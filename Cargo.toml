@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -23,10 +23,23 @@ rcgen = "0.13"
 rustls = "0.23"
 rustls-pemfile = "2"
 form_urlencoded = "1"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["net"] }
 rsa = "0.9"
 x509-parser = "0.16"
 async-stream = "0.3"
 gethostname = "1"
 async-graphql = "=7.0.17"
 serde_yaml = "0.9"
+hmac = "0.12"
+sha2 = "0.10"
+sha1 = "0.10"
+tonic = "0.12"
+prost = "0.13"
+
+[build-dependencies]
+tonic-build = "0.12"
+protoc-bin-vendored = "3"
+
+[dev-dependencies]
+tokio-tungstenite = "0.24"
+futures-util = "0.3"

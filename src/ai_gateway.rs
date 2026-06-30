@@ -166,7 +166,7 @@ struct OpenAIErrorDetail {
 
 // ── Token counting ──────────────────────────────────────────────────
 
-fn count_tokens(text: &str) -> usize {
+pub(crate) fn count_tokens(text: &str) -> usize {
     // Approximate tokenization: split on whitespace and punctuation
     text.split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
         .filter(|s| !s.is_empty())
@@ -175,7 +175,7 @@ fn count_tokens(text: &str) -> usize {
 
 // ── Canned responses ────────────────────────────────────────────────
 
-fn canned_response(last_message: &str) -> &'static str {
+pub(crate) fn canned_response(last_message: &str) -> &'static str {
     let lower = last_message.to_lowercase();
 
     if lower.contains("hello") || lower.contains("hi") || lower.contains("hey") {

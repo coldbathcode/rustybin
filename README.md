@@ -21,7 +21,7 @@ docker run -d -p 80:80 -p 443:443 --name rustybin rustybin
 
 | Category | Endpoints | Description |
 |---|---|---|
-| **Health & Identity** | `/health`, `/identity` | Service health check and instance identity (hostname, uptime, request count) |
+| **Health & Identity** | `/health`, `/health/healthy`, `/health/unhealthy`, `/health/toggle`, `/identity` | Service health check (runtime-toggleable to 503 for active health-check demos) and instance identity |
 | **Echo** | `/echo`, `/anything` | Echo back full request details (method, headers, body, query params) |
 | **Status Codes** | `/status/{code}` | Return any HTTP status code (100-599) |
 | **Response Shaping** | `/delay/{ms}`, `/bytes/{n}`, `/stream/{n}`, `/drip`, `/cache/{ttl}`, `/response-headers` | Control response timing, size, streaming, caching |
@@ -33,10 +33,14 @@ docker run -d -p 80:80 -p 443:443 --name rustybin rustybin
 | **Basic Auth** | `/auth/basic-auth`, `/auth/basic-auth/{user}/{pass}` | HTTP Basic authentication with default or custom credentials |
 | **API Key Auth** | `/auth/api-key`, `/auth/api-key/{header}/{key}` | API key header authentication |
 | **JWT Auth** | `/auth/jwt`, `/auth/jwt/exchange` | JWT validation and token exchange (HS256) |
+| **HMAC Auth** | `/auth/hmac`, `/auth/hmac/{user}/{secret}` | Gateway hmac-auth style signature validation (sha1/256/384/512) |
 | **OIDC Provider** | `/.well-known/openid-configuration`, `/oauth/token`, `/oauth/jwks`, `/oauth/authorize`, `/oauth/userinfo`, `/oauth/introspect` | Full OpenID Connect Identity Provider |
 | **mTLS** | `/auth/mtls`, `/auth/mtls/get-client-cert`, `/auth/mtls/get-ca-cert` | Mutual TLS with demo PKI |
-| **AI Gateway** | `/ai/v1/chat/completions`, `/ai/v1/completions`, `/ai/v1/embeddings`, `/ai/v1/models` | OpenAI-compatible endpoints for AI gateway testing |
+| **AI Gateway (OpenAI)** | `/ai/v1/chat/completions`, `/ai/v1/completions`, `/ai/v1/embeddings`, `/ai/v1/models` | OpenAI-compatible endpoints for AI gateway testing |
+| **AI Gateway (Anthropic)** | `/ai/anthropic/v1/messages` | Anthropic Messages API shape with native SSE event streaming |
 | **GraphQL** | `/graphql`, `/graphql/schema` | GraphQL API with playground (users, products, orders) |
+| **WebSocket** | `/ws`, `/ws/time` | Frame echo and server-push ticker for WebSocket proxying |
+| **gRPC** | `EchoService` on `:50051` | Unary + server/client/bidi streaming echo (separate port) |
 | **Orchestration** | `/orchestration/step/1-4`, `/orchestration/status` | Multi-step payment processing pipeline for orchestration |
 | **SOAP** | `/soap`, `/soap/wsdl` | SOAP/XML web service with WSDL |
 | **Flaky** | `/flaky/{rate}`, `/flaky/pattern/{p}`, `/flaky/after/{n}`, `/flaky/recover/{n}` | Configurable failure simulation for circuit breaker testing |
@@ -50,6 +54,7 @@ All JSON endpoints support content negotiation — send `Accept: application/xml
 |---|---|---|
 | `RUSTYBIN_HTTP_PORT` | `80` | HTTP listen port |
 | `RUSTYBIN_HTTPS_PORT` | `443` | HTTPS listen port |
+| `RUSTYBIN_GRPC_PORT` | `50051` | gRPC (EchoService) listen port |
 | `RUSTYBIN_HOST` | `0.0.0.0` | Bind address |
 | `RUSTYBIN_LOG_LEVEL` | `info` | Tracing log level (`debug`, `info`, `warn`, `error`) |
 | `RUSTYBIN_TRUST_FORWARD` | `false` | Trust `X-Forwarded-*` headers for IP/scheme detection |
@@ -146,6 +151,7 @@ curl -s http://gateway:8000/echo | jq .headers
 | basic-auth | `/auth/basic-auth/{u}/{p}` | Credential forwarding |
 | key-auth | `/auth/api-key/{header}/{key}` | API key forwarding |
 | jwt | `/auth/jwt`, `/oauth/jwks` | JWT validation, JWKS endpoint |
+| hmac-auth | `/auth/hmac`, `/auth/hmac/{u}/{s}` | HMAC signature validation |
 | oauth2 / openid-connect | `/.well-known/openid-configuration` | Full OIDC flow |
 | mtls-auth | `/auth/mtls` | Client certificate validation |
 | request-termination | `/status/{code}` | Custom error responses |
@@ -153,7 +159,10 @@ curl -s http://gateway:8000/echo | jq .headers
 | response-transformer | `/echo` | Header/body inspection |
 | retry | `/flaky/{rate}`, `/flaky/pattern/{p}` | Retry on 503 |
 | circuit-breaker | `/flaky/after/{n}`, `/flaky/recover/{n}` | Health state transitions |
-| ai-proxy | `/ai/v1/chat/completions` | OpenAI-compatible upstream |
+| ai-proxy | `/ai/v1/chat/completions`, `/ai/anthropic/v1/messages` | OpenAI- and Anthropic-format upstreams |
+| grpc-proxy / grpc-web / grpc-gateway | `EchoService` on `:50051` | gRPC unary + streaming proxying |
+| websocket-size-limit / ws | `/ws`, `/ws/time` | WebSocket frame proxying |
+| upstream health checks | `/health/unhealthy`, `/health/healthy` | Active health check failover |
 | graphql-proxy | `/graphql` | GraphQL query proxying |
 | soap-xml | `/soap`, `/soap/wsdl` | SOAP envelope routing |
 | orchestration | `/orchestration/step/1-4` | Multi-step orchestration |
@@ -161,6 +170,37 @@ curl -s http://gateway:8000/echo | jq .headers
 | cors | `/echo` | CORS header inspection |
 | request-size-limiting | `/echo` | Body size in echo response |
 | ip-restriction | `/ip` | Client IP detection |
+
+## gRPC
+
+Rustybin serves a gRPC `EchoService` on a separate port (default `50051`,
+`RUSTYBIN_GRPC_PORT`) for testing the gateway's `grpc-proxy`, `grpc-web`, and
+`grpc-gateway` plugins. It implements all four call types — unary, server
+streaming, client streaming, and bidirectional streaming — echoing the request
+message along with the reflected request metadata and the handling instance ID.
+
+The service definition lives in [`proto/echo.proto`](proto/echo.proto). Test it
+with [`grpcurl`](https://github.com/fullstorydev/grpcurl):
+
+```bash
+# Unary
+grpcurl -plaintext -d '{"message":"ping"}' \
+  localhost:50051 rustybin.echo.v1.EchoService/Echo
+
+# Server streaming — emit 5 responses
+grpcurl -plaintext -d '{"message":"tick","count":5}' \
+  localhost:50051 rustybin.echo.v1.EchoService/ServerStream
+```
+
+## WebSocket
+
+```bash
+# Echo (using websocat or wscat)
+websocat ws://localhost/ws
+
+# Server-push ticker: 5 timestamps, one every 500ms
+websocat "ws://localhost/ws/time?interval_ms=500&count=5"
+```
 
 ## API Documentation
 

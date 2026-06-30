@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package rustybin.echo.v1;
+
+// EchoService reflects requests back to the caller across all four gRPC
+// call types, so the gateway's grpc-proxy, grpc-web, and grpc-gateway plugins can
+// be exercised against a single upstream.
+service EchoService {
+  // Unary: returns the request message plus echoed metadata.
+  rpc Echo(EchoRequest) returns (EchoResponse);
+
+  // Server streaming: emits `count` responses (default 3), one per tick.
+  rpc ServerStream(EchoRequest) returns (stream EchoResponse);
+
+  // Client streaming: consumes a stream of requests, returns one summary.
+  rpc ClientStream(stream EchoRequest) returns (EchoResponse);
+
+  // Bidirectional streaming: echoes each request back as it arrives.
+  rpc BidiStream(stream EchoRequest) returns (stream EchoResponse);
+}
+
+message EchoRequest {
+  string message = 1;
+  // Optional: number of responses to emit for ServerStream (clamped 1..=100).
+  uint32 count = 2;
+}
+
+message EchoResponse {
+  string message = 1;
+  // gRPC request metadata (headers) reflected back, lower-cased.
+  map<string, string> metadata = 2;
+  // Identifies which Rustybin instance handled the call (load-balancer demos).
+  string instance_id = 3;
+  // Monotonic index within a streamed response (0 for unary).
+  uint32 index = 4;
+}

@@ -91,6 +91,15 @@ check "API Key (valid)" "200" -H 'apikey: my-key' "$BASE/auth/api-key"
 check "API Key (missing)" "401" "$BASE/auth/api-key"
 
 echo ""
+echo "Auth - HMAC:"
+HMAC_DATE="Mon, 02 Jan 2006 15:04:05 GMT"
+HMAC_SIG=$(printf 'date: %s' "$HMAC_DATE" | openssl dgst -sha256 -hmac "secret" -binary | base64)
+check "HMAC (valid)" "200" -H "date: $HMAC_DATE" \
+    -H "authorization: hmac username=\"alice\", algorithm=\"hmac-sha256\", headers=\"date\", signature=\"$HMAC_SIG\"" \
+    "$BASE/auth/hmac"
+check "HMAC (missing)" "401" "$BASE/auth/hmac"
+
+echo ""
 echo "Auth - JWT:"
 JWT_HEADER=$(printf '{"alg":"HS256","typ":"JWT"}' | base64 | tr '/+' '_-' | tr -d '=')
 JWT_PAYLOAD=$(printf '{"sub":"1234","name":"Test"}' | base64 | tr '/+' '_-' | tr -d '=')
@@ -117,6 +126,7 @@ check "Chat completions" "200" -X POST "$BASE/ai/v1/chat/completions" -H 'Conten
 check "Completions" "200" -X POST "$BASE/ai/v1/completions" -H 'Content-Type: application/json' -d '{"model":"rustybin-gpt","prompt":"test"}'
 check "Embeddings" "200" -X POST "$BASE/ai/v1/embeddings" -H 'Content-Type: application/json' -d '{"model":"rustybin-embed","input":"test"}'
 check "Models" "200" "$BASE/ai/v1/models"
+check "Anthropic messages" "200" -X POST "$BASE/ai/anthropic/v1/messages" -H 'Content-Type: application/json' -d '{"model":"rustybin-claude","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}'
 
 echo ""
 echo "GraphQL:"
@@ -140,6 +150,28 @@ check "Flaky 100%" "503" "$BASE/flaky/100"
 check "Flaky pattern SSF" "200" "$BASE/flaky/pattern/SSF"
 check "Flaky status" "200" "$BASE/flaky/status"
 check "Flaky reset" "200" -X POST "$BASE/flaky/reset"
+
+echo ""
+echo "Health toggle:"
+check "Set unhealthy" "503" -X POST "$BASE/health/unhealthy"
+check "Health reflects unhealthy" "503" "$BASE/health"
+check "Set healthy" "200" -X POST "$BASE/health/healthy"
+check "Health reflects healthy" "200" "$BASE/health"
+
+echo ""
+echo "gRPC (optional, needs grpcurl):"
+GRPC_HOST="${RUSTYBIN_GRPC_ADDR:-localhost:50051}"
+if command -v grpcurl >/dev/null 2>&1; then
+    if grpcurl -plaintext -d '{"message":"ping"}' "$GRPC_HOST" rustybin.echo.v1.EchoService/Echo >/dev/null 2>&1; then
+        echo "  ✓ gRPC EchoService/Echo"
+        PASS=$((PASS + 1))
+    else
+        echo "  ✗ gRPC EchoService/Echo (call failed)"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "  - skipped (grpcurl not installed)"
+fi
 
 echo ""
 echo "Docs:"

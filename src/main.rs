@@ -1,17 +1,22 @@
+mod ai_anthropic;
 mod ai_gateway;
 mod auth_apikey;
 mod auth_basic;
+mod auth_hmac;
 mod auth_jwt;
 mod auth_mtls;
 mod cert_state;
+mod collections;
 mod config;
 mod content_negotiation;
 mod cookies;
 mod echo;
 mod flaky;
 mod graphql;
+mod grpc;
 mod openapi;
 mod health;
+mod landing;
 mod identity;
 mod image;
 mod info;
@@ -25,6 +30,7 @@ mod response_shaping;
 mod soap;
 mod status;
 mod types;
+mod websocket;
 
 use config::Config;
 use std::net::SocketAddr;
@@ -47,9 +53,11 @@ async fn main() {
         request_count: std::sync::atomic::AtomicU64::new(0),
     });
     let flaky_state = Arc::new(flaky::FlakyState::new());
+    let health_state = Arc::new(health::HealthState::new());
 
     let app = axum::Router::new()
-        .merge(health::router())
+        .merge(landing::router())
+        .merge(health::router(health_state))
         .merge(echo::router())
         .merge(status::router())
         .merge(response_shaping::router())
@@ -60,15 +68,19 @@ async fn main() {
         .merge(image::router())
         .merge(auth_basic::router())
         .merge(auth_apikey::router())
+        .merge(auth_hmac::router())
         .merge(auth_jwt::router(jwt_state.clone()))
         .merge(oidc::router(jwt_state))
         .merge(auth_mtls::router(cert_state.clone()))
         .merge(ai_gateway::router())
+        .merge(ai_anthropic::router())
         .merge(graphql::router())
         .merge(orchestration::router())
         .merge(soap::router())
+        .merge(websocket::router())
         .merge(identity::router(identity_state))
         .merge(flaky::router(flaky_state))
+        .merge(collections::router())
         .merge(openapi::router())
         .with_state(config.clone());
 
@@ -112,6 +124,19 @@ async fn main() {
         }
     });
 
+    let grpc_instance_id = config.instance_id.clone();
+    let grpc_host = config.host.clone();
+    let grpc_handle = tokio::spawn(async move {
+        match grpc::grpc_addr(&grpc_host) {
+            Ok(addr) => {
+                if let Err(e) = grpc::serve(addr, grpc_instance_id).await {
+                    tracing::error!("gRPC server error: {e}");
+                }
+            }
+            Err(e) => tracing::warn!("gRPC server not started: invalid address: {e}"),
+        }
+    });
+
     tokio::select! {
         res = http_handle => {
             if let Err(e) = res {
@@ -121,6 +146,11 @@ async fn main() {
         res = https_handle => {
             if let Err(e) = res {
                 tracing::error!("HTTPS task failed: {e}");
+            }
+        }
+        res = grpc_handle => {
+            if let Err(e) = res {
+                tracing::error!("gRPC task failed: {e}");
             }
         }
     }

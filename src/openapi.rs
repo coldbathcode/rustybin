@@ -36,7 +36,8 @@ fn build_spec() -> Value {
             { "name": "AI Gateway", "description": "OpenAI-compatible AI endpoints" },
             { "name": "GraphQL", "description": "GraphQL API with playground" },
             { "name": "Orchestration", "description": "Multi-step orchestration pipeline" },
-            { "name": "SOAP", "description": "SOAP/XML web service" }
+            { "name": "SOAP", "description": "SOAP/XML web service" },
+            { "name": "WebSocket", "description": "WebSocket echo and server-push endpoints" }
         ],
         "paths": build_paths(),
         "components": build_components()
@@ -47,6 +48,16 @@ fn build_paths() -> Value {
     let mut paths = serde_json::Map::new();
 
     // ── Utility ─────────────────────────────────────────────────
+    paths.insert("/".into(), json!({
+        "get": {
+            "tags": ["Utility"],
+            "summary": "Landing page",
+            "description": "HTML landing page with endpoint directory and quick-start examples.",
+            "operationId": "getLanding",
+            "responses": { "200": { "description": "HTML landing page", "content": { "text/html": {} } } }
+        }
+    }));
+
     paths.insert("/health".into(), json!({
         "get": {
             "tags": ["Utility"],
@@ -81,6 +92,117 @@ fn build_paths() -> Value {
                     "description": "Instance identity information",
                     "content": json_xml_content(json!({ "$ref": "#/components/schemas/IdentityResponse" }))
                 }
+            }
+        }
+    }));
+
+    // Health toggle (runtime liveness control for active health-check demos)
+    for (path, op, summary, desc) in [
+        ("/health/healthy", "markHealthy", "Mark instance healthy", "Sets the instance health state to healthy. Subsequent GET /health returns 200."),
+        ("/health/unhealthy", "markUnhealthy", "Mark instance unhealthy", "Sets the instance health state to unhealthy. GET /health then returns 503 — useful for Gateway upstream active health-check failover demos."),
+        ("/health/toggle", "toggleHealth", "Toggle health state", "Flips the current health state between healthy and unhealthy."),
+    ] {
+        paths.insert(path.into(), json!({
+            "post": {
+                "tags": ["Utility"],
+                "summary": summary,
+                "description": desc,
+                "operationId": op,
+                "responses": {
+                    "200": { "description": "Instance is now healthy", "content": json_xml_content(json!({ "type": "object" })) },
+                    "503": { "description": "Instance is now unhealthy", "content": json_xml_content(json!({ "type": "object" })) }
+                }
+            }
+        }));
+    }
+
+    // HMAC auth
+    paths.insert("/auth/hmac".into(), json!({
+        "get": {
+            "tags": ["Auth"],
+            "summary": "HMAC authentication (default credentials)",
+            "description": "Validates a Gateway hmac-auth style `Authorization: hmac ...` header. Default credentials: username `alice`, secret `secret`. The signature is base64(HMAC(secret, signing-string)) where the signing string is built from the listed `headers` (default `date`), joined by newlines. Supports hmac-sha1/sha256/sha384/sha512.",
+            "operationId": "authHmac",
+            "responses": {
+                "200": { "description": "Signature valid", "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthResponse" })) },
+                "401": { "description": "Missing or invalid signature", "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthResponse" })) }
+            }
+        }
+    }));
+    paths.insert("/auth/hmac/{username}/{secret}".into(), json!({
+        "get": {
+            "tags": ["Auth"],
+            "summary": "HMAC authentication (custom credentials)",
+            "description": "Same as /auth/hmac but validates against the username and secret supplied in the path.",
+            "operationId": "authHmacCustom",
+            "parameters": [
+                { "name": "username", "in": "path", "required": true, "schema": { "type": "string" } },
+                { "name": "secret", "in": "path", "required": true, "schema": { "type": "string" } }
+            ],
+            "responses": {
+                "200": { "description": "Signature valid", "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthResponse" })) },
+                "401": { "description": "Missing or invalid signature", "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthResponse" })) }
+            }
+        }
+    }));
+
+    // Anthropic-compatible AI messages
+    paths.insert("/ai/anthropic/v1/messages".into(), json!({
+        "post": {
+            "tags": ["AI Gateway"],
+            "summary": "Anthropic Messages API (mock)",
+            "description": "Anthropic `/v1/messages`-compatible endpoint. Returns a canned assistant message with input/output token usage. When `stream: true`, emits the native Anthropic SSE event sequence (message_start, content_block_delta, message_stop, …). Use to test the ai-proxy plugin against the Anthropic provider format.",
+            "operationId": "anthropicMessages",
+            "requestBody": {
+                "required": true,
+                "content": { "application/json": { "schema": json!({
+                    "type": "object",
+                    "required": ["messages"],
+                    "properties": {
+                        "model": { "type": "string", "example": "rustybin-claude" },
+                        "max_tokens": { "type": "integer", "example": 256 },
+                        "system": { "type": "string" },
+                        "stream": { "type": "boolean", "default": false },
+                        "messages": { "type": "array", "items": { "type": "object", "properties": {
+                            "role": { "type": "string", "example": "user" },
+                            "content": { "type": "string", "example": "hello" }
+                        }}}
+                    }
+                }) } }
+            },
+            "responses": {
+                "200": { "description": "Assistant message (JSON) or text/event-stream when stream=true" },
+                "400": { "description": "Invalid request" }
+            }
+        }
+    }));
+
+    // WebSocket
+    paths.insert("/ws".into(), json!({
+        "get": {
+            "tags": ["WebSocket"],
+            "summary": "WebSocket echo",
+            "description": "Upgrade to a WebSocket connection that echoes every text and binary frame back to the client. Requires the standard WebSocket upgrade headers; a plain GET returns 426 Upgrade Required.",
+            "operationId": "wsEcho",
+            "responses": {
+                "101": { "description": "Switching Protocols (WebSocket established)" },
+                "426": { "description": "Upgrade Required (missing WebSocket headers)" }
+            }
+        }
+    }));
+    paths.insert("/ws/time".into(), json!({
+        "get": {
+            "tags": ["WebSocket"],
+            "summary": "WebSocket timestamp ticker",
+            "description": "Upgrade to a WebSocket that pushes the current timestamp on a fixed interval, then closes. Exercises server-initiated frames through Gateway.",
+            "operationId": "wsTime",
+            "parameters": [
+                { "name": "interval_ms", "in": "query", "required": false, "schema": { "type": "integer", "default": 1000, "minimum": 100, "maximum": 60000 }, "description": "Tick interval in milliseconds" },
+                { "name": "count", "in": "query", "required": false, "schema": { "type": "integer", "default": 10, "minimum": 1, "maximum": 1000 }, "description": "Number of ticks before close" }
+            ],
+            "responses": {
+                "101": { "description": "Switching Protocols (WebSocket established)" },
+                "426": { "description": "Upgrade Required (missing WebSocket headers)" }
             }
         }
     }));
@@ -134,6 +256,150 @@ fn build_paths() -> Value {
             "description": "Serves a Scalar-powered interactive API documentation page.",
             "operationId": "getDocs",
             "responses": { "200": { "description": "HTML documentation page", "content": { "text/html": {} } } }
+        }
+    }));
+
+    paths.insert("/export/postman.json".into(), json!({
+        "get": {
+            "tags": ["Utility"],
+            "summary": "Postman Collection export",
+            "description": "Downloads a Postman Collection v2.1 JSON file with pre-configured requests for all Rustybin endpoints.",
+            "operationId": "getExportPostman",
+            "responses": {
+                "200": {
+                    "description": "Postman Collection v2.1 JSON",
+                    "content": { "application/json": {} },
+                    "headers": { "Content-Disposition": { "schema": { "type": "string", "example": "attachment; filename=\"rustybin-postman.json\"" } } }
+                }
+            }
+        }
+    }));
+
+    paths.insert("/export/insomnia.json".into(), json!({
+        "get": {
+            "tags": ["Utility"],
+            "summary": "Insomnia Collection export",
+            "description": "Downloads an Insomnia Export v4 JSON file with pre-configured requests for all Rustybin endpoints.",
+            "operationId": "getExportInsomnia",
+            "responses": {
+                "200": {
+                    "description": "Insomnia Export v4 JSON",
+                    "content": { "application/json": {} },
+                    "headers": { "Content-Disposition": { "schema": { "type": "string", "example": "attachment; filename=\"rustybin-insomnia.json\"" } } }
+                }
+            }
+        }
+    }));
+
+    paths.insert("/export/curl.sh".into(), json!({
+        "get": {
+            "tags": ["Utility"],
+            "summary": "cURL shell script export",
+            "description": "Downloads a Bash script with curl commands for all Rustybin endpoints. Set BASE_URL env var to target your instance.",
+            "operationId": "getExportCurl",
+            "responses": {
+                "200": {
+                    "description": "Bash script with curl commands",
+                    "content": { "text/x-shellscript": {} },
+                    "headers": { "Content-Disposition": { "schema": { "type": "string", "example": "attachment; filename=\"rustybin-curl.sh\"" } } }
+                }
+            }
+        }
+    }));
+
+    paths.insert("/export/bruno.json".into(), json!({
+        "get": {
+            "tags": ["Utility"],
+            "summary": "Bruno Collection export",
+            "description": "Downloads a Bruno collection JSON file with pre-configured requests for all Rustybin endpoints.",
+            "operationId": "getExportBruno",
+            "responses": {
+                "200": {
+                    "description": "Bruno Collection JSON",
+                    "content": { "application/json": {} },
+                    "headers": { "Content-Disposition": { "schema": { "type": "string", "example": "attachment; filename=\"rustybin-bruno.json\"" } } }
+                }
+            }
+        }
+    }));
+
+    paths.insert("/export/requests.http".into(), json!({
+        "get": {
+            "tags": ["Utility"],
+            "summary": ".http file export",
+            "description": "Downloads an HTTP requests file compatible with JetBrains HTTP Client and VS Code REST Client.",
+            "operationId": "getExportHttpFile",
+            "responses": {
+                "200": {
+                    "description": ".http file with request definitions",
+                    "content": { "text/plain": {} },
+                    "headers": { "Content-Disposition": { "schema": { "type": "string", "example": "attachment; filename=\"rustybin.http\"" } } }
+                }
+            }
+        }
+    }));
+
+    paths.insert("/export/requests.hurl".into(), json!({
+        "get": {
+            "tags": ["Utility"],
+            "summary": "Hurl file export",
+            "description": "Downloads a Hurl file with HTTP request definitions and response assertions for all Rustybin endpoints.",
+            "operationId": "getExportHurl",
+            "responses": {
+                "200": {
+                    "description": "Hurl file with request definitions",
+                    "content": { "text/plain": {} },
+                    "headers": { "Content-Disposition": { "schema": { "type": "string", "example": "attachment; filename=\"rustybin.hurl\"" } } }
+                }
+            }
+        }
+    }));
+
+    paths.insert("/export/k6.js".into(), json!({
+        "get": {
+            "tags": ["Utility"],
+            "summary": "k6 load test script export",
+            "description": "Downloads a Grafana k6 JavaScript load test script for all Rustybin endpoints. Set BASE_URL env var to target your instance.",
+            "operationId": "getExportK6",
+            "responses": {
+                "200": {
+                    "description": "k6 JavaScript load test script",
+                    "content": { "application/javascript": {} },
+                    "headers": { "Content-Disposition": { "schema": { "type": "string", "example": "attachment; filename=\"rustybin-k6.js\"" } } }
+                }
+            }
+        }
+    }));
+
+    paths.insert("/export/gateway.yaml".into(), json!({
+        "get": {
+            "tags": ["Utility"],
+            "summary": "Gateway declarative configuration export",
+            "description": "Downloads a gateway declarative YAML configuration with a service and routes for all Rustybin endpoints.",
+            "operationId": "getExportDeclarative",
+            "responses": {
+                "200": {
+                    "description": "Gateway declarative YAML configuration",
+                    "content": { "text/yaml": {} },
+                    "headers": { "Content-Disposition": { "schema": { "type": "string", "example": "attachment; filename=\"rustybin-gateway.yaml\"" } } }
+                }
+            }
+        }
+    }));
+
+    paths.insert("/export/har.json".into(), json!({
+        "get": {
+            "tags": ["Utility"],
+            "summary": "HAR 1.2 archive export",
+            "description": "Downloads an HTTP Archive (HAR) 1.2 JSON file with request entries for all Rustybin endpoints.",
+            "operationId": "getExportHar",
+            "responses": {
+                "200": {
+                    "description": "HAR 1.2 JSON archive",
+                    "content": { "application/json": {} },
+                    "headers": { "Content-Disposition": { "schema": { "type": "string", "example": "attachment; filename=\"rustybin.har.json\"" } } }
+                }
+            }
         }
     }));
 
@@ -838,7 +1104,7 @@ fn build_paths() -> Value {
         "post": {
             "tags": ["Auth"],
             "summary": "OAuth2 token endpoint",
-            "description": "Issues tokens for client_credentials, password, and authorization_code grants.",
+            "description": "Issues tokens for client_credentials, password, authorization_code, and RFC 8693 token-exchange grants.",
             "operationId": "postOAuthToken",
             "requestBody": {
                 "required": true,
@@ -848,14 +1114,21 @@ fn build_paths() -> Value {
                             "type": "object",
                             "required": ["grant_type"],
                             "properties": {
-                                "grant_type": { "type": "string", "enum": ["client_credentials", "password", "authorization_code"] },
+                                "grant_type": { "type": "string", "enum": ["client_credentials", "password", "authorization_code", "urn:ietf:params:oauth:grant-type:token-exchange"] },
                                 "client_id": { "type": "string" },
                                 "client_secret": { "type": "string" },
-                                "username": { "type": "string" },
-                                "password": { "type": "string" },
+                                "username": { "type": "string", "description": "For password grant" },
+                                "password": { "type": "string", "description": "For password grant" },
                                 "scope": { "type": "string" },
-                                "code": { "type": "string" },
-                                "redirect_uri": { "type": "string" }
+                                "code": { "type": "string", "description": "For authorization_code grant" },
+                                "redirect_uri": { "type": "string", "description": "For authorization_code grant" },
+                                "subject_token": { "type": "string", "description": "RFC 8693: the token to exchange" },
+                                "subject_token_type": { "type": "string", "description": "RFC 8693: token type URI (e.g. urn:ietf:params:oauth:token-type:access_token)" },
+                                "actor_token": { "type": "string", "description": "RFC 8693: optional acting party token" },
+                                "actor_token_type": { "type": "string", "description": "RFC 8693: required if actor_token is present" },
+                                "audience": { "type": "string", "description": "RFC 8693: intended audience for the new token" },
+                                "resource": { "type": "string", "description": "RFC 8693: target service URI" },
+                                "requested_token_type": { "type": "string", "description": "RFC 8693: desired token type for the new token" }
                             }
                         }
                     }

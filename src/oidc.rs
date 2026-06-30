@@ -83,6 +83,21 @@ struct TokenRequest {
     redirect_uri: Option<String>,
     #[serde(default)]
     scope: Option<String>,
+    // RFC 8693 Token Exchange fields
+    #[serde(default)]
+    subject_token: Option<String>,
+    #[serde(default)]
+    subject_token_type: Option<String>,
+    #[serde(default)]
+    actor_token: Option<String>,
+    #[serde(default)]
+    actor_token_type: Option<String>,
+    #[serde(default)]
+    audience: Option<String>,
+    #[serde(default)]
+    resource: Option<String>,
+    #[serde(default)]
+    requested_token_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -122,6 +137,31 @@ struct IntrospectRequest {
     client_id: Option<String>,
     #[serde(default)]
     client_secret: Option<String>,
+}
+
+// ── RFC 8693 Token Exchange types ────────────────────────────────────
+
+const TOKEN_TYPE_ACCESS_TOKEN: &str = "urn:ietf:params:oauth:token-type:access_token";
+const TOKEN_TYPE_ID_TOKEN: &str = "urn:ietf:params:oauth:token-type:id_token";
+const TOKEN_TYPE_JWT: &str = "urn:ietf:params:oauth:token-type:jwt";
+const TOKEN_TYPE_REFRESH_TOKEN: &str = "urn:ietf:params:oauth:token-type:refresh_token";
+
+const VALID_TOKEN_TYPES: &[&str] = &[
+    TOKEN_TYPE_ACCESS_TOKEN,
+    TOKEN_TYPE_ID_TOKEN,
+    TOKEN_TYPE_JWT,
+    TOKEN_TYPE_REFRESH_TOKEN,
+];
+
+#[derive(Serialize)]
+struct TokenExchangeResponse {
+    access_token: String,
+    issued_token_type: String,
+    token_type: String,
+    expires_in: i64,
+    scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id_token: Option<String>,
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -222,6 +262,36 @@ fn cleanup_expired_codes(codes: &mut HashMap<String, AuthCodeEntry>) {
     codes.retain(|_, entry| now - entry.created_at < 60);
 }
 
+/// Decode a JWT by verifying signature first (RS256/HS256), falling back to
+/// structural-only decode for third-party tokens.
+fn decode_token_best_effort(
+    jwt_state: &JwtState,
+    token: &str,
+) -> Option<serde_json::Value> {
+    // Try verified decode first
+    if let Some(claims) = verify_token(jwt_state, token) {
+        return Some(claims);
+    }
+    // Fall back to structural decode (split on '.', base64url-decode)
+    structural_decode_jwt(token)
+}
+
+fn structural_decode_jwt(token: &str) -> Option<serde_json::Value> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let payload = parts[1].trim_end_matches('=');
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn is_valid_token_type(t: &str) -> bool {
+    VALID_TOKEN_TYPES.contains(&t)
+}
+
 // ── Handlers ────────────────────────────────────────────────────────
 
 async fn discovery(headers: HeaderMap) -> Response {
@@ -234,7 +304,7 @@ async fn discovery(headers: HeaderMap) -> Response {
         "jwks_uri": format!("{base}/oauth/jwks"),
         "introspection_endpoint": format!("{base}/oauth/introspect"),
         "response_types_supported": ["code", "token", "id_token", "code id_token"],
-        "grant_types_supported": ["authorization_code", "client_credentials", "password"],
+        "grant_types_supported": ["authorization_code", "client_credentials", "password", "urn:ietf:params:oauth:grant-type:token-exchange"],
         "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["RS256", "HS256"],
         "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
@@ -306,7 +376,11 @@ async fn token(
             );
             issue_token_response(&oidc.jwt, &claims, &entry.scope, &headers)
         }
-        _ => error_response(&headers, "unsupported_grant_type", "supported: client_credentials, password, authorization_code"),
+        // RFC 8693 Token Exchange
+        "urn:ietf:params:oauth:grant-type:token-exchange" => {
+            handle_token_exchange(&oidc, &headers, &form, &issuer, &client_id)
+        }
+        _ => error_response(&headers, "unsupported_grant_type", "supported: client_credentials, password, authorization_code, urn:ietf:params:oauth:grant-type:token-exchange"),
     }
 }
 
@@ -504,6 +578,156 @@ async fn introspect(
         }
         None => negotiate(&headers, &IntrospectInactive { active: false }),
     }
+}
+
+// ── RFC 8693 Token Exchange ──────────────────────────────────────────
+
+fn handle_token_exchange(
+    oidc: &OidcState,
+    headers: &HeaderMap,
+    form: &TokenRequest,
+    issuer: &str,
+    client_id: &str,
+) -> Response {
+    // Validate required fields
+    let Some(subject_token) = form.subject_token.as_deref() else {
+        return error_response(headers, "invalid_request", "missing required parameter: subject_token");
+    };
+    let Some(subject_token_type) = form.subject_token_type.as_deref() else {
+        return error_response(headers, "invalid_request", "missing required parameter: subject_token_type");
+    };
+
+    // Validate subject_token_type
+    if !is_valid_token_type(subject_token_type) {
+        return error_response(
+            headers,
+            "invalid_request",
+            &format!("unsupported subject_token_type: {subject_token_type}"),
+        );
+    }
+
+    // Validate actor_token_type if actor_token is present
+    if let Some(_actor_token) = form.actor_token.as_deref() {
+        match form.actor_token_type.as_deref() {
+            None => {
+                return error_response(
+                    headers,
+                    "invalid_request",
+                    "actor_token_type is required when actor_token is present",
+                );
+            }
+            Some(att) if !is_valid_token_type(att) => {
+                return error_response(
+                    headers,
+                    "invalid_request",
+                    &format!("unsupported actor_token_type: {att}"),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    // Validate resource URI if provided
+    if let Some(resource) = form.resource.as_deref() {
+        if !resource.starts_with("http://") && !resource.starts_with("https://") {
+            return error_response(headers, "invalid_target", "resource must be an absolute URI");
+        }
+    }
+
+    // Decode subject token (verified or structural fallback)
+    let subject_claims = decode_token_best_effort(&oidc.jwt, subject_token)
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    // Decode actor token if present
+    let actor_claims = form
+        .actor_token
+        .as_deref()
+        .and_then(|at| decode_token_best_effort(&oidc.jwt, at));
+
+    // Build new token claims
+    let now = chrono::Utc::now().timestamp();
+    let sub = subject_claims["sub"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
+
+    let default_client = if client_id.is_empty() {
+        "rustybin"
+    } else {
+        client_id
+    };
+    let aud = form
+        .audience
+        .clone()
+        .or_else(|| subject_claims["aud"].as_str().map(String::from))
+        .unwrap_or_else(|| default_client.to_string());
+
+    let scope = form
+        .scope
+        .clone()
+        .or_else(|| subject_claims["scope"].as_str().map(String::from))
+        .unwrap_or_else(|| "openid".to_string());
+
+    let mut claims = serde_json::Map::new();
+    claims.insert("iss".into(), serde_json::json!(issuer));
+    claims.insert("sub".into(), serde_json::json!(sub));
+    claims.insert("aud".into(), serde_json::json!(aud));
+    claims.insert("exp".into(), serde_json::json!(now + 3600));
+    claims.insert("iat".into(), serde_json::json!(now));
+    claims.insert(
+        "jti".into(),
+        serde_json::json!(uuid::Uuid::new_v4().to_string()),
+    );
+    claims.insert("scope".into(), serde_json::json!(scope));
+    claims.insert("token_type".into(), serde_json::json!("bearer"));
+
+    // RFC 8693 §4.1 — delegation: include act claim with actor's sub
+    if let Some(ref actor) = actor_claims {
+        let actor_sub = actor["sub"].as_str().unwrap_or("unknown");
+        claims.insert("act".into(), serde_json::json!({"sub": actor_sub}));
+    }
+
+    // Rustybin-specific: include original claims for debugging
+    claims.insert("original_claims".into(), subject_claims);
+
+    // Sign the new token
+    let token = match sign_rs256_token(&oidc.jwt, &claims) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("failed to sign token-exchange JWT: {e}");
+            return error_response(headers, "server_error", &e.to_string());
+        }
+    };
+
+    // Determine issued_token_type
+    let requested = form
+        .requested_token_type
+        .as_deref()
+        .unwrap_or(TOKEN_TYPE_ACCESS_TOKEN);
+
+    let issued_token_type = if requested == TOKEN_TYPE_ID_TOKEN {
+        TOKEN_TYPE_ID_TOKEN
+    } else {
+        TOKEN_TYPE_ACCESS_TOKEN
+    };
+
+    let id_token = if issued_token_type == TOKEN_TYPE_ID_TOKEN {
+        Some(token.clone())
+    } else {
+        None
+    };
+
+    negotiate(
+        headers,
+        &TokenExchangeResponse {
+            access_token: token,
+            issued_token_type: issued_token_type.to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 3600,
+            scope,
+            id_token,
+        },
+    )
 }
 
 // ── Router ──────────────────────────────────────────────────────────
@@ -934,5 +1158,287 @@ mod tests {
         let json = json_body(resp).await;
         assert!(json["access_token"].is_string());
         assert_eq!(json["token_type"], "Bearer");
+    }
+
+    // ── RFC 8693 Token Exchange tests ─────────────────────────────
+
+    fn get_test_token(jwt: &JwtState) -> String {
+        let claims = build_token_claims(
+            "http://localhost",
+            "testuser",
+            "rustybin",
+            "openid profile",
+            Some(("Test User", "testuser@rustybin.local")),
+        );
+        sign_rs256_token(jwt, &claims).expect("sign")
+    }
+
+    #[tokio::test]
+    async fn token_exchange_success() {
+        let (app, jwt) = test_app();
+        let subject = get_test_token(&jwt);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("host", "localhost")
+                    .body(Body::from(format!(
+                        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={subject}&subject_token_type=urn:ietf:params:oauth:token-type:access_token&audience=my-service"
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = json_body(resp).await;
+        assert!(json["access_token"].is_string());
+        assert_eq!(
+            json["issued_token_type"],
+            "urn:ietf:params:oauth:token-type:access_token"
+        );
+        assert_eq!(json["token_type"], "Bearer");
+        assert_eq!(json["expires_in"], 3600);
+        assert_eq!(json["scope"], "openid profile");
+    }
+
+    #[tokio::test]
+    async fn token_exchange_missing_subject_token() {
+        let (app, _) = test_app();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token_type=urn:ietf:params:oauth:token-type:access_token",
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = json_body(resp).await;
+        assert_eq!(json["error"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn token_exchange_missing_subject_token_type() {
+        let (app, jwt) = test_app();
+        let subject = get_test_token(&jwt);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={subject}"
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = json_body(resp).await;
+        assert_eq!(json["error"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn token_exchange_invalid_subject_token_type() {
+        let (app, jwt) = test_app();
+        let subject = get_test_token(&jwt);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={subject}&subject_token_type=invalid"
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = json_body(resp).await;
+        assert_eq!(json["error"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn token_exchange_actor_missing_type() {
+        let (app, jwt) = test_app();
+        let subject = get_test_token(&jwt);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={subject}&subject_token_type=urn:ietf:params:oauth:token-type:access_token&actor_token=sometoken"
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = json_body(resp).await;
+        assert_eq!(json["error"], "invalid_request");
+        assert!(json["error_description"]
+            .as_str()
+            .unwrap_or("")
+            .contains("actor_token_type"));
+    }
+
+    #[tokio::test]
+    async fn token_exchange_with_actor_delegation() {
+        let jwt = test_jwt_state();
+        let oidc_state = Arc::new(OidcState {
+            jwt: jwt.clone(),
+            auth_codes: Mutex::new(HashMap::new()),
+        });
+        let config = test_config();
+        let app = Router::new()
+            .route("/oauth/token", post(token))
+            .layer(Extension(oidc_state))
+            .with_state(config);
+
+        let subject = get_test_token(&jwt);
+
+        // Create actor token with different sub
+        let actor_claims = build_token_claims(
+            "http://localhost",
+            "admin",
+            "rustybin",
+            "openid",
+            Some(("Admin User", "admin@rustybin.local")),
+        );
+        let actor = sign_rs256_token(&jwt, &actor_claims).expect("sign actor");
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("host", "localhost")
+                    .body(Body::from(format!(
+                        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={subject}&subject_token_type=urn:ietf:params:oauth:token-type:access_token&actor_token={actor}&actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = json_body(resp).await;
+        assert!(json["access_token"].is_string());
+
+        // Decode the exchanged token and check for act claim
+        let exchanged = json["access_token"].as_str().expect("token");
+        let claims = verify_token(&jwt, exchanged).expect("verify exchanged token");
+        assert_eq!(claims["act"]["sub"], "admin");
+        assert_eq!(claims["sub"], "testuser");
+    }
+
+    #[tokio::test]
+    async fn token_exchange_requested_id_token() {
+        let (app, jwt) = test_app();
+        let subject = get_test_token(&jwt);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("host", "localhost")
+                    .body(Body::from(format!(
+                        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={subject}&subject_token_type=urn:ietf:params:oauth:token-type:access_token&requested_token_type=urn:ietf:params:oauth:token-type:id_token"
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = json_body(resp).await;
+        assert_eq!(
+            json["issued_token_type"],
+            "urn:ietf:params:oauth:token-type:id_token"
+        );
+        // id_token field should be present
+        assert!(json["id_token"].is_string());
+    }
+
+    #[tokio::test]
+    async fn token_exchange_third_party_jwt() {
+        let (app, _) = test_app();
+
+        // Create a structurally valid JWT that can't be signature-verified
+        let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let header = b64url.encode(br#"{"alg":"RS256","typ":"JWT"}"#);
+        let payload = b64url.encode(br#"{"sub":"external-user","iss":"external-idp","scope":"read write"}"#);
+        let third_party_jwt = format!("{header}.{payload}.fakesignature");
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("host", "localhost")
+                    .body(Body::from(format!(
+                        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={third_party_jwt}&subject_token_type=urn:ietf:params:oauth:token-type:jwt"
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = json_body(resp).await;
+        assert!(json["access_token"].is_string());
+        assert_eq!(json["scope"], "read write");
+    }
+
+    #[tokio::test]
+    async fn discovery_includes_token_exchange_grant() {
+        let (app, _) = test_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/openid-configuration")
+                    .header("host", "localhost")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        let json = json_body(resp).await;
+        let grants = json["grant_types_supported"]
+            .as_array()
+            .expect("grants array");
+        assert!(
+            grants
+                .iter()
+                .any(|g| g == "urn:ietf:params:oauth:grant-type:token-exchange"),
+            "discovery should include token-exchange grant"
+        );
     }
 }

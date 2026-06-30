@@ -5,6 +5,7 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      - "50051:50051"
     environment:
       - RUSTYBIN_LOG_LEVEL=info
       - RUSTYBIN_INSTANCE_ID=rustybin-01

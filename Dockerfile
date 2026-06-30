@@ -2,8 +2,10 @@ FROM rust:1.86-slim AS builder
 
 WORKDIR /app
 
-# Cache dependency build
-COPY Cargo.toml Cargo.lock ./
+# Cache dependency build (build.rs + proto are needed to compile build deps
+# and the gRPC stubs; copying them here keeps the dependency layer cacheable)
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY proto/ proto/
 RUN mkdir src && echo "fn main() {}" > src/main.rs && \
     cargo build --release && \
     rm -rf src
@@ -36,6 +38,6 @@ ENTRYPOINT
 RUN chmod +x /app/entrypoint.sh
 
 ENV RUST_LOG=info
-EXPOSE 80 443
+EXPOSE 80 443 50051
 
 ENTRYPOINT ["/app/entrypoint.sh"]
