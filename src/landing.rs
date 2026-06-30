@@ -67,7 +67,6 @@ footer span{{margin:0 8px}}
     <a href="/export/requests.http" download>.http</a>
     <a href="/export/requests.hurl" download>Hurl</a>
     <a href="/export/k6.js" download>k6</a>
-    <a href="/export/gateway.yaml" download>Gateway declarative</a>
     <a href="/export/har.json" download>HAR</a>
   </div>
 </header>
@@ -94,9 +93,6 @@ footer span{{margin:0 8px}}
 <h3>Response Shaping</h3>
 <table>
 <tr><td class="route">/delay/:ms</td><td class="methods">GET</td><td class="desc">Wait then respond (?jitter=true for variance)</td></tr>
-<tr><td class="route">/bytes/:n</td><td class="methods">GET</td><td class="desc">Random bytes (up to 10MB)</td></tr>
-<tr><td class="route">/stream/:n</td><td class="methods">GET</td><td class="desc">Streamed NDJSON chunks (?delay=100)</td></tr>
-<tr><td class="route">/drip</td><td class="methods">GET</td><td class="desc">Slow byte drip (?bytes, ?delay, ?chunk_size)</td></tr>
 <tr><td class="route">/cache/:ttl</td><td class="methods">GET</td><td class="desc">Caching headers with ETag and conditional 304</td></tr>
 <tr><td class="route">/response-headers</td><td class="methods">GET</td><td class="desc">Query params become response headers</td></tr>
 </table>
@@ -106,8 +102,6 @@ footer span{{margin:0 8px}}
 <h3>Redirects &amp; Cookies</h3>
 <table>
 <tr><td class="route">/redirect/:n</td><td class="methods">GET</td><td class="desc">Chain of n relative 302 redirects</td></tr>
-<tr><td class="route">/absolute-redirect/:n</td><td class="methods">GET</td><td class="desc">Chain of n absolute 302 redirects</td></tr>
-<tr><td class="route">/redirect-to</td><td class="methods">GET</td><td class="desc">Redirect to ?url with ?status</td></tr>
 <tr><td class="route">/cookies</td><td class="methods">GET</td><td class="desc">Return current cookies as JSON</td></tr>
 <tr><td class="route">/cookies/set</td><td class="methods">GET</td><td class="desc">Set cookies from query params</td></tr>
 <tr><td class="route">/cookies/delete</td><td class="methods">GET</td><td class="desc">Delete cookies by name</td></tr>
@@ -140,7 +134,7 @@ footer span{{margin:0 8px}}
 <div class="category">
 <h3>Auth: HMAC</h3>
 <table>
-<tr><td class="route">/auth/hmac</td><td class="methods">ALL</td><td class="desc">Validate HMAC signature (default: alice / secret), Gateway hmac-auth style</td></tr>
+<tr><td class="route">/auth/hmac</td><td class="methods">ALL</td><td class="desc">Validate HMAC signature (default: alice / secret), gateway hmac-auth style</td></tr>
 <tr><td class="route">/auth/hmac/:username/:secret</td><td class="methods">ALL</td><td class="desc">Custom username and secret; supports sha1/sha256/sha384/sha512</td></tr>
 </table>
 </div>

@@ -2,8 +2,8 @@
 //!
 //! Runs a Tonic-based `EchoService` on its own port (default 50051,
 //! `RUSTYBIN_GRPC_PORT`) covering unary, server-streaming, client-streaming,
-//! and bidirectional-streaming calls. This gives the gateway's `grpc-proxy`,
-//! `grpc-web`, and `grpc-gateway` plugins a real upstream to target.
+//! and bidirectional-streaming calls. This gives API gateway gRPC proxying
+//! (grpc-proxy / grpc-web / grpc-transcoding features) a real upstream to target.
 
 use std::net::SocketAddr;
 use std::pin::Pin;

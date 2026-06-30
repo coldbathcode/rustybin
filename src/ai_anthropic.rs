@@ -2,9 +2,9 @@
 //!
 //! Mirrors the request/response shape of Anthropic's `POST /v1/messages`,
 //! including the native server-sent-event stream format (`message_start`,
-//! `content_block_delta`, `message_stop`, …). This lets the gateway's `ai-proxy` /
-//! `ai-proxy-advanced` plugins be exercised against the Anthropic provider
-//! format — not just the OpenAI format served by `ai_gateway`.
+//! `content_block_delta`, `message_stop`, …). This lets an AI gateway's
+//! provider-routing be exercised against the Anthropic provider format —
+//! not just the OpenAI format served by `ai_gateway`.
 
 use axum::{
     http::{header, HeaderValue, StatusCode},

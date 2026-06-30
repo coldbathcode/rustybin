@@ -202,11 +202,11 @@ pub(crate) fn canned_response(last_message: &str) -> &'static str {
          responsibilities. It must handle streaming responses via Server-Sent Events, \
          count tokens for usage-based rate limiting, cache semantically similar requests, \
          and enforce prompt safety guardrails.\n\n\
-         API gateway's AI plugins demonstrate these capabilities effectively. The \
-         ai-proxy plugin routes requests to multiple LLM providers with a unified API. \
-         The ai-rate-limiting plugin tracks token consumption across time windows. The \
-         ai-prompt-guard plugin inspects prompts for policy violations before they reach \
-         the model. Together, these plugins form a comprehensive AI governance layer."
+         AI gateway plugins demonstrate these capabilities effectively. An \
+         AI proxy routes requests to multiple LLM providers with a unified API. \
+         AI rate limiting tracks token consumption across time windows. Prompt \
+         guarding inspects prompts for policy violations before they reach \
+         the model. Together, these form a comprehensive AI governance layer."
     } else {
         "Hello! I'm Rustybin, a mock AI endpoint for API gateway testing. I received \
          your message and I'm responding with a canned response. This is useful for \

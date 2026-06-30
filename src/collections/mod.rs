@@ -5,7 +5,6 @@ mod bruno;
 mod http_file;
 mod hurl;
 mod k6;
-mod declarative;
 mod har;
 
 use axum::{
@@ -122,30 +121,6 @@ pub fn all_categories() -> Vec<Category> {
                     auth: None,
                 },
                 RequestDef {
-                    name: "Random bytes (1KB)",
-                    method: "GET",
-                    path: "/bytes/1024",
-                    headers: &[],
-                    body: None,
-                    auth: None,
-                },
-                RequestDef {
-                    name: "Stream 5 chunks",
-                    method: "GET",
-                    path: "/stream/5",
-                    headers: &[],
-                    body: None,
-                    auth: None,
-                },
-                RequestDef {
-                    name: "Drip bytes",
-                    method: "GET",
-                    path: "/drip?bytes=512&delay=200&chunk_size=32",
-                    headers: &[],
-                    body: None,
-                    auth: None,
-                },
-                RequestDef {
                     name: "Cache 60s",
                     method: "GET",
                     path: "/cache/60",
@@ -170,14 +145,6 @@ pub fn all_categories() -> Vec<Category> {
                     name: "Redirect chain (3)",
                     method: "GET",
                     path: "/redirect/3",
-                    headers: &[],
-                    body: None,
-                    auth: None,
-                },
-                RequestDef {
-                    name: "Redirect to URL",
-                    method: "GET",
-                    path: "/redirect-to?url=/echo&status=302",
                     headers: &[],
                     body: None,
                     auth: None,
@@ -679,7 +646,7 @@ pub fn all_categories() -> Vec<Category> {
     ]
 }
 
-/// Split a path like "/drip?bytes=512&delay=200" into ("/drip", "bytes=512&delay=200").
+/// Split a path like "/cache/60?ttl=1" into ("/cache/60", "ttl=1").
 /// Returns (path, "") if there is no query string.
 pub fn split_path_query(path: &str) -> (&str, &str) {
     match path.find('?') {
@@ -764,20 +731,6 @@ async fn k6_handler() -> Response {
         .into_response()
 }
 
-async fn declarative_handler() -> Response {
-    let cats = all_categories();
-    let output = declarative::build(&cats);
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, HeaderValue::from_static("text/yaml; charset=utf-8")),
-            (header::CONTENT_DISPOSITION, HeaderValue::from_static("attachment; filename=\"rustybin-gateway.yaml\"")),
-        ],
-        output,
-    )
-        .into_response()
-}
-
 async fn har_handler() -> Response {
     let cats = all_categories();
     let export = har::build(&cats);
@@ -820,7 +773,6 @@ pub fn router() -> Router<Arc<Config>> {
         .route("/export/requests.http", get(http_file_handler))
         .route("/export/requests.hurl", get(hurl_handler))
         .route("/export/k6.js", get(k6_handler))
-        .route("/export/gateway.yaml", get(declarative_handler))
         .route("/export/har.json", get(har_handler))
 }
 
@@ -869,18 +821,18 @@ mod tests {
     }
 
     #[test]
-    fn all_categories_has_at_least_60_requests() {
+    fn all_categories_has_at_least_55_requests() {
         let cats = all_categories();
         let total: usize = cats.iter().map(|c| c.requests.len()).sum();
-        assert!(total >= 60, "should have at least 60 requests, got {total}");
+        assert!(total >= 55, "should have at least 55 requests, got {total}");
     }
 
     #[test]
     fn split_path_query_works() {
         assert_eq!(split_path_query("/echo"), ("/echo", ""));
         assert_eq!(
-            split_path_query("/drip?bytes=512&delay=200"),
-            ("/drip", "bytes=512&delay=200")
+            split_path_query("/response-headers?X-Custom=hello&X-Trace-Id=abc"),
+            ("/response-headers", "X-Custom=hello&X-Trace-Id=abc")
         );
     }
 
@@ -1151,23 +1103,6 @@ mod tests {
         assert!(body.contains("group("));
     }
 
-    // ── Gateway declarative tests ─────────────────────────────────
-
-    #[tokio::test]
-    async fn declarative_returns_yaml() {
-        let app = test_app();
-        let resp = app
-            .oneshot(Request::builder().uri("/export/gateway.yaml").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert!(resp.headers().get("content-type").unwrap().to_str().unwrap().contains("yaml"));
-        assert!(resp.headers().get("content-disposition").unwrap().to_str().unwrap().contains("rustybin-gateway.yaml"));
-        let body = body_string(resp).await;
-        assert!(body.contains("_format_version"));
-        assert!(body.contains("services:"));
-        assert!(body.contains("routes:"));
-    }
 
     // ── HAR tests ───────────────────────────────────────
 
@@ -1184,7 +1119,7 @@ mod tests {
         let body = body_string(resp).await;
         let val: Value = serde_json::from_str(&body).expect("valid JSON");
         assert_eq!(val["log"]["version"], "1.2");
-        assert!(val["log"]["entries"].as_array().unwrap().len() >= 60);
+        assert!(val["log"]["entries"].as_array().unwrap().len() >= 55);
     }
 
     #[tokio::test]

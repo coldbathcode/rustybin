@@ -14,8 +14,8 @@ use crate::config::Config;
 // ── /ws — echo ──────────────────────────────────────────────────────
 
 /// Upgrade to a WebSocket that echoes back every text/binary frame it
-/// receives. Useful for testing the gateway's WebSocket proxying, websocket-size-limit,
-/// and websocket-validator plugins. Responds to ping/close per the protocol.
+/// receives. Useful for testing API gateway WebSocket proxying and
+/// frame size/validation policies. Responds to ping/close per the protocol.
 async fn ws_echo(ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(handle_echo)
 }
@@ -56,7 +56,7 @@ struct TimeParams {
 }
 
 /// Upgrade to a WebSocket that pushes the current RFC 3339 timestamp on a
-/// fixed interval, then closes. Exercises server-initiated frames through Gateway.
+/// fixed interval, then closes. Exercises server-initiated frames through the gateway.
 async fn ws_time(ws: WebSocketUpgrade, Query(params): Query<TimeParams>) -> Response {
     let interval = params.interval_ms.unwrap_or(1000).clamp(100, 60_000);
     let count = params.count.unwrap_or(10).clamp(1, 1000);

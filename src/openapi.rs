@@ -16,7 +16,7 @@ fn build_spec() -> Value {
         "openapi": "3.0.3",
         "info": {
             "title": "Rustybin",
-            "description": "A high-performance, all-in-one HTTP stub service for API gateway testing. Built in Rust with axum. Designed to exercise every category of API gateway plugin.",
+            "description": "A high-performance, all-in-one HTTP stub service for API gateway testing. Built in Rust with axum. Designed to exercise every category of API gateway feature — auth, routing, transformation, rate limiting, AI proxying, and more.",
             "version": env!("CARGO_PKG_VERSION"),
             "contact": { "name": "Rustybin" }
         },
@@ -99,7 +99,7 @@ fn build_paths() -> Value {
     // Health toggle (runtime liveness control for active health-check demos)
     for (path, op, summary, desc) in [
         ("/health/healthy", "markHealthy", "Mark instance healthy", "Sets the instance health state to healthy. Subsequent GET /health returns 200."),
-        ("/health/unhealthy", "markUnhealthy", "Mark instance unhealthy", "Sets the instance health state to unhealthy. GET /health then returns 503 — useful for Gateway upstream active health-check failover demos."),
+        ("/health/unhealthy", "markUnhealthy", "Mark instance unhealthy", "Sets the instance health state to unhealthy. GET /health then returns 503 — useful for gateway upstream active health-check failover demos."),
         ("/health/toggle", "toggleHealth", "Toggle health state", "Flips the current health state between healthy and unhealthy."),
     ] {
         paths.insert(path.into(), json!({
@@ -121,7 +121,7 @@ fn build_paths() -> Value {
         "get": {
             "tags": ["Auth"],
             "summary": "HMAC authentication (default credentials)",
-            "description": "Validates a Gateway hmac-auth style `Authorization: hmac ...` header. Default credentials: username `alice`, secret `secret`. The signature is base64(HMAC(secret, signing-string)) where the signing string is built from the listed `headers` (default `date`), joined by newlines. Supports hmac-sha1/sha256/sha384/sha512.",
+            "description": "Validates a gateway hmac-auth style `Authorization: hmac ...` header. Default credentials: username `alice`, secret `secret`. The signature is base64(HMAC(secret, signing-string)) where the signing string is built from the listed `headers` (default `date`), joined by newlines. Supports hmac-sha1/sha256/sha384/sha512.",
             "operationId": "authHmac",
             "responses": {
                 "200": { "description": "Signature valid", "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthResponse" })) },
@@ -194,7 +194,7 @@ fn build_paths() -> Value {
         "get": {
             "tags": ["WebSocket"],
             "summary": "WebSocket timestamp ticker",
-            "description": "Upgrade to a WebSocket that pushes the current timestamp on a fixed interval, then closes. Exercises server-initiated frames through Gateway.",
+            "description": "Upgrade to a WebSocket that pushes the current timestamp on a fixed interval, then closes. Exercises server-initiated frames through the gateway.",
             "operationId": "wsTime",
             "parameters": [
                 { "name": "interval_ms", "in": "query", "required": false, "schema": { "type": "integer", "default": 1000, "minimum": 100, "maximum": 60000 }, "description": "Tick interval in milliseconds" },
@@ -366,22 +366,6 @@ fn build_paths() -> Value {
                     "description": "k6 JavaScript load test script",
                     "content": { "application/javascript": {} },
                     "headers": { "Content-Disposition": { "schema": { "type": "string", "example": "attachment; filename=\"rustybin-k6.js\"" } } }
-                }
-            }
-        }
-    }));
-
-    paths.insert("/export/gateway.yaml".into(), json!({
-        "get": {
-            "tags": ["Utility"],
-            "summary": "Gateway declarative configuration export",
-            "description": "Downloads a gateway declarative YAML configuration with a service and routes for all Rustybin endpoints.",
-            "operationId": "getExportDeclarative",
-            "responses": {
-                "200": {
-                    "description": "Gateway declarative YAML configuration",
-                    "content": { "text/yaml": {} },
-                    "headers": { "Content-Disposition": { "schema": { "type": "string", "example": "attachment; filename=\"rustybin-gateway.yaml\"" } } }
                 }
             }
         }
@@ -582,55 +566,6 @@ fn build_paths() -> Value {
         }
     }));
 
-    paths.insert("/bytes/{n}".into(), json!({
-        "get": {
-            "tags": ["Response Shaping"],
-            "summary": "Return N random bytes",
-            "description": "Returns N bytes of random binary data. Max 10MB.",
-            "operationId": "getBytes",
-            "parameters": [{ "name": "n", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 1, "maximum": 10485760 }, "description": "Number of random bytes" }],
-            "responses": {
-                "200": { "description": "Random bytes", "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } },
-                "400": { "description": "Invalid byte count", "content": json_xml_content(json!({ "$ref": "#/components/schemas/ErrorResponse" })) }
-            }
-        }
-    }));
-
-    paths.insert("/stream/{n}".into(), json!({
-        "get": {
-            "tags": ["Response Shaping"],
-            "summary": "Stream N NDJSON chunks",
-            "description": "Returns a stream of N newline-delimited JSON objects. Max 1000 chunks.",
-            "operationId": "getStream",
-            "parameters": [
-                { "name": "n", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }, "description": "Number of chunks to stream" },
-                { "name": "delay", "in": "query", "required": false, "schema": { "type": "integer" }, "description": "Delay in ms between chunks" }
-            ],
-            "responses": {
-                "200": { "description": "NDJSON stream", "content": { "application/x-ndjson": { "schema": { "type": "string" } } } },
-                "400": { "description": "Invalid chunk count", "content": json_xml_content(json!({ "$ref": "#/components/schemas/ErrorResponse" })) }
-            }
-        }
-    }));
-
-    paths.insert("/drip".into(), json!({
-        "get": {
-            "tags": ["Response Shaping"],
-            "summary": "Drip-feed bytes slowly",
-            "description": "Streams bytes in small chunks with a delay between each. Useful for testing timeouts and streaming.",
-            "operationId": "getDrip",
-            "parameters": [
-                { "name": "bytes", "in": "query", "required": false, "schema": { "type": "integer", "default": 1024, "maximum": 10485760 }, "description": "Total bytes to send" },
-                { "name": "delay", "in": "query", "required": false, "schema": { "type": "integer", "default": 100, "maximum": 10000 }, "description": "Delay in ms between chunks" },
-                { "name": "chunk_size", "in": "query", "required": false, "schema": { "type": "integer", "default": 10, "minimum": 1 }, "description": "Bytes per chunk" }
-            ],
-            "responses": {
-                "200": { "description": "Streaming bytes", "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } },
-                "400": { "description": "Invalid parameters", "content": json_xml_content(json!({ "$ref": "#/components/schemas/ErrorResponse" })) }
-            }
-        }
-    }));
-
     paths.insert("/response-headers".into(), json!({
         "get": {
             "tags": ["Response Shaping"],
@@ -673,37 +608,6 @@ fn build_paths() -> Value {
             "responses": {
                 "302": { "description": "Redirect", "headers": { "Location": { "schema": { "type": "string" } } } },
                 "400": { "description": "Invalid redirect count" }
-            }
-        }
-    }));
-
-    paths.insert("/absolute-redirect/{n}".into(), json!({
-        "get": {
-            "tags": ["Redirects & Cookies"],
-            "summary": "Absolute redirect chain",
-            "description": "Performs N absolute URL 302 redirects, ending at /echo. Max 20 hops.",
-            "operationId": "getAbsoluteRedirect",
-            "parameters": [{ "name": "n", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 1, "maximum": 20 }, "description": "Number of redirects" }],
-            "responses": {
-                "302": { "description": "Redirect with absolute URL", "headers": { "Location": { "schema": { "type": "string" } } } },
-                "400": { "description": "Invalid redirect count" }
-            }
-        }
-    }));
-
-    paths.insert("/redirect-to".into(), json!({
-        "get": {
-            "tags": ["Redirects & Cookies"],
-            "summary": "Redirect to a URL",
-            "description": "Redirects to the specified URL with the specified status code.",
-            "operationId": "getRedirectTo",
-            "parameters": [
-                { "name": "url", "in": "query", "required": true, "schema": { "type": "string", "format": "uri" }, "description": "Target URL" },
-                { "name": "status", "in": "query", "required": false, "schema": { "type": "integer", "enum": [301, 302, 303, 307, 308], "default": 302 }, "description": "Redirect status code" }
-            ],
-            "responses": {
-                "302": { "description": "Redirect to URL", "headers": { "Location": { "schema": { "type": "string" } } } },
-                "400": { "description": "Missing url parameter or invalid status" }
             }
         }
     }));

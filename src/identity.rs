@@ -245,7 +245,7 @@ mod tests {
                     .uri("/identity")
                     .header("x-forwarded-for", "10.0.0.1")
                     .header("host", "api.example.com")
-                    .header("via", "gateway/3.9.0")
+                    .header("via", "1.1 gateway")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -255,7 +255,7 @@ mod tests {
         let json = json_body(resp).await;
         assert_eq!(json["request"]["forwarded_for"], "10.0.0.1");
         assert_eq!(json["request"]["host"], "api.example.com");
-        assert_eq!(json["request"]["via"], "gateway/3.9.0");
+        assert_eq!(json["request"]["via"], "1.1 gateway");
     }
 
     #[tokio::test]

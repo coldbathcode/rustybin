@@ -1,6 +1,6 @@
 # Rustybin
 
-A high-performance, all-in-one HTTP stub/echo service written in Rust using [axum](https://github.com/tokio-rs/axum). Rustybin is designed to exercise every category of API gateway plugin — specifically [API gateway](https://example.com/) — from a single binary. Think httpbin, but faster, broader, and purpose-built for gateway demos and testing.
+A high-performance, all-in-one HTTP stub/echo service written in Rust using [axum](https://github.com/tokio-rs/axum). Rustybin is designed to exercise every category of API gateway capability — auth, routing, transformation, rate limiting, AI proxying, gRPC, WebSocket, and more — from a single binary. Think httpbin, but faster, broader, and purpose-built for gateway demos and testing.
 
 ## Quick Start
 
@@ -41,7 +41,7 @@ docker run -d -p 80:80 -p 443:443 --name rustybin rustybin
 | **GraphQL** | `/graphql`, `/graphql/schema` | GraphQL API with playground (users, products, orders) |
 | **WebSocket** | `/ws`, `/ws/time` | Frame echo and server-push ticker for WebSocket proxying |
 | **gRPC** | `EchoService` on `:50051` | Unary + server/client/bidi streaming echo (separate port) |
-| **Orchestration** | `/orchestration/step/1-4`, `/orchestration/status` | Multi-step payment processing pipeline for orchestration |
+| **Orchestration** | `/orchestration/step/1-4`, `/orchestration/status` | Multi-step payment processing pipeline |
 | **SOAP** | `/soap`, `/soap/wsdl` | SOAP/XML web service with WSDL |
 | **Flaky** | `/flaky/{rate}`, `/flaky/pattern/{p}`, `/flaky/after/{n}`, `/flaky/recover/{n}` | Configurable failure simulation for circuit breaker testing |
 | **Docs** | `/openapi.json`, `/openapi.yaml`, `/docs` | OpenAPI 3.0.3 spec and interactive Scalar UI |
@@ -74,7 +74,7 @@ docker run -d -p 8002:80 -e RUSTYBIN_INSTANCE_ID=instance-02 --name rb2 rustybin
 docker run -d -p 8003:80 -e RUSTYBIN_INSTANCE_ID=instance-03 --name rb3 rustybin
 ```
 
-Each instance returns its ID via `/identity`, making it easy to see which upstream Gateway selected.
+Each instance returns its ID via `/identity`, making it easy to see which upstream the gateway or load balancer selected.
 
 ## Building from Source
 
@@ -97,35 +97,23 @@ RUSTYBIN_HTTP_PORT=8080 cargo run
 
 Requires Rust 1.82+.
 
-## API gateway Integration
+## API Gateway Integration
 
-### Upstream Configuration
+Point any API gateway (or load balancer) at Rustybin as the upstream — `http://rustybin:80` for HTTP/HTTPS and `:50051` for gRPC — then route traffic through the gateway to exercise its policies.
 
-```yaml
-# gateway.yml (declarative config)
-services:
-  - name: rustybin
-    url: http://rustybin:80
-    routes:
-      - name: rustybin-route
-        paths:
-          - /
-```
+### Examples (assuming the gateway listens on `:8000`)
 
-### Plugin Testing Examples
-
-**Rate Limiting** — hit `/echo` to verify rate limit headers:
+**Rate limiting** — hit `/echo` and inspect the rate-limit headers the gateway adds:
 ```bash
 curl -i http://gateway:8000/echo
-# Look for X-RateLimit-Remaining headers
 ```
 
-**Basic Auth** — configure the gateway's basic-auth plugin, upstream validates at `/auth/basic-auth`:
+**Auth** — validate credentials forwarded by the gateway:
 ```bash
 curl -u alice:secret http://gateway:8000/auth/basic-auth/alice/secret
 ```
 
-**JWT** — get a token from the OIDC provider, validate through Gateway:
+**JWT / OIDC** — get a token from the built-in provider, then validate it through the gateway:
 ```bash
 TOKEN=$(curl -s -X POST http://rustybin/oauth/token \
   -d 'grant_type=client_credentials&client_id=rustybin&client_secret=secret' \
@@ -133,49 +121,51 @@ TOKEN=$(curl -s -X POST http://rustybin/oauth/token \
 curl -H "Authorization: Bearer $TOKEN" http://gateway:8000/auth/jwt
 ```
 
-**Circuit Breaker** — use `/flaky/50` to trigger the gateway's circuit breaker:
+**Retry / circuit breaking** — use `/flaky/50` to return 503 for half of requests:
 ```bash
 for i in $(seq 1 20); do curl -s -o /dev/null -w "%{http_code}\n" http://gateway:8000/flaky/50; done
 ```
 
-**Response Transformation** — inspect headers added by Gateway via `/echo`:
+**Transformation** — inspect headers/body the gateway adds or rewrites via `/echo`:
 ```bash
 curl -s http://gateway:8000/echo | jq .headers
 ```
 
-## Plugin Testing Matrix
+## Capability Testing Matrix
 
-| Gateway Plugin | Rustybin Endpoint | What to Test |
+A vendor-neutral map of gateway capabilities to the endpoints that exercise them:
+
+| Gateway capability | Rustybin endpoint | What to test |
 |---|---|---|
-| rate-limiting | `/echo`, `/anything` | Rate limit headers in echo response |
-| basic-auth | `/auth/basic-auth/{u}/{p}` | Credential forwarding |
-| key-auth | `/auth/api-key/{header}/{key}` | API key forwarding |
-| jwt | `/auth/jwt`, `/oauth/jwks` | JWT validation, JWKS endpoint |
-| hmac-auth | `/auth/hmac`, `/auth/hmac/{u}/{s}` | HMAC signature validation |
-| oauth2 / openid-connect | `/.well-known/openid-configuration` | Full OIDC flow |
-| mtls-auth | `/auth/mtls` | Client certificate validation |
-| request-termination | `/status/{code}` | Custom error responses |
-| proxy-cache | `/cache/{ttl}` | Cache headers, conditional requests |
-| response-transformer | `/echo` | Header/body inspection |
-| retry | `/flaky/{rate}`, `/flaky/pattern/{p}` | Retry on 503 |
-| circuit-breaker | `/flaky/after/{n}`, `/flaky/recover/{n}` | Health state transitions |
-| ai-proxy | `/ai/v1/chat/completions`, `/ai/anthropic/v1/messages` | OpenAI- and Anthropic-format upstreams |
-| grpc-proxy / grpc-web / grpc-gateway | `EchoService` on `:50051` | gRPC unary + streaming proxying |
-| websocket-size-limit / ws | `/ws`, `/ws/time` | WebSocket frame proxying |
-| upstream health checks | `/health/unhealthy`, `/health/healthy` | Active health check failover |
-| graphql-proxy | `/graphql` | GraphQL query proxying |
-| soap-xml | `/soap`, `/soap/wsdl` | SOAP envelope routing |
-| orchestration | `/orchestration/step/1-4` | Multi-step orchestration |
-| redirect | `/redirect/{n}` | Redirect following |
-| cors | `/echo` | CORS header inspection |
-| request-size-limiting | `/echo` | Body size in echo response |
-| ip-restriction | `/ip` | Client IP detection |
+| Rate limiting | `/echo`, `/anything` | Rate-limit headers in echo response |
+| Basic auth | `/auth/basic-auth/{u}/{p}` | Credential forwarding |
+| API-key auth | `/auth/api-key/{header}/{key}` | API key forwarding |
+| JWT auth | `/auth/jwt`, `/oauth/jwks` | JWT validation, JWKS endpoint |
+| HMAC auth | `/auth/hmac`, `/auth/hmac/{u}/{s}` | HMAC signature validation |
+| OAuth2 / OIDC | `/.well-known/openid-configuration` | Full OIDC flow |
+| mTLS | `/auth/mtls` | Client certificate validation |
+| Request termination | `/status/{code}` | Custom error responses |
+| Proxy caching | `/cache/{ttl}` | Cache headers, conditional requests |
+| Response transformation | `/echo` | Header/body inspection |
+| Retry | `/flaky/{rate}`, `/flaky/pattern/{p}` | Retry on 503 |
+| Circuit breaking | `/flaky/after/{n}`, `/flaky/recover/{n}` | Health state transitions |
+| AI proxying | `/ai/v1/chat/completions`, `/ai/anthropic/v1/messages` | OpenAI- and Anthropic-format upstreams |
+| gRPC proxying | `EchoService` on `:50051` | gRPC unary + streaming proxying |
+| WebSocket proxying | `/ws`, `/ws/time` | WebSocket frame proxying |
+| Active health checks | `/health/unhealthy`, `/health/healthy` | Health-check failover |
+| GraphQL proxying | `/graphql` | GraphQL query proxying |
+| SOAP / XML | `/soap`, `/soap/wsdl` | SOAP envelope routing |
+| Multi-step orchestration | `/orchestration/step/1-4` | Chained request pipeline |
+| Redirect following | `/redirect/{n}` | Relative redirect chains |
+| CORS | `/echo` | CORS header inspection |
+| Request size limiting | `/echo` | Body size in echo response |
+| IP restriction | `/ip` | Client IP detection |
 
 ## gRPC
 
 Rustybin serves a gRPC `EchoService` on a separate port (default `50051`,
-`RUSTYBIN_GRPC_PORT`) for testing the gateway's `grpc-proxy`, `grpc-web`, and
-`grpc-gateway` plugins. It implements all four call types — unary, server
+`RUSTYBIN_GRPC_PORT`) for testing API gateway gRPC proxying (unary, streaming,
+and web/HTTP transcoding). It implements all four call types — unary, server
 streaming, client streaming, and bidirectional streaming — echoing the request
 message along with the reflected request metadata and the handling instance ID.
 

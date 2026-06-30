@@ -3,8 +3,8 @@ syntax = "proto3";
 package rustybin.echo.v1;
 
 // EchoService reflects requests back to the caller across all four gRPC
-// call types, so the gateway's grpc-proxy, grpc-web, and grpc-gateway plugins can
-// be exercised against a single upstream.
+// call types, so API gateway gRPC proxying (unary, streaming, and web/HTTP
+// transcoding) can be exercised against a single upstream.
 service EchoService {
   // Unary: returns the request message plus echoed metadata.
   rpc Echo(EchoRequest) returns (EchoResponse);

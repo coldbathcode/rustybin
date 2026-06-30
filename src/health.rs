@@ -12,7 +12,7 @@ use crate::content_negotiation::negotiate_with_status;
 // ── State ───────────────────────────────────────────────────────────
 
 /// Runtime-toggleable liveness state. Lets a running instance be flipped
-/// to "unhealthy" (returning 503 from `/health`) so Gateway upstream active
+/// to "unhealthy" (returning 503 from `/health`) so gateway upstream active
 /// health checks and load-balancer failover can be demonstrated live.
 pub struct HealthState {
     healthy: AtomicBool,

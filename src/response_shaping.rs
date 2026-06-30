@@ -1,5 +1,4 @@
 use axum::{
-    body::{Body, Bytes},
     extract::{Extension, Path, Query},
     http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
@@ -7,15 +6,12 @@ use axum::{
     Router,
 };
 use chrono::{DateTime, NaiveDateTime, Utc};
-use rand::distributions::Alphanumeric;
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio_stream::wrappers::ReceiverStream;
 
 use crate::config::Config;
 use crate::content_negotiation::{negotiate, negotiate_with_status};
@@ -92,172 +88,6 @@ async fn delay_handler(
             timestamp_unix_ms: timestamp,
         },
     )
-}
-
-// ── Bytes ────────────────────────────────────────────────────────────
-
-async fn bytes_handler(Path(n): Path<String>, headers: HeaderMap) -> Response {
-    let n_val: usize = match n.parse() {
-        Ok(v) if (1..=10_485_760).contains(&v) => v,
-        _ => {
-            return negotiate_with_status(
-                &headers,
-                &ErrorResponse {
-                    error: "invalid_byte_count".to_string(),
-                    details: Some("Byte count must be between 1 and 10485760".to_string()),
-                },
-                StatusCode::BAD_REQUEST,
-            );
-        }
-    };
-
-    let mut rng = rand::thread_rng();
-    let data: Vec<u8> = (0..n_val).map(|_| rng.gen()).collect();
-
-    (
-        [(header::CONTENT_TYPE, "application/octet-stream")],
-        Bytes::from(data),
-    )
-        .into_response()
-}
-
-// ── Stream ───────────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct StreamQuery {
-    delay: Option<u64>,
-}
-
-#[derive(Serialize)]
-struct StreamChunk {
-    id: usize,
-    timestamp_unix_ms: u64,
-    data: String,
-}
-
-async fn stream_handler(
-    Path(n): Path<String>,
-    Query(query): Query<StreamQuery>,
-    headers: HeaderMap,
-) -> Response {
-    let n_val: usize = match n.parse() {
-        Ok(v) if (1..=1000).contains(&v) => v,
-        _ => {
-            return negotiate_with_status(
-                &headers,
-                &ErrorResponse {
-                    error: "invalid_chunk_count".to_string(),
-                    details: Some("Chunk count must be between 1 and 1000".to_string()),
-                },
-                StatusCode::BAD_REQUEST,
-            );
-        }
-    };
-
-    let delay_ms = query.delay;
-
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
-
-    tokio::spawn(async move {
-        let mut rng = StdRng::from_entropy();
-        for i in 0..n_val {
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-
-            let data: String = (&mut rng)
-                .sample_iter(&Alphanumeric)
-                .take(32)
-                .map(char::from)
-                .collect();
-
-            let chunk = StreamChunk {
-                id: i,
-                timestamp_unix_ms: timestamp,
-                data,
-            };
-
-            let line = match serde_json::to_string(&chunk) {
-                Ok(s) => format!("{s}\n"),
-                Err(_) => break,
-            };
-
-            if tx.send(Ok(Bytes::from(line))).await.is_err() {
-                break;
-            }
-
-            if let Some(d) = delay_ms {
-                tokio::time::sleep(Duration::from_millis(d)).await;
-            }
-        }
-    });
-
-    let body = Body::from_stream(ReceiverStream::new(rx));
-
-    ([(header::CONTENT_TYPE, "application/x-ndjson")], body).into_response()
-}
-
-// ── Drip ─────────────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-#[serde(default)]
-struct DripQuery {
-    bytes: usize,
-    delay: u64,
-    chunk_size: usize,
-}
-
-impl Default for DripQuery {
-    fn default() -> Self {
-        Self {
-            bytes: 1024,
-            delay: 100,
-            chunk_size: 10,
-        }
-    }
-}
-
-async fn drip_handler(Query(query): Query<DripQuery>, headers: HeaderMap) -> Response {
-    let total_bytes = query.bytes.min(10_485_760);
-    let delay_ms = query.delay.min(10_000);
-    let chunk_size = query.chunk_size.max(1);
-
-    if total_bytes == 0 {
-        return negotiate_with_status(
-            &headers,
-            &ErrorResponse {
-                error: "invalid_drip_params".to_string(),
-                details: Some("Total bytes must be at least 1".to_string()),
-            },
-            StatusCode::BAD_REQUEST,
-        );
-    }
-
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
-
-    tokio::spawn(async move {
-        let mut rng = StdRng::from_entropy();
-        let mut remaining = total_bytes;
-
-        while remaining > 0 {
-            let this_chunk = remaining.min(chunk_size);
-            let data: Vec<u8> = (0..this_chunk).map(|_| rng.gen()).collect();
-            remaining -= this_chunk;
-
-            if tx.send(Ok(Bytes::from(data))).await.is_err() {
-                break;
-            }
-
-            if remaining > 0 {
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            }
-        }
-    });
-
-    let body = Body::from_stream(ReceiverStream::new(rx));
-
-    ([(header::CONTENT_TYPE, "application/octet-stream")], body).into_response()
 }
 
 // ── Response Headers ─────────────────────────────────────────────────
@@ -401,9 +231,6 @@ pub fn router() -> Router<Arc<Config>> {
     let startup = ServerStartup(Utc::now());
     Router::new()
         .route("/delay/:ms", any(delay_handler))
-        .route("/bytes/:n", get(bytes_handler))
-        .route("/stream/:n", get(stream_handler))
-        .route("/drip", get(drip_handler))
         .route("/response-headers", get(response_headers_handler))
         .route("/cache/:ttl", get(cache_handler))
         .layer(axum::Extension(startup))
@@ -472,130 +299,6 @@ mod tests {
             .expect("response");
 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn bytes_returns_correct_count() {
-        let app = test_app();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/bytes/256")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let ct = resp
-            .headers()
-            .get("content-type")
-            .expect("ct")
-            .to_str()
-            .expect("str");
-        assert_eq!(ct, "application/octet-stream");
-
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        assert_eq!(body.len(), 256);
-    }
-
-    #[tokio::test]
-    async fn bytes_invalid_returns_400() {
-        let app = test_app();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/bytes/0")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn stream_returns_ndjson() {
-        let app = test_app();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/stream/3")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let ct = resp
-            .headers()
-            .get("content-type")
-            .expect("ct")
-            .to_str()
-            .expect("str");
-        assert_eq!(ct, "application/x-ndjson");
-
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let text = String::from_utf8(body.to_vec()).expect("utf8");
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 3);
-
-        for line in &lines {
-            let chunk: serde_json::Value = serde_json::from_str(line).expect("json");
-            assert!(chunk["id"].is_number());
-            assert!(chunk["data"].is_string());
-        }
-    }
-
-    #[tokio::test]
-    async fn stream_invalid_returns_400() {
-        let app = test_app();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/stream/0")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn drip_returns_bytes() {
-        let app = test_app();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/drip?bytes=50&delay=1&chunk_size=10")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let ct = resp
-            .headers()
-            .get("content-type")
-            .expect("ct")
-            .to_str()
-            .expect("str");
-        assert_eq!(ct, "application/octet-stream");
-
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        assert_eq!(body.len(), 50);
     }
 
     #[tokio::test]

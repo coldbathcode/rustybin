@@ -89,7 +89,7 @@ fn check_hmac(
     };
 
     // `headers` lists which request headers (space-separated, lowercase) form
-    // the signing string, in order. Gateway defaults to `date` when omitted.
+    // the signing string, in order. Defaults to `date` when omitted.
     let signed_headers = params
         .get("headers")
         .map(|s| s.as_str())
@@ -147,7 +147,7 @@ fn parse_params(s: &str) -> std::collections::HashMap<String, String> {
 
 /// Build the signing string from the listed header names, in order, joined by
 /// `\n`. The pseudo-header `request-line` expands to `"<METHOD> <path> HTTP/1.1"`
-/// (matching the gateway's hmac-auth behaviour). Returns Err(name) if a listed header
+/// (matching common gateway hmac-auth behaviour). Returns Err(name) if a listed header
 /// is not present on the request.
 fn build_signing_string(
     signed_headers: &str,
