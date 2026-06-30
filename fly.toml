@@ -1,0 +1,87 @@
+# fly.toml — deploy Rustybin to Fly.io
+#
+# Build uses the repo Dockerfile (HTTP :80, HTTPS :443, gRPC :50051; the
+# entrypoint generates demo TLS certs on first boot).
+#
+# Networking model:
+#   * Web surface (HTTP/HTTPS/WebSocket): Fly terminates TLS at the edge and
+#     provisions a real Let's Encrypt cert for your custom domain, forwarding
+#     plaintext to the app's internal :80. This is what makes https://rustybin.dev
+#     work in a browser (.dev is HSTS-preloaded, so a valid cert is mandatory).
+#   * gRPC: raw TCP passthrough on :50051 (plaintext h2c). Reach it with
+#     `grpcurl -plaintext rustybin.dev:50051 ...`.
+#
+# Trade-off: because Fly terminates TLS for the web surface, the app's OWN
+# HTTPS/:443 and the /auth/mtls demo are not exercised end-to-end (the edge
+# speaks TLS, the app receives plaintext). Everything else works. To test the
+# app's own mTLS instead, switch the 443 port block to raw passthrough
+# (handlers = []) — but then the browser can't use https://rustybin.dev because
+# the app serves a self-signed cert.
+
+app = "rustybin"
+primary_region = "iad"   # change to your nearest region (e.g. lhr, fra, sjc)
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  RUSTYBIN_LOG_LEVEL = "info"
+  RUSTYBIN_INSTANCE_ID = "rustybin-fly"
+  # Fly proxies requests, so trust X-Forwarded-* for correct /ip and scheme.
+  RUSTYBIN_TRUST_FORWARD = "true"
+
+# ── Web surface: HTTP + HTTPS (TLS terminated at the edge) ──────────────
+[[services]]
+  protocol = "tcp"
+  internal_port = 80
+  # Scale to zero when idle, wake on traffic — keeps idle cost near $0.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    force_https = true        # redirect :80 → :443
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [services.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 250
+
+  # Liveness check hits "/" (always 200) rather than "/health" — /health is a
+  # demo toggle that intentionally returns 503, which would otherwise make Fly
+  # consider the machine unhealthy.
+  [[services.http_checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "get"
+    path = "/"
+
+# ── gRPC: raw TCP passthrough (plaintext h2c) ───────────────────────────
+[[services]]
+  protocol = "tcp"
+  internal_port = 50051
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[services.ports]]
+    port = 50051
+    handlers = []             # L4 passthrough; client uses grpcurl -plaintext
+
+  [[services.tcp_checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "10s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  # 512MB headroom for RSA keygen + rustls + tonic at startup (256MB is tight).
+  memory = "512mb"
+  cpus = 1
