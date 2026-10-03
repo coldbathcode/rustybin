@@ -15,6 +15,20 @@ pub struct JwtState {
 }
 
 impl JwtState {
+    /// Verify an RS256 access token issued by the built-in OIDC provider.
+    ///
+    /// Checks the signature and `exp`/`nbf`; audience is not checked here so
+    /// callers (MCP, A2A, protected resources) can apply their own rules.
+    /// This is the stable entry point other modules use to validate tokens.
+    pub fn verify_rs256(&self, token: &str) -> Result<serde_json::Value, String> {
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+        validation.validate_aud = false;
+        validation.validate_nbf = true;
+        jsonwebtoken::decode::<serde_json::Value>(token, &self.rs256_decoding_key, &validation)
+            .map(|data| data.claims)
+            .map_err(|e| e.to_string())
+    }
+
     /// A process-wide JWT state generated once and shared by every caller.
     /// Tests use this so RSA key generation happens at most once per test
     /// binary instead of once per test.
