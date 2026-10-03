@@ -369,7 +369,15 @@ async fn exempt_routes_and_admin_bypass() {
         get_with(&app, "/echo", &[]).await.status(),
         StatusCode::TOO_MANY_REQUESTS
     );
-    for path in ["/", "/ui/", USAGE_PATH, "/", USAGE_PATH] {
+    for path in [
+        "/",
+        "/ui/",
+        USAGE_PATH,
+        STATUS_PATH,
+        "/",
+        USAGE_PATH,
+        STATUS_PATH,
+    ] {
         let resp = get_with(&app, path, &[]).await;
         assert!(resp.status().is_success(), "{path}: {}", resp.status());
         assert!(

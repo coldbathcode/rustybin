@@ -21,8 +21,8 @@
 //! restart (scale to zero) does not reset a monthly quota. Session counters
 //! live in a bounded map and are not persisted.
 //!
-//! Exempt from every limit: `/` (platform health check), `/ui/*` and
-//! `GET /_rustybin/usage`. Other control plane requests that carry a valid
+//! Exempt from every limit: `/` (platform health check), `/ui/*`,
+//! `GET /_rustybin/usage` and `GET /_rustybin/status` (polled by the console). Other control plane requests that carry a valid
 //! admin token are counted but never rejected.
 
 use std::collections::HashMap;
@@ -49,6 +49,9 @@ use crate::state::AppState;
 
 /// The usage endpoint (always exempt from limits).
 pub const USAGE_PATH: &str = "/_rustybin/usage";
+/// The status endpoint the console polls every few seconds (exempt so an
+/// open console cannot use up a plan's quota).
+pub const STATUS_PATH: &str = "/_rustybin/status";
 /// Response header naming the active plan.
 pub const PLAN_HEADER: &str = "x-rustybin-plan";
 /// Response header with the requests left in the current period.
@@ -1099,7 +1102,8 @@ pub fn is_exempt(method: &Method, path: &str) -> bool {
         || path
             .strip_prefix(crate::control::UI_PREFIX)
             .is_some_and(|rest| rest.starts_with('/'))
-        || (path == USAGE_PATH && (method == Method::GET || method == Method::HEAD))
+        || ((path == USAGE_PATH || path == STATUS_PATH)
+            && (method == Method::GET || method == Method::HEAD))
 }
 
 fn is_websocket_upgrade(headers: &HeaderMap) -> bool {

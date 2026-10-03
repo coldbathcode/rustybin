@@ -126,7 +126,8 @@ nobody sees other sessions). The [web console](../console.md) shows the same dat
 ## Exemptions and the admin token
 
 Never limited, counted or decorated: `/` (the platform health check), the web console
-(`/ui/*`) and `GET /_rustybin/usage`. Other control plane routes count like any other
+(`/ui/*`), `GET /_rustybin/usage` and `GET /_rustybin/status` (which the console
+polls every few seconds). Other control plane routes count like any other
 request, but a request with the [admin token](sessions.md) is never rejected on them,
 so an administrator can always reach a busy instance.
 
