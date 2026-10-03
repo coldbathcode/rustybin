@@ -323,12 +323,17 @@ collection exports (`/export/*`). A test fails when they drift apart.
 | GET | `/_rustybin/requests/{id}` | One captured request by id |
 | GET | `/_rustybin/config` | Effective configuration (no secrets) |
 | GET | `/_rustybin/version` | Service name and version |
+| GET | `/_rustybin/catalog` | Route catalogue as JSON (paths, methods, categories, examples) |
+| GET | `/_rustybin/status` | Uptime, health state and inspector counters |
 
 ### Docs & Exports
 
 | Methods | Path | Description |
 |---|---|---|
 | GET | `/` | This landing page (always 200, safe for liveness checks) |
+| GET | `/ui` | Web console (redirects to /ui/) |
+| GET | `/ui/` | Web console entry page |
+| GET | `/ui/{*path}` | Console assets; extension-less paths fall back to index.html |
 | GET | `/openapi.json` | OpenAPI 3.0.3 specification (JSON) |
 | GET | `/openapi.yaml` | OpenAPI 3.0.3 specification (YAML) |
 | GET | `/docs` | Interactive API reference (Scalar) |

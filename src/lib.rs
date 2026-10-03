@@ -54,6 +54,7 @@ pub mod state;
 pub mod status;
 pub mod transfer;
 pub mod types;
+pub mod ui;
 pub mod webhooks;
 pub mod websocket;
 
@@ -116,6 +117,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     openapi::router,
     inspector::router,
     control::router,
+    ui::router,
 ];
 
 /// Build the complete application: all module routers plus the middleware
@@ -215,6 +217,13 @@ fn cors_layer(origins: &[String]) -> Option<CorsLayer> {
                 HeaderName::from_static("x-request-id"),
                 HeaderName::from_static("x-rustybin-fault"),
                 header::CONTENT_LENGTH,
+                // Mock LLM metadata, readable by browser clients (the console's
+                // AI playground when it sends through a gateway).
+                HeaderName::from_static("x-rustybin-request-id"),
+                HeaderName::from_static("x-rustybin-credential"),
+                HeaderName::from_static("x-rustybin-provider"),
+                HeaderName::from_static("x-rustybin-model"),
+                HeaderName::from_static("x-rustybin-mode"),
                 // MCP clients in browsers need these (session, version, OAuth challenge).
                 HeaderName::from_static("mcp-session-id"),
                 HeaderName::from_static("mcp-protocol-version"),
