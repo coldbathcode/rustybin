@@ -284,7 +284,7 @@ mutations are disabled unless an admin token is configured.
 | `RUSTYBIN_INSPECTOR_CAPACITY` | `500` | Number of requests kept by the inspector (max 10000) |
 | `RUSTYBIN_MCP_API_KEY` | _(unset)_ | Exact `X-API-Key` required by `/mcp/apikey` (unset: any non-empty key) |
 | `RUSTYBIN_MCP_ALLOWED_ORIGINS` | `*` | Comma-separated Origins accepted by the MCP endpoints (others get `403`) |
-| `RUSTYBIN_MCP_ACCEPTED_AUDIENCES` | _(unset)_ | Extra token audiences accepted by `/mcp/protected` besides its resource URL |
+| `RUSTYBIN_MCP_ACCEPTED_AUDIENCES` | `rustybin` | Token audiences accepted by `/mcp/protected` besides its resource URL (default: the IdP's default audience, for demo convenience); `none` = strict RFC 8707 |
 | `RUSTYBIN_MCP_RESOURCE_URL` | _(derived)_ | Override the `/mcp/protected` resource identifier (e.g. the gateway URL) |
 | `RUSTYBIN_MCP_CLOCK_TICK_SECS` | `5` | Update interval of the subscribable `rustybin://clock` resource |
 

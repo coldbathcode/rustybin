@@ -86,6 +86,11 @@ pub fn protected_resource_metadata(headers: &HeaderMap, cfg: &McpConfig) -> Valu
         "scopes_supported": SCOPES_SUPPORTED,
         "bearer_methods_supported": ["header"],
         "resource_name": "Rustybin MCP (protected)",
+        // Informational (RFC 9728 allows extra members): where the built-in
+        // IdP publishes RFC 8414 metadata and dynamic client registration.
+        "rustybin_authorization_server_metadata": format!("{base}/.well-known/oauth-authorization-server"),
+        "rustybin_registration_endpoint": format!("{base}/oauth/register"),
+        "rustybin_accepted_audiences": accepted_audiences(headers, cfg),
         "resource_documentation": format!("{base}/"),
     })
 }
@@ -165,6 +170,14 @@ fn audience_matches(claims: &Value, expected: &[String]) -> bool {
     auds.iter().any(|a| expected.iter().any(|e| norm(e) == *a))
 }
 
+/// Audiences accepted on `/mcp/protected`: the resource URL first, then the
+/// configured extras (by default the IdP's default audience `rustybin`).
+pub fn accepted_audiences(headers: &HeaderMap, cfg: &McpConfig) -> Vec<String> {
+    let mut expected = vec![resource_url(headers, cfg)];
+    expected.extend(cfg.extra_audiences.iter().cloned());
+    expected
+}
+
 /// Validate the bearer token of a request to `/mcp/protected`.
 /// Returns the token claims, or the 401 response to send.
 #[allow(clippy::result_large_err)]
@@ -191,8 +204,7 @@ pub fn require_bearer(
             Some(("invalid_token", &format!("token validation failed: {e}"))),
         )
     })?;
-    let mut expected = vec![resource_url(headers, cfg)];
-    expected.extend(cfg.extra_audiences.iter().cloned());
+    let expected = accepted_audiences(headers, cfg);
     if !audience_matches(&claims, &expected) {
         let desc = format!(
             "token audience does not include this resource ({}); request the token with resource={}",

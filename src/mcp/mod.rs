@@ -12,7 +12,8 @@
 //! All variants share one implementation and differ by [`Profile`].
 //! Environment (read when the router is built):
 //! `RUSTYBIN_MCP_API_KEY`, `RUSTYBIN_MCP_ALLOWED_ORIGINS` (comma list, default `*`),
-//! `RUSTYBIN_MCP_ACCEPTED_AUDIENCES` (extra token audiences for `/mcp/protected`),
+//! `RUSTYBIN_MCP_ACCEPTED_AUDIENCES` (token audiences accepted by `/mcp/protected` besides
+//! its resource URL; default `rustybin`, the IdP's default audience; `none` = strict),
 //! `RUSTYBIN_MCP_RESOURCE_URL` (override the protected resource identifier),
 //! `RUSTYBIN_MCP_CLOCK_TICK_SECS` (default 5).
 
@@ -48,6 +49,8 @@ pub const PROTECTED_PATH: &str = "/mcp/protected";
 pub const APIKEY_PATH: &str = "/mcp/apikey";
 /// Names accepted by `/mcp/servers/{name}`.
 pub const NAMED_SERVERS: &[&str] = &["weather", "crm", "devtools"];
+/// Audience the built-in IdP puts in tokens requested without `resource`.
+pub const DEFAULT_IDP_AUDIENCE: &str = "rustybin";
 
 /// MCP-specific limits and settings.
 #[derive(Clone, Debug)]
@@ -111,14 +114,18 @@ impl McpConfig {
             client_request_timeout: Duration::from_secs(if public { 30 } else { 120 }),
             allowed_origins: vec!["*".to_string()],
             api_key: None,
-            extra_audiences: Vec::new(),
+            // Demo convenience: tokens from a plain client_credentials call (no
+            // RFC 8707 `resource`) carry the IdP's default audience.
+            extra_audiences: vec![DEFAULT_IDP_AUDIENCE.to_string()],
             resource_url: None,
         };
         if let Some(origins) = env_list("RUSTYBIN_MCP_ALLOWED_ORIGINS").filter(|o| !o.is_empty()) {
             cfg.allowed_origins = origins;
         }
         cfg.api_key = env_nonempty("RUSTYBIN_MCP_API_KEY");
-        cfg.extra_audiences = env_list("RUSTYBIN_MCP_ACCEPTED_AUDIENCES").unwrap_or_default();
+        if let Some(list) = env_list("RUSTYBIN_MCP_ACCEPTED_AUDIENCES") {
+            cfg.extra_audiences = list.into_iter().filter(|a| a != "none").collect();
+        }
         cfg.resource_url = env_nonempty("RUSTYBIN_MCP_RESOURCE_URL");
         if let Some(secs) =
             env_nonempty("RUSTYBIN_MCP_CLOCK_TICK_SECS").and_then(|s| s.parse::<u64>().ok())
@@ -133,7 +140,7 @@ impl McpConfig {
         let mut cfg = Self::from_config(&Config::for_tests());
         cfg.allowed_origins = vec!["*".to_string()];
         cfg.api_key = None;
-        cfg.extra_audiences = Vec::new();
+        cfg.extra_audiences = vec![DEFAULT_IDP_AUDIENCE.to_string()];
         cfg.resource_url = None;
         cfg.tick = Duration::from_millis(50);
         cfg.sse_deferral = Duration::from_secs(10);

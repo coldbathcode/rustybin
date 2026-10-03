@@ -53,7 +53,7 @@ async def protected() -> None:
                 data={
                     "grant_type": "client_credentials",
                     "client_id": "rustybin",
-                    "client_secret": "rustybin",
+                    "client_secret": "secret",
                     "scope": scope,
                     "resource": resource,
                 },
@@ -64,7 +64,9 @@ async def protected() -> None:
         writer = await token("mcp:tools mcp:tools:write")
         aud = jwt_claims(reader).get("aud")
         if resource not in (aud if isinstance(aud, list) else [aud]):
-            print(f"  note: IdP token aud is {aud!r} (no RFC 8707 binding yet); server must accept it via RUSTYBIN_MCP_ACCEPTED_AUDIENCES")
+            print(f"  note: IdP token aud is {aud!r} (no RFC 8707 binding); accepted as the default audience")
+        else:
+            check(True, "token audience bound to the resource (RFC 8707)")
 
     section("/mcp/protected: SDK with bearer token")
     async with client_for("/mcp/protected", {"Authorization": f"Bearer {reader}"}) as c:

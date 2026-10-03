@@ -18,11 +18,8 @@ TMP="$(mktemp -d)"
 BIN="$TMP/mcp-conformance-server"
 cp "$ROOT/target/debug/rustybin" "$BIN"
 
-# RUSTYBIN_MCP_ACCEPTED_AUDIENCES: the built-in IdP's client_credentials tokens
-# carry aud=<client_id> unless it binds RFC 8707 `resource`; accept that too.
 (cd "$TMP" && exec env RUSTYBIN_HTTP_PORT=18400 RUSTYBIN_HTTPS_PORT=18401 RUSTYBIN_GRPC_PORT=18402 \
   RUSTYBIN_HOST=127.0.0.1 RUSTYBIN_LOG_LEVEL=warn RUSTYBIN_MCP_CLOCK_TICK_SECS=1 \
-  RUSTYBIN_MCP_ACCEPTED_AUDIENCES=rustybin \
   "$BIN") &
 SERVER=$!
 trap 'kill $SERVER 2>/dev/null || true; rm -rf "$TMP"' EXIT

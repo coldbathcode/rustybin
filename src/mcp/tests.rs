@@ -1360,12 +1360,17 @@ async fn protected_variant_oauth() {
         "cancelled"
     );
 
-    // Extra accepted audiences (gateway demos).
+    // The IdP default audience is accepted by default (demo convenience) ...
+    let token = mint(super::DEFAULT_IDP_AUDIENCE, "openid");
+    let resp = protected_call(&app, Some(&token), "tools/list", json!({})).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    // ... and rejected in strict mode (RUSTYBIN_MCP_ACCEPTED_AUDIENCES=none).
     let mut cfg = McpConfig::for_tests();
-    cfg.extra_audiences = vec!["rustybin".into()];
-    let app2 = app_with(cfg);
-    let token = mint("rustybin", "openid");
-    let resp = protected_call(&app2, Some(&token), "tools/list", json!({})).await;
+    cfg.extra_audiences = Vec::new();
+    let strict = app_with(cfg);
+    let resp = protected_call(&strict, Some(&token), "tools/list", json!({})).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let resp = protected_call(&strict, Some(&good), "tools/list", json!({})).await;
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
