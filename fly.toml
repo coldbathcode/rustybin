@@ -1,4 +1,4 @@
-# fly.toml — deploy Rustybin to Fly.io
+# fly.toml - deploy Rustybin to Fly.io
 #
 # Build uses the repo Dockerfile (HTTP :80, HTTPS :443, gRPC :50051; the
 # entrypoint generates demo TLS certs on first boot).
@@ -15,7 +15,7 @@
 # HTTPS/:443 and the /auth/mtls demo are not exercised end-to-end (the edge
 # speaks TLS, the app receives plaintext). Everything else works. To test the
 # app's own mTLS instead, switch the 443 port block to raw passthrough
-# (handlers = []) — but then the browser can't use https://rustybin.dev because
+# (handlers = []) - but then the browser can't use https://rustybin.dev because
 # the app serves a self-signed cert.
 
 app = "rustybin"
@@ -34,7 +34,7 @@ primary_region = "iad"   # change to your nearest region (e.g. lhr, fra, sjc)
 [[services]]
   protocol = "tcp"
   internal_port = 80
-  # Scale to zero when idle, wake on traffic — keeps idle cost near $0.
+  # Scale to zero when idle, wake on traffic - keeps idle cost near $0.
   auto_stop_machines = "stop"
   auto_start_machines = true
   min_machines_running = 0
@@ -53,7 +53,7 @@ primary_region = "iad"   # change to your nearest region (e.g. lhr, fra, sjc)
     soft_limit = 200
     hard_limit = 250
 
-  # Liveness check hits "/" (always 200) rather than "/health" — /health is a
+  # Liveness check hits "/" (always 200) rather than "/health" - /health is a
   # demo toggle that intentionally returns 503, which would otherwise make Fly
   # consider the machine unhealthy.
   [[services.http_checks]]

@@ -12,8 +12,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::catalog::{category, Endpoint, Example};
 use crate::config::Config;
 use crate::content_negotiation::negotiate;
+use crate::state::AppState;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EchoResponse {
@@ -171,10 +173,7 @@ fn detect_scheme(headers: &HeaderMap, config: &Config) -> String {
 
 fn detect_remote_ip(headers: &HeaderMap, config: &Config, addr: &SocketAddr) -> String {
     if config.trust_forward {
-        if let Some(forwarded_for) = headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-        {
+        if let Some(forwarded_for) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
             if let Some(first_ip) = forwarded_for.split(',').next() {
                 return first_ip.trim().to_string();
             }
@@ -238,12 +237,44 @@ fn process_body(raw: &Bytes, limit: usize) -> EchoBody {
     }
 }
 
-pub fn router() -> Router<Arc<Config>> {
+pub fn router(_state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/echo", any(echo_handler))
-        .route("/echo/*path", any(echo_handler))
+        .route("/echo/{*path}", any(echo_handler))
         .route("/anything", any(echo_handler))
-        .route("/anything/*path", any(echo_handler))
+        .route("/anything/{*path}", any(echo_handler))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new(
+            "/echo",
+            &["ANY"],
+            category::ECHO,
+            "Echo back the full request (method, headers, query, body)",
+        )
+        .example(Example::get("GET /echo", "/echo"))
+        .example(
+            Example::post("POST /echo with JSON body", "/echo")
+                .json(r#"{"message": "hello", "number": 42}"#),
+        ),
+        Endpoint::new(
+            "/echo/{*path}",
+            &["ANY"],
+            category::ECHO,
+            "Echo with an arbitrary sub-path",
+        )
+        .example(Example::get("GET /echo/any/sub/path", "/echo/any/sub/path")),
+        Endpoint::new("/anything", &["ANY"], category::ECHO, "Alias for /echo")
+            .example(Example::get("GET /anything", "/anything")),
+        Endpoint::new(
+            "/anything/{*path}",
+            &["ANY"],
+            category::ECHO,
+            "Alias for /echo/{*path}",
+        )
+        .example(Example::get("GET /anything/sub/path", "/anything/sub/path")),
+    ]
 }
 
 #[cfg(test)]
@@ -253,23 +284,8 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_app() -> Router {
-        router().with_state(test_config())
+        crate::test_support::module_app(router)
     }
 
     fn echo_request(uri: &str) -> Request<Body> {
@@ -438,12 +454,12 @@ mod tests {
 
     #[tokio::test]
     async fn forwarded_headers_trusted() {
-        let config = Arc::new(Config {
+        let config = Config {
             trust_forward: true,
-            ..(*test_config()).clone()
-        });
+            ..crate::test_support::test_config()
+        };
 
-        let app = router().with_state(config);
+        let app = crate::test_support::module_app_with_config(config, router);
 
         let mut req = Request::builder()
             .uri("/echo")
@@ -467,12 +483,12 @@ mod tests {
 
     #[tokio::test]
     async fn body_truncated_when_over_limit() {
-        let config = Arc::new(Config {
+        let config = Config {
             body_limit: 10,
-            ..(*test_config()).clone()
-        });
+            ..crate::test_support::test_config()
+        };
 
-        let app = router().with_state(config);
+        let app = crate::test_support::module_app_with_config(config, router);
 
         let mut req = Request::builder()
             .method("POST")

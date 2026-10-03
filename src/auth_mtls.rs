@@ -8,9 +8,11 @@ use axum::{
 use serde::Serialize;
 use std::sync::Arc;
 
+use crate::catalog::{category, Endpoint, Example};
 use crate::cert_state::CertState;
 use crate::config::Config;
 use crate::content_negotiation::{negotiate, negotiate_with_status};
+use crate::state::AppState;
 use crate::types::{AuthFailure, AuthResponse};
 
 // ── Response types ───────────────────────────────────────────────────
@@ -123,7 +125,7 @@ async fn mtls_handler(
         );
     }
 
-    // No header mode configured — check if we can detect a known client cert
+    // No header mode configured - check if we can detect a known client cert
     // In production, this would extract from the TLS handshake.
     // For demo purposes, return 401 with a helpful message.
     let _ = cert_state; // available for future TLS peer cert extraction
@@ -198,12 +200,45 @@ fn urldecode(input: &str) -> String {
 
 // ── Router ──────────────────────────────────────────────────────────
 
-pub fn router(cert_state: Arc<CertState>) -> Router<Arc<Config>> {
+pub fn router(state: &AppState) -> Router<AppState> {
+    routes(state.certs.clone())
+}
+
+fn routes(cert_state: Arc<CertState>) -> Router<AppState> {
     Router::new()
         .route("/auth/mtls", any(mtls_handler))
         .route("/auth/mtls/get-client-cert", get(get_client_cert))
         .route("/auth/mtls/get-ca-cert", get(get_ca_cert))
         .layer(Extension(cert_state))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new(
+            "/auth/mtls",
+            &["ANY"],
+            category::AUTH_MTLS,
+            "Validate the client certificate (TLS or forwarded header)",
+        )
+        .example(Example::get("Validate client cert", "/auth/mtls")),
+        Endpoint::new(
+            "/auth/mtls/get-client-cert",
+            &["GET"],
+            category::AUTH_MTLS,
+            "Download the demo client certificate and key",
+        )
+        .example(Example::get(
+            "Get client cert",
+            "/auth/mtls/get-client-cert",
+        )),
+        Endpoint::new(
+            "/auth/mtls/get-ca-cert",
+            &["GET"],
+            category::AUTH_MTLS,
+            "Download the demo CA certificate",
+        )
+        .example(Example::get("Get CA cert", "/auth/mtls/get-ca-cert")),
+    ]
 }
 
 #[cfg(test)]
@@ -213,19 +248,10 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config_with_header(header: Option<&str>) -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: header.map(|s| s.to_string()),
-        })
+    fn test_config_with_header(header: Option<&str>) -> AppState {
+        let mut config = crate::test_support::test_config();
+        config.mtls_in_header = header.map(|s| s.to_string());
+        crate::test_support::test_state_with(config)
     }
 
     fn test_cert_state() -> Arc<CertState> {
@@ -237,11 +263,13 @@ mod tests {
                 .to_string(),
             client_key_pem: "-----BEGIN PRIVATE KEY-----\ntest-key\n-----END PRIVATE KEY-----"
                 .to_string(),
+            server_cert_pem: String::new(),
+            server_key_pem: String::new(),
         })
     }
 
     fn test_app(header: Option<&str>) -> Router {
-        router(test_cert_state()).with_state(test_config_with_header(header))
+        routes(test_cert_state()).with_state(test_config_with_header(header))
     }
 
     async fn json_body(resp: axum::http::Response<Body>) -> serde_json::Value {
@@ -266,7 +294,10 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::OK);
         let json = json_body(resp).await;
-        assert!(json["cert_pem"].as_str().expect("cert").contains("CERTIFICATE"));
+        assert!(json["cert_pem"]
+            .as_str()
+            .expect("cert")
+            .contains("CERTIFICATE"));
         assert!(json["key_pem"].as_str().expect("key").contains("KEY"));
         assert!(json["usage"].is_string());
     }
@@ -327,11 +358,9 @@ mod tests {
     #[tokio::test]
     async fn mtls_header_with_valid_cert() {
         // Generate a real cert for this test
-        let cert_state = Arc::new(
-            crate::cert_state::CertState::generate("/tmp/rustybin-test-server.crt", "/tmp/rustybin-test-server.key"),
-        );
+        let cert_state = crate::cert_state::CertState::shared_for_tests();
         let config = test_config_with_header(Some("X-Client-Cert"));
-        let app = router(cert_state.clone()).with_state(config);
+        let app = routes(cert_state.clone()).with_state(config);
 
         // URL-encode the client cert PEM
         let encoded: String = form_urlencoded::Serializer::new(String::new())
@@ -353,7 +382,10 @@ mod tests {
         let json = json_body(resp).await;
         assert_eq!(json["authenticated"], true);
         assert_eq!(json["auth_type"], "mtls");
-        assert!(json["client_dn"].as_str().expect("dn").contains("demo-client"));
+        assert!(json["client_dn"]
+            .as_str()
+            .expect("dn")
+            .contains("demo-client"));
         assert!(json["client_ca"]
             .as_str()
             .expect("ca")

@@ -39,10 +39,12 @@ fn build_entry(req: &super::RequestDef, category: &str) -> Value {
         match auth {
             AuthDef::Basic { user, pass } => {
                 let encoded = base64_encode(&format!("{user}:{pass}"));
-                headers.push(json!({ "name": "Authorization", "value": format!("Basic {encoded}") }));
+                headers
+                    .push(json!({ "name": "Authorization", "value": format!("Basic {encoded}") }));
             }
             AuthDef::Bearer(token) => {
-                headers.push(json!({ "name": "Authorization", "value": format!("Bearer {token}") }));
+                headers
+                    .push(json!({ "name": "Authorization", "value": format!("Bearer {token}") }));
             }
         }
     }

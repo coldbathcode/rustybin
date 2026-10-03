@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Extension, Path},
+    extract::{Extension, Path, State},
     http::{header::HeaderValue, HeaderMap, StatusCode},
     response::Response,
     routing::{any, get, post},
@@ -9,8 +9,10 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::catalog::{category, Endpoint, Example};
 use crate::config::Config;
 use crate::content_negotiation::{negotiate, negotiate_with_status};
+use crate::state::AppState;
 use crate::types::ErrorResponse;
 
 // ── State ───────────────────────────────────────────────────────────
@@ -30,6 +32,12 @@ impl FlakyState {
             recover_counter: AtomicU64::new(0),
             random_counter: AtomicU64::new(0),
         }
+    }
+}
+
+impl Default for FlakyState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -303,9 +311,14 @@ async fn flaky_recover_handler(
 }
 
 async fn flaky_reset_handler(
+    State(config): State<Arc<Config>>,
     Extension(state): Extension<Arc<FlakyState>>,
     headers: HeaderMap,
 ) -> Response {
+    // Resetting the global counters affects every client: admin-guarded.
+    if let Err(resp) = crate::admin::require_admin(&headers, &config) {
+        return resp;
+    }
     state.pattern_counter.store(0, Ordering::Relaxed);
     state.after_counter.store(0, Ordering::Relaxed);
     state.recover_counter.store(0, Ordering::Relaxed);
@@ -337,15 +350,66 @@ async fn flaky_status_handler(
 
 // ── Router ──────────────────────────────────────────────────────────
 
-pub fn router(flaky_state: Arc<FlakyState>) -> Router<Arc<Config>> {
+pub fn router(_state: &AppState) -> Router<AppState> {
+    routes(Arc::new(FlakyState::new()))
+}
+
+fn routes(flaky_state: Arc<FlakyState>) -> Router<AppState> {
     Router::new()
-        .route("/flaky/pattern/:pattern", any(flaky_pattern_handler))
-        .route("/flaky/after/:n", any(flaky_after_handler))
-        .route("/flaky/recover/:n", any(flaky_recover_handler))
+        .route("/flaky/pattern/{pattern}", any(flaky_pattern_handler))
+        .route("/flaky/after/{n}", any(flaky_after_handler))
+        .route("/flaky/recover/{n}", any(flaky_recover_handler))
         .route("/flaky/reset", post(flaky_reset_handler))
         .route("/flaky/status", get(flaky_status_handler))
-        .route("/flaky/:fail_rate", any(flaky_rate_handler))
+        .route("/flaky/{fail_rate}", any(flaky_rate_handler))
         .layer(Extension(flaky_state))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new(
+            "/flaky/{fail_rate}",
+            &["ANY"],
+            category::RELIABILITY,
+            "Fail with 503 for fail_rate percent of requests",
+        )
+        .example(Example::get("Flaky 50%", "/flaky/50")),
+        Endpoint::new(
+            "/flaky/pattern/{pattern}",
+            &["ANY"],
+            category::RELIABILITY,
+            "Deterministic success/failure pattern (S = success, F = failure)",
+        )
+        .example(Example::get("Flaky pattern SSFSS", "/flaky/pattern/SSFSS")),
+        Endpoint::new(
+            "/flaky/after/{n}",
+            &["ANY"],
+            category::RELIABILITY,
+            "Succeed n times, then fail (circuit breaker trip)",
+        )
+        .example(Example::get("Fail after 3", "/flaky/after/3")),
+        Endpoint::new(
+            "/flaky/recover/{n}",
+            &["ANY"],
+            category::RELIABILITY,
+            "Fail n times, then recover (circuit breaker half-open)",
+        )
+        .example(Example::get("Recover after 3", "/flaky/recover/3")),
+        Endpoint::new(
+            "/flaky/reset",
+            &["POST"],
+            category::RELIABILITY,
+            "Reset all flaky counters (admin-guarded)",
+        )
+        .example(Example::post("Reset counters", "/flaky/reset")),
+        Endpoint::new(
+            "/flaky/status",
+            &["GET"],
+            category::RELIABILITY,
+            "Current flaky counters",
+        )
+        .example(Example::get("Counter status", "/flaky/status")),
+    ]
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -357,28 +421,13 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_state() -> Arc<FlakyState> {
         Arc::new(FlakyState::new())
     }
 
     fn test_app() -> (Router, Arc<FlakyState>) {
         let state = test_state();
-        let app = router(state.clone()).with_state(test_config());
+        let app = routes(state.clone()).with_state(crate::test_support::test_state());
         (app, state)
     }
 
@@ -392,9 +441,9 @@ mod tests {
     #[tokio::test]
     async fn rate_0_always_succeeds() {
         let state = test_state();
-        let config = test_config();
+        let config = crate::test_support::test_state();
         for _ in 0..10 {
-            let app = router(state.clone()).with_state(config.clone());
+            let app = routes(state.clone()).with_state(config.clone());
             let resp = app
                 .oneshot(
                     Request::builder()
@@ -406,7 +455,11 @@ mod tests {
                 .expect("response");
             assert_eq!(resp.status(), StatusCode::OK);
             assert_eq!(
-                resp.headers().get("x-rustybin-flaky").unwrap().to_str().unwrap(),
+                resp.headers()
+                    .get("x-rustybin-flaky")
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
                 "true"
             );
         }
@@ -415,9 +468,9 @@ mod tests {
     #[tokio::test]
     async fn rate_100_always_fails() {
         let state = test_state();
-        let config = test_config();
+        let config = crate::test_support::test_state();
         for _ in 0..10 {
-            let app = router(state.clone()).with_state(config.clone());
+            let app = routes(state.clone()).with_state(config.clone());
             let resp = app
                 .oneshot(
                     Request::builder()
@@ -435,12 +488,18 @@ mod tests {
     #[tokio::test]
     async fn pattern_sfs() {
         let state = test_state();
-        let config = test_config();
-        let expected = [StatusCode::OK, StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK,
-                       StatusCode::OK, StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK];
+        let config = crate::test_support::test_state();
+        let expected = [
+            StatusCode::OK,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::OK,
+        ];
 
         for expected_status in &expected {
-            let app = router(state.clone()).with_state(config.clone());
+            let app = routes(state.clone()).with_state(config.clone());
             let resp = app
                 .oneshot(
                     Request::builder()
@@ -472,8 +531,8 @@ mod tests {
     #[tokio::test]
     async fn pattern_case_insensitive() {
         let state = test_state();
-        let config = test_config();
-        let app = router(state.clone()).with_state(config.clone());
+        let config = crate::test_support::test_state();
+        let app = routes(state.clone()).with_state(config.clone());
         let resp = app
             .oneshot(
                 Request::builder()
@@ -489,10 +548,10 @@ mod tests {
     #[tokio::test]
     async fn after_3_succeeds_then_fails() {
         let state = test_state();
-        let config = test_config();
+        let config = crate::test_support::test_state();
 
         for i in 1..=5 {
-            let app = router(state.clone()).with_state(config.clone());
+            let app = routes(state.clone()).with_state(config.clone());
             let resp = app
                 .oneshot(
                     Request::builder()
@@ -503,7 +562,12 @@ mod tests {
                 .await
                 .expect("response");
             if i <= 3 {
-                assert_eq!(resp.status(), StatusCode::OK, "request {} should succeed", i);
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::OK,
+                    "request {} should succeed",
+                    i
+                );
             } else {
                 assert_eq!(
                     resp.status(),
@@ -518,10 +582,10 @@ mod tests {
     #[tokio::test]
     async fn recover_3_fails_then_succeeds() {
         let state = test_state();
-        let config = test_config();
+        let config = crate::test_support::test_state();
 
         for i in 1..=5 {
-            let app = router(state.clone()).with_state(config.clone());
+            let app = routes(state.clone()).with_state(config.clone());
             let resp = app
                 .oneshot(
                     Request::builder()
@@ -539,7 +603,12 @@ mod tests {
                     i
                 );
             } else {
-                assert_eq!(resp.status(), StatusCode::OK, "request {} should succeed", i);
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::OK,
+                    "request {} should succeed",
+                    i
+                );
             }
         }
     }
@@ -547,12 +616,12 @@ mod tests {
     #[tokio::test]
     async fn reset_clears_counters() {
         let state = test_state();
-        let config = test_config();
+        let config = crate::test_support::test_state();
 
         // Bump the after counter
         state.after_counter.store(10, Ordering::Relaxed);
 
-        let app = router(state.clone()).with_state(config.clone());
+        let app = routes(state.clone()).with_state(config.clone());
         let resp = app
             .oneshot(
                 Request::builder()
@@ -576,8 +645,8 @@ mod tests {
         state.after_counter.store(5, Ordering::Relaxed);
         state.recover_counter.store(3, Ordering::Relaxed);
 
-        let config = test_config();
-        let app = router(state.clone()).with_state(config);
+        let config = crate::test_support::test_state();
+        let app = routes(state.clone()).with_state(config);
         let resp = app
             .oneshot(
                 Request::builder()

@@ -1,13 +1,13 @@
 use crate::config::Config;
 use tracing_subscriber::EnvFilter;
 
-/// Initialize the tracing subscriber with the configured log level.
+/// Initialize the tracing subscriber with the configured log level
+/// (`RUSTYBIN_LOG_LEVEL`, falling back to `RUST_LOG`). Safe to call twice.
 pub fn init(config: &Config) {
-    let filter = EnvFilter::try_new(&config.log_level)
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_new(&config.log_level).unwrap_or_else(|_| EnvFilter::new("info"));
 
-    tracing_subscriber::fmt()
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(true)
-        .init();
+        .try_init();
 }

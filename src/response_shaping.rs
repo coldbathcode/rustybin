@@ -10,11 +10,11 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::config::Config;
+use crate::catalog::{category, Endpoint, Example};
 use crate::content_negotiation::{negotiate, negotiate_with_status};
+use crate::state::AppState;
 use crate::types::ErrorResponse;
 
 #[derive(Clone)]
@@ -113,11 +113,7 @@ async fn response_headers_handler(uri: Uri) -> Response {
     let body_json = serde_json::to_string(&serde_json::Value::Object(headers_set))
         .unwrap_or_else(|_| "{}".to_string());
 
-    let mut resp = (
-        [(header::CONTENT_TYPE, "application/json")],
-        body_json,
-    )
-        .into_response();
+    let mut resp = ([(header::CONTENT_TYPE, "application/json")], body_json).into_response();
 
     resp.headers_mut().extend(custom_headers);
     resp
@@ -227,13 +223,42 @@ fn parse_http_date(s: &str) -> Option<DateTime<Utc>> {
 
 // ── Router ───────────────────────────────────────────────────────────
 
-pub fn router() -> Router<Arc<Config>> {
+pub fn router(_state: &AppState) -> Router<AppState> {
     let startup = ServerStartup(Utc::now());
     Router::new()
-        .route("/delay/:ms", any(delay_handler))
+        .route("/delay/{ms}", any(delay_handler))
         .route("/response-headers", get(response_headers_handler))
-        .route("/cache/:ttl", get(cache_handler))
+        .route("/cache/{ttl}", get(cache_handler))
         .layer(axum::Extension(startup))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new(
+            "/delay/{ms}",
+            &["ANY"],
+            category::SHAPING,
+            "Wait ms milliseconds, then respond (?jitter=true adds variance)",
+        )
+        .example(Example::get("Delay 500ms", "/delay/500")),
+        Endpoint::new(
+            "/cache/{ttl}",
+            &["GET"],
+            category::SHAPING,
+            "Cache-Control and ETag headers, 304 on If-None-Match",
+        )
+        .example(Example::get("Cache 60s", "/cache/60")),
+        Endpoint::new(
+            "/response-headers",
+            &["GET"],
+            category::SHAPING,
+            "Query parameters become response headers",
+        )
+        .example(Example::get(
+            "Response headers",
+            "/response-headers?X-Custom=hello&X-Trace-Id=abc123",
+        )),
+    ]
 }
 
 #[cfg(test)]
@@ -243,23 +268,8 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_app() -> Router {
-        router().with_state(test_config())
+        crate::test_support::module_app(router)
     }
 
     #[tokio::test]

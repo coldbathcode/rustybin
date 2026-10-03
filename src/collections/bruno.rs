@@ -9,7 +9,7 @@ pub fn build(categories: &[Category]) -> Value {
         "version": "1",
         "name": "Rustybin",
         "type": "collection",
-        "description": format!("Rustybin v{version} — HTTP stub service for API gateway testing"),
+        "description": format!("Rustybin v{version} - HTTP stub service for API gateway testing"),
         "environments": [
             {
                 "name": "Default",

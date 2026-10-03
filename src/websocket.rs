@@ -6,12 +6,12 @@ use axum::{
     Router,
 };
 use serde::Deserialize;
-use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::Config;
+use crate::catalog::{category, Endpoint, Example};
+use crate::state::AppState;
 
-// ── /ws — echo ──────────────────────────────────────────────────────
+// ── /ws - echo ──────────────────────────────────────────────────────
 
 /// Upgrade to a WebSocket that echoes back every text/binary frame it
 /// receives. Useful for testing API gateway WebSocket proxying and
@@ -43,7 +43,7 @@ async fn handle_echo(mut socket: WebSocket) {
     }
 }
 
-// ── /ws/time — server-push ticker ───────────────────────────────────
+// ── /ws/time - server-push ticker ───────────────────────────────────
 
 #[derive(Deserialize)]
 struct TimeParams {
@@ -69,7 +69,7 @@ async fn handle_time(mut socket: WebSocket, interval_ms: u64, count: u64) {
         ticker.tick().await;
         let now = chrono::Utc::now().to_rfc3339();
         let payload = format!("{{\"tick\":{n},\"timestamp\":\"{now}\"}}");
-        if socket.send(Message::Text(payload)).await.is_err() {
+        if socket.send(Message::Text(payload.into())).await.is_err() {
             return;
         }
     }
@@ -78,10 +78,34 @@ async fn handle_time(mut socket: WebSocket, interval_ms: u64, count: u64) {
 
 // ── Router ──────────────────────────────────────────────────────────
 
-pub fn router() -> Router<Arc<Config>> {
+pub fn router(_state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/ws", get(ws_echo))
         .route("/ws/time", get(ws_time))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new(
+            "/ws",
+            &["GET"],
+            category::WEBSOCKET,
+            "WebSocket echo of every text and binary frame",
+        )
+        .websocket()
+        .example(Example::get("WebSocket echo", "/ws")),
+        Endpoint::new(
+            "/ws/time",
+            &["GET"],
+            category::WEBSOCKET,
+            "WebSocket timestamp ticker (?interval_ms=&count=)",
+        )
+        .websocket()
+        .example(Example::get(
+            "WebSocket ticker",
+            "/ws/time?interval_ms=500&count=5",
+        )),
+    ]
 }
 
 #[cfg(test)]
@@ -93,23 +117,8 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message as TMessage;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_app() -> Router {
-        router().with_state(test_config())
+        crate::test_support::module_app(router)
     }
 
     /// Spawn the router on an ephemeral port and return its base ws:// URL.

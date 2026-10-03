@@ -4,9 +4,7 @@ pub fn build(categories: &[Category]) -> String {
     let version = env!("CARGO_PKG_VERSION");
     let mut out = String::with_capacity(8192);
 
-    out.push_str(&format!(
-        "# Rustybin v{version} — Hurl file\n"
-    ));
+    out.push_str(&format!("# Rustybin v{version} - Hurl file\n"));
     out.push_str("# Run: hurl --variable base_url=http://localhost rustybin.hurl\n\n");
 
     for cat in categories {
@@ -25,7 +23,7 @@ pub fn build(categories: &[Category]) -> String {
             out.push_str(&format!("{} {url}\n", req.method));
 
             // Headers
-            for (k, v) in req.headers {
+            for (k, v) in &req.headers {
                 out.push_str(&format!("{k}: {v}\n"));
             }
 

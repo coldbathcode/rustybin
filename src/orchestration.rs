@@ -7,10 +7,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 
-use crate::config::Config;
+use crate::catalog::{category, Endpoint, Example};
 use crate::content_negotiation::{negotiate, negotiate_with_status};
+use crate::state::AppState;
 use crate::types::ErrorResponse;
 
 // ── Request / Response types ────────────────────────────────────────
@@ -227,7 +227,10 @@ async fn step1(headers: HeaderMap, Json(body): Json<Step1Request>) -> Response {
 }
 
 async fn step2(headers: HeaderMap, Json(_body): Json<Step2Request>) -> Response {
-    let correlation_id = match headers.get("x-correlation-id").and_then(|v| v.to_str().ok()) {
+    let correlation_id = match headers
+        .get("x-correlation-id")
+        .and_then(|v| v.to_str().ok())
+    {
         Some(id) => id.to_string(),
         None => {
             return negotiate_with_status(
@@ -279,7 +282,10 @@ async fn step2(headers: HeaderMap, Json(_body): Json<Step2Request>) -> Response 
 }
 
 async fn step3(headers: HeaderMap, Json(body): Json<Step3Request>) -> Response {
-    let correlation_id = match headers.get("x-correlation-id").and_then(|v| v.to_str().ok()) {
+    let correlation_id = match headers
+        .get("x-correlation-id")
+        .and_then(|v| v.to_str().ok())
+    {
         Some(id) => id.to_string(),
         None => {
             return negotiate_with_status(
@@ -372,7 +378,10 @@ async fn step3(headers: HeaderMap, Json(body): Json<Step3Request>) -> Response {
 }
 
 async fn step4(headers: HeaderMap, Json(body): Json<Step4Request>) -> Response {
-    let correlation_id = match headers.get("x-correlation-id").and_then(|v| v.to_str().ok()) {
+    let correlation_id = match headers
+        .get("x-correlation-id")
+        .and_then(|v| v.to_str().ok())
+    {
         Some(id) => id.to_string(),
         None => {
             return negotiate_with_status(
@@ -459,15 +468,19 @@ struct HeaderDoc {
 
 async fn status_handler(headers: HeaderMap) -> Response {
     let doc = StatusDoc {
-        description: "Multi-step orchestration pipeline — 4-step payment processing flow",
+        description: "Multi-step orchestration pipeline - 4-step payment processing flow",
         steps: vec![
             StepDoc {
                 step: 1,
                 name: "authenticate",
                 method: "POST",
                 path: "/orchestration/step/1",
-                description: "Validate API key and return merchant metadata with a correlation token",
-                required_headers: vec![HeaderDoc { name: "X-Api-Key", value: "any non-empty value" }],
+                description:
+                    "Validate API key and return merchant metadata with a correlation token",
+                required_headers: vec![HeaderDoc {
+                    name: "X-Api-Key",
+                    value: "any non-empty value",
+                }],
                 example_body: r#"{"merchant_id":"M001","request_type":"payment"}"#,
                 output_keys: vec!["correlation_id", "merchant", "permissions"],
             },
@@ -477,9 +490,16 @@ async fn status_handler(headers: HeaderMap) -> Response {
                 method: "POST",
                 path: "/orchestration/step/2",
                 description: "Enrich transaction with risk score, geo data, and customer tier",
-                required_headers: vec![HeaderDoc { name: "X-Correlation-Id", value: "<from step 1>" }],
+                required_headers: vec![HeaderDoc {
+                    name: "X-Correlation-Id",
+                    value: "<from step 1>",
+                }],
                 example_body: r#"{"merchant_id":"M001","amount":5000,"currency":"GBP","card_bin":"411111"}"#,
-                output_keys: vec!["enrichment.risk_score", "enrichment.risk_level", "enrichment.velocity_check"],
+                output_keys: vec![
+                    "enrichment.risk_score",
+                    "enrichment.risk_level",
+                    "enrichment.velocity_check",
+                ],
             },
             StepDoc {
                 step: 3,
@@ -487,7 +507,10 @@ async fn status_handler(headers: HeaderMap) -> Response {
                 method: "POST",
                 path: "/orchestration/step/3",
                 description: "Run validation rules on enriched data and return approval/denial",
-                required_headers: vec![HeaderDoc { name: "X-Correlation-Id", value: "<from step 1>" }],
+                required_headers: vec![HeaderDoc {
+                    name: "X-Correlation-Id",
+                    value: "<from step 1>",
+                }],
                 example_body: r#"{"merchant_id":"M001","amount":5000,"risk_score":15,"risk_level":"low","permissions":["card_payment"]}"#,
                 output_keys: vec!["validation.approved", "validation.applied_rules"],
             },
@@ -498,11 +521,21 @@ async fn status_handler(headers: HeaderMap) -> Response {
                 path: "/orchestration/step/4",
                 description: "Process the final transaction after validation approval",
                 required_headers: vec![
-                    HeaderDoc { name: "X-Correlation-Id", value: "<from step 1>" },
-                    HeaderDoc { name: "X-Validation-Result", value: "approved" },
+                    HeaderDoc {
+                        name: "X-Correlation-Id",
+                        value: "<from step 1>",
+                    },
+                    HeaderDoc {
+                        name: "X-Validation-Result",
+                        value: "approved",
+                    },
                 ],
                 example_body: r#"{"merchant_id":"M001","amount":5000,"currency":"GBP"}"#,
-                output_keys: vec!["transaction.id", "transaction.authorization_code", "transaction.status"],
+                output_keys: vec![
+                    "transaction.id",
+                    "transaction.authorization_code",
+                    "transaction.status",
+                ],
             },
         ],
     };
@@ -512,13 +545,70 @@ async fn status_handler(headers: HeaderMap) -> Response {
 
 // ── Router ──────────────────────────────────────────────────────────
 
-pub fn router() -> Router<Arc<Config>> {
+pub fn router(_state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/orchestration/step/1", post(step1))
         .route("/orchestration/step/2", post(step2))
         .route("/orchestration/step/3", post(step3))
         .route("/orchestration/step/4", post(step4))
         .route("/orchestration/status", get(status_handler))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new(
+            "/orchestration/step/1",
+            &["POST"],
+            category::ORCHESTRATION,
+            "Step 1: authenticate (X-Api-Key required)",
+        )
+        .example(
+            Example::post("Step 1: Authenticate", "/orchestration/step/1")
+                .header("X-Api-Key", "my-api-key")
+                .json(r#"{"merchant_id":"merchant_123"}"#),
+        ),
+        Endpoint::new(
+            "/orchestration/step/2",
+            &["POST"],
+            category::ORCHESTRATION,
+            "Step 2: enrich (X-Correlation-Id required)",
+        )
+        .example(
+            Example::post("Step 2: Enrich", "/orchestration/step/2")
+                .header("X-Correlation-Id", "<from-step-1>")
+                .json(r#"{"card_number":"4111111111111111","amount":99.99}"#),
+        ),
+        Endpoint::new(
+            "/orchestration/step/3",
+            &["POST"],
+            category::ORCHESTRATION,
+            "Step 3: validate (risk scoring)",
+        )
+        .example(
+            Example::post("Step 3: Validate", "/orchestration/step/3")
+                .header("X-Correlation-Id", "<from-step-1>")
+                .json(r#"{"amount":99.99,"currency":"USD"}"#),
+        ),
+        Endpoint::new(
+            "/orchestration/step/4",
+            &["POST"],
+            category::ORCHESTRATION,
+            "Step 4: process (requires X-Validation-Result: approved)",
+        )
+        .example(
+            Example::post("Step 4: Process", "/orchestration/step/4")
+                .header("X-Correlation-Id", "<from-step-1>")
+                .header("X-Validation-Result", "approved")
+                .json(r#"{"amount":99.99,"currency":"USD"}"#),
+        ),
+        Endpoint::new(
+            "/orchestration/status",
+            &["GET"],
+            category::ORCHESTRATION,
+            "Pipeline documentation",
+        )
+        .example(Example::get("Pipeline status", "/orchestration/status")),
+    ]
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -530,23 +620,8 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_app() -> Router {
-        router().with_state(test_config())
+        crate::test_support::module_app(router)
     }
 
     async fn json_body(resp: axum::http::Response<Body>) -> serde_json::Value {
@@ -566,7 +641,9 @@ mod tests {
                     .uri("/orchestration/step/1")
                     .header("content-type", "application/json")
                     .header("x-api-key", "test-key")
-                    .body(Body::from(r#"{"merchant_id":"M001","request_type":"payment"}"#))
+                    .body(Body::from(
+                        r#"{"merchant_id":"M001","request_type":"payment"}"#,
+                    ))
                     .expect("request"),
             )
             .await

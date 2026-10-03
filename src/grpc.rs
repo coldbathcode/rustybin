@@ -5,7 +5,6 @@
 //! and bidirectional-streaming calls. This gives API gateway gRPC proxying
 //! (grpc-proxy / grpc-web / grpc-transcoding features) a real upstream to target.
 
-use std::net::SocketAddr;
 use std::pin::Pin;
 
 use tokio_stream::{Stream, StreamExt};
@@ -133,25 +132,23 @@ impl EchoService for EchoSvc {
     }
 }
 
-/// Resolve the gRPC bind address from `RUSTYBIN_GRPC_PORT` (default 50051).
-pub fn grpc_addr(host: &str) -> Result<SocketAddr, std::net::AddrParseError> {
-    let port = std::env::var("RUSTYBIN_GRPC_PORT")
-        .ok()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(50051);
-    format!("{host}:{port}").parse()
-}
-
-/// Serve the gRPC EchoService until the process exits.
-pub async fn serve(
-    addr: SocketAddr,
+/// Serve the gRPC EchoService on an already-bound listener until `shutdown`
+/// resolves.
+pub async fn serve<F>(
+    listener: tokio::net::TcpListener,
     instance_id: String,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    shutdown: F,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    F: std::future::Future<Output = ()> + Send,
+{
     let svc = EchoSvc { instance_id };
+    let addr = listener.local_addr()?;
     tracing::info!("gRPC listening on {addr} (EchoService)");
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
     Server::builder()
         .add_service(EchoServiceServer::new(svc))
-        .serve(addr)
+        .serve_with_incoming_shutdown(incoming, shutdown)
         .await?;
     Ok(())
 }
@@ -187,8 +184,7 @@ mod tests {
             message: "ping".to_string(),
             count: 0,
         });
-        req.metadata_mut()
-            .insert("x-demo", "abc".parse().unwrap());
+        req.metadata_mut().insert("x-demo", "abc".parse().unwrap());
         let resp = client.echo(req).await.unwrap().into_inner();
         assert_eq!(resp.message, "ping");
         assert_eq!(resp.instance_id, "test-instance");

@@ -6,13 +6,13 @@ WORKDIR /app
 # and the gRPC stubs; copying them here keeps the dependency layer cacheable)
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY proto/ proto/
-RUN mkdir src && echo "fn main() {}" > src/main.rs && \
-    cargo build --release && \
+RUN mkdir src && echo "fn main() {}" > src/main.rs && touch src/lib.rs && \
+    cargo build --release --locked && \
     rm -rf src
 
-# Build the real binary
+# Build the real binary (lib + bin)
 COPY src/ src/
-RUN touch src/main.rs && cargo build --release
+RUN touch src/main.rs src/lib.rs && cargo build --release --locked
 
 FROM debian:bookworm-slim AS runtime
 

@@ -11,8 +11,10 @@ use serde::Serialize;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
+use crate::catalog::{category, Endpoint, Example};
 use crate::config::Config;
 use crate::content_negotiation::{negotiate, negotiate_with_status};
+use crate::state::AppState;
 use crate::types::ErrorResponse;
 
 // ── Response types ───────────────────────────────────────────────────
@@ -183,15 +185,57 @@ async fn time_tz_handler(Path(tz_path): Path<String>, headers: HeaderMap) -> Res
 
 // ── Router ───────────────────────────────────────────────────────────
 
-pub fn router() -> Router<Arc<Config>> {
+pub fn router(_state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/ip", get(ip_handler))
         .route("/ip/v4", get(ip_v4_handler))
         .route("/ip/v6", get(ip_v6_handler))
         .route("/date", get(date_handler))
-        .route("/date/*tz", get(date_tz_handler))
+        .route("/date/{*timezone}", get(date_tz_handler))
         .route("/time", get(time_handler))
-        .route("/time/*tz", get(time_tz_handler))
+        .route("/time/{*timezone}", get(time_tz_handler))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new(
+            "/ip",
+            &["GET"],
+            category::INFO,
+            "Client IP address (IPv4 and IPv6)",
+        )
+        .example(Example::get("Client IP", "/ip")),
+        Endpoint::new("/ip/v4", &["GET"], category::INFO, "Client IPv4 address")
+            .example(Example::get("Client IPv4", "/ip/v4")),
+        Endpoint::new("/ip/v6", &["GET"], category::INFO, "Client IPv6 address")
+            .example(Example::get("Client IPv6", "/ip/v6")),
+        Endpoint::new("/date", &["GET"], category::INFO, "Current date (UTC)")
+            .example(Example::get("Current date (UTC)", "/date")),
+        Endpoint::new(
+            "/date/{*timezone}",
+            &["GET"],
+            category::INFO,
+            "Current date in an IANA timezone",
+        )
+        .example(Example::get(
+            "Current date (New York)",
+            "/date/America/New_York",
+        )),
+        Endpoint::new(
+            "/time",
+            &["GET"],
+            category::INFO,
+            "Current time, ISO 8601 (UTC)",
+        )
+        .example(Example::get("Current time (UTC)", "/time")),
+        Endpoint::new(
+            "/time/{*timezone}",
+            &["GET"],
+            category::INFO,
+            "Current time in an IANA timezone",
+        )
+        .example(Example::get("Current time (London)", "/time/Europe/London")),
+    ]
 }
 
 #[cfg(test)]
@@ -201,23 +245,8 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_app() -> Router {
-        router().with_state(test_config())
+        crate::test_support::module_app(router)
     }
 
     fn req_with_ip(uri: &str) -> Request<Body> {
@@ -258,11 +287,11 @@ mod tests {
 
     #[tokio::test]
     async fn ip_trusts_xff() {
-        let config = Arc::new(Config {
+        let config = Config {
             trust_forward: true,
-            ..(*test_config()).clone()
-        });
-        let app = router().with_state(config);
+            ..crate::test_support::test_config()
+        };
+        let app = crate::test_support::module_app_with_config(config, router);
 
         let mut req = Request::builder()
             .uri("/ip")

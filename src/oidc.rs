@@ -11,9 +11,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::config::Config;
+use crate::catalog::{category, Endpoint, Example};
 use crate::content_negotiation::negotiate;
 use crate::jwt_state::JwtState;
+use crate::state::AppState;
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -264,10 +265,7 @@ fn cleanup_expired_codes(codes: &mut HashMap<String, AuthCodeEntry>) {
 
 /// Decode a JWT by verifying signature first (RS256/HS256), falling back to
 /// structural-only decode for third-party tokens.
-fn decode_token_best_effort(
-    jwt_state: &JwtState,
-    token: &str,
-) -> Option<serde_json::Value> {
+fn decode_token_best_effort(jwt_state: &JwtState, token: &str) -> Option<serde_json::Value> {
     // Try verified decode first
     if let Some(claims) = verify_token(jwt_state, token) {
         return Some(claims);
@@ -472,7 +470,9 @@ async fn authorize_post(
     let code = uuid::Uuid::new_v4().to_string();
     let name = format!("{} User", capitalize(&form.username));
     let email = format!("{}@rustybin.local", form.username);
-    let scope = form.scope.unwrap_or_else(|| "openid profile email".to_string());
+    let scope = form
+        .scope
+        .unwrap_or_else(|| "openid profile email".to_string());
 
     let entry = AuthCodeEntry {
         sub: form.username,
@@ -591,10 +591,18 @@ fn handle_token_exchange(
 ) -> Response {
     // Validate required fields
     let Some(subject_token) = form.subject_token.as_deref() else {
-        return error_response(headers, "invalid_request", "missing required parameter: subject_token");
+        return error_response(
+            headers,
+            "invalid_request",
+            "missing required parameter: subject_token",
+        );
     };
     let Some(subject_token_type) = form.subject_token_type.as_deref() else {
-        return error_response(headers, "invalid_request", "missing required parameter: subject_token_type");
+        return error_response(
+            headers,
+            "invalid_request",
+            "missing required parameter: subject_token_type",
+        );
     };
 
     // Validate subject_token_type
@@ -630,13 +638,17 @@ fn handle_token_exchange(
     // Validate resource URI if provided
     if let Some(resource) = form.resource.as_deref() {
         if !resource.starts_with("http://") && !resource.starts_with("https://") {
-            return error_response(headers, "invalid_target", "resource must be an absolute URI");
+            return error_response(
+                headers,
+                "invalid_target",
+                "resource must be an absolute URI",
+            );
         }
     }
 
     // Decode subject token (verified or structural fallback)
-    let subject_claims = decode_token_best_effort(&oidc.jwt, subject_token)
-        .unwrap_or_else(|| serde_json::json!({}));
+    let subject_claims =
+        decode_token_best_effort(&oidc.jwt, subject_token).unwrap_or_else(|| serde_json::json!({}));
 
     // Decode actor token if present
     let actor_claims = form
@@ -681,7 +693,7 @@ fn handle_token_exchange(
     claims.insert("scope".into(), serde_json::json!(scope));
     claims.insert("token_type".into(), serde_json::json!("bearer"));
 
-    // RFC 8693 §4.1 — delegation: include act claim with actor's sub
+    // RFC 8693 §4.1 - delegation: include act claim with actor's sub
     if let Some(ref actor) = actor_claims {
         let actor_sub = actor["sub"].as_str().unwrap_or("unknown");
         claims.insert("act".into(), serde_json::json!({"sub": actor_sub}));
@@ -732,7 +744,8 @@ fn handle_token_exchange(
 
 // ── Router ──────────────────────────────────────────────────────────
 
-pub fn router(jwt_state: Arc<JwtState>) -> Router<Arc<Config>> {
+pub fn router(state: &AppState) -> Router<AppState> {
+    let jwt_state = state.jwt.clone();
     let oidc_state = Arc::new(OidcState {
         jwt: jwt_state,
         auth_codes: Mutex::new(HashMap::new()),
@@ -742,13 +755,51 @@ pub fn router(jwt_state: Arc<JwtState>) -> Router<Arc<Config>> {
         .route("/.well-known/openid-configuration", get(discovery))
         .route("/oauth/token", post(token))
         .route("/oauth/jwks", get(jwks))
-        .route(
-            "/oauth/authorize",
-            get(authorize_get).post(authorize_post),
-        )
+        .route("/oauth/authorize", get(authorize_get).post(authorize_post))
         .route("/oauth/userinfo", get(userinfo))
         .route("/oauth/introspect", post(introspect))
         .layer(Extension(oidc_state))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new("/.well-known/openid-configuration", &["GET"], category::AUTH_OIDC, "OIDC discovery document")
+            .example(Example::get("OIDC Discovery", "/.well-known/openid-configuration")),
+        Endpoint::new("/oauth/token", &["POST"], category::AUTH_OIDC, "Token endpoint (client_credentials, password, authorization_code, refresh, token exchange)")
+            .example(Example::post("Token (client_credentials)", "/oauth/token").form(&[
+                ("grant_type", "client_credentials"),
+                ("client_id", "rustybin"),
+                ("client_secret", "secret"),
+            ]))
+            .example(Example::post("Token (password grant)", "/oauth/token").form(&[
+                ("grant_type", "password"),
+                ("client_id", "rustybin"),
+                ("client_secret", "secret"),
+                ("username", "demo"),
+                ("password", "demo"),
+            ]))
+            .example(Example::post("Token Exchange (RFC 8693)", "/oauth/token").form(&[
+                ("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange"),
+                ("subject_token", crate::auth_jwt::SAMPLE_JWT),
+                ("subject_token_type", "urn:ietf:params:oauth:token-type:access_token"),
+                ("audience", "https://api.example.com"),
+            ])),
+        Endpoint::new("/oauth/jwks", &["GET"], category::AUTH_OIDC, "RS256 public key in JWK Set format")
+            .example(Example::get("JWKS", "/oauth/jwks")),
+        Endpoint::new("/oauth/authorize", &["GET", "POST"], category::AUTH_OIDC, "Authorization code flow with a demo login form")
+            .example(Example::get(
+                "Authorize (login form)",
+                "/oauth/authorize?response_type=code&client_id=rustybin&redirect_uri=http://localhost/callback&state=xyz",
+            )),
+        Endpoint::new("/oauth/userinfo", &["GET"], category::AUTH_OIDC, "User claims for a Bearer access token")
+            .example(Example::get("UserInfo", "/oauth/userinfo").header("Authorization", "Bearer <access_token>")),
+        Endpoint::new("/oauth/introspect", &["POST"], category::AUTH_OIDC, "Token introspection (RFC 7662)")
+            .example(Example::post("Introspect token", "/oauth/introspect").form(&[
+                ("token", "<access_token>"),
+                ("client_id", "rustybin"),
+                ("client_secret", "secret"),
+            ])),
+    ]
 }
 
 #[cfg(test)]
@@ -758,29 +809,14 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_jwt_state() -> Arc<JwtState> {
-        Arc::new(JwtState::generate())
+        JwtState::shared_for_tests()
     }
 
     fn test_app() -> (Router, Arc<JwtState>) {
-        let jwt = test_jwt_state();
-        let app = router(jwt.clone()).with_state(test_config());
-        (app, jwt)
+        let state = crate::test_support::test_state();
+        let jwt = state.jwt.clone();
+        (crate::test_support::module_app_with(state, router), jwt)
     }
 
     async fn json_body(resp: axum::http::Response<Body>) -> serde_json::Value {
@@ -807,10 +843,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = json_body(resp).await;
         assert_eq!(json["issuer"], "http://localhost");
-        assert_eq!(
-            json["token_endpoint"],
-            "http://localhost/oauth/token"
-        );
+        assert_eq!(json["token_endpoint"], "http://localhost/oauth/token");
         assert!(json["scopes_supported"].is_array());
     }
 
@@ -986,13 +1019,7 @@ mod tests {
     async fn introspect_active_token() {
         let (app, jwt) = test_app();
 
-        let claims = build_token_claims(
-            "http://localhost",
-            "testuser",
-            "rustybin",
-            "openid",
-            None,
-        );
+        let claims = build_token_claims("http://localhost", "testuser", "rustybin", "openid", None);
         let token = sign_rs256_token(&jwt, &claims).expect("sign");
 
         let resp = app
@@ -1094,14 +1121,11 @@ mod tests {
             jwt: jwt.clone(),
             auth_codes: Mutex::new(HashMap::new()),
         });
-        let config = test_config();
+        let config = crate::test_support::test_state();
 
         // Step 1: POST authorize to get code
         let app = Router::new()
-            .route(
-                "/oauth/authorize",
-                get(authorize_get).post(authorize_post),
-            )
+            .route("/oauth/authorize", get(authorize_get).post(authorize_post))
             .route("/oauth/token", post(token))
             .layer(Extension(oidc_state))
             .with_state(config);
@@ -1311,7 +1335,7 @@ mod tests {
             jwt: jwt.clone(),
             auth_codes: Mutex::new(HashMap::new()),
         });
-        let config = test_config();
+        let config = crate::test_support::test_state();
         let app = Router::new()
             .route("/oauth/token", post(token))
             .layer(Extension(oidc_state))
@@ -1392,7 +1416,8 @@ mod tests {
         // Create a structurally valid JWT that can't be signature-verified
         let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
         let header = b64url.encode(br#"{"alg":"RS256","typ":"JWT"}"#);
-        let payload = b64url.encode(br#"{"sub":"external-user","iss":"external-idp","scope":"read write"}"#);
+        let payload =
+            b64url.encode(br#"{"sub":"external-user","iss":"external-idp","scope":"read write"}"#);
         let third_party_jwt = format!("{header}.{payload}.fakesignature");
 
         let resp = app

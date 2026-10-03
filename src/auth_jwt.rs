@@ -9,9 +9,10 @@ use base64::Engine;
 use serde::Serialize;
 use std::sync::Arc;
 
-use crate::config::Config;
+use crate::catalog::{category, Endpoint, Example};
 use crate::content_negotiation::{negotiate, negotiate_with_status};
 use crate::jwt_state::JwtState;
+use crate::state::AppState;
 use crate::types::{AuthFailure, AuthResponse};
 
 // ── Response types ───────────────────────────────────────────────────
@@ -95,7 +96,10 @@ async fn jwt_validate(headers: HeaderMap) -> Response {
     )
 }
 
-async fn jwt_exchange(Extension(jwt_state): Extension<Arc<JwtState>>, headers: HeaderMap) -> Response {
+async fn jwt_exchange(
+    Extension(jwt_state): Extension<Arc<JwtState>>,
+    headers: HeaderMap,
+) -> Response {
     let Some(token) = extract_bearer(&headers) else {
         return unauthorized(&headers);
     };
@@ -155,11 +159,37 @@ async fn jwt_exchange(Extension(jwt_state): Extension<Arc<JwtState>>, headers: H
 
 // ── Router ──────────────────────────────────────────────────────────
 
-pub fn router(jwt_state: Arc<JwtState>) -> Router<Arc<Config>> {
+pub fn router(state: &AppState) -> Router<AppState> {
+    routes(state.jwt.clone())
+}
+
+fn routes(jwt_state: Arc<JwtState>) -> Router<AppState> {
     Router::new()
         .route("/auth/jwt", any(jwt_validate))
         .route("/auth/jwt/exchange", any(jwt_exchange))
         .layer(Extension(jwt_state))
+}
+
+/// Structurally valid demo JWT (HS256, not signed with Rustybin's key).
+pub const SAMPLE_JWT: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new(
+            "/auth/jwt",
+            &["ANY"],
+            category::AUTH_JWT,
+            "Decode and validate a Bearer JWT (structure, no signature check)",
+        )
+        .example(Example::get("Validate JWT", "/auth/jwt").bearer(SAMPLE_JWT)),
+        Endpoint::new(
+            "/auth/jwt/exchange",
+            &["ANY"],
+            category::AUTH_JWT,
+            "Exchange a JWT for a new HS256-signed token",
+        )
+        .example(Example::post("Exchange JWT", "/auth/jwt/exchange").bearer(SAMPLE_JWT)),
+    ]
 }
 
 #[cfg(test)]
@@ -168,21 +198,6 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
-
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
 
     fn test_jwt_state() -> Arc<JwtState> {
         Arc::new(JwtState {
@@ -194,7 +209,7 @@ mod tests {
     }
 
     fn test_app() -> Router {
-        router(test_jwt_state()).with_state(test_config())
+        routes(test_jwt_state()).with_state(crate::test_support::test_state())
     }
 
     /// Build a minimal structurally-valid JWT (no real signature).

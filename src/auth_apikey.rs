@@ -5,10 +5,10 @@ use axum::{
     routing::any,
     Router,
 };
-use std::sync::Arc;
 
-use crate::config::Config;
+use crate::catalog::{category, Endpoint, Example};
 use crate::content_negotiation::{negotiate, negotiate_with_status};
+use crate::state::AppState;
 use crate::types::{AuthFailure, AuthResponse};
 
 const DEFAULT_HEADER: &str = "apikey";
@@ -76,10 +76,35 @@ fn check_apikey(headers: &HeaderMap, expected_header: &str, expected_key: &str) 
 
 // ── Router ──────────────────────────────────────────────────────────
 
-pub fn router() -> Router<Arc<Config>> {
+pub fn router(_state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/auth/api-key", any(apikey_default))
-        .route("/auth/api-key/:header_name/:key_value", any(apikey_custom))
+        .route(
+            "/auth/api-key/{header_name}/{key_value}",
+            any(apikey_custom),
+        )
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new(
+            "/auth/api-key",
+            &["ANY"],
+            category::AUTH_BASIC,
+            "API key in a header (default apikey: my-key)",
+        )
+        .example(Example::get("API key (default)", "/auth/api-key").header("apikey", "my-key")),
+        Endpoint::new(
+            "/auth/api-key/{header_name}/{key_value}",
+            &["ANY"],
+            category::AUTH_BASIC,
+            "API key with header name and value from the path",
+        )
+        .example(
+            Example::get("API key (custom)", "/auth/api-key/x-token/s3cret")
+                .header("x-token", "s3cret"),
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -89,23 +114,8 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_app() -> Router {
-        router().with_state(test_config())
+        crate::test_support::module_app(router)
     }
 
     async fn json_body(resp: axum::http::Response<Body>) -> serde_json::Value {

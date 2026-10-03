@@ -7,7 +7,7 @@ pub fn build(categories: &[Category]) -> Value {
     json!({
         "info": {
             "name": "Rustybin",
-            "description": format!("Rustybin v{version} — High-performance HTTP stub service for API gateway testing.\n\nSet the {{{{base_url}}}} variable to your Rustybin instance (default: http://localhost)."),
+            "description": format!("Rustybin v{version} - High-performance HTTP stub service for API gateway testing.\n\nSet the {{{{base_url}}}} variable to your Rustybin instance (default: http://localhost)."),
             "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
             "version": version
         },

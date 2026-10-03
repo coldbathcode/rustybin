@@ -9,10 +9,10 @@ use base64::Engine;
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
 use sha2::{Sha256, Sha384, Sha512};
-use std::sync::Arc;
 
-use crate::config::Config;
+use crate::catalog::{category, Endpoint};
 use crate::content_negotiation::{negotiate, negotiate_with_status};
+use crate::state::AppState;
 use crate::types::{AuthFailure, AuthResponse};
 
 const DEFAULT_USERNAME: &str = "alice";
@@ -90,15 +90,15 @@ fn check_hmac(
 
     // `headers` lists which request headers (space-separated, lowercase) form
     // the signing string, in order. Defaults to `date` when omitted.
-    let signed_headers = params
-        .get("headers")
-        .map(|s| s.as_str())
-        .unwrap_or("date");
+    let signed_headers = params.get("headers").map(|s| s.as_str()).unwrap_or("date");
 
     let signing_string = match build_signing_string(signed_headers, method, uri, headers) {
         Ok(s) => s,
         Err(missing) => {
-            return unauthorized(headers, &format!("request missing signed header '{missing}'"));
+            return unauthorized(
+                headers,
+                &format!("request missing signed header '{missing}'"),
+            );
         }
     };
 
@@ -213,10 +213,18 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 // ── Router ──────────────────────────────────────────────────────────
 
-pub fn router() -> Router<Arc<Config>> {
+pub fn router(_state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/auth/hmac", any(hmac_default))
-        .route("/auth/hmac/:username/:secret", any(hmac_custom))
+        .route("/auth/hmac/{username}/{secret}", any(hmac_custom))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new("/auth/hmac", &["ANY"], category::AUTH_HMAC, "Validate an hmac-auth style signature (default alice / secret)")
+            .description("Signature is base64(HMAC(secret, signing string)) over the listed headers (default `date`). Supports hmac-sha1/sha256/sha384/sha512."),
+        Endpoint::new("/auth/hmac/{username}/{secret}", &["ANY"], category::AUTH_HMAC, "HMAC validation with username and secret from the path"),
+    ]
 }
 
 #[cfg(test)]
@@ -226,23 +234,8 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_app() -> Router {
-        router().with_state(test_config())
+        crate::test_support::module_app(router)
     }
 
     fn sign(algorithm: &str, secret: &str, signing_string: &str) -> String {

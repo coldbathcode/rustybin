@@ -6,8 +6,10 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::catalog::{category, Endpoint, Example};
 use crate::config::Config;
 use crate::content_negotiation::negotiate_with_status;
+use crate::state::AppState;
 
 // ── State ───────────────────────────────────────────────────────────
 
@@ -80,6 +82,9 @@ async fn set_unhealthy(
     Extension(state): Extension<Arc<HealthState>>,
     headers: HeaderMap,
 ) -> Response {
+    if let Err(resp) = crate::admin::require_admin(&headers, &config) {
+        return resp;
+    }
     state.set(false);
     health_body(&config, false, &headers)
 }
@@ -89,6 +94,9 @@ async fn set_healthy(
     Extension(state): Extension<Arc<HealthState>>,
     headers: HeaderMap,
 ) -> Response {
+    if let Err(resp) = crate::admin::require_admin(&headers, &config) {
+        return resp;
+    }
     state.set(true);
     health_body(&config, true, &headers)
 }
@@ -98,6 +106,9 @@ async fn toggle(
     Extension(state): Extension<Arc<HealthState>>,
     headers: HeaderMap,
 ) -> Response {
+    if let Err(resp) = crate::admin::require_admin(&headers, &config) {
+        return resp;
+    }
     let now_healthy = !state.is_healthy();
     state.set(now_healthy);
     health_body(&config, now_healthy, &headers)
@@ -105,13 +116,51 @@ async fn toggle(
 
 // ── Router ──────────────────────────────────────────────────────────
 
-pub fn router(state: Arc<HealthState>) -> Router<Arc<Config>> {
+/// Health toggles are instance-global (they drive gateway health checks), so
+/// the mutations are admin-guarded.
+pub fn router(_state: &AppState) -> Router<AppState> {
+    routes(Arc::new(HealthState::new()))
+}
+
+fn routes(state: Arc<HealthState>) -> Router<AppState> {
     Router::new()
         .route("/health", get(health))
         .route("/health/healthy", post(set_healthy))
         .route("/health/unhealthy", post(set_unhealthy))
         .route("/health/toggle", post(toggle))
         .layer(Extension(state))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new(
+            "/health",
+            &["GET"],
+            category::HEALTH,
+            "Health check (200, or 503 when toggled unhealthy)",
+        )
+        .example(Example::get("Health check", "/health")),
+        Endpoint::new(
+            "/health/healthy",
+            &["POST"],
+            category::HEALTH,
+            "Mark the instance healthy (admin-guarded)",
+        )
+        .example(Example::post("Mark healthy", "/health/healthy")),
+        Endpoint::new(
+            "/health/unhealthy",
+            &["POST"],
+            category::HEALTH,
+            "Mark the instance unhealthy, /health returns 503 (admin-guarded)",
+        )
+        .description("For gateway active health-check and failover demos. Global to the instance."),
+        Endpoint::new(
+            "/health/toggle",
+            &["POST"],
+            category::HEALTH,
+            "Flip the health state (admin-guarded)",
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -121,23 +170,8 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_app() -> Router {
-        router(Arc::new(HealthState::new())).with_state(test_config())
+        crate::test_support::module_app(router)
     }
 
     #[tokio::test]
@@ -196,8 +230,8 @@ mod tests {
     #[tokio::test]
     async fn unhealthy_then_healthy_toggle() {
         // Shared state across requests, so build the app once.
-        let state = Arc::new(HealthState::new());
-        let make = || router(state.clone()).with_state(test_config());
+        let app = test_app();
+        let make = || app.clone();
 
         // Flip to unhealthy → 503
         let resp = make()
@@ -245,9 +279,7 @@ mod tests {
 
     #[tokio::test]
     async fn toggle_flips_state() {
-        let state = Arc::new(HealthState::new());
-        let resp = router(state.clone())
-            .with_state(test_config())
+        let resp = test_app()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -258,6 +290,24 @@ mod tests {
             .await
             .unwrap();
         // Started healthy, toggled → unhealthy
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn mutations_require_admin_token_when_configured() {
+        let mut config = crate::test_support::test_config();
+        config.admin_token = Some("tok".to_string());
+        let app = crate::test_support::module_app_with_config(config, router);
+        let post = |auth: Option<&str>| {
+            let mut b = Request::builder().method("POST").uri("/health/unhealthy");
+            if let Some(a) = auth {
+                b = b.header("Authorization", a);
+            }
+            b.body(Body::empty()).unwrap()
+        };
+        let resp = app.clone().oneshot(post(None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let resp = app.clone().oneshot(post(Some("Bearer tok"))).await.unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

@@ -8,8 +8,10 @@ use axum::{
 use serde::Serialize;
 use std::sync::Arc;
 
+use crate::catalog::{category, Endpoint, Example};
 use crate::config::Config;
 use crate::content_negotiation::negotiate_with_status;
+use crate::state::AppState;
 use crate::types::ErrorResponse;
 
 #[derive(Serialize)]
@@ -29,9 +31,7 @@ async fn status_handler(
                 &headers,
                 &ErrorResponse {
                     error: "invalid_status_code".to_string(),
-                    details: Some(
-                        "Status code must be between 100 and 599".to_string(),
-                    ),
+                    details: Some("Status code must be between 100 and 599".to_string()),
                 },
                 StatusCode::BAD_REQUEST,
             );
@@ -45,9 +45,7 @@ async fn status_handler(
                 &headers,
                 &ErrorResponse {
                     error: "invalid_status_code".to_string(),
-                    details: Some(
-                        "Status code must be between 100 and 599".to_string(),
-                    ),
+                    details: Some("Status code must be between 100 and 599".to_string()),
                 },
                 StatusCode::BAD_REQUEST,
             );
@@ -55,7 +53,10 @@ async fn status_handler(
     };
 
     // 1xx informational or 204/304: empty body
-    if status.is_informational() || status == StatusCode::NO_CONTENT || status == StatusCode::NOT_MODIFIED {
+    if status.is_informational()
+        || status == StatusCode::NO_CONTENT
+        || status == StatusCode::NOT_MODIFIED
+    {
         return (status, ()).into_response();
     }
 
@@ -72,8 +73,20 @@ async fn status_handler(
     resp
 }
 
-pub fn router() -> Router<Arc<Config>> {
-    Router::new().route("/status/:code", any(status_handler))
+pub fn router(_state: &AppState) -> Router<AppState> {
+    Router::new().route("/status/{code}", any(status_handler))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![Endpoint::new(
+        "/status/{code}",
+        &["ANY"],
+        category::STATUS,
+        "Respond with any HTTP status code (200-599)",
+    )
+    .example(Example::get("200 OK", "/status/200"))
+    .example(Example::get("418 I'm a Teapot", "/status/418"))
+    .example(Example::get("503 Service Unavailable", "/status/503"))]
 }
 
 #[cfg(test)]
@@ -83,23 +96,8 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_app() -> Router {
-        router().with_state(test_config())
+        crate::test_support::module_app(router)
     }
 
     #[tokio::test]
@@ -203,7 +201,11 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::FOUND);
         assert_eq!(
-            resp.headers().get("location").expect("location header").to_str().expect("str"),
+            resp.headers()
+                .get("location")
+                .expect("location header")
+                .to_str()
+                .expect("str"),
             "/echo"
         );
     }

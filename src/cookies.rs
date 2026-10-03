@@ -9,8 +9,10 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::catalog::{category, Endpoint, Example};
 use crate::config::Config;
 use crate::content_negotiation::negotiate;
+use crate::state::AppState;
 
 // ── /cookies ─────────────────────────────────────────────────────────
 
@@ -19,10 +21,7 @@ struct CookiesResponse {
     cookies: HashMap<String, String>,
 }
 
-async fn cookies_handler(
-    State(_config): State<Arc<Config>>,
-    headers: HeaderMap,
-) -> Response {
+async fn cookies_handler(State(_config): State<Arc<Config>>, headers: HeaderMap) -> Response {
     let cookies = parse_cookies(&headers);
     negotiate(&headers, &CookiesResponse { cookies })
 }
@@ -156,12 +155,51 @@ fn build_set_cookie(name: &str, value: &str, attrs: &CookieAttrs) -> String {
 
 // ── Router ───────────────────────────────────────────────────────────
 
-pub fn router() -> Router<Arc<Config>> {
+pub fn router(_state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/cookies", get(cookies_handler))
         .route("/cookies/set", get(cookies_set_handler))
-        .route("/cookies/set/:name/:value", get(cookies_set_single_handler))
+        .route(
+            "/cookies/set/{name}/{value}",
+            get(cookies_set_single_handler),
+        )
         .route("/cookies/delete", get(cookies_delete_handler))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new(
+            "/cookies",
+            &["GET"],
+            category::REDIRECTS,
+            "Request cookies as JSON",
+        )
+        .example(Example::get("Get cookies", "/cookies")),
+        Endpoint::new(
+            "/cookies/set",
+            &["GET"],
+            category::REDIRECTS,
+            "Set cookies from query parameters",
+        )
+        .example(Example::get(
+            "Set cookies",
+            "/cookies/set?session=abc123&theme=dark",
+        )),
+        Endpoint::new(
+            "/cookies/set/{name}/{value}",
+            &["GET"],
+            category::REDIRECTS,
+            "Set a single cookie",
+        )
+        .example(Example::get("Set one cookie", "/cookies/set/theme/dark")),
+        Endpoint::new(
+            "/cookies/delete",
+            &["GET"],
+            category::REDIRECTS,
+            "Delete the cookies named in the query string",
+        )
+        .example(Example::get("Delete cookies", "/cookies/delete?session")),
+    ]
 }
 
 #[cfg(test)]
@@ -171,23 +209,8 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_app() -> Router {
-        router().with_state(test_config())
+        crate::test_support::module_app(router)
     }
 
     #[tokio::test]

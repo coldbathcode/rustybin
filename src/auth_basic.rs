@@ -6,10 +6,10 @@ use axum::{
     Router,
 };
 use base64::Engine;
-use std::sync::Arc;
 
-use crate::config::Config;
+use crate::catalog::{category, Endpoint, Example};
 use crate::content_negotiation::{negotiate, negotiate_with_status};
+use crate::state::AppState;
 use crate::types::{AuthFailure, AuthResponse};
 
 const DEFAULT_USERNAME: &str = "basic";
@@ -94,13 +94,37 @@ fn unauthorized(headers: &HeaderMap) -> Response {
 
 // ── Router ──────────────────────────────────────────────────────────
 
-pub fn router() -> Router<Arc<Config>> {
+pub fn router(_state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/auth/basic-auth", any(basic_auth_default))
         .route(
-            "/auth/basic-auth/:username/:password",
+            "/auth/basic-auth/{username}/{password}",
             any(basic_auth_custom),
         )
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new(
+            "/auth/basic-auth",
+            &["ANY"],
+            category::AUTH_BASIC,
+            "HTTP Basic auth (default user basic, password password)",
+        )
+        .example(
+            Example::get("Basic auth (default)", "/auth/basic-auth").basic("basic", "password"),
+        ),
+        Endpoint::new(
+            "/auth/basic-auth/{username}/{password}",
+            &["ANY"],
+            category::AUTH_BASIC,
+            "HTTP Basic auth with credentials from the path",
+        )
+        .example(
+            Example::get("Basic auth (custom)", "/auth/basic-auth/alice/secret")
+                .basic("alice", "secret"),
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -110,28 +134,12 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_app() -> Router {
-        router().with_state(test_config())
+        crate::test_support::module_app(router)
     }
 
     fn basic_auth_header(user: &str, pass: &str) -> String {
-        let encoded =
-            base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+        let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
         format!("Basic {encoded}")
     }
 

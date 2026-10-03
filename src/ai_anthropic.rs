@@ -3,7 +3,7 @@
 //! Mirrors the request/response shape of Anthropic's `POST /v1/messages`,
 //! including the native server-sent-event stream format (`message_start`,
 //! `content_block_delta`, `message_stop`, …). This lets an AI gateway's
-//! provider-routing be exercised against the Anthropic provider format —
+//! provider-routing be exercised against the Anthropic provider format  -
 //! not just the OpenAI format served by `ai_gateway`.
 
 use axum::{
@@ -13,10 +13,10 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 use crate::ai_gateway::{canned_response, count_tokens};
-use crate::config::Config;
+use crate::catalog::{category, Endpoint, Example};
+use crate::state::AppState;
 
 // ── Request types ───────────────────────────────────────────────────
 
@@ -138,7 +138,10 @@ async fn messages(body: axum::body::Bytes) -> Response {
     let req: MessagesRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
-            return anthropic_error(StatusCode::BAD_REQUEST, &format!("invalid request body: {e}"))
+            return anthropic_error(
+                StatusCode::BAD_REQUEST,
+                &format!("invalid request body: {e}"),
+            )
         }
     };
 
@@ -157,7 +160,11 @@ async fn messages(body: axum::body::Bytes) -> Response {
 
     let response_text = canned_response(&last);
 
-    let mut input_tokens: usize = req.messages.iter().map(|m| count_tokens(&m.content.as_text())).sum();
+    let mut input_tokens: usize = req
+        .messages
+        .iter()
+        .map(|m| count_tokens(&m.content.as_text()))
+        .sum();
     if let Some(system) = &req.system {
         input_tokens += count_tokens(system);
     }
@@ -268,8 +275,14 @@ fn sse(event: &str, data: &serde_json::Value) -> String {
 
 // ── Router ──────────────────────────────────────────────────────────
 
-pub fn router() -> Router<Arc<Config>> {
+pub fn router(_state: &AppState) -> Router<AppState> {
     Router::new().route("/ai/anthropic/v1/messages", post(messages))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![Endpoint::new("/ai/anthropic/v1/messages", &["POST"], category::AI_ANTHROPIC, "Messages API (native SSE event stream with stream=true)")
+        .example(Example::post("Messages", "/ai/anthropic/v1/messages")
+            .json(r#"{"model":"rustybin-claude","max_tokens":256,"messages":[{"role":"user","content":"hello"}]}"#))]
 }
 
 #[cfg(test)]
@@ -279,23 +292,8 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_app() -> Router {
-        router().with_state(test_config())
+        crate::test_support::module_app(router)
     }
 
     async fn json_body(resp: axum::http::Response<Body>) -> serde_json::Value {
@@ -375,7 +373,11 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
-            resp.headers().get("content-type").unwrap().to_str().unwrap(),
+            resp.headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "text/event-stream"
         );
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)

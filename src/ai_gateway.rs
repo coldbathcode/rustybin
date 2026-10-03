@@ -8,9 +8,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 
-use crate::config::Config;
+use crate::catalog::{category, Endpoint, Example};
+use crate::state::AppState;
 
 // ── Request types ───────────────────────────────────────────────────
 
@@ -258,10 +258,7 @@ fn openai_error(status: StatusCode, message: &str) -> Response {
 
 // ── Handlers ────────────────────────────────────────────────────────
 
-async fn chat_completions(
-    Query(q): Query<DelayQuery>,
-    body: axum::body::Bytes,
-) -> Response {
+async fn chat_completions(Query(q): Query<DelayQuery>, body: axum::body::Bytes) -> Response {
     if let Some(delay_ms) = q.delay {
         let delay = delay_ms.min(60000);
         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
@@ -269,7 +266,12 @@ async fn chat_completions(
 
     let req: ChatRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
-        Err(e) => return openai_error(StatusCode::BAD_REQUEST, &format!("Invalid request body: {e}")),
+        Err(e) => {
+            return openai_error(
+                StatusCode::BAD_REQUEST,
+                &format!("Invalid request body: {e}"),
+            )
+        }
     };
 
     if req.messages.is_empty() {
@@ -394,10 +396,7 @@ fn stream_chat_response(
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-async fn completions(
-    Query(q): Query<DelayQuery>,
-    body: axum::body::Bytes,
-) -> Response {
+async fn completions(Query(q): Query<DelayQuery>, body: axum::body::Bytes) -> Response {
     if let Some(delay_ms) = q.delay {
         let delay = delay_ms.min(60000);
         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
@@ -405,7 +404,12 @@ async fn completions(
 
     let req: CompletionRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
-        Err(e) => return openai_error(StatusCode::BAD_REQUEST, &format!("Invalid request body: {e}")),
+        Err(e) => {
+            return openai_error(
+                StatusCode::BAD_REQUEST,
+                &format!("Invalid request body: {e}"),
+            )
+        }
     };
 
     let response_text = canned_response(&req.prompt);
@@ -435,7 +439,12 @@ async fn completions(
 async fn embeddings(body: axum::body::Bytes) -> Response {
     let req: EmbeddingRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
-        Err(e) => return openai_error(StatusCode::BAD_REQUEST, &format!("Invalid request body: {e}")),
+        Err(e) => {
+            return openai_error(
+                StatusCode::BAD_REQUEST,
+                &format!("Invalid request body: {e}"),
+            )
+        }
     };
 
     let inputs = match req.input {
@@ -500,12 +509,30 @@ async fn models(headers: HeaderMap) -> Response {
 
 // ── Router ──────────────────────────────────────────────────────────
 
-pub fn router() -> Router<Arc<Config>> {
+pub fn router(_state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/ai/v1/chat/completions", post(chat_completions))
         .route("/ai/v1/completions", post(completions))
         .route("/ai/v1/embeddings", post(embeddings))
         .route("/ai/v1/models", get(models))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new("/ai/v1/chat/completions", &["POST"], category::AI_OPENAI, "Chat completions (SSE streaming with stream=true)")
+            .example(Example::post("Chat completions", "/ai/v1/chat/completions")
+                .json(r#"{"model":"rustybin-gpt","messages":[{"role":"user","content":"hello"}]}"#))
+            .example(Example::post("Chat completions (streaming)", "/ai/v1/chat/completions")
+                .json(r#"{"model":"rustybin-gpt","messages":[{"role":"user","content":"hello"}],"stream":true}"#)),
+        Endpoint::new("/ai/v1/completions", &["POST"], category::AI_OPENAI, "Legacy text completions")
+            .example(Example::post("Text completions", "/ai/v1/completions")
+                .json(r#"{"model":"rustybin-gpt","prompt":"Say hello"}"#)),
+        Endpoint::new("/ai/v1/embeddings", &["POST"], category::AI_OPENAI, "Deterministic 1536-dimension embeddings")
+            .example(Example::post("Embeddings", "/ai/v1/embeddings")
+                .json(r#"{"model":"rustybin-embed","input":"Hello world"}"#)),
+        Endpoint::new("/ai/v1/models", &["GET"], category::AI_OPENAI, "List available models")
+            .example(Example::get("List models", "/ai/v1/models")),
+    ]
 }
 
 #[cfg(test)]
@@ -515,23 +542,8 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_app() -> Router {
-        router().with_state(test_config())
+        crate::test_support::module_app(router)
     }
 
     async fn json_body(resp: axum::http::Response<Body>) -> serde_json::Value {
@@ -644,9 +656,7 @@ mod tests {
                     .method("POST")
                     .uri("/ai/v1/chat/completions")
                     .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"model":"rustybin-gpt","messages":[]}"#,
-                    ))
+                    .body(Body::from(r#"{"model":"rustybin-gpt","messages":[]}"#))
                     .expect("request"),
             )
             .await

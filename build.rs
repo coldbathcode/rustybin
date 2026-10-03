@@ -1,7 +1,7 @@
 // Compile the gRPC `.proto` definitions at build time.
 //
 // We point tonic-build at a vendored `protoc` binary so the build needs no
-// system protobuf compiler — important for the slim Docker image and clean
+// system protobuf compiler - important for the slim Docker image and clean
 // `cargo build` on any developer machine.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protoc = protoc_bin_vendored::protoc_bin_path()?;

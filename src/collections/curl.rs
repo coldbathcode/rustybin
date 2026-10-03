@@ -5,9 +5,7 @@ pub fn build(categories: &[Category]) -> String {
     let mut out = String::with_capacity(8192);
 
     out.push_str("#!/usr/bin/env bash\n");
-    out.push_str(&format!(
-        "# Rustybin v{version} — cURL collection\n"
-    ));
+    out.push_str(&format!("# Rustybin v{version} - cURL collection\n"));
     out.push_str("# Usage: BASE_URL=http://localhost bash rustybin-curl.sh\n");
     out.push_str("set -euo pipefail\n\n");
     out.push_str("BASE_URL=\"${BASE_URL:-http://localhost}\"\n\n");
@@ -29,7 +27,7 @@ pub fn build(categories: &[Category]) -> String {
             cmd.push('"');
 
             // Headers
-            for (k, v) in req.headers {
+            for (k, v) in &req.headers {
                 cmd.push_str(&format!(" \\\n  -H '{k}: {v}'"));
             }
 
@@ -67,6 +65,6 @@ pub fn build(categories: &[Category]) -> String {
         }
     }
 
-    out.push_str("echo \"Done — all requests sent.\"\n");
+    out.push_str("echo \"Done - all requests sent.\"\n");
     out
 }

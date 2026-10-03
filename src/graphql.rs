@@ -7,9 +7,9 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
-use std::sync::Arc;
 
-use crate::config::Config;
+use crate::catalog::{category, Endpoint, Example};
+use crate::state::AppState;
 
 // ── Enums ───────────────────────────────────────────────────────────
 
@@ -201,63 +201,227 @@ static PRODUCTS: &[ProductData] = &[
 ];
 
 static ORDER_ITEMS_1: &[OrderItemData] = &[
-    OrderItemData { product_id: "p1", quantity: 1, unit_price: 149.99 },
-    OrderItemData { product_id: "p2", quantity: 1, unit_price: 79.99 },
+    OrderItemData {
+        product_id: "p1",
+        quantity: 1,
+        unit_price: 149.99,
+    },
+    OrderItemData {
+        product_id: "p2",
+        quantity: 1,
+        unit_price: 79.99,
+    },
 ];
 
-static ORDER_ITEMS_2: &[OrderItemData] = &[
-    OrderItemData { product_id: "p4", quantity: 1, unit_price: 599.99 },
-];
+static ORDER_ITEMS_2: &[OrderItemData] = &[OrderItemData {
+    product_id: "p4",
+    quantity: 1,
+    unit_price: 599.99,
+}];
 
 static ORDER_ITEMS_3: &[OrderItemData] = &[
-    OrderItemData { product_id: "p7", quantity: 2, unit_price: 179.99 },
-    OrderItemData { product_id: "p8", quantity: 1, unit_price: 29.99 },
+    OrderItemData {
+        product_id: "p7",
+        quantity: 2,
+        unit_price: 179.99,
+    },
+    OrderItemData {
+        product_id: "p8",
+        quantity: 1,
+        unit_price: 29.99,
+    },
 ];
 
 static ORDER_ITEMS_4: &[OrderItemData] = &[
-    OrderItemData { product_id: "p5", quantity: 1, unit_price: 34.99 },
-    OrderItemData { product_id: "p6", quantity: 1, unit_price: 89.99 },
+    OrderItemData {
+        product_id: "p5",
+        quantity: 1,
+        unit_price: 34.99,
+    },
+    OrderItemData {
+        product_id: "p6",
+        quantity: 1,
+        unit_price: 89.99,
+    },
 ];
 
 static ORDER_ITEMS_5: &[OrderItemData] = &[
-    OrderItemData { product_id: "p3", quantity: 2, unit_price: 45.99 },
-    OrderItemData { product_id: "p10", quantity: 1, unit_price: 59.99 },
+    OrderItemData {
+        product_id: "p3",
+        quantity: 2,
+        unit_price: 45.99,
+    },
+    OrderItemData {
+        product_id: "p10",
+        quantity: 1,
+        unit_price: 59.99,
+    },
 ];
 
-static ORDER_ITEMS_6: &[OrderItemData] = &[
-    OrderItemData { product_id: "p1", quantity: 1, unit_price: 149.99 },
-];
+static ORDER_ITEMS_6: &[OrderItemData] = &[OrderItemData {
+    product_id: "p1",
+    quantity: 1,
+    unit_price: 149.99,
+}];
 
 static ORDER_ITEMS_7: &[OrderItemData] = &[
-    OrderItemData { product_id: "p9", quantity: 3, unit_price: 24.99 },
-    OrderItemData { product_id: "p7", quantity: 1, unit_price: 179.99 },
+    OrderItemData {
+        product_id: "p9",
+        quantity: 3,
+        unit_price: 24.99,
+    },
+    OrderItemData {
+        product_id: "p7",
+        quantity: 1,
+        unit_price: 179.99,
+    },
 ];
 
 static ORDER_ITEMS_8: &[OrderItemData] = &[
-    OrderItemData { product_id: "p4", quantity: 1, unit_price: 599.99 },
-    OrderItemData { product_id: "p5", quantity: 2, unit_price: 34.99 },
+    OrderItemData {
+        product_id: "p4",
+        quantity: 1,
+        unit_price: 599.99,
+    },
+    OrderItemData {
+        product_id: "p5",
+        quantity: 2,
+        unit_price: 34.99,
+    },
 ];
 
 static ORDERS: &[OrderData] = &[
-    OrderData { id: "o1", user_id: "u1", items: ORDER_ITEMS_1, status: OrderStatus::Delivered, total: 229.98, created_at: "2024-06-01T10:00:00Z" },
-    OrderData { id: "o2", user_id: "u2", items: ORDER_ITEMS_2, status: OrderStatus::Shipped, total: 599.99, created_at: "2024-06-05T14:30:00Z" },
-    OrderData { id: "o3", user_id: "u3", items: ORDER_ITEMS_3, status: OrderStatus::Processing, total: 389.97, created_at: "2024-06-10T09:15:00Z" },
-    OrderData { id: "o4", user_id: "u1", items: ORDER_ITEMS_4, status: OrderStatus::Delivered, total: 124.98, created_at: "2024-06-15T16:00:00Z" },
-    OrderData { id: "o5", user_id: "u4", items: ORDER_ITEMS_5, status: OrderStatus::Pending, total: 151.97, created_at: "2024-06-20T11:45:00Z" },
-    OrderData { id: "o6", user_id: "u5", items: ORDER_ITEMS_6, status: OrderStatus::Cancelled, total: 149.99, created_at: "2024-06-25T13:20:00Z" },
-    OrderData { id: "o7", user_id: "u2", items: ORDER_ITEMS_7, status: OrderStatus::Shipped, total: 254.96, created_at: "2024-07-01T08:00:00Z" },
-    OrderData { id: "o8", user_id: "u3", items: ORDER_ITEMS_8, status: OrderStatus::Pending, total: 669.97, created_at: "2024-07-05T15:30:00Z" },
+    OrderData {
+        id: "o1",
+        user_id: "u1",
+        items: ORDER_ITEMS_1,
+        status: OrderStatus::Delivered,
+        total: 229.98,
+        created_at: "2024-06-01T10:00:00Z",
+    },
+    OrderData {
+        id: "o2",
+        user_id: "u2",
+        items: ORDER_ITEMS_2,
+        status: OrderStatus::Shipped,
+        total: 599.99,
+        created_at: "2024-06-05T14:30:00Z",
+    },
+    OrderData {
+        id: "o3",
+        user_id: "u3",
+        items: ORDER_ITEMS_3,
+        status: OrderStatus::Processing,
+        total: 389.97,
+        created_at: "2024-06-10T09:15:00Z",
+    },
+    OrderData {
+        id: "o4",
+        user_id: "u1",
+        items: ORDER_ITEMS_4,
+        status: OrderStatus::Delivered,
+        total: 124.98,
+        created_at: "2024-06-15T16:00:00Z",
+    },
+    OrderData {
+        id: "o5",
+        user_id: "u4",
+        items: ORDER_ITEMS_5,
+        status: OrderStatus::Pending,
+        total: 151.97,
+        created_at: "2024-06-20T11:45:00Z",
+    },
+    OrderData {
+        id: "o6",
+        user_id: "u5",
+        items: ORDER_ITEMS_6,
+        status: OrderStatus::Cancelled,
+        total: 149.99,
+        created_at: "2024-06-25T13:20:00Z",
+    },
+    OrderData {
+        id: "o7",
+        user_id: "u2",
+        items: ORDER_ITEMS_7,
+        status: OrderStatus::Shipped,
+        total: 254.96,
+        created_at: "2024-07-01T08:00:00Z",
+    },
+    OrderData {
+        id: "o8",
+        user_id: "u3",
+        items: ORDER_ITEMS_8,
+        status: OrderStatus::Pending,
+        total: 669.97,
+        created_at: "2024-07-05T15:30:00Z",
+    },
 ];
 
 static REVIEWS: &[ReviewData] = &[
-    ReviewData { id: "r1", product_id: "p1", author_id: "u1", rating: 5, comment: "Best keyboard I've ever used. The switches feel amazing.", created_at: "2024-06-15T10:00:00Z" },
-    ReviewData { id: "r2", product_id: "p1", author_id: "u3", rating: 4, comment: "Great build quality, slightly loud for office use.", created_at: "2024-06-20T14:30:00Z" },
-    ReviewData { id: "r3", product_id: "p4", author_id: "u2", rating: 5, comment: "Makes coffee shop quality espresso at home.", created_at: "2024-06-25T09:00:00Z" },
-    ReviewData { id: "r4", product_id: "p7", author_id: "u3", rating: 4, comment: "Very comfortable for long runs. Carbon plate is noticeable.", created_at: "2024-07-01T16:00:00Z" },
-    ReviewData { id: "r5", product_id: "p2", author_id: "u5", rating: 3, comment: "Good mouse but the scroll wheel feels cheap.", created_at: "2024-07-05T11:00:00Z" },
-    ReviewData { id: "r6", product_id: "p5", author_id: "u1", rating: 5, comment: "Perfect heat distribution. Sears beautifully.", created_at: "2024-07-10T08:30:00Z" },
-    ReviewData { id: "r7", product_id: "p8", author_id: "u4", rating: 4, comment: "Nice thickness, doesn't slip. Strap is a bonus.", created_at: "2024-07-12T13:00:00Z" },
-    ReviewData { id: "r8", product_id: "p10", author_id: "u2", rating: 5, comment: "Clean desk setup. Cable management is a game changer.", created_at: "2024-07-15T10:30:00Z" },
+    ReviewData {
+        id: "r1",
+        product_id: "p1",
+        author_id: "u1",
+        rating: 5,
+        comment: "Best keyboard I've ever used. The switches feel amazing.",
+        created_at: "2024-06-15T10:00:00Z",
+    },
+    ReviewData {
+        id: "r2",
+        product_id: "p1",
+        author_id: "u3",
+        rating: 4,
+        comment: "Great build quality, slightly loud for office use.",
+        created_at: "2024-06-20T14:30:00Z",
+    },
+    ReviewData {
+        id: "r3",
+        product_id: "p4",
+        author_id: "u2",
+        rating: 5,
+        comment: "Makes coffee shop quality espresso at home.",
+        created_at: "2024-06-25T09:00:00Z",
+    },
+    ReviewData {
+        id: "r4",
+        product_id: "p7",
+        author_id: "u3",
+        rating: 4,
+        comment: "Very comfortable for long runs. Carbon plate is noticeable.",
+        created_at: "2024-07-01T16:00:00Z",
+    },
+    ReviewData {
+        id: "r5",
+        product_id: "p2",
+        author_id: "u5",
+        rating: 3,
+        comment: "Good mouse but the scroll wheel feels cheap.",
+        created_at: "2024-07-05T11:00:00Z",
+    },
+    ReviewData {
+        id: "r6",
+        product_id: "p5",
+        author_id: "u1",
+        rating: 5,
+        comment: "Perfect heat distribution. Sears beautifully.",
+        created_at: "2024-07-10T08:30:00Z",
+    },
+    ReviewData {
+        id: "r7",
+        product_id: "p8",
+        author_id: "u4",
+        rating: 4,
+        comment: "Nice thickness, doesn't slip. Strap is a bonus.",
+        created_at: "2024-07-12T13:00:00Z",
+    },
+    ReviewData {
+        id: "r8",
+        product_id: "p10",
+        author_id: "u2",
+        rating: 5,
+        comment: "Clean desk setup. Cable management is a game changer.",
+        created_at: "2024-07-15T10:30:00Z",
+    },
 ];
 
 // ── GraphQL output types ────────────────────────────────────────────
@@ -611,8 +775,7 @@ impl MutationRoot {
 type GqlSchema = Schema<QueryRoot, MutationRoot, async_graphql::EmptySubscription>;
 
 fn build_schema() -> GqlSchema {
-    Schema::build(QueryRoot, MutationRoot, async_graphql::EmptySubscription)
-        .finish()
+    Schema::build(QueryRoot, MutationRoot, async_graphql::EmptySubscription).finish()
 }
 
 // ── GraphQL request type ────────────────────────────────────────────
@@ -689,16 +852,35 @@ fn playground_html(endpoint: &str) -> String {
 
 // ── Router ──────────────────────────────────────────────────────────
 
-pub fn router() -> Router<Arc<Config>> {
+pub fn router(_state: &AppState) -> Router<AppState> {
     let schema = build_schema();
 
     Router::new()
-        .route(
-            "/graphql",
-            get(graphql_playground).post(graphql_handler),
-        )
+        .route("/graphql", get(graphql_playground).post(graphql_handler))
         .route("/graphql/schema", get(graphql_sdl))
         .layer(axum::extract::Extension(schema))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new(
+            "/graphql",
+            &["GET", "POST"],
+            category::GRAPHQL,
+            "GraphQL endpoint (GET: playground, POST: query)",
+        )
+        .example(
+            Example::post("Query users", "/graphql")
+                .json(r#"{"query":"{ users { id name email } }"}"#),
+        ),
+        Endpoint::new(
+            "/graphql/schema",
+            &["GET"],
+            category::GRAPHQL,
+            "Schema in SDL",
+        )
+        .example(Example::get("SDL schema", "/graphql/schema")),
+    ]
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -710,23 +892,8 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_app() -> Router {
-        router().with_state(test_config())
+        crate::test_support::module_app(router)
     }
 
     async fn json_body(resp: axum::http::Response<Body>) -> serde_json::Value {
@@ -812,11 +979,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_orders_by_status() {
-        let json = gql_query(
-            test_app(),
-            r#"{ orders(status: PENDING) { id total } }"#,
-        )
-        .await;
+        let json = gql_query(test_app(), r#"{ orders(status: PENDING) { id total } }"#).await;
         let orders = json["data"]["orders"].as_array().expect("orders");
         assert_eq!(orders.len(), 2);
     }
@@ -891,11 +1054,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_users_with_limit_offset() {
-        let json = gql_query(
-            test_app(),
-            "{ users(limit: 2, offset: 1) { name } }",
-        )
-        .await;
+        let json = gql_query(test_app(), "{ users(limit: 2, offset: 1) { name } }").await;
         let users = json["data"]["users"].as_array().expect("users");
         assert_eq!(users.len(), 2);
         assert_eq!(users[0]["name"], "Bob Martinez");

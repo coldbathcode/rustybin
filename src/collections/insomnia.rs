@@ -12,7 +12,7 @@ pub fn build(categories: &[Category]) -> Value {
         "_type": "workspace",
         "_id": "wrk_rustybin",
         "name": "Rustybin",
-        "description": format!("Rustybin v{version} — HTTP stub service for API gateway testing"),
+        "description": format!("Rustybin v{version} - HTTP stub service for API gateway testing"),
         "scope": "collection"
     }));
 
@@ -55,7 +55,9 @@ pub fn build(categories: &[Category]) -> Value {
                         });
                     }
                     AuthDef::Bearer(token) => {
-                        headers.push(json!({ "name": "Authorization", "value": format!("Bearer {token}") }));
+                        headers.push(
+                            json!({ "name": "Authorization", "value": format!("Bearer {token}") }),
+                        );
                     }
                 }
             }
@@ -83,7 +85,9 @@ pub fn build(categories: &[Category]) -> Value {
                         // Ensure Content-Type header
                         if let Some(arr) = resource["headers"].as_array_mut() {
                             if !arr.iter().any(|h| h["name"] == "Content-Type") {
-                                arr.push(json!({ "name": "Content-Type", "value": "application/json" }));
+                                arr.push(
+                                    json!({ "name": "Content-Type", "value": "application/json" }),
+                                );
                             }
                         }
                     }

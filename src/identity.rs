@@ -1,23 +1,34 @@
-use axum::{
-    extract::Extension,
-    http::HeaderMap,
-    response::Response,
-    routing::any,
-    Router,
-};
+use axum::{extract::Extension, http::HeaderMap, response::Response, routing::any, Router};
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::catalog::{category, Endpoint, Example};
 use crate::config::Config;
 use crate::content_negotiation::negotiate;
+use crate::state::AppState;
 
 // ── State ───────────────────────────────────────────────────────────
 
 pub struct IdentityState {
     pub start_time: Instant,
     pub request_count: AtomicU64,
+}
+
+impl IdentityState {
+    pub fn new() -> Self {
+        Self {
+            start_time: Instant::now(),
+            request_count: AtomicU64::new(0),
+        }
+    }
+}
+
+impl Default for IdentityState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ── Response types ──────────────────────────────────────────────────
@@ -63,17 +74,15 @@ async fn identity_handler(
     axum::extract::State(config): axum::extract::State<Arc<Config>>,
     Extension(state): Extension<Arc<IdentityState>>,
     headers: HeaderMap,
-    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    crate::session::PeerAddr(peer): crate::session::PeerAddr,
 ) -> Response {
     let count = state.request_count.fetch_add(1, Ordering::Relaxed) + 1;
     let uptime = state.start_time.elapsed().as_secs();
 
-    let hostname = gethostname::gethostname()
-        .to_string_lossy()
-        .to_string();
+    let hostname = gethostname::gethostname().to_string_lossy().to_string();
 
-    let remote_ip = connect_info
-        .map(|ci| ci.0.ip().to_string())
+    let remote_ip = peer
+        .map(|addr| addr.ip().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
     let forwarded_for = headers
@@ -127,10 +136,20 @@ async fn identity_handler(
 
 // ── Router ──────────────────────────────────────────────────────────
 
-pub fn router(identity_state: Arc<IdentityState>) -> Router<Arc<Config>> {
+pub fn router(state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/identity", any(identity_handler))
-        .layer(Extension(identity_state))
+        .layer(Extension(state.identity.clone()))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![Endpoint::new(
+        "/identity",
+        &["ANY"],
+        category::HEALTH,
+        "Instance identity: id, hostname, uptime, request count (load-balancing demos)",
+    )
+    .example(Example::get("Identity", "/identity"))]
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -142,32 +161,13 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance-01".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
-    fn test_state() -> Arc<IdentityState> {
-        Arc::new(IdentityState {
-            start_time: Instant::now(),
-            request_count: AtomicU64::new(0),
-        })
-    }
-
     fn test_app() -> (Router, Arc<IdentityState>) {
-        let state = test_state();
-        let app = router(state.clone()).with_state(test_config());
-        (app, state)
+        let state = crate::test_support::test_state();
+        let identity = state.identity.clone();
+        (
+            crate::test_support::module_app_with(state, router),
+            identity,
+        )
     }
 
     async fn json_body(resp: axum::http::Response<Body>) -> serde_json::Value {
@@ -192,23 +192,22 @@ mod tests {
 
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         let json = json_body(resp).await;
-        assert_eq!(json["instance_id"], "test-instance-01");
+        assert_eq!(json["instance_id"], "test-instance");
         assert!(json["hostname"].is_string());
         assert!(json["version"].is_string());
         assert!(json["uptime_seconds"].is_number());
-        assert_eq!(json["port"]["http"], 80);
-        assert_eq!(json["port"]["https"], 443);
+        assert_eq!(json["port"]["http"], 0);
+        assert_eq!(json["port"]["https"], 0);
         assert!(json["environment"]["profile"].is_string());
         assert!(json["timestamp"].is_string());
     }
 
     #[tokio::test]
     async fn request_count_increments() {
-        let state = test_state();
-        let config = test_config();
+        let state = crate::test_support::test_state();
 
         // First request
-        let app1 = router(state.clone()).with_state(config.clone());
+        let app1 = crate::test_support::module_app_with(state.clone(), router);
         let resp1 = app1
             .oneshot(
                 Request::builder()
@@ -222,7 +221,7 @@ mod tests {
         assert_eq!(json1["request_count"], 1);
 
         // Second request
-        let app2 = router(state.clone()).with_state(config);
+        let app2 = crate::test_support::module_app_with(state, router);
         let resp2 = app2
             .oneshot(
                 Request::builder()

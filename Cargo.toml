@@ -2,17 +2,33 @@
 name = "rustybin"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.86"
+description = "HTTP stub service for API and AI gateway demos"
+license = "MIT"
+default-run = "rustybin"
+
+[lib]
+name = "rustybin"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rustybin"
+path = "src/main.rs"
 
 [dependencies]
-axum = { version = "0.7", features = ["ws"] }
-axum-server = { version = "0.7", features = ["tls-rustls"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
+axum-server = { version = "0.7.2", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 quick-xml = { version = "0.36", features = ["serde", "serialize"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tower = "0.5"
+tower = { version = "0.5", features = ["util", "timeout"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "limit", "timeout", "request-id", "util", "set-header"] }
+bytes = "1"
+http-body-util = "0.1"
+futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
@@ -23,7 +39,7 @@ rcgen = "0.13"
 rustls = "0.23"
 rustls-pemfile = "2"
 form_urlencoded = "1"
-tokio-stream = { version = "0.1", features = ["net"] }
+tokio-stream = { version = "0.1", features = ["net", "sync"] }
 rsa = "0.9"
 x509-parser = "0.16"
 async-stream = "0.3"
@@ -42,4 +58,11 @@ protoc-bin-vendored = "3"
 
 [dev-dependencies]
 tokio-tungstenite = "0.24"
-futures-util = "0.3"
+tempfile = "3"
+
+# RSA key generation (startup, tests) is very slow without optimisations.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.dev.package.rsa]
+opt-level = 3

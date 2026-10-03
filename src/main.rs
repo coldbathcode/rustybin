@@ -1,214 +1,50 @@
-mod ai_anthropic;
-mod ai_gateway;
-mod auth_apikey;
-mod auth_basic;
-mod auth_hmac;
-mod auth_jwt;
-mod auth_mtls;
-mod cert_state;
-mod collections;
-mod config;
-mod content_negotiation;
-mod cookies;
-mod echo;
-mod flaky;
-mod graphql;
-mod grpc;
-mod openapi;
-mod health;
-mod landing;
-mod identity;
-mod image;
-mod info;
-mod jwt_state;
-mod logging;
-mod oidc;
-mod orchestration;
-mod random;
-mod redirects;
-mod response_shaping;
-mod soap;
-mod status;
-mod types;
-mod websocket;
+use std::process::ExitCode;
 
-use config::Config;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::net::TcpListener;
+use rustybin::{catalog, Config};
+
+const USAGE: &str = "\
+rustybin: HTTP stub service for API and AI gateway demos
+
+USAGE:
+    rustybin [--print-endpoints-markdown | --version | --help]
+
+Configuration is read from RUSTYBIN_* environment variables (see README.md).";
 
 #[tokio::main]
-async fn main() {
-    let config = Config::from_env();
-    logging::init(&config);
-
-    let config = Arc::new(config);
-    let jwt_state = Arc::new(jwt_state::JwtState::generate());
-    let cert_state = Arc::new(cert_state::CertState::generate(
-        &config.tls_cert,
-        &config.tls_key,
-    ));
-    let identity_state = Arc::new(identity::IdentityState {
-        start_time: std::time::Instant::now(),
-        request_count: std::sync::atomic::AtomicU64::new(0),
-    });
-    let flaky_state = Arc::new(flaky::FlakyState::new());
-    let health_state = Arc::new(health::HealthState::new());
-
-    let app = axum::Router::new()
-        .merge(landing::router())
-        .merge(health::router(health_state))
-        .merge(echo::router())
-        .merge(status::router())
-        .merge(response_shaping::router())
-        .merge(redirects::router())
-        .merge(cookies::router())
-        .merge(info::router())
-        .merge(random::router())
-        .merge(image::router())
-        .merge(auth_basic::router())
-        .merge(auth_apikey::router())
-        .merge(auth_hmac::router())
-        .merge(auth_jwt::router(jwt_state.clone()))
-        .merge(oidc::router(jwt_state))
-        .merge(auth_mtls::router(cert_state.clone()))
-        .merge(ai_gateway::router())
-        .merge(ai_anthropic::router())
-        .merge(graphql::router())
-        .merge(orchestration::router())
-        .merge(soap::router())
-        .merge(websocket::router())
-        .merge(identity::router(identity_state))
-        .merge(flaky::router(flaky_state))
-        .merge(collections::router())
-        .merge(openapi::router())
-        .with_state(config.clone());
-
-    let http_addr: SocketAddr = format!("{}:{}", config.host, config.http_port)
-        .parse()
-        .expect("invalid HTTP bind address");
-
-    let https_addr: SocketAddr = format!("{}:{}", config.host, config.https_port)
-        .parse()
-        .expect("invalid HTTPS bind address");
-
-    tracing::info!(
-        "rustybin v{} starting | instance={} | http={} | https={}",
-        env!("CARGO_PKG_VERSION"),
-        config.instance_id,
-        http_addr,
-        https_addr,
-    );
-
-    let http_app = app.clone();
-    let http_handle = tokio::spawn(async move {
-        let listener = TcpListener::bind(http_addr)
-            .await
-            .expect("failed to bind HTTP listener");
-        tracing::info!("HTTP listening on {http_addr}");
-        if let Err(e) = axum::serve(listener, http_app.into_make_service_with_connect_info::<SocketAddr>()).await {
-            tracing::error!("HTTP server error: {e}");
-        }
-    });
-
-    let tls_cert_path = config.tls_cert.clone();
-    let tls_key_path = config.tls_key.clone();
-    let ca_cert_pem = cert_state.ca_cert_pem.clone();
-    let https_app = app;
-
-    let https_handle = tokio::spawn(async move {
-        if let Err(e) =
-            start_https(https_addr, tls_cert_path, tls_key_path, ca_cert_pem, https_app).await
-        {
-            tracing::warn!("HTTPS server not started: {e}");
-        }
-    });
-
-    let grpc_instance_id = config.instance_id.clone();
-    let grpc_host = config.host.clone();
-    let grpc_handle = tokio::spawn(async move {
-        match grpc::grpc_addr(&grpc_host) {
-            Ok(addr) => {
-                if let Err(e) = grpc::serve(addr, grpc_instance_id).await {
-                    tracing::error!("gRPC server error: {e}");
-                }
+async fn main() -> ExitCode {
+    if let Some(arg) = std::env::args().nth(1) {
+        match arg.as_str() {
+            "--print-endpoints-markdown" => {
+                print!("{}", catalog::endpoints_markdown());
+                return ExitCode::SUCCESS;
             }
-            Err(e) => tracing::warn!("gRPC server not started: invalid address: {e}"),
-        }
-    });
-
-    tokio::select! {
-        res = http_handle => {
-            if let Err(e) = res {
-                tracing::error!("HTTP task failed: {e}");
+            "--version" | "-V" => {
+                println!("rustybin {}", env!("CARGO_PKG_VERSION"));
+                return ExitCode::SUCCESS;
             }
-        }
-        res = https_handle => {
-            if let Err(e) = res {
-                tracing::error!("HTTPS task failed: {e}");
+            "--help" | "-h" => {
+                println!("{USAGE}");
+                return ExitCode::SUCCESS;
             }
-        }
-        res = grpc_handle => {
-            if let Err(e) = res {
-                tracing::error!("gRPC task failed: {e}");
+            other => {
+                eprintln!("unknown argument: {other}\n\n{USAGE}");
+                return ExitCode::from(2);
             }
         }
     }
-}
 
-async fn start_https(
-    addr: SocketAddr,
-    cert_path: String,
-    key_path: String,
-    ca_cert_pem: String,
-    app: axum::Router,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use axum_server::tls_rustls::RustlsConfig;
-
-    let cert_path = std::path::Path::new(&cert_path);
-    let key_path = std::path::Path::new(&key_path);
-
-    if !cert_path.exists() || !key_path.exists() {
-        return Err(format!(
-            "TLS cert ({}) or key ({}) not found, skipping HTTPS",
-            cert_path.display(),
-            key_path.display()
-        )
-        .into());
+    let (config, warnings) = Config::load();
+    rustybin::logging::init(&config);
+    for warning in warnings {
+        tracing::warn!("{warning}");
     }
 
-    // Load server cert and key
-    let cert_pem = std::fs::read(cert_path)?;
-    let key_pem = std::fs::read(key_path)?;
-
-    let certs: Vec<_> = rustls_pemfile::certs(&mut cert_pem.as_slice())
-        .collect::<Result<Vec<_>, _>>()?;
-    let key = rustls_pemfile::private_key(&mut key_pem.as_slice())?
-        .ok_or("no private key found in key file")?;
-
-    // Load CA cert for optional client cert verification
-    let ca_certs: Vec<_> = rustls_pemfile::certs(&mut ca_cert_pem.as_bytes())
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let mut root_store = rustls::RootCertStore::empty();
-    for ca_cert in ca_certs {
-        root_store.add(ca_cert)?;
+    match rustybin::run(config).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            tracing::error!("fatal: {e}");
+            eprintln!("rustybin: fatal: {e}");
+            ExitCode::FAILURE
+        }
     }
-
-    let client_verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
-        .allow_unauthenticated()
-        .build()?;
-
-    let server_config = rustls::ServerConfig::builder()
-        .with_client_cert_verifier(client_verifier)
-        .with_single_cert(certs, key)?;
-
-    let tls_config = RustlsConfig::from_config(Arc::new(server_config));
-
-    tracing::info!("HTTPS listening on {addr} (optional client cert verification enabled)");
-    axum_server::bind_rustls(addr, tls_config)
-        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-        .await?;
-
-    Ok(())
 }

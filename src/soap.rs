@@ -7,9 +7,9 @@ use axum::{
 };
 use quick_xml::events::Event;
 use quick_xml::Reader;
-use std::sync::Arc;
 
-use crate::config::Config;
+use crate::catalog::{category, Endpoint, Example};
+use crate::state::AppState;
 
 // ── Constants ───────────────────────────────────────────────────────
 
@@ -260,7 +260,10 @@ fn local_name(full: &[u8]) -> String {
 }
 
 fn get_field<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    fields
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.as_str())
 }
 
 // ── Operation handlers ──────────────────────────────────────────────
@@ -381,10 +384,21 @@ async fn wsdl_handler() -> Response {
 
 // ── Router ──────────────────────────────────────────────────────────
 
-pub fn router() -> Router<Arc<Config>> {
+pub fn router(_state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/soap", post(soap_handler))
         .route("/soap/wsdl", get(wsdl_handler))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new("/soap", &["POST"], category::SOAP, "SOAP 1.1 service (GetUser, ListUsers, CreateUser)")
+            .example(Example::post("SOAP GetUser", "/soap")
+                .header("SOAPAction", "GetUser")
+                .xml(r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><GetUser xmlns="http://rustybin.local/users"><userId>123</userId></GetUser></soap:Body></soap:Envelope>"#)),
+        Endpoint::new("/soap/wsdl", &["GET"], category::SOAP, "WSDL document")
+            .example(Example::get("WSDL", "/soap/wsdl")),
+    ]
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -396,23 +410,8 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_app() -> Router {
-        router().with_state(test_config())
+        crate::test_support::module_app(router)
     }
 
     async fn body_string(resp: axum::http::Response<Body>) -> String {
@@ -432,7 +431,9 @@ mod tests {
     #[tokio::test]
     async fn get_user_returns_soap_response() {
         let app = test_app();
-        let xml = soap_req(r#"<GetUser xmlns="http://rustybin.local/users"><userId>123</userId></GetUser>"#);
+        let xml = soap_req(
+            r#"<GetUser xmlns="http://rustybin.local/users"><userId>123</userId></GetUser>"#,
+        );
         let resp = app
             .oneshot(
                 Request::builder()
@@ -465,7 +466,9 @@ mod tests {
     #[tokio::test]
     async fn get_user_unknown_id() {
         let app = test_app();
-        let xml = soap_req(r#"<GetUser xmlns="http://rustybin.local/users"><userId>999</userId></GetUser>"#);
+        let xml = soap_req(
+            r#"<GetUser xmlns="http://rustybin.local/users"><userId>999</userId></GetUser>"#,
+        );
         let resp = app
             .oneshot(
                 Request::builder()
@@ -604,7 +607,9 @@ mod tests {
     #[tokio::test]
     async fn soap_action_echoed() {
         let app = test_app();
-        let xml = soap_req(r#"<GetUser xmlns="http://rustybin.local/users"><userId>123</userId></GetUser>"#);
+        let xml = soap_req(
+            r#"<GetUser xmlns="http://rustybin.local/users"><userId>123</userId></GetUser>"#,
+        );
         let resp = app
             .oneshot(
                 Request::builder()

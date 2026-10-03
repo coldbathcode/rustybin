@@ -4,7 +4,7 @@ pub fn build(categories: &[Category]) -> String {
     let version = env!("CARGO_PKG_VERSION");
     let mut out = String::with_capacity(8192);
 
-    out.push_str(&format!("# Rustybin v{version} — HTTP requests\n"));
+    out.push_str(&format!("# Rustybin v{version} - HTTP requests\n"));
     out.push_str("# Compatible with JetBrains HTTP Client and VS Code REST Client\n\n");
     out.push_str("@base_url = http://localhost\n\n");
 
@@ -19,7 +19,7 @@ pub fn build(categories: &[Category]) -> String {
             out.push_str(&format!("{} {{{{base_url}}}}{}\n", req.method, req.path));
 
             // Headers
-            for (k, v) in req.headers {
+            for (k, v) in &req.headers {
                 out.push_str(&format!("{k}: {v}\n"));
             }
 
@@ -45,10 +45,8 @@ pub fn build(categories: &[Category]) -> String {
                         out.push('\n');
                     }
                     BodyDef::Form(params) => {
-                        let encoded: Vec<String> = params
-                            .iter()
-                            .map(|(k, v)| format!("{k}={v}"))
-                            .collect();
+                        let encoded: Vec<String> =
+                            params.iter().map(|(k, v)| format!("{k}={v}")).collect();
                         out.push_str(&encoded.join("&"));
                         out.push('\n');
                     }

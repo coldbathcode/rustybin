@@ -5,10 +5,10 @@ use axum::{
     routing::get,
     Router,
 };
-use std::sync::Arc;
 
-use crate::config::Config;
+use crate::catalog::{category, Endpoint, Example};
 use crate::content_negotiation::negotiate_with_status;
+use crate::state::AppState;
 use crate::types::ErrorResponse;
 
 // ── /redirect/:n ─────────────────────────────────────────────────────
@@ -71,8 +71,18 @@ fn build_redirect(location: &str, status: StatusCode, remaining: u32) -> Respons
 
 // ── Router ───────────────────────────────────────────────────────────
 
-pub fn router() -> Router<Arc<Config>> {
-    Router::new().route("/redirect/:n", get(redirect_handler))
+pub fn router(_state: &AppState) -> Router<AppState> {
+    Router::new().route("/redirect/{n}", get(redirect_handler))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![Endpoint::new(
+        "/redirect/{n}",
+        &["GET"],
+        category::REDIRECTS,
+        "Chain of n relative 302 redirects",
+    )
+    .example(Example::get("Redirect chain (3)", "/redirect/3"))]
 }
 
 #[cfg(test)]
@@ -82,23 +92,8 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_app() -> Router {
-        router().with_state(test_config())
+        crate::test_support::module_app(router)
     }
 
     #[tokio::test]
@@ -116,7 +111,11 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::FOUND);
         assert_eq!(
-            resp.headers().get("location").expect("location").to_str().expect("str"),
+            resp.headers()
+                .get("location")
+                .expect("location")
+                .to_str()
+                .expect("str"),
             "/redirect/2"
         );
     }
@@ -136,7 +135,11 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::FOUND);
         assert_eq!(
-            resp.headers().get("location").expect("location").to_str().expect("str"),
+            resp.headers()
+                .get("location")
+                .expect("location")
+                .to_str()
+                .expect("str"),
             "/echo"
         );
     }
@@ -155,7 +158,11 @@ mod tests {
             .expect("response");
 
         assert_eq!(
-            resp.headers().get("location").expect("location").to_str().expect("str"),
+            resp.headers()
+                .get("location")
+                .expect("location")
+                .to_str()
+                .expect("str"),
             "/echo?foo=bar"
         );
     }

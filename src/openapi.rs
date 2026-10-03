@@ -5,18 +5,140 @@ use axum::{
     Router,
 };
 use serde_json::{json, Value};
-use std::sync::Arc;
 
-use crate::config::Config;
+use crate::catalog::{category, Endpoint, Example};
+use crate::state::AppState;
+
+// ── Module hooks ────────────────────────────────────────────────────
+
+/// Per-module OpenAPI path fragments (objects of OpenAPI 3.0.3 path items).
+/// New modules register `openapi_paths` here; existing hand-written paths
+/// stay in [`build_paths`].
+const MODULE_PATHS: &[fn() -> Value] = &[
+    crate::inspector::openapi_paths,
+    crate::control::openapi_paths,
+];
+
+/// Per-module OpenAPI components fragments (e.g. `{"schemas": {...}}`).
+const MODULE_COMPONENTS: &[fn() -> Value] = &[crate::inspector::openapi_components];
+
+/// Merge path items: new operations are added to existing paths.
+fn merge_paths(paths: &mut serde_json::Map<String, Value>, fragment: Value) {
+    let Value::Object(fragment) = fragment else {
+        return;
+    };
+    for (path, item) in fragment {
+        match (paths.get_mut(&path), item) {
+            (Some(Value::Object(existing)), Value::Object(ops)) => {
+                for (method, op) in ops {
+                    existing.entry(method).or_insert(op);
+                }
+            }
+            (_, item) => {
+                paths.insert(path, item);
+            }
+        }
+    }
+}
+
+/// Merge component sections (`schemas`, `securitySchemes`, ...).
+fn merge_components(components: &mut Value, fragment: Value) {
+    let (Some(target), Value::Object(fragment)) = (components.as_object_mut(), fragment) else {
+        return;
+    };
+    for (section, entries) in fragment {
+        let slot = target
+            .entry(section)
+            .or_insert_with(|| Value::Object(Default::default()));
+        if let (Some(slot), Value::Object(entries)) = (slot.as_object_mut(), entries) {
+            for (k, v) in entries {
+                slot.entry(k).or_insert(v);
+            }
+        }
+    }
+}
+
+/// Replace `{param}` / `{*param}` with `{}` for name-agnostic comparison.
+fn normalize_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut in_param = false;
+    for c in path.chars() {
+        match c {
+            '{' => {
+                in_param = true;
+                out.push_str("{}");
+            }
+            '}' => in_param = false,
+            _ if in_param => {}
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Make the documented methods match the catalogue: routes registered with
+/// `any()` get get/post/put/patch/delete, and any catalogue method missing
+/// from a path item is added as a copy of an existing operation.
+fn align_methods_with_catalogue(paths: &mut serde_json::Map<String, Value>) {
+    let index: std::collections::HashMap<String, String> = paths
+        .keys()
+        .map(|k| (normalize_path(k), k.clone()))
+        .collect();
+    for ep in crate::catalog::all() {
+        let Some(key) = index.get(&normalize_path(ep.path)) else {
+            continue;
+        };
+        let Some(Value::Object(item)) = paths.get_mut(key) else {
+            continue;
+        };
+        let template = ["get", "post", "put", "patch", "delete"]
+            .iter()
+            .find_map(|m| item.get(*m).cloned());
+        let Some(template) = template else {
+            continue;
+        };
+        for method in ep.expanded_methods() {
+            let m = method.to_ascii_lowercase();
+            if item.contains_key(&m) {
+                continue;
+            }
+            let mut op = template.clone();
+            if let Some(obj) = op.as_object_mut() {
+                if let Some(Value::String(id)) = obj.get("operationId").cloned() {
+                    obj.insert("operationId".into(), Value::String(format!("{id}_{m}")));
+                }
+                if m == "get" || m == "delete" {
+                    obj.remove("requestBody");
+                }
+            }
+            item.insert(m, op);
+        }
+    }
+}
 
 // ── Spec builder ────────────────────────────────────────────────────
 
-fn build_spec() -> Value {
+/// The complete OpenAPI 3.0.3 document.
+pub fn build_spec() -> Value {
+    let mut paths = match build_paths() {
+        Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    for fragment in MODULE_PATHS {
+        merge_paths(&mut paths, fragment());
+    }
+    align_methods_with_catalogue(&mut paths);
+
+    let mut components = build_components();
+    for fragment in MODULE_COMPONENTS {
+        merge_components(&mut components, fragment());
+    }
+
     json!({
         "openapi": "3.0.3",
         "info": {
             "title": "Rustybin",
-            "description": "A high-performance, all-in-one HTTP stub service for API gateway testing. Built in Rust with axum. Designed to exercise every category of API gateway feature — auth, routing, transformation, rate limiting, AI proxying, and more.",
+            "description": "A high-performance, all-in-one HTTP stub service for API gateway testing. Built in Rust with axum. Designed to exercise every category of API gateway feature - auth, routing, transformation, rate limiting, AI proxying, and more.",
             "version": env!("CARGO_PKG_VERSION"),
             "contact": { "name": "Rustybin" }
         },
@@ -28,7 +150,7 @@ fn build_spec() -> Value {
             { "name": "Utility", "description": "Health, identity, image, and flaky endpoints" },
             { "name": "Echo", "description": "Echo and anything endpoints" },
             { "name": "Status", "description": "HTTP status code responses" },
-            { "name": "Response Shaping", "description": "Delay, bytes, stream, drip, cache, and response-headers" },
+            { "name": "Response Shaping", "description": "Delay, cache, and response-headers" },
             { "name": "Redirects & Cookies", "description": "Redirect chains and cookie management" },
             { "name": "Info", "description": "IP, date, and time information" },
             { "name": "Random", "description": "UUID, random numbers, and lorem ipsum" },
@@ -37,10 +159,11 @@ fn build_spec() -> Value {
             { "name": "GraphQL", "description": "GraphQL API with playground" },
             { "name": "Orchestration", "description": "Multi-step orchestration pipeline" },
             { "name": "SOAP", "description": "SOAP/XML web service" },
-            { "name": "WebSocket", "description": "WebSocket echo and server-push endpoints" }
+            { "name": "WebSocket", "description": "WebSocket echo and server-push endpoints" },
+            { "name": "Control Plane", "description": "Request inspector, configuration and version under /_rustybin" }
         ],
-        "paths": build_paths(),
-        "components": build_components()
+        "paths": Value::Object(paths),
+        "components": components
     })
 }
 
@@ -58,28 +181,31 @@ fn build_paths() -> Value {
         }
     }));
 
-    paths.insert("/health".into(), json!({
-        "get": {
-            "tags": ["Utility"],
-            "summary": "Health check",
-            "description": "Returns service health status with version and instance info.",
-            "operationId": "getHealth",
-            "responses": {
-                "200": {
-                    "description": "Service is healthy",
-                    "content": json_xml_content(json!({
-                        "type": "object",
-                        "properties": {
-                            "status": { "type": "string", "example": "healthy" },
-                            "service": { "type": "string", "example": "rustybin" },
-                            "version": { "type": "string", "example": "0.1.0" },
-                            "instance_id": { "type": "string", "format": "uuid" }
-                        }
-                    }))
+    paths.insert(
+        "/health".into(),
+        json!({
+            "get": {
+                "tags": ["Utility"],
+                "summary": "Health check",
+                "description": "Returns service health status with version and instance info.",
+                "operationId": "getHealth",
+                "responses": {
+                    "200": {
+                        "description": "Service is healthy",
+                        "content": json_xml_content(json!({
+                            "type": "object",
+                            "properties": {
+                                "status": { "type": "string", "example": "healthy" },
+                                "service": { "type": "string", "example": "rustybin" },
+                                "version": { "type": "string", "example": "0.1.0" },
+                                "instance_id": { "type": "string", "format": "uuid" }
+                            }
+                        }))
+                    }
                 }
             }
-        }
-    }));
+        }),
+    );
 
     paths.insert("/identity".into(), json!({
         "get": {
@@ -99,7 +225,7 @@ fn build_paths() -> Value {
     // Health toggle (runtime liveness control for active health-check demos)
     for (path, op, summary, desc) in [
         ("/health/healthy", "markHealthy", "Mark instance healthy", "Sets the instance health state to healthy. Subsequent GET /health returns 200."),
-        ("/health/unhealthy", "markUnhealthy", "Mark instance unhealthy", "Sets the instance health state to unhealthy. GET /health then returns 503 — useful for gateway upstream active health-check failover demos."),
+        ("/health/unhealthy", "markUnhealthy", "Mark instance unhealthy", "Sets the instance health state to unhealthy. GET /health then returns 503 - useful for gateway upstream active health-check failover demos."),
         ("/health/toggle", "toggleHealth", "Toggle health state", "Flips the current health state between healthy and unhealthy."),
     ] {
         paths.insert(path.into(), json!({
@@ -231,24 +357,30 @@ fn build_paths() -> Value {
     }
 
     // OpenAPI spec endpoints
-    paths.insert("/openapi.json".into(), json!({
-        "get": {
-            "tags": ["Utility"],
-            "summary": "OpenAPI spec (JSON)",
-            "description": "Returns the full OpenAPI 3.0.3 specification as JSON.",
-            "operationId": "getOpenApiJson",
-            "responses": { "200": { "description": "OpenAPI JSON spec" } }
-        }
-    }));
-    paths.insert("/openapi.yaml".into(), json!({
-        "get": {
-            "tags": ["Utility"],
-            "summary": "OpenAPI spec (YAML)",
-            "description": "Returns the full OpenAPI 3.0.3 specification as YAML.",
-            "operationId": "getOpenApiYaml",
-            "responses": { "200": { "description": "OpenAPI YAML spec" } }
-        }
-    }));
+    paths.insert(
+        "/openapi.json".into(),
+        json!({
+            "get": {
+                "tags": ["Utility"],
+                "summary": "OpenAPI spec (JSON)",
+                "description": "Returns the full OpenAPI 3.0.3 specification as JSON.",
+                "operationId": "getOpenApiJson",
+                "responses": { "200": { "description": "OpenAPI JSON spec" } }
+            }
+        }),
+    );
+    paths.insert(
+        "/openapi.yaml".into(),
+        json!({
+            "get": {
+                "tags": ["Utility"],
+                "summary": "OpenAPI spec (YAML)",
+                "description": "Returns the full OpenAPI 3.0.3 specification as YAML.",
+                "operationId": "getOpenApiYaml",
+                "responses": { "200": { "description": "OpenAPI YAML spec" } }
+            }
+        }),
+    );
     paths.insert("/docs".into(), json!({
         "get": {
             "tags": ["Utility"],
@@ -497,7 +629,7 @@ fn build_paths() -> Value {
         paths.insert((*path).to_string(), json!({
             "get": {
                 "tags": [tag],
-                "summary": format!("{name} — echo request details"),
+                "summary": format!("{name} - echo request details"),
                 "description": format!("Returns all details of the incoming request: method, headers, query params, body. Supports all HTTP methods."),
                 "operationId": format!("get{}", capitalize(name)),
                 "responses": {
@@ -506,18 +638,18 @@ fn build_paths() -> Value {
             },
             "post": {
                 "tags": [tag],
-                "summary": format!("{name} — echo request with body"),
+                "summary": format!("{name} - echo request with body"),
                 "operationId": format!("post{}", capitalize(name)),
                 "requestBody": { "content": { "application/json": { "schema": {} }, "text/plain": { "schema": { "type": "string" } } } },
                 "responses": {
                     "200": { "description": "Request details with body", "content": json_xml_content(json!({ "$ref": "#/components/schemas/EchoResponse" })) }
                 }
             },
-            "put": { "tags": [tag], "summary": format!("{name} — PUT"), "operationId": format!("put{}", capitalize(name)),
+            "put": { "tags": [tag], "summary": format!("{name} - PUT"), "operationId": format!("put{}", capitalize(name)),
                 "responses": { "200": { "description": "Request details" } } },
-            "delete": { "tags": [tag], "summary": format!("{name} — DELETE"), "operationId": format!("delete{}", capitalize(name)),
+            "delete": { "tags": [tag], "summary": format!("{name} - DELETE"), "operationId": format!("delete{}", capitalize(name)),
                 "responses": { "200": { "description": "Request details" } } },
-            "patch": { "tags": [tag], "summary": format!("{name} — PATCH"), "operationId": format!("patch{}", capitalize(name)),
+            "patch": { "tags": [tag], "summary": format!("{name} - PATCH"), "operationId": format!("patch{}", capitalize(name)),
                 "responses": { "200": { "description": "Request details" } } }
         }));
 
@@ -538,7 +670,7 @@ fn build_paths() -> Value {
         "get": {
             "tags": ["Status"],
             "summary": "Return a specific HTTP status code",
-            "description": "Returns the specified HTTP status code (100-599). Redirect codes (301, 302, 307, 308) include a Location header pointing to /echo. 1xx, 204, and 304 return empty bodies.",
+            "description": "Returns the specified HTTP status code (use 200-599: 1xx codes are interim responses and cannot be returned as a final response). Redirect codes (301, 302, 307, 308) include a Location header pointing to /echo. 204 and 304 return empty bodies.",
             "operationId": "getStatus",
             "parameters": [{ "name": "code", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 100, "maximum": 599 }, "example": 200, "description": "HTTP status code to return" }],
             "responses": {
@@ -592,7 +724,7 @@ fn build_paths() -> Value {
             ],
             "responses": {
                 "200": { "description": "Cacheable response with ETag and Cache-Control headers" },
-                "304": { "description": "Not Modified — conditional request matched" }
+                "304": { "description": "Not Modified - conditional request matched" }
             }
         }
     }));
@@ -691,15 +823,21 @@ fn build_paths() -> Value {
         }
     }));
 
-    paths.insert("/ip/v4".into(), json!({
-        "get": { "tags": ["Info"], "summary": "Client IPv4 address", "operationId": "getIpV4",
-            "responses": { "200": { "description": "IPv4 address" } } }
-    }));
+    paths.insert(
+        "/ip/v4".into(),
+        json!({
+            "get": { "tags": ["Info"], "summary": "Client IPv4 address", "operationId": "getIpV4",
+                "responses": { "200": { "description": "IPv4 address" } } }
+        }),
+    );
 
-    paths.insert("/ip/v6".into(), json!({
-        "get": { "tags": ["Info"], "summary": "Client IPv6 address", "operationId": "getIpV6",
-            "responses": { "200": { "description": "IPv6 address" } } }
-    }));
+    paths.insert(
+        "/ip/v6".into(),
+        json!({
+            "get": { "tags": ["Info"], "summary": "Client IPv6 address", "operationId": "getIpV6",
+                "responses": { "200": { "description": "IPv6 address" } } }
+        }),
+    );
 
     paths.insert("/date".into(), json!({
         "get": {
@@ -734,25 +872,28 @@ fn build_paths() -> Value {
         }
     }));
 
-    paths.insert("/time".into(), json!({
-        "get": {
-            "tags": ["Info"],
-            "summary": "Current time (UTC)",
-            "description": "Returns the current date and time in UTC (RFC 3339).",
-            "operationId": "getTime",
-            "responses": {
-                "200": { "description": "Time",
-                    "content": json_xml_content(json!({
-                        "type": "object",
-                        "properties": {
-                            "time": { "type": "string", "format": "date-time" },
-                            "timezone": { "type": "string", "example": "UTC" }
-                        }
-                    }))
+    paths.insert(
+        "/time".into(),
+        json!({
+            "get": {
+                "tags": ["Info"],
+                "summary": "Current time (UTC)",
+                "description": "Returns the current date and time in UTC (RFC 3339).",
+                "operationId": "getTime",
+                "responses": {
+                    "200": { "description": "Time",
+                        "content": json_xml_content(json!({
+                            "type": "object",
+                            "properties": {
+                                "time": { "type": "string", "format": "date-time" },
+                                "timezone": { "type": "string", "example": "UTC" }
+                            }
+                        }))
+                    }
                 }
             }
-        }
-    }));
+        }),
+    );
 
     paths.insert("/time/{timezone}".into(), json!({
         "get": {
@@ -768,21 +909,24 @@ fn build_paths() -> Value {
     }));
 
     // ── Random ──────────────────────────────────────────────────
-    paths.insert("/uuid".into(), json!({
-        "get": {
-            "tags": ["Random"],
-            "summary": "Generate a UUID v4",
-            "operationId": "getUuid",
-            "responses": {
-                "200": { "description": "UUID",
-                    "content": json_xml_content(json!({
-                        "type": "object",
-                        "properties": { "uuid": { "type": "string", "format": "uuid" } }
-                    }))
+    paths.insert(
+        "/uuid".into(),
+        json!({
+            "get": {
+                "tags": ["Random"],
+                "summary": "Generate a UUID v4",
+                "operationId": "getUuid",
+                "responses": {
+                    "200": { "description": "UUID",
+                        "content": json_xml_content(json!({
+                            "type": "object",
+                            "properties": { "uuid": { "type": "string", "format": "uuid" } }
+                        }))
+                    }
                 }
             }
-        }
-    }));
+        }),
+    );
 
     paths.insert("/guuid".into(), json!({
         "get": {
@@ -800,31 +944,37 @@ fn build_paths() -> Value {
         }
     }));
 
-    paths.insert("/random".into(), json!({
-        "get": {
-            "tags": ["Random"],
-            "summary": "Random data bundle",
-            "description": "Returns random int, uint, uuid, guuid, and lorem ipsum text.",
-            "operationId": "getRandom",
-            "responses": { "200": { "description": "Random data" } }
-        }
-    }));
+    paths.insert(
+        "/random".into(),
+        json!({
+            "get": {
+                "tags": ["Random"],
+                "summary": "Random data bundle",
+                "description": "Returns random int, uint, uuid, guuid, and lorem ipsum text.",
+                "operationId": "getRandom",
+                "responses": { "200": { "description": "Random data" } }
+            }
+        }),
+    );
 
-    paths.insert("/random/int".into(), json!({
-        "get": {
-            "tags": ["Random"],
-            "summary": "Random integer (-32000 to 32000)",
-            "operationId": "getRandomInt",
-            "responses": {
-                "200": { "description": "Random integer",
-                    "content": json_xml_content(json!({
-                        "type": "object",
-                        "properties": { "value": { "type": "integer" } }
-                    }))
+    paths.insert(
+        "/random/int".into(),
+        json!({
+            "get": {
+                "tags": ["Random"],
+                "summary": "Random integer (-32000 to 32000)",
+                "operationId": "getRandomInt",
+                "responses": {
+                    "200": { "description": "Random integer",
+                        "content": json_xml_content(json!({
+                            "type": "object",
+                            "properties": { "value": { "type": "integer" } }
+                        }))
+                    }
                 }
             }
-        }
-    }));
+        }),
+    );
 
     paths.insert("/random/int/{lower}/{upper}".into(), json!({
         "get": {
@@ -842,14 +992,17 @@ fn build_paths() -> Value {
         }
     }));
 
-    paths.insert("/random/uint".into(), json!({
-        "get": {
-            "tags": ["Random"],
-            "summary": "Random unsigned integer (0–65535)",
-            "operationId": "getRandomUint",
-            "responses": { "200": { "description": "Random unsigned integer" } }
-        }
-    }));
+    paths.insert(
+        "/random/uint".into(),
+        json!({
+            "get": {
+                "tags": ["Random"],
+                "summary": "Random unsigned integer (0-65535)",
+                "operationId": "getRandomUint",
+                "responses": { "200": { "description": "Random unsigned integer" } }
+            }
+        }),
+    );
 
     paths.insert("/random/lorem-ipsum".into(), json!({
         "get": {
@@ -994,15 +1147,18 @@ fn build_paths() -> Value {
         }
     }));
 
-    paths.insert("/oauth/jwks".into(), json!({
-        "get": {
-            "tags": ["Auth"],
-            "summary": "JWKS endpoint",
-            "description": "Returns the JSON Web Key Set containing the RS256 public key.",
-            "operationId": "getJwks",
-            "responses": { "200": { "description": "JWKS" } }
-        }
-    }));
+    paths.insert(
+        "/oauth/jwks".into(),
+        json!({
+            "get": {
+                "tags": ["Auth"],
+                "summary": "JWKS endpoint",
+                "description": "Returns the JSON Web Key Set containing the RS256 public key.",
+                "operationId": "getJwks",
+                "responses": { "200": { "description": "JWKS" } }
+            }
+        }),
+    );
 
     paths.insert("/oauth/token".into(), json!({
         "post": {
@@ -1056,92 +1212,101 @@ fn build_paths() -> Value {
         }
     }));
 
-    paths.insert("/oauth/authorize".into(), json!({
-        "get": {
-            "tags": ["Auth"],
-            "summary": "OAuth2 authorization endpoint (login form)",
-            "description": "Returns an HTML login form for the authorization code flow.",
-            "operationId": "getOAuthAuthorize",
-            "parameters": [
-                { "name": "client_id", "in": "query", "schema": { "type": "string" } },
-                { "name": "redirect_uri", "in": "query", "schema": { "type": "string" } },
-                { "name": "response_type", "in": "query", "schema": { "type": "string" } },
-                { "name": "scope", "in": "query", "schema": { "type": "string" } },
-                { "name": "state", "in": "query", "schema": { "type": "string" } }
-            ],
-            "responses": { "200": { "description": "HTML login form" } }
-        },
-        "post": {
-            "tags": ["Auth"],
-            "summary": "OAuth2 authorization endpoint (submit login)",
-            "description": "Processes login and redirects with authorization code.",
-            "operationId": "postOAuthAuthorize",
-            "responses": { "303": { "description": "Redirect with authorization code" } }
-        }
-    }));
-
-    paths.insert("/oauth/userinfo".into(), json!({
-        "get": {
-            "tags": ["Auth"],
-            "summary": "OIDC UserInfo endpoint",
-            "description": "Returns user claims from the access token.",
-            "operationId": "getOAuthUserinfo",
-            "security": [{ "bearerAuth": [] }],
-            "responses": {
-                "200": { "description": "User info",
-                    "content": json_xml_content(json!({
-                        "type": "object",
-                        "properties": {
-                            "sub": { "type": "string" },
-                            "name": { "type": "string" },
-                            "email": { "type": "string" },
-                            "email_verified": { "type": "boolean" }
-                        }
-                    }))
-                },
-                "401": { "description": "Invalid or missing token" }
+    paths.insert(
+        "/oauth/authorize".into(),
+        json!({
+            "get": {
+                "tags": ["Auth"],
+                "summary": "OAuth2 authorization endpoint (login form)",
+                "description": "Returns an HTML login form for the authorization code flow.",
+                "operationId": "getOAuthAuthorize",
+                "parameters": [
+                    { "name": "client_id", "in": "query", "schema": { "type": "string" } },
+                    { "name": "redirect_uri", "in": "query", "schema": { "type": "string" } },
+                    { "name": "response_type", "in": "query", "schema": { "type": "string" } },
+                    { "name": "scope", "in": "query", "schema": { "type": "string" } },
+                    { "name": "state", "in": "query", "schema": { "type": "string" } }
+                ],
+                "responses": { "200": { "description": "HTML login form" } }
+            },
+            "post": {
+                "tags": ["Auth"],
+                "summary": "OAuth2 authorization endpoint (submit login)",
+                "description": "Processes login and redirects with authorization code.",
+                "operationId": "postOAuthAuthorize",
+                "responses": { "303": { "description": "Redirect with authorization code" } }
             }
-        }
-    }));
+        }),
+    );
 
-    paths.insert("/oauth/introspect".into(), json!({
-        "post": {
-            "tags": ["Auth"],
-            "summary": "OAuth2 token introspection",
-            "description": "Introspects a token and returns its active status and claims.",
-            "operationId": "postOAuthIntrospect",
-            "requestBody": {
-                "required": true,
-                "content": {
-                    "application/x-www-form-urlencoded": {
-                        "schema": {
+    paths.insert(
+        "/oauth/userinfo".into(),
+        json!({
+            "get": {
+                "tags": ["Auth"],
+                "summary": "OIDC UserInfo endpoint",
+                "description": "Returns user claims from the access token.",
+                "operationId": "getOAuthUserinfo",
+                "security": [{ "bearerAuth": [] }],
+                "responses": {
+                    "200": { "description": "User info",
+                        "content": json_xml_content(json!({
                             "type": "object",
-                            "required": ["token"],
                             "properties": {
-                                "token": { "type": "string" },
-                                "client_id": { "type": "string" },
-                                "client_secret": { "type": "string" }
+                                "sub": { "type": "string" },
+                                "name": { "type": "string" },
+                                "email": { "type": "string" },
+                                "email_verified": { "type": "boolean" }
+                            }
+                        }))
+                    },
+                    "401": { "description": "Invalid or missing token" }
+                }
+            }
+        }),
+    );
+
+    paths.insert(
+        "/oauth/introspect".into(),
+        json!({
+            "post": {
+                "tags": ["Auth"],
+                "summary": "OAuth2 token introspection",
+                "description": "Introspects a token and returns its active status and claims.",
+                "operationId": "postOAuthIntrospect",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "type": "object",
+                                "required": ["token"],
+                                "properties": {
+                                    "token": { "type": "string" },
+                                    "client_id": { "type": "string" },
+                                    "client_secret": { "type": "string" }
+                                }
                             }
                         }
                     }
-                }
-            },
-            "responses": {
-                "200": { "description": "Introspection result",
-                    "content": json_xml_content(json!({
-                        "type": "object",
-                        "properties": {
-                            "active": { "type": "boolean" },
-                            "sub": { "type": "string" },
-                            "scope": { "type": "string" },
-                            "exp": { "type": "integer" },
-                            "client_id": { "type": "string" }
-                        }
-                    }))
+                },
+                "responses": {
+                    "200": { "description": "Introspection result",
+                        "content": json_xml_content(json!({
+                            "type": "object",
+                            "properties": {
+                                "active": { "type": "boolean" },
+                                "sub": { "type": "string" },
+                                "scope": { "type": "string" },
+                                "exp": { "type": "integer" },
+                                "client_id": { "type": "string" }
+                            }
+                        }))
+                    }
                 }
             }
-        }
-    }));
+        }),
+    );
 
     // mTLS
     paths.insert("/auth/mtls".into(), json!({
@@ -1377,10 +1542,22 @@ fn build_paths() -> Value {
     // ── Orchestration ───────────────────────────────────────────
     for step in 1..=4u8 {
         let (name, desc) = match step {
-            1 => ("authenticate", "Validate API key and return merchant metadata with correlation token"),
-            2 => ("enrich", "Enrich transaction with risk scoring and card details"),
-            3 => ("validate", "Apply business rules and validate the transaction"),
-            _ => ("process", "Execute the payment and return transaction result"),
+            1 => (
+                "authenticate",
+                "Validate API key and return merchant metadata with correlation token",
+            ),
+            2 => (
+                "enrich",
+                "Enrich transaction with risk scoring and card details",
+            ),
+            3 => (
+                "validate",
+                "Apply business rules and validate the transaction",
+            ),
+            _ => (
+                "process",
+                "Execute the payment and return transaction result",
+            ),
         };
         let mut params = vec![
             json!({ "name": "X-Correlation-Id", "in": "header", "required": step > 1, "schema": { "type": "string" }, "description": "Correlation ID from step 1" }),
@@ -1737,11 +1914,37 @@ const DOCS_HTML: &str = r#"<!DOCTYPE html>
 
 // ── Router ──────────────────────────────────────────────────────
 
-pub fn router() -> Router<Arc<Config>> {
+pub fn router(_state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/openapi.json", get(openapi_json_handler))
         .route("/openapi.yaml", get(openapi_yaml_handler))
         .route("/docs", get(docs_handler))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new(
+            "/openapi.json",
+            &["GET"],
+            category::DOCS,
+            "OpenAPI 3.0.3 specification (JSON)",
+        )
+        .example(Example::get("OpenAPI JSON", "/openapi.json")),
+        Endpoint::new(
+            "/openapi.yaml",
+            &["GET"],
+            category::DOCS,
+            "OpenAPI 3.0.3 specification (YAML)",
+        )
+        .example(Example::get("OpenAPI YAML", "/openapi.yaml")),
+        Endpoint::new(
+            "/docs",
+            &["GET"],
+            category::DOCS,
+            "Interactive API reference (Scalar)",
+        )
+        .example(Example::get("API docs", "/docs")),
+    ]
 }
 
 // ── Tests ───────────────────────────────────────────────────────
@@ -1753,23 +1956,8 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_app() -> Router {
-        router().with_state(test_config())
+        crate::test_support::module_app(router)
     }
 
     async fn body_string(resp: axum::http::Response<Body>) -> String {
@@ -1794,7 +1982,11 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
-            resp.headers().get("content-type").unwrap().to_str().unwrap(),
+            resp.headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "application/json"
         );
 
@@ -1819,14 +2011,13 @@ mod tests {
             .expect("response");
 
         assert_eq!(resp.status(), StatusCode::OK);
-        assert!(
-            resp.headers()
-                .get("content-type")
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .contains("yaml")
-        );
+        assert!(resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("yaml"));
 
         let body = body_string(resp).await;
         let spec: Value = serde_yaml::from_str(&body).expect("valid YAML");
@@ -1868,14 +2059,20 @@ mod tests {
         let paths = spec["paths"].as_object().unwrap();
 
         // Spot-check key endpoints
-        assert!(paths.contains_key("/ai/v1/chat/completions"), "missing AI chat");
+        assert!(
+            paths.contains_key("/ai/v1/chat/completions"),
+            "missing AI chat"
+        );
         assert!(paths.contains_key("/auth/basic-auth"), "missing basic auth");
         assert!(paths.contains_key("/delay/{ms}"), "missing delay");
         assert!(paths.contains_key("/graphql"), "missing graphql");
         assert!(paths.contains_key("/soap"), "missing soap");
         assert!(paths.contains_key("/flaky/{fail_rate}"), "missing flaky");
         assert!(paths.contains_key("/identity"), "missing identity");
-        assert!(paths.contains_key("/.well-known/openid-configuration"), "missing OIDC");
+        assert!(
+            paths.contains_key("/.well-known/openid-configuration"),
+            "missing OIDC"
+        );
     }
 
     #[tokio::test]
@@ -1894,10 +2091,12 @@ mod tests {
     async fn ai_chat_has_request_response_schemas() {
         let spec = build_spec();
         let chat = &spec["paths"]["/ai/v1/chat/completions"]["post"];
-        assert!(chat["requestBody"]["content"]["application/json"]["schema"]["$ref"]
-            .as_str()
-            .unwrap()
-            .contains("ChatCompletionRequest"));
+        assert!(
+            chat["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+                .as_str()
+                .unwrap()
+                .contains("ChatCompletionRequest")
+        );
     }
 
     #[tokio::test]

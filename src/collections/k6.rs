@@ -4,9 +4,7 @@ pub fn build(categories: &[Category]) -> String {
     let version = env!("CARGO_PKG_VERSION");
     let mut out = String::with_capacity(16384);
 
-    out.push_str(&format!(
-        "// Rustybin v{version} — k6 load test script\n"
-    ));
+    out.push_str(&format!("// Rustybin v{version} - k6 load test script\n"));
     out.push_str("// Run: BASE_URL=http://localhost k6 run rustybin-k6.js\n\n");
     out.push_str("import http from 'k6/http';\n");
     out.push_str("import { check, group } from 'k6';\n\n");
@@ -33,7 +31,7 @@ pub fn build(categories: &[Category]) -> String {
 
             // Build headers object
             let mut header_entries: Vec<String> = Vec::new();
-            for (k, v) in req.headers {
+            for (k, v) in &req.headers {
                 header_entries.push(format!("'{k}': '{v}'", k = escape_js(k), v = escape_js(v)));
             }
             if let Some(ref auth) = req.auth {
@@ -112,7 +110,13 @@ pub fn build(categories: &[Category]) -> String {
 
 fn safe_var_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .trim_end_matches('_')
         .to_string()

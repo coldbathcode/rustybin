@@ -3,10 +3,10 @@ use jsonwebtoken::{DecodingKey, EncodingKey};
 use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 use rsa::traits::PublicKeyParts;
 use rsa::RsaPrivateKey;
+use std::sync::{Arc, OnceLock};
 
 /// Shared JWT state holding signing keys for HS256 and RS256.
 /// Created once at startup and shared across auth modules.
-#[allow(dead_code)]
 pub struct JwtState {
     pub hs256_secret: String,
     pub rs256_encoding_key: EncodingKey,
@@ -15,6 +15,21 @@ pub struct JwtState {
 }
 
 impl JwtState {
+    /// A process-wide JWT state generated once and shared by every caller.
+    /// Tests use this so RSA key generation happens at most once per test
+    /// binary instead of once per test.
+    #[doc(hidden)]
+    pub fn shared_for_tests() -> Arc<JwtState> {
+        static SHARED: OnceLock<Arc<JwtState>> = OnceLock::new();
+        SHARED
+            .get_or_init(|| Arc::new(JwtState::generate()))
+            .clone()
+    }
+
+    /// Generate a fresh HS256 secret holder and RS256 key pair.
+    ///
+    /// Only called at startup (never on a request path), so failing loudly
+    /// on a broken RNG or encoder is acceptable.
     pub fn generate() -> Self {
         let hs256_secret = "rustybin-demo-secret-do-not-use-in-production".to_string();
 

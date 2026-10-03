@@ -1,0 +1,122 @@
+//! Admin guard for global-state mutations.
+//!
+//! Rules:
+//! - `RUSTYBIN_ADMIN_TOKEN` set: the request must carry
+//!   `Authorization: Bearer <token>` or `X-Rustybin-Admin-Token: <token>`.
+//! - Token unset, normal mode: open (backwards compatible).
+//! - Token unset, public mode: global mutations are disabled (403).
+//!
+//! Usage inside a handler:
+//!
+//! ```ignore
+//! if let Err(resp) = crate::admin::require_admin(&headers, &config) {
+//!     return resp;
+//! }
+//! ```
+
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde_json::json;
+
+use crate::config::Config;
+
+/// Header accepted as an alternative to `Authorization: Bearer`.
+pub const ADMIN_TOKEN_HEADER: &str = "x-rustybin-admin-token";
+
+/// Returns `Ok(())` when the caller may perform a global mutation, otherwise
+/// the JSON error response to send back (401 or 403).
+#[allow(clippy::result_large_err)]
+pub fn require_admin(headers: &HeaderMap, config: &Config) -> Result<(), Response> {
+    match config.admin_token.as_deref() {
+        Some(expected) => {
+            if presented_token(headers).is_some_and(|t| constant_time_eq(t, expected)) {
+                Ok(())
+            } else {
+                Err(error(
+                    StatusCode::UNAUTHORIZED,
+                    "admin token required: send Authorization: Bearer <token> or X-Rustybin-Admin-Token",
+                ))
+            }
+        }
+        None if config.public_mode => Err(error(
+            StatusCode::FORBIDDEN,
+            "this operation is disabled in public mode (no admin token configured)",
+        )),
+        None => Ok(()),
+    }
+}
+
+/// True when the request carries a valid admin token (or none is required).
+pub fn is_admin(headers: &HeaderMap, config: &Config) -> bool {
+    require_admin(headers, config).is_ok()
+}
+
+fn presented_token(headers: &HeaderMap) -> Option<&str> {
+    if let Some(v) = headers
+        .get(ADMIN_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok())
+    {
+        return Some(v.trim());
+    }
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            let (scheme, token) = v.trim().split_once(' ')?;
+            scheme.eq_ignore_ascii_case("bearer").then(|| token.trim())
+        })
+}
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn error(status: StatusCode, message: &str) -> Response {
+    (status, Json(json!({ "error": message }))).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn cfg(token: Option<&str>, public: bool) -> Config {
+        let mut c = Config::for_tests();
+        c.admin_token = token.map(str::to_string);
+        c.public_mode = public;
+        c
+    }
+
+    #[test]
+    fn open_without_token() {
+        assert!(require_admin(&HeaderMap::new(), &cfg(None, false)).is_ok());
+    }
+
+    #[test]
+    fn public_mode_without_token_is_forbidden() {
+        let err = require_admin(&HeaderMap::new(), &cfg(None, true)).unwrap_err();
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn token_via_bearer_or_header() {
+        let c = cfg(Some("s3cret"), true);
+        let mut h = HeaderMap::new();
+        assert_eq!(
+            require_admin(&h, &c).unwrap_err().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        h.insert("authorization", HeaderValue::from_static("Bearer s3cret"));
+        assert!(require_admin(&h, &c).is_ok());
+        let mut h = HeaderMap::new();
+        h.insert(ADMIN_TOKEN_HEADER, HeaderValue::from_static("s3cret"));
+        assert!(require_admin(&h, &c).is_ok());
+        h.insert(ADMIN_TOKEN_HEADER, HeaderValue::from_static("wrong"));
+        assert!(require_admin(&h, &c).is_err());
+    }
+}

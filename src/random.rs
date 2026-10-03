@@ -7,11 +7,11 @@ use axum::{
 };
 use rand::Rng;
 use serde::Serialize;
-use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::config::Config;
+use crate::catalog::{category, Endpoint, Example};
 use crate::content_negotiation::{negotiate, negotiate_with_status};
+use crate::state::AppState;
 use crate::types::ErrorResponse;
 
 // ── Response types ───────────────────────────────────────────────────
@@ -117,9 +117,7 @@ async fn random_int_range_handler(
             &headers,
             &ErrorResponse {
                 error: "invalid_range".to_string(),
-                details: Some(format!(
-                    "lower ({lower}) must be less than upper ({upper})"
-                )),
+                details: Some(format!("lower ({lower}) must be less than upper ({upper})")),
             },
             StatusCode::BAD_REQUEST,
         );
@@ -174,16 +172,73 @@ async fn lorem_ipsum_count_handler(Path(count): Path<u32>, headers: HeaderMap) -
 
 // ── Router ──────────────────────────────────────────────────────────
 
-pub fn router() -> Router<Arc<Config>> {
+pub fn router(_state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/uuid", get(uuid_handler))
         .route("/guuid", get(guuid_handler))
         .route("/random", get(random_all_handler))
         .route("/random/int", get(random_int_handler))
-        .route("/random/int/:lower/:upper", get(random_int_range_handler))
+        .route("/random/int/{lower}/{upper}", get(random_int_range_handler))
         .route("/random/uint", get(random_uint_handler))
         .route("/random/lorem-ipsum", get(lorem_ipsum_handler))
-        .route("/random/lorem-ipsum/:count", get(lorem_ipsum_count_handler))
+        .route(
+            "/random/lorem-ipsum/{count}",
+            get(lorem_ipsum_count_handler),
+        )
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new("/uuid", &["GET"], category::INFO, "Random UUID v4")
+            .example(Example::get("UUID v4", "/uuid")),
+        Endpoint::new("/guuid", &["GET"], category::INFO, "Random braced GUID")
+            .example(Example::get("GUID", "/guuid")),
+        Endpoint::new(
+            "/random",
+            &["GET"],
+            category::INFO,
+            "Bundle of random values",
+        )
+        .example(Example::get("Random bundle", "/random")),
+        Endpoint::new(
+            "/random/int",
+            &["GET"],
+            category::INFO,
+            "Random signed integer",
+        )
+        .example(Example::get("Random int", "/random/int")),
+        Endpoint::new(
+            "/random/int/{lower}/{upper}",
+            &["GET"],
+            category::INFO,
+            "Random integer in [lower, upper]",
+        )
+        .example(Example::get("Random int 1..100", "/random/int/1/100")),
+        Endpoint::new(
+            "/random/uint",
+            &["GET"],
+            category::INFO,
+            "Random unsigned integer",
+        )
+        .example(Example::get("Random uint", "/random/uint")),
+        Endpoint::new(
+            "/random/lorem-ipsum",
+            &["GET"],
+            category::INFO,
+            "One paragraph of lorem ipsum",
+        )
+        .example(Example::get("Lorem Ipsum", "/random/lorem-ipsum")),
+        Endpoint::new(
+            "/random/lorem-ipsum/{count}",
+            &["GET"],
+            category::INFO,
+            "count paragraphs of lorem ipsum",
+        )
+        .example(Example::get(
+            "Lorem Ipsum (3 paragraphs)",
+            "/random/lorem-ipsum/3",
+        )),
+    ]
 }
 
 #[cfg(test)]
@@ -193,23 +248,8 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config() -> Arc<Config> {
-        Arc::new(Config {
-            http_port: 80,
-            https_port: 443,
-            host: "0.0.0.0".to_string(),
-            log_level: "info".to_string(),
-            trust_forward: false,
-            body_limit: 1_048_576,
-            instance_id: "test-instance".to_string(),
-            tls_cert: "certs/server.crt".to_string(),
-            tls_key: "certs/server.key".to_string(),
-            mtls_in_header: None,
-        })
-    }
-
     fn test_app() -> Router {
-        router().with_state(test_config())
+        crate::test_support::module_app(router)
     }
 
     fn get_req(uri: &str) -> Request<Body> {
