@@ -48,6 +48,26 @@ collection exports (`/export/*`). A test fails when they drift apart.
 | ANY | `/delay/{ms}` | Wait ms milliseconds, then respond (?jitter=true adds variance) |
 | GET | `/cache/{ttl}` | Cache-Control and ETag headers, 304 on If-None-Match |
 | GET | `/response-headers` | Query parameters become response headers |
+| GET | `/gzip` | gzip-compressed JSON echo (gzipped: true) |
+| GET | `/deflate` | deflate (zlib) compressed JSON echo (deflated: true) |
+| GET | `/brotli` | Brotli-compressed JSON echo (brotli: true) |
+| GET | `/zstd` | Zstandard-compressed JSON echo (zstd: true) |
+| GET | `/encoding/utf8` | UTF-8 sample page (many scripts, symbols, emoji) |
+| GET | `/range/{n}` | n bytes supporting Range requests (206, 416, ETag, If-Range) |
+| GET | `/bytes/{n}` | n random bytes (seed for deterministic output) |
+| GET | `/stream/{n}` | n JSON lines streamed (chunked) |
+| GET | `/stream-bytes/{n}` | n random bytes streamed in chunks |
+| GET | `/drip` | Drip bytes over a duration (slow body) |
+| GET | `/links/{n}` | Redirect to /links/{n}/0 |
+| GET | `/links/{n}/{offset}` | HTML page with n links (max 200) |
+| GET | `/base64/{value}` | Decode a base64 (standard or URL-safe) value |
+
+### Streaming (SSE)
+
+| Methods | Path | Description |
+|---|---|---|
+| GET | `/sse` | Numbered event stream with resume (Last-Event-ID) and heartbeats (SSE) |
+| GET POST | `/sse/chat` | Provider-neutral streamed chat text, one word per event, ending with [DONE] (SSE) |
 
 ### Redirects & Cookies
 
@@ -58,6 +78,8 @@ collection exports (`/export/*`). A test fails when they drift apart.
 | GET | `/cookies/set` | Set cookies from query parameters |
 | GET | `/cookies/set/{name}/{value}` | Set a single cookie |
 | GET | `/cookies/delete` | Delete the cookies named in the query string |
+| ANY | `/redirect-to` | Redirect to a relative path or this host only (no open redirect) |
+| GET | `/absolute-redirect/{n}` | Chain of n absolute 302 redirects on the same host (max 10) |
 
 ### Info & Random
 
@@ -139,6 +161,15 @@ collection exports (`/export/*`). A test fails when they drift apart.
 |---|---|---|
 | POST | `/ai/anthropic/v1/messages` | Messages API (native SSE event stream with stream=true) |
 
+### AI: Guardrails
+
+| Methods | Path | Description |
+|---|---|---|
+| POST | `/guardrails/azure/contentsafety/{operation}` | Azure AI Content Safety style text:analyze and text:shieldPrompt |
+| POST | `/guardrails/bedrock/guardrail/{id}/version/{version}/apply` | AWS Bedrock ApplyGuardrail style assessment (block, anonymize PII) |
+| POST | `/guardrails/check` | Generic guardrail check: flagged, categories, jailbreak, PII spans, redacted text |
+| POST | `/guardrails/pii/redact` | Redact emails, phone numbers, SSNs, credit cards (Luhn) and IPs |
+
 ### GraphQL
 
 | Methods | Path | Description |
@@ -155,6 +186,7 @@ collection exports (`/export/*`). A test fails when they drift apart.
 | POST | `/orchestration/step/3` | Step 3: validate (risk scoring) |
 | POST | `/orchestration/step/4` | Step 4: process (requires X-Validation-Result: approved) |
 | GET | `/orchestration/status` | Pipeline documentation |
+| POST | `/jsonrpc` | Generic JSON-RPC 2.0 endpoint (batches, notifications, standard errors) |
 
 ### SOAP / XML
 
@@ -180,6 +212,22 @@ collection exports (`/export/*`). A test fails when they drift apart.
 | ANY | `/flaky/recover/{n}` | Fail n times, then recover (circuit breaker half-open) |
 | POST | `/flaky/reset` | Reset all flaky counters (admin-guarded) |
 | GET | `/flaky/status` | Current flaky counters |
+
+### Request Bin & Webhooks
+
+| Methods | Path | Description |
+|---|---|---|
+| GET POST | `/bin` | Create a request bin (POST) or list your bins (GET) |
+| ANY | `/bin/{id}` | Capture a request into a bin (DELETE deletes the bin) |
+| ANY | `/bin/{id}/{*path}` | Capture a request sent to any sub path of a bin |
+| GET | `/bin/{id}/requests` | List the requests captured by a bin (newest first) |
+| GET | `/bin/{id}/requests/stream` | Live feed of a bin's captured requests (SSE) |
+| GET | `/bin/{id}/requests/{n}` | One captured request by sequence number |
+| GET | `/webhooks` | Webhook signature schemes and demo secrets |
+| POST | `/webhooks/verify` | Verify a Standard Webhooks signature and explain failures |
+| POST | `/webhooks/verify/{scheme}` | Verify a webhook signature: standard, github (X-Hub-Signature-256) or stripe (Stripe-Signature) |
+| GET POST | `/webhooks/sign` | Produce a signed example webhook (headers + body) for a secret |
+| POST | `/webhooks/receive/{secret_id}` | Webhook receiver with a demo secret: 204 when valid, 401 otherwise |
 
 ### Health & Identity
 

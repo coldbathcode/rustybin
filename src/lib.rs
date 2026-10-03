@@ -18,6 +18,7 @@ pub mod auth_mtls;
 pub mod catalog;
 pub mod cert_state;
 pub mod collections;
+pub mod compression;
 pub mod config;
 pub mod content_negotiation;
 pub mod control;
@@ -27,11 +28,13 @@ pub mod fault;
 pub mod flaky;
 pub mod graphql;
 pub mod grpc;
+pub mod guardrails;
 pub mod health;
 pub mod identity;
 pub mod image;
 pub mod info;
 pub mod inspector;
+pub mod jsonrpc;
 pub mod jwt_state;
 pub mod landing;
 pub mod logging;
@@ -40,13 +43,17 @@ pub mod openapi;
 pub mod orchestration;
 pub mod random;
 pub mod redirects;
+pub mod request_bin;
 pub mod response_shaping;
 pub mod server;
 pub mod session;
 pub mod soap;
+pub mod sse;
 pub mod state;
 pub mod status;
+pub mod transfer;
 pub mod types;
+pub mod webhooks;
 pub mod websocket;
 
 #[cfg(test)]
@@ -96,6 +103,13 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     websocket::router,
     identity::router,
     flaky::router,
+    request_bin::router,
+    sse::router,
+    webhooks::router,
+    guardrails::router,
+    compression::router,
+    transfer::router,
+    jsonrpc::router,
     collections::router,
     openapi::router,
     inspector::router,
