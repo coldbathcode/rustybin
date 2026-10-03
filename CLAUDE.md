@@ -12,6 +12,9 @@ cargo test                                   # unit + tests/integration.rs, a fe
 RUSTYBIN_UPDATE_README=1 cargo test readme_endpoints   # regenerate README endpoint tables
 cargo run -- --print-endpoints-markdown      # print them instead
 RUSTYBIN_HTTP_PORT=8080 cargo run
+docs/examples/run.sh                         # documentation examples (Hurl) against a fresh server
+mdbook build docs                            # documentation site
+python3 docs/tools/check_includes.py         # every docs include and example anchor resolves
 ```
 
 MSRV is Rust 1.86 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `msrv` job).
@@ -35,7 +38,7 @@ MSRV is Rust 1.86 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   (bound addresses, `shutdown()`, `wait()`). HTTP bind failure is fatal; HTTPS and gRPC failures only warn.
   Ports may be 0. Graceful shutdown on SIGTERM/SIGINT with a 10 s grace period.
 - `src/config.rs`: `Config` from `RUSTYBIN_*` env vars (invalid values warn and default), `Config::for_tests()`.
-- `src/state.rs`: `AppState { config, jwt, certs, identity, inspector }`, `FromRef` for each part
+- `src/state.rs`: `AppState { config, jwt, certs, identity, inspector, health }`, `FromRef` for each part
   (handlers can keep extracting `State<Arc<Config>>`).
 - `src/catalog.rs`: route catalogue, the single source of truth (landing page, `/export/*`, README tables)
   plus the consistency tests.
@@ -66,6 +69,8 @@ MSRV is Rust 1.86 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
    `MODULE_PATHS` (and `MODULE_COMPONENTS`) in `src/openapi.rs`. New categories go in `catalog::category`
    and `CATEGORY_ORDER`.
 3. Regenerate the README tables (`RUSTYBIN_UPDATE_README=1 cargo test readme_endpoints`).
+4. Document it in `docs/src/` (mdBook) with every request example as a Hurl file under
+   `docs/examples/<area>/`, included with anchors and run by `docs/examples/run.sh`.
 
 The catalogue tests fail when a `.route("...")` literal is missing from the catalogue, a catalogue path is
 missing from the OpenAPI spec (or lacks a method), or an example returns 404/405 against the full app.

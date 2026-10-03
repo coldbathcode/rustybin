@@ -13,9 +13,9 @@ use crate::types::ErrorResponse;
 
 // ── /redirect/:n ─────────────────────────────────────────────────────
 //
-// Only relative, same-origin redirect chains are supported. The open
-// `/redirect-to?url=` and `/absolute-redirect` variants were removed because
-// they are open-redirect / SSRF vectors when the service is publicly hosted.
+// Relative redirect chains. The same-host-only `/redirect-to?url=` and
+// `/absolute-redirect/{n}` live in `crate::transfer`; neither can be used as
+// an open redirect.
 
 async fn redirect_handler(Path(n): Path<String>, uri: Uri, headers: HeaderMap) -> Response {
     let n_val: u32 = match n.parse() {

@@ -1,7 +1,7 @@
 # fly.toml - deploy Rustybin to Fly.io
 #
-# Build uses the repo Dockerfile (HTTP :80, HTTPS :443, gRPC :50051; the
-# entrypoint generates demo TLS certs on first boot).
+# Build uses the repo Dockerfile (HTTP :80, HTTPS :443, gRPC :50051; Rustybin
+# generates its demo TLS certificates on first boot).
 #
 # Networking model:
 #   * Web surface (HTTP/HTTPS/WebSocket): Fly terminates TLS at the edge and

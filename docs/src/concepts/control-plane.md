@@ -51,7 +51,8 @@ captured by the inspector and ignore the fault injection headers.
 | `GET /_rustybin/config` | Effective configuration, without secrets |
 | `GET /_rustybin/version` | Name, version, MSRV and build profile |
 | `GET, DELETE /_rustybin/requests`, `GET /_rustybin/requests/{id}`, `GET /_rustybin/requests/stream` | The [request inspector](inspector.md) |
-| `GET /_rustybin/catalog` | The route catalogue as JSON, for the [web console](../console.md) <!-- TODO(console): verify against ui/ after merge --> |
+| `GET /_rustybin/catalog` | The route catalogue as JSON (the [web console](../console.md)'s API explorer) |
+| `GET /_rustybin/status` | Uptime, health, public mode, inspector counters and ports (the console's overview) |
 
 ```hurl
 {{#include ../../examples/concepts/control.hurl:config}}

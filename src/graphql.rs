@@ -1435,7 +1435,7 @@ pub fn catalog() -> Vec<Endpoint> {
             "GraphQL over HTTP (POST or GET ?query=; GraphiQL for browsers)",
         )
         .description(
-            "Honours operationName, application/graphql-response+json (spec status codes), \
+            "Honours operationName, application/graphql-response+json or */* (spec status codes), \
              automatic persisted queries (extensions.persistedQuery), depth limit 10, \
              complexity limit 500 and 30 aliases. GET cannot run mutations (405).",
         )

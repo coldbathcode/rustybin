@@ -1,0 +1,10 @@
+# Pinned client SDKs for the conformance suites (conformance/*/run.sh, CI).
+# Python 3.11+. Install: python -m pip install -r conformance/requirements.txt
+openai==3.24.0
+anthropic==1.11.0
+google-genai==2.28.0
+mcp==2.3.0
+a2a-sdk==1.2.1
+httpx==0.28.1
+httpx2==2.13.1
+pydantic==2.13.5

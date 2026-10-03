@@ -10,7 +10,7 @@ user-facing is generated from it:
 | Landing page with a runnable example per endpoint | `GET /` |
 | Collection exports (Postman, Insomnia, Bruno, curl, `.http`, Hurl, k6, HAR) | `GET /export/*`, see [Collection exports](../exports.md) |
 | Endpoint tables in `README.md` | `cargo run -- --print-endpoints-markdown` |
-| The web console's endpoint list | `GET /_rustybin/catalog` (see [Web console](../console.md)) <!-- TODO(console): verify against ui/ after merge --> |
+| The web console's API explorer | `GET /_rustybin/catalog` (see [Web console](../console.md)) |
 
 The OpenAPI document (`/openapi.json`, `/openapi.yaml`, rendered at `/docs`) is
 assembled from per-module fragments, and tests keep it aligned with the catalogue.

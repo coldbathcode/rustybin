@@ -26,6 +26,11 @@ curl -s http://localhost:8080/anything -H 'Content-Type: application/json' \
   -d '{"message": "hello", "number": 42}'
 ```
 
+Shell examples (gRPC, WebSocket, TLS client certificates, never-ending feeds) use
+variables for the target: `$BASE` (for example `http://localhost:8080`), `$HTTP` and
+`$HTTPS` (`https://localhost:8443`), `$WS` (`ws://localhost:8080`) and `$GRPC`
+(`localhost:50051`).
+
 ## Running them
 
 ```bash

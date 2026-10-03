@@ -703,7 +703,7 @@ pub fn catalog() -> Vec<Endpoint> {
         .example(
             Example::post("Step 3: Validate", "/orchestration/step/3")
                 .header("X-Correlation-Id", "<from-step-1>")
-                .json(r#"{"merchant_id":"merchant_123","amount":99.99,"currency":"USD"}"#),
+                .json(r#"{"merchant_id":"merchant_123","amount":99.99,"currency":"USD","risk_score":35}"#),
         ),
         Endpoint::new(
             "/orchestration/step/4",
