@@ -1,7 +1,7 @@
 //! Transport-independent request handling: the per-request context, method
 //! dispatch, capabilities, pagination and result post-processing.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use axum::http::HeaderMap;
@@ -200,8 +200,12 @@ pub fn instructions(profile: &Profile) -> String {
 
 /// Modern results carry `resultType` and `_meta.serverInfo`; legacy results
 /// are returned as built.
-pub fn finalize(ctx: &CallCtx, mut result: Value) -> Value {
-    if !ctx.version.is_modern() {
+pub fn finalize(ctx: &CallCtx, result: Value) -> Value {
+    finalize_for(&ctx.profile, ctx.version, result)
+}
+
+fn finalize_for(profile: &Profile, version: Version, mut result: Value) -> Value {
+    if !version.is_modern() {
         return result;
     }
     if let Some(obj) = result.as_object_mut() {
@@ -210,7 +214,7 @@ pub fn finalize(ctx: &CallCtx, mut result: Value) -> Value {
         if let Some(meta) = meta.as_object_mut() {
             meta.insert(
                 protocol::META_SERVER_INFO.into(),
-                server_info(&ctx.profile, ctx.version),
+                server_info(profile, version),
             );
         }
     }
@@ -218,12 +222,149 @@ pub fn finalize(ctx: &CallCtx, mut result: Value) -> Value {
 }
 
 /// Add the CacheableResult fields (modern era only).
-pub fn cacheable(ctx: &CallCtx, mut result: Value, ttl_ms: u64, scope: &str) -> Value {
-    if ctx.version.is_modern() {
+pub fn cacheable(ctx: &CallCtx, result: Value, ttl_ms: u64, scope: &str) -> Value {
+    cacheable_for(ctx.version, result, ttl_ms, scope)
+}
+
+fn cacheable_for(version: Version, mut result: Value, ttl_ms: u64, scope: &str) -> Value {
+    if version.is_modern() {
         result["ttlMs"] = json!(ttl_ms);
         result["cacheScope"] = json!(scope);
     }
     result
+}
+
+/// The list methods whose result depends only on the profile, the protocol
+/// version and the requested page (never on the caller).
+const STATIC_LISTS: [&str; 4] = [
+    "tools/list",
+    "resources/list",
+    "resources/templates/list",
+    "prompts/list",
+];
+
+/// Rendered complete results of the static list methods.
+///
+/// `tools/list` used to rebuild every tool schema with `json!` (hundreds of
+/// small allocations), serialize the ~11 KB tree and free it again on every
+/// request: about 10x the cost of other MCP methods. The unpaginated result
+/// is now rendered once per (profile, method, protocol version) and spliced
+/// into the JSON-RPC envelope ([`protocol::result_response_json`]), so the
+/// bytes on the wire are unchanged. Bounded: 4 methods x 5 versions per profile.
+#[derive(Debug, Default)]
+pub struct ListCache {
+    slots: [[OnceLock<Option<RenderedList>>; Version::ALL.len()]; STATIC_LISTS.len()],
+}
+
+#[derive(Debug)]
+struct RenderedList {
+    /// Number of items in the complete list (smaller pages take the normal path).
+    total: usize,
+    /// The serialized, finalized result object.
+    json: Arc<str>,
+}
+
+/// The rendered result of a static list method asked for its first page
+/// when that page holds the whole list; `None` otherwise (the caller then
+/// dispatches normally).
+pub fn cached_list(ctx: &CallCtx, method: &str, params: &Value) -> Option<Arc<str>> {
+    let m = STATIC_LISTS.iter().position(|x| *x == method)?;
+    if !matches!(params.get("cursor"), None | Some(Value::Null)) {
+        return None;
+    }
+    let v = Version::ALL.iter().position(|x| *x == ctx.version)?;
+    let cache = ctx.shared.list_cache.get(&ctx.profile.key)?;
+    let rendered = cache.slots[m][v].get_or_init(|| {
+        let no_params = Value::Object(Map::new());
+        let (result, total) =
+            list_method(&ctx.profile, ctx.version, method, &no_params, usize::MAX)?.ok()?;
+        let result = finalize_for(&ctx.profile, ctx.version, result);
+        let json = serde_json::to_string(&result).ok()?;
+        Some(RenderedList {
+            total,
+            json: json.into(),
+        })
+    });
+    rendered
+        .as_ref()
+        .filter(|r| r.total <= ctx.page_size)
+        .map(|r| r.json.clone())
+}
+
+/// One page of a static list method (before [`finalize`]) and the total item
+/// count; `None` when `method` is not a static list method.
+fn list_method(
+    profile: &Profile,
+    version: Version,
+    method: &str,
+    params: &Value,
+    page_size: usize,
+) -> Option<Result<(Value, usize), RpcError>> {
+    fn build<T: Clone>(
+        all: &[T],
+        params: &Value,
+        page_size: usize,
+        kind: &str,
+        key: &str,
+        render: impl Fn(&T) -> Value,
+    ) -> Result<(Value, usize), RpcError> {
+        let (page, next) = paginate(all, params, page_size, kind)?;
+        let items: Vec<Value> = page.iter().map(render).collect();
+        let mut r = Map::new();
+        r.insert(key.into(), Value::Array(items));
+        if let Some(next) = next {
+            r.insert("nextCursor".into(), json!(next));
+        }
+        Ok((Value::Object(r), all.len()))
+    }
+    let (built, ttl_ms) = match method {
+        "tools/list" => {
+            let all = tools::list(profile);
+            let render = |t: &&tools::ToolDef| tools::tool_json(t, version);
+            (
+                build(&all, params, page_size, "tools", "tools", render),
+                300_000,
+            )
+        }
+        "resources/list" => {
+            let all = resources::list(profile);
+            (
+                build(
+                    &all,
+                    params,
+                    page_size,
+                    "resources",
+                    "resources",
+                    Value::clone,
+                ),
+                60_000,
+            )
+        }
+        "resources/templates/list" => {
+            let all = resources::templates(profile);
+            let built = build(
+                &all,
+                params,
+                page_size,
+                "templates",
+                "resourceTemplates",
+                Value::clone,
+            );
+            (built, 300_000)
+        }
+        "prompts/list" => {
+            let all = prompts::list(profile);
+            if all.is_empty() {
+                return Some(Err(RpcError::method_not_found(method)));
+            }
+            (
+                build(&all, params, page_size, "prompts", "prompts", Value::clone),
+                300_000,
+            )
+        }
+        _ => return None,
+    };
+    Some(built.map(|(r, total)| (cacheable_for(version, r, ttl_ms, "public"), total)))
 }
 
 /// Cursor pagination over a list (opaque base64url cursor).
@@ -261,6 +402,9 @@ pub fn paginate<T: Clone>(
 /// Dispatch one request method. `initialize` is handled by the transports
 /// (it creates the session). Errors are JSON-RPC errors.
 pub async fn dispatch(ctx: &CallCtx, method: &str, params: &Value) -> Result<Value, RpcError> {
+    if let Some(built) = list_method(&ctx.profile, ctx.version, method, params, ctx.page_size) {
+        return built.map(|(result, _)| finalize(ctx, result));
+    }
     let modern = ctx.version.is_modern();
     let result = match method {
         "server/discover" if modern => json!({
@@ -271,38 +415,7 @@ pub async fn dispatch(ctx: &CallCtx, method: &str, params: &Value) -> Result<Val
             "cacheScope": "public",
         }),
         "ping" if !modern => json!({}),
-        "tools/list" => {
-            let all = tools::list(&ctx.profile);
-            let (page, next) = paginate(&all, params, ctx.page_size, "tools")?;
-            let tools: Vec<Value> = page
-                .iter()
-                .map(|t| tools::tool_json(t, ctx.version))
-                .collect();
-            let mut r = json!({ "tools": tools });
-            if let Some(next) = next {
-                r["nextCursor"] = json!(next);
-            }
-            cacheable(ctx, r, 300_000, "public")
-        }
         "tools/call" => tools::call(ctx, params).await?,
-        "resources/list" => {
-            let all = resources::list(&ctx.profile);
-            let (page, next) = paginate(&all, params, ctx.page_size, "resources")?;
-            let mut r = json!({ "resources": page });
-            if let Some(next) = next {
-                r["nextCursor"] = json!(next);
-            }
-            cacheable(ctx, r, 60_000, "public")
-        }
-        "resources/templates/list" => {
-            let all = resources::templates(&ctx.profile);
-            let (page, next) = paginate(&all, params, ctx.page_size, "templates")?;
-            let mut r = json!({ "resourceTemplates": page });
-            if let Some(next) = next {
-                r["nextCursor"] = json!(next);
-            }
-            cacheable(ctx, r, 300_000, "public")
-        }
         "resources/read" => resources::read(ctx, params)?,
         "resources/subscribe" | "resources/unsubscribe" if !modern => {
             let uri = params
@@ -326,18 +439,6 @@ pub async fn dispatch(ctx: &CallCtx, method: &str, params: &Value) -> Result<Val
                 st.subscriptions.remove(uri);
             }
             json!({})
-        }
-        "prompts/list" => {
-            let all = prompts::list(&ctx.profile);
-            if all.is_empty() {
-                return Err(RpcError::method_not_found(method));
-            }
-            let (page, next) = paginate(&all, params, ctx.page_size, "prompts")?;
-            let mut r = json!({ "prompts": page });
-            if let Some(next) = next {
-                r["nextCursor"] = json!(next);
-            }
-            cacheable(ctx, r, 300_000, "public")
         }
         "prompts/get" => prompts::get(ctx, params)?,
         "completion/complete" if ctx.version.has_annotations() => complete(ctx, params)?,

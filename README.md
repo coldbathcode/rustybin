@@ -118,6 +118,10 @@ to the default. `GET /_rustybin/config` shows the effective configuration. Detai
 | `RUSTYBIN_ADMIN_TOKEN` | unset | Required (Bearer or `X-Rustybin-Admin-Token`) for health toggles, global flaky reset and clearing all captured requests |
 | `RUSTYBIN_CORS_ORIGINS` | `*` | Allowed CORS origins, comma separated; `off` disables Rustybin's CORS |
 | `RUSTYBIN_INSPECTOR_CAPACITY` | `500` | Requests kept by the inspector (max 10000) |
+| `RUSTYBIN_PLAN` | `none` | Plan limits preset: `none` (no limits, no headers), `free`, `pro`, `team`, `enterprise` ([plans and limits](docs/src/concepts/plans-and-limits.md)) |
+| `RUSTYBIN_LIMIT_RPS` / `_BURST` / `_CONCURRENCY` / `_STREAMS` / `_STREAM_SECS` | plan | Override one dimension of the plan; `0` or `unlimited` turns it off |
+| `RUSTYBIN_LIMIT_REQUESTS` / `_EGRESS_MB` / `_PERIOD` / `_SCOPE` | plan | Request and egress quota per `day` or `month` (UTC), counted per `instance` or `session` |
+| `RUSTYBIN_USAGE_FILE` | unset | JSON file the instance quota counters are saved to (every 30 s and on shutdown) and restored from |
 | `RUSTYBIN_MCP_API_KEY` | unset | Exact `X-API-Key` for `/mcp/apikey` (unset: any non-empty key) |
 | `RUSTYBIN_MCP_ALLOWED_ORIGINS` | `*` | `Origin` values accepted by the MCP endpoints |
 | `RUSTYBIN_MCP_ACCEPTED_AUDIENCES` | `rustybin` | Extra token audiences for `/mcp/protected`; `none` = strict |
@@ -447,6 +451,7 @@ gRPC `EchoService` listens on its own port (default `50051`), see
 | GET | `/_rustybin/requests/{id}` | One captured request by id |
 | GET | `/_rustybin/config` | Effective configuration (no secrets) |
 | GET | `/_rustybin/version` | Service name and version |
+| GET | `/_rustybin/usage` | Plan, limits and current usage (requests, egress, in flight, streams) |
 | GET | `/_rustybin/catalog` | Route catalogue as JSON (paths, methods, categories, examples) |
 | GET | `/_rustybin/status` | Uptime, health state and inspector counters |
 

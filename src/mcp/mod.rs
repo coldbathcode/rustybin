@@ -244,6 +244,8 @@ pub struct Shared {
     /// HMAC key for multi round-trip `requestState` (per process).
     pub state_key: [u8; 32],
     pub profiles: HashMap<String, Arc<Profile>>,
+    /// Rendered list results per profile key (see [`core::ListCache`]).
+    pub list_cache: HashMap<String, core::ListCache>,
 }
 
 impl Shared {
@@ -251,12 +253,15 @@ impl Shared {
         let mut state_key = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut state_key);
         let mut profiles = HashMap::new();
+        let mut list_cache = HashMap::new();
         let mut all = vec![Profile::open(), Profile::protected(), Profile::apikey()];
         all.extend(NAMED_SERVERS.iter().filter_map(|n| Profile::named(n)));
         for p in all {
+            list_cache.insert(p.key.clone(), core::ListCache::default());
             profiles.insert(p.key.clone(), Arc::new(p));
         }
         Self {
+            list_cache,
             sessions: sessions::SessionStore::new(cfg.max_sessions, cfg.session_ttl),
             cfg,
             state_key,

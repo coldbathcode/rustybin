@@ -6,7 +6,11 @@
 
 use std::env;
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::PathBuf;
+use std::time::Duration;
 use uuid::Uuid;
+
+use crate::limits::{LimitsConfig, Period, Plan, Scope};
 
 /// Maximum delay a client may request via `X-Rustybin-Delay` (normal mode).
 pub const MAX_DELAY_MS: u64 = 30_000;
@@ -52,6 +56,9 @@ pub struct Config {
     pub request_timeout_secs: u64,
     /// Number of requests kept by the inspector ring buffer (`RUSTYBIN_INSPECTOR_CAPACITY`, default 500).
     pub inspector_capacity: usize,
+    /// Plan limits (`RUSTYBIN_PLAN`, `RUSTYBIN_LIMIT_*`, `RUSTYBIN_USAGE_FILE`).
+    /// The default (plan `none`, no overrides) enforces nothing.
+    pub limits: LimitsConfig,
 }
 
 impl Config {
@@ -139,6 +146,7 @@ impl Config {
             cors_allow_origins,
             request_timeout_secs: parse_or(&get, "RUSTYBIN_REQUEST_TIMEOUT", 120, &mut warnings),
             inspector_capacity: parse_or(&get, "RUSTYBIN_INSPECTOR_CAPACITY", 500, &mut warnings),
+            limits: parse_limits(&get, &mut warnings),
         };
         (config, warnings)
     }
@@ -165,6 +173,7 @@ impl Config {
             cors_allow_origins: vec!["*".to_string()],
             request_timeout_secs: 120,
             inspector_capacity: 500,
+            limits: LimitsConfig::default(),
         }
     }
 
@@ -197,8 +206,107 @@ impl Config {
             "request_timeout_secs": self.request_timeout_secs,
             "inspector_capacity": self.inspector_capacity,
             "max_delay_ms": self.max_delay_ms(),
+            "plan": self.limits.plan_name(),
+            "limits": self.limits.public_view(),
         })
     }
+}
+
+/// `RUSTYBIN_PLAN` preset plus the `RUSTYBIN_LIMIT_*` overrides.
+fn parse_limits<G>(get: &G, warnings: &mut Vec<String>) -> LimitsConfig
+where
+    G: Fn(&str) -> Option<String>,
+{
+    let plan = match get("RUSTYBIN_PLAN") {
+        None => Plan::None,
+        Some(raw) => Plan::parse(&raw).unwrap_or_else(|| {
+            warnings.push(format!(
+                "invalid RUSTYBIN_PLAN {raw:?} (expected none, free, pro, team or enterprise), using none"
+            ));
+            Plan::None
+        }),
+    };
+    let mut cfg = LimitsConfig::preset(plan);
+    let mut overridden = false;
+    let mut limit = |key: &str, slot: &mut u64, warnings: &mut Vec<String>| {
+        if let Some(raw) = get(key) {
+            match parse_limit_value(&raw) {
+                Some(v) => {
+                    *slot = v;
+                    overridden = true;
+                }
+                None => warnings.push(format!(
+                    "invalid {key} {raw:?} (expected a whole number, 0 or unlimited), keeping the plan value"
+                )),
+            }
+        }
+    };
+    limit("RUSTYBIN_LIMIT_RPS", &mut cfg.rps, warnings);
+    limit("RUSTYBIN_LIMIT_BURST", &mut cfg.burst, warnings);
+    limit("RUSTYBIN_LIMIT_CONCURRENCY", &mut cfg.concurrency, warnings);
+    limit("RUSTYBIN_LIMIT_STREAMS", &mut cfg.streams, warnings);
+    limit("RUSTYBIN_LIMIT_REQUESTS", &mut cfg.requests, warnings);
+    let mut stream_secs = cfg.stream_lifetime.as_secs();
+    limit("RUSTYBIN_LIMIT_STREAM_SECS", &mut stream_secs, warnings);
+    cfg.stream_lifetime = Duration::from_secs(stream_secs);
+    if let Some(raw) = get("RUSTYBIN_LIMIT_EGRESS_MB") {
+        match parse_egress_mb(&raw) {
+            Some(bytes) => {
+                cfg.egress_bytes = bytes;
+                overridden = true;
+            }
+            None => warnings.push(format!(
+                "invalid RUSTYBIN_LIMIT_EGRESS_MB {raw:?} (expected megabytes such as 500 or 0.5, 0 or unlimited), keeping the plan value"
+            )),
+        }
+    }
+    if let Some(raw) = get("RUSTYBIN_LIMIT_PERIOD") {
+        match Period::parse(&raw) {
+            Some(p) => {
+                cfg.period = p;
+                overridden = true;
+            }
+            None => warnings.push(format!(
+                "invalid RUSTYBIN_LIMIT_PERIOD {raw:?} (expected day or month), keeping the plan value"
+            )),
+        }
+    }
+    if let Some(raw) = get("RUSTYBIN_LIMIT_SCOPE") {
+        match Scope::parse(&raw) {
+            Some(s) => {
+                cfg.scope = s;
+                overridden = true;
+            }
+            None => warnings.push(format!(
+                "invalid RUSTYBIN_LIMIT_SCOPE {raw:?} (expected instance or session), keeping the plan value"
+            )),
+        }
+    }
+    cfg.overridden = overridden;
+    cfg.usage_file = get("RUSTYBIN_USAGE_FILE").map(PathBuf::from);
+    cfg
+}
+
+/// A limit value: a whole number, `0`, `off` or `unlimited` (0 = no limit).
+fn parse_limit_value(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    if raw.eq_ignore_ascii_case("unlimited") || raw.eq_ignore_ascii_case("off") {
+        return Some(0);
+    }
+    raw.replace('_', "").parse::<u64>().ok()
+}
+
+/// Megabytes (decimal, 1 MB = 1,000,000 bytes; fractions allowed) to bytes.
+fn parse_egress_mb(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    if raw.eq_ignore_ascii_case("unlimited") || raw.eq_ignore_ascii_case("off") {
+        return Some(0);
+    }
+    let mb = raw.replace('_', "").parse::<f64>().ok()?;
+    if !(0.0..=1.0e12).contains(&mb) {
+        return None;
+    }
+    Some((mb * 1_000_000.0).round() as u64)
 }
 
 fn parse_or<T, G>(get: &G, key: &str, default: T, warnings: &mut Vec<String>) -> T
@@ -299,6 +407,58 @@ mod tests {
         );
         let (c, _) = load(&[("RUSTYBIN_CORS_ORIGINS", "off")]);
         assert!(c.cors_allow_origins.is_empty());
+    }
+
+    #[test]
+    fn plan_presets_and_overrides() {
+        let (c, w) = load(&[]);
+        assert!(w.is_empty());
+        assert_eq!(c.limits.plan, Plan::None);
+        assert!(!c.limits.active());
+
+        let (c, w) = load(&[("RUSTYBIN_PLAN", "Free")]);
+        assert!(w.is_empty());
+        assert_eq!(c.limits.plan, Plan::Free);
+        assert_eq!(c.limits.scope, Scope::Session);
+        assert_eq!(c.limits.period, Period::Day);
+        assert_eq!((c.limits.rps, c.limits.burst), (5, 20));
+        assert_eq!(c.limits.requests, 10_000);
+        assert_eq!(c.limits.egress_bytes, 1_000_000_000);
+        assert_eq!(c.limits.stream_lifetime, Duration::from_secs(300));
+
+        let (c, w) = load(&[
+            ("RUSTYBIN_PLAN", "pro"),
+            ("RUSTYBIN_LIMIT_RPS", "1000000"),
+            ("RUSTYBIN_LIMIT_BURST", "unlimited"),
+            ("RUSTYBIN_LIMIT_EGRESS_MB", "0.5"),
+            ("RUSTYBIN_LIMIT_PERIOD", "day"),
+            ("RUSTYBIN_LIMIT_SCOPE", "session"),
+            ("RUSTYBIN_LIMIT_STREAM_SECS", "0"),
+            ("RUSTYBIN_USAGE_FILE", "/data/usage.json"),
+        ]);
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(c.limits.rps, 1_000_000);
+        assert_eq!(c.limits.burst, 0);
+        assert_eq!(c.limits.egress_bytes, 500_000);
+        assert_eq!(c.limits.period, Period::Day);
+        assert_eq!(c.limits.scope, Scope::Session);
+        assert_eq!(c.limits.stream_lifetime, Duration::ZERO);
+        assert_eq!(c.limits.requests, 1_000_000);
+        assert!(c.limits.usage_file.is_some());
+
+        // Overrides without a plan: active, reported as "custom".
+        let (c, _) = load(&[("RUSTYBIN_LIMIT_RPS", "10")]);
+        assert!(c.limits.active());
+        assert_eq!(c.limits.plan_name(), "custom");
+
+        let (c, w) = load(&[
+            ("RUSTYBIN_PLAN", "platinum"),
+            ("RUSTYBIN_LIMIT_RPS", "fast"),
+            ("RUSTYBIN_LIMIT_PERIOD", "week"),
+        ]);
+        assert_eq!(c.limits.plan, Plan::None);
+        assert_eq!(w.len(), 3);
+        assert!(!c.limits.active());
     }
 
     #[test]

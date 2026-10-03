@@ -40,7 +40,9 @@ docs/examples/run.sh ai/openai.hurl        # one file (paths relative to docs/ex
 
 `run.sh` builds Rustybin (or uses `RUSTYBIN_BIN`), starts a fresh instance on ports
 18800 (HTTP), 18801 (HTTPS) and 18802 (gRPC), runs the files and stops the server.
-The instance uses these settings, which some examples rely on:
+A second instance on port 18803 (Hurl variable `plan_url`) runs the free plan with
+tiny overrides for the [plan limit](concepts/plans-and-limits.md) examples. The
+main instance uses these settings, which some examples rely on:
 
 | Setting | Value | Why |
 |---|---|---|
@@ -51,7 +53,7 @@ The instance uses these settings, which some examples rely on:
 
 Requirements: `hurl` and `curl`; `grpcurl`, `websocat` and `jq` for the shell
 examples (skipped with a notice when missing, or a failure with
-`REQUIRE_ALL_TOOLS=1`, which CI sets). Set `RUSTYBIN_DOCS_PORT` to move the three
+`REQUIRE_ALL_TOOLS=1`, which CI sets). Set `RUSTYBIN_DOCS_PORT` to move the four
 ports.
 
 To run a single Hurl file against your own instance:

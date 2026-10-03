@@ -32,6 +32,7 @@ pub struct RunningServer {
     shutdown: Arc<watch::Sender<bool>>,
     http_task: JoinHandle<std::io::Result<()>>,
     optional_tasks: Vec<(&'static str, JoinHandle<()>)>,
+    limits: Arc<crate::limits::Limiter>,
 }
 
 /// Cloneable trigger for a graceful shutdown.
@@ -92,6 +93,8 @@ impl RunningServer {
                 task.abort();
             }
         }
+        // Final usage file write, after in-flight responses were counted.
+        self.limits.save();
         let shutting_down = *self.shutdown.borrow();
         match http_result {
             Ok(Ok(())) if shutting_down => {
@@ -142,10 +145,11 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
     let http_addr = http_listener.local_addr()?;
 
     tracing::info!(
-        "rustybin v{} starting | instance={} | public_mode={}",
+        "rustybin v{} starting | instance={} | public_mode={} | plan={}",
         env!("CARGO_PKG_VERSION"),
         config.instance_id,
         config.public_mode,
+        config.limits.plan_name(),
     );
 
     let http_task = {
@@ -168,6 +172,15 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
     };
 
     let mut optional_tasks = Vec::new();
+
+    // Plan usage persistence (RUSTYBIN_USAGE_FILE); returns at once when off.
+    let persist = tokio::spawn(
+        state
+            .limits
+            .clone()
+            .persist_loop(wait_for(shutdown.subscribe())),
+    );
+    optional_tasks.push(("usage persistence", persist));
 
     // HTTPS: optional.
     let https_addr = match start_https(&state, app, shutdown.subscribe()) {
@@ -209,6 +222,7 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
         shutdown,
         http_task,
         optional_tasks,
+        limits: state.limits.clone(),
     })
 }
 

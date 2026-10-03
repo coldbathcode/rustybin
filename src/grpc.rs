@@ -268,6 +268,8 @@ async fn follow_health(state: AppState, mut reporter: tonic_health::server::Heal
 
 /// Serve every gRPC service on an already-bound listener until `shutdown`
 /// resolves.
+// The plan limit interceptor returns `tonic::Status` (large) by API design.
+#[allow(clippy::result_large_err)]
 pub async fn serve<F>(
     listener: tokio::net::TcpListener,
     state: AppState,
@@ -305,13 +307,16 @@ where
         "gRPC listening on {addr} (EchoService, health, reflection v1/v1alpha, grpc-web)"
     );
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let limits = state.limits.clone();
     let result = Server::builder()
         .accept_http1(true)
         .layer(cors)
         .layer(tonic_web::GrpcWebLayer::new())
-        .add_service(EchoServiceServer::new(EchoSvc::new(
-            state.config.instance_id.clone(),
-        )))
+        .add_service(EchoServiceServer::with_interceptor(
+            EchoSvc::new(state.config.instance_id.clone()),
+            // Plan limits (rate and request quota); health and reflection are exempt.
+            move |req: Request<()>| limits.check_grpc(&req).map(|()| req),
+        ))
         .add_service(health_service)
         .add_service(reflection_v1)
         .add_service(reflection_v1alpha)

@@ -236,6 +236,21 @@ pub fn result_response(id: &Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
 
+/// [`result_response`] serialized, around an already serialized result.
+/// The bytes equal `serde_json::to_string(&result_response(id, result))`:
+/// object keys serialize in sorted order (`id`, `jsonrpc`, `result`), which
+/// the `rendered_envelope_matches_serde` test pins.
+pub fn result_response_json(id: &Value, result_json: &str) -> String {
+    let id = serde_json::to_string(id).unwrap_or_else(|_| "null".to_string());
+    let mut out = String::with_capacity(result_json.len() + id.len() + 40);
+    out.push_str("{\"id\":");
+    out.push_str(&id);
+    out.push_str(",\"jsonrpc\":\"2.0\",\"result\":");
+    out.push_str(result_json);
+    out.push('}');
+    out
+}
+
 /// `{"jsonrpc":"2.0","id":..|null,"error":{..}}`
 pub fn error_response(id: Option<&Value>, err: &RpcError) -> Value {
     json!({ "jsonrpc": "2.0", "id": id.cloned().unwrap_or(Value::Null), "error": err.to_json() })
@@ -386,6 +401,18 @@ pub fn progress_token(params: &Value) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rendered_envelope_matches_serde() {
+        let result = json!({ "tools": [{ "name": "a\"b", "n": 1 }], "_meta": {} });
+        let rendered = serde_json::to_string(&result).expect("result");
+        for id in [json!(1), json!("req-\"x\u{e9}"), json!(-7.5), Value::Null] {
+            assert_eq!(
+                result_response_json(&id, &rendered),
+                serde_json::to_string(&result_response(&id, result.clone())).expect("envelope")
+            );
+        }
+    }
 
     #[test]
     fn classify_messages() {

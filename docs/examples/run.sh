@@ -10,7 +10,8 @@
 #
 # Environment:
 #   RUSTYBIN_BIN        use this binary instead of `cargo build` + target/debug/rustybin
-#   RUSTYBIN_DOCS_PORT  first of the three ports (default 18800: HTTP, +1 HTTPS, +2 gRPC)
+#   RUSTYBIN_DOCS_PORT  first of the ports (default 18800: HTTP, +1 HTTPS, +2 gRPC,
+#                       +3 HTTP of a second instance with plan limits)
 #   REQUIRE_ALL_TOOLS=1 fail instead of skipping when grpcurl / websocat / jq are missing (CI)
 set -euo pipefail
 
@@ -19,6 +20,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 PORT="${RUSTYBIN_DOCS_PORT:-18800}"
 HTTPS_PORT=$((PORT + 1))
 GRPC_PORT=$((PORT + 2))
+PLAN_PORT=$((PORT + 3))
 ADMIN_TOKEN="docs-admin-token"
 
 if ! command -v hurl >/dev/null 2>&1; then
@@ -50,16 +52,43 @@ cp "$RUSTYBIN_BIN" "$TMP/rustybin-docs-examples"
   RUSTYBIN_TLS_KEY="$TMP/server.key" \
   "$TMP/rustybin-docs-examples") &
 SERVER=$!
-trap 'kill "$SERVER" 2>/dev/null || true; wait "$SERVER" 2>/dev/null || true; rm -rf "$TMP"' EXIT
+# A second instance with the free plan and tiny overrides, so the plan limit
+# examples (docs/src/concepts/plans-and-limits.md) reach a 429 in a few
+# requests. HTTPS and gRPC use ephemeral ports.
+mkdir -p "$TMP/plan"
+(cd "$TMP/plan" && exec env \
+  RUSTYBIN_HTTP_PORT="$PLAN_PORT" \
+  RUSTYBIN_HTTPS_PORT=0 \
+  RUSTYBIN_GRPC_PORT=0 \
+  RUSTYBIN_HOST=127.0.0.1 \
+  RUSTYBIN_LOG_LEVEL=warn \
+  RUSTYBIN_INSTANCE_ID=docs-plan \
+  RUSTYBIN_ADMIN_TOKEN="$ADMIN_TOKEN" \
+  RUSTYBIN_TLS_CERT="$TMP/plan/server.crt" \
+  RUSTYBIN_TLS_KEY="$TMP/plan/server.key" \
+  RUSTYBIN_PLAN=free \
+  RUSTYBIN_LIMIT_RPS=1 \
+  RUSTYBIN_LIMIT_BURST=5 \
+  RUSTYBIN_LIMIT_REQUESTS=7 \
+  RUSTYBIN_LIMIT_EGRESS_MB=0.15 \
+  RUSTYBIN_LIMIT_STREAMS=1 \
+  RUSTYBIN_LIMIT_STREAM_SECS=2 \
+  "$TMP/rustybin-docs-examples") &
+PLAN_SERVER=$!
+trap 'kill "$SERVER" "$PLAN_SERVER" 2>/dev/null || true; wait "$SERVER" "$PLAN_SERVER" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 
 BASE="http://127.0.0.1:$PORT"
-for _ in $(seq 1 100); do
-  curl -fs -o /dev/null "$BASE/" && break
-  sleep 0.1
+PLAN_BASE="http://127.0.0.1:$PLAN_PORT"
+for url in "$BASE" "$PLAN_BASE"; do
+  for _ in $(seq 1 100); do
+    curl -fs -o /dev/null "$url/" && break
+    sleep 0.1
+  done
+  curl -fs -o /dev/null "$url/" || { echo "server $url did not start" >&2; exit 1; }
 done
-curl -fs -o /dev/null "$BASE/" || { echo "server did not start" >&2; exit 1; }
 
 export BASE
+export PLAN_BASE
 export HTTPS_BASE="https://127.0.0.1:$HTTPS_PORT"
 export GRPC_ADDR="127.0.0.1:$GRPC_PORT"
 export ADMIN_TOKEN
@@ -85,6 +114,7 @@ if [[ ${#hurl_files[@]} -gt 0 ]]; then
   # One file at a time: a few examples flip instance-global state (/health).
   hurl --test --jobs 1 --color \
     --variable "base_url=$BASE" \
+    --variable "plan_url=$PLAN_BASE" \
     --variable "https_url=$HTTPS_BASE" \
     --variable "grpc_url=http://$GRPC_ADDR" \
     --variable "admin_token=$ADMIN_TOKEN" \

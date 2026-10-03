@@ -33,6 +33,53 @@ function baseUrls(cfg) {
   ];
 }
 
+// Decimal units, as the plan quotas are defined (1 GB = 1,000,000,000 bytes).
+function decimalBytes(n) {
+  const units = [['GB', 1e9], ['MB', 1e6], ['KB', 1e3]];
+  for (const [unit, size] of units) {
+    if (n >= size) return (n / size).toFixed(1).replace(/\.0$/, '') + ' ' + unit;
+  }
+  return n + ' B';
+}
+
+// One "used of limit" row of the plan card, with a meter when there is a limit.
+function usageRow(label, used, limit, fmt) {
+  const text = limit === null || limit === undefined
+    ? `${fmt(used)} (no limit)`
+    : `${fmt(used)} of ${fmt(limit)}`;
+  const pct = limit ? Math.min(100, (used / limit) * 100) : 0;
+  return h('div', { class: 'stack-sm plan-row' },
+    h('div', { class: 'row', style: { justifyContent: 'space-between', gap: '8px' } },
+      h('span', { class: 'small' }, label), h('span', { class: 'small mono' }, text)),
+    limit ? h('div', { class: 'progress', role: 'progressbar', 'aria-label': label, 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(Math.round(pct)) },
+      h('div', { style: { width: pct + '%', background: pct >= 90 ? 'var(--err)' : pct >= 70 ? 'var(--warn)' : '' } })) : null);
+}
+
+// "Plan and usage" card body from GET /_rustybin/usage (plan limits are on).
+function planBody(u) {
+  const count = (n) => Number(n || 0).toLocaleString();
+  const bytes = (n) => decimalBytes(Number(n || 0));
+  const rate = u.rate || {};
+  const flight = u.in_flight || {};
+  const streams = u.open_streams || {};
+  const period = u.period || {};
+  return h('div', { class: 'stack-sm' },
+    h('div', { class: 'row', style: { gap: '6px', flexWrap: 'wrap' } },
+      badge(u.plan + ' plan', 'info'),
+      badge(u.scope === 'session' ? 'per session' : 'per instance', ''),
+      u.persisted ? badge('usage persisted', 'ok') : null),
+    usageRow(`Requests this ${period.kind || 'period'}`, u.requests.used, u.requests.limit, count),
+    usageRow(`Egress this ${period.kind || 'period'}`, u.egress.used_bytes, u.egress.limit_bytes, bytes),
+    kvgrid([
+      ['Rate', rate.rps ? `${rate.rps}/s, burst ${rate.burst} (${rate.available} available)` : 'no limit'],
+      ['In flight', flight.limit ? `${flight.current} of ${flight.limit}` : `${flight.current} (no limit)`],
+      ['Open streams', streams.limit ? `${streams.current} of ${streams.limit}` : `${streams.current} (no limit)`],
+      ['Stream lifetime', streams.lifetime_secs ? fmtDuration(streams.lifetime_secs) : 'no limit'],
+      ['Period resets in', period.resets_in_secs !== undefined ? fmtDuration(period.resets_in_secs) : undefined],
+      ['Session', u.session || undefined],
+    ]));
+}
+
 function tile(label, value, sub, extra) {
   return h('div', { class: 'card tile' }, h('span', { class: 'label' }, label), h('div', { class: 'value' }, value), sub ? h('div', { class: 'sub' }, sub) : null, extra || null);
 }
@@ -48,6 +95,8 @@ export default {
     const urlsEl = h('div');
     const configEl = h('div', null, spinner());
     const errEl = h('div');
+    // Hidden until /_rustybin/usage reports an active plan.
+    const planEl = h('div', { hidden: true });
 
     root.appendChild(h('div', { class: 'view-head' },
       h('div', { class: 'grow' }, h('h1', null, 'Overview'),
@@ -59,6 +108,7 @@ export default {
       h('div', { class: 'grid grid-2' },
         card('Base URLs', { flush: true, hint: 'derived from this page' }, urlsEl),
         h('div', { class: 'stack' },
+          planEl,
           card('What Rustybin sees of this browser', { hint: 'GET /identity' }, identityEl),
           card('Quick links', null, h('div', { class: 'pill-list' },
             ...[['Endpoint list', '/'], ['OpenAPI docs', '/docs'], ['openapi.json', '/openapi.json'], ['Postman', '/export/postman.json'],
@@ -100,6 +150,23 @@ export default {
         if (!alive) return;
         replace(errEl, notice('err', 'Cannot read /_rustybin/status: ' + e.message));
         replace(tilesEl);
+      }
+    }
+
+    async function loadUsage() {
+      try {
+        const u = await getJson('/_rustybin/usage');
+        if (!alive) return;
+        if (!u.active || u.plan === 'none') {
+          planEl.hidden = true;
+          replace(planEl);
+          return;
+        }
+        planEl.hidden = false;
+        replace(planEl, card('Plan and usage', { hint: 'GET /_rustybin/usage' }, planBody(u)));
+      } catch (e) {
+        // Older servers have no usage endpoint: keep the card hidden.
+        if (alive) planEl.hidden = true;
       }
     }
 
@@ -148,9 +215,10 @@ export default {
     }
 
     loadStatus();
+    loadUsage();
     loadConfig();
     loadIdentity();
-    timer = setInterval(loadStatus, 5000);
+    timer = setInterval(() => { loadStatus(); loadUsage(); }, 5000);
     tick = setInterval(() => {
       const el = document.getElementById('uptime');
       if (el && uptimeAt) el.textContent = fmtDuration(uptimeBase + (performance.now() - uptimeAt) / 1000);

@@ -44,6 +44,10 @@ API, AI and agent gateway demos.
   ranges, data transfer helpers, generic JSON-RPC, GraphQL subscriptions and
   automatic persisted queries, gRPC reflection, health and gRPC-Web.
 - The **web console** at `/ui`.
+- **Plan limits** for hosted offerings (`RUSTYBIN_PLAN`, `RUSTYBIN_LIMIT_*`,
+  `RUSTYBIN_USAGE_FILE`): rate, concurrency, streams and daily or monthly request and
+  egress quotas, per instance or per session, with IETF RateLimit headers on 429s and
+  `GET /_rustybin/usage`. Off by default.
 - This documentation site, with every example tested in CI, and SDK conformance
   suites for the mock LLM, MCP, A2A and OAuth.
 
@@ -57,3 +61,6 @@ API, AI and agent gateway demos.
   that the server replaced, which broke mTLS and HTTPS verification in containers).
 - `tests/smoke_test.sh` was replaced by the documentation examples
   (`docs/examples/run.sh`).
+- MCP `tools/list` (and the other list methods) render their result once per server
+  and protocol version instead of on every request: about 7x the throughput, same
+  bytes on the wire.

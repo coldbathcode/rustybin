@@ -20,7 +20,7 @@ use axum::{
     http::HeaderMap,
     response::Response,
     routing::get,
-    Router,
+    Extension, Router,
 };
 use futures_util::SinkExt;
 use serde::Deserialize;
@@ -30,6 +30,7 @@ use tokio::time::Instant;
 
 use crate::catalog::{category, Endpoint, Example};
 use crate::config::Config;
+use crate::limits::{lease_expired, StreamLease, STREAM_END_REASON};
 use crate::state::AppState;
 
 /// Connection limits for WebSocket endpoints (also used by `/graphql/ws`).
@@ -145,12 +146,15 @@ async fn ws_echo(
     ws: WebSocketUpgrade,
     State(config): State<Arc<Config>>,
     headers: HeaderMap,
+    lease: Option<Extension<StreamLease>>,
 ) -> Response {
     let limits = limits(&config);
-    configure(ws, &headers, limits).on_upgrade(move |socket| handle_echo(socket, limits))
+    let lease = lease.map(|Extension(l)| l);
+    configure(ws, &headers, limits).on_upgrade(move |socket| handle_echo(socket, limits, lease))
 }
 
-async fn handle_echo(mut socket: WebSocket, limits: WsLimits) {
+/// `lease`: the plan's stream slot (held while the socket is open) and lifetime.
+async fn handle_echo(mut socket: WebSocket, limits: WsLimits, lease: Option<StreamLease>) {
     let deadline = Instant::now() + limits.max_lifetime;
     loop {
         let idle = tokio::time::sleep(limits.idle_timeout);
@@ -182,6 +186,10 @@ async fn handle_echo(mut socket: WebSocket, limits: WsLimits) {
                 close_with(&mut socket, close_code::AWAY, "maximum connection lifetime reached").await;
                 return;
             }
+            _ = lease_expired(&lease) => {
+                close_with(&mut socket, close_code::POLICY, STREAM_END_REASON).await;
+                return;
+            }
         }
     }
 }
@@ -203,15 +211,23 @@ async fn ws_time(
     State(config): State<Arc<Config>>,
     headers: HeaderMap,
     Query(params): Query<TimeParams>,
+    lease: Option<Extension<StreamLease>>,
 ) -> Response {
     let interval = params.interval_ms.unwrap_or(1000).clamp(100, 60_000);
     let count = params.count.unwrap_or(10).clamp(1, 1000);
     let limits = limits(&config);
+    let lease = lease.map(|Extension(l)| l);
     configure(ws, &headers, limits)
-        .on_upgrade(move |socket| handle_time(socket, interval, count, limits))
+        .on_upgrade(move |socket| handle_time(socket, interval, count, limits, lease))
 }
 
-async fn handle_time(mut socket: WebSocket, interval_ms: u64, count: u64, limits: WsLimits) {
+async fn handle_time(
+    mut socket: WebSocket,
+    interval_ms: u64,
+    count: u64,
+    limits: WsLimits,
+    lease: Option<StreamLease>,
+) {
     let deadline = Instant::now() + limits.max_lifetime;
     let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms));
     let mut sent = 0u64;
@@ -238,6 +254,10 @@ async fn handle_time(mut socket: WebSocket, interval_ms: u64, count: u64, limits
             },
             _ = tokio::time::sleep_until(deadline) => {
                 close_with(&mut socket, close_code::AWAY, "maximum connection lifetime reached").await;
+                return;
+            }
+            _ = lease_expired(&lease) => {
+                close_with(&mut socket, close_code::POLICY, STREAM_END_REASON).await;
                 return;
             }
         }
@@ -447,7 +467,7 @@ mod tests {
         let app = Router::new().route(
             "/ws",
             get(move |ws: WebSocketUpgrade| async move {
-                ws.on_upgrade(move |s| handle_echo(s, small))
+                ws.on_upgrade(move |s| handle_echo(s, small, None))
             }),
         );
         let base = serve(app).await;
@@ -470,7 +490,7 @@ mod tests {
         let app = Router::new().route(
             "/ws/time",
             get(move |ws: WebSocketUpgrade| async move {
-                ws.on_upgrade(move |s| handle_time(s, 100, 1000, short_life))
+                ws.on_upgrade(move |s| handle_time(s, 100, 1000, short_life, None))
             }),
         );
         let base = serve(app).await;

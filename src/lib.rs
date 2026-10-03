@@ -37,6 +37,7 @@ pub mod inspector;
 pub mod jsonrpc;
 pub mod jwt_state;
 pub mod landing;
+pub mod limits;
 pub mod logging;
 pub mod mcp;
 pub mod oidc;
@@ -117,12 +118,14 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     openapi::router,
     inspector::router,
     control::router,
+    limits::router,
     ui::router,
 ];
 
 /// Build the complete application: all module routers plus the middleware
 /// stack (outermost first): request id, tracing, request id propagation,
-/// CORS, time-to-headers timeout, inspector capture, body limit, fault injection.
+/// CORS, plan limits, time-to-headers timeout, inspector capture, body limit,
+/// fault injection.
 pub fn build_app(state: AppState) -> Router {
     let config = state.config.clone();
 
@@ -155,7 +158,16 @@ pub fn build_app(state: AppState) -> Router {
         ));
     }
 
-    if let Some(cors) = cors_layer(&config.cors_allow_origins) {
+    // Plan limits: before inspector capture and fault injection so a
+    // rejected request costs almost nothing. A no-op with plan `none`.
+    if config.limits.active() {
+        router = router.layer(middleware::from_fn_with_state(
+            state.clone(),
+            limits::enforce,
+        ));
+    }
+
+    if let Some(cors) = cors_layer(&config.cors_allow_origins, config.limits.active()) {
         router = router.layer(cors);
     }
 
@@ -198,9 +210,35 @@ pub fn build_app(state: AppState) -> Router {
 /// (`RUSTYBIN_CORS_ORIGINS=off`) so a gateway's own CORS handling can be shown.
 /// Preflights are answered here only when they carry
 /// `Access-Control-Request-Method`; a plain `OPTIONS` still reaches the route.
-fn cors_layer(origins: &[String]) -> Option<CorsLayer> {
+fn cors_layer(origins: &[String], plan_headers: bool) -> Option<CorsLayer> {
     if origins.is_empty() {
         return None;
+    }
+    let mut expose = vec![
+        HeaderName::from_static("x-request-id"),
+        HeaderName::from_static("x-rustybin-fault"),
+        header::CONTENT_LENGTH,
+        // Mock LLM metadata, readable by browser clients (the console's
+        // AI playground when it sends through a gateway).
+        HeaderName::from_static("x-rustybin-request-id"),
+        HeaderName::from_static("x-rustybin-credential"),
+        HeaderName::from_static("x-rustybin-provider"),
+        HeaderName::from_static("x-rustybin-model"),
+        HeaderName::from_static("x-rustybin-mode"),
+        // MCP clients in browsers need these (session, version, OAuth challenge).
+        HeaderName::from_static("mcp-session-id"),
+        HeaderName::from_static("mcp-protocol-version"),
+        header::WWW_AUTHENTICATE,
+    ];
+    if plan_headers {
+        expose.extend([
+            header::RETRY_AFTER,
+            HeaderName::from_static("ratelimit"),
+            HeaderName::from_static("ratelimit-policy"),
+            HeaderName::from_static(limits::LIMIT_HEADER),
+            HeaderName::from_static(limits::PLAN_HEADER),
+            HeaderName::from_static(limits::QUOTA_REMAINING_HEADER),
+        ]);
     }
     let allow_origin = if origins.iter().any(|o| o == "*") {
         AllowOrigin::any()
@@ -213,22 +251,7 @@ fn cors_layer(origins: &[String]) -> Option<CorsLayer> {
             .allow_origin(allow_origin)
             .allow_methods(AllowMethods::mirror_request())
             .allow_headers(AllowHeaders::mirror_request())
-            .expose_headers(ExposeHeaders::list([
-                HeaderName::from_static("x-request-id"),
-                HeaderName::from_static("x-rustybin-fault"),
-                header::CONTENT_LENGTH,
-                // Mock LLM metadata, readable by browser clients (the console's
-                // AI playground when it sends through a gateway).
-                HeaderName::from_static("x-rustybin-request-id"),
-                HeaderName::from_static("x-rustybin-credential"),
-                HeaderName::from_static("x-rustybin-provider"),
-                HeaderName::from_static("x-rustybin-model"),
-                HeaderName::from_static("x-rustybin-mode"),
-                // MCP clients in browsers need these (session, version, OAuth challenge).
-                HeaderName::from_static("mcp-session-id"),
-                HeaderName::from_static("mcp-protocol-version"),
-                header::WWW_AUTHENTICATE,
-            ]))
+            .expose_headers(ExposeHeaders::list(expose))
             .max_age(Duration::from_secs(600)),
     )
 }

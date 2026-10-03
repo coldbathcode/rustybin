@@ -103,6 +103,8 @@ def run_theme(browser, theme):
         page.wait_for_selector("text=What Rustybin sees of this browser")
         page.wait_for_selector(".url-row code")
         expect(page.locator(".nav-link")).to_have_count(9)
+        # No plan configured (RUSTYBIN_PLAN=none): no "Plan and usage" card.
+        expect(page.locator("text=Plan and usage")).to_have_count(0)
         shot(page, theme, "01-overview")
 
     step("overview", overview)

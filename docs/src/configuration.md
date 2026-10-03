@@ -66,6 +66,28 @@ does not require one; when one is presented it must chain to the demo CA.
 | `RUSTYBIN_CORS_ORIGINS` | `*` | Allowed CORS origins, comma separated. `off` or an empty value removes the CORS layer entirely, so a gateway's own CORS plugin can be demonstrated. |
 | `RUSTYBIN_INSPECTOR_CAPACITY` | `500` | Requests kept by the [request inspector](concepts/inspector.md) ring buffer (1 to 10000). |
 
+## Plan limits
+
+Off by default. See [Plans and limits](concepts/plans-and-limits.md) for the presets,
+the response headers and what is exempt.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RUSTYBIN_PLAN` | `none` | `none` (nothing enforced, no extra header), `free`, `pro`, `team` or `enterprise` (no limits, plan name reported). |
+| `RUSTYBIN_LIMIT_RPS` | plan | Sustained requests per second (token bucket refill rate). |
+| `RUSTYBIN_LIMIT_BURST` | plan | Token bucket capacity; `0` means the same as the rps value. |
+| `RUSTYBIN_LIMIT_CONCURRENCY` | plan | Requests in flight at once (a response counts until its body is sent). |
+| `RUSTYBIN_LIMIT_STREAMS` | plan | Open SSE responses and WebSocket connections at once. |
+| `RUSTYBIN_LIMIT_STREAM_SECS` | plan | Maximum stream lifetime in seconds; longer streams are ended cleanly. |
+| `RUSTYBIN_LIMIT_REQUESTS` | plan | Requests per period. |
+| `RUSTYBIN_LIMIT_EGRESS_MB` | plan | Response body megabytes per period (1 MB = 1,000,000 bytes, fractions such as `0.5` allowed). |
+| `RUSTYBIN_LIMIT_PERIOD` | plan | Quota period: `day` or `month` (calendar UTC). |
+| `RUSTYBIN_LIMIT_SCOPE` | plan | `instance` (one set of counters) or `session` (one set per `X-Rustybin-Session`, else client IP). |
+| `RUSTYBIN_USAGE_FILE` | unset | Path of a JSON file holding the instance quota counters, written every 30 s and on graceful shutdown and read at startup, so a restart cannot reset a monthly quota. Session counters are never persisted. |
+
+Every `RUSTYBIN_LIMIT_*` value accepts `0` or `unlimited` to turn that dimension off.
+Setting any of them without a plan enables the limiter with the plan name `custom`.
+
 ## MCP server
 
 Read when the server starts.

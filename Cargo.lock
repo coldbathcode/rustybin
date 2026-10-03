@@ -2175,6 +2175,7 @@ dependencies = [
  "futures-util",
  "gethostname",
  "hmac",
+ "http-body",
  "http-body-util",
  "jsonwebtoken",
  "prost",

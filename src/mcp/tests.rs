@@ -1551,3 +1551,65 @@ async fn tool_behaviours() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(j["error"]["code"], protocol::INVALID_PARAMS);
 }
+
+/// The rendered list cache (JSON answers) must produce exactly the bytes the
+/// normal dispatch produces (an SSE-only Accept takes the normal path).
+#[tokio::test]
+async fn cached_list_results_match_dispatch() {
+    for path in ["/mcp", "/mcp/servers/weather", "/mcp/servers/crm"] {
+        for method in [
+            "tools/list",
+            "resources/list",
+            "resources/templates/list",
+            "prompts/list",
+        ] {
+            for id in [json!(7), json!("abc")] {
+                let mut bodies = Vec::new();
+                for accept in ["application/json", "text/event-stream"] {
+                    let params = modern_params(Value::Null, json!({}));
+                    let req = modern_req_accept(path, 0, method, params.clone(), accept)
+                        .body(Body::from(
+                            json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
+                                .to_string(),
+                        ))
+                        .expect("request");
+                    let resp = app().oneshot(req).await.expect("response");
+                    let status = resp.status();
+                    let text = body_string(resp).await;
+                    let text = match text.lines().find_map(|l| l.strip_prefix("data: ")) {
+                        Some(data) => data.to_string(),
+                        None => text,
+                    };
+                    bodies.push((status, text));
+                }
+                if bodies[0].0 != StatusCode::OK {
+                    // Errors are not cached (prompts/list on a server without prompts).
+                    continue;
+                }
+                assert_eq!(bodies[0], bodies[1], "{path} {method} {id}");
+            }
+        }
+    }
+    // Handshake era (no `_meta`, x-mcp-header stripped from schemas).
+    let app = app();
+    for version in ["2025-06-18", "2025-03-26"] {
+        let (sid, _) = initialize(&app, "/mcp", version, json!({})).await;
+        let mut bodies = Vec::new();
+        for accept in ["application/json", "text/event-stream"] {
+            let req = legacy_req("/mcp", Some(&sid), Some(version))
+                .body(Body::from(rpc(3, "tools/list", json!({})).to_string()))
+                .expect("request");
+            let mut req = req;
+            req.headers_mut()
+                .insert("accept", accept.parse().expect("accept"));
+            let text = body_string(app.clone().oneshot(req).await.expect("response")).await;
+            let text = match text.lines().find_map(|l| l.strip_prefix("data: ")) {
+                Some(data) => data.to_string(),
+                None => text,
+            };
+            bodies.push(text);
+        }
+        assert_eq!(bodies[0], bodies[1], "{version}");
+        assert!(!bodies[0].contains("x-mcp-header"));
+    }
+}

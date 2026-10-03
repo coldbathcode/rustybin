@@ -53,6 +53,7 @@ captured by the inspector and ignore the fault injection headers.
 | `GET, DELETE /_rustybin/requests`, `GET /_rustybin/requests/{id}`, `GET /_rustybin/requests/stream` | The [request inspector](inspector.md) |
 | `GET /_rustybin/catalog` | The route catalogue as JSON (the [web console](../console.md)'s API explorer) |
 | `GET /_rustybin/status` | Uptime, health, public mode, inspector counters and ports (the console's overview) |
+| `GET /_rustybin/usage` | The active plan, its limits and the current usage (see [Plans and limits](plans-and-limits.md)) |
 
 ```hurl
 {{#include ../../examples/concepts/control.hurl:config}}

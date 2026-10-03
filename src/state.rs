@@ -17,6 +17,7 @@ use crate::health::HealthState;
 use crate::identity::IdentityState;
 use crate::inspector::Inspector;
 use crate::jwt_state::JwtState;
+use crate::limits::Limiter;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -32,6 +33,8 @@ pub struct AppState {
     pub inspector: Inspector,
     /// `/health` toggle, shared with the gRPC health service.
     pub health: Arc<HealthState>,
+    /// Plan limits (HTTP middleware, gRPC interceptor, `/_rustybin/usage`).
+    pub limits: Arc<Limiter>,
 }
 
 impl AppState {
@@ -56,7 +59,9 @@ impl AppState {
     /// Assemble a state from already-built key material.
     pub fn from_parts(config: Config, jwt: Arc<JwtState>, certs: Arc<CertState>) -> Self {
         let inspector = Inspector::new(config.inspector_capacity, config.public_mode);
+        let limits = Arc::new(Limiter::new(config.limits.clone()));
         Self {
+            limits,
             config: Arc::new(config),
             jwt,
             certs,
@@ -88,6 +93,12 @@ impl FromRef<AppState> for Arc<CertState> {
 impl FromRef<AppState> for Arc<IdentityState> {
     fn from_ref(state: &AppState) -> Self {
         state.identity.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<Limiter> {
+    fn from_ref(state: &AppState) -> Self {
+        state.limits.clone()
     }
 }
 

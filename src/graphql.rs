@@ -1385,6 +1385,7 @@ async fn graphql_ws(
     Extension(state): Extension<GqlState>,
     State(config): State<Arc<Config>>,
     protocol: Result<GraphQLProtocol, StatusCode>,
+    lease: Option<Extension<crate::limits::StreamLease>>,
     ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Response {
     let ws = match ws {
@@ -1407,8 +1408,20 @@ async fn graphql_ws(
         .max_message_size(limits.max_message_size)
         .max_frame_size(limits.max_message_size)
         .on_upgrade(move |socket| async move {
-            let serve = GraphQLWebSocket::new(socket, schema, protocol).serve();
-            let _ = tokio::time::timeout(limits.max_lifetime, serve).await;
+            let lease = lease.map(|Extension(l)| l);
+            let (mut sink, mut stream) = futures_util::StreamExt::split(socket);
+            let serve = GraphQLWebSocket::new_with_pair(&mut sink, &mut stream, schema, protocol).serve();
+            tokio::select! {
+                _ = tokio::time::timeout(limits.max_lifetime, serve) => {}
+                _ = crate::limits::lease_expired(&lease) => {
+                    // The plan's stream lifetime: close 1008 with a reason.
+                    let frame = axum::extract::ws::CloseFrame {
+                        code: axum::extract::ws::close_code::POLICY,
+                        reason: crate::limits::STREAM_END_REASON.into(),
+                    };
+                    let _ = futures_util::SinkExt::send(&mut sink, axum::extract::ws::Message::Close(Some(frame))).await;
+                }
+            }
         })
 }
 

@@ -635,6 +635,22 @@ pub async fn run(
     (json_ok, sse_ok): (bool, bool),
     modern: bool,
 ) -> Response {
+    // Static list results are rendered once; such a request never emits a
+    // notification, so the answer is the same JSON object the dispatch
+    // below would produce (the SSE-only case keeps the normal path).
+    if json_ok {
+        if let Some(result) = core::cached_list(&ctx, &method, &params) {
+            let body = protocol::result_response_json(&id, &result);
+            return (
+                [(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                )],
+                body,
+            )
+                .into_response();
+        }
+    }
     let cancel = ctx.cancel.clone();
     let session = ctx.session.clone();
     if let Some(s) = &session {
