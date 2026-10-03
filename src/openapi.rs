@@ -17,10 +17,14 @@ use crate::state::AppState;
 const MODULE_PATHS: &[fn() -> Value] = &[
     crate::inspector::openapi_paths,
     crate::control::openapi_paths,
+    crate::mcp::openapi_paths,
 ];
 
 /// Per-module OpenAPI components fragments (e.g. `{"schemas": {...}}`).
-const MODULE_COMPONENTS: &[fn() -> Value] = &[crate::inspector::openapi_components];
+const MODULE_COMPONENTS: &[fn() -> Value] = &[
+    crate::inspector::openapi_components,
+    crate::mcp::openapi_components,
+];
 
 /// Merge path items: new operations are added to existing paths.
 fn merge_paths(paths: &mut serde_json::Map<String, Value>, fragment: Value) {

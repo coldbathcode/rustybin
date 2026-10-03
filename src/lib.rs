@@ -35,6 +35,7 @@ pub mod inspector;
 pub mod jwt_state;
 pub mod landing;
 pub mod logging;
+pub mod mcp;
 pub mod oidc;
 pub mod openapi;
 pub mod orchestration;
@@ -90,6 +91,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     auth_mtls::router,
     ai_gateway::router,
     ai_anthropic::router,
+    mcp::router,
     graphql::router,
     orchestration::router,
     soap::router,
@@ -199,6 +201,10 @@ fn cors_layer(origins: &[String]) -> Option<CorsLayer> {
                 HeaderName::from_static("x-request-id"),
                 HeaderName::from_static("x-rustybin-fault"),
                 header::CONTENT_LENGTH,
+                // MCP clients in browsers need these (session, version, OAuth challenge).
+                HeaderName::from_static("mcp-session-id"),
+                HeaderName::from_static("mcp-protocol-version"),
+                header::WWW_AUTHENTICATE,
             ]))
             .max_age(Duration::from_secs(600)),
     )
