@@ -17,6 +17,7 @@ use crate::state::AppState;
 const MODULE_PATHS: &[fn() -> Value] = &[
     crate::inspector::openapi_paths,
     crate::control::openapi_paths,
+    crate::a2a::openapi_paths,
 ];
 
 /// Per-module OpenAPI components fragments (e.g. `{"schemas": {...}}`).

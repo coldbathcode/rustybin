@@ -332,6 +332,7 @@ const SOURCES: &[fn() -> Vec<Endpoint>] = &[
     crate::auth_mtls::catalog,
     crate::ai_gateway::catalog,
     crate::ai_anthropic::catalog,
+    crate::a2a::catalog,
     crate::graphql::catalog,
     crate::orchestration::catalog,
     crate::soap::catalog,

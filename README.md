@@ -139,6 +139,19 @@ collection exports (`/export/*`). A test fails when they drift apart.
 |---|---|---|
 | POST | `/ai/anthropic/v1/messages` | Messages API (native SSE event stream with stream=true) |
 
+### A2A Agents
+
+| Methods | Path | Description |
+|---|---|---|
+| GET | `/.well-known/agent-card.json` | A2A Agent Card (v1.0, readable by v0.3 clients) of the default echo agent, listing every demo agent |
+| GET | `/.well-known/agent.json` | Legacy A2A v0.3 Agent Card (url + preferredTransport) of the default agent |
+| GET POST | `/a2a` | GET: directory of demo agents; POST: JSON-RPC endpoint of the default echo agent |
+| GET POST | `/a2a/{agent}` | A2A JSON-RPC endpoint per agent (v1.0 methods with A2A-Version: 1.0, v0.3 methods without); GET returns the agent card |
+| GET | `/a2a/{agent}/.well-known/agent-card.json` | Agent Card of one agent (v1.0 + v0.3 fields) |
+| GET | `/a2a/{agent}/.well-known/agent.json` | Legacy v0.3 Agent Card of one agent |
+| ANY | `/a2a/{agent}/v1/{*rest}` | A2A HTTP+JSON (REST) binding: message:send, message:stream, tasks, tasks/{id}, tasks/{id}:cancel, tasks/{id}:subscribe, push configs, extendedAgentCard |
+| GET POST DELETE | `/a2a/webhook-sink/{id}` | Built-in push notification sink: POST records a notification, GET lists them, DELETE clears |
+
 ### GraphQL
 
 | Methods | Path | Description |
@@ -269,6 +282,8 @@ mutations are disabled unless an admin token is configured.
 | `RUSTYBIN_CORS_ORIGINS` | `*` | Comma-separated allowed CORS origins; `off` disables CORS handling so a gateway's own CORS can be demonstrated |
 | `RUSTYBIN_REQUEST_TIMEOUT` | `120` | Seconds until response headers must be ready (`503` otherwise); streams (SSE, WebSocket) are not cut off; `0` disables |
 | `RUSTYBIN_INSPECTOR_CAPACITY` | `500` | Number of requests kept by the inspector (max 10000) |
+| `RUSTYBIN_A2A_PUSH_ALLOWLIST` | _(unset)_ | Comma-separated `host` or `host:port` entries A2A push notifications may be delivered to (the built-in `/a2a/webhook-sink/{id}` is always allowed) |
+| `RUSTYBIN_A2A_PUSH_ALLOW_ALL` | `false` | Allow A2A push notifications to any http(s) URL, including localhost and private addresses (ignored in public mode) |
 
 Invalid values are logged as warnings and the default is used. `GET /_rustybin/config`
 shows the effective (non-secret) configuration.
