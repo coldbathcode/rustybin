@@ -6,3 +6,6 @@ certs/*.csr
 certs/*.srl
 certs/*.cnf
 .DS_Store
+
+# Agent worktrees
+.claude/worktrees/
