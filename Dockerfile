@@ -13,7 +13,9 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs && touch src/lib.rs && \
 # Build the real binary (lib + bin); build.rs embeds the web console from ui/
 COPY ui/ ui/
 COPY src/ src/
-RUN touch src/main.rs src/lib.rs && cargo build --release --locked
+# Touch build.rs too: COPY keeps old mtimes, so without it Cargo would not
+# rerun the build script and the console (ui/) would be embedded empty.
+RUN touch src/main.rs src/lib.rs build.rs && cargo build --release --locked
 
 FROM debian:bookworm-slim AS runtime
 

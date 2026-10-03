@@ -59,8 +59,19 @@ jobs:
           context: .
           push: false
           tags: rustybin:ci
+          load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: smoke test the image
+        run: |
+          docker run -d --name rb -p 8080:80 rustybin:ci
+          for i in $(seq 1 60); do curl -fs http://localhost:8080/health >/dev/null && break; sleep 1; done
+          curl -fsS http://localhost:8080/health
+          # The console must be embedded in the image.
+          curl -fsS http://localhost:8080/ui/ | grep -q '<html'
+          curl -fsS http://localhost:8080/_rustybin/catalog >/dev/null
+          docker logs rb
+          docker rm -f rb
 
   no-dashes:
     name: no em or en dashes
