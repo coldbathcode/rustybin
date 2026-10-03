@@ -7,6 +7,7 @@
 //! - [`catalog`] is the single source of truth for routes (landing page,
 //!   exports, README); [`openapi`] merges per-module OpenAPI fragments.
 
+pub mod a2a;
 pub mod admin;
 pub mod ai;
 pub mod auth_apikey;
@@ -97,6 +98,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     auth_mtls::router,
     mcp::router,
     ai::router,
+    a2a::router,
     graphql::router,
     orchestration::router,
     soap::router,

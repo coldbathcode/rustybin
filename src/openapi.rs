@@ -33,6 +33,7 @@ const MODULE_PATHS: &[fn() -> Value] = &[
     crate::mcp::openapi_paths,
     crate::ai::openapi_paths,
     crate::graphql::openapi_paths,
+    crate::a2a::openapi_paths,
 ];
 
 /// Per-module OpenAPI components fragments (e.g. `{"schemas": {...}}`).

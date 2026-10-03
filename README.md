@@ -231,6 +231,19 @@ collection exports (`/export/*`). A test fails when they drift apart.
 | GET | `/.well-known/oauth-protected-resource` | OAuth Protected Resource Metadata (RFC 9728) for /mcp/protected |
 | GET | `/.well-known/oauth-protected-resource/mcp/protected` | OAuth Protected Resource Metadata (RFC 9728), path-suffixed form |
 
+### A2A Agents
+
+| Methods | Path | Description |
+|---|---|---|
+| GET | `/.well-known/agent-card.json` | A2A Agent Card (v1.0, readable by v0.3 clients) of the default echo agent, listing every demo agent |
+| GET | `/.well-known/agent.json` | Legacy A2A v0.3 Agent Card (url + preferredTransport) of the default agent |
+| GET POST | `/a2a` | GET: directory of demo agents; POST: JSON-RPC endpoint of the default echo agent |
+| GET POST | `/a2a/{agent}` | A2A JSON-RPC endpoint per agent (v1.0 methods with A2A-Version: 1.0, v0.3 methods without); GET returns the agent card |
+| GET | `/a2a/{agent}/.well-known/agent-card.json` | Agent Card of one agent (v1.0 + v0.3 fields) |
+| GET | `/a2a/{agent}/.well-known/agent.json` | Legacy v0.3 Agent Card of one agent |
+| ANY | `/a2a/{agent}/v1/{*rest}` | A2A HTTP+JSON (REST) binding: message:send, message:stream, tasks, tasks/{id}, tasks/{id}:cancel, tasks/{id}:subscribe, push configs, extendedAgentCard |
+| GET POST DELETE | `/a2a/webhook-sink/{id}` | Built-in push notification sink: POST records a notification, GET lists them, DELETE clears |
+
 ### GraphQL
 
 | Methods | Path | Description |
@@ -480,6 +493,8 @@ see their own session (`X-Rustybin-Session` or client IP).
 | `RUSTYBIN_MCP_CLOCK_TICK_SECS` | `5` | Update interval of the subscribable `rustybin://clock` resource |
 | `RUSTYBIN_AI_REQUIRE_AUTH` | `false` | Mock LLM: enforce each provider's native credential (see [Mock LLM](#mock-llm)) |
 | `RUSTYBIN_AI_API_KEY` | _(unset)_ | Mock LLM: the only accepted key (implies `RUSTYBIN_AI_REQUIRE_AUTH`; compared with the SigV4 access key id on Bedrock) |
+| `RUSTYBIN_A2A_PUSH_ALLOWLIST` | _(unset)_ | Comma-separated `host` or `host:port` entries A2A push notifications may be delivered to (the built-in `/a2a/webhook-sink/{id}` is always allowed) |
+| `RUSTYBIN_A2A_PUSH_ALLOW_ALL` | `false` | Allow A2A push notifications to any http(s) URL, including localhost and private addresses (ignored in public mode) |
 
 Invalid values are logged as warnings and the default is used. `GET /_rustybin/config`
 shows the effective (non-secret) configuration.
