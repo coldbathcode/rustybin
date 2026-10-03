@@ -51,6 +51,11 @@ sha2 = "0.10"
 sha1 = "0.10"
 tonic = "0.12"
 prost = "0.13"
+flate2 = "1"
+brotli = "8"
+# 0.8.2+ requires Rust 1.87 (MSRV is 1.86)
+ruzstd = "=0.8.1"
+regex = "1"
 
 [build-dependencies]
 tonic-build = "0.12"
