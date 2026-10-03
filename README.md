@@ -667,3 +667,10 @@ Visit `/docs` for interactive API documentation powered by [Scalar](https://gith
 curl http://localhost/openapi.json  # OpenAPI 3.0.3 JSON
 curl http://localhost/openapi.yaml  # YAML format
 ```
+
+## License
+
+Rustybin is open source under the [GNU AGPL-3.0](LICENSE), with a commercial
+license available for organisations that cannot use AGPL software. See
+[LICENSING.md](LICENSING.md), the [trademark policy](TRADEMARKS.md) and
+[CONTRIBUTING.md](CONTRIBUTING.md) (contributors sign the [CLA](CLA.md)).
