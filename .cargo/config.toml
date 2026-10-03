@@ -1,0 +1,5 @@
+# Resolve dependencies to versions that support the crate's rust-version
+# (1.86, matching the Dockerfile builder), so `cargo update` and merges that
+# re-lock Cargo.lock cannot silently raise the MSRV.
+[resolver]
+incompatible-rust-versions = "fallback"
