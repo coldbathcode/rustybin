@@ -9,3 +9,7 @@ certs/*.cnf
 
 # Agent worktrees
 .claude/worktrees/
+
+# Python bytecode from conformance scripts
+__pycache__/
+*.pyc
