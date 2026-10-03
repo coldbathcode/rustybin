@@ -220,7 +220,7 @@ pub fn catalog() -> Vec<Endpoint> {
         "/identity",
         &["ANY"],
         category::HEALTH,
-        "Instance identity: id, hostname, uptime, request count, ports and config (load-balancing demos)",
+        "Instance identity: id, hostname, uptime, /identity request count, ports and config (load-balancing demos)",
     )
     .example(Example::get("Identity", "/identity"))]
 }

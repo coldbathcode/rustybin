@@ -61,3 +61,68 @@ jobs:
           tags: rustybin:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  no-dashes:
+    name: no em or en dashes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/check-no-dashes.sh
+
+  docs:
+    name: docs (mdBook + tested examples)
+    runs-on: ubuntu-latest
+    env:
+      MDBOOK_VERSION: 0.4.52
+      HURL_VERSION: 7.0.0
+      GRPCURL_VERSION: 1.9.3
+      WEBSOCAT_VERSION: 1.14.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install mdbook, hurl, grpcurl and websocat (pinned release binaries)
+        run: |
+          set -euo pipefail
+          bin="$HOME/.local/bin"
+          mkdir -p "$bin"
+          curl -sSfL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$bin" mdbook
+          curl -sSfL "https://github.com/Orange-OpenSource/hurl/releases/download/${HURL_VERSION}/hurl-${HURL_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP"
+          cp "$RUNNER_TEMP/hurl-${HURL_VERSION}-x86_64-unknown-linux-gnu/bin/hurl" "$bin/"
+          curl -sSfL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz" \
+            | tar -xz -C "$bin" grpcurl
+          curl -sSfL -o "$bin/websocat" "https://github.com/vi/websocat/releases/download/v${WEBSOCAT_VERSION}/websocat.x86_64-unknown-linux-musl"
+          chmod +x "$bin/websocat"
+          echo "$bin" >> "$GITHUB_PATH"
+      - run: mdbook --version && hurl --version && grpcurl -version && websocat --version
+      - name: Check example includes and anchors
+        run: python3 docs/tools/check_includes.py
+      - name: Build the book
+        run: mdbook build docs
+      - name: Run every documentation example against a fresh server
+        run: REQUIRE_ALL_TOOLS=1 docs/examples/run.sh
+
+  conformance:
+    name: SDK conformance (mock LLM, MCP, A2A, OAuth)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: conformance/requirements.txt
+      - run: python -m pip install -r conformance/requirements.txt
+      - run: cargo build --locked
+      - name: Mock LLM (openai, anthropic, google-genai, httpx)
+        run: PYTHON=python conformance/ai/run.sh
+      - name: MCP (Python MCP SDK; the Inspector CLI runs only with --inspector)
+        run: PYTHON=python conformance/mcp/run.sh
+      - name: A2A (a2a-sdk)
+        run: PYTHON=python conformance/a2a/run.sh
+      - name: OAuth / OIDC flows
+        run: PYTHON=python conformance/oauth/run.sh

@@ -1,0 +1,17 @@
+[book]
+title = "Rustybin"
+description = "A stub service for API and AI gateway demos"
+authors = ["Rustybin contributors"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/oliwynn/rustybin"
+edit-url-template = "https://github.com/oliwynn/rustybin/edit/main/docs/{path}"
+
+[output.html.search]
+enable = true

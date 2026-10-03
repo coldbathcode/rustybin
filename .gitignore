@@ -10,6 +10,9 @@ certs/*.cnf
 # Agent worktrees
 .claude/worktrees/
 
+# mdBook output
+/docs/book/
+
 # Python bytecode from conformance scripts
 __pycache__/
 *.pyc

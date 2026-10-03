@@ -32,6 +32,7 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 
 use crate::catalog::{category, Endpoint, Example};
+use crate::session::Origin;
 use crate::state::AppState;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -646,7 +647,7 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-fn sign(q: SignQuery, body: Option<String>) -> Response {
+fn sign(q: SignQuery, body: Option<String>, base_url: &str) -> Response {
     let scheme = match q.scheme.as_deref().map(Scheme::parse) {
         None => Scheme::Standard,
         Some(Some(s)) => s,
@@ -721,8 +722,9 @@ fn sign(q: SignQuery, body: Option<String>) -> Response {
         shell_quote(&format!("x-webhook-secret: {secret}"))
     ));
     curl.push_str(&format!(
-        " --data-raw {} http://localhost{verify_path}",
-        shell_quote(&payload)
+        " --data-raw {} {}",
+        shell_quote(&payload),
+        shell_quote(&format!("{base_url}{verify_path}"))
     ));
     let receive_path = DEMO_SECRETS
         .iter()
@@ -742,13 +744,13 @@ fn sign(q: SignQuery, body: Option<String>) -> Response {
     .into_response()
 }
 
-async fn sign_get(Query(q): Query<SignQuery>) -> Response {
-    sign(q, None)
+async fn sign_get(Origin(origin): Origin, Query(q): Query<SignQuery>) -> Response {
+    sign(q, None, &origin.base_url())
 }
 
-async fn sign_post(Query(q): Query<SignQuery>, body: Bytes) -> Response {
+async fn sign_post(Origin(origin): Origin, Query(q): Query<SignQuery>, body: Bytes) -> Response {
     match String::from_utf8(body.to_vec()) {
-        Ok(s) => sign(q, Some(s)),
+        Ok(s) => sign(q, Some(s), &origin.base_url()),
         Err(_) => error(
             StatusCode::BAD_REQUEST,
             "invalid_payload",
