@@ -31,12 +31,14 @@ const MODULE_PATHS: &[fn() -> Value] = &[
     crate::oidc::openapi_paths,
     crate::auth_mtls::openapi_paths,
     crate::mcp::openapi_paths,
+    crate::ai::openapi_paths,
 ];
 
 /// Per-module OpenAPI components fragments (e.g. `{"schemas": {...}}`).
 const MODULE_COMPONENTS: &[fn() -> Value] = &[
     crate::inspector::openapi_components,
     crate::mcp::openapi_components,
+    crate::ai::openapi_components,
 ];
 
 /// Merge path items: new operations are added to existing paths.
@@ -258,37 +260,6 @@ fn build_paths() -> Value {
             }
         }));
     }
-
-    // Anthropic-compatible AI messages
-    paths.insert("/ai/anthropic/v1/messages".into(), json!({
-        "post": {
-            "tags": ["AI Gateway"],
-            "summary": "Anthropic Messages API (mock)",
-            "description": "Anthropic `/v1/messages`-compatible endpoint. Returns a canned assistant message with input/output token usage. When `stream: true`, emits the native Anthropic SSE event sequence (message_start, content_block_delta, message_stop, …). Use to test the ai-proxy plugin against the Anthropic provider format.",
-            "operationId": "anthropicMessages",
-            "requestBody": {
-                "required": true,
-                "content": { "application/json": { "schema": json!({
-                    "type": "object",
-                    "required": ["messages"],
-                    "properties": {
-                        "model": { "type": "string", "example": "rustybin-claude" },
-                        "max_tokens": { "type": "integer", "example": 256 },
-                        "system": { "type": "string" },
-                        "stream": { "type": "boolean", "default": false },
-                        "messages": { "type": "array", "items": { "type": "object", "properties": {
-                            "role": { "type": "string", "example": "user" },
-                            "content": { "type": "string", "example": "hello" }
-                        }}}
-                    }
-                }) } }
-            },
-            "responses": {
-                "200": { "description": "Assistant message (JSON) or text/event-stream when stream=true" },
-                "400": { "description": "Invalid request" }
-            }
-        }
-    }));
 
     // WebSocket
     paths.insert("/ws".into(), json!({
@@ -1020,128 +991,6 @@ fn build_paths() -> Value {
         }
     }));
 
-    // ── AI Gateway ──────────────────────────────────────────────
-    paths.insert("/ai/v1/chat/completions".into(), json!({
-        "post": {
-            "tags": ["AI Gateway"],
-            "summary": "Chat completions (OpenAI-compatible)",
-            "description": "OpenAI-compatible chat completions endpoint. Returns canned responses based on prompt keywords. Supports streaming via SSE.",
-            "operationId": "postChatCompletions",
-            "parameters": [{ "name": "delay", "in": "query", "required": false, "schema": { "type": "integer", "maximum": 60000 }, "description": "Delay in ms before responding" }],
-            "requestBody": {
-                "required": true,
-                "content": {
-                    "application/json": {
-                        "schema": { "$ref": "#/components/schemas/ChatCompletionRequest" }
-                    }
-                }
-            },
-            "responses": {
-                "200": { "description": "Chat completion",
-                    "content": {
-                        "application/json": { "schema": { "$ref": "#/components/schemas/ChatCompletionResponse" } },
-                        "text/event-stream": { "schema": { "type": "string", "description": "Server-Sent Events stream" } }
-                    }
-                },
-                "400": { "description": "Invalid request" }
-            }
-        }
-    }));
-
-    paths.insert("/ai/v1/completions".into(), json!({
-        "post": {
-            "tags": ["AI Gateway"],
-            "summary": "Text completions (OpenAI-compatible)",
-            "description": "OpenAI-compatible text completions endpoint with canned responses.",
-            "operationId": "postCompletions",
-            "parameters": [{ "name": "delay", "in": "query", "required": false, "schema": { "type": "integer" }, "description": "Delay in ms" }],
-            "requestBody": {
-                "required": true,
-                "content": {
-                    "application/json": {
-                        "schema": {
-                            "type": "object",
-                            "required": ["model", "prompt"],
-                            "properties": {
-                                "model": { "type": "string", "example": "rustybin-gpt" },
-                                "prompt": { "type": "string" },
-                                "max_tokens": { "type": "integer" }
-                            }
-                        }
-                    }
-                }
-            },
-            "responses": {
-                "200": { "description": "Text completion" },
-                "400": { "description": "Invalid request" }
-            }
-        }
-    }));
-
-    paths.insert("/ai/v1/embeddings".into(), json!({
-        "post": {
-            "tags": ["AI Gateway"],
-            "summary": "Embeddings (OpenAI-compatible)",
-            "description": "Returns deterministic 1536-dimensional embedding vectors. Same input always produces the same output.",
-            "operationId": "postEmbeddings",
-            "requestBody": {
-                "required": true,
-                "content": {
-                    "application/json": {
-                        "schema": {
-                            "type": "object",
-                            "required": ["model", "input"],
-                            "properties": {
-                                "model": { "type": "string", "example": "rustybin-embed" },
-                                "input": {
-                                    "oneOf": [
-                                        { "type": "string" },
-                                        { "type": "array", "items": { "type": "string" } }
-                                    ]
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            "responses": {
-                "200": { "description": "Embedding vectors" },
-                "400": { "description": "Invalid request" }
-            }
-        }
-    }));
-
-    paths.insert("/ai/v1/models".into(), json!({
-        "get": {
-            "tags": ["AI Gateway"],
-            "summary": "List available models",
-            "description": "Returns the list of available AI models (rustybin-gpt, rustybin-gpt-fast, rustybin-embed).",
-            "operationId": "getModels",
-            "responses": {
-                "200": { "description": "Model list",
-                    "content": json_xml_content(json!({
-                        "type": "object",
-                        "properties": {
-                            "object": { "type": "string", "example": "list" },
-                            "data": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "id": { "type": "string" },
-                                        "object": { "type": "string" },
-                                        "created": { "type": "integer" },
-                                        "owned_by": { "type": "string" }
-                                    }
-                                }
-                            }
-                        }
-                    }))
-                }
-            }
-        }
-    }));
-
     // ── GraphQL ──────────────────────────────────────────────────
     paths.insert("/graphql".into(), json!({
         "get": {
@@ -1398,61 +1247,6 @@ fn build_components() -> Value {
                     "error": { "type": "string", "example": "service_unavailable" },
                     "fail_rate": { "type": "integer" },
                     "message": { "type": "string", "example": "Simulated failure (50% fail rate)" }
-                }
-            },
-            "ChatCompletionRequest": {
-                "type": "object",
-                "required": ["model", "messages"],
-                "properties": {
-                    "model": { "type": "string", "example": "rustybin-gpt" },
-                    "messages": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "required": ["role", "content"],
-                            "properties": {
-                                "role": { "type": "string", "enum": ["system", "user", "assistant"] },
-                                "content": { "type": "string" }
-                            }
-                        }
-                    },
-                    "stream": { "type": "boolean", "default": false },
-                    "max_tokens": { "type": "integer" },
-                    "temperature": { "type": "number", "minimum": 0, "maximum": 2 }
-                }
-            },
-            "ChatCompletionResponse": {
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "example": "chatcmpl-abc123" },
-                    "object": { "type": "string", "example": "chat.completion" },
-                    "created": { "type": "integer" },
-                    "model": { "type": "string" },
-                    "choices": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "index": { "type": "integer" },
-                                "message": {
-                                    "type": "object",
-                                    "properties": {
-                                        "role": { "type": "string" },
-                                        "content": { "type": "string" }
-                                    }
-                                },
-                                "finish_reason": { "type": "string" }
-                            }
-                        }
-                    },
-                    "usage": {
-                        "type": "object",
-                        "properties": {
-                            "prompt_tokens": { "type": "integer" },
-                            "completion_tokens": { "type": "integer" },
-                            "total_tokens": { "type": "integer" }
-                        }
-                    }
                 }
             }
         },

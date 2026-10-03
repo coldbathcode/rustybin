@@ -154,16 +154,57 @@ collection exports (`/export/*`). A test fails when they drift apart.
 
 | Methods | Path | Description |
 |---|---|---|
-| POST | `/ai/v1/chat/completions` | Chat completions (SSE streaming with stream=true) |
-| POST | `/ai/v1/completions` | Legacy text completions |
-| POST | `/ai/v1/embeddings` | Deterministic 1536-dimension embeddings |
+| POST | `/ai/openai/v1/chat/completions` | Chat completions (SSE streaming with stream=true, tools, structured output, n) |
+| POST | `/ai/v1/chat/completions` | Chat completions (SSE streaming with stream=true, tools, structured output, n) |
+| POST | `/ai/openai/v1/completions` | Legacy text completions (stream, echo, suffix, n) |
+| POST | `/ai/v1/completions` | Legacy text completions (stream, echo, suffix, n) |
+| POST | `/ai/openai/v1/embeddings` | Deterministic bag-of-words embeddings (dimensions, base64) |
+| POST | `/ai/v1/embeddings` | Deterministic bag-of-words embeddings (dimensions, base64) |
+| GET | `/ai/openai/v1/models` | List available models |
 | GET | `/ai/v1/models` | List available models |
+| GET | `/ai/openai/v1/models/{model}` | Retrieve a model (404 model_not_found for unknown ids) |
+| GET | `/ai/v1/models/{model}` | Retrieve a model (404 model_not_found for unknown ids) |
+| POST | `/ai/openai/v1/moderations` | Moderation (keyword-based categories, deterministic scores) |
+| POST | `/ai/v1/moderations` | Moderation (keyword-based categories, deterministic scores) |
+| POST | `/ai/openai/v1/images/generations` | Image generation (tiny valid PNG as b64_json or a URL to /image/png) |
+| POST | `/ai/v1/images/generations` | Image generation (tiny valid PNG as b64_json or a URL to /image/png) |
+| POST | `/ai/openai/v1/audio/transcriptions` | Audio transcription (multipart; json, text, srt, vtt, verbose_json) |
+| POST | `/ai/v1/audio/transcriptions` | Audio transcription (multipart; json, text, srt, vtt, verbose_json) |
+| POST | `/ai/openai/v1/responses` | Responses API (output items, function calls, native SSE events with stream=true) |
+| POST | `/ai/v1/responses` | Responses API |
+| POST | `/ai/azure/openai/deployments/{deployment}/chat/completions` | Azure OpenAI chat completions (api-version required, model = deployment) |
+| POST | `/ai/azure/openai/deployments/{deployment}/completions` | Azure OpenAI legacy completions |
+| POST | `/ai/azure/openai/deployments/{deployment}/embeddings` | Azure OpenAI embeddings |
 
 ### AI: Anthropic-compatible
 
 | Methods | Path | Description |
 |---|---|---|
-| POST | `/ai/anthropic/v1/messages` | Messages API (native SSE event stream with stream=true) |
+| POST | `/ai/anthropic/v1/messages` | Messages API (tools, prompt caching usage, native SSE event stream with stream=true) |
+| POST | `/ai/anthropic/v1/messages/count_tokens` | Count input tokens |
+| GET | `/ai/anthropic/v1/models` | List models |
+| GET | `/ai/anthropic/v1/models/{model}` | Retrieve a model |
+
+### AI: Mock LLM
+
+| Methods | Path | Description |
+|---|---|---|
+| GET | `/ai/gemini/v1beta/models` | Gemini: list models |
+| GET POST | `/ai/gemini/v1beta/models/{*rest}` | Gemini: {model}:generateContent, :streamGenerateContent (?alt=sse), :countTokens, :embedContent, :batchEmbedContents |
+| POST | `/ai/bedrock/model/{model_id}/converse` | Bedrock Converse |
+| POST | `/ai/bedrock/model/{model_id}/converse-stream` | Bedrock ConverseStream (binary AWS event stream with CRC32 framing) |
+| POST | `/ai/bedrock/model/{model_id}/invoke` | Bedrock InvokeModel (Anthropic body, Titan text/embeddings, Llama prompt) |
+| POST | `/ai/bedrock/model/{model_id}/invoke-with-response-stream` | Bedrock InvokeModelWithResponseStream (event stream of base64 chunks) |
+| POST | `/ai/ollama/api/chat` | Ollama chat (NDJSON stream by default; tools, format) |
+| POST | `/ai/ollama/api/generate` | Ollama generate (NDJSON stream by default) |
+| GET | `/ai/ollama/api/tags` | Ollama local models |
+| POST | `/ai/ollama/api/embed` | Ollama embeddings (768 dimensions by default) |
+| POST | `/ai/ollama/api/embeddings` | Ollama legacy embeddings |
+| POST | `/ai/cohere/v2/rerank` | Rerank (deterministic relevance scores, top_n) |
+| POST | `/ai/cohere/v2/embed` | Cohere embed (float, int8, uint8, base64) |
+| POST | `/ai/v1/rerank` | Generic rerank alias (same as /ai/cohere/v2/rerank) |
+| GET | `/ai/requests` | Recent mock LLM exchanges (newest first) |
+| GET | `/ai/requests/{id}` | What the upstream received for one AI request |
 
 ### AI: Guardrails
 
@@ -296,7 +337,7 @@ These work on every route except the control plane (`/_rustybin/*`) and the cons
 | Header | Effect |
 |---|---|
 | `X-Rustybin-Delay: <ms>` | Delay the response (capped at 30 s, 10 s in public mode) |
-| `X-Rustybin-Fail: <status>` or `<status>:<percent>` | Inject an error response (status 400-599), always or with the given probability, e.g. `503:50` |
+| `X-Rustybin-Fail: <status>` or `<status>:<percent>` | Inject an error response (status 400-599), always or with the given probability, e.g. `503:50` (on `/ai/*` the provider's native error, see [Mock LLM](#mock-llm)) |
 | `X-Request-Id` | Propagated when sent, generated otherwise, and echoed on the response |
 | `X-Rustybin-Session: <id>` | Tags the request for the inspector (`/_rustybin/requests?session=<id>`) and scopes per-client state |
 
@@ -313,6 +354,100 @@ require `Authorization: Bearer <token>` or `X-Rustybin-Admin-Token: <token>`.
 instances: only requests carrying `X-Rustybin-Session` are captured, the inspector only
 returns entries for the `?session=` you ask for, delays are capped lower, and global
 mutations are disabled unless an admin token is configured.
+
+## Mock LLM
+
+A deterministic multi-provider model server for AI gateway demos (AI proxy,
+token rate limiting, prompt guard, prompt decorators/templates, semantic
+cache, PII sanitisers, load balancing/failover, credential injection,
+request/response transformers). The official SDKs accept it
+(`conformance/ai/` runs the OpenAI, Anthropic and Google Gen AI SDKs).
+
+| Provider | Point the client at | Routes |
+|---|---|---|
+| OpenAI | `base_url=http://HOST/ai/openai/v1` (or the legacy `/ai/v1`) | `chat/completions`, `completions`, `embeddings`, `models`, `models/{model}`, `moderations`, `responses`, `images/generations`, `audio/transcriptions` |
+| Azure OpenAI | `azure_endpoint=http://HOST/ai/azure` | `openai/deployments/{deployment}/chat/completions`, `/completions`, `/embeddings` (`?api-version=` required) |
+| Anthropic | `base_url=http://HOST/ai/anthropic` | `v1/messages`, `v1/messages/count_tokens`, `v1/models` |
+| Gemini | `http_options.base_url=http://HOST/ai/gemini` | `v1beta/models/{model}:generateContent`, `:streamGenerateContent` (`?alt=sse`), `:countTokens`, `:embedContent`, `:batchEmbedContents`, `v1beta/models` |
+| AWS Bedrock | endpoint `http://HOST/ai/bedrock` | `model/{modelId}/converse`, `/converse-stream` (binary event stream), `/invoke`, `/invoke-with-response-stream` |
+| Ollama | `http://HOST/ai/ollama` | `api/chat`, `api/generate` (NDJSON, streaming by default), `api/tags`, `api/embed` |
+| Cohere | `http://HOST/ai/cohere` | `v2/rerank`, `v2/embed` (plus the generic `/ai/v1/rerank`) |
+
+**Modes** (header `X-Rustybin-Mode`, or a model name segment split on `- _ : / . @`,
+e.g. `rustybin-echo`, `gpt-4o:scripted`, `random`):
+
+| Mode | Reply |
+|---|---|
+| `canned` (default) | Keyword table with whole-word matching: greetings (`hi`, `hello`; "this" does not match), code, JSON/data, long/essay, else a default text |
+| `echo` | The exact prompt the upstream received (`system: ...`, `user: ...`, tool calls and results), so prompt decorator/template plugins can be shown |
+| `scripted` | Demo rules on the last user message, below |
+| `random` | Text seeded by a SHA-256 hash of model + prompt (identical requests get identical text, `n>1` choices differ) |
+
+| Scripted trigger (whole words) | Reply |
+|---|---|
+| `lorem N` | N lorem ipsum words (max 4000, 500 in public mode) |
+| `ssn`, `social security`, `credit card`, `pii`, `customer record` | Fake PII: SSN `123-45-6789`, card `4111 1111 1111 1111`, email, phone (response sanitiser demos) |
+| `toxic`, `jailbreak`, `unsafe`, `harmful` | A simulated unsafe answer an output guardrail should block |
+| `secret`, `api key`, `password`, `credentials` | Fake cloud keys and tokens (secret redaction demos) |
+| `refuse`, `refusal` | A refusal |
+| `json` | A bare JSON object |
+| `markdown`, `table` | Markdown with a table and links |
+| `url`, `link` | Text with allowed and suspicious URLs |
+| `echo` | The rendered prompt |
+
+**Tools and structured output**: when tools are supplied and the tool choice is not
+`none`, a tool call is returned if the tool is forced (`required` / `any` / a named tool)
+or the last user message mentions the tool name or a description keyword (whole words).
+Arguments are generated from the tool's JSON schema (required and optional properties,
+enums, nested objects/arrays, `$ref` into `$defs`, formats, plausible strings by property
+name, e.g. `location` takes "Paris" from "weather in Paris"). After a tool result, the
+answer quotes the tool output. `response_format` json_schema / json_object (OpenAI),
+`text.format` (Responses), `responseSchema` (Gemini), `output_format` or a forced tool
+(Anthropic) and `format` (Ollama) produce JSON valid against the schema.
+
+**Tokens**: words cost `ceil(chars / 4)` tokens, every punctuation mark or symbol 1,
+images 85; prompt tokens count the rendered prompt plus tool definitions. The same count
+drives usage fields, rate-limit headers, `max_tokens` / `max_output_tokens` truncation
+(finish reason `length` / `max_tokens` / `MAX_TOKENS` / `incomplete`) and stream chunks
+(one token per delta). Anthropic `cache_control` prefixes report
+`cache_creation_input_tokens` on the first request and `cache_read_input_tokens` on
+repeats within 5 minutes.
+
+**Embeddings** are a hashed bag of words, word pairs and character trigrams (FNV-1a),
+normalised: identical input gives identical vectors, case and punctuation are ignored,
+reordered words stay close (cosine about 0.9), unrelated text is near 0. Rerank scores
+blend query-word overlap with that similarity.
+
+**Request headers** (values capped; latency caps follow `X-Rustybin-Delay`):
+
+| Header | Effect |
+|---|---|
+| `X-Rustybin-Mode` | `canned`, `echo`, `scripted`, `random` |
+| `X-Rustybin-Latency-Ms` | Delay before the response headers |
+| `X-Rustybin-TTFT-Ms` | Time to first token (streams: after the headers; otherwise added to latency) |
+| `X-Rustybin-Tokens-Per-Second` | Streaming pace (default 100, `0` = unpaced; a stream's pacing is capped at 60 s, 20 s in public mode) |
+| `X-Rustybin-Fail` | `kind[:percent]` in the provider's native error shape: `429`/`rate_limit` (with `retry-after` and provider rate-limit headers), `500`, `503`, `529`/`overloaded` (Anthropic 529, others 503), `504`/`timeout`, `context_length` (400 `context_length_exceeded`), `content_filter` (200 with the filtered finish reason), `prompt_filter` (400), `401`, `403`, `404`, any 400-599. Also `?fail=kind&fail_rate=0.3` |
+| `X-Rustybin-Require-Auth: true` | Enforce the provider's native credential (below) |
+
+**Credentials** (enforced with `X-Rustybin-Require-Auth`, `RUSTYBIN_AI_REQUIRE_AUTH=true`,
+or `RUSTYBIN_AI_API_KEY=<key>`, which also requires that exact key): OpenAI, Ollama and
+Cohere `Authorization: Bearer`; Azure `api-key`; Anthropic `x-api-key` plus
+`anthropic-version`; Gemini `x-goog-api-key` or `?key=`; Bedrock a SigV4
+`Authorization: AWS4-HMAC-SHA256 Credential=.../SignedHeaders=...,Signature=...` header
+plus `X-Amz-Date` (structure only) or a Bedrock API key bearer. Failures use the native
+status and shape (401, Gemini/Bedrock 403).
+
+**Response headers** on every `/ai/*` call: `X-Rustybin-Request-Id` (the `X-Request-Id`
+when sent), `X-Rustybin-Credential` (the credential seen, redacted to its last four
+characters, or `none`, to prove a gateway injected it), `X-Rustybin-Provider`,
+`X-Rustybin-Instance`, `X-Rustybin-Model`, `X-Rustybin-Mode`, and realistic rate-limit
+headers (`x-ratelimit-*` for OpenAI/Azure, `anthropic-ratelimit-*` for Anthropic).
+
+**Inspection**: `GET /ai/requests/{id}` (id from `X-Rustybin-Request-Id`) shows what the
+upstream received: headers (credentials redacted), body, normalised prompt, provider,
+model, mode and token counts; `GET /ai/requests` lists recent exchanges. Records are
+bounded (1000, 200 in public mode) and expire after an hour; in public mode callers only
+see their own session (`X-Rustybin-Session` or client IP).
 
 ## Configuration
 
@@ -339,6 +474,8 @@ mutations are disabled unless an admin token is configured.
 | `RUSTYBIN_MCP_ACCEPTED_AUDIENCES` | `rustybin` | Token audiences accepted by `/mcp/protected` besides its resource URL (default: the IdP's default audience, for demo convenience); `none` = strict RFC 8707 |
 | `RUSTYBIN_MCP_RESOURCE_URL` | _(derived)_ | Override the `/mcp/protected` resource identifier (e.g. the gateway URL) |
 | `RUSTYBIN_MCP_CLOCK_TICK_SECS` | `5` | Update interval of the subscribable `rustybin://clock` resource |
+| `RUSTYBIN_AI_REQUIRE_AUTH` | `false` | Mock LLM: enforce each provider's native credential (see [Mock LLM](#mock-llm)) |
+| `RUSTYBIN_AI_API_KEY` | _(unset)_ | Mock LLM: the only accepted key (implies `RUSTYBIN_AI_REQUIRE_AUTH`; compared with the SigV4 access key id on Bedrock) |
 
 Invalid values are logged as warnings and the default is used. `GET /_rustybin/config`
 shows the effective (non-secret) configuration.
@@ -432,7 +569,10 @@ A vendor-neutral map of gateway capabilities to the endpoints that exercise them
 | Response transformation | `/echo` | Header/body inspection |
 | Retry | `/flaky/{rate}`, `/flaky/pattern/{p}` | Retry on 503 |
 | Circuit breaking | `/flaky/after/{n}`, `/flaky/recover/{n}` | Health state transitions |
-| AI proxying | `/ai/v1/chat/completions`, `/ai/anthropic/v1/messages` | OpenAI- and Anthropic-format upstreams |
+| AI proxying | `/ai/openai/v1/*`, `/ai/anthropic/v1/*`, `/ai/gemini/v1beta/*`, `/ai/bedrock/*`, `/ai/azure/*`, `/ai/ollama/*` | Multi-provider mock LLM (see [Mock LLM](#mock-llm)) |
+| AI rate limiting / failover | `X-Rustybin-Fail: 429`, `X-Rustybin-Latency-Ms`, usage fields | Native 429/529 errors, token usage, rate-limit headers |
+| Prompt guard / decorator | `rustybin-echo`, `rustybin-scripted` models | Echo the decorated prompt, unsafe and PII replies |
+| Semantic cache | `/ai/openai/v1/embeddings` | Deterministic, similarity-preserving embeddings |
 | gRPC proxying | `EchoService` on `:50051` | gRPC unary + streaming proxying |
 | WebSocket proxying | `/ws`, `/ws/time` | WebSocket frame proxying |
 | Active health checks | `/health/unhealthy`, `/health/healthy` | Health-check failover |
