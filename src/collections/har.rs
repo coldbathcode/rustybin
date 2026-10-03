@@ -2,13 +2,13 @@ use serde_json::{json, Value};
 
 use super::{split_path_query, AuthDef, BodyDef, Category};
 
-pub fn build(categories: &[Category]) -> Value {
+pub fn build(categories: &[Category], base_url: &str) -> Value {
     let version = env!("CARGO_PKG_VERSION");
     let mut entries: Vec<Value> = Vec::new();
 
     for cat in categories {
         for req in &cat.requests {
-            entries.push(build_entry(req, cat.name));
+            entries.push(build_entry(req, cat.name, base_url));
         }
     }
 
@@ -24,9 +24,9 @@ pub fn build(categories: &[Category]) -> Value {
     })
 }
 
-fn build_entry(req: &super::RequestDef, category: &str) -> Value {
+fn build_entry(req: &super::RequestDef, category: &str, base_url: &str) -> Value {
     let (_path, query_string) = split_path_query(req.path);
-    let url = format!("http://localhost{}", req.path);
+    let url = format!("{base_url}{}", req.path);
 
     let mut headers: Vec<Value> = req
         .headers

@@ -35,8 +35,20 @@ HTTP 200
 [Asserts]
 jsonpath "$.info.schema" contains "v2.1.0"
 jsonpath "$.variable[0].key" == "base_url"
-jsonpath "$.variable[0].value" == "http://localhost"
+jsonpath "$.variable[0].value" == "{{base_url}}"
 # ANCHOR_END: postman
+
+# ANCHOR: base_url_override
+GET {{base_url}}/export/postman.json?base_url=https://gateway.example.com/rustybin
+HTTP 200
+[Asserts]
+jsonpath "$.variable[0].value" == "https://gateway.example.com/rustybin"
+
+GET {{base_url}}/export/curl.sh?base_url=not-a-url
+HTTP 400
+[Asserts]
+jsonpath "$.error" == "invalid base_url"
+# ANCHOR_END: base_url_override
 
 # ANCHOR: other_exports
 GET {{base_url}}/export/insomnia.json

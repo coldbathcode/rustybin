@@ -150,9 +150,10 @@ pub async fn handle(
     if let Err(resp) = auth::check_origin(&parts.headers, &sh.cfg) {
         return decorate(resp, &echo);
     }
+    let base_url = auth::base_url(&parts.headers, &parts.extensions, &parts.uri, &sh.cfg);
     let claims = match profile.access {
         Access::Open => None,
-        Access::OAuth => match auth::require_bearer(&parts.headers, &sh.cfg, &app.jwt) {
+        Access::OAuth => match auth::require_bearer(&parts.headers, &base_url, &sh.cfg, &app.jwt) {
             Ok(c) => Some(c),
             Err(resp) => return decorate(resp, &echo),
         },
@@ -164,6 +165,7 @@ pub async fn handle(
     let req = Req {
         info: Arc::new(http_info(&app, &parts, "streamable-http")),
         page_size: page_size(&sh, &parts.uri),
+        base_url,
         sh,
         profile,
         claims,
@@ -202,6 +204,8 @@ pub struct Req {
     pub claims: Option<Value>,
     pub info: Arc<HttpInfo>,
     pub page_size: usize,
+    /// Externally visible `scheme://host[:port]` (see [`auth::base_url`]).
+    pub base_url: String,
     pub echo: Echo,
 }
 
@@ -481,8 +485,7 @@ fn scope_check(req: &Req, id: &Value, params: &Value) -> Option<Response> {
     )
     .with_data(json!({ "requiredScope": scope }));
     Some(auth::insufficient_scope(
-        req.headers(),
-        &req.sh.cfg,
+        &req.base_url,
         scope,
         protocol::error_response(Some(id), &err),
     ))

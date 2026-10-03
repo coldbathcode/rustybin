@@ -1,11 +1,14 @@
 //! Demo PKI: a CA, a server certificate for the HTTPS listener and a client
 //! certificate for mTLS demos.
 //!
-//! The CA is persisted (`ca.crt` + `ca.key` next to the configured TLS
-//! certificate) when that directory is writable, so client certificates
-//! issued by an earlier run keep working after a restart. Tests use
-//! [`CertState::shared_for_tests`] / [`CertState::generate`], which never
-//! touch the filesystem.
+//! The CA is persisted next to the configured TLS certificate when that
+//! directory is writable, so client certificates issued by an earlier run
+//! keep working after a restart. It is stored as `ca.crt` + `ca.key`, unless
+//! those names hold another CA (for example your own): Rustybin never
+//! overwrites a CA it did not create (recognised by the subject
+//! [`DEMO_CA_CN`]) and then uses `rustybin-demo-ca.crt` +
+//! `rustybin-demo-ca.key` instead. Tests use [`CertState::shared_for_tests`]
+//! / [`CertState::generate`], which never touch the filesystem.
 
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
@@ -21,6 +24,11 @@ use crate::config::Config;
 
 /// Common name of the demo CA.
 pub const DEMO_CA_CN: &str = "Rustybin Demo CA";
+
+/// File stems (`<stem>.crt` + `<stem>.key`) where the demo CA may be
+/// persisted, in order of preference. The second one is used when the first
+/// holds a CA that is not the demo CA.
+pub const DEMO_CA_STEMS: &[&str] = &["ca", "rustybin-demo-ca"];
 
 /// Shared certificate state holding the demo PKI material.
 pub struct CertState {
@@ -72,11 +80,11 @@ impl Ca {
         }
     }
 
-    /// Load `ca.crt` + `ca.key`; `None` unless both parse, the key matches
-    /// the certificate and the subject is the demo CA.
-    fn load(dir: &Path) -> Option<Self> {
-        let cert_pem = std::fs::read_to_string(dir.join("ca.crt")).ok()?;
-        let key_pem = std::fs::read_to_string(dir.join("ca.key")).ok()?;
+    /// Load `<stem>.crt` + `<stem>.key`; `None` unless both parse, the key
+    /// matches the certificate and the subject is the demo CA.
+    fn load(dir: &Path, stem: &str) -> Option<Self> {
+        let cert_pem = std::fs::read_to_string(dir.join(format!("{stem}.crt"))).ok()?;
+        let key_pem = std::fs::read_to_string(dir.join(format!("{stem}.key"))).ok()?;
         let key = KeyPair::from_pem(&key_pem).ok()?;
         let der = pem_to_der(&cert_pem)?;
         let (_, parsed) = x509_parser::parse_x509_certificate(&der).ok()?;
@@ -97,21 +105,70 @@ impl Ca {
         })
     }
 
-    /// Best-effort write of `ca.crt` and `ca.key` (0600).
-    fn persist(&self, dir: &Path) {
+    /// Best-effort write of `<stem>.crt` and `<stem>.key` (0600).
+    fn persist(&self, dir: &Path, stem: &str) {
         if let Err(e) = std::fs::create_dir_all(dir) {
             tracing::warn!("demo CA not persisted ({}): {e}", dir.display());
             return;
         }
-        let key_path = dir.join("ca.key");
-        let cert_path = dir.join("ca.crt");
+        let key_path = dir.join(format!("{stem}.key"));
+        let cert_path = dir.join(format!("{stem}.crt"));
         let result = write_private(&key_path, self.key.serialize_pem().as_bytes())
             .and_then(|()| std::fs::write(&cert_path, &self.cert_pem));
         match result {
-            Ok(()) => tracing::info!("demo CA written to {}", dir.display()),
+            Ok(()) => tracing::info!("demo CA written to {}", cert_path.display()),
             Err(e) => {
                 let _ = std::fs::remove_file(&key_path);
                 tracing::warn!("demo CA not persisted ({}): {e}", dir.display());
+            }
+        }
+    }
+}
+
+/// What a `<stem>.crt` / `<stem>.key` pair in the certs directory holds.
+enum CaSlot {
+    /// A consistent demo CA, ready to use.
+    Demo(Box<Ca>),
+    /// Nothing, or a demo CA certificate whose key is missing or does not
+    /// match: Rustybin's own files, safe to (re)write.
+    Free,
+    /// Something Rustybin did not create (another CA, an unreadable file, a
+    /// key without a certificate): never touched.
+    Foreign,
+}
+
+/// Whether a PEM certificate is a CA certificate whose subject is the demo
+/// CA, i.e. one Rustybin generated.
+fn is_demo_ca_cert(cert_pem: &str) -> bool {
+    let Some(der) = pem_to_der(cert_pem) else {
+        return false;
+    };
+    x509_parser::parse_x509_certificate(&der).is_ok_and(|(_, c)| {
+        c.is_ca()
+            && c.subject()
+                .iter_common_name()
+                .any(|cn| cn.as_str() == Ok(DEMO_CA_CN))
+    })
+}
+
+fn inspect_slot(dir: &Path, stem: &str) -> CaSlot {
+    let cert_path = dir.join(format!("{stem}.crt"));
+    let key_path = dir.join(format!("{stem}.key"));
+    match (cert_path.exists(), key_path.exists()) {
+        (false, false) => CaSlot::Free,
+        (false, true) => CaSlot::Foreign,
+        (true, _) => {
+            let ours = std::fs::read_to_string(&cert_path).is_ok_and(|pem| is_demo_ca_cert(&pem));
+            if !ours {
+                CaSlot::Foreign
+            } else if let Some(ca) = Ca::load(dir, stem) {
+                CaSlot::Demo(Box::new(ca))
+            } else {
+                tracing::warn!(
+                    "{} is a demo CA without a matching key, replacing it",
+                    cert_path.display()
+                );
+                CaSlot::Free
             }
         }
     }
@@ -168,20 +225,37 @@ impl CertState {
         Self::load_or_generate(dir)
     }
 
-    /// Load `ca.crt` / `ca.key` from `dir` when present and consistent,
-    /// otherwise generate a new CA and try to persist it there.
+    /// Load the demo CA persisted in `dir` (see [`DEMO_CA_STEMS`]), or
+    /// generate one and persist it (best effort) in the first slot that is
+    /// free or already Rustybin's. Files that are not the demo CA are never
+    /// overwritten; when no slot is usable the CA stays in memory.
     pub fn load_or_generate(dir: &Path) -> Self {
-        let ca = match Ca::load(dir) {
-            Some(ca) => {
-                tracing::info!("demo CA loaded from {}", dir.display());
-                ca
+        let mut free = None;
+        for stem in DEMO_CA_STEMS {
+            match inspect_slot(dir, stem) {
+                CaSlot::Demo(ca) => {
+                    tracing::info!("demo CA loaded from {}", dir.join(format!("{stem}.crt")).display());
+                    return Self::from_ca(*ca);
+                }
+                CaSlot::Free => {
+                    free.get_or_insert(*stem);
+                }
+                CaSlot::Foreign => tracing::warn!(
+                    "{dir}/{stem}.crt / {stem}.key are not the Rustybin demo CA (subject CN {DEMO_CA_CN}); \
+                     leaving them untouched",
+                    dir = dir.display()
+                ),
             }
-            None => {
-                let ca = Ca::generate();
-                ca.persist(dir);
-                ca
-            }
-        };
+        }
+        let ca = Ca::generate();
+        match free {
+            Some(stem) => ca.persist(dir, stem),
+            None => tracing::warn!(
+                "no free file name for the demo CA in {}; it is kept in memory only, so client \
+                 certificates it issues stop working after a restart",
+                dir.display()
+            ),
+        }
         Self::from_ca(ca)
     }
 
@@ -426,6 +500,70 @@ mod tests {
         std::fs::write(dir.path().join("ca.key"), other.serialize_pem()).expect("write");
         let third = CertState::load_or_generate(dir.path());
         assert_ne!(third.ca_cert_pem, first.ca_cert_pem);
+    }
+
+    /// A CA that is not the demo CA (a user's own), as PEM (cert, key).
+    fn foreign_ca() -> (String, String) {
+        let key = KeyPair::generate().expect("key");
+        let mut params = ca_params();
+        params.distinguished_name = DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "My Company Root CA");
+        let cert = params.self_signed(&key).expect("cert");
+        (cert.pem(), key.serialize_pem())
+    }
+
+    #[test]
+    fn foreign_ca_files_are_never_overwritten() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (cert, key) = foreign_ca();
+        std::fs::write(dir.path().join("ca.crt"), &cert).expect("write");
+        std::fs::write(dir.path().join("ca.key"), &key).expect("write");
+
+        let first = CertState::load_or_generate(dir.path());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("ca.crt")).expect("read"),
+            cert
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("ca.key")).expect("read"),
+            key
+        );
+        assert_ne!(first.ca_cert_pem, cert);
+        assert!(is_demo_ca_cert(&first.ca_cert_pem));
+        let demo_crt = dir.path().join("rustybin-demo-ca.crt");
+        assert!(demo_crt.exists() && dir.path().join("rustybin-demo-ca.key").exists());
+
+        // A restart reuses the demo CA from the alternate pair.
+        let second = CertState::load_or_generate(dir.path());
+        assert_eq!(first.ca_cert_pem, second.ca_cert_pem);
+        let der = pem_to_der(&first.client_cert_pem).expect("der");
+        assert!(second.verify_client_cert(&der).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("ca.crt")).expect("read"),
+            cert
+        );
+    }
+
+    #[test]
+    fn unknown_files_are_left_alone() {
+        // A lone key and an unparseable certificate are not ours either.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("ca.key"), "my key").expect("write");
+        std::fs::write(dir.path().join("rustybin-demo-ca.crt"), "garbage").expect("write");
+        let state = CertState::load_or_generate(dir.path());
+        assert!(is_demo_ca_cert(&state.ca_cert_pem));
+        assert!(!dir.path().join("ca.crt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("ca.key")).expect("read"),
+            "my key"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("rustybin-demo-ca.crt")).expect("read"),
+            "garbage"
+        );
+        assert!(!dir.path().join("rustybin-demo-ca.key").exists());
     }
 
     #[test]

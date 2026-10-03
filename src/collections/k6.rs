@@ -1,14 +1,18 @@
 use super::{split_path_query, AuthDef, BodyDef, Category};
 
-pub fn build(categories: &[Category]) -> String {
+pub fn build(categories: &[Category], base_url: &str) -> String {
     let version = env!("CARGO_PKG_VERSION");
     let mut out = String::with_capacity(16384);
 
     out.push_str(&format!("// Rustybin v{version} - k6 load test script\n"));
-    out.push_str("// Run: BASE_URL=http://localhost k6 run rustybin-k6.js\n\n");
+    out.push_str(&format!(
+        "// Run: BASE_URL={base_url} k6 run rustybin-k6.js\n\n"
+    ));
     out.push_str("import http from 'k6/http';\n");
     out.push_str("import { check, group } from 'k6';\n\n");
-    out.push_str("const BASE_URL = __ENV.BASE_URL || 'http://localhost';\n\n");
+    out.push_str(&format!(
+        "const BASE_URL = __ENV.BASE_URL || '{base_url}';\n\n"
+    ));
     out.push_str("export const options = {\n");
     out.push_str("  vus: 1,\n");
     out.push_str("  iterations: 1,\n");

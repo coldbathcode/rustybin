@@ -19,8 +19,8 @@ OpenID Connect, OAuth introspection or JWT plugin, an MCP client and the A2A
 | `POST /oauth/register` | RFC 7591 dynamic client registration |
 
 The **issuer** is derived from each request: `http://<Host>`, or `https://` on the
-HTTPS listener. With `RUSTYBIN_TRUST_FORWARD=true`, `X-Forwarded-Proto`,
-`X-Forwarded-Host` and `X-Forwarded-Prefix` are honoured, so the issuer matches the
+HTTPS listener. With `RUSTYBIN_TRUST_FORWARD=true`, `Forwarded`, `X-Forwarded-Proto`,
+`X-Forwarded-Host`, `X-Forwarded-Port` and `X-Forwarded-Prefix` are honoured, so the issuer matches the
 public URL when Rustybin sits behind a gateway (route the gateway's `/.well-known`
 and `/oauth` paths to it and forward those headers).
 

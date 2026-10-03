@@ -2,17 +2,17 @@ use serde_json::{json, Value};
 
 use super::{AuthDef, BodyDef, Category, RequestDef};
 
-pub fn build(categories: &[Category]) -> Value {
+pub fn build(categories: &[Category], base_url: &str) -> Value {
     let version = env!("CARGO_PKG_VERSION");
     json!({
         "info": {
             "name": "Rustybin",
-            "description": format!("Rustybin v{version} - High-performance HTTP stub service for API gateway testing.\n\nSet the {{{{base_url}}}} variable to your Rustybin instance (default: http://localhost)."),
+            "description": format!("Rustybin v{version} - High-performance HTTP stub service for API gateway testing.\n\nSet the {{{{base_url}}}} variable to your Rustybin instance (default: {base_url})."),
             "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
             "version": version
         },
         "variable": [
-            { "key": "base_url", "value": "http://localhost", "type": "string" }
+            { "key": "base_url", "value": base_url, "type": "string" }
         ],
         "item": categories.iter().map(build_folder).collect::<Vec<_>>()
     })

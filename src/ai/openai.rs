@@ -1033,32 +1033,13 @@ pub fn tiny_png() -> &'static [u8] {
     })
 }
 
-/// `scheme://host` of the request (forwarded headers honoured, host validated).
-fn base_url(headers: &HeaderMap) -> String {
-    let get = |n: &str| headers.get(n).and_then(|v| v.to_str().ok()).map(str::trim);
-    let valid = |h: &&str| {
-        !h.is_empty()
-            && h.len() <= 255
-            && h.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"-.:[]_".contains(&b))
-    };
-    let host = get("x-forwarded-host")
-        .and_then(|h| h.split(',').next())
-        .map(str::trim)
-        .filter(valid)
-        .or_else(|| get("host").filter(valid))
-        .unwrap_or("localhost");
-    let scheme = match get("x-forwarded-proto")
-        .and_then(|p| p.split(',').next())
-        .map(str::trim)
-    {
-        Some("https") => "https",
-        _ => "http",
-    };
-    format!("{scheme}://{host}")
-}
-
-async fn images(Extension(ctx): Extension<AiCtx>, headers: HeaderMap, body: Bytes) -> Response {
+/// Image URLs point back at this server ([`crate::session::Origin`]: listener
+/// scheme, validated `Host`, proxy headers only with `RUSTYBIN_TRUST_FORWARD`).
+async fn images(
+    Extension(ctx): Extension<AiCtx>,
+    crate::session::Origin(origin): crate::session::Origin,
+    body: Bytes,
+) -> Response {
     use base64::Engine;
     let v: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -1091,7 +1072,7 @@ async fn images(Extension(ctx): Extension<AiCtx>, headers: HeaderMap, body: Byte
     let item = if b64 {
         json!({"b64_json": base64::engine::general_purpose::STANDARD.encode(tiny_png()), "revised_prompt": prompt})
     } else {
-        json!({"url": format!("{}/image/png", base_url(&headers)), "revised_prompt": prompt})
+        json!({"url": format!("{}/image/png", origin.base_url()), "revised_prompt": prompt})
     };
     let data: Vec<Value> = (0..n).map(|_| item.clone()).collect();
     let pt = super::tokens::count(prompt);

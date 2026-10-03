@@ -1,12 +1,12 @@
 use super::{AuthDef, BodyDef, Category};
 
-pub fn build(categories: &[Category]) -> String {
+pub fn build(categories: &[Category], base_url: &str) -> String {
     let version = env!("CARGO_PKG_VERSION");
     let mut out = String::with_capacity(8192);
 
     out.push_str(&format!("# Rustybin v{version} - HTTP requests\n"));
     out.push_str("# Compatible with JetBrains HTTP Client and VS Code REST Client\n\n");
-    out.push_str("@base_url = http://localhost\n\n");
+    out.push_str(&format!("@base_url = {base_url}\n\n"));
 
     for cat in categories {
         out.push_str(&format!(

@@ -1258,6 +1258,61 @@ async fn legacy_http_sse_transport() {
 
 // ── Variants ────────────────────────────────────────────────────────
 
+#[tokio::test]
+async fn protected_resource_urls_use_https_on_the_tls_listener() {
+    let app = app();
+    let https = crate::session::ListenerInfo::https(8443);
+    for path in [
+        "/.well-known/oauth-protected-resource/mcp/protected",
+        "/.well-known/oauth-protected-resource",
+    ] {
+        let mut req = Request::builder()
+            .uri(path)
+            .header("host", "localhost:8443")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(https);
+        let prm = body_json(app.clone().oneshot(req).await.expect("response")).await;
+        assert_eq!(prm["resource"], "https://localhost:8443/mcp/protected");
+        assert_eq!(
+            prm["authorization_servers"],
+            json!(["https://localhost:8443"])
+        );
+        assert_eq!(
+            prm["rustybin_authorization_server_metadata"],
+            "https://localhost:8443/.well-known/oauth-authorization-server"
+        );
+    }
+
+    // The 401 challenge points at the https metadata document, and a token
+    // for the https resource is accepted.
+    let call = |token: Option<String>| {
+        let params = modern_params(json!({}), json!({}));
+        let mut b = modern_req("/mcp/protected", 1, "tools/list", params.clone())
+            .header("host", "localhost:8443");
+        if let Some(t) = token {
+            b = b.header("authorization", format!("Bearer {t}"));
+        }
+        let mut req = b
+            .body(Body::from(rpc(1, "tools/list", params).to_string()))
+            .expect("request");
+        req.extensions_mut().insert(https);
+        app.clone().oneshot(req)
+    };
+    let resp = call(None).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let challenge = resp.headers()["www-authenticate"].to_str().unwrap_or("");
+    assert!(
+        challenge.contains(
+            "resource_metadata=\"https://localhost:8443/.well-known/oauth-protected-resource/mcp/protected\""
+        ),
+        "{challenge}"
+    );
+    let token = mint("https://localhost:8443/mcp/protected", "openid mcp:tools");
+    let resp = call(Some(token)).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
 fn mint(aud: &str, scope: &str) -> String {
     let jwt = crate::jwt_state::JwtState::shared_for_tests();
     let now = chrono::Utc::now().timestamp();

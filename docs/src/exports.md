@@ -15,13 +15,25 @@ HTTP clients cannot run them. Some examples contain placeholders such as
 | `/export/requests.http` | VS Code REST Client / JetBrains HTTP Client | `@base_url` at the top |
 | `/export/requests.hurl` | [Hurl](https://hurl.dev) file (asserts only `HTTP *`) | `hurl --variable base_url=...` |
 | `/export/k6.js` | [k6](https://k6.io) script (one iteration, checks that each request got a response) | `BASE_URL=... k6 run rustybin-k6.js` |
-| `/export/har.json` | HAR 1.2 archive | URLs use `http://localhost` |
+| `/export/har.json` | HAR 1.2 archive | absolute URLs on the base URL |
 
-The base URL defaults to `http://localhost` in every format: set the variable to
-your instance or gateway after importing.
+The base URL written into every format is the origin the export was downloaded
+from: the scheme of the listener (`https` on the HTTPS port), the `Host` header,
+and, with `RUSTYBIN_TRUST_FORWARD=true`, the `Forwarded` / `X-Forwarded-Proto` /
+`X-Forwarded-Host` / `X-Forwarded-Port` headers of your proxy. Download an export
+through your gateway and it already points at the gateway.
 
 ```hurl
 {{#include ../examples/exports/exports.hurl:postman}}
+```
+
+To target another URL, pass `?base_url=` (an absolute `http` or `https` URL, with an
+optional path prefix such as `https://gateway.example.com/rustybin`; no credentials,
+query or fragment). Anything else is a `400` with a JSON error. You can still change
+the variable after importing.
+
+```hurl
+{{#include ../examples/exports/exports.hurl:base_url_override}}
 ```
 
 ```hurl

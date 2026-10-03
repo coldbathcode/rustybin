@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, RawQuery};
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use axum::http::{header, Extensions, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
@@ -94,52 +94,15 @@ pub struct Origin {
     pub authority: String,
 }
 
-fn valid_host(h: &str) -> bool {
-    !h.is_empty()
-        && h.len() <= 255
-        && h.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']' | b'_')
-        })
-}
-
-/// Derive the origin from `Host` (and `X-Forwarded-Proto` / `X-Forwarded-Host`
-/// only when `RUSTYBIN_TRUST_FORWARD` is on).
-pub fn origin(headers: &HeaderMap, uri: &Uri, config: &Config) -> Origin {
-    let header = |name: &str| {
-        headers
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split(',').next())
-            .map(|v| v.trim().to_string())
-    };
-    let mut scheme = uri
-        .scheme_str()
-        .filter(|s| *s == "http" || *s == "https")
-        .unwrap_or("http")
-        .to_string();
-    let mut host = header("host")
-        .filter(|h| valid_host(h))
-        .or_else(|| {
-            uri.authority()
-                .map(|a| a.as_str().to_string())
-                .filter(|h| valid_host(h))
-        })
-        .unwrap_or_else(|| "localhost".to_string());
-    if config.trust_forward {
-        if let Some(p) = header("x-forwarded-proto") {
-            let p = p.to_ascii_lowercase();
-            if p == "http" || p == "https" {
-                scheme = p;
-            }
-        }
-        if let Some(h) = header("x-forwarded-host").filter(|h| valid_host(h)) {
-            host = h;
-        }
-    }
-    let host = host.to_ascii_lowercase();
+/// Derive the origin with [`crate::session::request_origin`]: the listener
+/// scheme and port, the `Host` header (or HTTP/2 authority), and the
+/// `Forwarded` / `X-Forwarded-*` headers only when `RUSTYBIN_TRUST_FORWARD`
+/// is on.
+pub fn origin(headers: &HeaderMap, extensions: &Extensions, uri: &Uri, config: &Config) -> Origin {
+    let o = crate::session::request_origin(headers, extensions, uri, config);
     Origin {
-        base_url: format!("{scheme}://{host}"),
-        authority: host,
+        base_url: o.base_url(),
+        authority: o.authority(),
     }
 }
 
@@ -208,13 +171,14 @@ fn build_req(
     agent: &'static AgentDef,
     owner: String,
     headers: &HeaderMap,
+    extensions: &Extensions,
     uri: &Uri,
     query: Option<&str>,
 ) -> Req {
     Req {
         agent,
         owner,
-        origin: origin(headers, uri, &a2a.config),
+        origin: origin(headers, extensions, uri, &a2a.config),
         version_raw: requested_version(headers, query),
         auth: authenticate(&a2a.jwt, headers, agent),
     }
@@ -338,18 +302,20 @@ fn default_agent() -> &'static AgentDef {
 async fn well_known_card(
     Extension(a2a): Extension<Arc<A2a>>,
     headers: HeaderMap,
+    extensions: Extensions,
     uri: Uri,
 ) -> Response {
-    let o = origin(&headers, &uri, &a2a.config);
+    let o = origin(&headers, &extensions, &uri, &a2a.config);
     card_response(&headers, &card::hybrid(&o.base_url, default_agent(), true))
 }
 
 async fn well_known_legacy(
     Extension(a2a): Extension<Arc<A2a>>,
     headers: HeaderMap,
+    extensions: Extensions,
     uri: Uri,
 ) -> Response {
-    let o = origin(&headers, &uri, &a2a.config);
+    let o = origin(&headers, &extensions, &uri, &a2a.config);
     card_response(
         &headers,
         &card::v03(&o.base_url, default_agent(), card::CardKind::Public),
@@ -360,12 +326,13 @@ async fn agent_card(
     Extension(a2a): Extension<Arc<A2a>>,
     Path(name): Path<String>,
     headers: HeaderMap,
+    extensions: Extensions,
     uri: Uri,
 ) -> Response {
     let Some(agent) = agents::find(&name) else {
         return unknown_agent(&name);
     };
-    let o = origin(&headers, &uri, &a2a.config);
+    let o = origin(&headers, &extensions, &uri, &a2a.config);
     card_response(
         &headers,
         &card::hybrid(&o.base_url, agent, agent.id == agents::DEFAULT_AGENT),
@@ -376,20 +343,26 @@ async fn agent_legacy_card(
     Extension(a2a): Extension<Arc<A2a>>,
     Path(name): Path<String>,
     headers: HeaderMap,
+    extensions: Extensions,
     uri: Uri,
 ) -> Response {
     let Some(agent) = agents::find(&name) else {
         return unknown_agent(&name);
     };
-    let o = origin(&headers, &uri, &a2a.config);
+    let o = origin(&headers, &extensions, &uri, &a2a.config);
     card_response(
         &headers,
         &card::v03(&o.base_url, agent, card::CardKind::Public),
     )
 }
 
-async fn directory(Extension(a2a): Extension<Arc<A2a>>, headers: HeaderMap, uri: Uri) -> Response {
-    let o = origin(&headers, &uri, &a2a.config);
+async fn directory(
+    Extension(a2a): Extension<Arc<A2a>>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    uri: Uri,
+) -> Response {
+    let o = origin(&headers, &extensions, &uri, &a2a.config);
     Json(card::directory_index(&o.base_url)).into_response()
 }
 
@@ -397,6 +370,7 @@ async fn rpc_default(
     Extension(a2a): Extension<Arc<A2a>>,
     Session(owner): Session,
     headers: HeaderMap,
+    extensions: Extensions,
     uri: Uri,
     RawQuery(query): RawQuery,
     body: Bytes,
@@ -406,17 +380,20 @@ async fn rpc_default(
         default_agent(),
         owner,
         &headers,
+        &extensions,
         &uri,
         query.as_deref(),
     );
     jsonrpc::handle(&a2a, req, &body).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn rpc_agent(
     Extension(a2a): Extension<Arc<A2a>>,
     Path(name): Path<String>,
     Session(owner): Session,
     headers: HeaderMap,
+    extensions: Extensions,
     uri: Uri,
     RawQuery(query): RawQuery,
     body: Bytes,
@@ -424,7 +401,15 @@ async fn rpc_agent(
     let Some(agent) = agents::find(&name) else {
         return unknown_agent(&name);
     };
-    let req = build_req(&a2a, agent, owner, &headers, &uri, query.as_deref());
+    let req = build_req(
+        &a2a,
+        agent,
+        owner,
+        &headers,
+        &extensions,
+        &uri,
+        query.as_deref(),
+    );
     jsonrpc::handle(&a2a, req, &body).await
 }
 
@@ -435,6 +420,7 @@ async fn rest_agent(
     Session(owner): Session,
     method: Method,
     headers: HeaderMap,
+    extensions: Extensions,
     uri: Uri,
     RawQuery(query): RawQuery,
     body: Bytes,
@@ -442,7 +428,15 @@ async fn rest_agent(
     let Some(agent) = agents::find(&name) else {
         return unknown_agent(&name);
     };
-    let req = build_req(&a2a, agent, owner, &headers, &uri, query.as_deref());
+    let req = build_req(
+        &a2a,
+        agent,
+        owner,
+        &headers,
+        &extensions,
+        &uri,
+        query.as_deref(),
+    );
     rest::handle(&a2a, req, &method, &rest, query.as_deref(), &body).await
 }
 
@@ -550,7 +544,7 @@ const SINK_BODY: &str = r#"{"statusUpdate":{"taskId":"t-1","contextId":"c-1","st
 pub fn catalog() -> Vec<Endpoint> {
     vec![
         Endpoint::new("/.well-known/agent-card.json", &["GET"], category::A2A, "A2A Agent Card (v1.0, readable by v0.3 clients) of the default echo agent, listing every demo agent")
-            .description("Card URLs are derived from the Host header (X-Forwarded-Host / -Proto only with RUSTYBIN_TRUST_FORWARD). Cache-Control and ETag are set.")
+            .description("Card URLs are derived from the listener (http or https) and the Host header (Forwarded / X-Forwarded-* only with RUSTYBIN_TRUST_FORWARD). Cache-Control and ETag are set.")
             .example(Example::get("Default agent card", "/.well-known/agent-card.json")),
         Endpoint::new("/.well-known/agent.json", &["GET"], category::A2A, "Legacy A2A v0.3 Agent Card (url + preferredTransport) of the default agent")
             .example(Example::get("Legacy v0.3 card", "/.well-known/agent.json")),

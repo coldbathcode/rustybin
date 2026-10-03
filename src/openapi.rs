@@ -504,6 +504,22 @@ fn build_paths() -> Value {
         }
     }));
 
+    // Every export takes ?base_url= (default: the request origin).
+    for (path, item) in paths.iter_mut() {
+        if !path.starts_with("/export/") {
+            continue;
+        }
+        if let Some(get) = item.get_mut("get") {
+            get["parameters"] = json!([{
+                "name": "base_url", "in": "query", "required": false,
+                "description": "Base URL written into the export (absolute http(s) URL, optional path prefix). Default: the origin the request used (scheme, Host, and Forwarded / X-Forwarded-* with RUSTYBIN_TRUST_FORWARD).",
+                "schema": { "type": "string", "format": "uri", "example": "https://gateway.example.com/rustybin" }
+            }]);
+            get["responses"]["400"] =
+                json!({ "description": "Invalid base_url", "content": { "application/json": {} } });
+        }
+    }
+
     // ── Flaky ────────────────────────────────────────────────────
     paths.insert("/flaky/{fail_rate}".into(), json!({
         "get": {

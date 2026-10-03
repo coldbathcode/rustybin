@@ -17,7 +17,7 @@
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
+use axum::http::{header, Extensions, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use axum::{Json, Router};
@@ -418,6 +418,7 @@ async fn absolute_redirect_handler(
     Path(n): Path<String>,
     uri: Uri,
     headers: HeaderMap,
+    extensions: Extensions,
 ) -> Response {
     let n = match n.parse::<u32>() {
         Ok(n) if (1..=MAX_ABSOLUTE_REDIRECTS).contains(&n) => n,
@@ -428,23 +429,17 @@ async fn absolute_redirect_handler(
             )
         }
     };
-    let Some(host) = request_host(&headers) else {
+    if request_host(&headers).is_none() {
         return json_error(StatusCode::BAD_REQUEST, "a valid Host header is required");
-    };
-    let scheme = if config.trust_forward {
-        headers
-            .get("x-forwarded-proto")
-            .and_then(|v| v.to_str().ok())
-            .filter(|p| *p == "https")
-            .unwrap_or("http")
-    } else {
-        "http"
-    };
+    }
+    // Listener scheme (https on the TLS listener), Host, and proxy headers
+    // only with RUSTYBIN_TRUST_FORWARD.
+    let base = crate::session::request_origin(&headers, &extensions, &uri, &config).base_url();
     let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
     let location = if n == 1 {
-        format!("{scheme}://{host}/echo{query}")
+        format!("{base}/echo{query}")
     } else {
-        format!("{scheme}://{host}/absolute-redirect/{}{query}", n - 1)
+        format!("{base}/absolute-redirect/{}{query}", n - 1)
     };
     redirect(StatusCode::FOUND, &location)
 }
@@ -778,9 +773,16 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         }
         let resp = app
+            .clone()
             .oneshot(with_host("/absolute-redirect/1", "evil host"))
             .await
             .expect("r");
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // On the HTTPS listener the chain stays on https.
+        let mut req = with_host("/absolute-redirect/1", "localhost:8443");
+        req.extensions_mut()
+            .insert(crate::session::ListenerInfo::https(8443));
+        let resp = app.oneshot(req).await.expect("r");
+        assert_eq!(resp.headers()["location"], "https://localhost:8443/echo");
     }
 }

@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 
 use super::{AuthDef, BodyDef, Category};
 
-pub fn build(categories: &[Category]) -> Value {
+pub fn build(categories: &[Category], base_url: &str) -> Value {
     let version = env!("CARGO_PKG_VERSION");
     let now = chrono::Utc::now().to_rfc3339();
     let mut resources: Vec<Value> = Vec::new();
@@ -22,7 +22,7 @@ pub fn build(categories: &[Category]) -> Value {
         "_id": "env_base",
         "parentId": "wrk_rustybin",
         "name": "Base Environment",
-        "data": { "base_url": "http://localhost" }
+        "data": { "base_url": base_url }
     }));
 
     // Build folders and requests

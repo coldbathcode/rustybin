@@ -22,7 +22,7 @@
 
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
+use axum::http::{header, Extensions, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
@@ -405,28 +405,23 @@ fn bin_not_found(id: &str) -> Response {
         .into_response()
 }
 
-/// `scheme://host` of the request, for absolute URLs in responses. The Host
-/// header is validated (only host and port characters) before use.
-fn base_url(headers: &HeaderMap, config: &Config) -> Option<String> {
-    let host = headers.get(header::HOST)?.to_str().ok()?;
-    if host.is_empty()
-        || host.len() > 255
-        || !host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']'))
-    {
-        return None;
-    }
-    let proto = if config.trust_forward {
-        headers
-            .get("x-forwarded-proto")
-            .and_then(|v| v.to_str().ok())
-            .filter(|p| *p == "https" || *p == "http")
-            .unwrap_or("http")
-    } else {
-        "http"
-    };
-    Some(format!("{proto}://{host}"))
+/// `scheme://host[:port]` of the request, for absolute URLs in responses
+/// ([`crate::session::request_origin`]: listener scheme, validated `Host`,
+/// proxy headers only with `RUSTYBIN_TRUST_FORWARD`). `None` when the
+/// request names no valid host.
+fn base_url(
+    headers: &HeaderMap,
+    extensions: &Extensions,
+    uri: &Uri,
+    config: &Config,
+) -> Option<String> {
+    let named = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .and_then(crate::session::split_host_port)
+        .is_some()
+        || uri.authority().is_some();
+    named.then(|| crate::session::request_origin(headers, extensions, uri, config).base_url())
 }
 
 fn bin_links(id: &str, base: Option<&str>) -> Value {
@@ -519,6 +514,8 @@ async fn create_handler(
     State(config): State<Arc<Config>>,
     Session(owner): Session,
     headers: HeaderMap,
+    extensions: Extensions,
+    uri: Uri,
     body: Bytes,
 ) -> Response {
     let req: CreateBin = if body.iter().all(u8::is_ascii_whitespace) {
@@ -548,7 +545,7 @@ async fn create_handler(
             )
         }
     };
-    let base = base_url(&headers, &config);
+    let base = base_url(&headers, &extensions, &uri, &config);
     let mut out = json!({
         "id": summary.id,
         "created_at": summary.created_at,
@@ -746,6 +743,8 @@ async fn requests_handler(
     Path(BinPath { id }): Path<BinPath>,
     Query(q): Query<ListQuery>,
     headers: HeaderMap,
+    extensions: Extensions,
+    uri: Uri,
 ) -> Response {
     let limit = q
         .limit
@@ -754,7 +753,7 @@ async fn requests_handler(
     let (Some(summary), Some(entries)) = (store.get(&id), store.entries(&id, limit)) else {
         return bin_not_found(&id);
     };
-    let base = base_url(&headers, &config);
+    let base = base_url(&headers, &extensions, &uri, &config);
     Json(json!({
         "bin": summary,
         "links": bin_links(&id, base.as_deref()),

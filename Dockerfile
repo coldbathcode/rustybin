@@ -32,7 +32,9 @@ COPY --from=builder /app/target/release/rustybin /app/rustybin
 # server.key, RUSTYBIN_TLS_CERT / RUSTYBIN_TLS_KEY) and a client certificate
 # for mTLS demos, all in /app/certs. Mount a volume there to keep them across
 # container restarts (docker-compose.yml does). To use your own server
-# certificate, put server.crt and server.key in that directory.
+# certificate, put server.crt and server.key in that directory. A ca.crt /
+# ca.key that is not the demo CA is never overwritten: the demo CA then uses
+# rustybin-demo-ca.crt / rustybin-demo-ca.key.
 RUN mkdir -p /app/certs
 
 ENV RUSTYBIN_LOG_LEVEL=info

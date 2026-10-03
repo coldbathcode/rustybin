@@ -2,7 +2,7 @@
 //! protected resource metadata) and `/mcp/apikey` variants, plus Origin
 //! validation shared by every MCP endpoint.
 
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, Extensions, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
@@ -22,66 +22,38 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-fn first_forwarded<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers
-        .get(name)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
+/// Externally visible base URL (`scheme://host[:port]`) of the request, from
+/// [`crate::session::request_origin_with`]: `https` on the TLS listener, the
+/// `Host` header, and `Forwarded` / `X-Forwarded-*` only when
+/// `RUSTYBIN_TRUST_FORWARD` is on (matching the built-in IdP's issuer).
+pub fn base_url(
+    headers: &HeaderMap,
+    extensions: &Extensions,
+    uri: &Uri,
+    cfg: &McpConfig,
+) -> String {
+    crate::session::request_origin_with(headers, extensions, uri, cfg.origin_policy()).base_url()
 }
 
-fn valid_host(h: &str) -> bool {
-    !h.is_empty()
-        && h.len() <= 255
-        && h.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']' | '_'))
-}
-
-/// Externally visible base URL (`scheme://host`). Forwarded headers are only
-/// honoured when `RUSTYBIN_TRUST_FORWARD` is on, matching the built-in IdP.
-pub fn base_url(headers: &HeaderMap, cfg: &McpConfig) -> String {
-    let (mut scheme, mut host) = ("http", None);
-    if cfg.trust_forward {
-        if let Some(p) = first_forwarded(headers, "x-forwarded-proto") {
-            if p.eq_ignore_ascii_case("https") {
-                scheme = "https";
-            }
-        }
-        host = first_forwarded(headers, "x-forwarded-host").filter(|h| valid_host(h));
-    }
-    let host = host
-        .or_else(|| {
-            headers
-                .get(header::HOST)
-                .and_then(|v| v.to_str().ok())
-                .filter(|h| valid_host(h))
-        })
-        .unwrap_or("localhost");
-    format!("{scheme}://{host}")
-}
-
-/// Canonical resource identifier of the protected MCP endpoint (RFC 8707).
-pub fn resource_url(headers: &HeaderMap, cfg: &McpConfig) -> String {
+/// Canonical resource identifier of the protected MCP endpoint (RFC 8707):
+/// `RUSTYBIN_MCP_RESOURCE_URL` when set, else derived from `base`.
+pub fn resource_url(base: &str, cfg: &McpConfig) -> String {
     match &cfg.resource_url {
         Some(u) => u.trim_end_matches('/').to_string(),
-        None => format!("{}{PROTECTED_PATH}", base_url(headers, cfg)),
+        None => format!("{base}{PROTECTED_PATH}"),
     }
 }
 
 /// URL of the RFC 9728 metadata document for the protected endpoint.
-pub fn metadata_url(headers: &HeaderMap, cfg: &McpConfig) -> String {
-    format!(
-        "{}/.well-known/oauth-protected-resource{PROTECTED_PATH}",
-        base_url(headers, cfg)
-    )
+pub fn metadata_url(base: &str) -> String {
+    format!("{base}/.well-known/oauth-protected-resource{PROTECTED_PATH}")
 }
 
 /// RFC 9728 Protected Resource Metadata for `/mcp/protected`.
-pub fn protected_resource_metadata(headers: &HeaderMap, cfg: &McpConfig) -> Value {
-    let base = base_url(headers, cfg);
+/// `base` is the request's [`base_url`].
+pub fn protected_resource_metadata(base: &str, cfg: &McpConfig) -> Value {
     json!({
-        "resource": resource_url(headers, cfg),
+        "resource": resource_url(base, cfg),
         "authorization_servers": [base],
         "scopes_supported": SCOPES_SUPPORTED,
         "bearer_methods_supported": ["header"],
@@ -90,7 +62,7 @@ pub fn protected_resource_metadata(headers: &HeaderMap, cfg: &McpConfig) -> Valu
         // IdP publishes RFC 8414 metadata and dynamic client registration.
         "rustybin_authorization_server_metadata": format!("{base}/.well-known/oauth-authorization-server"),
         "rustybin_registration_endpoint": format!("{base}/oauth/register"),
-        "rustybin_accepted_audiences": accepted_audiences(headers, cfg),
+        "rustybin_accepted_audiences": accepted_audiences(base, cfg),
         "resource_documentation": format!("{base}/"),
     })
 }
@@ -111,8 +83,8 @@ fn challenge(params: &[(&str, &str)]) -> HeaderValue {
 }
 
 /// 401 with the RFC 6750 / RFC 9728 challenge.
-pub fn unauthorized(headers: &HeaderMap, cfg: &McpConfig, error: Option<(&str, &str)>) -> Response {
-    let metadata = metadata_url(headers, cfg);
+pub fn unauthorized(base: &str, error: Option<(&str, &str)>) -> Response {
+    let metadata = metadata_url(base);
     let mut params = vec![
         ("resource_metadata", metadata.as_str()),
         ("scope", BASE_SCOPE),
@@ -139,13 +111,8 @@ pub fn unauthorized(headers: &HeaderMap, cfg: &McpConfig, error: Option<(&str, &
 }
 
 /// 403 insufficient_scope (step-up authorization).
-pub fn insufficient_scope(
-    headers: &HeaderMap,
-    cfg: &McpConfig,
-    scope: &str,
-    body: Value,
-) -> Response {
-    let metadata = metadata_url(headers, cfg);
+pub fn insufficient_scope(base: &str, scope: &str, body: Value) -> Response {
+    let metadata = metadata_url(base);
     let desc = format!("This operation requires the {scope} scope");
     let mut resp = (StatusCode::FORBIDDEN, Json(body)).into_response();
     resp.headers_mut().insert(
@@ -172,17 +139,19 @@ fn audience_matches(claims: &Value, expected: &[String]) -> bool {
 
 /// Audiences accepted on `/mcp/protected`: the resource URL first, then the
 /// configured extras (by default the IdP's default audience `rustybin`).
-pub fn accepted_audiences(headers: &HeaderMap, cfg: &McpConfig) -> Vec<String> {
-    let mut expected = vec![resource_url(headers, cfg)];
+pub fn accepted_audiences(base: &str, cfg: &McpConfig) -> Vec<String> {
+    let mut expected = vec![resource_url(base, cfg)];
     expected.extend(cfg.extra_audiences.iter().cloned());
     expected
 }
 
-/// Validate the bearer token of a request to `/mcp/protected`.
-/// Returns the token claims, or the 401 response to send.
+/// Validate the bearer token of a request to `/mcp/protected` (`base` is
+/// the request's [`base_url`]). Returns the token claims, or the 401
+/// response to send.
 #[allow(clippy::result_large_err)]
 pub fn require_bearer(
     headers: &HeaderMap,
+    base: &str,
     cfg: &McpConfig,
     jwt: &JwtState,
 ) -> Result<Value, Response> {
@@ -195,22 +164,21 @@ pub fn require_bearer(
         })
         .filter(|t| !t.is_empty());
     let Some(token) = token else {
-        return Err(unauthorized(headers, cfg, None));
+        return Err(unauthorized(base, None));
     };
     let claims = jwt.verify_rs256(token).map_err(|e| {
         unauthorized(
-            headers,
-            cfg,
+            base,
             Some(("invalid_token", &format!("token validation failed: {e}"))),
         )
     })?;
-    let expected = accepted_audiences(headers, cfg);
+    let expected = accepted_audiences(base, cfg);
     if !audience_matches(&claims, &expected) {
         let desc = format!(
             "token audience does not include this resource ({}); request the token with resource={}",
             expected[0], expected[0]
         );
-        return Err(unauthorized(headers, cfg, Some(("invalid_token", &desc))));
+        return Err(unauthorized(base, Some(("invalid_token", &desc))));
     }
     Ok(claims)
 }
@@ -310,16 +278,45 @@ mod tests {
     #[test]
     fn base_url_respects_trust_forward() {
         let mut cfg = McpConfig::for_tests();
+        cfg.http_port = 8080;
+        let (ext, uri) = (Extensions::new(), Uri::from_static("/mcp/protected"));
         let mut h = HeaderMap::new();
         h.insert(header::HOST, HeaderValue::from_static("example.test:8080"));
         h.insert("x-forwarded-proto", HeaderValue::from_static("https"));
         h.insert("x-forwarded-host", HeaderValue::from_static("gw.example"));
-        assert_eq!(base_url(&h, &cfg), "http://example.test:8080");
+        assert_eq!(base_url(&h, &ext, &uri, &cfg), "http://example.test:8080");
         cfg.trust_forward = true;
-        assert_eq!(base_url(&h, &cfg), "https://gw.example");
+        assert_eq!(base_url(&h, &ext, &uri, &cfg), "https://gw.example");
         h.insert(header::HOST, HeaderValue::from_static("bad host\"x"));
         cfg.trust_forward = false;
-        assert_eq!(base_url(&h, &cfg), "http://localhost");
+        assert_eq!(base_url(&h, &ext, &uri, &cfg), "http://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn base_url_uses_the_tls_listener() {
+        let cfg = McpConfig::for_tests();
+        let mut ext = Extensions::new();
+        ext.insert(crate::session::ListenerInfo::https(8443));
+        let uri = Uri::from_static("/mcp/protected");
+        let mut h = HeaderMap::new();
+        h.insert(header::HOST, HeaderValue::from_static("localhost:8443"));
+        let base = base_url(&h, &ext, &uri, &cfg);
+        assert_eq!(base, "https://localhost:8443");
+        assert_eq!(
+            resource_url(&base, &cfg),
+            "https://localhost:8443/mcp/protected"
+        );
+        assert_eq!(
+            metadata_url(&base),
+            "https://localhost:8443/.well-known/oauth-protected-resource/mcp/protected"
+        );
+        // RUSTYBIN_MCP_RESOURCE_URL still wins.
+        let mut fixed = cfg.clone();
+        fixed.resource_url = Some("https://mcp.example.com/mcp/protected/".into());
+        assert_eq!(
+            resource_url(&base, &fixed),
+            "https://mcp.example.com/mcp/protected"
+        );
     }
 
     #[test]

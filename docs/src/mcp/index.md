@@ -182,8 +182,10 @@ so that agents never see it.
 5. `cancel_order` needs `mcp:tools:write`; without it the call gets `403` with an
    `insufficient_scope` challenge (step-up authorization).
 
-The base URL comes from the `Host` header (and `X-Forwarded-Proto` /
-`X-Forwarded-Host` with `RUSTYBIN_TRUST_FORWARD=true`).
+The base URL comes from the request, like the built-in IdP's issuer: `https` on the
+HTTPS listener, the `Host` header, and `Forwarded` / `X-Forwarded-Proto` /
+`X-Forwarded-Host` / `X-Forwarded-Port` with `RUSTYBIN_TRUST_FORWARD=true`
+(`RUSTYBIN_MCP_RESOURCE_URL` still overrides the resource identifier).
 
 ```hurl
 {{#include ../../examples/mcp/session_and_oauth.hurl:protected_challenge}}

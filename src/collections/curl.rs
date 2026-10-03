@@ -1,14 +1,16 @@
 use super::{split_path_query, AuthDef, BodyDef, Category};
 
-pub fn build(categories: &[Category]) -> String {
+pub fn build(categories: &[Category], base_url: &str) -> String {
     let version = env!("CARGO_PKG_VERSION");
     let mut out = String::with_capacity(8192);
 
     out.push_str("#!/usr/bin/env bash\n");
     out.push_str(&format!("# Rustybin v{version} - cURL collection\n"));
-    out.push_str("# Usage: BASE_URL=http://localhost bash rustybin-curl.sh\n");
+    out.push_str(&format!(
+        "# Usage: BASE_URL={base_url} bash rustybin-curl.sh\n"
+    ));
     out.push_str("set -euo pipefail\n\n");
-    out.push_str("BASE_URL=\"${BASE_URL:-http://localhost}\"\n\n");
+    out.push_str(&format!("BASE_URL=\"${{BASE_URL:-{base_url}}}\"\n\n"));
 
     for cat in categories {
         out.push_str(&format!(

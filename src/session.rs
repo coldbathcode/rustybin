@@ -349,10 +349,44 @@ fn first_entry<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .map(str::trim)
 }
 
+/// The configuration [`request_origin`] depends on. Modules that keep their
+/// own copy of these settings (and tests that tweak them) use
+/// [`request_origin_with`] directly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OriginPolicy {
+    /// Honour proxy headers (`RUSTYBIN_TRUST_FORWARD`).
+    pub trust_forward: bool,
+    /// Bind address, used when the request names no valid host.
+    pub bind_host: IpAddr,
+    /// HTTP port, assumed when the request carries no [`ListenerInfo`].
+    pub http_port: u16,
+}
+
+impl OriginPolicy {
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            trust_forward: config.trust_forward,
+            bind_host: config.host,
+            http_port: config.http_port,
+        }
+    }
+
+    /// Host used when the request names none: the bind address, or
+    /// `localhost` for a wildcard bind (`0.0.0.0`, `::`).
+    fn fallback_host(&self) -> String {
+        if self.bind_host.is_unspecified() {
+            "localhost".to_string()
+        } else {
+            self.bind_host.to_string()
+        }
+    }
+}
+
 /// Resolve the request origin (scheme, host, port).
 ///
 /// - Listener: the [`ListenerInfo`] extension (`https` for the TLS listener).
-/// - Host: the `Host` header, else the URI authority (HTTP/2), else the bind address.
+/// - Host: the `Host` header, else the URI authority (HTTP/2), else the bind
+///   address (`localhost` for a wildcard bind) and listener port.
 /// - With `RUSTYBIN_TRUST_FORWARD`: `X-Forwarded-Proto`, `X-Forwarded-Host`,
 ///   `X-Forwarded-Port` and RFC 7239 `Forwarded` (`proto=`, `host=`) override
 ///   them (the first list entry, i.e. the proxy closest to the client, wins).
@@ -363,10 +397,20 @@ pub fn request_origin(
     uri: &Uri,
     config: &Config,
 ) -> RequestOrigin {
+    request_origin_with(headers, extensions, uri, OriginPolicy::from_config(config))
+}
+
+/// [`request_origin`] with explicit settings.
+pub fn request_origin_with(
+    headers: &HeaderMap,
+    extensions: &Extensions,
+    uri: &Uri,
+    policy: OriginPolicy,
+) -> RequestOrigin {
     let listener = extensions
         .get::<ListenerInfo>()
         .copied()
-        .unwrap_or(ListenerInfo::http(config.http_port));
+        .unwrap_or(ListenerInfo::http(policy.http_port));
     let mut scheme = listener.scheme.to_string();
     let mut host_port = headers
         .get(axum::http::header::HOST)
@@ -375,7 +419,7 @@ pub fn request_origin(
         .or_else(|| uri.authority().and_then(|a| split_host_port(a.as_str())));
     let mut explicit_port: Option<u16> = None;
 
-    if config.trust_forward {
+    if policy.trust_forward {
         let fwd = parse_forwarded(headers);
         let first = fwd.first();
         let proto = first_entry(headers, "x-forwarded-proto")
@@ -409,7 +453,7 @@ pub fn request_origin(
 
     let (host, host_port_num) = match host_port {
         Some(hp) => hp,
-        None => (config.host.to_string(), Some(listener.port)),
+        None => (policy.fallback_host(), Some(listener.port)),
     };
     let port = explicit_port
         .or(host_port_num)
@@ -661,6 +705,20 @@ mod tests {
         assert_eq!(
             request_origin(&h, &ext, &uri, &config).base_url(),
             "https://gw.example.com"
+        );
+        // No usable host: the bind address (localhost for a wildcard bind)
+        // and the listener port.
+        let h = hdrs(&[]);
+        let mut policy = OriginPolicy::from_config(&config);
+        policy.trust_forward = false;
+        assert_eq!(
+            request_origin_with(&h, &ext, &uri, policy).base_url(),
+            "http://127.0.0.1:8080"
+        );
+        policy.bind_host = IpAddr::from([0, 0, 0, 0]);
+        assert_eq!(
+            request_origin_with(&h, &ext, &uri, policy).base_url(),
+            "http://localhost:8080"
         );
         // Invalid forwarded values are ignored.
         let h = hdrs(&[

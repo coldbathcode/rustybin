@@ -7,14 +7,20 @@ mod insomnia;
 mod k6;
 mod postman;
 
+use std::sync::Arc;
+
 use axum::{
-    http::{header, HeaderValue, StatusCode},
+    extract::{FromRef, FromRequestParts},
+    http::{header, request::Parts, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
-    Router,
+    Json, Router,
 };
+use serde_json::json;
 
 use crate::catalog::{self, category, Endpoint, Example, Protocol, RouteCheck};
+use crate::config::Config;
+use crate::session::{request_origin, RequestOrigin};
 use crate::state::AppState;
 
 // Shared data model: the exporters consume catalogue examples grouped by
@@ -59,23 +65,112 @@ pub fn split_path_query(path: &str) -> (&str, &str) {
     }
 }
 
+// ── Base URL ────────────────────────────────────────────────────
+
+/// Longest accepted `?base_url=`.
+const MAX_BASE_URL_LEN: usize = 512;
+
+/// The base URL written into an export: `?base_url=` when given (validated),
+/// else the origin the request used ([`request_origin`]: listener scheme,
+/// `Host`, proxy headers only with `RUSTYBIN_TRUST_FORWARD`).
+pub struct ExportBase(pub String);
+
+impl<S> FromRequestParts<S> for ExportBase
+where
+    Arc<Config>: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let requested = parts.uri.query().and_then(|q| {
+            form_urlencoded::parse(q.as_bytes())
+                .find(|(k, _)| k == "base_url")
+                .map(|(_, v)| v.into_owned())
+        });
+        if let Some(raw) = requested {
+            return validate_base_url(&raw).map(ExportBase).map_err(|reason| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": "invalid base_url",
+                        "reason": reason,
+                        "hint": "use an absolute http(s) URL such as https://gateway.example.com/rustybin",
+                    })),
+                )
+                    .into_response()
+            });
+        }
+        let config = Arc::<Config>::from_ref(state);
+        let origin = request_origin(&parts.headers, &parts.extensions, &parts.uri, &config);
+        Ok(ExportBase(origin_base_url(&origin)))
+    }
+}
+
+/// `scheme://authority` of the request, with `ws`/`wss` (a proxy may say
+/// so) mapped to `http`/`https`.
+fn origin_base_url(origin: &RequestOrigin) -> String {
+    let scheme = match origin.scheme.as_str() {
+        "https" | "wss" => "https",
+        _ => "http",
+    };
+    let normalized = RequestOrigin {
+        scheme: scheme.to_string(),
+        host: origin.host.clone(),
+        port: origin.port,
+    };
+    normalized.base_url()
+}
+
+/// Validate a `?base_url=` override: an absolute http(s) URL with a host,
+/// optionally a path prefix, and no credentials, query or fragment. The
+/// value is embedded in shell, JavaScript and Hurl files, so only URL-safe
+/// characters are accepted. Returned without a trailing slash.
+pub fn validate_base_url(raw: &str) -> Result<String, &'static str> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.len() > MAX_BASE_URL_LEN {
+        return Err("base_url must be 1 to 512 characters");
+    }
+    let url = reqwest::Url::parse(raw).map_err(|_| "base_url is not an absolute URL")?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("base_url must use http or https");
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err("base_url has no host");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("base_url must not contain credentials");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("base_url must not have a query or fragment");
+    }
+    let out = url.as_str().trim_end_matches('/').to_string();
+    let safe = out
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"-._~:/[]%".contains(&b));
+    if !safe {
+        return Err("base_url contains characters that are not allowed");
+    }
+    Ok(out)
+}
+
 // ── Handlers ────────────────────────────────────────────────────
 
-async fn postman_handler() -> Response {
+async fn postman_handler(ExportBase(base): ExportBase) -> Response {
     let cats = all_categories();
-    let collection = postman::build(&cats);
+    let collection = postman::build(&cats, &base);
     json_attachment_response(&collection, "rustybin-postman.json")
 }
 
-async fn insomnia_handler() -> Response {
+async fn insomnia_handler(ExportBase(base): ExportBase) -> Response {
     let cats = all_categories();
-    let export = insomnia::build(&cats);
+    let export = insomnia::build(&cats, &base);
     json_attachment_response(&export, "rustybin-insomnia.json")
 }
 
-async fn curl_handler() -> Response {
+async fn curl_handler(ExportBase(base): ExportBase) -> Response {
     let cats = all_categories();
-    let script = curl::build(&cats);
+    let script = curl::build(&cats, &base);
     (
         StatusCode::OK,
         [
@@ -93,15 +188,15 @@ async fn curl_handler() -> Response {
         .into_response()
 }
 
-async fn bruno_handler() -> Response {
+async fn bruno_handler(ExportBase(base): ExportBase) -> Response {
     let cats = all_categories();
-    let collection = bruno::build(&cats);
+    let collection = bruno::build(&cats, &base);
     json_attachment_response(&collection, "rustybin-bruno.json")
 }
 
-async fn http_file_handler() -> Response {
+async fn http_file_handler(ExportBase(base): ExportBase) -> Response {
     let cats = all_categories();
-    let output = http_file::build(&cats);
+    let output = http_file::build(&cats, &base);
     (
         StatusCode::OK,
         [
@@ -119,9 +214,9 @@ async fn http_file_handler() -> Response {
         .into_response()
 }
 
-async fn hurl_handler() -> Response {
+async fn hurl_handler(ExportBase(base): ExportBase) -> Response {
     let cats = all_categories();
-    let output = hurl::build(&cats);
+    let output = hurl::build(&cats, &base);
     (
         StatusCode::OK,
         [
@@ -139,9 +234,9 @@ async fn hurl_handler() -> Response {
         .into_response()
 }
 
-async fn k6_handler() -> Response {
+async fn k6_handler(ExportBase(base): ExportBase) -> Response {
     let cats = all_categories();
-    let output = k6::build(&cats);
+    let output = k6::build(&cats, &base);
     (
         StatusCode::OK,
         [
@@ -159,9 +254,9 @@ async fn k6_handler() -> Response {
         .into_response()
 }
 
-async fn har_handler() -> Response {
+async fn har_handler(ExportBase(base): ExportBase) -> Response {
     let cats = all_categories();
-    let export = har::build(&cats);
+    let export = har::build(&cats, &base);
     json_attachment_response(&export, "rustybin.har.json")
 }
 
@@ -194,15 +289,22 @@ fn json_attachment_response(value: &serde_json::Value, filename: &str) -> Respon
 
 // ── Router ──────────────────────────────────────────────────────
 
+/// Shared description of every `/export/*` endpoint.
+const EXPORT_DESCRIPTION: &str = "The base URL defaults to the origin the request used (scheme, Host, and Forwarded / X-Forwarded-* with RUSTYBIN_TRUST_FORWARD); override it with ?base_url=https://gateway.example.com/prefix (absolute http(s) URL).";
+
 pub fn catalog() -> Vec<Endpoint> {
-    vec![
+    let endpoints = vec![
         Endpoint::new(
             "/export/postman.json",
             &["GET"],
             category::DOCS,
             "Postman collection (v2.1)",
         )
-        .example(Example::get("Postman collection", "/export/postman.json")),
+        .example(Example::get("Postman collection", "/export/postman.json"))
+        .example(Example::get(
+            "Postman collection for a gateway URL",
+            "/export/postman.json?base_url=https://gateway.example.com/rustybin",
+        )),
         Endpoint::new(
             "/export/insomnia.json",
             &["GET"],
@@ -247,7 +349,11 @@ pub fn catalog() -> Vec<Endpoint> {
         .example(Example::get("k6 script", "/export/k6.js")),
         Endpoint::new("/export/har.json", &["GET"], category::DOCS, "HAR archive")
             .example(Example::get("HAR archive", "/export/har.json")),
-    ]
+    ];
+    endpoints
+        .into_iter()
+        .map(|ep| ep.description(EXPORT_DESCRIPTION))
+        .collect()
 }
 
 pub fn router(_state: &AppState) -> Router<AppState> {
@@ -358,7 +464,7 @@ mod tests {
     #[tokio::test]
     async fn postman_has_all_folders() {
         let cats = all_categories();
-        let collection = postman::build(&cats);
+        let collection = postman::build(&cats, "http://localhost");
         let items = collection["item"].as_array().expect("items array");
         assert!(items.len() >= 15);
         let names: Vec<&str> = items.iter().filter_map(|i| i["name"].as_str()).collect();
@@ -373,7 +479,7 @@ mod tests {
     #[tokio::test]
     async fn postman_has_base_url_variable() {
         let cats = all_categories();
-        let collection = postman::build(&cats);
+        let collection = postman::build(&cats, "http://localhost");
         let vars = collection["variable"].as_array().expect("variables");
         let base = vars.iter().find(|v| v["key"] == "base_url");
         assert!(base.is_some());
@@ -383,7 +489,7 @@ mod tests {
     #[tokio::test]
     async fn postman_echo_folder_has_requests() {
         let cats = all_categories();
-        let collection = postman::build(&cats);
+        let collection = postman::build(&cats, "http://localhost");
         let items = collection["item"].as_array().unwrap();
         let echo = items
             .iter()
@@ -398,7 +504,7 @@ mod tests {
     #[tokio::test]
     async fn postman_basic_auth_has_credentials() {
         let cats = all_categories();
-        let collection = postman::build(&cats);
+        let collection = postman::build(&cats, "http://localhost");
         let items = collection["item"].as_array().unwrap();
         let auth = items
             .iter()
@@ -411,7 +517,7 @@ mod tests {
     #[tokio::test]
     async fn postman_urls_use_base_url_variable() {
         let cats = all_categories();
-        let collection = postman::build(&cats);
+        let collection = postman::build(&cats, "http://localhost");
         let items = collection["item"].as_array().unwrap();
         let echo = items
             .iter()
@@ -457,7 +563,7 @@ mod tests {
     #[tokio::test]
     async fn insomnia_has_workspace_and_environment() {
         let cats = all_categories();
-        let export = insomnia::build(&cats);
+        let export = insomnia::build(&cats, "http://localhost");
         let resources = export["resources"].as_array().expect("resources");
         let workspace = resources.iter().find(|r| r["_type"] == "workspace");
         assert!(workspace.is_some());
@@ -470,7 +576,7 @@ mod tests {
     #[tokio::test]
     async fn insomnia_has_all_folders() {
         let cats = all_categories();
-        let export = insomnia::build(&cats);
+        let export = insomnia::build(&cats, "http://localhost");
         let resources = export["resources"].as_array().unwrap();
         let folders: Vec<&str> = resources
             .iter()
@@ -485,7 +591,7 @@ mod tests {
     #[tokio::test]
     async fn insomnia_has_requests_with_correct_parents() {
         let cats = all_categories();
-        let export = insomnia::build(&cats);
+        let export = insomnia::build(&cats, "http://localhost");
         let resources = export["resources"].as_array().unwrap();
         let reqs: Vec<&Value> = resources
             .iter()
@@ -506,7 +612,7 @@ mod tests {
     #[tokio::test]
     async fn insomnia_basic_auth_has_credentials() {
         let cats = all_categories();
-        let export = insomnia::build(&cats);
+        let export = insomnia::build(&cats, "http://localhost");
         let resources = export["resources"].as_array().unwrap();
         let basic = resources.iter().find(|r| {
             r["_type"] == "request"
@@ -524,7 +630,7 @@ mod tests {
     #[tokio::test]
     async fn insomnia_export_source_has_version() {
         let cats = all_categories();
-        let export = insomnia::build(&cats);
+        let export = insomnia::build(&cats, "http://localhost");
         let source = export["__export_source"].as_str().unwrap();
         assert!(source.starts_with("rustybin:v"));
         assert!(source.contains(env!("CARGO_PKG_VERSION")));
@@ -533,7 +639,7 @@ mod tests {
     #[tokio::test]
     async fn insomnia_urls_use_base_url_variable() {
         let cats = all_categories();
-        let export = insomnia::build(&cats);
+        let export = insomnia::build(&cats, "http://localhost");
         let resources = export["resources"].as_array().unwrap();
         let req = resources.iter().find(|r| r["_type"] == "request").unwrap();
         let url = req["url"].as_str().unwrap();
@@ -575,7 +681,7 @@ mod tests {
     #[tokio::test]
     async fn curl_has_all_categories() {
         let cats = all_categories();
-        let script = curl::build(&cats);
+        let script = curl::build(&cats, "http://localhost");
         for cat in &cats {
             assert!(script.contains(cat.name), "missing category: {}", cat.name);
         }
@@ -740,10 +846,111 @@ mod tests {
         assert!(val["log"]["entries"].as_array().unwrap().len() >= 55);
     }
 
+    // ── Base URL ────────────────────────────────────────
+
+    async fn get(app: &Router, uri: &str, host: &str, https: bool) -> (StatusCode, String) {
+        let mut req = Request::builder()
+            .uri(uri)
+            .header("host", host)
+            .body(Body::empty())
+            .expect("request");
+        if https {
+            req.extensions_mut()
+                .insert(crate::session::ListenerInfo::https(8443));
+        }
+        let resp = app.clone().oneshot(req).await.expect("response");
+        let status = resp.status();
+        (status, body_string(resp).await)
+    }
+
+    #[tokio::test]
+    async fn exports_default_to_the_request_origin() {
+        let app = test_app();
+        let (status, body) = get(&app, "/export/postman.json", "rb.test:8080", false).await;
+        assert_eq!(status, StatusCode::OK);
+        let val: Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(val["variable"][0]["value"], "http://rb.test:8080");
+        let (_, body) = get(&app, "/export/insomnia.json", "localhost:8443", true).await;
+        let val: Value = serde_json::from_str(&body).expect("json");
+        let env = val["resources"]
+            .as_array()
+            .and_then(|r| r.iter().find(|r| r["_type"] == "environment"))
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(env["data"]["base_url"], "https://localhost:8443");
+        let (_, body) = get(&app, "/export/har.json", "localhost:8443", true).await;
+        let val: Value = serde_json::from_str(&body).expect("json");
+        let url = val["log"]["entries"][0]["request"]["url"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(url.starts_with("https://localhost:8443/"), "got: {url}");
+        let (_, body) = get(&app, "/export/curl.sh", "rb.test", false).await;
+        assert!(body.contains("BASE_URL=\"${BASE_URL:-http://rb.test}\""));
+        let (_, body) = get(&app, "/export/k6.js", "rb.test", false).await;
+        assert!(body.contains("__ENV.BASE_URL || 'http://rb.test'"));
+        let (_, body) = get(&app, "/export/requests.http", "rb.test", false).await;
+        assert!(body.contains("@base_url = http://rb.test\n"));
+        let (_, body) = get(&app, "/export/requests.hurl", "rb.test", false).await;
+        assert!(body.contains("--variable base_url=http://rb.test "));
+        let (_, body) = get(&app, "/export/bruno.json", "rb.test", false).await;
+        assert!(body.contains("\"http://rb.test\""));
+    }
+
+    #[tokio::test]
+    async fn base_url_query_overrides_and_is_validated() {
+        let app = test_app();
+        let (status, body) = get(
+            &app,
+            "/export/postman.json?base_url=https%3A%2F%2Fgw.example.com%2Frustybin%2F",
+            "rb.test",
+            false,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let val: Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(
+            val["variable"][0]["value"],
+            "https://gw.example.com/rustybin"
+        );
+        for bad in [
+            "ftp://gw.example.com",
+            "/relative",
+            "https://user:pw@gw.example.com",
+            "https://gw.example.com/?a=1",
+            "https://gw.example.com/a'b",
+            "https://gw.example.com/$(id)",
+            "",
+        ] {
+            let q: String = form_urlencoded::byte_serialize(bad.as_bytes()).collect();
+            let (status, body) = get(
+                &app,
+                &format!("/export/curl.sh?base_url={q}"),
+                "rb.test",
+                false,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+            assert!(body.contains("invalid base_url"));
+        }
+    }
+
+    #[test]
+    fn validate_base_url_normalizes() {
+        assert_eq!(
+            validate_base_url(" HTTP://Example.COM:8080/ ").as_deref(),
+            Ok("http://example.com:8080")
+        );
+        assert_eq!(
+            validate_base_url("https://[::1]:8443/gw").as_deref(),
+            Ok("https://[::1]:8443/gw")
+        );
+        assert!(validate_base_url("javascript:alert(1)").is_err());
+    }
+
     #[tokio::test]
     async fn har_has_creator() {
         let cats = all_categories();
-        let export = har::build(&cats);
+        let export = har::build(&cats, "http://localhost");
         assert_eq!(export["log"]["creator"]["name"], "Rustybin");
     }
 }

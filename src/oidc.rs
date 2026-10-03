@@ -22,7 +22,7 @@ mod store;
 use axum::{
     body::Bytes,
     extract::{Extension, RawQuery},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, request::Parts, Extensions, HeaderMap, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -36,7 +36,7 @@ use std::sync::Arc;
 use crate::catalog::{category, Endpoint, Example};
 use crate::jwt_state::{bearer_token, JwtState, VerifyOptions};
 use crate::landing::html_escape;
-use crate::server::TlsConnectionInfo;
+use crate::session::{request_origin_with, OriginPolicy};
 use crate::state::AppState;
 use clients::{
     Client, ClientRegistry, DemoUser, GRANT_AUTHORIZATION_CODE, GRANT_CLIENT_CREDENTIALS,
@@ -88,7 +88,8 @@ struct RefreshGrant {
 
 struct OidcState {
     jwt: Arc<JwtState>,
-    trust_forward: bool,
+    /// How the issuer is derived from a request (proxy trust, fallbacks).
+    origin: OriginPolicy,
     clients: ClientRegistry,
     codes: BoundedStore<AuthCode>,
     refresh_tokens: BoundedStore<RefreshGrant>,
@@ -97,7 +98,7 @@ struct OidcState {
 }
 
 impl OidcState {
-    fn new(jwt: Arc<JwtState>, trust_forward: bool, public_mode: bool) -> Self {
+    fn new(jwt: Arc<JwtState>, origin: OriginPolicy, public_mode: bool) -> Self {
         let (cap, clients_cap) = if public_mode {
             (2_000, 200)
         } else {
@@ -105,7 +106,7 @@ impl OidcState {
         };
         Self {
             jwt,
-            trust_forward,
+            origin,
             clients: ClientRegistry::new(clients_cap, CLIENT_TTL),
             codes: BoundedStore::new(cap, AUTH_CODE_TTL),
             refresh_tokens: BoundedStore::new(cap, REFRESH_TOKEN_TTL),
@@ -133,14 +134,6 @@ impl OidcState {
 
 // ── Issuer ──────────────────────────────────────────────────────────
 
-fn valid_host(host: &str) -> bool {
-    !host.is_empty()
-        && host.len() <= 255
-        && host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b".-:[]_".contains(&b))
-}
-
 fn valid_prefix(prefix: &str) -> bool {
     prefix.starts_with('/')
         && prefix.len() <= 200
@@ -159,38 +152,30 @@ fn first_header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .filter(|v| !v.is_empty())
 }
 
-/// The issuer URL for a request: `https` on the TLS listener, the `Host`
-/// header (validated, else `localhost`). `X-Forwarded-Proto`,
-/// `X-Forwarded-Host` and `X-Forwarded-Prefix` are honoured only when
-/// `trust_forward` (`RUSTYBIN_TRUST_FORWARD`) is set.
-pub fn issuer_for(headers: &HeaderMap, is_tls: bool, trust_forward: bool) -> String {
-    let mut scheme = if is_tls { "https" } else { "http" };
-    let mut host = first_header(headers, header::HOST.as_str())
-        .filter(|h| valid_host(h))
-        .unwrap_or("localhost");
-    let mut prefix = "";
-    if trust_forward {
-        match first_header(headers, "x-forwarded-proto") {
-            Some(p) if p.eq_ignore_ascii_case("https") => scheme = "https",
-            Some(p) if p.eq_ignore_ascii_case("http") => scheme = "http",
-            _ => {}
-        }
-        if let Some(h) = first_header(headers, "x-forwarded-host").filter(|h| valid_host(h)) {
-            host = h;
-        }
-        if let Some(p) = first_header(headers, "x-forwarded-prefix").filter(|p| valid_prefix(p)) {
-            prefix = p.trim_end_matches('/');
-        }
-    }
-    format!("{scheme}://{host}{prefix}")
+/// The issuer URL for a request: the request origin from
+/// [`crate::session::request_origin_with`] (`https` on the TLS listener, the
+/// `Host` header, `Forwarded` / `X-Forwarded-Proto` / `-Host` / `-Port` only
+/// when `trust_forward` is set), plus `X-Forwarded-Prefix` when trusted.
+pub fn issuer_for(
+    headers: &HeaderMap,
+    extensions: &Extensions,
+    uri: &Uri,
+    policy: OriginPolicy,
+) -> String {
+    let origin = request_origin_with(headers, extensions, uri, policy).base_url();
+    let prefix = if policy.trust_forward {
+        first_header(headers, "x-forwarded-prefix")
+            .filter(|p| valid_prefix(p))
+            .map(|p| p.trim_end_matches('/'))
+            .unwrap_or("")
+    } else {
+        ""
+    };
+    format!("{origin}{prefix}")
 }
 
-fn request_issuer(
-    oidc: &OidcState,
-    headers: &HeaderMap,
-    tls: &Option<Extension<TlsConnectionInfo>>,
-) -> String {
-    issuer_for(headers, tls.is_some(), oidc.trust_forward)
+fn request_issuer(oidc: &OidcState, parts: &Parts) -> String {
+    issuer_for(&parts.headers, &parts.extensions, &parts.uri, oidc.origin)
 }
 
 // ── OAuth errors and responses ──────────────────────────────────────
@@ -600,14 +585,9 @@ fn issue_tokens(oidc: &OidcState, issuer: &str, grant: Grant) -> Result<Response
 
 // ── Token endpoint ──────────────────────────────────────────────────
 
-async fn token(
-    Extension(oidc): Extension<Arc<OidcState>>,
-    tls: Option<Extension<TlsConnectionInfo>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let issuer = request_issuer(&oidc, &headers, &tls);
-    match token_inner(&oidc, &issuer, &headers, &body) {
+async fn token(Extension(oidc): Extension<Arc<OidcState>>, parts: Parts, body: Bytes) -> Response {
+    let issuer = request_issuer(&oidc, &parts);
+    match token_inner(&oidc, &issuer, &parts.headers, &body) {
         Ok(resp) => resp,
         Err(e) => e.into_response(),
     }
@@ -1530,18 +1510,16 @@ fn metadata(issuer: &str, oidc: bool) -> Value {
 
 async fn openid_configuration(
     Extension(oidc): Extension<Arc<OidcState>>,
-    tls: Option<Extension<TlsConnectionInfo>>,
-    headers: HeaderMap,
+    parts: Parts,
 ) -> Response {
-    Json(metadata(&request_issuer(&oidc, &headers, &tls), true)).into_response()
+    Json(metadata(&request_issuer(&oidc, &parts), true)).into_response()
 }
 
 async fn oauth_authorization_server(
     Extension(oidc): Extension<Arc<OidcState>>,
-    tls: Option<Extension<TlsConnectionInfo>>,
-    headers: HeaderMap,
+    parts: Parts,
 ) -> Response {
-    Json(metadata(&request_issuer(&oidc, &headers, &tls), false)).into_response()
+    Json(metadata(&request_issuer(&oidc, &parts), false)).into_response()
 }
 
 async fn jwks(Extension(oidc): Extension<Arc<OidcState>>) -> Response {
@@ -1553,7 +1531,7 @@ async fn jwks(Extension(oidc): Extension<Arc<OidcState>>) -> Response {
 pub fn router(state: &AppState) -> Router<AppState> {
     let oidc = Arc::new(OidcState::new(
         state.jwt.clone(),
-        state.config.trust_forward,
+        OriginPolicy::from_config(&state.config),
         state.config.public_mode,
     ));
     Router::new()

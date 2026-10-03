@@ -45,8 +45,9 @@ A method of one generation with the other generation's version is refused with
 | `GET /a2a/{agent}`, `GET /a2a/{agent}/.well-known/agent-card.json` | The agent's card |
 | `GET /a2a/{agent}/.well-known/agent.json` | The agent's legacy v0.3 card |
 
-Card URLs are derived from the `Host` header (and `X-Forwarded-Proto` /
-`X-Forwarded-Host` with `RUSTYBIN_TRUST_FORWARD=true`), so cards fetched through a
+Card URLs are derived from the request: `https` on the HTTPS listener, the `Host`
+header, and `Forwarded` / `X-Forwarded-Proto` / `X-Forwarded-Host` /
+`X-Forwarded-Port` with `RUSTYBIN_TRUST_FORWARD=true`, so cards fetched through a
 gateway point at the gateway. Cards carry `Cache-Control` and `ETag`.
 
 ```hurl

@@ -5,7 +5,7 @@
 | Route | Behaviour |
 |---|---|
 | `GET /redirect/{n}` | A chain of `n` relative `302` redirects (1 to 20) ending at `/echo`; the query string is carried along |
-| `GET /absolute-redirect/{n}` | The same with absolute URLs on the request's own host (1 to 10); `https` only when `RUSTYBIN_TRUST_FORWARD=true` and `X-Forwarded-Proto: https` |
+| `GET /absolute-redirect/{n}` | The same with absolute URLs on the request's own origin (1 to 10): `https` on the HTTPS listener, and the proxy's `Forwarded` / `X-Forwarded-*` scheme and host with `RUSTYBIN_TRUST_FORWARD=true` |
 | `ANY /redirect-to?url=&status_code=` | One redirect to `url` with `status_code` 300, 301, 302 (default), 303, 307 or 308 |
 
 `/redirect-to` is not an open redirect: `url` must be a path starting with a single

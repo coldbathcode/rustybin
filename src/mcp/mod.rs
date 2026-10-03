@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Path, Request, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -56,7 +56,11 @@ pub const DEFAULT_IDP_AUDIENCE: &str = "rustybin";
 #[derive(Clone, Debug)]
 pub struct McpConfig {
     pub public_mode: bool,
+    /// Honour proxy headers when building absolute URLs (`RUSTYBIN_TRUST_FORWARD`).
     pub trust_forward: bool,
+    /// Bind address and HTTP port, the fallbacks of the request origin.
+    pub bind_host: std::net::IpAddr,
+    pub http_port: u16,
     pub max_sessions: usize,
     pub session_ttl: Duration,
     /// Lifetime cap of long-lived streams (GET stream, HTTP+SSE, subscriptions/listen).
@@ -99,6 +103,8 @@ impl McpConfig {
         let mut cfg = Self {
             public_mode: public,
             trust_forward: config.trust_forward,
+            bind_host: config.host,
+            http_port: config.http_port,
             max_sessions: if public { 200 } else { 1000 },
             session_ttl: Duration::from_secs(if public { 600 } else { 1800 }),
             max_stream: Duration::from_secs(if public { 300 } else { 3600 }),
@@ -133,6 +139,15 @@ impl McpConfig {
             cfg.tick = Duration::from_secs(secs.clamp(1, 3600));
         }
         cfg
+    }
+
+    /// Settings for [`crate::session::request_origin_with`].
+    pub fn origin_policy(&self) -> crate::session::OriginPolicy {
+        crate::session::OriginPolicy {
+            trust_forward: self.trust_forward,
+            bind_host: self.bind_host,
+            http_port: self.http_port,
+        }
     }
 
     /// Deterministic settings for tests (no environment).
@@ -296,8 +311,9 @@ async fn named_handler(
     transport_streamable::handle(app, sh, profile, req).await
 }
 
-async fn prm_handler(Extension(sh): Sh, headers: HeaderMap) -> Response {
-    Json(auth::protected_resource_metadata(&headers, &sh.cfg)).into_response()
+async fn prm_handler(Extension(sh): Sh, parts: axum::http::request::Parts) -> Response {
+    let base = auth::base_url(&parts.headers, &parts.extensions, &parts.uri, &sh.cfg);
+    Json(auth::protected_resource_metadata(&base, &sh.cfg)).into_response()
 }
 
 pub fn router(state: &AppState) -> Router<AppState> {

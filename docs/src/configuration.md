@@ -39,7 +39,12 @@ in-flight connections (streams included) get 10 seconds to finish.
 
 **Demo PKI.** At startup Rustybin loads a demo CA from `ca.crt` and `ca.key` in the
 directory of `RUSTYBIN_TLS_CERT`, or generates one and writes it there (best effort),
-so client certificates issued before a restart stay valid. For the HTTPS listener:
+so client certificates issued before a restart stay valid. Rustybin only reuses or
+replaces files it created (a CA certificate with the subject `CN=Rustybin Demo CA`): if
+`ca.crt` / `ca.key` hold another CA, such as your own, they are left untouched with a
+warning and the demo CA lives in `rustybin-demo-ca.crt` / `rustybin-demo-ca.key` instead
+(if those names are taken by something else too, it is kept in memory only). For the
+HTTPS listener:
 
 - if both `RUSTYBIN_TLS_CERT` and `RUSTYBIN_TLS_KEY` exist, they are used (a stale
   pair issued by an older demo CA is replaced; a key that does not match the

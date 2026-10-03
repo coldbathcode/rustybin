@@ -1,11 +1,13 @@
 use super::{split_path_query, AuthDef, BodyDef, Category};
 
-pub fn build(categories: &[Category]) -> String {
+pub fn build(categories: &[Category], base_url: &str) -> String {
     let version = env!("CARGO_PKG_VERSION");
     let mut out = String::with_capacity(8192);
 
     out.push_str(&format!("# Rustybin v{version} - Hurl file\n"));
-    out.push_str("# Run: hurl --variable base_url=http://localhost rustybin.hurl\n\n");
+    out.push_str(&format!(
+        "# Run: hurl --variable base_url={base_url} rustybin.hurl\n\n"
+    ));
 
     for cat in categories {
         out.push_str(&format!("# ── {} ──\n\n", cat.name));

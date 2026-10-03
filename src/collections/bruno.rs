@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 
 use super::{AuthDef, BodyDef, Category};
 
-pub fn build(categories: &[Category]) -> Value {
+pub fn build(categories: &[Category], base_url: &str) -> Value {
     let version = env!("CARGO_PKG_VERSION");
 
     json!({
@@ -14,7 +14,7 @@ pub fn build(categories: &[Category]) -> Value {
             {
                 "name": "Default",
                 "variables": [
-                    { "name": "base_url", "value": "http://localhost", "enabled": true }
+                    { "name": "base_url", "value": base_url, "enabled": true }
                 ]
             }
         ],

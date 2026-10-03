@@ -246,6 +246,46 @@ async fn forwarded_headers_only_with_trust_forward() {
     );
 }
 
+#[tokio::test]
+async fn cards_use_https_on_the_tls_listener() {
+    let app = app();
+    let get = |uri: &'static str| {
+        let mut req = Request::builder()
+            .uri(uri)
+            .header("host", "localhost:8443")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut()
+            .insert(crate::session::ListenerInfo::https(8443));
+        app.clone().oneshot(req)
+    };
+    let card = body_json(get("/.well-known/agent-card.json").await.expect("resp")).await;
+    assert_eq!(
+        card["supportedInterfaces"][0]["url"],
+        "https://localhost:8443/a2a/echo"
+    );
+    assert_eq!(card["url"], "https://localhost:8443/a2a/echo");
+    let legacy = body_json(
+        get("/a2a/weather/.well-known/agent.json")
+            .await
+            .expect("resp"),
+    )
+    .await;
+    assert_eq!(legacy["url"], "https://localhost:8443/a2a/weather");
+    let agent = body_json(
+        get("/a2a/travel-planner/.well-known/agent-card.json")
+            .await
+            .expect("resp"),
+    )
+    .await;
+    assert!(agent
+        .to_string()
+        .contains("https://localhost:8443/a2a/travel-planner"));
+    assert!(!agent.to_string().contains("http://localhost"));
+    let dir = body_json(get("/a2a").await.expect("resp")).await;
+    assert!(dir.to_string().contains("https://localhost:8443/a2a/echo"));
+}
+
 // ── JSON-RPC: send, versions, errors ───────────────────────────────
 
 #[tokio::test]

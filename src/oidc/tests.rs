@@ -130,12 +130,41 @@ fn issuer_honours_forwarded_headers_only_when_trusted() {
         HeaderValue::from_static("api.example.com"),
     );
     h.insert("x-forwarded-prefix", HeaderValue::from_static("/idp/"));
-    assert_eq!(issuer_for(&h, false, false), "http://internal:8080");
-    assert_eq!(issuer_for(&h, true, false), "https://internal:8080");
-    assert_eq!(issuer_for(&h, false, true), "https://api.example.com/idp");
+    let uri = Uri::from_static("/oauth/token");
+    let plain = Extensions::new();
+    let mut tls = Extensions::new();
+    tls.insert(crate::session::ListenerInfo::https(8443));
+    let mut policy = OriginPolicy::from_config(&crate::config::Config::for_tests());
+    policy.http_port = 8080;
+    assert_eq!(issuer_for(&h, &plain, &uri, policy), "http://internal:8080");
+    assert_eq!(issuer_for(&h, &tls, &uri, policy), "https://internal:8080");
+    policy.trust_forward = true;
+    assert_eq!(
+        issuer_for(&h, &plain, &uri, policy),
+        "https://api.example.com/idp"
+    );
     h.insert("host", HeaderValue::from_static("evil\"host"));
     h.insert("x-forwarded-host", HeaderValue::from_static("a/b"));
-    assert_eq!(issuer_for(&h, false, true), "https://localhost/idp");
+    // No valid host at all: the bind address and listener port.
+    assert_eq!(
+        issuer_for(&h, &plain, &uri, policy),
+        "https://127.0.0.1:8080/idp"
+    );
+}
+
+#[tokio::test]
+async fn metadata_issuer_is_https_on_the_tls_listener() {
+    let mut req = Request::builder()
+        .uri("/.well-known/oauth-authorization-server")
+        .header("host", "localhost:8443")
+        .body(Body::empty())
+        .expect("request");
+    req.extensions_mut()
+        .insert(crate::session::ListenerInfo::https(8443));
+    let resp = app().oneshot(req).await.expect("response");
+    let json = body_json(resp).await;
+    assert_eq!(json["issuer"], "https://localhost:8443");
+    assert_eq!(json["token_endpoint"], "https://localhost:8443/oauth/token");
 }
 
 #[tokio::test]
@@ -368,7 +397,11 @@ async fn redirect_uri_and_client_must_match_the_code() {
 #[tokio::test]
 async fn expired_code_is_rejected() {
     let state = crate::test_support::test_state();
-    let oidc = OidcState::new(state.jwt.clone(), false, false);
+    let oidc = OidcState::new(
+        state.jwt.clone(),
+        OriginPolicy::from_config(&state.config),
+        false,
+    );
     oidc.codes.insert_until(
         "old".into(),
         AuthCode {
