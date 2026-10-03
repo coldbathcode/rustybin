@@ -106,8 +106,6 @@ versions in `conformance/requirements.txt`:
 `.github/workflows/ci.yml`: rustfmt, clippy, tests, the MSRV build, the Docker
 build, the no-dash check, the documentation job (mdBook build and every
 documentation example against a fresh server) and the SDK conformance job.
-`.github/workflows/docs.yml` builds the mdBook site on pushes to `main` and publishes
-it to GitHub Pages once Pages is enabled: set the Pages source to "GitHub Actions"
-and add the repository variable `PAGES_ENABLED=true` (Settings, Secrets and
-variables, Actions, Variables). Without the variable the book is built but not
-deployed, so the workflow stays green.
+`.github/workflows/docs.yml` builds the mdBook site and publishes it to GitHub Pages
+(<https://oliwynn.github.io/rustybin/>) on every push to `main`; the repository's
+Pages source must be set to "GitHub Actions".

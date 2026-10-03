@@ -10,6 +10,8 @@ build-dir = "book"
 create-missing = false
 
 [output.html]
+# Served from https://oliwynn.github.io/rustybin/ (GitHub Pages project site).
+site-url = "/rustybin/"
 git-repository-url = "https://github.com/oliwynn/rustybin"
 edit-url-template = "https://github.com/oliwynn/rustybin/edit/main/docs/{path}"
 
