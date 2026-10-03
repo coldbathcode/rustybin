@@ -1,357 +1,423 @@
+//! Reliability testing: random, patterned and threshold-based failures.
+//!
+//! Counters are scoped per client: the key is (session, route), where the
+//! session is [`crate::session::session_key`] (`X-Rustybin-Session`, else the
+//! client IP) and the route is the endpoint plus its parameter (`after:3`,
+//! `pattern:SSF`, ...). Two clients (or two different `n`) never share a
+//! counter. The map is bounded (capacity cap, idle TTL, oldest evicted).
+//!
+//! `POST /flaky/reset` resets the caller's own counters (open);
+//! `POST /flaky/reset?scope=all` resets everyone's and is admin-guarded.
+
 use axum::{
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::{header::HeaderValue, HeaderMap, StatusCode},
     response::Response,
     routing::{any, get, post},
     Router,
 };
-use serde::Serialize;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use rand::Rng;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::catalog::{category, Endpoint, Example};
 use crate::config::Config;
 use crate::content_negotiation::{negotiate, negotiate_with_status};
+use crate::session::Session;
 use crate::state::AppState;
 use crate::types::ErrorResponse;
 
+/// Maximum (session, route) counters kept (normal mode).
+pub const MAX_COUNTERS: usize = 10_000;
+/// Maximum (session, route) counters kept (public mode).
+pub const MAX_COUNTERS_PUBLIC: usize = 2_000;
+/// Counters idle for longer than this are dropped.
+pub const COUNTER_TTL: Duration = Duration::from_secs(3600);
+/// Maximum pattern length.
+pub const MAX_PATTERN_LEN: usize = 64;
+/// Maximum `n` for `/flaky/after/{n}` and `/flaky/recover/{n}`.
+pub const MAX_THRESHOLD: u64 = 1_000_000;
+
 // ── State ───────────────────────────────────────────────────────────
 
+struct Counter {
+    count: u64,
+    last_used: Instant,
+}
+
+/// Bounded per-(session, route) request counters.
 pub struct FlakyState {
-    pub pattern_counter: AtomicU64,
-    pub after_counter: AtomicU64,
-    pub recover_counter: AtomicU64,
-    pub random_counter: AtomicU64,
+    counters: Mutex<HashMap<(String, String), Counter>>,
+    capacity: usize,
+    ttl: Duration,
 }
 
 impl FlakyState {
-    pub fn new() -> Self {
+    pub fn new(capacity: usize, ttl: Duration) -> Self {
         Self {
-            pattern_counter: AtomicU64::new(0),
-            after_counter: AtomicU64::new(0),
-            recover_counter: AtomicU64::new(0),
-            random_counter: AtomicU64::new(0),
+            counters: Mutex::new(HashMap::new()),
+            capacity: capacity.max(1),
+            ttl,
         }
     }
-}
 
-impl Default for FlakyState {
-    fn default() -> Self {
-        Self::new()
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<(String, String), Counter>> {
+        // A poisoned lock only means another request panicked mid-update;
+        // the counters are still usable.
+        self.counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Increment and return the 1-based request number for (session, route).
+    pub fn next(&self, session: &str, route: &str) -> u64 {
+        let now = Instant::now();
+        let mut map = self.lock();
+        let key = (session.to_string(), route.to_string());
+        if let Some(c) = map.get_mut(&key) {
+            if now.duration_since(c.last_used) <= self.ttl {
+                c.count += 1;
+                c.last_used = now;
+                return c.count;
+            }
+            map.remove(&key);
+        }
+        if map.len() >= self.capacity {
+            let ttl = self.ttl;
+            map.retain(|_, c| now.duration_since(c.last_used) <= ttl);
+            if map.len() >= self.capacity {
+                if let Some(oldest) = map
+                    .iter()
+                    .min_by_key(|(_, c)| c.last_used)
+                    .map(|(k, _)| k.clone())
+                {
+                    map.remove(&oldest);
+                }
+            }
+        }
+        map.insert(
+            key,
+            Counter {
+                count: 1,
+                last_used: now,
+            },
+        );
+        1
+    }
+
+    /// Counters of one session: (route, count), sorted by route.
+    pub fn session_counters(&self, session: &str) -> Vec<(String, u64)> {
+        let now = Instant::now();
+        let map = self.lock();
+        let mut out: Vec<(String, u64)> = map
+            .iter()
+            .filter(|((s, _), c)| s == session && now.duration_since(c.last_used) <= self.ttl)
+            .map(|((_, r), c)| (r.clone(), c.count))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Remove one session's counters; returns how many were removed.
+    pub fn reset_session(&self, session: &str) -> usize {
+        let mut map = self.lock();
+        let before = map.len();
+        map.retain(|(s, _), _| s != session);
+        before - map.len()
+    }
+
+    /// Remove every counter; returns how many were removed.
+    pub fn reset_all(&self) -> usize {
+        let mut map = self.lock();
+        let n = map.len();
+        map.clear();
+        n
+    }
+
+    pub fn len(&self) -> usize {
+        self.lock().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
 // ── Response types ──────────────────────────────────────────────────
 
 #[derive(Serialize)]
-struct FlakySuccess {
-    status: &'static str,
-    fail_rate: u8,
+struct FlakyOutcome {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'static str>,
     message: String,
+    route: String,
     request_number: u64,
+    session: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fail_rate: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pattern: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    position: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    threshold: Option<u64>,
 }
 
-#[derive(Serialize)]
-struct FlakyFailure {
-    error: &'static str,
-    fail_rate: u8,
-    message: String,
-}
-
-#[derive(Serialize)]
-struct PatternSuccess {
-    status: &'static str,
-    pattern: String,
-    position: u64,
-    current: &'static str,
-    request_number: u64,
-}
-
-#[derive(Serialize)]
-struct PatternFailure {
-    error: &'static str,
-    pattern: String,
-    position: u64,
-    current: &'static str,
-    request_number: u64,
-}
-
-#[derive(Serialize)]
-struct AfterSuccess {
-    status: &'static str,
-    request_number: u64,
-    threshold: u64,
-    will_fail_after: u64,
-}
-
-#[derive(Serialize)]
-struct AfterFailure {
-    error: &'static str,
-    request_number: u64,
-    threshold: u64,
-    will_fail_after: u64,
-}
-
-#[derive(Serialize)]
-struct RecoverSuccess {
-    status: &'static str,
-    request_number: u64,
-    threshold: u64,
-    will_recover_after: u64,
-}
-
-#[derive(Serialize)]
-struct RecoverFailure {
-    error: &'static str,
-    request_number: u64,
-    threshold: u64,
-    will_recover_after: u64,
+impl FlakyOutcome {
+    fn new(route: String, session: String, request_number: u64, ok: bool, message: String) -> Self {
+        Self {
+            status: ok.then_some("ok"),
+            error: (!ok).then_some("service_unavailable"),
+            message,
+            route,
+            request_number,
+            session,
+            fail_rate: None,
+            pattern: None,
+            position: None,
+            current: None,
+            threshold: None,
+        }
+    }
 }
 
 #[derive(Serialize)]
 struct ResetResponse {
     status: &'static str,
-    message: &'static str,
+    scope: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session: Option<String>,
+    counters_removed: usize,
+}
+
+#[derive(Serialize)]
+struct CounterView {
+    route: String,
+    count: u64,
 }
 
 #[derive(Serialize)]
 struct StatusResponse {
-    pattern_counter: u64,
-    after_counter: u64,
-    recover_counter: u64,
-    random_counter: u64,
+    session: String,
+    counters: Vec<CounterView>,
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-fn flaky_headers(fail_rate: u8) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    headers.insert("x-rustybin-flaky", HeaderValue::from_static("true"));
-    if let Ok(v) = HeaderValue::from_str(&fail_rate.to_string()) {
-        headers.insert("x-rustybin-fail-rate", v);
-    }
-    headers
+fn bad_request(headers: &HeaderMap, details: String) -> Response {
+    negotiate_with_status(
+        headers,
+        &ErrorResponse {
+            error: "bad_request".to_string(),
+            details: Some(details),
+        },
+        StatusCode::BAD_REQUEST,
+    )
 }
 
-fn add_headers(mut resp: Response, extra: HeaderMap) -> Response {
-    let headers = resp.headers_mut();
-    for (k, v) in extra.iter() {
-        headers.insert(k.clone(), v.clone());
+fn respond(headers: &HeaderMap, outcome: &FlakyOutcome, ok: bool) -> Response {
+    let mut resp = if ok {
+        negotiate(headers, outcome)
+    } else {
+        negotiate_with_status(headers, outcome, StatusCode::SERVICE_UNAVAILABLE)
+    };
+    let h = resp.headers_mut();
+    h.insert("x-rustybin-flaky", HeaderValue::from_static("true"));
+    if !ok {
+        h.insert("retry-after", HeaderValue::from_static("1"));
+    }
+    if let Ok(v) = HeaderValue::from_str(&outcome.request_number.to_string()) {
+        h.insert("x-rustybin-request-number", v);
+    }
+    if let Some(rate) = outcome.fail_rate {
+        if let Ok(v) = HeaderValue::from_str(&rate.to_string()) {
+            h.insert("x-rustybin-fail-rate", v);
+        }
     }
     resp
+}
+
+fn parse_threshold(raw: &str) -> Result<u64, String> {
+    raw.trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|n| *n <= MAX_THRESHOLD)
+        .ok_or_else(|| format!("n must be an integer between 0 and {MAX_THRESHOLD}"))
 }
 
 // ── Handlers ────────────────────────────────────────────────────────
 
 async fn flaky_rate_handler(
-    Path(fail_rate): Path<u8>,
+    Path(raw): Path<String>,
+    Session(session): Session,
     Extension(state): Extension<Arc<FlakyState>>,
     headers: HeaderMap,
 ) -> Response {
-    if fail_rate > 100 {
-        return negotiate_with_status(
-            &headers,
-            &ErrorResponse {
-                error: "bad_request".to_string(),
-                details: Some("fail_rate must be 0-100".to_string()),
-            },
-            StatusCode::BAD_REQUEST,
-        );
-    }
-
-    let count = state.random_counter.fetch_add(1, Ordering::Relaxed) + 1;
-    let roll = rand::random::<u8>() % 100;
-    let extra = flaky_headers(fail_rate);
-
-    if roll < fail_rate {
-        let mut resp = negotiate_with_status(
-            &headers,
-            &FlakyFailure {
-                error: "service_unavailable",
-                fail_rate,
-                message: format!("Simulated failure ({}% fail rate)", fail_rate),
-            },
-            StatusCode::SERVICE_UNAVAILABLE,
-        );
-        resp.headers_mut()
-            .insert("retry-after", HeaderValue::from_static("1"));
-        add_headers(resp, extra)
+    let Some(fail_rate) = raw.trim().parse::<u8>().ok().filter(|r| *r <= 100) else {
+        return bad_request(&headers, "fail_rate must be an integer 0-100".to_string());
+    };
+    let route = format!("rate:{fail_rate}");
+    let count = state.next(&session, &route);
+    // Unbiased roll in 0..100.
+    let ok = rand::thread_rng().gen_range(0..100u8) >= fail_rate;
+    let message = if ok {
+        "Request succeeded".to_string()
     } else {
-        let resp = negotiate(
-            &headers,
-            &FlakySuccess {
-                status: "ok",
-                fail_rate,
-                message: "Request succeeded".to_string(),
-                request_number: count,
-            },
-        );
-        add_headers(resp, extra)
-    }
+        format!("Simulated failure ({fail_rate}% fail rate)")
+    };
+    let mut outcome = FlakyOutcome::new(route, session, count, ok, message);
+    outcome.fail_rate = Some(fail_rate);
+    respond(&headers, &outcome, ok)
 }
 
 async fn flaky_pattern_handler(
     Path(pattern): Path<String>,
+    Session(session): Session,
     Extension(state): Extension<Arc<FlakyState>>,
     headers: HeaderMap,
 ) -> Response {
-    let upper = pattern.to_uppercase();
-    if upper.is_empty() || !upper.chars().all(|c| c == 'S' || c == 'F') {
-        return negotiate_with_status(
+    let upper = pattern.to_ascii_uppercase();
+    if upper.is_empty()
+        || upper.len() > MAX_PATTERN_LEN
+        || !upper.bytes().all(|c| c == b'S' || c == b'F')
+    {
+        return bad_request(
             &headers,
-            &ErrorResponse {
-                error: "bad_request".to_string(),
-                details: Some(
-                    "Pattern must contain only S (success) and F (fail) characters".to_string(),
-                ),
-            },
-            StatusCode::BAD_REQUEST,
+            format!("Pattern must be 1-{MAX_PATTERN_LEN} characters of S (success) and F (fail)"),
         );
     }
-
-    let count = state.pattern_counter.fetch_add(1, Ordering::Relaxed);
-    let pos = count % upper.len() as u64;
-    let ch = upper.as_bytes()[pos as usize];
-
-    if ch == b'F' {
-        let mut resp = negotiate_with_status(
-            &headers,
-            &PatternFailure {
-                error: "service_unavailable",
-                pattern: upper,
-                position: pos,
-                current: "F",
-                request_number: count + 1,
-            },
-            StatusCode::SERVICE_UNAVAILABLE,
-        );
-        resp.headers_mut()
-            .insert("retry-after", HeaderValue::from_static("1"));
-        resp
-    } else {
-        negotiate(
-            &headers,
-            &PatternSuccess {
-                status: "ok",
-                pattern: upper,
-                position: pos,
-                current: "S",
-                request_number: count + 1,
-            },
-        )
-    }
+    let route = format!("pattern:{upper}");
+    let count = state.next(&session, &route);
+    let pos = (count - 1) % upper.len() as u64;
+    let ok = upper.as_bytes().get(pos as usize) != Some(&b'F');
+    let mut outcome =
+        FlakyOutcome::new(route, session, count, ok, format!("pattern position {pos}"));
+    outcome.pattern = Some(upper);
+    outcome.position = Some(pos);
+    outcome.current = Some(if ok { "S" } else { "F" });
+    respond(&headers, &outcome, ok)
 }
 
 async fn flaky_after_handler(
-    Path(n): Path<u64>,
+    Path(raw): Path<String>,
+    Session(session): Session,
     Extension(state): Extension<Arc<FlakyState>>,
     headers: HeaderMap,
 ) -> Response {
-    let count = state.after_counter.fetch_add(1, Ordering::Relaxed) + 1;
-
-    if count <= n {
-        negotiate(
-            &headers,
-            &AfterSuccess {
-                status: "ok",
-                request_number: count,
-                threshold: n,
-                will_fail_after: n,
-            },
-        )
+    let n = match parse_threshold(&raw) {
+        Ok(n) => n,
+        Err(e) => return bad_request(&headers, e),
+    };
+    let route = format!("after:{n}");
+    let count = state.next(&session, &route);
+    let ok = count <= n;
+    let message = if ok {
+        format!("success {count} of {n}, failing afterwards")
     } else {
-        let mut resp = negotiate_with_status(
-            &headers,
-            &AfterFailure {
-                error: "service_unavailable",
-                request_number: count,
-                threshold: n,
-                will_fail_after: n,
-            },
-            StatusCode::SERVICE_UNAVAILABLE,
-        );
-        resp.headers_mut()
-            .insert("retry-after", HeaderValue::from_static("1"));
-        resp
-    }
+        format!("failing after {n} successful requests")
+    };
+    let mut outcome = FlakyOutcome::new(route, session, count, ok, message);
+    outcome.threshold = Some(n);
+    respond(&headers, &outcome, ok)
 }
 
 async fn flaky_recover_handler(
-    Path(n): Path<u64>,
+    Path(raw): Path<String>,
+    Session(session): Session,
     Extension(state): Extension<Arc<FlakyState>>,
     headers: HeaderMap,
 ) -> Response {
-    let count = state.recover_counter.fetch_add(1, Ordering::Relaxed) + 1;
-
-    if count <= n {
-        let mut resp = negotiate_with_status(
-            &headers,
-            &RecoverFailure {
-                error: "service_unavailable",
-                request_number: count,
-                threshold: n,
-                will_recover_after: n,
-            },
-            StatusCode::SERVICE_UNAVAILABLE,
-        );
-        resp.headers_mut()
-            .insert("retry-after", HeaderValue::from_static("1"));
-        resp
+    let n = match parse_threshold(&raw) {
+        Ok(n) => n,
+        Err(e) => return bad_request(&headers, e),
+    };
+    let route = format!("recover:{n}");
+    let count = state.next(&session, &route);
+    let ok = count > n;
+    let message = if ok {
+        format!("recovered after {n} failures")
     } else {
-        negotiate(
-            &headers,
-            &RecoverSuccess {
-                status: "ok",
-                request_number: count,
-                threshold: n,
-                will_recover_after: n,
-            },
-        )
-    }
+        format!("failure {count} of {n} before recovering")
+    };
+    let mut outcome = FlakyOutcome::new(route, session, count, ok, message);
+    outcome.threshold = Some(n);
+    respond(&headers, &outcome, ok)
+}
+
+#[derive(Deserialize)]
+struct ResetQuery {
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 async fn flaky_reset_handler(
     State(config): State<Arc<Config>>,
+    Session(session): Session,
     Extension(state): Extension<Arc<FlakyState>>,
+    Query(query): Query<ResetQuery>,
     headers: HeaderMap,
 ) -> Response {
-    // Resetting the global counters affects every client: admin-guarded.
-    if let Err(resp) = crate::admin::require_admin(&headers, &config) {
-        return resp;
+    match query.scope.as_deref() {
+        Some("all") => {
+            // Resetting every client's counters is a global mutation.
+            if let Err(resp) = crate::admin::require_admin(&headers, &config) {
+                return resp;
+            }
+            let removed = state.reset_all();
+            negotiate(
+                &headers,
+                &ResetResponse {
+                    status: "reset",
+                    scope: "all",
+                    session: None,
+                    counters_removed: removed,
+                },
+            )
+        }
+        None | Some("session") => {
+            let removed = state.reset_session(&session);
+            negotiate(
+                &headers,
+                &ResetResponse {
+                    status: "reset",
+                    scope: "session",
+                    session: Some(session),
+                    counters_removed: removed,
+                },
+            )
+        }
+        Some(_) => bad_request(&headers, "scope must be session or all".to_string()),
     }
-    state.pattern_counter.store(0, Ordering::Relaxed);
-    state.after_counter.store(0, Ordering::Relaxed);
-    state.recover_counter.store(0, Ordering::Relaxed);
-    state.random_counter.store(0, Ordering::Relaxed);
-
-    negotiate(
-        &headers,
-        &ResetResponse {
-            status: "reset",
-            message: "All flaky counters reset",
-        },
-    )
 }
 
 async fn flaky_status_handler(
+    Session(session): Session,
     Extension(state): Extension<Arc<FlakyState>>,
     headers: HeaderMap,
 ) -> Response {
-    negotiate(
-        &headers,
-        &StatusResponse {
-            pattern_counter: state.pattern_counter.load(Ordering::Relaxed),
-            after_counter: state.after_counter.load(Ordering::Relaxed),
-            recover_counter: state.recover_counter.load(Ordering::Relaxed),
-            random_counter: state.random_counter.load(Ordering::Relaxed),
-        },
-    )
+    let counters = state
+        .session_counters(&session)
+        .into_iter()
+        .map(|(route, count)| CounterView { route, count })
+        .collect();
+    negotiate(&headers, &StatusResponse { session, counters })
 }
 
 // ── Router ──────────────────────────────────────────────────────────
 
-pub fn router(_state: &AppState) -> Router<AppState> {
-    routes(Arc::new(FlakyState::new()))
+pub fn router(state: &AppState) -> Router<AppState> {
+    let capacity = if state.config.public_mode {
+        MAX_COUNTERS_PUBLIC
+    } else {
+        MAX_COUNTERS
+    };
+    routes(Arc::new(FlakyState::new(capacity, COUNTER_TTL)))
 }
 
 fn routes(flaky_state: Arc<FlakyState>) -> Router<AppState> {
@@ -378,35 +444,39 @@ pub fn catalog() -> Vec<Endpoint> {
             "/flaky/pattern/{pattern}",
             &["ANY"],
             category::RELIABILITY,
-            "Deterministic success/failure pattern (S = success, F = failure)",
+            "Deterministic success/failure pattern (S = success, F = failure), per session",
         )
         .example(Example::get("Flaky pattern SSFSS", "/flaky/pattern/SSFSS")),
         Endpoint::new(
             "/flaky/after/{n}",
             &["ANY"],
             category::RELIABILITY,
-            "Succeed n times, then fail (circuit breaker trip)",
+            "Succeed n times, then fail (circuit breaker trip), per session and n",
         )
         .example(Example::get("Fail after 3", "/flaky/after/3")),
         Endpoint::new(
             "/flaky/recover/{n}",
             &["ANY"],
             category::RELIABILITY,
-            "Fail n times, then recover (circuit breaker half-open)",
+            "Fail n times, then recover (circuit breaker half-open), per session and n",
         )
         .example(Example::get("Recover after 3", "/flaky/recover/3")),
         Endpoint::new(
             "/flaky/reset",
             &["POST"],
             category::RELIABILITY,
-            "Reset all flaky counters (admin-guarded)",
+            "Reset the caller's counters (?scope=all resets everyone's, admin-guarded)",
         )
-        .example(Example::post("Reset counters", "/flaky/reset")),
+        .description(
+            "Counters are keyed by session (X-Rustybin-Session header, else client IP) and \
+             route. Without scope only the caller's session is reset.",
+        )
+        .example(Example::post("Reset my counters", "/flaky/reset")),
         Endpoint::new(
             "/flaky/status",
             &["GET"],
             category::RELIABILITY,
-            "Current flaky counters",
+            "The caller's flaky counters",
         )
         .example(Example::get("Counter status", "/flaky/status")),
     ]
@@ -417,273 +487,184 @@ pub fn catalog() -> Vec<Endpoint> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::body_json;
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_state() -> Arc<FlakyState> {
-        Arc::new(FlakyState::new())
+    fn app() -> Router {
+        crate::test_support::module_app(router)
     }
 
-    fn test_app() -> (Router, Arc<FlakyState>) {
-        let state = test_state();
-        let app = routes(state.clone()).with_state(crate::test_support::test_state());
-        (app, state)
+    fn req(method: &str, uri: &str, session: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().method(method).uri(uri);
+        if let Some(s) = session {
+            b = b.header("x-rustybin-session", s);
+        }
+        b.body(Body::empty()).expect("request")
     }
 
-    async fn json_body(resp: axum::http::Response<Body>) -> serde_json::Value {
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+    async fn status_of(app: &Router, uri: &str, session: &str) -> u16 {
+        app.clone()
+            .oneshot(req("GET", uri, Some(session)))
             .await
-            .expect("body");
-        serde_json::from_slice(&body).expect("json")
+            .expect("response")
+            .status()
+            .as_u16()
     }
 
     #[tokio::test]
-    async fn rate_0_always_succeeds() {
-        let state = test_state();
-        let config = crate::test_support::test_state();
-        for _ in 0..10 {
-            let app = routes(state.clone()).with_state(config.clone());
-            let resp = app
-                .oneshot(
-                    Request::builder()
-                        .uri("/flaky/0")
-                        .body(Body::empty())
-                        .expect("request"),
-                )
-                .await
-                .expect("response");
-            assert_eq!(resp.status(), StatusCode::OK);
-            assert_eq!(
-                resp.headers()
-                    .get("x-rustybin-flaky")
-                    .unwrap()
-                    .to_str()
-                    .unwrap(),
-                "true"
-            );
+    async fn rate_extremes() {
+        let app = app();
+        for _ in 0..20 {
+            assert_eq!(status_of(&app, "/flaky/0", "s").await, 200);
+            assert_eq!(status_of(&app, "/flaky/100", "s").await, 503);
         }
-    }
-
-    #[tokio::test]
-    async fn rate_100_always_fails() {
-        let state = test_state();
-        let config = crate::test_support::test_state();
-        for _ in 0..10 {
-            let app = routes(state.clone()).with_state(config.clone());
-            let resp = app
-                .oneshot(
-                    Request::builder()
-                        .uri("/flaky/100")
-                        .body(Body::empty())
-                        .expect("request"),
-                )
-                .await
-                .expect("response");
-            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-            assert!(resp.headers().get("retry-after").is_some());
-        }
-    }
-
-    #[tokio::test]
-    async fn pattern_sfs() {
-        let state = test_state();
-        let config = crate::test_support::test_state();
-        let expected = [
-            StatusCode::OK,
-            StatusCode::SERVICE_UNAVAILABLE,
-            StatusCode::OK,
-            StatusCode::OK,
-            StatusCode::SERVICE_UNAVAILABLE,
-            StatusCode::OK,
-        ];
-
-        for expected_status in &expected {
-            let app = routes(state.clone()).with_state(config.clone());
-            let resp = app
-                .oneshot(
-                    Request::builder()
-                        .uri("/flaky/pattern/SFS")
-                        .body(Body::empty())
-                        .expect("request"),
-                )
-                .await
-                .expect("response");
-            assert_eq!(resp.status(), *expected_status);
-        }
-    }
-
-    #[tokio::test]
-    async fn pattern_invalid_returns_400() {
-        let (app, _) = test_app();
         let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/flaky/pattern/ABCD")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
+            .clone()
+            .oneshot(req("GET", "/flaky/101", None))
             .await
-            .expect("response");
+            .expect("r");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(resp).await["error"], "bad_request");
+        let resp = app
+            .oneshot(req("GET", "/flaky/abc", None))
+            .await
+            .expect("r");
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
-    async fn pattern_case_insensitive() {
-        let state = test_state();
-        let config = crate::test_support::test_state();
-        let app = routes(state.clone()).with_state(config.clone());
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/flaky/pattern/sf")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
+    async fn failure_carries_retry_after_and_headers() {
+        let resp = app()
+            .oneshot(req("GET", "/flaky/100", None))
             .await
-            .expect("response");
-        assert_eq!(resp.status(), StatusCode::OK); // first char is S
+            .expect("r");
+        assert_eq!(resp.headers()["retry-after"], "1");
+        assert_eq!(resp.headers()["x-rustybin-fail-rate"], "100");
+        assert_eq!(resp.headers()["x-rustybin-request-number"], "1");
     }
 
     #[tokio::test]
-    async fn after_3_succeeds_then_fails() {
-        let state = test_state();
-        let config = crate::test_support::test_state();
-
-        for i in 1..=5 {
-            let app = routes(state.clone()).with_state(config.clone());
-            let resp = app
-                .oneshot(
-                    Request::builder()
-                        .uri("/flaky/after/3")
-                        .body(Body::empty())
-                        .expect("request"),
-                )
-                .await
-                .expect("response");
-            if i <= 3 {
-                assert_eq!(
-                    resp.status(),
-                    StatusCode::OK,
-                    "request {} should succeed",
-                    i
-                );
-            } else {
-                assert_eq!(
-                    resp.status(),
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "request {} should fail",
-                    i
-                );
+    async fn pattern_is_per_session() {
+        let app = app();
+        let seq_a: Vec<u16> = {
+            let mut v = Vec::new();
+            for _ in 0..4 {
+                v.push(status_of(&app, "/flaky/pattern/SFS", "a").await);
             }
-        }
-    }
-
-    #[tokio::test]
-    async fn recover_3_fails_then_succeeds() {
-        let state = test_state();
-        let config = crate::test_support::test_state();
-
-        for i in 1..=5 {
-            let app = routes(state.clone()).with_state(config.clone());
-            let resp = app
-                .oneshot(
-                    Request::builder()
-                        .uri("/flaky/recover/3")
-                        .body(Body::empty())
-                        .expect("request"),
-                )
-                .await
-                .expect("response");
-            if i <= 3 {
-                assert_eq!(
-                    resp.status(),
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "request {} should fail",
-                    i
-                );
-            } else {
-                assert_eq!(
-                    resp.status(),
-                    StatusCode::OK,
-                    "request {} should succeed",
-                    i
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn reset_clears_counters() {
-        let state = test_state();
-        let config = crate::test_support::test_state();
-
-        // Bump the after counter
-        state.after_counter.store(10, Ordering::Relaxed);
-
-        let app = routes(state.clone()).with_state(config.clone());
+            v
+        };
+        assert_eq!(seq_a, vec![200, 503, 200, 200]);
+        // Session b starts from the beginning of the pattern.
+        assert_eq!(status_of(&app, "/flaky/pattern/sfs", "b").await, 200);
+        assert_eq!(status_of(&app, "/flaky/pattern/SFS", "b").await, 503);
         let resp = app
+            .oneshot(req(
+                "GET",
+                &format!("/flaky/pattern/{}", "S".repeat(65)),
+                None,
+            ))
+            .await
+            .expect("r");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn after_and_recover_are_per_session_and_n() {
+        let app = app();
+        assert_eq!(status_of(&app, "/flaky/after/2", "a").await, 200);
+        assert_eq!(status_of(&app, "/flaky/after/2", "a").await, 200);
+        assert_eq!(status_of(&app, "/flaky/after/2", "a").await, 503);
+        // Different n: separate counter.
+        assert_eq!(status_of(&app, "/flaky/after/3", "a").await, 200);
+        // Different session: separate counter.
+        assert_eq!(status_of(&app, "/flaky/after/2", "b").await, 200);
+
+        assert_eq!(status_of(&app, "/flaky/recover/1", "a").await, 503);
+        assert_eq!(status_of(&app, "/flaky/recover/1", "a").await, 200);
+        assert_eq!(status_of(&app, "/flaky/recover/1", "b").await, 503);
+    }
+
+    #[tokio::test]
+    async fn session_reset_is_open_global_reset_is_guarded() {
+        let mut config = crate::test_support::test_config();
+        config.admin_token = Some("tok".to_string());
+        let app = crate::test_support::module_app_with_config(config, router);
+        status_of(&app, "/flaky/after/1", "a").await;
+        assert_eq!(status_of(&app, "/flaky/after/1", "a").await, 503);
+        status_of(&app, "/flaky/after/1", "b").await;
+
+        let resp = app
+            .clone()
+            .oneshot(req("POST", "/flaky/reset", Some("a")))
+            .await
+            .expect("r");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["scope"], "session");
+        assert_eq!(json["counters_removed"], 1);
+        assert_eq!(status_of(&app, "/flaky/after/1", "a").await, 200);
+        // b untouched.
+        assert_eq!(status_of(&app, "/flaky/after/1", "b").await, 503);
+
+        let resp = app
+            .clone()
+            .oneshot(req("POST", "/flaky/reset?scope=all", Some("a")))
+            .await
+            .expect("r");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/flaky/reset")
+                    .uri("/flaky/reset?scope=all")
+                    .header("authorization", "Bearer tok")
                     .body(Body::empty())
                     .expect("request"),
             )
             .await
-            .expect("response");
-
+            .expect("r");
         assert_eq!(resp.status(), StatusCode::OK);
-        let json = json_body(resp).await;
-        assert_eq!(json["status"], "reset");
-        assert_eq!(state.after_counter.load(Ordering::Relaxed), 0);
+        assert_eq!(status_of(&app, "/flaky/after/1", "b").await, 200);
     }
 
     #[tokio::test]
-    async fn status_shows_counters() {
-        let state = test_state();
-        state.after_counter.store(5, Ordering::Relaxed);
-        state.recover_counter.store(3, Ordering::Relaxed);
-
-        let config = crate::test_support::test_state();
-        let app = routes(state.clone()).with_state(config);
+    async fn status_lists_only_the_callers_counters() {
+        let app = app();
+        status_of(&app, "/flaky/after/5", "a").await;
+        status_of(&app, "/flaky/after/5", "a").await;
+        status_of(&app, "/flaky/pattern/SF", "b").await;
         let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/flaky/status")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
+            .oneshot(req("GET", "/flaky/status", Some("a")))
             .await
-            .expect("response");
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let json = json_body(resp).await;
-        assert_eq!(json["after_counter"], 5);
-        assert_eq!(json["recover_counter"], 3);
-    }
-
-    #[tokio::test]
-    async fn flaky_xml_negotiation() {
-        let (app, _) = test_app();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/flaky/status")
-                    .header("accept", "application/xml")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
+            .expect("r");
+        let json = body_json(resp).await;
+        assert_eq!(json["session"], "a");
         assert_eq!(
-            resp.headers()
-                .get("content-type")
-                .expect("ct")
-                .to_str()
-                .expect("str"),
-            "application/xml"
+            json["counters"],
+            serde_json::json!([{ "route": "after:5", "count": 2 }])
         );
+    }
+
+    #[test]
+    fn state_is_bounded_and_expires() {
+        let state = FlakyState::new(3, Duration::from_secs(3600));
+        for i in 0..10 {
+            state.next(&format!("s{i}"), "r");
+        }
+        assert_eq!(state.len(), 3);
+        // The most recent survive.
+        assert_eq!(state.session_counters("s9"), vec![("r".to_string(), 1)]);
+        assert!(state.session_counters("s0").is_empty());
+
+        let state = FlakyState::new(10, Duration::from_millis(0));
+        state.next("a", "r");
+        std::thread::sleep(Duration::from_millis(5));
+        // Expired: starts again from 1.
+        assert_eq!(state.next("a", "r"), 1);
+        assert_eq!(state.reset_all(), 1);
+        assert!(state.is_empty());
     }
 }

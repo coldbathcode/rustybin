@@ -146,7 +146,12 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
     );
 
     let http_task = {
-        let app = app.clone();
+        // Tag requests with the listener so handlers report scheme and port.
+        let app = app
+            .clone()
+            .layer(axum::Extension(crate::session::ListenerInfo::http(
+                http_addr.port(),
+            )));
         let rx = shutdown.subscribe();
         tokio::spawn(async move {
             tracing::info!("HTTP listening on {http_addr}");
@@ -178,10 +183,10 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
     let grpc_addr = match TcpListener::bind(grpc_bind).await {
         Ok(listener) => {
             let addr = listener.local_addr()?;
-            let instance_id = config.instance_id.clone();
+            let grpc_state = state.clone();
             let rx = shutdown.subscribe();
             let task = tokio::spawn(async move {
-                if let Err(e) = crate::grpc::serve(listener, instance_id, wait_for(rx)).await {
+                if let Err(e) = crate::grpc::serve(listener, grpc_state, wait_for(rx)).await {
                     tracing::warn!("gRPC listener stopped: {e} (HTTP keeps serving)");
                 }
             });
@@ -263,6 +268,9 @@ fn start_https(
         .map_err(|e| format!("failed to bind HTTPS listener on {bind}: {e}"))?;
     listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?;
+    let app = app.layer(axum::Extension(crate::session::ListenerInfo::https(
+        addr.port(),
+    )));
 
     let handle = axum_server::Handle::new();
     let shutdown_handle = handle.clone();

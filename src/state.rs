@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use crate::cert_state::CertState;
 use crate::config::Config;
+use crate::health::HealthState;
 use crate::identity::IdentityState;
 use crate::inspector::Inspector;
 use crate::jwt_state::JwtState;
@@ -29,6 +30,8 @@ pub struct AppState {
     pub identity: Arc<IdentityState>,
     /// Captured request ring buffer + live feed.
     pub inspector: Inspector,
+    /// `/health` toggle, shared with the gRPC health service.
+    pub health: Arc<HealthState>,
 }
 
 impl AppState {
@@ -59,6 +62,7 @@ impl AppState {
             certs,
             identity: Arc::new(IdentityState::new()),
             inspector,
+            health: Arc::new(HealthState::new()),
         }
     }
 }

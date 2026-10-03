@@ -1,14 +1,41 @@
-use async_graphql::{Enum, InputObject, Object, Schema, SimpleObject, ID};
+//! GraphQL API (async-graphql) with a GraphQL-over-HTTP transport.
+//!
+//! - `POST /graphql` (application/json or application/graphql) and
+//!   `GET /graphql?query=...` (queries only; mutations over GET are 405).
+//!   Browsers (Accept: text/html, no query) get a pinned GraphiQL page.
+//! - `operationName` selects the operation in multi-operation documents.
+//! - `Accept: application/graphql-response+json` switches to the
+//!   GraphQL-over-HTTP status codes (400 for parse/validation/limit errors);
+//!   legacy `application/json` answers 200 for every well-formed request.
+//! - Limits: depth 10, complexity 500, 30 aliases (fragments expanded).
+//! - Automatic persisted queries (`extensions.persistedQuery.sha256Hash`,
+//!   `PersistedQueryNotFound`), bounded cache.
+//! - Subscriptions over WebSocket at `/graphql/ws` (graphql-transport-ws and
+//!   legacy graphql-ws): `ticker`, `orderUpdates`.
+
+use async_graphql::parser::types::{
+    DocumentOperations, ExecutableDocument, OperationType, Selection, SelectionSet,
+};
+use async_graphql::{Enum, InputObject, Object, Schema, SimpleObject, Subscription, ID};
+use async_graphql_axum::{GraphQLProtocol, GraphQLWebSocket};
 use axum::{
-    extract::Extension,
-    http::{header, StatusCode},
+    body::Bytes,
+    extract::{ws::WebSocketUpgrade, Extension, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::get,
-    Json, Router,
+    Router,
 };
+use futures_util::Stream;
 use serde::Deserialize;
+use serde_json::json;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::catalog::{category, Endpoint, Example};
+use crate::config::Config;
+use crate::content_negotiation::{add_vary, choose};
 use crate::state::AppState;
 
 // ── Enums ───────────────────────────────────────────────────────────
@@ -770,95 +797,633 @@ impl MutationRoot {
     }
 }
 
+// ── Subscription root ───────────────────────────────────────────────
+
+/// Maximum events one subscription emits.
+const MAX_SUB_EVENTS: i32 = 100;
+/// Subscription interval bounds (ms).
+const MIN_INTERVAL_MS: i32 = 50;
+const MAX_INTERVAL_MS: i32 = 10_000;
+
+#[derive(SimpleObject, Clone)]
+struct Tick {
+    sequence: i32,
+    timestamp: String,
+}
+
+#[derive(SimpleObject, Clone)]
+struct OrderUpdate {
+    order_id: ID,
+    sequence: i32,
+    status: OrderStatus,
+    timestamp: String,
+}
+
+struct SubscriptionRoot;
+
+#[Subscription]
+impl SubscriptionRoot {
+    /// Emit `count` ticks (1-100, default 5), one every `intervalMs`
+    /// (50-10000, default 1000), then complete.
+    async fn ticker(
+        &self,
+        #[graphql(default = 5)] count: i32,
+        #[graphql(default = 1000)] interval_ms: i32,
+    ) -> impl Stream<Item = Tick> {
+        let count = count.clamp(1, MAX_SUB_EVENTS);
+        let interval =
+            Duration::from_millis(interval_ms.clamp(MIN_INTERVAL_MS, MAX_INTERVAL_MS) as u64);
+        async_stream::stream! {
+            for sequence in 0..count {
+                if sequence > 0 {
+                    tokio::time::sleep(interval).await;
+                }
+                yield Tick { sequence, timestamp: chrono::Utc::now().to_rfc3339() };
+            }
+        }
+    }
+
+    /// Status changes of an order (PENDING, PROCESSING, SHIPPED,
+    /// DELIVERED), one every `intervalMs` (50-10000, default 500), then
+    /// complete.
+    async fn order_updates(
+        &self,
+        order_id: ID,
+        #[graphql(default = 500)] interval_ms: i32,
+    ) -> impl Stream<Item = OrderUpdate> {
+        let interval =
+            Duration::from_millis(interval_ms.clamp(MIN_INTERVAL_MS, MAX_INTERVAL_MS) as u64);
+        let steps = [
+            OrderStatus::Pending,
+            OrderStatus::Processing,
+            OrderStatus::Shipped,
+            OrderStatus::Delivered,
+        ];
+        async_stream::stream! {
+            for (i, status) in steps.into_iter().enumerate() {
+                if i > 0 {
+                    tokio::time::sleep(interval).await;
+                }
+                yield OrderUpdate {
+                    order_id: order_id.clone(),
+                    sequence: i as i32,
+                    status,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                };
+            }
+        }
+    }
+}
+
 // ── Schema construction ─────────────────────────────────────────────
 
-type GqlSchema = Schema<QueryRoot, MutationRoot, async_graphql::EmptySubscription>;
+type GqlSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
+
+/// Maximum selection depth.
+pub const MAX_DEPTH: usize = 10;
+/// Maximum query complexity (1 per field by default).
+pub const MAX_COMPLEXITY: usize = 500;
+/// Maximum aliases per operation (fragments expanded).
+pub const MAX_ALIASES: usize = 30;
+/// Automatic persisted queries kept.
+pub const APQ_CAPACITY: usize = 1_000;
+/// Automatic persisted queries idle TTL.
+pub const APQ_TTL: Duration = Duration::from_secs(24 * 3600);
+/// Largest query stored in the APQ cache.
+const APQ_MAX_QUERY_LEN: usize = 64 * 1024;
 
 fn build_schema() -> GqlSchema {
-    Schema::build(QueryRoot, MutationRoot, async_graphql::EmptySubscription).finish()
+    Schema::build(QueryRoot, MutationRoot, SubscriptionRoot)
+        .limit_depth(MAX_DEPTH)
+        .limit_complexity(MAX_COMPLEXITY)
+        .finish()
 }
 
-// ── GraphQL request type ────────────────────────────────────────────
+// ── Automatic persisted queries ─────────────────────────────────────
 
-#[derive(Deserialize)]
-struct GraphQLRequest {
-    query: String,
+/// Bounded hash -> query cache (capacity cap, idle TTL, oldest evicted).
+struct ApqCache {
+    entries: Mutex<HashMap<String, (Arc<str>, Instant)>>,
+    capacity: usize,
+    ttl: Duration,
+}
+
+impl ApqCache {
+    fn new(capacity: usize, ttl: Duration) -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            capacity: capacity.max(1),
+            ttl,
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, (Arc<str>, Instant)>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn get(&self, hash: &str) -> Option<Arc<str>> {
+        let now = Instant::now();
+        let mut map = self.lock();
+        match map.get_mut(hash) {
+            Some((q, used)) if now.duration_since(*used) <= self.ttl => {
+                *used = now;
+                Some(q.clone())
+            }
+            Some(_) => {
+                map.remove(hash);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn insert(&self, hash: String, query: &str) {
+        if query.len() > APQ_MAX_QUERY_LEN {
+            return;
+        }
+        let now = Instant::now();
+        let mut map = self.lock();
+        if !map.contains_key(&hash) && map.len() >= self.capacity {
+            let ttl = self.ttl;
+            map.retain(|_, (_, used)| now.duration_since(*used) <= ttl);
+            if map.len() >= self.capacity {
+                if let Some(oldest) = map
+                    .iter()
+                    .min_by_key(|(_, (_, used))| *used)
+                    .map(|(k, _)| k.clone())
+                {
+                    map.remove(&oldest);
+                }
+            }
+        }
+        map.insert(hash, (Arc::from(query), now));
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.lock().len()
+    }
+}
+
+fn sha256_hex(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(s.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+// ── Static analysis (aliases, operation type) ───────────────────────
+
+fn count_aliases(doc: &ExecutableDocument, limit: usize) -> usize {
+    fn walk(
+        set: &SelectionSet,
+        doc: &ExecutableDocument,
+        stack: &mut Vec<String>,
+        count: &mut usize,
+        limit: usize,
+    ) {
+        for item in &set.items {
+            if *count > limit {
+                return;
+            }
+            match &item.node {
+                Selection::Field(f) => {
+                    if f.node.alias.is_some() {
+                        *count += 1;
+                    }
+                    walk(&f.node.selection_set.node, doc, stack, count, limit);
+                }
+                Selection::InlineFragment(fr) => {
+                    walk(&fr.node.selection_set.node, doc, stack, count, limit);
+                }
+                Selection::FragmentSpread(spread) => {
+                    let name = spread.node.fragment_name.node.to_string();
+                    if stack.contains(&name) || stack.len() > MAX_DEPTH {
+                        continue;
+                    }
+                    if let Some(fragment) = doc.fragments.get(&spread.node.fragment_name.node) {
+                        stack.push(name);
+                        walk(&fragment.node.selection_set.node, doc, stack, count, limit);
+                        stack.pop();
+                    }
+                }
+            }
+        }
+    }
+    let mut max = 0;
+    for (_, op) in doc.operations.iter() {
+        let mut count = 0;
+        walk(
+            &op.node.selection_set.node,
+            doc,
+            &mut Vec::new(),
+            &mut count,
+            limit,
+        );
+        max = max.max(count);
+    }
+    max
+}
+
+/// The type of the operation that would run (by name, or the only one).
+fn selected_operation_type(doc: &ExecutableDocument, name: Option<&str>) -> Option<OperationType> {
+    match (&doc.operations, name) {
+        (DocumentOperations::Single(op), _) => Some(op.node.ty),
+        (DocumentOperations::Multiple(ops), Some(name)) => ops
+            .iter()
+            .find(|(n, _)| n.as_str() == name)
+            .map(|(_, op)| op.node.ty),
+        (DocumentOperations::Multiple(_), None) => None,
+    }
+}
+
+// ── HTTP transport ──────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ResponseMode {
+    /// `application/graphql-response+json`: spec status codes (4xx for
+    /// request errors).
+    GraphqlResponse,
+    /// `application/json`: legacy, 200 for every well-formed request.
+    Json,
+}
+
+impl ResponseMode {
+    fn from_headers(headers: &HeaderMap) -> Self {
+        match choose(
+            headers,
+            &[
+                ("application", "graphql-response+json"),
+                ("application", "json"),
+            ],
+        ) {
+            Some(0) => ResponseMode::GraphqlResponse,
+            _ => ResponseMode::Json,
+        }
+    }
+
+    fn content_type(self) -> &'static str {
+        match self {
+            ResponseMode::GraphqlResponse => "application/graphql-response+json; charset=utf-8",
+            ResponseMode::Json => "application/json",
+        }
+    }
+}
+
+#[derive(Deserialize, Default, Debug)]
+struct GqlHttpRequest {
+    #[serde(default)]
+    query: Option<String>,
     #[serde(default)]
     variables: Option<serde_json::Value>,
-    #[allow(dead_code)]
     #[serde(default, rename = "operationName")]
     operation_name: Option<String>,
+    #[serde(default)]
+    extensions: Option<serde_json::Value>,
 }
 
-// ── Handlers ────────────────────────────────────────────────────────
+#[derive(Clone)]
+struct GqlState {
+    schema: GqlSchema,
+    apq: Arc<ApqCache>,
+}
 
-async fn graphql_handler(
-    Extension(schema): Extension<GqlSchema>,
-    Json(req): Json<GraphQLRequest>,
+fn gql_json(mode: ResponseMode, status: StatusCode, body: serde_json::Value) -> Response {
+    let mut resp = (
+        status,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static(mode.content_type()),
+        )],
+        body.to_string(),
+    )
+        .into_response();
+    add_vary(resp.headers_mut(), "Accept");
+    resp
+}
+
+fn error_body(message: &str, code: &str) -> serde_json::Value {
+    json!({ "errors": [{ "message": message, "extensions": { "code": code } }] })
+}
+
+/// A request-level error: 400 in both modes (the request could not be
+/// understood at all).
+fn bad_request(mode: ResponseMode, message: &str, code: &str) -> Response {
+    gql_json(mode, StatusCode::BAD_REQUEST, error_body(message, code))
+}
+
+/// A document-level error (parse / validation / limits): 400 with
+/// `application/graphql-response+json`, 200 with legacy `application/json`.
+fn document_error(mode: ResponseMode, message: &str, code: &str) -> Response {
+    let status = match mode {
+        ResponseMode::GraphqlResponse => StatusCode::BAD_REQUEST,
+        ResponseMode::Json => StatusCode::OK,
+    };
+    gql_json(mode, status, error_body(message, code))
+}
+
+async fn execute(
+    state: &GqlState,
+    req: GqlHttpRequest,
+    is_get: bool,
+    mode: ResponseMode,
 ) -> Response {
-    let mut gql_req = async_graphql::Request::new(&req.query);
-    if let Some(vars) = req.variables {
+    let variables = match req.variables {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v @ serde_json::Value::Object(_)) => Some(v),
+        Some(_) => return bad_request(mode, "variables must be a JSON object", "BAD_REQUEST"),
+    };
+
+    // Automatic persisted queries (Apollo protocol).
+    let mut query = req.query.filter(|q| !q.trim().is_empty());
+    if let Some(pq) = req
+        .extensions
+        .as_ref()
+        .and_then(|e| e.get("persistedQuery"))
+    {
+        if pq.get("version").and_then(|v| v.as_i64()) != Some(1) {
+            return bad_request(mode, "Unsupported persisted query version", "BAD_REQUEST");
+        }
+        let Some(hash) = pq
+            .get("sha256Hash")
+            .and_then(|h| h.as_str())
+            .map(str::to_ascii_lowercase)
+            .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+        else {
+            return bad_request(
+                mode,
+                "persistedQuery.sha256Hash must be a SHA-256 hex digest",
+                "BAD_REQUEST",
+            );
+        };
+        match &query {
+            Some(q) => {
+                if sha256_hex(q) != hash {
+                    return bad_request(
+                        mode,
+                        "provided sha does not match query",
+                        "PERSISTED_QUERY_HASH_MISMATCH",
+                    );
+                }
+                state.apq.insert(hash, q);
+            }
+            None => match state.apq.get(&hash) {
+                Some(q) => query = Some(q.to_string()),
+                None => {
+                    return gql_json(
+                        mode,
+                        StatusCode::OK,
+                        error_body("PersistedQueryNotFound", "PERSISTED_QUERY_NOT_FOUND"),
+                    );
+                }
+            },
+        }
+    }
+    let Some(query) = query else {
+        return bad_request(mode, "Must provide query string.", "BAD_REQUEST");
+    };
+
+    if let Ok(doc) = async_graphql::parser::parse_query(&query) {
+        if is_get
+            && selected_operation_type(&doc, req.operation_name.as_deref())
+                == Some(OperationType::Mutation)
+        {
+            let mut resp = gql_json(
+                mode,
+                StatusCode::METHOD_NOT_ALLOWED,
+                error_body("Mutations are only allowed over POST", "METHOD_NOT_ALLOWED"),
+            );
+            resp.headers_mut()
+                .insert(header::ALLOW, HeaderValue::from_static("POST"));
+            return resp;
+        }
+        let aliases = count_aliases(&doc, MAX_ALIASES);
+        if aliases > MAX_ALIASES {
+            return document_error(
+                mode,
+                &format!("Query has too many aliases (more than {MAX_ALIASES})"),
+                "ALIAS_LIMIT_EXCEEDED",
+            );
+        }
+    }
+
+    let mut gql_req = async_graphql::Request::new(query);
+    if let Some(vars) = variables {
         gql_req = gql_req.variables(async_graphql::Variables::from_json(vars));
     }
-    let resp = schema.execute(gql_req).await;
-    let body = serde_json::to_string(&resp).unwrap_or_default();
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response()
+    if let Some(name) = req.operation_name.filter(|n| !n.is_empty()) {
+        gql_req = gql_req.operation_name(name);
+    }
+    let resp = state.schema.execute(gql_req).await;
+
+    // No data and only errors without a path: the document never executed
+    // (parse, validation, limits, unknown operation).
+    let request_error = matches!(resp.data, async_graphql::Value::Null)
+        && !resp.errors.is_empty()
+        && resp.errors.iter().all(|e| e.path.is_empty());
+    let status = if request_error && mode == ResponseMode::GraphqlResponse {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::OK
+    };
+    let body =
+        serde_json::to_value(&resp).unwrap_or_else(|e| error_body(&e.to_string(), "INTERNAL"));
+    gql_json(mode, status, body)
 }
 
-async fn graphql_playground() -> Html<String> {
-    Html(playground_html("/graphql"))
+async fn graphql_post(
+    Extension(state): Extension<GqlState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let mode = ResponseMode::from_headers(&headers);
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| {
+            ct.split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+        });
+    let req = match content_type.as_deref() {
+        None | Some("application/json") | Some("application/graphql+json") => {
+            match serde_json::from_slice::<serde_json::Value>(&body) {
+                Ok(serde_json::Value::Array(_)) => {
+                    return bad_request(mode, "Batched requests are not supported", "BAD_REQUEST");
+                }
+                Ok(v @ serde_json::Value::Object(_)) => {
+                    match serde_json::from_value::<GqlHttpRequest>(v) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return bad_request(
+                                mode,
+                                &format!("Invalid GraphQL request: {e}"),
+                                "BAD_REQUEST",
+                            );
+                        }
+                    }
+                }
+                Ok(_) => {
+                    return bad_request(mode, "Request body must be a JSON object", "BAD_REQUEST")
+                }
+                Err(e) => {
+                    return bad_request(mode, &format!("Malformed JSON body: {e}"), "BAD_REQUEST");
+                }
+            }
+        }
+        Some("application/graphql") => GqlHttpRequest {
+            query: Some(String::from_utf8_lossy(&body).into_owned()),
+            ..GqlHttpRequest::default()
+        },
+        Some(other) => {
+            return gql_json(
+                mode,
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                error_body(
+                    &format!(
+                        "Unsupported Content-Type {other:?}: use application/json (or application/graphql)"
+                    ),
+                    "UNSUPPORTED_MEDIA_TYPE",
+                ),
+            );
+        }
+    };
+    execute(&state, req, false, mode).await
 }
 
-async fn graphql_sdl(Extension(schema): Extension<GqlSchema>) -> Response {
-    let sdl = schema.sdl();
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        sdl,
-    )
-        .into_response()
+async fn graphql_get(
+    Extension(state): Extension<GqlState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    let mut req = GqlHttpRequest::default();
+    let mut errors = Vec::new();
+    for (k, v) in form_urlencoded::parse(uri.query().unwrap_or("").as_bytes()) {
+        match k.as_ref() {
+            "query" => req.query = Some(v.into_owned()),
+            "operationName" => req.operation_name = Some(v.into_owned()),
+            "variables" => match serde_json::from_str(&v) {
+                Ok(val) => req.variables = Some(val),
+                Err(_) => errors.push("variables must be JSON"),
+            },
+            "extensions" => match serde_json::from_str(&v) {
+                Ok(val) => req.extensions = Some(val),
+                Err(_) => errors.push("extensions must be JSON"),
+            },
+            _ => {}
+        }
+    }
+    let wants_html = choose(
+        &headers,
+        &[
+            ("text", "html"),
+            ("application", "json"),
+            ("application", "graphql-response+json"),
+        ],
+    ) == Some(0);
+    if req.query.is_none() && req.extensions.is_none() && wants_html {
+        let mut resp = Html(PLAYGROUND_HTML).into_response();
+        add_vary(resp.headers_mut(), "Accept");
+        return resp;
+    }
+    let mode = ResponseMode::from_headers(&headers);
+    if let Some(e) = errors.first() {
+        return bad_request(mode, e, "BAD_REQUEST");
+    }
+    execute(&state, req, true, mode).await
 }
 
-fn playground_html(endpoint: &str) -> String {
-    format!(
-        r#"<!DOCTYPE html>
-<html>
+/// Self-contained GraphiQL page with exact, pinned CDN versions. The fetcher
+/// and subscription URLs are relative to the page, so it keeps working behind
+/// a gateway path prefix.
+const PLAYGROUND_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
 <head>
-  <title>Rustybin GraphQL Playground</title>
-  <link rel="stylesheet" href="https://unpkg.com/graphiql/graphiql.min.css" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rustybin GraphiQL</title>
+  <link rel="stylesheet" href="https://unpkg.com/graphiql@3.7.1/graphiql.min.css" />
+  <style>html, body, #graphiql { height: 100%; margin: 0; }</style>
 </head>
-<body style="margin: 0;">
-  <div id="graphiql" style="height: 100vh;"></div>
-  <script crossorigin src="https://unpkg.com/react/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom/umd/react-dom.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/graphiql/graphiql.min.js"></script>
+<body>
+  <div id="graphiql">Loading GraphiQL...</div>
+  <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/graphiql@3.7.1/graphiql.min.js"></script>
   <script>
-    const fetcher = GraphiQL.createFetcher({{ url: '{}' }});
-    ReactDOM.render(
-      React.createElement(GraphiQL, {{ fetcher }}),
-      document.getElementById('graphiql'),
+    var path = window.location.pathname.replace(/\/+$/, '');
+    var wsUrl = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host + path + '/ws';
+    var fetcher = GraphiQL.createFetcher({ url: path, subscriptionUrl: wsUrl });
+    ReactDOM.createRoot(document.getElementById('graphiql')).render(
+      React.createElement(GraphiQL, {
+        fetcher: fetcher,
+        defaultQuery: '{\n  users(limit: 3) {\n    id\n    name\n    orders { id status total }\n  }\n}\n',
+      })
     );
   </script>
 </body>
-</html>"#,
-        endpoint
+</html>
+"#;
+
+async fn graphql_sdl(Extension(state): Extension<GqlState>) -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        state.schema.sdl(),
     )
+        .into_response()
+}
+
+// ── WebSocket subscriptions ─────────────────────────────────────────
+
+async fn graphql_ws(
+    Extension(state): Extension<GqlState>,
+    State(config): State<Arc<Config>>,
+    protocol: Result<GraphQLProtocol, StatusCode>,
+    ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
+) -> Response {
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(rejection) => return rejection.into_response(),
+    };
+    let Ok(protocol) = protocol else {
+        return gql_json(
+            ResponseMode::Json,
+            StatusCode::BAD_REQUEST,
+            error_body(
+                "Sec-WebSocket-Protocol must offer graphql-transport-ws or graphql-ws",
+                "BAD_REQUEST",
+            ),
+        );
+    };
+    let limits = crate::websocket::limits(&config);
+    let schema = state.schema.clone();
+    ws.protocols(async_graphql::http::ALL_WEBSOCKET_PROTOCOLS)
+        .max_message_size(limits.max_message_size)
+        .max_frame_size(limits.max_message_size)
+        .on_upgrade(move |socket| async move {
+            let serve = GraphQLWebSocket::new(socket, schema, protocol).serve();
+            let _ = tokio::time::timeout(limits.max_lifetime, serve).await;
+        })
 }
 
 // ── Router ──────────────────────────────────────────────────────────
 
 pub fn router(_state: &AppState) -> Router<AppState> {
-    let schema = build_schema();
-
+    let state = GqlState {
+        schema: build_schema(),
+        apq: Arc::new(ApqCache::new(APQ_CAPACITY, APQ_TTL)),
+    };
     Router::new()
-        .route("/graphql", get(graphql_playground).post(graphql_handler))
+        .route("/graphql", get(graphql_get).post(graphql_post))
         .route("/graphql/schema", get(graphql_sdl))
-        .layer(axum::extract::Extension(schema))
+        .route("/graphql/ws", get(graphql_ws))
+        .layer(Extension(state))
 }
 
 pub fn catalog() -> Vec<Endpoint> {
@@ -867,11 +1432,25 @@ pub fn catalog() -> Vec<Endpoint> {
             "/graphql",
             &["GET", "POST"],
             category::GRAPHQL,
-            "GraphQL endpoint (GET: playground, POST: query)",
+            "GraphQL over HTTP (POST or GET ?query=; GraphiQL for browsers)",
+        )
+        .description(
+            "Honours operationName, application/graphql-response+json (spec status codes), \
+             automatic persisted queries (extensions.persistedQuery), depth limit 10, \
+             complexity limit 500 and 30 aliases. GET cannot run mutations (405).",
         )
         .example(
             Example::post("Query users", "/graphql")
                 .json(r#"{"query":"{ users { id name email } }"}"#),
+        )
+        .example(Example::get(
+            "Query via GET",
+            "/graphql?query=%7B%20products(limit%3A%202)%20%7B%20id%20name%20price%20%7D%20%7D",
+        ))
+        .example(
+            Example::post("Named operation", "/graphql")
+                .header("Accept", "application/graphql-response+json")
+                .json(r#"{"query":"query A { users(limit: 1) { name } } query B { products(limit: 1) { name } }","operationName":"B"}"#),
         ),
         Endpoint::new(
             "/graphql/schema",
@@ -880,7 +1459,43 @@ pub fn catalog() -> Vec<Endpoint> {
             "Schema in SDL",
         )
         .example(Example::get("SDL schema", "/graphql/schema")),
+        Endpoint::new(
+            "/graphql/ws",
+            &["GET"],
+            category::GRAPHQL,
+            "GraphQL subscriptions over WebSocket (graphql-transport-ws and graphql-ws)",
+        )
+        .description("Subscriptions: ticker(count, intervalMs), orderUpdates(orderId, intervalMs).")
+        .websocket()
+        .example(
+            Example::get("Subscriptions (WebSocket)", "/graphql/ws")
+                .header("Sec-WebSocket-Protocol", "graphql-transport-ws")
+                .skip_check("WebSocket upgrade"),
+        ),
     ]
+}
+
+pub fn openapi_paths() -> serde_json::Value {
+    json!({
+        "/graphql/ws": {
+            "get": {
+                "tags": ["GraphQL"],
+                "summary": "GraphQL subscriptions over WebSocket",
+                "description": "WebSocket upgrade with Sec-WebSocket-Protocol graphql-transport-ws (graphql-ws library) or graphql-ws (legacy subscriptions-transport-ws). Subscriptions: ticker(count, intervalMs), orderUpdates(orderId, intervalMs).",
+                "operationId": "graphqlSubscriptions",
+                "parameters": [{
+                    "name": "Sec-WebSocket-Protocol",
+                    "in": "header",
+                    "required": true,
+                    "schema": { "type": "string", "enum": ["graphql-transport-ws", "graphql-ws"] }
+                }],
+                "responses": {
+                    "101": { "description": "Switching Protocols" },
+                    "400": { "description": "Missing or unsupported subprotocol" }
+                }
+            }
+        }
+    })
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -1067,6 +1682,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/graphql")
+                    .header("accept", "text/html,application/xhtml+xml,*/*;q=0.8")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -1080,6 +1696,478 @@ mod tests {
             .to_str()
             .expect("str");
         assert!(ct.contains("text/html"));
+        let html = crate::test_support::body_string(resp).await;
+        // Exact pinned versions only.
+        assert!(html.contains("graphiql@3.7.1/graphiql.min.js"));
+        assert!(html.contains("react@18.3.1/umd/react.production.min.js"));
+        assert!(!html.contains("unpkg.com/graphiql/"));
+    }
+
+    const GRAPHQL_RESPONSE_JSON: &str = "application/graphql-response+json";
+
+    async fn send(app: Router, req: Request<Body>) -> (StatusCode, String, serde_json::Value) {
+        let resp = app.oneshot(req).await.expect("response");
+        let status = resp.status();
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        (status, ct, json_body(resp).await)
+    }
+
+    fn post_json(body: serde_json::Value, accept: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri("/graphql")
+            .header("content-type", "application/json");
+        if let Some(a) = accept {
+            b = b.header("accept", a);
+        }
+        b.body(Body::from(body.to_string())).expect("request")
+    }
+
+    fn get(uri: &str, accept: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().uri(uri);
+        if let Some(a) = accept {
+            b = b.header("accept", a);
+        }
+        b.body(Body::empty()).expect("request")
+    }
+
+    #[tokio::test]
+    async fn operation_name_selects_the_operation() {
+        let q = "query A { users(limit: 1) { name } } query B { products(limit: 1) { name } }";
+        let (status, _, json) = send(
+            test_app(),
+            post_json(
+                serde_json::json!({ "query": q, "operationName": "B" }),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["data"]["products"].is_array());
+        assert!(json["data"].get("users").is_none());
+        // Without a name, a multi-operation document is an error.
+        let (status, _, json) = send(
+            test_app(),
+            post_json(
+                serde_json::json!({ "query": q }),
+                Some(GRAPHQL_RESPONSE_JSON),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["errors"].is_array());
+    }
+
+    #[tokio::test]
+    async fn get_queries_and_mutations() {
+        let (status, ct, json) = send(
+            test_app(),
+            get(
+                "/graphql?query=%7B%20users(limit%3A%201)%20%7B%20name%20%7D%20%7D",
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ct, "application/json");
+        assert_eq!(json["data"]["users"][0]["name"], "Alice Chen");
+
+        let (status, _, json) = send(
+            test_app(),
+            get(
+                "/graphql?query=mutation%20%7B%20createUser(input%3A%20%7Bname%3A%20%22x%22%2C%20email%3A%20%22y%22%7D)%20%7B%20id%20%7D%20%7D",
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            json["errors"][0]["extensions"]["code"],
+            "METHOD_NOT_ALLOWED"
+        );
+
+        // GET without a query and without an HTML Accept: JSON 400.
+        let (status, _, json) = send(test_app(), get("/graphql", None)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["errors"][0]["message"].is_string());
+        let (status, _, _) = send(
+            test_app(),
+            get("/graphql?query=%7Ba%7D&variables=nope", None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn graphql_response_json_status_codes() {
+        // Validation error: 400 with the new media type, 200 with legacy JSON.
+        let bad = serde_json::json!({ "query": "{ nope }" });
+        let (status, ct, json) = send(
+            test_app(),
+            post_json(bad.clone(), Some(GRAPHQL_RESPONSE_JSON)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(ct.starts_with(GRAPHQL_RESPONSE_JSON));
+        assert!(json["errors"].is_array());
+        let (status, ct, _) = send(test_app(), post_json(bad, None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ct, "application/json");
+        // Syntax error.
+        let (status, _, _) = send(
+            test_app(),
+            post_json(
+                serde_json::json!({ "query": "{ users {" }),
+                Some(GRAPHQL_RESPONSE_JSON),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // Success with the new media type.
+        let (status, ct, json) = send(
+            test_app(),
+            post_json(
+                serde_json::json!({ "query": "{ users(limit: 1) { id } }" }),
+                Some(GRAPHQL_RESPONSE_JSON),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(ct.starts_with(GRAPHQL_RESPONSE_JSON));
+        assert!(json["data"]["users"].is_array());
+    }
+
+    #[tokio::test]
+    async fn bad_bodies_and_content_types_get_json_errors() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/graphql")
+            .header("content-type", "text/plain")
+            .body(Body::from("{ users { id } }"))
+            .expect("request");
+        let (status, ct, json) = send(test_app(), req).await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(ct, "application/json");
+        assert_eq!(
+            json["errors"][0]["extensions"]["code"],
+            "UNSUPPORTED_MEDIA_TYPE"
+        );
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/graphql")
+            .header("content-type", "application/json")
+            .body(Body::from("{not json"))
+            .expect("request");
+        let (status, _, json) = send(test_app(), req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["errors"][0]["message"].is_string());
+
+        let (status, _, _) = send(
+            test_app(),
+            post_json(
+                serde_json::json!({ "query": "{ users { id } }", "variables": [1] }),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // application/graphql bodies are the query itself.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/graphql")
+            .header("content-type", "application/graphql")
+            .body(Body::from("{ users(limit: 2) { id } }"))
+            .expect("request");
+        let (status, _, json) = send(test_app(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["users"].as_array().map(Vec::len), Some(2));
+    }
+
+    #[tokio::test]
+    async fn depth_complexity_and_alias_limits() {
+        // Depth 12: users > (orders > user) x 5 > name
+        let mut q = String::from("name");
+        for _ in 0..5 {
+            q = format!("orders {{ user {{ {q} }} }}");
+        }
+        let deep = format!("{{ users {{ {q} }} }}");
+        let (status, _, json) = send(
+            test_app(),
+            post_json(
+                serde_json::json!({ "query": deep }),
+                Some(GRAPHQL_RESPONSE_JSON),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+
+        let aliases: String = (0..31)
+            .map(|i| format!("a{i}: users(limit: 1) {{ id }} "))
+            .collect();
+        let (status, _, json) = send(
+            test_app(),
+            post_json(
+                serde_json::json!({ "query": format!("{{ {aliases} }}") }),
+                Some(GRAPHQL_RESPONSE_JSON),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json["errors"][0]["extensions"]["code"],
+            "ALIAS_LIMIT_EXCEEDED"
+        );
+
+        // Aliases hidden behind a fragment spread twice are counted twice.
+        let frag_aliases: String = (0..16).map(|i| format!("f{i}: name ")).collect();
+        let q = format!(
+            "{{ a: users {{ ...F }} b: users {{ ...F }} }} fragment F on User {{ {frag_aliases} }}"
+        );
+        let (_, _, json) = send(
+            test_app(),
+            post_json(serde_json::json!({ "query": q }), None),
+        )
+        .await;
+        assert_eq!(
+            json["errors"][0]["extensions"]["code"],
+            "ALIAS_LIMIT_EXCEEDED"
+        );
+
+        // Complexity: many fields, each counted.
+        let fields: String = (0..30)
+            .map(|i| format!("x{i}: products {{ id name description price category inStock reviews {{ id rating comment author {{ id name email role createdAt }} }} }} "))
+            .collect();
+        let (status, _, _) = send(
+            test_app(),
+            post_json(
+                serde_json::json!({ "query": format!("{{ {fields} }}") }),
+                Some(GRAPHQL_RESPONSE_JSON),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn automatic_persisted_queries() {
+        let app = test_app();
+        let query = "{ users(limit: 1) { name } }";
+        let hash = sha256_hex(query);
+        let ext = serde_json::json!({ "persistedQuery": { "version": 1, "sha256Hash": hash } });
+
+        let (status, _, json) = send(
+            app.clone(),
+            post_json(serde_json::json!({ "extensions": ext }), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["errors"][0]["message"], "PersistedQueryNotFound");
+        assert_eq!(
+            json["errors"][0]["extensions"]["code"],
+            "PERSISTED_QUERY_NOT_FOUND"
+        );
+
+        let (status, _, json) = send(
+            app.clone(),
+            post_json(
+                serde_json::json!({ "query": query, "extensions": ext }),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["users"][0]["name"], "Alice Chen");
+
+        // Hash only, now registered; also over GET.
+        let (_, _, json) = send(
+            app.clone(),
+            post_json(serde_json::json!({ "extensions": ext }), None),
+        )
+        .await;
+        assert_eq!(json["data"]["users"][0]["name"], "Alice Chen");
+        let ext_q: String = form_urlencoded::byte_serialize(ext.to_string().as_bytes()).collect();
+        let (_, _, json) = send(
+            app.clone(),
+            get(&format!("/graphql?extensions={ext_q}"), None),
+        )
+        .await;
+        assert_eq!(json["data"]["users"][0]["name"], "Alice Chen");
+
+        // Mismatched hash.
+        let wrong = serde_json::json!({ "persistedQuery": { "version": 1, "sha256Hash": sha256_hex("{ other }") } });
+        let (status, _, json) = send(
+            app,
+            post_json(
+                serde_json::json!({ "query": query, "extensions": wrong }),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json["errors"][0]["extensions"]["code"],
+            "PERSISTED_QUERY_HASH_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn apq_cache_is_bounded() {
+        let cache = ApqCache::new(3, Duration::from_secs(60));
+        for i in 0..10 {
+            cache.insert(format!("h{i}"), "{ a }");
+        }
+        assert_eq!(cache.len(), 3);
+        assert!(cache.get("h9").is_some());
+        assert!(cache.get("h0").is_none());
+        let expiring = ApqCache::new(3, Duration::from_millis(0));
+        expiring.insert("h".into(), "{ a }");
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(expiring.get("h").is_none());
+    }
+
+    async fn spawn_server() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let app = test_app();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        addr
+    }
+
+    async fn ws_connect(
+        addr: std::net::SocketAddr,
+        protocol: &str,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut req = format!("ws://{addr}/graphql/ws")
+            .into_client_request()
+            .expect("request");
+        req.headers_mut()
+            .insert("sec-websocket-protocol", protocol.parse().expect("header"));
+        let (socket, resp) = tokio_tungstenite::connect_async(req)
+            .await
+            .expect("connect");
+        assert_eq!(
+            resp.headers()
+                .get("sec-websocket-protocol")
+                .and_then(|v| v.to_str().ok()),
+            Some(protocol)
+        );
+        socket
+    }
+
+    async fn next_json(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> serde_json::Value {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message as TMessage;
+        loop {
+            let msg = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await
+                .expect("in time")
+                .expect("message")
+                .expect("ok");
+            if let TMessage::Text(t) = msg {
+                return serde_json::from_str(&t).expect("json");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn subscriptions_over_graphql_transport_ws() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message as TMessage;
+        let addr = spawn_server().await;
+        let mut socket = ws_connect(addr, "graphql-transport-ws").await;
+        socket
+            .send(TMessage::Text(r#"{"type":"connection_init"}"#.into()))
+            .await
+            .expect("send");
+        assert_eq!(next_json(&mut socket).await["type"], "connection_ack");
+        let sub = serde_json::json!({
+            "id": "1",
+            "type": "subscribe",
+            "payload": { "query": "subscription { orderUpdates(orderId: \"o1\", intervalMs: 50) { sequence status } }" }
+        });
+        socket
+            .send(TMessage::Text(sub.to_string()))
+            .await
+            .expect("send");
+        let mut statuses = Vec::new();
+        loop {
+            let msg = next_json(&mut socket).await;
+            match msg["type"].as_str() {
+                Some("next") => {
+                    statuses.push(msg["payload"]["data"]["orderUpdates"]["status"].clone())
+                }
+                Some("complete") => break,
+                other => panic!("unexpected {other:?}: {msg}"),
+            }
+        }
+        assert_eq!(
+            statuses,
+            vec!["PENDING", "PROCESSING", "SHIPPED", "DELIVERED"]
+        );
+    }
+
+    #[tokio::test]
+    async fn subscriptions_over_legacy_graphql_ws() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message as TMessage;
+        let addr = spawn_server().await;
+        let mut socket = ws_connect(addr, "graphql-ws").await;
+        socket
+            .send(TMessage::Text(r#"{"type":"connection_init"}"#.into()))
+            .await
+            .expect("send");
+        assert_eq!(next_json(&mut socket).await["type"], "connection_ack");
+        let start = serde_json::json!({
+            "id": "t",
+            "type": "start",
+            "payload": { "query": "subscription { ticker(count: 2, intervalMs: 50) { sequence } }" }
+        });
+        socket
+            .send(TMessage::Text(start.to_string()))
+            .await
+            .expect("send");
+        let mut seqs = Vec::new();
+        loop {
+            let msg = next_json(&mut socket).await;
+            match msg["type"].as_str() {
+                Some("data") => seqs.push(msg["payload"]["data"]["ticker"]["sequence"].clone()),
+                Some("complete") => break,
+                Some("ka") => {}
+                other => panic!("unexpected {other:?}: {msg}"),
+            }
+        }
+        assert_eq!(seqs, vec![0, 1]);
+    }
+
+    #[tokio::test]
+    async fn ws_without_subprotocol_is_rejected() {
+        let req = Request::builder()
+            .uri("/graphql/ws")
+            .header("connection", "upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(Body::empty())
+            .expect("request");
+        let resp = test_app().oneshot(req).await.expect("response");
+        assert!(resp.status().is_client_error());
     }
 
     #[tokio::test]

@@ -149,7 +149,7 @@ check "Flaky reset" "200" -X POST "$BASE/flaky/reset"
 
 echo ""
 echo "Health toggle:"
-check "Set unhealthy" "503" -X POST "$BASE/health/unhealthy"
+check "Set unhealthy" "200" -X POST "$BASE/health/unhealthy"
 check "Health reflects unhealthy" "503" "$BASE/health"
 check "Set healthy" "200" -X POST "$BASE/health/healthy"
 check "Health reflects healthy" "200" "$BASE/health"

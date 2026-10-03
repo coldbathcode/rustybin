@@ -109,9 +109,19 @@ async fn random_int_handler(headers: HeaderMap) -> Response {
 }
 
 async fn random_int_range_handler(
-    Path((lower, upper)): Path<(i64, i64)>,
+    Path((lower, upper)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
+    let (Ok(lower), Ok(upper)) = (lower.trim().parse::<i64>(), upper.trim().parse::<i64>()) else {
+        return negotiate_with_status(
+            &headers,
+            &ErrorResponse {
+                error: "invalid_range".to_string(),
+                details: Some("lower and upper must be 64-bit signed integers".to_string()),
+            },
+            StatusCode::BAD_REQUEST,
+        );
+    };
     if lower >= upper {
         return negotiate_with_status(
             &headers,
@@ -151,7 +161,8 @@ async fn lorem_ipsum_handler(headers: HeaderMap) -> Response {
     )
 }
 
-async fn lorem_ipsum_count_handler(Path(count): Path<u32>, headers: HeaderMap) -> Response {
+async fn lorem_ipsum_count_handler(Path(count): Path<String>, headers: HeaderMap) -> Response {
+    let count = count.trim().parse::<u32>().unwrap_or(0);
     if count == 0 || count > 32 {
         return negotiate_with_status(
             &headers,
@@ -334,6 +345,25 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn non_numeric_parameters_get_json_400() {
+        for uri in [
+            "/random/int/a/10",
+            "/random/int/1/99999999999999999999",
+            "/random/lorem-ipsum/x",
+        ] {
+            let resp = test_app().oneshot(get_req(uri)).await.expect("response");
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+            assert!(json_body(resp).await["error"].is_string());
+        }
+        // Full i64 range does not overflow.
+        let resp = test_app()
+            .oneshot(get_req(&format!("/random/int/{}/{}", i64::MIN, i64::MAX)))
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

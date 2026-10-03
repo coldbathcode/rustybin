@@ -1,5 +1,5 @@
 use axum::{
-    extract::{ConnectInfo, Path, State},
+    extract::Path,
     http::{HeaderMap, StatusCode},
     response::Response,
     routing::get,
@@ -8,12 +8,11 @@ use axum::{
 use chrono::Utc;
 use chrono_tz::Tz;
 use serde::Serialize;
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::net::IpAddr;
 
 use crate::catalog::{category, Endpoint, Example};
-use crate::config::Config;
 use crate::content_negotiation::{negotiate, negotiate_with_status};
+use crate::session::ClientIp;
 use crate::state::AppState;
 use crate::types::ErrorResponse;
 
@@ -49,53 +48,29 @@ struct TimeResponse {
 
 // ── IP handlers ──────────────────────────────────────────────────────
 
-async fn ip_handler(
-    State(config): State<Arc<Config>>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> Response {
-    let ip = resolve_ip(&headers, &config, &addr);
+// The client IP comes from `session::client_ip` (rightmost untrusted hop of
+// the proxy headers when RUSTYBIN_TRUST_FORWARD is on, else the peer).
+
+async fn ip_handler(ClientIp(ip): ClientIp, headers: HeaderMap) -> Response {
     let (ipv4, ipv6) = classify_ip(ip);
     negotiate(&headers, &IpResponse { ipv4, ipv6 })
 }
 
-async fn ip_v4_handler(
-    State(config): State<Arc<Config>>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> Response {
-    let ip = resolve_ip(&headers, &config, &addr);
+async fn ip_v4_handler(ClientIp(ip): ClientIp, headers: HeaderMap) -> Response {
     let (ipv4, _) = classify_ip(ip);
     negotiate(&headers, &Ipv4Response { ipv4 })
 }
 
-async fn ip_v6_handler(
-    State(config): State<Arc<Config>>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> Response {
-    let ip = resolve_ip(&headers, &config, &addr);
+async fn ip_v6_handler(ClientIp(ip): ClientIp, headers: HeaderMap) -> Response {
     let (_, ipv6) = classify_ip(ip);
     negotiate(&headers, &Ipv6Response { ipv6 })
 }
 
-fn resolve_ip(headers: &HeaderMap, config: &Config, addr: &SocketAddr) -> IpAddr {
-    if config.trust_forward {
-        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            if let Some(first) = xff.split(',').next() {
-                if let Ok(ip) = first.trim().parse::<IpAddr>() {
-                    return ip;
-                }
-            }
-        }
-    }
-    addr.ip()
-}
-
-fn classify_ip(ip: IpAddr) -> (Option<String>, Option<String>) {
+fn classify_ip(ip: Option<IpAddr>) -> (Option<String>, Option<String>) {
     match ip {
-        IpAddr::V4(v4) => (Some(v4.to_string()), None),
-        IpAddr::V6(v6) => {
+        None => (None, None),
+        Some(IpAddr::V4(v4)) => (Some(v4.to_string()), None),
+        Some(IpAddr::V6(v6)) => {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 (Some(v4.to_string()), None)
             } else {
@@ -241,9 +216,29 @@ pub fn catalog() -> Vec<Endpoint> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use axum::body::Body;
+    use axum::extract::ConnectInfo;
     use axum::http::Request;
+    use std::net::SocketAddr;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn ip_ignores_spoofed_leftmost_xff_entry() {
+        let config = Config {
+            trust_forward: true,
+            ..crate::test_support::test_config()
+        };
+        let app = crate::test_support::module_app_with_config(config, router);
+        let req = Request::builder()
+            .uri("/ip")
+            .header("x-forwarded-for", "1.2.3.4, 2001:db8::5, 10.0.0.9")
+            .body(Body::empty())
+            .expect("request");
+        let json = crate::test_support::body_json(app.oneshot(req).await.expect("resp")).await;
+        assert_eq!(json["ipv6"], "2001:db8::5");
+        assert!(json["ipv4"].is_null());
+    }
 
     fn test_app() -> Router {
         crate::test_support::module_app(router)
