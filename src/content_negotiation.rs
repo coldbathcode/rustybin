@@ -124,7 +124,25 @@ pub fn choose(headers: &HeaderMap, candidates: &[(&str, &str)]) -> Option<usize>
 }
 
 /// The response format for this request (JSON unless XML is preferred).
+///
+/// Browsers send `text/html,...,application/xml;q=0.9,*/*;q=0.8`, which would
+/// strictly pick XML. A request that accepts HTML is a person in a browser, so
+/// it gets JSON unless it ranks XML above HTML (an explicit XML request).
 pub fn preferred_format(headers: &HeaderMap) -> Format {
+    let ranges = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(parse_accept)
+        .unwrap_or_default();
+    if let Some(html_q) = quality(&ranges, "text", "html").filter(|q| *q > 0.0) {
+        let explicit_html = ranges
+            .iter()
+            .any(|r| r.matches("text", "html").is_some_and(|spec| spec >= 2));
+        let xml_q = quality(&ranges, "application", "xml").unwrap_or(0.0);
+        if explicit_html && xml_q <= html_q {
+            return Format::Json;
+        }
+    }
     const CANDIDATES: [(&str, &str); 3] = [
         ("application", "json"),
         ("application", "xml"),
@@ -339,6 +357,11 @@ mod tests {
             preferred_format(&accept(
                 "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
             )),
+            Format::Json
+        );
+        // XML ranked above HTML is an explicit XML request.
+        assert_eq!(
+            preferred_format(&accept("application/xml, text/html;q=0.5")),
             Format::Xml
         );
     }
