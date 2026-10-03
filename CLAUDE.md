@@ -43,6 +43,9 @@ MSRV is Rust 1.86 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   aligned with the catalogue (routes registered with `any()` are documented as get/post/put/patch/delete).
 - `src/inspector.rs`: bounded ring buffer + broadcast feed of captured requests, `/_rustybin/requests*`.
 - `src/control.rs`: `/_rustybin/config`, `/_rustybin/version`, `is_control_path()` (`/_rustybin/*`, `/ui/*`).
+- `src/ui.rs` + `ui/`: the web console under `/ui` (vanilla ES modules and CSS, no Node build step;
+  `build.rs` embeds every file under `ui/`), plus `/_rustybin/catalog` and `/_rustybin/status`.
+  Browser check: `conformance/ui/run.sh` (Playwright).
 - `src/fault.rs`: `X-Rustybin-Delay` / `X-Rustybin-Fail` middleware.
 - `src/admin.rs`: `require_admin(&headers, &config)` guard for instance-global mutations.
 - `src/session.rs`: `session_key(&headers, client_ip)`, `client_ip(...)`, extractors `Session`, `ClientIp`, `PeerAddr`.

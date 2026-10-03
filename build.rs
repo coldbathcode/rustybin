@@ -31,8 +31,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=RUSTYBIN_RUSTC_VERSION={version}");
 
+    embed_ui(&out_dir)?;
+
     println!("cargo:rerun-if-changed=proto/echo.proto");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=RUSTC");
+    Ok(())
+}
+
+/// Generate `$OUT_DIR/ui_assets.rs`: a table of every file under `ui/`
+/// (relative path, bytes) embedded with `include_bytes!`, served by `src/ui.rs`.
+fn embed_ui(out_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            let hidden = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with('.'));
+            if hidden {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, out)?;
+            } else {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+    let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?).join("ui");
+    let mut files = Vec::new();
+    if root.is_dir() {
+        walk(&root, &mut files)?;
+    }
+    files.sort();
+    let mut code = String::from(
+        "/// Embedded console files: (path relative to `ui/`, contents).\n\
+         pub static UI_ASSETS: &[(&str, &[u8])] = &[\n",
+    );
+    for file in &files {
+        let rel = file
+            .strip_prefix(&root)?
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        code.push_str(&format!(
+            "    ({rel:?}, include_bytes!({:?})),\n",
+            file.to_string_lossy()
+        ));
+    }
+    code.push_str("];\n");
+    std::fs::write(out_dir.join("ui_assets.rs"), code)?;
+    println!("cargo:rerun-if-changed=ui");
     Ok(())
 }

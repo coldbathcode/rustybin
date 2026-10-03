@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="same-origin">
+<title>Rustybin console</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="app" id="app">
+  <header class="topbar">
+    <button class="btn ghost icon menu-btn" id="menu-btn" type="button" aria-label="Toggle navigation" aria-expanded="false" aria-controls="sidebar"></button>
+    <a class="brand" href="#/overview" aria-label="Rustybin console home">
+      <img class="brand-mark" src="favicon.svg" alt="">
+      <span>Rustybin <small>console</small></span>
+    </a>
+    <div class="topbar-meta" id="topbar-meta"></div>
+    <div class="spacer"></div>
+    <div id="topbar-actions" class="row nowrap"></div>
+  </header>
+  <nav class="sidebar" id="sidebar" aria-label="Console sections"></nav>
+  <div class="backdrop" id="backdrop"></div>
+  <main class="main" id="main" tabindex="-1">
+    <div class="view" id="view">
+      <noscript><p>The Rustybin console needs JavaScript. Every endpoint also works with curl: see the landing page.</p></noscript>
+    </div>
+  </main>
+</div>
+<dialog id="settings-dialog" aria-labelledby="settings-title"></dialog>
+</body>
+</html>

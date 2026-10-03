@@ -84,6 +84,8 @@ struct Inner {
     public_mode: bool,
     entries: Mutex<VecDeque<Arc<CapturedRequest>>>,
     tx: broadcast::Sender<Arc<CapturedRequest>>,
+    /// Requests captured since start (including evicted ones).
+    total: std::sync::atomic::AtomicU64,
 }
 
 /// Handle to the shared inspector (cheap to clone).
@@ -126,6 +128,7 @@ impl Inspector {
                 public_mode,
                 entries: Mutex::new(VecDeque::with_capacity(capacity.min(1024))),
                 tx,
+                total: std::sync::atomic::AtomicU64::new(0),
             }),
         }
     }
@@ -148,6 +151,9 @@ impl Inspector {
     /// Store an entry (evicting the oldest when full) and publish it.
     pub fn record(&self, entry: CapturedRequest) -> Arc<CapturedRequest> {
         let entry = Arc::new(entry);
+        self.inner
+            .total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         {
             let mut entries = self.entries();
             while entries.len() >= self.inner.capacity {
@@ -217,6 +223,11 @@ impl Inspector {
 
     pub fn len(&self) -> usize {
         self.entries().len()
+    }
+
+    /// Requests captured since start, including evicted ones.
+    pub fn total_recorded(&self) -> u64 {
+        self.inner.total.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn is_empty(&self) -> bool {
