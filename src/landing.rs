@@ -55,6 +55,9 @@ h1{font-size:2rem;letter-spacing:-.02em}.tag{color:var(--muted)}
 .btn{display:inline-block;border:1px solid var(--border);border-radius:8px;padding:7px 14px;background:var(--card);color:var(--fg);font-weight:500}
 .btn:hover{text-decoration:none;border-color:var(--accent)}
 .btn.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+.console{display:flex;flex-wrap:wrap;gap:16px;align-items:center;justify-content:space-between;margin-top:20px;padding:18px 20px;border:1px solid var(--accent);border-radius:12px;background:var(--card)}
+.console h2{font-size:1.15rem;margin-bottom:4px}.console p{color:var(--muted);font-size:.92rem;max-width:62ch}
+.btn.big{font-size:1.05rem;padding:11px 22px;border-radius:10px}
 .exports{margin-top:14px;color:var(--muted);font-size:.88rem}.exports a{margin-right:10px}
 .search{position:sticky;top:0;background:var(--bg);padding:16px 0 10px;z-index:1}
 .search input{width:100%;padding:10px 14px;font-size:1rem;border:1px solid var(--border);border-radius:8px;background:var(--card);color:var(--fg)}
@@ -172,6 +175,13 @@ pub fn render(config: &Config) -> String {
     out.push_str("<a class=\"btn\" href=\"/docs\">API docs</a>");
     out.push_str("<a class=\"btn\" href=\"/openapi.json\">OpenAPI JSON</a>");
     out.push_str("<a class=\"btn\" href=\"/openapi.yaml\">YAML</a></div></header>\n");
+    out.push_str(
+        "<section class=\"console\" aria-label=\"Web console\"><div><h2>Presenting a gateway demo?</h2>\
+         <p>The web console shows exactly what the gateway sent upstream (live traffic, headers, bodies, \
+         side by side compare) and drives the mocks: AI playground, MCP inspector, A2A client, request bins, \
+         chaos controls and token lab. Works offline.</p></div>\
+         <a class=\"btn primary big\" href=\"/ui\">Open the console</a></section>\n",
+    );
 
     out.push_str("<div class=\"exports\">Export collections: ");
     for (name, href) in EXPORTS {
@@ -309,6 +319,10 @@ mod tests {
         assert!(html.contains("/echo"), "should list echo endpoint");
         assert!(html.contains("href=\"/docs\""), "should link to docs");
         assert!(html.contains("href=\"/ui\""), "should link to the console");
+        assert!(
+            html.contains("Open the console"),
+            "the console call to action is prominent"
+        );
         assert!(html.contains("/oauth/token"), "should list oauth endpoint");
         assert!(html.contains("prefers-color-scheme"), "dark mode support");
         assert!(

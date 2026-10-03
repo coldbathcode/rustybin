@@ -9,5 +9,7 @@ pub fn init(config: &Config) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(true)
+        // Colour codes only on a terminal; container log collectors get plain text.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .try_init();
 }
