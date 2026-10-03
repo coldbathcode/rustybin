@@ -73,6 +73,9 @@ pub async fn inject(State(config): State<Arc<Config>>, req: Request, next: Next)
         tokio::time::sleep(Duration::from_millis(ms)).await;
     }
 
+    // The mock LLM (`/ai/*`) answers X-Rustybin-Fail itself, in each
+    // provider's native error shape (see `crate::ai::faults`).
+    let fail = fail.filter(|_| !req.uri().path().starts_with("/ai/"));
     if let Some(spec) = fail {
         let hit = spec.percent >= 100
             || (spec.percent > 0 && rand::thread_rng().gen_range(0..100u8) < spec.percent);

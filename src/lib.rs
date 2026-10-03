@@ -8,8 +8,7 @@
 //!   exports, README); [`openapi`] merges per-module OpenAPI fragments.
 
 pub mod admin;
-pub mod ai_anthropic;
-pub mod ai_gateway;
+pub mod ai;
 pub mod auth_apikey;
 pub mod auth_basic;
 pub mod auth_hmac;
@@ -88,8 +87,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     auth_jwt::router,
     oidc::router,
     auth_mtls::router,
-    ai_gateway::router,
-    ai_anthropic::router,
+    ai::router,
     graphql::router,
     orchestration::router,
     soap::router,
