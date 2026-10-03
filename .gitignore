@@ -9,3 +9,6 @@ certs/*.cnf
 
 # Agent worktrees
 .claude/worktrees/
+
+# mdBook output
+/docs/book/
