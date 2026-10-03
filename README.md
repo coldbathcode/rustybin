@@ -174,6 +174,19 @@ collection exports (`/export/*`). A test fails when they drift apart.
 | POST | `/guardrails/check` | Generic guardrail check: flagged, categories, jailbreak, PII spans, redacted text |
 | POST | `/guardrails/pii/redact` | Redact emails, phone numbers, SSNs, credit cards (Luhn) and IPs |
 
+### MCP Server
+
+| Methods | Path | Description |
+|---|---|---|
+| POST GET DELETE | `/mcp` | MCP Streamable HTTP server (2026-07-28 stateless + 2025-xx sessions) |
+| POST GET DELETE | `/mcp/protected` | MCP server behind OAuth 2.1 bearer auth (MCP authorization spec) |
+| POST GET DELETE | `/mcp/apikey` | MCP server requiring an X-API-Key header |
+| POST GET DELETE | `/mcp/servers/{name}` | Named MCP servers with tool subsets: weather, crm, devtools |
+| GET | `/mcp/sse` | Legacy MCP HTTP+SSE transport (2024-11-05): event stream (SSE) |
+| POST | `/mcp/messages` | Legacy MCP HTTP+SSE transport (2024-11-05): message endpoint |
+| GET | `/.well-known/oauth-protected-resource` | OAuth Protected Resource Metadata (RFC 9728) for /mcp/protected |
+| GET | `/.well-known/oauth-protected-resource/mcp/protected` | OAuth Protected Resource Metadata (RFC 9728), path-suffixed form |
+
 ### GraphQL
 
 | Methods | Path | Description |
@@ -321,6 +334,11 @@ mutations are disabled unless an admin token is configured.
 | `RUSTYBIN_CORS_ORIGINS` | `*` | Comma-separated allowed CORS origins; `off` disables CORS handling so a gateway's own CORS can be demonstrated |
 | `RUSTYBIN_REQUEST_TIMEOUT` | `120` | Seconds until response headers must be ready (`503` otherwise); streams (SSE, WebSocket) are not cut off; `0` disables |
 | `RUSTYBIN_INSPECTOR_CAPACITY` | `500` | Number of requests kept by the inspector (max 10000) |
+| `RUSTYBIN_MCP_API_KEY` | _(unset)_ | Exact `X-API-Key` required by `/mcp/apikey` (unset: any non-empty key) |
+| `RUSTYBIN_MCP_ALLOWED_ORIGINS` | `*` | Comma-separated Origins accepted by the MCP endpoints (others get `403`) |
+| `RUSTYBIN_MCP_ACCEPTED_AUDIENCES` | `rustybin` | Token audiences accepted by `/mcp/protected` besides its resource URL (default: the IdP's default audience, for demo convenience); `none` = strict RFC 8707 |
+| `RUSTYBIN_MCP_RESOURCE_URL` | _(derived)_ | Override the `/mcp/protected` resource identifier (e.g. the gateway URL) |
+| `RUSTYBIN_MCP_CLOCK_TICK_SECS` | `5` | Update interval of the subscribable `rustybin://clock` resource |
 
 Invalid values are logged as warnings and the default is used. `GET /_rustybin/config`
 shows the effective (non-secret) configuration.
@@ -455,6 +473,31 @@ websocat ws://localhost/ws
 
 # Server-push ticker: 5 timestamps, one every 500ms
 websocat "ws://localhost/ws/time?interval_ms=500&count=5"
+```
+
+## MCP
+
+`/mcp` is a mock Model Context Protocol server speaking 2026-07-28 (stateless:
+`server/discover`, `_meta` envelope, `Mcp-Method` / `Mcp-Name` / `Mcp-Param-*`
+headers, multi round-trip elicitation and sampling, `subscriptions/listen`) and
+the handshake-era 2025-11-25, 2025-06-18 and 2025-03-26 (`initialize`,
+`Mcp-Session-Id`, GET stream, DELETE). `/mcp/sse` + `/mcp/messages` serve the
+2024-11-05 HTTP+SSE transport. Variants for gateway demos: `/mcp/protected`
+(OAuth 2.1 bearer with RFC 9728 metadata naming the built-in IdP,
+`mcp:tools:write` step-up for `cancel_order`), `/mcp/apikey` and
+`/mcp/servers/{weather,crm,devtools}`. The `inspect_request` tool shows the
+headers the server received (e.g. identity headers injected by a gateway).
+
+```bash
+# Python SDK + Inspector CLI conformance (ports 18400-18402)
+PYTHON=/path/to/venv/bin/python conformance/mcp/run.sh --inspector
+
+# Raw 2026-07-28 call
+curl -s localhost/mcp -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' -H 'Mcp-Method: tools/call' \
+  -H 'Mcp-Name: get_weather' -H 'Mcp-Param-City: Paris' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_weather","arguments":{"city":"Paris"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}'
 ```
 
 ## API Documentation
