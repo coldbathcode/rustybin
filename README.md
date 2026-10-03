@@ -39,15 +39,15 @@ collection exports (`/export/*`). A test fails when they drift apart.
 
 | Methods | Path | Description |
 |---|---|---|
-| ANY | `/status/{code}` | Respond with any HTTP status code (200-599) |
+| ANY | `/status/{code}` | Respond with any HTTP status code (200-599), or a weighted random choice |
 
 ### Response Shaping
 
 | Methods | Path | Description |
 |---|---|---|
-| ANY | `/delay/{ms}` | Wait ms milliseconds, then respond (?jitter=true adds variance) |
-| GET | `/cache/{ttl}` | Cache-Control and ETag headers, 304 on If-None-Match |
-| GET | `/response-headers` | Query parameters become response headers |
+| ANY | `/delay/{ms}` | Wait, then respond: milliseconds (1500), `250ms` or seconds (`1.5s`); ?jitter=true adds +-20% |
+| GET | `/cache/{ttl}` | Cache-Control, ETag and Last-Modified; 304 on If-None-Match / If-Modified-Since |
+| GET | `/response-headers` | Query parameters become response headers (hop-by-hop / framing headers refused) |
 | GET | `/gzip` | gzip-compressed JSON echo (gzipped: true) |
 | GET | `/deflate` | deflate (zlib) compressed JSON echo (deflated: true) |
 | GET | `/brotli` | Brotli-compressed JSON echo (brotli: true) |
@@ -75,9 +75,9 @@ collection exports (`/export/*`). A test fails when they drift apart.
 |---|---|---|
 | GET | `/redirect/{n}` | Chain of n relative 302 redirects |
 | GET | `/cookies` | Request cookies as JSON |
-| GET | `/cookies/set` | Set cookies from query parameters |
-| GET | `/cookies/set/{name}/{value}` | Set a single cookie |
-| GET | `/cookies/delete` | Delete the cookies named in the query string |
+| GET | `/cookies/set` | Set cookies from query parameters, then 302 to /cookies |
+| GET | `/cookies/set/{name}/{value}` | Set a single cookie (Path=/) |
+| GET | `/cookies/delete` | Expire the cookies named in the query string (_path / _domain must match how they were set) |
 | ANY | `/redirect-to` | Redirect to a relative path or this host only (no open redirect) |
 | GET | `/absolute-redirect/{n}` | Chain of n absolute 302 redirects on the same host (max 10) |
 
@@ -100,9 +100,12 @@ collection exports (`/export/*`). A test fails when they drift apart.
 | GET | `/random/uint` | Random unsigned integer |
 | GET | `/random/lorem-ipsum` | One paragraph of lorem ipsum |
 | GET | `/random/lorem-ipsum/{count}` | count paragraphs of lorem ipsum |
-| GET | `/image/png` | Minimal PNG image |
-| GET | `/image/jpeg` | Minimal JPEG image |
-| GET | `/image/gif` | Minimal GIF image |
+| GET | `/image` | Image in the format chosen by Accept (webp, svg, jpeg, png, gif; 406 otherwise) |
+| GET | `/image/png` | 16x16 PNG image |
+| GET | `/image/jpeg` | 8x8 JPEG image |
+| GET | `/image/gif` | 8x8 GIF image |
+| GET | `/image/webp` | 8x8 lossless WebP image |
+| GET | `/image/svg` | SVG image |
 
 ### Auth: Basic & API Key
 
@@ -232,16 +235,17 @@ collection exports (`/export/*`). A test fails when they drift apart.
 
 | Methods | Path | Description |
 |---|---|---|
-| GET POST | `/graphql` | GraphQL endpoint (GET: playground, POST: query) |
+| GET POST | `/graphql` | GraphQL over HTTP (POST or GET ?query=; GraphiQL for browsers) |
 | GET | `/graphql/schema` | Schema in SDL |
+| GET | `/graphql/ws` | GraphQL subscriptions over WebSocket (graphql-transport-ws and graphql-ws) (WebSocket) |
 
 ### Orchestration
 
 | Methods | Path | Description |
 |---|---|---|
-| POST | `/orchestration/step/1` | Step 1: authenticate (X-Api-Key required) |
-| POST | `/orchestration/step/2` | Step 2: enrich (X-Correlation-Id required) |
-| POST | `/orchestration/step/3` | Step 3: validate (risk scoring) |
+| POST | `/orchestration/step/1` | Step 1: authenticate (non-empty X-Api-Key required) |
+| POST | `/orchestration/step/2` | Step 2: enrich with a deterministic risk score (X-Correlation-Id required) |
+| POST | `/orchestration/step/3` | Step 3: validate (declined when risk score >= 70 or amount > 50000) |
 | POST | `/orchestration/step/4` | Step 4: process (requires X-Validation-Result: approved) |
 | GET | `/orchestration/status` | Pipeline documentation |
 | POST | `/jsonrpc` | Generic JSON-RPC 2.0 endpoint (batches, notifications, standard errors) |
@@ -250,26 +254,26 @@ collection exports (`/export/*`). A test fails when they drift apart.
 
 | Methods | Path | Description |
 |---|---|---|
-| POST | `/soap` | SOAP 1.1 service (GetUser, ListUsers, CreateUser) |
-| GET | `/soap/wsdl` | WSDL document |
+| GET POST | `/soap` | SOAP 1.1 / 1.2 service (GetUser, CreateOrder, GetStatus); GET /soap?wsdl returns the WSDL |
+| GET | `/soap/wsdl` | WSDL 1.1 document (SOAP 1.1 and 1.2 bindings) |
 
 ### WebSocket
 
 | Methods | Path | Description |
 |---|---|---|
-| GET | `/ws` | WebSocket echo of every text and binary frame (WebSocket) |
-| GET | `/ws/time` | WebSocket timestamp ticker (?interval_ms=&count=) (WebSocket) |
+| GET | `/ws` | WebSocket echo of every text and binary frame (subprotocol echoed) (WebSocket) |
+| GET | `/ws/time` | WebSocket timestamp ticker (?interval_ms=&count=), then a normal close (WebSocket) |
 
 ### Reliability Testing
 
 | Methods | Path | Description |
 |---|---|---|
 | ANY | `/flaky/{fail_rate}` | Fail with 503 for fail_rate percent of requests |
-| ANY | `/flaky/pattern/{pattern}` | Deterministic success/failure pattern (S = success, F = failure) |
-| ANY | `/flaky/after/{n}` | Succeed n times, then fail (circuit breaker trip) |
-| ANY | `/flaky/recover/{n}` | Fail n times, then recover (circuit breaker half-open) |
-| POST | `/flaky/reset` | Reset all flaky counters (admin-guarded) |
-| GET | `/flaky/status` | Current flaky counters |
+| ANY | `/flaky/pattern/{pattern}` | Deterministic success/failure pattern (S = success, F = failure), per session |
+| ANY | `/flaky/after/{n}` | Succeed n times, then fail (circuit breaker trip), per session and n |
+| ANY | `/flaky/recover/{n}` | Fail n times, then recover (circuit breaker half-open), per session and n |
+| POST | `/flaky/reset` | Reset the caller's counters (?scope=all resets everyone's, admin-guarded) |
+| GET | `/flaky/status` | The caller's flaky counters |
 
 ### Request Bin & Webhooks
 
@@ -293,9 +297,9 @@ collection exports (`/export/*`). A test fails when they drift apart.
 |---|---|---|
 | GET | `/health` | Health check (200, or 503 when toggled unhealthy) |
 | POST | `/health/healthy` | Mark the instance healthy (admin-guarded) |
-| POST | `/health/unhealthy` | Mark the instance unhealthy, /health returns 503 (admin-guarded) |
-| POST | `/health/toggle` | Flip the health state (admin-guarded) |
-| ANY | `/identity` | Instance identity: id, hostname, uptime, request count (load-balancing demos) |
+| POST | `/health/unhealthy` | Mark the instance unhealthy: 200 here, then /health returns 503 (admin-guarded) |
+| POST | `/health/toggle` | Flip the health state, 200 with the new state (admin-guarded) |
+| ANY | `/identity` | Instance identity: id, hostname, uptime, request count, ports and config (load-balancing demos) |
 
 ### Control Plane
 

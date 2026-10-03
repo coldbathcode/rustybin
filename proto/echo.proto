@@ -3,34 +3,75 @@ syntax = "proto3";
 package rustybin.echo.v1;
 
 // EchoService reflects requests back to the caller across all four gRPC
-// call types, so API gateway gRPC proxying (unary, streaming, and web/HTTP
-// transcoding) can be exercised against a single upstream.
+// call types, so API gateway gRPC proxying (unary, streaming, grpc-web and
+// HTTP/JSON transcoding) can be exercised against a single upstream.
+//
+// The same port also serves:
+// - grpc.reflection.v1 and grpc.reflection.v1alpha (server reflection, so
+//   `grpcurl -plaintext host:50051 list` works without the .proto file);
+// - grpc.health.v1.Health, following the HTTP `/health` toggle (SERVING or
+//   NOT_SERVING for "" and "rustybin.echo.v1.EchoService");
+// - grpc-web (`application/grpc-web`, `application/grpc-web-text`) over
+//   HTTP/1.1 and HTTP/2.
 service EchoService {
-  // Unary: returns the request message plus echoed metadata.
+  // Unary: returns the request message plus echoed metadata and deadline.
   rpc Echo(EchoRequest) returns (EchoResponse);
 
-  // Server streaming: emits `count` responses (default 3), one per tick.
+  // Server streaming: emits `count` responses (default 3, max 100), one
+  // every 50 ms.
   rpc ServerStream(EchoRequest) returns (stream EchoResponse);
 
-  // Client streaming: consumes a stream of requests, returns one summary.
+  // Client streaming: consumes a stream of requests (max 1000 messages,
+  // else RESOURCE_EXHAUSTED), returns one summary: messages joined by a
+  // space, `index` = number of messages received.
   rpc ClientStream(stream EchoRequest) returns (EchoResponse);
 
-  // Bidirectional streaming: echoes each request back as it arrives.
+  // Bidirectional streaming: echoes each request back as it arrives (max
+  // 1000 messages per call).
   rpc BidiStream(stream EchoRequest) returns (stream EchoResponse);
+
+  // Fail with the requested gRPC status code and message, for gateway
+  // error-mapping tests (gRPC status to HTTP status). The status carries
+  // rich error details (`grpc-status-details-bin`, google.rpc.Status with
+  // google.rpc.ErrorInfo and, when retry_delay_ms is set,
+  // google.rpc.RetryInfo). Code 0 (OK) returns a normal EchoResponse.
+  rpc Fail(FailRequest) returns (EchoResponse);
 }
 
 message EchoRequest {
   string message = 1;
-  // Optional: number of responses to emit for ServerStream (clamped 1..=100).
+  // Number of responses for ServerStream (0 means the default 3, clamped
+  // to 1..=100). Ignored by the other methods.
   uint32 count = 2;
 }
 
 message EchoResponse {
   string message = 1;
-  // gRPC request metadata (headers) reflected back, lower-cased.
+  // gRPC request metadata (headers) reflected back, lower-cased. Binary
+  // (`-bin`) values are base64 encoded.
   map<string, string> metadata = 2;
   // Identifies which Rustybin instance handled the call (load-balancer demos).
   string instance_id = 3;
-  // Monotonic index within a streamed response (0 for unary).
+  // Index within a streamed response (0 for unary); for ClientStream the
+  // number of messages received.
   uint32 index = 4;
+  // The raw `grpc-timeout` request header (the client deadline), if any.
+  string grpc_timeout = 5;
+  // The client deadline in milliseconds parsed from `grpc-timeout` (0 when
+  // the call has no deadline).
+  uint64 deadline_ms = 6;
+}
+
+message FailRequest {
+  // gRPC status code to return (0..=16, e.g. 14 UNAVAILABLE, 16
+  // UNAUTHENTICATED). Other values return INVALID_ARGUMENT.
+  int32 code = 1;
+  // Status message (default: a description of the code).
+  string message = 2;
+  // google.rpc.ErrorInfo reason (default "RUSTYBIN_REQUESTED_FAILURE").
+  string reason = 3;
+  // When set, a google.rpc.RetryInfo detail with this delay is attached.
+  uint32 retry_delay_ms = 4;
+  // Extra google.rpc.ErrorInfo metadata entries.
+  map<string, string> metadata = 5;
 }

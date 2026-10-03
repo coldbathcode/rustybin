@@ -263,3 +263,62 @@ async fn optional_listener_bind_failure_is_not_fatal_but_http_is() {
     let result = rustybin::start_with_state(AppState::for_tests(c)).await;
     assert!(result.is_err(), "HTTP bind failure must be an error");
 }
+
+/// Each listener tags its requests: /echo over the HTTPS listener reports
+/// scheme https and the bound port; over HTTP, http and the HTTP port.
+#[tokio::test]
+async fn echo_reports_listener_scheme_and_port() {
+    use std::sync::Arc;
+    use tokio_rustls::rustls;
+
+    let state = AppState::for_tests(Config::for_tests());
+    let ca_pem = state.certs.ca_cert_pem.clone();
+    let server = rustybin::start_with_state(state)
+        .await
+        .expect("server starts");
+    let https = server.https_addr.expect("HTTPS should start");
+
+    let http_json = get(server.http_addr, "/echo").await.json();
+    assert_eq!(http_json["scheme"], "http");
+    assert_eq!(http_json["port"], server.http_addr.port());
+
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in rustls_pemfile::certs(&mut ca_pem.as_bytes()) {
+        roots.add(cert.expect("ca cert")).expect("add root");
+    }
+    let tls = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(tls));
+    let tcp = TcpStream::connect(https).await.expect("connect");
+    let name = rustls::pki_types::ServerName::try_from("localhost").expect("name");
+    let mut stream = connector.connect(name, tcp).await.expect("TLS handshake");
+    let req = format!(
+        "GET /echo HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
+        https.port()
+    );
+    stream.write_all(req.as_bytes()).await.expect("write");
+    let mut raw = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut raw)).await;
+    let text = String::from_utf8_lossy(&raw).to_string();
+    let (head, body) = text.split_once("\r\n\r\n").expect("response");
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    let body = if head
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
+        dechunk(body)
+    } else {
+        body.to_string()
+    };
+    let json: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(json["scheme"], "https");
+    assert_eq!(json["port"], https.port());
+    assert_eq!(
+        json["url"],
+        format!("https://localhost:{}/echo", https.port())
+    );
+
+    server.shutdown();
+    server.wait().await.expect("clean shutdown");
+}

@@ -32,6 +32,7 @@ const MODULE_PATHS: &[fn() -> Value] = &[
     crate::auth_mtls::openapi_paths,
     crate::mcp::openapi_paths,
     crate::ai::openapi_paths,
+    crate::graphql::openapi_paths,
 ];
 
 /// Per-module OpenAPI components fragments (e.g. `{"schemas": {...}}`).
@@ -244,8 +245,8 @@ fn build_paths() -> Value {
     // Health toggle (runtime liveness control for active health-check demos)
     for (path, op, summary, desc) in [
         ("/health/healthy", "markHealthy", "Mark instance healthy", "Sets the instance health state to healthy. Subsequent GET /health returns 200."),
-        ("/health/unhealthy", "markUnhealthy", "Mark instance unhealthy", "Sets the instance health state to unhealthy. GET /health then returns 503 - useful for gateway upstream active health-check failover demos."),
-        ("/health/toggle", "toggleHealth", "Toggle health state", "Flips the current health state between healthy and unhealthy."),
+        ("/health/unhealthy", "markUnhealthy", "Mark instance unhealthy", "Sets the instance health state to unhealthy (200 confirms the change). GET /health then returns 503 and the gRPC grpc.health.v1 service reports NOT_SERVING - useful for gateway upstream active health-check failover demos."),
+        ("/health/toggle", "toggleHealth", "Toggle health state", "Flips the current health state between healthy and unhealthy; 200 with the new state."),
     ] {
         paths.insert(path.into(), json!({
             "post": {
@@ -254,8 +255,9 @@ fn build_paths() -> Value {
                 "description": desc,
                 "operationId": op,
                 "responses": {
-                    "200": { "description": "Instance is now healthy", "content": json_xml_content(json!({ "type": "object" })) },
-                    "503": { "description": "Instance is now unhealthy", "content": json_xml_content(json!({ "type": "object" })) }
+                    "200": { "description": "State changed; the body reports the new state (`status`, `healthy`)", "content": json_xml_content(json!({ "type": "object" })) },
+                    "401": { "description": "Admin token required" },
+                    "403": { "description": "Disabled in public mode without an admin token" }
                 }
             }
         }));
@@ -266,7 +268,7 @@ fn build_paths() -> Value {
         "get": {
             "tags": ["WebSocket"],
             "summary": "WebSocket echo",
-            "description": "Upgrade to a WebSocket connection that echoes every text and binary frame back to the client. Requires the standard WebSocket upgrade headers; a plain GET returns 426 Upgrade Required.",
+            "description": "Upgrade to a WebSocket connection that echoes every text and binary frame back to the client. The first subprotocol offered in Sec-WebSocket-Protocol is echoed back. Limits: 1 MiB messages (close 1009), 5 min idle and 1 h lifetime (close 1001); 256 KiB, 1 min and 10 min in public mode. Requires the standard WebSocket upgrade headers; a plain GET returns 426 Upgrade Required.",
             "operationId": "wsEcho",
             "responses": {
                 "101": { "description": "Switching Protocols (WebSocket established)" },
@@ -292,17 +294,40 @@ fn build_paths() -> Value {
     }));
 
     // Images
-    for fmt in &["png", "jpeg", "gif"] {
+    paths.insert("/image".into(), json!({
+        "get": {
+            "tags": ["Utility"],
+            "summary": "Get an image in the format chosen by Accept",
+            "description": "Picks webp, svg, jpeg, png or gif from the Accept header (q-values honoured); PNG without Accept; 406 when nothing acceptable is offered.",
+            "operationId": "getImage",
+            "responses": {
+                "200": {
+                    "description": "Image",
+                    "content": {
+                        "image/webp": { "schema": { "type": "string", "format": "binary" } },
+                        "image/svg+xml": { "schema": { "type": "string" } },
+                        "image/jpeg": { "schema": { "type": "string", "format": "binary" } },
+                        "image/png": { "schema": { "type": "string", "format": "binary" } },
+                        "image/gif": { "schema": { "type": "string", "format": "binary" } }
+                    }
+                },
+                "406": { "description": "No supported image type acceptable" }
+            }
+        }
+    }));
+    for fmt in &["png", "jpeg", "gif", "webp", "svg"] {
         let ct = match *fmt {
             "png" => "image/png",
             "jpeg" => "image/jpeg",
+            "webp" => "image/webp",
+            "svg" => "image/svg+xml",
             _ => "image/gif",
         };
         paths.insert(format!("/image/{fmt}"), json!({
             "get": {
                 "tags": ["Utility"],
                 "summary": format!("Get a {fmt} image"),
-                "description": format!("Returns a minimal {fmt} test image."),
+                "description": format!("Returns a small, valid {fmt} test image."),
                 "operationId": format!("getImage{}", fmt.to_uppercase()),
                 "responses": {
                     "200": {
@@ -541,19 +566,23 @@ fn build_paths() -> Value {
     paths.insert("/flaky/reset".into(), json!({
         "post": {
             "tags": ["Utility"],
-            "summary": "Reset all flaky counters",
-            "description": "Resets all counters for after, recover, pattern, and random flaky endpoints back to zero.",
+            "summary": "Reset flaky counters",
+            "description": "Counters are kept per (session, route): the session is X-Rustybin-Session (else the client IP), the route the endpoint plus its parameter. Without `scope` the caller's own counters are reset (open). `scope=all` resets every client's counters and is admin-guarded.",
             "operationId": "resetFlaky",
+            "parameters": [{ "name": "scope", "in": "query", "required": false, "schema": { "type": "string", "enum": ["session", "all"], "default": "session" } }],
             "responses": {
-                "200": { "description": "All counters reset",
+                "200": { "description": "Counters reset",
                     "content": json_xml_content(json!({
                         "type": "object",
                         "properties": {
                             "status": { "type": "string", "example": "reset" },
-                            "message": { "type": "string", "example": "All flaky counters reset" }
+                            "scope": { "type": "string", "example": "session" },
+                            "session": { "type": "string", "example": "ip:203.0.113.9" },
+                            "counters_removed": { "type": "integer", "example": 2 }
                         }
                     }))
-                }
+                },
+                "401": { "description": "scope=all without the admin token" }
             }
         }
     }));
@@ -562,17 +591,18 @@ fn build_paths() -> Value {
         "get": {
             "tags": ["Utility"],
             "summary": "Flaky endpoint counter status",
-            "description": "Returns current values of all flaky endpoint counters for debugging.",
+            "description": "Returns the caller's flaky counters (per session and route).",
             "operationId": "getFlakyStatus",
             "responses": {
                 "200": { "description": "Current counter values",
                     "content": json_xml_content(json!({
                         "type": "object",
                         "properties": {
-                            "pattern_counter": { "type": "integer" },
-                            "after_counter": { "type": "integer" },
-                            "recover_counter": { "type": "integer" },
-                            "random_counter": { "type": "integer" }
+                            "session": { "type": "string" },
+                            "counters": { "type": "array", "items": { "type": "object", "properties": {
+                                "route": { "type": "string", "example": "after:3" },
+                                "count": { "type": "integer" }
+                            }}}
                         }
                     }))
                 }
@@ -627,13 +657,13 @@ fn build_paths() -> Value {
     paths.insert("/status/{code}".into(), json!({
         "get": {
             "tags": ["Status"],
-            "summary": "Return a specific HTTP status code",
-            "description": "Returns the specified HTTP status code (use 200-599: 1xx codes are interim responses and cannot be returned as a final response). Redirect codes (301, 302, 307, 308) include a Location header pointing to /echo. 204 and 304 return empty bodies.",
+            "summary": "Return a specific HTTP status code (or a weighted random choice)",
+            "description": "Returns the specified HTTP status code (200-599). 1xx codes return 400 with a JSON explanation: they are interim responses and cannot be sent as a final response. `200,500` picks uniformly, `200:0.9,500:0.1` by relative weight (up to 20 codes). Redirect codes (301, 302, 303, 307, 308) include `Location: /echo`; 401 adds WWW-Authenticate, 407 Proxy-Authenticate, 429 and 503 Retry-After. 204, 205 and 304 return empty bodies.",
             "operationId": "getStatus",
-            "parameters": [{ "name": "code", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 100, "maximum": 599 }, "example": 200, "description": "HTTP status code to return" }],
+            "parameters": [{ "name": "code", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[0-9]{3}(:[0-9.]+)?(,[0-9]{3}(:[0-9.]+)?)*$" }, "example": "200:0.9,500:0.1", "description": "Status code, or comma-separated codes with optional :weight" }],
             "responses": {
-                "200": { "description": "Success response", "content": json_xml_content(json!({ "type": "object", "properties": { "status": { "type": "integer" } } })) },
-                "400": { "description": "Invalid status code", "content": json_xml_content(json!({ "$ref": "#/components/schemas/ErrorResponse" })) }
+                "200": { "description": "Success response", "content": json_xml_content(json!({ "type": "object", "properties": { "status": { "type": "integer" }, "chosen_from": { "type": "string" } } })) },
+                "400": { "description": "Invalid or informational (1xx) status code", "content": json_xml_content(json!({ "$ref": "#/components/schemas/ErrorResponse" })) }
             }
         }
     }));
@@ -643,11 +673,11 @@ fn build_paths() -> Value {
         "get": {
             "tags": ["Response Shaping"],
             "summary": "Delay response by N milliseconds",
-            "description": "Waits the specified number of milliseconds before responding. Max 60,000ms.",
+            "description": "Waits before responding. The value is milliseconds (`1500`), or carries a unit: `250ms`, `1.5s`. Maximum 60 s (10 s in public mode) including jitter; larger values return 400.",
             "operationId": "getDelay",
             "parameters": [
-                { "name": "ms", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 0, "maximum": 60000 }, "description": "Delay in milliseconds" },
-                { "name": "jitter", "in": "query", "required": false, "schema": { "type": "boolean" }, "description": "Apply ±20% random jitter to the delay" }
+                { "name": "ms", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[0-9.]+(ms|s)?$" }, "example": "1500", "description": "Delay: milliseconds, or with an ms / s suffix" },
+                { "name": "jitter", "in": "query", "required": false, "schema": { "type": "boolean" }, "description": "Apply +-20% random jitter to the delay (capped at the maximum)" }
             ],
             "responses": {
                 "200": { "description": "Delayed response with request details" },
@@ -660,11 +690,12 @@ fn build_paths() -> Value {
         "get": {
             "tags": ["Response Shaping"],
             "summary": "Set arbitrary response headers",
-            "description": "Any query parameters are set as response headers and returned in the JSON body.",
+            "description": "Any query parameters are set as response headers and returned in the JSON body (repeated names become several headers). Hop-by-hop and framing headers (Connection, Content-Length, Transfer-Encoding, Keep-Alive, TE, Trailer, Upgrade, ...) are refused with 400; Content-Type may be overridden.",
             "operationId": "getResponseHeaders",
             "parameters": [{ "name": "X-Custom-Header", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Example: any query parameter becomes a response header" }],
             "responses": {
-                "200": { "description": "Response with custom headers" }
+                "200": { "description": "Response with custom headers" },
+                "400": { "description": "Forbidden or invalid header", "content": json_xml_content(json!({ "$ref": "#/components/schemas/ErrorResponse" })) }
             }
         }
     }));
@@ -673,7 +704,7 @@ fn build_paths() -> Value {
         "get": {
             "tags": ["Response Shaping"],
             "summary": "Cacheable response with TTL",
-            "description": "Returns a response with Cache-Control, ETag, and Last-Modified headers. Supports conditional requests via If-None-Match and If-Modified-Since.",
+            "description": "Returns a response with Cache-Control, ETag, Last-Modified and Vary: Accept. Conditional requests: If-None-Match (lists, weak tags, `*`; weak comparison) takes precedence over If-Modified-Since (second precision). JSON and XML representations have different ETags. 304 responses carry ETag, Cache-Control, Last-Modified and Vary.",
             "operationId": "getCache",
             "parameters": [
                 { "name": "ttl", "in": "path", "required": true, "schema": { "type": "integer" }, "description": "Cache TTL in seconds" },
@@ -723,15 +754,21 @@ fn build_paths() -> Value {
         "get": {
             "tags": ["Redirects & Cookies"],
             "summary": "Set cookies via query parameters",
-            "description": "Sets cookies from query parameters and redirects to /cookies. Use _path, _domain, _secure, _httponly, _samesite, _maxage prefixed params for cookie options.",
+            "description": "Sets cookies from query parameters and redirects to /cookies. Use _path (default /), _domain, _secure, _httponly, _samesite (Strict, Lax, None; None forces Secure), _maxage for cookie options. Names must be RFC 6265 tokens; values are percent-encoded where they contain characters outside cookie-octet (space, ;, comma, quotes, CR/LF, non-ASCII).",
             "operationId": "setCookies",
             "parameters": [
                 { "name": "name", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Cookie name=value (any query param becomes a cookie)" },
-                { "name": "_path", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Cookie Path attribute" },
+                { "name": "_path", "in": "query", "required": false, "schema": { "type": "string", "default": "/" }, "description": "Cookie Path attribute" },
+                { "name": "_domain", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Cookie Domain attribute" },
                 { "name": "_secure", "in": "query", "required": false, "schema": { "type": "boolean" }, "description": "Cookie Secure flag" },
-                { "name": "_httponly", "in": "query", "required": false, "schema": { "type": "boolean" }, "description": "Cookie HttpOnly flag" }
+                { "name": "_httponly", "in": "query", "required": false, "schema": { "type": "boolean" }, "description": "Cookie HttpOnly flag" },
+                { "name": "_samesite", "in": "query", "required": false, "schema": { "type": "string", "enum": ["Strict", "Lax", "None"] }, "description": "Cookie SameSite attribute" },
+                { "name": "_maxage", "in": "query", "required": false, "schema": { "type": "integer" }, "description": "Cookie Max-Age in seconds" }
             ],
-            "responses": { "302": { "description": "Redirect to /cookies with Set-Cookie headers" } }
+            "responses": {
+                "302": { "description": "Redirect to /cookies with Set-Cookie headers" },
+                "400": { "description": "Invalid cookie name or attribute", "content": json_xml_content(json!({ "$ref": "#/components/schemas/ErrorResponse" })) }
+            }
         }
     }));
 
@@ -753,9 +790,13 @@ fn build_paths() -> Value {
         "get": {
             "tags": ["Redirects & Cookies"],
             "summary": "Delete cookies",
-            "description": "Deletes cookies named in the query parameters by setting Max-Age=0.",
+            "description": "Deletes cookies named in the query parameters by setting Max-Age=0 and an expired Expires, with Path (default /) and Domain matching how they were set (_path, _domain).",
             "operationId": "deleteCookies",
-            "parameters": [{ "name": "name", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Cookie name to delete (any query param name)" }],
+            "parameters": [
+                { "name": "name", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Cookie name to delete (any query param name)" },
+                { "name": "_path", "in": "query", "required": false, "schema": { "type": "string", "default": "/" }, "description": "Path the cookie was set with" },
+                { "name": "_domain", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Domain the cookie was set with" }
+            ],
             "responses": { "302": { "description": "Redirect to /cookies with expired Set-Cookie headers" } }
         }
     }));
@@ -995,15 +1036,25 @@ fn build_paths() -> Value {
     paths.insert("/graphql".into(), json!({
         "get": {
             "tags": ["GraphQL"],
-            "summary": "GraphQL Playground",
-            "description": "Serves an interactive GraphiQL playground for exploring the schema.",
-            "operationId": "getGraphqlPlayground",
-            "responses": { "200": { "description": "GraphiQL HTML page", "content": { "text/html": {} } } }
+            "summary": "GraphQL query over GET (or GraphiQL for browsers)",
+            "description": "Runs `query` (with optional `variables` / `operationName` / `extensions` as JSON strings). Mutations over GET return 405. Without a query, `Accept: text/html` gets a GraphiQL page (pinned CDN versions); other clients get 400.",
+            "operationId": "getGraphql",
+            "parameters": [
+                { "name": "query", "in": "query", "required": false, "schema": { "type": "string" }, "example": "{ users { id name } }" },
+                { "name": "variables", "in": "query", "required": false, "schema": { "type": "string" }, "description": "JSON object" },
+                { "name": "operationName", "in": "query", "required": false, "schema": { "type": "string" } },
+                { "name": "extensions", "in": "query", "required": false, "schema": { "type": "string" }, "description": "JSON object, e.g. persistedQuery" }
+            ],
+            "responses": {
+                "200": { "description": "GraphQL response, or the GraphiQL page", "content": { "application/json": {}, "application/graphql-response+json": {}, "text/html": {} } },
+                "400": { "description": "Request error (and parse/validation errors with application/graphql-response+json)" },
+                "405": { "description": "Mutation over GET" }
+            }
         },
         "post": {
             "tags": ["GraphQL"],
             "summary": "Execute GraphQL query",
-            "description": "Executes a GraphQL query against the hardcoded dataset (users, products, orders, reviews).",
+            "description": "Executes a GraphQL operation against the hardcoded dataset (users, products, orders, reviews). Content-Type application/json (or application/graphql with the query as body; others 415). `Accept: application/graphql-response+json` enables GraphQL-over-HTTP status codes (400 for parse/validation/limit errors); legacy application/json answers 200 for well-formed requests. Limits: depth 10, complexity 500, 30 aliases. Automatic persisted queries via extensions.persistedQuery (version 1, sha256Hash); unknown hashes return PersistedQueryNotFound.",
             "operationId": "postGraphql",
             "requestBody": {
                 "required": true,
@@ -1011,14 +1062,18 @@ fn build_paths() -> Value {
                     "application/json": {
                         "schema": {
                             "type": "object",
-                            "required": ["query"],
                             "properties": {
                                 "query": { "type": "string", "example": "{ users { id name email } }" },
                                 "variables": { "type": "object" },
-                                "operationName": { "type": "string" }
+                                "operationName": { "type": "string" },
+                                "extensions": { "type": "object", "properties": { "persistedQuery": { "type": "object", "properties": {
+                                    "version": { "type": "integer", "example": 1 },
+                                    "sha256Hash": { "type": "string" }
+                                } } } }
                             }
                         }
-                    }
+                    },
+                    "application/graphql": { "schema": { "type": "string" } }
                 }
             },
             "responses": {
@@ -1029,8 +1084,10 @@ fn build_paths() -> Value {
                             "data": { "type": "object" },
                             "errors": { "type": "array", "items": { "type": "object" } }
                         }
-                    } } }
-                }
+                    } }, "application/graphql-response+json": {} }
+                },
+                "400": { "description": "Malformed request (or document error with application/graphql-response+json)" },
+                "415": { "description": "Unsupported Content-Type" }
             }
         }
     }));
@@ -1054,11 +1111,11 @@ fn build_paths() -> Value {
             ),
             2 => (
                 "enrich",
-                "Enrich transaction with risk scoring and card details",
+                "Enrich the transaction with a deterministic risk score (0-99, stable hash of correlation id, merchant_id, amount and card BIN) and card details. Amounts are numbers in major units (99.99).",
             ),
             3 => (
                 "validate",
-                "Apply business rules and validate the transaction",
+                "Apply business rules: declined when the risk score (forwarded `risk_score`, else computed like step 2) is >= 70, the amount exceeds 50000 or card_payment is not permitted. validation.result is the X-Validation-Result value for step 4.",
             ),
             _ => (
                 "process",
@@ -1107,24 +1164,39 @@ fn build_paths() -> Value {
 
     // ── SOAP ────────────────────────────────────────────────────
     paths.insert("/soap".into(), json!({
+        "get": {
+            "tags": ["SOAP"],
+            "summary": "WSDL (GET /soap?wsdl)",
+            "description": "With the `wsdl` query string returns the WSDL document; otherwise 405 with a SOAP fault.",
+            "operationId": "getSoapWsdlQuery",
+            "responses": {
+                "200": { "description": "WSDL document", "content": { "text/xml": { "schema": { "type": "string" } } } },
+                "405": { "description": "Use POST for SOAP calls" }
+            }
+        },
         "post": {
             "tags": ["SOAP"],
-            "summary": "SOAP web service",
-            "description": "Accepts SOAP XML envelopes and routes to operations: GetUser, CreateOrder, GetStatus. Returns SOAP responses.",
+            "summary": "SOAP 1.1 / 1.2 web service",
+            "description": "Accepts SOAP 1.1 (text/xml, envelope http://schemas.xmlsoap.org/soap/envelope/) and SOAP 1.2 (application/soap+xml, envelope http://www.w3.org/2003/05/soap-envelope) and responds in kind. Operations: GetUser, CreateOrder, GetStatus, dispatched by SOAPAction (1.1) or the Content-Type action parameter (1.2), falling back to the first Body element. Faults: SOAP 1.1 faultcode/faultstring/detail with HTTP 500; SOAP 1.2 Code/Reason/Detail with HTTP 400 (env:Sender) or 500.",
             "operationId": "postSoap",
-            "parameters": [{ "name": "SOAPAction", "in": "header", "required": false, "schema": { "type": "string" }, "description": "SOAP action URI (echoed in response)" }],
+            "parameters": [{ "name": "SOAPAction", "in": "header", "required": false, "schema": { "type": "string" }, "description": "SOAP 1.1 action URI, e.g. \"http://rustybin.local/GetUser\"" }],
             "requestBody": {
                 "required": true,
                 "content": {
                     "text/xml": {
                         "schema": { "type": "string" },
                         "example": "<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"><soap:Body><GetUser xmlns=\"http://rustybin.local/users\"><userId>123</userId></GetUser></soap:Body></soap:Envelope>"
+                    },
+                    "application/soap+xml": {
+                        "schema": { "type": "string" },
+                        "example": "<env:Envelope xmlns:env=\"http://www.w3.org/2003/05/soap-envelope\"><env:Body><GetStatus xmlns=\"http://rustybin.local/status\"><orderId>ORD-1</orderId></GetStatus></env:Body></env:Envelope>"
                     }
                 }
             },
             "responses": {
-                "200": { "description": "SOAP response", "content": { "text/xml": { "schema": { "type": "string" } } } },
-                "400": { "description": "SOAP fault (invalid envelope or unknown operation)", "content": { "text/xml": { "schema": { "type": "string" } } } }
+                "200": { "description": "SOAP response", "content": { "text/xml": { "schema": { "type": "string" } }, "application/soap+xml": { "schema": { "type": "string" } } } },
+                "400": { "description": "SOAP 1.2 sender fault", "content": { "application/soap+xml": { "schema": { "type": "string" } } } },
+                "500": { "description": "SOAP fault (1.1: every fault; 1.2: receiver, version mismatch, mustUnderstand)", "content": { "text/xml": { "schema": { "type": "string" } }, "application/soap+xml": { "schema": { "type": "string" } } } }
             }
         }
     }));
@@ -1133,7 +1205,7 @@ fn build_paths() -> Value {
         "get": {
             "tags": ["SOAP"],
             "summary": "WSDL service description",
-            "description": "Returns the WSDL document defining the SOAP service operations (GetUser, CreateOrder, GetStatus).",
+            "description": "Returns the WSDL document defining the SOAP service operations (GetUser, CreateOrder, GetStatus) with SOAP 1.1 and SOAP 1.2 bindings; soap:address is derived from the request (Host, or trusted X-Forwarded-* headers).",
             "operationId": "getSoapWsdl",
             "responses": { "200": { "description": "WSDL document", "content": { "text/xml": { "schema": { "type": "string" } } } } }
         }
@@ -1179,6 +1251,7 @@ fn build_components() -> Value {
                 "type": "object",
                 "properties": {
                     "method": { "type": "string", "example": "GET" },
+                    "url": { "type": "string", "example": "https://api.example.com/echo?a=1", "description": "As the client used it (trusted X-Forwarded-Proto/Host/Port and Forwarded applied)" },
                     "path": { "type": "string", "example": "/echo" },
                     "path_info": { "type": "array", "items": { "type": "string" } },
                     "query_string": { "type": "string" },
@@ -1214,18 +1287,48 @@ fn build_components() -> Value {
                     "request_count": { "type": "integer" },
                     "port": {
                         "type": "object",
-                        "properties": { "http": { "type": "integer" }, "https": { "type": "integer" } }
+                        "properties": {
+                            "http": { "type": "integer" },
+                            "https": { "type": "integer" },
+                            "grpc": { "type": "integer" },
+                            "listener": { "type": "object", "properties": { "scheme": { "type": "string" }, "port": { "type": "integer" } } }
+                        }
+                    },
+                    "config": {
+                        "type": "object",
+                        "properties": {
+                            "host": { "type": "string" },
+                            "public_mode": { "type": "boolean" },
+                            "trust_forward": { "type": "boolean" },
+                            "body_limit": { "type": "integer" },
+                            "request_timeout_secs": { "type": "integer" },
+                            "max_delay_ms": { "type": "integer" },
+                            "inspector_capacity": { "type": "integer" },
+                            "cors_allow_origins": { "type": "array", "items": { "type": "string" } },
+                            "admin_token_configured": { "type": "boolean" }
+                        }
                     },
                     "environment": {
                         "type": "object",
-                        "properties": { "rust_version": { "type": "string" }, "profile": { "type": "string" } }
+                        "properties": {
+                            "rust_version": { "type": "string", "example": "rustc 1.86.0 (05f9846f8 2025-03-31)" },
+                            "msrv": { "type": "string" },
+                            "profile": { "type": "string" },
+                            "os": { "type": "string" },
+                            "arch": { "type": "string" }
+                        }
                     },
                     "request": {
                         "type": "object",
                         "properties": {
+                            "method": { "type": "string" },
+                            "peer_ip": { "type": "string" },
                             "remote_ip": { "type": "string" },
                             "forwarded_for": { "type": "string", "nullable": true },
+                            "forwarded": { "type": "string", "nullable": true },
                             "host": { "type": "string" },
+                            "scheme": { "type": "string" },
+                            "url_base": { "type": "string" },
                             "via": { "type": "string", "nullable": true }
                         }
                     },
@@ -1566,6 +1669,7 @@ mod tests {
         let params = delay["parameters"].as_array().unwrap();
         let ms_param = &params[0];
         assert_eq!(ms_param["name"], "ms");
-        assert_eq!(ms_param["schema"]["maximum"], 60000);
+        assert!(ms_param["schema"]["pattern"].is_string());
+        assert!(delay["description"].as_str().unwrap_or("").contains("60 s"));
     }
 }

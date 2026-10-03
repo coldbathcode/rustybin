@@ -1,30 +1,39 @@
+//! `/echo` and `/anything`: reflect the request back.
+//!
+//! Client IP, scheme, host and port come from [`crate::session::client_ip`]
+//! and [`crate::session::request_origin`], so `RUSTYBIN_TRUST_FORWARD`
+//! (`Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `Fly-Client-IP`) and the HTTPS
+//! listener are reported consistently with every other module.
+
 use axum::{
     body::Bytes,
-    extract::{ConnectInfo, OriginalUri, State},
-    http::{HeaderMap, Method},
+    extract::{OriginalUri, State},
+    http::{request::Parts, HeaderMap, Method},
     response::Response,
     routing::any,
     Router,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::catalog::{category, Endpoint, Example};
 use crate::config::Config;
 use crate::content_negotiation::negotiate;
+use crate::session::{client_ip, request_origin};
 use crate::state::AppState;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EchoResponse {
     pub method: String,
+    /// Full URL as the client used it (forwarded headers applied when trusted).
+    pub url: String,
     pub path: String,
     pub path_info: Vec<String>,
     pub query_string: String,
     pub query_params: serde_json::Value,
-    pub headers: HashMap<String, Vec<String>>,
+    pub headers: BTreeMap<String, Vec<String>>,
     pub host: String,
     pub port: u16,
     pub scheme: String,
@@ -46,12 +55,12 @@ pub struct EchoBody {
 
 async fn echo_handler(
     State(config): State<Arc<Config>>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    headers: HeaderMap,
+    parts: Parts,
     body: Bytes,
 ) -> Response {
+    let headers = &parts.headers;
     let path = uri.path().to_string();
     let path_info: Vec<String> = path
         .split('/')
@@ -62,13 +71,18 @@ async fn echo_handler(
     let query_string = uri.query().unwrap_or("").to_string();
     let query_params = parse_query_params(&query_string);
 
-    let header_map = collect_headers(&headers);
+    let header_map = collect_headers(headers);
 
-    let host = extract_host(&headers);
-    let port = extract_port(&headers, &config);
-    let scheme = detect_scheme(&headers, &config);
-    let remote_ip = detect_remote_ip(&headers, &config, &addr);
+    let origin = request_origin(headers, &parts.extensions, &uri, &config);
+    let remote_ip = client_ip(headers, &parts.extensions, &config)
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
     let echo_body = process_body(&body, config.body_limit);
+    let path_and_query = uri
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| path.clone());
+    let url = format!("{}{}", origin.base_url(), path_and_query);
 
     let timestamp_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -77,20 +91,21 @@ async fn echo_handler(
 
     let resp = EchoResponse {
         method: method.to_string(),
+        url,
         path,
         path_info,
         query_string,
         query_params,
         headers: header_map,
-        host,
-        port,
-        scheme,
+        host: origin.host,
+        port: origin.port,
+        scheme: origin.scheme,
         remote_ip,
         body: echo_body,
         timestamp_unix_ms,
     };
 
-    negotiate(&headers, &resp)
+    negotiate(headers, &resp)
 }
 
 fn parse_query_params(query: &str) -> serde_json::Value {
@@ -126,60 +141,14 @@ fn parse_query_params(query: &str) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
-fn collect_headers(headers: &HeaderMap) -> HashMap<String, Vec<String>> {
-    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+fn collect_headers(headers: &HeaderMap) -> BTreeMap<String, Vec<String>> {
+    let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (name, value) in headers.iter() {
         let key = name.to_string();
         let val = value.to_str().unwrap_or("<binary>").to_string();
         map.entry(key).or_default().push(val);
     }
     map
-}
-
-fn extract_host(headers: &HeaderMap) -> String {
-    headers
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .map(|h| h.split(':').next().unwrap_or(h).to_string())
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn extract_port(headers: &HeaderMap, config: &Config) -> u16 {
-    headers
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|h| {
-            let parts: Vec<&str> = h.split(':').collect();
-            if parts.len() == 2 {
-                parts[1].parse().ok()
-            } else {
-                None
-            }
-        })
-        .unwrap_or(config.http_port)
-}
-
-fn detect_scheme(headers: &HeaderMap, config: &Config) -> String {
-    if config.trust_forward {
-        if let Some(proto) = headers
-            .get("x-forwarded-proto")
-            .and_then(|v| v.to_str().ok())
-        {
-            return proto.to_string();
-        }
-    }
-    "http".to_string()
-}
-
-fn detect_remote_ip(headers: &HeaderMap, config: &Config, addr: &SocketAddr) -> String {
-    if config.trust_forward {
-        if let Some(forwarded_for) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            if let Some(first_ip) = forwarded_for.split(',').next() {
-                return first_ip.trim().to_string();
-            }
-        }
-    }
-    addr.ip().to_string()
 }
 
 fn process_body(raw: &Bytes, limit: usize) -> EchoBody {
@@ -281,11 +250,52 @@ pub fn catalog() -> Vec<Endpoint> {
 mod tests {
     use super::*;
     use axum::body::Body;
+    use axum::extract::ConnectInfo;
     use axum::http::{Request, StatusCode};
+    use std::net::SocketAddr;
     use tower::ServiceExt;
 
     fn test_app() -> Router {
         crate::test_support::module_app(router)
+    }
+
+    #[tokio::test]
+    async fn url_scheme_and_port_follow_forwarded_headers() {
+        let config = Config {
+            trust_forward: true,
+            ..crate::test_support::test_config()
+        };
+        let app = crate::test_support::module_app_with_config(config, router);
+        let req = Request::builder()
+            .uri("/echo/x?a=1")
+            .header("host", "internal:8080")
+            .header("x-forwarded-proto", "https")
+            .header("x-forwarded-host", "api.example.com")
+            .header("x-forwarded-for", "198.51.100.4, 203.0.113.9, 10.0.0.2")
+            .body(Body::empty())
+            .expect("request");
+        let json = crate::test_support::body_json(app.oneshot(req).await.expect("resp")).await;
+        assert_eq!(json["url"], "https://api.example.com/echo/x?a=1");
+        assert_eq!(json["scheme"], "https");
+        assert_eq!(json["port"], 443);
+        assert_eq!(json["host"], "api.example.com");
+        assert_eq!(json["remote_ip"], "203.0.113.9");
+    }
+
+    #[tokio::test]
+    async fn ipv6_host_and_https_listener() {
+        let req = Request::builder()
+            .uri("/echo")
+            .header("host", "[::1]:8443")
+            .extension(crate::session::ListenerInfo::https(8443))
+            .body(Body::empty())
+            .expect("request");
+        let json =
+            crate::test_support::body_json(test_app().oneshot(req).await.expect("resp")).await;
+        assert_eq!(json["host"], "::1");
+        assert_eq!(json["port"], 8443);
+        assert_eq!(json["scheme"], "https");
+        assert_eq!(json["url"], "https://[::1]:8443/echo");
     }
 
     fn echo_request(uri: &str) -> Request<Body> {

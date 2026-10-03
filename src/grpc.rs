@@ -1,39 +1,122 @@
-//! gRPC echo service.
+//! gRPC listener (default port 50051, `RUSTYBIN_GRPC_PORT`).
 //!
-//! Runs a Tonic-based `EchoService` on its own port (default 50051,
-//! `RUSTYBIN_GRPC_PORT`) covering unary, server-streaming, client-streaming,
-//! and bidirectional-streaming calls. This gives API gateway gRPC proxying
-//! (grpc-proxy / grpc-web / grpc-transcoding features) a real upstream to target.
+//! Services on the one port:
+//! - `rustybin.echo.v1.EchoService`: unary, server/client/bidi streaming and a
+//!   `Fail` RPC that returns a requested status with rich error details.
+//! - `grpc.health.v1.Health` (tonic-health), following the HTTP `/health`
+//!   toggle through [`crate::health::HealthState::subscribe`].
+//! - `grpc.reflection.v1` and `grpc.reflection.v1alpha` server reflection.
+//! - grpc-web (HTTP/1.1 and HTTP/2) via tonic-web, with permissive CORS so
+//!   browser clients work directly.
 
+use std::collections::HashMap;
 use std::pin::Pin;
+use std::time::Duration;
 
+use base64::Engine;
 use tokio_stream::{Stream, StreamExt};
-use tonic::{transport::Server, Request, Response, Status, Streaming};
+use tonic::{transport::Server, Code, Request, Response, Status, Streaming};
+use tonic_health::ServingStatus;
+use tonic_types::{ErrorDetails, StatusExt};
+
+use crate::state::AppState;
 
 pub mod pb {
     tonic::include_proto!("rustybin.echo.v1");
+
+    /// Encoded descriptor set for server reflection (emitted by build.rs).
+    pub const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("echo_descriptor");
 }
 
 use pb::echo_service_server::{EchoService, EchoServiceServer};
-use pb::{EchoRequest, EchoResponse};
+use pb::{EchoRequest, EchoResponse, FailRequest};
+
+/// Fully qualified service name (health checks, reflection).
+pub const ECHO_SERVICE_NAME: &str = "rustybin.echo.v1.EchoService";
+/// Default number of ServerStream responses (per the proto).
+pub const DEFAULT_STREAM_COUNT: u32 = 3;
+/// Maximum ServerStream responses.
+pub const MAX_STREAM_COUNT: u32 = 100;
+/// Maximum messages accepted by ClientStream / BidiStream per call.
+pub const MAX_STREAM_MESSAGES: u32 = 1000;
 
 #[derive(Clone)]
 pub struct EchoSvc {
     instance_id: String,
 }
 
-/// Collect gRPC request metadata (headers) into the response map, lower-cased,
-/// skipping binary (`-bin`) keys which aren't valid UTF-8.
-fn reflect_metadata<T>(req: &Request<T>) -> std::collections::HashMap<String, String> {
+impl EchoSvc {
+    pub fn new(instance_id: impl Into<String>) -> Self {
+        Self {
+            instance_id: instance_id.into(),
+        }
+    }
+
+    fn response<T>(&self, req: &Request<T>, message: String, index: u32) -> EchoResponse {
+        let (grpc_timeout, deadline_ms) = deadline(req);
+        EchoResponse {
+            message,
+            metadata: reflect_metadata(req),
+            instance_id: self.instance_id.clone(),
+            index,
+            grpc_timeout,
+            deadline_ms,
+        }
+    }
+}
+
+/// Collect gRPC request metadata (headers), lower-cased. Binary (`-bin`)
+/// values are base64 encoded.
+fn reflect_metadata<T>(req: &Request<T>) -> HashMap<String, String> {
     req.metadata()
         .iter()
-        .filter_map(|kv| match kv {
-            tonic::metadata::KeyAndValueRef::Ascii(k, v) => {
-                Some((k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-            }
-            tonic::metadata::KeyAndValueRef::Binary(_, _) => None,
+        .map(|kv| match kv {
+            tonic::metadata::KeyAndValueRef::Ascii(k, v) => (
+                k.as_str().to_string(),
+                v.to_str().unwrap_or_default().to_string(),
+            ),
+            tonic::metadata::KeyAndValueRef::Binary(k, v) => (
+                k.as_str().to_string(),
+                // Re-encode canonically (padded standard base64).
+                v.to_bytes()
+                    .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
+                    .unwrap_or_else(|_| String::from_utf8_lossy(v.as_encoded_bytes()).into()),
+            ),
         })
         .collect()
+}
+
+/// The raw `grpc-timeout` header and the deadline it encodes, in ms.
+fn deadline<T>(req: &Request<T>) -> (String, u64) {
+    let raw = req
+        .metadata()
+        .get("grpc-timeout")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let ms = parse_grpc_timeout(&raw).map_or(0, |d| d.as_millis() as u64);
+    (raw, ms)
+}
+
+/// Parse a `grpc-timeout` value: 1-8 digits plus a unit (H, M, S, m, u, n).
+pub fn parse_grpc_timeout(raw: &str) -> Option<Duration> {
+    if raw.len() < 2 || raw.len() > 9 {
+        return None;
+    }
+    let (digits, unit) = raw.split_at(raw.len() - 1);
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: u64 = digits.parse().ok()?;
+    Some(match unit {
+        "H" => Duration::from_secs(n.checked_mul(3600)?),
+        "M" => Duration::from_secs(n.checked_mul(60)?),
+        "S" => Duration::from_secs(n),
+        "m" => Duration::from_millis(n),
+        "u" => Duration::from_micros(n),
+        "n" => Duration::from_nanos(n),
+        _ => return None,
+    })
 }
 
 type ResponseStream = Pin<Box<dyn Stream<Item = Result<EchoResponse, Status>> + Send>>;
@@ -41,14 +124,8 @@ type ResponseStream = Pin<Box<dyn Stream<Item = Result<EchoResponse, Status>> + 
 #[tonic::async_trait]
 impl EchoService for EchoSvc {
     async fn echo(&self, request: Request<EchoRequest>) -> Result<Response<EchoResponse>, Status> {
-        let metadata = reflect_metadata(&request);
-        let msg = request.into_inner().message;
-        Ok(Response::new(EchoResponse {
-            message: msg,
-            metadata,
-            instance_id: self.instance_id.clone(),
-            index: 0,
-        }))
+        let message = request.get_ref().message.clone();
+        Ok(Response::new(self.response(&request, message, 0)))
     }
 
     type ServerStreamStream = ResponseStream;
@@ -57,24 +134,17 @@ impl EchoService for EchoSvc {
         &self,
         request: Request<EchoRequest>,
     ) -> Result<Response<Self::ServerStreamStream>, Status> {
-        let metadata = reflect_metadata(&request);
-        let instance_id = self.instance_id.clone();
-        let inner = request.into_inner();
-        let count = inner.count.clamp(1, 100);
-        let message = inner.message;
-
+        let template = self.response(&request, request.get_ref().message.clone(), 0);
+        let count = match request.get_ref().count {
+            0 => DEFAULT_STREAM_COUNT,
+            n => n.min(MAX_STREAM_COUNT),
+        };
         let stream = async_stream::stream! {
             for index in 0..count {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                yield Ok(EchoResponse {
-                    message: message.clone(),
-                    metadata: metadata.clone(),
-                    instance_id: instance_id.clone(),
-                    index,
-                });
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                yield Ok(EchoResponse { index, ..template.clone() });
             }
         };
-
         Ok(Response::new(Box::pin(stream) as ResponseStream))
     }
 
@@ -82,18 +152,21 @@ impl EchoService for EchoSvc {
         &self,
         request: Request<Streaming<EchoRequest>>,
     ) -> Result<Response<EchoResponse>, Status> {
-        let metadata = reflect_metadata(&request);
+        let template = self.response(&request, String::new(), 0);
         let mut stream = request.into_inner();
         let mut messages = Vec::new();
         while let Some(req) = stream.next().await {
+            if messages.len() as u32 >= MAX_STREAM_MESSAGES {
+                return Err(Status::resource_exhausted(format!(
+                    "ClientStream accepts at most {MAX_STREAM_MESSAGES} messages"
+                )));
+            }
             messages.push(req?.message);
         }
-        let count = messages.len() as u32;
         Ok(Response::new(EchoResponse {
+            index: messages.len() as u32,
             message: messages.join(" "),
-            metadata,
-            instance_id: self.instance_id.clone(),
-            index: count,
+            ..template
         }))
     }
 
@@ -103,21 +176,20 @@ impl EchoService for EchoSvc {
         &self,
         request: Request<Streaming<EchoRequest>>,
     ) -> Result<Response<Self::BidiStreamStream>, Status> {
-        let metadata = reflect_metadata(&request);
-        let instance_id = self.instance_id.clone();
+        let template = self.response(&request, String::new(), 0);
         let mut stream = request.into_inner();
-
         let out = async_stream::stream! {
             let mut index = 0u32;
             while let Some(req) = stream.next().await {
+                if index >= MAX_STREAM_MESSAGES {
+                    yield Err(Status::resource_exhausted(format!(
+                        "BidiStream accepts at most {MAX_STREAM_MESSAGES} messages"
+                    )));
+                    break;
+                }
                 match req {
                     Ok(r) => {
-                        yield Ok(EchoResponse {
-                            message: r.message,
-                            metadata: metadata.clone(),
-                            instance_id: instance_id.clone(),
-                            index,
-                        });
+                        yield Ok(EchoResponse { message: r.message, index, ..template.clone() });
                         index += 1;
                     }
                     Err(e) => {
@@ -127,135 +199,460 @@ impl EchoService for EchoSvc {
                 }
             }
         };
-
         Ok(Response::new(Box::pin(out) as ResponseStream))
+    }
+
+    async fn fail(&self, request: Request<FailRequest>) -> Result<Response<EchoResponse>, Status> {
+        let req = request.get_ref().clone();
+        if !(0..=16).contains(&req.code) {
+            return Err(Status::invalid_argument(format!(
+                "code must be a gRPC status code 0..=16, got {}",
+                req.code
+            )));
+        }
+        let code = Code::from_i32(req.code);
+        if code == Code::Ok {
+            let message = if req.message.is_empty() {
+                "OK".to_string()
+            } else {
+                req.message.clone()
+            };
+            return Ok(Response::new(self.response(&request, message, 0)));
+        }
+        let message = if req.message.is_empty() {
+            format!("requested failure: {}", code.description())
+        } else {
+            req.message.chars().take(1024).collect()
+        };
+        let reason = if req.reason.is_empty() {
+            "RUSTYBIN_REQUESTED_FAILURE".to_string()
+        } else {
+            req.reason.chars().take(128).collect()
+        };
+        let mut info: HashMap<String, String> = req.metadata.into_iter().take(32).collect();
+        info.insert("instance_id".to_string(), self.instance_id.clone());
+        let mut details = ErrorDetails::with_error_info(reason, "rustybin", info);
+        if req.retry_delay_ms > 0 {
+            details.set_retry_info(Some(Duration::from_millis(u64::from(req.retry_delay_ms))));
+        }
+        let mut metadata = tonic::metadata::MetadataMap::new();
+        metadata.insert(
+            "x-rustybin-fail",
+            tonic::metadata::MetadataValue::from_static("true"),
+        );
+        Err(Status::with_error_details_and_metadata(
+            code, message, details, metadata,
+        ))
     }
 }
 
-/// Serve the gRPC EchoService on an already-bound listener until `shutdown`
+/// Keep the gRPC health service in sync with the HTTP `/health` toggle.
+async fn follow_health(state: AppState, mut reporter: tonic_health::server::HealthReporter) {
+    let mut rx = state.health.subscribe();
+    loop {
+        let status = if *rx.borrow_and_update() {
+            ServingStatus::Serving
+        } else {
+            ServingStatus::NotServing
+        };
+        reporter.set_service_status("", status).await;
+        reporter.set_service_status(ECHO_SERVICE_NAME, status).await;
+        if rx.changed().await.is_err() {
+            break;
+        }
+    }
+}
+
+/// Serve every gRPC service on an already-bound listener until `shutdown`
 /// resolves.
 pub async fn serve<F>(
     listener: tokio::net::TcpListener,
-    instance_id: String,
+    state: AppState,
     shutdown: F,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     F: std::future::Future<Output = ()> + Send,
 {
-    let svc = EchoSvc { instance_id };
     let addr = listener.local_addr()?;
-    tracing::info!("gRPC listening on {addr} (EchoService)");
+
+    let (reporter, health_service) = tonic_health::server::health_reporter();
+    let health_task = tokio::spawn(follow_health(state.clone(), reporter));
+
+    let reflection_v1 = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(pb::FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
+        .build_v1()?;
+    let reflection_v1alpha = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(pb::FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
+        .build_v1alpha()?;
+
+    let cors = tower_http::cors::CorsLayer::new()
+        .allow_origin(tower_http::cors::AllowOrigin::mirror_request())
+        .allow_methods([axum::http::Method::POST, axum::http::Method::OPTIONS])
+        .allow_headers(tower_http::cors::AllowHeaders::mirror_request())
+        .expose_headers([
+            axum::http::HeaderName::from_static("grpc-status"),
+            axum::http::HeaderName::from_static("grpc-message"),
+            axum::http::HeaderName::from_static("grpc-status-details-bin"),
+        ])
+        .max_age(Duration::from_secs(600));
+
+    tracing::info!(
+        "gRPC listening on {addr} (EchoService, health, reflection v1/v1alpha, grpc-web)"
+    );
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-    Server::builder()
-        .add_service(EchoServiceServer::new(svc))
+    let result = Server::builder()
+        .accept_http1(true)
+        .layer(cors)
+        .layer(tonic_web::GrpcWebLayer::new())
+        .add_service(EchoServiceServer::new(EchoSvc::new(
+            state.config.instance_id.clone(),
+        )))
+        .add_service(health_service)
+        .add_service(reflection_v1)
+        .add_service(reflection_v1alpha)
         .serve_with_incoming_shutdown(incoming, shutdown)
-        .await?;
+        .await;
+    health_task.abort();
+    result?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::pb::echo_service_client::EchoServiceClient;
-    use super::pb::{EchoRequest, EchoResponse};
+    use super::pb::{EchoRequest, EchoResponse, FailRequest};
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_stream::StreamExt;
 
-    async fn spawn() -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    async fn spawn_with(state: AppState) -> (String, std::net::SocketAddr) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
         tokio::spawn(async move {
-            Server::builder()
-                .add_service(EchoServiceServer::new(EchoSvc {
-                    instance_id: "test-instance".to_string(),
-                }))
-                .serve_with_incoming(incoming)
-                .await
-                .unwrap();
+            let _ = serve(listener, state, std::future::pending()).await;
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), addr)
+    }
+
+    async fn spawn() -> String {
+        spawn_with(crate::test_support::test_state()).await.0
+    }
+
+    fn req(message: &str, count: u32) -> EchoRequest {
+        EchoRequest {
+            message: message.to_string(),
+            count,
+        }
+    }
+
+    #[test]
+    fn grpc_timeout_parsing() {
+        assert_eq!(parse_grpc_timeout("100m"), Some(Duration::from_millis(100)));
+        assert_eq!(parse_grpc_timeout("2S"), Some(Duration::from_secs(2)));
+        assert_eq!(parse_grpc_timeout("1H"), Some(Duration::from_secs(3600)));
+        assert_eq!(parse_grpc_timeout("5x"), None);
+        assert_eq!(parse_grpc_timeout("123456789S"), None);
+        assert_eq!(parse_grpc_timeout(""), None);
     }
 
     #[tokio::test]
-    async fn unary_echo() {
+    async fn unary_echo_with_metadata_and_deadline() {
         let url = spawn().await;
-        let mut client = EchoServiceClient::connect(url).await.unwrap();
-        let mut req = Request::new(EchoRequest {
-            message: "ping".to_string(),
-            count: 0,
-        });
-        req.metadata_mut().insert("x-demo", "abc".parse().unwrap());
-        let resp = client.echo(req).await.unwrap().into_inner();
+        let mut client = EchoServiceClient::connect(url).await.expect("connect");
+        let mut request = Request::new(req("ping", 0));
+        request
+            .metadata_mut()
+            .insert("x-demo", "abc".parse().expect("meta"));
+        request.metadata_mut().insert_bin(
+            "x-trace-bin",
+            tonic::metadata::MetadataValue::from_bytes(&[1, 2, 3]),
+        );
+        request.set_timeout(Duration::from_secs(5));
+        let resp = client.echo(request).await.expect("echo").into_inner();
         assert_eq!(resp.message, "ping");
         assert_eq!(resp.instance_id, "test-instance");
         assert_eq!(resp.metadata.get("x-demo").map(String::as_str), Some("abc"));
+        assert_eq!(
+            resp.metadata.get("x-trace-bin").map(String::as_str),
+            Some("AQID")
+        );
+        assert!(!resp.grpc_timeout.is_empty());
+        assert!(resp.deadline_ms > 0 && resp.deadline_ms <= 5000);
     }
 
     #[tokio::test]
-    async fn server_streaming() {
+    async fn server_streaming_defaults_to_three() {
         let url = spawn().await;
-        let mut client = EchoServiceClient::connect(url).await.unwrap();
-        let resp = client
-            .server_stream(EchoRequest {
-                message: "tick".to_string(),
-                count: 4,
-            })
-            .await
-            .unwrap();
-        let mut stream = resp.into_inner();
-        let mut seen = 0u32;
-        while let Some(item) = stream.next().await {
-            let item = item.unwrap();
-            assert_eq!(item.message, "tick");
-            assert_eq!(item.index, seen);
-            seen += 1;
+        let mut client = EchoServiceClient::connect(url).await.expect("connect");
+        for (count, expected) in [(0u32, 3u32), (4, 4)] {
+            let mut stream = client
+                .server_stream(req("tick", count))
+                .await
+                .expect("stream")
+                .into_inner();
+            let mut seen = 0u32;
+            while let Some(item) = stream.next().await {
+                let item = item.expect("item");
+                assert_eq!(item.message, "tick");
+                assert_eq!(item.index, seen);
+                seen += 1;
+            }
+            assert_eq!(seen, expected);
         }
-        assert_eq!(seen, 4);
     }
 
     #[tokio::test]
-    async fn client_streaming() {
+    async fn client_streaming_and_cap() {
         let url = spawn().await;
-        let mut client = EchoServiceClient::connect(url).await.unwrap();
-        let outbound = tokio_stream::iter(vec![
-            EchoRequest {
-                message: "a".to_string(),
-                count: 0,
-            },
-            EchoRequest {
-                message: "b".to_string(),
-                count: 0,
-            },
-            EchoRequest {
-                message: "c".to_string(),
-                count: 0,
-            },
-        ]);
-        let resp: EchoResponse = client.client_stream(outbound).await.unwrap().into_inner();
+        let mut client = EchoServiceClient::connect(url).await.expect("connect");
+        let outbound = tokio_stream::iter(vec![req("a", 0), req("b", 0), req("c", 0)]);
+        let resp: EchoResponse = client
+            .client_stream(outbound)
+            .await
+            .expect("call")
+            .into_inner();
         assert_eq!(resp.message, "a b c");
         assert_eq!(resp.index, 3);
+
+        let too_many = tokio_stream::iter((0..MAX_STREAM_MESSAGES + 1).map(|_| req("x", 0)));
+        let err = client
+            .client_stream(too_many)
+            .await
+            .expect_err("over the cap");
+        assert_eq!(err.code(), Code::ResourceExhausted);
     }
 
     #[tokio::test]
     async fn bidi_streaming() {
         let url = spawn().await;
-        let mut client = EchoServiceClient::connect(url).await.unwrap();
-        let outbound = tokio_stream::iter(vec![
-            EchoRequest {
-                message: "one".to_string(),
-                count: 0,
-            },
-            EchoRequest {
-                message: "two".to_string(),
-                count: 0,
-            },
-        ]);
-        let resp = client.bidi_stream(outbound).await.unwrap();
-        let mut stream = resp.into_inner();
+        let mut client = EchoServiceClient::connect(url).await.expect("connect");
+        let outbound = tokio_stream::iter(vec![req("one", 0), req("two", 0)]);
+        let mut stream = client
+            .bidi_stream(outbound)
+            .await
+            .expect("call")
+            .into_inner();
         let mut msgs = Vec::new();
         while let Some(item) = stream.next().await {
-            msgs.push(item.unwrap().message);
+            msgs.push(item.expect("item").message);
         }
         assert_eq!(msgs, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn fail_returns_requested_status_with_details() {
+        let url = spawn().await;
+        let mut client = EchoServiceClient::connect(url).await.expect("connect");
+        let err = client
+            .fail(FailRequest {
+                code: 14,
+                message: "backend down".to_string(),
+                reason: "MAINTENANCE".to_string(),
+                retry_delay_ms: 1500,
+                metadata: HashMap::from([("region".to_string(), "eu".to_string())]),
+            })
+            .await
+            .expect_err("must fail");
+        assert_eq!(err.code(), Code::Unavailable);
+        assert_eq!(err.message(), "backend down");
+        assert_eq!(
+            err.metadata()
+                .get("x-rustybin-fail")
+                .and_then(|v| v.to_str().ok()),
+            Some("true")
+        );
+        let details = err.get_error_details();
+        let info = details.error_info().expect("ErrorInfo");
+        assert_eq!(info.reason, "MAINTENANCE");
+        assert_eq!(info.domain, "rustybin");
+        assert_eq!(info.metadata.get("region").map(String::as_str), Some("eu"));
+        let retry = details.retry_info().expect("RetryInfo");
+        assert_eq!(retry.retry_delay, Some(Duration::from_millis(1500)));
+
+        let ok = client
+            .fail(FailRequest {
+                code: 0,
+                ..FailRequest::default()
+            })
+            .await
+            .expect("code 0 succeeds");
+        assert_eq!(ok.into_inner().message, "OK");
+        let bad = client
+            .fail(FailRequest {
+                code: 42,
+                ..FailRequest::default()
+            })
+            .await
+            .expect_err("invalid code");
+        assert_eq!(bad.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn health_service_follows_http_toggle() {
+        use tonic_health::pb::health_check_response::ServingStatus as PbStatus;
+        use tonic_health::pb::health_client::HealthClient;
+        use tonic_health::pb::HealthCheckRequest;
+
+        let state = crate::test_support::test_state();
+        let (url, _) = spawn_with(state.clone()).await;
+        let channel = tonic::transport::Endpoint::from_shared(url)
+            .expect("endpoint")
+            .connect()
+            .await
+            .expect("connect");
+        let mut client = HealthClient::new(channel);
+        let check = |service: &str| HealthCheckRequest {
+            service: service.to_string(),
+        };
+
+        let status = |client: &mut HealthClient<tonic::transport::Channel>, svc: &'static str| {
+            let mut c = client.clone();
+            async move {
+                c.check(check(svc))
+                    .await
+                    .expect("check")
+                    .into_inner()
+                    .status
+            }
+        };
+        assert_eq!(status(&mut client, "").await, PbStatus::Serving as i32);
+        assert_eq!(
+            status(&mut client, ECHO_SERVICE_NAME).await,
+            PbStatus::Serving as i32
+        );
+
+        // Watch sees the transition triggered by the HTTP toggle.
+        let mut watch = client
+            .watch(check(ECHO_SERVICE_NAME))
+            .await
+            .expect("watch")
+            .into_inner();
+        let first = watch.next().await.expect("item").expect("ok");
+        assert_eq!(first.status, PbStatus::Serving as i32);
+        state.health.set(false);
+        let next = tokio::time::timeout(Duration::from_secs(5), watch.next())
+            .await
+            .expect("in time")
+            .expect("item")
+            .expect("ok");
+        assert_eq!(next.status, PbStatus::NotServing as i32);
+        assert_eq!(status(&mut client, "").await, PbStatus::NotServing as i32);
+        state.health.set(true);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(status(&mut client, "").await, PbStatus::Serving as i32);
+    }
+
+    #[tokio::test]
+    async fn reflection_lists_services_v1_and_v1alpha() {
+        let url = spawn().await;
+        let channel = tonic::transport::Endpoint::from_shared(url)
+            .expect("endpoint")
+            .connect()
+            .await
+            .expect("connect");
+
+        {
+            use tonic_reflection::pb::v1::server_reflection_client::ServerReflectionClient;
+            use tonic_reflection::pb::v1::server_reflection_request::MessageRequest;
+            use tonic_reflection::pb::v1::server_reflection_response::MessageResponse;
+            use tonic_reflection::pb::v1::ServerReflectionRequest;
+            let mut client = ServerReflectionClient::new(channel.clone());
+            let request = ServerReflectionRequest {
+                host: String::new(),
+                message_request: Some(MessageRequest::ListServices(String::new())),
+            };
+            let mut stream = client
+                .server_reflection_info(tokio_stream::iter(vec![request]))
+                .await
+                .expect("reflection")
+                .into_inner();
+            let resp = stream.next().await.expect("item").expect("ok");
+            let Some(MessageResponse::ListServicesResponse(list)) = resp.message_response else {
+                panic!("unexpected reflection response");
+            };
+            let names: Vec<String> = list.service.into_iter().map(|s| s.name).collect();
+            assert!(names.contains(&ECHO_SERVICE_NAME.to_string()), "{names:?}");
+            assert!(names.contains(&"grpc.health.v1.Health".to_string()));
+            assert!(names.contains(&"grpc.reflection.v1.ServerReflection".to_string()));
+
+            // The descriptor for our service resolves.
+            let request = ServerReflectionRequest {
+                host: String::new(),
+                message_request: Some(MessageRequest::FileContainingSymbol(
+                    ECHO_SERVICE_NAME.to_string(),
+                )),
+            };
+            let mut stream = client
+                .server_reflection_info(tokio_stream::iter(vec![request]))
+                .await
+                .expect("reflection")
+                .into_inner();
+            let resp = stream.next().await.expect("item").expect("ok");
+            assert!(matches!(
+                resp.message_response,
+                Some(MessageResponse::FileDescriptorResponse(_))
+            ));
+        }
+        {
+            use tonic_reflection::pb::v1alpha::server_reflection_client::ServerReflectionClient;
+            use tonic_reflection::pb::v1alpha::server_reflection_request::MessageRequest;
+            use tonic_reflection::pb::v1alpha::server_reflection_response::MessageResponse;
+            use tonic_reflection::pb::v1alpha::ServerReflectionRequest;
+            let mut client = ServerReflectionClient::new(channel);
+            let request = ServerReflectionRequest {
+                host: String::new(),
+                message_request: Some(MessageRequest::ListServices(String::new())),
+            };
+            let mut stream = client
+                .server_reflection_info(tokio_stream::iter(vec![request]))
+                .await
+                .expect("reflection")
+                .into_inner();
+            let resp = stream.next().await.expect("item").expect("ok");
+            assert!(matches!(
+                resp.message_response,
+                Some(MessageResponse::ListServicesResponse(_))
+            ));
+        }
+    }
+
+    /// grpc-web over plain HTTP/1.1: a framed protobuf request, the response
+    /// carries the message frame and a trailer frame with grpc-status.
+    #[tokio::test]
+    async fn grpc_web_over_http1() {
+        use prost::Message;
+        let (_, addr) = spawn_with(crate::test_support::test_state()).await;
+        let msg = req("web", 0).encode_to_vec();
+        let mut body = vec![0u8];
+        body.extend_from_slice(&(msg.len() as u32).to_be_bytes());
+        body.extend_from_slice(&msg);
+        let head = format!(
+            "POST /rustybin.echo.v1.EchoService/Echo HTTP/1.1\r\nHost: {addr}\r\n\
+             Content-Type: application/grpc-web+proto\r\nX-Grpc-Web: 1\r\n\
+             Origin: http://example.com\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        stream.write_all(head.as_bytes()).await.expect("write");
+        stream.write_all(&body).await.expect("write");
+        let mut raw = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut raw))
+            .await
+            .expect("in time")
+            .expect("read");
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+        assert!(text
+            .to_ascii_lowercase()
+            .contains("content-type: application/grpc-web+proto"));
+        assert!(text
+            .to_ascii_lowercase()
+            .contains("access-control-allow-origin: http://example.com"));
+        assert!(text.contains("grpc-status:0"), "{text}");
+        assert!(text.contains("web"));
     }
 }
