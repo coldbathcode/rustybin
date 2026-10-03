@@ -1,5 +1,14 @@
 # Contributing
 
+## License and CLA
+
+Rustybin is licensed under the AGPL-3.0, with a commercial license available
+(see `LICENSING.md` in the repository). To keep dual licensing possible, every
+contributor signs the Contributor License Agreement (`CLA.md`) once: a bot
+comments on your first pull request with a one-line sign-off. You keep the
+copyright in your contribution. The name and logo are covered by
+`TRADEMARKS.md`.
+
 ## Build and test
 
 ```bash

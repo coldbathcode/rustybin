@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.86"
 description = "HTTP stub service for API and AI gateway demos"
-license = "MIT"
+license = "AGPL-3.0-only"
 default-run = "rustybin"
 
 [lib]

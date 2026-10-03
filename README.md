@@ -470,3 +470,10 @@ gRPC `EchoService` listens on its own port (default `50051`), see
 | GET | `/export/k6.js` | k6 load-test script |
 | GET | `/export/har.json` | HAR archive |
 <!-- END ENDPOINTS -->
+
+## License
+
+Rustybin is open source under the [GNU AGPL-3.0](LICENSE), with a commercial
+license available for organisations that cannot use AGPL software. See
+[LICENSING.md](LICENSING.md), the [trademark policy](TRADEMARKS.md) and
+[CONTRIBUTING.md](CONTRIBUTING.md) (contributors sign the [CLA](CLA.md)).

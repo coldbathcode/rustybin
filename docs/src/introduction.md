@@ -57,3 +57,7 @@ required: if HTTPS or gRPC cannot start, Rustybin logs a warning and keeps servi
   look at in Rustybin for each capability.
 - `GET /` on a running instance lists every endpoint with a runnable example, and
   `/openapi.json` and `/docs` describe the HTTP API.
+
+Rustybin is open source under the GNU AGPL-3.0, with a commercial license for
+organisations that cannot use AGPL software (see `LICENSING.md` in the
+repository).
