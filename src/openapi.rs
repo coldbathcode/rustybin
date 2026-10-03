@@ -636,7 +636,7 @@ fn build_paths() -> Value {
             "get": {
                 "tags": [tag],
                 "summary": format!("{name} - echo request details"),
-                "description": format!("Returns all details of the incoming request: method, headers, query params, body. Supports all HTTP methods."),
+                "description": "Returns all details of the incoming request: method, headers, query params, body. Supports all HTTP methods.",
                 "operationId": format!("get{}", capitalize(name)),
                 "responses": {
                     "200": { "description": "Request details", "content": json_xml_content(json!({ "$ref": "#/components/schemas/EchoResponse" })) }

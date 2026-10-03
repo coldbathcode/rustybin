@@ -1,7 +1,11 @@
 name: Docs site
 
-# Build the mdBook documentation and publish it to GitHub Pages
-# (repository settings: Pages source "GitHub Actions").
+# Build the mdBook documentation on every docs change, and publish it to
+# GitHub Pages once Pages is set up. To enable publishing:
+#   1. Settings > Pages > Source: "GitHub Actions"
+#   2. Settings > Secrets and variables > Actions > Variables:
+#      add PAGES_ENABLED = true
+# Until then the book is still built and checked, but not deployed.
 on:
   push:
     branches: [main]
@@ -34,13 +38,19 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: python3 docs/tools/check_includes.py
       - run: mdbook build docs
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - name: Pages not enabled yet
+        if: vars.PAGES_ENABLED != 'true'
+        run: echo "::notice::Book built. Set the PAGES_ENABLED repository variable to true (after choosing Pages source 'GitHub Actions') to publish it."
+      - if: vars.PAGES_ENABLED == 'true'
+        uses: actions/configure-pages@v5
+      - if: vars.PAGES_ENABLED == 'true'
+        uses: actions/upload-pages-artifact@v3
         with:
           path: docs/book
 
   deploy:
     needs: build
+    if: vars.PAGES_ENABLED == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
