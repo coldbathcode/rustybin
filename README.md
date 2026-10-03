@@ -117,34 +117,38 @@ collection exports (`/export/*`). A test fails when they drift apart.
 
 | Methods | Path | Description |
 |---|---|---|
-| ANY | `/auth/hmac` | Validate an hmac-auth style signature (default alice / secret) |
+| ANY | `/auth/hmac` | Validate an hmac-auth / draft-cavage signature (default alice / secret) |
 | ANY | `/auth/hmac/{username}/{secret}` | HMAC validation with username and secret from the path |
 
 ### Auth: JWT
 
 | Methods | Path | Description |
 |---|---|---|
-| ANY | `/auth/jwt` | Decode and validate a Bearer JWT (structure, no signature check) |
-| ANY | `/auth/jwt/exchange` | Exchange a JWT for a new HS256-signed token |
+| ANY | `/auth/jwt` | Validate a Bearer JWT (HS256 demo secret or RS256 IdP key, exp/nbf, optional ?iss= ?aud=) |
+| ANY | `/auth/jwt/decode` | Decode a Bearer JWT WITHOUT validation (shows what the gateway forwarded) |
+| ANY | `/auth/jwt/exchange` | Exchange a valid JWT for a new HS256-signed token (same checks as /auth/jwt) |
 
 ### Auth: OIDC Provider
 
 | Methods | Path | Description |
 |---|---|---|
 | GET | `/.well-known/openid-configuration` | OIDC discovery document |
-| POST | `/oauth/token` | Token endpoint (client_credentials, password, authorization_code, refresh, token exchange) |
+| GET | `/.well-known/oauth-authorization-server` | OAuth 2.0 authorization server metadata (RFC 8414) |
+| POST | `/oauth/token` | Token endpoint (authorization_code + PKCE, refresh_token, client_credentials, password, token exchange) |
 | GET | `/oauth/jwks` | RS256 public key in JWK Set format |
-| GET POST | `/oauth/authorize` | Authorization code flow with a demo login form |
-| GET | `/oauth/userinfo` | User claims for a Bearer access token |
-| POST | `/oauth/introspect` | Token introspection (RFC 7662) |
+| GET POST | `/oauth/authorize` | Authorization code flow with a demo login form (PKCE, nonce, resource) |
+| GET POST | `/oauth/userinfo` | User claims for a Bearer access token (scope openid) |
+| POST | `/oauth/introspect` | Token introspection (RFC 7662, client authentication required) |
+| POST | `/oauth/revoke` | Token revocation (RFC 7009) for refresh and access tokens |
+| POST | `/oauth/register` | Dynamic client registration (RFC 7591, used by MCP clients) |
 
 ### Auth: mTLS
 
 | Methods | Path | Description |
 |---|---|---|
-| ANY | `/auth/mtls` | Validate the client certificate (TLS or forwarded header) |
+| ANY | `/auth/mtls` | Validate the client certificate (TLS peer certificate, or the RUSTYBIN_MTLS_IN_HEADER header) |
 | GET | `/auth/mtls/get-client-cert` | Download the demo client certificate and key |
-| GET | `/auth/mtls/get-ca-cert` | Download the demo CA certificate |
+| GET | `/auth/mtls/get-ca-cert` | Download the demo CA certificate (persisted across restarts when the cert dir is writable) |
 
 ### AI: OpenAI-compatible
 

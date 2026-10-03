@@ -24,6 +24,12 @@ const MODULE_PATHS: &[fn() -> Value] = &[
     crate::compression::openapi_paths,
     crate::transfer::openapi_paths,
     crate::jsonrpc::openapi_paths,
+    crate::auth_basic::openapi_paths,
+    crate::auth_apikey::openapi_paths,
+    crate::auth_hmac::openapi_paths,
+    crate::auth_jwt::openapi_paths,
+    crate::oidc::openapi_paths,
+    crate::auth_mtls::openapi_paths,
 ];
 
 /// Per-module OpenAPI components fragments (e.g. `{"schemas": {...}}`).
@@ -248,36 +254,6 @@ fn build_paths() -> Value {
             }
         }));
     }
-
-    // HMAC auth
-    paths.insert("/auth/hmac".into(), json!({
-        "get": {
-            "tags": ["Auth"],
-            "summary": "HMAC authentication (default credentials)",
-            "description": "Validates a gateway hmac-auth style `Authorization: hmac ...` header. Default credentials: username `alice`, secret `secret`. The signature is base64(HMAC(secret, signing-string)) where the signing string is built from the listed `headers` (default `date`), joined by newlines. Supports hmac-sha1/sha256/sha384/sha512.",
-            "operationId": "authHmac",
-            "responses": {
-                "200": { "description": "Signature valid", "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthResponse" })) },
-                "401": { "description": "Missing or invalid signature", "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthResponse" })) }
-            }
-        }
-    }));
-    paths.insert("/auth/hmac/{username}/{secret}".into(), json!({
-        "get": {
-            "tags": ["Auth"],
-            "summary": "HMAC authentication (custom credentials)",
-            "description": "Same as /auth/hmac but validates against the username and secret supplied in the path.",
-            "operationId": "authHmacCustom",
-            "parameters": [
-                { "name": "username", "in": "path", "required": true, "schema": { "type": "string" } },
-                { "name": "secret", "in": "path", "required": true, "schema": { "type": "string" } }
-            ],
-            "responses": {
-                "200": { "description": "Signature valid", "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthResponse" })) },
-                "401": { "description": "Missing or invalid signature", "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthResponse" })) }
-            }
-        }
-    }));
 
     // Anthropic-compatible AI messages
     paths.insert("/ai/anthropic/v1/messages".into(), json!({
@@ -1040,336 +1016,6 @@ fn build_paths() -> Value {
         }
     }));
 
-    // ── Auth ─────────────────────────────────────────────────────
-    paths.insert("/auth/basic-auth".into(), json!({
-        "get": {
-            "tags": ["Auth"],
-            "summary": "HTTP Basic authentication (default credentials)",
-            "description": "Validates HTTP Basic auth with default credentials (basic:password).",
-            "operationId": "getBasicAuth",
-            "security": [{ "basicAuth": [] }],
-            "responses": {
-                "200": { "description": "Authenticated", "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthResponse" })) },
-                "401": { "description": "Unauthorized", "headers": { "WWW-Authenticate": { "schema": { "type": "string" } } },
-                    "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthFailure" })) }
-            }
-        }
-    }));
-
-    paths.insert("/auth/basic-auth/{username}/{password}".into(), json!({
-        "get": {
-            "tags": ["Auth"],
-            "summary": "HTTP Basic authentication (custom credentials)",
-            "description": "Validates HTTP Basic auth with custom username and password.",
-            "operationId": "getBasicAuthCustom",
-            "security": [{ "basicAuth": [] }],
-            "parameters": [
-                { "name": "username", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Expected username" },
-                { "name": "password", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Expected password" }
-            ],
-            "responses": {
-                "200": { "description": "Authenticated", "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthResponse" })) },
-                "401": { "description": "Unauthorized", "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthFailure" })) }
-            }
-        }
-    }));
-
-    paths.insert("/auth/api-key".into(), json!({
-        "get": {
-            "tags": ["Auth"],
-            "summary": "API key authentication (default header)",
-            "description": "Validates API key in the 'apikey' header with default value 'my-key'.",
-            "operationId": "getApiKey",
-            "security": [{ "apiKeyAuth": [] }],
-            "responses": {
-                "200": { "description": "Authenticated", "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthResponse" })) },
-                "401": { "description": "Unauthorized", "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthFailure" })) }
-            }
-        }
-    }));
-
-    paths.insert("/auth/api-key/{header_name}/{key_value}".into(), json!({
-        "get": {
-            "tags": ["Auth"],
-            "summary": "API key authentication (custom header and value)",
-            "description": "Validates API key in a custom header with a custom value.",
-            "operationId": "getApiKeyCustom",
-            "parameters": [
-                { "name": "header_name", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Header name to check" },
-                { "name": "key_value", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Expected key value" }
-            ],
-            "responses": {
-                "200": { "description": "Authenticated", "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthResponse" })) },
-                "401": { "description": "Unauthorized", "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthFailure" })) }
-            }
-        }
-    }));
-
-    paths.insert("/auth/jwt".into(), json!({
-        "get": {
-            "tags": ["Auth"],
-            "summary": "JWT validation",
-            "description": "Decodes and returns JWT claims from the Authorization Bearer token. Validates structure but does not verify signature.",
-            "operationId": "getJwt",
-            "security": [{ "bearerAuth": [] }],
-            "responses": {
-                "200": { "description": "Token decoded", "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthResponse" })) },
-                "401": { "description": "Invalid token", "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthFailure" })) }
-            }
-        }
-    }));
-
-    paths.insert("/auth/jwt/exchange".into(), json!({
-        "post": {
-            "tags": ["Auth"],
-            "summary": "JWT token exchange",
-            "description": "Accepts a JWT, inherits its claims, and returns a new JWT signed by Rustybin (HS256). Adds iss, iat, jti, exp claims.",
-            "operationId": "postJwtExchange",
-            "security": [{ "bearerAuth": [] }],
-            "responses": {
-                "200": { "description": "Exchanged token",
-                    "content": json_xml_content(json!({
-                        "type": "object",
-                        "properties": {
-                            "authenticated": { "type": "boolean" },
-                            "auth_type": { "type": "string" },
-                            "claims": { "type": "object" },
-                            "exchanged_token": { "type": "string" }
-                        }
-                    }))
-                },
-                "401": { "description": "Invalid token" }
-            }
-        }
-    }));
-
-    // OIDC
-    paths.insert("/.well-known/openid-configuration".into(), json!({
-        "get": {
-            "tags": ["Auth"],
-            "summary": "OIDC discovery document",
-            "description": "Returns the OpenID Connect discovery document with all endpoint URLs.",
-            "operationId": "getOidcDiscovery",
-            "responses": { "200": { "description": "OIDC configuration" } }
-        }
-    }));
-
-    paths.insert(
-        "/oauth/jwks".into(),
-        json!({
-            "get": {
-                "tags": ["Auth"],
-                "summary": "JWKS endpoint",
-                "description": "Returns the JSON Web Key Set containing the RS256 public key.",
-                "operationId": "getJwks",
-                "responses": { "200": { "description": "JWKS" } }
-            }
-        }),
-    );
-
-    paths.insert("/oauth/token".into(), json!({
-        "post": {
-            "tags": ["Auth"],
-            "summary": "OAuth2 token endpoint",
-            "description": "Issues tokens for client_credentials, password, authorization_code, and RFC 8693 token-exchange grants.",
-            "operationId": "postOAuthToken",
-            "requestBody": {
-                "required": true,
-                "content": {
-                    "application/x-www-form-urlencoded": {
-                        "schema": {
-                            "type": "object",
-                            "required": ["grant_type"],
-                            "properties": {
-                                "grant_type": { "type": "string", "enum": ["client_credentials", "password", "authorization_code", "urn:ietf:params:oauth:grant-type:token-exchange"] },
-                                "client_id": { "type": "string" },
-                                "client_secret": { "type": "string" },
-                                "username": { "type": "string", "description": "For password grant" },
-                                "password": { "type": "string", "description": "For password grant" },
-                                "scope": { "type": "string" },
-                                "code": { "type": "string", "description": "For authorization_code grant" },
-                                "redirect_uri": { "type": "string", "description": "For authorization_code grant" },
-                                "subject_token": { "type": "string", "description": "RFC 8693: the token to exchange" },
-                                "subject_token_type": { "type": "string", "description": "RFC 8693: token type URI (e.g. urn:ietf:params:oauth:token-type:access_token)" },
-                                "actor_token": { "type": "string", "description": "RFC 8693: optional acting party token" },
-                                "actor_token_type": { "type": "string", "description": "RFC 8693: required if actor_token is present" },
-                                "audience": { "type": "string", "description": "RFC 8693: intended audience for the new token" },
-                                "resource": { "type": "string", "description": "RFC 8693: target service URI" },
-                                "requested_token_type": { "type": "string", "description": "RFC 8693: desired token type for the new token" }
-                            }
-                        }
-                    }
-                }
-            },
-            "responses": {
-                "200": { "description": "Token response",
-                    "content": json_xml_content(json!({
-                        "type": "object",
-                        "properties": {
-                            "access_token": { "type": "string" },
-                            "token_type": { "type": "string", "example": "Bearer" },
-                            "expires_in": { "type": "integer", "example": 3600 },
-                            "id_token": { "type": "string" },
-                            "scope": { "type": "string" }
-                        }
-                    }))
-                },
-                "400": { "description": "Invalid grant type or parameters" }
-            }
-        }
-    }));
-
-    paths.insert(
-        "/oauth/authorize".into(),
-        json!({
-            "get": {
-                "tags": ["Auth"],
-                "summary": "OAuth2 authorization endpoint (login form)",
-                "description": "Returns an HTML login form for the authorization code flow.",
-                "operationId": "getOAuthAuthorize",
-                "parameters": [
-                    { "name": "client_id", "in": "query", "schema": { "type": "string" } },
-                    { "name": "redirect_uri", "in": "query", "schema": { "type": "string" } },
-                    { "name": "response_type", "in": "query", "schema": { "type": "string" } },
-                    { "name": "scope", "in": "query", "schema": { "type": "string" } },
-                    { "name": "state", "in": "query", "schema": { "type": "string" } }
-                ],
-                "responses": { "200": { "description": "HTML login form" } }
-            },
-            "post": {
-                "tags": ["Auth"],
-                "summary": "OAuth2 authorization endpoint (submit login)",
-                "description": "Processes login and redirects with authorization code.",
-                "operationId": "postOAuthAuthorize",
-                "responses": { "303": { "description": "Redirect with authorization code" } }
-            }
-        }),
-    );
-
-    paths.insert(
-        "/oauth/userinfo".into(),
-        json!({
-            "get": {
-                "tags": ["Auth"],
-                "summary": "OIDC UserInfo endpoint",
-                "description": "Returns user claims from the access token.",
-                "operationId": "getOAuthUserinfo",
-                "security": [{ "bearerAuth": [] }],
-                "responses": {
-                    "200": { "description": "User info",
-                        "content": json_xml_content(json!({
-                            "type": "object",
-                            "properties": {
-                                "sub": { "type": "string" },
-                                "name": { "type": "string" },
-                                "email": { "type": "string" },
-                                "email_verified": { "type": "boolean" }
-                            }
-                        }))
-                    },
-                    "401": { "description": "Invalid or missing token" }
-                }
-            }
-        }),
-    );
-
-    paths.insert(
-        "/oauth/introspect".into(),
-        json!({
-            "post": {
-                "tags": ["Auth"],
-                "summary": "OAuth2 token introspection",
-                "description": "Introspects a token and returns its active status and claims.",
-                "operationId": "postOAuthIntrospect",
-                "requestBody": {
-                    "required": true,
-                    "content": {
-                        "application/x-www-form-urlencoded": {
-                            "schema": {
-                                "type": "object",
-                                "required": ["token"],
-                                "properties": {
-                                    "token": { "type": "string" },
-                                    "client_id": { "type": "string" },
-                                    "client_secret": { "type": "string" }
-                                }
-                            }
-                        }
-                    }
-                },
-                "responses": {
-                    "200": { "description": "Introspection result",
-                        "content": json_xml_content(json!({
-                            "type": "object",
-                            "properties": {
-                                "active": { "type": "boolean" },
-                                "sub": { "type": "string" },
-                                "scope": { "type": "string" },
-                                "exp": { "type": "integer" },
-                                "client_id": { "type": "string" }
-                            }
-                        }))
-                    }
-                }
-            }
-        }),
-    );
-
-    // mTLS
-    paths.insert("/auth/mtls".into(), json!({
-        "get": {
-            "tags": ["Auth"],
-            "summary": "Mutual TLS authentication",
-            "description": "Validates client certificate presented via TLS or header (RUSTYBIN_MTLS_IN_HEADER).",
-            "operationId": "getMtls",
-            "responses": {
-                "200": { "description": "Authenticated", "content": json_xml_content(json!({ "$ref": "#/components/schemas/AuthResponse" })) },
-                "401": { "description": "Missing or invalid client certificate" }
-            }
-        }
-    }));
-
-    paths.insert("/auth/mtls/get-client-cert".into(), json!({
-        "get": {
-            "tags": ["Auth"],
-            "summary": "Get demo client certificate",
-            "description": "Returns a demo client certificate and private key for testing mTLS.",
-            "operationId": "getMtlsClientCert",
-            "responses": {
-                "200": { "description": "Client cert and key PEM",
-                    "content": json_xml_content(json!({
-                        "type": "object",
-                        "properties": {
-                            "cert_pem": { "type": "string" },
-                            "key_pem": { "type": "string" },
-                            "usage": { "type": "string" }
-                        }
-                    }))
-                }
-            }
-        }
-    }));
-
-    paths.insert("/auth/mtls/get-ca-cert".into(), json!({
-        "get": {
-            "tags": ["Auth"],
-            "summary": "Get demo CA certificate",
-            "description": "Returns the demo CA certificate for configuring trust in your API gateway.",
-            "operationId": "getMtlsCaCert",
-            "responses": {
-                "200": { "description": "CA certificate PEM",
-                    "content": json_xml_content(json!({
-                        "type": "object",
-                        "properties": {
-                            "ca_cert_pem": { "type": "string" },
-                            "usage": { "type": "string" }
-                        }
-                    }))
-                }
-            }
-        }
-    }));
-
     // ── AI Gateway ──────────────────────────────────────────────
     paths.insert("/ai/v1/chat/completions".into(), json!({
         "post": {
@@ -1658,7 +1304,7 @@ fn build_components() -> Value {
                 "type": "object",
                 "properties": {
                     "authenticated": { "type": "boolean" },
-                    "auth_type": { "type": "string", "enum": ["basic-auth", "api-key", "jwt", "mtls"] },
+                    "auth_type": { "type": "string", "enum": ["basic-auth", "api-key", "hmac", "jwt", "mtls"] },
                     "username": { "type": "string", "nullable": true },
                     "header": { "type": "string", "nullable": true },
                     "claims": { "type": "object", "nullable": true },
@@ -1830,7 +1476,7 @@ fn build_components() -> Value {
 
 // ── Helpers ─────────────────────────────────────────────────────
 
-fn json_xml_content(schema: Value) -> Value {
+pub(crate) fn json_xml_content(schema: Value) -> Value {
     json!({
         "application/json": { "schema": schema },
         "application/xml": { "schema": schema }
