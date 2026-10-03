@@ -10,7 +10,7 @@ use base64::Engine;
 use crate::catalog::{category, Endpoint, Example};
 use crate::content_negotiation::{negotiate, negotiate_with_status};
 use crate::state::AppState;
-use crate::types::{AuthFailure, AuthResponse};
+use crate::types::{constant_time_eq, AuthFailure, AuthResponse};
 
 const DEFAULT_USERNAME: &str = "basic";
 const DEFAULT_PASSWORD: &str = "password";
@@ -28,66 +28,52 @@ async fn basic_auth_custom(
     check_basic_auth(&headers, &username, &password)
 }
 
+/// `(user, password)` from an `Authorization: Basic ...` header (scheme
+/// matched case-insensitively).
+pub fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?.trim();
+    let (scheme, encoded) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .ok()?;
+    let decoded = String::from_utf8(bytes).ok()?;
+    let (user, pass) = decoded.split_once(':')?;
+    Some((user.to_string(), pass.to_string()))
+}
+
 fn check_basic_auth(headers: &HeaderMap, expected_user: &str, expected_pass: &str) -> Response {
-    let auth_header = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
-
-    let Some(auth_value) = auth_header else {
+    let Some((username, password)) = basic_credentials(headers) else {
         return unauthorized(headers);
     };
 
-    let Some(encoded) = auth_value.strip_prefix("Basic ") else {
-        return unauthorized(headers);
-    };
-
-    let decoded = match base64::engine::general_purpose::STANDARD.decode(encoded.trim()) {
-        Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(_) => return unauthorized(headers),
-        },
-        Err(_) => return unauthorized(headers),
-    };
-
-    let Some((username, password)) = decoded.split_once(':') else {
-        return unauthorized(headers);
-    };
-
-    if username != expected_user || password != expected_pass {
+    // Evaluate both comparisons so timing does not reveal which one failed.
+    let user_ok = constant_time_eq(username.as_bytes(), expected_user.as_bytes());
+    let pass_ok = constant_time_eq(password.as_bytes(), expected_pass.as_bytes());
+    if !(user_ok & pass_ok) {
         return unauthorized(headers);
     }
 
     negotiate(
         headers,
         &AuthResponse {
-            authenticated: true,
-            auth_type: "basic-auth".to_string(),
-            username: Some(username.to_string()),
-            header: None,
-            claims: None,
-            jwt_header: None,
-            client_dn: None,
-            client_ca: None,
+            username: Some(username),
+            ..AuthResponse::ok("basic-auth")
         },
     )
 }
 
 fn unauthorized(headers: &HeaderMap) -> Response {
-    let body = negotiate_with_status(
+    let mut resp = negotiate_with_status(
         headers,
-        &AuthFailure {
-            authenticated: false,
-            error: "unauthorized".to_string(),
-        },
+        &AuthFailure::new("unauthorized"),
         StatusCode::UNAUTHORIZED,
     );
-
-    // Add WWW-Authenticate header
-    let (parts, body_inner) = body.into_parts();
-    let mut resp = Response::from_parts(parts, body_inner);
     resp.headers_mut().insert(
         header::WWW_AUTHENTICATE,
-        HeaderValue::from_static("Basic realm=\"rustybin\""),
+        HeaderValue::from_static("Basic realm=\"rustybin\", charset=\"UTF-8\""),
     );
     resp
 }
@@ -111,6 +97,10 @@ pub fn catalog() -> Vec<Endpoint> {
             category::AUTH_BASIC,
             "HTTP Basic auth (default user basic, password password)",
         )
+        .description(
+            "Default credentials: user `basic`, password `password`. 401 responses carry \
+             `WWW-Authenticate: Basic realm=\"rustybin\"`. Comparisons are constant time.",
+        )
         .example(
             Example::get("Basic auth (default)", "/auth/basic-auth").basic("basic", "password"),
         ),
@@ -125,6 +115,39 @@ pub fn catalog() -> Vec<Endpoint> {
                 .basic("alice", "secret"),
         ),
     ]
+}
+
+pub fn openapi_paths() -> serde_json::Value {
+    use serde_json::json;
+    let ok =
+        crate::openapi::json_xml_content(json!({ "$ref": "#/components/schemas/AuthResponse" }));
+    let unauthorized = json!({
+        "description": "Unauthorized",
+        "headers": { "WWW-Authenticate": { "schema": { "type": "string", "example": "Basic realm=\"rustybin\", charset=\"UTF-8\"" } } },
+        "content": crate::openapi::json_xml_content(json!({ "$ref": "#/components/schemas/AuthFailure" }))
+    });
+    json!({
+        "/auth/basic-auth": { "get": {
+            "tags": ["Auth"],
+            "summary": "HTTP Basic authentication (default credentials)",
+            "description": "Validates HTTP Basic auth with the default credentials basic:password.",
+            "operationId": "getBasicAuth",
+            "security": [{ "basicAuth": [] }],
+            "responses": { "200": { "description": "Authenticated", "content": ok }, "401": unauthorized }
+        }},
+        "/auth/basic-auth/{username}/{password}": { "get": {
+            "tags": ["Auth"],
+            "summary": "HTTP Basic authentication (custom credentials)",
+            "description": "Validates HTTP Basic auth against the username and password given in the path.",
+            "operationId": "getBasicAuthCustom",
+            "security": [{ "basicAuth": [] }],
+            "parameters": [
+                { "name": "username", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Expected username" },
+                { "name": "password", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Expected password" }
+            ],
+            "responses": { "200": { "description": "Authenticated", "content": ok }, "401": unauthorized }
+        }}
+    })
 }
 
 #[cfg(test)]
@@ -226,6 +249,22 @@ mod tests {
         let json = json_body(resp).await;
         assert_eq!(json["authenticated"], true);
         assert_eq!(json["username"], "alice");
+    }
+
+    #[tokio::test]
+    async fn lowercase_scheme_accepted() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode("basic:password");
+        let resp = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/basic-auth")
+                    .header("authorization", format!("basic {encoded}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

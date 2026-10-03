@@ -1,3 +1,11 @@
+//! `/auth/mtls*`: client certificate authentication.
+//!
+//! On the HTTPS listener the TLS peer certificate (already verified against
+//! the demo CA during the handshake) is used. Otherwise, when
+//! `RUSTYBIN_MTLS_IN_HEADER` names a header, a gateway that terminated mTLS
+//! can forward the client certificate there (URL-encoded PEM, raw PEM or
+//! base64 DER); it is verified against the demo CA and its validity period.
+
 use axum::{
     extract::{Extension, State},
     http::{HeaderMap, StatusCode},
@@ -5,13 +13,16 @@ use axum::{
     routing::{any, get},
     Router,
 };
+use base64::Engine;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use crate::catalog::{category, Endpoint, Example};
 use crate::cert_state::CertState;
 use crate::config::Config;
 use crate::content_negotiation::{negotiate, negotiate_with_status};
+use crate::server::TlsConnectionInfo;
 use crate::state::AppState;
 use crate::types::{AuthFailure, AuthResponse};
 
@@ -32,15 +43,89 @@ struct CaCertResponse {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-fn parse_cert_dns(pem_data: &[u8]) -> Result<(String, String), String> {
-    let (_, pem) =
-        x509_parser::pem::parse_x509_pem(pem_data).map_err(|e| format!("PEM parse error: {e}"))?;
-    let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents)
-        .map_err(|e| format!("X509 parse error: {e}"))?;
+const PEM_BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+const PEM_END: &str = "-----END CERTIFICATE-----";
 
-    let subject = cert.subject().to_string();
-    let issuer = cert.issuer().to_string();
-    Ok((subject, issuer))
+/// Percent-decode (`%XX`) into bytes, then UTF-8. `+` is kept literally
+/// because it is a base64 character in PEM bodies.
+fn percent_decode(input: &str) -> Result<String, &'static str> {
+    String::from_utf8(crate::types::percent_decode(input, false))
+        .map_err(|_| "certificate header is not UTF-8 after URL decoding")
+}
+
+/// DER of a certificate forwarded in a header: URL-encoded or raw PEM
+/// (newlines may be replaced by spaces), or bare base64 DER.
+fn decode_header_cert(value: &str) -> Result<Vec<u8>, &'static str> {
+    let decoded = percent_decode(value.trim())?;
+    // Form encoding turns the spaces of the PEM markers into '+'.
+    let text = decoded
+        .replace("-----BEGIN+CERTIFICATE-----", PEM_BEGIN)
+        .replace("-----END+CERTIFICATE-----", PEM_END);
+    let body = match text.find(PEM_BEGIN) {
+        Some(start) => {
+            let after = &text[start + PEM_BEGIN.len()..];
+            let end = after
+                .find(PEM_END)
+                .ok_or("PEM certificate has no END marker")?;
+            &after[..end]
+        }
+        None => text.as_str(),
+    };
+    let b64: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(b64.as_bytes())
+        .map_err(|_| "certificate is neither PEM nor base64 DER")
+}
+
+/// Subject, issuer and details of a DER certificate.
+fn describe_cert(der: &[u8]) -> Result<(String, String, serde_json::Value), &'static str> {
+    let (_, cert) =
+        x509_parser::parse_x509_certificate(der).map_err(|_| "not a valid X.509 certificate")?;
+    let fingerprint: String = Sha256::digest(der)
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(":");
+    let details = serde_json::json!({
+        "serial": cert.raw_serial_as_string(),
+        "not_before": cert.validity().not_before.to_rfc2822().unwrap_or_default(),
+        "not_after": cert.validity().not_after.to_rfc2822().unwrap_or_default(),
+        "sha256_fingerprint": fingerprint,
+    });
+    Ok((
+        cert.subject().to_string(),
+        cert.issuer().to_string(),
+        details,
+    ))
+}
+
+fn unauthorized(headers: &HeaderMap, error: String) -> Response {
+    negotiate_with_status(headers, &AuthFailure::new(error), StatusCode::UNAUTHORIZED)
+}
+
+fn authenticated(
+    headers: &HeaderMap,
+    der: &[u8],
+    source: &str,
+    header_name: Option<&str>,
+) -> Response {
+    let (subject, issuer, mut details) = match describe_cert(der) {
+        Ok(d) => d,
+        Err(e) => return unauthorized(headers, format!("invalid_certificate: {e}")),
+    };
+    if let Some(obj) = details.as_object_mut() {
+        obj.insert("source".into(), source.into());
+    }
+    negotiate(
+        headers,
+        &AuthResponse {
+            header: header_name.map(String::from),
+            claims: Some(details),
+            client_dn: Some(subject),
+            client_ca: Some(issuer),
+            ..AuthResponse::ok("mtls")
+        },
+    )
 }
 
 // ── Handlers ────────────────────────────────────────────────────────
@@ -48,95 +133,47 @@ fn parse_cert_dns(pem_data: &[u8]) -> Result<(String, String), String> {
 async fn mtls_handler(
     State(config): State<Arc<Config>>,
     Extension(cert_state): Extension<Arc<CertState>>,
+    tls: Option<Extension<TlsConnectionInfo>>,
     headers: HeaderMap,
 ) -> Response {
-    // Header mode: read cert from configured header
-    if let Some(ref header_name) = config.mtls_in_header {
-        if let Some(cert_header) = headers.get(header_name.as_str()) {
-            let cert_value = match cert_header.to_str() {
-                Ok(v) => v,
-                Err(_) => {
-                    return negotiate_with_status(
-                        &headers,
-                        &AuthFailure {
-                            authenticated: false,
-                            error: "unauthorized".to_string(),
-                        },
-                        StatusCode::UNAUTHORIZED,
-                    );
-                }
-            };
-
-            // URL-decode the PEM
-            let pem_str = match form_urlencoded::parse(cert_value.as_bytes())
-                .map(|(k, v)| {
-                    if v.is_empty() {
-                        k.into_owned()
-                    } else {
-                        format!("{k}={v}")
-                    }
-                })
-                .next()
-            {
-                Some(decoded) => decoded,
-                None => cert_value.to_string(),
-            };
-
-            // If it doesn't look like PEM, try raw URL decode
-            let pem_str = if pem_str.contains("BEGIN CERTIFICATE") {
-                pem_str
-            } else {
-                urldecode(cert_value)
-            };
-
-            return match parse_cert_dns(pem_str.as_bytes()) {
-                Ok((subject, issuer)) => negotiate(
-                    &headers,
-                    &AuthResponse {
-                        authenticated: true,
-                        auth_type: "mtls".to_string(),
-                        username: None,
-                        header: None,
-                        claims: None,
-                        jwt_header: None,
-                        client_dn: Some(subject),
-                        client_ca: Some(issuer),
-                    },
-                ),
-                Err(e) => negotiate_with_status(
-                    &headers,
-                    &AuthFailure {
-                        authenticated: false,
-                        error: format!("invalid_certificate: {e}"),
-                    },
-                    StatusCode::UNAUTHORIZED,
-                ),
-            };
-        }
-
-        // Header configured but not present
-        return negotiate_with_status(
-            &headers,
-            &AuthFailure {
-                authenticated: false,
-                error: "unauthorized".to_string(),
-            },
-            StatusCode::UNAUTHORIZED,
-        );
+    // 1. TLS peer certificate (verified against the demo CA in the handshake).
+    if let Some(der) = tls.as_ref().and_then(|t| t.peer_certificate.clone()) {
+        return authenticated(&headers, &der, "tls", None);
     }
 
-    // No header mode configured - check if we can detect a known client cert
-    // In production, this would extract from the TLS handshake.
-    // For demo purposes, return 401 with a helpful message.
-    let _ = cert_state; // available for future TLS peer cert extraction
+    // 2. Header mode: certificate forwarded by a gateway.
+    if let Some(header_name) = config.mtls_in_header.as_deref() {
+        let Some(value) = headers.get(header_name) else {
+            return unauthorized(
+                &headers,
+                format!("unauthorized: no client certificate in the {header_name} header"),
+            );
+        };
+        let Ok(value) = value.to_str() else {
+            return unauthorized(&headers, "invalid_certificate: header is not ASCII".into());
+        };
+        let der = match decode_header_cert(value) {
+            Ok(der) => der,
+            Err(e) => return unauthorized(&headers, format!("invalid_certificate: {e}")),
+        };
+        if let Err(e) = cert_state.verify_client_cert(&der) {
+            return unauthorized(
+                &headers,
+                format!("untrusted_certificate: not a valid certificate from the demo CA ({e})"),
+            );
+        }
+        return authenticated(&headers, &der, "header", Some(header_name));
+    }
+
     negotiate_with_status(
         &headers,
         &crate::types::ErrorResponse {
             error: "unauthorized".to_string(),
             details: Some(
-                "No client certificate found. Set RUSTYBIN_MTLS_IN_HEADER to a header name \
-                 (e.g. X-Client-Cert) for header-based mTLS, or use the HTTPS listener with \
-                 a client certificate."
+                "No client certificate found. Call the HTTPS listener with a client certificate \
+                 issued by the demo CA (/auth/mtls/get-client-cert), or set \
+                 RUSTYBIN_MTLS_IN_HEADER to the header your gateway forwards the certificate in \
+                 (e.g. X-Client-Cert)."
                     .to_string(),
             ),
         },
@@ -153,7 +190,7 @@ async fn get_client_cert(
         &ClientCertResponse {
             cert_pem: cert_state.client_cert_pem.clone(),
             key_pem: cert_state.client_key_pem.clone(),
-            usage: "curl --cert client.crt --key client.key https://localhost:443/auth/mtls"
+            usage: "curl --cacert ca.crt --cert client.crt --key client.key https://localhost/auth/mtls"
                 .to_string(),
         },
     )
@@ -172,44 +209,14 @@ async fn get_ca_cert(
     )
 }
 
-fn urldecode(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let mut chars = input.bytes();
-    while let Some(b) = chars.next() {
-        if b == b'%' {
-            let hi = chars.next().unwrap_or(b'0');
-            let lo = chars.next().unwrap_or(b'0');
-            let hex = [hi, lo];
-            if let Ok(s) = std::str::from_utf8(&hex) {
-                if let Ok(val) = u8::from_str_radix(s, 16) {
-                    result.push(val as char);
-                    continue;
-                }
-            }
-            result.push('%');
-            result.push(hi as char);
-            result.push(lo as char);
-        } else if b == b'+' {
-            result.push(' ');
-        } else {
-            result.push(b as char);
-        }
-    }
-    result
-}
-
 // ── Router ──────────────────────────────────────────────────────────
 
 pub fn router(state: &AppState) -> Router<AppState> {
-    routes(state.certs.clone())
-}
-
-fn routes(cert_state: Arc<CertState>) -> Router<AppState> {
     Router::new()
         .route("/auth/mtls", any(mtls_handler))
         .route("/auth/mtls/get-client-cert", get(get_client_cert))
         .route("/auth/mtls/get-ca-cert", get(get_ca_cert))
-        .layer(Extension(cert_state))
+        .layer(Extension(state.certs.clone()))
 }
 
 pub fn catalog() -> Vec<Endpoint> {
@@ -218,7 +225,12 @@ pub fn catalog() -> Vec<Endpoint> {
             "/auth/mtls",
             &["ANY"],
             category::AUTH_MTLS,
-            "Validate the client certificate (TLS or forwarded header)",
+            "Validate the client certificate (TLS peer certificate, or the RUSTYBIN_MTLS_IN_HEADER header)",
+        )
+        .description(
+            "On the HTTPS listener the verified TLS client certificate is used. Otherwise, when \
+             RUSTYBIN_MTLS_IN_HEADER is set, the certificate forwarded by the gateway in that header \
+             (URL-encoded PEM, PEM or base64 DER) must be issued by the demo CA and currently valid.",
         )
         .example(Example::get("Validate client cert", "/auth/mtls")),
         Endpoint::new(
@@ -235,54 +247,99 @@ pub fn catalog() -> Vec<Endpoint> {
             "/auth/mtls/get-ca-cert",
             &["GET"],
             category::AUTH_MTLS,
-            "Download the demo CA certificate",
+            "Download the demo CA certificate (persisted across restarts when the cert dir is writable)",
         )
         .example(Example::get("Get CA cert", "/auth/mtls/get-ca-cert")),
     ]
 }
 
+pub fn openapi_paths() -> serde_json::Value {
+    use serde_json::json;
+    json!({
+        "/auth/mtls": { "get": {
+            "tags": ["Auth"],
+            "summary": "Mutual TLS authentication",
+            "description": "Uses the TLS client certificate on the HTTPS listener (verified against the demo CA during the handshake). Otherwise, when RUSTYBIN_MTLS_IN_HEADER is set, reads the certificate forwarded in that header (URL-encoded PEM, PEM or base64 DER) and verifies it was issued by the demo CA and is within its validity period.",
+            "operationId": "getMtls",
+            "responses": {
+                "200": { "description": "Authenticated", "content": crate::openapi::json_xml_content(json!({ "$ref": "#/components/schemas/AuthResponse" })) },
+                "401": { "description": "Missing, invalid or untrusted client certificate" }
+            }
+        }},
+        "/auth/mtls/get-client-cert": { "get": {
+            "tags": ["Auth"],
+            "summary": "Get demo client certificate",
+            "description": "Returns a demo client certificate (CN demo-client, issued by the demo CA) and its private key.",
+            "operationId": "getMtlsClientCert",
+            "responses": {
+                "200": { "description": "Client cert and key PEM",
+                    "content": crate::openapi::json_xml_content(json!({
+                        "type": "object",
+                        "properties": {
+                            "cert_pem": { "type": "string" },
+                            "key_pem": { "type": "string" },
+                            "usage": { "type": "string" }
+                        }
+                    }))
+                }
+            }
+        }},
+        "/auth/mtls/get-ca-cert": { "get": {
+            "tags": ["Auth"],
+            "summary": "Get demo CA certificate",
+            "description": "Returns the demo CA certificate for configuring trust in your API gateway. The CA is persisted next to the TLS certificate when that directory is writable.",
+            "operationId": "getMtlsCaCert",
+            "responses": {
+                "200": { "description": "CA certificate PEM",
+                    "content": crate::openapi::json_xml_content(json!({
+                        "type": "object",
+                        "properties": {
+                            "ca_cert_pem": { "type": "string" },
+                            "usage": { "type": "string" }
+                        }
+                    }))
+                }
+            }
+        }}
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{body_json, module_app_with_config, test_config};
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_config_with_header(header: Option<&str>) -> AppState {
-        let mut config = crate::test_support::test_config();
-        config.mtls_in_header = header.map(|s| s.to_string());
-        crate::test_support::test_state_with(config)
+    fn app(header: Option<&str>) -> Router {
+        let mut config = test_config();
+        config.mtls_in_header = header.map(String::from);
+        module_app_with_config(config, router)
     }
 
-    fn test_cert_state() -> Arc<CertState> {
-        // Generate a real cert state for testing
-        Arc::new(CertState {
-            ca_cert_pem: "-----BEGIN CERTIFICATE-----\ntest-ca\n-----END CERTIFICATE-----"
-                .to_string(),
-            client_cert_pem: "-----BEGIN CERTIFICATE-----\ntest-client\n-----END CERTIFICATE-----"
-                .to_string(),
-            client_key_pem: "-----BEGIN PRIVATE KEY-----\ntest-key\n-----END PRIVATE KEY-----"
-                .to_string(),
-            server_cert_pem: String::new(),
-            server_key_pem: String::new(),
-        })
+    fn request(header: Option<(&str, &str)>) -> Request<Body> {
+        let mut b = Request::builder().uri("/auth/mtls");
+        if let Some((k, v)) = header {
+            b = b.header(k, v);
+        }
+        b.body(Body::empty()).expect("request")
     }
 
-    fn test_app(header: Option<&str>) -> Router {
-        routes(test_cert_state()).with_state(test_config_with_header(header))
-    }
-
-    async fn json_body(resp: axum::http::Response<Body>) -> serde_json::Value {
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        serde_json::from_slice(&body).expect("json")
+    fn url_encode(s: &str) -> String {
+        s.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect()
     }
 
     #[tokio::test]
-    async fn get_client_cert_returns_pem() {
-        let app = test_app(None);
-        let resp = app
+    async fn get_client_and_ca_cert() {
+        let resp = app(None)
             .oneshot(
                 Request::builder()
                     .uri("/auth/mtls/get-client-cert")
@@ -291,163 +348,118 @@ mod tests {
             )
             .await
             .expect("response");
-
         assert_eq!(resp.status(), StatusCode::OK);
-        let json = json_body(resp).await;
+        let json = body_json(resp).await;
         assert!(json["cert_pem"]
             .as_str()
-            .expect("cert")
+            .unwrap_or("")
             .contains("CERTIFICATE"));
-        assert!(json["key_pem"].as_str().expect("key").contains("KEY"));
-        assert!(json["usage"].is_string());
-    }
+        assert!(json["key_pem"].as_str().unwrap_or("").contains("KEY"));
 
-    #[tokio::test]
-    async fn get_ca_cert_returns_pem() {
-        let app = test_app(None);
-        let resp = app
+        let resp = app(None)
             .oneshot(
                 Request::builder()
                     .uri("/auth/mtls/get-ca-cert")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let json = json_body(resp).await;
-        assert!(json["ca_cert_pem"]
-            .as_str()
-            .expect("ca")
-            .contains("CERTIFICATE"));
-    }
-
-    #[tokio::test]
-    async fn mtls_no_header_configured_returns_401() {
-        let app = test_app(None);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/auth/mtls")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn mtls_header_configured_but_missing_returns_401() {
-        let app = test_app(Some("X-Client-Cert"));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/auth/mtls")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn mtls_header_with_valid_cert() {
-        // Generate a real cert for this test
-        let cert_state = crate::cert_state::CertState::shared_for_tests();
-        let config = test_config_with_header(Some("X-Client-Cert"));
-        let app = routes(cert_state.clone()).with_state(config);
-
-        // URL-encode the client cert PEM
-        let encoded: String = form_urlencoded::Serializer::new(String::new())
-            .append_key_only(&cert_state.client_cert_pem)
-            .finish();
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/auth/mtls")
-                    .header("X-Client-Cert", &encoded)
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let json = json_body(resp).await;
-        assert_eq!(json["authenticated"], true);
-        assert_eq!(json["auth_type"], "mtls");
-        assert!(json["client_dn"]
-            .as_str()
-            .expect("dn")
-            .contains("demo-client"));
-        assert!(json["client_ca"]
-            .as_str()
-            .expect("ca")
-            .contains("Rustybin Demo CA"));
-    }
-
-    #[tokio::test]
-    async fn mtls_header_with_invalid_cert_returns_401() {
-        let app = test_app(Some("X-Client-Cert"));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/auth/mtls")
-                    .header("X-Client-Cert", "not-a-valid-cert")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn mtls_post_method_works() {
-        let app = test_app(None);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/auth/mtls")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        // Returns 401 (no cert) but the route accepts POST
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn get_client_cert_xml_negotiation() {
-        let app = test_app(None);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/auth/mtls/get-client-cert")
                     .header("accept", "application/xml")
                     .body(Body::empty())
                     .expect("request"),
             )
             .await
             .expect("response");
-
         assert_eq!(
             resp.headers()
                 .get("content-type")
-                .expect("ct")
-                .to_str()
-                .expect("str"),
-            "application/xml"
+                .and_then(|v| v.to_str().ok()),
+            Some("application/xml")
         );
+    }
+
+    #[tokio::test]
+    async fn no_certificate_is_401() {
+        let resp = app(None).oneshot(request(None)).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let resp = app(Some("X-Client-Cert"))
+            .oneshot(request(None))
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn header_mode_accepts_demo_ca_cert_in_several_encodings() {
+        let certs = CertState::shared_for_tests();
+        let pem = certs.client_cert_pem.clone();
+        let form: String = form_urlencoded::Serializer::new(String::new())
+            .append_key_only(&pem)
+            .finish();
+        let der = crate::cert_state::pem_to_der(&pem).expect("der");
+        let encodings = [
+            url_encode(&pem),
+            form,
+            pem.replace('\n', " "),
+            base64::engine::general_purpose::STANDARD.encode(der),
+        ];
+        for value in encodings {
+            let resp = app(Some("X-Client-Cert"))
+                .oneshot(request(Some(("X-Client-Cert", &value))))
+                .await
+                .expect("response");
+            assert_eq!(resp.status(), StatusCode::OK, "{value}");
+            let json = body_json(resp).await;
+            assert_eq!(json["auth_type"], "mtls");
+            assert_eq!(json["claims"]["source"], "header");
+            assert!(json["client_dn"]
+                .as_str()
+                .unwrap_or("")
+                .contains("demo-client"));
+            assert!(json["client_ca"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Rustybin Demo CA"));
+        }
+    }
+
+    #[tokio::test]
+    async fn header_mode_rejects_foreign_ca_and_garbage() {
+        // Same subject names, but issued by a different CA.
+        let foreign = CertState::generate();
+        for value in [
+            url_encode(&foreign.client_cert_pem),
+            "not-a-valid-cert".into(),
+        ] {
+            let resp = app(Some("X-Client-Cert"))
+                .oneshot(request(Some(("X-Client-Cert", &value))))
+                .await
+                .expect("response");
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn tls_peer_certificate_is_used_first() {
+        let certs = CertState::shared_for_tests();
+        let der = crate::cert_state::pem_to_der(&certs.client_cert_pem).expect("der");
+        let mut req = request(None);
+        req.extensions_mut().insert(TlsConnectionInfo {
+            peer_certificate: Some(Arc::new(der)),
+        });
+        let resp = app(Some("X-Client-Cert"))
+            .oneshot(req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["claims"]["source"], "tls");
+    }
+
+    #[test]
+    fn percent_decode_handles_multibyte_utf8() {
+        assert_eq!(
+            percent_decode("caf%C3%A9%20%2B+x").expect("utf8"),
+            "café ++x"
+        );
+        assert_eq!(percent_decode("100%").expect("utf8"), "100%");
+        assert_eq!(percent_decode("%zz%4").expect("utf8"), "%zz%4");
+        assert!(percent_decode("%FF").is_err());
     }
 }

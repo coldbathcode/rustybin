@@ -9,7 +9,7 @@ use axum::{
 use crate::catalog::{category, Endpoint, Example};
 use crate::content_negotiation::{negotiate, negotiate_with_status};
 use crate::state::AppState;
-use crate::types::{AuthFailure, AuthResponse};
+use crate::types::{constant_time_eq, AuthFailure, AuthResponse};
 
 const DEFAULT_HEADER: &str = "apikey";
 const DEFAULT_KEY: &str = "my-key";
@@ -37,24 +37,13 @@ fn check_apikey(headers: &HeaderMap, expected_header: &str, expected_key: &str) 
         }
     });
 
-    let Some(key) = provided_key else {
+    let valid = provided_key
+        .as_deref()
+        .is_some_and(|key| constant_time_eq(key.as_bytes(), expected_key.as_bytes()));
+    if !valid {
         return negotiate_with_status(
             headers,
-            &AuthFailure {
-                authenticated: false,
-                error: "unauthorized".to_string(),
-            },
-            StatusCode::UNAUTHORIZED,
-        );
-    };
-
-    if key != expected_key {
-        return negotiate_with_status(
-            headers,
-            &AuthFailure {
-                authenticated: false,
-                error: "unauthorized".to_string(),
-            },
+            &AuthFailure::new("unauthorized"),
             StatusCode::UNAUTHORIZED,
         );
     }
@@ -62,14 +51,8 @@ fn check_apikey(headers: &HeaderMap, expected_header: &str, expected_key: &str) 
     negotiate(
         headers,
         &AuthResponse {
-            authenticated: true,
-            auth_type: "api-key".to_string(),
-            username: None,
             header: Some(expected_header.to_string()),
-            claims: None,
-            jwt_header: None,
-            client_dn: None,
-            client_ca: None,
+            ..AuthResponse::ok("api-key")
         },
     )
 }
@@ -93,6 +76,10 @@ pub fn catalog() -> Vec<Endpoint> {
             category::AUTH_BASIC,
             "API key in a header (default apikey: my-key)",
         )
+        .description(
+            "Default: header `apikey` with value `my-key` (header name matched \
+             case-insensitively, value compared in constant time).",
+        )
         .example(Example::get("API key (default)", "/auth/api-key").header("apikey", "my-key")),
         Endpoint::new(
             "/auth/api-key/{header_name}/{key_value}",
@@ -105,6 +92,41 @@ pub fn catalog() -> Vec<Endpoint> {
                 .header("x-token", "s3cret"),
         ),
     ]
+}
+
+pub fn openapi_paths() -> serde_json::Value {
+    use serde_json::json;
+    let ok =
+        crate::openapi::json_xml_content(json!({ "$ref": "#/components/schemas/AuthResponse" }));
+    let fail =
+        crate::openapi::json_xml_content(json!({ "$ref": "#/components/schemas/AuthFailure" }));
+    json!({
+        "/auth/api-key": { "get": {
+            "tags": ["Auth"],
+            "summary": "API key authentication (default header)",
+            "description": "Validates the API key in the `apikey` header against the default value `my-key`.",
+            "operationId": "getApiKey",
+            "security": [{ "apiKeyAuth": [] }],
+            "responses": {
+                "200": { "description": "Authenticated", "content": ok },
+                "401": { "description": "Unauthorized", "content": fail }
+            }
+        }},
+        "/auth/api-key/{header_name}/{key_value}": { "get": {
+            "tags": ["Auth"],
+            "summary": "API key authentication (custom header and value)",
+            "description": "Validates the API key in a custom header against a custom value, both from the path.",
+            "operationId": "getApiKeyCustom",
+            "parameters": [
+                { "name": "header_name", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Header name to check" },
+                { "name": "key_value", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Expected key value" }
+            ],
+            "responses": {
+                "200": { "description": "Authenticated", "content": ok },
+                "401": { "description": "Unauthorized", "content": fail }
+            }
+        }}
+    })
 }
 
 #[cfg(test)]

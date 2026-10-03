@@ -119,8 +119,11 @@ pub async fn run(config: Config) -> Result<(), Error> {
 }
 
 /// Generate the application state (keys, PKI) and start all listeners.
+/// The demo CA is loaded from / persisted next to the TLS certificate.
 pub async fn start(config: Config) -> Result<RunningServer, Error> {
-    start_with_state(AppState::new(config)).await
+    let certs = Arc::new(crate::cert_state::CertState::for_config(&config));
+    let jwt = Arc::new(crate::jwt_state::JwtState::generate());
+    start_with_state(AppState::from_parts(config, jwt, certs)).await
 }
 
 /// Start all listeners for an existing state. Ports may be 0 (ephemeral);
@@ -204,27 +207,85 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
     })
 }
 
-/// Load the TLS material: the configured files when both exist, otherwise
-/// the in-memory demo server certificate.
-fn tls_material(state: &AppState) -> Result<(Vec<u8>, Vec<u8>), Error> {
-    let config = &state.config;
-    if !config.tls_cert.is_empty() && !config.tls_key.is_empty() {
-        state.certs.write_files(&config.tls_cert, &config.tls_key);
-        let cert_path = std::path::Path::new(&config.tls_cert);
-        let key_path = std::path::Path::new(&config.tls_key);
-        if cert_path.exists() && key_path.exists() {
-            return Ok((std::fs::read(cert_path)?, std::fs::read(key_path)?));
-        }
-        tracing::info!(
-            "TLS cert ({}) or key ({}) not found, using the generated demo certificate",
-            cert_path.display(),
-            key_path.display()
-        );
+/// Connection facts of the HTTPS listener, inserted as a request extension
+/// on every request it serves (absent on plain HTTP).
+///
+/// Handlers read it with `Option<Extension<TlsConnectionInfo>>`.
+#[derive(Clone, Debug, Default)]
+pub struct TlsConnectionInfo {
+    /// DER of the client (leaf) certificate, when the client presented one.
+    /// The listener only accepts certificates that chain to the demo CA.
+    pub peer_certificate: Option<Arc<Vec<u8>>>,
+}
+
+/// Wraps the per-connection service and inserts [`TlsConnectionInfo`].
+#[derive(Clone)]
+struct WithTlsInfo<S> {
+    inner: S,
+    info: TlsConnectionInfo,
+}
+
+impl<S, B> tower::Service<axum::http::Request<B>> for WithTlsInfo<S>
+where
+    S: tower::Service<axum::http::Request<B>>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
     }
-    Ok((
-        state.certs.server_cert_pem.clone().into_bytes(),
-        state.certs.server_key_pem.clone().into_bytes(),
-    ))
+
+    fn call(&mut self, mut req: axum::http::Request<B>) -> Self::Future {
+        req.extensions_mut().insert(self.info.clone());
+        self.inner.call(req)
+    }
+}
+
+/// rustls acceptor that exposes the verified peer certificate to handlers.
+#[derive(Clone)]
+struct PeerCertAcceptor {
+    inner: axum_server::tls_rustls::RustlsAcceptor,
+}
+
+impl<S> axum_server::accept::Accept<tokio::net::TcpStream, S> for PeerCertAcceptor
+where
+    S: Send + 'static,
+{
+    type Stream = <axum_server::tls_rustls::RustlsAcceptor as axum_server::accept::Accept<
+        tokio::net::TcpStream,
+        S,
+    >>::Stream;
+    type Service = WithTlsInfo<S>;
+    type Future = std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = std::io::Result<(Self::Stream, Self::Service)>> + Send,
+        >,
+    >;
+
+    fn accept(&self, stream: tokio::net::TcpStream, service: S) -> Self::Future {
+        let handshake = self.inner.accept(stream, service);
+        Box::pin(async move {
+            let (stream, service) = handshake.await?;
+            let (_, connection) = stream.get_ref();
+            let peer_certificate = connection
+                .peer_certificates()
+                .and_then(|chain| chain.first())
+                .map(|leaf| Arc::new(leaf.as_ref().to_vec()));
+            let info = TlsConnectionInfo { peer_certificate };
+            Ok((
+                stream,
+                WithTlsInfo {
+                    inner: service,
+                    info,
+                },
+            ))
+        })
+    }
 }
 
 fn start_https(
@@ -232,9 +293,12 @@ fn start_https(
     app: Router,
     rx: watch::Receiver<bool>,
 ) -> Result<(SocketAddr, JoinHandle<()>), Error> {
-    use axum_server::tls_rustls::RustlsConfig;
+    use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 
-    let (cert_pem, key_pem) = tls_material(state)?;
+    let config = &state.config;
+    let (cert_pem, key_pem) = state
+        .certs
+        .server_tls_material(&config.tls_cert, &config.tls_key)?;
     let certs: Vec<_> =
         rustls_pemfile::certs(&mut cert_pem.as_slice()).collect::<Result<Vec<_>, _>>()?;
     if certs.is_empty() {
@@ -244,19 +308,13 @@ fn start_https(
         .ok_or("no private key found in TLS key file")?;
 
     // Optional client certificate verification against the demo CA.
-    let ca_certs: Vec<_> = rustls_pemfile::certs(&mut state.certs.ca_cert_pem.as_bytes())
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut root_store = rustls::RootCertStore::empty();
-    for ca_cert in ca_certs {
-        root_store.add(ca_cert)?;
-    }
-    let client_verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
-        .allow_unauthenticated()
-        .build()?;
     let server_config = rustls::ServerConfig::builder()
-        .with_client_cert_verifier(client_verifier)
+        .with_client_cert_verifier(state.certs.client_verifier())
         .with_single_cert(certs, key)?;
     let tls_config = RustlsConfig::from_config(Arc::new(server_config));
+    let acceptor = PeerCertAcceptor {
+        inner: RustlsAcceptor::new(tls_config),
+    };
 
     let bind = SocketAddr::new(state.config.host, state.config.https_port);
     let listener = std::net::TcpListener::bind(bind)
@@ -273,7 +331,8 @@ fn start_https(
 
     let task = tokio::spawn(async move {
         tracing::info!("HTTPS listening on {addr} (optional client cert verification enabled)");
-        let result = axum_server::from_tcp_rustls(listener, tls_config)
+        let result = axum_server::from_tcp(listener)
+            .acceptor(acceptor)
             .handle(handle)
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await;

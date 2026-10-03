@@ -1,19 +1,28 @@
+//! `/auth/jwt*`: real JWT validation (HS256 demo secret or RS256 IdP key),
+//! a decode-only endpoint for "what did the gateway forward" demos, and an
+//! exchange endpoint that re-signs a verified token.
+
 use axum::{
-    extract::Extension,
-    http::{header, HeaderMap, StatusCode},
+    extract::{Extension, RawQuery},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::Response,
     routing::any,
     Router,
 };
-use base64::Engine;
 use serde::Serialize;
 use std::sync::Arc;
 
 use crate::catalog::{category, Endpoint, Example};
 use crate::content_negotiation::{negotiate, negotiate_with_status};
-use crate::jwt_state::JwtState;
+use crate::jwt_state::{bearer_token, decode_unverified, JwtState, VerifyOptions};
 use crate::state::AppState;
 use crate::types::{AuthFailure, AuthResponse};
+
+/// Demo JWT: HS256 signed with the demo secret
+/// ([`crate::jwt_state::HS256_DEMO_SECRET`]), `exp` in the year 2100, so it
+/// validates on every instance. Claims: sub 1234567890, name John Doe,
+/// iss rustybin, aud rustybin, scope "openid profile".
+pub const SAMPLE_JWT: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaXNzIjoicnVzdHliaW4iLCJhdWQiOiJydXN0eWJpbiIsInNjb3BlIjoib3BlbmlkIHByb2ZpbGUiLCJpYXQiOjE1MTYyMzkwMjIsImV4cCI6NDEwMjQ0NDgwMH0.o8obKOeREkQXJtz3ZyqxTs5bvJBn9lxiYnL2NC9Npbw";
 
 // ── Response types ───────────────────────────────────────────────────
 
@@ -25,97 +34,152 @@ struct JwtExchangeResponse {
     exchanged_token: String,
 }
 
+#[derive(Serialize)]
+struct JwtDecodeResponse {
+    /// Always false: this endpoint never validates.
+    verified: bool,
+    jwt_header: serde_json::Value,
+    claims: serde_json::Value,
+    /// `exp` is in the past (informational only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expired: Option<bool>,
+    note: &'static str,
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
-fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+/// `?iss=` / `?aud=` constraints.
+#[derive(Default)]
+struct Constraints {
+    iss: Option<String>,
+    aud: Option<String>,
 }
 
-fn base64url_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
-    let input = input.trim_end_matches('=');
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(input)
-}
-
-fn decode_jwt_structure(
-    token: &str,
-) -> Result<(serde_json::Value, serde_json::Value), &'static str> {
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
-        return Err("token must have exactly 3 parts");
+fn constraints(query: Option<&str>) -> Constraints {
+    let mut c = Constraints::default();
+    for (k, v) in form_urlencoded::parse(query.unwrap_or("").as_bytes()) {
+        match k.as_ref() {
+            "iss" if !v.is_empty() => c.iss = Some(v.into_owned()),
+            "aud" if !v.is_empty() => c.aud = Some(v.into_owned()),
+            _ => {}
+        }
     }
-
-    let header_bytes = base64url_decode(parts[0]).map_err(|_| "invalid base64 in header")?;
-    let payload_bytes = base64url_decode(parts[1]).map_err(|_| "invalid base64 in payload")?;
-
-    let jwt_header: serde_json::Value =
-        serde_json::from_slice(&header_bytes).map_err(|_| "invalid JSON in header")?;
-    let claims: serde_json::Value =
-        serde_json::from_slice(&payload_bytes).map_err(|_| "invalid JSON in payload")?;
-
-    Ok((jwt_header, claims))
+    c
 }
 
-fn unauthorized(headers: &HeaderMap) -> Response {
-    negotiate_with_status(
-        headers,
-        &AuthFailure {
-            authenticated: false,
-            error: "unauthorized".to_string(),
-        },
-        StatusCode::UNAUTHORIZED,
-    )
+/// 401 with an RFC 6750 `WWW-Authenticate` challenge. `reason` is always one
+/// of our own fixed messages, never request input.
+fn unauthorized(headers: &HeaderMap, reason: Option<&str>) -> Response {
+    let (error, challenge) = match reason {
+        Some(r) => (
+            format!("invalid_token: {r}"),
+            format!(
+                "Bearer realm=\"rustybin\", error=\"invalid_token\", error_description=\"{}\"",
+                r.replace(['"', '\\'], "'")
+            ),
+        ),
+        None => (
+            "unauthorized: missing Bearer token".to_string(),
+            "Bearer realm=\"rustybin\"".to_string(),
+        ),
+    };
+    let mut resp =
+        negotiate_with_status(headers, &AuthFailure::new(error), StatusCode::UNAUTHORIZED);
+    let value = HeaderValue::from_str(&challenge)
+        .unwrap_or_else(|_| HeaderValue::from_static("Bearer realm=\"rustybin\""));
+    resp.headers_mut().insert(header::WWW_AUTHENTICATE, value);
+    resp
+}
+
+fn verify_request(
+    jwt: &JwtState,
+    headers: &HeaderMap,
+    query: Option<&str>,
+) -> Result<crate::jwt_state::VerifiedJwt, Box<Response>> {
+    let Some(token) = bearer_token(headers) else {
+        return Err(Box::new(unauthorized(headers, None)));
+    };
+    let c = constraints(query);
+    let opts = VerifyOptions {
+        issuer: c.iss.as_deref(),
+        audience: c.aud.as_deref(),
+    };
+    jwt.verify(token, &opts)
+        .map_err(|reason| Box::new(unauthorized(headers, Some(&reason))))
 }
 
 // ── Handlers ────────────────────────────────────────────────────────
 
-async fn jwt_validate(headers: HeaderMap) -> Response {
-    let Some(token) = extract_bearer(&headers) else {
-        return unauthorized(&headers);
+async fn jwt_validate(
+    Extension(jwt): Extension<Arc<JwtState>>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let verified = match verify_request(&jwt, &headers, query.as_deref()) {
+        Ok(v) => v,
+        Err(resp) => return *resp,
     };
-
-    let (jwt_header, claims) = match decode_jwt_structure(token) {
-        Ok(parts) => parts,
-        Err(_) => return unauthorized(&headers),
-    };
-
+    let username = verified
+        .claims
+        .get("sub")
+        .and_then(|s| s.as_str())
+        .map(String::from);
     negotiate(
         &headers,
         &AuthResponse {
-            authenticated: true,
-            auth_type: "jwt".to_string(),
-            username: None,
-            header: None,
-            claims: Some(claims),
-            jwt_header: Some(jwt_header),
-            client_dn: None,
-            client_ca: None,
+            username,
+            claims: Some(verified.claims),
+            jwt_header: Some(verified.header),
+            ..AuthResponse::ok("jwt")
+        },
+    )
+}
+
+async fn jwt_decode(headers: HeaderMap) -> Response {
+    let Some(token) = bearer_token(&headers) else {
+        return unauthorized(&headers, None);
+    };
+    let (jwt_header, claims) = match decode_unverified(token) {
+        Ok(parts) => parts,
+        Err(reason) => {
+            return negotiate_with_status(
+                &headers,
+                &AuthFailure::new(format!("malformed_token: {reason}")),
+                StatusCode::BAD_REQUEST,
+            )
+        }
+    };
+    let now = chrono::Utc::now().timestamp();
+    let expired = claims
+        .get("exp")
+        .and_then(|e| e.as_i64())
+        .map(|exp| exp < now);
+    negotiate(
+        &headers,
+        &JwtDecodeResponse {
+            verified: false,
+            jwt_header,
+            claims,
+            expired,
+            note: "decoded WITHOUT signature or claim validation; use /auth/jwt to validate",
         },
     )
 }
 
 async fn jwt_exchange(
-    Extension(jwt_state): Extension<Arc<JwtState>>,
+    Extension(jwt): Extension<Arc<JwtState>>,
+    RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    let Some(token) = extract_bearer(&headers) else {
-        return unauthorized(&headers);
+    let verified = match verify_request(&jwt, &headers, query.as_deref()) {
+        Ok(v) => v,
+        Err(resp) => return *resp,
     };
 
-    let (_, claims) = match decode_jwt_structure(token) {
-        Ok(parts) => parts,
-        Err(_) => return unauthorized(&headers),
-    };
-
-    // Build new claims inheriting from incoming token
-    let mut new_claims = match claims.as_object() {
-        Some(obj) => obj.clone(),
-        None => serde_json::Map::new(),
-    };
-
+    // New claims inherit the verified token's claims.
+    let mut new_claims = verified.claims.as_object().cloned().unwrap_or_default();
     let now = chrono::Utc::now().timestamp();
+    new_claims.remove("nbf");
     new_claims.insert("iss".to_string(), serde_json::json!("rustybin"));
     new_claims.insert("iat".to_string(), serde_json::json!(now));
     new_claims.insert(
@@ -124,12 +188,7 @@ async fn jwt_exchange(
     );
     new_claims.insert("exp".to_string(), serde_json::json!(now + 3600));
 
-    // Sign with HS256
-    let exchanged_token = match jsonwebtoken::encode(
-        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
-        &new_claims,
-        &jsonwebtoken::EncodingKey::from_secret(jwt_state.hs256_secret.as_bytes()),
-    ) {
+    let exchanged_token = match jwt.sign_hs256(&new_claims) {
         Ok(t) => t,
         Err(e) => {
             tracing::error!("failed to sign exchanged JWT: {e}");
@@ -137,21 +196,19 @@ async fn jwt_exchange(
                 &headers,
                 &crate::types::ErrorResponse {
                     error: "token_signing_failed".to_string(),
-                    details: Some(e.to_string()),
+                    details: None,
                 },
                 StatusCode::INTERNAL_SERVER_ERROR,
             );
         }
     };
 
-    let claims_value = serde_json::Value::Object(new_claims);
-
     negotiate(
         &headers,
         &JwtExchangeResponse {
             authenticated: true,
             auth_type: "jwt".to_string(),
-            claims: claims_value,
+            claims: serde_json::Value::Object(new_claims),
             exchanged_token,
         },
     )
@@ -160,18 +217,12 @@ async fn jwt_exchange(
 // ── Router ──────────────────────────────────────────────────────────
 
 pub fn router(state: &AppState) -> Router<AppState> {
-    routes(state.jwt.clone())
-}
-
-fn routes(jwt_state: Arc<JwtState>) -> Router<AppState> {
     Router::new()
         .route("/auth/jwt", any(jwt_validate))
+        .route("/auth/jwt/decode", any(jwt_decode))
         .route("/auth/jwt/exchange", any(jwt_exchange))
-        .layer(Extension(jwt_state))
+        .layer(Extension(state.jwt.clone()))
 }
-
-/// Structurally valid demo JWT (HS256, not signed with Rustybin's key).
-pub const SAMPLE_JWT: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
 
 pub fn catalog() -> Vec<Endpoint> {
     vec![
@@ -179,243 +230,317 @@ pub fn catalog() -> Vec<Endpoint> {
             "/auth/jwt",
             &["ANY"],
             category::AUTH_JWT,
-            "Decode and validate a Bearer JWT (structure, no signature check)",
+            "Validate a Bearer JWT (HS256 demo secret or RS256 IdP key, exp/nbf, optional ?iss= ?aud=)",
         )
-        .example(Example::get("Validate JWT", "/auth/jwt").bearer(SAMPLE_JWT)),
+        .description(
+            "Verifies the signature (alg from the header: HS256 with the demo secret \
+             `rustybin-demo-secret-do-not-use-in-production`, RS256 with the key at /oauth/jwks; \
+             alg none and other algorithms are rejected), requires exp, checks nbf, and \
+             optionally ?iss= and ?aud=. 401 with WWW-Authenticate on failure.",
+        )
+        .example(Example::get("Validate JWT", "/auth/jwt").bearer(SAMPLE_JWT))
+        .example(
+            Example::get("Validate JWT with iss and aud", "/auth/jwt?iss=rustybin&aud=rustybin")
+                .bearer(SAMPLE_JWT),
+        ),
+        Endpoint::new(
+            "/auth/jwt/decode",
+            &["ANY"],
+            category::AUTH_JWT,
+            "Decode a Bearer JWT WITHOUT validation (shows what the gateway forwarded)",
+        )
+        .description(
+            "Returns the header and claims of any structurally valid JWT. Nothing is verified: \
+             use it to inspect tokens a gateway injected or forwarded.",
+        )
+        .example(Example::get("Decode JWT (no validation)", "/auth/jwt/decode").bearer(SAMPLE_JWT)),
         Endpoint::new(
             "/auth/jwt/exchange",
             &["ANY"],
             category::AUTH_JWT,
-            "Exchange a JWT for a new HS256-signed token",
+            "Exchange a valid JWT for a new HS256-signed token (same checks as /auth/jwt)",
         )
         .example(Example::post("Exchange JWT", "/auth/jwt/exchange").bearer(SAMPLE_JWT)),
     ]
 }
 
+pub fn openapi_paths() -> serde_json::Value {
+    use serde_json::json;
+    let auth_ok =
+        crate::openapi::json_xml_content(json!({ "$ref": "#/components/schemas/AuthResponse" }));
+    let auth_fail =
+        crate::openapi::json_xml_content(json!({ "$ref": "#/components/schemas/AuthFailure" }));
+    let constraints = json!([
+        { "name": "iss", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Required issuer" },
+        { "name": "aud", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Required audience" }
+    ]);
+    json!({
+        "/auth/jwt": { "get": {
+            "tags": ["Auth"],
+            "summary": "JWT validation",
+            "description": "Verifies the Bearer JWT: HS256 with the demo secret or RS256 with the IdP key (selected by the header alg; none and other algorithms are rejected), exp (required), nbf, and the optional iss / aud query constraints.",
+            "operationId": "getJwt",
+            "security": [{ "bearerAuth": [] }],
+            "parameters": constraints,
+            "responses": {
+                "200": { "description": "Token valid", "content": auth_ok },
+                "401": { "description": "Missing or invalid token (WWW-Authenticate: Bearer error=\"invalid_token\")", "content": auth_fail }
+            }
+        }},
+        "/auth/jwt/decode": { "get": {
+            "tags": ["Auth"],
+            "summary": "JWT decode (no validation)",
+            "description": "Returns the header and claims of the Bearer JWT WITHOUT verifying signature or claims.",
+            "operationId": "getJwtDecode",
+            "security": [{ "bearerAuth": [] }],
+            "responses": {
+                "200": { "description": "Decoded token", "content": crate::openapi::json_xml_content(json!({
+                    "type": "object",
+                    "properties": {
+                        "verified": { "type": "boolean", "example": false },
+                        "jwt_header": { "type": "object" },
+                        "claims": { "type": "object" },
+                        "expired": { "type": "boolean" },
+                        "note": { "type": "string" }
+                    }
+                })) },
+                "400": { "description": "Malformed token", "content": auth_fail },
+                "401": { "description": "Missing Bearer token", "content": auth_fail }
+            }
+        }},
+        "/auth/jwt/exchange": { "post": {
+            "tags": ["Auth"],
+            "summary": "JWT token exchange",
+            "description": "Validates the Bearer JWT like /auth/jwt, then returns a new HS256 token inheriting its claims (new iss, iat, jti, exp).",
+            "operationId": "postJwtExchange",
+            "security": [{ "bearerAuth": [] }],
+            "parameters": constraints,
+            "responses": {
+                "200": { "description": "Exchanged token", "content": crate::openapi::json_xml_content(json!({
+                    "type": "object",
+                    "properties": {
+                        "authenticated": { "type": "boolean" },
+                        "auth_type": { "type": "string" },
+                        "claims": { "type": "object" },
+                        "exchanged_token": { "type": "string" }
+                    }
+                })) },
+                "401": { "description": "Missing or invalid token", "content": auth_fail }
+            }
+        }}
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{body_json, module_app};
     use axum::body::Body;
     use axum::http::Request;
+    use base64::Engine;
     use tower::ServiceExt;
 
-    fn test_jwt_state() -> Arc<JwtState> {
-        Arc::new(JwtState {
-            hs256_secret: "test-secret".to_string(),
-            rs256_encoding_key: jsonwebtoken::EncodingKey::from_secret(b"unused"),
-            rs256_decoding_key: jsonwebtoken::DecodingKey::from_secret(b"unused"),
-            rs256_jwk: serde_json::json!({}),
-        })
+    fn app() -> Router {
+        module_app(router)
     }
 
-    fn test_app() -> Router {
-        routes(test_jwt_state()).with_state(crate::test_support::test_state())
+    fn get(uri: &str, auth: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().uri(uri);
+        if let Some(a) = auth {
+            b = b.header("authorization", a);
+        }
+        b.body(Body::empty()).expect("request")
     }
 
-    /// Build a minimal structurally-valid JWT (no real signature).
-    fn make_test_jwt(header: &serde_json::Value, payload: &serde_json::Value) -> String {
-        let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        let h = b64url.encode(serde_json::to_vec(header).expect("header json"));
-        let p = b64url.encode(serde_json::to_vec(payload).expect("payload json"));
-        format!("{h}.{p}.fakesig")
+    fn signed(claims: serde_json::Value) -> String {
+        let jwt = JwtState::shared_for_tests();
+        jwt.sign_hs256(claims.as_object().expect("object"))
+            .expect("sign")
     }
 
-    fn default_test_jwt() -> String {
-        make_test_jwt(
-            &serde_json::json!({"alg": "HS256", "typ": "JWT"}),
-            &serde_json::json!({"sub": "1234", "name": "Test User"}),
-        )
-    }
-
-    async fn json_body(resp: axum::http::Response<Body>) -> serde_json::Value {
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        serde_json::from_slice(&body).expect("json")
+    fn now() -> i64 {
+        chrono::Utc::now().timestamp()
     }
 
     #[tokio::test]
-    async fn jwt_validate_success() {
-        let app = test_app();
-        let token = default_test_jwt();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/auth/jwt")
-                    .header("authorization", format!("Bearer {token}"))
-                    .body(Body::empty())
-                    .expect("request"),
-            )
+    async fn sample_jwt_validates() {
+        let resp = app()
+            .oneshot(get("/auth/jwt", Some(&format!("Bearer {SAMPLE_JWT}"))))
             .await
             .expect("response");
-
         assert_eq!(resp.status(), StatusCode::OK);
-        let json = json_body(resp).await;
+        let json = body_json(resp).await;
         assert_eq!(json["authenticated"], true);
-        assert_eq!(json["auth_type"], "jwt");
-        assert_eq!(json["claims"]["sub"], "1234");
-        assert_eq!(json["claims"]["name"], "Test User");
+        assert_eq!(json["claims"]["name"], "John Doe");
         assert_eq!(json["jwt_header"]["alg"], "HS256");
+        assert_eq!(json["username"], "1234567890");
     }
 
     #[tokio::test]
-    async fn jwt_validate_no_auth_returns_401() {
-        let app = test_app();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/auth/jwt")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
+    async fn rs256_token_validates_with_lowercase_bearer() {
+        let jwt = JwtState::shared_for_tests();
+        let claims = serde_json::json!({"sub": "rs", "exp": now() + 60});
+        let token = jwt
+            .sign_rs256(claims.as_object().expect("object"), "JWT")
+            .expect("sign");
+        let resp = app()
+            .oneshot(get("/auth/jwt", Some(&format!("bearer {token}"))))
             .await
             .expect("response");
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-        let json = json_body(resp).await;
-        assert_eq!(json["authenticated"], false);
-    }
-
-    #[tokio::test]
-    async fn jwt_validate_bad_token_returns_401() {
-        let app = test_app();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/auth/jwt")
-                    .header("authorization", "Bearer not.a.valid-jwt!!!")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn jwt_validate_two_parts_returns_401() {
-        let app = test_app();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/auth/jwt")
-                    .header("authorization", "Bearer header.payload")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn jwt_validate_not_bearer_returns_401() {
-        let app = test_app();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/auth/jwt")
-                    .header("authorization", "Basic dGVzdDp0ZXN0")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn jwt_exchange_success() {
-        let app = test_app();
-        let token = default_test_jwt();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/auth/jwt/exchange")
-                    .header("authorization", format!("Bearer {token}"))
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
         assert_eq!(resp.status(), StatusCode::OK);
-        let json = json_body(resp).await;
-        assert_eq!(json["authenticated"], true);
-        assert_eq!(json["auth_type"], "jwt");
-        assert_eq!(json["claims"]["iss"], "rustybin");
-        assert!(json["claims"]["iat"].is_i64());
-        assert!(json["claims"]["jti"].is_string());
-        assert!(json["claims"]["exp"].is_i64());
-        // Inherited claims
-        assert_eq!(json["claims"]["sub"], "1234");
-        assert_eq!(json["claims"]["name"], "Test User");
-        // Exchanged token is present
-        let exchanged = json["exchanged_token"].as_str().expect("token string");
-        assert_eq!(exchanged.split('.').count(), 3);
+        assert_eq!(body_json(resp).await["jwt_header"]["alg"], "RS256");
     }
 
     #[tokio::test]
-    async fn jwt_exchange_no_auth_returns_401() {
-        let app = test_app();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/auth/jwt/exchange")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
+    async fn forged_expired_and_none_are_rejected() {
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let payload = b64.encode(format!(r#"{{"sub":"x","exp":{}}}"#, now() + 600));
+        let forged = format!(
+            "{}.{payload}.{}",
+            b64.encode(r#"{"alg":"HS256","typ":"JWT"}"#),
+            b64.encode("not-the-signature")
+        );
+        let none = format!("{}.{payload}.", b64.encode(r#"{"alg":"none"}"#));
+        let expired = signed(serde_json::json!({"sub": "x", "exp": now() - 3600}));
+        for (token, reason) in [
+            (forged, "invalid signature"),
+            (none, "alg none"),
+            (expired, "token expired"),
+        ] {
+            let resp = app()
+                .oneshot(get("/auth/jwt", Some(&format!("Bearer {token}"))))
+                .await
+                .expect("response");
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{reason}");
+            let challenge = resp
+                .headers()
+                .get("www-authenticate")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            assert!(challenge.contains("invalid_token"), "{challenge}");
+            let json = body_json(resp).await;
+            assert!(
+                json["error"].as_str().unwrap_or("").contains(reason),
+                "{json}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn iss_and_aud_constraints() {
+        let auth = format!("Bearer {SAMPLE_JWT}");
+        let ok = app()
+            .oneshot(get("/auth/jwt?iss=rustybin&aud=rustybin", Some(&auth)))
             .await
             .expect("response");
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(ok.status(), StatusCode::OK);
+        let bad = app()
+            .oneshot(get("/auth/jwt?aud=other", Some(&auth)))
+            .await
+            .expect("response");
+        assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
+        let bad = app()
+            .oneshot(get("/auth/jwt?iss=other", Some(&auth)))
+            .await
+            .expect("response");
+        assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn jwt_validate_post_method() {
-        let app = test_app();
-        let token = default_test_jwt();
-        let resp = app
+    async fn missing_or_non_bearer_is_401() {
+        for auth in [
+            None,
+            Some("Basic dGVzdDp0ZXN0"),
+            Some("Bearer header.payload"),
+        ] {
+            let resp = app()
+                .oneshot(get("/auth/jwt", auth))
+                .await
+                .expect("response");
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            assert!(resp.headers().contains_key("www-authenticate"));
+        }
+    }
+
+    #[tokio::test]
+    async fn decode_shows_unverified_token() {
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let token = format!(
+            "{}.{}.sig",
+            b64.encode(r#"{"alg":"RS256","kid":"other"}"#),
+            b64.encode(r#"{"sub":"someone","exp":1}"#)
+        );
+        let resp = app()
+            .oneshot(get("/auth/jwt/decode", Some(&format!("Bearer {token}"))))
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["verified"], false);
+        assert_eq!(json["expired"], true);
+        assert_eq!(json["claims"]["sub"], "someone");
+        assert_eq!(json["jwt_header"]["kid"], "other");
+
+        let resp = app()
+            .oneshot(get("/auth/jwt/decode", Some("Bearer nope")))
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn exchange_requires_valid_token() {
+        let resp = app()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/auth/jwt")
-                    .header("authorization", format!("Bearer {token}"))
+                    .uri("/auth/jwt/exchange")
+                    .header("authorization", format!("Bearer {SAMPLE_JWT}"))
                     .body(Body::empty())
                     .expect("request"),
             )
             .await
             .expect("response");
-
         assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["claims"]["iss"], "rustybin");
+        assert_eq!(json["claims"]["sub"], "1234567890");
+        let exchanged = json["exchanged_token"].as_str().expect("token");
+        let jwt = JwtState::shared_for_tests();
+        assert!(jwt.verify(exchanged, &VerifyOptions::default()).is_ok());
+
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let forged = format!(
+            "{}.{}.sig",
+            b64.encode(r#"{"alg":"HS256"}"#),
+            b64.encode(format!(r#"{{"sub":"evil","exp":{}}}"#, now() + 60))
+        );
+        let resp = app()
+            .oneshot(get("/auth/jwt/exchange", Some(&format!("Bearer {forged}"))))
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn jwt_validate_xml_negotiation() {
-        let app = test_app();
-        let token = default_test_jwt();
-        let resp = app
+    async fn xml_negotiation() {
+        let resp = app()
             .oneshot(
                 Request::builder()
                     .uri("/auth/jwt")
-                    .header("authorization", format!("Bearer {token}"))
+                    .header("authorization", format!("Bearer {SAMPLE_JWT}"))
                     .header("accept", "application/xml")
                     .body(Body::empty())
                     .expect("request"),
             )
             .await
             .expect("response");
-
         assert_eq!(
             resp.headers()
                 .get("content-type")
-                .expect("ct")
-                .to_str()
-                .expect("str"),
-            "application/xml"
+                .and_then(|v| v.to_str().ok()),
+            Some("application/xml")
         );
     }
 }
