@@ -10,7 +10,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::control_auth::ControlAuth;
 use crate::limits::{LimitsConfig, Period, Plan, Scope};
+use crate::logging::LogFormat;
 
 /// Maximum delay a client may request via `X-Rustybin-Delay` (normal mode).
 pub const MAX_DELAY_MS: u64 = 30_000;
@@ -59,6 +61,24 @@ pub struct Config {
     /// Plan limits (`RUSTYBIN_PLAN`, `RUSTYBIN_LIMIT_*`, `RUSTYBIN_USAGE_FILE`).
     /// The default (plan `none`, no overrides) enforces nothing.
     pub limits: LimitsConfig,
+    /// Hosted preset (`RUSTYBIN_HOSTED_MODE`): control auth `jwt` and JSON
+    /// logs unless `RUSTYBIN_CONTROL_AUTH` / `RUSTYBIN_LOG_FORMAT` say otherwise.
+    pub hosted_mode: bool,
+    /// Control-plane authentication (`RUSTYBIN_CONTROL_AUTH`, default `open`).
+    pub control_auth: ControlAuth,
+    /// Ed25519 public key for control-plane JWTs (`RUSTYBIN_CONTROL_JWT_PUBLIC_KEY`).
+    pub control_jwt_key: Option<[u8; 32]>,
+    /// Required `aud` of control-plane JWTs (`RUSTYBIN_CONTROL_JWT_AUDIENCE`,
+    /// default the instance id).
+    pub control_jwt_audience: String,
+    /// Log line format (`RUSTYBIN_LOG_FORMAT`, `text` or `json`).
+    pub log_format: LogFormat,
+    /// Serve gRPC on the HTTP and HTTPS listeners too (`RUSTYBIN_GRPC_ON_HTTP`).
+    pub grpc_on_http: bool,
+    /// Link back to a portal, shown in the console header (`RUSTYBIN_CONSOLE_BACKLINK`).
+    pub console_backlink: Option<String>,
+    /// Title shown in the console header (`RUSTYBIN_CONSOLE_TITLE`).
+    pub console_title: Option<String>,
 }
 
 impl Config {
@@ -129,6 +149,91 @@ impl Config {
             }
         };
 
+        let instance_id = get("RUSTYBIN_INSTANCE_ID").unwrap_or_else(|| Uuid::new_v4().to_string());
+        let hosted_mode = parse_bool_or(&get, "RUSTYBIN_HOSTED_MODE", false, &mut warnings);
+        let admin_token = get("RUSTYBIN_ADMIN_TOKEN");
+
+        let control_auth_default = if hosted_mode {
+            ControlAuth::Jwt
+        } else {
+            ControlAuth::Open
+        };
+        let control_auth = match get("RUSTYBIN_CONTROL_AUTH") {
+            None => control_auth_default,
+            Some(raw) => ControlAuth::parse(&raw).unwrap_or_else(|| {
+                warnings.push(format!(
+                    "invalid RUSTYBIN_CONTROL_AUTH {raw:?} (expected open, token or jwt), using {}",
+                    control_auth_default.as_str()
+                ));
+                control_auth_default
+            }),
+        };
+        let control_jwt_key = get("RUSTYBIN_CONTROL_JWT_PUBLIC_KEY").and_then(|raw| {
+            let key = crate::control_auth::parse_public_key(&raw);
+            if key.is_none() {
+                warnings.push(
+                    "invalid RUSTYBIN_CONTROL_JWT_PUBLIC_KEY (expected an Ed25519 public key: PEM, \
+                     or base64 of the raw 32 bytes), control-plane JWTs are refused"
+                        .to_string(),
+                );
+            }
+            key
+        });
+        let control_jwt_audience =
+            get("RUSTYBIN_CONTROL_JWT_AUDIENCE").unwrap_or_else(|| instance_id.clone());
+        match control_auth {
+            ControlAuth::Token if admin_token.is_none() => warnings.push(
+                "RUSTYBIN_CONTROL_AUTH=token without RUSTYBIN_ADMIN_TOKEN: every control-plane \
+                 request is refused"
+                    .to_string(),
+            ),
+            ControlAuth::Jwt if control_jwt_key.is_none() => warnings.push(format!(
+                "RUSTYBIN_CONTROL_AUTH=jwt without a valid RUSTYBIN_CONTROL_JWT_PUBLIC_KEY: {}",
+                if admin_token.is_some() {
+                    "only the admin token is accepted on the control plane"
+                } else {
+                    "every control-plane request is refused"
+                }
+            )),
+            _ => {}
+        }
+
+        let log_format_default = if hosted_mode {
+            LogFormat::Json
+        } else {
+            LogFormat::Text
+        };
+        let log_format = match get("RUSTYBIN_LOG_FORMAT") {
+            None => log_format_default,
+            Some(raw) => LogFormat::parse(&raw).unwrap_or_else(|| {
+                warnings.push(format!(
+                    "invalid RUSTYBIN_LOG_FORMAT {raw:?} (expected text or json), using {}",
+                    log_format_default.as_str()
+                ));
+                log_format_default
+            }),
+        };
+
+        let console_backlink = get("RUSTYBIN_CONSOLE_BACKLINK").and_then(|raw| {
+            let ok = valid_backlink(&raw);
+            if !ok {
+                warnings.push(format!(
+                    "invalid RUSTYBIN_CONSOLE_BACKLINK {raw:?} (expected an http:// or https:// URL), ignored"
+                ));
+            }
+            ok.then_some(raw)
+        });
+        let console_title = get("RUSTYBIN_CONSOLE_TITLE")
+            .map(|raw| {
+                raw.chars()
+                    .filter(|c| !c.is_control())
+                    .take(MAX_CONSOLE_TITLE_CHARS)
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
+            })
+            .filter(|t| !t.is_empty());
+
         let config = Self {
             http_port: parse_or(&get, "RUSTYBIN_HTTP_PORT", 80, &mut warnings),
             https_port: parse_or(&get, "RUSTYBIN_HTTPS_PORT", 443, &mut warnings),
@@ -137,16 +242,24 @@ impl Config {
             log_level,
             trust_forward: parse_bool_or(&get, "RUSTYBIN_TRUST_FORWARD", false, &mut warnings),
             body_limit: parse_or(&get, "RUSTYBIN_BODY_LIMIT", 1_048_576, &mut warnings),
-            instance_id: get("RUSTYBIN_INSTANCE_ID").unwrap_or_else(|| Uuid::new_v4().to_string()),
+            instance_id,
             tls_cert: get("RUSTYBIN_TLS_CERT").unwrap_or_else(|| "certs/server.crt".to_string()),
             tls_key: get("RUSTYBIN_TLS_KEY").unwrap_or_else(|| "certs/server.key".to_string()),
             mtls_in_header: get("RUSTYBIN_MTLS_IN_HEADER"),
             public_mode: parse_bool_or(&get, "RUSTYBIN_PUBLIC_MODE", false, &mut warnings),
-            admin_token: get("RUSTYBIN_ADMIN_TOKEN"),
+            admin_token,
             cors_allow_origins,
             request_timeout_secs: parse_or(&get, "RUSTYBIN_REQUEST_TIMEOUT", 120, &mut warnings),
             inspector_capacity: parse_or(&get, "RUSTYBIN_INSPECTOR_CAPACITY", 500, &mut warnings),
             limits: parse_limits(&get, &mut warnings),
+            hosted_mode,
+            control_auth,
+            control_jwt_key,
+            control_jwt_audience,
+            log_format,
+            grpc_on_http: parse_bool_or(&get, "RUSTYBIN_GRPC_ON_HTTP", false, &mut warnings),
+            console_backlink,
+            console_title,
         };
         (config, warnings)
     }
@@ -174,6 +287,14 @@ impl Config {
             request_timeout_secs: 120,
             inspector_capacity: 500,
             limits: LimitsConfig::default(),
+            hosted_mode: false,
+            control_auth: ControlAuth::Open,
+            control_jwt_key: None,
+            control_jwt_audience: "test-instance".to_string(),
+            log_format: LogFormat::Text,
+            grpc_on_http: false,
+            console_backlink: None,
+            console_title: None,
         }
     }
 
@@ -208,8 +329,42 @@ impl Config {
             "max_delay_ms": self.max_delay_ms(),
             "plan": self.limits.plan_name(),
             "limits": self.limits.public_view(),
+            "hosted_mode": self.hosted_mode,
+            "control_auth": self.control_auth.as_str(),
+            "control_jwt_key_configured": self.control_jwt_key.is_some(),
+            "control_jwt_audience": self.control_jwt_audience,
+            "log_format": self.log_format.as_str(),
+            "grpc_on_http": self.grpc_on_http,
+            "console_backlink": self.console_backlink,
+            "console_title": self.console_title,
         })
     }
+}
+
+/// Longest console title kept (`RUSTYBIN_CONSOLE_TITLE`).
+pub const MAX_CONSOLE_TITLE_CHARS: usize = 80;
+/// Longest console back link accepted (`RUSTYBIN_CONSOLE_BACKLINK`).
+pub const MAX_BACKLINK_LEN: usize = 2048;
+
+/// An absolute `http://` or `https://` URL with a host, without whitespace,
+/// control characters, quotes or angle brackets.
+pub fn valid_backlink(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    let Some(rest) = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    raw.len() <= MAX_BACKLINK_LEN
+        && !host.is_empty()
+        && !host.contains('@')
+        && raw.chars().all(|c| {
+            !c.is_control()
+                && !c.is_whitespace()
+                && !matches!(c, '"' | '\'' | '<' | '>' | '`' | '\\')
+        })
 }
 
 /// `RUSTYBIN_PLAN` preset plus the `RUSTYBIN_LIMIT_*` overrides.

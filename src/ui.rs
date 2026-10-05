@@ -12,8 +12,15 @@
 //! - `GET /_rustybin/catalog`: the route catalogue as JSON (API explorer).
 //! - `GET /_rustybin/status`: uptime, health and inspector counters (overview).
 //!
+//! - `index.html` carries `<meta name="rustybin-*">` elements ([`console_meta`]):
+//!   the control auth mode, `RUSTYBIN_CONSOLE_TITLE` and
+//!   `RUSTYBIN_CONSOLE_BACKLINK` (HTML-escaped), so the console can show its
+//!   sign-in screen and header before it may call the control plane.
+//!
 //! `/ui/*` and `/_rustybin/*` are excluded from inspector capture and fault
-//! injection (see [`crate::control::is_control_path`]).
+//! injection (see [`crate::control::is_control_path`]). The console files are
+//! served without credentials in every `RUSTYBIN_CONTROL_AUTH` mode (they hold
+//! no instance data); `/_rustybin/*` is protected by [`crate::control_auth`].
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -28,7 +35,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::catalog::{self, category, AuthDef, BodyDef, Endpoint, Example, Protocol, RouteCheck};
+use crate::config::Config;
 use crate::state::AppState;
+use std::sync::Arc;
 
 include!(concat!(env!("OUT_DIR"), "/ui_assets.rs"));
 
@@ -165,17 +174,41 @@ fn missing_console() -> Response {
         .into_response()
 }
 
+/// `<meta>` elements describing the instance to the console before it can
+/// call the (possibly authenticated) control plane: control auth mode,
+/// console title and back link (`RUSTYBIN_CONSOLE_TITLE`,
+/// `RUSTYBIN_CONSOLE_BACKLINK`). Values are HTML-escaped.
+pub fn console_meta(config: &Config) -> String {
+    let mut out = String::new();
+    let mut meta = |name: &str, value: &str| {
+        out.push_str(&format!(
+            "<meta name=\"rustybin-{name}\" content=\"{}\">",
+            crate::landing::html_escape(value)
+        ));
+    };
+    meta("control-auth", config.control_auth.as_str());
+    if let Some(title) = &config.console_title {
+        meta("console-title", title);
+    }
+    if let Some(link) = &config.console_backlink {
+        meta("console-backlink", link);
+    }
+    out
+}
+
 /// `index.html` for a SPA route `depth` segments below `/ui/`: relative asset
-/// URLs are re-anchored with a `<base>` element.
-fn serve_index(headers: &HeaderMap, depth: usize) -> Response {
+/// URLs are re-anchored with a `<base>` element; [`console_meta`] is added.
+fn serve_index(headers: &HeaderMap, depth: usize, config: &Config) -> Response {
     let Some(index) = assets().get("index.html") else {
         return missing_console();
     };
-    if depth <= 1 {
-        return serve_asset(headers, index);
-    }
-    let base = format!("<base href=\"{}\">", "../".repeat(depth - 1));
-    let html = String::from_utf8_lossy(index.bytes).replacen("<head>", &format!("<head>{base}"), 1);
+    let base = if depth <= 1 {
+        String::new()
+    } else {
+        format!("<base href=\"{}\">", "../".repeat(depth - 1))
+    };
+    let head = format!("<head>{base}{}", console_meta(config));
+    let html = String::from_utf8_lossy(index.bytes).replacen("<head>", &head, 1);
     let etag = etag_of(html.as_bytes());
     serve_bytes(headers, html.into_bytes(), index.content_type, &etag)
 }
@@ -193,11 +226,15 @@ async fn ui_root(RawQuery(query): RawQuery) -> Response {
     resp
 }
 
-async fn ui_index(headers: HeaderMap) -> Response {
-    serve_index(&headers, 0)
+async fn ui_index(State(config): State<Arc<Config>>, headers: HeaderMap) -> Response {
+    serve_index(&headers, 0, &config)
 }
 
-async fn ui_path(Path(path): Path<String>, headers: HeaderMap) -> Response {
+async fn ui_path(
+    State(config): State<Arc<Config>>,
+    Path(path): Path<String>,
+    headers: HeaderMap,
+) -> Response {
     if let Some(asset) = assets().get(path.as_str()) {
         return serve_asset(&headers, asset);
     }
@@ -210,7 +247,7 @@ async fn ui_path(Path(path): Path<String>, headers: HeaderMap) -> Response {
             .into_response();
     }
     let depth = path.trim_end_matches('/').split('/').count();
-    serve_index(&headers, depth)
+    serve_index(&headers, depth, &config)
 }
 
 // ── /_rustybin/catalog ──────────────────────────────────────────────
@@ -311,6 +348,13 @@ async fn status_handler(State(state): State<AppState>) -> Response {
         "healthy": state.health.is_healthy(),
         "public_mode": state.config.public_mode,
         "admin_token_configured": state.config.admin_token.is_some(),
+        "control_auth": state.config.control_auth.as_str(),
+        "hosted_mode": state.config.hosted_mode,
+        "git_sha": crate::control::git_sha(),
+        "console": {
+            "title": state.config.console_title,
+            "backlink": state.config.console_backlink,
+        },
         "identity_requests": state.identity.request_count.load(Ordering::Relaxed),
         "inspector": {
             "stored": state.inspector.len(),
@@ -622,6 +666,72 @@ mod tests {
         assert_eq!(v["healthy"], true);
         assert!(v["inspector"]["capacity"].as_u64().is_some_and(|c| c > 0));
         assert!(v["uptime_seconds"].is_number());
+    }
+
+    #[tokio::test]
+    async fn console_meta_is_escaped_and_reported() {
+        let mut config = crate::test_support::test_config();
+        config.console_title = Some("Acme <script>\"x\"</script>".to_string());
+        config.console_backlink = Some("https://portal.example.com/p?a=1&b=2".to_string());
+        config.control_auth = crate::control_auth::ControlAuth::Token;
+        config.admin_token = Some("t".to_string());
+        let app = crate::test_support::test_app_with(crate::test_support::test_state_with(config));
+        for path in ["/ui/", "/ui/a/b"] {
+            let resp = app
+                .clone()
+                .oneshot(get_request(path))
+                .await
+                .expect("response");
+            assert_eq!(resp.status(), StatusCode::OK, "{path}");
+            let html = body_string(resp).await;
+            assert!(html.contains("<meta name=\"rustybin-control-auth\" content=\"token\">"));
+            assert!(html.contains("content=\"Acme &lt;script&gt;&quot;x&quot;&lt;/script&gt;\""));
+            assert!(html.contains("content=\"https://portal.example.com/p?a=1&amp;b=2\""));
+            assert!(!html.contains("<script>\"x\""));
+        }
+        let req = Request::builder()
+            .uri("/_rustybin/status")
+            .header("authorization", "Bearer t")
+            .body(Body::empty())
+            .expect("request");
+        let v = body_json(app.oneshot(req).await.expect("response")).await;
+        assert_eq!(v["control_auth"], "token");
+        assert_eq!(
+            v["console"]["backlink"],
+            "https://portal.example.com/p?a=1&b=2"
+        );
+    }
+
+    #[test]
+    fn backlink_validation() {
+        use crate::config::valid_backlink;
+        assert!(valid_backlink("https://portal.example.com/pods/acme"));
+        assert!(valid_backlink("http://localhost:3000"));
+        for bad in [
+            "javascript:alert(1)",
+            "ftp://example.com",
+            "https://",
+            "https:///path",
+            "https://user@evil.example.com",
+            "https://a.example.com/\"onmouseover=x",
+            "https://a.example.com/ x",
+            "//example.com",
+        ] {
+            assert!(!valid_backlink(bad), "{bad}");
+        }
+        let (c, w) = Config::from_lookup(|k| match k {
+            "RUSTYBIN_CONSOLE_BACKLINK" => Some("javascript:alert(1)".to_string()),
+            "RUSTYBIN_CONSOLE_TITLE" => Some(format!("  Demo\u{7}{}  ", "x".repeat(200))),
+            _ => None,
+        });
+        assert!(c.console_backlink.is_none());
+        assert_eq!(w.len(), 1);
+        let title = c.console_title.expect("title");
+        assert!(title.starts_with("Demo") && !title.contains('\u{7}'));
+        assert_eq!(
+            title.chars().count(),
+            crate::config::MAX_CONSOLE_TITLE_CHARS
+        );
     }
 
     #[test]

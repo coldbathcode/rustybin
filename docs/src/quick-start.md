@@ -13,10 +13,13 @@ docker build -t rustybin .
 docker run -d --name rustybin -p 8080:80 -p 8443:443 -p 50051:50051 rustybin
 ```
 
-The container listens on 80 (HTTP), 443 (HTTPS) and 50051 (gRPC). On first start it
-generates a demo PKI in `/app/certs` (a CA, the HTTPS server certificate and a client
-certificate for mTLS demos); mount a volume on `/app/certs` to keep it across
-restarts. Settings are environment variables, see [Configuration](configuration.md):
+The container listens on 80 (HTTP), 443 (HTTPS) and 50051 (gRPC) and runs as an
+unprivileged user (uid 10001). On first start it generates a demo PKI in `/app/certs`
+(a CA, the HTTPS server certificate and a client certificate for mTLS demos); mount
+a volume on `/app/certs` to keep it across restarts (a bind-mounted host directory
+must be writable by uid 10001). The image also runs with `--read-only` when
+`/app/certs` is a volume, see [Containers](concepts/control-plane-security.md#containers).
+Settings are environment variables, see [Configuration](configuration.md):
 
 ```bash
 docker run -d -p 8080:80 -e RUSTYBIN_INSTANCE_ID=demo-1 -e RUSTYBIN_ADMIN_TOKEN=change-me rustybin
@@ -24,8 +27,9 @@ docker run -d -p 8080:80 -e RUSTYBIN_INSTANCE_ID=demo-1 -e RUSTYBIN_ADMIN_TOKEN=
 
 ## Docker Compose
 
-`docker-compose.yml` builds the image, publishes ports 80, 443 and 50051 and mounts
-`./certs` so the demo PKI survives restarts:
+`docker-compose.yml` builds the image, publishes ports 80, 443 and 50051 and keeps
+the demo PKI in the named volume `rustybin-certs` so it survives restarts (download
+the CA with `curl -o ca.crt http://localhost/auth/mtls/get-ca-cert`):
 
 ```bash
 docker compose up -d
@@ -67,8 +71,13 @@ Things to know about the provided configuration:
 - `RUSTYBIN_TRUST_FORWARD=true`: Fly's proxy sets `Fly-Client-IP` and
   `X-Forwarded-*`, so `/ip`, `/echo` and the OIDC issuer report the real client and
   `https` scheme.
-- The HTTP health check targets `GET /` (always 200), not `/health`, which is a
-  demo toggle that can return 503.
+- The HTTP health check targets `GET /_rustybin/ready` (always 200 while serving),
+  not `/health`, which is a demo toggle that can return 503.
+- The image runs as an unprivileged user, so the configuration moves the listeners
+  to ports 8080 (HTTP, Fly's `internal_port`) and 8443 (HTTPS).
+- To serve gRPC through Fly's TLS edge on 443 instead of a raw port, set
+  `RUSTYBIN_GRPC_ON_HTTP=true` and give the 443 service an HTTP/2 backend (see
+  [gRPC](reference/grpc.md#on-the-http-and-https-ports)).
 - Because Fly terminates TLS for the web surface, Rustybin's own HTTPS listener and
   mTLS on it are not reachable; use the `RUSTYBIN_MTLS_IN_HEADER` mode for mTLS demos
   behind a gateway instead (see [Authentication](reference/auth.md#mtls)).

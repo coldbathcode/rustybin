@@ -51,6 +51,26 @@ API, AI and agent gateway demos.
 - This documentation site, with every example tested in CI, and SDK conformance
   suites for the mock LLM, MCP, A2A and OAuth.
 
+### Operations and hosting
+
+- Control-plane authentication (`RUSTYBIN_CONTROL_AUTH`): `token` (admin token) or
+  `jwt` (admin token or Ed25519 JWTs with `aud`, `exp` and the scopes `inspector`,
+  `console`, `admin`) for every `/_rustybin/*` route except the new readiness probe.
+  The web console signs in with a token from the URL fragment or a sign-in screen
+  and reads its live feed with `fetch` so the bearer header is sent.
+  `RUSTYBIN_HOSTED_MODE=true` presets `jwt` and JSON logs.
+- `GET /_rustybin/ready`: readiness, always 200 while serving, independent of the
+  `/health` demo toggle, exempt from auth, plan limits and capture.
+- `GET /_rustybin/metrics`: Prometheus metrics with bounded labels (route templates,
+  status classes, protocols, mock LLM tokens by model family, injected faults,
+  open streams, egress, build info).
+- `RUSTYBIN_LOG_FORMAT=json`: one JSON object per line with the request id.
+- `RUSTYBIN_GRPC_ON_HTTP=true`: the gRPC services on the HTTP and HTTPS listeners
+  (h2c and ALPN `h2`) for a TLS-terminating proxy.
+- `RUSTYBIN_CONSOLE_TITLE` and `RUSTYBIN_CONSOLE_BACKLINK` in the console header.
+- `/_rustybin/version`, `/_rustybin/status` and `/_rustybin/usage` report the build
+  commit (`git_sha`) and the control auth mode.
+
 ### Changed
 
 - Open redirects and other abuse-prone endpoints were removed or made safe
@@ -61,6 +81,9 @@ API, AI and agent gateway demos.
   that the server replaced, which broke mTLS and HTTPS verification in containers).
 - `tests/smoke_test.sh` was replaced by the documentation examples
   (`docs/examples/run.sh`).
+- The Docker image runs as an unprivileged user (uid 10001) and supports a
+  read-only root filesystem; `docker-compose.yml` keeps the demo PKI in a named
+  volume, and `fly.toml` uses ports 8080 / 8443 and the readiness probe.
 - MCP `tools/list` (and the other list methods) render their result once per server
   and protocol version instead of on every request: about 7x the throughput, same
   bytes on the wire.

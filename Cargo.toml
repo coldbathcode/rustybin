@@ -16,14 +16,14 @@ name = "rustybin"
 path = "src/main.rs"
 
 [dependencies]
-axum = { version = "0.8", features = ["ws", "macros"] }
+axum = { version = "0.8", features = ["ws", "macros", "http2"] }
 axum-server = { version = "0.7.2", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 quick-xml = { version = "0.36", features = ["serde", "serialize"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tower = { version = "0.5", features = ["util", "timeout"] }
 tower-http = { version = "0.6", features = ["trace", "cors", "limit", "timeout", "request-id", "util", "set-header"] }
 bytes = "1"
@@ -73,6 +73,7 @@ protoc-bin-vendored = "3"
 tokio-tungstenite = "0.24"
 tempfile = "3"
 tokio-rustls = "0.26"
+hyper-util = { version = "0.1", features = ["tokio"] }
 
 # RSA key generation (startup, tests) is very slow without optimisations.
 [profile.dev.package.num-bigint-dig]

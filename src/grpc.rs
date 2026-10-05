@@ -266,10 +266,55 @@ async fn follow_health(state: AppState, mut reporter: tonic_health::server::Heal
     }
 }
 
-/// Serve every gRPC service on an already-bound listener until `shutdown`
-/// resolves.
+/// Every gRPC service (EchoService with the plan limit interceptor, health,
+/// reflection v1 and v1alpha), plus the task that keeps the health service
+/// in sync with the HTTP `/health` toggle (abort it when done).
 // The plan limit interceptor returns `tonic::Status` (large) by API design.
 #[allow(clippy::result_large_err)]
+pub fn routes(
+    state: &AppState,
+) -> Result<
+    (tonic::service::Routes, tokio::task::JoinHandle<()>),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let (reporter, health_service) = tonic_health::server::health_reporter();
+    let reflection_v1 = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(pb::FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
+        .build_v1()?;
+    let reflection_v1alpha = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(pb::FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
+        .build_v1alpha()?;
+    let limits = state.limits.clone();
+    let routes = tonic::service::Routes::new(EchoServiceServer::with_interceptor(
+        EchoSvc::new(state.config.instance_id.clone()),
+        // Plan limits (rate and request quota); health and reflection are exempt.
+        move |req: Request<()>| limits.check_grpc(&req).map(|()| req),
+    ))
+    .add_service(health_service)
+    .add_service(reflection_v1)
+    .add_service(reflection_v1alpha);
+    let health_task = tokio::spawn(follow_health(state.clone(), reporter));
+    Ok((routes, health_task))
+}
+
+/// CORS for grpc-web browser clients (any origin, gRPC status headers exposed).
+fn grpc_cors() -> tower_http::cors::CorsLayer {
+    tower_http::cors::CorsLayer::new()
+        .allow_origin(tower_http::cors::AllowOrigin::mirror_request())
+        .allow_methods([axum::http::Method::POST, axum::http::Method::OPTIONS])
+        .allow_headers(tower_http::cors::AllowHeaders::mirror_request())
+        .expose_headers([
+            axum::http::HeaderName::from_static("grpc-status"),
+            axum::http::HeaderName::from_static("grpc-message"),
+            axum::http::HeaderName::from_static("grpc-status-details-bin"),
+        ])
+        .max_age(Duration::from_secs(600))
+}
+
+/// Serve every gRPC service on an already-bound listener until `shutdown`
+/// resolves.
 pub async fn serve<F>(
     listener: tokio::net::TcpListener,
     state: AppState,
@@ -279,52 +324,117 @@ where
     F: std::future::Future<Output = ()> + Send,
 {
     let addr = listener.local_addr()?;
-
-    let (reporter, health_service) = tonic_health::server::health_reporter();
-    let health_task = tokio::spawn(follow_health(state.clone(), reporter));
-
-    let reflection_v1 = tonic_reflection::server::Builder::configure()
-        .register_encoded_file_descriptor_set(pb::FILE_DESCRIPTOR_SET)
-        .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
-        .build_v1()?;
-    let reflection_v1alpha = tonic_reflection::server::Builder::configure()
-        .register_encoded_file_descriptor_set(pb::FILE_DESCRIPTOR_SET)
-        .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
-        .build_v1alpha()?;
-
-    let cors = tower_http::cors::CorsLayer::new()
-        .allow_origin(tower_http::cors::AllowOrigin::mirror_request())
-        .allow_methods([axum::http::Method::POST, axum::http::Method::OPTIONS])
-        .allow_headers(tower_http::cors::AllowHeaders::mirror_request())
-        .expose_headers([
-            axum::http::HeaderName::from_static("grpc-status"),
-            axum::http::HeaderName::from_static("grpc-message"),
-            axum::http::HeaderName::from_static("grpc-status-details-bin"),
-        ])
-        .max_age(Duration::from_secs(600));
-
+    let (routes, health_task) = routes(&state)?;
     tracing::info!(
         "gRPC listening on {addr} (EchoService, health, reflection v1/v1alpha, grpc-web)"
     );
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-    let limits = state.limits.clone();
+    let metrics = state.metrics.clone();
     let result = Server::builder()
         .accept_http1(true)
-        .layer(cors)
-        .layer(tonic_web::GrpcWebLayer::new())
-        .add_service(EchoServiceServer::with_interceptor(
-            EchoSvc::new(state.config.instance_id.clone()),
-            // Plan limits (rate and request quota); health and reflection are exempt.
-            move |req: Request<()>| limits.check_grpc(&req).map(|()| req),
+        .layer(tower::util::MapRequestLayer::new(
+            move |req: axum::http::Request<tonic::body::BoxBody>| {
+                metrics.count_protocol(crate::metrics::Protocol::Grpc);
+                req
+            },
         ))
-        .add_service(health_service)
-        .add_service(reflection_v1)
-        .add_service(reflection_v1alpha)
+        .layer(grpc_cors())
+        .layer(tonic_web::GrpcWebLayer::new())
+        .add_routes(routes)
         .serve_with_incoming_shutdown(incoming, shutdown)
         .await;
     health_task.abort();
     result?;
     Ok(())
+}
+
+/// True for gRPC and grpc-web requests (`content-type: application/grpc*`).
+pub fn is_grpc_request<B>(req: &axum::http::Request<B>) -> bool {
+    req.headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.get(..16)
+                .is_some_and(|p| p.eq_ignore_ascii_case("application/grpc"))
+        })
+}
+
+type BoxedGrpc = tower::util::BoxCloneSyncService<
+    axum::http::Request<axum::body::Body>,
+    axum::response::Response,
+    std::convert::Infallible,
+>;
+
+/// The main HTTP / HTTPS listener service with `RUSTYBIN_GRPC_ON_HTTP`:
+/// gRPC and grpc-web requests go to the gRPC services, everything else to
+/// the axum application. A TLS-terminating proxy can then forward gRPC on
+/// the same port as the web traffic (HTTP/2 cleartext to the HTTP listener,
+/// or HTTP/2 over TLS to the HTTPS listener).
+#[derive(Clone)]
+pub struct GrpcOnHttp {
+    app: axum::Router,
+    grpc: BoxedGrpc,
+}
+
+impl GrpcOnHttp {
+    pub fn new(app: axum::Router, routes: tonic::service::Routes, state: &AppState) -> Self {
+        let metrics = state.metrics.clone();
+        let grpc = tower::ServiceBuilder::new()
+            .layer(grpc_cors())
+            .layer(tonic_web::GrpcWebLayer::new())
+            .service(routes);
+        let grpc = tower::util::BoxCloneSyncService::new(tower::service_fn(
+            move |req: axum::http::Request<axum::body::Body>| {
+                metrics.count_protocol(crate::metrics::Protocol::Grpc);
+                let svc = grpc.clone();
+                async move {
+                    let req = req.map(tonic::body::boxed);
+                    let resp = match tower::ServiceExt::oneshot(svc, req).await {
+                        Ok(resp) => resp.map(axum::body::Body::new),
+                        Err(e) => {
+                            tracing::warn!("gRPC on the HTTP listener failed: {e}");
+                            tonic::Status::internal("gRPC dispatch failed")
+                                .into_http()
+                                .map(axum::body::Body::new)
+                        }
+                    };
+                    Ok::<_, std::convert::Infallible>(resp)
+                }
+            },
+        ));
+        Self { app, grpc }
+    }
+
+    /// Wrap into a router (so `into_make_service_with_connect_info` and
+    /// extension layers keep working).
+    pub fn into_router(self) -> axum::Router {
+        axum::Router::new().fallback_service(self)
+    }
+}
+
+impl tower::Service<axum::http::Request<axum::body::Body>> for GrpcOnHttp {
+    type Response = axum::response::Response;
+    type Error = std::convert::Infallible;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: axum::http::Request<axum::body::Body>) -> Self::Future {
+        if is_grpc_request(&req) {
+            let svc = self.grpc.clone();
+            Box::pin(tower::ServiceExt::oneshot(svc, req))
+        } else {
+            let app = self.app.clone();
+            Box::pin(tower::ServiceExt::oneshot(app, req))
+        }
+    }
 }
 
 #[cfg(test)]

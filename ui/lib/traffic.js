@@ -1,14 +1,19 @@
 // Live traffic store: backfills from /_rustybin/requests and follows
 // /_rustybin/requests/stream (SSE). Runs for the whole console session so no
 // request is missed while the presenter is on another view.
+//
+// The feed is read with fetch (not EventSource) so it can carry the
+// control-plane token in an Authorization header; it reconnects (and
+// backfills, deduplicated by id) after a drop.
 import * as settings from './settings.js';
-import { SERVER, getJson } from './http.js';
+import * as auth from './auth.js';
+import { SERVER, getJson, send, readText, sseParser } from './http.js';
 
 const MAX = 1000;
 const entries = []; // newest first
 const listeners = new Set();
-let source = null;
-let status = 'idle'; // idle | connecting | live | error | needs-session
+let feed = null; // AbortController of the running stream
+let status = 'idle'; // idle | connecting | live | error | needs-session | signed-out
 let lastError = '';
 let unseen = 0;
 let viewing = false;
@@ -53,38 +58,71 @@ function setStatus(s, err) {
 export function connect() {
   disconnect();
   clearTimeout(retryTimer);
+  if (auth.needsSignIn()) {
+    setStatus('signed-out', 'Sign in to see the live feed.');
+    return;
+  }
   if (settings.instance.publicMode && !settings.get('session')) {
     setStatus('needs-session', 'This instance runs in public mode: set a session to see your requests.');
     return;
   }
   setStatus('connecting');
   backfill().catch((e) => setStatus('error', e.message));
-  const q = query();
-  try {
-    source = new EventSource(SERVER + '/_rustybin/requests/stream' + (q ? '?' + q : ''));
-  } catch (e) {
-    setStatus('error', String(e));
-    return;
-  }
-  source.addEventListener('open', () => setStatus('live'));
-  source.addEventListener('request', (ev) => {
-    try { add(JSON.parse(ev.data), true); } catch { /* ignore malformed */ }
-  });
-  source.addEventListener('error', () => {
-    // EventSource retries by itself; report the state meanwhile.
-    if (source && source.readyState === EventSource.CLOSED) {
-      setStatus('error', 'Live feed closed, retrying in 3 s');
-      retryTimer = setTimeout(connect, 3000);
-    } else {
-      setStatus('connecting', 'Reconnecting to the live feed');
-    }
+  const ctrl = new AbortController();
+  feed = ctrl;
+  follow(ctrl).catch((e) => {
+    if (feed === ctrl) retry(String(e && e.message ? e.message : e));
   });
 }
 
+function retry(message) {
+  setStatus('error', message + ' Retrying in 3 s.');
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(connect, 3000);
+}
+
+async function follow(ctrl) {
+  const q = query();
+  const r = await send({
+    url: SERVER + '/_rustybin/requests/stream' + (q ? '?' + q : ''),
+    headers: [['Accept', 'text/event-stream']],
+    stream: true,
+    timeout: 15000,
+    signal: ctrl.signal,
+  });
+  if (feed !== ctrl) return;
+  if (r.error) {
+    retry(r.error);
+    return;
+  }
+  if (!r.ok) {
+    if (r.status === 401 || r.status === 403) {
+      setStatus(r.status === 401 ? 'signed-out' : 'error', r.status === 401 ? 'Sign in to see the live feed.' : 'This token may not read the live feed.');
+      return;
+    }
+    retry('Live feed answered ' + r.status + '.');
+    return;
+  }
+  setStatus('live');
+  const parse = sseParser((ev) => {
+    if (ev.event !== 'request') return;
+    try { add(JSON.parse(ev.data), true); } catch { /* ignore malformed */ }
+  });
+  try {
+    await readText(r.response, parse, ctrl.signal);
+  } catch { /* dropped */ }
+  if (feed === ctrl && !ctrl.signal.aborted) {
+    setStatus('connecting', 'Reconnecting to the live feed');
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(connect, 1000);
+  }
+}
+
 export function disconnect() {
-  if (source) {
-    source.close();
-    source = null;
+  if (feed) {
+    const ctrl = feed;
+    feed = null;
+    ctrl.abort();
   }
 }
 
@@ -114,5 +152,13 @@ settings.onChange((key) => {
   if (key === 'session' || key === 'trafficSessionOnly') {
     clearLocal();
     connect();
+  }
+});
+
+auth.onChange((kind) => {
+  if (kind === 'required') {
+    disconnect();
+    clearTimeout(retryTimer);
+    setStatus('signed-out', 'Sign in to see the live feed.');
   }
 });

@@ -99,3 +99,59 @@ pub async fn body_string(resp: Response<Body>) -> String {
 pub async fn body_json(resp: Response<Body>) -> serde_json::Value {
     serde_json::from_slice(&body_bytes(resp).await).expect("json body")
 }
+
+/// Test-only Ed25519 keys for control-plane JWTs (shared with the
+/// integration tests).
+pub mod control_keys {
+    include!("../tests/common/control_jwt_keys.rs");
+}
+
+/// A config with `RUSTYBIN_CONTROL_AUTH=jwt`, the test public key, audience
+/// `test-instance` and admin token `admin-secret`.
+pub fn jwt_config() -> Config {
+    let mut c = Config::for_tests();
+    c.control_auth = crate::control_auth::ControlAuth::Jwt;
+    c.control_jwt_key = crate::control_auth::parse_public_key(control_keys::CONTROL_JWT_PUBLIC_PEM);
+    c.control_jwt_audience = "test-instance".to_string();
+    c.admin_token = Some("admin-secret".to_string());
+    c
+}
+
+/// Sign `claims` as an EdDSA JWT with the test key (or the other key).
+pub fn sign_control_jwt(claims: &serde_json::Value, other_key: bool) -> String {
+    let pem = if other_key {
+        control_keys::CONTROL_JWT_OTHER_PRIVATE_PEM
+    } else {
+        control_keys::CONTROL_JWT_PRIVATE_PEM
+    };
+    let key = jsonwebtoken::EncodingKey::from_ed_pem(pem.as_bytes()).expect("test key");
+    jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA),
+        claims,
+        &key,
+    )
+    .expect("sign")
+}
+
+/// A valid control JWT for `test-instance` with `scope` (None: no claim),
+/// expiring in 10 minutes.
+pub fn control_jwt(scope: Option<&str>) -> String {
+    let mut claims = serde_json::json!({
+        "aud": "test-instance",
+        "sub": "user-1",
+        "exp": chrono::Utc::now().timestamp() + 600,
+    });
+    if let Some(s) = scope {
+        claims["scope"] = serde_json::json!(s);
+    }
+    sign_control_jwt(&claims, false)
+}
+
+/// `method uri` with `Authorization: Bearer token` (when given).
+pub fn bearer_request(method: &str, uri: &str, token: Option<&str>) -> Request<Body> {
+    let mut b = Request::builder().method(method).uri(uri);
+    if let Some(t) = token {
+        b = b.header("authorization", format!("Bearer {t}"));
+    }
+    b.body(Body::empty()).expect("valid request")
+}

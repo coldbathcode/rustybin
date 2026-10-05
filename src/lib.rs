@@ -22,6 +22,7 @@ pub mod compression;
 pub mod config;
 pub mod content_negotiation;
 pub mod control;
+pub mod control_auth;
 pub mod cookies;
 pub mod echo;
 pub mod fault;
@@ -40,6 +41,7 @@ pub mod landing;
 pub mod limits;
 pub mod logging;
 pub mod mcp;
+pub mod metrics;
 pub mod oidc;
 pub mod openapi;
 pub mod orchestration;
@@ -118,14 +120,15 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     openapi::router,
     inspector::router,
     control::router,
+    metrics::router,
     limits::router,
     ui::router,
 ];
 
 /// Build the complete application: all module routers plus the middleware
-/// stack (outermost first): request id, tracing, request id propagation,
-/// CORS, plan limits, time-to-headers timeout, inspector capture, body limit,
-/// fault injection.
+/// stack (outermost first): request id, tracing, metrics, request id
+/// propagation, CORS, control-plane auth, plan limits, time-to-headers
+/// timeout, inspector capture, body limit, fault injection.
 pub fn build_app(state: AppState) -> Router {
     let config = state.config.clone();
 
@@ -167,12 +170,28 @@ pub fn build_app(state: AppState) -> Router {
         ));
     }
 
+    // Control-plane auth (RUSTYBIN_CONTROL_AUTH): before plan limits so an
+    // unauthenticated control request costs nothing; inside CORS so
+    // preflights are answered and 401s carry CORS headers.
+    if config.control_auth != control_auth::ControlAuth::Open {
+        router = router.layer(middleware::from_fn_with_state(
+            state.clone(),
+            control_auth::enforce,
+        ));
+    }
+
     if let Some(cors) = cors_layer(&config.cors_allow_origins, config.limits.active()) {
         router = router.layer(cors);
     }
 
     router
         .layer(PropagateRequestIdLayer::x_request_id())
+        // Metrics: sees every response (CORS preflights, 401s, 429s, timeouts)
+        // and the matched route template.
+        .layer(middleware::from_fn_with_state(
+            state.metrics.clone(),
+            metrics::track,
+        ))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|req: &axum::http::Request<axum::body::Body>| {

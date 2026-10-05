@@ -68,6 +68,33 @@ frame; the response ends with a trailer frame carrying `grpc-status`.
 {{#include ../../examples/protocols/grpc_web.hurl:grpc_web_cors}}
 ```
 
+## On the HTTP and HTTPS ports
+
+With `RUSTYBIN_GRPC_ON_HTTP=true` the HTTP and HTTPS listeners serve the same gRPC
+services (EchoService, health, reflection, gRPC-Web) for requests with
+`content-type: application/grpc*`; everything else is the usual HTTP surface. A
+TLS-terminating proxy or platform edge can then forward gRPC on port 443 to the
+HTTP listener as cleartext HTTP/2 (h2c), next to the web traffic. The HTTPS listener
+offers HTTP/2 through ALPN in this mode. The separate gRPC port keeps working.
+
+`$HTTP_ADDR` and `$HTTPS_ADDR` are the listeners' `host:port`:
+
+```bash
+{{#include ../../examples/protocols/grpc_on_http.sh:h2c}}
+```
+
+```bash
+{{#include ../../examples/protocols/grpc_on_http.sh:tls}}
+```
+
+```bash
+{{#include ../../examples/protocols/grpc_on_http.sh:health}}
+```
+
+gRPC requests on the HTTP ports skip the HTTP middleware (inspector, fault headers,
+CORS of the HTTP routes); plan limits apply to `EchoService` as on the gRPC port, and
+`rustybin_protocol_requests_total{protocol="grpc"}` counts them.
+
 ## Behind a gateway
 
 Route HTTP/2 traffic for `/rustybin.echo.v1.EchoService/*` to port 50051 with an

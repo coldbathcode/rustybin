@@ -44,16 +44,20 @@ To demonstrate a gateway's own CORS plugin, turn Rustybin's off with
 ## Control plane
 
 Routes under `/_rustybin/` describe and manage the instance. They are never
-captured by the inspector and ignore the fault injection headers.
+captured by the inspector and ignore the fault injection headers. They are open by
+default; `RUSTYBIN_CONTROL_AUTH=token` or `jwt` protects them (see
+[Control-plane security](control-plane-security.md)).
 
 | Route | Purpose |
 |---|---|
 | `GET /_rustybin/config` | Effective configuration, without secrets |
-| `GET /_rustybin/version` | Name, version, MSRV and build profile |
+| `GET /_rustybin/version` | Name, version, commit (`git_sha`), MSRV, build profile and the control auth mode |
+| `GET /_rustybin/ready` | Readiness probe: always `200` while serving, independent of `/health`; never authenticated, limited or captured |
+| `GET /_rustybin/metrics` | Prometheus metrics (see [Control-plane security, metrics and operations](control-plane-security.md#metrics)) |
 | `GET, DELETE /_rustybin/requests`, `GET /_rustybin/requests/{id}`, `GET /_rustybin/requests/stream` | The [request inspector](inspector.md) |
 | `GET /_rustybin/catalog` | The route catalogue as JSON (the [web console](../console.md)'s API explorer) |
 | `GET /_rustybin/status` | Uptime, health, public mode, inspector counters and ports (the console's overview) |
-| `GET /_rustybin/usage` | The active plan, its limits and the current usage (see [Plans and limits](plans-and-limits.md)) |
+| `GET /_rustybin/usage` | The active plan, its limits, the current usage and the build (see [Plans and limits](plans-and-limits.md)) |
 
 ```hurl
 {{#include ../../examples/concepts/control.hurl:config}}
@@ -63,6 +67,15 @@ captured by the inspector and ignore the fault injection headers.
 {{#include ../../examples/concepts/control.hurl:version}}
 ```
 
+```hurl
+{{#include ../../examples/concepts/control.hurl:ready}}
+```
+
+```hurl
+{{#include ../../examples/concepts/control.hurl:metrics}}
+```
+
 Related instance endpoints outside the control plane: `GET /` (landing page, always
-200, use it for platform liveness checks), [`/health`](../reference/reliability.md#health-toggle)
+200, use it for platform liveness checks; `GET /_rustybin/ready` is the readiness
+equivalent), [`/health`](../reference/reliability.md#health-toggle)
 (a demo toggle) and [`/identity`](../reference/identity.md).

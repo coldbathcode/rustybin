@@ -1,7 +1,9 @@
 // Build script:
 // - compiles the gRPC `.proto` definitions (server + client stubs) and emits
 //   the encoded file descriptor set used by gRPC server reflection;
-// - records the compiler version for `/identity` (RUSTYBIN_RUSTC_VERSION).
+// - records the compiler version for `/identity` (RUSTYBIN_RUSTC_VERSION);
+// - records the commit for `/_rustybin/version` (RUSTYBIN_GIT_SHA);
+// - embeds the web console (`ui/`).
 //
 // We point tonic-build at a vendored `protoc` binary so the build needs no
 // system protobuf compiler - important for the slim Docker image and clean
@@ -31,12 +33,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=RUSTYBIN_RUSTC_VERSION={version}");
 
+    if let Some(sha) = git_sha() {
+        println!("cargo:rustc-env=RUSTYBIN_GIT_SHA={sha}");
+    }
+
     embed_ui(&out_dir)?;
 
     println!("cargo:rerun-if-changed=proto/echo.proto");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=RUSTC");
+    println!("cargo:rerun-if-env-changed=RUSTYBIN_GIT_SHA");
     Ok(())
+}
+
+/// The commit being built, for `/_rustybin/version` and the metrics build
+/// info: `RUSTYBIN_GIT_SHA` when set (Docker builds have no `.git`), else the
+/// checkout's HEAD (12 hex digits). Also asks Cargo to rerun the script when
+/// HEAD moves.
+fn git_sha() -> Option<String> {
+    if let Ok(sha) = std::env::var("RUSTYBIN_GIT_SHA") {
+        let sha = sha.trim();
+        if !sha.is_empty() && sha.len() <= 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Some(sha.chars().take(12).collect());
+        }
+        return None;
+    }
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let sha = git(&["rev-parse", "--short=12", "HEAD"])?;
+    // Rerun when HEAD or the current branch ref changes (only for paths that
+    // exist: a missing path would make Cargo rerun the script every build).
+    let mut watch = Vec::new();
+    if let Some(dir) = git(&["rev-parse", "--absolute-git-dir"]) {
+        watch.push(PathBuf::from(&dir).join("HEAD"));
+    }
+    if let Some(common) = git(&["rev-parse", "--git-common-dir"]) {
+        let common = PathBuf::from(common);
+        let common = if common.is_absolute() {
+            common
+        } else {
+            std::env::current_dir()
+                .map(|d| d.join(&common))
+                .unwrap_or(common)
+        };
+        watch.push(common.join("packed-refs"));
+        if let Some(head_ref) = git(&["symbolic-ref", "-q", "HEAD"]) {
+            watch.push(common.join(head_ref));
+        }
+    }
+    for path in watch.into_iter().filter(|p| p.exists()) {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    sha.bytes().all(|b| b.is_ascii_hexdigit()).then_some(sha)
 }
 
 /// Generate `$OUT_DIR/ui_assets.rs`: a table of every file under `ui/`

@@ -322,3 +322,248 @@ async fn echo_reports_listener_scheme_and_port() {
     server.shutdown();
     server.wait().await.expect("clean shutdown");
 }
+
+// Shared with src/test_support.rs; not every key is used here.
+#[allow(dead_code)]
+mod common {
+    include!("common/control_jwt_keys.rs");
+}
+
+/// `RUSTYBIN_GRPC_ON_HTTP`: gRPC (h2c, as forwarded by a TLS-terminating
+/// proxy) on the HTTP listener next to the web routes; EchoService, health
+/// and reflection all answer, and the separate gRPC port keeps working.
+#[tokio::test]
+async fn grpc_on_the_http_listener() {
+    use rustybin::grpc::pb::echo_service_client::EchoServiceClient;
+    use rustybin::grpc::pb::EchoRequest;
+    use tokio_stream::StreamExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut c = config(&dir);
+    c.grpc_on_http = true;
+    let server = start(c).await;
+    let url = format!("http://{}", server.http_addr);
+
+    let mut client = EchoServiceClient::connect(url.clone())
+        .await
+        .expect("h2c connect");
+    let resp = client
+        .echo(EchoRequest {
+            message: "over http".to_string(),
+            count: 0,
+        })
+        .await
+        .expect("echo")
+        .into_inner();
+    assert_eq!(resp.message, "over http");
+    assert_eq!(resp.instance_id, "test-instance");
+
+    let channel = tonic::transport::Endpoint::from_shared(url)
+        .expect("endpoint")
+        .connect()
+        .await
+        .expect("connect");
+    let mut health = tonic_health::pb::health_client::HealthClient::new(channel.clone());
+    let status = health
+        .check(tonic_health::pb::HealthCheckRequest {
+            service: String::new(),
+        })
+        .await
+        .expect("health")
+        .into_inner()
+        .status;
+    assert_eq!(
+        status,
+        tonic_health::pb::health_check_response::ServingStatus::Serving as i32
+    );
+
+    {
+        use tonic_reflection::pb::v1::server_reflection_client::ServerReflectionClient;
+        use tonic_reflection::pb::v1::server_reflection_request::MessageRequest;
+        use tonic_reflection::pb::v1::server_reflection_response::MessageResponse;
+        use tonic_reflection::pb::v1::ServerReflectionRequest;
+        let mut reflection = ServerReflectionClient::new(channel);
+        let request = ServerReflectionRequest {
+            host: String::new(),
+            message_request: Some(MessageRequest::ListServices(String::new())),
+        };
+        let mut stream = reflection
+            .server_reflection_info(tokio_stream::iter(vec![request]))
+            .await
+            .expect("reflection")
+            .into_inner();
+        let resp = stream.next().await.expect("item").expect("ok");
+        let Some(MessageResponse::ListServicesResponse(list)) = resp.message_response else {
+            panic!("unexpected reflection response");
+        };
+        let names: Vec<String> = list.service.into_iter().map(|s| s.name).collect();
+        assert!(names.contains(&rustybin::grpc::ECHO_SERVICE_NAME.to_string()));
+        assert!(names.contains(&"grpc.health.v1.Health".to_string()));
+    }
+
+    // Web routes on the same port are untouched; the metrics count gRPC.
+    assert_eq!(get(server.http_addr, "/echo").await.status, 200);
+    let metrics = get(server.http_addr, "/_rustybin/metrics").await.body;
+    assert!(
+        metrics.lines().any(|l| l
+            .starts_with("rustybin_protocol_requests_total{protocol=\"grpc\"}")
+            && !l.ends_with(" 0")),
+        "{metrics}"
+    );
+    // The separate gRPC port still serves.
+    let grpc = server.grpc_addr.expect("gRPC listener");
+    let mut client = EchoServiceClient::connect(format!("http://{grpc}"))
+        .await
+        .expect("connect");
+    assert!(client
+        .echo(EchoRequest {
+            message: "port".to_string(),
+            count: 0,
+        })
+        .await
+        .is_ok());
+
+    server.shutdown();
+    server.wait().await.expect("clean shutdown");
+}
+
+/// Without `RUSTYBIN_GRPC_ON_HTTP` the HTTP listener does not speak gRPC.
+#[tokio::test]
+async fn grpc_is_not_on_the_http_listener_by_default() {
+    use rustybin::grpc::pb::echo_service_client::EchoServiceClient;
+    use rustybin::grpc::pb::EchoRequest;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let server = start(config(&dir)).await;
+    let mut client = EchoServiceClient::connect(format!("http://{}", server.http_addr))
+        .await
+        .expect("h2c connect");
+    let err = client
+        .echo(EchoRequest {
+            message: "x".to_string(),
+            count: 0,
+        })
+        .await
+        .expect_err("not a gRPC endpoint");
+    assert_ne!(err.code(), tonic::Code::Ok);
+    server.shutdown();
+    server.wait().await.expect("clean shutdown");
+}
+
+/// gRPC over TLS on the HTTPS listener: ALPN offers h2 when
+/// `RUSTYBIN_GRPC_ON_HTTP` is on.
+#[tokio::test]
+async fn grpc_on_the_https_listener() {
+    use rustybin::grpc::pb::echo_service_client::EchoServiceClient;
+    use rustybin::grpc::pb::EchoRequest;
+    use std::sync::Arc;
+    use tokio_rustls::rustls;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut c = config(&dir);
+    c.grpc_on_http = true;
+    let state = AppState::for_tests(c);
+    let ca_pem = state.certs.ca_cert_pem.clone();
+    let server = rustybin::start_with_state(state)
+        .await
+        .expect("server starts");
+    let https = server.https_addr.expect("HTTPS should start");
+
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in rustls_pemfile::certs(&mut ca_pem.as_bytes()) {
+        roots.add(cert.expect("ca cert")).expect("add root");
+    }
+    let mut tls = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    tls.alpn_protocols = vec![b"h2".to_vec()];
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(tls));
+    let negotiated = Arc::new(std::sync::Mutex::new(None::<Vec<u8>>));
+    let seen = negotiated.clone();
+    let channel = tonic::transport::Endpoint::from_static("http://localhost")
+        .connect_with_connector(tower::service_fn(move |_uri: axum::http::Uri| {
+            let connector = connector.clone();
+            let seen = seen.clone();
+            async move {
+                let tcp = TcpStream::connect(https).await?;
+                let name = rustls::pki_types::ServerName::try_from("localhost")
+                    .map_err(std::io::Error::other)?;
+                let stream = connector.connect(name, tcp).await?;
+                if let Ok(mut s) = seen.lock() {
+                    *s = stream.get_ref().1.alpn_protocol().map(<[u8]>::to_vec);
+                }
+                Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
+            }
+        }))
+        .await
+        .expect("TLS h2 connect");
+    let mut client = EchoServiceClient::new(channel);
+    let resp = client
+        .echo(EchoRequest {
+            message: "over tls".to_string(),
+            count: 0,
+        })
+        .await
+        .expect("echo")
+        .into_inner();
+    assert_eq!(resp.message, "over tls");
+    assert_eq!(
+        negotiated.lock().ok().and_then(|n| n.clone()),
+        Some(b"h2".to_vec())
+    );
+
+    server.shutdown();
+    server.wait().await.expect("clean shutdown");
+}
+
+/// `RUSTYBIN_CONTROL_AUTH=jwt` end to end: 401 without a token, 200 with a
+/// signed console token, readiness and data plane open.
+#[tokio::test]
+async fn control_plane_jwt_end_to_end() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut c = config(&dir);
+    c.control_auth = rustybin::control_auth::ControlAuth::Jwt;
+    c.control_jwt_key = rustybin::control_auth::parse_public_key(common::CONTROL_JWT_PUBLIC_PEM);
+    c.control_jwt_audience = "pod-1".to_string();
+    let server = start(c).await;
+    let addr = server.http_addr;
+
+    let resp = get(addr, "/_rustybin/status").await;
+    assert_eq!(resp.status, 401);
+    assert!(resp.header("www-authenticate").is_some());
+    assert_eq!(get(addr, "/_rustybin/ready").await.status, 200);
+    assert_eq!(get(addr, "/echo").await.status, 200);
+    assert_eq!(get(addr, "/ui/").await.status, 200);
+
+    let key = jsonwebtoken::EncodingKey::from_ed_pem(common::CONTROL_JWT_PRIVATE_PEM.as_bytes())
+        .expect("key");
+    let exp = chrono::Utc::now().timestamp() + 300;
+    let token = jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA),
+        &serde_json::json!({"aud": "pod-1", "exp": exp, "scope": "console", "sub": "u1"}),
+        &key,
+    )
+    .expect("sign");
+    let auth = format!("Bearer {token}");
+    let resp = request(
+        addr,
+        "GET",
+        "/_rustybin/status",
+        &[("Authorization", &auth)],
+        "",
+    )
+    .await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.json()["control_auth"], "jwt");
+    let resp = request(
+        addr,
+        "DELETE",
+        "/_rustybin/requests",
+        &[("Authorization", &auth)],
+        "",
+    )
+    .await;
+    assert_eq!(resp.status, 403);
+
+    server.shutdown();
+    server.wait().await.expect("clean shutdown");
+}

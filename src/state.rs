@@ -2,7 +2,7 @@
 //!
 //! `AppState` is cheap to clone (everything is behind `Arc`). Handlers can
 //! extract the whole state (`State<AppState>`) or any single part through
-//! [`FromRef`], e.g. `State<Arc<Config>>`, `State<Inspector>`.
+//! [`FromRef`], e.g. `State<Arc<Config>>`, `State<Inspector>`, `State<Arc<Metrics>>`.
 //!
 //! Module-local state should NOT be added here: create it inside the module's
 //! `router(state: &AppState)` function and attach it with `Extension`.
@@ -18,6 +18,7 @@ use crate::identity::IdentityState;
 use crate::inspector::Inspector;
 use crate::jwt_state::JwtState;
 use crate::limits::Limiter;
+use crate::metrics::Metrics;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -35,6 +36,9 @@ pub struct AppState {
     pub health: Arc<HealthState>,
     /// Plan limits (HTTP middleware, gRPC interceptor, `/_rustybin/usage`).
     pub limits: Arc<Limiter>,
+    /// Prometheus counters (`/_rustybin/metrics`), fed by the HTTP middleware,
+    /// the gRPC services and the mock LLM.
+    pub metrics: Arc<Metrics>,
 }
 
 impl AppState {
@@ -68,6 +72,7 @@ impl AppState {
             identity: Arc::new(IdentityState::new()),
             inspector,
             health: Arc::new(HealthState::new()),
+            metrics: Arc::new(Metrics::new()),
         }
     }
 }
@@ -99,6 +104,12 @@ impl FromRef<AppState> for Arc<IdentityState> {
 impl FromRef<AppState> for Arc<Limiter> {
     fn from_ref(state: &AppState) -> Self {
         state.limits.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<Metrics> {
+    fn from_ref(state: &AppState) -> Self {
+        state.metrics.clone()
     }
 }
 

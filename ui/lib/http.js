@@ -1,6 +1,7 @@
 // HTTP helpers: a fetch wrapper that never throws and always times out,
 // streaming readers (SSE, NDJSON), base URL handling and curl rendering.
 import * as settings from './settings.js';
+import * as auth from './auth.js';
 
 /** Base URL of this Rustybin instance, keeping a gateway path prefix
  *  (`https://gw/prefix/ui/` -> `https://gw/prefix`). */
@@ -12,6 +13,18 @@ export const SERVER = (() => {
 })();
 
 export const SESSION_HEADER = 'X-Rustybin-Session';
+
+/** True for URLs of this server's control plane (`/_rustybin` and below). */
+export function isControlUrl(u) {
+  try {
+    const url = new URL(u, location.href);
+    const base = new URL(SERVER + '/');
+    const prefix = base.pathname.replace(/\/$/, '') + '/_rustybin';
+    return url.origin === base.origin && (url.pathname === prefix || url.pathname.startsWith(prefix + '/'));
+  } catch {
+    return false;
+  }
+}
 
 export function trimBase(u) {
   return String(u || '').trim().replace(/\/+$/, '');
@@ -39,12 +52,20 @@ export function headerList(headers) {
   return Object.entries(headers).map(([k, v]) => [k, String(v ?? '')]);
 }
 
-/** Add the console session / admin headers when configured. */
+/**
+ * Add the console session / admin headers when configured, and the
+ * control-plane token (`Authorization: Bearer`) on calls to this server's
+ * `/_rustybin/*` routes.
+ */
 export function withConsoleHeaders(list, opts = {}) {
   const out = list.slice();
   const session = settings.get('session');
   if (opts.session !== false && session && !hasHeader(out, SESSION_HEADER)) out.push([SESSION_HEADER, session]);
-  const admin = settings.get('adminToken');
+  const control = auth.getToken();
+  if (control && opts.url && isControlUrl(opts.url) && !hasHeader(out, 'authorization')) out.push(['Authorization', 'Bearer ' + control]);
+  // Admin actions: the configured admin token, else the control token (the
+  // admin token itself in token mode, or a JWT that may carry the admin scope).
+  const admin = settings.get('adminToken') || (auth.required() ? control : '');
   if (opts.admin && admin && !hasHeader(out, 'x-rustybin-admin-token')) out.push(['X-Rustybin-Admin-Token', admin]);
   return out;
 }
@@ -93,6 +114,7 @@ export async function send(req) {
     result.contentType = resp.headers.get('content-type') || '';
     result.ttfbMs = performance.now() - started;
     if (req.stream) {
+      if (resp.status === 401 && isControlUrl(url)) auth.markUnauthorized();
       result.response = resp;
       return result;
     }
@@ -100,6 +122,7 @@ export async function send(req) {
     if (result.contentType.includes('json') || /^\s*[{[]/.test(result.text)) {
       try { result.json = JSON.parse(result.text); } catch { /* not JSON */ }
     }
+    if (resp.status === 401 && isControlUrl(url)) auth.markUnauthorized(result.json && result.json.reason);
   } catch (err) {
     result.error = explainNetworkError(url, err, timeoutMs, timedOut);
   } finally {
@@ -124,7 +147,8 @@ export async function getJson(path, opts = {}) {
 export async function readText(response, onText, signal) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  const stop = () => { try { reader.cancel(); } catch { /* ignore */ } };
+  // cancel() returns a promise that rejects once the fetch was aborted.
+  const stop = () => { try { reader.cancel().catch(() => {}); } catch { /* ignore */ } };
   if (signal) signal.addEventListener('abort', stop);
   try {
     for (;;) {

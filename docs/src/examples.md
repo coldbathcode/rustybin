@@ -41,7 +41,14 @@ docs/examples/run.sh ai/openai.hurl        # one file (paths relative to docs/ex
 `run.sh` builds Rustybin (or uses `RUSTYBIN_BIN`), starts a fresh instance on ports
 18800 (HTTP), 18801 (HTTPS) and 18802 (gRPC), runs the files and stops the server.
 A second instance on port 18803 (Hurl variable `plan_url`) runs the free plan with
-tiny overrides for the [plan limit](concepts/plans-and-limits.md) examples. The
+tiny overrides for the [plan limit](concepts/plans-and-limits.md) examples. A
+third instance on ports 18804 (HTTP, Hurl variable `secured_url`) and 18805 (HTTPS)
+runs as a hosted platform would: `RUSTYBIN_HOSTED_MODE=true` with a signing key
+generated for the run, `RUSTYBIN_GRPC_ON_HTTP=true`, a console title and back link
+(the [control-plane security](concepts/control-plane-security.md) and
+[gRPC on HTTP](reference/grpc.md#on-the-http-and-https-ports) examples). Its tokens
+are minted with `concepts/_mint-control-jwt.sh` and passed as the Hurl variables
+`console_token`, `inspector_token`, `expired_token` and `other_audience_token`. The
 main instance uses these settings, which some examples rely on:
 
 | Setting | Value | Why |
@@ -53,8 +60,8 @@ main instance uses these settings, which some examples rely on:
 
 Requirements: `hurl` and `curl`; `grpcurl`, `websocat` and `jq` for the shell
 examples (skipped with a notice when missing, or a failure with
-`REQUIRE_ALL_TOOLS=1`, which CI sets). Set `RUSTYBIN_DOCS_PORT` to move the four
-ports.
+`REQUIRE_ALL_TOOLS=1`, which CI sets), and `openssl` 3 for the signing key. Set
+`RUSTYBIN_DOCS_PORT` to move the six ports.
 
 To run a single Hurl file against your own instance:
 

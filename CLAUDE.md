@@ -12,7 +12,7 @@ cargo test                                   # unit + tests/integration.rs, a fe
 RUSTYBIN_UPDATE_README=1 cargo test readme_endpoints   # regenerate README endpoint tables
 cargo run -- --print-endpoints-markdown      # print them instead
 RUSTYBIN_HTTP_PORT=8080 cargo run
-docs/examples/run.sh                         # documentation examples (Hurl) against a fresh server
+docs/examples/run.sh                         # documentation examples (Hurl) against fresh servers (open, plan, secured)
 mdbook build docs                            # documentation site
 python3 docs/tools/check_includes.py         # every docs include and example anchor resolves
 ```
@@ -32,23 +32,34 @@ MSRV is Rust 1.86 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
 
 - `src/main.rs`: thin CLI (`--print-endpoints-markdown`, `--version`), exits non-zero on fatal errors.
 - `src/lib.rs`: module list, `ROUTERS` (every module's router), `build_app(state)` with the middleware stack
-  (outermost first): request id, trace, request id propagation, CORS, time-to-headers timeout,
-  inspector capture, body limit, fault injection. JSON 404 fallback.
+  (outermost first): request id, trace, metrics, request id propagation, CORS, control-plane auth, plan limits,
+  time-to-headers timeout, inspector capture, body limit, fault injection. JSON 404 fallback.
 - `src/server.rs`: `run(config)`, `start(config)`, `start_with_state(state)` -> `RunningServer`
   (bound addresses, `shutdown()`, `wait()`). HTTP bind failure is fatal; HTTPS and gRPC failures only warn.
-  Ports may be 0. Graceful shutdown on SIGTERM/SIGINT with a 10 s grace period.
+  Ports may be 0. Graceful shutdown on SIGTERM/SIGINT with a 10 s grace period. With `RUSTYBIN_GRPC_ON_HTTP`
+  the HTTP/HTTPS app is wrapped in `grpc::GrpcOnHttp` (content-type `application/grpc*` goes to tonic).
 - `src/config.rs`: `Config` from `RUSTYBIN_*` env vars (invalid values warn and default), `Config::for_tests()`.
-- `src/state.rs`: `AppState { config, jwt, certs, identity, inspector, health }`, `FromRef` for each part
-  (handlers can keep extracting `State<Arc<Config>>`).
+- `src/state.rs`: `AppState { config, jwt, certs, identity, inspector, health, limits, metrics }`, `FromRef` for
+  each part (handlers can keep extracting `State<Arc<Config>>`).
 - `src/catalog.rs`: route catalogue, the single source of truth (landing page, `/export/*`, README tables)
   plus the consistency tests.
 - `src/openapi.rs`: hand-written paths plus `MODULE_PATHS` / `MODULE_COMPONENTS` merge lists; methods are
   aligned with the catalogue (routes registered with `any()` are documented as get/post/put/patch/delete).
 - `src/inspector.rs`: bounded ring buffer + broadcast feed of captured requests, `/_rustybin/requests*`.
-- `src/control.rs`: `/_rustybin/config`, `/_rustybin/version`, `is_control_path()` (`/_rustybin/*`, `/ui/*`).
+- `src/control.rs`: `/_rustybin/config`, `/_rustybin/version`, `/_rustybin/ready` (readiness, never authenticated),
+  `git_sha()` / `build_info()` (build.rs sets `RUSTYBIN_GIT_SHA`), `is_control_path()` (`/_rustybin/*`, `/ui/*`).
+- `src/control_auth.rs`: `RUSTYBIN_CONTROL_AUTH` (`open` / `token` / `jwt`), Ed25519 JWT verification with scopes
+  (`inspector`, `console`, `admin`), the `enforce` middleware (protects `/_rustybin/*` except `/_rustybin/ready`;
+  `/ui/*` static files stay open). Tests sign tokens with the keys in `tests/common/control_jwt_keys.rs`
+  (`test_support::control_jwt`).
+- `src/metrics.rs`: `Metrics` (in `AppState`), the `track` middleware (route label = `MatchedPath` template),
+  `/_rustybin/metrics`. Every label is bounded; WebSocket handlers hold a guard from `metrics::open_ws`.
+- `src/logging.rs`: `RUSTYBIN_LOG_FORMAT` (`text` / `json`), `logging::subscriber(config, writer, ansi)`.
 - `src/ui.rs` + `ui/`: the web console under `/ui` (vanilla ES modules and CSS, no Node build step;
-  `build.rs` embeds every file under `ui/`), plus `/_rustybin/catalog` and `/_rustybin/status`.
-  Browser check: `conformance/ui/run.sh` (Playwright).
+  `build.rs` embeds every file under `ui/`), plus `/_rustybin/catalog` and `/_rustybin/status`. `index.html` gets
+  `<meta name="rustybin-*">` tags (control auth mode, console title, back link); `ui/lib/auth.js` handles the
+  control token (`#token=` fragment, sessionStorage, sign-in screen) and `http.js` sends it as a bearer on
+  `/_rustybin/*` calls. Browser check: `conformance/ui/run.sh` (Playwright; open mode plus a jwt-mode instance).
 - `src/fault.rs`: `X-Rustybin-Delay` / `X-Rustybin-Fail` middleware.
 - `src/admin.rs`: `require_admin(&headers, &config)` guard for instance-global mutations.
 - `src/session.rs`: `session_key(&headers, client_ip)`, `client_ip(...)`, extractors `Session`, `ClientIp`, `PeerAddr`.
@@ -82,5 +93,8 @@ missing from the OpenAPI spec (or lacks a method), or an example returns 404/405
 - Global mutations call `admin::require_admin`: token set means it is required; no token is open in normal
   mode and forbidden in public mode (`RUSTYBIN_PUBLIC_MODE`).
 - Control plane lives under `/_rustybin/*`, the web console under `/ui`; both are excluded from inspector
-  capture and fault injection.
-- `GET /` must always return 200 (platform liveness check). `/health` is a demo toggle that may return 503.
+  capture and fault injection. Control-plane routes are protected by `control_auth::enforce` when
+  `RUSTYBIN_CONTROL_AUTH` is `token` or `jwt`; data-plane routes never are. The console must not use
+  `EventSource` for control-plane feeds (no headers): use `send({stream: true})` + `sseParser`.
+- `GET /` must always return 200 (platform liveness check), `GET /_rustybin/ready` too (readiness).
+  `/health` is a demo toggle that may return 503.

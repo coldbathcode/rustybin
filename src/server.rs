@@ -135,7 +135,25 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
     let config = state.config.clone();
     let (shutdown_tx, _) = watch::channel(false);
     let shutdown = Arc::new(shutdown_tx);
-    let app = crate::build_app(state.clone());
+    let mut app = crate::build_app(state.clone());
+    let mut optional_tasks = Vec::new();
+
+    // RUSTYBIN_GRPC_ON_HTTP: gRPC (content-type application/grpc*) on the
+    // HTTP and HTTPS listeners too.
+    if config.grpc_on_http {
+        match crate::grpc::routes(&state) {
+            Ok((routes, health_task)) => {
+                app = crate::grpc::GrpcOnHttp::new(app, routes, &state).into_router();
+                let rx = shutdown.subscribe();
+                let task = tokio::spawn(async move {
+                    wait_for(rx).await;
+                    health_task.abort();
+                });
+                optional_tasks.push(("gRPC on HTTP health", task));
+            }
+            Err(e) => tracing::warn!("gRPC on the HTTP listeners not enabled: {e}"),
+        }
+    }
 
     // HTTP: fatal on failure.
     let http_bind = SocketAddr::new(config.host, config.http_port);
@@ -145,11 +163,13 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
     let http_addr = http_listener.local_addr()?;
 
     tracing::info!(
-        "rustybin v{} starting | instance={} | public_mode={} | plan={}",
+        "rustybin v{} starting | instance={} | public_mode={} | plan={} | control_auth={} | grpc_on_http={}",
         env!("CARGO_PKG_VERSION"),
         config.instance_id,
         config.public_mode,
         config.limits.plan_name(),
+        config.control_auth.as_str(),
+        config.grpc_on_http,
     );
 
     let http_task = {
@@ -170,8 +190,6 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
             .await
         })
     };
-
-    let mut optional_tasks = Vec::new();
 
     // Plan usage persistence (RUSTYBIN_USAGE_FILE); returns at once when off.
     let persist = tokio::spawn(
@@ -327,9 +345,13 @@ fn start_https(
         .ok_or("no private key found in TLS key file")?;
 
     // Optional client certificate verification against the demo CA.
-    let server_config = rustls::ServerConfig::builder()
+    let mut server_config = rustls::ServerConfig::builder()
         .with_client_cert_verifier(state.certs.client_verifier())
         .with_single_cert(certs, key)?;
+    if config.grpc_on_http {
+        // gRPC needs HTTP/2: offer it through ALPN (HTTP/1.1 stays available).
+        server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    }
     let tls_config = RustlsConfig::from_config(Arc::new(server_config));
     let acceptor = PeerCertAcceptor {
         inner: RustlsAcceptor::new(tls_config),

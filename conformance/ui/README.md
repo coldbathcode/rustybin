@@ -7,12 +7,14 @@ console error or uncaught exception.
 ## Run
 
 ```bash
-# Python venv with: pip install playwright
+# Python venv with: pip install playwright pyjwt cryptography
 PYTHON=/path/to/venv/bin/python conformance/ui/run.sh
 ```
 
 `run.sh` builds the binary, starts it on ports 18700 (HTTP), 18701 (HTTPS) and
-18702 (gRPC), runs the script and stops the server. Screenshots land in
+18702 (gRPC), plus a second instance on 18703 with `RUSTYBIN_CONTROL_AUTH=jwt`
+(a signing key generated with openssl for the run, a console title and back link),
+runs the script and stops the servers. `RUSTYBIN_UI_PORT` moves the ports. Screenshots land in
 `conformance/ui/screenshots/` (override with `SCREENSHOT_DIR`).
 
 Against an already running server:
@@ -39,3 +41,4 @@ Other knobs: `THEMES=dark` (one theme only), `HEADED=1` (visible browser),
 | Chaos and health | flaky counters, load generator (histogram, percentiles) |
 | Token lab | client_credentials, JWT decoder with countdown, introspection, authorization code + PKCE popup, HMAC signer, Standard Webhooks sign and verify |
 | Shell | settings dialog, keyboard navigation (Alt+1..9), send via a CORS-enabled second origin, unreachable gateway message, phone width without horizontal scroll |
+| Control-plane auth (jwt instance) | sign-in screen with back link, refused token, `#token=` fragment sign-in (token stripped from the URL, kept for the tab), title and back link in the header, live feed over fetch with the bearer token, reload, expiry screen, sign out |

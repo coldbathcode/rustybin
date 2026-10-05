@@ -21,12 +21,17 @@ This list is checked against `src/config.rs` and every `std::env::var` call in
 | `RUSTYBIN_GRPC_PORT` | `50051` | gRPC port (`EchoService`, health, reflection, gRPC-Web). Optional, like HTTPS. |
 | `RUSTYBIN_HOST` | `0.0.0.0` | Bind address for all listeners: an IPv4 or IPv6 address (`::`, `[::]`) or `localhost` (127.0.0.1). |
 | `RUSTYBIN_LOG_LEVEL` | `info` | Log filter in `tracing` `EnvFilter` syntax (`debug`, `warn`, `rustybin=debug,tower_http=info`, ...). Falls back to `RUST_LOG`; an unparsable filter means `info`. Logs go to stdout, coloured only when stdout is a terminal. |
+| `RUSTYBIN_LOG_FORMAT` | `text` | `text` or `json` (one JSON object per line, with the request's `method`, `path` and `request_id` in a `span` object). `json` by default in hosted mode. See [Logs](concepts/control-plane-security.md#logs). |
+| `RUSTYBIN_GRPC_ON_HTTP` | `false` | Also serve the gRPC services on the HTTP and HTTPS listeners for requests with `content-type: application/grpc*` (HTTP/2; the HTTPS listener then offers `h2` through ALPN), so a TLS-terminating proxy can forward gRPC on 443. See [gRPC](reference/grpc.md#on-the-http-and-https-ports). |
 | `RUSTYBIN_INSTANCE_ID` | random UUID | Instance name returned by `/identity`, `/health`, the mock LLM (`X-Rustybin-Instance`) and the gRPC `EchoService`. Set it per replica for load balancing demos. |
 | `RUSTYBIN_REQUEST_TIMEOUT` | `120` | Seconds until the response headers must be ready, else `503`. Streaming bodies (SSE, WebSocket, slow drips) are not cut once headers are sent. `0` disables the timeout. |
 | `RUSTYBIN_BODY_LIMIT` | `1048576` | Maximum request body in bytes; larger bodies get `413`. Also the size up to which `/echo` shows a body. |
 
 The process stops gracefully on SIGTERM or SIGINT: listeners stop accepting and
-in-flight connections (streams included) get 10 seconds to finish.
+in-flight connections (streams included) get 10 seconds to finish. `GET /_rustybin/ready`
+is the readiness probe (always `200` while serving); `GET /` the liveness check.
+The Docker image runs as an unprivileged user and supports a read-only root
+filesystem, see [Containers](concepts/control-plane-security.md#containers).
 
 ## Proxies and TLS
 
@@ -62,9 +67,22 @@ does not require one; when one is presented it must chain to the demo CA.
 | Variable | Default | Description |
 |---|---|---|
 | `RUSTYBIN_PUBLIC_MODE` | `false` | Hardening for shared, internet-facing instances: lower caps everywhere, the inspector only captures requests tagged with `X-Rustybin-Session`, and instance-global mutations are refused unless an admin token is configured. See [Sessions, public mode and the admin token](concepts/sessions.md). |
-| `RUSTYBIN_ADMIN_TOKEN` | unset | When set, instance-global mutations (health toggles, `POST /flaky/reset?scope=all`, clearing every captured request) need `Authorization: Bearer <token>` or `X-Rustybin-Admin-Token: <token>`. Never returned by any endpoint. |
+| `RUSTYBIN_ADMIN_TOKEN` | unset | When set, instance-global mutations (health toggles, `POST /flaky/reset?scope=all`, clearing every captured request) need `Authorization: Bearer <token>` or `X-Rustybin-Admin-Token: <token>` (or a control-plane JWT with the `admin` scope). With `RUSTYBIN_CONTROL_AUTH=token` or `jwt` it also opens the whole control plane. Never returned by any endpoint. |
 | `RUSTYBIN_CORS_ORIGINS` | `*` | Allowed CORS origins, comma separated. `off` or an empty value removes the CORS layer entirely, so a gateway's own CORS plugin can be demonstrated. |
 | `RUSTYBIN_INSPECTOR_CAPACITY` | `500` | Requests kept by the [request inspector](concepts/inspector.md) ring buffer (1 to 10000). |
+
+## Control plane and console
+
+See [Control-plane security, metrics and operations](concepts/control-plane-security.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `RUSTYBIN_CONTROL_AUTH` | `open` | `open`: `/_rustybin/*` needs no credentials. `token`: every `/_rustybin/*` route except `/_rustybin/ready` needs `RUSTYBIN_ADMIN_TOKEN`. `jwt`: the admin token or an Ed25519 JWT signed by `RUSTYBIN_CONTROL_JWT_PUBLIC_KEY` (scopes `inspector`, `console`, `admin`). Data-plane routes and the console's static files are never affected. `jwt` by default in hosted mode. |
+| `RUSTYBIN_CONTROL_JWT_PUBLIC_KEY` | unset | Ed25519 public key for control-plane JWTs: PEM (newlines may be `\n`), base64 DER, or base64 / base64url of the raw 32 bytes. Invalid: warning, JWTs refused. |
+| `RUSTYBIN_CONTROL_JWT_AUDIENCE` | `RUSTYBIN_INSTANCE_ID` | Required `aud` claim of control-plane JWTs. |
+| `RUSTYBIN_HOSTED_MODE` | `false` | Preset for platforms running one instance per customer: control auth `jwt` and JSON logs, unless `RUSTYBIN_CONTROL_AUTH` / `RUSTYBIN_LOG_FORMAT` say otherwise. |
+| `RUSTYBIN_CONSOLE_TITLE` | unset | Shown in the console header and tab title (control characters removed, at most 80 characters). |
+| `RUSTYBIN_CONSOLE_BACKLINK` | unset | `http://` or `https://` URL shown as a "Back to ..." link in the console header and sign-in screen; anything else is ignored with a warning. |
 
 ## Plan limits
 
@@ -123,6 +141,8 @@ See [Faults, latency, credentials, inspection](ai/gateway-features.md#credential
 | `RUSTYBIN_UPDATE_README` | `RUSTYBIN_UPDATE_README=1 cargo test readme_endpoints` rewrites the endpoint tables in `README.md`. |
 | `RUSTYBIN_BIN`, `RUSTYBIN_DOCS_PORT`, `REQUIRE_ALL_TOOLS` | `docs/examples/run.sh` (see [How the examples work](examples.md)). |
 | `PYTHON`, `RUSTYBIN_CONFORMANCE_PORT`, `RUSTYBIN_URL`, `MCP_BASE` | The SDK conformance scripts under `conformance/`. |
+| `RUSTYBIN_UI_PORT`, `RUSTYBIN_JWT_URL`, `CONTROL_JWT_PRIVATE_KEY`, `CONTROL_JWT_AUDIENCE` | `conformance/ui/run.sh` and `console_e2e.py` (the console check, including the sign-in flow). |
+| `RUSTYBIN_GIT_SHA` | Build time: the commit reported by `/_rustybin/version` and the metrics when the source tree has no `.git` (Docker builds: `--build-arg RUSTYBIN_GIT_SHA=<commit>`). |
 
 ## Limits that are not configurable
 
@@ -146,3 +166,4 @@ Request-reachable state is always bounded. The main caps (normal mode / public m
 | MCP sessions (idle TTL) / long-lived streams | 1000 (30 min) / 1 h | 200 (10 min) / 5 min |
 | A2A tasks (total / per session / idle TTL) | 5000 / 1000 / 1 h | 2000 / 50 / 15 min |
 | Inspector entries | `RUSTYBIN_INSPECTOR_CAPACITY` (max 10000) | same |
+| Metrics series (`route` values / LLM token series) | 1024 / 256 (beyond: `other`) | same |

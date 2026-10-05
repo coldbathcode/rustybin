@@ -7,6 +7,10 @@ provider plus tool calling, MCP list + call with progress and the OAuth
 discovery, A2A streaming and approval continuation, chaos load generator,
 token lab) and fails on browser console errors or uncaught exceptions.
 
+With RUSTYBIN_JWT_URL it also checks the sign-in flow of an instance with
+RUSTYBIN_CONTROL_AUTH=jwt (sign-in screen, #token= fragment, fetch-based live
+feed with the bearer token, expiry, sign out).
+
 Usage (server already running):
     RUSTYBIN_URL=http://127.0.0.1:18700 python conformance/ui/console_e2e.py
 
@@ -17,6 +21,10 @@ Environment:
                      first chrome found under $PLAYWRIGHT_BROWSERS_PATH)
     THEMES           comma list of light,dark (default both)
     HEADED=1         show the browser
+    RUSTYBIN_JWT_URL          base URL of a RUSTYBIN_CONTROL_AUTH=jwt instance
+                              (with RUSTYBIN_CONSOLE_TITLE and _BACKLINK set)
+    CONTROL_JWT_PRIVATE_KEY   Ed25519 private key (PEM file) it trusts
+    CONTROL_JWT_AUDIENCE      its RUSTYBIN_CONTROL_JWT_AUDIENCE
 """
 
 import glob
@@ -351,6 +359,96 @@ def run_theme(browser, theme):
     ctx.close()
 
 
+def control_jwt(scope="console", ttl=600):
+    import jwt  # PyJWT (with cryptography for EdDSA)
+
+    with open(os.environ["CONTROL_JWT_PRIVATE_KEY"], "rb") as f:
+        key = f.read()
+    claims = {
+        "aud": os.environ.get("CONTROL_JWT_AUDIENCE", "ui-conformance"),
+        "sub": "e2e-user",
+        "exp": int(time.time()) + ttl,
+        "scope": scope,
+    }
+    return jwt.encode(claims, key, algorithm="EdDSA")
+
+
+def run_jwt(browser):
+    """Sign-in flow against an instance with RUSTYBIN_CONTROL_AUTH=jwt."""
+    jwt_base = os.environ["RUSTYBIN_JWT_URL"].rstrip("/")
+    print(f"control auth jwt: {jwt_base}")
+    ctx = browser.new_context(viewport={"width": 1280, "height": 860})
+    page = ctx.new_page()
+    page.set_default_timeout(TIMEOUT)
+
+    def on_console(msg):
+        # 401s of the control plane are expected here (logged as resource failures).
+        if msg.type == "error" and "Failed to load resource" not in msg.text:
+            console_errors.append(f"[jwt] {msg.text}")
+
+    page.on("console", on_console)
+    page.on("pageerror", lambda e: console_errors.append(f"[jwt] uncaught: {e}"))
+
+    def sign_in_screen():
+        status = urllib.request.urlopen(jwt_base + "/_rustybin/ready", timeout=10).status
+        assert status == 200, status
+        page.goto(jwt_base + "/ui/#/overview")
+        page.wait_for_selector("#signin")
+        expect(page.locator("#signin-title")).to_have_text("Sign in required")
+        expect(page.locator("#signin-backlink")).to_have_attribute("href", "https://portal.example.com/pods/acme")
+        expect(page.locator("#signin-backlink")).to_contain_text("Acme demo pod")
+        shot(page, "jwt", "20-sign-in")
+        page.fill("#signin-token", "not-a-valid-token")
+        page.get_by_role("button", name="Sign in").click()
+        page.wait_for_selector("#signin .notice.err")
+        expect(page.locator("#signin")).to_contain_text("refused")
+
+    step("jwt: sign-in screen, wrong token refused", sign_in_screen)
+
+    def fragment_token():
+        token = control_jwt("console")
+        page.goto(jwt_base + "/ui/#/overview&token=" + token)
+        page.wait_for_selector("text=Requests captured")
+        expect(page.locator("#signin")).to_have_count(0)
+        if "token" in page.url:
+            raise AssertionError("the token stays in the URL: " + page.url)
+        stored = page.evaluate("sessionStorage.getItem('rustybin.console.controlToken')")
+        assert stored == token, "token not kept for this tab"
+        expect(page.locator(".console-title")).to_have_text("Acme demo pod")
+        expect(page.locator("#backlink")).to_have_attribute("href", "https://portal.example.com/pods/acme")
+        # The live feed (fetch-based SSE with the bearer token) works.
+        goto_view(page, "traffic")
+        page.wait_for_selector("text=live feed")
+        tag = "jwt-" + str(int(time.time()))
+        urllib.request.urlopen(jwt_base + "/echo/" + tag, timeout=10).read()
+        page.locator(".list-item", has_text="/echo/" + tag).first.wait_for()
+        shot(page, "jwt", "21-signed-in")
+        # A reload keeps the session (sessionStorage), without the fragment.
+        page.reload()
+        page.wait_for_selector("#view h1")
+        expect(page.locator("#signin")).to_have_count(0)
+
+    step("jwt: #token= fragment signs in, live feed with bearer", fragment_token)
+
+    def expiry_and_sign_out():
+        page.goto(jwt_base + "/ui/#/overview&token=" + control_jwt("console", ttl=3))
+        page.wait_for_selector("text=Requests captured")
+        page.wait_for_selector("#signin", timeout=15000)
+        expect(page.locator("#signin-title")).to_have_text("Session expired")
+        shot(page, "jwt", "22-expired")
+        page.goto(jwt_base + "/ui/#/overview&token=" + control_jwt("console"))
+        page.wait_for_selector("text=Requests captured")
+        page.get_by_role("button", name="Console settings").click()
+        page.locator("#sign-out").click()
+        page.wait_for_selector("#signin")
+        expect(page.locator("#signin")).to_contain_text("You signed out")
+        stored = page.evaluate("sessionStorage.getItem('rustybin.console.controlToken')")
+        assert not stored, "token kept after sign out"
+
+    step("jwt: expiry and sign out", expiry_and_sign_out)
+    ctx.close()
+
+
 def main():
     print(f"console e2e against {BASE}")
     with sync_playwright() as p:
@@ -358,6 +456,8 @@ def main():
         browser = p.chromium.launch(executable_path=exe, headless=not os.environ.get("HEADED")) if exe else p.chromium.launch()
         for theme in THEMES:
             run_theme(browser, theme)
+        if os.environ.get("RUSTYBIN_JWT_URL"):
+            run_jwt(browser)
         browser.close()
     for e in console_errors:
         failures.append("console: " + e)

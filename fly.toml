@@ -1,12 +1,13 @@
 # fly.toml - deploy Rustybin to Fly.io
 #
-# Build uses the repo Dockerfile (HTTP :80, HTTPS :443, gRPC :50051; Rustybin
-# generates its demo TLS certificates on first boot).
+# Build uses the repo Dockerfile. The image runs as an unprivileged user, so
+# the listeners use unprivileged ports here (HTTP :8080, HTTPS :8443, gRPC
+# :50051); Rustybin generates its demo TLS certificates on first boot.
 #
 # Networking model:
 #   * Web surface (HTTP/HTTPS/WebSocket): Fly terminates TLS at the edge and
 #     provisions a real Let's Encrypt cert for your custom domain, forwarding
-#     plaintext to the app's internal :80. This is what makes https://rustybin.dev
+#     plaintext to the app's internal :8080. This is what makes https://rustybin.dev
 #     work in a browser (.dev is HSTS-preloaded, so a valid cert is mandatory).
 #   * gRPC: raw TCP passthrough on :50051 (plaintext h2c). Reach it with
 #     `grpcurl -plaintext rustybin.dev:50051 ...`.
@@ -29,11 +30,14 @@ primary_region = "iad"   # change to your nearest region (e.g. lhr, fra, sjc)
   RUSTYBIN_INSTANCE_ID = "rustybin-fly"
   # Fly proxies requests, so trust X-Forwarded-* for correct /ip and scheme.
   RUSTYBIN_TRUST_FORWARD = "true"
+  # Non-root image: ports above 1024.
+  RUSTYBIN_HTTP_PORT = "8080"
+  RUSTYBIN_HTTPS_PORT = "8443"
 
 # ── Web surface: HTTP + HTTPS (TLS terminated at the edge) ──────────────
 [[services]]
   protocol = "tcp"
-  internal_port = 80
+  internal_port = 8080
   # Scale to zero when idle, wake on traffic - keeps idle cost near $0.
   auto_stop_machines = "stop"
   auto_start_machines = true
@@ -53,15 +57,15 @@ primary_region = "iad"   # change to your nearest region (e.g. lhr, fra, sjc)
     soft_limit = 200
     hard_limit = 250
 
-  # Liveness check hits "/" (always 200) rather than "/health" - /health is a
-  # demo toggle that intentionally returns 503, which would otherwise make Fly
-  # consider the machine unhealthy.
+  # The check hits the readiness probe (always 200 while serving) rather than
+  # "/health", a demo toggle that intentionally returns 503, which would
+  # otherwise make Fly consider the machine unhealthy.
   [[services.http_checks]]
     interval = "15s"
     timeout = "5s"
     grace_period = "10s"
     method = "get"
-    path = "/"
+    path = "/_rustybin/ready"
 
 # ── gRPC: raw TCP passthrough (plaintext h2c) ───────────────────────────
 [[services]]

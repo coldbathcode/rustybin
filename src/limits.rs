@@ -22,8 +22,10 @@
 //! live in a bounded map and are not persisted.
 //!
 //! Exempt from every limit: `/` (platform health check), `/ui/*`,
-//! `GET /_rustybin/usage` and `GET /_rustybin/status` (polled by the console). Other control plane requests that carry a valid
-//! admin token are counted but never rejected.
+//! `GET /_rustybin/ready` (readiness probe), `GET /_rustybin/usage` and
+//! `GET /_rustybin/status` (polled by the console). Other control plane
+//! requests that carry a valid admin token (or, with control-plane auth on,
+//! any accepted token) are counted but never rejected.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -1102,7 +1104,7 @@ pub fn is_exempt(method: &Method, path: &str) -> bool {
         || path
             .strip_prefix(crate::control::UI_PREFIX)
             .is_some_and(|rest| rest.starts_with('/'))
-        || ((path == USAGE_PATH || path == STATUS_PATH)
+        || ((path == USAGE_PATH || path == STATUS_PATH || path == crate::control_auth::READY_PATH)
             && (method == Method::GET || method == Method::HEAD))
 }
 
@@ -1140,9 +1142,16 @@ pub async fn enforce(State(state): State<AppState>, mut req: Request, next: Next
     }
     let key = scope_key(&state, &req);
     let counters = limiter.counters(key.as_deref());
-    let bypass = state.config.admin_token.is_some()
-        && req.uri().path().starts_with(crate::control::CONTROL_PREFIX)
-        && crate::admin::is_admin(req.headers(), &state.config);
+    // Authenticated control-plane requests are counted but never rejected:
+    // the admin token, or any valid token when control auth is on.
+    let control = req.uri().path().starts_with(crate::control::CONTROL_PREFIX);
+    let bypass = control
+        && (req
+            .extensions()
+            .get::<crate::control_auth::ControlAuthorized>()
+            .is_some()
+            || (state.config.admin_token.is_some()
+                && crate::admin::is_admin(req.headers(), &state.config)));
     let websocket = is_websocket_upgrade(req.headers());
     let mut admission = match limiter.admit(&counters, bypass, websocket) {
         Ok(a) => a,
@@ -1277,7 +1286,11 @@ async fn usage_handler(
 ) -> Response {
     let limiter = &state.limits;
     let key = (limiter.config().scope == Scope::Session).then_some(key);
-    Json(limiter.usage(key.as_deref())).into_response()
+    let mut usage = limiter.usage(key.as_deref());
+    usage["instance_id"] = json!(state.config.instance_id);
+    usage["build"] = crate::control::build_info();
+    usage["control_auth"] = json!(state.config.control_auth.as_str());
+    Json(usage).into_response()
 }
 
 pub fn router(_state: &AppState) -> Router<AppState> {
@@ -1330,7 +1343,15 @@ pub fn openapi_paths() -> Value {
                         "rate": { "type": "object" },
                         "in_flight": { "type": "object" },
                         "open_streams": { "type": "object" },
-                        "persisted": { "type": "boolean" }
+                        "persisted": { "type": "boolean" },
+                        "instance_id": { "type": "string" },
+                        "build": { "type": "object", "properties": {
+                            "version": { "type": "string" },
+                            "git_sha": { "type": ["string", "null"] },
+                            "profile": { "type": "string" },
+                            "rustc": { "type": "string" }
+                        } },
+                        "control_auth": { "type": "string", "enum": ["open", "token", "jwt"] }
                     }
                 } } } } }
             }

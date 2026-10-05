@@ -1386,6 +1386,7 @@ async fn graphql_ws(
     State(config): State<Arc<Config>>,
     protocol: Result<GraphQLProtocol, StatusCode>,
     lease: Option<Extension<crate::limits::StreamLease>>,
+    tracker: Option<Extension<crate::metrics::StreamTracker>>,
     ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Response {
     let ws = match ws {
@@ -1408,6 +1409,7 @@ async fn graphql_ws(
         .max_message_size(limits.max_message_size)
         .max_frame_size(limits.max_message_size)
         .on_upgrade(move |socket| async move {
+            let _open = crate::metrics::open_ws(&tracker);
             let lease = lease.map(|Extension(l)| l);
             let (mut sink, mut stream) = futures_util::StreamExt::split(socket);
             let serve = GraphQLWebSocket::new_with_pair(&mut sink, &mut stream, schema, protocol).serve();

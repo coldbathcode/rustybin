@@ -19,6 +19,7 @@ HTTP 200
 jsonpath "$.name" == "rustybin"
 jsonpath "$.version" exists
 jsonpath "$.profile" exists
+jsonpath "$.control_auth" == "open"
 # ANCHOR_END: version
 
 # ANCHOR: request_id_generated
@@ -49,3 +50,21 @@ header "Access-Control-Allow-Methods" == "PUT"
 header "Access-Control-Allow-Headers" == "x-custom"
 header "Access-Control-Max-Age" == "600"
 # ANCHOR_END: cors_preflight
+
+# ANCHOR: ready
+GET {{base_url}}/_rustybin/ready
+HTTP 200
+[Asserts]
+jsonpath "$.status" == "ready"
+# ANCHOR_END: ready
+
+# ANCHOR: metrics
+GET {{base_url}}/_rustybin/metrics
+HTTP 200
+[Asserts]
+header "Content-Type" startsWith "text/plain; version=0.0.4"
+body contains "# TYPE rustybin_requests_total counter"
+body contains "rustybin_request_duration_seconds_bucket{route=\"/uuid\",le=\"0.005\"}"
+body contains "rustybin_protocol_requests_total{protocol=\"http\"}"
+body not contains "/no/such/route"
+# ANCHOR_END: metrics

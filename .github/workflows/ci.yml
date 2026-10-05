@@ -60,13 +60,20 @@ jobs:
           push: false
           tags: rustybin:ci
           load: true
+          build-args: RUSTYBIN_GIT_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: smoke test the image
         run: |
-          docker run -d --name rb -p 8080:80 rustybin:ci
-          for i in $(seq 1 60); do curl -fs http://localhost:8080/health >/dev/null && break; sleep 1; done
+          # Hardened: non-root, read-only root filesystem, no capabilities;
+          # only /app/certs (demo PKI, usage file) is writable.
+          docker run -d --name rb --read-only --cap-drop ALL --security-opt no-new-privileges \
+            -v rb-certs:/app/certs -e RUSTYBIN_USAGE_FILE=/app/certs/usage.json -p 8080:80 rustybin:ci
+          for i in $(seq 1 60); do curl -fs http://localhost:8080/_rustybin/ready >/dev/null && break; sleep 1; done
           curl -fsS http://localhost:8080/health
+          test "$(docker exec rb id -u)" = 10001
+          docker exec rb test -s /app/certs/ca.crt
+          curl -fsS http://localhost:8080/_rustybin/version | grep -q "${GITHUB_SHA:0:12}"
           # The console must be embedded in the image.
           curl -fsS http://localhost:8080/ui/ | grep -q '<html'
           curl -fsS http://localhost:8080/_rustybin/catalog >/dev/null

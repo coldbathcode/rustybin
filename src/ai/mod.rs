@@ -77,6 +77,8 @@ pub struct AiShared {
     pub auth: AuthSettings,
     pub store: RequestStore,
     pub prompt_cache: PromptCache,
+    /// Token counters for `/_rustybin/metrics`.
+    pub metrics: Arc<crate::metrics::Metrics>,
 }
 
 impl AiShared {
@@ -85,6 +87,7 @@ impl AiShared {
         Self {
             config: state.config.clone(),
             inspector: state.inspector.clone(),
+            metrics: state.metrics.clone(),
             auth,
             store: RequestStore::new(if public { 200 } else { 1000 }, Duration::from_secs(3600)),
             prompt_cache: PromptCache::new(
@@ -179,6 +182,12 @@ impl AiCtx {
                 Value::String(text.into_owned())
             }
         };
+        self.shared.metrics.record_llm_tokens(
+            self.provider.as_str(),
+            r.model,
+            r.prompt_tokens,
+            r.completion_tokens,
+        );
         let preview: String = r.reply.chars().take(500).collect();
         let prompt: String = r.prompt.chars().take(32 * 1024).collect();
         self.shared.store.insert(AiRecord {

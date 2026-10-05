@@ -11,7 +11,9 @@
 # Environment:
 #   RUSTYBIN_BIN        use this binary instead of `cargo build` + target/debug/rustybin
 #   RUSTYBIN_DOCS_PORT  first of the ports (default 18800: HTTP, +1 HTTPS, +2 gRPC,
-#                       +3 HTTP of a second instance with plan limits)
+#                       +3 HTTP of a second instance with plan limits, +4 HTTP and
+#                       +5 HTTPS of a third, secured instance: control-plane JWT
+#                       auth, gRPC on the HTTP listeners, console title and link)
 #   REQUIRE_ALL_TOOLS=1 fail instead of skipping when grpcurl / websocat / jq are missing (CI)
 set -euo pipefail
 
@@ -21,7 +23,10 @@ PORT="${RUSTYBIN_DOCS_PORT:-18800}"
 HTTPS_PORT=$((PORT + 1))
 GRPC_PORT=$((PORT + 2))
 PLAN_PORT=$((PORT + 3))
+SECURED_PORT=$((PORT + 4))
+SECURED_HTTPS_PORT=$((PORT + 5))
 ADMIN_TOKEN="docs-admin-token"
+SECURED_AUDIENCE="docs-secured"
 
 if ! command -v hurl >/dev/null 2>&1; then
   echo "hurl is required (https://hurl.dev/docs/installation.html)" >&2
@@ -75,11 +80,36 @@ mkdir -p "$TMP/plan"
   RUSTYBIN_LIMIT_STREAM_SECS=2 \
   "$TMP/rustybin-docs-examples") &
 PLAN_SERVER=$!
-trap 'kill "$SERVER" "$PLAN_SERVER" 2>/dev/null || true; wait "$SERVER" "$PLAN_SERVER" 2>/dev/null || true; rm -rf "$TMP"' EXIT
+# A third instance as a hosted platform would run it (see
+# docs/src/concepts/control-plane-security.md): control-plane JWTs signed by a
+# key generated for this run, gRPC on the HTTP and HTTPS listeners, JSON logs,
+# a console title and back link. Its gRPC port is ephemeral.
+mkdir -p "$TMP/secured"
+openssl genpkey -algorithm ed25519 -out "$TMP/secured/control.key" 2>/dev/null
+openssl pkey -in "$TMP/secured/control.key" -pubout -out "$TMP/secured/control.pub"
+(cd "$TMP/secured" && exec env \
+  RUSTYBIN_HTTP_PORT="$SECURED_PORT" \
+  RUSTYBIN_HTTPS_PORT="$SECURED_HTTPS_PORT" \
+  RUSTYBIN_GRPC_PORT=0 \
+  RUSTYBIN_HOST=127.0.0.1 \
+  RUSTYBIN_LOG_LEVEL=warn \
+  RUSTYBIN_INSTANCE_ID="$SECURED_AUDIENCE" \
+  RUSTYBIN_ADMIN_TOKEN="$ADMIN_TOKEN" \
+  RUSTYBIN_TLS_CERT="$TMP/secured/server.crt" \
+  RUSTYBIN_TLS_KEY="$TMP/secured/server.key" \
+  RUSTYBIN_HOSTED_MODE=true \
+  RUSTYBIN_CONTROL_JWT_PUBLIC_KEY="$(cat "$TMP/secured/control.pub")" \
+  RUSTYBIN_GRPC_ON_HTTP=true \
+  RUSTYBIN_CONSOLE_TITLE="Docs demo" \
+  RUSTYBIN_CONSOLE_BACKLINK="https://portal.example.com/instances/docs-secured" \
+  "$TMP/rustybin-docs-examples" >/dev/null) &
+SECURED_SERVER=$!
+trap 'kill "$SERVER" "$PLAN_SERVER" "$SECURED_SERVER" 2>/dev/null || true; wait "$SERVER" "$PLAN_SERVER" "$SECURED_SERVER" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 
 BASE="http://127.0.0.1:$PORT"
 PLAN_BASE="http://127.0.0.1:$PLAN_PORT"
-for url in "$BASE" "$PLAN_BASE"; do
+SECURED_BASE="http://127.0.0.1:$SECURED_PORT"
+for url in "$BASE" "$PLAN_BASE" "$SECURED_BASE"; do
   for _ in $(seq 1 100); do
     curl -fs -o /dev/null "$url/" && break
     sleep 0.1
@@ -89,9 +119,20 @@ done
 
 export BASE
 export PLAN_BASE
+export SECURED_BASE
 export HTTPS_BASE="https://127.0.0.1:$HTTPS_PORT"
 export GRPC_ADDR="127.0.0.1:$GRPC_PORT"
+export SECURED_ADDR="127.0.0.1:$SECURED_PORT"
+export SECURED_HTTPS_ADDR="127.0.0.1:$SECURED_HTTPS_PORT"
 export ADMIN_TOKEN
+
+# Control-plane tokens for the secured instance.
+MINT="$HERE/concepts/_mint-control-jwt.sh"
+CONSOLE_TOKEN="$(bash "$MINT" "$TMP/secured/control.key" "$SECURED_AUDIENCE" console 900)"
+INSPECTOR_TOKEN="$(bash "$MINT" "$TMP/secured/control.key" "$SECURED_AUDIENCE" inspector 900)"
+EXPIRED_TOKEN="$(bash "$MINT" "$TMP/secured/control.key" "$SECURED_AUDIENCE" console -600)"
+OTHER_AUDIENCE_TOKEN="$(bash "$MINT" "$TMP/secured/control.key" another-instance console 900)"
+export CONSOLE_TOKEN
 
 cd "$HERE"
 if [[ $# -gt 0 ]]; then
@@ -118,6 +159,11 @@ if [[ ${#hurl_files[@]} -gt 0 ]]; then
     --variable "https_url=$HTTPS_BASE" \
     --variable "grpc_url=http://$GRPC_ADDR" \
     --variable "admin_token=$ADMIN_TOKEN" \
+    --variable "secured_url=$SECURED_BASE" \
+    --variable "console_token=$CONSOLE_TOKEN" \
+    --variable "inspector_token=$INSPECTOR_TOKEN" \
+    --variable "expired_token=$EXPIRED_TOKEN" \
+    --variable "other_audience_token=$OTHER_AUDIENCE_TOKEN" \
     "${hurl_files[@]}" || status=1
 fi
 

@@ -4,7 +4,8 @@
 import { h, icon, replace, clear, notice, toast, field, input, select, fmtDuration } from './lib/dom.js';
 import * as settings from './lib/settings.js';
 import * as traffic from './lib/traffic.js';
-import { SERVER, getJson, trimBase } from './lib/http.js';
+import * as auth from './lib/auth.js';
+import { SERVER, getJson, send, trimBase } from './lib/http.js';
 
 const VIEWS = [
   { section: 'Instance' },
@@ -108,7 +109,7 @@ async function route() {
     else a.removeAttribute('aria-current');
   }
   const def = VIEWS.find((v) => v.id === id);
-  document.title = def.title + ' | Rustybin console';
+  if (!auth.needsSignIn()) document.title = def.title + ' | ' + (auth.consoleTitle ? auth.consoleTitle + ' | ' : '') + 'Rustybin console';
   replace(viewEl, h('div', { class: 'row muted' }, h('span', { class: 'spinner' }), 'Loading ' + def.title));
   try {
     const mod = await def.load();
@@ -132,6 +133,7 @@ function chip(label, value, title) {
 
 function renderMeta() {
   clear(meta);
+  if (auth.consoleTitle) meta.appendChild(h('span', { class: 'badge violet console-title', title: 'RUSTYBIN_CONSOLE_TITLE' }, auth.consoleTitle));
   const st = settings.instance.status;
   if (st) {
     const healthy = st.healthy;
@@ -143,11 +145,20 @@ function renderMeta() {
   const live = ts.status === 'live';
   meta.appendChild(h('span', { class: 'badge outline hide-sm', title: ts.error || 'Live inspector feed' },
     h('span', { class: 'dot ' + (live ? 'live' : ts.status === 'error' || ts.status === 'needs-session' ? 'err' : 'warn') }),
-    live ? 'live feed' : ts.status === 'needs-session' ? 'set a session' : ts.status));
+    live ? 'live feed' : ts.status === 'needs-session' ? 'set a session' : ts.status === 'signed-out' ? 'signed out' : ts.status));
+}
+
+function backlinkLabel() {
+  if (auth.consoleTitle) return auth.consoleTitle;
+  try { return new URL(auth.backlink).host; } catch { return 'portal'; }
 }
 
 function renderActions() {
   clear(actions);
+  if (auth.backlink) {
+    actions.appendChild(h('a', { class: 'btn sm ghost backlink', href: auth.backlink, rel: 'noopener', title: 'Back to ' + auth.backlink, id: 'backlink' },
+      icon('external'), h('span', { class: 'ellipsis', style: { maxWidth: '200px' } }, 'Back to ' + backlinkLabel())));
+  }
   const gw = settings.get('gatewayUrl');
   const session = settings.get('session');
   const wrap = h('span', { class: 'row nowrap topbar-field hide-sm' });
@@ -167,8 +178,17 @@ function openSettings() {
   const admin = input({ value: settings.get('adminToken'), placeholder: 'only when RUSTYBIN_ADMIN_TOKEN is set', type: 'password' });
   const theme = select([['system', 'Follow the system'], ['light', 'Light'], ['dark', 'Dark']], settings.get('theme'));
   const err = h('div');
+  const exp = auth.expiresAt();
+  const signedIn = auth.required() && auth.getToken()
+    ? h('div', { class: 'notice' }, icon('shield'), h('div', { class: 'grow' },
+      'Signed in to the control plane (RUSTYBIN_CONTROL_AUTH=' + auth.mode + ')',
+      auth.scopes() ? ', scope ' + auth.scopes().join(' ') : '',
+      exp ? ', expires ' + new Date(exp).toLocaleTimeString() : '', '.'),
+    h('button', { class: 'btn sm', type: 'button', id: 'sign-out', onclick: () => { dialog.close(); auth.signOut(); } }, 'Sign out'))
+    : null;
   const form = h('form', { method: 'dialog', class: 'stack', style: { padding: '18px', width: 'min(560px, 92vw)' } },
     h('h2', { id: 'settings-title' }, 'Console settings'),
+    signedIn,
     field('Session (X-Rustybin-Session)', session, 'Tags the requests this console sends, scopes per-client state (flaky counters, bins, tasks). Required to see traffic in public mode. Letters, digits and . _ : - only.'),
     field('Gateway base URL', gateway, 'Views offer "via gateway" to send their requests through this URL instead of directly to Rustybin. Cross-origin calls need CORS on the gateway.'),
     field('Admin token', admin, settings.instance.adminTokenConfigured ? 'This instance requires it for health toggles and clearing all captured requests.' : 'Not required by this instance.'),
@@ -219,9 +239,85 @@ function handleCallback() {
   return true;
 }
 
+// ── Sign-in screen (RUSTYBIN_CONTROL_AUTH = token | jwt) ───────────
+
+let signinEl = null;
+
+const REASONS = {
+  missing: null,
+  'signed-out': 'You signed out.',
+  expired: 'Your session expired.',
+  invalid_audience: 'The token was issued for another instance (audience mismatch).',
+  invalid_signature: 'The token signature is not valid for this instance.',
+  invalid_algorithm: 'The token uses an algorithm this instance does not accept.',
+  not_yet_valid: 'The token is not valid yet (check the clock).',
+  missing_claim: 'The token lacks a required claim (exp, aud).',
+  malformed: 'The token is malformed.',
+  invalid_token: 'The token was refused.',
+  missing_token: 'The token did not reach the server.',
+};
+
+function renderSignIn() {
+  if (!auth.needsSignIn()) {
+    if (signinEl) { signinEl.remove(); signinEl = null; }
+    app.removeAttribute('aria-hidden');
+    return;
+  }
+  const reason = auth.getReason();
+  const expired = reason === 'expired';
+  const tokenInput = input({ type: 'password', placeholder: auth.mode === 'jwt' ? 'Access token or admin token' : 'Admin token', 'aria-label': 'Token', autocomplete: 'off', id: 'signin-token' });
+  const err = h('div');
+  const why = REASONS[reason] === undefined ? 'The token was refused (' + reason + ').' : REASONS[reason];
+  const form = h('form', { class: 'stack' },
+    field(auth.mode === 'jwt' ? 'Paste a token' : 'Paste the admin token', tokenInput,
+      auth.mode === 'jwt' ? 'A control-plane access token (JWT) or RUSTYBIN_ADMIN_TOKEN. It is kept in this tab only.' : 'RUSTYBIN_ADMIN_TOKEN. It is kept in this tab only.'),
+    err,
+    h('div', { class: 'row' }, h('span', { class: 'grow' }), h('button', { class: 'btn primary', type: 'submit' }, 'Sign in')));
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const v = tokenInput.value.trim();
+    if (!v) {
+      replace(err, notice('err', 'Enter a token.'));
+      return;
+    }
+    auth.setToken(v);
+  });
+  const body = h('div', { class: 'stack' },
+    h('div', { class: 'row nowrap' }, icon('shield'), h('h1', { id: 'signin-title' }, expired ? 'Session expired' : 'Sign in required')),
+    why ? notice(expired || reason === 'signed-out' ? 'warn' : 'err', why) : null,
+    h('p', null, 'This Rustybin instance protects its control plane and console data (RUSTYBIN_CONTROL_AUTH=' + auth.mode + '). ',
+      auth.backlink ? 'Open the console again from your portal to get a fresh access token, or paste a token below.' : 'Paste a token below, or open the console with #token=<token> appended to its URL.'),
+    auth.backlink ? h('a', { class: 'btn primary', href: auth.backlink, rel: 'noopener', id: 'signin-backlink' }, icon('external'), 'Open ' + backlinkLabel()) : null,
+    form,
+    h('p', { class: 'muted small' }, 'The data plane stays open: ', h('a', { href: SERVER + '/' }, 'endpoint list'), ', ', h('a', { href: SERVER + '/docs' }, 'OpenAPI docs'), '.'));
+  const el = h('div', { class: 'signin', id: 'signin', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'signin-title' },
+    h('section', { class: 'card signin-card' }, h('div', { class: 'card-body' }, body)));
+  if (signinEl) signinEl.replaceWith(el);
+  else document.body.appendChild(el);
+  signinEl = el;
+  app.setAttribute('aria-hidden', 'true');
+  document.title = (expired ? 'Session expired' : 'Sign in') + ' | ' + (auth.consoleTitle ? auth.consoleTitle + ' | ' : '') + 'Rustybin console';
+  tokenInput.focus();
+}
+
+async function verifyAndResume() {
+  // Check the new token once; a 401 brings the sign-in screen back with the reason.
+  const r = await send({ url: SERVER + '/_rustybin/status', session: false, timeout: 15000 });
+  if (r.ok) {
+    renderSignIn();
+    currentId = null;
+    route();
+    loadInstance().then(() => traffic.connect());
+  }
+}
+
 // ── Start ──────────────────────────────────────────────────────────
 
 async function loadInstance() {
+  if (auth.needsSignIn()) {
+    renderMeta();
+    return;
+  }
   try {
     const st = await getJson('/_rustybin/status', { session: false });
     settings.instance.status = st;
@@ -243,6 +339,7 @@ async function loadInstance() {
 
 function start() {
   if (handleCallback()) return;
+  auth.consumeFragment();
   const menu = document.getElementById('menu-btn');
   menu.appendChild(icon('menu'));
   menu.addEventListener('click', () => {
@@ -262,7 +359,21 @@ function start() {
     if (kind === 'status') renderMeta();
     if (kind === 'add' || kind === 'seen' || kind === 'clear') updateTrafficCount();
   });
-  window.addEventListener('hashchange', route);
+  window.addEventListener('hashchange', () => {
+    // A token pasted into the address bar as #token=... is picked up too.
+    if (auth.consumeFragment()) return;
+    route();
+  });
+  auth.onChange((kind) => {
+    if (kind === 'token') {
+      renderActions();
+      verifyAndResume();
+    } else {
+      renderSignIn();
+      renderMeta();
+    }
+  });
+  renderSignIn();
   document.addEventListener('keydown', (e) => {
     if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-9]$/.test(e.key)) {
       const views = VIEWS.filter((v) => v.id);

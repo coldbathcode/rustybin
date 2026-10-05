@@ -83,7 +83,11 @@ a runnable example, and `/docs` for the OpenAPI reference. See the
 - Chaos: `X-Rustybin-Delay` and `X-Rustybin-Fail` on every route, flaky endpoints per
   client, a health toggle shared with gRPC health.
 - Observability: a request inspector with a live feed, request bins, webhook
-  signature verification.
+  signature verification, Prometheus metrics (`/_rustybin/metrics`) and JSON logs.
+- Operations: a readiness probe that ignores the `/health` demo toggle, control-plane
+  authentication (admin token or Ed25519 JWTs with scopes), gRPC on the HTTP ports
+  behind a TLS-terminating proxy, a non-root image that runs on a read-only root
+  filesystem ([control-plane security](docs/src/concepts/control-plane-security.md)).
 - Collections for Postman, Insomnia, Bruno, curl, `.http`, Hurl, k6 and HAR,
   generated from the same route catalogue as everything else.
 
@@ -93,7 +97,9 @@ a runnable example, and `/docs` for the OpenAPI reference. See the
 forwarded, with gateway headers highlighted), Request bins, API explorer, AI
 playground, MCP inspector, A2A client, Chaos and health (with a small load
 generator) and Token lab. It is embedded in the binary and works offline. Set a
-gateway base URL in its settings to send every request through your gateway.
+gateway base URL in its settings to send every request through your gateway. With a
+protected control plane it signs in with a token from the URL fragment
+(`/ui/#token=...`) or a sign-in screen.
 
 ## Configuration
 
@@ -108,6 +114,7 @@ to the default. `GET /_rustybin/config` shows the effective configuration. Detai
 | `RUSTYBIN_GRPC_PORT` | `50051` | gRPC port (optional listener) |
 | `RUSTYBIN_HOST` | `0.0.0.0` | Bind address, IPv4 or IPv6 |
 | `RUSTYBIN_LOG_LEVEL` | `info` | Log filter (`EnvFilter` syntax); falls back to `RUST_LOG` |
+| `RUSTYBIN_LOG_FORMAT` | `text` | `text` or `json` (one object per line with the request id) |
 | `RUSTYBIN_INSTANCE_ID` | random UUID | Instance name for load balancing demos |
 | `RUSTYBIN_TRUST_FORWARD` | `false` | Trust `Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `Fly-Client-IP` for client IP, scheme and host |
 | `RUSTYBIN_BODY_LIMIT` | `1048576` | Maximum request body in bytes (`413` above) |
@@ -116,6 +123,11 @@ to the default. `GET /_rustybin/config` shows the effective configuration. Detai
 | `RUSTYBIN_MTLS_IN_HEADER` | unset | Header in which a gateway forwards the client certificate for `/auth/mtls` |
 | `RUSTYBIN_PUBLIC_MODE` | `false` | Hardening for shared instances: lower caps, session-scoped inspector, global mutations need the admin token |
 | `RUSTYBIN_ADMIN_TOKEN` | unset | Required (Bearer or `X-Rustybin-Admin-Token`) for health toggles, global flaky reset and clearing all captured requests |
+| `RUSTYBIN_CONTROL_AUTH` | `open` | Protect `/_rustybin/*` (except `/_rustybin/ready`): `token` (admin token) or `jwt` (admin token or Ed25519 JWT with scope `inspector`, `console` or `admin`) |
+| `RUSTYBIN_CONTROL_JWT_PUBLIC_KEY` / `_AUDIENCE` | unset / instance id | Ed25519 public key (PEM or base64) and required `aud` of control-plane JWTs |
+| `RUSTYBIN_HOSTED_MODE` | `false` | Preset for one-instance-per-customer platforms: control auth `jwt` and JSON logs |
+| `RUSTYBIN_GRPC_ON_HTTP` | `false` | Also serve gRPC (`content-type: application/grpc*`) on the HTTP and HTTPS listeners |
+| `RUSTYBIN_CONSOLE_TITLE` / `_BACKLINK` | unset | Title and "Back to" link (http(s) URL) in the web console header |
 | `RUSTYBIN_CORS_ORIGINS` | `*` | Allowed CORS origins, comma separated; `off` disables Rustybin's CORS |
 | `RUSTYBIN_INSPECTOR_CAPACITY` | `500` | Requests kept by the inspector (max 10000) |
 | `RUSTYBIN_PLAN` | `none` | Plan limits preset: `none` (no limits, no headers), `free`, `pro`, `team`, `enterprise` ([plans and limits](docs/src/concepts/plans-and-limits.md)) |
@@ -147,7 +159,8 @@ Architecture, adding a module and the conformance suites: see
 ## Endpoint reference
 
 Generated from the route catalogue (`cargo run -- --print-endpoints-markdown`). The
-gRPC `EchoService` listens on its own port (default `50051`), see
+gRPC `EchoService` listens on its own port (default `50051`) and, with
+`RUSTYBIN_GRPC_ON_HTTP=true`, on the HTTP and HTTPS ports too, see
 [gRPC](docs/src/reference/grpc.md). JSON endpoints also answer XML with
 `Accept: application/xml`.
 
@@ -450,7 +463,9 @@ gRPC `EchoService` listens on its own port (default `50051`), see
 | GET | `/_rustybin/requests/stream` | Live feed of captured requests (SSE) |
 | GET | `/_rustybin/requests/{id}` | One captured request by id |
 | GET | `/_rustybin/config` | Effective configuration (no secrets) |
-| GET | `/_rustybin/version` | Service name and version |
+| GET | `/_rustybin/version` | Service name, version, commit and control-plane auth mode |
+| GET | `/_rustybin/ready` | Readiness probe: 200 while serving, independent of the /health toggle |
+| GET | `/_rustybin/metrics` | Prometheus metrics (requests by route template, latency, streams, egress, protocols, LLM tokens, faults) |
 | GET | `/_rustybin/usage` | Plan, limits and current usage (requests, egress, in flight, streams) |
 | GET | `/_rustybin/catalog` | Route catalogue as JSON (paths, methods, categories, examples) |
 | GET | `/_rustybin/status` | Uptime, health state and inspector counters |

@@ -21,6 +21,25 @@ captured by the inspector and ignores fault injection headers.
 {{#include ../examples/exports/console.hurl:ui_index}}
 ```
 
+## Signing in, title and back link
+
+When the instance protects its control plane (`RUSTYBIN_CONTROL_AUTH=token` or
+`jwt`), the console's files still load without credentials, but every call to
+`/_rustybin/*` carries a token. Open the console with the token in the URL fragment,
+`/ui/#token=<token>` (or `/ui/#/traffic&token=<token>`), or paste it on the sign-in
+screen. The console keeps it for the browser tab only, strips it from the address
+bar, sends it as `Authorization: Bearer` (the live traffic feed included), and
+shows the sign-in screen again when the token is refused or its `exp` passes.
+**Console settings, Sign out** forgets it. Details:
+[Control-plane security](concepts/control-plane-security.md#the-console-with-a-token).
+
+`RUSTYBIN_CONSOLE_TITLE` (up to 80 characters) is shown as a badge in the header and
+in the browser tab title; `RUSTYBIN_CONSOLE_BACKLINK` (an `http://` or `https://`
+URL, anything else is ignored with a warning) adds a "Back to ..." link to the
+header and to the sign-in screen, for example back to the portal that launched the
+console. Both reach the page as HTML-escaped `<meta>` elements, so they are visible
+before sign-in.
+
 ## Views
 
 `Alt+1` to `Alt+9` switch between the views, in this order:
@@ -45,14 +64,14 @@ The settings dialog (gear icon) stores, in the browser:
 |---|---|
 | Session | The `X-Rustybin-Session` the console sends: it tags the console's traffic and scopes per-client state (flaky counters, bins, A2A tasks). In [public mode](concepts/sessions.md#public-mode) a random session is generated on first load, because the live traffic view needs one there. |
 | Gateway base URL | Views offer to send their requests through this URL instead of directly to Rustybin (the gateway must allow CORS for the console's origin) |
-| Admin token | Sent for admin-guarded actions (health toggles, clearing all captured requests) when the instance has `RUSTYBIN_ADMIN_TOKEN` |
+| Admin token | Sent for admin-guarded actions (health toggles, clearing all captured requests) when the instance has `RUSTYBIN_ADMIN_TOKEN`. Without it, the sign-in token is sent instead (useful with the admin token or a JWT with the `admin` scope). |
 | Theme | Follow the system, light or dark |
 
 ## Control-plane endpoints used by the console
 
 | Route | Returns |
 |---|---|
-| `GET /_rustybin/status` | Name, version, instance id, hostname, uptime and start time, health, public mode, `admin_token_configured`, `/identity` request count, inspector counters (stored, capacity, total captured) and ports |
+| `GET /_rustybin/status` | Name, version, commit, instance id, hostname, uptime and start time, health, public mode, `admin_token_configured`, `control_auth`, `hosted_mode`, console title and back link, `/identity` request count, inspector counters (stored, capacity, total captured) and ports |
 | `GET /_rustybin/catalog` | The route catalogue as JSON: categories with counts, and every endpoint with methods, category, summary, description and runnable examples |
 
 ```hurl

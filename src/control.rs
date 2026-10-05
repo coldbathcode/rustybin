@@ -1,5 +1,6 @@
-//! Control-plane endpoints under `/_rustybin/*` (config and version).
-//! The inspector endpoints live in `crate::inspector`.
+//! Control-plane endpoints under `/_rustybin/*` (config, version, ready).
+//! The inspector endpoints live in `crate::inspector`, metrics in
+//! `crate::metrics`, authentication in `crate::control_auth`.
 
 use axum::extract::State;
 use axum::response::IntoResponse;
@@ -33,8 +34,34 @@ async fn config_handler(State(config): State<Arc<Config>>) -> impl IntoResponse 
     Json(config.public_view())
 }
 
-async fn version_handler() -> impl IntoResponse {
-    Json(version_info())
+async fn version_handler(State(config): State<Arc<Config>>) -> impl IntoResponse {
+    let mut v = version_info();
+    v["control_auth"] = json!(config.control_auth.as_str());
+    v["hosted_mode"] = json!(config.hosted_mode);
+    v["grpc_on_http"] = json!(config.grpc_on_http);
+    Json(v)
+}
+
+/// Readiness: 200 while the process serves HTTP, whatever the `/health`
+/// demo toggle says. Never authenticated, limited or captured.
+async fn ready_handler() -> impl IntoResponse {
+    Json(json!({ "status": "ready" }))
+}
+
+/// Commit the binary was built from (`RUSTYBIN_GIT_SHA` at build time, else
+/// the checkout's HEAD, see build.rs), when known.
+pub fn git_sha() -> Option<&'static str> {
+    option_env!("RUSTYBIN_GIT_SHA").filter(|s| !s.is_empty())
+}
+
+/// Build information (also embedded in `/_rustybin/usage`).
+pub fn build_info() -> Value {
+    json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "git_sha": git_sha(),
+        "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+        "rustc": env!("RUSTYBIN_RUSTC_VERSION"),
+    })
 }
 
 /// Build/version information.
@@ -42,6 +69,7 @@ pub fn version_info() -> Value {
     json!({
         "name": env!("CARGO_PKG_NAME"),
         "version": env!("CARGO_PKG_VERSION"),
+        "git_sha": git_sha(),
         "rust_version": env!("CARGO_PKG_RUST_VERSION"),
         "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
     })
@@ -51,6 +79,7 @@ pub fn router(_state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/_rustybin/config", get(config_handler))
         .route("/_rustybin/version", get(version_handler))
+        .route("/_rustybin/ready", get(ready_handler))
 }
 
 pub fn catalog() -> Vec<Endpoint> {
@@ -66,9 +95,21 @@ pub fn catalog() -> Vec<Endpoint> {
             "/_rustybin/version",
             &["GET"],
             category::CONTROL,
-            "Service name and version",
+            "Service name, version, commit and control-plane auth mode",
         )
         .example(Example::get("Version", "/_rustybin/version")),
+        Endpoint::new(
+            "/_rustybin/ready",
+            &["GET"],
+            category::CONTROL,
+            "Readiness probe: 200 while serving, independent of the /health toggle",
+        )
+        .description(
+            "Never authenticated (RUSTYBIN_CONTROL_AUTH), never limited by the plan, never \
+             captured by the inspector. Use it for platform readiness checks; /health is a demo \
+             toggle that may return 503.",
+        )
+        .example(Example::get("Readiness", "/_rustybin/ready")),
     ]
 }
 
@@ -93,9 +134,26 @@ pub fn openapi_paths() -> Value {
                     "properties": {
                         "name": { "type": "string" },
                         "version": { "type": "string" },
+                        "git_sha": { "type": ["string", "null"], "description": "Commit the binary was built from, when known" },
                         "rust_version": { "type": "string" },
-                        "profile": { "type": "string" }
+                        "profile": { "type": "string" },
+                        "control_auth": { "type": "string", "enum": ["open", "token", "jwt"] },
+                        "hosted_mode": { "type": "boolean" },
+                        "grpc_on_http": { "type": "boolean" }
                     }
+                } } } } }
+            }
+        },
+        "/_rustybin/ready": {
+            "get": {
+                "tags": ["Control Plane"],
+                "summary": "Readiness probe",
+                "description": "Always 200 while the process serves HTTP, independent of the `/health` demo toggle. Exempt from control-plane auth, plan limits and inspector capture.",
+                "operationId": "getRustybinReady",
+                "security": [],
+                "responses": { "200": { "description": "Ready", "content": { "application/json": { "schema": {
+                    "type": "object",
+                    "properties": { "status": { "type": "string", "enum": ["ready"] } }
                 } } } } }
             }
         }

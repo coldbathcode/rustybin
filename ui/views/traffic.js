@@ -6,6 +6,7 @@ import { bodyView, headersTable, diffView, normaliseBody, isGatewayHeader, codeB
 import { SERVER, send, toCurl } from '../lib/http.js';
 import * as traffic from '../lib/traffic.js';
 import * as settings from '../lib/settings.js';
+import * as auth from '../lib/auth.js';
 
 const LIST_LIMIT = 400;
 const SKIP_CURL_HEADERS = new Set(['host', 'content-length', 'connection', 'accept-encoding', 'x-request-id']);
@@ -219,9 +220,24 @@ export default {
           ]),
           h('div', { class: 'row' },
             copyButton(() => curlFor(e), { label: 'Copy as curl', toast: 'curl command copied (replays directly to Rustybin)' }),
-            h('a', { class: 'btn sm', href: SERVER + '/_rustybin/requests/' + encodeURIComponent(e.id) + (e.session ? '?session=' + encodeURIComponent(e.session) : ''), target: '_blank', rel: 'noopener' }, icon('external'), 'JSON'),
+            jsonLink(e),
             h('button', { class: 'btn sm', type: 'button', onclick: () => { state.compare = true; state.a = e.id; state.b = null; renderPause(); schedule(); renderDetail(); } }, icon('diff'), 'Compare with...'))),
         t.el);
+    }
+
+    // Raw JSON of an entry. With control-plane auth a plain link would lack
+    // the token, so fetch it (with the Authorization header) into a blob.
+    function jsonLink(e) {
+      const url = SERVER + '/_rustybin/requests/' + encodeURIComponent(e.id) + (e.session ? '?session=' + encodeURIComponent(e.session) : '');
+      if (!auth.required()) return h('a', { class: 'btn sm', href: url, target: '_blank', rel: 'noopener' }, icon('external'), 'JSON');
+      return h('button', { class: 'btn sm', type: 'button', onclick: async () => {
+        const r = await send({ url, session: false });
+        if (!r.ok) { toast(r.error || ('JSON not available: ' + r.status), 'err'); return; }
+        const blob = new Blob([JSON.stringify(r.json, null, 2)], { type: 'application/json' });
+        const href = URL.createObjectURL(blob);
+        window.open(href, '_blank', 'noopener');
+        setTimeout(() => URL.revokeObjectURL(href), 60000);
+      } }, icon('external'), 'JSON');
     }
 
     function renderCompare() {

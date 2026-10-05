@@ -147,10 +147,14 @@ async fn ws_echo(
     State(config): State<Arc<Config>>,
     headers: HeaderMap,
     lease: Option<Extension<StreamLease>>,
+    tracker: Option<Extension<crate::metrics::StreamTracker>>,
 ) -> Response {
     let limits = limits(&config);
     let lease = lease.map(|Extension(l)| l);
-    configure(ws, &headers, limits).on_upgrade(move |socket| handle_echo(socket, limits, lease))
+    configure(ws, &headers, limits).on_upgrade(move |socket| async move {
+        let _open = crate::metrics::open_ws(&tracker);
+        handle_echo(socket, limits, lease).await
+    })
 }
 
 /// `lease`: the plan's stream slot (held while the socket is open) and lifetime.
@@ -212,13 +216,16 @@ async fn ws_time(
     headers: HeaderMap,
     Query(params): Query<TimeParams>,
     lease: Option<Extension<StreamLease>>,
+    tracker: Option<Extension<crate::metrics::StreamTracker>>,
 ) -> Response {
     let interval = params.interval_ms.unwrap_or(1000).clamp(100, 60_000);
     let count = params.count.unwrap_or(10).clamp(1, 1000);
     let limits = limits(&config);
     let lease = lease.map(|Extension(l)| l);
-    configure(ws, &headers, limits)
-        .on_upgrade(move |socket| handle_time(socket, interval, count, limits, lease))
+    configure(ws, &headers, limits).on_upgrade(move |socket| async move {
+        let _open = crate::metrics::open_ws(&tracker);
+        handle_time(socket, interval, count, limits, lease).await
+    })
 }
 
 async fn handle_time(

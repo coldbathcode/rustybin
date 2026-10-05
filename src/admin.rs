@@ -20,17 +20,27 @@ use axum::Json;
 use serde_json::json;
 
 use crate::config::Config;
+use crate::control_auth::{constant_time_eq, presented_token};
 
 /// Header accepted as an alternative to `Authorization: Bearer`.
 pub const ADMIN_TOKEN_HEADER: &str = "x-rustybin-admin-token";
 
 /// Returns `Ok(())` when the caller may perform a global mutation, otherwise
 /// the JSON error response to send back (401 or 403).
+///
+/// With `RUSTYBIN_CONTROL_AUTH=jwt`, a control-plane JWT with the `admin`
+/// scope is accepted as well.
 #[allow(clippy::result_large_err)]
 pub fn require_admin(headers: &HeaderMap, config: &Config) -> Result<(), Response> {
+    let token = presented_token(headers);
+    if let Some(t) = token {
+        if crate::control_auth::verify_jwt(t, config).is_ok_and(|g| g.admin) {
+            return Ok(());
+        }
+    }
     match config.admin_token.as_deref() {
         Some(expected) => {
-            if presented_token(headers).is_some_and(|t| constant_time_eq(t, expected)) {
+            if token.is_some_and(|t| constant_time_eq(t, expected)) {
                 Ok(())
             } else {
                 Err(error(
@@ -50,30 +60,6 @@ pub fn require_admin(headers: &HeaderMap, config: &Config) -> Result<(), Respons
 /// True when the request carries a valid admin token (or none is required).
 pub fn is_admin(headers: &HeaderMap, config: &Config) -> bool {
     require_admin(headers, config).is_ok()
-}
-
-fn presented_token(headers: &HeaderMap) -> Option<&str> {
-    if let Some(v) = headers
-        .get(ADMIN_TOKEN_HEADER)
-        .and_then(|v| v.to_str().ok())
-    {
-        return Some(v.trim());
-    }
-    headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| {
-            let (scheme, token) = v.trim().split_once(' ')?;
-            scheme.eq_ignore_ascii_case("bearer").then(|| token.trim())
-        })
-}
-
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 fn error(status: StatusCode, message: &str) -> Response {
