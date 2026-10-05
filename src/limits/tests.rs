@@ -374,9 +374,11 @@ async fn exempt_routes_and_admin_bypass() {
         "/ui/",
         USAGE_PATH,
         STATUS_PATH,
+        crate::metrics::METRICS_PATH,
         "/",
         USAGE_PATH,
         STATUS_PATH,
+        crate::metrics::METRICS_PATH,
     ] {
         let resp = get_with(&app, path, &[]).await;
         assert!(resp.status().is_success(), "{path}: {}", resp.status());

@@ -22,8 +22,9 @@
 //! live in a bounded map and are not persisted.
 //!
 //! Exempt from every limit: `/` (platform health check), `/ui/*`,
-//! `GET /_rustybin/ready` (readiness probe), `GET /_rustybin/usage` and
-//! `GET /_rustybin/status` (polled by the console). Other control plane
+//! `GET /_rustybin/ready` (readiness probe), `GET /_rustybin/usage`,
+//! `GET /_rustybin/status` (polled by the console) and `GET /_rustybin/metrics`
+//! (monitoring scrapes). Other control plane
 //! requests that carry a valid admin token (or, with control-plane auth on,
 //! any accepted token) are counted but never rejected.
 
@@ -1134,7 +1135,10 @@ pub fn is_exempt(method: &Method, path: &str) -> bool {
         || path
             .strip_prefix(crate::control::UI_PREFIX)
             .is_some_and(|rest| rest.starts_with('/'))
-        || ((path == USAGE_PATH || path == STATUS_PATH || path == crate::control_auth::READY_PATH)
+        || ((path == USAGE_PATH
+            || path == STATUS_PATH
+            || path == crate::control_auth::READY_PATH
+            || path == crate::metrics::METRICS_PATH)
             && (method == Method::GET || method == Method::HEAD))
 }
 
