@@ -64,6 +64,11 @@ API, AI and agent gateway demos.
 - `GET /_rustybin/metrics`: Prometheus metrics with bounded labels (route templates,
   status classes, protocols, mock LLM tokens by model family, injected faults,
   open streams, egress, build info).
+- More metrics: `rustybin_limit_rejections_total{dimension}` (plan limiter 429s and
+  gRPC `RESOURCE_EXHAUSTED`), `rustybin_llm_requests_total{provider,model_family,streaming}`
+  and `rustybin_llm_faults_total{provider,kind}` (mock LLM faults by kind), and
+  latency buckets from 1 ms to 60 s on `rustybin_request_duration_seconds` so p50
+  and p99 can be computed with `histogram_quantile` (PromQL examples in the docs).
 - `RUSTYBIN_LOG_FORMAT=json`: one JSON object per line with the request id.
 - `RUSTYBIN_GRPC_ON_HTTP=true`: the gRPC services on the HTTP and HTTPS listeners
   (h2c and ALPN `h2`) for a TLS-terminating proxy.

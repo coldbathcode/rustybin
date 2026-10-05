@@ -64,7 +64,28 @@ HTTP 200
 [Asserts]
 header "Content-Type" startsWith "text/plain; version=0.0.4"
 body contains "# TYPE rustybin_requests_total counter"
-body contains "rustybin_request_duration_seconds_bucket{route=\"/uuid\",le=\"0.005\"}"
+body contains "rustybin_request_duration_seconds_bucket{route=\"/uuid\",le=\"0.001\"}"
+body contains "rustybin_request_duration_seconds_bucket{route=\"/uuid\",le=\"60\"}"
 body contains "rustybin_protocol_requests_total{protocol=\"http\"}"
+body contains "# TYPE rustybin_limit_rejections_total counter"
 body not contains "/no/such/route"
 # ANCHOR_END: metrics
+
+# ANCHOR: metrics_llm
+# One mock LLM call and one injected native error, then the LLM series.
+POST {{base_url}}/ai/openai/v1/chat/completions
+{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]}
+HTTP 200
+
+POST {{base_url}}/ai/openai/v1/chat/completions
+X-Rustybin-Fail: rate_limit
+{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]}
+HTTP 429
+
+GET {{base_url}}/_rustybin/metrics
+HTTP 200
+[Asserts]
+body matches /rustybin_llm_requests_total\{provider="openai",model_family="gpt-4o",streaming="false"\} [1-9]/
+body matches /rustybin_llm_tokens_total\{provider="openai",model_family="gpt-4o",direction="input"\} [1-9]/
+body matches /rustybin_llm_faults_total\{provider="openai",kind="rate_limit"\} [1-9]/
+# ANCHOR_END: metrics_llm

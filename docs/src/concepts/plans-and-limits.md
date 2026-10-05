@@ -161,3 +161,16 @@ On the gRPC listener the rate and request quota of the plan apply to
 `RESOURCE_EXHAUSTED`, the same explanation as the HTTP body and `retry-after`,
 `x-rustybin-limit` and `x-rustybin-plan` metadata. Health and reflection are exempt;
 concurrency, streams and egress are enforced on the HTTP listeners only.
+
+## Metrics
+
+Every rejection, HTTP 429 or gRPC `RESOURCE_EXHAUSTED`, increments
+`rustybin_limit_rejections_total{dimension}` in the
+[Prometheus metrics](control-plane-security.md#metrics), with `dimension` one of
+`rps`, `concurrency`, `streams`, `requests` and `egress` (the `X-Rustybin-Limit`
+value). All five series are exported from the start, at 0, so an alert on
+`rate(rustybin_limit_rejections_total[5m]) > 0` needs no `absent()` guard.
+
+```hurl
+{{#include ../../examples/concepts/plans.hurl:metrics}}
+```

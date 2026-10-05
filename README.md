@@ -465,7 +465,7 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET | `/_rustybin/config` | Effective configuration (no secrets) |
 | GET | `/_rustybin/version` | Service name, version, commit and control-plane auth mode |
 | GET | `/_rustybin/ready` | Readiness probe: 200 while serving, independent of the /health toggle |
-| GET | `/_rustybin/metrics` | Prometheus metrics (requests by route template, latency, streams, egress, protocols, LLM tokens, faults) |
+| GET | `/_rustybin/metrics` | Prometheus metrics (requests by route template, latency, streams, egress, protocols, LLM tokens, requests and faults, limit rejections) |
 | GET | `/_rustybin/usage` | Plan, limits and current usage (requests, egress, in flight, streams) |
 | GET | `/_rustybin/catalog` | Route catalogue as JSON (paths, methods, categories, examples) |
 | GET | `/_rustybin/status` | Uptime, health state and inspector counters |

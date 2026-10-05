@@ -529,6 +529,19 @@ pub enum Dimension {
 }
 
 impl Dimension {
+    pub const ALL: [Dimension; 5] = [
+        Dimension::Rps,
+        Dimension::Concurrency,
+        Dimension::Streams,
+        Dimension::Requests,
+        Dimension::Egress,
+    ];
+
+    /// Position in [`Dimension::ALL`].
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Dimension::Rps => "rps",
@@ -566,6 +579,8 @@ pub struct Limiter {
     sessions: Mutex<HashMap<String, Arc<Counters>>>,
     /// Quota values last written to the usage file (skip unchanged writes).
     persisted: Mutex<Option<(DateTime<Utc>, u64, u64)>>,
+    /// Receives one count per rejection (`rustybin_limit_rejections_total`).
+    metrics: Option<Arc<crate::metrics::Metrics>>,
 }
 
 impl std::fmt::Debug for Limiter {
@@ -593,9 +608,22 @@ impl Limiter {
             instance,
             sessions: Mutex::new(HashMap::new()),
             persisted: Mutex::new(None),
+            metrics: None,
         };
         limiter.load();
         limiter
+    }
+
+    /// Report every rejection to these metrics.
+    pub fn with_metrics(mut self, metrics: Arc<crate::metrics::Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    fn count_rejection(&self, rejection: &Rejection) {
+        if let Some(m) = &self.metrics {
+            m.count_limit_rejection(rejection.dimension);
+        }
     }
 
     pub fn config(&self) -> &LimitsConfig {
@@ -811,8 +839,9 @@ impl Limiter {
         )
     }
 
-    /// The 429 response for a rejection.
+    /// The 429 response for a rejection (counted in the metrics).
     pub fn rejection_response(&self, rejection: &Rejection) -> Response {
+        self.count_rejection(rejection);
         let body = json!({
             "error": ERROR_CODE,
             "limit": rejection.dimension.as_str(),
@@ -1057,6 +1086,7 @@ impl Limiter {
         match self.admit(&counters, false, false) {
             Ok(_) => Ok(()),
             Err(rejection) => {
+                self.count_rejection(&rejection);
                 let mut status = tonic::Status::resource_exhausted(self.message(&rejection));
                 let md = status.metadata_mut();
                 if let Ok(v) = rejection.retry_after_secs.to_string().parse() {

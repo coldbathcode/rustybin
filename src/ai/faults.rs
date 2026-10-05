@@ -84,6 +84,27 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
+    /// Bounded `kind` label of `rustybin_llm_faults_total`.
+    pub fn metric_label(&self) -> &'static str {
+        match self {
+            ErrorKind::BadRequest => "bad_request",
+            ErrorKind::MissingCredential => "missing_credential",
+            ErrorKind::InvalidCredential => "invalid_credential",
+            ErrorKind::Forbidden => "forbidden",
+            ErrorKind::NotFound => "not_found",
+            ErrorKind::TooLarge => "too_large",
+            ErrorKind::RateLimit => "rate_limit",
+            ErrorKind::Server => "server_error",
+            ErrorKind::Unavailable => "unavailable",
+            ErrorKind::Overloaded => "overloaded",
+            ErrorKind::Timeout => "timeout",
+            ErrorKind::ContextLength => "context_length",
+            ErrorKind::PromptFilter => "prompt_filter",
+            ErrorKind::Status(s) if *s < 500 => "status_4xx",
+            ErrorKind::Status(_) => "status_5xx",
+        }
+    }
+
     fn default_message(&self, p: Provider) -> String {
         match self {
             ErrorKind::BadRequest => "Invalid request.".into(),

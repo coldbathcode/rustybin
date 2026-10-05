@@ -188,6 +188,9 @@ impl AiCtx {
             r.prompt_tokens,
             r.completion_tokens,
         );
+        self.shared
+            .metrics
+            .count_llm_request(self.provider.as_str(), r.model, r.stream);
         let preview: String = r.reply.chars().take(500).collect();
         let prompt: String = r.prompt.chars().take(32 * 1024).collect();
         self.shared.store.insert(AiRecord {
@@ -461,13 +464,21 @@ pub async fn ai_layer(
         if faults::roll(pct) {
             match f {
                 Fault::Error(kind) => {
+                    shared
+                        .metrics
+                        .count_llm_fault(provider.as_str(), kind.metric_label());
                     let mut resp = faults::error_response(provider, kind, None);
                     resp.headers_mut()
                         .insert("x-rustybin-fault", HeaderValue::from_static("ai"));
                     common(&mut resp, &seen);
                     return resp;
                 }
-                Fault::ContentFilter => content_filter = true,
+                Fault::ContentFilter => {
+                    shared
+                        .metrics
+                        .count_llm_fault(provider.as_str(), "content_filter");
+                    content_filter = true;
+                }
             }
         }
     }

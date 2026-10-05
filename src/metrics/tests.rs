@@ -368,3 +368,240 @@ async fn metrics_are_protected_when_control_auth_is_on() {
         .expect("response");
     assert_eq!(resp.status(), 200);
 }
+
+#[tokio::test]
+async fn limit_rejections_are_counted_by_dimension() {
+    use crate::limits::{Limiter, LimitsConfig, Plan};
+    let mut config = crate::config::Config::for_tests();
+    config.limits = LimitsConfig {
+        plan: Plan::Pro,
+        requests: 2,
+        ..LimitsConfig::default()
+    };
+    let state = crate::test_support::test_state_with(config);
+    let app = test_app_with(state.clone());
+    let mut statuses = Vec::new();
+    for _ in 0..5 {
+        let resp = app
+            .clone()
+            .oneshot(get_request("/uuid"))
+            .await
+            .expect("response");
+        statuses.push(resp.status().as_u16());
+    }
+    assert_eq!(statuses, [200, 200, 429, 429, 429]);
+    let text = state.metrics.render();
+    assert_eq!(
+        value(
+            &text,
+            "rustybin_limit_rejections_total",
+            &[("dimension", "requests")]
+        ),
+        3.0
+    );
+    // Every dimension is exported (zero until it rejects something).
+    for d in Dimension::ALL {
+        assert!(
+            text.contains(&format!(
+                "rustybin_limit_rejections_total{{dimension=\"{}\"}}",
+                d.as_str()
+            )),
+            "{d:?}"
+        );
+    }
+    assert_eq!(
+        value(
+            &text,
+            "rustybin_limit_rejections_total",
+            &[("dimension", "rps")]
+        ),
+        0.0
+    );
+
+    // gRPC: RESOURCE_EXHAUSTED counts too.
+    let metrics = Arc::new(Metrics::new());
+    let limiter = Limiter::new(LimitsConfig {
+        plan: Plan::Pro,
+        rps: 1,
+        ..LimitsConfig::default()
+    })
+    .with_metrics(metrics.clone());
+    assert!(limiter.check_grpc(&tonic::Request::new(())).is_ok());
+    assert!(limiter.check_grpc(&tonic::Request::new(())).is_err());
+    assert_eq!(
+        value(
+            &metrics.render(),
+            "rustybin_limit_rejections_total",
+            &[("dimension", "rps")]
+        ),
+        1.0
+    );
+}
+
+#[tokio::test]
+async fn llm_requests_and_faults_are_counted() {
+    let state = test_state();
+    let app = test_app_with(state.clone());
+    let chat = |stream: bool| {
+        json_request(
+            "POST",
+            "/ai/openai/v1/chat/completions",
+            &json!({
+                "model": "gpt-4o-mini",
+                "stream": stream,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        )
+    };
+    for stream in [false, false, true] {
+        let resp = app.clone().oneshot(chat(stream)).await.expect("response");
+        assert_eq!(resp.status(), 200);
+        let _ = body_string(resp).await;
+    }
+    let resp = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/ai/anthropic/v1/messages",
+            &json!({
+                "model": "claude-sonnet-4-5",
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        ))
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), 200);
+    let _ = body_string(resp).await;
+    // Injected faults: a native error, a raw status and a content filter.
+    for fail in ["rate_limit", "418", "content_filter"] {
+        let mut req = chat(false);
+        req.headers_mut().insert(
+            "x-rustybin-fail",
+            HeaderValue::from_str(fail).expect("header"),
+        );
+        let resp = app.clone().oneshot(req).await.expect("response");
+        let _ = body_string(resp).await;
+    }
+
+    let text = scrape(&app).await;
+    let count = |labels: &[(&str, &str)]| value(&text, "rustybin_llm_requests_total", labels);
+    assert_eq!(
+        count(&[
+            ("provider", "openai"),
+            ("model_family", "gpt-4o"),
+            ("streaming", "false")
+        ]),
+        3.0,
+        "two plain chats and the content filtered one: {text}"
+    );
+    assert_eq!(
+        count(&[
+            ("provider", "openai"),
+            ("model_family", "gpt-4o"),
+            ("streaming", "true")
+        ]),
+        1.0
+    );
+    assert_eq!(
+        count(&[
+            ("provider", "anthropic"),
+            ("model_family", "claude"),
+            ("streaming", "false")
+        ]),
+        1.0
+    );
+    let faults = |kind: &str| {
+        value(
+            &text,
+            "rustybin_llm_faults_total",
+            &[("provider", "openai"), ("kind", kind)],
+        )
+    };
+    assert_eq!(faults("rate_limit"), 1.0);
+    assert_eq!(faults("status_4xx"), 1.0);
+    assert_eq!(faults("content_filter"), 1.0);
+    // The generic fault counter still sees the error responses.
+    assert_eq!(
+        value(&text, "rustybin_faults_injected_total", &[("kind", "ai")]),
+        2.0
+    );
+}
+
+#[test]
+fn llm_labels_are_bounded() {
+    let m = Metrics::new();
+    for i in 0..(MAX_LLM_SERIES + 50) {
+        m.count_llm_request(&format!("provider-{i}"), &format!("model-{i}"), i % 2 == 0);
+        m.count_llm_fault(&format!("provider-{i}"), &format!("kind-{i}"));
+    }
+    for p in LLM_PROVIDERS {
+        for model in ["gpt-4o", "claude-3", "gemini-2.0", "llama3", "x"] {
+            m.count_llm_request(p, model, true);
+            m.count_llm_request(p, model, false);
+        }
+        for kind in LLM_FAULT_KINDS {
+            m.count_llm_fault(p, kind);
+        }
+    }
+    let text = m.render();
+    let mut providers = BTreeSet::new();
+    let mut families = BTreeSet::new();
+    let mut kinds = BTreeSet::new();
+    let mut streaming = BTreeSet::new();
+    for (name, labels, _) in samples(&text) {
+        match name.as_str() {
+            "rustybin_llm_requests_total" => {
+                providers.insert(labels["provider"].clone());
+                families.insert(labels["model_family"].clone());
+                streaming.insert(labels["streaming"].clone());
+            }
+            "rustybin_llm_faults_total" => {
+                providers.insert(labels["provider"].clone());
+                kinds.insert(labels["kind"].clone());
+            }
+            _ => {}
+        }
+    }
+    assert!(providers.len() <= LLM_PROVIDERS.len() + 1, "{providers:?}");
+    assert!(providers.contains("other"));
+    assert!(kinds.len() <= LLM_FAULT_KINDS.len() + 1, "{kinds:?}");
+    assert!(kinds.contains("other"));
+    assert_eq!(
+        streaming,
+        BTreeSet::from(["false".to_string(), "true".to_string()])
+    );
+    assert!(
+        families.iter().all(|f| !f.starts_with("model-")),
+        "{families:?}"
+    );
+    let inner = m.lock();
+    assert!(inner.llm_requests.len() <= MAX_LLM_SERIES + 2);
+    assert!(inner.llm_faults.len() <= (LLM_PROVIDERS.len() + 1) * (LLM_FAULT_KINDS.len() + 1));
+}
+
+#[test]
+fn buckets_cover_1ms_to_60s_for_quantiles() {
+    assert_eq!(BUCKETS.first(), Some(&0.001));
+    assert_eq!(BUCKETS.last(), Some(&60.0));
+    assert!(BUCKETS.windows(2).all(|w| w[0] < w[1]));
+    // No gap wider than 3x between neighbours: quantile interpolation stays
+    // within one bucket of the true value.
+    assert!(BUCKETS.windows(2).all(|w| w[1] / w[0] <= 3.0));
+    let m = Metrics::new();
+    m.observe_request("/a", &Method::GET, 200, Duration::from_micros(800));
+    m.observe_request("/a", &Method::GET, 200, Duration::from_secs(45));
+    m.observe_request("/a", &Method::GET, 200, Duration::from_secs(90));
+    let text = m.render();
+    let bucket = |le: &str| {
+        value(
+            &text,
+            "rustybin_request_duration_seconds_bucket",
+            &[("le", le)],
+        )
+    };
+    assert_eq!(bucket("0.001"), 1.0);
+    assert_eq!(bucket("30"), 1.0);
+    assert_eq!(bucket("60"), 2.0);
+    assert_eq!(bucket("+Inf"), 3.0);
+}

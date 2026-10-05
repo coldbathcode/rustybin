@@ -159,3 +159,17 @@ body contains "data:"
 body endsWith ": rustybin plan stream lifetime reached\n\n"
 duration < 6000
 # ANCHOR_END: stream_lifetime
+
+# ANCHOR: metrics
+# Every 429 above is counted by dimension in the Prometheus metrics (the admin
+# token lets the scrape through: counted, never rejected).
+GET {{plan_url}}/_rustybin/metrics
+X-Rustybin-Session: docs-metrics
+Authorization: Bearer {{admin_token}}
+HTTP 200
+[Asserts]
+body matches /rustybin_limit_rejections_total\{dimension="rps"\} [1-9]/
+body matches /rustybin_limit_rejections_total\{dimension="requests"\} [1-9]/
+body matches /rustybin_limit_rejections_total\{dimension="egress"\} [1-9]/
+body contains "rustybin_limit_rejections_total{dimension=\"concurrency\"} 0"
+# ANCHOR_END: metrics

@@ -4,20 +4,33 @@
 //! - `rustybin_requests_total{route,method,status_class}`: `route` is the
 //!   matched axum route template (`/status/{code}`), never the raw path;
 //!   unmatched requests use `unmatched`.
-//! - `rustybin_request_duration_seconds{route}`: time until response headers.
+//! - `rustybin_request_duration_seconds{route}`: time until response headers
+//!   (histogram, buckets from 1 ms to 60 s, see [`BUCKETS`], so
+//!   `histogram_quantile` gives usable p50 and p99 values).
 //! - `rustybin_streams_open`: SSE responses and WebSocket connections open now.
 //! - `rustybin_egress_bytes_total`: response body bytes sent.
 //! - `rustybin_protocol_requests_total{protocol}`: `http`, `graphql`, `grpc`,
 //!   `websocket`, `sse`, `mcp`, `a2a`, `llm`.
 //! - `rustybin_llm_tokens_total{provider,model_family,direction}`: mock LLM
 //!   tokens; models map to a fixed list of families (unknown: `other`).
+//! - `rustybin_llm_requests_total{provider,model_family,streaming}`: mock LLM
+//!   requests served (`streaming` is `true` or `false`), same families.
+//! - `rustybin_llm_faults_total{provider,kind}`: native provider errors (and
+//!   content filter results) injected via `X-Rustybin-Fail` / `?fail=` on the
+//!   mock LLM; `kind` comes from a fixed list ([`LLM_FAULT_KINDS`]).
+//! - `rustybin_limit_rejections_total{dimension}`: requests the plan limiter
+//!   rejected (HTTP 429 or gRPC `RESOURCE_EXHAUSTED`); `dimension` is `rps`,
+//!   `concurrency`, `streams`, `requests` or `egress`.
 //! - `rustybin_faults_injected_total{kind}`: `fail`, `delay`, `ai`.
 //! - `rustybin_build_info{version,git_sha}`: always 1.
 //!
 //! The counters live in [`Metrics`] (shared through `AppState`); the
 //! [`track`] middleware feeds the HTTP series, the gRPC services count
-//! themselves ([`Metrics::count_protocol`]) and the mock LLM reports tokens
-//! ([`Metrics::record_llm_tokens`]). Protected like every control route.
+//! themselves ([`Metrics::count_protocol`]), the mock LLM reports tokens,
+//! requests and faults ([`Metrics::record_llm_tokens`],
+//! [`Metrics::count_llm_request`], [`Metrics::count_llm_fault`]) and the plan
+//! limiter its rejections ([`Metrics::count_limit_rejection`]). Protected like
+//! every control route.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -37,6 +50,7 @@ use axum::Router;
 use serde_json::{json, Value};
 
 use crate::catalog::{category, Endpoint, Example};
+use crate::limits::Dimension;
 use crate::state::AppState;
 
 /// Path of the metrics endpoint.
@@ -44,11 +58,43 @@ pub const METRICS_PATH: &str = "/_rustybin/metrics";
 /// Most distinct `route` label values (beyond: `other`). The catalogue has
 /// far fewer routes; this is a safety net.
 pub const MAX_ROUTES: usize = 1024;
-/// Most distinct LLM token series (beyond: dropped into `other`).
+/// Most distinct series per LLM counter (beyond: dropped into `other`).
 pub const MAX_LLM_SERIES: usize = 256;
-/// Histogram bucket upper bounds, in seconds.
-pub const BUCKETS: [f64; 11] = [
-    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+/// Histogram bucket upper bounds, in seconds: 1 ms to 60 s in 1, 2.5, 5
+/// steps, so `histogram_quantile(0.5, ...)` and `histogram_quantile(0.99,
+/// ...)` stay meaningful from fast stubs up to slow mock LLM streams and
+/// long injected delays.
+pub const BUCKETS: [f64; 15] = [
+    0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+];
+/// `kind` label values of `rustybin_llm_faults_total` (anything else: `other`).
+pub const LLM_FAULT_KINDS: [&str; 16] = [
+    "bad_request",
+    "missing_credential",
+    "invalid_credential",
+    "forbidden",
+    "not_found",
+    "too_large",
+    "rate_limit",
+    "server_error",
+    "unavailable",
+    "overloaded",
+    "timeout",
+    "context_length",
+    "prompt_filter",
+    "content_filter",
+    "status_4xx",
+    "status_5xx",
+];
+/// `provider` label values of the LLM counters (anything else: `other`).
+pub const LLM_PROVIDERS: [&str; 7] = [
+    "openai",
+    "azure",
+    "anthropic",
+    "gemini",
+    "bedrock",
+    "ollama",
+    "cohere",
 ];
 /// Route label of requests no route matched (JSON 404 fallback).
 pub const UNMATCHED: &str = "unmatched";
@@ -126,6 +172,8 @@ struct RouteStats {
 struct Inner {
     routes: HashMap<String, RouteStats>,
     llm_tokens: HashMap<(&'static str, &'static str, &'static str), u64>,
+    llm_requests: HashMap<(&'static str, &'static str, bool), u64>,
+    llm_faults: HashMap<(&'static str, &'static str), u64>,
     faults: HashMap<&'static str, u64>,
 }
 
@@ -135,6 +183,7 @@ pub struct Metrics {
     streams_open: AtomicI64,
     egress_bytes: AtomicU64,
     protocols: [AtomicU64; 8],
+    limit_rejections: [AtomicU64; Dimension::ALL.len()],
 }
 
 impl Default for Metrics {
@@ -156,6 +205,7 @@ impl Metrics {
             streams_open: AtomicI64::new(0),
             egress_bytes: AtomicU64::new(0),
             protocols: Default::default(),
+            limit_rejections: Default::default(),
         }
     }
 
@@ -216,6 +266,35 @@ impl Metrics {
             }
             *inner.llm_tokens.entry(key).or_insert(0) += u64::from(n);
         }
+    }
+
+    /// Count one mock LLM request served (once per recorded exchange).
+    pub fn count_llm_request(&self, provider: &str, model: &str, streaming: bool) {
+        let provider = llm_provider(provider);
+        let family = model_family(model);
+        let mut inner = self.lock();
+        let mut key = (provider, family, streaming);
+        if !inner.llm_requests.contains_key(&key) && inner.llm_requests.len() >= MAX_LLM_SERIES {
+            key = ("other", "other", streaming);
+        }
+        *inner.llm_requests.entry(key).or_insert(0) += 1;
+    }
+
+    /// Count one fault injected on the mock LLM (`kind`: one of
+    /// [`LLM_FAULT_KINDS`], anything else is `other`).
+    pub fn count_llm_fault(&self, provider: &str, kind: &str) {
+        let provider = llm_provider(provider);
+        let kind = LLM_FAULT_KINDS
+            .iter()
+            .copied()
+            .find(|k| *k == kind)
+            .unwrap_or("other");
+        *self.lock().llm_faults.entry((provider, kind)).or_insert(0) += 1;
+    }
+
+    /// Count one plan limiter rejection (HTTP 429 or gRPC RESOURCE_EXHAUSTED).
+    pub fn count_limit_rejection(&self, dimension: Dimension) {
+        self.limit_rejections[dimension.index()].fetch_add(1, Ordering::Relaxed);
     }
 
     /// A guard counting one open stream until dropped.
@@ -320,6 +399,39 @@ impl Metrics {
             );
         }
 
+        out.push_str("# HELP rustybin_llm_requests_total Mock LLM requests by provider, model family and streaming.\n");
+        out.push_str("# TYPE rustybin_llm_requests_total counter\n");
+        let mut requests: Vec<_> = inner.llm_requests.iter().collect();
+        requests.sort();
+        for ((provider, family, streaming), n) in requests {
+            let _ = writeln!(
+                out,
+                "rustybin_llm_requests_total{{provider=\"{provider}\",model_family=\"{family}\",streaming=\"{streaming}\"}} {n}"
+            );
+        }
+
+        out.push_str("# HELP rustybin_llm_faults_total Faults injected on the mock LLM (native provider errors, content filter) by provider and kind.\n");
+        out.push_str("# TYPE rustybin_llm_faults_total counter\n");
+        let mut llm_faults: Vec<_> = inner.llm_faults.iter().collect();
+        llm_faults.sort();
+        for ((provider, kind), n) in llm_faults {
+            let _ = writeln!(
+                out,
+                "rustybin_llm_faults_total{{provider=\"{provider}\",kind=\"{kind}\"}} {n}"
+            );
+        }
+
+        out.push_str("# HELP rustybin_limit_rejections_total Requests rejected by the plan limiter (HTTP 429, gRPC RESOURCE_EXHAUSTED) by dimension.\n");
+        out.push_str("# TYPE rustybin_limit_rejections_total counter\n");
+        for d in Dimension::ALL {
+            let _ = writeln!(
+                out,
+                "rustybin_limit_rejections_total{{dimension=\"{}\"}} {}",
+                d.as_str(),
+                self.limit_rejections[d.index()].load(Ordering::Relaxed)
+            );
+        }
+
         out.push_str("# HELP rustybin_faults_injected_total Faults injected (X-Rustybin-Fail, X-Rustybin-Delay, mock LLM faults).\n");
         out.push_str("# TYPE rustybin_faults_injected_total counter\n");
         let mut faults: Vec<_> = inner.faults.iter().collect();
@@ -397,6 +509,15 @@ fn status_class(status: u16) -> &'static str {
         400..=499 => "4xx",
         _ => "5xx",
     }
+}
+
+/// Provider label: a fixed list, everything else is `other`.
+fn llm_provider(provider: &str) -> &'static str {
+    LLM_PROVIDERS
+        .iter()
+        .copied()
+        .find(|p| *p == provider)
+        .unwrap_or("other")
 }
 
 /// Model family label: a fixed list, everything else is `other`.
@@ -600,7 +721,7 @@ pub fn catalog() -> Vec<Endpoint> {
         METRICS_PATH,
         &["GET"],
         category::CONTROL,
-        "Prometheus metrics (requests by route template, latency, streams, egress, protocols, LLM tokens, faults)",
+        "Prometheus metrics (requests by route template, latency, streams, egress, protocols, LLM tokens, requests and faults, limit rejections)",
     )
     .description(
         "Text exposition format 0.0.4. Labels are bounded: the route label is the matched route \
@@ -616,7 +737,7 @@ pub fn openapi_paths() -> Value {
             "get": {
                 "tags": ["Control Plane"],
                 "summary": "Prometheus metrics",
-                "description": "Prometheus text exposition (version 0.0.4): rustybin_requests_total{route,method,status_class}, rustybin_request_duration_seconds{route} (histogram), rustybin_streams_open, rustybin_egress_bytes_total, rustybin_protocol_requests_total{protocol}, rustybin_llm_tokens_total{provider,model_family,direction}, rustybin_faults_injected_total{kind}, rustybin_build_info{version,git_sha}. The route label is the matched route template.",
+                "description": "Prometheus text exposition (version 0.0.4): rustybin_requests_total{route,method,status_class}, rustybin_request_duration_seconds{route} (histogram, buckets 1 ms to 60 s), rustybin_streams_open, rustybin_egress_bytes_total, rustybin_protocol_requests_total{protocol}, rustybin_llm_tokens_total{provider,model_family,direction}, rustybin_llm_requests_total{provider,model_family,streaming}, rustybin_llm_faults_total{provider,kind}, rustybin_limit_rejections_total{dimension}, rustybin_faults_injected_total{kind}, rustybin_build_info{version,git_sha}. The route label is the matched route template.",
                 "operationId": "getRustybinMetrics",
                 "responses": {
                     "200": { "description": "Metrics", "content": { "text/plain": { "schema": { "type": "string" } } } },

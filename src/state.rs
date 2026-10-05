@@ -63,7 +63,8 @@ impl AppState {
     /// Assemble a state from already-built key material.
     pub fn from_parts(config: Config, jwt: Arc<JwtState>, certs: Arc<CertState>) -> Self {
         let inspector = Inspector::new(config.inspector_capacity, config.public_mode);
-        let limits = Arc::new(Limiter::new(config.limits.clone()));
+        let metrics = Arc::new(Metrics::new());
+        let limits = Arc::new(Limiter::new(config.limits.clone()).with_metrics(metrics.clone()));
         Self {
             limits,
             config: Arc::new(config),
@@ -72,7 +73,7 @@ impl AppState {
             identity: Arc::new(IdentityState::new()),
             inspector,
             health: Arc::new(HealthState::new()),
-            metrics: Arc::new(Metrics::new()),
+            metrics,
         }
     }
 }

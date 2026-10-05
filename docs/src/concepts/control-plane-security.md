@@ -161,20 +161,58 @@ rest of the control plane (`console` scope or the admin token):
 | Series | Labels |
 |---|---|
 | `rustybin_requests_total` | `route` (the matched route template such as `/status/{code}`, or `unmatched`), `method`, `status_class` (`2xx`...) |
-| `rustybin_request_duration_seconds` (histogram) | `route`; time until response headers |
+| `rustybin_request_duration_seconds` (histogram) | `route`; time until response headers, buckets from 1 ms to 60 s (see below) |
 | `rustybin_streams_open` (gauge) | open SSE responses and WebSocket connections |
 | `rustybin_egress_bytes_total` | response body bytes |
 | `rustybin_protocol_requests_total` | `protocol`: `http`, `graphql`, `grpc`, `websocket`, `sse`, `mcp`, `a2a`, `llm` |
+| `rustybin_llm_requests_total` | mock LLM requests served: `provider` (`openai`, `azure`, `anthropic`, `gemini`, `bedrock`, `ollama`, `cohere`), `model_family` (as for tokens), `streaming` (`true`, `false`) |
 | `rustybin_llm_tokens_total` | `provider`, `model_family` (a fixed list such as `gpt-4o`, `claude`, `gemini`; anything else is `other`), `direction` (`input`, `output`) |
-| `rustybin_faults_injected_total` | `kind`: `fail`, `delay` (`X-Rustybin-Fail`, `X-Rustybin-Delay`), `ai` (mock LLM faults) |
+| `rustybin_llm_faults_total` | faults injected on the mock LLM with `X-Rustybin-Fail` or `?fail=` (see [AI faults](../ai/gateway-features.md#faults)): `provider`, `kind` (`rate_limit`, `server_error`, `unavailable`, `overloaded`, `timeout`, `context_length`, `prompt_filter`, `content_filter`, `invalid_credential`, `missing_credential`, `forbidden`, `not_found`, `bad_request`, `too_large`, `status_4xx`, `status_5xx`) |
+| `rustybin_limit_rejections_total` | requests rejected by the [plan limiter](plans-and-limits.md) (HTTP 429 or gRPC `RESOURCE_EXHAUSTED`): `dimension` (`rps`, `concurrency`, `streams`, `requests`, `egress`); all five are always exported |
+| `rustybin_faults_injected_total` | `kind`: `fail`, `delay` (`X-Rustybin-Fail`, `X-Rustybin-Delay`), `ai` (mock LLM error responses) |
 | `rustybin_build_info` (always 1) | `version`, `git_sha` |
 
 Every label is bounded: raw paths, query strings and model names never become label
-values, so a scanner hitting random URLs cannot blow up the series count.
+values, so a scanner hitting random URLs cannot blow up the series count. Model names
+map to a fixed list of families, providers and fault kinds come from fixed lists, and
+every other value becomes `other`.
 
 ```hurl
 {{#include ../../examples/concepts/control_auth.hurl:metrics}}
 ```
+
+The mock LLM series after one completion and one injected `rate_limit` error:
+
+```hurl
+{{#include ../../examples/concepts/control.hurl:metrics_llm}}
+```
+
+### Latency percentiles
+
+`rustybin_request_duration_seconds` has the buckets 0.001, 0.0025, 0.005, 0.01,
+0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30 and 60 seconds (plus `+Inf`), so
+`histogram_quantile` gives usable values from a fast stub (about 1 ms) up to a slow
+mock LLM stream or a long injected delay. No two neighbouring bounds are more than
+3x apart, so an estimated percentile is within one bucket of the true value.
+
+```promql
+# p50 and p99 per route over the last 5 minutes
+histogram_quantile(0.50, sum by (le, route) (rate(rustybin_request_duration_seconds_bucket[5m])))
+histogram_quantile(0.99, sum by (le, route) (rate(rustybin_request_duration_seconds_bucket[5m])))
+
+# p99 over every route
+histogram_quantile(0.99, sum by (le) (rate(rustybin_request_duration_seconds_bucket[5m])))
+
+# Plan limit rejections per second, by dimension
+sum by (dimension) (rate(rustybin_limit_rejections_total[5m]))
+
+# Share of streaming mock LLM requests
+sum(rate(rustybin_llm_requests_total{streaming="true"}[5m]))
+  / sum(rate(rustybin_llm_requests_total[5m]))
+```
+
+The histogram measures the time until response headers: for an SSE or streaming LLM
+response that is the time to the first byte, not the length of the stream.
 
 A Prometheus scrape job:
 

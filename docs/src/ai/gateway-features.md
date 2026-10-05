@@ -42,6 +42,10 @@ string works too, for clients that cannot set headers: `?fail=<kind>` and
 
 Faulted responses carry `X-Rustybin-Fault: ai`. The `X-Rustybin-Delay` header
 (see [Fault injection](../concepts/fault-injection.md)) also works on `/ai/*`.
+Every fault that fires (`content_filter` included) is counted in
+`rustybin_llm_faults_total{provider,kind}` and every served request in
+`rustybin_llm_requests_total{provider,model_family,streaming}`, next to the token
+counter (see [Metrics](../concepts/control-plane-security.md#metrics)).
 
 ```hurl
 {{#include ../../examples/ai/faults_auth.hurl:rate_limit}}
