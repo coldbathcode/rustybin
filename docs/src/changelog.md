@@ -92,3 +92,12 @@ API, AI and agent gateway demos.
 - MCP `tools/list` (and the other list methods) render their result once per server
   and protocol version instead of on every request: about 7x the throughput, same
   bytes on the wire.
+- Minimum supported Rust version is now 1.88 (was 1.86), to take security fixes in
+  `ruzstd` (zstd request bodies, RUSTSEC-2026-0344) and `time` (used when parsing
+  client certificates, RUSTSEC-2026-0009).
+- Security updates: rustls 0.23.46 (RUSTSEC-2026-0285, -0346, -0347, -0348, -0349),
+  rustls-webpki 0.103.15 (RUSTSEC-2026-0104), h2 0.4.20 (RUSTSEC-2026-0258) and
+  quick-xml 0.42 (RUSTSEC-2026-0194, -0195: memory exhaustion in the namespace reader
+  used by the SOAP endpoint). SOAP field values still decode `&amp;`, character
+  references and the other predefined entities; unknown entities are a Sender fault.
+- CI runs `cargo audit` on every push.

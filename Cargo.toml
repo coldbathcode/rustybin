@@ -2,7 +2,7 @@
 name = "rustybin"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.86"
+rust-version = "1.88"
 description = "HTTP stub service for API and AI gateway demos"
 license = "AGPL-3.0-only"
 default-run = "rustybin"
@@ -21,7 +21,7 @@ axum-server = { version = "0.7.2", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
-quick-xml = { version = "0.36", features = ["serde", "serialize"] }
+quick-xml = { version = "0.42", features = ["serde", "serialize"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tower = { version = "0.5", features = ["util", "timeout"] }
@@ -59,8 +59,7 @@ tonic-web = "0.12"
 prost = "0.13"
 flate2 = "1"
 brotli = "8"
-# 0.8.2+ requires Rust 1.87 (MSRV is 1.86)
-ruzstd = "=0.8.1"
+ruzstd = "0.9.1"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots-no-provider"] }
 webpki-roots = "1"

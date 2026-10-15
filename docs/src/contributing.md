@@ -21,7 +21,7 @@ docs/examples/run.sh                         # the documentation examples (needs
 mdbook build docs                            # the documentation site (needs mdbook)
 ```
 
-The MSRV is Rust 1.86 (`rust-version` in `Cargo.toml`, the Dockerfile builder
+The MSRV is Rust 1.88 (`rust-version` in `Cargo.toml`, the Dockerfile builder
 image and the CI `msrv` job). `.cargo/config.toml` makes the resolver prefer
 dependency versions compatible with it, so `cargo update` cannot silently raise it.
 

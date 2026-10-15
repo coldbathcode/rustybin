@@ -17,7 +17,7 @@ mdbook build docs                            # documentation site
 python3 docs/tools/check_includes.py         # every docs include and example anchor resolves
 ```
 
-MSRV is Rust 1.86 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `msrv` job).
+MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `msrv` job).
 
 ## Hard rules
 

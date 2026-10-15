@@ -28,7 +28,7 @@ docker run -d --name rustybin -p 8080:80 -p 8443:443 -p 50051:50051 rustybin
 ```
 
 Or without Docker: `RUSTYBIN_HTTP_PORT=8080 RUSTYBIN_HTTPS_PORT=8443 cargo run --release`
-(Rust 1.86+). Then:
+(Rust 1.88+). Then:
 
 ```bash
 # What did the upstream receive?

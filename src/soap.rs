@@ -212,8 +212,8 @@ fn requested_action(headers: &HeaderMap) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
-fn local(name: &[u8]) -> String {
-    String::from_utf8_lossy(name).into_owned()
+fn local(name: &str) -> String {
+    name.to_owned()
 }
 
 fn parse_envelope(
@@ -222,7 +222,9 @@ fn parse_envelope(
 ) -> Result<ParsedOperation, (SoapVersion, Fault)> {
     let fallback = ct_version.unwrap_or(SoapVersion::V11);
     let mut reader = NsReader::from_reader(xml);
-    reader.config_mut().trim_text(true);
+    // No per-event trimming: text is split around entity references, so trimming each piece
+    // would drop spaces next to `&amp;`. Field values are trimmed once when the element ends.
+    reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
 
     let mut version: Option<SoapVersion> = None;
@@ -247,7 +249,7 @@ fn parse_envelope(
             }
         };
         let ns_str = match ns {
-            ResolveResult::Bound(n) => Some(String::from_utf8_lossy(n.as_ref()).into_owned()),
+            ResolveResult::Bound(n) => Some(n.as_ref().to_owned()),
             _ => None,
         };
         let (is_start, is_empty) = match &event {
@@ -300,8 +302,8 @@ fn parse_envelope(
                     }
                     3 if in_header => {
                         let must = e.attributes().flatten().any(|a| {
-                            a.key.local_name().as_ref() == b"mustUnderstand"
-                                && matches!(a.value.as_ref(), b"1" | b"true")
+                            a.key.local_name().as_ref() == "mustUnderstand"
+                                && matches!(a.value.as_ref(), "1" | "true")
                         });
                         if must {
                             return Err((
@@ -345,8 +347,8 @@ fn parse_envelope(
             Event::End(_) => {
                 match depth {
                     4 => {
-                        if let Some(f) = current.take() {
-                            fields.push(f);
+                        if let Some((name, value)) = current.take() {
+                            fields.push((name, value.trim().to_owned()));
                         }
                     }
                     3 if in_body && op.is_some() => op_done = true,
@@ -360,15 +362,29 @@ fn parse_envelope(
             }
             Event::Text(t) if depth == 4 => {
                 if let Some((_, value)) = current.as_mut() {
-                    let text = t.unescape().map_err(|e| {
-                        (v, Fault::sender("Malformed XML", format!("bad text: {e}")))
-                    })?;
-                    value.push_str(&text);
+                    // Entity references arrive as separate GeneralRef events.
+                    value.push_str(&t.xml10_content());
+                }
+            }
+            Event::GeneralRef(r) if depth == 4 => {
+                if let Some((_, value)) = current.as_mut() {
+                    let bad = |detail: String| (v, Fault::sender("Malformed XML", detail));
+                    match r.resolve_char_ref() {
+                        Ok(Some(c)) => value.push(c),
+                        Ok(None) => {
+                            let name = r.xml10_content();
+                            match quick_xml::escape::resolve_predefined_entity(&name) {
+                                Some(text) => value.push_str(text),
+                                None => return Err(bad(format!("unknown entity &{name};"))),
+                            }
+                        }
+                        Err(e) => return Err(bad(format!("bad character reference: {e}"))),
+                    }
                 }
             }
             Event::CData(t) if depth == 4 => {
                 if let Some((_, value)) = current.as_mut() {
-                    value.push_str(&String::from_utf8_lossy(t.as_ref()));
+                    value.push_str(&t.xml10_content());
                 }
             }
             Event::DocType(_) => {
@@ -824,6 +840,34 @@ mod tests {
         assert!(body.contains("<currency>&lt;EUR&gt;</currency>"));
         assert!(body.contains("<amount>12.5</amount>"));
         assert_well_formed(&body);
+    }
+
+    #[tokio::test]
+    async fn entity_and_character_references_in_values() {
+        // quick-xml reports references as separate events; spaces around them must survive.
+        let (status, _, body) = call(
+            "text/xml",
+            &[],
+            env11(
+                r#"<CreateOrder><merchantId> Tom &amp; &#74;erry&#x21; &quot;q&apos; </merchantId><amount>1</amount><currency>EUR</currency></CreateOrder>"#,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("<merchantId>Tom &amp; Jerry! &quot;q&apos;</merchantId>"),
+            "{body}"
+        );
+        assert_well_formed(&body);
+
+        let (status, _, body) = call(
+            "text/xml",
+            &[],
+            env11(r#"<CreateOrder><merchantId>a &nbsp; b</merchantId></CreateOrder>"#),
+        )
+        .await;
+        assert_ne!(status, StatusCode::OK);
+        assert!(body.contains("unknown entity &amp;nbsp;"), "{body}");
     }
 
     #[tokio::test]

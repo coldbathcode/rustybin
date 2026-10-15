@@ -42,7 +42,7 @@ balancing demos (see [Identity and load balancing](reference/identity.md)).
 
 ## Cargo
 
-Rust 1.86 or newer. The default ports (80 and 443) need root, so pick high ports:
+Rust 1.88 or newer. The default ports (80 and 443) need root, so pick high ports:
 
 ```bash
 RUSTYBIN_HTTP_PORT=8080 RUSTYBIN_HTTPS_PORT=8443 cargo run --release

@@ -39,12 +39,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-targets --locked
 
-  msrv:
-    name: build (MSRV 1.86)
+  audit:
+    name: cargo audit (RustSec advisories)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.86
+      - uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2
+        with:
+          tool: cargo-audit
+      # RUSTSEC-2023-0071 (rsa, Marvin timing attack): no fixed release exists. Rustybin only uses
+      # RSA to sign demo JWTs with throwaway keys it generates itself, never to decrypt or to
+      # protect real secrets. Review 2027-04-01 or when rsa 0.10 is released.
+      - run: cargo audit --ignore RUSTSEC-2023-0071
+
+  msrv:
+    name: build (MSRV 1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked
 
