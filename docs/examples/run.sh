@@ -53,7 +53,9 @@ TMP="$(mktemp -d)"
 cp "$RUSTYBIN_BIN" "$TMP/rustybin-docs-examples"
 # The settings below are the ones the documentation assumes (see
 # docs/src/examples.md): an admin token, mTLS header mode, demo TLS files in a
-# temporary directory and a fixed instance id.
+# temporary directory, a fixed instance id, and OpenAPI mocks from
+# docs/examples/mocks (a rustybin.yaml with an environment variable, and a
+# directory of specs).
 (cd "$TMP" && exec env \
   RUSTYBIN_HTTP_PORT="$PORT" \
   RUSTYBIN_HTTPS_PORT="$HTTPS_PORT" \
@@ -65,6 +67,9 @@ cp "$RUSTYBIN_BIN" "$TMP/rustybin-docs-examples"
   RUSTYBIN_MTLS_IN_HEADER=X-Client-Cert \
   RUSTYBIN_TLS_CERT="$TMP/server.crt" \
   RUSTYBIN_TLS_KEY="$TMP/server.key" \
+  RUSTYBIN_CONFIG_FILE="$HERE/mocks/rustybin.yaml" \
+  RUSTYBIN_MOCKS_DIR="$HERE/mocks/specs-dir" \
+  INVENTORY_API_KEY=docs-inventory-key \
   "$TMP/rustybin-docs-examples") &
 SERVER=$!
 # A second instance with the free plan and tiny overrides, so the plan limit
@@ -177,6 +182,7 @@ export GRPC_ADDR="127.0.0.1:$GRPC_PORT"
 export SECURED_ADDR="127.0.0.1:$SECURED_PORT"
 export SECURED_HTTPS_ADDR="127.0.0.1:$SECURED_HTTPS_PORT"
 export ADMIN_TOKEN
+export RUSTYBIN_BIN
 
 # Control-plane tokens for the secured instance.
 MINT="$HERE/concepts/_mint-control-jwt.sh"

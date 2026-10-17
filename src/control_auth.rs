@@ -16,7 +16,10 @@
 //!   - `admin`: everything, including mutations.
 //!
 //! Mutations (any method other than GET, HEAD, OPTIONS) need the admin token
-//! or the `admin` scope. Data-plane routes are never affected.
+//! or the `admin` scope. The exceptions are POST routes that only compute an
+//! answer (previewing a mock spec, validating a body against a mock
+//! operation, testing a mock's rules): the `console` scope may call them. Data-plane routes are never
+//! affected.
 //!
 //! The web console (`/ui/*`) is a set of static files with no instance data:
 //! it is served without credentials so a browser can load it and pick up a
@@ -139,7 +142,7 @@ impl Grant {
             return true;
         }
         if !is_safe(method) {
-            return false;
+            return self.console && method == Method::POST && is_read_only_post(path);
         }
         self.console || (self.inspector && is_inspector_path(path))
     }
@@ -159,6 +162,25 @@ fn under(path: &str, prefix: &str) -> bool {
         || path
             .strip_prefix(prefix)
             .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// POST routes that change nothing: `/_rustybin/mocks/import`,
+/// `/_rustybin/mocks/{name}/operations/{op}/validate` and
+/// `/_rustybin/mocks/{name}/operations/{op}/rules/test`.
+fn is_read_only_post(path: &str) -> bool {
+    if path == "/_rustybin/mocks/import" {
+        return true;
+    }
+    let Some(rest) = path.strip_prefix("/_rustybin/mocks/") else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('/').collect();
+    match parts.as_slice() {
+        [name, "operations", op, "validate"] | [name, "operations", op, "rules", "test"] => {
+            !name.is_empty() && !op.is_empty()
+        }
+        _ => false,
+    }
 }
 
 fn is_inspector_path(path: &str) -> bool {

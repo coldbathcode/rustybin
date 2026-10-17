@@ -1,6 +1,8 @@
 # Configuration
 
-Rustybin is configured only through environment variables. Invalid values never
+Rustybin is configured through environment variables; the only command-line
+option of the server is `--config <file>`, the `rustybin.yaml` declaring
+[OpenAPI mocks](mocks/config.md). Invalid values never
 stop the server: they are logged as warnings and the default is used. Values are
 trimmed, and an empty value counts as unset (except for `RUSTYBIN_CORS_ORIGINS`, see
 below). Booleans accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `off`
@@ -83,6 +85,24 @@ See [Control-plane security, metrics and operations](concepts/control-plane-secu
 | `RUSTYBIN_HOSTED_MODE` | `false` | Preset for platforms running one instance per customer: control auth `jwt` and JSON logs, unless `RUSTYBIN_CONTROL_AUTH` / `RUSTYBIN_LOG_FORMAT` say otherwise. |
 | `RUSTYBIN_CONSOLE_TITLE` | unset | Shown in the console header and tab title (control characters removed, at most 80 characters). |
 | `RUSTYBIN_CONSOLE_BACKLINK` | unset | `http://` or `https://` URL shown as a "Back to ..." link in the console header and sign-in screen; anything else is ignored with a warning. |
+
+## OpenAPI mocks
+
+See [Configuration as code](mocks/config.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `RUSTYBIN_CONFIG_FILE` | `./rustybin.yaml` if it exists | A `rustybin.yaml` declaring [OpenAPI mocks](mocks/index.md), loaded at startup and reloaded by `SIGHUP` or `POST /_rustybin/mocks/reload`. The command-line option `--config <file>` takes precedence. Problems are logged and listed in `GET /_rustybin/mocks` (`load_errors`); they never stop the server. |
+| `RUSTYBIN_MOCKS_DIR` | unset | A directory whose `*.yaml`, `*.yml` and `*.json` OpenAPI files (up to 200) each become a mock named after the file, with default settings. |
+| `RUSTYBIN_MOCKS_SAMPLE` | `true` (`false` in public mode) | Create the built-in `petstore` mock. |
+| `RUSTYBIN_MOCKS_STATE_DIR` | unset | Save mocks created or edited through the API or console in this directory (one JSON file each, written on every change) and load them at startup. File-defined mocks are not saved. See [Configuration as code](mocks/config.md#keeping-console-changes). |
+| `RUSTYBIN_MOCKS_HOST` | unset | Domain for host-based mock URLs, e.g. `mock.example.com`: a request to `petstore.mock.example.com/v1/pets` is served by the mock `petstore`. Needs wildcard DNS (and a wildcard certificate for HTTPS). See [Configuration as code](mocks/config.md#host-based-urls). |
+
+`${VAR}` and `${VAR:-default}` in the config file are expanded from the environment
+(see [Environment variables](mocks/config.md#environment-variables)). The
+[`rustybin mock` CLI](mocks/cli.md) reads `RUSTYBIN_SERVER` (default
+`http://localhost` on `RUSTYBIN_HTTP_PORT`, port 80 when unset) and `RUSTYBIN_TOKEN` (else `RUSTYBIN_ADMIN_TOKEN`) as
+defaults for `--server` and `--token`.
 
 ## Plan limits
 
@@ -184,5 +204,6 @@ Request-reachable state is always bounded. The main caps (normal mode / public m
 | Mock LLM request records (1 h TTL) / choices `n` / embedding dimensions | 1000 / 8 / 4096 | 200 / 2 / 1536 |
 | MCP sessions (idle TTL) / long-lived streams | 1000 (30 min) / 1 h | 200 (10 min) / 5 min |
 | A2A tasks (total / per session / idle TTL) | 5000 / 1000 / 1 h | 2000 / 50 / 15 min |
+| OpenAPI mocks (mocks / spec size / operations / captured requests per mock / lifetime of API-created mocks) | 100 / 1 MiB / 500 / 200 / unlimited | 50 / 256 KiB / 200 / 50 / 24 h |
 | Inspector entries | `RUSTYBIN_INSPECTOR_CAPACITY` (max 10000) | same |
 | Metrics series (`route` values / LLM token series) | 1024 / 256 (beyond: `other`) | same |

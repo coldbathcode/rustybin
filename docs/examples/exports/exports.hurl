@@ -19,7 +19,7 @@ jsonpath "$.paths['/mcp']" exists
 GET {{base_url}}/openapi.yaml
 HTTP 200
 [Asserts]
-body contains "\nopenapi: 3.0.3"
+body startsWith "openapi: 3.0.3"
 # ANCHOR_END: openapi
 
 # ANCHOR: api_reference

@@ -77,6 +77,7 @@ pub struct Service {
 }
 
 /// Result of a send.
+#[allow(clippy::large_enum_variant)]
 pub enum Started {
     /// Direct message reply (no task).
     Reply(Message),

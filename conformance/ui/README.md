@@ -34,6 +34,7 @@ Other knobs: `THEMES=dark` (one theme only), `HEADED=1` (visible browser),
 | Overview | status tiles, base URLs, `/identity`, configuration |
 | Live traffic | requests sent from outside appear live, gateway header highlighting, body viewer, compare mode (header diff) |
 | Request bins | create a bin, send a test request, see it arrive over SSE |
+| Mock APIs | petstore sample listed, operation editor (rules with the live "would match" preview, schema check), Try it (200 with the mock headers), live traffic, on/off switch (503 while off), collection download (Hurl), duplicate into a stateful copy (create through Try it, item shown in Data), create a mock from a pasted spec with the wizard, bulk switch off and delete; read-only list and menu with a console-scope token on the jwt instance |
 | API explorer | catalogue search, Try it, response viewer |
 | AI playground | streaming chat with OpenAI chat, OpenAI Responses, Anthropic, Gemini, Ollama and Bedrock (non-stream), tool call round trip, raw wire panel |
 | MCP inspector | 2026-07-28 connect, tools list, `slow_task` with progress, elicitation (multi round-trip), resources, 2025-11-25 session connect, `/mcp/protected` OAuth discovery and token |

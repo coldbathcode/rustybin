@@ -31,12 +31,13 @@ every piece of state is bounded so a shared instance stays healthy.
 | [MCP server](mcp/index.md) | Streamable HTTP for protocol 2026-07-28 (stateless) and the 2025 handshake versions, legacy HTTP+SSE, OAuth 2.1 protected and API key variants, named servers with tool subsets |
 | [A2A agents](a2a/index.md) | Seven demo agents speaking A2A v1.0 and v0.3 over JSON-RPC and HTTP+JSON, streaming, multi-turn, auth-required, push notifications |
 | [Identity provider](reference/oidc.md) | OAuth 2.0 / OpenID Connect with authorization code + PKCE, client credentials, password, refresh, token exchange, introspection, revocation and dynamic client registration |
+| [OpenAPI mocks](mocks/index.md) | Upload an OpenAPI 3.0 / 3.1 spec and get a mock API at `/mock/<name>`: spec examples or generated data, rules, request validation, deploy checks, captured traffic, mocked API key, basic, bearer, OAuth 2.0 and mTLS security; managed in the console, the API, `rustybin.yaml` or the CLI |
 | [Auth checks](reference/auth.md) | Basic, API key, JWT (HS256 and RS256), HMAC signatures, mTLS |
 | [Protocols](reference/graphql.md) | GraphQL (with subscriptions and persisted queries), SOAP 1.1 / 1.2, gRPC (with reflection, health and gRPC-Web), WebSocket, SSE, JSON-RPC |
 | [HTTP toolbox](reference/http-basics.md) | Echo, any status code, delays, caching, compression, ranges, redirects, cookies, request bins, webhook signatures |
 | [Chaos](concepts/fault-injection.md) | `X-Rustybin-Delay` and `X-Rustybin-Fail` on every route, flaky endpoints, a health toggle |
 | [Observability](concepts/inspector.md) | A request inspector with a live feed, per-session scoping, and an [AI request inspector](ai/gateway-features.md#request-inspection) |
-| [Web console](console.md) | A browser UI at `/ui` for live traffic, request bins, the AI playground, MCP and A2A clients and more |
+| [Web console](console.md) | A browser UI at `/ui` for live traffic, mock APIs, request bins, the AI playground, MCP and A2A clients and more |
 
 ## Ports
 

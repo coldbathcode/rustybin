@@ -54,7 +54,12 @@ RUSTYBIN_HTTP_PORT=8080 RUSTYBIN_HTTPS_PORT=8443 cargo run --release
 ```bash
 cargo run -- --version                    # print the version
 cargo run -- --print-endpoints-markdown   # print the endpoint tables (from the route catalogue)
+cargo run -- --config rustybin.yaml       # run with OpenAPI mocks declared in a file
+cargo run -- mock --help                  # the OpenAPI mock CLI
 ```
+
+See [OpenAPI mocks](mocks/index.md) for `rustybin.yaml`, mounting specs into the
+container and the `rustybin mock` commands.
 
 ## Fly.io
 
@@ -96,6 +101,9 @@ curl -s http://localhost:8080/ai/openai/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}'
 
+# An OpenAPI mock: the built-in Petstore sample (upload your own spec in /ui/#/mocks)
+curl -s http://localhost:8080/mock/petstore/v1/pets/42
+
 # MCP: start a session (2025-06-18 handshake)
 curl -si http://localhost:8080/mcp -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
@@ -119,6 +127,8 @@ curl -s http://localhost:8080/oauth/token \
 {{#include ../examples/quickstart/quickstart.hurl:echo}}
 
 {{#include ../examples/quickstart/quickstart.hurl:chat}}
+
+{{#include ../examples/quickstart/quickstart.hurl:mock}}
 
 {{#include ../examples/quickstart/quickstart.hurl:mcp}}
 

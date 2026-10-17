@@ -105,6 +105,19 @@ pub struct Config {
     pub quota_flush_ms: u64,
     /// Link returned in daily quota 429 bodies (`RUSTYBIN_QUOTA_UPGRADE_URL`).
     pub quota_upgrade_url: Option<String>,
+    /// `rustybin.yaml` declaring mocks (`RUSTYBIN_CONFIG_FILE` or `--config`).
+    pub config_file: Option<String>,
+    /// Directory whose OpenAPI files become mocks (`RUSTYBIN_MOCKS_DIR`).
+    pub mocks_dir: Option<String>,
+    /// Create the built-in `petstore` mock (`RUSTYBIN_MOCKS_SAMPLE`, default
+    /// on outside public mode).
+    pub mocks_sample: bool,
+    /// Directory where mocks created or edited through the API are saved and
+    /// reloaded from at startup (`RUSTYBIN_MOCKS_STATE_DIR`).
+    pub mocks_state_dir: Option<String>,
+    /// Domain under which `<name>.<domain>` serves the mock `<name>` at its
+    /// root (`RUSTYBIN_MOCKS_HOST`, e.g. `mock.example.com`).
+    pub mocks_host: Option<String>,
 }
 
 /// Default `RUSTYBIN_KEYS_POLL_SECS`.
@@ -310,6 +323,10 @@ impl Config {
             limits.scope = Scope::Session;
             limits.period = Period::Day;
         }
+        let public_mode =
+            shared_mode || parse_bool_or(&get, "RUSTYBIN_PUBLIC_MODE", false, &mut warnings);
+        let mocks_sample =
+            parse_bool_or(&get, "RUSTYBIN_MOCKS_SAMPLE", !public_mode, &mut warnings);
 
         let config = Self {
             http_port: parse_or(&get, "RUSTYBIN_HTTP_PORT", 80, &mut warnings),
@@ -323,8 +340,7 @@ impl Config {
             tls_cert: get("RUSTYBIN_TLS_CERT").unwrap_or_else(|| "certs/server.crt".to_string()),
             tls_key: get("RUSTYBIN_TLS_KEY").unwrap_or_else(|| "certs/server.key".to_string()),
             mtls_in_header: get("RUSTYBIN_MTLS_IN_HEADER"),
-            public_mode: shared_mode
-                || parse_bool_or(&get, "RUSTYBIN_PUBLIC_MODE", false, &mut warnings),
+            public_mode,
             admin_token,
             cors_allow_origins,
             request_timeout_secs: parse_or(&get, "RUSTYBIN_REQUEST_TIMEOUT", 120, &mut warnings),
@@ -361,6 +377,13 @@ impl Config {
             )
             .max(10),
             quota_upgrade_url,
+            config_file: get("RUSTYBIN_CONFIG_FILE"),
+            mocks_dir: get("RUSTYBIN_MOCKS_DIR"),
+            mocks_sample,
+            mocks_state_dir: get("RUSTYBIN_MOCKS_STATE_DIR"),
+            mocks_host: get("RUSTYBIN_MOCKS_HOST")
+                .map(|h| h.trim().trim_start_matches('.').to_ascii_lowercase())
+                .filter(|h| !h.is_empty()),
         };
         (config, warnings)
     }
@@ -407,6 +430,11 @@ impl Config {
             quota_store_ca: None,
             quota_flush_ms: DEFAULT_QUOTA_FLUSH_MS,
             quota_upgrade_url: None,
+            config_file: None,
+            mocks_dir: None,
+            mocks_sample: true,
+            mocks_state_dir: None,
+            mocks_host: None,
         }
     }
 
@@ -463,6 +491,11 @@ impl Config {
             "quota_store_configured": self.quota_store.is_some(),
             "quota_flush_ms": self.quota_flush_ms,
             "quota_upgrade_url": self.quota_upgrade_url,
+            "config_file_configured": self.config_file.is_some(),
+            "mocks_dir_configured": self.mocks_dir.is_some(),
+            "mocks_sample": self.mocks_sample,
+            "mocks_state_dir_configured": self.mocks_state_dir.is_some(),
+            "mocks_host": self.mocks_host,
         })
     }
 }

@@ -238,14 +238,14 @@ pub fn result_response(id: &Value, result: Value) -> Value {
 
 /// [`result_response`] serialized, around an already serialized result.
 /// The bytes equal `serde_json::to_string(&result_response(id, result))`:
-/// object keys serialize in sorted order (`id`, `jsonrpc`, `result`), which
-/// the `rendered_envelope_matches_serde` test pins.
+/// object keys serialize in insertion order (`jsonrpc`, `id`, `result`),
+/// which the `rendered_envelope_matches_serde` test pins.
 pub fn result_response_json(id: &Value, result_json: &str) -> String {
     let id = serde_json::to_string(id).unwrap_or_else(|_| "null".to_string());
     let mut out = String::with_capacity(result_json.len() + id.len() + 40);
-    out.push_str("{\"id\":");
+    out.push_str("{\"jsonrpc\":\"2.0\",\"id\":");
     out.push_str(&id);
-    out.push_str(",\"jsonrpc\":\"2.0\",\"result\":");
+    out.push_str(",\"result\":");
     out.push_str(result_json);
     out.push('}');
     out
@@ -282,6 +282,7 @@ pub enum Message {
 
 /// Classify one JSON value as a JSON-RPC message.
 /// On failure returns the error plus the request id when one was readable.
+#[allow(clippy::result_large_err)]
 pub fn classify(v: &Value) -> Result<Message, (RpcError, Option<Value>)> {
     let Some(obj) = v.as_object() else {
         return Err((

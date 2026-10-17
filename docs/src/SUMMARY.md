@@ -38,6 +38,14 @@
 - [Orchestration pipeline](reference/orchestration.md)
 - [Identity and load balancing](reference/identity.md)
 
+# Mock APIs (OpenAPI)
+
+- [OpenAPI mocks](mocks/index.md)
+  - [Responses, rules and validation](mocks/responses.md)
+  - [Mocked security](mocks/security.md)
+  - [Configuration as code](mocks/config.md)
+  - [CLI](mocks/cli.md)
+
 # AI and agents
 
 - [Mock LLM](ai/index.md)

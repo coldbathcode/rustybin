@@ -20,6 +20,7 @@ use crate::jwt_state::JwtState;
 use crate::keys::Keys;
 use crate::limits::{Clock, Limiter, SystemClock};
 use crate::metrics::Metrics;
+use crate::mocks::store::MockStore;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -44,6 +45,9 @@ pub struct AppState {
     /// per-key daily counters, used by the key layer, the limiter, the
     /// inspector and the gRPC interceptor.
     pub keys: Arc<Keys>,
+    /// OpenAPI mocks (`/mock/*`, `/_rustybin/mocks*`, startup loading and
+    /// SIGHUP reloads in the server).
+    pub mocks: MockStore,
 }
 
 impl AppState {
@@ -98,6 +102,7 @@ impl AppState {
             Limiter::with_clock(config.limits.clone(), clock.clone()).with_metrics(metrics.clone()),
         );
         let keys = Arc::new(Keys::new(&config, metrics.clone(), clock));
+        let mocks = crate::mocks::new_store(&config);
         Self {
             keys,
             limits,
@@ -108,6 +113,7 @@ impl AppState {
             inspector,
             health: Arc::new(HealthState::new()),
             metrics,
+            mocks,
         }
     }
 }
@@ -145,6 +151,12 @@ impl FromRef<AppState> for Arc<Limiter> {
 impl FromRef<AppState> for Arc<Metrics> {
     fn from_ref(state: &AppState) -> Self {
         state.metrics.clone()
+    }
+}
+
+impl FromRef<AppState> for MockStore {
+    fn from_ref(state: &AppState) -> Self {
+        state.mocks.clone()
     }
 }
 

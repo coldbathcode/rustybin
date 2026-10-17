@@ -40,6 +40,23 @@ BASE = os.environ.get("RUSTYBIN_URL", "http://127.0.0.1:18700").rstrip("/")
 OUT = os.environ.get("SCREENSHOT_DIR", "screenshots")
 THEMES = [t.strip() for t in os.environ.get("THEMES", "light,dark").split(",") if t.strip()]
 TIMEOUT = 20_000
+SMALL_SPEC = """openapi: 3.0.3
+info: {title: Orders, version: "1"}
+paths:
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {id: {type: integer}, total: {type: number}}
+"""
 
 failures = []
 console_errors = []
@@ -110,7 +127,7 @@ def run_theme(browser, theme):
         page.wait_for_selector("text=Requests captured")
         page.wait_for_selector("text=What Rustybin sees of this browser")
         page.wait_for_selector(".url-row code")
-        expect(page.locator(".nav-link")).to_have_count(9)
+        expect(page.locator(".nav-link")).to_have_count(10)
         # No plan configured (RUSTYBIN_PLAN=none): no "Plan and usage" card.
         expect(page.locator("text=Plan and usage")).to_have_count(0)
         shot(page, theme, "01-overview")
@@ -158,6 +175,105 @@ def run_theme(browser, theme):
         shot(page, theme, "04-bins")
 
     step("request bin", bins)
+
+    def mocks():
+        goto_view(page, "mocks")
+        row = page.locator(".mock-row", has_text="petstore")
+        row.wait_for()
+        row.locator(".mr-link").click()
+        page.wait_for_selector(".op-row")
+        # Operation editor: the rule-driven getPetById with its documented statuses.
+        page.locator(".op-row", has_text="Find a pet by id").click()
+        page.wait_for_selector(".st-tab")
+        page.locator(".rule").first.wait_for()
+        page.locator("text=matches the schema").first.wait_for()
+        shot(page, theme, "15-mock-operation")
+        # Try it: the prefilled sample answers 200 with the mock headers.
+        page.get_by_role("tab", name="Try it").click()
+        page.get_by_label("Operation").select_option("listPets")
+        expect(page.get_by_label("Path and query (below the mock URL)")).to_have_value("/v1/pets")
+        page.get_by_role("button", name="Send", exact=True).click()
+        page.locator(".mock-strip", has_text="listPets").wait_for()
+        page.locator(".card .badge.ok", has_text="200").first.wait_for()
+        shot(page, theme, "16-mock-try")
+        # Traffic shows the call live.
+        page.get_by_role("tab", name="Traffic").click()
+        page.locator(".mt-row", has_text="listPets").first.wait_for()
+        # Switch the mock off (no confirmation) and back on.
+        sw = page.get_by_role("switch", name="Mock on or off")
+        sw.click()
+        expect(sw).to_have_attribute("aria-checked", "false")
+        page.wait_for_selector("text=This mock is switched off")
+        assert http("GET", "/mock/petstore/v1/pets") == 503, "switched off mock still answers"
+        sw.click()
+        expect(sw).to_have_attribute("aria-checked", "true")
+        assert http("GET", "/mock/petstore/v1/pets") == 200, "switched on mock does not answer"
+        # Rule preview: the sample rule (petId 0 -> 404) would answer the last call.
+        assert http("GET", "/mock/petstore/v1/pets/0") == 404, "sample rule does not answer 404"
+        page.get_by_role("tab", name="Operations").click()
+        page.locator(".op-row", has_text="Find a pet by id").click()
+        page.locator(".rule-result", has_text="would answer").wait_for()
+        page.locator(".cond-seen-v", has_text='seen "0"').first.wait_for()
+        shot(page, theme, "19-mock-rule-preview")
+        # Collection download from the overflow menu.
+        page.locator("summary[aria-label='More actions']").click()
+        page.get_by_role("menuitem", name="Download collection").click()
+        page.locator("dialog .radio-card", has_text="Hurl").click()
+        with page.expect_download() as dl:
+            page.locator("dialog").get_by_role("button", name="Download").click()
+        assert dl.value.suggested_filename == "petstore.hurl", dl.value.suggested_filename
+        # Duplicate, switch the copy to stateful mode and round trip through Try it.
+        copy = f"pets-{theme}"
+        page.locator("summary[aria-label='More actions']").click()
+        page.get_by_role("menuitem", name="Duplicate").click()
+        page.get_by_label("Name of the copy").fill(copy)
+        page.locator("dialog").get_by_role("button", name="Duplicate").click()
+        page.wait_for_url(f"**#/mocks/{copy}")
+        page.locator("h1", has_text=copy).wait_for()
+        page.get_by_role("tab", name="Settings").click()
+        page.get_by_label("Response mode").select_option("stateful")
+        page.get_by_role("button", name="Save to draft").click()
+        page.get_by_role("tab", name="Data").wait_for()
+        page.locator(".mock-actions").get_by_role("button", name="Deploy").click()
+        page.wait_for_selector("text=Deployed revision")
+        page.get_by_role("tab", name="Try it").click()
+        page.get_by_label("Operation").select_option("createPet")
+        expect(page.get_by_label("Path and query (below the mock URL)")).to_have_value("/v1/pets")
+        page.get_by_label("Request body").fill('{"name": "Bella", "tag": "dog"}')
+        page.get_by_role("button", name="Send", exact=True).click()
+        page.locator(".mock-strip", has_text="state create").wait_for()
+        page.get_by_role("tab", name="Data").click()
+        page.locator(".data-col", has_text="Bella").wait_for()
+        shot(page, theme, "20-mock-data")
+        # Wizard: paste a spec, review, create and deploy.
+        name = f"orders-{theme}"
+        goto_view(page, "mocks")
+        page.get_by_role("button", name="New mock").click()
+        page.get_by_label("OpenAPI document (JSON or YAML)").fill(SMALL_SPEC)
+        page.get_by_role("button", name="Continue").click()
+        page.get_by_label("Mock name").fill(name)
+        page.wait_for_selector("text=Available.")
+        page.get_by_role("button", name="Next").click()
+        page.get_by_role("button", name="Create and deploy").click()
+        page.wait_for_selector("text=Your mock is live")
+        assert http("GET", f"/mock/{name}/orders/7") == 200, "new mock does not answer"
+        shot(page, theme, "17-mock-created")
+        page.get_by_role("link", name="All mocks").click()
+        page.locator(".mock-row", has_text=name).wait_for()
+        shot(page, theme, "18-mocks")
+        # Bulk: select both new mocks, switch them off, then delete them (confirmed).
+        page.get_by_label("Select " + name).check()
+        page.get_by_label("Select " + copy).check()
+        page.locator(".bulk-bar").get_by_role("button", name="Turn off").click()
+        page.wait_for_selector("text=2 mocks switched off")
+        expect(page.get_by_role("switch", name=copy + " on or off")).to_have_attribute("aria-checked", "false")
+        page.once("dialog", lambda d: d.accept())
+        page.locator(".bulk-bar").get_by_role("button", name="Delete").click()
+        page.wait_for_selector("text=2 mocks deleted")
+        expect(page.locator(".mock-row", has_text=copy)).to_have_count(0)
+        assert http("GET", f"/mock/{name}/orders/7") == 404, "deleted mock still answers"
+
+    step("mock apis (detail, try it, on/off, rule preview, collection, duplicate, stateful, wizard, bulk)", mocks)
 
     def explorer():
         goto_view(page, "explorer")
@@ -429,6 +545,21 @@ def run_jwt(browser):
         expect(page.locator("#signin")).to_have_count(0)
 
     step("jwt: #token= fragment signs in, live feed with bearer", fragment_token)
+
+    def mocks_read_only():
+        goto_view(page, "mocks")
+        page.locator(".mock-row", has_text="petstore").wait_for()
+        page.wait_for_selector("text=read-only")
+        expect(page.get_by_role("button", name="New mock")).to_have_count(0)
+        expect(page.get_by_role("switch").first).to_be_disabled()
+        expect(page.locator(".bulk-bar")).to_have_count(0)
+        page.locator(".mock-row .mr-link", has_text="petstore").click()
+        page.locator("summary[aria-label='More actions']").click()
+        page.get_by_role("menuitem", name="Download collection").wait_for()
+        expect(page.get_by_role("menuitem", name="Duplicate")).to_have_count(0)
+        expect(page.get_by_role("menuitem", name="Delete")).to_have_count(0)
+
+    step("jwt: mock apis read-only with a console token", mocks_read_only)
 
     def expiry_and_sign_out():
         page.goto(jwt_base + "/ui/#/overview&token=" + control_jwt("console", ttl=3))

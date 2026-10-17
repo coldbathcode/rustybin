@@ -9,10 +9,16 @@ services:
     environment:
       - RUSTYBIN_LOG_LEVEL=info
       - RUSTYBIN_INSTANCE_ID=rustybin-01
+      # OpenAPI mocks from a folder of specs (each file becomes /mock/<file name>):
+      # - RUSTYBIN_MOCKS_DIR=/app/specs
     volumes:
       # Named volume: the image runs as uid 10001, which owns it. (A bind mount
       # such as ./certs must be writable by that uid.)
       - rustybin-certs:/app/certs
+      # OpenAPI mocks as code: /app/rustybin.yaml is loaded at startup (spec
+      # paths in it are relative to the file). Read-only mounts are fine.
+      # - ./rustybin.yaml:/app/rustybin.yaml:ro
+      # - ./specs:/app/specs:ro
     restart: unless-stopped
 
 # Uncomment to run multiple instances for load balancing demos:

@@ -53,6 +53,28 @@ fn percent_decode(input: &str) -> Result<String, &'static str> {
         .map_err(|_| "certificate header is not UTF-8 after URL decoding")
 }
 
+/// True when the request presents a client certificate from the demo CA:
+/// the TLS peer certificate, or (with `RUSTYBIN_MTLS_IN_HEADER`) a forwarded
+/// one that verifies. Used by mocked `mutualTLS` security.
+pub fn has_verified_client_cert(
+    tls: Option<&TlsConnectionInfo>,
+    headers: &HeaderMap,
+    config: &Config,
+    certs: &CertState,
+) -> bool {
+    if tls.is_some_and(|t| t.peer_certificate.is_some()) {
+        return true;
+    }
+    let Some(header_name) = config.mtls_in_header.as_deref() else {
+        return false;
+    };
+    headers
+        .get(header_name)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| decode_header_cert(v).ok())
+        .is_some_and(|der| certs.verify_client_cert(&der).is_ok())
+}
+
 /// DER of a certificate forwarded in a header: URL-encoded or raw PEM
 /// (newlines may be replaced by spaces), or bare base64 DER.
 fn decode_header_cert(value: &str) -> Result<Vec<u8>, &'static str> {

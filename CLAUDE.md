@@ -12,6 +12,7 @@ cargo test                                   # unit + tests/integration.rs, a fe
 cargo test --features quota-postgres         # + the PostgreSQL quota store (set RUSTYBIN_TEST_QUOTA_STORE to run against a database)
 RUSTYBIN_UPDATE_README=1 cargo test readme_endpoints   # regenerate README endpoint tables
 cargo run -- --print-endpoints-markdown      # print them instead
+cargo run -- mock validate src/mocks/petstore.yaml   # OpenAPI mocks CLI (offline: validate, init, sample, check-config)
 RUSTYBIN_HTTP_PORT=8080 cargo run
 docs/examples/run.sh                         # documentation examples (Hurl) against fresh servers (open, plan, secured, shared, keyed)
 mdbook build docs                            # documentation site
@@ -40,7 +41,7 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   Ports may be 0. Graceful shutdown on SIGTERM/SIGINT with a 10 s grace period. With `RUSTYBIN_GRPC_ON_HTTP`
   the HTTP/HTTPS app is wrapped in `grpc::GrpcOnHttp` (content-type `application/grpc*` goes to tonic).
 - `src/config.rs`: `Config` from `RUSTYBIN_*` env vars (invalid values warn and default), `Config::for_tests()`.
-- `src/state.rs`: `AppState { config, jwt, certs, identity, inspector, health, limits, metrics }`, `FromRef` for
+- `src/state.rs`: `AppState { config, jwt, certs, identity, inspector, health, limits, metrics, mocks }`, `FromRef` for
   each part (handlers can keep extracting `State<Arc<Config>>`).
 - `src/catalog.rs`: route catalogue, the single source of truth (landing page, `/export/*`, README tables)
   plus the consistency tests.
@@ -67,6 +68,22 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   counters), `store.rs` (`QuotaStore`; PostgreSQL behind the cargo feature `quota-postgres`, tests in
   `pg_tests.rs` need `RUSTYBIN_TEST_QUOTA_STORE=postgres://...`), `/_rustybin/keys/usage`. The key layer sits
   outside the limiter and attaches a `KeyContext` extension. Keys are redacted in captures (`redact_*`).
+- `src/mocks/`: OpenAPI mocks. `spec.rs` (OAS 3.0/3.1 parsing into a normalised model, `serde_json::Value`
+  based, lenient: odd specs give warnings), `schema.rs` (deterministic generation and validation in the OpenAPI
+  dialect, readOnly/writeOnly by direction, path parameter echo), `model.rs` (settings: the same struct in the
+  control API, `rustybin.yaml` and exports), `compile.rs` (immutable revision: spec + settings + route table +
+  deploy report), `respond.rs` (Prefer header, rules, overrides, modes), `request.rs` (request validation),
+  `security.rs` (mocked security, JWTs from `jwt_state`), `checks.rs` (deploy checks: a valid request and
+  response per operation), `store.rs` (`MockStore` in `AppState`: draft, live, history, on/off, capture log with
+  per-operation and hourly counts, stateful data; bounded by `MockLimits`), `state.rs` (`stateful` mode: bounded
+  in-memory CRUD keyed by request path), `swagger2.rs` (Swagger 2.0 to OpenAPI 3.0 on parse), `persist.rs`
+  (`RUSTYBIN_MOCKS_STATE_DIR`: API-created mocks saved as JSON, loaded by `new_store`), `host.rs`
+  (`RUSTYBIN_MOCKS_HOST`: `<name>.<domain>` rewritten to `/mock/<name>` by a layer wrapping the finished router in
+  `build_app`), `collections.rs` (a mock as Postman / Hurl / curl / .http / k6), `config_file.rs` (`rustybin.yaml`,
+  `RUSTYBIN_MOCKS_DIR`, export), `cli.rs` (`rustybin mock ...`), `handlers.rs` (`/mock/{name}/...` data plane,
+  `/_rustybin/mocks*` control plane; mutations call `admin::require_admin`). Mocks are matched inside the handler (operations change at runtime), never as
+  axum routes. The built-in `petstore` sample (`petstore.yaml`, `RUSTYBIN_MOCKS_SAMPLE`) is what catalogue
+  examples and tests call. File-defined mocks load in `server::start_with_state` and reload on SIGHUP.
 - `src/fault.rs`: `X-Rustybin-Delay` / `X-Rustybin-Fail` middleware.
 - `src/admin.rs`: `require_admin(&headers, &config)` guard for instance-global mutations.
 - `src/session.rs`: `session_key(&headers, client_ip)`, `client_ip(...)`, extractors `Session`, `ClientIp`, `PeerAddr`.
@@ -96,6 +113,8 @@ missing from the OpenAPI spec (or lacks a method), or an example returns 404/405
 ## Conventions
 
 - Route syntax is axum 0.8: `/status/{code}`, wildcard `/echo/{*path}`.
+- `serde_json` has `preserve_order`: object keys serialise in insertion order (OpenAPI documents keep their
+  path and property order). Do not write tests that rely on sorted keys.
 - Per-client state is scoped with `session::session_key` (`X-Rustybin-Session`, else client IP).
 - Global mutations call `admin::require_admin`: token set means it is required; no token is open in normal
   mode and forbidden in public mode (`RUSTYBIN_PUBLIC_MODE`).

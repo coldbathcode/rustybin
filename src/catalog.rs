@@ -44,6 +44,7 @@ pub mod category {
     pub const WEBSOCKET: &str = "WebSocket";
     pub const RELIABILITY: &str = "Reliability Testing";
     pub const REQUEST_BIN: &str = "Request Bin & Webhooks";
+    pub const MOCKS: &str = "Mock APIs (OpenAPI)";
     pub const HEALTH: &str = "Health & Identity";
     pub const CONTROL: &str = "Control Plane";
     pub const DOCS: &str = "Docs & Exports";
@@ -74,6 +75,7 @@ pub const CATEGORY_ORDER: &[&str] = &[
     category::WEBSOCKET,
     category::RELIABILITY,
     category::REQUEST_BIN,
+    category::MOCKS,
     category::HEALTH,
     category::CONTROL,
     category::DOCS,
@@ -339,6 +341,7 @@ const SOURCES: &[fn() -> Vec<Endpoint>] = &[
     crate::websocket::catalog,
     crate::flaky::catalog,
     crate::request_bin::catalog,
+    crate::mocks::catalog,
     crate::sse::catalog,
     crate::webhooks::catalog,
     crate::guardrails::catalog,

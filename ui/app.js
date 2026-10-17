@@ -11,6 +11,7 @@ const VIEWS = [
   { section: 'Instance' },
   { id: 'overview', title: 'Overview', icon: 'overview', load: () => import('./views/overview.js') },
   { id: 'traffic', title: 'Live traffic', icon: 'traffic', load: () => import('./views/traffic.js') },
+  { id: 'mocks', title: 'Mock APIs', icon: 'mock', load: () => import('./views/mocks.js') },
   { id: 'bins', title: 'Request bins', icon: 'bin', load: () => import('./views/bins.js') },
   { id: 'explorer', title: 'API explorer', icon: 'explorer', load: () => import('./views/explorer.js') },
   { section: 'AI and agents' },

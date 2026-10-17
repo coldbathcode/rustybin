@@ -22,6 +22,7 @@ const MODULE_PATHS: &[fn() -> Value] = &[
     crate::keys::openapi_paths,
     crate::ui::openapi_paths,
     crate::request_bin::openapi_paths,
+    crate::mocks::openapi_paths,
     crate::sse::openapi_paths,
     crate::webhooks::openapi_paths,
     crate::guardrails::openapi_paths,

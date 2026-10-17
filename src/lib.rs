@@ -43,6 +43,7 @@ pub mod limits;
 pub mod logging;
 pub mod mcp;
 pub mod metrics;
+pub mod mocks;
 pub mod oidc;
 pub mod openapi;
 pub mod orchestration;
@@ -111,6 +112,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     identity::router,
     flaky::router,
     request_bin::router,
+    mocks::router,
     sse::router,
     webhooks::router,
     guardrails::router,
@@ -199,7 +201,7 @@ pub fn build_app(state: AppState) -> Router {
         router = router.layer(cors);
     }
 
-    router
+    let router = router
         .layer(PropagateRequestIdLayer::x_request_id())
         // Metrics: sees every response (CORS preflights, 401s, 429s, timeouts)
         // and the matched route template.
@@ -237,7 +239,16 @@ pub fn build_app(state: AppState) -> Router {
                 ),
         )
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-        .with_state(state)
+        .with_state(state);
+
+    // Host-based mock URLs rewrite the path before routing, so they wrap the
+    // finished router.
+    if config.mocks_host.is_some() {
+        return Router::new()
+            .fallback_service(router)
+            .layer(middleware::from_fn_with_state(config, mocks::host::route));
+    }
+    router
 }
 
 /// CORS for browser clients (the UI, docs, demos). `None` disables the layer
@@ -263,6 +274,12 @@ fn cors_layer(origins: &[String], plan_headers: bool) -> Option<CorsLayer> {
         HeaderName::from_static("mcp-session-id"),
         HeaderName::from_static("mcp-protocol-version"),
         header::WWW_AUTHENTICATE,
+        // OpenAPI mocks: which mock and operation answered, and how.
+        HeaderName::from_static("x-rustybin-mock"),
+        HeaderName::from_static("x-rustybin-mock-operation"),
+        HeaderName::from_static("x-rustybin-mock-source"),
+        HeaderName::from_static("x-rustybin-mock-validation"),
+        header::ALLOW,
     ];
     if plan_headers {
         expose.extend([

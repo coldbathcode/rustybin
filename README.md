@@ -71,6 +71,15 @@ a runnable example, and `/docs` for the OpenAPI reference. See the
 
 **API gateway essentials**
 
+- **OpenAPI mocks**: upload an OpenAPI 3.0 / 3.1 spec and get a named mock at
+  `/mock/<name>` in one step. Responses come from spec examples, deterministic data
+  generated from the schemas, or bodies you build in a schema-aware editor, plus
+  rules (`petId == 0` answers 404) and `Prefer: code=404`. Requests are validated,
+  deploys are checked (a valid request and response per operation), mocks switch on
+  and off, mocked security follows the spec's schemes (API key, basic, bearer,
+  OAuth2 with scopes via the built-in IdP, mTLS) and every call is captured. The
+  same mocks are configurable as code in `rustybin.yaml` and with
+  `rustybin mock ...` ([OpenAPI mocks](docs/src/mocks/index.md)).
 - Echo, any status code, delays, caching with ETags, compression, ranges, redirects,
   cookies, images.
 - Real credential checks: Basic, API keys, JWT (HS256 and RS256), HMAC signatures,
@@ -94,7 +103,8 @@ a runnable example, and `/docs` for the OpenAPI reference. See the
 ## Web console
 
 `/ui` is a browser console for presenting: Overview, Live traffic (what the gateway
-forwarded, with gateway headers highlighted), Request bins, API explorer, AI
+forwarded, with gateway headers highlighted), Mock APIs (upload a spec, edit
+responses, toggle mocks and mocked security), Request bins, API explorer, AI
 playground, MCP inspector, A2A client, Chaos and health (with a small load
 generator) and Token lab. It is embedded in the binary and works offline. Set a
 gateway base URL in its settings to send every request through your gateway. With a
@@ -128,6 +138,11 @@ to the default. `GET /_rustybin/config` shows the effective configuration. Detai
 | `RUSTYBIN_HOSTED_MODE` | `false` | Preset for one-instance-per-customer platforms: control auth `jwt` and JSON logs |
 | `RUSTYBIN_GRPC_ON_HTTP` | `false` | Also serve gRPC (`content-type: application/grpc*`) on the HTTP and HTTPS listeners |
 | `RUSTYBIN_CONSOLE_TITLE` / `_BACKLINK` | unset | Title and "Back to" link (http(s) URL) in the web console header |
+| `RUSTYBIN_CONFIG_FILE` | `./rustybin.yaml` if present | Mocks as code (also `rustybin --config <file>`); reloaded by `POST /_rustybin/mocks/reload` or SIGHUP |
+| `RUSTYBIN_MOCKS_DIR` | unset | Directory whose OpenAPI files (`*.yaml`, `*.yml`, `*.json`) become mocks named after the file |
+| `RUSTYBIN_MOCKS_SAMPLE` | `true` (`false` in public mode) | Create the built-in `petstore` mock |
+| `RUSTYBIN_MOCKS_STATE_DIR` | unset | Save mocks created or edited through the API or console here (one JSON file each) and reload them at startup |
+| `RUSTYBIN_MOCKS_HOST` | unset | Domain for host-based mock URLs: `<name>.<domain>` serves the mock `<name>` at its root (needs wildcard DNS) |
 | `RUSTYBIN_CORS_ORIGINS` | `*` | Allowed CORS origins, comma separated; `off` disables Rustybin's CORS |
 | `RUSTYBIN_INSPECTOR_CAPACITY` | `500` | Requests kept by the inspector (max 10000) |
 | `RUSTYBIN_PLAN` | `none` | Plan limits preset: `none` (no limits, no headers), `free`, `pro`, `team`, `enterprise` ([plans and limits](docs/src/concepts/plans-and-limits.md)) |
@@ -449,6 +464,39 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | POST | `/webhooks/verify/{scheme}` | Verify a webhook signature: standard, github (X-Hub-Signature-256) or stripe (Stripe-Signature) |
 | GET POST | `/webhooks/sign` | Produce a signed example webhook (headers + body) for a secret |
 | POST | `/webhooks/receive/{secret_id}` | Webhook receiver with a demo secret: 204 when valid, 401 otherwise |
+
+### Mock APIs (OpenAPI)
+
+| Methods | Path | Description |
+|---|---|---|
+| ANY | `/mock/{name}` | Call an OpenAPI mock (its root path) |
+| ANY | `/mock/{name}/{*path}` | Call an operation of an OpenAPI mock |
+| GET | `/mock/{name}/_rustybin/openapi.json` | The deployed spec of a mock, servers rewritten to the mock URL |
+| GET | `/mock/{name}/_rustybin/openapi.yaml` | The deployed spec of a mock as YAML |
+| GET POST | `/_rustybin/mocks` | List mocks (GET) or create one from a spec (POST, admin) |
+| POST | `/_rustybin/mocks/import` | Preview a spec: operations, security schemes, warnings, suggested name |
+| POST | `/_rustybin/mocks/apply` | Apply a rustybin.yaml document (create, update, ?prune=true deletes the rest) |
+| POST | `/_rustybin/mocks/reload` | Re-read RUSTYBIN_CONFIG_FILE and RUSTYBIN_MOCKS_DIR (also on SIGHUP) |
+| GET | `/_rustybin/mocks/export` | Every mock (except the sample) as a rustybin.yaml document |
+| GET | `/_rustybin/mocks/config.schema.json` | JSON Schema of rustybin.yaml (editor completion) |
+| GET PATCH DELETE | `/_rustybin/mocks/{name}` | A mock's details (GET), edit its draft (PATCH) or delete it |
+| POST | `/_rustybin/mocks/{name}/enable` | Switch a mock on |
+| POST | `/_rustybin/mocks/{name}/disable` | Switch a mock off (its URL answers 503, config and history are kept) |
+| POST | `/_rustybin/mocks/{name}/deploy` | Publish the draft after the deploy checks (?force=true ignores errors) |
+| POST | `/_rustybin/mocks/{name}/rollback` | Make a previous revision live again (body {revision} optional) |
+| GET | `/_rustybin/mocks/{name}/report` | Deploy-check report of the draft: a valid request and response per operation |
+| GET | `/_rustybin/mocks/{name}/export` | One mock as a rustybin.yaml document |
+| GET | `/_rustybin/mocks/{name}/spec` | The spec as uploaded (the draft's, JSON or YAML as written) |
+| POST | `/_rustybin/mocks/{name}/duplicate` | Copy a mock under a new name (body {name} optional; default <name>-copy) |
+| GET DELETE | `/_rustybin/mocks/{name}/state` | Items stored by a mock in stateful mode (DELETE resets them) |
+| GET | `/_rustybin/mocks/{name}/collections/{format}` | The mock's operations as a collection: postman, hurl, curl, http or k6 (?base_url=) |
+| GET PUT | `/_rustybin/mocks/{name}/operations/{op}` | One operation (schemas inlined, settings, sample request) or set its settings (PUT) |
+| GET | `/_rustybin/mocks/{name}/operations/{op}/sample` | Generate a valid request and response (?status=, ?mode=, ?example=, ?seed=) |
+| POST | `/_rustybin/mocks/{name}/operations/{op}/validate` | Validate a response (or request) body against the operation's schema |
+| POST | `/_rustybin/mocks/{name}/operations/{op}/rules/test` | Which rule would answer a captured call (body {rules?, request?}) |
+| GET DELETE | `/_rustybin/mocks/{name}/requests` | Requests a mock received, newest first (DELETE clears them) |
+| GET | `/_rustybin/mocks/{name}/requests/stream` | Live feed of a mock's requests (SSE) (SSE) |
+| GET | `/_rustybin/mocks/{name}/requests/{n}` | One captured request by sequence number |
 
 ### Health & Identity
 

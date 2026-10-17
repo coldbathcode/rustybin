@@ -192,6 +192,45 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
         })
     };
 
+    // Mocks from RUSTYBIN_CONFIG_FILE / RUSTYBIN_MOCKS_DIR, reloaded on SIGHUP.
+    crate::mocks::load_startup(&state);
+    #[cfg(unix)]
+    if config.config_file.is_some() || config.mocks_dir.is_some() {
+        let mocks_state = state.clone();
+        let rx = shutdown.subscribe();
+        let task = tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let Ok(mut hup) = signal(SignalKind::hangup()) else {
+                tracing::warn!(
+                    "SIGHUP handler not installed: mocks reload with POST /_rustybin/mocks/reload"
+                );
+                return;
+            };
+            let stop = wait_for(rx);
+            tokio::pin!(stop);
+            loop {
+                tokio::select! {
+                    _ = &mut stop => break,
+                    received = hup.recv() => {
+                        if received.is_none() {
+                            break;
+                        }
+                        let (report, problems) =
+                            crate::mocks::reload_files(&mocks_state.mocks, &mocks_state.config);
+                        tracing::info!(
+                            "mocks reloaded: {} created, {} updated, {} deleted, {} problem(s)",
+                            report.created.len(),
+                            report.updated.len(),
+                            report.deleted.len(),
+                            problems.len()
+                        );
+                    }
+                }
+            }
+        });
+        optional_tasks.push(("mocks reload", task));
+    }
+
     // Plan usage persistence (RUSTYBIN_USAGE_FILE); returns at once when off.
     let persist = tokio::spawn(
         state

@@ -44,6 +44,17 @@ API, AI and agent gateway demos.
   ranges, data transfer helpers, generic JSON-RPC, GraphQL subscriptions and
   automatic persisted queries, gRPC reflection, health and gRPC-Web.
 - The **web console** at `/ui`.
+- **OpenAPI mocks** (`/mock/{name}`): upload an OpenAPI 3.0 / 3.1 spec and get a
+  named mock API answering with spec examples or deterministic data generated from
+  the schemas (path parameters echoed), with rules, per-operation overrides, the
+  `Prefer` header, request validation (warn or enforce), deploy checks with a
+  report, drafts, rollback, an on/off switch, captured traffic, and mocked security
+  from the spec (API key, basic, bearer, OAuth 2.0 / OpenID Connect scopes against
+  the built-in identity provider, mTLS) or a fixed scheme. Managed in the console,
+  through `/_rustybin/mocks*`, from `rustybin.yaml` (`RUSTYBIN_CONFIG_FILE`,
+  `--config`, reload on `SIGHUP`, JSON Schema for editors) or a directory of specs
+  (`RUSTYBIN_MOCKS_DIR`), and with the `rustybin mock` CLI. A `petstore` sample is
+  built in (`RUSTYBIN_MOCKS_SAMPLE`).
 - **Plan limits** for hosted offerings (`RUSTYBIN_PLAN`, `RUSTYBIN_LIMIT_*`,
   `RUSTYBIN_USAGE_FILE`): rate, concurrency, streams and daily or monthly request and
   egress quotas, per instance or per session, with IETF RateLimit headers on 429s and

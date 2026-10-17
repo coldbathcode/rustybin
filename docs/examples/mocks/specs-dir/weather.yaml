@@ -1,0 +1,25 @@
+openapi: 3.0.3
+info:
+  title: Weather
+  version: "1.0"
+paths:
+  /forecast/{city}:
+    get:
+      operationId: getForecast
+      parameters:
+        - name: city
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Today's forecast
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [city, celsius, sky]
+                properties:
+                  city: { type: string }
+                  celsius: { type: integer, minimum: -40, maximum: 50 }
+                  sky: { type: string, enum: [sunny, cloudy, rain, snow] }

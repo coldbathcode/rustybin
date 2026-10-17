@@ -42,12 +42,13 @@ before sign-in.
 
 ## Views
 
-`Alt+1` to `Alt+9` switch between the views, in this order:
+The views, in sidebar order (`Alt+1` to `Alt+9` switch to the first nine):
 
 | View | What it does |
 |---|---|
 | **Overview** | Which instance answers, whether it is healthy, uptime and inspector counters, and the base URLs (HTTP, HTTPS, gRPC, the AI providers, MCP, A2A, OIDC) to paste into a gateway configuration |
 | **Live traffic** | The [request inspector](concepts/inspector.md) live over SSE: method, path, headers, body for every request Rustybin received, with filters, highlighting of headers gateways typically add or rewrite, copy as curl, and a compare mode that diffs two requests |
+| **Mock APIs** | [OpenAPI mocks](mocks/index.md): create one from a spec, switch mocks on and off, edit responses, rules and security, try operations and watch their traffic (see [below](#mock-apis)) |
 | **Request bins** | Create a [request bin](reference/request-bin.md) with a configured response, send a test request, watch captures arrive live |
 | **API explorer** | The route catalogue with search and category filters, and a "Try it" request builder prefilled from each endpoint's examples |
 | **AI playground** | Chat with the [mock LLM](ai/index.md) in OpenAI chat, OpenAI Responses, Anthropic, Gemini, Ollama (streaming) and Bedrock (non-streaming) wire formats, with modes, fault and latency injection, tool calling with a tool result round trip, the raw wire frames, and the [AI request record](ai/gateway-features.md#request-inspection) of each call |
@@ -55,6 +56,63 @@ before sign-in.
 | **A2A client** | Agent directory and cards, blocking or streaming sends over JSON-RPC in v1.0 or v0.3 (the HTTP+JSON binding is not used), a task timeline with artifacts, input-required and auth-required continuation, cancel, and the push notification sink |
 | **Chaos and health** | The health toggle, flaky endpoints with live counters, a fault injection header builder, and a load generator (at most 500 requests and 50 in flight) with a status histogram and latency percentiles, for rate limiting, retry and circuit breaker demos |
 | **Token lab** | Tokens from the [identity provider](reference/oidc.md) (client credentials, password, authorization code + PKCE in a popup), a JWT decoder with an expiry countdown, introspection, UserInfo and JWKS, an HMAC request signer for `/auth/hmac`, and a Standard Webhooks signer and verifier |
+
+## Mock APIs
+
+The **Mock APIs** view (`/ui/#/mocks`) manages the instance's
+[OpenAPI mocks](mocks/index.md):
+
+- **List**: every mock with its URL (copy button, plus the
+  [host-based URL](mocks/config.md#host-based-urls) when one is configured), title
+  and version, operation count, an on/off switch, a security badge, calls in the
+  last hour with the total and the last hit, stored items for stateful mocks, and a
+  marker for undeployed draft changes. Select mocks with the checkboxes to switch
+  them on or off or delete them in bulk. With no mocks yet, the page is a drop zone
+  for a spec.
+- **Create wizard**: drop, browse or paste an OpenAPI 3.0 / 3.1 or Swagger 2.0 file
+  (JSON or YAML; Swagger 2.0 is converted); the review step shows the operations,
+  security schemes and warnings (`POST /_rustybin/mocks/import`) and a name with the
+  resulting URL; the last step picks how responses are produced (spec examples,
+  generated data, your own responses, or "Remember changes", the
+  [stateful mode](mocks/responses.md)), whether the mock is secured and how
+  requests are validated, then creates and deploys it.
+- **Header menu**: Rename, Duplicate (a copy under a new name, deployed when the
+  source is, with empty traffic), Export YAML, Download spec (as uploaded),
+  Download collection (Postman, Hurl, curl, `.http` or k6, with an optional base URL
+  such as a gateway route), Rollback, Clear traffic and Delete.
+- **Operations and the operation editor**: each operation with its hit count and
+  last call; per documented status, the response source (spec example, generated
+  data, stateful, or a custom body built in a form generated from the schema, with
+  a JSON view validated as you type; "Edit as custom body" turns a generated
+  preview into a fixed response), response headers, a delay, a public toggle, and
+  [rules](mocks/responses.md#rules) ("when path parameter `id` equals `0`, respond
+  `404`"), evaluated in order. Drag rules by their handle (or use the arrows) to
+  reorder them. The **Would match** preview runs the unsaved rules against the
+  latest captured call of the operation (or one you pick) and shows which rule
+  would answer and the value each condition saw.
+- **Try it**: a request prefilled from a valid sample (parameters, body, demo
+  credentials), sent to the mock, with the response, the response source and the
+  validation result. A picker sets the [`Prefer` header](mocks/responses.md) to ask
+  for another status or example, and a button fetches a token from the built-in
+  identity provider.
+- **Security**: the [mocked security](mocks/security.md) switch and mode, the demo
+  credentials to copy, a way to get a token from the built-in identity provider,
+  and which operations are public.
+- **Data** (stateful mocks only): the items the mock stored, per collection, with
+  Refresh and Reset.
+- **Traffic**: the mock's captured calls, live, with the matched operation, status,
+  validation and authentication result.
+- **Deploy report**: the [deploy checks](mocks/responses.md#deploy-checks) per
+  operation, deploy, revisions and rollback, and export as `rustybin.yaml`.
+
+Edits go to the mock's draft and reach the live mock when you press **Deploy**
+(the button shows the check results). The **Security** switch is the exception: it
+deploys at once, and asks first when other draft changes would go live with it.
+Every view has its own link: `#/mocks/<name>/<tab>/<operationId>`.
+
+With a read-only control-plane token (`console` scope) the view shows everything
+but the controls that change mocks (bulk actions, Duplicate, Reset, Rename,
+Delete and the editors); downloads and the rule preview still work.
 
 ## Settings
 

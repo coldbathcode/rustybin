@@ -109,6 +109,20 @@ fn scope_claims() {
     let console = Grant::from_scope_claim(Some(&json!("console")));
     assert!(console.allows(&Method::GET, "/_rustybin/metrics"));
     assert!(!console.allows(&Method::DELETE, "/_rustybin/requests"));
+    assert!(console.allows(&Method::POST, "/_rustybin/mocks/import"));
+    assert!(console.allows(
+        &Method::POST,
+        "/_rustybin/mocks/petstore/operations/getPetById/validate"
+    ));
+    assert!(console.allows(
+        &Method::POST,
+        "/_rustybin/mocks/petstore/operations/getPetById/rules/test"
+    ));
+    assert!(!console.allows(&Method::POST, "/_rustybin/mocks"));
+    assert!(!console.allows(&Method::POST, "/_rustybin/mocks/petstore/deploy"));
+    assert!(!console.allows(&Method::PUT, "/_rustybin/mocks/import"));
+    assert!(!console.allows(&Method::POST, "/_rustybin/mocks/a/operations/b/validate/x"));
+    assert!(!inspector.allows(&Method::POST, "/_rustybin/mocks/import"));
     assert!(Grant::ADMIN.allows(&Method::DELETE, "/_rustybin/requests"));
 }
 

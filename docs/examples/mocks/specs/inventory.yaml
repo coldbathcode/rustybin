@@ -1,0 +1,67 @@
+openapi: 3.1.0
+info:
+  title: Inventory
+  version: 2.0.0
+servers:
+  - url: https://inventory.example.com/v2
+paths:
+  /health:
+    get:
+      operationId: health
+      responses:
+        "200":
+          description: Up
+          content:
+            application/json:
+              example: { status: up }
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - name: warehouse
+          in: query
+          schema: { type: string, enum: [north, south] }
+      responses:
+        "200":
+          description: Items in stock
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 3
+                items: { $ref: "#/components/schemas/Item" }
+  /items/{sku}:
+    get:
+      operationId: getItem
+      parameters:
+        - name: sku
+          in: path
+          required: true
+          schema: { type: string, pattern: "^SKU-[0-9]+$" }
+      responses:
+        "200":
+          description: One item
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Item" }
+        "404":
+          description: Unknown SKU
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Problem" }
+              example: { title: unknown SKU }
+components:
+  schemas:
+    Item:
+      type: object
+      required: [sku, name, quantity]
+      properties:
+        sku: { type: string, pattern: "^SKU-[0-9]+$" }
+        name: { type: string }
+        quantity: { type: integer, minimum: 0 }
+        updated: { type: [string, "null"], format: date-time }
+    Problem:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string }

@@ -567,3 +567,83 @@ async fn control_plane_jwt_end_to_end() {
     server.shutdown();
     server.wait().await.expect("clean shutdown");
 }
+
+#[tokio::test]
+async fn mocks_load_from_config_file_and_directory_and_reload() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let spec = r#"{"openapi":"3.0.3","info":{"title":"Inventory","version":"1"},
+      "paths":{"/items/{id}":{"get":{"operationId":"getItem",
+        "parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"integer"}}],
+        "responses":{"200":{"description":"ok","content":{"application/json":{"schema":{
+          "type":"object","required":["id","name"],"properties":{"id":{"type":"integer"},"name":{"type":"string"}}}}}}}}}}}"#;
+    std::fs::write(dir.path().join("inventory.json"), spec).expect("spec");
+    let specs = dir.path().join("specs");
+    std::fs::create_dir(&specs).expect("dir");
+    std::fs::write(specs.join("catalog.json"), spec).expect("spec");
+    let file = dir.path().join("rustybin.yaml");
+    let write_config = |key: &str| {
+        std::fs::write(
+            &file,
+            format!(
+                "version: 1\nmocks:\n  - name: inventory\n    spec: inventory.json\n    responses: {{ mode: generated }}\n    security: {{ enabled: true, mode: api_key, api_key: {{ keys: ['{key}'] }} }}\n"
+            ),
+        )
+        .expect("config");
+    };
+    write_config("${INVENTORY_KEY:-k1}");
+
+    let mut c = config(&dir);
+    c.config_file = Some(file.display().to_string());
+    c.mocks_dir = Some(specs.display().to_string());
+    c.mocks_sample = false;
+    let server = start(c).await;
+    let addr = server.http_addr;
+
+    let list = get(addr, "/_rustybin/mocks").await.json();
+    let names: Vec<&str> = list["mocks"]
+        .as_array()
+        .expect("mocks")
+        .iter()
+        .filter_map(|m| m["name"].as_str())
+        .collect();
+    assert_eq!(names, vec!["catalog", "inventory"]);
+    assert_eq!(list["mocks"][1]["origin"], "file");
+
+    assert_eq!(get(addr, "/mock/inventory/items/5").await.status, 401);
+    let resp = request(
+        addr,
+        "GET",
+        "/mock/inventory/items/5",
+        &[("x-api-key", "k1")],
+        "",
+    )
+    .await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.json()["id"], 5);
+    assert_eq!(get(addr, "/mock/catalog/items/9").await.json()["id"], 9);
+
+    // Edit the file, reload: the new key applies, the removed directory spec goes.
+    write_config("k2");
+    std::fs::remove_file(specs.join("catalog.json")).expect("remove");
+    let reload = request(addr, "POST", "/_rustybin/mocks/reload", &[], "").await;
+    assert_eq!(reload.status, 200);
+    let report = reload.json();
+    assert_eq!(
+        report["report"]["updated"],
+        serde_json::json!(["inventory"])
+    );
+    assert_eq!(report["report"]["deleted"], serde_json::json!(["catalog"]));
+    let resp = request(
+        addr,
+        "GET",
+        "/mock/inventory/items/5",
+        &[("x-api-key", "k2")],
+        "",
+    )
+    .await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(get(addr, "/mock/catalog/items/9").await.status, 404);
+
+    server.shutdown();
+    server.wait().await.expect("clean shutdown");
+}

@@ -1,6 +1,7 @@
 # Plan: OpenAPI mocks ("spec bins")
 
-Status: proposal, not started. Owner: TBD. Last updated: 2026-10-17.
+Status: phases 0 to 5 implemented (2026-10-17); phase 6 open. See section 12 for where the build
+differs from this plan. Last updated: 2026-10-17.
 
 ## 1. Goal
 
@@ -100,7 +101,7 @@ gateway.
 | `GET /_rustybin/mocks/{name}` | Full definition (draft and live revision ids, settings, overrides). |
 | `PATCH /_rustybin/mocks/{name}` | Update settings or the draft (rename, mode, security, operation overrides, replace spec). |
 | `POST /_rustybin/mocks/{name}/enable` and `/disable` | The on/off switch. |
-| `POST /_rustybin/mocks/{name}/check` | Dry run of the deploy checks on the draft; returns the report. |
+| `GET /_rustybin/mocks/{name}/report` | The deploy checks of the draft (computed when the draft is saved). |
 | `POST /_rustybin/mocks/{name}/deploy` | Run checks, publish the draft (`?force=true` deploys with warnings). |
 | `POST /_rustybin/mocks/{name}/rollback` | Back to a previous revision. |
 | `DELETE /_rustybin/mocks/{name}` | Delete. |
@@ -261,7 +262,7 @@ the revision so the console shows it instantly.
 
 | | Normal | Public mode |
 |---|---|---|
-| Mocks per instance | 100 | 50 (5 per session) |
+| Mocks per instance | 100 | 50 (mutations need the admin token) |
 | Spec size | 1 MiB | 256 KiB |
 | Operations per mock | 500 | 200 |
 | Rules per operation | 20 | 10 |
@@ -519,3 +520,41 @@ Rough size: phases 0 to 2 are the MVP worth demoing; 3 and 4 make it the
    present bins as "mocks without a spec" in one list.
 5. **Built-in sample**: ship `petstore` on by default, or only when
    `RUSTYBIN_MOCKS_SAMPLE=true`?
+
+## 12. As built (differences from the plan)
+
+- **Schema module**: the AI generator (`src/ai/schema.rs`) was left untouched. Mocks have their own
+  OpenAPI-dialect generator and validator in `src/mocks/schema.rs` (reusing the AI module's plausible-string
+  helper), so AI behaviour cannot regress.
+- **Capture log**: mocks have their own bounded capture log (`src/mocks/capture.rs`) instead of a refactor of
+  `RequestBins`; it records the mock's decision (operation, validation issues, auth result, response sent).
+- **Path matching**: a small segment matcher (literal, `{param}`, `prefix{param}suffix`) instead of `matchit`, so
+  conflicting templates load with a warning instead of failing.
+- **Validation leniency**: `oneOf` needs at least one matching branch (overlapping branches are common), and
+  `additionalProperties: false` inside an `allOf` part does not reject properties declared by sibling parts.
+- **Routes**: the dry-run check is `GET /_rustybin/mocks/{name}/report` (a read, so `console` tokens can see it);
+  added `GET/PUT /_rustybin/mocks/{name}/operations/{op}` (operation detail with inlined schemas for the editor,
+  and per-operation settings), `GET /_rustybin/mocks/export` (all mocks), `POST /_rustybin/mocks/reload`,
+  `DELETE /_rustybin/mocks/{name}/requests` and `GET /_rustybin/mocks/config.schema.json`. The names `import`,
+  `export`, `apply` and `reload` are reserved.
+- **Config file**: `RUSTYBIN_CONFIG_FILE` (or `rustybin --config <file>`, or `./rustybin.yaml` when it exists).
+  `POST /_rustybin/mocks/apply` accepts `spec_inline` only; `rustybin mock push` inlines spec files.
+- **CLI**: offline `validate`, `init`, `sample`, `check-config`; remote `push`, `list`, `enable`, `disable`,
+  `deploy`, `delete`, `export`.
+- **JSON key order**: `serde_json` now has `preserve_order`, so spec paths, properties and security requirements
+  keep their declaration order everywhere (the MCP envelope renderer was updated to match).
+- **Public mode**: management is control plane, so without an admin token public mode is read-only and the
+  per-session mock cap was not needed; it returns with hosted self-service (open question 1).
+- **CLI defaults**: `--server` defaults to `$RUSTYBIN_SERVER`, else `http://localhost` on `RUSTYBIN_HTTP_PORT`
+  (the server's own default, so `docker exec <container> rustybin mock list` works; the image puts `/app` on
+  `PATH`).
+- **Control auth**: the `console` scope may call the two `POST` routes that change nothing (`import` and
+  `.../operations/{op}/validate`); every other mutation still needs `admin`.
+- **Console**: not built yet: bulk enable/disable/delete, "Duplicate", the rule "would match" preview against
+  the last captured call, and drag to reorder (rules move with up/down buttons). Known gaps: no raw (unrewritten)
+  spec download, no per-operation hit counts, and `GET /_rustybin/mocks/{name}` shows basic-auth demo passwords
+  to `console` readers.
+- **Open questions** (section 11) were settled with the recommendations: control-plane management only,
+  `/mock/{name}` URLs, in-memory plus `rustybin.yaml`, separate views for bins and mocks, and the `petstore`
+  sample on by default outside public mode.
+

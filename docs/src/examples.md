@@ -29,7 +29,8 @@ curl -s http://localhost:8080/anything -H 'Content-Type: application/json' \
 Shell examples (gRPC, WebSocket, TLS client certificates, never-ending feeds) use
 variables for the target: `$BASE` (for example `http://localhost:8080`), `$HTTP` and
 `$HTTPS` (`https://localhost:8443`), `$WS` (`ws://localhost:8080`) and `$GRPC`
-(`localhost:50051`).
+(`localhost:50051`). The [mock CLI](mocks/cli.md) examples call the `rustybin`
+binary (`$RUSTYBIN_BIN` when run by `run.sh`).
 
 ## Running them
 
@@ -56,6 +57,7 @@ main instance uses these settings, which some examples rely on:
 | `RUSTYBIN_ADMIN_TOKEN` | `docs-admin-token` (Hurl variable `admin_token`) | to show admin-guarded mutations |
 | `RUSTYBIN_MTLS_IN_HEADER` | `X-Client-Cert` | to show mTLS header mode |
 | `RUSTYBIN_INSTANCE_ID` | `docs-examples` | stable identity in assertions |
+| `RUSTYBIN_CONFIG_FILE` / `RUSTYBIN_MOCKS_DIR` | `mocks/rustybin.yaml` / `mocks/specs-dir` (with `INVENTORY_API_KEY=docs-inventory-key`) | the [OpenAPI mocks loaded from files](mocks/config.md) |
 | `RUSTYBIN_TLS_CERT` / `RUSTYBIN_TLS_KEY` | a temporary directory | the demo PKI is never written into the repository |
 
 Requirements: `hurl` and `curl`; `grpcurl`, `websocat` and `jq` for the shell

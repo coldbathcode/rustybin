@@ -18,6 +18,14 @@ HTTP 200
 jsonpath "$.choices[0].message.content" startsWith "Hello! I'm Rustybin"
 # ANCHOR_END: chat
 
+# ANCHOR: mock
+GET {{base_url}}/mock/petstore/v1/pets/42
+HTTP 200
+[Asserts]
+header "X-Rustybin-Mock-Operation" == "getPetById"
+jsonpath "$.id" == 42
+# ANCHOR_END: mock
+
 # ANCHOR: mcp
 POST {{base_url}}/mcp
 Accept: application/json, text/event-stream

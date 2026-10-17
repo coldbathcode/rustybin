@@ -66,7 +66,10 @@ the instance only needs the public key. A token must have:
 | `admin` | everything, including mutations; also accepted wherever the [admin token](sessions.md) is (health toggles, global resets) |
 
 A mutation (any method other than GET, HEAD or OPTIONS) needs the admin token or the
-`admin` scope; other scopes get `403` with `reason: insufficient_scope`.
+`admin` scope; other scopes get `403` with `reason: insufficient_scope`. Two `POST`
+routes change nothing and are open to the `console` scope: previewing a mock spec
+(`/_rustybin/mocks/import`) and validating a body against a mock operation
+(`/_rustybin/mocks/{name}/operations/{op}/validate`).
 
 ```hurl
 {{#include ../../examples/concepts/control_auth.hurl:console_token}}

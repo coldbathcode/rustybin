@@ -181,7 +181,7 @@ Content-Type: application/json
 }
 HTTP 200
 [Asserts]
-jsonpath "$.choices[0].message.content" == "{\"age\":30,\"name\":\"Jane Doe\"}"
+jsonpath "$.choices[0].message.content" == "{\"name\":\"Jane Doe\",\"age\":30}"
 # ANCHOR_END: structured_openai
 
 # ANCHOR: structured_gemini

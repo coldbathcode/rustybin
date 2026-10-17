@@ -38,6 +38,6 @@ HTTP 200
 header "Content-Type" == "text/event-stream"
 body contains "\"object\":\"chat.chunk\""
 body contains "\"finish_reason\":\"length\""
-body contains "\"usage\":{\"completion_tokens\":5"
+body contains "\"completion_tokens\":5"
 body endsWith "data: [DONE]\n\n"
 # ANCHOR_END: sse_chat

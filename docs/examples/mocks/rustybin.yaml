@@ -1,0 +1,27 @@
+# yaml-language-server: $schema=http://localhost:8080/_rustybin/mocks/config.schema.json
+#
+# Loaded by the docs example server (docs/examples/run.sh) through
+# RUSTYBIN_CONFIG_FILE, and shown in docs/src/mocks/config.md.
+version: 1
+mocks:
+  - name: inventory
+    spec: specs/inventory.yaml            # relative to this file
+    strip_server_prefix: true             # /mock/inventory/items, not /mock/inventory/v2/items
+    responses:
+      mode: generated
+      seed: 42
+      validate_requests: enforce
+    security:
+      enabled: true
+      mode: api_key
+      api_key:
+        header: x-api-key
+        keys: ["${INVENTORY_API_KEY:-inventory-key}"]
+    operations:
+      health:
+        public: true
+      getItem:
+        rules:
+          - name: sold out
+            when: { path.sku: { equals: SKU-0 } }
+            respond: { status: 404 }

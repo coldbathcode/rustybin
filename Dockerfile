@@ -61,6 +61,8 @@ RUN groupadd --system --gid 10001 rustybin && \
     mkdir -p /app/certs && chown 10001:10001 /app/certs
 
 ENV RUSTYBIN_LOG_LEVEL=info
+# `docker exec <container> rustybin mock list` finds the binary.
+ENV PATH="/app:${PATH}"
 # HTTP, HTTPS, gRPC
 EXPOSE 80 443 50051
 
