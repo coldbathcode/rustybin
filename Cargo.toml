@@ -15,6 +15,12 @@ path = "src/lib.rs"
 name = "rustybin"
 path = "src/main.rs"
 
+[features]
+default = []
+# Shared quota store for shared mode (RUSTYBIN_QUOTA_STORE=postgres://...).
+# Off by default: the default build, its MSRV and its dependency set do not change.
+quota-postgres = ["dep:tokio-postgres", "dep:tokio-postgres-rustls"]
+
 [dependencies]
 axum = { version = "0.8", features = ["ws", "macros", "http2"] }
 axum-server = { version = "0.7.2", features = ["tls-rustls"] }
@@ -63,6 +69,8 @@ ruzstd = "0.9.1"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots-no-provider"] }
 webpki-roots = "1"
+tokio-postgres = { version = "0.7.13", optional = true, default-features = false, features = ["runtime", "with-chrono-0_4"] }
+tokio-postgres-rustls = { version = "0.14", optional = true, features = ["aws-lc-rs"] }
 
 [build-dependencies]
 tonic-build = "0.12"

@@ -254,6 +254,12 @@ impl JwtError {
 
 /// Verify a control-plane JWT and return its grant.
 pub fn verify_jwt(token: &str, config: &Config) -> Result<Grant, JwtError> {
+    verify_jwt_claims(token, config).map(|(grant, _)| grant)
+}
+
+/// Verify a control-plane JWT and return its grant and claims (shared mode
+/// reads the `rb_key` claim, see `crate::keys`).
+pub fn verify_jwt_claims(token: &str, config: &Config) -> Result<(Grant, Value), JwtError> {
     if config.control_auth != ControlAuth::Jwt {
         return Err(JwtError::NotAccepted);
     }
@@ -281,7 +287,10 @@ pub fn verify_jwt(token: &str, config: &Config) -> Result<Grant, JwtError> {
                 _ => JwtError::Malformed,
             }
         })?;
-    Ok(Grant::from_scope_claim(data.claims.get("scope")))
+    Ok((
+        Grant::from_scope_claim(data.claims.get("scope")),
+        data.claims,
+    ))
 }
 
 /// The grant of a request's credentials, ignoring the mode's path rules:

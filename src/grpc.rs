@@ -287,10 +287,12 @@ pub fn routes(
         .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
         .build_v1alpha()?;
     let limits = state.limits.clone();
+    let keys = state.keys.clone();
     let routes = tonic::service::Routes::new(EchoServiceServer::with_interceptor(
         EchoSvc::new(state.config.instance_id.clone()),
-        // Plan limits (rate and request quota); health and reflection are exempt.
-        move |req: Request<()>| limits.check_grpc(&req).map(|()| req),
+        // API keys (x-rustybin-key metadata) and plan limits (rate and request
+        // quota); health and reflection are exempt.
+        move |req: Request<()>| crate::keys::check_grpc(&keys, &limits, &req).map(|()| req),
     ))
     .add_service(health_service)
     .add_service(reflection_v1)

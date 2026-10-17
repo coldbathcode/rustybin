@@ -184,6 +184,10 @@ pub struct Metrics {
     egress_bytes: AtomicU64,
     protocols: [AtomicU64; 8],
     limit_rejections: [AtomicU64; Dimension::ALL.len()],
+    /// API key gauges (`crate::keys`); negative = not reported.
+    keys_active: AtomicI64,
+    keys_synced_at: AtomicI64,
+    quota_store_up: AtomicI64,
 }
 
 impl Default for Metrics {
@@ -206,7 +210,33 @@ impl Metrics {
             egress_bytes: AtomicU64::new(0),
             protocols: Default::default(),
             limit_rejections: Default::default(),
+            keys_active: AtomicI64::new(-1),
+            keys_synced_at: AtomicI64::new(-1),
+            quota_store_up: AtomicI64::new(-1),
         }
+    }
+
+    /// Active API keys in the registry (`rustybin_keys_active`).
+    pub fn set_keys_active(&self, n: i64) {
+        self.keys_active.store(n.max(0), Ordering::Relaxed);
+    }
+
+    /// Unix time of the last successful registry check
+    /// (`rustybin_keys_last_sync_timestamp_seconds`).
+    pub fn set_keys_synced_at(&self, unix_secs: i64) {
+        self.keys_synced_at
+            .store(unix_secs.max(0), Ordering::Relaxed);
+    }
+
+    /// Quota store reachability (`rustybin_quota_store_up`).
+    pub fn set_quota_store_up(&self, up: bool) {
+        self.quota_store_up.store(i64::from(up), Ordering::Relaxed);
+    }
+
+    /// `rustybin_quota_store_up` (`None`: no quota store).
+    pub fn quota_store_up(&self) -> Option<bool> {
+        let v = self.quota_store_up.load(Ordering::Relaxed);
+        (v >= 0).then_some(v == 1)
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -438,6 +468,25 @@ impl Metrics {
         faults.sort();
         for (kind, n) in faults {
             let _ = writeln!(out, "rustybin_faults_injected_total{{kind=\"{kind}\"}} {n}");
+        }
+
+        let keys_active = self.keys_active.load(Ordering::Relaxed);
+        if keys_active >= 0 {
+            out.push_str("# HELP rustybin_keys_active Active API keys in the key registry (shared mode, RUSTYBIN_REQUIRE_KEY).\n");
+            out.push_str("# TYPE rustybin_keys_active gauge\n");
+            let _ = writeln!(out, "rustybin_keys_active {keys_active}");
+            out.push_str("# HELP rustybin_keys_last_sync_timestamp_seconds Unix time of the last successful key registry check (0: never).\n");
+            out.push_str("# TYPE rustybin_keys_last_sync_timestamp_seconds gauge\n");
+            let _ = writeln!(
+                out,
+                "rustybin_keys_last_sync_timestamp_seconds {}",
+                self.keys_synced_at.load(Ordering::Relaxed).max(0)
+            );
+        }
+        if let Some(up) = self.quota_store_up() {
+            out.push_str("# HELP rustybin_quota_store_up 1 when the last exchange with the quota store (RUSTYBIN_QUOTA_STORE) succeeded.\n");
+            out.push_str("# TYPE rustybin_quota_store_up gauge\n");
+            let _ = writeln!(out, "rustybin_quota_store_up {}", u8::from(up));
         }
 
         out.push_str("# HELP rustybin_build_info Build information (always 1).\n");
@@ -737,7 +786,7 @@ pub fn openapi_paths() -> Value {
             "get": {
                 "tags": ["Control Plane"],
                 "summary": "Prometheus metrics",
-                "description": "Prometheus text exposition (version 0.0.4): rustybin_requests_total{route,method,status_class}, rustybin_request_duration_seconds{route} (histogram, buckets 1 ms to 60 s), rustybin_streams_open, rustybin_egress_bytes_total, rustybin_protocol_requests_total{protocol}, rustybin_llm_tokens_total{provider,model_family,direction}, rustybin_llm_requests_total{provider,model_family,streaming}, rustybin_llm_faults_total{provider,kind}, rustybin_limit_rejections_total{dimension}, rustybin_faults_injected_total{kind}, rustybin_build_info{version,git_sha}. The route label is the matched route template.",
+                "description": "Prometheus text exposition (version 0.0.4): rustybin_requests_total{route,method,status_class}, rustybin_request_duration_seconds{route} (histogram, buckets 1 ms to 60 s), rustybin_streams_open, rustybin_egress_bytes_total, rustybin_protocol_requests_total{protocol}, rustybin_llm_tokens_total{provider,model_family,direction}, rustybin_llm_requests_total{provider,model_family,streaming}, rustybin_llm_faults_total{provider,kind}, rustybin_limit_rejections_total{dimension}, rustybin_faults_injected_total{kind}, rustybin_build_info{version,git_sha}; with API keys also rustybin_keys_active, rustybin_keys_last_sync_timestamp_seconds and (with a quota store) rustybin_quota_store_up. The route label is the matched route template.",
                 "operationId": "getRustybinMetrics",
                 "responses": {
                     "200": { "description": "Metrics", "content": { "text/plain": { "schema": { "type": "string" } } } },

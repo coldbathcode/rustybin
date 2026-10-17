@@ -654,12 +654,15 @@ async fn capture(
         method: method.to_string(),
         path: sub_path,
         full_path: uri.path().to_string(),
-        query: uri.query().map(str::to_string),
+        // API keys (X-Rustybin-Key, ?rb_key=) are redacted like in the inspector.
+        query: uri
+            .query()
+            .map(|q| crate::keys::redact_query(q).unwrap_or_else(|| q.to_string())),
         headers: headers
             .iter()
             .map(|(k, v)| BinHeader {
                 name: k.as_str().to_string(),
-                value: String::from_utf8_lossy(v.as_bytes()).into_owned(),
+                value: crate::keys::redact_header(k.as_str(), v.as_bytes()),
             })
             .collect(),
         content_type: headers

@@ -17,7 +17,8 @@ use crate::health::HealthState;
 use crate::identity::IdentityState;
 use crate::inspector::Inspector;
 use crate::jwt_state::JwtState;
-use crate::limits::Limiter;
+use crate::keys::Keys;
+use crate::limits::{Clock, Limiter, SystemClock};
 use crate::metrics::Metrics;
 
 #[derive(Clone)]
@@ -39,6 +40,10 @@ pub struct AppState {
     /// Prometheus counters (`/_rustybin/metrics`), fed by the HTTP middleware,
     /// the gRPC services and the mock LLM.
     pub metrics: Arc<Metrics>,
+    /// API keys (shared mode, `RUSTYBIN_REQUIRE_KEY`): the registry and the
+    /// per-key daily counters, used by the key layer, the limiter, the
+    /// inspector and the gRPC interceptor.
+    pub keys: Arc<Keys>,
 }
 
 impl AppState {
@@ -60,12 +65,41 @@ impl AppState {
         )
     }
 
+    /// A test state on a given clock (limits and daily key quotas).
+    #[doc(hidden)]
+    pub fn for_tests_with_clock(config: Config, clock: Arc<dyn Clock>) -> Self {
+        Self::with_clock(
+            config,
+            JwtState::shared_for_tests(),
+            CertState::shared_for_tests(),
+            clock,
+        )
+    }
+
     /// Assemble a state from already-built key material.
     pub fn from_parts(config: Config, jwt: Arc<JwtState>, certs: Arc<CertState>) -> Self {
-        let inspector = Inspector::new(config.inspector_capacity, config.public_mode);
+        Self::with_clock(config, jwt, certs, Arc::new(SystemClock::new()))
+    }
+
+    /// [`AppState::from_parts`] on a given clock.
+    pub fn with_clock(
+        config: Config,
+        jwt: Arc<JwtState>,
+        certs: Arc<CertState>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        let inspector = Inspector::with_keys(
+            config.inspector_capacity,
+            config.public_mode,
+            config.shared_mode,
+        );
         let metrics = Arc::new(Metrics::new());
-        let limits = Arc::new(Limiter::new(config.limits.clone()).with_metrics(metrics.clone()));
+        let limits = Arc::new(
+            Limiter::with_clock(config.limits.clone(), clock.clone()).with_metrics(metrics.clone()),
+        );
+        let keys = Arc::new(Keys::new(&config, metrics.clone(), clock));
         Self {
+            keys,
             limits,
             config: Arc::new(config),
             jwt,
@@ -117,5 +151,11 @@ impl FromRef<AppState> for Arc<Metrics> {
 impl FromRef<AppState> for Inspector {
     fn from_ref(state: &AppState) -> Self {
         state.inspector.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<Keys> {
+    fn from_ref(state: &AppState) -> Self {
+        state.keys.clone()
     }
 }

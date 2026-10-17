@@ -163,10 +163,11 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
     let http_addr = http_listener.local_addr()?;
 
     tracing::info!(
-        "rustybin v{} starting | instance={} | public_mode={} | plan={} | control_auth={} | grpc_on_http={}",
+        "rustybin v{} starting | instance={} | public_mode={} | keys={} | plan={} | control_auth={} | grpc_on_http={}",
         env!("CARGO_PKG_VERSION"),
         config.instance_id,
         config.public_mode,
+        state.keys.mode().as_str(),
         config.limits.plan_name(),
         config.control_auth.as_str(),
         config.grpc_on_http,
@@ -199,6 +200,24 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
             .persist_loop(wait_for(shutdown.subscribe())),
     );
     optional_tasks.push(("usage persistence", persist));
+
+    // API keys: registry reloads and quota store flushes (no-ops when off).
+    if state.keys.enabled() {
+        let registry = tokio::spawn(
+            state
+                .keys
+                .clone()
+                .registry_loop(wait_for(shutdown.subscribe())),
+        );
+        optional_tasks.push(("key registry", registry));
+        let flush = tokio::spawn(
+            state
+                .keys
+                .clone()
+                .flush_loop(wait_for(shutdown.subscribe())),
+        );
+        optional_tasks.push(("quota store", flush));
+    }
 
     // HTTPS: optional.
     let https_addr = match start_https(&state, app, shutdown.subscribe()) {

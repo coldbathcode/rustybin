@@ -37,6 +37,7 @@ pub mod info;
 pub mod inspector;
 pub mod jsonrpc;
 pub mod jwt_state;
+pub mod keys;
 pub mod landing;
 pub mod limits;
 pub mod logging;
@@ -122,13 +123,14 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     control::router,
     metrics::router,
     limits::router,
+    keys::router,
     ui::router,
 ];
 
 /// Build the complete application: all module routers plus the middleware
 /// stack (outermost first): request id, tracing, metrics, request id
-/// propagation, CORS, control-plane auth, plan limits, time-to-headers
-/// timeout, inspector capture, body limit, fault injection.
+/// propagation, CORS, control-plane auth, API keys, plan limits,
+/// time-to-headers timeout, inspector capture, body limit, fault injection.
 pub fn build_app(state: AppState) -> Router {
     let config = state.config.clone();
 
@@ -162,25 +164,38 @@ pub fn build_app(state: AppState) -> Router {
     }
 
     // Plan limits: before inspector capture and fault injection so a
-    // rejected request costs almost nothing. A no-op with plan `none`.
-    if config.limits.active() {
+    // rejected request costs almost nothing. A no-op with plan `none`
+    // (in shared mode each API key brings its own limits).
+    if config.limits.active() || state.keys.shared() {
         router = router.layer(middleware::from_fn_with_state(
             state.clone(),
             limits::enforce,
         ));
     }
 
+    // API keys (RUSTYBIN_SHARED_MODE, RUSTYBIN_REQUIRE_KEY): outside plan
+    // limits, which apply the key's limits. In shared mode this layer also
+    // authenticates the control plane (admin token, the key itself, or a
+    // control JWT bound to a key).
+    if state.keys.enabled() {
+        router = router.layer(middleware::from_fn_with_state(state.clone(), keys::enforce));
+    }
+
     // Control-plane auth (RUSTYBIN_CONTROL_AUTH): before plan limits so an
     // unauthenticated control request costs nothing; inside CORS so
-    // preflights are answered and 401s carry CORS headers.
-    if config.control_auth != control_auth::ControlAuth::Open {
+    // preflights are answered and 401s carry CORS headers. Shared mode
+    // authenticates the control plane in the key layer instead.
+    if config.control_auth != control_auth::ControlAuth::Open && !state.keys.shared() {
         router = router.layer(middleware::from_fn_with_state(
             state.clone(),
             control_auth::enforce,
         ));
     }
 
-    if let Some(cors) = cors_layer(&config.cors_allow_origins, config.limits.active()) {
+    if let Some(cors) = cors_layer(
+        &config.cors_allow_origins,
+        config.limits.active() || state.keys.shared(),
+    ) {
         router = router.layer(cors);
     }
 

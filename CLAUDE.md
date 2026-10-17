@@ -9,10 +9,11 @@ cargo build
 cargo fmt
 cargo clippy --all-targets -- -D warnings
 cargo test                                   # unit + tests/integration.rs, a few seconds
+cargo test --features quota-postgres         # + the PostgreSQL quota store (set RUSTYBIN_TEST_QUOTA_STORE to run against a database)
 RUSTYBIN_UPDATE_README=1 cargo test readme_endpoints   # regenerate README endpoint tables
 cargo run -- --print-endpoints-markdown      # print them instead
 RUSTYBIN_HTTP_PORT=8080 cargo run
-docs/examples/run.sh                         # documentation examples (Hurl) against fresh servers (open, plan, secured)
+docs/examples/run.sh                         # documentation examples (Hurl) against fresh servers (open, plan, secured, shared, keyed)
 mdbook build docs                            # documentation site
 python3 docs/tools/check_includes.py         # every docs include and example anchor resolves
 ```
@@ -60,6 +61,12 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   `<meta name="rustybin-*">` tags (control auth mode, console title, back link); `ui/lib/auth.js` handles the
   control token (`#token=` fragment, sessionStorage, sign-in screen) and `http.js` sends it as a bearer on
   `/_rustybin/*` calls. Browser check: `conformance/ui/run.sh` (Playwright; open mode plus a jwt-mode instance).
+- `src/keys.rs` + `src/keys/`: API keys. `RUSTYBIN_SHARED_MODE` (keys on every data-plane route, per-key limits
+  and daily quotas, inspector and usage scoped by key id, the key layer authenticates the control plane) and
+  `RUSTYBIN_REQUIRE_KEY`. `registry.rs` (JSON registry, SHA-256 lookup), `ledger.rs` (bounded per-key daily
+  counters), `store.rs` (`QuotaStore`; PostgreSQL behind the cargo feature `quota-postgres`, tests in
+  `pg_tests.rs` need `RUSTYBIN_TEST_QUOTA_STORE=postgres://...`), `/_rustybin/keys/usage`. The key layer sits
+  outside the limiter and attaches a `KeyContext` extension. Keys are redacted in captures (`redact_*`).
 - `src/fault.rs`: `X-Rustybin-Delay` / `X-Rustybin-Fail` middleware.
 - `src/admin.rs`: `require_admin(&headers, &config)` guard for instance-global mutations.
 - `src/session.rs`: `session_key(&headers, client_ip)`, `client_ip(...)`, extractors `Session`, `ClientIp`, `PeerAddr`.

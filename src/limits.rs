@@ -218,6 +218,12 @@ pub struct LimitsConfig {
     pub usage_file: Option<PathBuf>,
     /// At least one `RUSTYBIN_LIMIT_*` variable was set.
     pub overridden: bool,
+    /// Plan name reported instead of the preset name (an API key's `label`
+    /// in shared mode, see `crate::keys`).
+    pub label: Option<String>,
+    /// These limits belong to one API key (shared mode): rejections say
+    /// "per API key" and usage reports scope `key`.
+    pub per_key: bool,
 }
 
 impl LimitsConfig {
@@ -273,8 +279,12 @@ impl LimitsConfig {
         self.plan != Plan::None || self.overridden
     }
 
-    /// The reported plan name (`custom` for overrides without a plan).
-    pub fn plan_name(&self) -> &'static str {
+    /// The reported plan name (the key label in shared mode, `custom` for
+    /// overrides without a plan).
+    pub fn plan_name(&self) -> &str {
+        if let Some(label) = &self.label {
+            return label;
+        }
         if self.plan == Plan::None && self.overridden {
             "custom"
         } else {
@@ -291,13 +301,27 @@ impl LimitsConfig {
         }
     }
 
+    /// The `X-Rustybin-Plan` header value.
+    pub fn plan_header(&self) -> HeaderValue {
+        HeaderValue::from_str(self.plan_name()).unwrap_or(HeaderValue::from_static("custom"))
+    }
+
+    /// The reported scope (`key` for API key limits in shared mode).
+    pub fn scope_name(&self) -> &'static str {
+        if self.per_key {
+            "key"
+        } else {
+            self.scope.as_str()
+        }
+    }
+
     /// Configured limits as JSON (`null` = unlimited).
     pub fn public_view(&self) -> Value {
         let opt = |v: u64| if v == 0 { Value::Null } else { json!(v) };
         let rps_on = self.active() && self.rps > 0;
         json!({
             "active": self.active(),
-            "scope": self.scope.as_str(),
+            "scope": self.scope_name(),
             "period": self.period.as_str(),
             "rps": if rps_on { json!(self.rps) } else { Value::Null },
             "burst": if rps_on { json!(self.bucket_capacity()) } else { Value::Null },
@@ -573,8 +597,12 @@ pub struct Admission {
 }
 
 /// Shared limiter state (one per instance).
+///
+/// Every method has a `*_for` variant taking the limits to apply: the
+/// instance limits by default, an API key's limits in shared mode
+/// (`crate::keys`), where the key id is the session key.
 pub struct Limiter {
-    cfg: LimitsConfig,
+    cfg: Arc<LimitsConfig>,
     clock: Arc<dyn Clock>,
     instance: Arc<Counters>,
     sessions: Mutex<HashMap<String, Arc<Counters>>>,
@@ -583,6 +611,11 @@ pub struct Limiter {
     /// Receives one count per rejection (`rustybin_limit_rejections_total`).
     metrics: Option<Arc<crate::metrics::Metrics>>,
 }
+
+/// Response extension marking a 429 produced by the limiter (the key layer
+/// then gives the daily quota count back).
+#[derive(Clone, Copy, Debug)]
+pub struct LimitRejected;
 
 impl std::fmt::Debug for Limiter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -604,7 +637,7 @@ impl Limiter {
             cfg.period.start(now),
         ));
         let limiter = Self {
-            cfg,
+            cfg: Arc::new(cfg),
             clock,
             instance,
             sessions: Mutex::new(HashMap::new()),
@@ -631,6 +664,16 @@ impl Limiter {
         &self.cfg
     }
 
+    /// The instance limits, shareable.
+    pub fn config_arc(&self) -> Arc<LimitsConfig> {
+        self.cfg.clone()
+    }
+
+    /// The limiter's clock (shared with the API key layer).
+    pub fn clock(&self) -> Arc<dyn Clock> {
+        self.clock.clone()
+    }
+
     pub fn active(&self) -> bool {
         self.cfg.active()
     }
@@ -638,7 +681,12 @@ impl Limiter {
     /// The counters of a scope key (`None` for instance scope). Session sets
     /// are created on first use; the map is capped at [`MAX_SESSIONS`].
     pub fn counters(&self, session_key: Option<&str>) -> Arc<Counters> {
-        let (Scope::Session, Some(key)) = (self.cfg.scope, session_key) else {
+        self.counters_for(&self.cfg, session_key)
+    }
+
+    /// [`Limiter::counters`] for the limits `cfg`.
+    pub fn counters_for(&self, cfg: &LimitsConfig, session_key: Option<&str>) -> Arc<Counters> {
+        let (Scope::Session, Some(key)) = (cfg.scope, session_key) else {
             return self.instance.clone();
         };
         let now = self.clock.mono();
@@ -651,9 +699,9 @@ impl Limiter {
             evict(&mut map, now);
         }
         let c = Arc::new(Counters::new(
-            self.cfg.bucket_capacity(),
+            cfg.bucket_capacity(),
             now,
-            self.cfg.period.start(self.clock.wall()),
+            cfg.period.start(self.clock.wall()),
         ));
         map.insert(key.to_string(), c.clone());
         c
@@ -669,8 +717,8 @@ impl Limiter {
         lock(&self.sessions).len()
     }
 
-    fn roll(&self, st: &mut CounterState, now: DateTime<Utc>) {
-        let start = self.cfg.period.start(now);
+    fn roll(&self, cfg: &LimitsConfig, st: &mut CounterState, now: DateTime<Utc>) {
+        let start = cfg.period.start(now);
         if start != st.period_start {
             st.period_start = start;
             st.requests = 0;
@@ -678,8 +726,8 @@ impl Limiter {
         }
     }
 
-    fn secs_to_period_end(&self, now: DateTime<Utc>) -> u64 {
-        let end = self.cfg.period.end(now);
+    fn secs_to_period_end(&self, cfg: &LimitsConfig, now: DateTime<Utc>) -> u64 {
+        let end = cfg.period.end(now);
         (end - now).num_seconds().max(1) as u64
     }
 
@@ -692,11 +740,21 @@ impl Limiter {
         bypass: bool,
         stream: bool,
     ) -> Result<Admission, Rejection> {
-        let cfg = &self.cfg;
+        self.admit_for(&self.cfg, counters, bypass, stream)
+    }
+
+    /// [`Limiter::admit`] for the limits `cfg`.
+    pub fn admit_for(
+        &self,
+        cfg: &LimitsConfig,
+        counters: &Arc<Counters>,
+        bypass: bool,
+        stream: bool,
+    ) -> Result<Admission, Rejection> {
         let now = self.clock.wall();
         let mono = self.clock.mono();
         let mut st = lock(&counters.state);
-        self.roll(&mut st, now);
+        self.roll(cfg, &mut st, now);
         if cfg.rps > 0 {
             let elapsed = mono.saturating_sub(st.refilled_at).as_secs_f64();
             let cap = cfg.bucket_capacity() as f64;
@@ -711,10 +769,10 @@ impl Limiter {
                 })
             };
             if cfg.requests > 0 && st.requests >= cfg.requests {
-                return reject(Dimension::Requests, self.secs_to_period_end(now));
+                return reject(Dimension::Requests, self.secs_to_period_end(cfg, now));
             }
             if cfg.egress_bytes > 0 && st.egress >= cfg.egress_bytes {
-                return reject(Dimension::Egress, self.secs_to_period_end(now));
+                return reject(Dimension::Egress, self.secs_to_period_end(cfg, now));
             }
             if cfg.rps > 0 && st.tokens < 1.0 {
                 let wait = ((1.0 - st.tokens) / cfg.rps as f64).ceil().max(1.0);
@@ -750,18 +808,27 @@ impl Limiter {
     }
 
     /// Take a stream slot for a response that turned out to be a stream (SSE).
-    fn open_stream(&self, counters: &Arc<Counters>, bypass: bool) -> Option<StreamLease> {
-        if !bypass && self.cfg.streams > 0 && counters.open_streams() >= self.cfg.streams {
+    fn open_stream(
+        &self,
+        cfg: &LimitsConfig,
+        counters: &Arc<Counters>,
+        bypass: bool,
+    ) -> Option<StreamLease> {
+        if !bypass && cfg.streams > 0 && counters.open_streams() >= cfg.streams {
             return None;
         }
-        Some(StreamLease::new(counters.clone(), self.cfg.stream_lifetime))
+        Some(StreamLease::new(counters.clone(), cfg.stream_lifetime))
     }
 
     /// The `RateLimit-Policy` field value: every configured policy
     /// (draft-ietf-httpapi-ratelimit-headers, Structured Fields list).
     pub fn policy_header(&self) -> String {
-        let cfg = &self.cfg;
-        let window = self.period_secs();
+        self.policy_header_for(&self.cfg)
+    }
+
+    /// [`Limiter::policy_header`] for the limits `cfg`.
+    pub fn policy_header_for(&self, cfg: &LimitsConfig) -> String {
+        let window = self.period_secs(cfg);
         let mut items = Vec::new();
         if cfg.rps > 0 {
             items.push(format!(
@@ -795,19 +862,22 @@ impl Limiter {
     }
 
     /// Length of the current period in seconds.
-    fn period_secs(&self) -> u64 {
+    fn period_secs(&self, cfg: &LimitsConfig) -> u64 {
         let now = self.clock.wall();
-        (self.cfg.period.end(now) - self.cfg.period.start(now))
+        (cfg.period.end(now) - cfg.period.start(now))
             .num_seconds()
             .max(1) as u64
     }
 
     /// The human explanation of a rejection.
-    fn message(&self, rejection: &Rejection) -> String {
-        let cfg = &self.cfg;
-        let who = match cfg.scope {
-            Scope::Instance => "for this instance",
-            Scope::Session => "per session (X-Rustybin-Session header, else client IP)",
+    fn message(&self, cfg: &LimitsConfig, rejection: &Rejection) -> String {
+        let who = if cfg.per_key {
+            "per API key"
+        } else {
+            match cfg.scope {
+                Scope::Instance => "for this instance",
+                Scope::Session => "per session (X-Rustybin-Session header, else client IP)",
+            }
         };
         let period = cfg.period.as_str();
         let what = match rejection.dimension {
@@ -842,23 +912,29 @@ impl Limiter {
 
     /// The 429 response for a rejection (counted in the metrics).
     pub fn rejection_response(&self, rejection: &Rejection) -> Response {
+        self.rejection_response_for(&self.cfg, rejection)
+    }
+
+    /// [`Limiter::rejection_response`] for the limits `cfg`.
+    pub fn rejection_response_for(&self, cfg: &LimitsConfig, rejection: &Rejection) -> Response {
         self.count_rejection(rejection);
         let body = json!({
             "error": ERROR_CODE,
             "limit": rejection.dimension.as_str(),
-            "plan": self.cfg.plan_name(),
-            "scope": self.cfg.scope.as_str(),
+            "plan": cfg.plan_name(),
+            "scope": cfg.scope_name(),
             "retry_after_secs": rejection.retry_after_secs,
-            "message": self.message(rejection),
+            "message": self.message(cfg, rejection),
             "usage": USAGE_PATH,
         });
         let mut resp = (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
+        resp.extensions_mut().insert(LimitRejected);
         let h = resp.headers_mut();
         h.insert(
             header::RETRY_AFTER,
             HeaderValue::from(rejection.retry_after_secs),
         );
-        if let Ok(v) = HeaderValue::from_str(&self.policy_header()) {
+        if let Ok(v) = HeaderValue::from_str(&self.policy_header_for(cfg)) {
             if !v.is_empty() {
                 h.insert(HeaderName::from_static("ratelimit-policy"), v);
             }
@@ -875,16 +951,17 @@ impl Limiter {
             HeaderName::from_static(LIMIT_HEADER),
             HeaderValue::from_static(name),
         );
-        h.insert(
-            HeaderName::from_static(PLAN_HEADER),
-            HeaderValue::from_static(self.cfg.plan_name()),
-        );
+        h.insert(HeaderName::from_static(PLAN_HEADER), cfg.plan_header());
         resp
     }
 
     /// Usage of one scope as JSON (`/_rustybin/usage`).
     pub fn usage(&self, session_key: Option<&str>) -> Value {
-        let cfg = &self.cfg;
+        self.usage_for(&self.cfg, session_key)
+    }
+
+    /// [`Limiter::usage`] for the limits `cfg`.
+    pub fn usage_for(&self, cfg: &LimitsConfig, session_key: Option<&str>) -> Value {
         let now = self.clock.wall();
         let counters = match (cfg.scope, session_key) {
             (Scope::Session, Some(key)) => self.peek(key),
@@ -893,7 +970,7 @@ impl Limiter {
         let (requests, egress, tokens, in_flight, streams) = match &counters {
             Some(c) => {
                 let mut st = lock(&c.state);
-                self.roll(&mut st, now);
+                self.roll(cfg, &mut st, now);
                 let elapsed = self
                     .clock
                     .mono()
@@ -925,7 +1002,7 @@ impl Limiter {
         let mut v = json!({
             "plan": cfg.plan_name(),
             "active": cfg.active(),
-            "scope": cfg.scope.as_str(),
+            "scope": cfg.scope_name(),
             "limits": cfg.public_view(),
             "period": {
                 "kind": cfg.period.as_str(),
@@ -944,7 +1021,7 @@ impl Limiter {
             "open_streams": { "current": streams, "limit": opt(cfg.streams), "lifetime_secs": opt(cfg.stream_lifetime.as_secs()) },
             "persisted": cfg.scope == Scope::Instance && cfg.usage_file.is_some(),
         });
-        if cfg.scope == Scope::Session {
+        if cfg.scope == Scope::Session && !cfg.per_key {
             v["session"] = json!(session_key);
         }
         v
@@ -980,7 +1057,7 @@ impl Limiter {
         let same_kind =
             saved.get("period").and_then(Value::as_str) == Some(self.cfg.period.as_str());
         let mut st = lock(&self.instance.state);
-        self.roll(&mut st, self.clock.wall());
+        self.roll(&self.cfg, &mut st, self.clock.wall());
         if !same_kind || saved_start != Some(st.period_start) {
             tracing::info!(
                 "usage file {} is from an earlier period, starting from zero",
@@ -1017,7 +1094,7 @@ impl Limiter {
         };
         let (start, requests, egress) = {
             let mut st = lock(&self.instance.state);
-            self.roll(&mut st, self.clock.wall());
+            self.roll(&self.cfg, &mut st, self.clock.wall());
             (st.period_start, st.requests, st.egress)
         };
         let mut last = lock(&self.persisted);
@@ -1082,13 +1159,24 @@ impl Limiter {
                     None => "anonymous".to_string(),
                 })
         });
-        let counters = self.counters(key.as_deref());
+        self.check_grpc_for(&self.cfg, key.as_deref())
+    }
+
+    /// [`Limiter::check_grpc`] for the limits `cfg` and an explicit session
+    /// key (an API key id in shared mode).
+    #[allow(clippy::result_large_err)]
+    pub fn check_grpc_for(
+        &self,
+        cfg: &LimitsConfig,
+        session_key: Option<&str>,
+    ) -> Result<(), tonic::Status> {
+        let counters = self.counters_for(cfg, session_key);
         // The admission (its in-flight slot) ends with the interceptor call.
-        match self.admit(&counters, false, false) {
+        match self.admit_for(cfg, &counters, false, false) {
             Ok(_) => Ok(()),
             Err(rejection) => {
                 self.count_rejection(&rejection);
-                let mut status = tonic::Status::resource_exhausted(self.message(&rejection));
+                let mut status = tonic::Status::resource_exhausted(self.message(cfg, &rejection));
                 let md = status.metadata_mut();
                 if let Ok(v) = rejection.retry_after_secs.to_string().parse() {
                     md.insert("retry-after", v);
@@ -1096,7 +1184,7 @@ impl Limiter {
                 if let Ok(v) = rejection.dimension.as_str().parse() {
                     md.insert(LIMIT_HEADER, v);
                 }
-                if let Ok(v) = self.cfg.plan_name().parse() {
+                if let Ok(v) = cfg.plan_name().parse() {
                     md.insert(PLAN_HEADER, v);
                 }
                 Err(status)
@@ -1169,13 +1257,26 @@ fn scope_key(state: &AppState, req: &Request) -> Option<String> {
 }
 
 /// The limiter middleware (outside fault injection and inspector capture).
+///
+/// In shared mode the API key layer (`crate::keys::enforce`, outside this
+/// one) attaches a [`crate::keys::KeyContext`]: its limits replace the
+/// instance limits and its key id is the session key.
 pub async fn enforce(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let limiter = state.limits.clone();
-    if !limiter.active() || is_exempt(req.method(), req.uri().path()) {
+    if is_exempt(req.method(), req.uri().path()) {
         return next.run(req).await;
     }
-    let key = scope_key(&state, &req);
-    let counters = limiter.counters(key.as_deref());
+    let keyed = req
+        .extensions()
+        .get::<crate::keys::KeyContext>()
+        .filter(|k| k.shared)
+        .map(|k| k.key.clone());
+    let (cfg, key) = match keyed {
+        Some(record) => (record.limits.clone(), Some(record.id.to_string())),
+        None if limiter.active() => (limiter.config_arc(), scope_key(&state, &req)),
+        None => return next.run(req).await,
+    };
+    let counters = limiter.counters_for(&cfg, key.as_deref());
     // Authenticated control-plane requests are counted but never rejected:
     // the admin token, or any valid token when control auth is on.
     let control = req.uri().path().starts_with(crate::control::CONTROL_PREFIX);
@@ -1187,9 +1288,9 @@ pub async fn enforce(State(state): State<AppState>, mut req: Request, next: Next
             || (state.config.admin_token.is_some()
                 && crate::admin::is_admin(req.headers(), &state.config)));
     let websocket = is_websocket_upgrade(req.headers());
-    let mut admission = match limiter.admit(&counters, bypass, websocket) {
+    let mut admission = match limiter.admit_for(&cfg, &counters, bypass, websocket) {
         Ok(a) => a,
-        Err(rejection) => return limiter.rejection_response(&rejection),
+        Err(rejection) => return limiter.rejection_response_for(&cfg, &rejection),
     };
     if let Some(lease) = &admission.stream {
         req.extensions_mut().insert(lease.clone());
@@ -1200,7 +1301,7 @@ pub async fn enforce(State(state): State<AppState>, mut req: Request, next: Next
         // The WebSocket handler holds its own copy of the lease.
         (None, None)
     } else if is_event_stream(&resp) {
-        match limiter.open_stream(&admission.counters, bypass) {
+        match limiter.open_stream(&cfg, &admission.counters, bypass) {
             Some(lease) => (None, Some(lease)),
             None => {
                 // Rejected after all: the request does not count.
@@ -1209,7 +1310,7 @@ pub async fn enforce(State(state): State<AppState>, mut req: Request, next: Next
                     dimension: Dimension::Streams,
                     retry_after_secs: 1,
                 };
-                return limiter.rejection_response(&rejection);
+                return limiter.rejection_response_for(&cfg, &rejection);
             }
         }
     } else {
@@ -1217,10 +1318,7 @@ pub async fn enforce(State(state): State<AppState>, mut req: Request, next: Next
     };
 
     let h = resp.headers_mut();
-    h.insert(
-        HeaderName::from_static(PLAN_HEADER),
-        HeaderValue::from_static(limiter.config().plan_name()),
-    );
+    h.insert(HeaderName::from_static(PLAN_HEADER), cfg.plan_header());
     if let Some(left) = admission.requests_remaining {
         h.insert(
             HeaderName::from_static(QUOTA_REMAINING_HEADER),
@@ -1317,7 +1415,11 @@ impl HttpBody for MeteredBody {
 async fn usage_handler(
     State(state): State<AppState>,
     crate::session::Session(key): crate::session::Session,
+    api_key: Option<axum::Extension<crate::keys::KeyContext>>,
 ) -> Response {
+    if let Some(axum::Extension(ctx)) = api_key.filter(|k| k.shared) {
+        return Json(crate::keys::key_usage(&state, &ctx.key)).into_response();
+    }
     let limiter = &state.limits;
     let key = (limiter.config().scope == Scope::Session).then_some(key);
     let mut usage = limiter.usage(key.as_deref());
@@ -1340,7 +1442,9 @@ pub fn catalog() -> Vec<Endpoint> {
     )
     .description(
         "Never limited. With session scope (the free plan) it reports the caller's own \
-         counters (X-Rustybin-Session header, else client IP). Plan none reports active false.",
+         counters (X-Rustybin-Session header, else client IP). Plan none reports active false. \
+         Shared mode: called with an API key (X-Rustybin-Key or ?rb_key=) it reports that key's \
+         limits and daily usage (scope key).",
     )
     .example(Example::get("Plan and usage", USAGE_PATH))]
 }
@@ -1352,15 +1456,21 @@ pub fn openapi_paths() -> Value {
             "get": {
                 "tags": ["Control Plane"],
                 "summary": "Plan limits and current usage",
-                "description": "The active plan (RUSTYBIN_PLAN), its limits and the usage of the current period. Session scope reports only the caller's own counters. Exempt from every limit.",
+                "description": "The active plan (RUSTYBIN_PLAN), its limits and the usage of the current period. Session scope reports only the caller's own counters. Shared mode (RUSTYBIN_SHARED_MODE): called with an API key (X-Rustybin-Key or ?rb_key=, or a control JWT with scope inspector and claim rb_key) it reports that key's limits and today's usage (scope `key`, plan = the key's label). Exempt from every limit.",
                 "operationId": "getRustybinUsage",
                 "responses": { "200": { "description": "Usage", "content": { "application/json": { "schema": {
                     "type": "object",
                     "properties": {
-                        "plan": { "type": "string", "enum": ["none", "free", "pro", "team", "enterprise", "custom"] },
+                        "plan": { "type": "string", "description": "none, free, pro, team, enterprise or custom; in shared mode the key's label" },
                         "active": { "type": "boolean" },
-                        "scope": { "type": "string", "enum": ["instance", "session"] },
+                        "scope": { "type": "string", "enum": ["instance", "session", "key"] },
                         "session": { "type": "string", "description": "Session scope only: the caller's session key" },
+                        "key_id": { "type": "string", "description": "Shared mode: the API key id" },
+                        "inspector": { "type": "object", "description": "Shared mode: the key's inspector retention", "properties": {
+                            "entries": { "type": ["integer", "null"] },
+                            "ttl_secs": { "type": ["integer", "null"] }
+                        } },
+                        "quota_store": { "type": "string", "enum": ["local", "postgres"], "description": "Shared mode: where daily totals are shared" },
                         "limits": { "type": "object" },
                         "period": { "type": "object", "properties": {
                             "kind": { "type": "string", "enum": ["day", "month"] },

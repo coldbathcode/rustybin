@@ -134,6 +134,11 @@ to the default. `GET /_rustybin/config` shows the effective configuration. Detai
 | `RUSTYBIN_LIMIT_RPS` / `_BURST` / `_CONCURRENCY` / `_STREAMS` / `_STREAM_SECS` | plan | Override one dimension of the plan; `0` or `unlimited` turns it off |
 | `RUSTYBIN_LIMIT_REQUESTS` / `_EGRESS_MB` / `_PERIOD` / `_SCOPE` | plan | Request and egress quota per `day` or `month` (UTC), counted per `instance` or `session` |
 | `RUSTYBIN_USAGE_FILE` | unset | JSON file the instance quota counters are saved to (every 30 s and on shutdown) and restored from |
+| `RUSTYBIN_SHARED_MODE` | `false` | One instance for many API keys (`X-Rustybin-Key` or `?rb_key=`): per-key limits and daily quotas, inspector and usage scoped by key ([shared mode](docs/src/concepts/shared-mode.md)) |
+| `RUSTYBIN_REQUIRE_KEY` | `false` | Require a valid API key on the data plane of a normal instance |
+| `RUSTYBIN_KEYS_FILE` / `RUSTYBIN_KEYS_URL` | unset | Key registry: a JSON file (reloaded on change) or a URL polled every `RUSTYBIN_KEYS_POLL_SECS` (30) with `RUSTYBIN_KEYS_TOKEN` as bearer; at most `RUSTYBIN_KEYS_MAX` (200000) keys |
+| `RUSTYBIN_QUOTA_STORE` | unset | `postgres://` URL shared by replicas for daily quotas (build with `--features quota-postgres`), flushed every `RUSTYBIN_QUOTA_FLUSH_MS` (2000) |
+| `RUSTYBIN_QUOTA_UPGRADE_URL` | unset | Link returned in daily quota 429 bodies |
 | `RUSTYBIN_MCP_API_KEY` | unset | Exact `X-API-Key` for `/mcp/apikey` (unset: any non-empty key) |
 | `RUSTYBIN_MCP_ALLOWED_ORIGINS` | `*` | `Origin` values accepted by the MCP endpoints |
 | `RUSTYBIN_MCP_ACCEPTED_AUDIENCES` | `rustybin` | Extra token audiences for `/mcp/protected`; `none` = strict |
@@ -467,6 +472,7 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET | `/_rustybin/ready` | Readiness probe: 200 while serving, independent of the /health toggle |
 | GET | `/_rustybin/metrics` | Prometheus metrics (requests by route template, latency, streams, egress, protocols, LLM tokens, requests and faults, limit rejections) |
 | GET | `/_rustybin/usage` | Plan, limits and current usage (requests, egress, in flight, streams) |
+| GET | `/_rustybin/keys/usage` | Per-key daily totals (requests, response bytes), paginated (shared mode, admin) |
 | GET | `/_rustybin/catalog` | Route catalogue as JSON (paths, methods, categories, examples) |
 | GET | `/_rustybin/status` | Uptime, health state and inspector counters |
 

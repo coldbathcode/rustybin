@@ -207,7 +207,9 @@ impl WebhookSink {
 // ── Delivery ────────────────────────────────────────────────────────
 
 /// rustls client configuration (aws-lc-rs provider, Mozilla roots).
-fn tls_config() -> Result<rustls::ClientConfig, rustls::Error> {
+/// HTTPS client configuration (public web roots, explicit crypto provider);
+/// also used by the key registry client (`crate::keys`).
+pub(crate) fn tls_config() -> Result<rustls::ClientConfig, rustls::Error> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     Ok(rustls::ClientConfig::builder_with_provider(Arc::new(

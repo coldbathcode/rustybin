@@ -3,7 +3,8 @@
 //! `crate::metrics`, authentication in `crate::control_auth`.
 
 use axum::extract::State;
-use axum::response::IntoResponse;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{json, Value};
@@ -43,9 +44,18 @@ async fn version_handler(State(config): State<Arc<Config>>) -> impl IntoResponse
 }
 
 /// Readiness: 200 while the process serves HTTP, whatever the `/health`
-/// demo toggle says. Never authenticated, limited or captured.
-async fn ready_handler() -> impl IntoResponse {
-    Json(json!({ "status": "ready" }))
+/// demo toggle says. Never authenticated, limited or captured. With API keys
+/// (shared mode, `RUSTYBIN_REQUIRE_KEY`) 503 until the key registry was
+/// loaded once, so a cold replica gets no traffic.
+async fn ready_handler(State(keys): State<Arc<crate::keys::Keys>>) -> Response {
+    if keys.enabled() && !keys.loaded() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "status": "not_ready", "reason": crate::keys::ERR_UNAVAILABLE })),
+        )
+            .into_response();
+    }
+    Json(json!({ "status": "ready" })).into_response()
 }
 
 /// Commit the binary was built from (`RUSTYBIN_GIT_SHA` at build time, else
@@ -107,7 +117,8 @@ pub fn catalog() -> Vec<Endpoint> {
         .description(
             "Never authenticated (RUSTYBIN_CONTROL_AUTH), never limited by the plan, never \
              captured by the inspector. Use it for platform readiness checks; /health is a demo \
-             toggle that may return 503.",
+             toggle that may return 503. With API keys (RUSTYBIN_SHARED_MODE, \
+             RUSTYBIN_REQUIRE_KEY) it returns 503 until the key registry was loaded once.",
         )
         .example(Example::get("Readiness", "/_rustybin/ready")),
     ]
@@ -148,13 +159,22 @@ pub fn openapi_paths() -> Value {
             "get": {
                 "tags": ["Control Plane"],
                 "summary": "Readiness probe",
-                "description": "Always 200 while the process serves HTTP, independent of the `/health` demo toggle. Exempt from control-plane auth, plan limits and inspector capture.",
+                "description": "200 while the process serves HTTP, independent of the `/health` demo toggle. Exempt from control-plane auth, API keys, plan limits and inspector capture. With API keys (RUSTYBIN_SHARED_MODE, RUSTYBIN_REQUIRE_KEY) 503 until the key registry was loaded once.",
                 "operationId": "getRustybinReady",
                 "security": [],
-                "responses": { "200": { "description": "Ready", "content": { "application/json": { "schema": {
-                    "type": "object",
-                    "properties": { "status": { "type": "string", "enum": ["ready"] } }
-                } } } } }
+                "responses": {
+                    "200": { "description": "Ready", "content": { "application/json": { "schema": {
+                        "type": "object",
+                        "properties": { "status": { "type": "string", "enum": ["ready"] } }
+                    } } } },
+                    "503": { "description": "Not ready: the key registry was never loaded", "content": { "application/json": { "schema": {
+                        "type": "object",
+                        "properties": {
+                            "status": { "type": "string", "enum": ["not_ready"] },
+                            "reason": { "type": "string", "enum": ["rustybin_keys_unavailable"] }
+                        }
+                    } } } }
+                }
             }
         }
     })

@@ -79,7 +79,40 @@ pub struct Config {
     pub console_backlink: Option<String>,
     /// Title shown in the console header (`RUSTYBIN_CONSOLE_TITLE`).
     pub console_title: Option<String>,
+    /// Shared mode (`RUSTYBIN_SHARED_MODE`): every data-plane request needs an
+    /// API key from the key registry; implies public mode, session-scoped
+    /// limits and daily quotas (see `crate::keys`).
+    pub shared_mode: bool,
+    /// Require an API key on the data plane of a normal instance
+    /// (`RUSTYBIN_REQUIRE_KEY`); control-plane auth is unchanged.
+    pub require_key: bool,
+    /// Key registry file (`RUSTYBIN_KEYS_FILE`), reloaded when it changes.
+    pub keys_file: Option<PathBuf>,
+    /// Key registry URL (`RUSTYBIN_KEYS_URL`), polled.
+    pub keys_url: Option<String>,
+    /// Bearer token sent to the registry URL (`RUSTYBIN_KEYS_TOKEN`). Never exposed.
+    pub keys_token: Option<String>,
+    /// Registry URL poll interval in seconds (`RUSTYBIN_KEYS_POLL_SECS`, default 30).
+    pub keys_poll_secs: u64,
+    /// Most keys accepted in a registry (`RUSTYBIN_KEYS_MAX`, default 200,000).
+    pub keys_max: usize,
+    /// Shared quota store URL (`RUSTYBIN_QUOTA_STORE`, `postgres://...`;
+    /// needs the `quota-postgres` feature). Never exposed.
+    pub quota_store: Option<String>,
+    /// Extra CA certificates (PEM) for the quota store's TLS (`RUSTYBIN_QUOTA_STORE_CA`).
+    pub quota_store_ca: Option<PathBuf>,
+    /// Quota store flush interval in milliseconds (`RUSTYBIN_QUOTA_FLUSH_MS`, default 2000).
+    pub quota_flush_ms: u64,
+    /// Link returned in daily quota 429 bodies (`RUSTYBIN_QUOTA_UPGRADE_URL`).
+    pub quota_upgrade_url: Option<String>,
 }
+
+/// Default `RUSTYBIN_KEYS_POLL_SECS`.
+pub const DEFAULT_KEYS_POLL_SECS: u64 = 30;
+/// Default `RUSTYBIN_KEYS_MAX`.
+pub const DEFAULT_KEYS_MAX: usize = 200_000;
+/// Default `RUSTYBIN_QUOTA_FLUSH_MS`.
+pub const DEFAULT_QUOTA_FLUSH_MS: u64 = 2_000;
 
 impl Config {
     /// Read the configuration from the process environment, logging any
@@ -234,6 +267,50 @@ impl Config {
             })
             .filter(|t| !t.is_empty());
 
+        let shared_mode = parse_bool_or(&get, "RUSTYBIN_SHARED_MODE", false, &mut warnings);
+        let require_key = parse_bool_or(&get, "RUSTYBIN_REQUIRE_KEY", false, &mut warnings);
+        let keys_file = get("RUSTYBIN_KEYS_FILE").map(PathBuf::from);
+        let keys_url = get("RUSTYBIN_KEYS_URL").and_then(|raw| {
+            let ok = valid_backlink(&raw);
+            if !ok {
+                warnings.push(format!(
+                    "invalid RUSTYBIN_KEYS_URL {raw:?} (expected an http:// or https:// URL), ignored"
+                ));
+            }
+            ok.then_some(raw)
+        });
+        if keys_file.is_some() && keys_url.is_some() {
+            warnings.push(
+                "both RUSTYBIN_KEYS_FILE and RUSTYBIN_KEYS_URL are set: using the file".to_string(),
+            );
+        }
+        if (shared_mode || require_key) && keys_file.is_none() && keys_url.is_none() {
+            warnings.push(format!(
+                "{} without RUSTYBIN_KEYS_FILE or RUSTYBIN_KEYS_URL: every data-plane request \
+                 gets 503 rustybin_keys_unavailable",
+                if shared_mode {
+                    "RUSTYBIN_SHARED_MODE"
+                } else {
+                    "RUSTYBIN_REQUIRE_KEY"
+                }
+            ));
+        }
+        let quota_upgrade_url = get("RUSTYBIN_QUOTA_UPGRADE_URL").and_then(|raw| {
+            let ok = valid_backlink(&raw);
+            if !ok {
+                warnings.push(format!(
+                    "invalid RUSTYBIN_QUOTA_UPGRADE_URL {raw:?} (expected an http:// or https:// URL), ignored"
+                ));
+            }
+            ok.then_some(raw)
+        });
+        let mut limits = parse_limits(&get, &mut warnings);
+        if shared_mode {
+            // Shared mode: one set of counters per API key, daily quotas.
+            limits.scope = Scope::Session;
+            limits.period = Period::Day;
+        }
+
         let config = Self {
             http_port: parse_or(&get, "RUSTYBIN_HTTP_PORT", 80, &mut warnings),
             https_port: parse_or(&get, "RUSTYBIN_HTTPS_PORT", 443, &mut warnings),
@@ -246,12 +323,13 @@ impl Config {
             tls_cert: get("RUSTYBIN_TLS_CERT").unwrap_or_else(|| "certs/server.crt".to_string()),
             tls_key: get("RUSTYBIN_TLS_KEY").unwrap_or_else(|| "certs/server.key".to_string()),
             mtls_in_header: get("RUSTYBIN_MTLS_IN_HEADER"),
-            public_mode: parse_bool_or(&get, "RUSTYBIN_PUBLIC_MODE", false, &mut warnings),
+            public_mode: shared_mode
+                || parse_bool_or(&get, "RUSTYBIN_PUBLIC_MODE", false, &mut warnings),
             admin_token,
             cors_allow_origins,
             request_timeout_secs: parse_or(&get, "RUSTYBIN_REQUEST_TIMEOUT", 120, &mut warnings),
             inspector_capacity: parse_or(&get, "RUSTYBIN_INSPECTOR_CAPACITY", 500, &mut warnings),
-            limits: parse_limits(&get, &mut warnings),
+            limits,
             hosted_mode,
             control_auth,
             control_jwt_key,
@@ -260,6 +338,29 @@ impl Config {
             grpc_on_http: parse_bool_or(&get, "RUSTYBIN_GRPC_ON_HTTP", false, &mut warnings),
             console_backlink,
             console_title,
+            shared_mode,
+            require_key,
+            keys_file,
+            keys_url,
+            keys_token: get("RUSTYBIN_KEYS_TOKEN"),
+            keys_poll_secs: parse_or(
+                &get,
+                "RUSTYBIN_KEYS_POLL_SECS",
+                DEFAULT_KEYS_POLL_SECS,
+                &mut warnings,
+            )
+            .max(1),
+            keys_max: parse_or(&get, "RUSTYBIN_KEYS_MAX", DEFAULT_KEYS_MAX, &mut warnings).max(1),
+            quota_store: get("RUSTYBIN_QUOTA_STORE"),
+            quota_store_ca: get("RUSTYBIN_QUOTA_STORE_CA").map(PathBuf::from),
+            quota_flush_ms: parse_or(
+                &get,
+                "RUSTYBIN_QUOTA_FLUSH_MS",
+                DEFAULT_QUOTA_FLUSH_MS,
+                &mut warnings,
+            )
+            .max(10),
+            quota_upgrade_url,
         };
         (config, warnings)
     }
@@ -295,6 +396,17 @@ impl Config {
             grpc_on_http: false,
             console_backlink: None,
             console_title: None,
+            shared_mode: false,
+            require_key: false,
+            keys_file: None,
+            keys_url: None,
+            keys_token: None,
+            keys_poll_secs: DEFAULT_KEYS_POLL_SECS,
+            keys_max: DEFAULT_KEYS_MAX,
+            quota_store: None,
+            quota_store_ca: None,
+            quota_flush_ms: DEFAULT_QUOTA_FLUSH_MS,
+            quota_upgrade_url: None,
         }
     }
 
@@ -337,6 +449,20 @@ impl Config {
             "grpc_on_http": self.grpc_on_http,
             "console_backlink": self.console_backlink,
             "console_title": self.console_title,
+            "shared_mode": self.shared_mode,
+            "require_key": self.require_key,
+            "keys_source": if self.keys_file.is_some() {
+                Some("file")
+            } else if self.keys_url.is_some() {
+                Some("url")
+            } else {
+                None
+            },
+            "keys_poll_secs": self.keys_poll_secs,
+            "keys_max": self.keys_max,
+            "quota_store_configured": self.quota_store.is_some(),
+            "quota_flush_ms": self.quota_flush_ms,
+            "quota_upgrade_url": self.quota_upgrade_url,
         })
     }
 }

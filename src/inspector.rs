@@ -6,6 +6,12 @@
 //!   except control-plane paths (`/_rustybin/*`, `/ui/*`) and the landing page.
 //! - Public mode: only requests carrying `X-Rustybin-Session` are captured, and
 //!   the API only returns entries matching the caller's `?session=` value.
+//! - API keys (`crate::keys`): entries are tagged with the key id; in shared
+//!   mode every keyed request is captured, each key keeps at most its
+//!   `inspector_entries` entries for `inspector_ttl_secs` (inside the global
+//!   capacity), and a caller authenticated by a key only sees that key's
+//!   entries. `X-Rustybin-Key` and the `rb_key` query value are always
+//!   redacted (`rbk_...<last 4>`).
 //! - Other modules (request bin, AI inspector, UI) use the public API on
 //!   [`Inspector`]: [`Inspector::list`], [`Inspector::get`],
 //!   [`Inspector::for_session`], [`Inspector::find_by_request_id`],
@@ -23,15 +29,16 @@ use base64::Engine;
 use http_body_util::BodyExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
 use crate::catalog::{category, Endpoint, Example};
+use crate::keys::KeyContext;
 use crate::state::AppState;
 
 /// Bytes of request body kept per captured entry.
@@ -66,6 +73,9 @@ pub struct CapturedRequest {
     pub client_ip: Option<String>,
     /// Value of `X-Rustybin-Session`, if sent.
     pub session: Option<String>,
+    /// API key id of the request (shared mode, `RUSTYBIN_REQUIRE_KEY`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
     /// Body as text when it is valid UTF-8.
     pub body: Option<String>,
     /// Body as base64 when it is not valid UTF-8.
@@ -77,12 +87,101 @@ pub struct CapturedRequest {
     pub status: u16,
     /// Time to response headers, in milliseconds.
     pub latency_ms: f64,
+    /// Insertion order (set by [`Inspector::record`]).
+    #[serde(skip)]
+    pub seq: u64,
+    /// When the entry expires (per-key TTL), if ever.
+    #[serde(skip)]
+    pub expires_at: Option<Instant>,
+}
+
+/// Per-key retention of inspector entries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeyRetention {
+    /// Entries kept for the key (`None`: only the global capacity).
+    pub entries: Option<usize>,
+    /// Entry lifetime (`None`: until evicted).
+    pub ttl: Option<Duration>,
+}
+
+/// The ring buffer plus the per-key index (sequence numbers per key id).
+#[derive(Default)]
+struct Store {
+    ring: VecDeque<Arc<CapturedRequest>>,
+    per_key: HashMap<String, VecDeque<u64>>,
+    next_seq: u64,
+    has_ttl: bool,
+    last_purge: Option<Instant>,
+}
+
+impl Store {
+    /// Drop the oldest entry (global capacity).
+    fn pop_oldest(&mut self) {
+        if let Some(old) = self.ring.pop_front() {
+            self.unindex(&old);
+        }
+    }
+
+    fn unindex(&mut self, entry: &CapturedRequest) {
+        let Some(key) = &entry.key_id else {
+            return;
+        };
+        if let Some(seqs) = self.per_key.get_mut(key) {
+            if let Ok(pos) = seqs.binary_search(&entry.seq) {
+                seqs.remove(pos);
+            }
+            if seqs.is_empty() {
+                self.per_key.remove(key);
+            }
+        }
+    }
+
+    /// Remove one entry by sequence number (the ring is sorted by it).
+    fn remove_seq(&mut self, seq: u64) {
+        if let Ok(pos) = self.ring.binary_search_by_key(&seq, |e| e.seq) {
+            if let Some(old) = self.ring.remove(pos) {
+                self.unindex(&old);
+            }
+        }
+    }
+
+    /// Drop expired entries (at most once a second).
+    fn purge(&mut self, now: Instant) {
+        if !self.has_ttl
+            || self
+                .last_purge
+                .is_some_and(|t| now.duration_since(t) < Duration::from_secs(1))
+        {
+            return;
+        }
+        self.last_purge = Some(now);
+        let before = self.ring.len();
+        self.ring.retain(|e| !expired(e, now));
+        if self.ring.len() != before {
+            self.reindex();
+        }
+    }
+
+    fn reindex(&mut self) {
+        self.per_key.clear();
+        for e in &self.ring {
+            if let Some(k) = &e.key_id {
+                self.per_key.entry(k.clone()).or_default().push_back(e.seq);
+            }
+        }
+    }
+}
+
+fn expired(entry: &CapturedRequest, now: Instant) -> bool {
+    entry.expires_at.is_some_and(|at| at <= now)
 }
 
 struct Inner {
     capacity: usize,
     public_mode: bool,
-    entries: Mutex<VecDeque<Arc<CapturedRequest>>>,
+    /// Shared mode: callers without a key are admins (no `?session=` needed).
+    keyed: bool,
+    entries: Mutex<Store>,
     tx: broadcast::Sender<Arc<CapturedRequest>>,
     /// Requests captured since start (including evicted ones).
     total: std::sync::atomic::AtomicU64,
@@ -100,10 +199,19 @@ pub struct InspectorQuery {
     pub session: Option<String>,
     pub path_prefix: Option<String>,
     pub limit: Option<usize>,
+    /// Only this API key's entries (set from the caller's key, never from
+    /// the query string).
+    #[serde(skip)]
+    pub key_id: Option<String>,
 }
 
 impl InspectorQuery {
     fn matches(&self, entry: &CapturedRequest) -> bool {
+        if let Some(k) = &self.key_id {
+            if entry.key_id.as_deref() != Some(k.as_str()) {
+                return false;
+            }
+        }
         if let Some(s) = &self.session {
             if entry.session.as_deref() != Some(s.as_str()) {
                 return false;
@@ -120,13 +228,22 @@ impl InspectorQuery {
 
 impl Inspector {
     pub fn new(capacity: usize, public_mode: bool) -> Self {
+        Self::with_keys(capacity, public_mode, false)
+    }
+
+    /// An inspector for shared mode when `keyed` (see the module docs).
+    pub fn with_keys(capacity: usize, public_mode: bool, keyed: bool) -> Self {
         let capacity = capacity.clamp(1, MAX_CAPACITY);
         let (tx, _) = broadcast::channel(256);
         Self {
             inner: Arc::new(Inner {
                 capacity,
                 public_mode,
-                entries: Mutex::new(VecDeque::with_capacity(capacity.min(1024))),
+                keyed,
+                entries: Mutex::new(Store {
+                    ring: VecDeque::with_capacity(capacity.min(1024)),
+                    ..Store::default()
+                }),
                 tx,
                 total: std::sync::atomic::AtomicU64::new(0),
             }),
@@ -141,7 +258,12 @@ impl Inspector {
         self.inner.public_mode
     }
 
-    fn entries(&self) -> std::sync::MutexGuard<'_, VecDeque<Arc<CapturedRequest>>> {
+    /// Shared mode (entries are scoped by API key).
+    pub fn keyed(&self) -> bool {
+        self.inner.keyed
+    }
+
+    fn store(&self) -> std::sync::MutexGuard<'_, Store> {
         self.inner
             .entries
             .lock()
@@ -150,17 +272,58 @@ impl Inspector {
 
     /// Store an entry (evicting the oldest when full) and publish it.
     pub fn record(&self, entry: CapturedRequest) -> Arc<CapturedRequest> {
-        let entry = Arc::new(entry);
+        self.record_with(entry, KeyRetention::default())
+    }
+
+    /// Store an entry with a per-key retention (used when the entry has a
+    /// `key_id`): at most `retention.entries` entries of that key are kept
+    /// (its oldest is dropped first) and the entry expires after
+    /// `retention.ttl`.
+    pub fn record_with(
+        &self,
+        mut entry: CapturedRequest,
+        retention: KeyRetention,
+    ) -> Arc<CapturedRequest> {
         self.inner
             .total
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        {
-            let mut entries = self.entries();
-            while entries.len() >= self.inner.capacity {
-                entries.pop_front();
+        let now = Instant::now();
+        let entry = {
+            let mut store = self.store();
+            store.purge(now);
+            entry.seq = store.next_seq;
+            store.next_seq += 1;
+            entry.expires_at = entry.key_id.as_ref().and(retention.ttl).map(|t| now + t);
+            if entry.expires_at.is_some() {
+                store.has_ttl = true;
             }
-            entries.push_back(entry.clone());
-        }
+            if let (Some(key), Some(cap)) = (&entry.key_id, retention.entries) {
+                let cap = cap.max(1);
+                loop {
+                    let oldest = match store.per_key.get(key) {
+                        Some(seqs) if seqs.len() >= cap => seqs.front().copied(),
+                        _ => None,
+                    };
+                    match oldest {
+                        Some(seq) => store.remove_seq(seq),
+                        None => break,
+                    }
+                }
+            }
+            while store.ring.len() >= self.inner.capacity {
+                store.pop_oldest();
+            }
+            let entry = Arc::new(entry);
+            if let Some(key) = &entry.key_id {
+                store
+                    .per_key
+                    .entry(key.clone())
+                    .or_default()
+                    .push_back(entry.seq);
+            }
+            store.ring.push_back(entry.clone());
+            entry
+        };
         // No receivers is fine.
         let _ = self.inner.tx.send(entry.clone());
         entry
@@ -169,60 +332,89 @@ impl Inspector {
     /// Entries matching `query`, newest first, at most `query.limit`
     /// (default [`DEFAULT_LIMIT`], capped at the capacity).
     pub fn list(&self, query: &InspectorQuery) -> Vec<Arc<CapturedRequest>> {
+        self.list_at(query, Instant::now())
+    }
+
+    /// [`Inspector::list`] as seen at `now` (expired entries are hidden).
+    pub fn list_at(&self, query: &InspectorQuery, now: Instant) -> Vec<Arc<CapturedRequest>> {
         let limit = query
             .limit
             .unwrap_or(DEFAULT_LIMIT)
             .clamp(1, self.inner.capacity);
-        self.entries()
+        self.store()
+            .ring
             .iter()
             .rev()
-            .filter(|e| query.matches(e))
+            .filter(|e| !expired(e, now) && query.matches(e))
             .take(limit)
             .cloned()
             .collect()
+    }
+
+    /// Number of entries held for one API key.
+    pub fn key_len(&self, key_id: &str) -> usize {
+        self.store().per_key.get(key_id).map_or(0, VecDeque::len)
+    }
+
+    /// Number of API keys with entries.
+    pub fn key_count(&self) -> usize {
+        self.store().per_key.len()
     }
 
     /// Entries of one session, newest first.
     pub fn for_session(&self, session: &str, limit: usize) -> Vec<Arc<CapturedRequest>> {
         self.list(&InspectorQuery {
             session: Some(session.to_string()),
-            path_prefix: None,
             limit: Some(limit),
+            ..InspectorQuery::default()
         })
     }
 
     /// Entry by inspector id.
     pub fn get(&self, id: &str) -> Option<Arc<CapturedRequest>> {
-        self.entries().iter().rev().find(|e| e.id == id).cloned()
+        let now = Instant::now();
+        self.store()
+            .ring
+            .iter()
+            .rev()
+            .find(|e| e.id == id && !expired(e, now))
+            .cloned()
     }
 
     /// Newest entry with this `X-Request-Id`.
     pub fn find_by_request_id(&self, request_id: &str) -> Option<Arc<CapturedRequest>> {
-        self.entries()
+        let now = Instant::now();
+        self.store()
+            .ring
             .iter()
             .rev()
-            .find(|e| e.request_id.as_deref() == Some(request_id))
+            .find(|e| e.request_id.as_deref() == Some(request_id) && !expired(e, now))
             .cloned()
     }
 
     /// Remove everything; returns the number of removed entries.
     pub fn clear(&self) -> usize {
-        let mut entries = self.entries();
-        let n = entries.len();
-        entries.clear();
+        let mut store = self.store();
+        let n = store.ring.len();
+        store.ring.clear();
+        store.per_key.clear();
         n
     }
 
     /// Remove one session's entries; returns the number removed.
     pub fn clear_session(&self, session: &str) -> usize {
-        let mut entries = self.entries();
-        let before = entries.len();
-        entries.retain(|e| e.session.as_deref() != Some(session));
-        before - entries.len()
+        let mut store = self.store();
+        let before = store.ring.len();
+        store.ring.retain(|e| e.session.as_deref() != Some(session));
+        let removed = before - store.ring.len();
+        if removed > 0 {
+            store.reindex();
+        }
+        removed
     }
 
     pub fn len(&self) -> usize {
-        self.entries().len()
+        self.store().ring.len()
     }
 
     /// Requests captured since start, including evicted ones.
@@ -257,7 +449,8 @@ pub async fn capture(State(state): State<AppState>, req: Request, next: Next) ->
         return next.run(req).await;
     }
     let session = crate::session::session_header(req.headers());
-    if state.config.public_mode && session.is_none() {
+    let key = req.extensions().get::<KeyContext>().cloned();
+    if state.config.public_mode && session.is_none() && key.is_none() {
         return next.run(req).await;
     }
 
@@ -296,7 +489,7 @@ pub async fn capture(State(state): State<AppState>, req: Request, next: Next) ->
         .iter()
         .map(|(k, v)| CapturedHeader {
             name: k.as_str().to_string(),
-            value: String::from_utf8_lossy(v.as_bytes()).into_owned(),
+            value: crate::keys::redact_header(k.as_str(), v.as_bytes()),
         })
         .collect();
     let body_size = bytes.len();
@@ -318,19 +511,32 @@ pub async fn capture(State(state): State<AppState>, req: Request, next: Next) ->
         request_id,
         timestamp,
         method: parts.method.to_string(),
-        uri: parts.uri.to_string(),
+        uri: crate::keys::redact_uri(&parts.uri),
         path: parts.uri.path().to_string(),
-        query: parts.uri.query().map(str::to_string),
+        query: parts
+            .uri
+            .query()
+            .map(|q| crate::keys::redact_query(q).unwrap_or_else(|| q.to_string())),
         version: format!("{:?}", parts.version),
         headers,
         client_ip,
         session,
+        key_id: key.as_ref().map(|k| k.key.id.to_string()),
         body: body_text,
         body_base64,
         body_size,
         body_truncated: body_size > MAX_CAPTURED_BODY,
         status: 0,
         latency_ms: 0.0,
+        seq: 0,
+        expires_at: None,
+    };
+    let retention = match &key {
+        Some(k) if k.shared => KeyRetention {
+            entries: k.key.inspector_entries,
+            ttl: k.key.inspector_ttl,
+        },
+        _ => KeyRetention::default(),
     };
 
     let resp = match early {
@@ -342,7 +548,7 @@ pub async fn capture(State(state): State<AppState>, req: Request, next: Next) ->
     };
     entry.status = resp.status().as_u16();
     entry.latency_ms = start.elapsed().as_secs_f64() * 1000.0;
-    state.inspector.record(entry);
+    state.inspector.record_with(entry, retention);
     resp
 }
 
@@ -351,26 +557,42 @@ pub async fn capture(State(state): State<AppState>, req: Request, next: Next) ->
 const SESSION_REQUIRED: &str =
     "this instance runs in public mode: pass ?session=<your X-Rustybin-Session value>";
 
-/// In public mode a valid `?session=` is mandatory.
+/// The API key a control-plane caller is scoped to (shared mode).
+type CallerKey = Option<axum::Extension<KeyContext>>;
+
+fn caller_key(key: CallerKey) -> Option<String> {
+    key.filter(|k| k.shared && k.control)
+        .map(|axum::Extension(k)| k.key.id.to_string())
+}
+
+/// In public mode a valid `?session=` is mandatory, except in shared mode,
+/// where a key caller only sees its key's entries and other callers are
+/// admins.
 #[allow(clippy::result_large_err)]
-fn scoped_query(inspector: &Inspector, mut q: InspectorQuery) -> Result<InspectorQuery, Response> {
+fn scoped_query(
+    inspector: &Inspector,
+    mut q: InspectorQuery,
+    key: Option<String>,
+) -> Result<InspectorQuery, Response> {
     if let Some(s) = &q.session {
         if !crate::session::is_valid_session(s) {
             return Err(json_error(StatusCode::BAD_REQUEST, "invalid session value"));
         }
     }
-    if inspector.public_mode() && q.session.is_none() {
+    if inspector.public_mode() && !inspector.keyed() && q.session.is_none() {
         return Err(json_error(StatusCode::BAD_REQUEST, SESSION_REQUIRED));
     }
+    q.key_id = key;
     q.limit = Some(q.limit.unwrap_or(DEFAULT_LIMIT));
     Ok(q)
 }
 
 async fn list_handler(
     State(inspector): State<Inspector>,
+    key: CallerKey,
     Query(q): Query<InspectorQuery>,
 ) -> Response {
-    let q = match scoped_query(&inspector, q) {
+    let q = match scoped_query(&inspector, q, caller_key(key)) {
         Ok(q) => q,
         Err(resp) => return resp,
     };
@@ -391,12 +613,18 @@ struct SessionParam {
 
 async fn get_handler(
     State(inspector): State<Inspector>,
+    key: CallerKey,
     Path(id): Path<String>,
     Query(p): Query<SessionParam>,
 ) -> Response {
-    let entry = inspector.get(&id).filter(|e| {
+    let key = caller_key(key);
+    let entry = inspector.get(&id).filter(|e| match &key {
+        // Shared mode: a key caller only sees its key's entries.
+        Some(k) => e.key_id.as_deref() == Some(k.as_str()),
+        // Shared mode admin.
+        None if inspector.keyed() => true,
         // Public mode: the caller must prove the session the entry belongs to.
-        !inspector.public_mode() || (p.session.is_some() && e.session == p.session)
+        None => !inspector.public_mode() || (p.session.is_some() && e.session == p.session),
     });
     match entry {
         Some(e) => Json(e.as_ref().clone()).into_response(),
@@ -427,15 +655,16 @@ async fn clear_handler(
 
 async fn stream_handler(
     State(inspector): State<Inspector>,
+    key: CallerKey,
     Query(q): Query<InspectorQuery>,
 ) -> Response {
-    let q = match scoped_query(&inspector, q) {
+    let q = match scoped_query(&inspector, q, caller_key(key)) {
         Ok(q) => q,
         Err(resp) => return resp,
     };
     let stream = BroadcastStream::new(inspector.subscribe()).filter_map(move |item| {
         let entry = item.ok()?;
-        if !q.matches(&entry) {
+        if !q.matches(&entry) || expired(&entry, Instant::now()) {
             return None;
         }
         let data = serde_json::to_string(entry.as_ref()).ok()?;
@@ -471,8 +700,9 @@ pub fn catalog() -> Vec<Endpoint> {
         )
         .description(
             "Filters: ?session=, ?path_prefix=, ?limit=. Public mode requires ?session= and only \
-             returns that session's requests. DELETE with ?session= clears one session; without \
-             it, clearing everything requires the admin token.",
+             returns that session's requests. Shared mode: a caller authenticated with an API key \
+             (X-Rustybin-Key or ?rb_key=) only sees that key's requests. DELETE with ?session= \
+             clears one session; without it, clearing everything requires the admin token.",
         )
         .example(Example::get("List captured requests", "/_rustybin/requests?limit=20"))
         .example(Example::get(
@@ -592,6 +822,7 @@ pub fn openapi_components() -> Value {
                     "headers": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "value": { "type": "string" } } } },
                     "client_ip": { "type": "string", "nullable": true },
                     "session": { "type": "string", "nullable": true },
+                    "key_id": { "type": "string", "description": "API key id (shared mode, RUSTYBIN_REQUIRE_KEY); absent otherwise" },
                     "body": { "type": "string", "nullable": true },
                     "body_base64": { "type": "string", "nullable": true },
                     "body_size": { "type": "integer" },
@@ -624,12 +855,15 @@ mod tests {
             headers: vec![],
             client_ip: None,
             session: session.map(str::to_string),
+            key_id: None,
             body: None,
             body_base64: None,
             body_size: 0,
             body_truncated: false,
             status: 200,
             latency_ms: 0.0,
+            seq: 0,
+            expires_at: None,
         }
     }
 
@@ -658,7 +892,7 @@ mod tests {
         let q = InspectorQuery {
             session: Some("b".into()),
             path_prefix: Some("/echo".into()),
-            limit: None,
+            ..InspectorQuery::default()
         };
         assert_eq!(i.list(&q).len(), 1);
         assert_eq!(i.clear_session("b"), 2);
