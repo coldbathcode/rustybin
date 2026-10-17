@@ -8,7 +8,7 @@ OIDC provider, real auth checks, every common protocol, and failure modes you ca
 trigger on demand. Everything is deterministic, every bit of state is bounded, and a
 web console shows exactly what the gateway forwarded.
 
-Documentation: **<https://oliwynn.github.io/rustybin/>** (built from [`docs/`](docs/src/introduction.md);
+Documentation: **<https://docs.rustybin.dev/>** (built from [`docs/`](docs/src/introduction.md);
 every request example in it is tested in CI).
 
 ## Why

@@ -107,5 +107,5 @@ versions in `conformance/requirements.txt`:
 build, the no-dash check, the documentation job (mdBook build and every
 documentation example against a fresh server) and the SDK conformance job.
 `.github/workflows/docs.yml` builds the mdBook site and publishes it to GitHub Pages
-(<https://oliwynn.github.io/rustybin/>) on every push to `main`; the repository's
+(<https://docs.rustybin.dev/>) on every push to `main`; the repository's
 Pages source must be set to "GitHub Actions".
