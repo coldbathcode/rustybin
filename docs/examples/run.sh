@@ -13,7 +13,10 @@
 #   RUSTYBIN_DOCS_PORT  first of the ports (default 18800: HTTP, +1 HTTPS, +2 gRPC,
 #                       +3 HTTP of a second instance with plan limits, +4 HTTP and
 #                       +5 HTTPS of a third, secured instance: control-plane JWT
-#                       auth, gRPC on the HTTP listeners, console title and link)
+#                       auth, gRPC on the HTTP listeners, console title and link;
+#                       +6 HTTP of a fourth instance in shared mode with API keys
+#                       from a registry file in the temporary directory; +7 HTTP
+#                       of a fifth, normal instance with RUSTYBIN_REQUIRE_KEY)
 #   REQUIRE_ALL_TOOLS=1 fail instead of skipping when grpcurl / websocat / jq are missing (CI)
 set -euo pipefail
 
@@ -25,8 +28,15 @@ GRPC_PORT=$((PORT + 2))
 PLAN_PORT=$((PORT + 3))
 SECURED_PORT=$((PORT + 4))
 SECURED_HTTPS_PORT=$((PORT + 5))
+SHARED_PORT=$((PORT + 6))
+KEYED_PORT=$((PORT + 7))
 ADMIN_TOKEN="docs-admin-token"
 SECURED_AUDIENCE="docs-secured"
+SHARED_AUDIENCE="docs-shared"
+# API keys of the shared-mode examples (documentation values, not secrets).
+ALPHA_KEY="rbk_kdocsalpha_7d1f0c9b2e4a6f8d0b1c3e5a7f9d2b4c"
+BETA_KEY="rbk_kdocsbeta_0a2c4e6f8b1d3f5a7c9e1b3d5f7a9c2e"
+REVOKED_KEY="rbk_kdocsold_5e7a9c1e3b5d7f9a2c4e6b8d0f1a3c5e"
 
 if ! command -v hurl >/dev/null 2>&1; then
   echo "hurl is required (https://hurl.dev/docs/installation.html)" >&2
@@ -104,12 +114,52 @@ openssl pkey -in "$TMP/secured/control.key" -pubout -out "$TMP/secured/control.p
   RUSTYBIN_CONSOLE_BACKLINK="https://portal.example.com/instances/docs-secured" \
   "$TMP/rustybin-docs-examples" >/dev/null) &
 SECURED_SERVER=$!
-trap 'kill "$SERVER" "$PLAN_SERVER" "$SECURED_SERVER" 2>/dev/null || true; wait "$SERVER" "$PLAN_SERVER" "$SECURED_SERVER" 2>/dev/null || true; rm -rf "$TMP"' EXIT
+# A fourth instance in shared mode (docs/src/concepts/shared-mode.md): API
+# keys from a registry file, control-plane JWTs with the secured instance's
+# key, a quota upgrade link. HTTPS and gRPC use ephemeral ports.
+mkdir -p "$TMP/shared"
+bash "$HERE/concepts/_make-key-registry.sh" "$TMP/shared/keys.json" "$ALPHA_KEY" "$BETA_KEY" "$REVOKED_KEY"
+(cd "$TMP/shared" && exec env \
+  RUSTYBIN_HTTP_PORT="$SHARED_PORT" \
+  RUSTYBIN_HTTPS_PORT=0 \
+  RUSTYBIN_GRPC_PORT=0 \
+  RUSTYBIN_HOST=127.0.0.1 \
+  RUSTYBIN_LOG_LEVEL=warn \
+  RUSTYBIN_INSTANCE_ID="$SHARED_AUDIENCE" \
+  RUSTYBIN_ADMIN_TOKEN="$ADMIN_TOKEN" \
+  RUSTYBIN_TLS_CERT="$TMP/shared/server.crt" \
+  RUSTYBIN_TLS_KEY="$TMP/shared/server.key" \
+  RUSTYBIN_SHARED_MODE=true \
+  RUSTYBIN_KEYS_FILE="$TMP/shared/keys.json" \
+  RUSTYBIN_QUOTA_UPGRADE_URL="https://example.com/pricing" \
+  RUSTYBIN_CONTROL_AUTH=jwt \
+  RUSTYBIN_CONTROL_JWT_PUBLIC_KEY="$(cat "$TMP/secured/control.pub")" \
+  "$TMP/rustybin-docs-examples") &
+SHARED_SERVER=$!
+# A fifth, normal instance that only requires a key on the data plane.
+mkdir -p "$TMP/keyed"
+(cd "$TMP/keyed" && exec env \
+  RUSTYBIN_HTTP_PORT="$KEYED_PORT" \
+  RUSTYBIN_HTTPS_PORT=0 \
+  RUSTYBIN_GRPC_PORT=0 \
+  RUSTYBIN_HOST=127.0.0.1 \
+  RUSTYBIN_LOG_LEVEL=warn \
+  RUSTYBIN_INSTANCE_ID=docs-keyed \
+  RUSTYBIN_TLS_CERT="$TMP/keyed/server.crt" \
+  RUSTYBIN_TLS_KEY="$TMP/keyed/server.key" \
+  RUSTYBIN_REQUIRE_KEY=true \
+  RUSTYBIN_KEYS_FILE="$TMP/shared/keys.json" \
+  "$TMP/rustybin-docs-examples") &
+KEYED_SERVER=$!
+ALL_SERVERS=("$SERVER" "$PLAN_SERVER" "$SECURED_SERVER" "$SHARED_SERVER" "$KEYED_SERVER")
+trap 'kill "${ALL_SERVERS[@]}" 2>/dev/null || true; wait "${ALL_SERVERS[@]}" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 
 BASE="http://127.0.0.1:$PORT"
 PLAN_BASE="http://127.0.0.1:$PLAN_PORT"
 SECURED_BASE="http://127.0.0.1:$SECURED_PORT"
-for url in "$BASE" "$PLAN_BASE" "$SECURED_BASE"; do
+SHARED_BASE="http://127.0.0.1:$SHARED_PORT"
+KEYED_BASE="http://127.0.0.1:$KEYED_PORT"
+for url in "$BASE" "$PLAN_BASE" "$SECURED_BASE" "$SHARED_BASE" "$KEYED_BASE"; do
   for _ in $(seq 1 100); do
     curl -fs -o /dev/null "$url/" && break
     sleep 0.1
@@ -120,6 +170,8 @@ done
 export BASE
 export PLAN_BASE
 export SECURED_BASE
+export SHARED_BASE
+export KEYED_BASE
 export HTTPS_BASE="https://127.0.0.1:$HTTPS_PORT"
 export GRPC_ADDR="127.0.0.1:$GRPC_PORT"
 export SECURED_ADDR="127.0.0.1:$SECURED_PORT"
@@ -132,6 +184,8 @@ CONSOLE_TOKEN="$(bash "$MINT" "$TMP/secured/control.key" "$SECURED_AUDIENCE" con
 INSPECTOR_TOKEN="$(bash "$MINT" "$TMP/secured/control.key" "$SECURED_AUDIENCE" inspector 900)"
 EXPIRED_TOKEN="$(bash "$MINT" "$TMP/secured/control.key" "$SECURED_AUDIENCE" console -600)"
 OTHER_AUDIENCE_TOKEN="$(bash "$MINT" "$TMP/secured/control.key" another-instance console 900)"
+# A control-plane token for the shared instance, bound to the alpha key.
+KEY_INSPECTOR_TOKEN="$(bash "$MINT" "$TMP/secured/control.key" "$SHARED_AUDIENCE" inspector 900 kdocsalpha)"
 export CONSOLE_TOKEN
 
 cd "$HERE"
@@ -164,6 +218,12 @@ if [[ ${#hurl_files[@]} -gt 0 ]]; then
     --variable "inspector_token=$INSPECTOR_TOKEN" \
     --variable "expired_token=$EXPIRED_TOKEN" \
     --variable "other_audience_token=$OTHER_AUDIENCE_TOKEN" \
+    --variable "shared_url=$SHARED_BASE" \
+    --variable "keyed_url=$KEYED_BASE" \
+    --variable "alpha_key=$ALPHA_KEY" \
+    --variable "beta_key=$BETA_KEY" \
+    --variable "revoked_key=$REVOKED_KEY" \
+    --variable "key_inspector_token=$KEY_INSPECTOR_TOKEN" \
     "${hurl_files[@]}" || status=1
 fi
 

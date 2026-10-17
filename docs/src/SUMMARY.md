@@ -17,6 +17,7 @@
 - [Request ids, CORS and the control plane](concepts/control-plane.md)
 - [Control-plane security, metrics and operations](concepts/control-plane-security.md)
 - [Plans and limits](concepts/plans-and-limits.md)
+- [Shared mode and API keys](concepts/shared-mode.md)
 
 # HTTP reference
 

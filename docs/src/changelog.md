@@ -75,6 +75,14 @@ API, AI and agent gateway demos.
 - `RUSTYBIN_CONSOLE_TITLE` and `RUSTYBIN_CONSOLE_BACKLINK` in the console header.
 - `/_rustybin/version`, `/_rustybin/status` and `/_rustybin/usage` report the build
   commit (`git_sha`) and the control auth mode.
+- Shared mode (`RUSTYBIN_SHARED_MODE=true`): one instance for many API keys
+  (`X-Rustybin-Key` or `?rb_key=`) from a registry file or URL, per-key limits and
+  daily quotas (429 `rustybin_quota_exceeded` until 00:00 UTC), inspector and usage
+  scoped by key, keys redacted in captures, readiness waiting for the registry, and
+  `GET /_rustybin/keys/usage` for collectors. `RUSTYBIN_REQUIRE_KEY=true` requires a
+  key on a normal instance.
+- Optional cargo feature `quota-postgres`: replicas share daily quotas through
+  PostgreSQL (`RUSTYBIN_QUOTA_STORE`), with `rustybin_quota_store_up` in the metrics.
 
 ### Changed
 

@@ -106,6 +106,25 @@ the response headers and what is exempt.
 Every `RUSTYBIN_LIMIT_*` value accepts `0` or `unlimited` to turn that dimension off.
 Setting any of them without a plan enables the limiter with the plan name `custom`.
 
+## API keys and shared mode
+
+Off by default. See [Shared mode and API keys](concepts/shared-mode.md) for the
+registry format, quotas, scoping and the control plane.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RUSTYBIN_SHARED_MODE` | `false` | One instance for many API keys: every data-plane request needs a key (`X-Rustybin-Key`, else `?rb_key=`), each key has its own limits and daily quotas, inspector and usage are scoped by key, the rest of the control plane needs the admin token. Implies `RUSTYBIN_PUBLIC_MODE`, `RUSTYBIN_LIMIT_SCOPE=session` and `RUSTYBIN_LIMIT_PERIOD=day`. |
+| `RUSTYBIN_REQUIRE_KEY` | `false` | On a normal instance: the data plane needs a valid key from the registry; no per-key limits, control-plane auth unchanged. |
+| `RUSTYBIN_KEYS_FILE` | unset | Key registry file (JSON), read at startup and reloaded when it changes (checked every 5 s). Wins over `RUSTYBIN_KEYS_URL`. |
+| `RUSTYBIN_KEYS_URL` | unset | Key registry URL (`http://` or `https://`), fetched at startup and every `RUSTYBIN_KEYS_POLL_SECS` with `If-None-Match`. Errors keep the last good registry. |
+| `RUSTYBIN_KEYS_TOKEN` | unset | Sent to `RUSTYBIN_KEYS_URL` as `Authorization: Bearer <token>`. Never returned by any endpoint. |
+| `RUSTYBIN_KEYS_POLL_SECS` | `30` | Registry URL poll interval in seconds (every 5 s at most while nothing was loaded yet). |
+| `RUSTYBIN_KEYS_MAX` | `200000` | Most keys accepted in a registry; a larger registry is refused with a warning (the last good one stays). |
+| `RUSTYBIN_QUOTA_STORE` | unset | `postgres://...` URL of a PostgreSQL database shared by the replicas for daily quotas (table `key_usage`, created when missing). Needs a binary built with `--features quota-postgres`; otherwise a warning and local counting. Never returned by any endpoint. |
+| `RUSTYBIN_QUOTA_STORE_CA` | unset | PEM file with extra CA certificates for the quota store's TLS (besides the public web roots). |
+| `RUSTYBIN_QUOTA_FLUSH_MS` | `2000` | How often each replica flushes its counts to the quota store, in milliseconds. |
+| `RUSTYBIN_QUOTA_UPGRADE_URL` | unset | `http://` or `https://` link returned as `upgrade_url` in daily quota 429 bodies (`null` when unset). |
+
 ## MCP server
 
 Read when the server starts.

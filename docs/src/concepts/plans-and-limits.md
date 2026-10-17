@@ -9,6 +9,9 @@ middleware stack and responses carry no extra header.
 Every rejection says clearly that it comes from Rustybin, so a 429 in a gateway demo
 is never mistaken for the gateway's own rate limiting.
 
+For one instance serving many API keys, each with its own limits and daily quotas,
+see [Shared mode and API keys](shared-mode.md).
+
 ## Presets
 
 `RUSTYBIN_PLAN` selects a preset:
