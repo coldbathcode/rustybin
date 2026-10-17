@@ -39,6 +39,33 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-targets --locked
 
+  quota-postgres:
+    name: test (quota-postgres feature, PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      # Enables the tests that need a running PostgreSQL (src/keys/pg_tests.rs).
+      RUSTYBIN_TEST_QUOTA_STORE: postgres://postgres:dev@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --locked --features quota-postgres -- -D warnings
+      - run: cargo test --all-targets --locked --features quota-postgres
+
   audit:
     name: cargo audit (RustSec advisories)
     runs-on: ubuntu-latest
@@ -60,6 +87,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked
+      - run: cargo check --locked --features quota-postgres
 
   docker:
     name: docker build

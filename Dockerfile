@@ -2,12 +2,18 @@ FROM rust:1.88-slim AS builder
 
 WORKDIR /app
 
+# Cargo features of the image. The image includes the shared quota store
+# (quota-postgres, used only when RUSTYBIN_QUOTA_STORE is set) so one image
+# serves dedicated instances and shared deployments; build with
+# --build-arg CARGO_FEATURES= for the plain default feature set.
+ARG CARGO_FEATURES="quota-postgres"
+
 # Cache dependency build (build.rs + proto are needed to compile build deps
 # and the gRPC stubs; copying them here keeps the dependency layer cacheable)
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY proto/ proto/
 RUN mkdir src && echo "fn main() {}" > src/main.rs && touch src/lib.rs && \
-    cargo build --release --locked && \
+    cargo build --release --locked --features "$CARGO_FEATURES" && \
     rm -rf src
 
 # Build the real binary (lib + bin); build.rs embeds the web console from ui/
@@ -20,7 +26,7 @@ ARG RUSTYBIN_GIT_SHA=""
 # Touch build.rs too: COPY keeps old mtimes, so without it Cargo would not
 # rerun the build script and the console (ui/) would be embedded empty.
 RUN touch src/main.rs src/lib.rs build.rs && \
-    RUSTYBIN_GIT_SHA="$RUSTYBIN_GIT_SHA" cargo build --release --locked
+    RUSTYBIN_GIT_SHA="$RUSTYBIN_GIT_SHA" cargo build --release --locked --features "$CARGO_FEATURES"
 
 FROM debian:bookworm-slim AS runtime
 

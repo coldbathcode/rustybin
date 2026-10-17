@@ -1,0 +1,38 @@
+name: Release (Arm tests)
+
+# The shared runtime runs on Arm (linux/arm64) nodes: once per release, run the
+# whole test suite there, including the quota store tests against PostgreSQL.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  arm-test:
+    name: test on linux/arm64
+    runs-on: ubuntu-24.04-arm
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      RUSTYBIN_TEST_QUOTA_STORE: postgres://postgres:dev@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: uname -m
+      - run: cargo test --all-targets --locked
+      - run: cargo test --all-targets --locked --features quota-postgres
