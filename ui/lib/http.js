@@ -2,6 +2,7 @@
 // streaming readers (SSE, NDJSON), base URL handling and curl rendering.
 import * as settings from './settings.js';
 import * as auth from './auth.js';
+import * as visit from './visit.js';
 
 /** Base URL of this Rustybin instance, keeping a gateway path prefix
  *  (`https://gw/prefix/ui/` -> `https://gw/prefix`). */
@@ -13,6 +14,18 @@ export const SERVER = (() => {
 })();
 
 export const SESSION_HEADER = 'X-Rustybin-Session';
+
+/** True for URLs of this server's mock management API (`/_rustybin/mocks*`). */
+export function isMocksUrl(u) {
+  try {
+    const url = new URL(u, location.href);
+    const base = new URL(SERVER + '/');
+    const prefix = base.pathname.replace(/\/$/, '') + '/_rustybin/mocks';
+    return url.origin === base.origin && (url.pathname === prefix || url.pathname.startsWith(prefix + '/'));
+  } catch {
+    return false;
+  }
+}
 
 /** True for URLs of this server's control plane (`/_rustybin` and below). */
 export function isControlUrl(u) {
@@ -63,6 +76,9 @@ export function withConsoleHeaders(list, opts = {}) {
   if (opts.session !== false && session && !hasHeader(out, SESSION_HEADER)) out.push([SESSION_HEADER, session]);
   const control = auth.getToken();
   if (control && opts.url && isControlUrl(opts.url) && !hasHeader(out, 'authorization')) out.push(['Authorization', 'Bearer ' + control]);
+  // Self-service: the visitor's manage tokens, to this server's mock API only.
+  const mockTokens = visit.tokens();
+  if (mockTokens.length && opts.url && isMocksUrl(opts.url) && !hasHeader(out, visit.HEADER)) out.push([visit.HEADER, mockTokens.join(', ')]);
   // Admin actions: the configured admin token, else the control token (the
   // admin token itself in token mode, or a JWT that may carry the admin scope).
   const admin = settings.get('adminToken') || (auth.required() ? control : '');

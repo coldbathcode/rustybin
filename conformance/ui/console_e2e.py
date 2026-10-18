@@ -11,6 +11,10 @@ With RUSTYBIN_JWT_URL it also checks the sign-in flow of an instance with
 RUSTYBIN_CONTROL_AUTH=jwt (sign-in screen, #token= fragment, fetch-based live
 feed with the bearer token, expiry, sign out).
 
+With RUSTYBIN_SS_URL it checks self-service mocks on a public instance
+(create as a visitor, Extend, the email step, another visitor, manage link,
+end the visit).
+
 Usage (server already running):
     RUSTYBIN_URL=http://127.0.0.1:18700 python conformance/ui/console_e2e.py
 
@@ -25,6 +29,10 @@ Environment:
                               (with RUSTYBIN_CONSOLE_TITLE and _BACKLINK set)
     CONTROL_JWT_PRIVATE_KEY   Ed25519 private key (PEM file) it trusts
     CONTROL_JWT_AUDIENCE      its RUSTYBIN_CONTROL_JWT_AUDIENCE
+    RUSTYBIN_SS_URL           base URL of a public instance with self-service mocks
+                              (RUSTYBIN_MOCKS_VISIT_MINUTES=5, _ANON_VISITS_PER_DAY=0:
+                              Extend is always open, the email step comes first)
+    LEADS_FILE                its RUSTYBIN_LEADS_FILE
 """
 
 import glob
@@ -580,6 +588,114 @@ def run_jwt(browser):
     ctx.close()
 
 
+def run_self_service(browser):
+    """Self-service mocks: two visitors on a public instance."""
+    ss_base = os.environ["RUSTYBIN_SS_URL"].rstrip("/")
+    print(f"self-service: {ss_base}")
+    state = {}
+
+    def new_page():
+        ctx = browser.new_context(viewport={"width": 1280, "height": 860})
+        page = ctx.new_page()
+        page.set_default_timeout(TIMEOUT)
+
+        def on_console(msg):
+            # 403 (email step) and 404 (someone else's mock) are expected.
+            if msg.type == "error" and "Failed to load resource" not in msg.text:
+                console_errors.append(f"[self-service] {msg.text}")
+
+        page.on("console", on_console)
+        page.on("pageerror", lambda e: console_errors.append(f"[self-service] uncaught: {e}"))
+        return ctx, page
+
+    ctx, page = new_page()
+
+    def create_as_visitor():
+        page.goto(ss_base + "/ui/#/mocks")
+        page.wait_for_selector("text=Try it with your own API")
+        page.get_by_role("button", name="New mock").click()
+        page.get_by_label("OpenAPI document (JSON or YAML)").fill(SMALL_SPEC)
+        page.get_by_role("button", name="Continue").click()
+        page.wait_for_selector("text=random suffix")
+        page.get_by_role("button", name="Next").click()
+        expect(page.get_by_text("Remember changes (stateful CRUD)")).to_have_count(0)
+        page.get_by_role("button", name="Create and deploy").click()
+        # No anonymous visits on this instance: the email step comes first.
+        page.get_by_label("Email address").fill("visitor@example.com")
+        page.locator("#visit-consent").check()
+        shot(page, "self-service", "31-email-step")
+        page.get_by_role("button", name="Continue").click()
+        page.wait_for_selector("text=Your mock is live")
+        page.wait_for_selector("text=Only this browser can change it")
+        name = page.locator("h1.mono").inner_text().strip()
+        assert re.fullmatch(r"orders-[a-z2-7]{6}", name), name
+        state["name"] = name
+        tokens = page.evaluate("JSON.parse(localStorage.getItem('rustybin.console.mockTokens') || '[]')")
+        assert len(tokens) == 1 and tokens[0].startswith("rbm_"), tokens
+        state["token"] = tokens[0]
+        status = urllib.request.urlopen(ss_base + f"/mock/{name}/orders/7", timeout=10).status
+        assert status == 200, status
+        shot(page, "self-service", "30-visitor-mock")
+
+    step("self-service: create a mock as a visitor", create_as_visitor)
+
+    def extend_and_lead():
+        page.get_by_role("link", name="All mocks").click()
+        page.wait_for_selector(".visit-bar")
+        page.locator(".mock-group", has_text="Your mocks").wait_for()
+        page.wait_for_selector("text=hours used today")
+        page.locator("#visit-extend").click()
+        page.wait_for_selector("text=Your mocks now run until")
+        leads = os.environ.get("LEADS_FILE")
+        if leads:
+            deadline = time.time() + 5
+            while time.time() < deadline and not (os.path.exists(leads) and "visitor@example.com" in open(leads).read()):
+                time.sleep(0.2)
+            text = open(leads).read()
+            assert "visitor@example.com" in text and '"marketing_consent":true' in text, text
+        shot(page, "self-service", "32-visit-bar")
+
+    step("self-service: email step, lead written, Extend", extend_and_lead)
+
+    ctx2, page2 = new_page()
+
+    def another_visitor():
+        name = state["name"]
+        page2.goto(ss_base + "/ui/#/mocks")
+        page2.wait_for_selector("text=Try it with your own API")
+        expect(page2.locator(".mock-row", has_text=name)).to_have_count(0)
+        page2.goto(ss_base + f"/ui/#/mocks/{name}")
+        page2.wait_for_selector("text=This mock does not exist")
+
+    step("self-service: another visitor does not see it", another_visitor)
+
+    def manage_link_and_end():
+        name = state["name"]
+        page2.goto(ss_base + "/ui/#/mocks&mock_token=" + state["token"])
+        page2.locator(".mock-row", has_text=name).wait_for()
+        if "mock_token" in page2.url:
+            raise AssertionError("the manage token stays in the URL: " + page2.url)
+        page2.wait_for_selector(".visit-bar")
+        page2.once("dialog", lambda d: d.accept())
+        page2.get_by_role("button", name="End visit").click()
+        page2.wait_for_selector("text=Visit ended")
+        expect(page2.locator(".mock-row", has_text=name)).to_have_count(0)
+        status = http_at(ss_base, f"/mock/{name}/orders/7")
+        assert status == 404, status
+
+    step("self-service: manage link, end the visit", manage_link_and_end)
+    ctx2.close()
+    ctx.close()
+
+
+def http_at(base, path):
+    try:
+        with urllib.request.urlopen(base + path, timeout=10) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
 def main():
     print(f"console e2e against {BASE}")
     with sync_playwright() as p:
@@ -589,6 +705,8 @@ def main():
             run_theme(browser, theme)
         if os.environ.get("RUSTYBIN_JWT_URL"):
             run_jwt(browser)
+        if os.environ.get("RUSTYBIN_SS_URL"):
+            run_self_service(browser)
         browser.close()
     for e in console_errors:
         failures.append("console: " + e)

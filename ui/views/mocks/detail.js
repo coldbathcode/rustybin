@@ -2,11 +2,12 @@
 // URL, on/off switch, Deploy and more actions, then tabs for operations (with
 // the response editor), Try it, Security, Settings, Traffic and the deploy
 // report with revision history.
-import { h, replace, clear, card, icon, notice, spinner, empty, methodBadge, badge, input, select, textarea, toast, copyButton, toggleSwitch, tabs, kvgrid, debounce } from '../../lib/dom.js';
+import { h, replace, clear, card, icon, notice, spinner, empty, methodBadge, badge, input, select, textarea, toast, copyButton, copyText, toggleSwitch, tabs, kvgrid, debounce } from '../../lib/dom.js';
 import { copyableCode } from '../../lib/format.js';
 import { toCurl, trimBase } from '../../lib/http.js';
 import { jsonView } from '../../lib/format.js';
-import { api, errorText, report, readOnlyReason, nameProblem, statePill, securityLabel, relTime, groupByTag, download, readFile, sampleToRequest, MODES, COLLECTIONS, isStateful, plural, dispositionName } from '../../lib/mockapi.js';
+import { api, errorText, report, readOnlyReason, mockReadOnly, setMockBase, nameProblem, statePill, securityLabel, relTime, groupByTag, download, readFile, sampleToRequest, MODES, COLLECTIONS, isStateful, plural, dispositionName } from '../../lib/mockapi.js';
+import * as visit from '../../lib/visit.js';
 import { operationEditor, checkIcon, responseChecks } from './operation.js';
 import { tryPanel, securityPanel, trafficPanel } from './panels.js';
 import { checksFailed, wireDrop } from './wizard.js';
@@ -24,7 +25,8 @@ export function mountDetail(root, name, sub) {
   let opId = null;
   let editor = null;
   let pollTimer = null;
-  const readOnly = readOnlyReason();
+  // Decided per mock once it is loaded (a visitor may change their own).
+  let readOnly = readOnlyReason();
   const headEl = h('div', { class: 'view-head mock-head' }, spinner('Loading the mock'));
   // Banners: the one-off "created" message, the state of the draft (rebuilt
   // on every refresh) and the result of a failed deploy.
@@ -56,6 +58,11 @@ export function mountDetail(root, name, sub) {
     // A new draft makes an earlier "deploy failed" message stale.
     if (detail && detail.draft_revision !== r.json.draft_revision) replace(deployFailEl);
     detail = r.json;
+    setMockBase(name, detail.base_url);
+    if (first) {
+      readOnly = mockReadOnly(detail);
+      switchCtl.el.disabled = !!readOnly;
+    }
     renderHead();
     renderBanner();
     if (first) buildTabs();
@@ -113,7 +120,7 @@ export function mountDetail(root, name, sub) {
     replace(menu,
       h('summary', { class: 'btn icon', 'aria-label': 'More actions', title: 'More actions' }, icon('more')),
       h('div', { class: 'menu-pop', role: 'menu' },
-        readOnly ? null : item('Rename', 'edit', () => goTab('settings', null, '#mock-rename')),
+        readOnly || d.yours ? null : item('Rename', 'edit', () => goTab('settings', null, '#mock-rename')),
         readOnly ? null : item('Duplicate', 'copy', duplicateMock),
         item('Export YAML', 'download', exportYaml),
         item('Download spec', 'file', () => downloadFrom('/spec', name + '.openapi.yaml')),
@@ -121,7 +128,21 @@ export function mountDetail(root, name, sub) {
         d.live_revision !== null ? h('a', { role: 'menuitem', href: d.spec.spec_url, target: '_blank', rel: 'noopener', onclick: () => { menu.open = false; } }, icon('external'), 'Open served spec') : null,
         readOnly ? null : item('Rollback', 'history', () => goTab('report', null, '#mock-revisions')),
         readOnly ? null : item('Clear traffic', 'trash', clearTraffic),
+        d.yours && visit.tokens()[0] ? item('Copy manage link', 'link', () => copyText(visit.manageLink(visit.tokens()[0]), 'Manage link copied: open it in another browser to manage your mocks there')) : null,
+        d.yours ? item('Rotate manage token', 'refresh', rotateToken) : null,
         readOnly ? null : item('Delete', 'trash', deleteMock, 'danger')));
+  }
+
+  async function rotateToken() {
+    if (!confirm('Replace your manage token? Manage links you shared stop working; this browser keeps access.')) return;
+    const old = visit.tokens()[0];
+    const r = await api('POST', '/visit/token');
+    if (r.ok && r.json && r.json.manage_token) {
+      visit.replaceToken(old, r.json.manage_token);
+      toast('New manage token saved in this browser');
+    } else {
+      toast(errorText(r, 'Rotating the token'), 'err');
+    }
   }
 
   function renderBanner() {
@@ -151,7 +172,10 @@ export function mountDetail(root, name, sub) {
   function createdBanner(deployed) {
     const host = h('div', { class: 'stack-sm' }, h('div', { class: 'row nowrap' }, h('code', { class: 'grow break' }, detail.url), copyButton(detail.url, { label: 'Copy URL' })));
     const el = notice('ok', h('strong', null, deployed ? 'Your mock is live. ' : 'Draft created. '),
-      deployed ? 'Call it from anywhere, for example with this curl:' : 'Deploy it when you are ready; its URL answers 503 until then.', host);
+      deployed ? 'Call it from anywhere, for example with this curl:' : 'Deploy it when you are ready; its URL answers 503 until then.', host,
+      detail.yours && visit.tokens()[0] ? h('div', { class: 'small', style: { marginTop: '6px' } },
+        'Only this browser can change it: its manage token is saved here. To manage it from another browser, ',
+        copyButton(() => visit.manageLink(visit.tokens()[0]), { label: 'Copy the manage link', toast: 'Manage link copied' }), '.') : null);
     const op = detail.operations.find((o) => o.method === 'GET') || detail.operations[0];
     if (op && deployed) {
       api('GET', `/${enc(name)}/operations/${enc(op.id)}`).then((r) => {
@@ -374,6 +398,7 @@ export function mountDetail(root, name, sub) {
       renderList();
       editor = operationEditor({
         name, opId: id, readOnly: !!readOnly, mockMode: detail.settings.responses.mode,
+        visitor: detail.owner === 'visit' || detail.owner === 'key',
         securityOn: detail.security.enabled, maxDelayMs: detail.limits && detail.limits.max_delay_ms,
         onSaved: () => refresh(),
         onTry: (op) => { goTab('try'); panels.try.select(op); },
@@ -408,7 +433,8 @@ export function mountDetail(root, name, sub) {
       dirty = false;
       const s = detail.settings;
       const r = s.responses;
-      const mode = select(MODES.map(([v, l]) => [v, l]), r.mode, { 'aria-label': 'Response mode' });
+      const visitorMock = detail.owner === 'visit' || detail.owner === 'key';
+      const mode = select(MODES.filter(([v]) => !visitorMock || v !== 'stateful').map(([v, l]) => [v, l]), r.mode, { 'aria-label': 'Response mode' });
       const modeHint = h('span', { class: 'hint' });
       const showModeHint = () => { modeHint.textContent = ((MODES.find(([v]) => v === mode.value) || [])[2] || '') + ' Per operation overrides win.'; };
       mode.addEventListener('change', showModeHint);
@@ -474,7 +500,7 @@ export function mountDetail(root, name, sub) {
       replace(el,
         card('Behaviour', { hint: 'saved to the draft' }, form),
         h('div', { class: 'grid grid-2' },
-          readOnly ? null : card('Name', null, h('div', { class: 'stack-sm' }, h('div', { class: 'row nowrap' }, h('div', { class: 'grow' }, nameIn), renameBtn), nameMsg)),
+          readOnly || detail.yours ? null : card('Name', null, h('div', { class: 'stack-sm' }, h('div', { class: 'row nowrap' }, h('div', { class: 'grow' }, nameIn), renameBtn), nameMsg)),
           card('About', null, kvgrid([
             ['Origin', d.origin === 'sample' ? 'built-in sample' : d.origin === 'file' ? 'config file (changes are overwritten on reload)' : 'created here or with the API'],
             ['Spec', (String(d.spec.openapi || '').startsWith('2') ? 'Swagger ' : 'OpenAPI ') + d.spec.openapi], ['Server prefix', d.spec.server_prefix || 'none'],

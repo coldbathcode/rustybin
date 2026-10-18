@@ -5,6 +5,7 @@ import { h, icon, replace, clear, notice, toast, field, input, select, fmtDurati
 import * as settings from './lib/settings.js';
 import * as traffic from './lib/traffic.js';
 import * as auth from './lib/auth.js';
+import * as visit from './lib/visit.js';
 import { SERVER, getJson, send, trimBase } from './lib/http.js';
 
 const VIEWS = [
@@ -341,6 +342,7 @@ async function loadInstance() {
 function start() {
   if (handleCallback()) return;
   auth.consumeFragment();
+  visit.consumeFragment();
   const menu = document.getElementById('menu-btn');
   menu.appendChild(icon('menu'));
   menu.addEventListener('click', () => {
@@ -363,6 +365,7 @@ function start() {
   window.addEventListener('hashchange', () => {
     // A token pasted into the address bar as #token=... is picked up too.
     if (auth.consumeFragment()) return;
+    visit.consumeFragment();
     route();
   });
   auth.onChange((kind) => {

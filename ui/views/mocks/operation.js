@@ -183,7 +183,7 @@ export function operationEditor(opts) {
       else toast('A status between 100 and 599', 'err');
     }
     tabsEl.appendChild(h('span', { class: 'row nowrap', style: { gap: '4px' } }, other, h('button', { class: 'btn sm', type: 'button', onclick: addOther }, icon('plus'), 'Add status')));
-    const seg = segmented(SOURCES, source, (v) => {
+    const seg = segmented(SOURCES.filter(([v]) => !opts.visitor || v !== 'stateful'), source, (v) => {
       if (v === 'custom' && customBody === undefined && !customText) fillCustom('preview');
       source = v;
       renderResponse();

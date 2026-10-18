@@ -3,7 +3,9 @@
 // (POST /_rustybin/mocks/import); creating runs the deploy checks and offers
 // "Create as draft" or "Deploy anyway" when they fail.
 import { h, replace, clear, icon, notice, spinner, methodBadge, badge, field, input, select, textarea, toggleSwitch } from '../../lib/dom.js';
-import { api, errorText, nameProblem, mockUrl, readFile, groupByTag } from '../../lib/mockapi.js';
+import { api, errorText, nameProblem, mockUrl, readFile, groupByTag, slug } from '../../lib/mockapi.js';
+import * as visit from '../../lib/visit.js';
+import { comeBack, isComeBack, startWithEmail } from './visit.js';
 
 const STEPS = ['Spec', 'Review', 'Behaviour'];
 const MODES = [
@@ -22,7 +24,8 @@ export async function sampleSpecText() {
 
 /**
  * Open the wizard. opts: {taken: [names], text?: spec text to parse at once,
- * maxBytes?, onCreated(detail, deployed)}.
+ * maxBytes?, visitor?: the list's self_service info (a self-service visitor:
+ * names get a random suffix, no stateful mode), onCreated(detail, deployed)}.
  */
 export function openWizard(opts = {}) {
   const st = { step: 0, text: opts.text || '', preview: null, name: '', strip: false, mode: 'examples', secure: false, validate: 'warn', busy: false };
@@ -139,9 +142,15 @@ export function openWizard(opts = {}) {
     const strip = p.server_prefix ? h('input', { type: 'checkbox', checked: st.strip }) : null;
     function problem() {
       st.name = nameIn.value.trim();
-      const why = nameProblem(st.name, opts.taken || []);
-      urlEl.textContent = mockUrl(st.name || '<name>', st.strip ? '' : p.server_prefix);
-      nameMsg.textContent = why || 'Available.';
+      const v = opts.visitor;
+      const why = v
+        ? (!st.name ? 'Pick a name.' : st.name.length > 33 ? 'At most 33 characters (a random suffix is added).' : '')
+        : nameProblem(st.name, opts.taken || []);
+      const shown = v ? slug(st.name || 'name').slice(0, 33) + '-xxxxxx' : st.name || '<name>';
+      urlEl.textContent = v && v.host
+        ? 'https://' + shown + '.' + v.host + (st.strip ? '' : p.server_prefix || '')
+        : mockUrl(shown, st.strip ? '' : p.server_prefix);
+      nameMsg.textContent = why || (v ? 'A random suffix (xxxxxx) keeps your mock\'s address private.' : 'Available.');
       nameMsg.classList.toggle('err-text', !!why);
       nameIn.setAttribute('aria-invalid', String(!!why));
       nextBtn.disabled = !!why;
@@ -187,7 +196,7 @@ export function openWizard(opts = {}) {
     const p = st.preview;
     const result = h('div');
     const cards = h('div', { class: 'radio-cards', role: 'radiogroup', 'aria-label': 'Responses' });
-    for (const [value, label, text, recommended] of MODES) {
+    for (const [value, label, text, recommended] of MODES.filter(([value]) => !opts.visitor || value !== 'stateful')) {
       const radio = h('input', { type: 'radio', name: 'wizard-mode', value, checked: st.mode === value, 'data-autofocus': st.mode === value ? true : null });
       radio.addEventListener('change', () => { st.mode = value; });
       cards.appendChild(h('label', { class: 'radio-card' }, radio,
@@ -227,12 +236,26 @@ export function openWizard(opts = {}) {
       draftBtn.disabled = deployBtn.disabled = false;
       if (!dlg.open) return;
       if (r.status === 201 && r.json) {
+        if (r.json.manage_token) visit.add(r.json.manage_token);
         dlg.close();
         if (opts.onCreated) opts.onCreated(r.json, deploy);
         return;
       }
+      if (opts.visitor && r.status === 403 && r.json && r.json.error === 'rustybin_email_required') {
+        replace(result);
+        if (await startWithEmail(opts.visitor)) create(deploy, force);
+        return;
+      }
+      if (isComeBack(r)) {
+        replace(result, comeBack(r.json));
+        return;
+      }
       if (r.status === 422 && r.json && r.json.report) {
         replace(result, checksFailed(r.json.report, () => create(true, true), () => create(false, false)));
+        return;
+      }
+      if (r.status === 409 && r.json && r.json.error === 'rustybin_mock_cap') {
+        replace(result, notice('err', errorText(r), ' ', h('a', { href: '#/mocks', onclick: () => dlg.close() }, 'Your mocks')));
         return;
       }
       if (r.status === 409) {

@@ -8,7 +8,7 @@ import * as settings from './settings.js';
 
 export const API = '/_rustybin/mocks';
 export const NAME_RE = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/;
-export const RESERVED = ['import', 'export', 'apply', 'reload'];
+export const RESERVED = ['import', 'export', 'apply', 'reload', 'visit', 'visits'];
 
 /**
  * Call the management API. `path` is relative to /_rustybin/mocks; objects are
@@ -37,6 +37,9 @@ export function getMock(path) {
 /** Readable error of a failed call. */
 export function errorText(r, what) {
   if (r.error) return r.error;
+  const j = r.json || {};
+  // Self-service answers carry a code (rustybin_...) and a readable message.
+  if (/^rustybin_/.test(j.error || '') && j.message) return j.message;
   const msg = r.json && (r.json.error || r.json.detail || r.json.message);
   if (r.status === 401 || r.status === 403) {
     return (msg || 'Not allowed') + '. Changes need the admin token (console settings) or a control token with the admin scope.';
@@ -69,6 +72,29 @@ export function readOnlyReason() {
 
 export function canEdit() {
   return readOnlyReason() === '';
+}
+
+/** Why the console may not change this mock (its detail), or '' when it may. */
+export function mockReadOnly(detail) {
+  if (detail && detail.can_manage === true) return '';
+  const instance = readOnlyReason();
+  if (detail && detail.can_manage === false) {
+    return instance || 'This mock belongs to the instance: changing it needs the admin token (console settings).';
+  }
+  return instance;
+}
+
+// Where each mock answers (visitor mocks live on the mocks domain).
+const bases = new Map();
+
+/** Remember a mock's base URL (`base_url` of its detail). */
+export function setMockBase(name, base) {
+  if (name && base) bases.set(name, base);
+}
+
+/** Base URL of a mock without its server prefix. */
+export function mockBase(name) {
+  return bases.get(name) || SERVER + '/mock/' + name;
 }
 
 /** Problem with a mock name, or '' when it is valid. */
@@ -175,7 +201,7 @@ export function sampleToRequest(name, sample) {
     body = typeof sample.body === 'string' ? sample.body : JSON.stringify(sample.body, null, 2);
     if (!headers.some(([k]) => k.toLowerCase() === 'content-type')) headers.push(['Content-Type', sample.content_type || 'application/json']);
   }
-  return { method: sample.method, path: sample.path + (qs ? '?' + qs : ''), url: SERVER + '/mock/' + name + sample.path + (qs ? '?' + qs : ''), headers, body };
+  return { method: sample.method, path: sample.path + (qs ? '?' + qs : ''), url: mockBase(name) + sample.path + (qs ? '?' + qs : ''), headers, body };
 }
 
 /** Response modes: [value, short label, explanation]. */
