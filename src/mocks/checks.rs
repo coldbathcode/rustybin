@@ -232,6 +232,32 @@ pub fn sample_request(c: &Compiled, op: &Operation) -> SampleRequest {
     }
 }
 
+/// Replace the demo credentials [`sample_request`] added with placeholders,
+/// for callers who may not see the mock's secrets.
+pub fn hide_credentials(c: &Compiled, op: &Operation, req: &mut SampleRequest) {
+    let (real_h, real_q) = c.sample_credentials(op);
+    let (shown_h, shown_q) = c.placeholder_credentials(op);
+    for (pairs, real, shown) in [
+        (&mut req.headers, real_h, shown_h),
+        (&mut req.query, real_q, shown_q),
+    ] {
+        for (r, s) in real.into_iter().zip(shown) {
+            if let Some(p) = pairs.iter_mut().rev().find(|p| **p == r) {
+                *p = s;
+            }
+        }
+    }
+}
+
+/// [`hide_credentials`] for every operation of a report.
+pub fn hide_report_credentials(c: &Compiled, report: &mut Report) {
+    for r in &mut report.operations {
+        if let Some(op) = c.spec.operation(&r.id) {
+            hide_credentials(c, op, &mut r.request);
+        }
+    }
+}
+
 /// Validate a rendered body against the schema of the media it was taken from.
 pub fn validate_body(
     c: &Compiled,
@@ -681,5 +707,36 @@ mod tests {
             .headers
             .contains(&("x-api-key".to_string(), "demo-key".to_string())));
         assert_eq!(get.status, "ok", "{:?}", get.findings);
+    }
+
+    #[test]
+    fn hidden_credentials_become_placeholders() {
+        for (mode, header, real, shown) in [
+            (SecurityMode::ApiKey, "x-api-key", "demo-key", "<api-key>"),
+            (
+                SecurityMode::Bearer,
+                "Authorization",
+                "Bearer demo-token",
+                "Bearer <token>",
+            ),
+            (
+                SecurityMode::Basic,
+                "Authorization",
+                "Basic ZGVtbzpkZW1v",
+                "Basic <base64 user:password>",
+            ),
+        ] {
+            let mut settings = MockSettings::default();
+            settings.security.enabled = true;
+            settings.security.mode = mode;
+            let c = compile(SPEC, settings);
+            let mut report = c.report.clone();
+            let pair = |v: &str| (header.to_string(), v.to_string());
+            assert!(report.operations[0].request.headers.contains(&pair(real)));
+            hide_report_credentials(&c, &mut report);
+            let headers = &report.operations[0].request.headers;
+            assert!(headers.contains(&pair(shown)), "{mode:?}: {headers:?}");
+            assert!(!headers.contains(&pair(real)), "{mode:?}: {headers:?}");
+        }
     }
 }

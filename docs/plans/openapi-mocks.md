@@ -1,7 +1,8 @@
 # Plan: OpenAPI mocks ("spec bins")
 
-Status: phases 0 to 5 implemented (2026-10-17); phase 6 open. See section 12 for where the build
-differs from this plan. Last updated: 2026-10-17.
+Status: phases 0 to 6 implemented (2026-10-17); mock secrets hidden from read-only callers
+(2026-10-18). Hosted self-service (open question 1) is deliberately left for later. See section 12 for
+where the build differs from this plan. Last updated: 2026-10-18.
 
 ## 1. Goal
 
@@ -47,9 +48,9 @@ gateway.
   reasons; the CLI and the browser read the file locally and upload its contents.
 - Following spec callbacks / webhooks (outbound calls).
 - External `$ref`s (other files or URLs). Bundled specs only; the CLI can bundle.
-- Swagger 2.0 (planned, phase 6).
+- Swagger 2.0 (added in phase 6).
 - Durable storage by default. Mocks live in memory plus whatever the YAML declares
-  (optional persistence directory in phase 6).
+  (optional persistence directory, added in phase 6).
 
 ## 2. How it fits the existing code
 
@@ -550,10 +551,19 @@ Rough size: phases 0 to 2 are the MVP worth demoing; 3 and 4 make it the
   `PATH`).
 - **Control auth**: the `console` scope may call the two `POST` routes that change nothing (`import` and
   `.../operations/{op}/validate`); every other mutation still needs `admin`.
-- **Console**: not built yet: bulk enable/disable/delete, "Duplicate", the rule "would match" preview against
-  the last captured call, and drag to reorder (rules move with up/down buttons). Known gaps: no raw (unrewritten)
-  spec download, no per-operation hit counts, and `GET /_rustybin/mocks/{name}` shows basic-auth demo passwords
-  to `console` readers.
+- **Console**: bulk enable/disable/delete, "Duplicate" (`POST /_rustybin/mocks/{name}/duplicate`), the rule
+  "would match" preview against a captured call (`POST .../operations/{op}/rules/test`, allowed for `console`),
+  drag to reorder rules, the uploaded spec as written (`GET /_rustybin/mocks/{name}/spec`) and per-operation hit
+  counts are all built.
+- **Phase 6**: Swagger 2.0 import (`swagger2.rs`), `stateful` mode (`state.rs`), persistence
+  (`RUSTYBIN_MOCKS_STATE_DIR`, `persist.rs`), collections (Postman, Hurl, curl, `.http`, k6; `collections.rs`;
+  Bruno and Insomnia were not added) and host-based routing (`RUSTYBIN_MOCKS_HOST`, `host.rs`).
+- **Hidden secrets**: API keys, bearer tokens and basic passwords are only shown to callers who may change the
+  mock (control-auth admin grant and the admin guard). Everyone else gets `"<redacted>"` in `settings` and
+  `credentials` (with `"secrets_hidden": true`) and `<api-key>` / `<token>` / `<base64 user:password>`
+  placeholders in sample requests, the deploy report, collections and YAML exports. `"<redacted>"` is rejected
+  as a value so redacted settings cannot be saved back. Captured traffic still shows the headers clients sent,
+  like request bins.
 - **Open questions** (section 11) were settled with the recommendations: control-plane management only,
   `/mock/{name}` URLs, in-memory plus `rustybin.yaml`, separate views for bins and mocks, and the `petstore`
   sample on by default outside public mode.

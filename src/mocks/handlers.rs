@@ -34,6 +34,7 @@ use super::security::{AuthContext, AuthResult};
 use super::spec;
 use super::store::{Lookup, MockStore, Origin, Snapshot, StoreError};
 use crate::config::Config;
+use crate::control_auth::ControlAuthorized;
 use crate::request_bin::BinHeader;
 use crate::server::TlsConnectionInfo;
 use crate::session::ClientIp;
@@ -718,7 +719,15 @@ fn revisions(s: &Snapshot) -> Vec<Value> {
     list
 }
 
-fn detail(s: &Snapshot, base: &str, host: Option<&host::HostBase>, limits: Value) -> Value {
+/// A mock's full definition. Without `reveal` the security secrets are
+/// redacted (see [`sees_secrets`]).
+fn detail(
+    s: &Snapshot,
+    base: &str,
+    host: Option<&host::HostBase>,
+    limits: Value,
+    reveal: bool,
+) -> Value {
     let c = &s.draft;
     let mut out = s.summary();
     if let Value::Object(m) = &mut out {
@@ -744,15 +753,18 @@ fn detail(s: &Snapshot, base: &str, host: Option<&host::HostBase>, limits: Value
                 "spec_url": format!("{base}/mock/{}/_rustybin/openapi.json", s.name),
             }),
         );
-        m.insert(
-            "settings".into(),
-            serde_json::to_value(&c.settings).unwrap_or(Value::Null),
-        );
+        let settings = if reveal {
+            serde_json::to_value(&c.settings)
+        } else {
+            serde_json::to_value(c.settings.redacted())
+        };
+        m.insert("settings".into(), settings.unwrap_or(Value::Null));
+        m.insert("secrets_hidden".into(), json!(!reveal));
         m.insert(
             "operations".into(),
             json!(operation_rows(c, &s.capture.operation_stats())),
         );
-        m.insert("credentials".into(), c.credentials_summary());
+        m.insert("credentials".into(), c.credentials_summary(reveal));
         m.insert(
             "report".into(),
             json!({
@@ -811,12 +823,24 @@ pub fn inline_refs(v: &Value, root: &Value, stack: &mut Vec<String>, depth: usiz
     }
 }
 
-fn operation_detail(c: &Compiled, op_id: &str, base: &str, name: &str) -> Option<Value> {
+fn operation_detail(
+    c: &Compiled,
+    op_id: &str,
+    base: &str,
+    name: &str,
+    reveal: bool,
+) -> Option<Value> {
     let op = c.spec.operation(op_id)?;
     let mut op_json = serde_json::to_value(op).unwrap_or(Value::Null);
     let op_json = inline_refs(&op_json.take(), &c.spec.root, &mut Vec::new(), 0);
-    let report = c.report.operations.iter().find(|r| r.id == op_id);
-    let sample = checks::sample_request(c, op);
+    let mut report = c.report.operations.iter().find(|r| r.id == op_id).cloned();
+    let mut sample = checks::sample_request(c, op);
+    if !reveal {
+        checks::hide_credentials(c, op, &mut sample);
+        if let Some(r) = &mut report {
+            checks::hide_credentials(c, op, &mut r.request);
+        }
+    }
     Some(json!({
         "operation": op_json,
         "settings": c.settings.operations.get(op_id).cloned().unwrap_or_default(),
@@ -837,6 +861,17 @@ fn limits_json(store: &MockStore) -> Value {
 #[allow(clippy::result_large_err)]
 fn admin(headers: &HeaderMap, config: &Config) -> Result<(), Response> {
     crate::admin::require_admin(headers, config)
+}
+
+/// May the caller see the mocks' secrets (API keys, bearer tokens, basic
+/// passwords)? Only when it could change the mock: the control-auth grant
+/// (when control auth or shared mode is on) has the admin scope and the
+/// admin guard passes. Everyone else gets placeholders.
+fn sees_secrets(headers: &HeaderMap, extensions: &Extensions, config: &Config) -> bool {
+    extensions
+        .get::<ControlAuthorized>()
+        .is_none_or(|g| g.0.admin)
+        && crate::admin::is_admin(headers, config)
 }
 
 pub async fn list(
@@ -1011,6 +1046,7 @@ pub async fn create(
                     &base,
                     host::base(&headers, &extensions, &uri, &state.config).as_ref(),
                     limits_json(&state.mocks),
+                    sees_secrets(&headers, &extensions, &state.config),
                 )),
             )
                 .into_response()
@@ -1035,6 +1071,7 @@ pub async fn get_one(
         &base,
         host::base(&headers, &extensions, &uri, &state.config).as_ref(),
         limits_json(&state.mocks),
+        sees_secrets(&headers, &extensions, &state.config),
     ))
     .into_response()
 }
@@ -1125,6 +1162,7 @@ pub async fn patch(
         &base,
         host::base(&headers, &extensions, &uri, &state.config).as_ref(),
         limits_json(&state.mocks),
+        sees_secrets(&headers, &extensions, &state.config),
     ))
     .into_response()
 }
@@ -1233,9 +1271,18 @@ pub async fn rollback(
 pub async fn report(
     State(state): State<AppState>,
     Path(MockPath { name }): Path<MockPath>,
+    headers: HeaderMap,
+    extensions: Extensions,
 ) -> Response {
     match state.mocks.draft(&name) {
-        Ok(d) => Json(&d.report).into_response(),
+        Ok(d) if sees_secrets(&headers, &extensions, &state.config) => {
+            Json(&d.report).into_response()
+        }
+        Ok(d) => {
+            let mut report = d.report.clone();
+            checks::hide_report_credentials(&d, &mut report);
+            Json(report).into_response()
+        }
         Err(e) => store_error(e),
     }
 }
@@ -1256,21 +1303,32 @@ fn yaml_response(text: String, filename: &str) -> Response {
 pub async fn export_one(
     State(state): State<AppState>,
     Path(MockPath { name }): Path<MockPath>,
+    headers: HeaderMap,
+    extensions: Extensions,
 ) -> Response {
+    let reveal = sees_secrets(&headers, &extensions, &state.config);
     match state.mocks.get(&name) {
-        Some(s) => yaml_response(config_file::export(&[s]), &format!("{name}.rustybin.yaml")),
+        Some(s) => yaml_response(
+            config_file::export(&[s], reveal),
+            &format!("{name}.rustybin.yaml"),
+        ),
         None => store_error(StoreError::NotFound(name)),
     }
 }
 
-pub async fn export_all(State(state): State<AppState>) -> Response {
+pub async fn export_all(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+) -> Response {
+    let reveal = sees_secrets(&headers, &extensions, &state.config);
     let all: Vec<Snapshot> = state
         .mocks
         .list()
         .into_iter()
         .filter(|s| s.origin != Origin::Sample)
         .collect();
-    yaml_response(config_file::export(&all), "rustybin.yaml")
+    yaml_response(config_file::export(&all, reveal), "rustybin.yaml")
 }
 
 pub async fn config_schema() -> Response {
@@ -1338,7 +1396,13 @@ pub async fn get_operation(
         Err(e) => return store_error(e),
     };
     let base = base_url(&headers, &extensions, &uri, &state.config);
-    match operation_detail(&draft, &op, &base, &name) {
+    match operation_detail(
+        &draft,
+        &op,
+        &base,
+        &name,
+        sees_secrets(&headers, &extensions, &state.config),
+    ) {
         Some(v) => Json(v).into_response(),
         None => store_error(StoreError::NotFound(format!("{name}/{op}"))),
     }
@@ -1369,7 +1433,13 @@ pub async fn put_operation(
         Err(e) => return store_error(e),
     };
     let base = base_url(&headers, &extensions, &uri, &state.config);
-    match operation_detail(&snap.draft, &op, &base, &name) {
+    match operation_detail(
+        &snap.draft,
+        &op,
+        &base,
+        &name,
+        sees_secrets(&headers, &extensions, &state.config),
+    ) {
         Some(v) => Json(v).into_response(),
         None => store_error(StoreError::NotFound(format!("{name}/{op}"))),
     }
@@ -1417,7 +1487,10 @@ pub async fn sample(
     };
     let status = q.status.unwrap_or_else(|| operation.default_status());
     let mode = q.mode.unwrap_or(c.settings.responses.mode);
-    let request = checks::sample_request(c, operation);
+    let mut request = checks::sample_request(c, operation);
+    if !sees_secrets(&headers, &extensions, &state.config) {
+        checks::hide_credentials(c, operation, &mut request);
+    }
     let (content_type, body, source) = respond::render_body(
         c,
         operation,
@@ -1703,6 +1776,7 @@ pub async fn duplicate(
                     &base,
                     host::base(&headers, &extensions, &uri, &state.config).as_ref(),
                     limits_json(&state.mocks),
+                    sees_secrets(&headers, &extensions, &state.config),
                 )),
             )
                 .into_response()
@@ -1899,7 +1973,9 @@ pub async fn collection(
         ),
     };
     let c = s.live.as_ref().unwrap_or(&s.draft);
-    let Some((ct, file, text)) = super::collections::render(c, &name, &format, &base) else {
+    let reveal = sees_secrets(&headers, &extensions, &state.config);
+    let Some((ct, file, text)) = super::collections::render(c, &name, &format, &base, reveal)
+    else {
         let known: Vec<&str> = super::collections::FORMATS
             .iter()
             .map(|(f, _, _)| *f)

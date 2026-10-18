@@ -99,7 +99,10 @@ jsonpath "$.mocks[*].name" contains "petstore"
 jsonpath "$.limits.max_mocks" == 100
 jsonpath "$.load_errors" isCollection
 
+# With the admin token the details include the demo credentials (without it
+# they are "<redacted>").
 GET {{base_url}}/_rustybin/mocks/petstore
+Authorization: Bearer {{admin_token}}
 HTTP 200
 [Asserts]
 jsonpath "$.state" == "live"

@@ -16,6 +16,21 @@ jsonpath "$.credentials.bearer.tokens" contains "demo-token"
 jsonpath "$.credentials.token_endpoint" == "/oauth/token"
 # ANCHOR_END: petstore_on
 
+# ANCHOR: credentials_hidden
+# Without admin rights (no admin token here) the secrets are placeholders.
+GET {{base_url}}/_rustybin/mocks/petstore
+HTTP 200
+[Asserts]
+jsonpath "$.secrets_hidden" == true
+jsonpath "$.credentials.api_key.keys[0]" == "<redacted>"
+jsonpath "$.settings.security.basic.users.demo" == "<redacted>"
+
+GET {{base_url}}/_rustybin/mocks/petstore/operations/createPet
+HTTP 200
+[Asserts]
+jsonpath "$.sample_request.headers[*][1]" contains "<api-key>"
+# ANCHOR_END: credentials_hidden
+
 # ANCHOR: petstore_401
 # createPet declares `apiKey` OR `bearer`.
 POST {{base_url}}/mock/petstore/v1/pets

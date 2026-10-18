@@ -259,8 +259,9 @@ pub fn load_dir(dir: &Path, max_spec: u64) -> (Vec<Definition>, Vec<String>) {
     (defs, problems)
 }
 
-/// A mock as a `rustybin.yaml` document (spec inlined).
-pub fn export(snapshots: &[Snapshot]) -> String {
+/// A mock as a `rustybin.yaml` document (spec inlined). Without `reveal`
+/// the security secrets are redacted.
+pub fn export(snapshots: &[Snapshot], reveal: bool) -> String {
     let mocks: Vec<Value> = snapshots
         .iter()
         .map(|s| {
@@ -276,10 +277,12 @@ pub fn export(snapshots: &[Snapshot]) -> String {
                 "responses".into(),
                 serde_json::to_value(&settings.responses).unwrap_or(Value::Null),
             );
-            doc.insert(
-                "security".into(),
-                serde_json::to_value(&settings.security).unwrap_or(Value::Null),
-            );
+            let security = if reveal {
+                serde_json::to_value(&settings.security)
+            } else {
+                serde_json::to_value(settings.security.redacted())
+            };
+            doc.insert("security".into(), security.unwrap_or(Value::Null));
             if !settings.operations.is_empty() {
                 doc.insert(
                     "operations".into(),
@@ -292,7 +295,12 @@ pub fn export(snapshots: &[Snapshot]) -> String {
         .collect();
     let file = json!({ "version": 1, "mocks": mocks });
     let body = serde_yaml::to_string(&file).unwrap_or_default();
-    format!("# Rustybin mocks (rustybin.yaml). Apply with: rustybin mock push <file>\n{body}")
+    let note = if reveal {
+        ""
+    } else {
+        "# Secrets are shown as \"<redacted>\": export with admin rights to include them.\n"
+    };
+    format!("# Rustybin mocks (rustybin.yaml). Apply with: rustybin mock push <file>\n{note}{body}")
 }
 
 /// JSON Schema of the file (editor completion and validation).

@@ -83,13 +83,18 @@ fn expected_status(c: &Compiled, op: &Operation, sample: &SampleRequest) -> Opti
     Some(out.status)
 }
 
-fn items(c: &Compiled) -> Vec<Item> {
+/// Without `reveal` the demo credentials are placeholders (the expected
+/// status is still the one the real credentials get).
+fn items(c: &Compiled, reveal: bool) -> Vec<Item> {
     c.spec
         .operations
         .iter()
         .map(|op| {
-            let sample = checks::sample_request(c, op);
+            let mut sample = checks::sample_request(c, op);
             let status = expected_status(c, op, &sample);
+            if !reveal {
+                checks::hide_credentials(c, op, &mut sample);
+            }
             Item {
                 name: op.summary.clone().unwrap_or_else(|| op.id.clone()),
                 folder: op.tags.first().cloned().unwrap_or_else(|| "default".into()),
@@ -115,9 +120,9 @@ fn js(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
 }
 
-fn postman(c: &Compiled, title: &str, base: &str) -> String {
+fn postman(items: Vec<Item>, title: &str, base: &str) -> String {
     let mut folders: Vec<(String, Vec<Value>)> = Vec::new();
-    for it in items(c) {
+    for it in items {
         let s = &it.sample;
         let segments: Vec<&str> = s.path.split('/').filter(|p| !p.is_empty()).collect();
         let mut request = json!({
@@ -161,12 +166,12 @@ fn postman(c: &Compiled, title: &str, base: &str) -> String {
     serde_json::to_string_pretty(&doc).unwrap_or_default()
 }
 
-fn hurl(c: &Compiled, title: &str, base: &str) -> String {
+fn hurl(items: Vec<Item>, title: &str, base: &str) -> String {
     let mut out = format!(
         "# {} (Rustybin mock)\n# Run: hurl --test --variable base_url={base} <this file>\n\n",
         one_line(title)
     );
-    for it in items(c) {
+    for it in items {
         let s = &it.sample;
         out.push_str(&format!("# {}\n", one_line(&it.name)));
         out.push_str(&format!(
@@ -189,12 +194,12 @@ fn hurl(c: &Compiled, title: &str, base: &str) -> String {
     out
 }
 
-fn curl(c: &Compiled, title: &str, base: &str) -> String {
+fn curl(items: Vec<Item>, title: &str, base: &str) -> String {
     let mut out = format!(
         "#!/bin/sh\n# {} (Rustybin mock)\nBASE_URL=\"${{BASE_URL:-{base}}}\"\n\n",
         one_line(title)
     );
-    for it in items(c) {
+    for it in items {
         let s = &it.sample;
         out.push_str(&format!("# {}\n", one_line(&it.name)));
         out.push_str(&format!(
@@ -217,12 +222,12 @@ fn curl(c: &Compiled, title: &str, base: &str) -> String {
     out
 }
 
-fn http_file(c: &Compiled, title: &str, base: &str) -> String {
+fn http_file(items: Vec<Item>, title: &str, base: &str) -> String {
     let mut out = format!(
         "# {} (Rustybin mock)\n@baseUrl = {base}\n\n",
         one_line(title)
     );
-    for it in items(c) {
+    for it in items {
         let s = &it.sample;
         out.push_str(&format!("### {}\n", one_line(&it.name)));
         out.push_str(&format!(
@@ -242,13 +247,13 @@ fn http_file(c: &Compiled, title: &str, base: &str) -> String {
     out
 }
 
-fn k6(c: &Compiled, title: &str, base: &str) -> String {
+fn k6(items: Vec<Item>, title: &str, base: &str) -> String {
     let mut out = format!(
         "// {} (Rustybin mock). Run: k6 run <this file>\nimport http from 'k6/http';\nimport {{ check }} from 'k6';\n\nconst BASE_URL = __ENV.BASE_URL || {};\n\nexport default function () {{\n",
         one_line(title),
         js(base)
     );
-    for it in items(c) {
+    for it in items {
         let s = &it.sample;
         let mut headers = serde_json::Map::new();
         for (k, v) in &s.headers {
@@ -281,21 +286,23 @@ fn k6(c: &Compiled, title: &str, base: &str) -> String {
 }
 
 /// Render a collection; `None` for an unknown format. Returns (content type,
-/// file name, text).
+/// file name, text). Without `reveal` the credentials are placeholders.
 pub fn render(
     c: &Compiled,
     name: &str,
     format: &str,
     base: &str,
+    reveal: bool,
 ) -> Option<(&'static str, String, String)> {
     let (_, ct, ext) = FORMATS.iter().find(|(f, _, _)| *f == format)?;
     let title = &c.spec.title;
+    let list = items(c, reveal);
     let text = match format {
-        "postman" => postman(c, title, base),
-        "hurl" => hurl(c, title, base),
-        "curl" => curl(c, title, base),
-        "http" => http_file(c, title, base),
-        "k6" => k6(c, title, base),
+        "postman" => postman(list, title, base),
+        "hurl" => hurl(list, title, base),
+        "curl" => curl(list, title, base),
+        "http" => http_file(list, title, base),
+        "k6" => k6(list, title, base),
         _ => return None,
     };
     Some((ct, format!("{name}.{ext}"), text))
@@ -312,17 +319,17 @@ mod tests {
         let c = compile(SAMPLE_SPEC, sample_settings());
         let base = "http://localhost:8080/mock/petstore";
         for (format, _, _) in FORMATS {
-            let (_, file, text) = render(&c, "petstore", format, base).expect("format");
+            let (_, file, text) = render(&c, "petstore", format, base, true).expect("format");
             assert!(file.starts_with("petstore."), "{file}");
             assert!(text.contains("/v1/pets"), "{format}: {text}");
         }
-        let (_, _, pm) = render(&c, "petstore", "postman", base).expect("postman");
+        let (_, _, pm) = render(&c, "petstore", "postman", base, true).expect("postman");
         let doc: Value = serde_json::from_str(&pm).expect("json");
         assert_eq!(doc["variable"][0]["value"], base);
-        let (_, _, h) = render(&c, "petstore", "hurl", base).expect("hurl");
+        let (_, _, h) = render(&c, "petstore", "hurl", base, true).expect("hurl");
         assert!(h.contains("GET {{base_url}}/v1/pets"), "{h}");
         assert!(h.contains("HTTP 200"), "{h}");
-        assert!(render(&c, "petstore", "nope", base).is_none());
+        assert!(render(&c, "petstore", "nope", base, true).is_none());
     }
 
     #[test]

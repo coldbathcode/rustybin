@@ -570,6 +570,120 @@ async fn public_mode_and_control_auth() {
 }
 
 #[tokio::test]
+async fn secrets_are_hidden_from_callers_who_cannot_change_mocks() {
+    let mut config = crate::test_support::jwt_config();
+    config.mocks_sample = false;
+    let app = test_app_with(test_state_with(config));
+    let console = format!(
+        "Bearer {}",
+        crate::test_support::control_jwt(Some("console"))
+    );
+    let admin = format!("Bearer {}", crate::test_support::control_jwt(Some("admin")));
+    let secrets = ["sekret-key", "sekret-token", "hunter2", "YW5uOmh1bnRlcjI"];
+    let security = json!({
+        "enabled": true,
+        "api_key": { "keys": ["sekret-key"] },
+        "bearer": { "tokens": ["sekret-token"] },
+        "basic": { "users": { "ann": "hunter2" } },
+    });
+    let mut create_req = json_request(
+        "POST",
+        "/_rustybin/mocks",
+        &json!({ "spec": ORDERS, "security": security }),
+    );
+    create_req
+        .headers_mut()
+        .insert("authorization", admin.parse().expect("header"));
+    let (status, _, created) = send(&app, create_req).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["secrets_hidden"], false);
+    assert_eq!(
+        created["settings"]["security"]["basic"]["users"]["ann"],
+        "hunter2"
+    );
+
+    let reads = [
+        "/_rustybin/mocks/orders-api",
+        "/_rustybin/mocks/orders-api/report",
+        "/_rustybin/mocks/orders-api/operations/createOrder",
+        "/_rustybin/mocks/orders-api/operations/createOrder/sample",
+        "/_rustybin/mocks/orders-api/export",
+        "/_rustybin/mocks/export",
+        "/_rustybin/mocks/orders-api/collections/curl",
+        "/_rustybin/mocks/orders-api/collections/postman",
+    ];
+    for uri in reads {
+        let (status, _, body) =
+            send(&app, req("GET", uri, &[("authorization", &console)], None)).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        let text = body.to_string();
+        for secret in secrets {
+            assert!(
+                !text.contains(secret),
+                "{uri} shows {secret} to a console token: {text}"
+            );
+        }
+        // The admin token sees the real API key (the spec's only scheme).
+        let (status, _, body) =
+            send(&app, req("GET", uri, &[("authorization", &admin)], None)).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        assert!(body.to_string().contains("sekret-key"), "{uri}: {body}");
+    }
+
+    let (_, _, d) = send(
+        &app,
+        req(
+            "GET",
+            "/_rustybin/mocks/orders-api",
+            &[("authorization", &console)],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(d["secrets_hidden"], true);
+    assert_eq!(
+        d["settings"]["security"]["api_key"]["keys"],
+        json!(["<redacted>"])
+    );
+    assert_eq!(
+        d["settings"]["security"]["basic"]["users"],
+        json!({ "ann": "<redacted>" })
+    );
+    assert_eq!(d["credentials"]["bearer"]["tokens"], json!(["<redacted>"]));
+    assert_eq!(d["credentials"]["hidden"], true);
+    let (_, _, op) = send(
+        &app,
+        req(
+            "GET",
+            "/_rustybin/mocks/orders-api/operations/createOrder",
+            &[("authorization", &console)],
+            None,
+        ),
+    )
+    .await;
+    assert!(
+        op["sample_request"]["headers"]
+            .as_array()
+            .expect("headers")
+            .contains(&json!(["X-Key", "<api-key>"])),
+        "{op}"
+    );
+
+    // Redacted settings cannot be saved back.
+    let mut patch = json_request(
+        "PATCH",
+        "/_rustybin/mocks/orders-api",
+        &json!({ "security": d["settings"]["security"] }),
+    );
+    patch
+        .headers_mut()
+        .insert("authorization", admin.parse().expect("header"));
+    let (status, _, body) = send(&app, patch).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("hidden secret"), "{body}");
+}
+
+#[tokio::test]
 async fn sample_security_with_idp_tokens() {
     let app = test_app();
     let (status, _, _) = send(

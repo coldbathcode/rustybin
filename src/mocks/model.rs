@@ -12,6 +12,10 @@ pub const MAX_RULES: usize = 20;
 pub const MAX_HEADERS: usize = 20;
 /// Longest `matches` regular expression.
 pub const MAX_PATTERN_LEN: usize = 256;
+/// Stands for a configured secret (API key, bearer token, basic password) in
+/// settings shown to callers who may not change the mock. Never accepted as
+/// a value, so a redacted document cannot be saved back by mistake.
+pub const REDACTED: &str = "<redacted>";
 
 /// Where response bodies come from by default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -318,7 +322,32 @@ fn check_condition_key(key: &str) -> bool {
             .any(|p| key.strip_prefix(p).is_some_and(|rest| !rest.is_empty()))
 }
 
+impl SecuritySettings {
+    /// The settings with every secret replaced by [`REDACTED`] (user names,
+    /// header names and JWT checks stay).
+    pub fn redacted(&self) -> Self {
+        let mut s = self.clone();
+        for k in &mut s.api_key.keys {
+            *k = REDACTED.into();
+        }
+        for t in &mut s.bearer.tokens {
+            *t = REDACTED.into();
+        }
+        for p in s.basic.users.values_mut() {
+            *p = REDACTED.into();
+        }
+        s
+    }
+}
+
 impl MockSettings {
+    /// The settings with the security secrets redacted.
+    pub fn redacted(&self) -> Self {
+        let mut s = self.clone();
+        s.security = self.security.redacted();
+        s
+    }
+
     /// Reject settings that cannot work (bad headers, statuses, patterns,
     /// limits). Mismatches with the spec are deploy-check findings instead.
     pub fn validate(&self, limits: &SettingsLimits) -> Result<(), String> {
@@ -354,6 +383,19 @@ impl MockSettings {
         }
         if s.basic.users.len() > 50 {
             return Err("security.basic.users: at most 50 users".into());
+        }
+        let redacted = [
+            ("api_key.keys", s.api_key.keys.iter().any(|k| k == REDACTED)),
+            (
+                "bearer.tokens",
+                s.bearer.tokens.iter().any(|t| t == REDACTED),
+            ),
+            ("basic.users", s.basic.users.values().any(|p| p == REDACTED)),
+        ];
+        if let Some((what, _)) = redacted.iter().find(|(_, hit)| *hit) {
+            return Err(format!(
+                "security.{what}: {REDACTED:?} stands for a hidden secret; load the mock with admin rights and save the real values"
+            ));
         }
         if self.operations.len() > 1000 {
             return Err("at most 1000 operation entries".into());
@@ -420,6 +462,23 @@ mod tests {
         max_body_bytes: 1024,
         max_rules: 2,
     };
+
+    #[test]
+    fn redacted_hides_secrets_and_cannot_be_saved() {
+        let s = MockSettings::default();
+        let r = s.redacted();
+        assert_eq!(r.security.api_key.keys, vec![REDACTED]);
+        assert_eq!(r.security.bearer.tokens, vec![REDACTED]);
+        assert_eq!(
+            r.security.basic.users.get("demo").map(String::as_str),
+            Some(REDACTED)
+        );
+        assert_eq!(r.security.api_key.header, s.security.api_key.header);
+        assert_eq!(r.responses, s.responses);
+        assert!(s.validate(&LIMITS).is_ok());
+        let err = r.validate(&LIMITS).expect_err("redacted values rejected");
+        assert!(err.contains("hidden secret"), "{err}");
+    }
 
     #[test]
     fn defaults_round_trip() {

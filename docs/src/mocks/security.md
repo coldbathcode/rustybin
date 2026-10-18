@@ -132,11 +132,24 @@ pick a fixed mode: it protects **every** operation (the spec's requirements, and
 
 Setting `security` replaces the whole section, so list every credential you want
 to keep. The mock's details (`GET /_rustybin/mocks/{name}`, the console's Security
-tab) show them under `credentials`, with a hint per scheme and the token endpoint;
-basic passwords are not shown there. In `rustybin.yaml`, write secrets as
-`${ENV_VAR}` references ([environment variables](config.md#environment-variables)).
+tab) show them under `credentials`, with a hint per scheme and the token endpoint.
+In `rustybin.yaml`, write secrets as `${ENV_VAR}` references
+([environment variables](config.md#environment-variables)).
 The deploy report's sample requests and the console's "Try it" already carry the
 demo credentials.
+
+Only callers who could change the mock see its secrets: the admin token or the
+`admin` scope, or anyone when the instance has no admin token (outside public
+mode). Everyone else, for example a `console` token, gets `"<redacted>"` for every
+API key, bearer token and basic password in `settings` and `credentials`, and
+`<api-key>`, `<token>` or `<base64 user:password>` placeholders in sample requests,
+the deploy report, collections and YAML exports. The details then carry
+`"secrets_hidden": true`. `"<redacted>"` is never accepted as a value, so a redacted
+document cannot be saved back by mistake.
+
+```hurl
+{{#include ../../examples/mocks/security.hurl:credentials_hidden}}
+```
 
 ## Public operations
 

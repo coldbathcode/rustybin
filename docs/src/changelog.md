@@ -50,7 +50,8 @@ API, AI and agent gateway demos.
   `Prefer` header, request validation (warn or enforce), deploy checks with a
   report, drafts, rollback, an on/off switch, captured traffic, and mocked security
   from the spec (API key, basic, bearer, OAuth 2.0 / OpenID Connect scopes against
-  the built-in identity provider, mTLS) or a fixed scheme. Managed in the console,
+  the built-in identity provider, mTLS) or a fixed scheme, its secrets shown only to
+  callers who may change the mock. Managed in the console,
   through `/_rustybin/mocks*`, from `rustybin.yaml` (`RUSTYBIN_CONFIG_FILE`,
   `--config`, reload on `SIGHUP`, JSON Schema for editors) or a directory of specs
   (`RUSTYBIN_MOCKS_DIR`), and with the `rustybin mock` CLI. A `petstore` sample is

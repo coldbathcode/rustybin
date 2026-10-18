@@ -45,6 +45,7 @@ export function tryPanel(ctx) {
   const respEl = h('div');
   const bodyDetails = h('details', { class: 'disclosure' }, h('summary', null, 'Body'), bodyIn);
   const tokenBtn = h('button', { class: 'btn sm', type: 'button', hidden: true }, icon('token'), 'Add a token from the built-in IdP');
+  const credHint = h('span', { class: 'hint' }, 'Demo credentials are prefilled when mocked security is on.');
 
   function request() {
     const p = pathIn.value.trim() || '/';
@@ -85,6 +86,9 @@ export function tryPanel(ctx) {
     preferSel.appendChild(h('option', { value: 'dynamic=true' }, 'Generated data (dynamic=true)'));
     const det = ctx.detail();
     tokenBtn.hidden = !(det && det.security && det.security.enabled && ['spec', 'bearer', 'jwt'].includes(det.security.mode));
+    credHint.textContent = det && det.secrets_hidden
+      ? 'The demo credentials are hidden from you: replace the <api-key>, <token> or <base64 user:password> placeholders.'
+      : 'Demo credentials are prefilled when mocked security is on.';
   }
 
   preferSel.addEventListener('change', () => setHeader('Prefer', preferSel.value));
@@ -122,7 +126,7 @@ export function tryPanel(ctx) {
       h('div', { class: 'row nowrap' }, methodSel, baseEl),
       h('div', { class: 'row nowrap' }, h('div', { class: 'grow' }, pathIn), sendBtn,
         copyButton(() => toCurl(request()), { label: 'Copy as curl', toast: 'curl command copied' })),
-      h('div', { class: 'grid grid-2' }, h('label', { class: 'field' }, h('span', null, 'Pick a response (Prefer header)'), preferSel), h('div', { class: 'field' }, h('span', null, 'Credentials'), h('div', null, tokenBtn), h('span', { class: 'hint' }, 'Demo credentials are prefilled when mocked security is on.'))),
+      h('div', { class: 'grid grid-2' }, h('label', { class: 'field' }, h('span', null, 'Pick a response (Prefer header)'), preferSel), h('div', { class: 'field' }, h('span', null, 'Credentials'), h('div', null, tokenBtn), credHint)),
       h('details', { class: 'disclosure', open: true }, h('summary', null, 'Headers'), hdrs.el),
       bodyDetails,
       h('p', { class: 'tiny muted', style: { margin: 0 } }, 'Ctrl+Enter sends. The request is sent from this browser, exactly like the curl command.'))),
@@ -193,12 +197,13 @@ function usersEditor(users) {
   };
 }
 
-/** Example header lines for a scheme of credentials.schemes. */
-function useLines(scheme, sec) {
-  const key = (sec.api_key.keys || [])[0] || '<key>';
+/** Example header lines for a scheme of credentials.schemes (placeholders
+ * when the secrets are hidden from this caller). */
+function useLines(scheme, sec, hidden) {
+  const key = hidden ? '<api-key>' : (sec.api_key.keys || [])[0] || '<key>';
   const user = Object.entries(sec.basic.users || {})[0];
-  const basic = user ? 'Authorization: Basic ' + btoa(user[0] + ':' + user[1]) : null;
-  const bearer = (sec.bearer.tokens || [])[0];
+  const basic = !user ? null : 'Authorization: Basic ' + (hidden ? '<base64 user:password>' : btoa(user[0] + ':' + user[1]));
+  const bearer = (sec.bearer.tokens || [])[0] && (hidden ? '<token>' : sec.bearer.tokens[0]);
   switch (scheme.type) {
     case 'api_key':
       if (scheme.in === 'query') return ['?' + scheme.name + '=' + key];
@@ -249,7 +254,9 @@ export function securityPanel(ctx) {
     dirty = false;
     const sec = d.settings.security;
     const creds = d.credentials;
-    const ro = ctx.readOnly;
+    // Hidden secrets come back as "<redacted>": nothing here can be saved.
+    const hidden = !!d.secrets_hidden;
+    const ro = ctx.readOnly || hidden;
     const sw = toggleSwitch('Mocked security', sec.enabled, (v) => setEnabled(v, sw), { disabled: ro });
     // Credentials form.
     const modeSel = select(MODES.map(([v, l]) => [v, l]), sec.mode, { 'aria-label': 'Security mode' });
@@ -307,7 +314,7 @@ export function securityPanel(ctx) {
     });
     // How to call it.
     const schemes = (creds.schemes || []).map((s) => {
-      const lines = useLines(s, sec);
+      const lines = useLines(s, sec, hidden);
       return h('div', { class: 'scheme' },
         h('div', { class: 'row' }, icon('lock'), h('strong', { class: 'mono' }, s.name), badge(String(s.type).replace(/_/g, ' '), 'violet'), s.bearer_format ? badge(s.bearer_format, 'outline') : null),
         s.hint ? h('p', { class: 'small muted', style: { margin: '4px 0' } }, s.hint) : null,
@@ -345,6 +352,7 @@ export function securityPanel(ctx) {
           h('div', { class: 'stack-sm' },
             schemes.length ? schemes : h('p', { class: 'small muted' }, 'No scheme applies (the spec declares none and the mode is "spec").'),
             tokenEl,
+            hidden ? notice('', 'The keys, tokens and passwords of this mock are hidden: only callers who can change it (admin token or admin scope) see them.') : null,
             sec.enabled ? null : notice('', 'Security is off, so these credentials are not checked yet.')))),
       card('Per-operation access', { hint: 'public operations skip the check; changes go to the draft', flush: true },
         h('div', { class: 'table-wrap' }, h('table', { class: 'table' },

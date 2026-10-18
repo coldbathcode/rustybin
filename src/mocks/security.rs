@@ -328,6 +328,17 @@ impl Compiled {
     /// Headers and query parameters that satisfy security for `op`
     /// (demo credentials), for samples, Try it and curl commands.
     pub fn sample_credentials(&self, op: &Operation) -> (Pairs, Pairs) {
+        self.credentials_for(op, true)
+    }
+
+    /// [`Self::sample_credentials`] with placeholders (`<api-key>`,
+    /// `Basic <base64 user:password>`, `Bearer <token>`) instead of the
+    /// configured secrets, in the same order.
+    pub fn placeholder_credentials(&self, op: &Operation) -> (Pairs, Pairs) {
+        self.credentials_for(op, false)
+    }
+
+    fn credentials_for(&self, op: &Operation, reveal: bool) -> (Pairs, Pairs) {
         let sec = &self.settings.security;
         let mut headers = Vec::new();
         let mut query = Vec::new();
@@ -340,12 +351,23 @@ impl Compiled {
         {
             return (headers, query);
         }
-        let key = sec.api_key.keys.first().cloned().unwrap_or_default();
+        let key = match sec.api_key.keys.first() {
+            Some(_) if !reveal => "<api-key>".to_string(),
+            k => k.cloned().unwrap_or_default(),
+        };
         let basic_header = sec.basic.users.iter().next().map(|(u, p)| {
-            let enc = base64::engine::general_purpose::STANDARD.encode(format!("{u}:{p}"));
+            let enc = if reveal {
+                base64::engine::general_purpose::STANDARD.encode(format!("{u}:{p}"))
+            } else {
+                "<base64 user:password>".to_string()
+            };
             ("Authorization".to_string(), format!("Basic {enc}"))
         });
-        let token = sec.bearer.tokens.first().cloned();
+        let token =
+            sec.bearer
+                .tokens
+                .first()
+                .map(|t| if reveal { t.clone() } else { "<token>".into() });
         match sec.mode {
             SecurityMode::ApiKey => headers.push((sec.api_key.header.clone(), key)),
             SecurityMode::Basic => headers.extend(basic_header),
@@ -385,8 +407,15 @@ impl Compiled {
     }
 
     /// What a client needs to know to call the mock (shown in the console).
-    pub fn credentials_summary(&self) -> Value {
-        let sec = &self.settings.security;
+    /// Without `reveal` the secrets are [`super::model::REDACTED`].
+    pub fn credentials_summary(&self, reveal: bool) -> Value {
+        let redacted;
+        let sec = if reveal {
+            &self.settings.security
+        } else {
+            redacted = self.settings.security.redacted();
+            &redacted
+        };
         let schemes: Vec<Value> = match sec.mode {
             SecurityMode::Spec => self
                 .spec
@@ -431,6 +460,7 @@ impl Compiled {
             "bearer": { "tokens": sec.bearer.tokens },
             "jwt": sec.jwt,
             "token_endpoint": "/oauth/token",
+            "hidden": !reveal,
         })
     }
 }
