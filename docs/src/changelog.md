@@ -109,7 +109,7 @@ API, AI and agent gateway demos.
   Rustybin generates and persists its own demo PKI (the old script produced a CA
   that the server replaced, which broke mTLS and HTTPS verification in containers).
 - `tests/smoke_test.sh` was replaced by the documentation examples
-  (`docs/examples/run.sh`).
+  (`docs/examples/run.sh`), which need Hurl 8 (CI pins 8.0.1).
 - The Docker image runs as an unprivileged user (uid 10001) and supports a
   read-only root filesystem; `docker-compose.yml` keeps the demo PKI in a named
   volume, and `fly.toml` uses ports 8080 / 8443 and the readiness probe.

@@ -4,7 +4,7 @@
 #   docs/examples/run.sh                 # build, start on 18800-18802, run all
 #   docs/examples/run.sh ai/openai.hurl  # only some files (paths relative to docs/examples)
 #
-# Needs: hurl (https://hurl.dev), curl. Optional: grpcurl and websocat for the
+# Needs: hurl 8 (https://hurl.dev), curl. Optional: grpcurl and websocat for the
 # gRPC and WebSocket shell examples (skipped with a notice when missing), jq
 # for the TLS client certificate example.
 #

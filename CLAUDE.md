@@ -2,6 +2,22 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
+## Next up: hosted self-service mocks
+
+All of the next build work is [docs/plans/hosted-mocks.md](docs/plans/hosted-mocks.md): visitors on the hosted
+demo create their own mocks without an admin token. Nothing of it is built yet; the decisions are settled (its
+section 15), so start at phase 0 and work through the phases in order. In short:
+
+- Ownership by a manage token per visit (`X-Rustybin-Mock-Token`, stored hashed); shared-mode keys own mocks directly.
+- Visitor mocks are served only on their own domain, `<name>.rustybin-mock.dev`, with safety headers, a header
+  denylist and a media type allowlist.
+- Time per visit: 1 hour, extendable to 3 hours, then an email address (a marketing lead, with a separate consent
+  checkbox, sent to a webhook, never logged) for up to 6 hours of use per UTC day.
+- Off by default (also in public mode), one instance, a come-back page when busy, no `stateful` mode for visitors.
+
+The OpenAPI mocks plan (`docs/plans/openapi-mocks.md`) is complete. Keep the hosted plan's status line and its
+"As built" section current as phases land, and update `docs/src/roadmap.md` when a phase ships.
+
 ## Commands
 
 ```bash

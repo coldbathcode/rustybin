@@ -17,7 +17,7 @@ cargo fmt
 cargo clippy --all-targets -- -D warnings
 cargo test                                   # unit tests + tests/integration.rs, a few seconds
 RUSTYBIN_UPDATE_README=1 cargo test readme_endpoints   # regenerate the README endpoint tables
-docs/examples/run.sh                         # the documentation examples (needs hurl)
+docs/examples/run.sh                         # the documentation examples (needs hurl 8)
 mdbook build docs                            # the documentation site (needs mdbook)
 ```
 

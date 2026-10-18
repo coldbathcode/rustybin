@@ -4,7 +4,7 @@ Status: phases 0 to 6 implemented (2026-10-17); mock secrets hidden from read-on
 (2026-10-18); the remaining gaps from an audit against sections 3 to 10 closed (2026-10-18: safe
 reloads, failed file mocks listed with their error, `406`, `insufficient_scope` challenges, the reserved
 `/_rustybin` sub path, mock metrics, more deploy checks, captured path parameters, draft diff count,
-delay slider). Hosted self-service (open question 1) is drafted in
+delay slider). Hosted self-service (open question 1) is the next build, planned in
 [hosted-mocks.md](hosted-mocks.md). See section 12 for
 where the build differs from this plan. Last updated: 2026-10-18.
 

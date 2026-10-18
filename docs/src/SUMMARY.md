@@ -67,3 +67,4 @@
 
 - [Contributing](contributing.md)
 - [Changelog](changelog.md)
+- [Roadmap](roadmap.md)
