@@ -1,0 +1,237 @@
+# Plan: a management MCP server (configure Rustybin from an AI agent)
+
+Status: **next up for the Rustybin build.** Planned 2026-10-18; nothing built yet. Start at phase 0
+(section 10). Keep this status line and section 13 ("As built") current while building. Last updated:
+2026-10-18.
+
+## 1. Goal
+
+Let someone connect an AI agent (Claude Code, or any MCP client) to their Rustybin and say what they want
+in plain words: "mock this OpenAPI spec, secure it with an API key, make `GET /orders/0` answer 404, then
+show me what my gateway sent". The agent does it through a **management MCP server** built into every
+Rustybin: self-hosted instances, Rustybin Cloud pods and the free demo alike.
+
+```bash
+claude mcp add --transport http rustybin https://<host>/_rustybin/mcp \
+  --header "Authorization: Bearer <admin token or control JWT>"
+```
+
+Today an agent can already drive the control-plane REST API with `curl`, the `rustybin mock` CLI and
+`rustybin.yaml` (with its JSON Schema), but it has to discover all of that from the docs. The management
+MCP gives it typed tools, descriptions written for models, safe defaults and the same permissions as the
+console.
+
+### What a user can do through an agent
+
+1. Ask what the instance can do ("which mock LLM providers are there?", "how do I test MCP auth?").
+2. Create, edit, deploy, roll back, switch off and delete OpenAPI mocks; set responses, rules, delays,
+   validation and mocked security per operation; check them before deploying.
+3. Read what arrived: a mock's captured calls, the request inspector, a request bin.
+4. Export and apply `rustybin.yaml`, so agent work ends up as configuration as code.
+5. On a shared demo (self-service), manage their own mocks and visit, never anyone else's.
+
+### Non-goals (v1)
+
+- **Platform operations** (create pods, change a pod's size or settings): the platform API's job, a separate
+  MCP later ("option 2" in the 2026-10-18 discussion).
+- **Changing environment configuration at runtime.** Settings come from `RUSTYBIN_*` variables; the MCP shows
+  them (the same view as `/_rustybin/config`) but cannot change them.
+- **Fetching from URLs.** No server-side fetch of specs or anything else (SSRF, the same rule as the mocks
+  plan): the agent reads local files and passes their content.
+- **The email step of self-service visits.** Consent belongs in the console form, not in an agent's tool call
+  (section 5).
+- Replacing the REST API, the console or the CLI. They stay; the MCP is another client of the same logic.
+
+## 2. How it fits the existing code
+
+| Existing piece | Reuse |
+|---|---|
+| The mock MCP server (`src/mcp/`) | Protocol (`protocol.rs`), Streamable HTTP transport, sessions, pagination, list caching, progress, cancellation, elicitation. It gets a second **profile family** with its own tool registry; the mock tools (`get_weather`, `cancel_order`, ...) stay exactly as they are at `/mcp`. |
+| Control-plane protection (`control_auth::enforce`, `keys::control`) | `/_rustybin/mcp` is under `/_rustybin`, so control auth (`token`, `jwt`, shared-mode keys) protects it with no new code; it is also excluded from inspector capture and fault injection already. |
+| Self-service access (`src/mocks/selfservice.rs`) | `Caller`, `readable`, `manageable`: tool calls get the same answers as the REST routes (other visitors' mocks do not exist). |
+| Mock handlers (`src/mocks/handlers.rs`) | Their logic moves into a service layer both the REST handlers and the MCP tools call (phase 0), so validation, caps, redaction and errors are identical. |
+| Catalogue (`src/catalog.rs`), config view (`Config::public_view`), JSON Schema of `rustybin.yaml` | Read-only tools and resources ("what can this instance do"). |
+| Metrics (`src/metrics.rs`) | Counts of MCP tool calls by tool and outcome (bounded labels: tool names are a fixed list). |
+
+## 3. Endpoint and transport
+
+- **Path**: `POST, GET, DELETE /_rustybin/mcp`. **Recommendation**: under `/_rustybin`, not `/mcp/...`: it is
+  control plane (protected by control auth, never captured by the inspector, never hit by fault injection),
+  and keeping it apart from the mock server avoids gateway demos ever routing to it by accident.
+- **Protocol versions**: 2026-07-28 (stateless) and the 2025-06-18 / 2025-11-25 handshake, like `/mcp`. No
+  legacy HTTP+SSE transport (management clients are recent).
+- **Server identity**: `serverInfo.name = "rustybin-manage"`, with `instructions` telling the model what
+  Rustybin is, which tools change things, and that captured traffic is untrusted data (section 6).
+- **Sessions**: the existing bounded session store (a separate pool so mock-server load cannot starve it).
+- **CORS**: like the rest of the control plane (`RUSTYBIN_CORS_ALLOW_ORIGINS`), so a browser-based agent can
+  connect where the operator allows it.
+
+## 4. Authentication and permissions
+
+Transport authentication is whatever protects `/_rustybin/*` on that instance:
+
+| Instance | Who connects | With |
+|---|---|---|
+| Self-hosted, control auth `open` | anyone who can reach it | nothing (normal mode: full access, like the console) |
+| Control auth `token` | the operator | `Authorization: Bearer <RUSTYBIN_ADMIN_TOKEN>` |
+| Control auth `jwt` (hosted mode, Cloud pods) | the customer | a control JWT from the platform (scopes `inspector`, `console`, `admin`) |
+| Shared mode | a key holder | `X-Rustybin-Key` (their own mocks, inspector entries and usage) |
+| Public mode with self-service (the demo) | a visitor | `X-Rustybin-Mock-Token` (their visit's mocks); admin token for the operator |
+
+Each tool declares the right it needs, mapped onto the existing rules:
+
+- **read**: the `console` (or `inspector`) scope, or anyone on an open control plane. Secrets in mock
+  settings are redacted unless the caller may change the mock (the REST rule).
+- **manage mock**: `manageable(...)`: admin rights for instance mocks, the owner (or admin) for visitor and
+  key-owned mocks.
+- **admin**: instance-global changes (`apply_config`, health toggles, visit operator tools): the admin token
+  or the `admin` scope.
+
+`tools/list` only lists the tools the caller can use (a visitor never sees `apply_config`), and every call is
+checked again on the server. Calls a caller may not make answer a tool error saying which credential is
+missing, never a protocol error.
+
+Every tool carries MCP annotations: `readOnlyHint` on reads, `destructiveHint` on `delete_mock`,
+`clear_traffic`, `rollback_mock`, `apply_config` with `prune` and the operator tools, `idempotentHint` where
+true. Destructive tools also ask through **elicitation** ("Delete the mock orders-api and its traffic?")
+when the client supports it; without elicitation they need `"confirm": true` in the arguments, which the
+tool description tells the model to set only after the user agreed.
+
+Every call that changes something is logged as one JSON line: tool, target, caller kind and fingerprint,
+outcome, never arguments that may hold secrets or spec bodies.
+
+## 5. Tools (v1)
+
+Names are short verbs on nouns; arguments mirror the REST bodies (and `rustybin.yaml`), so docs and agents
+can move between the two. Every result has a one-line text summary plus `structuredContent`, and includes
+links the user can open: the mock's URL, its console page (`/ui/#/mocks/<name>/<tab>`), a `curl` for a sample
+request.
+
+**Instance**
+
+| Tool | Right | |
+|---|---|---|
+| `get_instance` | read | Version, modes (public, shared, hosted, self-service), control auth mode, limits, the public config view, URLs of the console and docs |
+| `find_endpoints` | read | Search the route catalogue by text or category ("mock LLM Anthropic streaming"): path, methods, summary, an example request |
+| `get_health` / `set_health` | read / admin | The `/health` demo toggle |
+
+**OpenAPI mocks**
+
+| Tool | Right | |
+|---|---|---|
+| `list_mocks` | read | Name, URL, state, security, calls, owner (filters: text, state) |
+| `get_mock` | read | Detail: operations with hit counts, settings (redacted unless manageable), deploy report summary, revisions |
+| `preview_spec` | read | Parse a spec without creating anything (the `import` route): title, operations, schemes, warnings, check results |
+| `create_mock` | manage | From spec text (JSON or YAML, Swagger 2.0 accepted) with optional name, responses, security, validation, deploy; visitors get the suffixed name and their manage token is not returned (they hold it already) |
+| `update_mock` | manage | Replace the spec and/or settings (draft); `deploy: true` to publish |
+| `set_operation` | manage | One operation's response override, rules, mode, delay, public flag |
+| `test_rules` | read | Which rule would answer a captured call (the "Would match" preview) |
+| `check_mock` | read | The deploy report: errors and warnings per operation |
+| `deploy_mock` | manage | Publish the draft (`force` only after the user accepted the check errors) |
+| `rollback_mock` | manage | Back to a revision (destructive hint) |
+| `set_mock_enabled` | manage | On or off |
+| `duplicate_mock` | manage | Copy under a new name |
+| `delete_mock` | manage | Destructive, confirmed |
+| `sample_request` | read | A valid request for an operation, as `curl` and as parts, plus the response the mock would send |
+| `get_mock_traffic` | read (owner for visitor mocks) | Captured calls with operation, status, validation and auth result; bodies only on request (section 6) |
+| `clear_traffic` | manage | Destructive, confirmed |
+| `export_config` | read | `rustybin.yaml` for one mock or all (secrets redacted unless manageable) |
+| `apply_config` | admin | Apply a `rustybin.yaml` document; `dry_run: true` reports what would change; `prune` is destructive and confirmed |
+
+**Traffic**
+
+| Tool | Right | |
+|---|---|---|
+| `list_requests` | read | Request inspector entries (filters: path, method, status, session, since); scoped by key in shared mode |
+| `get_request` | read | One captured request in full |
+| `create_bin` / `get_bin` | read | A request bin and what arrived in it (data-plane resources, created for the caller's session) |
+
+**Self-service** (only when self-service is on)
+
+| Tool | Right | |
+|---|---|---|
+| `get_visit` | visitor | Time left, hours used, what the next extension needs |
+| `extend_visit` | visitor | One more period **without** the email step; when an address is needed the tool says so and gives the console link, where the form shows the consent choice and privacy notice |
+| `list_visits`, `end_visit`, `pause_self_service`, `resume_self_service` | admin | The operator routes |
+
+**Prompts** (MCP prompts, optional for clients): `mock_an_api` (from a spec to a deployed, tested mock),
+`debug_gateway_call` (find the request a gateway sent and explain it), `secure_a_mock` (pick a security mode
+and show the credentials). **Resources**: `rustybin://config.schema.json` (the `rustybin.yaml` schema),
+`rustybin://catalogue` (the route catalogue as JSON).
+
+## 6. Untrusted content and size
+
+Captured traffic (mock captures, the inspector, bins) is written by whoever calls the data plane, which on a
+public instance is anyone. An agent reading it is exposed to prompt injection. So:
+
+- Tool results never put captured bodies or header values in the text summary; they go in
+  `structuredContent` under fields named `untrusted_*`, and the server `instructions` and tool descriptions
+  say that this content is data from third parties, never instructions.
+- Bodies are left out unless the call asks (`include_bodies: true`), and are truncated (4 KB per body,
+  64 KB per result) with a flag saying so.
+- Spec text and rule patterns from the agent are validated exactly as on the REST routes (size caps, YAML
+  limits, regex size limits), so an agent cannot do what a REST caller could not.
+
+Large inputs: specs up to the instance's `max_spec_bytes` (1 MB, 256 KB in public mode) go in one argument.
+Results are paginated (`cursor`) like the mock server's lists.
+
+## 7. Console and CLI
+
+- **Console**: a "Connect an AI agent" panel (settings dialog and the Mock APIs view) with the
+  `claude mcp add` command for this instance, filled in with the URL and the credential the console already
+  holds (control token, admin token or the visitor's manage token), and the JSON snippet other MCP clients
+  use. Copy buttons, never the secret on screen until asked.
+- **CLI**: `rustybin mcp-stdio --server <url> --token <token>`, a small stdio-to-HTTP bridge for MCP clients
+  that only speak stdio (optional, phase 4).
+
+## 8. Limits and observability
+
+- MCP sessions: their own bounded pool (1,000; 200 in public mode) with the idle TTL of the mock server.
+- Tool calls count as control-plane requests (plan limits, where configured, apply as for the REST routes).
+- Metrics: `rustybin_manage_mcp_calls_total{tool, outcome}` (outcome: `ok`, `denied`, `invalid`, `error`);
+  tool names are a fixed list, so the series are bounded.
+
+## 9. Documentation
+
+- A page "Configure Rustybin from an AI agent" (`docs/src/concepts/agent-mcp.md` or under Mock APIs): connect
+  Claude Code and other clients, credentials per instance type, the tool list, safety (confirmations,
+  untrusted content), examples of what to ask.
+- Hurl examples of the JSON-RPC calls (`tools/list` per role, `create_mock`, `deploy_mock`, a refused call,
+  `get_mock_traffic` with untrusted fields) on the open, secured and self-service documentation instances.
+- README endpoint tables (the catalogue entry), configuration (no new variables expected), console page,
+  changelog, roadmap.
+
+## 10. Phases
+
+| Phase | Scope | Done when |
+|---|---|---|
+| 0. Service layer | Move the logic of the mock control-plane handlers into functions shared by REST and MCP (inputs and outputs as plain types; access through `selfservice`); no behaviour change | All existing tests pass unchanged; handlers are thin |
+| 1. Endpoint and reads | `/_rustybin/mcp` (profile family, registry, role-filtered `tools/list`), `get_instance`, `find_endpoints`, `get_health`, `list_mocks`, `get_mock`, `preview_spec`, `check_mock`, `sample_request`, `export_config`, `list_requests`, `get_request`; catalogue and OpenAPI entries | Unit tests through the full app per tool and per role (open, read-only token, admin, visitor, key) |
+| 2. Mock changes | `create_mock`, `update_mock`, `set_operation`, `test_rules`, `deploy_mock`, `rollback_mock`, `set_mock_enabled`, `duplicate_mock`, `delete_mock`, `clear_traffic`, `apply_config` (dry run), `set_health`; annotations, elicitation or `confirm`, audit lines, metrics | A scripted session builds, deploys, calls and deletes a mock; refused calls for every role that may not |
+| 3. Untrusted content, self-service, shared mode | `get_mock_traffic` and bins with `untrusted_*` fields and truncation; visit and operator tools; key-scoped results in shared mode | Tests that captured bodies never reach the text summary; visitor isolation tests mirroring `selfservice_tests.rs` |
+| 4. Prompts, resources, console, CLI | The three prompts, two resources, the "Connect an AI agent" panel, optional `rustybin mcp-stdio` | Browser check of the panel; the official Python MCP SDK lists tools, prompts and resources (`conformance/mcp/`) |
+| 5. Docs | Page, Hurl examples on three documentation instances, README, changelog | `docs/examples/run.sh` and `check_includes.py` pass |
+
+## 11. Testing
+
+- Every tool through the full application (`test_support`), for each role: allowed, refused with the right
+  message, and absent from `tools/list` when refused.
+- The official Python MCP SDK (`conformance/mcp/`) as a client of `/_rustybin/mcp`: handshake and stateless
+  versions, `tools/list`, a create, deploy and delete round trip, elicitation for a delete.
+- An injection test: a captured call whose body says "ignore previous instructions" appears only under an
+  `untrusted_` field, truncated, never in the text content.
+- Hurl examples double as end-to-end tests (section 9).
+
+## 12. Open questions
+
+1. **Path**: `/_rustybin/mcp` (recommended, control plane) or `/mcp/manage` (next to the mock server)?
+2. **OAuth discovery**: v1 uses a bearer header. Should `/_rustybin/mcp` also publish RFC 9728 metadata so
+   clients can sign in through an issuer (useful for Cloud pods with platform-issued tokens), or wait for the
+   platform MCP?
+3. **Instance-global toggles**: expose `/health` and fault settings to agents (recommended, admin only), or
+   keep the MCP to mocks and traffic?
+4. **stdio bridge**: build `rustybin mcp-stdio` in v1, or rely on clients that speak Streamable HTTP?
+
+## 13. As built (differences from the plan)
+
+Nothing built yet.

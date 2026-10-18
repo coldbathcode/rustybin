@@ -2,6 +2,28 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
+## Next up: a management MCP server (to build)
+
+The next build is [docs/plans/management-mcp.md](docs/plans/management-mcp.md): an MCP server at `/_rustybin/mcp`
+so people can configure their Rustybin from an AI agent (`claude mcp add --transport http rustybin
+https://<host>/_rustybin/mcp --header "Authorization: Bearer <token>"`). Nothing is built yet; start at phase 0 and
+work through the phases in order. In short:
+
+- It is not the mock MCP server at `/mcp` (fake demo tools, unchanged): a second profile family on the same protocol
+  and transport code in `src/mcp/`, with its own tool registry, under the control plane (control auth protects it).
+- Tools for the instance, OpenAPI mocks (create, edit, check, deploy, roll back, delete), traffic (mock captures,
+  inspector, bins), `rustybin.yaml` export and apply, and self-service visits. They call a service layer shared with
+  the REST handlers (phase 0), so permissions, redaction, caps and errors are identical; `tools/list` shows only
+  what the caller may use.
+- Destructive tools carry MCP annotations and ask for confirmation (elicitation, else `confirm: true`); every change
+  is logged without secrets; captured traffic is returned only under `untrusted_*` fields, truncated, never in the
+  text summary (prompt injection).
+- Not in v1: platform operations (pods), runtime changes to `RUSTYBIN_*` settings, server-side URL fetches, the
+  self-service email step (consent stays in the console).
+
+Keep the plan's status line and its "As built" section current as phases land, and move the roadmap entry in
+`docs/src/roadmap.md` when it ships.
+
 ## Hosted self-service mocks (built)
 
 [docs/plans/hosted-mocks.md](docs/plans/hosted-mocks.md) is built (phases 0 to 7, 2026-10-18; its section 16 lists
@@ -9,8 +31,8 @@ where the build differs). Visitors of a public instance create their own mocks w
 (off by default): a manage token per visit, 1 hour extendable to 3, then an email lead for up to 6 hours per UTC
 day, visitor mocks only on `RUSTYBIN_MOCKS_SELF_SERVICE_HOST` with restricted responses. What is left for the hosted
 demo is deployment, not code: DNS and TLS for `rustybin-mock.dev`, the env vars, a lead webhook and a privacy page
-(see `docs/src/mocks/self-service.md`). Candidates for later are in `docs/src/roadmap.md`. Both plans in
-`docs/plans/` are complete; keep `docs/src/roadmap.md` current when new work is planned.
+(see `docs/src/mocks/self-service.md`). Candidates for later are in `docs/src/roadmap.md`. The OpenAPI mocks and
+hosted mocks plans in `docs/plans/` are complete; keep `docs/src/roadmap.md` current when new work is planned.
 
 ## Commands
 

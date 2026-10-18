@@ -10,6 +10,13 @@ for the features that exist today describe current behaviour.
   three, then an email address for up to six hours a day), on a separate mocks
   domain. Off by default; built for the hosted demo at rustybin.dev.
 
+## Next
+
+- **Configure Rustybin from an AI agent**: a management MCP server at `/_rustybin/mcp`, protected like the
+  rest of the control plane, so an agent such as Claude Code can create and deploy mocks, change their
+  responses and security, and read captured traffic for you. It is separate from the mock MCP server at
+  `/mcp`, which stays a test upstream for MCP gateways.
+
 ## Under consideration
 
 - **Self-service across replicas**: visits and visitor mocks live in memory on one
