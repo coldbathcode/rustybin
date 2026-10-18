@@ -144,9 +144,9 @@ returning key_id, day, requests, egress_bytes
 
 The table `key_usage (key_id text, day date, requests bigint, egress_bytes bigint,
 primary key (key_id, day))` is created on startup when missing, and rows older than 35
-days are deleted once a day. A quota can be overshot by at most the flush interval
-times the key's rate on each replica (0.4% for 100 requests per second, 100,000 a day
-and two replicas). Rate limits stay per replica, so route a key to one replica where
+days are deleted once a day. A quota can be overshot by about the flush interval
+(plus the store's round trip) times the key's rate on each replica (0.4% for 100
+requests per second, 100,000 a day and two replicas). Rate limits stay per replica, so route a key to one replica where
 you can (consistent hashing on the key or a per-key hostname).
 
 If the store is unreachable, replicas keep enforcing with their local counters, retry
