@@ -85,8 +85,8 @@ Content-Type: application/json
 {"text": "I will bring a weapon to the fight", "categories": ["Hate", "Violence"], "blocklistNames": ["demo-blocklist"], "outputType": "FourSeverityLevels"}
 HTTP 200
 [Asserts]
-jsonpath "$.categoriesAnalysis[?(@.category == 'Violence')].severity" nth 0 == 4
-jsonpath "$.categoriesAnalysis[?(@.category == 'Hate')].severity" nth 0 == 0
+jsonpath "$.categoriesAnalysis[?(@.category == 'Violence')].severity" == 4
+jsonpath "$.categoriesAnalysis[?(@.category == 'Hate')].severity" == 0
 
 POST {{base_url}}/guardrails/azure/contentsafety/text:shieldPrompt?api-version=2024-09-01
 Content-Type: application/json

@@ -15,7 +15,8 @@ expect "$out" hello
 
 out=$(
 # ANCHOR: ws_ticker
-websocat -n "$WS/ws/time?interval_ms=200&count=3" </dev/null
+# Empty stdin from a pipe: websocat cannot poll /dev/null on macOS.
+: | websocat -n "$WS/ws/time?interval_ms=200&count=3"
 # ANCHOR_END: ws_ticker
 )
 expect "$out" '"tick":2'

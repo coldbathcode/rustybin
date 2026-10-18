@@ -31,7 +31,7 @@ GET {{base_url}}/_rustybin/requests/{{entry_id}}
 HTTP 200
 [Asserts]
 jsonpath "$.id" == "{{entry_id}}"
-jsonpath "$.headers[?(@.name == 'x-rustybin-session')].value" nth 0 == "docs-inspector"
+jsonpath "$.headers[?(@.name == 'x-rustybin-session')].value" == "docs-inspector"
 # ANCHOR_END: get_one
 
 # ANCHOR: filter_prefix

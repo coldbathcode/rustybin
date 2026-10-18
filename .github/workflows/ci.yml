@@ -133,7 +133,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       MDBOOK_VERSION: 0.4.52
-      HURL_VERSION: 7.0.0
+      HURL_VERSION: 8.0.1
       GRPCURL_VERSION: 1.9.3
       WEBSOCAT_VERSION: 1.14.0
     steps:

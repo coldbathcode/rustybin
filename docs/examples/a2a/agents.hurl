@@ -5,7 +5,7 @@ GET {{base_url}}/a2a
 HTTP 200
 [Asserts]
 jsonpath "$.agents[*].id" contains "travel-planner"
-jsonpath "$.agents[?(@.id == 'secure')].requiresAuth" nth 0 == true
+jsonpath "$.agents[?(@.id == 'secure')].requiresAuth" == true
 # ANCHOR_END: directory
 
 # ANCHOR: cards

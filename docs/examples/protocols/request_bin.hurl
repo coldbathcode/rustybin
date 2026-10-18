@@ -39,7 +39,7 @@ jsonpath "$.requests[0].method" == "POST"
 jsonpath "$.requests[0].path" == "/hooks/orders"
 jsonpath "$.requests[0].query" == "attempt=1"
 jsonpath "$.requests[0].body" == "{\"event\": \"order.created\"}"
-jsonpath "$.requests[0].headers[?(@.name == 'x-gateway-consumer')].value" nth 0 == "alice"
+jsonpath "$.requests[0].headers[?(@.name == 'x-gateway-consumer')].value" == "alice"
 
 GET {{base_url}}/bin/{{bin_id}}/requests/1
 HTTP 200
