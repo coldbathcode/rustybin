@@ -117,6 +117,26 @@ With a read-only control-plane token (`console` scope) the view shows everything
 but the controls that change mocks (bulk actions, Duplicate, Reset, Rename,
 Delete and the editors); downloads and the rule preview still work.
 
+### Self-service
+
+On a public instance with [self-service mocks](mocks/self-service.md), visitors
+get **New mock** without an admin token:
+
+- The wizard shows the address the mock will get (the name plus a random
+  suffix, on the mocks domain when there is one) and leaves out the stateful
+  mode. When the server asks for an email address, a short form appears (the
+  address, an unticked "send me product news" checkbox and the privacy notice).
+- The manage token is kept in the browser's local storage and sent with mock
+  management calls only. **Copy manage link** (in the visit bar, the "mock is
+  live" banner and the header menu) opens the same mocks in another browser;
+  **Rotate manage token** replaces it.
+- A **visit bar** above the list shows the time left, the hours used, **Extend**
+  (open from 15 minutes before the end) and **End visit**. When the day is used
+  or the demo is busy, a panel says when to come back and links to running your
+  own Rustybin.
+- The list splits **Your mocks** from the instance's mocks, which stay
+  read-only; the detail view of your own mock has every editor except Rename.
+
 ## Settings
 
 The settings dialog (gear icon) stores, in the browser:

@@ -45,6 +45,7 @@
   - [Mocked security](mocks/security.md)
   - [Configuration as code](mocks/config.md)
   - [CLI](mocks/cli.md)
+  - [Self-service mocks](mocks/self-service.md)
 
 # AI and agents
 

@@ -98,6 +98,31 @@ See [Configuration as code](mocks/config.md).
 | `RUSTYBIN_MOCKS_STATE_DIR` | unset | Save mocks created or edited through the API or console in this directory (one JSON file each, written on every change) and load them at startup. File-defined mocks are not saved. See [Configuration as code](mocks/config.md#keeping-console-changes). |
 | `RUSTYBIN_MOCKS_HOST` | unset | Domain for host-based mock URLs, e.g. `mock.example.com`: a request to `petstore.mock.example.com/v1/pets` is served by the mock `petstore`. Needs wildcard DNS (and a wildcard certificate for HTTPS). See [Configuration as code](mocks/config.md#host-based-urls). |
 
+## Self-service mocks
+
+Visitors of a public instance create and manage their own mocks without the admin
+token. See [Self-service mocks](mocks/self-service.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `RUSTYBIN_MOCKS_SELF_SERVICE` | `false` | Turn self-service on. Needs public mode (or shared mode) and control auth `open` (or shared mode); otherwise it is ignored with a warning. Off by default, also in public mode. |
+| `RUSTYBIN_MOCKS_SELF_SERVICE_HOST` | unset | The mocks domain (a separate registrable domain, e.g. `rustybin-mock.dev`): visitor mocks answer as `<name>.<domain>` and the domain serves nothing else. Unset: they are served under `/mock/<name>` (a warning says this is for testing). |
+| `RUSTYBIN_MOCKS_SELF_SERVICE_HOME` | unset | Where the bare mocks domain redirects (else `404`). |
+| `RUSTYBIN_MOCKS_PER_OWNER` | `3` | Mocks per visitor (or API key in shared mode). |
+| `RUSTYBIN_MOCKS_SELF_SERVICE_MAX` | `200` | Visitor mocks on the instance (on top of the instance's own). |
+| `RUSTYBIN_MOCKS_CREATE_PER_HOUR` | `10` | Mocks a session may create per hour. |
+| `RUSTYBIN_MOCKS_VISIT_MINUTES` | `60` | First period of a visit and the length of each extension (1 to 1440). |
+| `RUSTYBIN_MOCKS_ANON_HOURS` | `3` | Visit time without an email address. |
+| `RUSTYBIN_MOCKS_DAILY_HOURS` | `6` | Time per email address and UTC day (never below the anonymous hours). |
+| `RUSTYBIN_MOCKS_ANON_VISITS_PER_DAY` | `3` | Anonymous visits per session and UTC day; after that the email step comes first (`0`: always). |
+| `RUSTYBIN_MOCKS_BLOCKED_NAMES` | unset | Comma separated globs of names visitors may not use (`*paypal*,login*`). |
+| `RUSTYBIN_LEADS_WEBHOOK_URL` | unset | Where captured email addresses are posted as JSON (retried for an hour). |
+| `RUSTYBIN_LEADS_WEBHOOK_TOKEN` | unset | Sent as `Authorization: Bearer` to the webhook. Never exposed. |
+| `RUSTYBIN_LEADS_FILE` | unset | A file the leads are appended to, one JSON object per line. |
+| `RUSTYBIN_PRIVACY_URL` | unset | The privacy notice the email form links to. Email capture is off without it. |
+| `RUSTYBIN_LEADS_CONSENT` | `checkbox` | `checkbox`: a separate, unticked marketing checkbox. `notice`: no checkbox. |
+| `RUSTYBIN_LEADS_SALT` | generated | Salt of the email hashes in the daily ledger; set it to keep daily counts across restarts. Never exposed. |
+
 `${VAR}` and `${VAR:-default}` in the config file are expanded from the environment
 (see [Environment variables](mocks/config.md#environment-variables)). The
 [`rustybin mock` CLI](mocks/cli.md) reads `RUSTYBIN_SERVER` (default

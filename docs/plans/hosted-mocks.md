@@ -1,8 +1,9 @@
 # Plan: hosted self-service mocks
 
-Status: **next up for the Rustybin build.** Decisions settled 2026-10-18 (section 15); nothing built yet.
-Start at phase 0 (section 13). Follows open question 1 of [openapi-mocks.md](openapi-mocks.md). Keep this
-status line and section 16 ("As built") current while building. Last updated: 2026-10-18.
+Status: **built** (phases 0 to 7, 2026-10-18). Decisions in section 15; section 16 lists where the build
+differs from this plan. Follows open question 1 of [openapi-mocks.md](openapi-mocks.md). User documentation:
+`docs/src/mocks/self-service.md`. What is left for the hosted demo is deployment (DNS and TLS for the mocks
+domain, the settings, a lead webhook, a privacy page). Last updated: 2026-10-18.
 
 ## 1. Goal
 
@@ -329,4 +330,33 @@ come later with tight caps (for example 50 items, 64 KB, text only).
 
 ## 16. As built (differences from the plan)
 
-Nothing built yet.
+- **Code layout**: `src/mocks/visits.rs` (owners, visits, ledger, rates), `selfservice.rs` (`Caller`, the
+  `readable` / `manageable` guards, visit and operator routes), `restrict.rs` (response rules), `leads.rs`
+  (delivery); tests in `selfservice_tests.rs`, the end-to-end test with a real webhook in
+  `tests/integration.rs`, the visitor flow in `conformance/ui/run.sh` (a third, self-service instance).
+- **Names**: mock names stay at most 40 characters (`valid_name`), so slugs are cut to 33, not 56. Slugs that
+  equal an instance mock's name are allowed: the suffix already makes the name different, and refusing them
+  would refuse the most common upload (`petstore`). Reserved names and `RUSTYBIN_MOCKS_BLOCKED_NAMES` are refused.
+- **Operator switch**: environment variables cannot change in a running process, so "set
+  `RUSTYBIN_MOCKS_SELF_SERVICE=false` and SIGHUP" became `POST /_rustybin/mocks/visits/pause` and `/resume`, and
+  the purge became `DELETE /_rustybin/mocks/visits` (no `RUSTYBIN_MOCKS_SELF_SERVICE_PURGE`). Also added:
+  `DELETE /_rustybin/mocks/visits/{id}`, `POST /_rustybin/mocks/visit` (start a visit, with the email step up
+  front) and `DELETE /_rustybin/mocks/visit` (the visitor ends their visit).
+- **Caps**: visitor mocks are counted on their own (`RUSTYBIN_MOCKS_SELF_SERVICE_MAX`) next to `max_mocks` for
+  the instance's mocks, instead of raising `max_mocks` to 250. Running visits are capped at twice that.
+- **Extend**: the new expiry is the old one (or now, if later) plus one period; as Extend opens 15 minutes before
+  the end, a visit is never more than one period and 15 minutes ahead.
+- **Mocks domain**: `RUSTYBIN_MOCKS_SELF_SERVICE_HOME` sets where the bare domain redirects (unset: `404`),
+  instead of a fixed redirect to rustybin.dev. The main host's pointer always names `https://<name>.<domain>`.
+- **Response rules**: also `X-Frame-Options: DENY` and `frame-ancestors 'none'`, `Content-Location` treated like
+  `Location`, and YAML and NDJSON added to the inert media types. Headers configured in settings that would be
+  dropped are refused when saving (not only reported).
+- **Keys**: key-owned mocks have no visit clock and keep the public-mode lifetime of API-created mocks (24 hours).
+- **Leads**: the payload also carries `consent_mode`; an address given when starting a visit is a lead with
+  `source: "mock_start"`. Metrics are `rustybin_mock_visits`, `rustybin_mock_visit_events_total{event}` and
+  `rustybin_mock_leads_total{result}`.
+- **Visitors' own mocks**: their secrets (API keys, tokens) are shown to their owner; the "export all" YAML gives a
+  visitor the instance's mocks and their own, with secrets hidden.
+- **Console test**: no test-only clock hook. The browser check runs an instance with 5 minute periods and no
+  anonymous visits, so Extend is always open and the email step comes first; Extend with the email step is
+  covered by the Rust tests on a manual clock.

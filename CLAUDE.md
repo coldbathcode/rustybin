@@ -2,21 +2,15 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Next up: hosted self-service mocks
+## Hosted self-service mocks (built)
 
-All of the next build work is [docs/plans/hosted-mocks.md](docs/plans/hosted-mocks.md): visitors on the hosted
-demo create their own mocks without an admin token. Nothing of it is built yet; the decisions are settled (its
-section 15), so start at phase 0 and work through the phases in order. In short:
-
-- Ownership by a manage token per visit (`X-Rustybin-Mock-Token`, stored hashed); shared-mode keys own mocks directly.
-- Visitor mocks are served only on their own domain, `<name>.rustybin-mock.dev`, with safety headers, a header
-  denylist and a media type allowlist.
-- Time per visit: 1 hour, extendable to 3 hours, then an email address (a marketing lead, with a separate consent
-  checkbox, sent to a webhook, never logged) for up to 6 hours of use per UTC day.
-- Off by default (also in public mode), one instance, a come-back page when busy, no `stateful` mode for visitors.
-
-The OpenAPI mocks plan (`docs/plans/openapi-mocks.md`) is complete. Keep the hosted plan's status line and its
-"As built" section current as phases land, and update `docs/src/roadmap.md` when a phase ships.
+[docs/plans/hosted-mocks.md](docs/plans/hosted-mocks.md) is built (phases 0 to 7, 2026-10-18; its section 16 lists
+where the build differs). Visitors of a public instance create their own mocks with `RUSTYBIN_MOCKS_SELF_SERVICE`
+(off by default): a manage token per visit, 1 hour extendable to 3, then an email lead for up to 6 hours per UTC
+day, visitor mocks only on `RUSTYBIN_MOCKS_SELF_SERVICE_HOST` with restricted responses. What is left for the hosted
+demo is deployment, not code: DNS and TLS for `rustybin-mock.dev`, the env vars, a lead webhook and a privacy page
+(see `docs/src/mocks/self-service.md`). Candidates for later are in `docs/src/roadmap.md`. Both plans in
+`docs/plans/` are complete; keep `docs/src/roadmap.md` current when new work is planned.
 
 ## Commands
 
@@ -97,7 +91,12 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   (`RUSTYBIN_MOCKS_HOST`: `<name>.<domain>` rewritten to `/mock/<name>` by a layer wrapping the finished router in
   `build_app`), `collections.rs` (a mock as Postman / Hurl / curl / .http / k6), `config_file.rs` (`rustybin.yaml`,
   `RUSTYBIN_MOCKS_DIR`, export), `cli.rs` (`rustybin mock ...`), `handlers.rs` (`/mock/{name}/...` data plane,
-  `/_rustybin/mocks*` control plane; mutations call `admin::require_admin`). Mocks are matched inside the handler (operations change at runtime), never as
+  `/_rustybin/mocks*` control plane; access through `selfservice.rs`). Self-service (`RUSTYBIN_MOCKS_SELF_SERVICE`):
+  `visits.rs` (`Owner` of every mock: instance, visit by manage-token hash, or API key; the visit clock and daily
+  ledger on the injectable `limits::Clock`), `selfservice.rs` (`Caller`, `readable` / `manageable` guards: other
+  people's visitor mocks are `404`; the `/_rustybin/mocks/visit*` and operator `visits*` routes), `restrict.rs`
+  (visitor responses: safety headers, header denylist, inert media types), `leads.rs` (email leads to a webhook or
+  file through a bounded retry queue; addresses are never logged). Mocks are matched inside the handler (operations change at runtime), never as
   axum routes. The built-in `petstore` sample (`petstore.yaml`, `RUSTYBIN_MOCKS_SAMPLE`) is what catalogue
   examples and tests call. File-defined mocks load in `server::start_with_state` and reload on SIGHUP.
 - `src/fault.rs`: `X-Rustybin-Delay` / `X-Rustybin-Fail` middleware.

@@ -174,6 +174,9 @@ rest of the control plane (`console` scope or the admin token):
 | `rustybin_limit_rejections_total` | requests rejected by the [plan limiter](plans-and-limits.md) (HTTP 429 or gRPC `RESOURCE_EXHAUSTED`): `dimension` (`rps`, `concurrency`, `streams`, `requests`, `egress`); all five are always exported |
 | `rustybin_faults_injected_total` | `kind`: `fail`, `delay` (`X-Rustybin-Fail`, `X-Rustybin-Delay`), `ai` (mock LLM error responses) |
 | `rustybin_mock_requests_total` | requests to [OpenAPI mocks](../mocks/index.md): `mock` (the mock name; not exported in public mode, at most 1024 series, then `other`), `outcome` (`mocked`, `not_found`, `method_not_allowed`, `unauthorized`, `forbidden`, `invalid_request`, `not_acceptable`, `disabled`, `not_deployed`) |
+| `rustybin_mock_visits` (gauge) | running [self-service](../mocks/self-service.md) visits (only with self-service on) |
+| `rustybin_mock_visit_events_total` | `event`: `started`, `extended`, `ended`, `email_required`, `daily_limit`, `time_used`, `too_early`, `busy`, `rate_limited`, `invalid_email`, `paused`, `not_found` |
+| `rustybin_mock_leads_total` | email addresses captured by self-service visits, by `result`: `captured`, `delivered`, `retried`, `dropped` (never an address) |
 | `rustybin_build_info` (always 1) | `version`, `git_sha` |
 
 Every label is bounded: raw paths, query strings and model names never become label

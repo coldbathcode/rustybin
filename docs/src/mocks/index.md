@@ -255,8 +255,8 @@ themselves (`/mock/*`) are data plane and never need a control-plane token.
   [admin token rules](../concepts/sessions.md#admin-token): with
   `RUSTYBIN_ADMIN_TOKEN` set it needs `Authorization: Bearer <token>` or
   `X-Rustybin-Admin-Token`; without one it is open, except in public mode where it
-  is refused (`403`), so a public instance is read-only for mocks. Self-service
-  mocks for visitors of a public instance are [next on the roadmap](../roadmap.md).
+  is refused (`403`), so a public instance is read-only for mocks, unless
+  [self-service mocks](self-service.md) let visitors manage their own.
 - With [control-plane authentication](../concepts/control-plane-security.md)
   (`RUSTYBIN_CONTROL_AUTH=token` or `jwt`), reading needs a token with the
   `console` scope and every `POST`, `PUT`, `PATCH` and `DELETE` needs the admin

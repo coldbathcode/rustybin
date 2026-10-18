@@ -60,6 +60,12 @@ API, AI and agent gateway demos.
   `load_error`), enforced validation answers `406` for an unacceptable `Accept`,
   missing scopes get an RFC 6750 `insufficient_scope` challenge, and requests are
   counted in `rustybin_mock_requests_total`.
+- **Self-service mocks** for hosted demos (`RUSTYBIN_MOCKS_SELF_SERVICE`, off by
+  default): visitors of a public instance create and manage their own mocks
+  through a manage token, on a time allowance (an hour, extendable to three, then
+  an email address for up to six hours a day, delivered to a webhook), on a
+  separate mocks domain, with responses that can never set cookies, redirect
+  elsewhere or ship active content. Operators can list, end and pause visits.
 - **Plan limits** for hosted offerings (`RUSTYBIN_PLAN`, `RUSTYBIN_LIMIT_*`,
   `RUSTYBIN_USAGE_FILE`): rate, concurrency, streams and daily or monthly request and
   egress quotas, per instance or per session, with IETF RateLimit headers on 429s and
