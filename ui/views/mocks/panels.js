@@ -502,7 +502,9 @@ export function trafficPanel(ctx) {
           issues.length ? h('div', { class: 'stack-sm' }, notice('warn', 'The request does not match the spec. ', ctx.detail() && ctx.detail().validate_requests === 'enforce' ? 'Validation is enforced, so the mock answered 400.' : 'Validation warns, so the mock answered anyway (header X-Rustybin-Mock-Validation: failed).'), issuesList(issues))
             : h('p', { class: 'small muted' }, e.operation ? 'No problems found (or validation is off).' : 'Not validated: no operation matched.')) },
         { id: 'info', label: 'Details', render: () => h('div', { style: { padding: '12px' } }, kvgrid([
-          ['Outcome', e.outcome], ['Operation', e.operation || null], ['Response source', e.source || null], ['Auth', e.auth || 'not required'],
+          ['Outcome', e.outcome], ['Operation', e.operation || null],
+          ['Path parameters', e.params && e.params.length ? e.params.map((p) => `${p.name} = ${p.value}`).join(', ') : undefined],
+          ['Response source', e.source || null], ['Auth', e.auth || 'not required'],
           ['Revision', String(e.revision)], ['Duration', fmtMs(e.duration_ms)], ['Client IP', e.client_ip || null], ['Received', new Date(e.timestamp).toLocaleString() + ' (' + relTime(e.timestamp) + ')'], ['Request id', e.id]])) },
       ], issues.length ? 'validation' : 'request').el));
   }

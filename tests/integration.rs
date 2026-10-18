@@ -644,6 +644,90 @@ async fn mocks_load_from_config_file_and_directory_and_reload() {
     assert_eq!(resp.status, 200);
     assert_eq!(get(addr, "/mock/catalog/items/9").await.status, 404);
 
+    // A file that cannot be parsed deletes nothing: the mock keeps answering.
+    std::fs::write(&file, "version: 1\nmocks: [ {name: inventory\n").expect("config");
+    let reload = request(addr, "POST", "/_rustybin/mocks/reload", &[], "").await;
+    assert_eq!(reload.status, 200);
+    let report = reload.json();
+    assert_eq!(
+        report["report"]["deleted"],
+        serde_json::json!([]),
+        "{report}"
+    );
+    assert!(
+        report["problems"].to_string().contains("were kept"),
+        "{report}"
+    );
+    let key2 = [("x-api-key", "k2")];
+    let resp = request(addr, "GET", "/mock/inventory/items/5", &key2, "").await;
+    assert_eq!(resp.status, 200);
+
+    // One bad entry is skipped (its mock kept, the error shown); a new mock
+    // whose spec does not parse is listed switched off with the error.
+    std::fs::write(dir.path().join("broken.json"), "{ not json").expect("spec");
+    std::fs::write(
+        &file,
+        "version: 1\nmocks:\n  - name: inventory\n    spec: inventory.json\n    enabeld: true\n  - name: broken\n    spec: broken.json\n",
+    )
+    .expect("config");
+    let reload = request(addr, "POST", "/_rustybin/mocks/reload", &[], "").await;
+    let report = reload.json();
+    assert_eq!(
+        report["report"]["deleted"],
+        serde_json::json!([]),
+        "{report}"
+    );
+    assert!(
+        report["problems"].to_string().contains("enabeld"),
+        "{report}"
+    );
+    let resp = request(addr, "GET", "/mock/inventory/items/5", &key2, "").await;
+    assert_eq!(resp.status, 200);
+    let list = get(addr, "/_rustybin/mocks").await.json();
+    let mock = |name: &str| {
+        list["mocks"]
+            .as_array()
+            .expect("mocks")
+            .iter()
+            .find(|m| m["name"] == name)
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert!(mock("inventory")["load_error"]
+        .as_str()
+        .is_some_and(|e| e.contains("enabeld")));
+    let broken = mock("broken");
+    assert_eq!(broken["state"], "draft", "{broken}");
+    assert_eq!(broken["enabled"], false);
+    assert!(broken["load_error"].is_string(), "{broken}");
+    let resp = get(addr, "/mock/broken/anything").await;
+    assert_eq!(resp.status, 503);
+    assert!(resp.json()["load_error"].is_string());
+    // The placeholder cannot go live: only a fixed file (or a new spec) helps.
+    let resp = request(
+        addr,
+        "POST",
+        "/_rustybin/mocks/broken/deploy?force=true",
+        &[],
+        "",
+    )
+    .await;
+    assert_eq!(resp.status, 409, "{}", resp.body);
+
+    // Fixed: the errors clear and the new mock answers.
+    std::fs::write(dir.path().join("broken.json"), spec).expect("spec");
+    write_config("k2");
+    let mut text = std::fs::read_to_string(&file).expect("read");
+    text.push_str("  - name: broken\n    spec: broken.json\n");
+    std::fs::write(&file, text).expect("config");
+    let reload = request(addr, "POST", "/_rustybin/mocks/reload", &[], "").await;
+    assert_eq!(reload.json()["problems"], serde_json::json!([]));
+    let list = get(addr, "/_rustybin/mocks").await.json();
+    for m in list["mocks"].as_array().expect("mocks") {
+        assert!(m["load_error"].is_null(), "{m}");
+    }
+    assert_eq!(get(addr, "/mock/broken/items/3").await.status, 200);
+
     server.shutdown();
     server.wait().await.expect("clean shutdown");
 }

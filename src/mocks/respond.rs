@@ -251,6 +251,32 @@ pub fn negotiate<'m>(content: &'m [Media], accept: Option<&str>) -> Option<&'m M
     content.iter().find(|m| m.is_json()).or(content.first())
 }
 
+/// Does an `Accept` header allow `media_type`?
+pub fn accept_allows(accept: &str, media_type: &str) -> bool {
+    let base = media_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    accept.split(',').any(|part| {
+        let mut bits = part.split(';');
+        let range = bits.next().unwrap_or("").trim().to_ascii_lowercase();
+        let q = bits
+            .filter_map(|b| b.trim().strip_prefix("q="))
+            .find_map(|q| q.parse::<f32>().ok())
+            .unwrap_or(1.0);
+        if range.is_empty() || q <= 0.0 {
+            return false;
+        }
+        match range.strip_suffix("/*") {
+            Some("*") => true,
+            Some(ty) => base.starts_with(&format!("{ty}/")),
+            None => range == base,
+        }
+    })
+}
+
 fn reason(status: u16) -> &'static str {
     axum::http::StatusCode::from_u16(status)
         .ok()

@@ -173,6 +173,7 @@ rest of the control plane (`console` scope or the admin token):
 | `rustybin_llm_faults_total` | faults injected on the mock LLM with `X-Rustybin-Fail` or `?fail=` (see [AI faults](../ai/gateway-features.md#faults)): `provider`, `kind` (`rate_limit`, `server_error`, `unavailable`, `overloaded`, `timeout`, `context_length`, `prompt_filter`, `content_filter`, `invalid_credential`, `missing_credential`, `forbidden`, `not_found`, `bad_request`, `too_large`, `status_4xx`, `status_5xx`) |
 | `rustybin_limit_rejections_total` | requests rejected by the [plan limiter](plans-and-limits.md) (HTTP 429 or gRPC `RESOURCE_EXHAUSTED`): `dimension` (`rps`, `concurrency`, `streams`, `requests`, `egress`); all five are always exported |
 | `rustybin_faults_injected_total` | `kind`: `fail`, `delay` (`X-Rustybin-Fail`, `X-Rustybin-Delay`), `ai` (mock LLM error responses) |
+| `rustybin_mock_requests_total` | requests to [OpenAPI mocks](../mocks/index.md): `mock` (the mock name; not exported in public mode, at most 1024 series, then `other`), `outcome` (`mocked`, `not_found`, `method_not_allowed`, `unauthorized`, `forbidden`, `invalid_request`, `not_acceptable`, `disabled`, `not_deployed`) |
 | `rustybin_build_info` (always 1) | `version`, `git_sha` |
 
 Every label is bounded: raw paths, query strings and model names never become label

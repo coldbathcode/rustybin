@@ -60,6 +60,8 @@ pub const METRICS_PATH: &str = "/_rustybin/metrics";
 pub const MAX_ROUTES: usize = 1024;
 /// Most distinct series per LLM counter (beyond: dropped into `other`).
 pub const MAX_LLM_SERIES: usize = 256;
+/// Most (mock, outcome) series; later mocks are counted as `other`.
+pub const MAX_MOCK_SERIES: usize = 1024;
 /// Histogram bucket upper bounds, in seconds: 1 ms to 60 s in 1, 2.5, 5
 /// steps, so `histogram_quantile(0.5, ...)` and `histogram_quantile(0.99,
 /// ...)` stay meaningful from fast stubs up to slow mock LLM streams and
@@ -175,6 +177,7 @@ struct Inner {
     llm_requests: HashMap<(&'static str, &'static str, bool), u64>,
     llm_faults: HashMap<(&'static str, &'static str), u64>,
     faults: HashMap<&'static str, u64>,
+    mocks: HashMap<(String, &'static str), u64>,
 }
 
 /// Process-wide metric counters.
@@ -322,6 +325,17 @@ impl Metrics {
         *self.lock().llm_faults.entry((provider, kind)).or_insert(0) += 1;
     }
 
+    /// Count one request to an OpenAPI mock (`outcome`: `mocked`,
+    /// `not_found`, `unauthorized`, ...).
+    pub fn count_mock(&self, mock: &str, outcome: &'static str) {
+        let mut inner = self.lock();
+        let mut key = (mock.to_string(), outcome);
+        if !inner.mocks.contains_key(&key) && inner.mocks.len() >= MAX_MOCK_SERIES {
+            key.0 = "other".to_string();
+        }
+        *inner.mocks.entry(key).or_insert(0) += 1;
+    }
+
     /// Count one plan limiter rejection (HTTP 429 or gRPC RESOURCE_EXHAUSTED).
     pub fn count_limit_rejection(&self, dimension: Dimension) {
         self.limit_rejections[dimension.index()].fetch_add(1, Ordering::Relaxed);
@@ -449,6 +463,20 @@ impl Metrics {
                 out,
                 "rustybin_llm_faults_total{{provider=\"{provider}\",kind=\"{kind}\"}} {n}"
             );
+        }
+
+        if !inner.mocks.is_empty() {
+            out.push_str("# HELP rustybin_mock_requests_total Requests to OpenAPI mocks by mock and outcome (not in public mode).\n");
+            out.push_str("# TYPE rustybin_mock_requests_total counter\n");
+            let mut mocks: Vec<_> = inner.mocks.iter().collect();
+            mocks.sort();
+            for ((mock, outcome), n) in mocks {
+                let _ = writeln!(
+                    out,
+                    "rustybin_mock_requests_total{{mock=\"{}\",outcome=\"{outcome}\"}} {n}",
+                    escape(mock)
+                );
+            }
         }
 
         out.push_str("# HELP rustybin_limit_rejections_total Requests rejected by the plan limiter (HTTP 429, gRPC RESOURCE_EXHAUSTED) by dimension.\n");

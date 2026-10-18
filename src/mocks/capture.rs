@@ -32,9 +32,13 @@ pub struct MockCapture {
     pub body_truncated: bool,
     pub client_ip: Option<String>,
     /// `mocked`, `not_found`, `method_not_allowed`, `unauthorized`,
-    /// `forbidden`, `invalid_request` or `disabled`.
+    /// `forbidden`, `invalid_request`, `not_acceptable`, `disabled` or
+    /// `not_deployed`.
     pub outcome: &'static str,
     pub operation: Option<String>,
+    /// Path parameters of the matched operation (decoded).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<BinHeader>,
     /// Revision that answered.
     pub revision: u64,
     pub status: u16,
@@ -63,6 +67,11 @@ impl MockCapture {
             + self.response_body.as_ref().map_or(0, String::len)
             + self.full_path.len()
             + self.query.as_ref().map_or(0, String::len)
+            + self
+                .params
+                .iter()
+                .map(|p| p.name.len() + p.value.len())
+                .sum::<usize>()
             + self
                 .validation
                 .iter()
@@ -248,6 +257,7 @@ mod tests {
             client_ip: None,
             outcome: "mocked",
             operation: None,
+            params: Vec::new(),
             revision: 1,
             status: 200,
             source: None,

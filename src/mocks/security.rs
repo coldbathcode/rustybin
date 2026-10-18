@@ -63,8 +63,19 @@ enum Check {
     Pass,
     /// Credentials missing or wrong.
     Unauthorized(String),
-    /// Credentials fine, scope missing.
-    Forbidden(String),
+    /// Credentials fine, scope missing (reason, the missing scopes).
+    Forbidden(String, String),
+}
+
+/// The RFC 6750 challenge of a token that lacks scopes.
+fn insufficient_scope(scopes: &str) -> String {
+    format!("Bearer realm=\"mock\", error=\"insufficient_scope\", scope=\"{scopes}\"")
+}
+
+/// `jwt.issuer: builtin` (or none) accepts any issuer: the signature already
+/// proves the built-in IdP issued the token.
+fn required_issuer(issuer: Option<&str>) -> Option<&str> {
+    issuer.filter(|i| !i.trim().is_empty() && !i.eq_ignore_ascii_case("builtin"))
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
@@ -175,7 +186,7 @@ impl Compiled {
         }
         let jwt = &self.settings.security.jwt;
         let opts = VerifyOptions {
-            issuer: jwt.issuer.as_deref(),
+            issuer: required_issuer(jwt.issuer.as_deref()),
             audience: jwt.audience.as_deref(),
         };
         let verified = match ctx.jwt.verify(token, &opts) {
@@ -188,7 +199,8 @@ impl Compiled {
             Check::Pass
         } else {
             let names: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
-            Check::Forbidden(format!("insufficient scope (needs {})", names.join(" ")))
+            let names = names.join(" ");
+            Check::Forbidden(format!("insufficient scope (needs {names})"), names)
         }
     }
 
@@ -245,10 +257,10 @@ impl Compiled {
                 reason,
                 challenges: challenge.into_iter().collect(),
             }),
-            Check::Forbidden(reason) => AuthResult::Failed(AuthFailure {
+            Check::Forbidden(reason, scopes) => AuthResult::Failed(AuthFailure {
                 status: 403,
                 reason,
-                challenges: Vec::new(),
+                challenges: vec![insufficient_scope(&scopes)],
             }),
         };
         let realm = "realm=\"mock\"";
@@ -281,7 +293,7 @@ impl Compiled {
         if alternatives.is_empty() {
             return AuthResult::NotRequired;
         }
-        let mut forbidden: Option<String> = None;
+        let mut forbidden: Option<(String, String)> = None;
         let mut reasons: Vec<String> = Vec::new();
         let mut challenges: Vec<String> = Vec::new();
         for alt in alternatives {
@@ -300,9 +312,9 @@ impl Compiled {
                             }
                         }
                     }
-                    Check::Forbidden(r) => {
+                    Check::Forbidden(r, scopes) => {
                         failed = true;
-                        forbidden.get_or_insert(r);
+                        forbidden.get_or_insert((r, scopes));
                     }
                 }
             }
@@ -312,10 +324,10 @@ impl Compiled {
             }
         }
         match forbidden {
-            Some(reason) => AuthResult::Failed(AuthFailure {
+            Some((reason, scopes)) => AuthResult::Failed(AuthFailure {
                 status: 403,
                 reason,
-                challenges: Vec::new(),
+                challenges: vec![insufficient_scope(&scopes)],
             }),
             None => AuthResult::Failed(AuthFailure {
                 status: 401,
@@ -618,6 +630,93 @@ mod tests {
             c.authorize(b, &ctx(&map, &jwt, false)),
             AuthResult::Passed(_)
         ));
+    }
+
+    #[test]
+    fn key_locations_openid_connect_and_scope_challenges() {
+        const SPEC2: &str = r##"{
+          "openapi": "3.0.3", "info": {"title": "t", "version": "1"},
+          "paths": {
+            "/cookie": {"get": {"operationId": "cookie", "security": [{"session": []}], "responses": {"200": {"description": "ok"}}}},
+            "/query": {"get": {"operationId": "query", "security": [{"qkey": []}], "responses": {"200": {"description": "ok"}}}},
+            "/oidc": {"get": {"operationId": "oidc", "security": [{"oidc": ["orders:read", "orders:write"]}], "responses": {"200": {"description": "ok"}}}}
+          },
+          "components": {"securitySchemes": {
+            "session": {"type": "apiKey", "name": "sid", "in": "cookie"},
+            "qkey": {"type": "apiKey", "name": "api_key", "in": "query"},
+            "oidc": {"type": "openIdConnect", "openIdConnectUrl": "https://idp.example/.well-known/openid-configuration"}
+          }}
+        }"##;
+        let jwt: Arc<JwtState> = JwtState::shared_for_tests();
+        let mut settings = secured();
+        settings.security.jwt.issuer = Some("builtin".into());
+        let c = compile(SPEC2, settings);
+        let none = HeaderMap::new();
+
+        let cookie = c.spec.operation("cookie").expect("cookie");
+        let jar = with(&[("cookie", "theme=dark; sid=demo-key".into())]);
+        assert_eq!(
+            c.authorize(cookie, &ctx(&jar, &jwt, false)),
+            AuthResult::Passed("session".into())
+        );
+        let other = with(&[("cookie", "sid=nope".into())]);
+        assert!(
+            matches!(c.authorize(cookie, &ctx(&other, &jwt, false)), AuthResult::Failed(f) if f.status == 401)
+        );
+
+        let query = c.spec.operation("query").expect("query");
+        let q = vec![("api_key".to_string(), "demo-key".to_string())];
+        let qctx = AuthContext {
+            headers: &none,
+            query: &q,
+            jwt: &jwt,
+            client_cert: false,
+        };
+        assert!(matches!(c.authorize(query, &qctx), AuthResult::Passed(_)));
+        assert!(
+            matches!(c.authorize(query, &ctx(&none, &jwt, false)), AuthResult::Failed(f) if f.reason.contains("query api_key"))
+        );
+
+        // OpenID Connect: a token from the built-in IdP (any issuer with
+        // `builtin`), scopes from the requirement, RFC 6750 challenge on 403.
+        let oidc = c.spec.operation("oidc").expect("oidc");
+        let both = with(&[(
+            "authorization",
+            format!(
+                "Bearer {}",
+                jwt_with_scope(&jwt, "orders:read orders:write")
+            ),
+        )]);
+        assert_eq!(
+            c.authorize(oidc, &ctx(&both, &jwt, false)),
+            AuthResult::Passed("oidc".into())
+        );
+        let read_only = with(&[(
+            "authorization",
+            format!("Bearer {}", jwt_with_scope(&jwt, "orders:read")),
+        )]);
+        match c.authorize(oidc, &ctx(&read_only, &jwt, false)) {
+            AuthResult::Failed(f) => {
+                assert_eq!(f.status, 403);
+                assert_eq!(f.reason, "insufficient scope (needs orders:write)");
+                assert_eq!(
+                    f.challenges,
+                    vec![
+                        "Bearer realm=\"mock\", error=\"insufficient_scope\", scope=\"orders:write\""
+                    ]
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // A literal issuer is still compared.
+        let mut settings = secured();
+        settings.security.jwt.issuer = Some("https://idp.example".into());
+        let c = compile(SPEC2, settings);
+        let oidc = c.spec.operation("oidc").expect("oidc");
+        assert!(
+            matches!(c.authorize(oidc, &ctx(&both, &jwt, false)), AuthResult::Failed(f) if f.status == 401)
+        );
     }
 
     #[test]

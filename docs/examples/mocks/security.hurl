@@ -170,6 +170,8 @@ Authorization: Bearer {{read_token}}
 HTTP 403
 [Asserts]
 jsonpath "$.detail" == "insufficient scope (needs orders:write)"
+header "WWW-Authenticate" contains "error=\"insufficient_scope\""
+header "WWW-Authenticate" contains "scope=\"orders:write\""
 
 POST {{base_url}}/oauth/token
 [BasicAuth]

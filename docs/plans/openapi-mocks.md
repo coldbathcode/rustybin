@@ -1,7 +1,10 @@
 # Plan: OpenAPI mocks ("spec bins")
 
 Status: phases 0 to 6 implemented (2026-10-17); mock secrets hidden from read-only callers
-(2026-10-18). Hosted self-service (open question 1) is deliberately left for later. See section 12 for
+(2026-10-18); the remaining gaps from an audit against sections 3 to 10 closed (2026-10-18: safe
+reloads, failed file mocks listed with their error, `406`, `insufficient_scope` challenges, the reserved
+`/_rustybin` sub path, mock metrics, more deploy checks, captured path parameters, draft diff count,
+delay slider). Hosted self-service (open question 1) is deliberately left for later. See section 12 for
 where the build differs from this plan. Last updated: 2026-10-18.
 
 ## 1. Goal
@@ -564,6 +567,29 @@ Rough size: phases 0 to 2 are the MVP worth demoing; 3 and 4 make it the
   placeholders in sample requests, the deploy report, collections and YAML exports. `"<redacted>"` is rejected
   as a value so redacted settings cannot be saved back. Captured traffic still shows the headers clients sent,
   like request bins.
+- **Reloads** (4.9): a file that cannot be read or parsed changes nothing; a bad entry (unknown field,
+  wrong type, unreadable spec file) is skipped on its own and its mock keeps the last good revision. A file
+  mock whose definition fails carries a `load_error` (list, detail, console badge and banner); a new one is
+  created switched off and not deployed, so its URL answers `503` with the error. The API apply endpoint
+  still refuses a whole document with an unknown field.
+- **Metrics**: mocks are counted in their own series, `rustybin_mock_requests_total{mock,outcome}`
+  (normal mode only, at most 1024 series), rather than a `mock` label on `rustybin_requests_total`.
+- **Deploy checks** (4.7): rules that can never match (contradictory conditions) or are shadowed by an
+  earlier catch-all rule, empty key or user lists for schemes in use, schemes that are not mocked,
+  `pattern`s the generator cannot satisfy, and response header values that cannot be sent. Not checked:
+  whether the instance can verify `mutualTLS` (it depends on the listener and `RUSTYBIN_MTLS_IN_HEADER`)
+  and whether tokens will carry the configured `aud`.
+- **Spec response headers**: framing and connection headers (`Content-Length`, `Transfer-Encoding`,
+  `Connection`, ...) and invalid names are dropped with a parse warning.
+- **JWT issuer**: `jwt.issuer: builtin` (the section 5 example) means "any issuer": the signature already
+  ties the token to the built-in IdP.
+- **Defaults kept**: the default API key is the fixed `demo-key` (not a generated one) so docs, tests and
+  demos stay copy-pasteable; the switched-off answer is `application/problem+json` with a `mock` member
+  rather than `{"error":"mock disabled"}`, like every other mock error.
+- **Testing** (9): spec fixtures live inline in the test modules instead of `tests/fixtures/openapi/`; the
+  mocks Hurl files run on the open and secured documentation instances (not the plan instance, which
+  adds nothing mock specific). The deploy report shows each response's source and validity; the body
+  itself is one click away in the operation editor and Try it.
 - **Open questions** (section 11) were settled with the recommendations: control-plane management only,
   `/mock/{name}` URLs, in-memory plus `rustybin.yaml`, separate views for bins and mocks, and the `petstore`
   sample on by default outside public mode.

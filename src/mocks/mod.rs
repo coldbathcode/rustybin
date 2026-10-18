@@ -41,7 +41,7 @@ use crate::catalog::{category, Endpoint, Example};
 use crate::config::Config;
 use crate::state::AppState;
 use model::MockSettings;
-use store::{ApplyReport, Definition, MockStore, Origin};
+use store::{ApplyReport, MockStore, Origin};
 
 /// The built-in sample spec.
 pub const SAMPLE_SPEC: &str = include_str!("petstore.yaml");
@@ -98,41 +98,75 @@ pub fn new_store(config: &Config) -> MockStore {
     store.with_persistence(dir)
 }
 
-/// Definitions from `RUSTYBIN_CONFIG_FILE` and `RUSTYBIN_MOCKS_DIR`.
-fn file_definitions(store: &MockStore, config: &Config) -> (Vec<Definition>, Vec<String>) {
+/// Definitions from `RUSTYBIN_CONFIG_FILE` and `RUSTYBIN_MOCKS_DIR`. The
+/// flag is false when the file or the directory could not be read at all:
+/// a reload then deletes nothing.
+fn file_definitions(store: &MockStore, config: &Config) -> (config_file::Loaded, bool) {
     let max_spec = store.limits().max_spec_bytes as u64;
-    let mut defs = Vec::new();
-    let mut problems = Vec::new();
+    let mut all = config_file::Loaded::default();
+    let mut complete = true;
     if let Some(dir) = &config.mocks_dir {
-        let (d, p) = config_file::load_dir(Path::new(dir), max_spec);
-        defs.extend(d);
-        problems.extend(p);
+        match config_file::load_dir(Path::new(dir), max_spec) {
+            Ok(l) => all = l,
+            Err(e) => {
+                all.problems.push(e);
+                complete = false;
+            }
+        }
     }
     if let Some(file) = &config.config_file {
         match config_file::load_file(Path::new(file), |k| std::env::var(k).ok(), max_spec) {
-            Ok((d, p)) => {
+            Ok(l) => {
                 // The file wins over a same-named spec from the directory.
-                defs.retain(|x: &Definition| !d.iter().any(|y| y.name == x.name));
-                defs.extend(d);
-                problems.extend(p);
+                let named = |n: &str| {
+                    l.defs.iter().any(|y| y.name == n) || l.failed.iter().any(|(y, _)| y == n)
+                };
+                all.defs.retain(|x| !named(&x.name));
+                all.failed.retain(|(x, _)| !named(x));
+                all.defs.extend(l.defs);
+                all.failed.extend(l.failed);
+                all.problems.extend(l.problems);
             }
-            Err(e) => problems.push(e),
+            Err(e) => {
+                all.problems.push(e);
+                complete = false;
+            }
         }
     }
-    (defs, problems)
+    (all, complete)
 }
 
 /// (Re)load file-defined mocks: create, update, and delete the file mocks
-/// that are gone. Problems are logged and kept for the console.
+/// that are gone. A mock whose entry or spec cannot be used keeps its last
+/// good revision (or, when new, is created switched off) and shows the
+/// error; when the file cannot be read at all nothing is deleted. Problems
+/// are logged and kept for the console.
 pub fn reload_files(store: &MockStore, config: &Config) -> (ApplyReport, Vec<String>) {
-    let (defs, mut problems) = file_definitions(store, config);
-    let mut report = store.apply(defs, Origin::File, Some(Origin::File));
+    let (loaded, complete) = file_definitions(store, config);
+    let config_file::Loaded {
+        defs,
+        mut problems,
+        mut failed,
+    } = loaded;
+    if !complete {
+        problems.push(
+            "the mocks file or directory could not be read: file mocks were kept as they are"
+                .into(),
+        );
+    }
+    let keep: Vec<String> = failed.iter().map(|(n, _)| n.clone()).collect();
+    let prune = complete.then_some(Origin::File);
+    let mut report = store.apply_keeping(defs, Origin::File, prune, &keep);
     for e in &report.errors {
-        problems.push(format!(
-            "mock {}: {}",
-            e["name"].as_str().unwrap_or("?"),
-            e["error"].as_str().unwrap_or("?")
-        ));
+        let name = e["name"].as_str().unwrap_or("?");
+        let error = e["error"].as_str().unwrap_or("?");
+        problems.push(format!("mock {name}: {error}"));
+        if e.get("deployed").is_none() {
+            failed.push((name.to_string(), error.to_string()));
+        }
+    }
+    for (name, error) in &failed {
+        store.mark_failed(name, Origin::File, error);
     }
     store.clear_load_errors();
     for p in &problems {

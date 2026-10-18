@@ -17,6 +17,9 @@ the same name in the directory. Nothing stops the server from starting: a file t
 cannot be read or parsed, an unset environment variable or a spec that does not
 compile is logged as a warning and listed in `load_errors` of
 `GET /_rustybin/mocks` (and in the console), and the other mocks load normally.
+A mock whose entry or spec cannot be used still shows up in the list, switched off
+and not deployed, with the reason in its `load_error` (its URL answers `503` with the
+same `load_error`), so a broken definition is visible where you look for the mock.
 File-defined mocks are deployed even when their deploy checks report errors (the
 report shows them) and never expire. Their `origin` is `file`.
 
@@ -80,7 +83,9 @@ mocks:
 ```
 
 Every field except `name` (and one of `spec` / `spec_inline`) is optional, with the
-defaults shown. Unknown fields are errors, so a typo does not go unnoticed. The
+defaults shown. Unknown fields are errors, so a typo does not go unnoticed: in a file
+on disk the entry with the typo is skipped (with a warning naming the field) and the
+other entries load; a document sent to `POST /_rustybin/mocks/apply` is refused. The
 response fields are described in [Responses, rules and validation](responses.md),
 the security fields in [Mocked security](security.md).
 
@@ -124,6 +129,16 @@ file and the mocks directory and apply the difference: new mocks are created,
 changed ones are redeployed (their traffic history is kept), unchanged ones are
 left alone, and file-defined mocks that are no longer declared are deleted. Mocks
 created through the console or the API are never deleted by a reload.
+
+A reload never deletes a mock because of a mistake in the file:
+
+| Problem | What the reload does |
+|---|---|
+| The file (or the directory) cannot be read, or is not valid YAML / JSON | Nothing changes; the problem is reported and every file mock keeps answering |
+| One entry has an unknown field, a wrong type or a spec file that cannot be read | That entry is skipped: its mock keeps its last good revision and gets a `load_error` |
+| A spec does not parse | Same: the last good revision keeps answering, with a `load_error` |
+
+The `load_error` clears on the next reload that applies the entry.
 
 ```hurl
 {{#include ../../examples/mocks/config.hurl:reload}}

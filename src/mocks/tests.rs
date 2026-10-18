@@ -340,6 +340,7 @@ async fn drafts_checks_deploy_and_rollback() {
     assert_eq!(op["report"]["status"], "error");
     let (_, _, detail) = send(&app, get_request("/_rustybin/mocks/o")).await;
     assert_eq!(detail["has_draft_changes"], true);
+    assert_eq!(detail["draft_changes"], json!(["operation getOrder"]));
     assert_eq!(detail["report"]["ok"], false);
     let (status, _, body) = send(&app, req("POST", "/_rustybin/mocks/o/deploy", &[], None)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -907,4 +908,75 @@ async fn rule_test_spec_source_and_collections() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn accept_reserved_paths_params_and_metrics() {
+    let state = test_state_with(Config::for_tests());
+    let metrics = state.metrics.clone();
+    let app = test_app_with(state);
+
+    // Warn mode answers JSON whatever Accept says; enforce answers 406.
+    let xml = [("accept", "application/xml")];
+    let (status, _, _) = send(&app, req("GET", "/mock/petstore/v1/pets/7", &xml, None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send(
+        &app,
+        json_request(
+            "PATCH",
+            "/_rustybin/mocks/petstore",
+            &json!({ "responses": { "validate_requests": "enforce" }, "deploy": true }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, headers, body) =
+        send(&app, req("GET", "/mock/petstore/v1/pets/7", &xml, None)).await;
+    assert_eq!(status, StatusCode::NOT_ACCEPTABLE, "{body}");
+    assert_eq!(headers["content-type"], "application/problem+json");
+    assert_eq!(body["available"], json!(["application/json"]));
+    for accept in [
+        "application/json",
+        "application/*",
+        "*/*",
+        "text/html, */*;q=0.1",
+    ] {
+        let (status, _, _) = send(
+            &app,
+            req(
+                "GET",
+                "/mock/petstore/v1/pets/7",
+                &[("accept", accept)],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{accept}");
+    }
+
+    // `/_rustybin` below a mock is never an operation and never captured.
+    let (_, _, before) = send(&app, get_request("/_rustybin/mocks/petstore/requests")).await;
+    let (status, _, _) = send(&app, get_request("/mock/petstore/_rustybin/other")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = send(&app, get_request("/mock/petstore/_rustybin/openapi.json")).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, _, after) = send(&app, get_request("/_rustybin/mocks/petstore/requests")).await;
+    assert!(before["total"].is_u64(), "{before}");
+    assert_eq!(before["total"], after["total"], "{after}");
+
+    // Captures carry the matched path parameters.
+    let latest = &after["requests"][0];
+    assert_eq!(
+        latest["params"],
+        json!([{ "name": "petId", "value": "7" }]),
+        "{latest}"
+    );
+
+    // Metrics count mock requests by mock and outcome.
+    let text = metrics.render();
+    assert!(
+        text.contains("rustybin_mock_requests_total{mock=\"petstore\",outcome=\"mocked\"}"),
+        "{text}"
+    );
+    assert!(text.contains("outcome=\"not_acceptable\"} 1"), "{text}");
 }

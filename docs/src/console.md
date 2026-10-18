@@ -65,8 +65,9 @@ The **Mock APIs** view (`/ui/#/mocks`) manages the instance's
 - **List**: every mock with its URL (copy button, plus the
   [host-based URL](mocks/config.md#host-based-urls) when one is configured), title
   and version, operation count, an on/off switch, a security badge, calls in the
-  last hour with the total and the last hit, stored items for stateful mocks, and a
-  marker for undeployed draft changes. Select mocks with the checkboxes to switch
+  last hour with the total and the last hit, stored items for stateful mocks, a
+  marker for undeployed draft changes, and a "load error" badge for a file mock
+  whose last reload failed (the detail page shows the error). Select mocks with the checkboxes to switch
   them on or off or delete them in bulk. With no mocks yet, the page is a drop zone
   for a spec.
 - **Create wizard**: drop, browse or paste an OpenAPI 3.0 / 3.1 or Swagger 2.0 file
@@ -84,7 +85,8 @@ The **Mock APIs** view (`/ui/#/mocks`) manages the instance's
   last call; per documented status, the response source (spec example, generated
   data, stateful, or a custom body built in a form generated from the schema, with
   a JSON view validated as you type; "Edit as custom body" turns a generated
-  preview into a fixed response), response headers, a delay, a public toggle, and
+  preview into a fixed response), response headers, a delay (slider or number), a
+  public toggle, and
   [rules](mocks/responses.md#rules) ("when path parameter `id` equals `0`, respond
   `404`"), evaluated in order. Drag rules by their handle (or use the arrows) to
   reorder them. The **Would match** preview runs the unsaved rules against the
@@ -100,13 +102,14 @@ The **Mock APIs** view (`/ui/#/mocks`) manages the instance's
   and which operations are public.
 - **Data** (stateful mocks only): the items the mock stored, per collection, with
   Refresh and Reset.
-- **Traffic**: the mock's captured calls, live, with the matched operation, status,
-  validation and authentication result.
+- **Traffic**: the mock's captured calls, live, with the matched operation and its
+  path parameters, status, validation and authentication result.
 - **Deploy report**: the [deploy checks](mocks/responses.md#deploy-checks) per
   operation, deploy, revisions and rollback, and export as `rustybin.yaml`.
 
 Edits go to the mock's draft and reach the live mock when you press **Deploy**
-(the button shows the check results). The **Security** switch is the exception: it
+(the button shows how many parts changed, such as the spec, the security settings
+or an operation, and the check results; the banner lists them). The **Security** switch is the exception: it
 deploys at once, and asks first when other draft changes would go live with it.
 Every view has its own link: `#/mocks/<name>/<tab>/<operationId>`.
 

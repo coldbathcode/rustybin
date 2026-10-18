@@ -61,7 +61,13 @@ export function operationEditor(opts) {
   let form = null;
   const respEl = h('div', { class: 'stack-sm' });
   const hdrs = headerEditor([]);
-  const delayIn = input({ type: 'number', min: '0', class: 'input mono', placeholder: 'mock default', 'aria-label': 'Delay (ms)' });
+  const delayIn = input({ type: 'number', min: '0', id: 'op-delay', class: 'input mono', placeholder: 'mock default', 'aria-label': 'Delay (ms)', style: { maxWidth: '9em' } });
+  // The slider and the number field edit the same value (empty: mock default);
+  // the slider covers the usual range, the field takes anything up to the limit.
+  const delayMax = Math.max(1000, Math.min(Number(opts.maxDelayMs) || 5000, 5000));
+  const delayRange = h('input', { type: 'range', min: '0', max: String(delayMax), step: '50', class: 'grow', 'aria-label': 'Delay slider (ms)' });
+  delayRange.addEventListener('input', () => { delayIn.value = delayRange.value; });
+  delayIn.addEventListener('input', () => { delayRange.value = delayIn.value.trim() === '' ? '0' : delayIn.value; });
   const publicCb = h('input', { type: 'checkbox' });
   let rules = null;
 
@@ -91,6 +97,7 @@ export function operationEditor(opts) {
     customText = customBody === undefined ? '' : JSON.stringify(customBody, null, 2);
     hdrs.set(Object.entries(resp.headers || {}));
     delayIn.value = s.delay_ms !== undefined ? String(s.delay_ms) : '';
+    delayRange.value = s.delay_ms !== undefined ? String(s.delay_ms) : '0';
     publicCb.checked = !!s.public;
     if (rules) rules.destroy();
     rules = rulesBuilder(clone(s.rules) || [], d, opts, markDirty);
@@ -134,7 +141,7 @@ export function operationEditor(opts) {
         h('div', { class: 'field' }, h('span', null, 'Response headers'), hdrs.el,
           headerHint()),
         h('div', { class: 'grid grid-2' },
-          h('label', { class: 'field' }, h('span', null, 'Delay (ms)'), delayIn, h('span', { class: 'hint' }, 'Extra latency for this operation only.')),
+          h('div', { class: 'field' }, h('label', { for: 'op-delay' }, 'Delay (ms)'), h('div', { class: 'row nowrap' }, delayRange, delayIn), h('span', { class: 'hint' }, `Extra latency for this operation only (slider up to ${delayMax} ms, type more in the field; empty uses the mock default).`)),
           h('div', { class: 'field' }, h('span', null, 'Access'),
             h('label', { class: 'check' }, publicCb, 'Public (no mocked security)'),
             h('span', { class: 'hint' }, opts.securityOn ? 'Skips the credential check for this operation.' : 'Mocked security is off for this mock, so every operation is public.'))))),

@@ -158,7 +158,7 @@ the request body's presence, content type, JSON syntax and schema.
 |---|---|
 | `off` | Nothing is checked |
 | `warn` (default) | The mock answers normally, adds `X-Rustybin-Mock-Validation: failed` and records the issues in the capture's `validation` |
-| `enforce` | `400` `application/problem+json` with an `errors` list of `{pointer, message}`, nothing else is answered |
+| `enforce` | `400` `application/problem+json` with an `errors` list of `{pointer, message}`, nothing else is answered; a request whose `Accept` excludes every media type of the chosen response gets `406` with the `available` types |
 
 Pointers address a virtual document: `/path/productId`, `/query/limit`,
 `/header/x-request-id`, `/body/items/0/quantity`.
@@ -170,6 +170,9 @@ Pointers address a virtual document: `/path/productId`, `/query/limit`,
 ```hurl
 {{#include ../../examples/mocks/responses.hurl:validation_enforce}}
 ```
+
+In `off` and `warn` mode the media type falls back to JSON (or the first one
+documented) when `Accept` matches nothing, so a strict client still gets an answer.
 
 ## Deploy checks
 
@@ -183,7 +186,7 @@ documented status), validating each body against its schema.
 | Level | Examples |
 |---|---|
 | Error (blocks the deploy) | A configured `body` that does not match the schema; an `example` name that the status does not document |
-| Warning | A spec example or generated data that does not match its schema; a rule on an unknown path or query parameter or on a body the operation does not have; settings for an operationId the spec does not have; security on in `spec` mode while the spec declares none; every parse warning (undeclared path parameters, operations without responses, unsupported keywords, ...) |
+| Warning | A spec example or generated data that does not match its schema; a rule on an unknown path or query parameter or on a body the operation does not have; a rule that can never match (`exists: false` on a path parameter, `equals` and `not_equals` of the same value, an `equals` value its `matches` rejects) or is never reached (an earlier rule matches every request); settings for an operationId the spec does not have; security on in `spec` mode while the spec declares none; empty API key or basic user lists for schemes in use; security schemes that are not mocked; a `pattern` too complex for the generator; a documented response header whose value cannot be sent; every parse warning (undeclared path parameters, operations without responses, unsupported keywords, server-owned headers such as `Content-Length`, ...) |
 
 ```hurl
 {{#include ../../examples/mocks/responses.hurl:checks_block}}

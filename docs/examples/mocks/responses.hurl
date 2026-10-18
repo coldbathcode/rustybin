@@ -360,6 +360,14 @@ HTTP 400
 [Asserts]
 jsonpath "$.errors[0].pointer" == "/path/productId"
 
+# The operation answers JSON only: an XML-only client gets 406.
+GET {{base_url}}/mock/docs-shop/products/7
+Accept: application/xml
+HTTP 406
+[Asserts]
+jsonpath "$.available" count == 1
+jsonpath "$.available[0]" == "application/json"
+
 # Restore the default (warn).
 PATCH {{base_url}}/_rustybin/mocks/docs-shop
 Authorization: Bearer {{admin_token}}

@@ -17,7 +17,7 @@ reason (`auth` in the capture, outcome `unauthorized` or `forbidden`):
 | Result | Status |
 |---|---|
 | No credentials, or wrong ones | `401` with a `WWW-Authenticate` challenge (`Basic realm="mock"` or `Bearer realm="mock"`) when the scheme has one |
-| A valid token without a required scope | `403`, `detail: "insufficient scope (needs ...)"` |
+| A valid token without a required scope | `403`, `detail: "insufficient scope (needs ...)"` and `WWW-Authenticate: Bearer realm="mock", error="insufficient_scope", scope="..."` (RFC 6750) |
 
 ## Spec mode
 
@@ -35,7 +35,9 @@ enough, and each alternative may combine several schemes, all of which are neede
 | `mutualTLS` | A client certificate from the [demo CA](../reference/auth.md#mtls): on the HTTPS listener, or forwarded by a gateway in the `RUSTYBIN_MTLS_IN_HEADER` header |
 
 JWTs are verified with the identity provider's RS256 key (signature and expiry);
-`security.jwt.issuer` and `security.jwt.audience` add `iss` and `aud` checks. Keys,
+`security.jwt.issuer` and `security.jwt.audience` add `iss` and `aud` checks
+(`issuer: builtin` is the same as no issuer: any token the built-in identity
+provider signed is accepted). Keys,
 passwords and tokens are compared in constant time. Schemes of other types are not
 enforced (a spec warning names them).
 

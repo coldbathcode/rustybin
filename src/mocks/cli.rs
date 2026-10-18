@@ -316,7 +316,7 @@ fn config_path(args: &Args) -> PathBuf {
 fn check_config(args: &Args) -> Result<bool, String> {
     let path = config_path(args);
     let limits = limits();
-    let (defs, problems) = config_file::load_file(
+    let config_file::Loaded { defs, problems, .. } = config_file::load_file(
         &path,
         |k| std::env::var(k).ok(),
         limits.max_spec_bytes as u64,

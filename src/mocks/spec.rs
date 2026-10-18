@@ -1013,6 +1013,19 @@ fn parse_content(
     out
 }
 
+/// Response headers the server owns (framing and connection management):
+/// documented ones are not sent by the mock.
+const RESERVED_RESPONSE_HEADERS: &[&str] = &[
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "upgrade",
+    "trailer",
+    "te",
+    "proxy-connection",
+];
+
 fn parse_responses(
     root: &Value,
     v: Option<&Value>,
@@ -1048,6 +1061,19 @@ fn parse_responses(
         if let Some(hmap) = r.get("headers").and_then(Value::as_object) {
             for (name, h) in hmap {
                 if name.eq_ignore_ascii_case("content-type") {
+                    continue;
+                }
+                let lower = name.to_ascii_lowercase();
+                if RESERVED_RESPONSE_HEADERS.contains(&lower.as_str()) {
+                    warnings.push(format!(
+                        "{label}: response {status}: header {name:?} is set by the server, not mocked"
+                    ));
+                    continue;
+                }
+                if axum::http::HeaderName::from_bytes(name.as_bytes()).is_err() {
+                    warnings.push(format!(
+                        "{label}: response {status}: {name:?} is not a valid header name, skipped"
+                    ));
                     continue;
                 }
                 let Ok(h) = resolve(root, h) else {

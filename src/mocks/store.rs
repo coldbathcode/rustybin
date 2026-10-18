@@ -139,6 +139,9 @@ struct Entry {
     capture: CaptureLog,
     state: MockState,
     expires: Option<(Instant, DateTime<Utc>)>,
+    /// Why the last reload of this file mock failed (its last good
+    /// revision, if any, keeps answering).
+    load_error: Option<String>,
 }
 
 /// What a request handler needs from a mock.
@@ -151,8 +154,9 @@ pub struct LiveMock {
 
 pub enum Lookup {
     Missing,
-    /// Exists but was never deployed.
-    NotDeployed(CaptureLog),
+    /// Exists but was never deployed (with the load error of a file mock
+    /// whose spec could not be used).
+    NotDeployed(CaptureLog, Option<String>),
     Ready(LiveMock),
 }
 
@@ -169,6 +173,7 @@ pub struct Snapshot {
     pub capture: CaptureLog,
     pub state: MockState,
     pub expires_at: Option<DateTime<Utc>>,
+    pub load_error: Option<String>,
 }
 
 impl Snapshot {
@@ -215,6 +220,7 @@ impl Snapshot {
             "created_at": self.created_at.to_rfc3339(),
             "updated_at": self.updated_at.to_rfc3339(),
             "expires_at": self.expires_at.map(|e| e.to_rfc3339()),
+            "load_error": self.load_error,
         })
     }
 }
@@ -421,6 +427,7 @@ impl MockStore {
             capture: CaptureLog::new(self.limits.captures, self.limits.capture_bytes),
             state: MockState::new(self.limits.state_items, self.limits.state_bytes),
             expires,
+            load_error: None,
         };
         let snap = snapshot(name, &entry);
         map.insert(name.to_string(), entry);
@@ -434,7 +441,7 @@ impl MockStore {
             return Lookup::Missing;
         };
         match &e.live {
-            None => Lookup::NotDeployed(e.capture.clone()),
+            None => Lookup::NotDeployed(e.capture.clone(), e.load_error.clone()),
             Some(live) => Lookup::Ready(LiveMock {
                 compiled: live.clone(),
                 enabled: e.enabled,
@@ -504,6 +511,10 @@ impl MockStore {
             .remove(name)
             .ok_or_else(|| StoreError::NotFound(name.to_string()))?;
         if let Some(c) = compiled {
+            // A new spec replaces whatever failed to load.
+            if c.source != entry.draft.source {
+                entry.load_error = None;
+            }
             entry.draft = Arc::new(c);
         }
         entry.updated_at = Utc::now();
@@ -557,6 +568,13 @@ impl MockStore {
         let e = map
             .get_mut(name)
             .ok_or_else(|| StoreError::NotFound(name.to_string()))?;
+        if e.live.is_none() {
+            if let Some(error) = &e.load_error {
+                return Err(StoreError::Conflict(format!(
+                    "this mock could not be loaded from its file ({error}): fix the definition and reload"
+                )));
+            }
+        }
         if !force && !e.draft.report.ok {
             return Err(StoreError::ChecksFailed(Box::new(e.draft.report.clone())));
         }
@@ -690,6 +708,39 @@ impl MockStore {
         self.create_inner(name, draft, origin, enabled, false, false)
     }
 
+    fn set_load_error(&self, name: &str, error: Option<&str>) {
+        if let Some(e) = self.write().get_mut(name) {
+            e.load_error = error.map(str::to_string);
+        }
+    }
+
+    /// Record that the definition of `name` could not be loaded. An existing
+    /// mock keeps its revisions (and keeps answering) with the error shown;
+    /// a new one is created switched off and not deployed, so the console
+    /// lists it with the error instead of hiding it.
+    pub fn mark_failed(&self, name: &str, origin: Origin, error: &str) {
+        let error: String = error.chars().take(2000).collect();
+        if self.get(name).is_none() {
+            if !valid_name(name) {
+                return;
+            }
+            let title = serde_json::to_string(name).unwrap_or_default();
+            let stub = format!(
+                r#"{{"openapi":"3.0.3","info":{{"title":{title},"version":"0"}},"paths":{{}}}}"#
+            );
+            let Ok(compiled) = self.compile(&stub, MockSettings::default()) else {
+                return;
+            };
+            if self
+                .create_inner(name, compiled, origin, false, false, false)
+                .is_err()
+            {
+                return;
+            }
+        }
+        self.set_load_error(name, Some(&error));
+    }
+
     /// Apply definitions: create, update (draft + deploy, forced) or leave
     /// unchanged; with `prune`, delete mocks of `prune_origin` that are not
     /// listed.
@@ -699,8 +750,21 @@ impl MockStore {
         origin: Origin,
         prune: Option<Origin>,
     ) -> ApplyReport {
+        self.apply_keeping(defs, origin, prune, &[])
+    }
+
+    /// [`Self::apply`]; the mocks named in `keep` are never pruned (file
+    /// entries that failed to load).
+    pub fn apply_keeping(
+        &self,
+        defs: Vec<Definition>,
+        origin: Origin,
+        prune: Option<Origin>,
+        keep: &[String],
+    ) -> ApplyReport {
         let mut report = ApplyReport::default();
-        let listed: Vec<String> = defs.iter().map(|d| d.name.clone()).collect();
+        let mut listed: Vec<String> = defs.iter().map(|d| d.name.clone()).collect();
+        listed.extend(keep.iter().cloned());
         for def in defs {
             let existing = self.get(&def.name);
             // The same document in another formatting (an export re-applied)
@@ -715,6 +779,7 @@ impl MockStore {
                     && s.draft.settings == def.settings.clone().normalised()
                     && s.live.as_ref().map(|l| l.revision) == Some(s.draft.revision);
                 if same {
+                    self.set_load_error(&def.name, None);
                     if s.enabled != def.enabled {
                         let _ = self.set_enabled(&def.name, def.enabled);
                         report.updated.push(def.name);
@@ -747,6 +812,9 @@ impl MockStore {
                     .create(&def.name, compiled, origin, def.enabled, true, true)
                     .map(|_| report.created.push(def.name.clone())),
             };
+            if result.is_ok() {
+                self.set_load_error(&def.name, None);
+            }
             match result {
                 Err(e) => report
                     .errors
@@ -789,6 +857,7 @@ fn snapshot(name: &str, e: &Entry) -> Snapshot {
         capture: e.capture.clone(),
         state: e.state.clone(),
         expires_at: e.expires.map(|(_, at)| at),
+        load_error: e.load_error.clone(),
     }
 }
 
@@ -818,7 +887,7 @@ mod tests {
             .create("t", c, Origin::Api, true, false, false)
             .expect("create");
         assert_eq!(snap.state(), "draft");
-        assert!(matches!(s.lookup("t"), Lookup::NotDeployed(_)));
+        assert!(matches!(s.lookup("t"), Lookup::NotDeployed(..)));
         let first = s.deploy("t", false).expect("deploy");
         assert_eq!(first.state(), "live");
         assert!(!first.has_draft_changes());

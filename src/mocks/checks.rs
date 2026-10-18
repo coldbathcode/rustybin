@@ -8,11 +8,11 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::compile::Compiled;
-use super::model::{ResponseMode, ResponseOverride, SecurityMode};
+use super::model::{Condition, ResponseMode, ResponseOverride, Rule, SecurityMode};
 use super::request;
 use super::respond::{self, Body, BodyChoice};
 use super::schema::{self, Direction, GenOptions, Issue};
-use super::spec::{Location, Operation};
+use super::spec::{Location, Operation, SchemeKind};
 
 /// At most this many documented statuses are checked per operation.
 const MAX_STATUSES: usize = 10;
@@ -452,11 +452,27 @@ fn check_operation(c: &Compiled, op: &Operation) -> OperationReport {
             .params_in(Location::Query)
             .map(|p| p.name.as_str())
             .collect();
+        let mut shadowed_by: Option<String> = None;
         for (i, rule) in o.rules.iter().enumerate() {
             let label = match &rule.name {
                 Some(n) => format!("rule {n:?}"),
                 None => format!("rule {}", i + 1),
             };
+            if let Some(first) = &shadowed_by {
+                findings.push(Finding::warning(format!(
+                    "{label} is never reached: {first} matches every request"
+                )));
+            }
+            for (key, cond) in &rule.when {
+                if let Some(why) = contradiction(key, cond, &path_names) {
+                    findings.push(Finding::warning(format!(
+                        "{label}: {key} {why}, the rule never matches"
+                    )));
+                }
+            }
+            if shadowed_by.is_none() && always_matches(rule, &path_names) {
+                shadowed_by = Some(label.clone());
+            }
             for key in rule.when.keys() {
                 if let Some(name) = key.strip_prefix("path.") {
                     if !path_names.contains(&name) {
@@ -480,7 +496,13 @@ fn check_operation(c: &Compiled, op: &Operation) -> OperationReport {
             let check = check_override(c, op, &rule.respond, label, mode, &mut findings);
             responses.push(check);
         }
+        if let (Some(first), Some(_)) = (&shadowed_by, &o.respond) {
+            findings.push(Finding::warning(format!(
+                "the operation's respond override is never used: {first} matches every request"
+            )));
+        }
     }
+    findings.extend(header_findings(c, op));
     // Every other documented status (what `Prefer: code=` returns).
     let checked: Vec<u16> = responses.iter().map(|r| r.status).collect();
     for status in op
@@ -534,6 +556,185 @@ fn check_operation(c: &Compiled, op: &Operation) -> OperationReport {
     }
 }
 
+/// Why a condition can never hold, if it cannot.
+fn contradiction(key: &str, cond: &Condition, path_names: &[&str]) -> Option<String> {
+    let wants_value = cond.equals.is_some() || cond.matches.is_some() || cond.exists == Some(true);
+    if cond.exists == Some(false) {
+        if wants_value {
+            return Some("must both be absent and have a value".into());
+        }
+        if key
+            .strip_prefix("path.")
+            .is_some_and(|n| path_names.contains(&n))
+        {
+            return Some("is a path parameter and always present".into());
+        }
+    }
+    let text = |v: &Value| match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    if let (Some(a), Some(b)) = (&cond.equals, &cond.not_equals) {
+        if text(a) == text(b) {
+            return Some(format!("must both equal and not equal {:?}", text(a)));
+        }
+    }
+    if let (Some(v), Some(p)) = (&cond.equals, &cond.matches) {
+        if schema::cached_regex(p).is_some_and(|re| !re.is_match(&text(v))) {
+            return Some(format!(
+                "must equal {:?}, which does not match {p:?}",
+                text(v)
+            ));
+        }
+    }
+    None
+}
+
+/// A rule without conditions, or one that only asks for path parameters to
+/// exist, matches every request of its operation.
+fn always_matches(rule: &Rule, path_names: &[&str]) -> bool {
+    rule.when.iter().all(|(key, cond)| {
+        let is_path = key
+            .strip_prefix("path.")
+            .is_some_and(|n| path_names.contains(&n));
+        is_path
+            && cond.equals.is_none()
+            && cond.not_equals.is_none()
+            && cond.matches.is_none()
+            && cond.exists != Some(false)
+    })
+}
+
+/// Documented response headers whose example or generated value cannot be
+/// sent as a header value (they are left out of the response).
+fn header_findings(c: &Compiled, op: &Operation) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for status in op.documented_statuses().into_iter().take(MAX_STATUSES) {
+        let Some(def) = op.response_for(status) else {
+            continue;
+        };
+        if def.headers.is_empty() {
+            continue;
+        }
+        let sent: Vec<String> = respond::spec_headers(c, op, status)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        for h in &def.headers {
+            if !sent.contains(&h.name) {
+                out.push(Finding::warning(format!(
+                    "response {status}: the value of header {:?} cannot be sent as a header value (control characters or line breaks), the header is left out",
+                    h.name
+                )));
+            }
+        }
+    }
+    out
+}
+
+/// Most `pattern` findings in one report.
+const MAX_PATTERN_FINDINGS: usize = 20;
+
+/// `pattern`s the generator cannot produce values for (the spec's examples
+/// and defaults are data, not schemas, and are skipped).
+fn unsupported_patterns(root: &Value) -> Vec<(String, String)> {
+    fn walk(v: &Value, pointer: &mut String, out: &mut Vec<(String, String)>, depth: usize) {
+        if depth > 64 || out.len() >= MAX_PATTERN_FINDINGS {
+            return;
+        }
+        match v {
+            Value::Object(m) => {
+                if let Some(Value::String(p)) = m.get("pattern") {
+                    if schema::pattern_string(p).is_none() && !out.iter().any(|(q, _)| q == p) {
+                        out.push((p.clone(), format!("{pointer}/pattern")));
+                    }
+                }
+                for (k, child) in m {
+                    if matches!(
+                        k.as_str(),
+                        "example" | "examples" | "default" | "enum" | "const" | "x-examples"
+                    ) {
+                        continue;
+                    }
+                    let len = pointer.len();
+                    pointer.push('/');
+                    pointer.push_str(&k.replace('~', "~0").replace('/', "~1"));
+                    walk(child, pointer, out, depth + 1);
+                    pointer.truncate(len);
+                }
+            }
+            Value::Array(a) => {
+                for (i, child) in a.iter().enumerate() {
+                    let len = pointer.len();
+                    pointer.push_str(&format!("/{i}"));
+                    walk(child, pointer, out, depth + 1);
+                    pointer.truncate(len);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, &mut String::from("#"), &mut out, 0);
+    out
+}
+
+/// Security settings that no request can satisfy, and schemes that are not
+/// mocked (requests pass them unchecked).
+fn security_findings(c: &Compiled) -> Vec<Finding> {
+    let sec = &c.settings.security;
+    let mut out = Vec::new();
+    if !sec.enabled {
+        return out;
+    }
+    let no_keys =
+        "no API key is configured (security.api_key.keys): API key checks reject every call";
+    let no_users =
+        "no basic user is configured (security.basic.users): basic auth checks reject every call";
+    match sec.mode {
+        SecurityMode::ApiKey if sec.api_key.keys.is_empty() => {
+            out.push(Finding::warning(no_keys));
+        }
+        SecurityMode::Basic if sec.basic.users.is_empty() => {
+            out.push(Finding::warning(no_users));
+        }
+        SecurityMode::Spec => {
+            let mut used: Vec<&str> = Vec::new();
+            for op in &c.spec.operations {
+                if c.settings.operations.get(&op.id).is_some_and(|o| o.public) {
+                    continue;
+                }
+                for alt in &op.security {
+                    for (name, _) in alt {
+                        if !used.contains(&name.as_str()) {
+                            used.push(name);
+                        }
+                    }
+                }
+            }
+            let (mut keys, mut users) = (false, false);
+            for name in used {
+                match c.spec.scheme(name).map(|s| &s.kind) {
+                    Some(SchemeKind::ApiKey { .. }) => keys = true,
+                    Some(SchemeKind::Basic) => users = true,
+                    Some(SchemeKind::Unsupported { detail }) => out.push(Finding::warning(format!(
+                        "security scheme {name:?} is not mocked ({detail}): requests pass it unchecked"
+                    ))),
+                    _ => {}
+                }
+            }
+            if keys && sec.api_key.keys.is_empty() {
+                out.push(Finding::warning(no_keys));
+            }
+            if users && sec.basic.users.is_empty() {
+                out.push(Finding::warning(no_users));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 /// Path parameters of a concrete sample path.
 fn extract_params(op: &Operation, path: &str, prefix: &str) -> Vec<(String, String)> {
     let rest = path.strip_prefix(prefix).unwrap_or(path);
@@ -574,6 +775,13 @@ pub fn run(c: &Compiled) -> Report {
             "security is on but the spec declares no security requirements: pick a fixed mode \
              (api_key, basic, bearer or jwt) to protect the operations",
         ));
+    }
+    findings.extend(security_findings(c));
+    for (pattern, pointer) in unsupported_patterns(&c.spec.root) {
+        findings.push(Finding::warning(format!(
+            "pattern {pattern:?} at {pointer} is too complex for the generator: generated values \
+             use a placeholder that may not match it (add an example to the schema)"
+        )));
     }
     let operations: Vec<OperationReport> = c
         .spec
@@ -691,6 +899,88 @@ mod tests {
             messages.iter().any(|m| m.contains("does not exist")),
             "{messages:?}"
         );
+    }
+
+    #[test]
+    fn unreachable_rules_headers_patterns_and_security() {
+        const SPEC2: &str = r##"{
+          "openapi": "3.0.3", "info": {"title": "t", "version": "1"},
+          "paths": {"/items/{id}": {"get": {"operationId": "item",
+            "security": [{"key": []}, {"weird": []}],
+            "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^(?=x)a$"}}],
+            "responses": {"200": {"description": "ok",
+              "headers": {
+                "Content-Length": {"schema": {"type": "integer"}, "example": 3},
+                "X-Bad": {"schema": {"type": "string"}, "example": "a\nb"},
+                "X-Good": {"schema": {"type": "string"}, "example": "fine"}
+              },
+              "content": {"application/json": {"schema": {"type": "object"}, "example": {"pattern": "(?=ignored)"}}}}}}}},
+          "components": {"securitySchemes": {
+            "key": {"type": "apiKey", "name": "X-Key", "in": "header"},
+            "weird": {"type": "http", "scheme": "digest"}
+          }}
+        }"##;
+        let mut settings: MockSettings = serde_json::from_value(json!({
+            "security": {"enabled": true, "api_key": {"keys": []}},
+            "operations": {"item": {
+                "rules": [
+                    {"when": {"path.id": {"exists": false}}, "respond": {"status": 404}},
+                    {"when": {"query.q": {"equals": "a", "not_equals": "a"}}, "respond": {"status": 400}},
+                    {"name": "catch-all", "when": {"path.id": {"exists": true}}, "respond": {"status": 200}},
+                    {"when": {"header.x": {"equals": "abc", "matches": "^z"}}, "respond": {"status": 418}}
+                ],
+                "respond": {"status": 200}
+            }}
+        }))
+        .expect("settings");
+        settings.responses.mode = ResponseMode::Examples;
+        let c = compile(SPEC2, settings);
+        let r = &c.report;
+        assert!(
+            r.spec_warnings
+                .iter()
+                .any(|w| w.contains("\"Content-Length\" is set by the server")),
+            "{:?}",
+            r.spec_warnings
+        );
+        let op = &r.operations[0];
+        let messages: Vec<&str> = op.findings.iter().map(|f| f.message.as_str()).collect();
+        let has = |needle: &str| messages.iter().any(|m| m.contains(needle));
+        assert!(
+            has("rule 1: path.id is a path parameter and always present"),
+            "{messages:?}"
+        );
+        assert!(
+            has("rule 2: query.q must both equal and not equal"),
+            "{messages:?}"
+        );
+        assert!(
+            has("rule 4 is never reached: rule \"catch-all\" matches every request"),
+            "{messages:?}"
+        );
+        assert!(
+            has("rule 4: header.x must equal \"abc\", which does not match"),
+            "{messages:?}"
+        );
+        assert!(has("respond override is never used"), "{messages:?}");
+        assert!(has("header \"X-Bad\" cannot be sent"), "{messages:?}");
+        assert!(!has("X-Good"), "{messages:?}");
+
+        let global: Vec<&str> = r.findings.iter().map(|f| f.message.as_str()).collect();
+        assert!(
+            global.iter().any(|m| m.contains("\"weird\" is not mocked")),
+            "{global:?}"
+        );
+        assert!(
+            global
+                .iter()
+                .any(|m| m.contains("no API key is configured")),
+            "{global:?}"
+        );
+        let patterns: Vec<&&str> = global.iter().filter(|m| m.contains("pattern")).collect();
+        assert_eq!(patterns.len(), 1, "{global:?}");
+        assert!(patterns[0].contains("#/paths/~1items~1{id}/get/parameters/0/schema/pattern"));
+        assert!(r.ok, "warnings only: {r:#?}");
     }
 
     #[test]

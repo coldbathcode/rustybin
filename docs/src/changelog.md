@@ -55,7 +55,11 @@ API, AI and agent gateway demos.
   through `/_rustybin/mocks*`, from `rustybin.yaml` (`RUSTYBIN_CONFIG_FILE`,
   `--config`, reload on `SIGHUP`, JSON Schema for editors) or a directory of specs
   (`RUSTYBIN_MOCKS_DIR`), and with the `rustybin mock` CLI. A `petstore` sample is
-  built in (`RUSTYBIN_MOCKS_SAMPLE`).
+  built in (`RUSTYBIN_MOCKS_SAMPLE`). A reload never deletes mocks because of a
+  broken file or entry (they keep their last good revision and show a
+  `load_error`), enforced validation answers `406` for an unacceptable `Accept`,
+  missing scopes get an RFC 6750 `insufficient_scope` challenge, and requests are
+  counted in `rustybin_mock_requests_total`.
 - **Plan limits** for hosted offerings (`RUSTYBIN_PLAN`, `RUSTYBIN_LIMIT_*`,
   `RUSTYBIN_USAGE_FILE`): rate, concurrency, streams and daily or monthly request and
   egress quotas, per instance or per session, with IETF RateLimit headers on 429s and

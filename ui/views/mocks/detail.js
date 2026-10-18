@@ -82,19 +82,22 @@ export function mountDetail(root, name, sub) {
     const d = detail;
     switchCtl.set(d.enabled);
     switchText.textContent = d.enabled ? 'On' : 'Off';
-    const pending = d.has_draft_changes || d.live_revision === null;
+    // A file mock that never loaded has nothing to deploy: fix the file.
+    const unloaded = !!d.load_error && d.live_revision === null;
+    const pending = !unloaded && (d.has_draft_changes || d.live_revision === null);
     deployBtn.className = 'btn' + (pending && !readOnly ? ' primary' : '');
     deployBtn.disabled = !pending || !!readOnly;
     const c = d.report;
-    const counts = c.errors ? badge(String(c.errors), 'err') : c.warnings ? badge(String(c.warnings), 'warn') : null;
-    replace(deployBtn, icon('up'), 'Deploy', counts);
-    deployBtn.title = pending ? `Publish the draft (revision ${d.draft_revision}). Checks: ${c.errors} errors, ${c.warnings} warnings.` : 'Nothing to deploy: the draft is live.';
+    const changes = d.draft_changes || [];
+    const counts = unloaded ? null : c.errors ? badge(String(c.errors), 'err') : c.warnings ? badge(String(c.warnings), 'warn') : null;
+    replace(deployBtn, icon('up'), 'Deploy', changes.length ? h('span', { class: 'tiny' }, ` (${plural(changes.length, 'change')})`) : null, counts);
+    deployBtn.title = unloaded ? 'Nothing to deploy: fix the definition in the file, then reload.' : pending ? `Publish the draft (revision ${d.draft_revision})${changes.length ? '. Changed: ' + changes.join(', ') : ''}. Checks: ${c.errors} errors, ${c.warnings} warnings.` : 'Nothing to deploy: the draft is live.';
     buildMenu();
     replace(headEl,
       h('div', { class: 'grow stack-sm', style: { gap: '6px' } },
         h('a', { class: 'small back-link', href: '#/mocks' }, icon('back'), 'All mocks'),
         h('div', { class: 'row' }, h('h1', { class: 'mono' }, d.name), statePill(d),
-          d.has_draft_changes ? badge(h('span', null, h('span', { class: 'dot warn' }), ' draft changes'), 'warn') : null,
+          d.has_draft_changes && !unloaded ? badge(h('span', null, h('span', { class: 'dot warn' }), ' draft changes'), 'warn') : null,
           d.origin !== 'api' ? badge(d.origin === 'sample' ? 'built-in sample' : 'from file', 'outline') : null),
         h('p', { style: { margin: 0 } }, h('strong', null, d.spec.title), ' v', d.spec.version, h('span', { class: 'muted' }, ` | ${plural(d.operations.length, 'operation')} | security ${securityLabel(d.security)} | ${plural(d.requests_last_hour || 0, 'call')} in the last hour, ${d.requests_total} in total, last ${relTime(d.last_hit)}`)),
         h('div', { class: 'row nowrap url-bar' }, h('code', { class: 'grow break' }, d.url), copyButton(d.url, { label: 'Copy URL', toast: 'Mock URL copied' })),
@@ -129,13 +132,20 @@ export function mountDetail(root, name, sub) {
       replace(createdEl, createdBanner(created.deployed));
     }
     if (readOnly) stateEl.appendChild(notice('', readOnly));
-    if (detail.live_revision === null) {
+    if (detail.load_error) {
+      stateEl.appendChild(notice('err', h('strong', null, 'The last reload of this mock failed. '),
+        detail.live_revision === null ? 'It was never loaded, so its URL answers 503. ' : `Revision ${detail.live_revision} keeps answering. `,
+        'Fix the definition in the file, then reload (SIGHUP or POST /_rustybin/mocks/reload).',
+        h('pre', { class: 'tiny break', style: { margin: '6px 0 0', whiteSpace: 'pre-wrap' } }, detail.load_error)));
+    } else if (detail.live_revision === null) {
       stateEl.appendChild(notice('warn', h('strong', null, 'Not deployed yet. '), 'Calls to its URL answer 503 until you deploy the draft.', readOnly ? null : h('div', { style: { marginTop: '6px' } }, h('button', { class: 'btn sm primary', type: 'button', onclick: () => deploy(false) }, icon('up'), 'Deploy now'))));
     } else if (detail.has_draft_changes) {
+      const changes = detail.draft_changes || [];
       stateEl.appendChild(notice('warn', h('strong', null, 'The draft has changes that are not live yet. '), `Revision ${detail.live_revision} answers calls; deploy to publish revision ${detail.draft_revision}.`,
+        changes.length ? h('div', { class: 'small', style: { marginTop: '4px' } }, 'Changed: ', changes.join(', ')) : null,
         readOnly ? null : h('div', { style: { marginTop: '6px' } }, h('button', { class: 'btn sm primary', type: 'button', onclick: () => deploy(false) }, icon('up'), 'Deploy'))));
     }
-    if (!detail.enabled) stateEl.appendChild(notice('', 'This mock is switched off: its URL answers ' + detail.settings.responses.disabled_status + '. Configuration and history are kept.'));
+    if (!detail.enabled && !(detail.load_error && detail.live_revision === null)) stateEl.appendChild(notice('', 'This mock is switched off: its URL answers ' + detail.settings.responses.disabled_status + '. Configuration and history are kept.'));
   }
 
   function createdBanner(deployed) {
@@ -364,7 +374,7 @@ export function mountDetail(root, name, sub) {
       renderList();
       editor = operationEditor({
         name, opId: id, readOnly: !!readOnly, mockMode: detail.settings.responses.mode,
-        securityOn: detail.security.enabled,
+        securityOn: detail.security.enabled, maxDelayMs: detail.limits && detail.limits.max_delay_ms,
         onSaved: () => refresh(),
         onTry: (op) => { goTab('try'); panels.try.select(op); },
         onData: () => { if (hasData) goTab('data'); else toast('Save first: the Data tab appears once the mock or an operation is stateful.'); },

@@ -191,6 +191,7 @@ struct Incoming<'a> {
 struct Outcome<'a> {
     outcome: &'static str,
     operation: Option<&'a str>,
+    params: &'a [(String, String)],
     revision: u64,
     source: Option<String>,
     validation: Vec<schema::Issue>,
@@ -246,6 +247,14 @@ fn capture_entry(
         client_ip: inc.ip.map(|i| i.to_string()),
         outcome: out.outcome,
         operation: out.operation.map(str::to_string),
+        params: out
+            .params
+            .iter()
+            .map(|(name, value)| BinHeader {
+                name: name.clone(),
+                value: value.clone(),
+            })
+            .collect(),
         revision: out.revision,
         status: resp.status().as_u16(),
         source: out.source,
@@ -256,6 +265,20 @@ fn capture_entry(
         response_truncated,
         duration_ms: inc.started.elapsed().as_millis() as u64,
     }
+}
+
+/// Count a mock request in `/_rustybin/metrics` (normal mode only: in public
+/// mode mock names are visitor input).
+fn count(state: &AppState, name: &str, outcome: &'static str) {
+    if !state.config.public_mode {
+        state.metrics.count_mock(name, outcome);
+    }
+}
+
+/// `/mock/{name}/_rustybin/...` belongs to Rustybin (the served spec), never
+/// to the mock's operations.
+fn is_reserved_sub_path(sub_path: &str) -> bool {
+    sub_path == "/_rustybin" || sub_path.starts_with("/_rustybin/")
 }
 
 fn add_mock_headers(resp: &mut Response, name: &str, op: Option<&str>) {
@@ -287,6 +310,13 @@ async fn serve(
         Some("") | None => "/".to_string(),
         Some(rest) => rest.to_string(),
     };
+    if is_reserved_sub_path(&sub_path) {
+        return problem(
+            404,
+            "reserved path: below /_rustybin a mock serves only openapi.json and openapi.yaml",
+            json!({ "mock": name }),
+        );
+    }
     let inc = Incoming {
         method: &method,
         uri: &uri,
@@ -309,16 +339,25 @@ async fn serve(
             )
                 .into_response();
         }
-        Lookup::NotDeployed(capture) => {
-            let mut resp = problem(
-                503,
-                "this mock has not been deployed yet: deploy it in the console or with POST /_rustybin/mocks/{name}/deploy",
-                json!({ "mock": name }),
-            );
+        Lookup::NotDeployed(capture, load_error) => {
+            let mut resp = match load_error {
+                Some(error) => problem(
+                    503,
+                    "this mock could not be loaded from its file: fix the definition and reload",
+                    json!({ "mock": name, "load_error": error }),
+                ),
+                None => problem(
+                    503,
+                    "this mock has not been deployed yet: deploy it in the console or with POST /_rustybin/mocks/{name}/deploy",
+                    json!({ "mock": name }),
+                ),
+            };
             add_mock_headers(&mut resp, &name, None);
+            count(&state, &name, "not_deployed");
             let out = Outcome {
                 outcome: "not_deployed",
                 operation: None,
+                params: &[],
                 revision: 0,
                 source: None,
                 validation: Vec::new(),
@@ -331,6 +370,7 @@ async fn serve(
     };
     let c: &Compiled = &live.compiled;
     let record = |resp: Response, out: Outcome, preview: Option<Vec<u8>>| {
+        count(&state, &name, out.outcome);
         live.capture
             .record(capture_entry(&inc, out, &resp, preview.as_deref()));
         resp
@@ -338,6 +378,7 @@ async fn serve(
     let outcome = |o: &'static str| Outcome {
         outcome: o,
         operation: None,
+        params: &[],
         revision: c.revision,
         source: None,
         validation: Vec::new(),
@@ -420,6 +461,7 @@ async fn serve(
                 "unauthorized"
             },
             operation: Some(&op.id),
+            params: &params,
             revision: c.revision,
             source: None,
             validation: Vec::new(),
@@ -455,6 +497,7 @@ async fn serve(
         let out = Outcome {
             outcome: "invalid_request",
             operation: Some(&op.id),
+            params: &params,
             revision: c.revision,
             source: None,
             validation: issues,
@@ -484,6 +527,39 @@ async fn serve(
         },
         Some((&live.state, &sub_path)),
     );
+    if mode == ValidationMode::Enforce && out.source != "undocumented" {
+        let accept = headers
+            .get(header::ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .filter(|a| !a.trim().is_empty());
+        if let (Some(accept), Some(ct)) = (accept, out.content_type.as_deref()) {
+            if !respond::accept_allows(accept, ct) {
+                let available: Vec<&str> = op
+                    .response_for(out.status)
+                    .map(|d| d.content.iter().map(|m| m.media_type.as_str()).collect())
+                    .unwrap_or_else(|| vec![ct]);
+                let mut resp = problem(
+                    406,
+                    &format!(
+                        "the operation answers {} but Accept is {accept:?}",
+                        available.join(", ")
+                    ),
+                    json!({ "mock": name, "operation": op.id, "available": available }),
+                );
+                add_mock_headers(&mut resp, &name, Some(&op.id));
+                let entry = Outcome {
+                    outcome: "not_acceptable",
+                    operation: Some(&op.id),
+                    params: &params,
+                    revision: c.revision,
+                    source: None,
+                    validation: issues,
+                    auth: auth_label,
+                };
+                return record(resp, entry, None);
+            }
+        }
+    }
     if out.delay_ms > 0 {
         let capped = out.delay_ms.min(state.config.max_delay_ms());
         tokio::time::sleep(Duration::from_millis(capped)).await;
@@ -524,6 +600,7 @@ async fn serve(
     let entry = Outcome {
         outcome: "mocked",
         operation: Some(&op.id),
+        params: &params,
         revision: c.revision,
         source: Some(out.source.clone()),
         validation: issues,
@@ -719,6 +796,44 @@ fn revisions(s: &Snapshot) -> Vec<Value> {
     list
 }
 
+/// Most entries of `draft_changes`.
+const MAX_DRAFT_CHANGES: usize = 50;
+
+/// What the draft changes compared with the live revision (empty when the
+/// draft is live or was never deployed): `spec`, `responses`, `security`,
+/// `operation <id>`, ...
+fn draft_changes(s: &Snapshot) -> Vec<String> {
+    let (Some(live), draft) = (&s.live, &s.draft) else {
+        return Vec::new();
+    };
+    if live.revision == draft.revision {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if live.source != draft.source {
+        out.push("spec".to_string());
+    }
+    let (a, b) = (&live.settings, &draft.settings);
+    if a.strip_server_prefix != b.strip_server_prefix {
+        out.push("server prefix".to_string());
+    }
+    if a.responses != b.responses {
+        out.push("responses".to_string());
+    }
+    if a.security != b.security {
+        out.push("security".to_string());
+    }
+    let ids: std::collections::BTreeSet<&String> =
+        a.operations.keys().chain(b.operations.keys()).collect();
+    for id in ids {
+        if a.operations.get(id) != b.operations.get(id) {
+            out.push(format!("operation {id}"));
+        }
+    }
+    out.truncate(MAX_DRAFT_CHANGES);
+    out
+}
+
 /// A mock's full definition. Without `reveal` the security secrets are
 /// redacted (see [`sees_secrets`]).
 fn detail(
@@ -773,6 +888,7 @@ fn detail(
             }),
         );
         m.insert("revisions".into(), json!(revisions(s)));
+        m.insert("draft_changes".into(), json!(draft_changes(s)));
         m.insert("limits".into(), limits);
     }
     out

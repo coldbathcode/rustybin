@@ -93,6 +93,75 @@ pub fn parse(text: &str) -> Result<MocksFile, String> {
     Ok(file)
 }
 
+/// A mock entry of a file that could not be used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failed {
+    /// The entry's name, when it has a usable one.
+    pub name: Option<String>,
+    pub error: String,
+}
+
+/// [`parse`] for files on disk: a bad entry is skipped (and returned) instead
+/// of failing the whole document. Errors that leave nothing to read (not
+/// YAML or JSON, wrong version, `mocks` not a list) still fail.
+pub fn parse_lenient(text: &str) -> Result<(MocksFile, Vec<Failed>), String> {
+    let value = parse_document(text)?;
+    let Value::Object(mut top) = value else {
+        return Err("invalid mocks document: expected a mapping with `version` and `mocks`".into());
+    };
+    let version = match top.remove("version") {
+        None => default_version(),
+        Some(v) => v
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or_else(|| format!("invalid version {v} (expected 1)"))?,
+    };
+    if version != 1 {
+        return Err(format!("unsupported version {version} (expected 1)"));
+    }
+    let entries = match top.remove("mocks") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(a)) => a,
+        Some(_) => return Err("invalid mocks document: `mocks` must be a list".into()),
+    };
+    let mut failed: Vec<Failed> = top
+        .keys()
+        .map(|k| Failed {
+            name: None,
+            error: format!("unknown field {k:?} ignored (expected `version` and `mocks`)"),
+        })
+        .collect();
+    let mut mocks = Vec::new();
+    for (i, entry) in entries.into_iter().enumerate() {
+        let name = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        match serde_json::from_value::<MockDoc>(entry) {
+            Ok(doc) => mocks.push(doc),
+            Err(e) => failed.push(Failed {
+                error: match &name {
+                    Some(n) => format!("mock {n}: {e}"),
+                    None => format!("mocks[{i}]: {e}"),
+                },
+                name,
+            }),
+        }
+    }
+    Ok((MocksFile { version, mocks }, failed))
+}
+
+/// Mocks read from disk.
+#[derive(Default)]
+pub struct Loaded {
+    pub defs: Vec<Definition>,
+    /// Everything worth a warning (unset variables, skipped entries, ...).
+    pub problems: Vec<String>,
+    /// Named entries that could not be read: a reload keeps their mocks
+    /// instead of deleting them.
+    pub failed: Vec<(String, String)>,
+}
+
 /// Expand `${VAR}` and `${VAR:-default}`; unknown variables without a
 /// default become empty and are reported.
 pub fn expand_env<F>(text: &str, lookup: F) -> (String, Vec<String>)
@@ -187,47 +256,51 @@ pub fn definitions(
     (defs, errors)
 }
 
-/// Load a config file from disk.
-pub fn load_file<F>(
-    path: &Path,
-    lookup: F,
-    max_spec: u64,
-) -> Result<(Vec<Definition>, Vec<String>), String>
+/// Load a config file from disk. Bad entries are skipped (see
+/// [`Loaded::failed`]); `Err` means nothing could be read.
+pub fn load_file<F>(path: &Path, lookup: F, max_spec: u64) -> Result<Loaded, String>
 where
     F: Fn(&str) -> Option<String>,
 {
     let raw = read_limited(path, MAX_FILE_BYTES)?;
     let (text, missing) = expand_env(&raw, lookup);
-    let mut problems: Vec<String> = missing
-        .into_iter()
-        .map(|v| format!("{}: environment variable {v} is not set", path.display()))
-        .collect();
-    let file = parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut out = Loaded {
+        problems: missing
+            .into_iter()
+            .map(|v| format!("{}: environment variable {v} is not set", path.display()))
+            .collect(),
+        ..Loaded::default()
+    };
+    let (file, skipped) = parse_lenient(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    for f in skipped {
+        out.problems
+            .push(format!("{}: {}", path.display(), f.error));
+        if let Some(name) = f.name {
+            out.failed.push((name, f.error));
+        }
+    }
     let base = path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     let (defs, errors) = definitions(file, Some(&base), max_spec);
-    problems.extend(errors.into_iter().map(|e| {
-        format!(
-            "{}: mock {}: {}",
-            path.display(),
-            e["name"].as_str().unwrap_or("?"),
-            e["error"].as_str().unwrap_or("?")
-        )
-    }));
-    Ok((defs, problems))
+    out.defs = defs;
+    for e in errors {
+        let name = e["name"].as_str().unwrap_or("?").to_string();
+        let error = e["error"].as_str().unwrap_or("?").to_string();
+        out.problems
+            .push(format!("{}: mock {name}: {error}", path.display()));
+        out.failed.push((name, error));
+    }
+    Ok(out)
 }
 
 /// Every `*.yaml`, `*.yml` and `*.json` spec in a directory becomes a mock
-/// with default settings, named after the file.
-pub fn load_dir(dir: &Path, max_spec: u64) -> (Vec<Definition>, Vec<String>) {
-    let mut defs = Vec::new();
-    let mut problems = Vec::new();
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) => return (defs, vec![format!("{}: {e}", dir.display())]),
-    };
+/// with default settings, named after the file. `Err`: the directory cannot
+/// be read.
+pub fn load_dir(dir: &Path, max_spec: u64) -> Result<Loaded, String> {
+    let mut out = Loaded::default();
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut paths: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
@@ -247,16 +320,19 @@ pub fn load_dir(dir: &Path, max_spec: u64) -> (Vec<Definition>, Vec<String>) {
                 .unwrap_or_default(),
         );
         match read_limited(&path, max_spec) {
-            Ok(source) => defs.push(Definition {
+            Ok(source) => out.defs.push(Definition {
                 name,
                 source,
                 settings: MockSettings::default(),
                 enabled: true,
             }),
-            Err(e) => problems.push(e),
+            Err(e) => {
+                out.problems.push(e.clone());
+                out.failed.push((name, e));
+            }
         }
     }
-    (defs, problems)
+    Ok(out)
 }
 
 /// A mock as a `rustybin.yaml` document (spec inlined). Without `reveal`
@@ -412,14 +488,17 @@ mod tests {
             "version: 1\nmocks:\n  - name: a\n    spec: spec.yaml\n    security: { enabled: true, api_key: { keys: ['${K}'] } }\n  - name: b\n    spec_inline: { openapi: 3.0.0, info: { title: y }, paths: {} }\n    enabled: false\n  - name: c\n",
         )
         .expect("write");
-        let (defs, problems) =
+        let loaded =
             load_file(&cfg, |k| (k == "K").then(|| "k1".to_string()), 1 << 20).expect("load");
+        let (defs, problems) = (&loaded.defs, &loaded.problems);
         assert_eq!(defs.len(), 2);
         assert_eq!(defs[0].settings.security.api_key.keys, vec!["k1"]);
         assert!(defs[0].source.contains("openapi"));
         assert!(!defs[1].enabled);
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].contains("spec_inline is required"));
+        assert_eq!(loaded.failed.len(), 1);
+        assert_eq!(loaded.failed[0].0, "c");
 
         // API documents cannot reference files.
         let file = parse("mocks: [{name: a, spec: /etc/passwd}]").expect("parse");
@@ -433,11 +512,41 @@ mod tests {
         assert!(parse("version: 2").is_err());
         assert!(parse("mocks: [{name: a, nope: 1}]").is_err());
 
-        let (defs, problems) = load_dir(dir.path(), 1 << 20);
+        let loaded = load_dir(dir.path(), 1 << 20).expect("dir");
         assert_eq!(
-            defs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            loaded
+                .defs
+                .iter()
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["rustybin", "spec"]
         );
-        assert!(problems.is_empty());
+        assert!(loaded.problems.is_empty());
+        assert!(load_dir(&dir.path().join("missing"), 1 << 20).is_err());
+    }
+
+    #[test]
+    fn bad_entries_are_skipped_one_by_one() {
+        let (file, failed) = parse_lenient(
+            "version: 1\nextra: true\nmocks:\n  - name: good\n    spec_inline: {}\n  - name: typo\n    enabeld: false\n  - spec: x.yaml\n    nope: 1\n",
+        )
+        .expect("parse");
+        assert_eq!(file.mocks.len(), 1);
+        assert_eq!(file.mocks[0].name, "good");
+        assert_eq!(failed.len(), 3, "{failed:?}");
+        assert!(failed[0].error.contains("extra"));
+        assert_eq!(failed[1].name.as_deref(), Some("typo"));
+        assert!(failed[1].error.contains("enabeld"), "{failed:?}");
+        assert_eq!(failed[2].name, None);
+        assert!(failed[2].error.starts_with("mocks[2]"), "{failed:?}");
+
+        assert!(parse_lenient("version: 2").is_err());
+        assert!(parse_lenient("mocks: {a: 1}").is_err());
+        assert!(parse_lenient("- just\n- a list").is_err());
+        assert!(parse_lenient("version: 1")
+            .expect("empty")
+            .0
+            .mocks
+            .is_empty());
     }
 }
