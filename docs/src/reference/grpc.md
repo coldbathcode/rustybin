@@ -3,7 +3,7 @@
 The gRPC listener (default port 50051, `RUSTYBIN_GRPC_PORT`, plaintext h2c) serves,
 on one port:
 
-- `rustybin.echo.v1.EchoService` ([`proto/echo.proto`](https://github.com/oliwynn/rustybin/blob/main/proto/echo.proto)),
+- `rustybin.echo.v1.EchoService` ([`proto/echo.proto`](https://github.com/coldbathcode/rustybin/blob/main/proto/echo.proto)),
   all four call types plus a failure RPC;
 - `grpc.health.v1.Health`, following the HTTP [`/health` toggle](reliability.md#health-toggle)
   (`SERVING` / `NOT_SERVING` for `""` and `rustybin.echo.v1.EchoService`);

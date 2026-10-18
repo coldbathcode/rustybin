@@ -22,7 +22,7 @@ one container, and shows you what arrived.
 ## 60 second quick start
 
 ```bash
-git clone https://github.com/oliwynn/rustybin && cd rustybin
+git clone https://github.com/coldbathcode/rustybin && cd rustybin
 docker build -t rustybin .
 docker run -d --name rustybin -p 8080:80 -p 8443:443 -p 50051:50051 rustybin
 ```

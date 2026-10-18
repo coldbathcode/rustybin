@@ -12,8 +12,8 @@ create-missing = false
 [output.html]
 # Served from https://docs.rustybin.dev/ (GitHub Pages with a custom domain).
 site-url = "/"
-git-repository-url = "https://github.com/oliwynn/rustybin"
-edit-url-template = "https://github.com/oliwynn/rustybin/edit/main/docs/{path}"
+git-repository-url = "https://github.com/coldbathcode/rustybin"
+edit-url-template = "https://github.com/coldbathcode/rustybin/edit/main/docs/{path}"
 
 [output.html.search]
 enable = true

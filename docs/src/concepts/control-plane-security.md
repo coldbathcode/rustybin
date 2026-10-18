@@ -107,7 +107,7 @@ RUSTYBIN_CONTROL_AUTH=jwt RUSTYBIN_CONTROL_JWT_PUBLIC_KEY="$(cat control.pub)" \
 ```
 
 Minting a token needs nothing but openssl 3
-([`_mint-control-jwt.sh`](https://github.com/oliwynn/rustybin/blob/main/docs/examples/concepts/_mint-control-jwt.sh)
+([`_mint-control-jwt.sh`](https://github.com/coldbathcode/rustybin/blob/main/docs/examples/concepts/_mint-control-jwt.sh)
 `<key> <audience> [scope] [ttl]`, used by the documentation runner):
 
 ```bash

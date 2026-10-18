@@ -1,7 +1,7 @@
 name: Docs site
 
 # Build the mdBook documentation and publish it to GitHub Pages
-# (https://oliwynn.github.io/rustybin/) on every push to main.
+# (https://docs.rustybin.dev/) on every push to main.
 # Requires Settings > Pages > Source: "GitHub Actions".
 on:
   push:

@@ -8,7 +8,7 @@ There is no published image: build it from the repository (the build compiles a
 release binary, which takes a few minutes the first time).
 
 ```bash
-git clone https://github.com/oliwynn/rustybin && cd rustybin
+git clone https://github.com/coldbathcode/rustybin && cd rustybin
 docker build -t rustybin .
 docker run -d --name rustybin -p 8080:80 -p 8443:443 -p 50051:50051 rustybin
 ```
