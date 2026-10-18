@@ -479,6 +479,13 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | POST | `/_rustybin/mocks/reload` | Re-read RUSTYBIN_CONFIG_FILE and RUSTYBIN_MOCKS_DIR (also on SIGHUP) |
 | GET | `/_rustybin/mocks/export` | Every mock (except the sample) as a rustybin.yaml document |
 | GET | `/_rustybin/mocks/config.schema.json` | JSON Schema of rustybin.yaml (editor completion) |
+| GET POST DELETE | `/_rustybin/mocks/visit` | Self-service: the caller's visit (GET), start one (POST) or end it (DELETE) |
+| POST | `/_rustybin/mocks/visit/extend` | Self-service: one more period for the visit (optionally with the email step) |
+| POST | `/_rustybin/mocks/visit/token` | Self-service: replace the visit's manage token |
+| GET DELETE | `/_rustybin/mocks/visits` | Self-service operators: every running visit (GET) or end them all (DELETE) |
+| POST | `/_rustybin/mocks/visits/pause` | Self-service operators: stop new visits and visitor mocks |
+| POST | `/_rustybin/mocks/visits/resume` | Self-service operators: allow new visits again |
+| DELETE | `/_rustybin/mocks/visits/{id}` | Self-service operators: end one visit and delete its mocks |
 | GET PATCH DELETE | `/_rustybin/mocks/{name}` | A mock's details (GET), edit its draft (PATCH) or delete it |
 | POST | `/_rustybin/mocks/{name}/enable` | Switch a mock on |
 | POST | `/_rustybin/mocks/{name}/disable` | Switch a mock off (its URL answers 503, config and history are kept) |

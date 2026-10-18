@@ -5,12 +5,20 @@
 //! HTTPS) pointing at the instance.
 //!
 //! The rewrite happens before routing; every other host is untouched.
+//!
+//! The self-service mocks domain (`RUSTYBIN_MOCKS_SELF_SERVICE_HOST`) works
+//! the same way and serves nothing else: every path of `<name>.<domain>` is
+//! below that mock, the bare domain redirects home (or answers `404`), and
+//! deeper names answer `404`. Requests through it are tagged with
+//! [`ViaMocksDomain`].
 
 use axum::extract::{Request, State};
 use axum::http::uri::PathAndQuery;
-use axum::http::{Extensions, HeaderMap, Uri};
+use axum::http::{header, Extensions, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde_json::json;
 use std::sync::Arc;
 
 use super::model::valid_name;
@@ -47,7 +55,23 @@ pub fn base(
     uri: &Uri,
     config: &Config,
 ) -> Option<HostBase> {
-    let domain = config.mocks_host.as_ref()?;
+    base_for(
+        config.mocks_host.as_ref()?,
+        headers,
+        extensions,
+        uri,
+        config,
+    )
+}
+
+/// [`base`] for a given domain (the self-service mocks domain).
+pub fn base_for(
+    domain: &str,
+    headers: &HeaderMap,
+    extensions: &Extensions,
+    uri: &Uri,
+    config: &Config,
+) -> Option<HostBase> {
     let origin: RequestOrigin = request_origin(headers, extensions, uri, config);
     let default = matches!(
         (origin.scheme.as_str(), origin.port),
@@ -55,36 +79,79 @@ pub fn base(
     );
     Some(HostBase {
         scheme: origin.scheme.clone(),
-        domain: domain.clone(),
+        domain: domain.to_string(),
         port: (!default).then_some(origin.port),
     })
 }
 
+/// Request extension: this request came through the self-service mocks
+/// domain.
+#[derive(Clone, Copy, Debug)]
+pub struct ViaMocksDomain;
+
+/// Point `req` at `/mock/{name}` (the original path below it).
+fn rewrite(req: &mut Request, name: &str) {
+    let path = req.uri().path();
+    let new_path = if path == "/" {
+        format!("/mock/{name}")
+    } else {
+        format!("/mock/{name}{path}")
+    };
+    let pq = match req.uri().query() {
+        Some(q) => format!("{new_path}?{q}"),
+        None => new_path,
+    };
+    if let Ok(pq) = pq.parse::<PathAndQuery>() {
+        let mut parts = req.uri().clone().into_parts();
+        parts.path_and_query = Some(pq);
+        if let Ok(uri) = Uri::from_parts(parts) {
+            *req.uri_mut() = uri;
+        }
+    }
+}
+
 /// Middleware (outside the router): rewrite mock hosts to `/mock/{name}`.
 pub async fn route(State(config): State<Arc<Config>>, mut req: Request, next: Next) -> Response {
-    if let Some(domain) = &config.mocks_host {
-        let origin = request_origin(req.headers(), req.extensions(), req.uri(), &config);
-        if let Some(name) = mock_for_host(&origin.host, domain) {
-            let path = req.uri().path();
-            let new_path = if path == "/" {
-                format!("/mock/{name}")
-            } else {
-                format!("/mock/{name}{path}")
-            };
-            let pq = match req.uri().query() {
-                Some(q) => format!("{new_path}?{q}"),
-                None => new_path,
-            };
-            if let Ok(pq) = pq.parse::<PathAndQuery>() {
-                let mut parts = req.uri().clone().into_parts();
-                parts.path_and_query = Some(pq);
-                if let Ok(uri) = Uri::from_parts(parts) {
-                    *req.uri_mut() = uri;
+    let origin = request_origin(req.headers(), req.extensions(), req.uri(), &config);
+    let ss = &config.self_service;
+    if let Some(domain) = ss.host.as_deref().filter(|_| ss.enabled) {
+        if origin.host == domain {
+            return match &ss.home_url {
+                Some(home) => {
+                    let mut resp = StatusCode::FOUND.into_response();
+                    if let Ok(v) = HeaderValue::from_str(home) {
+                        resp.headers_mut().insert(header::LOCATION, v);
+                    }
+                    resp
                 }
-            }
+                None => mocks_domain_404("this domain only serves mocks: <name>.this-domain"),
+            };
+        }
+        if let Some(name) = mock_for_host(&origin.host, domain) {
+            rewrite(&mut req, name);
+            req.extensions_mut().insert(ViaMocksDomain);
+            return next.run(req).await;
+        }
+        if origin.host.ends_with(&format!(".{domain}")) {
+            return mocks_domain_404("no mock answers on this host");
+        }
+    }
+    if let Some(domain) = &config.mocks_host {
+        if let Some(name) = mock_for_host(&origin.host, domain) {
+            rewrite(&mut req, name);
         }
     }
     next.run(req).await
+}
+
+fn mocks_domain_404(message: &str) -> Response {
+    let mut resp = (
+        StatusCode::NOT_FOUND,
+        Json(json!({ "error": "not found", "message": message })),
+    )
+        .into_response();
+    super::restrict::harden(&mut resp);
+    resp
 }
 
 #[cfg(test)]

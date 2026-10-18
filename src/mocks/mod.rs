@@ -21,16 +21,20 @@ pub mod compile;
 pub mod config_file;
 pub mod handlers;
 pub mod host;
+pub mod leads;
 pub mod model;
 pub mod persist;
 pub mod request;
 pub mod respond;
+pub mod restrict;
 pub mod schema;
 pub mod security;
+pub mod selfservice;
 pub mod spec;
 pub mod state;
 pub mod store;
 pub mod swagger2;
+pub mod visits;
 
 use axum::routing::{any, get, post};
 use axum::Router;
@@ -66,7 +70,31 @@ pub fn sample_settings() -> MockSettings {
 
 /// A store for `config`, with the sample when `RUSTYBIN_MOCKS_SAMPLE` is on.
 pub fn new_store(config: &Config) -> MockStore {
-    let store = MockStore::new(config);
+    new_store_with(
+        config,
+        std::sync::Arc::new(crate::limits::SystemClock::new()),
+        std::sync::Arc::new(crate::metrics::Metrics::new()),
+    )
+}
+
+/// [`new_store`] on a clock, counting into `metrics` (self-service visits
+/// and leads).
+pub fn new_store_with(
+    config: &Config,
+    clock: std::sync::Arc<dyn crate::limits::Clock>,
+    metrics: std::sync::Arc<crate::metrics::Metrics>,
+) -> MockStore {
+    let mut store = MockStore::new(config);
+    let ss = &config.self_service;
+    if ss.enabled {
+        let leads = std::sync::Arc::new(leads::Leads::new(ss, metrics.clone()));
+        let mut visits = visits::Visits::new(ss.clone(), clock, leads);
+        if let Some(dir) = &config.mocks_state_dir {
+            visits = visits.with_persistence(std::path::PathBuf::from(dir));
+        }
+        metrics.set_mock_visits(visits.running() as i64);
+        store = store.with_visits(std::sync::Arc::new(visits));
+    }
     if config.mocks_sample {
         match store.compile(SAMPLE_SPEC, sample_settings()) {
             Ok(c) => {
@@ -191,6 +219,7 @@ pub fn load_startup(state: &AppState) {
 
 pub fn router(_state: &AppState) -> Router<AppState> {
     use handlers as h;
+    use selfservice as ss;
     Router::new()
         .route("/mock/{name}", any(h::mock_root))
         .route("/mock/{name}/_rustybin/openapi.json", get(h::spec_json))
@@ -202,6 +231,24 @@ pub fn router(_state: &AppState) -> Router<AppState> {
         .route("/_rustybin/mocks/reload", post(h::reload))
         .route("/_rustybin/mocks/export", get(h::export_all))
         .route("/_rustybin/mocks/config.schema.json", get(h::config_schema))
+        .route(
+            "/_rustybin/mocks/visit",
+            get(ss::get_visit)
+                .post(ss::start_visit)
+                .delete(ss::end_visit),
+        )
+        .route("/_rustybin/mocks/visit/extend", post(ss::extend_visit))
+        .route("/_rustybin/mocks/visit/token", post(ss::rotate_token))
+        .route(
+            "/_rustybin/mocks/visits",
+            get(ss::list_visits).delete(ss::end_all_visits),
+        )
+        .route("/_rustybin/mocks/visits/pause", post(ss::pause))
+        .route("/_rustybin/mocks/visits/resume", post(ss::resume))
+        .route(
+            "/_rustybin/mocks/visits/{id}",
+            axum::routing::delete(ss::end_one_visit),
+        )
         .route(
             "/_rustybin/mocks/{name}",
             get(h::get_one).patch(h::patch).delete(h::delete),
@@ -369,6 +416,83 @@ pub fn catalog() -> Vec<Endpoint> {
             "JSON Schema of rustybin.yaml (editor completion)",
         )
         .example(Example::get("Config file schema", "/_rustybin/mocks/config.schema.json")),
+        Endpoint::new(
+            "/_rustybin/mocks/visit",
+            &["GET", "POST", "DELETE"],
+            category::MOCKS,
+            "Self-service: the caller's visit (GET), start one (POST) or end it (DELETE)",
+        )
+        .description(
+            "With RUSTYBIN_MOCKS_SELF_SERVICE on a public instance, visitors create mocks without the \
+             admin token. A visit owns them through its manage token (X-Rustybin-Mock-Token, returned \
+             once by POST here or by the first POST /_rustybin/mocks) and lasts a time allowance: one \
+             hour, extendable to the anonymous hours, then with an email address up to the daily \
+             hours. Off: 404 rustybin_self_service_off.",
+        )
+        .example(
+            Example::get("The caller's visit (self-service off: 404)", "/_rustybin/mocks/visit")
+                .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/mocks/visit/extend",
+            &["POST"],
+            category::MOCKS,
+            "Self-service: one more period for the visit (optionally with the email step)",
+        )
+        .example(
+            Example::post("Extend the visit (self-service off: 404)", "/_rustybin/mocks/visit/extend")
+                .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/mocks/visit/token",
+            &["POST"],
+            category::MOCKS,
+            "Self-service: replace the visit's manage token",
+        )
+        .example(
+            Example::post("Rotate the token (self-service off: 404)", "/_rustybin/mocks/visit/token")
+                .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/mocks/visits",
+            &["GET", "DELETE"],
+            category::MOCKS,
+            "Self-service operators: every running visit (GET) or end them all (DELETE)",
+        )
+        .example(
+            Example::get("Running visits (self-service off: 404)", "/_rustybin/mocks/visits")
+                .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/mocks/visits/pause",
+            &["POST"],
+            category::MOCKS,
+            "Self-service operators: stop new visits and visitor mocks",
+        )
+        .example(
+            Example::post("Pause self-service (off: 404)", "/_rustybin/mocks/visits/pause")
+                .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/mocks/visits/resume",
+            &["POST"],
+            category::MOCKS,
+            "Self-service operators: allow new visits again",
+        )
+        .example(
+            Example::post("Resume self-service (off: 404)", "/_rustybin/mocks/visits/resume")
+                .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/mocks/visits/{id}",
+            &["DELETE"],
+            category::MOCKS,
+            "Self-service operators: end one visit and delete its mocks",
+        )
+        .example(
+            Example::delete("End a visit (self-service off: 404)", "/_rustybin/mocks/visits/0123456789abcdef")
+                .expect_status(404),
+        ),
         Endpoint::new(
             "/_rustybin/mocks/{name}",
             &["GET", "PATCH", "DELETE"],
@@ -552,6 +676,22 @@ pub fn openapi_paths() -> Value {
         })
     };
     let json_body = |schema: Value| json!({ "required": true, "content": { "application/json": { "schema": schema } } });
+    let token = json!({ "name": "X-Rustybin-Mock-Token", "in": "header", "required": false, "schema": { "type": "string" }, "description": "Manage token of the visit (self-service)" });
+    let visit_op = |id: &str, summary: &str| {
+        json!({
+            "tags": tags, "summary": summary, "operationId": id, "parameters": [token],
+            "responses": {
+                "200": { "description": "The visit" },
+                "201": { "description": "Visit started: manage_token (shown once) and the visit" },
+                "403": { "description": "rustybin_email_required: give an email address" },
+                "404": { "description": "Self-service off, or no running visit for the token" },
+                "409": { "description": "rustybin_extend_too_early" },
+                "429": { "description": "rustybin_daily_limit or rustybin_visit_limit (Retry-After)" },
+                "503": { "description": "rustybin_mocks_busy or rustybin_self_service_paused (Retry-After)" }
+            }
+        })
+    };
+    let email_schema = json!({ "type": "object", "properties": { "email": { "type": "string", "format": "email" }, "marketing_consent": { "type": "boolean" } } });
     let mock_call = |id: &str, params: Value| {
         json!({
             "tags": tags,
@@ -609,7 +749,7 @@ pub fn openapi_paths() -> Value {
         }
         op
     };
-    json!({
+    let mut paths = json!({
         "/mock/{name}": { "post": mock_call("callMock", json!([name])) },
         "/mock/{name}/{path}": { "post": mock_call("callMockPath", json!([name, path])) },
         "/mock/{name}/_rustybin/openapi.json": { "get": simple("getMockSpec", "Deployed spec (JSON)", json!([name])) },
@@ -669,7 +809,27 @@ pub fn openapi_paths() -> Value {
             "responses": { "200": { "description": "text/event-stream of `request` events", "content": { "text/event-stream": {} } }, "404": not_found }
         } },
         "/_rustybin/mocks/{name}/requests/{n}": { "get": simple("getMockRequest", "One captured request", json!([name, n])) }
-    })
+    });
+    let visits = json!({
+        "/_rustybin/mocks/visit": {
+            "get": visit_op("getMockVisit", "The caller's self-service visit"),
+            "post": with_body(visit_op("startMockVisit", "Start a self-service visit"), email_schema.clone()),
+            "delete": visit_op("endMockVisit", "End the visit and delete its mocks")
+        },
+        "/_rustybin/mocks/visit/extend": { "post": with_body(visit_op("extendMockVisit", "One more period (optionally with the email step)"), email_schema.clone()) },
+        "/_rustybin/mocks/visit/token": { "post": visit_op("rotateMockVisitToken", "Replace the manage token") },
+        "/_rustybin/mocks/visits": {
+            "get": admin("listMockVisits", "Running visits (operators)", json!([])),
+            "delete": admin("endAllMockVisits", "End every visit (operators)", json!([]))
+        },
+        "/_rustybin/mocks/visits/pause": { "post": admin("pauseMockVisits", "Stop new visits (operators)", json!([])) },
+        "/_rustybin/mocks/visits/resume": { "post": admin("resumeMockVisits", "Allow new visits (operators)", json!([])) },
+        "/_rustybin/mocks/visits/{id}": { "delete": admin("endMockVisit", "End one visit (operators)", json!([{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Visit id from GET /_rustybin/mocks/visits" }])) }
+    });
+    if let (Value::Object(all), Value::Object(more)) = (&mut paths, visits) {
+        all.extend(more);
+    }
+    paths
 }
 
 #[cfg(test)]

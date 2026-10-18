@@ -6,12 +6,15 @@
 //!
 //! Each file holds the draft and, when different, the live revision
 //! (`{name}.json`). Writes go to a temporary file renamed into place.
+//! Self-service mocks keep their owner; a visit's mocks only come back
+//! while the visit runs (visits are saved in `_visits.json`).
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use super::model::MockSettings;
 use super::store::{MockStore, Origin, Snapshot};
+use super::visits::{Owner, VISITS_FILE};
 
 /// One revision on disk.
 #[derive(Serialize, Deserialize)]
@@ -36,6 +39,13 @@ struct Saved {
     live: Option<Revision>,
     #[serde(default)]
     live_is_draft: bool,
+    /// Absent in files written before self-service: an instance mock.
+    #[serde(default, skip_serializing_if = "is_instance")]
+    owner: Owner,
+}
+
+fn is_instance(o: &Owner) -> bool {
+    *o == Owner::Instance
 }
 
 fn file_for(dir: &Path, name: &str) -> PathBuf {
@@ -75,6 +85,7 @@ pub fn save(dir: &Path, snap: &Snapshot) {
         },
         live,
         live_is_draft,
+        owner: snap.owner.clone(),
     };
     let text = match serde_json::to_vec_pretty(&saved) {
         Ok(t) => t,
@@ -119,7 +130,7 @@ pub fn load(store: &MockStore, dir: &Path) -> (Vec<String>, Vec<String>) {
                 && !p
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with('.'))
+                    .is_some_and(|n| n.starts_with('.') || n == VISITS_FILE)
         })
         .collect();
     files.sort();
@@ -136,7 +147,7 @@ pub fn load(store: &MockStore, dir: &Path) -> (Vec<String>, Vec<String>) {
                 }
             })
             .and_then(|bytes| serde_json::from_slice::<Saved>(&bytes).map_err(|e| e.to_string()))
-            .and_then(|saved| restore(store, saved));
+            .and_then(|saved| restore(store, saved, dir));
         match result {
             Ok(name) => loaded.push(name),
             Err(e) => problems.push(format!("{shown}: {e}")),
@@ -145,11 +156,18 @@ pub fn load(store: &MockStore, dir: &Path) -> (Vec<String>, Vec<String>) {
     (loaded, problems)
 }
 
-fn restore(store: &MockStore, saved: Saved) -> Result<String, String> {
+fn restore(store: &MockStore, saved: Saved, dir: &Path) -> Result<String, String> {
     if saved.version != 1 {
         return Err(format!("unsupported version {}", saved.version));
     }
     let name = saved.name;
+    if let Owner::Visit(hash) = &saved.owner {
+        if !store.visits().is_some_and(|v| v.alive(hash)) {
+            remove(dir, &name);
+            return Err("its visit has ended (removed)".into());
+        }
+    }
+    let visitor = saved.owner.is_visitor();
     let draft_source = saved
         .draft
         .source
@@ -158,23 +176,24 @@ fn restore(store: &MockStore, saved: Saved) -> Result<String, String> {
     if store.get(&name).is_some_and(|s| s.origin == Origin::Sample) {
         store.delete_quietly(&name);
     }
-    let draft = store.compile(&draft_source, saved.draft.settings)?;
+    let draft = store.compile_for(&draft_source, saved.draft.settings, visitor)?;
+    let owner = saved.owner;
     match saved.live {
         Some(live) => {
             let source = live.source.unwrap_or_else(|| draft_source.clone());
-            let live = store.compile(&source, live.settings)?;
+            let live = store.compile_for(&source, live.settings, visitor)?;
             store
-                .restore(&name, live, Some(draft), saved.origin, saved.enabled)
+                .restore(&name, live, Some(draft), saved.origin, owner, saved.enabled)
                 .map_err(|e| e.message())?;
         }
         None if saved.live_is_draft => {
             store
-                .restore(&name, draft, None, saved.origin, saved.enabled)
+                .restore(&name, draft, None, saved.origin, owner, saved.enabled)
                 .map_err(|e| e.message())?;
         }
         None => {
             store
-                .restore_undeployed(&name, draft, saved.origin, saved.enabled)
+                .restore_undeployed(&name, draft, saved.origin, owner, saved.enabled)
                 .map_err(|e| e.message())?;
         }
     }

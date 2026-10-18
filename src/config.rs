@@ -118,6 +118,104 @@ pub struct Config {
     /// Domain under which `<name>.<domain>` serves the mock `<name>` at its
     /// root (`RUSTYBIN_MOCKS_HOST`, e.g. `mock.example.com`).
     pub mocks_host: Option<String>,
+    /// Self-service mocks for visitors of a public instance
+    /// (`RUSTYBIN_MOCKS_SELF_SERVICE` and friends).
+    pub self_service: SelfServiceConfig,
+}
+
+/// What the email form asks for (`RUSTYBIN_LEADS_CONSENT`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LeadsConsent {
+    /// A separate, unticked marketing checkbox (the default).
+    #[default]
+    Checkbox,
+    /// No checkbox: the notice says what the address is used for.
+    Notice,
+}
+
+impl LeadsConsent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Checkbox => "checkbox",
+            Self::Notice => "notice",
+        }
+    }
+}
+
+/// Self-service mocks (`docs/plans/hosted-mocks.md`): visitors without the
+/// admin token create and manage their own mocks, on a time allowance.
+#[derive(Clone, Debug)]
+pub struct SelfServiceConfig {
+    /// Effective switch: requested, in public mode, and with a control plane
+    /// visitors can reach (`open`, or shared mode).
+    pub enabled: bool,
+    /// Domain serving visitor mocks as `<name>.<domain>`
+    /// (`RUSTYBIN_MOCKS_SELF_SERVICE_HOST`).
+    pub host: Option<String>,
+    /// Where the bare mocks domain redirects (`RUSTYBIN_MOCKS_SELF_SERVICE_HOME`).
+    pub home_url: Option<String>,
+    /// Mocks per visit or API key (`RUSTYBIN_MOCKS_PER_OWNER`).
+    pub per_owner: usize,
+    /// Visitor mocks on the instance (`RUSTYBIN_MOCKS_SELF_SERVICE_MAX`).
+    pub max_mocks: usize,
+    /// Creations per session key per hour (`RUSTYBIN_MOCKS_CREATE_PER_HOUR`).
+    pub create_per_hour: u32,
+    /// First period of a visit and each extension (`RUSTYBIN_MOCKS_VISIT_MINUTES`).
+    pub visit_minutes: u64,
+    /// Visit time without an email address (`RUSTYBIN_MOCKS_ANON_HOURS`).
+    pub anon_hours: u64,
+    /// Time per email address and UTC day (`RUSTYBIN_MOCKS_DAILY_HOURS`).
+    pub daily_hours: u64,
+    /// Anonymous visits per session key and UTC day
+    /// (`RUSTYBIN_MOCKS_ANON_VISITS_PER_DAY`).
+    pub anon_visits_per_day: u32,
+    /// Slug globs refused on create (`RUSTYBIN_MOCKS_BLOCKED_NAMES`).
+    pub blocked_names: Vec<String>,
+    /// Where captured email addresses are posted (`RUSTYBIN_LEADS_WEBHOOK_URL`).
+    pub leads_webhook_url: Option<String>,
+    /// Bearer token for the webhook (`RUSTYBIN_LEADS_WEBHOOK_TOKEN`). Never exposed.
+    pub leads_webhook_token: Option<String>,
+    /// JSON lines file the leads are appended to (`RUSTYBIN_LEADS_FILE`).
+    pub leads_file: Option<PathBuf>,
+    /// Privacy notice linked from the email form (`RUSTYBIN_PRIVACY_URL`).
+    pub privacy_url: Option<String>,
+    pub leads_consent: LeadsConsent,
+    /// Salt of the email hashes in the daily ledger (`RUSTYBIN_LEADS_SALT`;
+    /// generated at startup when unset). Never exposed.
+    pub leads_salt: Option<String>,
+}
+
+impl Default for SelfServiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: None,
+            home_url: None,
+            per_owner: 3,
+            max_mocks: 200,
+            create_per_hour: 10,
+            visit_minutes: 60,
+            anon_hours: 3,
+            daily_hours: 6,
+            anon_visits_per_day: 3,
+            blocked_names: Vec::new(),
+            leads_webhook_url: None,
+            leads_webhook_token: None,
+            leads_file: None,
+            privacy_url: None,
+            leads_consent: LeadsConsent::Checkbox,
+            leads_salt: None,
+        }
+    }
+}
+
+impl SelfServiceConfig {
+    /// Email capture is on: somewhere to deliver the address and a privacy
+    /// notice to link.
+    pub fn leads_enabled(&self) -> bool {
+        (self.leads_webhook_url.is_some() || self.leads_file.is_some())
+            && self.privacy_url.is_some()
+    }
 }
 
 /// Default `RUSTYBIN_KEYS_POLL_SECS`.
@@ -327,6 +425,12 @@ impl Config {
             shared_mode || parse_bool_or(&get, "RUSTYBIN_PUBLIC_MODE", false, &mut warnings);
         let mocks_sample =
             parse_bool_or(&get, "RUSTYBIN_MOCKS_SAMPLE", !public_mode, &mut warnings);
+        let self_service = parse_self_service(
+            &get,
+            public_mode,
+            shared_mode || control_auth == ControlAuth::Open,
+            &mut warnings,
+        );
 
         let config = Self {
             http_port: parse_or(&get, "RUSTYBIN_HTTP_PORT", 80, &mut warnings),
@@ -381,9 +485,8 @@ impl Config {
             mocks_dir: get("RUSTYBIN_MOCKS_DIR"),
             mocks_sample,
             mocks_state_dir: get("RUSTYBIN_MOCKS_STATE_DIR"),
-            mocks_host: get("RUSTYBIN_MOCKS_HOST")
-                .map(|h| h.trim().trim_start_matches('.').to_ascii_lowercase())
-                .filter(|h| !h.is_empty()),
+            mocks_host: get("RUSTYBIN_MOCKS_HOST").and_then(|h| normalise_domain(&h)),
+            self_service,
         };
         (config, warnings)
     }
@@ -435,6 +538,7 @@ impl Config {
             mocks_sample: true,
             mocks_state_dir: None,
             mocks_host: None,
+            self_service: SelfServiceConfig::default(),
         }
     }
 
@@ -449,7 +553,7 @@ impl Config {
 
     /// The effective configuration without secrets, for `/_rustybin/config`.
     pub fn public_view(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut view = serde_json::json!({
             "http_port": self.http_port,
             "https_port": self.https_port,
             "grpc_port": self.grpc_port,
@@ -496,7 +600,17 @@ impl Config {
             "mocks_sample": self.mocks_sample,
             "mocks_state_dir_configured": self.mocks_state_dir.is_some(),
             "mocks_host": self.mocks_host,
-        })
+        });
+        if let serde_json::Value::Object(m) = &mut view {
+            let ss = &self.self_service;
+            m.insert("mocks_self_service".into(), ss.enabled.into());
+            m.insert("mocks_self_service_host".into(), serde_json::json!(ss.host));
+            m.insert(
+                "leads_enabled".into(),
+                (ss.enabled && ss.leads_enabled()).into(),
+            );
+        }
+        view
     }
 }
 
@@ -623,6 +737,144 @@ fn parse_egress_mb(raw: &str) -> Option<u64> {
     Some((mb * 1_000_000.0).round() as u64)
 }
 
+fn normalise_domain(raw: &str) -> Option<String> {
+    let d = raw.trim().trim_start_matches('.').to_ascii_lowercase();
+    (!d.is_empty()).then_some(d)
+}
+
+/// `RUSTYBIN_MOCKS_SELF_SERVICE` and its settings. `reachable`: visitors can
+/// reach the control plane (control auth `open`, or shared mode).
+fn parse_self_service<G>(
+    get: &G,
+    public_mode: bool,
+    reachable: bool,
+    warnings: &mut Vec<String>,
+) -> SelfServiceConfig
+where
+    G: Fn(&str) -> Option<String>,
+{
+    let d = SelfServiceConfig::default();
+    let requested = parse_bool_or(get, "RUSTYBIN_MOCKS_SELF_SERVICE", false, warnings);
+    let enabled = match (requested, public_mode, reachable) {
+        (false, ..) => false,
+        (true, false, _) => {
+            warnings.push(
+                "RUSTYBIN_MOCKS_SELF_SERVICE needs RUSTYBIN_PUBLIC_MODE (or shared mode): outside \
+                 public mode everyone may already manage mocks; ignored"
+                    .to_string(),
+            );
+            false
+        }
+        (true, true, false) => {
+            warnings.push(
+                "RUSTYBIN_MOCKS_SELF_SERVICE is ignored with RUSTYBIN_CONTROL_AUTH token or jwt: \
+                 visitors cannot reach the control plane"
+                    .to_string(),
+            );
+            false
+        }
+        (true, true, true) => true,
+    };
+    let url = |key: &str, warnings: &mut Vec<String>| {
+        get(key).and_then(|raw| {
+            let ok = valid_backlink(&raw);
+            if !ok {
+                warnings.push(format!(
+                    "invalid {key} {raw:?} (expected an http:// or https:// URL), ignored"
+                ));
+            }
+            ok.then_some(raw)
+        })
+    };
+    let visit_minutes = parse_or(
+        get,
+        "RUSTYBIN_MOCKS_VISIT_MINUTES",
+        d.visit_minutes,
+        warnings,
+    )
+    .clamp(1, 1440);
+    let anon_hours = parse_or(get, "RUSTYBIN_MOCKS_ANON_HOURS", d.anon_hours, warnings).max(1);
+    let daily_hours = parse_or(get, "RUSTYBIN_MOCKS_DAILY_HOURS", d.daily_hours, warnings);
+    if daily_hours < anon_hours {
+        warnings.push(format!(
+            "RUSTYBIN_MOCKS_DAILY_HOURS {daily_hours} is below RUSTYBIN_MOCKS_ANON_HOURS \
+             {anon_hours}: using {anon_hours}"
+        ));
+    }
+    let leads_consent = match get("RUSTYBIN_LEADS_CONSENT").as_deref() {
+        None | Some("checkbox") => LeadsConsent::Checkbox,
+        Some("notice") => LeadsConsent::Notice,
+        Some(other) => {
+            warnings.push(format!(
+                "invalid RUSTYBIN_LEADS_CONSENT {other:?} (checkbox or notice), using checkbox"
+            ));
+            LeadsConsent::Checkbox
+        }
+    };
+    let cfg = SelfServiceConfig {
+        enabled,
+        host: get("RUSTYBIN_MOCKS_SELF_SERVICE_HOST").and_then(|h| normalise_domain(&h)),
+        home_url: url("RUSTYBIN_MOCKS_SELF_SERVICE_HOME", warnings),
+        per_owner: parse_or(get, "RUSTYBIN_MOCKS_PER_OWNER", d.per_owner, warnings).max(1),
+        max_mocks: parse_or(
+            get,
+            "RUSTYBIN_MOCKS_SELF_SERVICE_MAX",
+            d.max_mocks,
+            warnings,
+        )
+        .clamp(1, 10_000),
+        create_per_hour: parse_or(
+            get,
+            "RUSTYBIN_MOCKS_CREATE_PER_HOUR",
+            d.create_per_hour,
+            warnings,
+        )
+        .max(1),
+        visit_minutes,
+        anon_hours,
+        daily_hours: daily_hours.max(anon_hours),
+        anon_visits_per_day: parse_or(
+            get,
+            "RUSTYBIN_MOCKS_ANON_VISITS_PER_DAY",
+            d.anon_visits_per_day,
+            warnings,
+        ),
+        blocked_names: get("RUSTYBIN_MOCKS_BLOCKED_NAMES")
+            .map(|raw| {
+                raw.split(',')
+                    .map(|p| p.trim().to_ascii_lowercase())
+                    .filter(|p| !p.is_empty())
+                    .take(200)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        leads_webhook_url: url("RUSTYBIN_LEADS_WEBHOOK_URL", warnings),
+        leads_webhook_token: get("RUSTYBIN_LEADS_WEBHOOK_TOKEN"),
+        leads_file: get("RUSTYBIN_LEADS_FILE").map(PathBuf::from),
+        privacy_url: url("RUSTYBIN_PRIVACY_URL", warnings),
+        leads_consent,
+        leads_salt: get("RUSTYBIN_LEADS_SALT").filter(|s| !s.is_empty()),
+    };
+    if cfg.enabled
+        && (cfg.leads_webhook_url.is_some() || cfg.leads_file.is_some())
+        && cfg.privacy_url.is_none()
+    {
+        warnings.push(
+            "email capture is off: RUSTYBIN_PRIVACY_URL is required with RUSTYBIN_LEADS_WEBHOOK_URL \
+             or RUSTYBIN_LEADS_FILE"
+                .to_string(),
+        );
+    }
+    if cfg.enabled && cfg.host.is_none() {
+        warnings.push(
+            "RUSTYBIN_MOCKS_SELF_SERVICE without RUSTYBIN_MOCKS_SELF_SERVICE_HOST: visitor mocks \
+             share the console's origin (fine for testing, not for a public demo)"
+                .to_string(),
+        );
+    }
+    cfg
+}
+
 fn parse_or<T, G>(get: &G, key: &str, default: T, warnings: &mut Vec<String>) -> T
 where
     T: std::str::FromStr + std::fmt::Display,
@@ -685,6 +937,45 @@ mod tests {
         assert_eq!(c.inspector_capacity, 500);
         assert!(!c.public_mode);
         assert!(c.admin_token.is_none());
+    }
+
+    #[test]
+    fn self_service_needs_public_mode_and_a_reachable_control_plane() {
+        let (c, w) = load(&[("RUSTYBIN_MOCKS_SELF_SERVICE", "true")]);
+        assert!(!c.self_service.enabled);
+        assert!(w.iter().any(|w| w.contains("needs RUSTYBIN_PUBLIC_MODE")));
+        let (c, w) = load(&[
+            ("RUSTYBIN_MOCKS_SELF_SERVICE", "true"),
+            ("RUSTYBIN_PUBLIC_MODE", "true"),
+            ("RUSTYBIN_CONTROL_AUTH", "token"),
+            ("RUSTYBIN_ADMIN_TOKEN", "t"),
+        ]);
+        assert!(!c.self_service.enabled);
+        assert!(w.iter().any(|w| w.contains("token or jwt")));
+        let (c, w) = load(&[
+            ("RUSTYBIN_MOCKS_SELF_SERVICE", "true"),
+            ("RUSTYBIN_PUBLIC_MODE", "true"),
+            ("RUSTYBIN_MOCKS_SELF_SERVICE_HOST", ".Rustybin-Mock.dev"),
+            ("RUSTYBIN_MOCKS_VISIT_MINUTES", "30"),
+            ("RUSTYBIN_MOCKS_DAILY_HOURS", "2"),
+            ("RUSTYBIN_MOCKS_BLOCKED_NAMES", "*paypal*, Login"),
+            (
+                "RUSTYBIN_LEADS_WEBHOOK_URL",
+                "https://hooks.example.com/leads",
+            ),
+            ("RUSTYBIN_LEADS_CONSENT", "notice"),
+        ]);
+        let ss = &c.self_service;
+        assert!(ss.enabled);
+        assert_eq!(ss.host.as_deref(), Some("rustybin-mock.dev"));
+        assert_eq!(ss.visit_minutes, 30);
+        assert_eq!(ss.daily_hours, 3, "never below the anonymous hours");
+        assert_eq!(ss.blocked_names, vec!["*paypal*", "login"]);
+        assert_eq!(ss.leads_consent, LeadsConsent::Notice);
+        assert!(!ss.leads_enabled(), "no privacy URL");
+        assert!(w.iter().any(|w| w.contains("RUSTYBIN_PRIVACY_URL")));
+        assert!(w.iter().any(|w| w.contains("RUSTYBIN_MOCKS_DAILY_HOURS")));
+        assert_eq!(c.public_view()["mocks_self_service"], true);
     }
 
     #[test]

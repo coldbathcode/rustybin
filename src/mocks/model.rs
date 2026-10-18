@@ -260,6 +260,8 @@ pub struct SettingsLimits {
     pub max_delay_ms: u64,
     pub max_body_bytes: usize,
     pub max_rules: usize,
+    /// A self-service mock: no `stateful` mode, no reserved headers.
+    pub visitor: bool,
 }
 
 /// Mock names: `[a-z0-9-]`, 1 to 40 characters, no leading or trailing dash.
@@ -298,6 +300,9 @@ fn check_response(
             "content-length" | "transfer-encoding" | "connection" | "upgrade" | "trailer"
         ) {
             return Err(format!("{where_}: header {name:?} cannot be configured"));
+        }
+        if limits.visitor {
+            super::restrict::check_header(name, value).map_err(|e| format!("{where_}: {e}"))?;
         }
     }
     if let Some(body) = &r.body {
@@ -352,6 +357,20 @@ impl MockSettings {
     /// limits). Mismatches with the spec are deploy-check findings instead.
     pub fn validate(&self, limits: &SettingsLimits) -> Result<(), String> {
         let r = &self.responses;
+        if limits.visitor {
+            let stateful = r.mode == ResponseMode::Stateful
+                || self
+                    .operations
+                    .values()
+                    .any(|o| o.mode == Some(ResponseMode::Stateful));
+            if stateful {
+                return Err(
+                    "stateful mode is not available for self-service mocks: use examples, \
+                     generated or static"
+                        .into(),
+                );
+            }
+        }
         if r.delay_ms > limits.max_delay_ms {
             return Err(format!(
                 "responses.delay_ms must be at most {}",
@@ -461,6 +480,7 @@ mod tests {
         max_delay_ms: 10_000,
         max_body_bytes: 1024,
         max_rules: 2,
+        visitor: false,
     };
 
     #[test]

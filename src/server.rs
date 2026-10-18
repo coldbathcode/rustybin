@@ -240,6 +240,38 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
     );
     optional_tasks.push(("usage persistence", persist));
 
+    // Self-service mocks: end visits on time and deliver captured leads.
+    if let Some(visits) = state.mocks.visits().cloned() {
+        let store = state.mocks.clone();
+        let metrics = state.metrics.clone();
+        let stop = wait_for(shutdown.subscribe());
+        let sweep = tokio::spawn(async move {
+            tokio::pin!(stop);
+            let mut tick = tokio::time::interval(Duration::from_secs(15));
+            loop {
+                tokio::select! {
+                    _ = &mut stop => return,
+                    _ = tick.tick() => {
+                        let gone = store.sweep();
+                        if gone > 0 {
+                            tracing::info!("visits ended: {gone} visitor mock(s) deleted");
+                        }
+                        metrics.set_mock_visits(visits.running() as i64);
+                    }
+                }
+            }
+        });
+        optional_tasks.push(("visit sweep", sweep));
+        let leads = state
+            .mocks
+            .visits()
+            .map(|v| v.leads().clone())
+            .map(|l| tokio::spawn(l.run(wait_for(shutdown.subscribe()))));
+        if let Some(task) = leads {
+            optional_tasks.push(("lead delivery", task));
+        }
+    }
+
     // API keys: registry reloads and quota store flushes (no-ops when off).
     if state.keys.enabled() {
         let registry = tokio::spawn(

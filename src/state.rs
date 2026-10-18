@@ -101,8 +101,8 @@ impl AppState {
         let limits = Arc::new(
             Limiter::with_clock(config.limits.clone(), clock.clone()).with_metrics(metrics.clone()),
         );
-        let keys = Arc::new(Keys::new(&config, metrics.clone(), clock));
-        let mocks = crate::mocks::new_store(&config);
+        let keys = Arc::new(Keys::new(&config, metrics.clone(), clock.clone()));
+        let mocks = crate::mocks::new_store_with(&config, clock, metrics.clone());
         Self {
             keys,
             limits,

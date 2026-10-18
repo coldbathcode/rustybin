@@ -178,6 +178,9 @@ struct Inner {
     llm_faults: HashMap<(&'static str, &'static str), u64>,
     faults: HashMap<&'static str, u64>,
     mocks: HashMap<(String, &'static str), u64>,
+    /// Self-service visits and leads (fixed label sets).
+    visit_events: HashMap<&'static str, u64>,
+    leads: HashMap<&'static str, u64>,
 }
 
 /// Process-wide metric counters.
@@ -191,6 +194,7 @@ pub struct Metrics {
     keys_active: AtomicI64,
     keys_synced_at: AtomicI64,
     quota_store_up: AtomicI64,
+    mock_visits: AtomicI64,
 }
 
 impl Default for Metrics {
@@ -216,6 +220,7 @@ impl Metrics {
             keys_active: AtomicI64::new(-1),
             keys_synced_at: AtomicI64::new(-1),
             quota_store_up: AtomicI64::new(-1),
+            mock_visits: AtomicI64::new(-1),
         }
     }
 
@@ -327,6 +332,23 @@ impl Metrics {
 
     /// Count one request to an OpenAPI mock (`outcome`: `mocked`,
     /// `not_found`, `unauthorized`, ...).
+    /// A self-service visit event (`started`, `extended`, `email_required`,
+    /// `daily_limit`, `busy`, `ended`, ...).
+    pub fn count_visit_event(&self, event: &'static str) {
+        *self.lock().visit_events.entry(event).or_insert(0) += 1;
+    }
+
+    /// A captured email address and what became of it (`captured`,
+    /// `delivered`, `retried`, `dropped`); never the address itself.
+    pub fn count_lead(&self, result: &'static str) {
+        *self.lock().leads.entry(result).or_insert(0) += 1;
+    }
+
+    /// Running self-service visits (negative: not reported).
+    pub fn set_mock_visits(&self, n: i64) {
+        self.mock_visits.store(n, Ordering::Relaxed);
+    }
+
     pub fn count_mock(&self, mock: &str, outcome: &'static str) {
         let mut inner = self.lock();
         let mut key = (mock.to_string(), outcome);
@@ -476,6 +498,38 @@ impl Metrics {
                     "rustybin_mock_requests_total{{mock=\"{}\",outcome=\"{outcome}\"}} {n}",
                     escape(mock)
                 );
+            }
+        }
+
+        let visits = self.mock_visits.load(Ordering::Relaxed);
+        if visits >= 0 {
+            out.push_str("# HELP rustybin_mock_visits Running self-service visits.\n");
+            out.push_str("# TYPE rustybin_mock_visits gauge\n");
+            let _ = writeln!(out, "rustybin_mock_visits {visits}");
+        }
+        for (name, help, label, map) in [
+            (
+                "rustybin_mock_visit_events_total",
+                "Self-service visit events (started, extended, email_required, daily_limit, busy, ...).",
+                "event",
+                &inner.visit_events,
+            ),
+            (
+                "rustybin_mock_leads_total",
+                "Email addresses captured by self-service visits and their delivery (no addresses).",
+                "result",
+                &inner.leads,
+            ),
+        ] {
+            if map.is_empty() {
+                continue;
+            }
+            let _ = writeln!(out, "# HELP {name} {help}");
+            let _ = writeln!(out, "# TYPE {name} counter");
+            let mut rows: Vec<_> = map.iter().collect();
+            rows.sort();
+            for (value, n) in rows {
+                let _ = writeln!(out, "{name}{{{label}=\"{value}\"}} {n}");
             }
         }
 

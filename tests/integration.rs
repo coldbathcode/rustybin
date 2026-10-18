@@ -731,3 +731,110 @@ async fn mocks_load_from_config_file_and_directory_and_reload() {
     server.shutdown();
     server.wait().await.expect("clean shutdown");
 }
+
+#[tokio::test]
+async fn self_service_visitors_with_lead_delivery() {
+    use axum::routing::post;
+    use axum::Json;
+
+    // A local webhook receiving the leads.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<serde_json::Value>(4);
+    let hook = axum::Router::new().route(
+        "/leads",
+        post(move |Json(v): Json<serde_json::Value>| {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(v).await;
+                "ok"
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let hook_addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, hook).await;
+    });
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut c = config(&dir);
+    c.body_limit = 64 * 1024;
+    c.public_mode = true;
+    c.mocks_sample = false;
+    c.self_service = rustybin::config::SelfServiceConfig {
+        enabled: true,
+        // Every visit needs an email address up front.
+        anon_visits_per_day: 0,
+        leads_webhook_url: Some(format!("http://{hook_addr}/leads")),
+        privacy_url: Some("https://example.com/privacy".into()),
+        leads_salt: Some("integration".into()),
+        ..Default::default()
+    };
+    let server = start(c).await;
+    let addr = server.http_addr;
+    let spec = r#"{"spec":{"openapi":"3.0.3","info":{"title":"Orders","version":"1"},
+      "paths":{"/orders/{id}":{"get":{"operationId":"getOrder",
+        "parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"integer"}}],
+        "responses":{"200":{"description":"ok","content":{"application/json":{"schema":{
+          "type":"object","properties":{"id":{"type":"integer"}}}}}}}}}}}}"#;
+    let json = [("content-type", "application/json")];
+
+    let resp = request(addr, "POST", "/_rustybin/mocks", &json, spec).await;
+    assert_eq!(resp.status, 403, "{}", resp.body);
+    assert_eq!(resp.json()["error"], "rustybin_email_required");
+
+    let resp = request(
+        addr,
+        "POST",
+        "/_rustybin/mocks/visit",
+        &json,
+        r#"{"email":"ada@example.com","marketing_consent":true}"#,
+    )
+    .await;
+    assert_eq!(resp.status, 201, "{}", resp.body);
+    let token = resp.json()["manage_token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+    let lead = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("lead delivered in time")
+        .expect("lead");
+    assert_eq!(lead["email"], "ada@example.com");
+    assert_eq!(lead["source"], "mock_start");
+
+    let with_token = [
+        ("content-type", "application/json"),
+        ("x-rustybin-mock-token", token.as_str()),
+    ];
+    let resp = request(addr, "POST", "/_rustybin/mocks", &with_token, spec).await;
+    assert_eq!(resp.status, 201, "{}", resp.body);
+    let name = resp.json()["name"].as_str().expect("name").to_string();
+    assert!(name.starts_with("orders-"));
+
+    let resp = get(addr, &format!("/mock/{name}/orders/7")).await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.json()["id"], 7);
+    assert_eq!(resp.header("x-content-type-options"), Some("nosniff"));
+
+    // Another visitor sees nothing of it.
+    let resp = get(addr, &format!("/_rustybin/mocks/{name}")).await;
+    assert_eq!(resp.status, 404);
+    let resp = request(
+        addr,
+        "GET",
+        &format!("/_rustybin/mocks/{name}"),
+        &[("x-rustybin-mock-token", token.as_str())],
+        "",
+    )
+    .await;
+    assert_eq!(resp.status, 200);
+    let metrics = get(addr, "/_rustybin/metrics").await.body;
+    assert!(
+        metrics.contains("rustybin_mock_leads_total{result=\"delivered\"} 1"),
+        "{metrics}"
+    );
+    assert!(!metrics.contains("ada@"));
+    server.shutdown();
+}

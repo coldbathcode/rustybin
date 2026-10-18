@@ -1,6 +1,8 @@
 //! HTTP handlers: the mocks themselves (`/mock/{name}/...`, data plane) and
 //! their management API (`/_rustybin/mocks*`, control plane: reads need the
-//! `console` scope, mutations the admin token or `admin` scope).
+//! `console` scope, mutations the admin token or `admin` scope). With
+//! self-service on, visitors also create and manage their own mocks
+//! ([`super::selfservice`]).
 
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, Query, State};
@@ -29,10 +31,13 @@ use super::model::{
 };
 use super::request;
 use super::respond::{self, BodyChoice, RequestView};
+use super::restrict;
 use super::schema::{self, Direction};
 use super::security::{AuthContext, AuthResult};
+use super::selfservice::{self as ss, Caller};
 use super::spec;
 use super::store::{Lookup, MockStore, Origin, Snapshot, StoreError};
+use super::visits::{EmailInput, Owner};
 use crate::config::Config;
 use crate::control_auth::ControlAuthorized;
 use crate::request_bin::BinHeader;
@@ -41,7 +46,7 @@ use crate::session::ClientIp;
 use crate::state::AppState;
 
 /// Names that would collide with fixed control-plane routes.
-pub const RESERVED_NAMES: &[&str] = &["import", "export", "apply", "reload"];
+pub const RESERVED_NAMES: &[&str] = &["import", "export", "apply", "reload", "visit", "visits"];
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -70,6 +75,11 @@ fn store_error(e: StoreError) -> Response {
         StoreError::Conflict(_) => json_error(StatusCode::CONFLICT, &message),
         StoreError::Invalid(_) => json_error(StatusCode::BAD_REQUEST, &message),
         StoreError::Full(_) => json_error(StatusCode::SERVICE_UNAVAILABLE, &message),
+        StoreError::OwnerCap(_) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "rustybin_mock_cap", "message": message })),
+        )
+            .into_response(),
         StoreError::ChecksFailed(report) => (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({ "error": message, "report": report })),
@@ -80,6 +90,29 @@ fn store_error(e: StoreError) -> Response {
 
 fn base_url(headers: &HeaderMap, extensions: &Extensions, uri: &Uri, config: &Config) -> String {
     crate::session::request_origin(headers, extensions, uri, config).base_url()
+}
+
+/// Where a mock answers, as seen by this request: `{base}/mock/{name}`, or
+/// `https://{name}.{domain}` for a visitor mock with a mocks domain.
+fn mock_base(
+    owner: &Owner,
+    name: &str,
+    headers: &HeaderMap,
+    extensions: &Extensions,
+    uri: &Uri,
+    config: &Config,
+) -> String {
+    if owner.is_visitor() {
+        if let Some(h) = config
+            .self_service
+            .host
+            .as_deref()
+            .and_then(|d| host::base_for(d, headers, extensions, uri, config))
+        {
+            return h.url(name, "");
+        }
+    }
+    format!("{}/mock/{name}", base_url(headers, extensions, uri, config))
 }
 
 fn query_pairs(uri: &Uri) -> Vec<(String, String)> {
@@ -134,6 +167,7 @@ pub async fn mock_root(
     Path(MockPath { name }): Path<MockPath>,
     ClientIp(ip): ClientIp,
     tls: Option<Extension<TlsConnectionInfo>>,
+    via: Option<Extension<host::ViaMocksDomain>>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -144,6 +178,7 @@ pub async fn mock_root(
         name,
         ip,
         tls.map(|t| t.0),
+        via.is_some(),
         method,
         uri,
         headers,
@@ -158,6 +193,7 @@ pub async fn mock_sub(
     Path(MockSubPath { name, .. }): Path<MockSubPath>,
     ClientIp(ip): ClientIp,
     tls: Option<Extension<TlsConnectionInfo>>,
+    via: Option<Extension<host::ViaMocksDomain>>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -168,6 +204,7 @@ pub async fn mock_sub(
         name,
         ip,
         tls.map(|t| t.0),
+        via.is_some(),
         method,
         uri,
         headers,
@@ -298,6 +335,7 @@ async fn serve(
     name: String,
     ip: Option<std::net::IpAddr>,
     tls: Option<TlsConnectionInfo>,
+    via_mocks_domain: bool,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -368,8 +406,23 @@ async fn serve(
         }
         Lookup::Ready(live) => live,
     };
+    // A visitor mock answers only on the mocks domain when there is one.
+    if live.visitor && !via_mocks_domain {
+        if let Some(domain) = state.config.self_service.host.as_deref() {
+            let mut resp = problem(
+                404,
+                "this self-service mock answers on its own domain",
+                json!({ "mock": name, "url": format!("https://{name}.{domain}") }),
+            );
+            restrict::harden(&mut resp);
+            return resp;
+        }
+    }
     let c: &Compiled = &live.compiled;
-    let record = |resp: Response, out: Outcome, preview: Option<Vec<u8>>| {
+    let record = |mut resp: Response, out: Outcome, preview: Option<Vec<u8>>| {
+        if live.visitor {
+            restrict::harden(&mut resp);
+        }
         count(&state, &name, out.outcome);
         live.capture
             .record(capture_entry(&inc, out, &resp, preview.as_deref()));
@@ -678,7 +731,11 @@ fn served_bases(
 ) -> (String, String) {
     let origin = crate::session::request_origin(headers, extensions, uri, config);
     let base = origin.base_url();
-    if let Some(domain) = &config.mocks_host {
+    let domains = [
+        config.mocks_host.as_ref(),
+        config.self_service.host.as_ref(),
+    ];
+    for domain in domains.into_iter().flatten() {
         if host::mock_for_host(&origin.host, domain) == Some(name) {
             let apex = crate::session::RequestOrigin {
                 scheme: origin.scheme.clone(),
@@ -838,7 +895,7 @@ fn draft_changes(s: &Snapshot) -> Vec<String> {
 /// redacted (see [`sees_secrets`]).
 fn detail(
     s: &Snapshot,
-    base: &str,
+    root: &str,
     host: Option<&host::HostBase>,
     limits: Value,
     reveal: bool,
@@ -846,14 +903,11 @@ fn detail(
     let c = &s.draft;
     let mut out = s.summary();
     if let Value::Object(m) = &mut out {
-        if let Some(h) = host {
+        if let Some(h) = host.filter(|_| !s.owner.is_visitor()) {
             m.insert("host_url".into(), json!(h.url(&s.name, c.path_prefix())));
         }
-        m.insert(
-            "url".into(),
-            json!(format!("{base}/mock/{}{}", s.name, c.path_prefix())),
-        );
-        m.insert("base_url".into(), json!(format!("{base}/mock/{}", s.name)));
+        m.insert("url".into(), json!(format!("{root}{}", c.path_prefix())));
+        m.insert("base_url".into(), json!(root));
         m.insert(
             "spec".into(),
             json!({
@@ -865,7 +919,7 @@ fn detail(
                 "tags": c.spec.tags,
                 "security_schemes": c.spec.security_schemes,
                 "warnings": c.spec.warnings,
-                "spec_url": format!("{base}/mock/{}/_rustybin/openapi.json", s.name),
+                "spec_url": format!("{root}/_rustybin/openapi.json"),
             }),
         );
         let settings = if reveal {
@@ -939,13 +993,7 @@ pub fn inline_refs(v: &Value, root: &Value, stack: &mut Vec<String>, depth: usiz
     }
 }
 
-fn operation_detail(
-    c: &Compiled,
-    op_id: &str,
-    base: &str,
-    name: &str,
-    reveal: bool,
-) -> Option<Value> {
+fn operation_detail(c: &Compiled, op_id: &str, root: &str, reveal: bool) -> Option<Value> {
     let op = c.spec.operation(op_id)?;
     let mut op_json = serde_json::to_value(op).unwrap_or(Value::Null);
     let op_json = inline_refs(&op_json.take(), &c.spec.root, &mut Vec::new(), 0);
@@ -964,7 +1012,7 @@ fn operation_detail(
         "mode": c.settings.operations.get(op_id).and_then(|o| o.mode).unwrap_or(c.settings.responses.mode),
         "report": report,
         "sample_request": sample,
-        "url": format!("{base}/mock/{name}{}", sample.path),
+        "url": format!("{root}{}", sample.path),
     }))
 }
 
@@ -990,26 +1038,49 @@ fn sees_secrets(headers: &HeaderMap, extensions: &Extensions, config: &Config) -
         && crate::admin::is_admin(headers, config)
 }
 
+#[derive(Deserialize)]
+pub struct ListOwnerQuery {
+    /// `all` (admin): every visitor's mocks too.
+    owner: Option<String>,
+}
+
 pub async fn list(
     State(state): State<AppState>,
+    Query(q): Query<ListOwnerQuery>,
     headers: HeaderMap,
     extensions: Extensions,
     uri: Uri,
 ) -> Response {
-    let base = base_url(&headers, &extensions, &uri, &state.config);
+    let c = ss::caller(&state, &headers, &extensions);
+    let all = c.admin && q.owner.as_deref() == Some("all");
     let host = host::base(&headers, &extensions, &uri, &state.config);
     let mocks: Vec<Value> = state
         .mocks
         .list()
         .iter()
+        // Admins see their own and the instance's mocks unless they ask
+        // for every visitor's.
+        .filter(|s| !s.owner.is_visitor() || c.owns(&s.owner) || all)
         .map(|s| {
             let mut v = s.summary();
+            let root = mock_base(
+                &s.owner,
+                &s.name,
+                &headers,
+                &extensions,
+                &uri,
+                &state.config,
+            );
             if let Value::Object(m) = &mut v {
                 m.insert(
                     "url".into(),
-                    json!(format!("{base}/mock/{}{}", s.name, s.draft.path_prefix())),
+                    json!(format!("{root}{}", s.draft.path_prefix())),
                 );
-                if let Some(h) = &host {
+                m.insert("yours".into(), json!(c.owns(&s.owner)));
+                if c.admin && s.owner.is_visitor() {
+                    m.insert("owner_fingerprint".into(), json!(s.owner.fingerprint()));
+                }
+                if let Some(h) = host.as_ref().filter(|_| !s.owner.is_visitor()) {
                     m.insert(
                         "host_url".into(),
                         json!(h.url(&s.name, s.draft.path_prefix())),
@@ -1019,15 +1090,22 @@ pub async fn list(
             v
         })
         .collect();
-    Json(json!({
+    let mut out = json!({
         "count": mocks.len(),
         "mocks": mocks,
         "load_errors": state.mocks.load_errors(),
         "persistent": state.mocks.persist_dir().is_some(),
         "host_domain": state.config.mocks_host,
         "limits": limits_json(&state.mocks),
-    }))
-    .into_response()
+        "can_manage_instance": c.admin,
+    });
+    if let Value::Object(m) = &mut out {
+        m.insert("self_service".into(), ss::info(&state.config));
+        if let Some(v) = c.visit().and_then(|h| ss::visit_json(&state, h)) {
+            m.insert("visit".into(), v);
+        }
+    }
+    Json(out).into_response()
 }
 
 /// Body of `POST /_rustybin/mocks/import`: `{"spec": ...}`, the spec object
@@ -1109,6 +1187,132 @@ pub struct CreateBody {
     operations: Option<BTreeMap<String, OperationSettings>>,
 }
 
+/// Lowercase `a-z0-9-` slug of at most `max` characters (`mock` if empty).
+fn slug(raw: &str, max: usize) -> String {
+    let mut out = String::new();
+    for ch in raw.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+    }
+    let cut: String = out.chars().take(max).collect();
+    let trimmed = cut.trim_matches('-');
+    if trimmed.is_empty() {
+        "mock".into()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Room for the slug of a visitor mock name: 40 characters minus `-` and
+/// the six character suffix.
+const VISITOR_SLUG_MAX: usize = 33;
+
+/// A visitor mock name: the slug plus a random suffix nobody else holds.
+fn visitor_name(store: &MockStore, slug_base: &str) -> String {
+    for _ in 0..8 {
+        let candidate = format!("{slug_base}-{}", super::visits::name_suffix());
+        if store.get(&candidate).is_none() {
+            return candidate;
+        }
+    }
+    format!("{slug_base}-{}", super::visits::name_suffix())
+}
+
+/// The owner a visitor's new mock gets, and a manage token when this
+/// creation started the visit.
+struct NewOwner {
+    owner: Owner,
+    started: Option<(String, String)>,
+}
+
+#[allow(clippy::result_large_err)]
+fn visitor_owner(state: &AppState, c: &Caller) -> Result<NewOwner, Response> {
+    let Some(visits) = state.mocks.visits() else {
+        return Err(
+            crate::admin::require_admin(&HeaderMap::new(), &state.config)
+                .err()
+                .unwrap_or_else(|| json_error(StatusCode::FORBIDDEN, "admin rights required")),
+        );
+    };
+    if visits.paused() {
+        return Err(ss::visit_error(
+            super::visits::VisitError::Paused,
+            &state.config,
+        ));
+    }
+    if let Some(k) = c.key() {
+        return Ok(NewOwner {
+            owner: Owner::Key(k.to_string()),
+            started: None,
+        });
+    }
+    if let Some(h) = c.visit() {
+        return Ok(NewOwner {
+            owner: Owner::Visit(h.to_string()),
+            started: None,
+        });
+    }
+    match visits.start(&c.session, &EmailInput::default()) {
+        Ok((token, hash)) => {
+            state.metrics.count_visit_event("started");
+            Ok(NewOwner {
+                owner: Owner::Visit(hash.clone()),
+                started: Some((token, hash)),
+            })
+        }
+        Err(e) => {
+            state.metrics.count_visit_event(ss::event_of(&e));
+            Err(ss::visit_error(e, &state.config))
+        }
+    }
+}
+
+/// Caps and rates a visitor's creation must pass before a visit starts.
+#[allow(clippy::result_large_err)]
+fn visitor_admission(state: &AppState, c: &Caller, name_slug: &str) -> Result<(), Response> {
+    let Some(visits) = state.mocks.visits() else {
+        return Ok(());
+    };
+    let cfg = visits.config();
+    if super::visits::blocked(name_slug, &cfg.blocked_names) || RESERVED_NAMES.contains(&name_slug)
+    {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            &format!("the name {name_slug:?} is not available: pick another"),
+        ));
+    }
+    let mine = c
+        .owners
+        .iter()
+        .map(|o| state.mocks.owned_names(o).len())
+        .max()
+        .unwrap_or(0);
+    if mine >= cfg.per_owner {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "rustybin_mock_cap",
+                "message": format!("you have {mine} mocks, the most one visitor may keep: delete one first"),
+            })),
+        )
+            .into_response());
+    }
+    if state.mocks.visitor_count() >= cfg.max_mocks {
+        state.metrics.count_visit_event("busy");
+        return Err(ss::visit_error(
+            super::visits::VisitError::Busy { retry_after: 300 },
+            &state.config,
+        ));
+    }
+    visits.note_creation(&c.session).map_err(|e| {
+        state.metrics.count_visit_event(ss::event_of(&e));
+        ss::visit_error(e, &state.config)
+    })
+}
+
 pub async fn create(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1116,8 +1320,12 @@ pub async fn create(
     uri: Uri,
     body: Bytes,
 ) -> Response {
-    if let Err(r) = admin(&headers, &state.config) {
-        return r;
+    let c = ss::caller(&state, &headers, &extensions);
+    let visitor = !c.admin;
+    if visitor && state.mocks.visits().is_none() {
+        if let Err(r) = admin(&headers, &state.config) {
+            return r;
+        }
     }
     let req: CreateBody = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -1133,41 +1341,97 @@ pub async fn create(
         security: req.security.unwrap_or_default(),
         operations: req.operations.unwrap_or_default(),
     };
-    let compiled = match state.mocks.compile(&text, settings) {
+    let compiled = match state.mocks.compile_for(&text, settings, visitor) {
         Ok(c) => c,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
     };
-    let name = match req.name {
-        Some(n) => n,
-        None => unique_name(&state.mocks, &compiled.spec.suggested_name()),
-    };
-    if let Err(e) = check_name(&name) {
-        return store_error(e);
+    let deploy = req.deploy.unwrap_or(true);
+    let force = req.force.unwrap_or(false);
+    if deploy && !force && !compiled.report.ok {
+        return store_error(StoreError::ChecksFailed(Box::new(compiled.report.clone())));
     }
-    let created = state.mocks.create(
+    let (name, owner) = if visitor {
+        let base = slug(
+            req.name
+                .as_deref()
+                .unwrap_or(&compiled.spec.suggested_name()),
+            VISITOR_SLUG_MAX,
+        );
+        if let Err(r) = visitor_admission(&state, &c, &base) {
+            return r;
+        }
+        let owner = match visitor_owner(&state, &c) {
+            Ok(o) => o,
+            Err(r) => return r,
+        };
+        (visitor_name(&state.mocks, &base), owner)
+    } else {
+        let name = match req.name {
+            Some(n) => n,
+            None => unique_name(&state.mocks, &compiled.spec.suggested_name()),
+        };
+        if let Err(e) = check_name(&name) {
+            return store_error(e);
+        }
+        (
+            name,
+            NewOwner {
+                owner: Owner::Instance,
+                started: None,
+            },
+        )
+    };
+    let created = state.mocks.create_owned(
         &name,
         compiled,
         Origin::Api,
+        owner.owner.clone(),
         req.enabled.unwrap_or(true),
-        req.deploy.unwrap_or(true),
-        req.force.unwrap_or(false),
+        deploy,
+        force,
     );
     match created {
         Ok(s) => {
-            let base = base_url(&headers, &extensions, &uri, &state.config);
-            (
-                StatusCode::CREATED,
-                Json(detail(
-                    &s,
-                    &base,
-                    host::base(&headers, &extensions, &uri, &state.config).as_ref(),
-                    limits_json(&state.mocks),
-                    sees_secrets(&headers, &extensions, &state.config),
-                )),
-            )
-                .into_response()
+            let root = mock_base(
+                &s.owner,
+                &s.name,
+                &headers,
+                &extensions,
+                &uri,
+                &state.config,
+            );
+            let mut out = detail(
+                &s,
+                &root,
+                host::base(&headers, &extensions, &uri, &state.config).as_ref(),
+                limits_json(&state.mocks),
+                c.admin || visitor,
+            );
+            if let Value::Object(m) = &mut out {
+                m.insert("yours".into(), json!(visitor));
+                if let Some((token, _)) = &owner.started {
+                    m.insert("manage_token".into(), json!(token));
+                }
+                let hash = owner
+                    .started
+                    .as_ref()
+                    .map(|(_, h)| h.as_str())
+                    .or(c.visit());
+                if let Some(v) = hash.and_then(|h| ss::visit_json(&state, h)) {
+                    m.insert("visit".into(), v);
+                }
+            }
+            if visitor {
+                tracing::info!(mock = %s.name, owner = %s.owner.fingerprint(), "visitor mock created");
+            }
+            (StatusCode::CREATED, Json(out)).into_response()
         }
-        Err(e) => store_error(e),
+        Err(e) => {
+            if let (Some((_, hash)), Some(v)) = (&owner.started, state.mocks.visits()) {
+                v.abandon(hash);
+            }
+            ss::store_refusal(&e).unwrap_or_else(|| store_error(e))
+        }
     }
 }
 
@@ -1178,18 +1442,33 @@ pub async fn get_one(
     extensions: Extensions,
     uri: Uri,
 ) -> Response {
-    let Some(s) = state.mocks.get(&name) else {
-        return store_error(StoreError::NotFound(name));
+    let (c, s) = match ss::readable(&state, &headers, &extensions, &name) {
+        Ok(x) => x,
+        Err(r) => return r,
     };
-    let base = base_url(&headers, &extensions, &uri, &state.config);
-    Json(detail(
+    let root = mock_base(
+        &s.owner,
+        &s.name,
+        &headers,
+        &extensions,
+        &uri,
+        &state.config,
+    );
+    let mut out = detail(
         &s,
-        &base,
+        &root,
         host::base(&headers, &extensions, &uri, &state.config).as_ref(),
         limits_json(&state.mocks),
-        sees_secrets(&headers, &extensions, &state.config),
-    ))
-    .into_response()
+        c.reveals(&s),
+    );
+    if let Value::Object(m) = &mut out {
+        m.insert("yours".into(), json!(c.owns(&s.owner)));
+        m.insert(
+            "can_manage".into(),
+            json!(c.admin || (s.owner.is_visitor() && c.owns(&s.owner))),
+        );
+    }
+    Json(out).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1213,18 +1492,22 @@ pub async fn patch(
     uri: Uri,
     body: Bytes,
 ) -> Response {
-    if let Err(r) = admin(&headers, &state.config) {
-        return r;
-    }
+    let (c, current) = match ss::manageable(&state, &headers, &extensions, &name) {
+        Ok(x) => x,
+        Err(r) => return r,
+    };
     let req: PatchBody = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("invalid request: {e}")),
     };
-    let draft = match state.mocks.draft(&name) {
-        Ok(d) => d,
-        Err(e) => return store_error(e),
-    };
-    if let Some(n) = &req.name {
+    let draft = current.draft.clone();
+    if let Some(n) = req.name.as_deref().filter(|n| *n != name) {
+        if current.owner.is_visitor() && !c.admin {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "self-service mocks keep the name they were given",
+            );
+        }
         if let Err(e) = check_name(n) {
             return store_error(e);
         }
@@ -1272,13 +1555,20 @@ pub async fn patch(
             Err(e) => return store_error(e),
         };
     }
-    let base = base_url(&headers, &extensions, &uri, &state.config);
+    let root = mock_base(
+        &snap.owner,
+        &snap.name,
+        &headers,
+        &extensions,
+        &uri,
+        &state.config,
+    );
     Json(detail(
         &snap,
-        &base,
+        &root,
         host::base(&headers, &extensions, &uri, &state.config).as_ref(),
         limits_json(&state.mocks),
-        sees_secrets(&headers, &extensions, &state.config),
+        c.reveals(&snap),
     ))
     .into_response()
 }
@@ -1287,8 +1577,9 @@ pub async fn delete(
     State(state): State<AppState>,
     Path(MockPath { name }): Path<MockPath>,
     headers: HeaderMap,
+    extensions: Extensions,
 ) -> Response {
-    if let Err(r) = admin(&headers, &state.config) {
+    if let Err(r) = ss::manageable(&state, &headers, &extensions, &name) {
         return r;
     }
     if state.mocks.delete(&name) {
@@ -1298,8 +1589,14 @@ pub async fn delete(
     }
 }
 
-async fn switch(state: AppState, name: String, headers: HeaderMap, on: bool) -> Response {
-    if let Err(r) = admin(&headers, &state.config) {
+async fn switch(
+    state: AppState,
+    name: String,
+    headers: HeaderMap,
+    extensions: Extensions,
+    on: bool,
+) -> Response {
+    if let Err(r) = ss::manageable(&state, &headers, &extensions, &name) {
         return r;
     }
     match state.mocks.set_enabled(&name, on) {
@@ -1312,16 +1609,18 @@ pub async fn enable(
     State(state): State<AppState>,
     Path(MockPath { name }): Path<MockPath>,
     headers: HeaderMap,
+    extensions: Extensions,
 ) -> Response {
-    switch(state, name, headers, true).await
+    switch(state, name, headers, extensions, true).await
 }
 
 pub async fn disable(
     State(state): State<AppState>,
     Path(MockPath { name }): Path<MockPath>,
     headers: HeaderMap,
+    extensions: Extensions,
 ) -> Response {
-    switch(state, name, headers, false).await
+    switch(state, name, headers, extensions, false).await
 }
 
 #[derive(Deserialize)]
@@ -1334,8 +1633,9 @@ pub async fn deploy(
     Path(MockPath { name }): Path<MockPath>,
     Query(q): Query<ForceQuery>,
     headers: HeaderMap,
+    extensions: Extensions,
 ) -> Response {
-    if let Err(r) = admin(&headers, &state.config) {
+    if let Err(r) = ss::manageable(&state, &headers, &extensions, &name) {
         return r;
     }
     match state.mocks.deploy(&name, q.force.unwrap_or(false)) {
@@ -1360,9 +1660,10 @@ pub async fn rollback(
     State(state): State<AppState>,
     Path(MockPath { name }): Path<MockPath>,
     headers: HeaderMap,
+    extensions: Extensions,
     body: Bytes,
 ) -> Response {
-    if let Err(r) = admin(&headers, &state.config) {
+    if let Err(r) = ss::manageable(&state, &headers, &extensions, &name) {
         return r;
     }
     let req: RollbackBody = if body.iter().all(u8::is_ascii_whitespace) {
@@ -1390,16 +1691,14 @@ pub async fn report(
     headers: HeaderMap,
     extensions: Extensions,
 ) -> Response {
-    match state.mocks.draft(&name) {
-        Ok(d) if sees_secrets(&headers, &extensions, &state.config) => {
-            Json(&d.report).into_response()
-        }
-        Ok(d) => {
-            let mut report = d.report.clone();
-            checks::hide_report_credentials(&d, &mut report);
+    match ss::readable(&state, &headers, &extensions, &name) {
+        Ok((c, s)) if c.reveals(&s) => Json(&s.draft.report).into_response(),
+        Ok((_, s)) => {
+            let mut report = s.draft.report.clone();
+            checks::hide_report_credentials(&s.draft, &mut report);
             Json(report).into_response()
         }
-        Err(e) => store_error(e),
+        Err(r) => r,
     }
 }
 
@@ -1422,13 +1721,15 @@ pub async fn export_one(
     headers: HeaderMap,
     extensions: Extensions,
 ) -> Response {
-    let reveal = sees_secrets(&headers, &extensions, &state.config);
-    match state.mocks.get(&name) {
-        Some(s) => yaml_response(
-            config_file::export(&[s], reveal),
-            &format!("{name}.rustybin.yaml"),
-        ),
-        None => store_error(StoreError::NotFound(name)),
+    match ss::readable(&state, &headers, &extensions, &name) {
+        Ok((c, s)) => {
+            let reveal = c.reveals(&s);
+            yaml_response(
+                config_file::export(&[s], reveal),
+                &format!("{name}.rustybin.yaml"),
+            )
+        }
+        Err(r) => r,
     }
 }
 
@@ -1438,11 +1739,13 @@ pub async fn export_all(
     extensions: Extensions,
 ) -> Response {
     let reveal = sees_secrets(&headers, &extensions, &state.config);
+    let c = ss::caller(&state, &headers, &extensions);
+    // Instance mocks (and the caller's own); never other visitors'.
     let all: Vec<Snapshot> = state
         .mocks
         .list()
         .into_iter()
-        .filter(|s| s.origin != Origin::Sample)
+        .filter(|s| s.origin != Origin::Sample && (!s.owner.is_visitor() || c.owns(&s.owner)))
         .collect();
     yaml_response(config_file::export(&all, reveal), "rustybin.yaml")
 }
@@ -1507,18 +1810,19 @@ pub async fn get_operation(
     extensions: Extensions,
     uri: Uri,
 ) -> Response {
-    let draft = match state.mocks.draft(&name) {
-        Ok(d) => d,
-        Err(e) => return store_error(e),
+    let (c, s) = match ss::readable(&state, &headers, &extensions, &name) {
+        Ok(x) => x,
+        Err(r) => return r,
     };
-    let base = base_url(&headers, &extensions, &uri, &state.config);
-    match operation_detail(
-        &draft,
-        &op,
-        &base,
-        &name,
-        sees_secrets(&headers, &extensions, &state.config),
-    ) {
+    let root = mock_base(
+        &s.owner,
+        &s.name,
+        &headers,
+        &extensions,
+        &uri,
+        &state.config,
+    );
+    match operation_detail(&s.draft, &op, &root, c.reveals(&s)) {
         Some(v) => Json(v).into_response(),
         None => store_error(StoreError::NotFound(format!("{name}/{op}"))),
     }
@@ -1532,9 +1836,10 @@ pub async fn put_operation(
     uri: Uri,
     body: Bytes,
 ) -> Response {
-    if let Err(r) = admin(&headers, &state.config) {
-        return r;
-    }
+    let c = match ss::manageable(&state, &headers, &extensions, &name) {
+        Ok((c, _)) => c,
+        Err(r) => return r,
+    };
     let settings: Option<OperationSettings> = match serde_json::from_slice(&body) {
         Ok(s) => s,
         Err(e) => {
@@ -1548,14 +1853,15 @@ pub async fn put_operation(
         Ok(s) => s,
         Err(e) => return store_error(e),
     };
-    let base = base_url(&headers, &extensions, &uri, &state.config);
-    match operation_detail(
-        &snap.draft,
-        &op,
-        &base,
-        &name,
-        sees_secrets(&headers, &extensions, &state.config),
-    ) {
+    let root = mock_base(
+        &snap.owner,
+        &snap.name,
+        &headers,
+        &extensions,
+        &uri,
+        &state.config,
+    );
+    match operation_detail(&snap.draft, &op, &root, c.reveals(&snap)) {
         Some(v) => Json(v).into_response(),
         None => store_error(StoreError::NotFound(format!("{name}/{op}"))),
     }
@@ -1577,10 +1883,11 @@ pub async fn sample(
     extensions: Extensions,
     uri: Uri,
 ) -> Response {
-    let draft = match state.mocks.draft(&name) {
-        Ok(d) => d,
-        Err(e) => return store_error(e),
+    let (caller, snap) = match ss::readable(&state, &headers, &extensions, &name) {
+        Ok(x) => x,
+        Err(r) => return r,
     };
+    let draft = snap.draft.clone();
     let Some(operation) = draft.spec.operation(&op) else {
         return store_error(StoreError::NotFound(format!("{name}/{op}")));
     };
@@ -1604,7 +1911,7 @@ pub async fn sample(
     let status = q.status.unwrap_or_else(|| operation.default_status());
     let mode = q.mode.unwrap_or(c.settings.responses.mode);
     let mut request = checks::sample_request(c, operation);
-    if !sees_secrets(&headers, &extensions, &state.config) {
+    if !caller.reveals(&snap) {
         checks::hide_credentials(c, operation, &mut request);
     }
     let (content_type, body, source) = respond::render_body(
@@ -1621,10 +1928,17 @@ pub async fn sample(
     );
     let issues =
         checks::validate_body(c, operation, status, content_type.as_deref(), body.as_ref());
-    let base = base_url(&headers, &extensions, &uri, &state.config);
+    let root = mock_base(
+        &snap.owner,
+        &name,
+        &headers,
+        &extensions,
+        &uri,
+        &state.config,
+    );
     Json(json!({
         "request": request,
-        "url": format!("{base}/mock/{name}{}", request.path),
+        "url": format!("{root}{}", request.path),
         "response": {
             "status": status,
             "content_type": content_type,
@@ -1653,11 +1967,13 @@ pub struct ValidateBody {
 pub async fn validate(
     State(state): State<AppState>,
     Path(OpPath { name, op }): Path<OpPath>,
+    headers: HeaderMap,
+    extensions: Extensions,
     Json(req): Json<ValidateBody>,
 ) -> Response {
-    let draft = match state.mocks.draft(&name) {
-        Ok(d) => d,
-        Err(e) => return store_error(e),
+    let draft = match ss::readable(&state, &headers, &extensions, &name) {
+        Ok((_, s)) => s.draft,
+        Err(r) => return r,
     };
     let Some(operation) = draft.spec.operation(&op) else {
         return store_error(StoreError::NotFound(format!("{name}/{op}")));
@@ -1698,9 +2014,12 @@ pub async fn requests(
     State(state): State<AppState>,
     Path(MockPath { name }): Path<MockPath>,
     Query(q): Query<ListQuery>,
+    headers: HeaderMap,
+    extensions: Extensions,
 ) -> Response {
-    let Some(s) = state.mocks.get(&name) else {
-        return store_error(StoreError::NotFound(name));
+    let s = match ss::readable(&state, &headers, &extensions, &name) {
+        Ok((_, s)) => s,
+        Err(r) => return r,
     };
     let limit = q
         .limit
@@ -1720,16 +2039,14 @@ pub async fn clear_requests(
     State(state): State<AppState>,
     Path(MockPath { name }): Path<MockPath>,
     headers: HeaderMap,
+    extensions: Extensions,
 ) -> Response {
-    if let Err(r) = admin(&headers, &state.config) {
-        return r;
-    }
-    match state.mocks.get(&name) {
-        Some(s) => {
+    match ss::manageable(&state, &headers, &extensions, &name) {
+        Ok((_, s)) => {
             s.capture.clear();
             Json(json!({ "cleared": name })).into_response()
         }
-        None => store_error(StoreError::NotFound(name)),
+        Err(r) => r,
     }
 }
 
@@ -1742,9 +2059,12 @@ pub struct EntryPath {
 pub async fn request_entry(
     State(state): State<AppState>,
     Path(EntryPath { name, n }): Path<EntryPath>,
+    headers: HeaderMap,
+    extensions: Extensions,
 ) -> Response {
-    let Some(s) = state.mocks.get(&name) else {
-        return store_error(StoreError::NotFound(name));
+    let s = match ss::readable(&state, &headers, &extensions, &name) {
+        Ok((_, s)) => s,
+        Err(r) => return r,
     };
     let Ok(seq) = n.parse::<u64>() else {
         return json_error(
@@ -1765,9 +2085,11 @@ pub async fn stream(
     State(state): State<AppState>,
     Path(MockPath { name }): Path<MockPath>,
     headers: HeaderMap,
+    extensions: Extensions,
 ) -> Response {
-    let Some(s) = state.mocks.get(&name) else {
-        return store_error(StoreError::NotFound(name));
+    let s = match ss::readable(&state, &headers, &extensions, &name) {
+        Ok((_, s)) => s,
+        Err(r) => return r,
     };
     let mut rx = s.capture.subscribe();
     let last_seen: Option<u64> = headers
@@ -1831,10 +2153,12 @@ fn capture_event(entry: &MockCapture) -> Event {
 pub async fn spec_source(
     State(state): State<AppState>,
     Path(MockPath { name }): Path<MockPath>,
+    headers: HeaderMap,
+    extensions: Extensions,
 ) -> Response {
-    let draft = match state.mocks.draft(&name) {
-        Ok(d) => d,
-        Err(e) => return store_error(e),
+    let draft = match ss::readable(&state, &headers, &extensions, &name) {
+        Ok((_, s)) => s.draft,
+        Err(r) => return r,
     };
     let text = draft.source.to_string();
     let json = text.trim_start().starts_with('{');
@@ -1865,9 +2189,10 @@ pub async fn duplicate(
     uri: Uri,
     body: Bytes,
 ) -> Response {
-    if let Err(r) = admin(&headers, &state.config) {
-        return r;
-    }
+    let (c, source) = match ss::manageable(&state, &headers, &extensions, &name) {
+        Ok(x) => x,
+        Err(r) => return r,
+    };
     let req: DuplicateBody = if body.iter().all(u8::is_ascii_whitespace) {
         DuplicateBody { name: None }
     } else {
@@ -1876,28 +2201,52 @@ pub async fn duplicate(
             Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("invalid request: {e}")),
         }
     };
-    let new_name = req
-        .name
-        .unwrap_or_else(|| unique_name(&state.mocks, &format!("{name}-copy")));
-    if let Err(e) = check_name(&new_name) {
-        return store_error(e);
-    }
+    let new_name = if source.owner.is_visitor() && !c.admin {
+        // `orders-k3f9q2` copies as `orders-<new suffix>`.
+        let stem = req
+            .name
+            .clone()
+            .unwrap_or_else(|| match name.rsplit_once('-') {
+                Some((stem, suffix)) if suffix.len() == 6 => stem.to_string(),
+                _ => name.clone(),
+            });
+        let base = slug(&stem, VISITOR_SLUG_MAX);
+        if let Err(r) = visitor_admission(&state, &c, &base) {
+            return r;
+        }
+        visitor_name(&state.mocks, &base)
+    } else {
+        let n = req
+            .name
+            .unwrap_or_else(|| unique_name(&state.mocks, &format!("{name}-copy")));
+        if let Err(e) = check_name(&n) {
+            return store_error(e);
+        }
+        n
+    };
     match state.mocks.duplicate(&name, &new_name) {
         Ok(s) => {
-            let base = base_url(&headers, &extensions, &uri, &state.config);
+            let root = mock_base(
+                &s.owner,
+                &s.name,
+                &headers,
+                &extensions,
+                &uri,
+                &state.config,
+            );
             (
                 StatusCode::CREATED,
                 Json(detail(
                     &s,
-                    &base,
+                    &root,
                     host::base(&headers, &extensions, &uri, &state.config).as_ref(),
                     limits_json(&state.mocks),
-                    sees_secrets(&headers, &extensions, &state.config),
+                    c.reveals(&s),
                 )),
             )
                 .into_response()
         }
-        Err(e) => store_error(e),
+        Err(e) => ss::store_refusal(&e).unwrap_or_else(|| store_error(e)),
     }
 }
 
@@ -1915,6 +2264,8 @@ pub struct RuleTestBody {
 pub async fn test_rules(
     State(state): State<AppState>,
     Path(OpPath { name, op }): Path<OpPath>,
+    headers: HeaderMap,
+    extensions: Extensions,
     body: Bytes,
 ) -> Response {
     let req: RuleTestBody = if body.iter().all(u8::is_ascii_whitespace) {
@@ -1925,8 +2276,9 @@ pub async fn test_rules(
             Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("invalid request: {e}")),
         }
     };
-    let Some(s) = state.mocks.get(&name) else {
-        return store_error(StoreError::NotFound(name));
+    let s = match ss::readable(&state, &headers, &extensions, &name) {
+        Ok((_, s)) => s,
+        Err(r) => return r,
     };
     let c = &s.draft;
     let Some(operation) = c.spec.operation(&op) else {
@@ -2031,10 +2383,12 @@ pub async fn test_rules(
 pub async fn get_state(
     State(state): State<AppState>,
     Path(MockPath { name }): Path<MockPath>,
+    headers: HeaderMap,
+    extensions: Extensions,
 ) -> Response {
-    match state.mocks.get(&name) {
-        Some(s) => Json(s.state.dump()).into_response(),
-        None => store_error(StoreError::NotFound(name)),
+    match ss::readable(&state, &headers, &extensions, &name) {
+        Ok((_, s)) => Json(s.state.dump()).into_response(),
+        Err(r) => r,
     }
 }
 
@@ -2042,16 +2396,14 @@ pub async fn clear_state(
     State(state): State<AppState>,
     Path(MockPath { name }): Path<MockPath>,
     headers: HeaderMap,
+    extensions: Extensions,
 ) -> Response {
-    if let Err(r) = admin(&headers, &state.config) {
-        return r;
-    }
-    match state.mocks.get(&name) {
-        Some(s) => {
+    match ss::manageable(&state, &headers, &extensions, &name) {
+        Ok((_, s)) => {
             s.state.clear();
             Json(json!({ "cleared": name })).into_response()
         }
-        None => store_error(StoreError::NotFound(name)),
+        Err(r) => r,
     }
 }
 
@@ -2075,21 +2427,19 @@ pub async fn collection(
     extensions: Extensions,
     uri: Uri,
 ) -> Response {
-    let Some(s) = state.mocks.get(&name) else {
-        return store_error(StoreError::NotFound(name));
+    let (caller, s) = match ss::readable(&state, &headers, &extensions, &name) {
+        Ok(x) => x,
+        Err(r) => return r,
     };
     let base = match q.base_url {
         Some(raw) => match crate::collections::validate_base_url(&raw) {
             Ok(b) => b,
             Err(reason) => return json_error(StatusCode::BAD_REQUEST, reason),
         },
-        None => format!(
-            "{}/mock/{name}",
-            base_url(&headers, &extensions, &uri, &state.config)
-        ),
+        None => mock_base(&s.owner, &name, &headers, &extensions, &uri, &state.config),
     };
     let c = s.live.as_ref().unwrap_or(&s.draft);
-    let reveal = sees_secrets(&headers, &extensions, &state.config);
+    let reveal = caller.reveals(&s);
     let Some((ct, file, text)) = super::collections::render(c, &name, &format, &base, reveal)
     else {
         let known: Vec<&str> = super::collections::FORMATS

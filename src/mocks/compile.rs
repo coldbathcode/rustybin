@@ -26,6 +26,8 @@ pub struct Compiled {
     pub settings: MockSettings,
     routes: Vec<Route>,
     pub report: Report,
+    /// Compiled for a self-service mock (restricted settings and responses).
+    pub visitor: bool,
 }
 
 /// One segment of a path template.
@@ -185,6 +187,7 @@ impl Compiled {
             settings,
             routes,
             report: Report::default(),
+            visitor: limits.settings.visitor,
         };
         compiled.report = checks::run(&compiled);
         Ok(compiled)
@@ -252,6 +255,7 @@ pub(crate) mod tests {
             max_delay_ms: 10_000,
             max_body_bytes: 64 * 1024,
             max_rules: 20,
+            visitor: false,
         },
     };
 

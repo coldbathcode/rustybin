@@ -243,7 +243,9 @@ pub fn build_app(state: AppState) -> Router {
 
     // Host-based mock URLs rewrite the path before routing, so they wrap the
     // finished router.
-    if config.mocks_host.is_some() {
+    if config.mocks_host.is_some()
+        || (config.self_service.enabled && config.self_service.host.is_some())
+    {
         return Router::new()
             .fallback_service(router)
             .layer(middleware::from_fn_with_state(config, mocks::host::route));

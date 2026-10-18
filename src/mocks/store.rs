@@ -2,6 +2,10 @@
 //! live revision, a short history for rollback, an on/off switch and a
 //! capture log. Bounded by [`MockLimits`]; mocks created through the API
 //! expire in public mode.
+//!
+//! Every mock has an [`Owner`]. Self-service mocks (a visit or an API key)
+//! have their own caps next to `max_mocks`, are compiled with the visitor
+//! restrictions, and a visit's mocks end with the visit ([`Visits`]).
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -18,6 +22,7 @@ use super::compile::{CompileLimits, Compiled};
 use super::model::{valid_name, MockSettings, OperationSettings, SettingsLimits, MAX_RULES};
 use super::spec::ParseLimits;
 use super::state::MockState;
+use super::visits::{Owner, Visits};
 use crate::config::Config;
 
 /// Capacity limits (lower in public mode).
@@ -78,6 +83,11 @@ impl MockLimits {
     }
 
     pub fn compile_limits(&self) -> CompileLimits {
+        self.compile_limits_for(false)
+    }
+
+    /// Limits for an instance mock or (`visitor`) a self-service one.
+    pub fn compile_limits_for(&self, visitor: bool) -> CompileLimits {
         CompileLimits {
             parse: ParseLimits {
                 max_bytes: self.max_spec_bytes,
@@ -87,6 +97,7 @@ impl MockLimits {
                 max_delay_ms: self.max_delay_ms,
                 max_body_bytes: self.max_body_bytes,
                 max_rules: self.max_rules,
+                visitor,
             },
         }
     }
@@ -110,6 +121,8 @@ pub enum StoreError {
     Conflict(String),
     Invalid(String),
     Full(String),
+    /// The owner already has as many mocks as it may.
+    OwnerCap(String),
     /// Deploy refused: the checks found errors.
     ChecksFailed(Box<Report>),
 }
@@ -118,7 +131,7 @@ impl StoreError {
     pub fn message(&self) -> String {
         match self {
             Self::NotFound(n) => format!("mock {n:?} not found"),
-            Self::Conflict(m) | Self::Invalid(m) | Self::Full(m) => m.clone(),
+            Self::Conflict(m) | Self::Invalid(m) | Self::Full(m) | Self::OwnerCap(m) => m.clone(),
             Self::ChecksFailed(r) => format!(
                 "the deploy checks found {} error(s): fix them or deploy with force",
                 r.errors
@@ -129,6 +142,7 @@ impl StoreError {
 
 struct Entry {
     origin: Origin,
+    owner: Owner,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     enabled: bool,
@@ -150,6 +164,8 @@ pub struct LiveMock {
     pub enabled: bool,
     pub capture: CaptureLog,
     pub state: MockState,
+    /// A self-service mock: restricted responses, the mocks domain only.
+    pub visitor: bool,
 }
 
 pub enum Lookup {
@@ -164,6 +180,7 @@ pub enum Lookup {
 pub struct Snapshot {
     pub name: String,
     pub origin: Origin,
+    pub owner: Owner,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub enabled: bool,
@@ -205,6 +222,7 @@ impl Snapshot {
             "enabled": self.enabled,
             "has_draft_changes": self.has_draft_changes(),
             "origin": self.origin,
+            "owner": self.owner.kind(),
             "operations": shown.spec.operations.len(),
             "security": { "enabled": sec.enabled, "mode": sec.mode.as_str() },
             "spec_declares_security": shown.spec.declares_security(),
@@ -251,6 +269,8 @@ pub struct MockStore {
     limits: MockLimits,
     /// Where API-created mocks are saved (`RUSTYBIN_MOCKS_STATE_DIR`).
     persist_dir: Option<Arc<PathBuf>>,
+    /// Self-service visits (`RUSTYBIN_MOCKS_SELF_SERVICE`).
+    visits: Option<Arc<Visits>>,
 }
 
 impl MockStore {
@@ -265,7 +285,18 @@ impl MockStore {
             load_errors: Arc::new(RwLock::new(Vec::new())),
             limits,
             persist_dir: None,
+            visits: None,
         }
+    }
+
+    /// Turn on self-service: visit-owned mocks live as long as their visit.
+    pub fn with_visits(mut self, visits: Arc<Visits>) -> Self {
+        self.visits = Some(visits);
+        self
+    }
+
+    pub fn visits(&self) -> Option<&Arc<Visits>> {
+        self.visits.as_ref()
     }
 
     /// Save API-created mocks under `dir` on every change.
@@ -294,32 +325,72 @@ impl MockStore {
         self.inner.read().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Write lock; expired mocks are dropped first.
+    /// Write lock; expired mocks (and the mocks of ended visits) are
+    /// dropped first, with their saved copies.
     fn write(&self) -> RwLockWriteGuard<'_, BTreeMap<String, Entry>> {
         let mut map = self.inner.write().unwrap_or_else(|p| p.into_inner());
-        let now = Instant::now();
-        map.retain(|_, e| e.expires.is_none_or(|(deadline, _)| deadline > now));
+        let mut gone = Vec::new();
+        map.retain(|name, e| {
+            let keep = self.live_entry(e);
+            if !keep {
+                gone.push(name.clone());
+            }
+            keep
+        });
+        if let Some(dir) = &self.persist_dir {
+            for name in &gone {
+                super::persist::remove(dir, name);
+            }
+        }
         map
     }
 
-    fn live_entry(e: &Entry) -> bool {
-        e.expires
-            .is_none_or(|(deadline, _)| deadline > Instant::now())
+    fn live_entry(&self, e: &Entry) -> bool {
+        let timed = e
+            .expires
+            .is_none_or(|(deadline, _)| deadline > Instant::now());
+        timed
+            && match &e.owner {
+                Owner::Visit(hash) => self.visits.as_ref().is_some_and(|v| v.alive(hash)),
+                _ => true,
+            }
+    }
+
+    /// Drop the mocks of ended visits now (the sweep task); returns how
+    /// many went.
+    pub fn sweep(&self) -> usize {
+        if let Some(v) = &self.visits {
+            v.sweep();
+        }
+        let before = self.read().len();
+        let after = self.write().len();
+        before.saturating_sub(after)
     }
 
     /// Compile a definition (outside any lock).
     pub fn compile(&self, source: &str, settings: MockSettings) -> Result<Compiled, String> {
+        self.compile_for(source, settings, false)
+    }
+
+    /// [`Self::compile`]; `visitor` applies the self-service restrictions.
+    pub fn compile_for(
+        &self,
+        source: &str,
+        settings: MockSettings,
+        visitor: bool,
+    ) -> Result<Compiled, String> {
         let revision = self.revision.fetch_add(1, Ordering::Relaxed);
         Compiled::build(
             revision,
             Arc::from(source),
             settings.normalised(),
-            &self.limits.compile_limits(),
+            &self.limits.compile_limits_for(visitor),
         )
     }
 
     /// Compile new settings (and optionally a new spec) for an existing
-    /// revision; an unchanged spec is shared, not parsed again.
+    /// revision; an unchanged spec is shared, not parsed again. A visitor
+    /// revision stays a visitor revision.
     pub fn recompile(
         &self,
         base: &Compiled,
@@ -327,7 +398,7 @@ impl MockStore {
         settings: MockSettings,
     ) -> Result<Compiled, String> {
         match source {
-            Some(s) if s != &*base.source => self.compile(s, settings),
+            Some(s) if s != &*base.source => self.compile_for(s, settings, base.visitor),
             _ => {
                 let revision = self.revision.fetch_add(1, Ordering::Relaxed);
                 Compiled::from_parsed(
@@ -335,7 +406,7 @@ impl MockStore {
                     base.source.clone(),
                     base.spec.clone(),
                     settings.normalised(),
-                    &self.limits.compile_limits(),
+                    &self.limits.compile_limits_for(base.visitor),
                 )
             }
         }
@@ -374,15 +445,90 @@ impl MockStore {
         deploy: bool,
         force: bool,
     ) -> Result<Snapshot, StoreError> {
-        let r = self.create_inner(name, compiled, origin, enabled, deploy, force);
+        self.create_owned(
+            name,
+            compiled,
+            origin,
+            Owner::Instance,
+            enabled,
+            deploy,
+            force,
+        )
+    }
+
+    /// [`Self::create`] for an owner (self-service caps apply to visitors).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_owned(
+        &self,
+        name: &str,
+        compiled: Compiled,
+        origin: Origin,
+        owner: Owner,
+        enabled: bool,
+        deploy: bool,
+        force: bool,
+    ) -> Result<Snapshot, StoreError> {
+        let r = self.create_inner(name, compiled, origin, owner, enabled, deploy, force);
         self.saved(r)
     }
 
+    /// Mocks of `owner`, by name.
+    pub fn owned_names(&self, owner: &Owner) -> Vec<String> {
+        self.read()
+            .iter()
+            .filter(|(_, e)| &e.owner == owner && self.live_entry(e))
+            .map(|(n, _)| n.clone())
+            .collect()
+    }
+
+    /// Self-service mocks on the instance.
+    pub fn visitor_count(&self) -> usize {
+        self.read()
+            .values()
+            .filter(|e| e.owner.is_visitor() && self.live_entry(e))
+            .count()
+    }
+
+    /// Give `from`'s mocks to `to` (a rotated manage token).
+    pub fn reassign(&self, from: &Owner, to: Owner) {
+        let changed: Vec<Snapshot> = {
+            let mut map = self.inner.write().unwrap_or_else(|p| p.into_inner());
+            map.iter_mut()
+                .filter(|(_, e)| &e.owner == from)
+                .map(|(n, e)| {
+                    e.owner = to.clone();
+                    snapshot(n, e)
+                })
+                .collect()
+        };
+        if let Some(dir) = &self.persist_dir {
+            for s in &changed {
+                super::persist::save(dir, s);
+            }
+        }
+    }
+
+    /// Delete every mock of `owner`; returns their names.
+    pub fn delete_owned(&self, owner: &Owner) -> Vec<String> {
+        let names: Vec<String> = self
+            .read()
+            .iter()
+            .filter(|(_, e)| &e.owner == owner)
+            .map(|(n, _)| n.clone())
+            .collect();
+        for n in &names {
+            self.delete(n);
+        }
+        names
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn create_inner(
         &self,
         name: &str,
         compiled: Compiled,
         origin: Origin,
+        owner: Owner,
         enabled: bool,
         deploy: bool,
         force: bool,
@@ -401,15 +547,45 @@ impl MockStore {
                 "a mock named {name:?} already exists"
             )));
         }
-        if map.len() >= self.limits.max_mocks {
-            return Err(StoreError::Full(format!(
-                "this instance holds at most {} mocks: delete one first",
-                self.limits.max_mocks
-            )));
+        if owner.is_visitor() {
+            let cfg = self
+                .visits
+                .as_ref()
+                .map(|v| v.config().clone())
+                .unwrap_or_default();
+            let (mine, visitors) = map.values().fold((0, 0), |(mine, all), e| {
+                (
+                    mine + usize::from(e.owner == owner),
+                    all + usize::from(e.owner.is_visitor()),
+                )
+            });
+            if mine >= cfg.per_owner {
+                return Err(StoreError::OwnerCap(format!(
+                    "you have {mine} mocks, the most one visitor may keep: delete one first"
+                )));
+            }
+            if visitors >= cfg.max_mocks {
+                return Err(StoreError::Full(
+                    "the demo holds as many visitor mocks as it can: try again later".into(),
+                ));
+            }
+        } else {
+            let instance = map.values().filter(|e| !e.owner.is_visitor()).count();
+            if instance >= self.limits.max_mocks {
+                return Err(StoreError::Full(format!(
+                    "this instance holds at most {} mocks: delete one first",
+                    self.limits.max_mocks
+                )));
+            }
         }
         let draft = Arc::new(compiled);
         let now = Utc::now();
-        let expires = match (origin, self.limits.ttl_secs) {
+        // A visit's mocks end with the visit, not after the public-mode TTL.
+        let ttl = match owner {
+            Owner::Visit(_) => None,
+            _ => self.limits.ttl_secs,
+        };
+        let expires = match (origin, ttl) {
             (Origin::Api, Some(ttl)) => Some((
                 Instant::now() + Duration::from_secs(ttl),
                 now + chrono::TimeDelta::try_seconds(ttl as i64).unwrap_or_default(),
@@ -418,6 +594,7 @@ impl MockStore {
         };
         let entry = Entry {
             origin,
+            owner,
             created_at: now,
             updated_at: now,
             enabled,
@@ -437,7 +614,7 @@ impl MockStore {
     /// Request-path lookup.
     pub fn lookup(&self, name: &str) -> Lookup {
         let map = self.read();
-        let Some(e) = map.get(name).filter(|e| Self::live_entry(e)) else {
+        let Some(e) = map.get(name).filter(|e| self.live_entry(e)) else {
             return Lookup::Missing;
         };
         match &e.live {
@@ -447,6 +624,7 @@ impl MockStore {
                 enabled: e.enabled,
                 capture: e.capture.clone(),
                 state: e.state.clone(),
+                visitor: e.owner.is_visitor(),
             }),
         }
     }
@@ -454,14 +632,14 @@ impl MockStore {
     pub fn get(&self, name: &str) -> Option<Snapshot> {
         let map = self.read();
         map.get(name)
-            .filter(|e| Self::live_entry(e))
+            .filter(|e| self.live_entry(e))
             .map(|e| snapshot(name, e))
     }
 
     pub fn list(&self) -> Vec<Snapshot> {
         self.read()
             .iter()
-            .filter(|(_, e)| Self::live_entry(e))
+            .filter(|(_, e)| self.live_entry(e))
             .map(|(n, e)| snapshot(n, e))
             .collect()
     }
@@ -657,10 +835,11 @@ impl MockStore {
             Origin::Sample | Origin::File => Origin::Api,
             o => o,
         };
-        self.create(
+        self.create_owned(
             new_name,
             compiled,
             origin,
+            source.owner.clone(),
             true,
             source.live.is_some(),
             true,
@@ -688,9 +867,10 @@ impl MockStore {
         live: Compiled,
         draft: Option<Compiled>,
         origin: Origin,
+        owner: Owner,
         enabled: bool,
     ) -> Result<Snapshot, StoreError> {
-        let snap = self.create_inner(name, live, origin, enabled, true, true)?;
+        let snap = self.create_inner(name, live, origin, owner, enabled, true, true)?;
         match draft {
             Some(d) => self.set_draft_inner(name, Some(d), None),
             None => Ok(snap),
@@ -703,9 +883,10 @@ impl MockStore {
         name: &str,
         draft: Compiled,
         origin: Origin,
+        owner: Owner,
         enabled: bool,
     ) -> Result<Snapshot, StoreError> {
-        self.create_inner(name, draft, origin, enabled, false, false)
+        self.create_inner(name, draft, origin, owner, enabled, false, false)
     }
 
     fn set_load_error(&self, name: &str, error: Option<&str>) {
@@ -732,7 +913,7 @@ impl MockStore {
                 return;
             };
             if self
-                .create_inner(name, compiled, origin, false, false, false)
+                .create_inner(name, compiled, origin, Owner::Instance, false, false, false)
                 .is_err()
             {
                 return;
@@ -848,6 +1029,7 @@ fn snapshot(name: &str, e: &Entry) -> Snapshot {
     Snapshot {
         name: name.to_string(),
         origin: e.origin,
+        owner: e.owner.clone(),
         created_at: e.created_at,
         updated_at: e.updated_at,
         enabled: e.enabled,

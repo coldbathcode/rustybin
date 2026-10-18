@@ -740,6 +740,12 @@ fn is_control(path: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
+/// Mock management routes (`/_rustybin/mocks*`): with self-service on, a
+/// key manages its own mocks there (the handlers check ownership).
+fn is_mock_route(path: &str) -> bool {
+    path == "/_rustybin/mocks" || path.starts_with("/_rustybin/mocks/")
+}
+
 /// Control-plane routes a key may read in shared mode.
 fn is_key_readable(method: &Method, path: &str) -> bool {
     let inspector = path == "/_rustybin/requests" || path.starts_with("/_rustybin/requests/");
@@ -815,7 +821,8 @@ async fn control(state: AppState, mut req: Request, next: Next) -> Response {
             ));
         return next.run(req).await;
     }
-    if !is_key_readable(req.method(), req.uri().path()) {
+    let self_service = config.self_service.enabled && is_mock_route(req.uri().path());
+    if !self_service && !is_key_readable(req.method(), req.uri().path()) {
         let message = "in shared mode this control-plane route needs the admin token";
         let status = if config.admin_token.is_some() {
             StatusCode::UNAUTHORIZED
@@ -1160,7 +1167,7 @@ pub fn openapi_paths() -> Value {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(all(test, feature = "quota-postgres"))]
 mod pg_tests;

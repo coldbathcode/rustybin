@@ -777,6 +777,13 @@ pub fn run(c: &Compiled) -> Report {
         ));
     }
     findings.extend(security_findings(c));
+    if c.visitor {
+        findings.extend(
+            super::restrict::findings(c)
+                .into_iter()
+                .map(Finding::warning),
+        );
+    }
     for (pattern, pointer) in unsupported_patterns(&c.spec.root) {
         findings.push(Finding::warning(format!(
             "pattern {pattern:?} at {pointer} is too complex for the generator: generated values \
