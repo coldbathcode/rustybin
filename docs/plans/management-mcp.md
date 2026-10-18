@@ -26,9 +26,14 @@ console.
 1. Ask what the instance can do ("which mock LLM providers are there?", "how do I test MCP auth?").
 2. Create, edit, deploy, roll back, switch off and delete OpenAPI mocks; set responses, rules, delays,
    validation and mocked security per operation; check them before deploying.
-3. Read what arrived: a mock's captured calls, the request inspector, a request bin.
-4. Export and apply `rustybin.yaml`, so agent work ends up as configuration as code.
-5. On a shared demo (self-service), manage their own mocks and visit, never anyone else's.
+3. Test what they built without leaving the conversation: send a request to the instance, get a token from
+   the built-in identity provider, validate a body against the spec, and wait for the request their
+   gateway sends next ("I'll send it now, tell me what arrived").
+4. Read what arrived: a mock's captured calls, the request inspector, a request bin, the plan usage that
+   explains a 429.
+5. Export and apply `rustybin.yaml`, and write collections (Hurl, Postman, ...) into their repository, so
+   agent work ends up as configuration and tests as code.
+6. On a shared demo (self-service), manage their own mocks and visit, never anyone else's.
 
 ### Non-goals (v1)
 
@@ -36,8 +41,10 @@ console.
   MCP later ("option 2" in the 2026-10-18 discussion).
 - **Changing environment configuration at runtime.** Settings come from `RUSTYBIN_*` variables; the MCP shows
   them (the same view as `/_rustybin/config`) but cannot change them.
-- **Fetching from URLs.** No server-side fetch of specs or anything else (SSRF, the same rule as the mocks
-  plan): the agent reads local files and passes their content.
+- **Fetching from URLs or calling other hosts.** No server-side fetch of specs or anything else (SSRF, the
+  same rule as the mocks plan): the agent reads local files and passes their content, and `try_request`
+  only reaches this instance, in process.
+- **Rotating the visitor's manage token** through the MCP: the agent's own connection uses that token.
 - **The email step of self-service visits.** Consent belongs in the console form, not in an agent's tool call
   (section 5).
 - Replacing the REST API, the console or the CLI. They stay; the MCP is another client of the same logic.
@@ -114,6 +121,9 @@ request.
 | `get_instance` | read | Version, modes (public, shared, hosted, self-service), control auth mode, limits, the public config view, URLs of the console and docs |
 | `find_endpoints` | read | Search the route catalogue by text or category ("mock LLM Anthropic streaming"): path, methods, summary, an example request |
 | `get_health` / `set_health` | read / admin | The `/health` demo toggle |
+| `get_usage` | read | Plan, limits and what is left (requests, egress, in flight, streams; the caller's key in shared mode), so an agent can explain a 429 instead of guessing |
+| `get_key_usage` | admin | Per-key daily totals in shared mode (the `/_rustybin/keys/usage` route), paginated |
+| `reset_flaky` | read / admin | Reset the caller's `/flaky` counters between test runs; `scope: "all"` (everyone's) needs admin, like `/flaky/reset` |
 
 **OpenAPI mocks**
 
@@ -122,6 +132,7 @@ request.
 | `list_mocks` | read | Name, URL, state, security, calls, owner (filters: text, state) |
 | `get_mock` | read | Detail: operations with hit counts, settings (redacted unless manageable), deploy report summary, revisions |
 | `preview_spec` | read | Parse a spec without creating anything (the `import` route): title, operations, schemes, warnings, check results |
+| `get_mock_spec` | read | The spec as uploaded (the draft's), so the agent can edit it and send it back with `update_mock`; optionally the served `openapi.json` with the mock's server URL |
 | `create_mock` | manage | From spec text (JSON or YAML, Swagger 2.0 accepted) with optional name, responses, security, validation, deploy; visitors get the suffixed name and their manage token is not returned (they hold it already) |
 | `update_mock` | manage | Replace the spec and/or settings (draft); `deploy: true` to publish |
 | `set_operation` | manage | One operation's response override, rules, mode, delay, public flag |
@@ -133,6 +144,9 @@ request.
 | `duplicate_mock` | manage | Copy under a new name |
 | `delete_mock` | manage | Destructive, confirmed |
 | `sample_request` | read | A valid request for an operation, as `curl` and as parts, plus the response the mock would send |
+| `validate_payload` | read | Check a request or response body against an operation's schema (the `.../validate` route): which fields break the spec, for example after a gateway transformation |
+| `export_collection` | read | The mock as a Postman collection, Hurl file, curl script, `.http` file or k6 script, with an optional base URL (a gateway route), for the agent to write into the user's repository |
+| `get_mock_data` / `clear_mock_data` | read / manage | Items a `stateful` mock stored, per collection; clearing is destructive and confirmed |
 | `get_mock_traffic` | read (owner for visitor mocks) | Captured calls with operation, status, validation and auth result; bodies only on request (section 6) |
 | `clear_traffic` | manage | Destructive, confirmed |
 | `export_config` | read | `rustybin.yaml` for one mock or all (secrets redacted unless manageable) |
@@ -144,7 +158,17 @@ request.
 |---|---|---|
 | `list_requests` | read | Request inspector entries (filters: path, method, status, session, since); scoped by key in shared mode |
 | `get_request` | read | One captured request in full |
-| `create_bin` / `get_bin` | read | A request bin and what arrived in it (data-plane resources, created for the caller's session) |
+| `wait_for_requests` | read | Wait for the next captured requests matching a filter (path prefix, method, header, session; a mock name for its captures), up to `timeout_secs` (default 30, at most 60), and return them; built on the inspector's and the mocks' live feeds. For "I'll send it through the gateway now, tell me what arrived" |
+| `clear_requests` | admin | Empty the request inspector before a test run (the `DELETE /_rustybin/requests` rule); destructive and confirmed |
+| `create_bin` / `get_bin` | read | A request bin (with its configured response) and what arrived in it (data-plane resources, created for the caller's session) |
+| `list_push_notifications` | read | What the A2A push notification sink received for a sink id (`/a2a/webhook-sink/{id}`) |
+
+**Testing**
+
+| Tool | Right | |
+|---|---|---|
+| `try_request` | read | Send a request to this instance's own data plane and return status, headers, body and timing: a mock operation, the mock LLM, the mock MCP server, any catalogued route. Handled **in process** through the full application (the same middleware a real client meets), never over the network, so it cannot reach another host; `/_rustybin/*` and `/ui/*` are refused (managing the instance is what the other tools are for). Captured like any request, tagged with the session `mcp-<session>` so `list_requests` finds it. For MCP clients without a shell; Claude Code may use `curl` instead |
+| `issue_token` | read | A token from the built-in identity provider for testing secured mocks, `/mcp/protected` or a gateway's JWT validation: client credentials of the demo client with the asked scopes and audience (or a JWT signed with the HS256 demo secret), returned with its decoded claims and expiry |
 
 **Self-service** (only when self-service is on)
 
@@ -161,14 +185,18 @@ and show the credentials). **Resources**: `rustybin://config.schema.json` (the `
 
 ## 6. Untrusted content and size
 
-Captured traffic (mock captures, the inspector, bins) is written by whoever calls the data plane, which on a
-public instance is anyone. An agent reading it is exposed to prompt injection. So:
+Captured traffic (mock captures, the inspector, bins, the A2A sink, `wait_for_requests`) is written by whoever
+calls the data plane, which on a public instance is anyone. An agent reading it is exposed to prompt
+injection. So:
 
 - Tool results never put captured bodies or header values in the text summary; they go in
   `structuredContent` under fields named `untrusted_*`, and the server `instructions` and tool descriptions
   say that this content is data from third parties, never instructions.
 - Bodies are left out unless the call asks (`include_bodies: true`), and are truncated (4 KB per body,
   64 KB per result) with a flag saying so.
+- `try_request` responses come from the instance itself, but a mock's body and headers are whatever its owner
+  configured (on a demo, another visitor's mock): they are returned the same way, as `untrusted_*` fields,
+  truncated (64 KB; streams stop after 64 KB or 5 seconds, with a flag).
 - Spec text and rule patterns from the agent are validated exactly as on the REST routes (size caps, YAML
   limits, regex size limits), so an agent cannot do what a REST caller could not.
 
@@ -187,6 +215,11 @@ Results are paginated (`cursor`) like the mock server's lists.
 ## 8. Limits and observability
 
 - MCP sessions: their own bounded pool (1,000; 200 in public mode) with the idle TTL of the mock server.
+- `wait_for_requests`: at most 60 seconds per call and a bounded number of concurrent waits (100; 20 in public
+  mode), each holding one feed subscription; extra calls answer a tool error asking to retry.
+- `try_request`: request bodies up to the instance's body limit, a 30 second timeout, responses truncated as in
+  section 6; it goes through plan limits like any data-plane request, so it cannot bypass them.
+- `issue_token`: the identity provider's own caps (tokens are stateless JWTs; refresh tokens are not issued).
 - Tool calls count as control-plane requests (plan limits, where configured, apply as for the REST routes).
 - Metrics: `rustybin_manage_mcp_calls_total{tool, outcome}` (outcome: `ok`, `denied`, `invalid`, `error`);
   tool names are a fixed list, so the series are bounded.
@@ -206,9 +239,9 @@ Results are paginated (`cursor`) like the mock server's lists.
 | Phase | Scope | Done when |
 |---|---|---|
 | 0. Service layer | Move the logic of the mock control-plane handlers into functions shared by REST and MCP (inputs and outputs as plain types; access through `selfservice`); no behaviour change | All existing tests pass unchanged; handlers are thin |
-| 1. Endpoint and reads | `/_rustybin/mcp` (profile family, registry, role-filtered `tools/list`), `get_instance`, `find_endpoints`, `get_health`, `list_mocks`, `get_mock`, `preview_spec`, `check_mock`, `sample_request`, `export_config`, `list_requests`, `get_request`; catalogue and OpenAPI entries | Unit tests through the full app per tool and per role (open, read-only token, admin, visitor, key) |
-| 2. Mock changes | `create_mock`, `update_mock`, `set_operation`, `test_rules`, `deploy_mock`, `rollback_mock`, `set_mock_enabled`, `duplicate_mock`, `delete_mock`, `clear_traffic`, `apply_config` (dry run), `set_health`; annotations, elicitation or `confirm`, audit lines, metrics | A scripted session builds, deploys, calls and deletes a mock; refused calls for every role that may not |
-| 3. Untrusted content, self-service, shared mode | `get_mock_traffic` and bins with `untrusted_*` fields and truncation; visit and operator tools; key-scoped results in shared mode | Tests that captured bodies never reach the text summary; visitor isolation tests mirroring `selfservice_tests.rs` |
+| 1. Endpoint, reads and testing | `/_rustybin/mcp` (profile family, registry, role-filtered `tools/list`), `get_instance`, `find_endpoints`, `get_health`, `get_usage`, `list_mocks`, `get_mock`, `get_mock_spec`, `preview_spec`, `check_mock`, `sample_request`, `validate_payload`, `export_config`, `list_requests`, `get_request`, `try_request`, `issue_token`; catalogue and OpenAPI entries | Unit tests through the full app per tool and per role (open, read-only token, admin, visitor, key); `try_request` refuses `/_rustybin/*` and never opens a socket |
+| 2. Mock changes and waiting | `create_mock`, `update_mock`, `set_operation`, `test_rules`, `deploy_mock`, `rollback_mock`, `set_mock_enabled`, `duplicate_mock`, `delete_mock`, `clear_traffic`, `apply_config` (dry run), `set_health`, `wait_for_requests`, `clear_requests`; annotations, elicitation or `confirm`, audit lines, metrics | A scripted session builds, deploys, calls (with `try_request`) and deletes a mock; `wait_for_requests` returns a call sent while it waits and times out cleanly; refused calls for every role that may not |
+| 3. Untrusted content, the rest, self-service, shared mode | `get_mock_traffic`, bins, `list_push_notifications` and `try_request` bodies as `untrusted_*` fields with truncation; `export_collection`, `get_mock_data`, `clear_mock_data`, `reset_flaky`, `get_key_usage`; visit and operator tools; key-scoped results in shared mode | Tests that captured and mocked bodies never reach the text summary; visitor isolation tests mirroring `selfservice_tests.rs` |
 | 4. Prompts, resources, console, CLI | The three prompts, two resources, the "Connect an AI agent" panel, optional `rustybin mcp-stdio` | Browser check of the panel; the official Python MCP SDK lists tools, prompts and resources (`conformance/mcp/`) |
 | 5. Docs | Page, Hurl examples on three documentation instances, README, changelog | `docs/examples/run.sh` and `check_includes.py` pass |
 
@@ -219,7 +252,13 @@ Results are paginated (`cursor`) like the mock server's lists.
 - The official Python MCP SDK (`conformance/mcp/`) as a client of `/_rustybin/mcp`: handshake and stateless
   versions, `tools/list`, a create, deploy and delete round trip, elicitation for a delete.
 - An injection test: a captured call whose body says "ignore previous instructions" appears only under an
-  `untrusted_` field, truncated, never in the text content.
+  `untrusted_` field, truncated, never in the text content; the same for a mock whose example body says it,
+  read through `try_request`.
+- `try_request`: answers like a real client gets (status, headers, body of a mock, a mock LLM stream cut at
+  the limit), refuses control-plane paths, and is captured with its `mcp-` session.
+- `wait_for_requests`: a request sent during the wait is returned, a filter that matches nothing times out
+  with an empty list, the concurrency cap answers a tool error, and the subscription is released either way.
+- `issue_token`: a token it returns opens a mock secured with JWT security and `/mcp/protected`.
 - Hurl examples double as end-to-end tests (section 9).
 
 ## 12. Open questions

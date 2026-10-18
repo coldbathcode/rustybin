@@ -11,10 +11,12 @@ work through the phases in order. In short:
 
 - It is not the mock MCP server at `/mcp` (fake demo tools, unchanged): a second profile family on the same protocol
   and transport code in `src/mcp/`, with its own tool registry, under the control plane (control auth protects it).
-- Tools for the instance, OpenAPI mocks (create, edit, check, deploy, roll back, delete), traffic (mock captures,
-  inspector, bins), `rustybin.yaml` export and apply, and self-service visits. They call a service layer shared with
-  the REST handlers (phase 0), so permissions, redaction, caps and errors are identical; `tools/list` shows only
-  what the caller may use.
+- Tools for the instance, OpenAPI mocks (create, edit, check, deploy, roll back, delete, spec, collections, stored
+  data), testing (`try_request` in process on this instance only, `issue_token` from the built-in IdP,
+  `validate_payload`, `wait_for_requests` for the next call a gateway sends), traffic (mock captures, inspector,
+  bins, the A2A sink), usage, `rustybin.yaml` export and apply, and self-service visits. They call a service layer
+  shared with the REST handlers (phase 0), so permissions, redaction, caps and errors are identical; `tools/list`
+  shows only what the caller may use.
 - Destructive tools carry MCP annotations and ask for confirmation (elicitation, else `confirm: true`); every change
   is logged without secrets; captured traffic is returned only under `untrusted_*` fields, truncated, never in the
   text summary (prompt injection).
