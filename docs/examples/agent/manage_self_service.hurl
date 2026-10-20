@@ -73,3 +73,10 @@ HTTP 200
 [Asserts]
 jsonpath "$.result.isError" == false
 # ANCHOR_END: ss_agent_cleanup
+
+# End the visit so later self-service examples start from a clean instance.
+DELETE {{ss_url}}/_rustybin/mocks/visit
+X-Rustybin-Mock-Token: {{agent_mock_token}}
+HTTP 200
+[Asserts]
+jsonpath "$.ended" == true

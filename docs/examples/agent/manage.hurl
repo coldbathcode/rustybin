@@ -1,8 +1,10 @@
 # The management MCP server (docs/src/agent-mcp.md): JSON-RPC calls an MCP
-# client makes to /_rustybin/mcp, on the open documentation instance.
+# client makes to /_rustybin/mcp, on the open documentation instance (which
+# has an admin token: without it an agent sees only the read tools).
 
 # ANCHOR: discover
 POST {{base_url}}/_rustybin/mcp
+Authorization: Bearer {{admin_token}}
 Accept: application/json, text/event-stream
 Content-Type: application/json
 MCP-Protocol-Version: 2026-07-28
@@ -18,6 +20,7 @@ jsonpath "$.result.capabilities.prompts" exists
 
 # ANCHOR: tools_list
 POST {{base_url}}/_rustybin/mcp
+Authorization: Bearer {{admin_token}}
 Accept: application/json, text/event-stream
 Content-Type: application/json
 MCP-Protocol-Version: 2026-07-28
@@ -30,12 +33,13 @@ jsonpath "$.result.tools[*].name" includes "create_mock"
 jsonpath "$.result.tools[*].name" includes "try_request"
 jsonpath "$.result.tools[*].name" includes "wait_for_requests"
 jsonpath "$.result.tools[*].name" includes "apply_config"
-jsonpath "$.result.tools[?(@.name == 'delete_mock')].annotations.destructiveHint" includes true
-jsonpath "$.result.tools[?(@.name == 'get_mock')].annotations.readOnlyHint" includes true
+jsonpath "$.result.tools[?(@.name == 'delete_mock')].annotations.destructiveHint" == true
+jsonpath "$.result.tools[?(@.name == 'get_mock')].annotations.readOnlyHint" == true
 # ANCHOR_END: tools_list
 
 # ANCHOR: get_instance
 POST {{base_url}}/_rustybin/mcp
+Authorization: Bearer {{admin_token}}
 Accept: application/json, text/event-stream
 Content-Type: application/json
 MCP-Protocol-Version: 2026-07-28
@@ -53,6 +57,7 @@ jsonpath "$.result.content[0].text" contains "Rustybin"
 
 # ANCHOR: create_mock
 POST {{base_url}}/_rustybin/mcp
+Authorization: Bearer {{admin_token}}
 Accept: application/json, text/event-stream
 Content-Type: application/json
 MCP-Protocol-Version: 2026-07-28
@@ -79,6 +84,7 @@ jsonpath "$.result.structuredContent.operations[0].rules" == 1
 
 # ANCHOR: try_request
 POST {{base_url}}/_rustybin/mcp
+Authorization: Bearer {{admin_token}}
 Accept: application/json, text/event-stream
 Content-Type: application/json
 MCP-Protocol-Version: 2026-07-28
@@ -97,6 +103,7 @@ jsonpath "$.result.content[0].text" contains "answered 404"
 
 # ANCHOR: control_plane_refused
 POST {{base_url}}/_rustybin/mcp
+Authorization: Bearer {{admin_token}}
 Accept: application/json, text/event-stream
 Content-Type: application/json
 MCP-Protocol-Version: 2026-07-28
@@ -111,6 +118,7 @@ jsonpath "$.result.content[0].text" contains "control-plane paths"
 
 # ANCHOR: traffic
 POST {{base_url}}/_rustybin/mcp
+Authorization: Bearer {{admin_token}}
 Accept: application/json, text/event-stream
 Content-Type: application/json
 MCP-Protocol-Version: 2026-07-28
@@ -122,13 +130,14 @@ HTTP 200
 jsonpath "$.result.structuredContent.total" == 1
 jsonpath "$.result.structuredContent.requests[0].operation" == "getOrder"
 jsonpath "$.result.structuredContent.requests[0].status" == 404
-jsonpath "$.result.structuredContent.requests[0].source" == "rule"
+jsonpath "$.result.structuredContent.requests[0].source" startsWith "rule:unknown order"
 jsonpath "$.result.structuredContent.requests[0].untrusted_headers" exists
 jsonpath "$.result.content[0].text" contains "untrusted_* fields"
 # ANCHOR_END: traffic
 
 # ANCHOR: delete_needs_confirmation
 POST {{base_url}}/_rustybin/mcp
+Authorization: Bearer {{admin_token}}
 Accept: application/json, text/event-stream
 Content-Type: application/json
 MCP-Protocol-Version: 2026-07-28
@@ -147,6 +156,7 @@ HTTP 200
 
 # ANCHOR: delete_confirmed
 POST {{base_url}}/_rustybin/mcp
+Authorization: Bearer {{admin_token}}
 Accept: application/json, text/event-stream
 Content-Type: application/json
 MCP-Protocol-Version: 2026-07-28
@@ -164,6 +174,7 @@ HTTP 404
 
 # ANCHOR: issue_token
 POST {{base_url}}/_rustybin/mcp
+Authorization: Bearer {{admin_token}}
 Accept: application/json, text/event-stream
 Content-Type: application/json
 MCP-Protocol-Version: 2026-07-28
@@ -191,6 +202,7 @@ HTTP 200
 
 # ANCHOR: resources
 POST {{base_url}}/_rustybin/mcp
+Authorization: Bearer {{admin_token}}
 Accept: application/json, text/event-stream
 Content-Type: application/json
 MCP-Protocol-Version: 2026-07-28
