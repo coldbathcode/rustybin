@@ -186,7 +186,9 @@ middleware a real client meets (plan limits, fault injection, inspector capture)
 never opens a socket: it cannot reach another host. Control-plane paths (`/_rustybin/*`,
 `/ui/*`) are refused, since managing the instance is what the other tools are for. The
 request is captured under the session `mcp-<id>` (or the caller's
-`X-Rustybin-Session`), so `list_requests` finds it. It suits MCP clients without a
+`X-Rustybin-Session`), so `list_requests` finds it. It carries the caller's API key in
+shared mode, never the credential the agent connected with (admin token, control
+token or manage token): add headers to the request when the target needs them. It suits MCP clients without a
 shell; Claude Code may just use `curl`.
 
 ```hurl

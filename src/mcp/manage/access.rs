@@ -51,13 +51,12 @@ impl Right {
 }
 
 /// Request headers forwarded into in-process requests (`try_request`,
-/// bins, the flaky reset), so a caller tests as who they are.
-const FORWARDED: &[&str] = &[
-    "authorization",
-    "x-rustybin-admin-token",
-    "x-rustybin-key",
-    "x-rustybin-mock-token",
-];
+/// bins, the flaky reset), so a caller tests as who they are. Only the API
+/// key (shared mode: data-plane routes need it, captures redact it). The
+/// caller's control credentials (bearer, admin token, visit manage token)
+/// are never forwarded: the data plane does not use them, and the request
+/// would be captured where other readers see it.
+const FORWARDED: &[&str] = &["x-rustybin-key"];
 
 /// The caller of the management server.
 pub struct Access {
@@ -72,6 +71,11 @@ pub struct Access {
     pub links: Links,
     /// Credentials to forward into in-process requests.
     pub forward: Vec<(HeaderName, axum::http::HeaderValue)>,
+    /// For admin callers: a credential the data plane's admin guard accepts
+    /// (the instance's admin token, else the caller's own token), sent as
+    /// `X-Rustybin-Admin-Token` (redacted in captures) only by tools that
+    /// call an admin-guarded data-plane route.
+    pub admin_credential: Option<axum::http::HeaderValue>,
     /// `X-Rustybin-Session` of the request, if any.
     pub session_header: Option<String>,
     /// Public mode without keys: the instance.
@@ -101,8 +105,20 @@ impl Access {
                 headers.get(&name).map(|v| (name, v.clone()))
             })
             .collect();
+        let admin_credential = caller
+            .admin
+            .then(|| {
+                state
+                    .config
+                    .admin_token
+                    .as_deref()
+                    .or_else(|| crate::control_auth::presented_token(headers))
+            })
+            .flatten()
+            .and_then(|t| axum::http::HeaderValue::from_str(t).ok());
         Self {
             caller,
+            admin_credential,
             grant,
             key_id,
             key,

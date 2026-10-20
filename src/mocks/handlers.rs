@@ -73,7 +73,7 @@ fn header_list(headers: &HeaderMap) -> Vec<BinHeader> {
         .iter()
         .map(|(k, v)| BinHeader {
             name: k.as_str().to_string(),
-            value: String::from_utf8_lossy(v.as_bytes()).into_owned(),
+            value: crate::keys::redact_header(k.as_str(), v.as_bytes()),
         })
         .collect()
 }

@@ -320,7 +320,18 @@ pub async fn reset_flaky(ctx: &CallCtx, access: &Access, args: &Value) -> Value 
     }
     let session = arg_str(args, "session");
     let path = format!("/flaky/reset?scope={scope}");
-    match in_process(ctx, access, Method::POST, &path, Vec::new(), None, session).await {
+    match in_process(
+        ctx,
+        access,
+        Method::POST,
+        &path,
+        Vec::new(),
+        None,
+        session,
+        scope == "all",
+    )
+    .await
+    {
         Ok(a) if a.status == 200 => {
             let body = a.json().unwrap_or(Value::Null);
             ok(

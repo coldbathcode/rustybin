@@ -678,11 +678,17 @@ pub fn redact_uri(uri: &Uri) -> String {
     }
 }
 
-/// A header value as captured: `X-Rustybin-Key` is redacted.
+/// A header value as captured: `X-Rustybin-Key` is redacted to its tail,
+/// the admin token and visit manage token headers entirely (they are
+/// Rustybin credentials, never something a gateway test needs to read).
 pub fn redact_header(name: &str, value: &[u8]) -> String {
     let text = String::from_utf8_lossy(value);
     if name.eq_ignore_ascii_case(KEY_HEADER) {
         redact_key(text.trim())
+    } else if name.eq_ignore_ascii_case(crate::admin::ADMIN_TOKEN_HEADER)
+        || name.eq_ignore_ascii_case(crate::mocks::visits::TOKEN_HEADER)
+    {
+        "[redacted]".to_string()
     } else {
         text.into_owned()
     }

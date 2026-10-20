@@ -166,7 +166,8 @@ itself is the credential to read them: `GET /_rustybin/requests`,
 key (header or `rb_key`) and only return that key's entries.
 
 `X-Rustybin-Key` and the `rb_key` query value are redacted to `rbk_...` plus the last
-4 characters, in the inspector and in [request bins](../reference/request-bin.md). They
+4 characters, in the inspector, in [request bins](../reference/request-bin.md) and in
+the traffic of OpenAPI mocks. They
 never appear in the logs (request lines log the path, not the query string). Echo
 responses still return what the caller sent, since it is the caller's own key.
 

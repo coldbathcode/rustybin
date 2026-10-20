@@ -433,6 +433,7 @@ pub async fn create_bin(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
         std::mem::take(&mut headers),
         Some(payload),
         session,
+        false,
     )
     .await
     {
@@ -476,7 +477,18 @@ pub async fn get_bin(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     let limit = arg_usize(args, "limit").unwrap_or(20).clamp(1, 200);
     let include_bodies = arg_bool(args, "include_bodies").unwrap_or(false);
     let path = format!("/bin/{id}/requests?limit={limit}");
-    let answer = match in_process(ctx, access, Method::GET, &path, Vec::new(), None, None).await {
+    let answer = match in_process(
+        ctx,
+        access,
+        Method::GET,
+        &path,
+        Vec::new(),
+        None,
+        None,
+        false,
+    )
+    .await
+    {
         Ok(a) => a,
         Err(e) => return e,
     };
@@ -541,7 +553,18 @@ pub async fn list_push_notifications(ctx: &CallCtx, access: &Access, args: &Valu
         return err("sink ids are 1-64 characters of A-Z a-z 0-9 . _ -");
     }
     let path = format!("/a2a/webhook-sink/{id}");
-    let answer = match in_process(ctx, access, Method::GET, &path, Vec::new(), None, None).await {
+    let answer = match in_process(
+        ctx,
+        access,
+        Method::GET,
+        &path,
+        Vec::new(),
+        None,
+        None,
+        false,
+    )
+    .await
+    {
         Ok(a) => a,
         Err(e) => return e,
     };

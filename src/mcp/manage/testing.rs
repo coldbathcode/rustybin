@@ -68,9 +68,11 @@ impl Answer {
 }
 
 /// Build and send a request through the application, in process. The
-/// caller's credentials are forwarded (unless the request sets them) and
+/// caller's API key is forwarded (unless the request sets it), with
+/// `as_admin` also the caller's admin credential ([`Access::admin_credential`]), and
 /// `X-Rustybin-Session` is set to the caller's test session (unless given),
 /// so the call is captured like any other and attributable.
+#[allow(clippy::too_many_arguments)]
 pub async fn in_process(
     ctx: &CallCtx,
     access: &Access,
@@ -79,6 +81,7 @@ pub async fn in_process(
     headers: Vec<(String, String)>,
     body: Option<Vec<u8>>,
     session: Option<&str>,
+    as_admin: bool,
 ) -> Result<Answer, Value> {
     let Some(router) = ctx.app.router.get().cloned() else {
         return Err(err(
@@ -118,6 +121,11 @@ pub async fn in_process(
     for (n, v) in &access.forward {
         if !set.contains(n) {
             b = b.header(n.clone(), v.clone());
+        }
+    }
+    if as_admin {
+        if let Some(v) = &access.admin_credential {
+            b = b.header(crate::admin::ADMIN_TOKEN_HEADER, v.clone());
         }
     }
     let session_value = session
@@ -279,7 +287,7 @@ pub async fn try_request(ctx: &CallCtx, access: &Access, args: &Value) -> Value 
     }
     let session = arg_str(args, "session");
     let method_text = method.to_string();
-    match in_process(ctx, access, method, path, headers, body, session).await {
+    match in_process(ctx, access, method, path, headers, body, session, false).await {
         Ok(a) => {
             let summary = format!(
                 "{method_text} {path} answered {} in {} ms ({}, {} bytes{}); sent as session {}. The \
@@ -349,6 +357,7 @@ pub async fn issue_token(ctx: &CallCtx, access: &Access, args: &Value) -> Value 
         headers,
         Some(form.into_bytes()),
         None,
+        false,
     )
     .await
     {

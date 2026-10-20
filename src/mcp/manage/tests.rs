@@ -628,6 +628,39 @@ async fn try_request_refuses_the_control_plane_and_urls() {
 }
 
 #[tokio::test]
+async fn try_request_never_forwards_control_credentials() {
+    let mut config = open_config();
+    config.admin_token = Some("adm1n-s3cret".into());
+    let app = app_with(config);
+    let hdr = [
+        ("authorization", "Bearer adm1n-s3cret"),
+        ("x-rustybin-mock-token", "rbm_not-for-the-data-plane"),
+    ];
+    // /anything echoes the request headers it received.
+    let r = tool(&app, &hdr, "try_request", json!({ "path": "/anything" })).await;
+    assert!(!is_error(&r), "{r}");
+    let echoed = r["structuredContent"].to_string();
+    assert!(!echoed.contains("adm1n-s3cret"), "{echoed}");
+    assert!(!echoed.contains("rbm_not-for-the-data-plane"), "{echoed}");
+
+    // The admin-guarded flaky reset still works, and its capture shows the
+    // admin token header redacted.
+    let r = tool(&app, &hdr, "reset_flaky", json!({ "scope": "all" })).await;
+    assert!(!is_error(&r), "{r}");
+    let r = tool(
+        &app,
+        &hdr,
+        "list_requests",
+        json!({ "path_prefix": "/flaky/reset" }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    let listed = r["structuredContent"].to_string();
+    assert!(listed.contains("[redacted]"), "{listed}");
+    assert!(!listed.contains("adm1n-s3cret"), "{listed}");
+}
+
+#[tokio::test]
 async fn wait_for_requests_sees_a_request_sent_meanwhile() {
     let app = app_with(open_config());
     let waiter = {

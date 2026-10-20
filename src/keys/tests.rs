@@ -186,6 +186,14 @@ fn redaction_helpers() {
         "rbk_...aaa1"
     );
     assert_eq!(redact_header("x-other", b"v"), "v");
+    assert_eq!(
+        redact_header("X-Rustybin-Admin-Token", b"s3cret"),
+        "[redacted]"
+    );
+    assert_eq!(
+        redact_header("x-rustybin-mock-token", b"rbm_x"),
+        "[redacted]"
+    );
 }
 
 // ── Data plane ──────────────────────────────────────────────────────
