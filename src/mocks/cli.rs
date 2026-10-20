@@ -51,7 +51,7 @@ REMOTE (control API of a running instance):
         Copy a mock (default name <name>-copy).
     rustybin mock reset-state <name>
         Forget the items a stateful mock stored.
-    rustybin mock collection <name> <postman|hurl|curl|http|k6> [--base-url URL]
+    rustybin mock collection <name> <postman|hurl|curl|http|k6|bruno|insomnia> [--base-url URL]
         Print the mock's operations as a ready-to-run collection.
 
     --server URL   instance URL (default $RUSTYBIN_SERVER, else http://localhost:$RUSTYBIN_HTTP_PORT,
@@ -650,7 +650,7 @@ async fn remote_collection(args: &Args) -> Result<bool, String> {
     let format = args
         .positional
         .get(1)
-        .ok_or("a format is required: postman, hurl, curl, http or k6")?;
+        .ok_or("a format is required: postman, hurl, curl, http, k6, bruno or insomnia")?;
     let remote = Remote::new(args)?;
     let mut path = format!("/_rustybin/mocks/{name}/collections/{format}");
     if let Some(base) = args.value("--base-url") {

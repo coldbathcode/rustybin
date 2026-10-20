@@ -496,7 +496,7 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET | `/_rustybin/mocks/{name}/spec` | The spec as uploaded (the draft's, JSON or YAML as written) |
 | POST | `/_rustybin/mocks/{name}/duplicate` | Copy a mock under a new name (body {name} optional; default <name>-copy) |
 | GET DELETE | `/_rustybin/mocks/{name}/state` | Items stored by a mock in stateful mode (DELETE resets them) |
-| GET | `/_rustybin/mocks/{name}/collections/{format}` | The mock's operations as a collection: postman, hurl, curl, http or k6 (?base_url=) |
+| GET | `/_rustybin/mocks/{name}/collections/{format}` | The mock's operations as a collection: postman, hurl, curl, http, k6, bruno or insomnia (?base_url=) |
 | GET PUT | `/_rustybin/mocks/{name}/operations/{op}` | One operation (schemas inlined, settings, sample request) or set its settings (PUT) |
 | GET | `/_rustybin/mocks/{name}/operations/{op}/sample` | Generate a valid request and response (?status=, ?mode=, ?example=, ?seed=) |
 | POST | `/_rustybin/mocks/{name}/operations/{op}/validate` | Validate a response (or request) body against the operation's schema |

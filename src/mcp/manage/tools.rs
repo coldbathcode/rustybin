@@ -160,7 +160,7 @@ pub static TOOLS: &[ToolDef] = &[
         "kind": { "type": "string", "enum": ["request", "response"], "default": "response" },
         "status": { "type": "integer", "description": "Response status whose schema to use (default: the operation's default)" }
     }), &["name", "operation", "body"])),
-    tool!("export_collection", "Export a collection", "The mock's operations as a Postman collection, Hurl file, curl script, .http file or k6 script, with an optional base URL (a gateway route). Write it into the user's repository.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+    tool!("export_collection", "Export a collection", "The mock's operations as a Postman collection, Hurl file, curl script, .http file, k6 script, Bruno collection or Insomnia export, with an optional base URL (a gateway route). Write it into the user's repository.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "name": name_prop(),
         "format": { "type": "string", "enum": crate::mocks::collections::FORMATS.iter().map(|(f, _, _)| *f).collect::<Vec<_>>() },
         "base_url": { "type": "string", "description": "Base URL to put in the collection (default: the mock's URL)" }

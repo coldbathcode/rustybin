@@ -66,6 +66,10 @@ API, AI and agent gateway demos.
   an email address for up to six hours a day, delivered to a webhook), on a
   separate mocks domain, with responses that can never set cookies, redirect
   elsewhere or ship active content. Operators can list, end and pause visits.
+- Mock collections also export as a Bruno collection and an Insomnia export
+  (`GET /_rustybin/mocks/{name}/collections/bruno|insomnia`, `rustybin mock
+  collection`, the console and the management MCP's `export_collection`), in the
+  same shapes as `/export/bruno.json` and `/export/insomnia.json`.
 - **Management MCP server** at `/_rustybin/mcp`: configure a Rustybin from an AI
   agent such as Claude Code. Tools for the instance, OpenAPI mocks (create, edit,
   check, deploy, roll back, delete, collections, `rustybin.yaml` export and apply),

@@ -573,7 +573,7 @@ pub fn catalog() -> Vec<Endpoint> {
             "/_rustybin/mocks/{name}/collections/{format}",
             &["GET"],
             category::MOCKS,
-            "The mock's operations as a collection: postman, hurl, curl, http or k6 (?base_url=)",
+            "The mock's operations as a collection: postman, hurl, curl, http, k6, bruno or insomnia (?base_url=)",
         )
         .example(Example::get("Sample as Hurl", "/_rustybin/mocks/petstore/collections/hurl")),
         Endpoint::new(
@@ -782,7 +782,7 @@ pub fn openapi_paths() -> Value {
             "delete": admin("clearMockState", "Reset stored items", json!([name]))
         },
         "/_rustybin/mocks/{name}/collections/{format}": { "get": simple("getMockCollection", "The mock as a collection", json!([name,
-            { "name": "format", "in": "path", "required": true, "schema": { "type": "string", "enum": ["postman", "hurl", "curl", "http", "k6"] } },
+            { "name": "format", "in": "path", "required": true, "schema": { "type": "string", "enum": collections::FORMATS.iter().map(|(f, _, _)| *f).collect::<Vec<_>>() } },
             { "name": "base_url", "in": "query", "schema": { "type": "string" } }])) },
         "/_rustybin/mocks/{name}/operations/{op}/rules/test": { "post": with_body(simple("testMockRules", "Which rule would answer a captured call", json!([name, op])), json!({
             "type": "object", "properties": { "rules": { "type": "array" }, "request": { "type": "integer" } }

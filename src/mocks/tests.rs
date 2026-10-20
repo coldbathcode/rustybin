@@ -902,6 +902,25 @@ async fn rule_test_spec_source_and_collections() {
         .is_ok_and(|d| d.contains("petstore.postman.json")));
     let doc: Value = serde_json::from_str(&body_string(resp).await).expect("json");
     assert_eq!(doc["variable"][0]["value"], "https://gw.example.com/pets");
+    for (format, file) in [
+        ("bruno", "petstore.bruno.json"),
+        ("insomnia", "petstore.insomnia.json"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(get_request(&format!(
+                "/_rustybin/mocks/petstore/collections/{format}?base_url=https://gw.example.com/pets"
+            )))
+            .await
+            .expect(format);
+        assert_eq!(resp.status(), StatusCode::OK, "{format}");
+        assert!(resp.headers()["content-disposition"]
+            .to_str()
+            .is_ok_and(|d| d.contains(file)));
+        let text = body_string(resp).await;
+        let _: Value = serde_json::from_str(&text).expect("json");
+        assert!(text.contains("https://gw.example.com/pets"), "{format}");
+    }
     let (status, _, _) = send(
         &app,
         get_request("/_rustybin/mocks/petstore/collections/word"),

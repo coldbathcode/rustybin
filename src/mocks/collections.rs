@@ -1,5 +1,7 @@
 //! A mock's operations as a ready-to-run collection: Postman, Hurl, curl,
-//! `.http` (VS Code REST Client / JetBrains) and k6. Every request is the
+//! `.http` (VS Code REST Client / JetBrains), k6, Bruno and Insomnia (the
+//! same document shapes as the instance-wide `/export/*` routes). Every
+//! request is the
 //! operation's valid sample (parameters, body and demo credentials), with
 //! the status the mock answers it with.
 
@@ -19,6 +21,8 @@ pub const FORMATS: &[(&str, &str, &str)] = &[
     ("curl", "text/x-shellscript", "sh"),
     ("http", "text/plain; charset=utf-8", "http"),
     ("k6", "application/javascript", "k6.js"),
+    ("bruno", "application/json", "bruno.json"),
+    ("insomnia", "application/json", "insomnia.json"),
 ];
 
 /// One request of the collection.
@@ -285,6 +289,115 @@ fn k6(items: Vec<Item>, title: &str, base: &str) -> String {
     out
 }
 
+/// Requests grouped by folder (first tag), in operation order.
+fn by_folder(items: Vec<Item>) -> Vec<(String, Vec<Item>)> {
+    let mut folders: Vec<(String, Vec<Item>)> = Vec::new();
+    for it in items {
+        match folders.iter_mut().find(|(f, _)| *f == it.folder) {
+            Some((_, list)) => list.push(it),
+            None => folders.push((it.folder.clone(), vec![it])),
+        }
+    }
+    folders
+}
+
+/// Bruno collection JSON (import "Bruno Collection"), like `/export/bruno.json`.
+fn bruno(items: Vec<Item>, title: &str, base: &str) -> String {
+    let folders = by_folder(items)
+        .into_iter()
+        .map(|(name, list)| {
+            let requests = list
+                .into_iter()
+                .map(|it| {
+                    let s = &it.sample;
+                    let mut request = json!({
+                        "method": s.method,
+                        "url": format!("{{{{base_url}}}}{}{}", s.path, query_string(&s.query)),
+                        "headers": s.headers.iter().map(|(k, v)| json!({ "name": k, "value": v, "enabled": true })).collect::<Vec<_>>(),
+                    });
+                    if let (Some(body), Some(obj)) = (body_text(s), request.as_object_mut()) {
+                        obj.insert("body".into(), json!({ "mode": "json", "json": body }));
+                    }
+                    if let (Some(st), Some(obj)) = (it.status, request.as_object_mut()) {
+                        obj.insert(
+                            "assertions".into(),
+                            json!([{ "name": "res.status", "value": format!("eq {st}"), "enabled": true }]),
+                        );
+                    }
+                    json!({ "name": it.name, "type": "http", "request": request })
+                })
+                .collect::<Vec<_>>();
+            json!({ "name": name, "type": "folder", "items": requests })
+        })
+        .collect::<Vec<_>>();
+    let doc = json!({
+        "version": "1",
+        "name": format!("{title} (Rustybin mock)"),
+        "type": "collection",
+        "environments": [{
+            "name": "Default",
+            "variables": [{ "name": "base_url", "value": base, "enabled": true }],
+        }],
+        "items": folders,
+    });
+    serde_json::to_string_pretty(&doc).unwrap_or_default()
+}
+
+/// Insomnia export v4 JSON, like `/export/insomnia.json`. Ids carry the mock
+/// name so importing several mocks (or the instance export) keeps them apart.
+fn insomnia(items: Vec<Item>, title: &str, base: &str, name: &str) -> String {
+    let wrk = format!("wrk_mock_{name}");
+    let mut resources = vec![
+        json!({ "_type": "workspace", "_id": wrk, "name": format!("{title} (Rustybin mock)"), "scope": "collection" }),
+        json!({ "_type": "environment", "_id": format!("env_mock_{name}"), "parentId": wrk, "name": "Base Environment", "data": { "base_url": base } }),
+    ];
+    for (i, (folder, list)) in by_folder(items).into_iter().enumerate() {
+        let fld = format!("fld_mock_{name}_{i}");
+        resources
+            .push(json!({ "_type": "request_group", "_id": fld, "parentId": wrk, "name": folder }));
+        for (j, it) in list.into_iter().enumerate() {
+            let s = &it.sample;
+            let mut headers: Vec<Value> = s
+                .headers
+                .iter()
+                .map(|(k, v)| json!({ "name": k, "value": v }))
+                .collect();
+            let body = match body_text(s) {
+                Some(text) => {
+                    if !s
+                        .headers
+                        .iter()
+                        .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                    {
+                        headers
+                            .push(json!({ "name": "Content-Type", "value": "application/json" }));
+                    }
+                    json!({ "mimeType": "application/json", "text": text })
+                }
+                None => json!({}),
+            };
+            resources.push(json!({
+                "_type": "request",
+                "_id": format!("req_mock_{name}_{i}_{j}"),
+                "parentId": fld,
+                "name": it.name,
+                "method": s.method,
+                "url": format!("{{{{ base_url }}}}{}{}", s.path, query_string(&s.query)),
+                "headers": headers,
+                "body": body,
+            }));
+        }
+    }
+    let doc = json!({
+        "_type": "export",
+        "__export_format": 4,
+        "__export_date": chrono::Utc::now().to_rfc3339(),
+        "__export_source": format!("rustybin:v{}", env!("CARGO_PKG_VERSION")),
+        "resources": resources,
+    });
+    serde_json::to_string_pretty(&doc).unwrap_or_default()
+}
+
 /// Render a collection; `None` for an unknown format. Returns (content type,
 /// file name, text). Without `reveal` the credentials are placeholders.
 pub fn render(
@@ -303,6 +416,8 @@ pub fn render(
         "curl" => curl(list, title, base),
         "http" => http_file(list, title, base),
         "k6" => k6(list, title, base),
+        "bruno" => bruno(list, title, base),
+        "insomnia" => insomnia(list, title, base, name),
         _ => return None,
     };
     Some((ct, format!("{name}.{ext}"), text))
@@ -326,6 +441,46 @@ mod tests {
         let (_, _, pm) = render(&c, "petstore", "postman", base, true).expect("postman");
         let doc: Value = serde_json::from_str(&pm).expect("json");
         assert_eq!(doc["variable"][0]["value"], base);
+        let (_, file, br) = render(&c, "petstore", "bruno", base, true).expect("bruno");
+        assert_eq!(file, "petstore.bruno.json");
+        let doc: Value = serde_json::from_str(&br).expect("json");
+        assert_eq!(doc["type"], "collection");
+        assert_eq!(doc["environments"][0]["variables"][0]["value"], base);
+        let reqs: Vec<&Value> = doc["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|f| f["items"].as_array().into_iter().flatten())
+            .collect();
+        assert_eq!(reqs.len(), c.spec.operations.len());
+        assert!(reqs.iter().all(|r| r["type"] == "http"
+            && r["request"]["url"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("{{base_url}}/v1/"))));
+        assert!(reqs
+            .iter()
+            .any(|r| r["request"]["assertions"][0]["value"] == "eq 200"));
+        let (_, _, ins) = render(&c, "petstore", "insomnia", base, true).expect("insomnia");
+        let doc: Value = serde_json::from_str(&ins).expect("json");
+        assert_eq!(doc["_type"], "export");
+        assert_eq!(doc["__export_format"], 4);
+        let res = doc["resources"].as_array().expect("resources");
+        let env = res
+            .iter()
+            .find(|r| r["_type"] == "environment")
+            .expect("env");
+        assert_eq!(env["data"]["base_url"], base);
+        let reqs: Vec<&Value> = res.iter().filter(|r| r["_type"] == "request").collect();
+        assert_eq!(reqs.len(), c.spec.operations.len());
+        for r in &reqs {
+            let parent = &r["parentId"];
+            assert!(res
+                .iter()
+                .any(|g| g["_type"] == "request_group" && g["_id"] == *parent));
+            assert!(r["url"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("{{ base_url }}/v1/")));
+        }
         let (_, _, h) = render(&c, "petstore", "hurl", base, true).expect("hurl");
         assert!(h.contains("GET {{base_url}}/v1/pets"), "{h}");
         assert!(h.contains("HTTP 200"), "{h}");

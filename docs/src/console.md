@@ -79,7 +79,7 @@ The **Mock APIs** view (`/ui/#/mocks`) manages the instance's
   requests are validated, then creates and deploys it.
 - **Header menu**: Rename, Duplicate (a copy under a new name, deployed when the
   source is, with empty traffic), Export YAML, Download spec (as uploaded),
-  Download collection (Postman, Hurl, curl, `.http` or k6, with an optional base URL
+  Download collection (Postman, Hurl, curl, `.http`, k6, Bruno or Insomnia, with an optional base URL
   such as a gateway route), Rollback, Clear traffic and Delete.
 - **Operations and the operation editor**: each operation with its hit count and
   last call; per documented status, the response source (spec example, generated

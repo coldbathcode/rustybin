@@ -5,6 +5,8 @@ for the features that exist today describe current behaviour.
 
 ## Recently built
 
+- Mock collections as a Bruno collection and an Insomnia export, next to Postman,
+  Hurl, curl, `.http` and k6.
 - [Configure Rustybin from an AI agent](agent-mcp.md): a management MCP server at
   `/_rustybin/mcp`, protected like the rest of the control plane, so an agent such
   as Claude Code can create and deploy mocks, change their responses and security,
@@ -22,8 +24,6 @@ for the features that exist today describe current behaviour.
   without routing each mock to one of them.
 - **Stateful mode for visitor mocks**, with tight caps on what a mock may store
   (items, bytes, text only).
-- **More collection formats** for mocks: Bruno and Insomnia, next to Postman, Hurl,
-  curl, `.http` and k6.
 - **OAuth sign-in to the management MCP server**: RFC 9728 metadata on
   `/_rustybin/mcp` so agents sign in through an issuer (platform-issued tokens on
   hosted instances) instead of pasting a bearer token.

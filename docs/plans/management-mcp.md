@@ -291,7 +291,7 @@ call it too). Every tool, prompt and resource in sections 5 and 7 exists. Differ
 - **`issue_token`** issues client-credentials tokens of the demo client only; the HS256 demo-secret JWT
   option was left out.
 - **`export_collection`** takes the formats of `mocks::collections::FORMATS` (Postman, Hurl, curl, `.http`,
-  k6). Bruno and Insomnia stay on the roadmap.
+  k6, and since 2026-10-20 Bruno and Insomnia).
 - **Audit log**: refused calls are logged too (target `rustybin::manage`), with the caller as `admin`,
   `key:<id>`, `visit:<fingerprint>` or `session:<label>`.
 - **Console**: the "Connect an AI agent" panel is `ui/lib/agent.js` (settings dialog and the Mock APIs

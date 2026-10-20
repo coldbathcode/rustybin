@@ -238,4 +238,6 @@ export const COLLECTIONS = [
   ['curl', 'curl script', 'shell script with one curl per operation'],
   ['http', '.http file', 'for editor REST clients'],
   ['k6', 'k6 script', 'load test script'],
+  ['bruno', 'Bruno collection', 'JSON, import into Bruno'],
+  ['insomnia', 'Insomnia export', 'JSON (export format 4), import into Insomnia'],
 ];

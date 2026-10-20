@@ -101,7 +101,7 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   in-memory CRUD keyed by request path), `swagger2.rs` (Swagger 2.0 to OpenAPI 3.0 on parse), `persist.rs`
   (`RUSTYBIN_MOCKS_STATE_DIR`: API-created mocks saved as JSON, loaded by `new_store`), `host.rs`
   (`RUSTYBIN_MOCKS_HOST`: `<name>.<domain>` rewritten to `/mock/<name>` by a layer wrapping the finished router in
-  `build_app`), `collections.rs` (a mock as Postman / Hurl / curl / .http / k6), `config_file.rs` (`rustybin.yaml`,
+  `build_app`), `collections.rs` (a mock as Postman / Hurl / curl / .http / k6 / Bruno / Insomnia), `config_file.rs` (`rustybin.yaml`,
   `RUSTYBIN_MOCKS_DIR`, export), `cli.rs` (`rustybin mock ...`), `service.rs` (the control-plane logic shared by
   the REST handlers and the management MCP), `handlers.rs` (`/mock/{name}/...` data plane, thin
   `/_rustybin/mocks*` handlers over `service.rs`; access through `selfservice.rs`). Self-service (`RUSTYBIN_MOCKS_SELF_SERVICE`):
