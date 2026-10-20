@@ -61,6 +61,7 @@
 # Using Rustybin
 
 - [Web console](console.md)
+- [Configure Rustybin from an AI agent](agent-mcp.md)
 - [Gateway recipes](gateway-recipes.md)
 - [Collection exports and OpenAPI](exports.md)
 
