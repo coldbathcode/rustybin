@@ -150,7 +150,9 @@ export async function copyText(text, label) {
 }
 
 export function copyButton(getText, opts = {}) {
-  const b = h('button', { class: 'btn sm' + (opts.icon ? ' icon' : ''), type: 'button', title: opts.title || 'Copy', 'aria-label': opts.title || 'Copy' },
+  // The accessible name follows the visible label (an icon-only button has none).
+  const name = opts.title || (opts.icon ? null : opts.label) || 'Copy';
+  const b = h('button', { class: 'btn sm' + (opts.icon ? ' icon' : ''), type: 'button', title: name, 'aria-label': name },
     icon('copy'), opts.icon ? null : (opts.label || 'Copy'));
   b.addEventListener('click', (e) => {
     e.stopPropagation();

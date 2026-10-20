@@ -153,7 +153,7 @@ demo).
 | `delete_mock` | manage | The mock, its revisions, stored data and traffic (confirmed) |
 | `sample_request` | read | A valid request for an operation, as `curl` and as parts, plus the response the mock would send |
 | `validate_payload` | read | Check a request or response body against an operation's schema, for example after a gateway transformation |
-| `export_collection` | read | The mock as a Postman collection, Hurl file, curl script, `.http` file, k6 script, Bruno or Insomnia export, optionally against a gateway's base URL (see [collection exports](exports.md)) |
+| `export_collection` | read | The mock as a Postman collection, Hurl file, curl script, `.http` file or k6 script, optionally against a gateway's base URL (see [collection exports](exports.md)) |
 | `get_mock_data` / `clear_mock_data` | read / manage | What a `stateful` mock stored; clearing is confirmed |
 | `get_mock_traffic` / `clear_traffic` | traffic / manage | The calls a mock received: operation, status, validation and auth result, how the response was chosen; clearing is confirmed |
 | `export_config` | read | `rustybin.yaml` for one mock or all (secrets redacted unless manageable), to commit as configuration as code |
