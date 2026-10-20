@@ -5,11 +5,13 @@ Clicks through every view in light and dark mode, exercises the main flows
 (live traffic + compare, request bin, API explorer, AI streaming for every
 provider plus tool calling, MCP list + call with progress and the OAuth
 discovery, A2A streaming and approval continuation, chaos load generator,
-token lab) and fails on browser console errors or uncaught exceptions.
+token lab, the "Connect an AI agent" panel) and fails on browser console
+errors or uncaught exceptions.
 
 With RUSTYBIN_JWT_URL it also checks the sign-in flow of an instance with
 RUSTYBIN_CONTROL_AUTH=jwt (sign-in screen, #token= fragment, fetch-based live
-feed with the bearer token, expiry, sign out).
+feed with the bearer token, the agent panel with the masked token, expiry,
+sign out).
 
 With RUSTYBIN_SS_URL it checks self-service mocks on a public instance
 (create as a visitor, Extend, the email step, another visitor, manage link,
@@ -36,6 +38,7 @@ Environment:
 """
 
 import glob
+import json
 import os
 import re
 import sys
@@ -283,6 +286,23 @@ def run_theme(browser, theme):
 
     step("mock apis (detail, try it, on/off, rule preview, collection, duplicate, stateful, wizard, bulk)", mocks)
 
+    def agent_panel():
+        # Open control plane and no admin token held: the command has no header.
+        goto_view(page, "mocks")
+        panel = page.locator("#agent-connect details")
+        assert panel.get_attribute("open") is None, "agent panel open by default"
+        panel.locator("summary", has_text="Connect an AI agent").click()
+        url = BASE + "/_rustybin/mcp"
+        expect(panel.locator("pre.code").first).to_have_text(f"claude mcp add --transport http rustybin '{url}'")
+        snippet = json.loads(panel.locator("pre.code").nth(1).inner_text())
+        assert snippet == {"mcpServers": {"rustybin": {"type": "http", "url": url}}}, snippet
+        expect(panel).to_contain_text("This instance needs no credential")
+        expect(panel.get_by_role("button", name="Show the token")).to_have_count(0)
+        expect(panel.locator("code", has_text="rustybin mcp-stdio --server " + url)).to_have_count(1)
+        shot(page, theme, "19-agent-panel")
+
+    step("connect an AI agent panel (open instance)", agent_panel)
+
     def explorer():
         goto_view(page, "explorer")
         page.wait_for_selector("text=Try it")
@@ -501,7 +521,8 @@ def run_jwt(browser):
     """Sign-in flow against an instance with RUSTYBIN_CONTROL_AUTH=jwt."""
     jwt_base = os.environ["RUSTYBIN_JWT_URL"].rstrip("/")
     print(f"control auth jwt: {jwt_base}")
-    ctx = browser.new_context(viewport={"width": 1280, "height": 860})
+    # Clipboard access for the agent panel's copy button.
+    ctx = browser.new_context(viewport={"width": 1280, "height": 860}, permissions=["clipboard-read", "clipboard-write"])
     page = ctx.new_page()
     page.set_default_timeout(TIMEOUT)
 
@@ -568,6 +589,36 @@ def run_jwt(browser):
         expect(page.get_by_role("menuitem", name="Delete")).to_have_count(0)
 
     step("jwt: mock apis read-only with a console token", mocks_read_only)
+
+    def agent_panel_with_token():
+        token = page.evaluate("sessionStorage.getItem('rustybin.console.controlToken')")
+        assert token, "not signed in"
+        page.get_by_role("button", name="Console settings").click()
+        panel = page.locator("#agent-panel")
+        panel.locator("summary", has_text="Connect an AI agent").click()
+        url = jwt_base + "/_rustybin/mcp"
+        command = f"claude mcp add --transport http rustybin '{url}' --header 'Authorization: Bearer {token}'"
+        masked = command.replace(token, token[:4] + "..." + token[-2:])
+        cmd = panel.locator("pre.code").first
+        expect(cmd).to_have_text(masked)
+        expect(panel).to_contain_text("control token")
+        # The secret is nowhere in the page until the user asks to see it.
+        assert token not in page.content(), "control token rendered before Show the token"
+        shot(page, "jwt", "23-agent-panel")
+        panel.get_by_role("button", name="Show the token").click()
+        expect(cmd).to_have_text(command)
+        snippet = json.loads(panel.locator("pre.code").nth(1).inner_text())
+        assert snippet["mcpServers"]["rustybin"] == {"type": "http", "url": url, "headers": {"Authorization": "Bearer " + token}}, snippet
+        panel.get_by_role("button", name="Hide the token").click()
+        expect(cmd).to_have_text(masked)
+        # Copy gives the real value while the panel shows the masked one.
+        panel.locator("button", has_text="Copy command").click()
+        page.wait_for_function("navigator.clipboard.readText().then((t) => t.length > 0)")
+        copied = page.evaluate("navigator.clipboard.readText()")
+        assert copied == command, copied
+        page.keyboard.press("Escape")
+
+    step("jwt: agent panel masks the control token", agent_panel_with_token)
 
     def expiry_and_sign_out():
         page.goto(jwt_base + "/ui/#/overview&token=" + control_jwt("console", ttl=3))
@@ -657,6 +708,20 @@ def run_self_service(browser):
 
     step("self-service: email step, lead written, Extend", extend_and_lead)
 
+    def agent_panel_for_visitor():
+        # The visit's manage token is the credential, masked like the others.
+        token = state["token"]
+        panel = page.locator("#agent-connect details")
+        panel.locator("summary", has_text="Connect an AI agent").click()
+        url = ss_base + "/_rustybin/mcp"
+        masked = token[:4] + "..." + token[-2:]
+        expect(panel.locator("pre.code").first).to_have_text(
+            f"claude mcp add --transport http rustybin '{url}' --header 'X-Rustybin-Mock-Token: {masked}'")
+        expect(panel).to_contain_text("visit manage token")
+        assert token not in page.content(), "manage token rendered before Show the token"
+
+    step("self-service: agent panel with the manage token", agent_panel_for_visitor)
+
     ctx2, page2 = new_page()
 
     def another_visitor():
@@ -664,6 +729,11 @@ def run_self_service(browser):
         page2.goto(ss_base + "/ui/#/mocks")
         page2.wait_for_selector("text=Try it with your own API")
         expect(page2.locator(".mock-row", has_text=name)).to_have_count(0)
+        # No credential held on a public instance: the agent panel says what that allows.
+        panel = page2.locator("#agent-connect details")
+        panel.locator("summary", has_text="Connect an AI agent").click()
+        expect(panel).to_contain_text("No credential held")
+        expect(panel.locator("pre.code").first).not_to_contain_text("--header")
         page2.goto(ss_base + f"/ui/#/mocks/{name}")
         page2.wait_for_selector("text=This mock does not exist")
 

@@ -41,5 +41,6 @@ Other knobs: `THEMES=dark` (one theme only), `HEADED=1` (visible browser),
 | A2A client | travel planner stream with artifacts, approval agent input-required continuation, secure agent auth-required continuation |
 | Chaos and health | flaky counters, load generator (histogram, percentiles) |
 | Token lab | client_credentials, JWT decoder with countdown, introspection, authorization code + PKCE popup, HMAC signer, Standard Webhooks sign and verify |
+| Connect an AI agent | the `claude mcp add` command and `mcpServers` JSON for `/_rustybin/mcp` on the open instance (no header); on the jwt instance the control token masked until "Show the token" (never in the page before), the copy button copying the real value; on the self-service instance the visit's manage token as `X-Rustybin-Mock-Token`, and the no-credential note for a new visitor |
 | Shell | settings dialog, keyboard navigation (Alt+1..9), send via a CORS-enabled second origin, unreachable gateway message, phone width without horizontal scroll |
 | Control-plane auth (jwt instance) | sign-in screen with back link, refused token, `#token=` fragment sign-in (token stripped from the URL, kept for the tab), title and back link in the header, live feed over fetch with the bearer token, reload, expiry screen, sign out |
