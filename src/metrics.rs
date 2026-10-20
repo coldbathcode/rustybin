@@ -181,6 +181,8 @@ struct Inner {
     /// Self-service visits and leads (fixed label sets).
     visit_events: HashMap<&'static str, u64>,
     leads: HashMap<&'static str, u64>,
+    /// Management MCP tool calls by tool and outcome (fixed label sets).
+    manage_calls: HashMap<(&'static str, &'static str), u64>,
 }
 
 /// Process-wide metric counters.
@@ -344,6 +346,12 @@ impl Metrics {
         *self.lock().leads.entry(result).or_insert(0) += 1;
     }
 
+    /// A management MCP tool call (`rustybin_manage_mcp_calls_total`);
+    /// `outcome` is `ok`, `denied`, `invalid` or `error`.
+    pub fn count_manage_call(&self, tool: &'static str, outcome: &'static str) {
+        *self.lock().manage_calls.entry((tool, outcome)).or_insert(0) += 1;
+    }
+
     /// Running self-service visits (negative: not reported).
     pub fn set_mock_visits(&self, n: i64) {
         self.mock_visits.store(n, Ordering::Relaxed);
@@ -497,6 +505,19 @@ impl Metrics {
                     out,
                     "rustybin_mock_requests_total{{mock=\"{}\",outcome=\"{outcome}\"}} {n}",
                     escape(mock)
+                );
+            }
+        }
+
+        if !inner.manage_calls.is_empty() {
+            out.push_str("# HELP rustybin_manage_mcp_calls_total Management MCP tool calls by tool and outcome.\n");
+            out.push_str("# TYPE rustybin_manage_mcp_calls_total counter\n");
+            let mut rows: Vec<_> = inner.manage_calls.iter().collect();
+            rows.sort();
+            for ((tool, outcome), n) in rows {
+                let _ = writeln!(
+                    out,
+                    "rustybin_manage_mcp_calls_total{{tool=\"{tool}\",outcome=\"{outcome}\"}} {n}"
                 );
             }
         }

@@ -203,6 +203,8 @@ pub async fn messages_handler(
                     http: Arc::new(http_info(&app, &parts, "http+sse")),
                     auth: None,
                     page_size: sh.cfg.default_page_size,
+                    app: app.clone(),
+                    access: None,
                 };
                 let task_session = session.clone();
                 tokio::spawn(async move {

@@ -16,7 +16,7 @@
 //! `demo`/`demo`, `alice`/`alice` (groups users, admins), `bob`/`bob`.
 //! All state is bounded (capacity + TTL).
 
-mod clients;
+pub mod clients;
 mod store;
 
 use axum::{

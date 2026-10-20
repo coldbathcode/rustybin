@@ -822,7 +822,10 @@ async fn control(state: AppState, mut req: Request, next: Next) -> Response {
         return next.run(req).await;
     }
     let self_service = config.self_service.enabled && is_mock_route(req.uri().path());
-    if !self_service && !is_key_readable(req.method(), req.uri().path()) {
+    // The management MCP server scopes a key holder to its own mocks,
+    // inspector entries and usage itself.
+    let manage = req.uri().path() == crate::mcp::manage::MANAGE_PATH;
+    if !self_service && !manage && !is_key_readable(req.method(), req.uri().path()) {
         let message = "in shared mode this control-plane route needs the admin token";
         let status = if config.admin_token.is_some() {
             StatusCode::UNAUTHORIZED

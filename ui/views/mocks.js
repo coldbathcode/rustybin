@@ -8,6 +8,7 @@ import * as visit from '../lib/visit.js';
 import { openWizard, sampleSpecText, wireDrop } from './mocks/wizard.js';
 import { mountDetail } from './mocks/detail.js';
 import { visitBar } from './mocks/visit.js';
+import { agentPanel } from '../lib/agent.js';
 
 const FILTERS = [['all', 'All'], ['on', 'On'], ['off', 'Off'], ['secured', 'Secured'], ['draft', 'Draft changes']];
 
@@ -49,6 +50,7 @@ function mountList(root) {
         newBtn,
         yamlIn)),
     visitEl, noticeEl, heroEl,
+    h('div', { class: 'card', style: { padding: '10px 14px' }, id: 'agent-connect' }, agentPanel({ compact: true })),
     card('Mocks', { actions: h('div', { class: 'row mock-filters' }, search, filter.el) }, readOnly ? null : bulkEl, listEl, limitsEl));
 
   function names() {

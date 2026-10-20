@@ -33,6 +33,7 @@ pub fn mock_for_host<'h>(host: &'h str, domain: &str) -> Option<&'h str> {
 }
 
 /// Scheme, domain and port of host-based URLs as seen by this request.
+#[derive(Clone, Debug)]
 pub struct HostBase {
     scheme: String,
     domain: String,

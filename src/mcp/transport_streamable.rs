@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 use super::core::{self, CallCtx, HttpInfo};
 use super::protocol::{self, Message, RpcError, Version};
 use super::sessions::{CancelToken, Session, TransportKind};
-use super::{auth, resources, tools, Access, Profile, Shared};
+use super::{auth, manage, resources, tools, Access, Profile, Shared};
 use crate::state::AppState;
 
 /// Values echoed in `X-Rustybin-Mcp-*` response headers.
@@ -139,6 +139,17 @@ pub async fn handle(
     profile: Option<Arc<Profile>>,
     req: Request,
 ) -> Response {
+    handle_with(app, sh, profile, req, None).await
+}
+
+/// [`handle`] with the management server's caller.
+pub async fn handle_with(
+    app: AppState,
+    sh: Arc<Shared>,
+    profile: Option<Arc<Profile>>,
+    req: Request,
+    access: Option<Arc<manage::Access>>,
+) -> Response {
     let Some(profile) = profile else {
         return plain_error(StatusCode::NOT_FOUND, "unknown MCP server");
     };
@@ -170,6 +181,8 @@ pub async fn handle(
         profile,
         claims,
         echo,
+        app,
+        access,
     };
     match parts.method {
         Method::POST => {
@@ -207,6 +220,8 @@ pub struct Req {
     /// Externally visible `scheme://host[:port]` (see [`auth::base_url`]).
     pub base_url: String,
     pub echo: Echo,
+    pub app: AppState,
+    pub access: Option<Arc<manage::Access>>,
 }
 
 impl Req {
@@ -586,6 +601,8 @@ fn make_ctx(
         http: req.info.clone(),
         auth: req.claims.clone(),
         page_size: req.page_size,
+        app: req.app.clone(),
+        access: req.access.clone(),
     }
 }
 

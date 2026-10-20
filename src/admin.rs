@@ -32,6 +32,11 @@ pub const ADMIN_TOKEN_HEADER: &str = "x-rustybin-admin-token";
 /// scope is accepted as well.
 #[allow(clippy::result_large_err)]
 pub fn require_admin(headers: &HeaderMap, config: &Config) -> Result<(), Response> {
+    admin_check(headers, config).map_err(|(status, message)| error(status, message))
+}
+
+/// [`require_admin`] as plain data: the status and message of the refusal.
+pub fn admin_check(headers: &HeaderMap, config: &Config) -> Result<(), (StatusCode, &'static str)> {
     let token = presented_token(headers);
     if let Some(t) = token {
         if crate::control_auth::verify_jwt(t, config).is_ok_and(|g| g.admin) {
@@ -43,13 +48,13 @@ pub fn require_admin(headers: &HeaderMap, config: &Config) -> Result<(), Respons
             if token.is_some_and(|t| constant_time_eq(t, expected)) {
                 Ok(())
             } else {
-                Err(error(
+                Err((
                     StatusCode::UNAUTHORIZED,
                     "admin token required: send Authorization: Bearer <token> or X-Rustybin-Admin-Token",
                 ))
             }
         }
-        None if config.public_mode => Err(error(
+        None if config.public_mode => Err((
             StatusCode::FORBIDDEN,
             "this operation is disabled in public mode (no admin token configured)",
         )),

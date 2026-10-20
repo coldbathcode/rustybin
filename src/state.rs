@@ -9,7 +9,7 @@
 //! Only add a field when several modules (or the UI) must share it.
 
 use axum::extract::FromRef;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::cert_state::CertState;
 use crate::config::Config;
@@ -48,6 +48,9 @@ pub struct AppState {
     /// OpenAPI mocks (`/mock/*`, `/_rustybin/mocks*`, startup loading and
     /// SIGHUP reloads in the server).
     pub mocks: MockStore,
+    /// The finished application (set by `build_app`): the management MCP
+    /// server's `try_request` sends requests through it in process.
+    pub router: Arc<OnceLock<axum::Router>>,
 }
 
 impl AppState {
@@ -114,6 +117,7 @@ impl AppState {
             health: Arc::new(HealthState::new()),
             metrics,
             mocks,
+            router: Arc::new(OnceLock::new()),
         }
     }
 }

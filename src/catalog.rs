@@ -318,6 +318,7 @@ impl Endpoint {
 /// Every module's catalogue function. Register new modules here (once).
 const SOURCES: &[fn() -> Vec<Endpoint>] = &[
     crate::landing::catalog,
+    crate::mcp::manage::catalog,
     crate::echo::catalog,
     crate::status::catalog,
     crate::response_shaping::catalog,

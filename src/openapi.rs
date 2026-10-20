@@ -16,6 +16,7 @@ use crate::state::AppState;
 /// stay in [`build_paths`].
 const MODULE_PATHS: &[fn() -> Value] = &[
     crate::inspector::openapi_paths,
+    crate::mcp::manage::openapi_paths,
     crate::control::openapi_paths,
     crate::metrics::openapi_paths,
     crate::limits::openapi_paths,

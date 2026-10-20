@@ -103,6 +103,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     oidc::router,
     auth_mtls::router,
     mcp::router,
+    mcp::manage::router,
     ai::router,
     a2a::router,
     graphql::router,
@@ -239,17 +240,22 @@ pub fn build_app(state: AppState) -> Router {
                 ),
         )
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-        .with_state(state);
+        .with_state(state.clone());
 
     // Host-based mock URLs rewrite the path before routing, so they wrap the
     // finished router.
-    if config.mocks_host.is_some()
+    let router = if config.mocks_host.is_some()
         || (config.self_service.enabled && config.self_service.host.is_some())
     {
-        return Router::new()
+        Router::new()
             .fallback_service(router)
-            .layer(middleware::from_fn_with_state(config, mocks::host::route));
-    }
+            .layer(middleware::from_fn_with_state(config, mocks::host::route))
+    } else {
+        router
+    };
+    // In-process requests (the management MCP's try_request) go through the
+    // same stack. A state built into several apps keeps the first.
+    let _ = state.router.set(router.clone());
     router
 }
 

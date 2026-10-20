@@ -10,11 +10,12 @@
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{header, Extensions, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{Extensions, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
 
+use super::service::ServiceError;
 use super::store::{Snapshot, StoreError};
 use super::visits::{EmailInput, Owner, VisitError, Visits, SELF_HOST_URL, TOKEN_HEADER};
 use crate::config::Config;
@@ -23,6 +24,7 @@ use crate::keys::KeyContext;
 use crate::state::AppState;
 
 /// Who is calling.
+#[derive(Clone)]
 pub struct Caller {
     /// Admin rights (the admin guard passes and the control-plane grant, if
     /// any, has the admin scope).
@@ -32,6 +34,10 @@ pub struct Caller {
     pub owners: Vec<Owner>,
     /// The session key (`X-Rustybin-Session`, else the client IP).
     pub session: String,
+    /// The admin guard's own answer for this request
+    /// ([`crate::admin::admin_check`]): what a refused instance-global
+    /// change says.
+    pub admin_guard: Result<(), (StatusCode, &'static str)>,
 }
 
 impl Caller {
@@ -66,10 +72,11 @@ impl Caller {
 
 pub fn caller(state: &AppState, headers: &HeaderMap, extensions: &Extensions) -> Caller {
     let config = &state.config;
+    let admin_guard = crate::admin::admin_check(headers, config);
     let admin = extensions
         .get::<ControlAuthorized>()
         .is_none_or(|g| g.0.admin)
-        && crate::admin::is_admin(headers, config);
+        && admin_guard.is_ok();
     let mut owners = Vec::new();
     if let Some(visits) = state.mocks.visits() {
         let tokens: Vec<&str> = headers
@@ -90,62 +97,12 @@ pub fn caller(state: &AppState, headers: &HeaderMap, extensions: &Extensions) ->
         admin,
         owners,
         session: crate::session::session_key(headers, ip),
-    }
-}
-
-fn not_found(name: &str) -> Response {
-    (
-        StatusCode::NOT_FOUND,
-        Json(json!({ "error": format!("mock {name:?} not found") })),
-    )
-        .into_response()
-}
-
-/// The mock, if the caller may read it (`404` otherwise).
-#[allow(clippy::result_large_err)]
-pub fn readable(
-    state: &AppState,
-    headers: &HeaderMap,
-    extensions: &Extensions,
-    name: &str,
-) -> Result<(Caller, Snapshot), Response> {
-    let c = caller(state, headers, extensions);
-    match state.mocks.get(name) {
-        Some(s) if c.can_read(&s) => Ok((c, s)),
-        _ => Err(not_found(name)),
-    }
-}
-
-/// The mock, if the caller may change it: admin for instance mocks (with
-/// the admin guard's own answer), admin or the owner for visitor mocks
-/// (`404` for anyone else).
-#[allow(clippy::result_large_err)]
-pub fn manageable(
-    state: &AppState,
-    headers: &HeaderMap,
-    extensions: &Extensions,
-    name: &str,
-) -> Result<(Caller, Snapshot), Response> {
-    match readable(state, headers, extensions, name) {
-        Ok((c, s)) => {
-            if !s.owner.is_visitor() && !c.admin {
-                crate::admin::require_admin(headers, &state.config)?;
-            }
-            Ok((c, s))
-        }
-        // Without self-service an unknown name answers as before: the admin
-        // guard first. With it, unknown and other people's mocks are 404.
-        Err(not_found) => {
-            if state.mocks.visits().is_none() {
-                crate::admin::require_admin(headers, &state.config)?;
-            }
-            Err(not_found)
-        }
+        admin_guard,
     }
 }
 
 /// The JSON error of a visit decision.
-pub fn visit_error(e: VisitError, config: &Config) -> Response {
+pub fn visit_error(e: VisitError, config: &Config) -> ServiceError {
     let cfg = &config.self_service;
     let (status, code, message, extra, retry) = match e {
         VisitError::NotFound => (
@@ -232,12 +189,11 @@ pub fn visit_error(e: VisitError, config: &Config) -> Response {
     if let (Value::Object(b), Value::Object(more)) = (&mut body, extra) {
         b.extend(more);
     }
-    let mut resp = (status, Json(body)).into_response();
-    if let Some(secs) = retry {
-        resp.headers_mut()
-            .insert(header::RETRY_AFTER, HeaderValue::from(secs));
+    ServiceError {
+        status,
+        body,
+        retry_after: retry,
     }
-    resp
 }
 
 /// Metric label of a visit decision.
@@ -256,15 +212,12 @@ pub fn event_of(e: &VisitError) -> &'static str {
 }
 
 /// A store refusal for a visitor (caps) as the matching visit error.
-pub fn store_refusal(e: &StoreError) -> Option<Response> {
+pub fn store_refusal(e: &StoreError) -> Option<ServiceError> {
     match e {
-        StoreError::OwnerCap(m) => Some(
-            (
-                StatusCode::CONFLICT,
-                Json(json!({ "error": "rustybin_mock_cap", "message": m })),
-            )
-                .into_response(),
-        ),
+        StoreError::OwnerCap(m) => Some(ServiceError::with_body(
+            StatusCode::CONFLICT,
+            json!({ "error": "rustybin_mock_cap", "message": m }),
+        )),
         _ => None,
     }
 }
@@ -286,32 +239,25 @@ pub fn info(config: &Config) -> Value {
     })
 }
 
-#[allow(clippy::result_large_err)]
-fn visits_of(state: &AppState) -> Result<&std::sync::Arc<Visits>, Response> {
+/// The visit store, or the `404` of an instance without self-service.
+pub fn visits_of(state: &AppState) -> Result<&std::sync::Arc<Visits>, ServiceError> {
     state.mocks.visits().ok_or_else(|| {
-        (
+        ServiceError::with_body(
             StatusCode::NOT_FOUND,
-            Json(json!({
+            json!({
                 "error": "rustybin_self_service_off",
                 "message": "self-service mocks are off on this instance",
-            })),
+            }),
         )
-            .into_response()
     })
 }
 
-#[allow(clippy::result_large_err)]
-fn email_input(body: &Bytes) -> Result<EmailInput, Response> {
+fn email_input(body: &Bytes) -> Result<EmailInput, ServiceError> {
     if body.iter().all(u8::is_ascii_whitespace) {
         return Ok(EmailInput::default());
     }
-    serde_json::from_slice(body).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": format!("invalid request: {e}") })),
-        )
-            .into_response()
-    })
+    serde_json::from_slice(body)
+        .map_err(|e| ServiceError::bad_request(format!("invalid request: {e}")))
 }
 
 /// The visit state with its mocks.
@@ -327,163 +273,93 @@ pub fn visit_json(state: &AppState, hash: &str) -> Option<Value> {
     Some(v)
 }
 
-/// `GET /_rustybin/mocks/visit`: the caller's visit.
-pub async fn get_visit(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-) -> Response {
-    if let Err(r) = visits_of(&state) {
-        return r;
-    }
-    let c = caller(&state, &headers, &extensions);
-    match c.visit().and_then(|h| visit_json(&state, h)) {
-        Some(v) => Json(v).into_response(),
-        None => visit_error(VisitError::NotFound, &state.config),
-    }
+// ── Visits: the logic (shared with the management MCP) ──────────────
+
+/// The caller's visit (`GET /_rustybin/mocks/visit`).
+pub fn visit_view(state: &AppState, c: &Caller) -> Result<Value, ServiceError> {
+    visits_of(state)?;
+    c.visit()
+        .and_then(|h| visit_json(state, h))
+        .ok_or_else(|| visit_error(VisitError::NotFound, &state.config))
 }
 
-/// `POST /_rustybin/mocks/visit`: start a visit (optionally with the email
-/// step); answers the manage token once.
-pub async fn start_visit(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-    body: Bytes,
-) -> Response {
-    let visits = match visits_of(&state) {
-        Ok(v) => v.clone(),
-        Err(r) => return r,
-    };
-    let input = match email_input(&body) {
-        Ok(i) => i,
-        Err(r) => return r,
-    };
-    let c = caller(&state, &headers, &extensions);
-    match visits.start(&c.session, &input) {
+/// Start a visit (`POST /_rustybin/mocks/visit`): the manage token (shown
+/// once) and the visit.
+pub fn start(state: &AppState, c: &Caller, input: &EmailInput) -> Result<Value, ServiceError> {
+    let visits = visits_of(state)?.clone();
+    match visits.start(&c.session, input) {
         Ok((token, hash)) => {
             state.metrics.count_visit_event("started");
             tracing::info!(owner = %Owner::Visit(hash.clone()).fingerprint(), "visit started");
-            (
-                StatusCode::CREATED,
-                Json(json!({ "manage_token": token, "visit": visit_json(&state, &hash) })),
-            )
-                .into_response()
+            Ok(json!({ "manage_token": token, "visit": visit_json(state, &hash) }))
         }
         Err(e) => {
             state.metrics.count_visit_event(event_of(&e));
-            visit_error(e, &state.config)
+            Err(visit_error(e, &state.config))
         }
     }
 }
 
-/// `POST /_rustybin/mocks/visit/extend`.
-pub async fn extend_visit(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-    body: Bytes,
-) -> Response {
-    let visits = match visits_of(&state) {
-        Ok(v) => v.clone(),
-        Err(r) => return r,
-    };
-    let input = match email_input(&body) {
-        Ok(i) => i,
-        Err(r) => return r,
-    };
-    let c = caller(&state, &headers, &extensions);
+/// Extend the caller's visit (`POST /_rustybin/mocks/visit/extend`).
+pub fn extend(state: &AppState, c: &Caller, input: &EmailInput) -> Result<Value, ServiceError> {
+    let visits = visits_of(state)?.clone();
     let Some(hash) = c.visit().map(str::to_string) else {
-        return visit_error(VisitError::NotFound, &state.config);
+        return Err(visit_error(VisitError::NotFound, &state.config));
     };
     let mocks = state.mocks.owned_names(&Owner::Visit(hash.clone()));
-    match visits.extend(&hash, &input, &mocks) {
+    match visits.extend(&hash, input, &mocks) {
         Ok(_) => {
             state.metrics.count_visit_event("extended");
             tracing::info!(owner = %Owner::Visit(hash.clone()).fingerprint(), "visit extended");
-            Json(visit_json(&state, &hash)).into_response()
+            Ok(visit_json(state, &hash).unwrap_or(Value::Null))
         }
         Err(e) => {
             state.metrics.count_visit_event(event_of(&e));
-            visit_error(e, &state.config)
+            Err(visit_error(e, &state.config))
         }
     }
 }
 
-/// `POST /_rustybin/mocks/visit/token`: a new manage token for the visit.
-pub async fn rotate_token(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-) -> Response {
-    let visits = match visits_of(&state) {
-        Ok(v) => v.clone(),
-        Err(r) => return r,
-    };
-    let c = caller(&state, &headers, &extensions);
+/// A new manage token for the caller's visit (`POST /_rustybin/mocks/visit/token`).
+pub fn rotate(state: &AppState, c: &Caller) -> Result<Value, ServiceError> {
+    let visits = visits_of(state)?.clone();
     let rotated = c
         .visit()
         .and_then(|h| visits.rotate(h).map(|r| (h.to_string(), r)));
     let Some((old, (token, hash))) = rotated else {
-        return visit_error(VisitError::NotFound, &state.config);
+        return Err(visit_error(VisitError::NotFound, &state.config));
     };
     state
         .mocks
         .reassign(&Owner::Visit(old), Owner::Visit(hash.clone()));
-    Json(json!({ "manage_token": token, "visit": visit_json(&state, &hash) })).into_response()
+    Ok(json!({ "manage_token": token, "visit": visit_json(state, &hash) }))
 }
 
-/// `DELETE /_rustybin/mocks/visit`: end the caller's visit and delete its
-/// mocks.
-pub async fn end_visit(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-) -> Response {
-    let visits = match visits_of(&state) {
-        Ok(v) => v.clone(),
-        Err(r) => return r,
-    };
-    let c = caller(&state, &headers, &extensions);
+/// End the caller's visit and delete its mocks (`DELETE /_rustybin/mocks/visit`).
+pub fn end_own(state: &AppState, c: &Caller) -> Result<Value, ServiceError> {
+    let visits = visits_of(state)?.clone();
     let Some(hash) = c.visit().map(str::to_string) else {
-        return visit_error(VisitError::NotFound, &state.config);
+        return Err(visit_error(VisitError::NotFound, &state.config));
     };
     let deleted = state.mocks.delete_owned(&Owner::Visit(hash.clone()));
     visits.end(&hash);
     state.metrics.count_visit_event("ended");
-    Json(json!({ "ended": true, "deleted": deleted })).into_response()
+    Ok(json!({ "ended": true, "deleted": deleted }))
 }
 
-// ── Operators ───────────────────────────────────────────────────────
-
-#[allow(clippy::result_large_err)]
-fn operator(
-    state: &AppState,
-    headers: &HeaderMap,
-    extensions: &Extensions,
-) -> Result<std::sync::Arc<Visits>, Response> {
+/// The visit store for an operator (admin), else the refusal.
+fn operator(state: &AppState, c: &Caller) -> Result<std::sync::Arc<Visits>, ServiceError> {
     let visits = visits_of(state)?.clone();
-    if !caller(state, headers, extensions).admin {
-        crate::admin::require_admin(headers, &state.config)?;
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "this route needs admin rights" })),
-        )
-            .into_response());
+    if !c.admin {
+        c.admin_guard.map_err(ServiceError::admin)?;
+        return Err(ServiceError::forbidden("this route needs admin rights"));
     }
     Ok(visits)
 }
 
-/// `GET /_rustybin/mocks/visits` (admin): every running visit.
-pub async fn list_visits(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-) -> Response {
-    let visits = match operator(&state, &headers, &extensions) {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
+/// Every running visit (`GET /_rustybin/mocks/visits`, admin).
+pub fn list_all(state: &AppState, c: &Caller) -> Result<Value, ServiceError> {
+    let visits = operator(state, c)?;
     let rows: Vec<Value> = visits
         .list()
         .into_iter()
@@ -498,25 +374,17 @@ pub async fn list_visits(
             row
         })
         .collect();
-    Json(json!({
+    Ok(json!({
         "paused": visits.paused(),
         "count": rows.len(),
         "visitor_mocks": state.mocks.visitor_count(),
         "visits": rows,
     }))
-    .into_response()
 }
 
-/// `DELETE /_rustybin/mocks/visits` (admin): end every visit.
-pub async fn end_all_visits(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-) -> Response {
-    let visits = match operator(&state, &headers, &extensions) {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
+/// End every visit (`DELETE /_rustybin/mocks/visits`, admin).
+pub fn end_all(state: &AppState, c: &Caller) -> Result<Value, ServiceError> {
+    let visits = operator(state, c)?;
     let mut deleted = Vec::new();
     for hash in visits.end_all() {
         deleted.extend(state.mocks.delete_owned(&Owner::Visit(hash)));
@@ -525,7 +393,127 @@ pub async fn end_all_visits(
         "all visits ended by an operator ({} mocks deleted)",
         deleted.len()
     );
-    Json(json!({ "ended": true, "deleted": deleted })).into_response()
+    Ok(json!({ "ended": true, "deleted": deleted }))
+}
+
+/// End one visit by its id (`DELETE /_rustybin/mocks/visits/{id}`, admin).
+pub fn end_one(state: &AppState, c: &Caller, id: &str) -> Result<Value, ServiceError> {
+    let visits = operator(state, c)?;
+    let Some(hash) = visits.hash_for_id(id) else {
+        return Err(visit_error(VisitError::NotFound, &state.config));
+    };
+    let deleted = state.mocks.delete_owned(&Owner::Visit(hash.clone()));
+    visits.end(&hash);
+    Ok(json!({ "ended": true, "deleted": deleted }))
+}
+
+/// Pause or resume self-service (`POST /_rustybin/mocks/visits/pause`,
+/// `/resume`, admin).
+pub fn set_paused(state: &AppState, c: &Caller, paused: bool) -> Result<Value, ServiceError> {
+    let visits = operator(state, c)?;
+    visits.pause(paused);
+    tracing::info!(
+        "self-service {} by an operator",
+        if paused { "paused" } else { "resumed" }
+    );
+    Ok(json!({ "paused": paused }))
+}
+
+// ── Visits: the routes ──────────────────────────────────────────────
+
+fn answer(status: StatusCode, r: Result<Value, ServiceError>) -> Response {
+    match r {
+        Ok(v) => (status, Json(v)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `GET /_rustybin/mocks/visit`: the caller's visit.
+pub async fn get_visit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+) -> Response {
+    let c = caller(&state, &headers, &extensions);
+    answer(StatusCode::OK, visit_view(&state, &c))
+}
+
+/// `POST /_rustybin/mocks/visit`: start a visit (optionally with the email
+/// step); answers the manage token once.
+pub async fn start_visit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    body: Bytes,
+) -> Response {
+    if let Err(e) = visits_of(&state) {
+        return e.into_response();
+    }
+    let input = match email_input(&body) {
+        Ok(i) => i,
+        Err(e) => return e.into_response(),
+    };
+    let c = caller(&state, &headers, &extensions);
+    answer(StatusCode::CREATED, start(&state, &c, &input))
+}
+
+/// `POST /_rustybin/mocks/visit/extend`.
+pub async fn extend_visit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    body: Bytes,
+) -> Response {
+    if let Err(e) = visits_of(&state) {
+        return e.into_response();
+    }
+    let input = match email_input(&body) {
+        Ok(i) => i,
+        Err(e) => return e.into_response(),
+    };
+    let c = caller(&state, &headers, &extensions);
+    answer(StatusCode::OK, extend(&state, &c, &input))
+}
+
+/// `POST /_rustybin/mocks/visit/token`: a new manage token for the visit.
+pub async fn rotate_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+) -> Response {
+    let c = caller(&state, &headers, &extensions);
+    answer(StatusCode::OK, rotate(&state, &c))
+}
+
+/// `DELETE /_rustybin/mocks/visit`: end the caller's visit and delete its
+/// mocks.
+pub async fn end_visit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+) -> Response {
+    let c = caller(&state, &headers, &extensions);
+    answer(StatusCode::OK, end_own(&state, &c))
+}
+
+/// `GET /_rustybin/mocks/visits` (admin): every running visit.
+pub async fn list_visits(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+) -> Response {
+    let c = caller(&state, &headers, &extensions);
+    answer(StatusCode::OK, list_all(&state, &c))
+}
+
+/// `DELETE /_rustybin/mocks/visits` (admin): end every visit.
+pub async fn end_all_visits(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+) -> Response {
+    let c = caller(&state, &headers, &extensions);
+    answer(StatusCode::OK, end_all(&state, &c))
 }
 
 /// `DELETE /_rustybin/mocks/visits/{id}` (admin): end one visit.
@@ -535,34 +523,8 @@ pub async fn end_one_visit(
     headers: HeaderMap,
     extensions: Extensions,
 ) -> Response {
-    let visits = match operator(&state, &headers, &extensions) {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    let Some(hash) = visits.hash_for_id(&id) else {
-        return visit_error(VisitError::NotFound, &state.config);
-    };
-    let deleted = state.mocks.delete_owned(&Owner::Visit(hash.clone()));
-    visits.end(&hash);
-    Json(json!({ "ended": true, "deleted": deleted })).into_response()
-}
-
-async fn set_paused(
-    state: AppState,
-    headers: HeaderMap,
-    extensions: Extensions,
-    paused: bool,
-) -> Response {
-    let visits = match operator(&state, &headers, &extensions) {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    visits.pause(paused);
-    tracing::info!(
-        "self-service {} by an operator",
-        if paused { "paused" } else { "resumed" }
-    );
-    Json(json!({ "paused": paused })).into_response()
+    let c = caller(&state, &headers, &extensions);
+    answer(StatusCode::OK, end_one(&state, &c, &id))
 }
 
 /// `POST /_rustybin/mocks/visits/pause` (admin): no new visits or mocks.
@@ -571,7 +533,8 @@ pub async fn pause(
     headers: HeaderMap,
     extensions: Extensions,
 ) -> Response {
-    set_paused(state, headers, extensions, true).await
+    let c = caller(&state, &headers, &extensions);
+    answer(StatusCode::OK, set_paused(&state, &c, true))
 }
 
 /// `POST /_rustybin/mocks/visits/resume` (admin).
@@ -580,7 +543,8 @@ pub async fn resume(
     headers: HeaderMap,
     extensions: Extensions,
 ) -> Response {
-    set_paused(state, headers, extensions, false).await
+    let c = caller(&state, &headers, &extensions);
+    answer(StatusCode::OK, set_paused(&state, &c, false))
 }
 
 #[cfg(test)]

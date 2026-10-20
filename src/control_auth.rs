@@ -141,6 +141,11 @@ impl Grant {
         if self.admin {
             return true;
         }
+        // The management MCP server checks every tool against the grant
+        // itself (read-only tools for the console and inspector scopes).
+        if path == crate::mcp::manage::MANAGE_PATH {
+            return true;
+        }
         if !is_safe(method) {
             return self.console && method == Method::POST && is_read_only_post(path);
         }

@@ -8,6 +8,7 @@ rustybin: HTTP stub service for API and AI gateway demos
 USAGE:
     rustybin [--config rustybin.yaml]          run the server
     rustybin mock <command> ...                 OpenAPI mocks (rustybin mock --help)
+    rustybin mcp-stdio --server <url> ...       stdio bridge to a management MCP server (--help)
     rustybin [--print-endpoints-markdown | --version | --help]
 
 Configuration is read from RUSTYBIN_* environment variables (see README.md).
@@ -33,6 +34,7 @@ async fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Some("mock") => return rustybin::mocks::cli::run(&args[1..]).await,
+        Some("mcp-stdio") => return rustybin::mcp::manage::stdio::run(&args[1..]).await,
         Some("--config") => match args.get(1) {
             Some(path) if args.len() == 2 => config_file = Some(path.clone()),
             _ => {

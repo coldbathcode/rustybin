@@ -519,6 +519,7 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 
 | Methods | Path | Description |
 |---|---|---|
+| POST GET DELETE | `/_rustybin/mcp` | Management MCP server: configure this Rustybin from an AI agent |
 | GET DELETE | `/_rustybin/requests` | List captured requests (newest first); DELETE clears them |
 | GET | `/_rustybin/requests/stream` | Live feed of captured requests (SSE) |
 | GET | `/_rustybin/requests/{id}` | One captured request by id |

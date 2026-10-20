@@ -9,9 +9,11 @@ use base64::Engine;
 use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 
+use super::manage;
 use super::protocol::{self, RpcError, Version};
 use super::sessions::{CancelToken, Session};
 use super::{prompts, resources, tools, Profile, Shared};
+use crate::state::AppState;
 
 /// What the transport knows about the HTTP request carrying the message.
 #[derive(Clone, Debug, Default)]
@@ -42,6 +44,11 @@ pub struct CallCtx {
     /// Verified access token claims (protected variant).
     pub auth: Option<Value>,
     pub page_size: usize,
+    /// The application (the management server calls its services and sends
+    /// in-process requests through it).
+    pub app: AppState,
+    /// Who is calling the management server (`None` on the mock server).
+    pub access: Option<Arc<manage::Access>>,
 }
 
 impl CallCtx {
@@ -163,9 +170,11 @@ pub fn server_info(profile: &Profile, version: Version) -> Value {
         info["title"] = json!(profile.title());
     }
     if version >= Version::V2025_11_25 {
-        info["description"] = json!(
+        info["description"] = json!(if profile.is_manage() {
+            manage::SERVER_DESCRIPTION
+        } else {
             "Mock MCP server for API and AI gateway demos. All data is fake and deterministic."
-        );
+        });
     }
     info
 }
@@ -174,6 +183,12 @@ pub fn server_info(profile: &Profile, version: Version) -> Value {
 pub fn capabilities(profile: &Profile, version: Version) -> Value {
     let mut caps = Map::new();
     caps.insert("tools".into(), json!({ "listChanged": false }));
+    if profile.is_manage() {
+        caps.insert("resources".into(), json!({ "listChanged": false }));
+        caps.insert("prompts".into(), json!({ "listChanged": false }));
+        caps.insert("logging".into(), json!({}));
+        return Value::Object(caps);
+    }
     caps.insert(
         "resources".into(),
         json!({ "subscribe": true, "listChanged": false }),
@@ -189,6 +204,9 @@ pub fn capabilities(profile: &Profile, version: Version) -> Value {
 }
 
 pub fn instructions(profile: &Profile) -> String {
+    if profile.is_manage() {
+        return manage::INSTRUCTIONS.to_string();
+    }
     format!(
         "Rustybin mock MCP server ({}). Everything is fake test data for gateway demos: \
          tools such as get_weather, lookup_customer and calculate are deterministic, \
@@ -268,6 +286,10 @@ struct RenderedList {
 /// when that page holds the whole list; `None` otherwise (the caller then
 /// dispatches normally).
 pub fn cached_list(ctx: &CallCtx, method: &str, params: &Value) -> Option<Arc<str>> {
+    // The management server's lists depend on the caller's rights.
+    if ctx.profile.is_manage() {
+        return None;
+    }
     let m = STATIC_LISTS.iter().position(|x| *x == method)?;
     if !matches!(params.get("cursor"), None | Some(Value::Null)) {
         return None;
@@ -402,6 +424,11 @@ pub fn paginate<T: Clone>(
 /// Dispatch one request method. `initialize` is handled by the transports
 /// (it creates the session). Errors are JSON-RPC errors.
 pub async fn dispatch(ctx: &CallCtx, method: &str, params: &Value) -> Result<Value, RpcError> {
+    if ctx.profile.is_manage() {
+        return manage::dispatch(ctx, method, params)
+            .await
+            .map(|result| finalize(ctx, result));
+    }
     if let Some(built) = list_method(&ctx.profile, ctx.version, method, params, ctx.page_size) {
         return built.map(|(result, _)| finalize(ctx, result));
     }

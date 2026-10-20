@@ -20,6 +20,7 @@
 pub mod auth;
 pub mod core;
 pub mod data;
+pub mod manage;
 pub mod prompts;
 pub mod protocol;
 pub mod resources;
@@ -171,6 +172,15 @@ pub enum Access {
     ApiKey,
 }
 
+/// Which server a profile serves: the mock demo server (`/mcp*`) or the
+/// management server (`/_rustybin/mcp`, see [`manage`]). Both share the
+/// protocol and transport code and differ in their tool registries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Family {
+    Mock,
+    Manage,
+}
+
 /// One served MCP server variant.
 #[derive(Clone, Debug)]
 pub struct Profile {
@@ -180,6 +190,7 @@ pub struct Profile {
     pub access: Access,
     /// Tool/resource/prompt subset (`None` = everything).
     pub server: Option<&'static str>,
+    pub family: Family,
 }
 
 impl Profile {
@@ -189,6 +200,7 @@ impl Profile {
             path: OPEN_PATH.into(),
             access: Access::Open,
             server: None,
+            family: Family::Mock,
         }
     }
 
@@ -198,6 +210,7 @@ impl Profile {
             path: PROTECTED_PATH.into(),
             access: Access::OAuth,
             server: None,
+            family: Family::Mock,
         }
     }
 
@@ -207,6 +220,7 @@ impl Profile {
             path: APIKEY_PATH.into(),
             access: Access::ApiKey,
             server: None,
+            family: Family::Mock,
         }
     }
 
@@ -217,22 +231,40 @@ impl Profile {
             path: format!("/mcp/servers/{server}"),
             access: Access::Open,
             server: Some(server),
+            family: Family::Mock,
         })
     }
 
+    /// The management server (transport auth is the control plane's).
+    pub fn manage() -> Self {
+        Self {
+            key: manage::PROFILE_KEY.into(),
+            path: manage::MANAGE_PATH.into(),
+            access: Access::Open,
+            server: None,
+            family: Family::Manage,
+        }
+    }
+
+    pub fn is_manage(&self) -> bool {
+        self.family == Family::Manage
+    }
+
     pub fn server_name(&self) -> String {
-        match self.server {
-            Some(s) => format!("rustybin-mcp-{s}"),
-            None => "rustybin-mcp".to_string(),
+        match (self.family, self.server) {
+            (Family::Manage, _) => manage::SERVER_NAME.to_string(),
+            (_, Some(s)) => format!("rustybin-mcp-{s}"),
+            (_, None) => "rustybin-mcp".to_string(),
         }
     }
 
     pub fn title(&self) -> String {
-        match (self.server, self.access) {
-            (Some(s), _) => format!("Rustybin MCP: {s}"),
-            (None, Access::OAuth) => "Rustybin MCP (OAuth protected)".into(),
-            (None, Access::ApiKey) => "Rustybin MCP (API key)".into(),
-            (None, Access::Open) => "Rustybin MCP".into(),
+        match (self.family, self.server, self.access) {
+            (Family::Manage, _, _) => "Rustybin management".into(),
+            (_, Some(s), _) => format!("Rustybin MCP: {s}"),
+            (_, None, Access::OAuth) => "Rustybin MCP (OAuth protected)".into(),
+            (_, None, Access::ApiKey) => "Rustybin MCP (API key)".into(),
+            (_, None, Access::Open) => "Rustybin MCP".into(),
         }
     }
 }
@@ -246,26 +278,43 @@ pub struct Shared {
     pub profiles: HashMap<String, Arc<Profile>>,
     /// Rendered list results per profile key (see [`core::ListCache`]).
     pub list_cache: HashMap<String, core::ListCache>,
+    /// Concurrent `wait_for_requests` calls of the management server.
+    pub waits: tokio::sync::Semaphore,
 }
 
 impl Shared {
     pub fn new(cfg: McpConfig) -> Self {
+        let mut all = vec![Profile::open(), Profile::protected(), Profile::apikey()];
+        all.extend(NAMED_SERVERS.iter().filter_map(|n| Profile::named(n)));
+        Self::with_profiles(cfg, all)
+    }
+
+    /// The management server's state: one profile and its own session pool.
+    pub fn new_manage(cfg: McpConfig) -> Self {
+        Self::with_profiles(cfg, vec![Profile::manage()])
+    }
+
+    fn with_profiles(cfg: McpConfig, all: Vec<Profile>) -> Self {
         let mut state_key = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut state_key);
         let mut profiles = HashMap::new();
         let mut list_cache = HashMap::new();
-        let mut all = vec![Profile::open(), Profile::protected(), Profile::apikey()];
-        all.extend(NAMED_SERVERS.iter().filter_map(|n| Profile::named(n)));
         for p in all {
             list_cache.insert(p.key.clone(), core::ListCache::default());
             profiles.insert(p.key.clone(), Arc::new(p));
         }
+        let waits = tokio::sync::Semaphore::new(if cfg.public_mode {
+            manage::MAX_WAITS_PUBLIC
+        } else {
+            manage::MAX_WAITS
+        });
         Self {
             list_cache,
             sessions: sessions::SessionStore::new(cfg.max_sessions, cfg.session_ttl),
             cfg,
             state_key,
             profiles,
+            waits,
         }
     }
 

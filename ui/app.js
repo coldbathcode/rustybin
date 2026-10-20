@@ -7,6 +7,7 @@ import * as traffic from './lib/traffic.js';
 import * as auth from './lib/auth.js';
 import * as visit from './lib/visit.js';
 import { SERVER, getJson, send, trimBase } from './lib/http.js';
+import { agentPanel } from './lib/agent.js';
 
 const VIEWS = [
   { section: 'Instance' },
@@ -195,6 +196,9 @@ function openSettings() {
     field('Gateway base URL', gateway, 'Views offer "via gateway" to send their requests through this URL instead of directly to Rustybin. Cross-origin calls need CORS on the gateway.'),
     field('Admin token', admin, settings.instance.adminTokenConfigured ? 'This instance requires it for health toggles and clearing all captured requests.' : 'Not required by this instance.'),
     field('Theme', theme),
+    h('details', { class: 'disclosure', id: 'agent-panel' },
+      h('summary', null, 'Connect an AI agent (MCP)'),
+      h('div', { style: { paddingTop: '8px' } }, agentPanel())),
     err,
     h('div', { class: 'row' }, h('span', { class: 'grow' }),
       h('button', { class: 'btn', type: 'button', onclick: () => dialog.close() }, 'Cancel'),

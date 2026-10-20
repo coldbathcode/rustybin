@@ -407,13 +407,13 @@ pub fn tool_json(t: &ToolDef, version: Version) -> Value {
     v
 }
 
-fn text(s: impl Into<String>) -> Value {
+pub(crate) fn text(s: impl Into<String>) -> Value {
     json!({ "type": "text", "text": s.into() })
 }
 
 /// A successful result with text content (plus structuredContent when the
 /// version supports it).
-fn ok_structured(ctx: &CallCtx, summary: String, structured: Value) -> Value {
+pub(crate) fn ok_structured(ctx: &CallCtx, summary: String, structured: Value) -> Value {
     let mut r = json!({ "content": [text(summary)], "isError": false });
     if ctx.version.has_structured_output() {
         r["structuredContent"] = structured;
@@ -421,11 +421,11 @@ fn ok_structured(ctx: &CallCtx, summary: String, structured: Value) -> Value {
     r
 }
 
-fn ok_content(content: Vec<Value>) -> Value {
+pub(crate) fn ok_content(content: Vec<Value>) -> Value {
     json!({ "content": content, "isError": false })
 }
 
-fn tool_error(msg: impl Into<String>) -> Value {
+pub(crate) fn tool_error(msg: impl Into<String>) -> Value {
     json!({ "content": [text(msg)], "isError": true })
 }
 
@@ -968,7 +968,7 @@ fn verify_state(ctx: &CallCtx, tool: &str, state: &str) -> Result<(), RpcError> 
 }
 
 /// For MRTR retries: the client's response for `key`, after checking the state.
-fn input_response<'a>(
+pub(crate) fn input_response<'a>(
     ctx: &CallCtx,
     tool: &str,
     params: &'a Value,
@@ -983,7 +983,7 @@ fn input_response<'a>(
     Ok(params.get("inputResponses").and_then(|r| r.get(key)))
 }
 
-fn input_required(ctx: &CallCtx, tool: &str, key: &str, request: Value) -> Value {
+pub(crate) fn input_required(ctx: &CallCtx, tool: &str, key: &str, request: Value) -> Value {
     let mut requests = Map::new();
     requests.insert(key.to_string(), request);
     json!({
@@ -993,7 +993,7 @@ fn input_required(ctx: &CallCtx, tool: &str, key: &str, request: Value) -> Value
     })
 }
 
-fn elicit_request_params(ctx: &CallCtx, action: &str) -> Value {
+pub(crate) fn elicit_request_params(ctx: &CallCtx, action: &str) -> Value {
     let mut p = json!({
         "message": format!("Please confirm: {action}?"),
         "requestedSchema": {

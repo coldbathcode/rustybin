@@ -30,6 +30,7 @@ pub mod restrict;
 pub mod schema;
 pub mod security;
 pub mod selfservice;
+pub mod service;
 pub mod spec;
 pub mod state;
 pub mod store;
