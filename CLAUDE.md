@@ -2,29 +2,17 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Next up: a management MCP server (to build)
+## Management MCP server (built)
 
-The next build is [docs/plans/management-mcp.md](docs/plans/management-mcp.md): an MCP server at `/_rustybin/mcp`
-so people can configure their Rustybin from an AI agent (`claude mcp add --transport http rustybin
-https://<host>/_rustybin/mcp --header "Authorization: Bearer <token>"`). Nothing is built yet; start at phase 0 and
-work through the phases in order. In short:
-
-- It is not the mock MCP server at `/mcp` (fake demo tools, unchanged): a second profile family on the same protocol
-  and transport code in `src/mcp/`, with its own tool registry, under the control plane (control auth protects it).
-- Tools for the instance, OpenAPI mocks (create, edit, check, deploy, roll back, delete, spec, collections, stored
-  data), testing (`try_request` in process on this instance only, `issue_token` from the built-in IdP,
-  `validate_payload`, `wait_for_requests` for the next call a gateway sends), traffic (mock captures, inspector,
-  bins, the A2A sink), usage, `rustybin.yaml` export and apply, and self-service visits. They call a service layer
-  shared with the REST handlers (phase 0), so permissions, redaction, caps and errors are identical; `tools/list`
-  shows only what the caller may use.
-- Destructive tools carry MCP annotations and ask for confirmation (elicitation, else `confirm: true`); every change
-  is logged without secrets; captured traffic is returned only under `untrusted_*` fields, truncated, never in the
-  text summary (prompt injection).
-- Not in v1: platform operations (pods), runtime changes to `RUSTYBIN_*` settings, server-side URL fetches, the
-  self-service email step (consent stays in the console).
-
-Keep the plan's status line and its "As built" section current as phases land, and move the roadmap entry in
-`docs/src/roadmap.md` when it ships.
+[docs/plans/management-mcp.md](docs/plans/management-mcp.md) is built (phases 0 to 5, 2026-10-20; its section 13
+lists where the build differs; user docs in `docs/src/agent-mcp.md`). `/_rustybin/mcp` lets an agent configure the
+instance (`claude mcp add --transport http rustybin https://<host>/_rustybin/mcp --header "Authorization: Bearer
+<token>"`). It is a second profile family on the mock MCP server's protocol and transport code (`src/mcp/manage/`),
+separate from the mock server at `/mcp`. Its tools call `src/mocks/service.rs`, the layer the REST handlers use, so
+a new mock feature belongs in the service layer and then in both. Keep the rules when adding tools: a `Right` per
+tool and the role-filtered `tools/list`, annotations plus confirmation (elicitation, else `confirm: true`) on
+destructive tools, captured or mocked content only under `untrusted_*` fields (truncated, never in the text
+summary), audit lines without arguments.
 
 ## Hosted self-service mocks (built)
 
@@ -114,8 +102,9 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   (`RUSTYBIN_MOCKS_STATE_DIR`: API-created mocks saved as JSON, loaded by `new_store`), `host.rs`
   (`RUSTYBIN_MOCKS_HOST`: `<name>.<domain>` rewritten to `/mock/<name>` by a layer wrapping the finished router in
   `build_app`), `collections.rs` (a mock as Postman / Hurl / curl / .http / k6), `config_file.rs` (`rustybin.yaml`,
-  `RUSTYBIN_MOCKS_DIR`, export), `cli.rs` (`rustybin mock ...`), `handlers.rs` (`/mock/{name}/...` data plane,
-  `/_rustybin/mocks*` control plane; access through `selfservice.rs`). Self-service (`RUSTYBIN_MOCKS_SELF_SERVICE`):
+  `RUSTYBIN_MOCKS_DIR`, export), `cli.rs` (`rustybin mock ...`), `service.rs` (the control-plane logic shared by
+  the REST handlers and the management MCP), `handlers.rs` (`/mock/{name}/...` data plane, thin
+  `/_rustybin/mocks*` handlers over `service.rs`; access through `selfservice.rs`). Self-service (`RUSTYBIN_MOCKS_SELF_SERVICE`):
   `visits.rs` (`Owner` of every mock: instance, visit by manage-token hash, or API key; the visit clock and daily
   ledger on the injectable `limits::Clock`), `selfservice.rs` (`Caller`, `readable` / `manageable` guards: other
   people's visitor mocks are `404`; the `/_rustybin/mocks/visit*` and operator `visits*` routes), `restrict.rs`
@@ -123,6 +112,9 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   file through a bounded retry queue; addresses are never logged). Mocks are matched inside the handler (operations change at runtime), never as
   axum routes. The built-in `petstore` sample (`petstore.yaml`, `RUSTYBIN_MOCKS_SAMPLE`) is what catalogue
   examples and tests call. File-defined mocks load in `server::start_with_state` and reload on SIGHUP.
+- `src/mcp/`: the mock MCP server at `/mcp` (protocol, transports, sessions, fake tools) and `src/mcp/manage/`, the
+  management MCP server at `/_rustybin/mcp` (`tools.rs` registry, `access.rs` rights, `stdio.rs` for
+  `rustybin mcp-stdio`).
 - `src/fault.rs`: `X-Rustybin-Delay` / `X-Rustybin-Fail` middleware.
 - `src/admin.rs`: `require_admin(&headers, &config)` guard for instance-global mutations.
 - `src/session.rs`: `session_key(&headers, client_ip)`, `client_ip(...)`, extractors `Session`, `ClientIp`, `PeerAddr`.

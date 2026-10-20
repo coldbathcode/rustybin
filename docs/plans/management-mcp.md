@@ -1,8 +1,7 @@
 # Plan: a management MCP server (configure Rustybin from an AI agent)
 
-Status: **next up for the Rustybin build.** Planned 2026-10-18; nothing built yet. Start at phase 0
-(section 10). Keep this status line and section 13 ("As built") current while building. Last updated:
-2026-10-18.
+Status: **built** (phases 0 to 5, 2026-10-20). Section 13 lists where the build differs from the plan;
+the user documentation is `docs/src/agent-mcp.md`. Planned 2026-10-18. Last updated: 2026-10-20.
 
 ## 1. Goal
 
@@ -261,16 +260,49 @@ Results are paginated (`cursor`) like the mock server's lists.
 - `issue_token`: a token it returns opens a mock secured with JWT security and `/mcp/protected`.
 - Hurl examples double as end-to-end tests (section 9).
 
-## 12. Open questions
+## 12. Open questions (settled by the build)
 
-1. **Path**: `/_rustybin/mcp` (recommended, control plane) or `/mcp/manage` (next to the mock server)?
-2. **OAuth discovery**: v1 uses a bearer header. Should `/_rustybin/mcp` also publish RFC 9728 metadata so
-   clients can sign in through an issuer (useful for Cloud pods with platform-issued tokens), or wait for the
-   platform MCP?
-3. **Instance-global toggles**: expose `/health` and fault settings to agents (recommended, admin only), or
-   keep the MCP to mocks and traffic?
-4. **stdio bridge**: build `rustybin mcp-stdio` in v1, or rely on clients that speak Streamable HTTP?
+1. **Path**: `/_rustybin/mcp`, on the control plane.
+2. **OAuth discovery**: not in v1; agents send a bearer header. RFC 9728 metadata is on the roadmap under
+   "Under consideration".
+3. **Instance-global toggles**: `get_health` / `set_health` (admin) only. Fault injection stays per request
+   (`X-Rustybin-Delay`, `X-Rustybin-Fail`), which `try_request` can send.
+4. **stdio bridge**: built in v1 (`rustybin mcp-stdio`, `src/mcp/manage/stdio.rs`).
 
 ## 13. As built (differences from the plan)
 
-Nothing built yet.
+Built 2026-10-20 in `src/mcp/manage/` (registry `tools.rs`, rights `access.rs`, tool modules `instance.rs`,
+`mocks.rs`, `testing.rs`, `traffic.rs`, `visits.rs`, plus `prompts.rs`, `resources.rs`, `stdio.rs`) over the
+service layer `src/mocks/service.rs` (phase 0: the REST handlers in `handlers.rs` and the self-service guards
+call it too). Every tool, prompt and resource in sections 5 and 7 exists. Differences:
+
+- **Rights**: besides read, manage and admin there are **traffic** (read, or the `inspector` scope alone:
+  `list_requests`, `get_request`, `wait_for_requests`, `get_bin`, `get_mock_traffic`,
+  `list_push_notifications`), **visitor** (a running visit) and **operator** (admin on a self-service
+  instance). `control_auth` lets `inspector` and `console` scopes through to `/_rustybin/mcp` for every
+  method, since the server checks each tool against the grant itself.
+- **Open control plane with an admin token set**: callers without the token get the read, test and traffic
+  tools only (the `admin::require_admin` rule), not full access. The admin token is accepted as a bearer or as
+  `X-Rustybin-Admin-Token`.
+- **Self-service**: a visitor's agent needs no credential for its first mock: `create_mock` starts a visit and
+  **returns** its manage token (section 5 said the token is never returned, assuming the visitor already held
+  it), which the agent then sends as `X-Rustybin-Mock-Token`.
+- **`try_request`** captures under the caller's `X-Rustybin-Session` when it sends one, else `mcp-<id>`.
+- **`issue_token`** issues client-credentials tokens of the demo client only; the HS256 demo-secret JWT
+  option was left out.
+- **`export_collection`** takes the formats of `mocks::collections::FORMATS` (Postman, Hurl, curl, `.http`,
+  k6). Bruno and Insomnia stay on the roadmap.
+- **Audit log**: refused calls are logged too (target `rustybin::manage`), with the caller as `admin`,
+  `key:<id>`, `visit:<fingerprint>` or `session:<label>`.
+- **Console**: the "Connect an AI agent" panel is `ui/lib/agent.js` (settings dialog and the Mock APIs
+  view); the token is masked until asked for, the copy buttons copy the real value.
+- **stdio bridge**: `--server` falls back to `RUSTYBIN_MCP_URL` (a bare base URL gets `/_rustybin/mcp`
+  appended), `--token` to `RUSTYBIN_TOKEN` or `RUSTYBIN_ADMIN_TOKEN`; `--header` adds any header (a
+  visitor's `X-Rustybin-Mock-Token`).
+- **Docs**: the page is `docs/src/agent-mcp.md` (not under `concepts/`); Hurl examples in
+  `docs/examples/agent/` on the open, secured and self-service instances.
+- **Tests**: `src/mcp/manage/tests.rs` (full app per role, injection, `try_request`, `wait_for_requests`,
+  `issue_token`, elicitation, visitor isolation, shared mode); the official Python SDK checks in
+  `conformance/mcp/` and the console panel in `conformance/ui/console_e2e.py`.
+- Also in the same commit, unrelated to the plan: `.github/workflows/docker-publish.yml` publishes the image
+  to GHCR.

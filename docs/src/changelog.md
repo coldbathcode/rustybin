@@ -66,6 +66,18 @@ API, AI and agent gateway demos.
   an email address for up to six hours a day, delivered to a webhook), on a
   separate mocks domain, with responses that can never set cookies, redirect
   elsewhere or ship active content. Operators can list, end and pause visits.
+- **Management MCP server** at `/_rustybin/mcp`: configure a Rustybin from an AI
+  agent such as Claude Code. Tools for the instance, OpenAPI mocks (create, edit,
+  check, deploy, roll back, delete, collections, `rustybin.yaml` export and apply),
+  testing (`try_request` in process on this instance only, `issue_token`,
+  `validate_payload`, `wait_for_requests`), captured traffic, usage and
+  self-service visits, plus three prompts and two resources. Protected by
+  control-plane authentication; `tools/list` shows only what the caller may use;
+  destructive tools ask for confirmation (elicitation, else `confirm: true`);
+  captured traffic is returned only under `untrusted_*` fields, truncated; changes
+  are logged without arguments and counted in `rustybin_manage_mcp_calls_total`.
+  The console shows the `claude mcp add` command for the instance, and
+  `rustybin mcp-stdio` bridges stdio-only clients.
 - **Plan limits** for hosted offerings (`RUSTYBIN_PLAN`, `RUSTYBIN_LIMIT_*`,
   `RUSTYBIN_USAGE_FILE`): rate, concurrency, streams and daily or monthly request and
   egress quotas, per instance or per session, with IETF RateLimit headers on 429s and
@@ -75,6 +87,8 @@ API, AI and agent gateway demos.
 
 ### Operations and hosting
 
+- A workflow publishes the image to `ghcr.io/coldbathcode/rustybin` on pushes to
+  `main` and on `v*` tags.
 - Control-plane authentication (`RUSTYBIN_CONTROL_AUTH`): `token` (admin token) or
   `jwt` (admin token or Ed25519 JWTs with `aud`, `exp` and the scopes `inspector`,
   `console`, `admin`) for every `/_rustybin/*` route except the new readiness probe.
