@@ -2,6 +2,13 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
+## Next to build: an MCP server for every OpenAPI mock
+
+[docs/plans/mock-mcp.md](docs/plans/mock-mcp.md) (planned 2026-10-21, not started): each deployed mock also
+serves MCP at `/mock/<name>/_rustybin/mcp`, one tool per operation, calls answered through
+`mocks::handlers::serve` so REST and MCP never drift apart. Start with phase 1 (tools from a spec). Update the
+plan's status and `docs/src/roadmap.md` ("Next") as phases land.
+
 ## Management MCP server (built)
 
 [docs/plans/management-mcp.md](docs/plans/management-mcp.md) is built (phases 0 to 5, 2026-10-20; its section 13

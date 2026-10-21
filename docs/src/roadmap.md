@@ -1,7 +1,14 @@
 # Roadmap
 
-What may come next. Nothing under "Under consideration" is available yet; the pages
-for the features that exist today describe current behaviour.
+What may come next. Nothing under "Next" or "Under consideration" is available yet;
+the pages for the features that exist today describe current behaviour.
+
+## Next
+
+- **An MCP server for every OpenAPI mock**: deploy a mock and get an MCP server for
+  the same API at `/mock/<name>/_rustybin/mcp`, one tool per operation, answered by
+  the mock engine (rules, examples, stateful data, mocked security). For MCP gateway
+  demos with the customer's own API instead of fake weather tools.
 
 ## Recently built
 
