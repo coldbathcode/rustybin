@@ -72,11 +72,16 @@ impl Caller {
 
 pub fn caller(state: &AppState, headers: &HeaderMap, extensions: &Extensions) -> Caller {
     let config = &state.config;
-    let admin_guard = crate::admin::admin_check(headers, config);
-    let admin = extensions
-        .get::<ControlAuthorized>()
-        .is_none_or(|g| g.0.admin)
-        && admin_guard.is_ok();
+    let grant = extensions.get::<ControlAuthorized>().map(|g| g.0);
+    // A token from the control plane's OAuth server (accepted on the
+    // management MCP server only) with the admin scope is admin there.
+    let via_oauth = extensions.get::<crate::control_oauth::ViaOAuth>().is_some();
+    let admin_guard = if via_oauth && grant.is_some_and(|g| g.admin) {
+        Ok(())
+    } else {
+        crate::admin::admin_check(headers, config)
+    };
+    let admin = grant.is_none_or(|g| g.admin) && admin_guard.is_ok();
     let mut owners = Vec::new();
     if let Some(visits) = state.mocks.visits() {
         let tokens: Vec<&str> = headers

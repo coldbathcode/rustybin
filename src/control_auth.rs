@@ -146,6 +146,11 @@ impl Grant {
         if path == crate::mcp::manage::MANAGE_PATH {
             return true;
         }
+        // The OAuth consent API caps what it grants at the approver's own
+        // grant (any scope may approve what it holds).
+        if crate::control_oauth::is_consent_path(path) {
+            return true;
+        }
         if !is_safe(method) {
             return self.console && method == Method::POST && is_read_only_post(path);
         }
@@ -194,7 +199,7 @@ fn is_inspector_path(path: &str) -> bool {
 
 /// True for the paths [`enforce`] protects when control auth is on.
 pub fn is_protected_path(path: &str) -> bool {
-    under(path, CONTROL_PREFIX) && path != READY_PATH
+    under(path, CONTROL_PREFIX) && path != READY_PATH && !crate::control_oauth::is_public_path(path)
 }
 
 /// The token a request presents: `X-Rustybin-Admin-Token`, else
@@ -418,13 +423,32 @@ pub async fn enforce(State(state): State<AppState>, mut req: Request, next: Next
     if config.control_auth == ControlAuth::Open || !is_protected_path(req.uri().path()) {
         return next.run(req).await;
     }
+    // A token from the built-in OAuth server, on /_rustybin/mcp only.
+    match crate::control_oauth::authorize_manage(&req, config) {
+        Some(Ok(grant)) => {
+            req.extensions_mut().insert(ControlAuthorized(grant));
+            req.extensions_mut().insert(crate::control_oauth::ViaOAuth);
+            return next.run(req).await;
+        }
+        Some(Err(resp)) => return resp,
+        None => {}
+    }
     // CORS preflights carry no credentials; the CORS layer answers them.
     match authorize(req.method(), req.uri().path(), req.headers(), config) {
         Ok(grant) => {
             req.extensions_mut().insert(ControlAuthorized(grant));
             next.run(req).await
         }
-        Err(resp) => resp,
+        Err(mut resp) => {
+            crate::control_oauth::add_challenge(
+                &mut resp,
+                req.headers(),
+                req.extensions(),
+                req.uri(),
+                config,
+            );
+            resp
+        }
     }
 }
 

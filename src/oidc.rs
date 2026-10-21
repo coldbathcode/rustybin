@@ -17,7 +17,7 @@
 //! All state is bounded (capacity + TTL).
 
 pub mod clients;
-mod store;
+pub(crate) mod store;
 
 use axum::{
     body::Bytes,
@@ -370,13 +370,13 @@ fn validate_resources(resources: &[String]) -> Result<(), OAuthError> {
 }
 
 /// PKCE code_challenge / code_verifier syntax (RFC 7636 4.1).
-fn valid_pkce_value(v: &str) -> bool {
+pub(crate) fn valid_pkce_value(v: &str) -> bool {
     (43..=128).contains(&v.len())
         && v.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
 }
 
-fn pkce_matches(verifier: &str, challenge: &str, method: &str) -> bool {
+pub(crate) fn pkce_matches(verifier: &str, challenge: &str, method: &str) -> bool {
     let computed = match method {
         "S256" => base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(Sha256::digest(verifier.as_bytes())),

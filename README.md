@@ -520,6 +520,13 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | Methods | Path | Description |
 |---|---|---|
 | POST GET DELETE | `/_rustybin/mcp` | Management MCP server: configure this Rustybin from an AI agent |
+| GET | `/.well-known/oauth-protected-resource/_rustybin/mcp` | Management MCP: protected resource metadata (RFC 9728) |
+| GET | `/.well-known/oauth-authorization-server/_rustybin/oauth` | Management MCP sign-in: authorization server metadata (RFC 8414) |
+| GET | `/.well-known/openid-configuration/_rustybin/oauth` | Management MCP sign-in: the same metadata at the OpenID Connect discovery path |
+| POST | `/_rustybin/oauth/register` | Management MCP sign-in: dynamic client registration (RFC 7591, public clients) |
+| GET | `/_rustybin/oauth/authorize` | Management MCP sign-in: authorization endpoint (redirects to the console's consent page) |
+| GET POST | `/_rustybin/oauth/requests/{id}` | Management MCP sign-in: a pending request, approved or denied by the console |
+| POST | `/_rustybin/oauth/token` | Management MCP sign-in: token endpoint (authorization code with PKCE, refresh token) |
 | GET DELETE | `/_rustybin/requests` | List captured requests (newest first); DELETE clears them |
 | GET | `/_rustybin/requests/stream` | Live feed of captured requests (SSE) |
 | GET | `/_rustybin/requests/{id}` | One captured request by id |

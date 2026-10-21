@@ -71,6 +71,16 @@ pub struct Config {
     /// Required `aud` of control-plane JWTs (`RUSTYBIN_CONTROL_JWT_AUDIENCE`,
     /// default the instance id).
     pub control_jwt_audience: String,
+    /// OAuth sign-in to the management MCP server (`RUSTYBIN_CONTROL_OAUTH`,
+    /// default on; effective only where the control plane asks for
+    /// credentials, see `crate::control_oauth::enabled`).
+    pub control_oauth: bool,
+    /// External authorization server named in the metadata instead of the
+    /// built-in one (`RUSTYBIN_CONTROL_OAUTH_ISSUER`).
+    pub control_oauth_issuer: Option<String>,
+    /// Key of the built-in authorization server (`RUSTYBIN_CONTROL_OAUTH_KEY`,
+    /// else derived from the admin token, else random). Never exposed.
+    pub control_oauth_key: crate::control_oauth::OAuthKey,
     /// Log line format (`RUSTYBIN_LOG_FORMAT`, `text` or `json`).
     pub log_format: LogFormat,
     /// Serve gRPC on the HTTP and HTTPS listeners too (`RUSTYBIN_GRPC_ON_HTTP`).
@@ -325,6 +335,40 @@ impl Config {
         });
         let control_jwt_audience =
             get("RUSTYBIN_CONTROL_JWT_AUDIENCE").unwrap_or_else(|| instance_id.clone());
+        let control_oauth = parse_bool_or(&get, "RUSTYBIN_CONTROL_OAUTH", true, &mut warnings);
+        let control_oauth_issuer = get("RUSTYBIN_CONTROL_OAUTH_ISSUER").and_then(|raw| {
+            let issuer = raw.trim().trim_end_matches('/').to_string();
+            let ok = !issuer.contains('#')
+                && issuer.parse::<axum::http::Uri>().is_ok_and(|u| {
+                    matches!(u.scheme_str(), Some("https" | "http"))
+                        && u.authority().is_some()
+                        && u.query().is_none()
+                });
+            if ok {
+                Some(issuer)
+            } else {
+                warnings.push(format!(
+                    "invalid RUSTYBIN_CONTROL_OAUTH_ISSUER {raw:?} (expected an absolute http(s) URL \
+                     without query or fragment), using the built-in authorization server"
+                ));
+                None
+            }
+        });
+        let oauth_key_setting = get("RUSTYBIN_CONTROL_OAUTH_KEY");
+        if oauth_key_setting
+            .as_ref()
+            .is_some_and(|k| k.trim().len() < 32)
+        {
+            warnings.push(
+                "RUSTYBIN_CONTROL_OAUTH_KEY is shorter than 32 characters, ignored".to_string(),
+            );
+        }
+        let control_oauth_key = crate::control_oauth::OAuthKey::from_settings(
+            oauth_key_setting
+                .as_deref()
+                .filter(|k| k.trim().len() >= 32),
+            admin_token.as_deref(),
+        );
         match control_auth {
             ControlAuth::Token if admin_token.is_none() => warnings.push(
                 "RUSTYBIN_CONTROL_AUTH=token without RUSTYBIN_ADMIN_TOKEN: every control-plane \
@@ -454,6 +498,9 @@ impl Config {
             control_auth,
             control_jwt_key,
             control_jwt_audience,
+            control_oauth,
+            control_oauth_issuer,
+            control_oauth_key,
             log_format,
             grpc_on_http: parse_bool_or(&get, "RUSTYBIN_GRPC_ON_HTTP", false, &mut warnings),
             console_backlink,
@@ -518,6 +565,9 @@ impl Config {
             control_auth: ControlAuth::Open,
             control_jwt_key: None,
             control_jwt_audience: "test-instance".to_string(),
+            control_oauth: true,
+            control_oauth_issuer: None,
+            control_oauth_key: crate::control_oauth::OAuthKey::from_settings(None, None),
             log_format: LogFormat::Text,
             grpc_on_http: false,
             console_backlink: None,
@@ -577,6 +627,7 @@ impl Config {
             "control_auth": self.control_auth.as_str(),
             "control_jwt_key_configured": self.control_jwt_key.is_some(),
             "control_jwt_audience": self.control_jwt_audience,
+            "control_oauth": crate::control_oauth::mode(self),
             "log_format": self.log_format.as_str(),
             "grpc_on_http": self.grpc_on_http,
             "console_backlink": self.console_backlink,

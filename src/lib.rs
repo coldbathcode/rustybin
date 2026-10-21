@@ -23,6 +23,7 @@ pub mod config;
 pub mod content_negotiation;
 pub mod control;
 pub mod control_auth;
+pub mod control_oauth;
 pub mod cookies;
 pub mod echo;
 pub mod fault;
@@ -124,6 +125,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     openapi::router,
     inspector::router,
     control::router,
+    control_oauth::router,
     metrics::router,
     limits::router,
     keys::router,

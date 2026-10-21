@@ -319,6 +319,7 @@ impl Endpoint {
 const SOURCES: &[fn() -> Vec<Endpoint>] = &[
     crate::landing::catalog,
     crate::mcp::manage::catalog,
+    crate::control_oauth::catalog,
     crate::echo::catalog,
     crate::status::catalog,
     crate::response_shaping::catalog,
