@@ -193,6 +193,11 @@ pub fn is_public_path(path: &str) -> bool {
     matches!(path, REGISTER_PATH | AUTHORIZE_PATH | TOKEN_PATH)
 }
 
+/// The discovery documents (public metadata, no instance data).
+pub fn is_discovery_path(path: &str) -> bool {
+    matches!(path, PRM_PATH | AS_METADATA_PATH | OIDC_METADATA_PATH)
+}
+
 /// The consent API, which checks the approver's grant itself (any scope
 /// may approve what it holds).
 pub fn is_consent_path(path: &str) -> bool {
@@ -239,6 +244,13 @@ pub fn authorize_manage(req: &Request, config: &Config) -> Option<Result<Grant, 
     }
     let token = crate::control_auth::presented_token(req.headers())?;
     if token.len() > crate::control_auth::MAX_TOKEN_LEN || token.matches('.').count() != 2 {
+        return None;
+    }
+    if config
+        .admin_token
+        .as_deref()
+        .is_some_and(|t| crate::control_auth::constant_time_eq(t, token))
+    {
         return None;
     }
     let ours = jsonwebtoken::decode_header(token).is_ok_and(|h| h.alg == Algorithm::HS256);
@@ -866,7 +878,16 @@ async fn authorize_handler(State(app): State<AppState>, st: St, req: Request) ->
     if state.as_ref().is_some_and(|s| s.len() > MAX_STATE_LEN) {
         return error_page(StatusCode::BAD_REQUEST, "state is too long.");
     }
+    // Registration is open, so a redirect to a registered https or app URI
+    // proves nothing about the client: errors go back automatically only to
+    // a loopback listener (an agent waiting for its callback), and show a
+    // page otherwise (RFC 9700 4.11.2). Approvals and denials redirect after
+    // the user acted on the consent page.
+    let loopback = loopback_without_port(&redirect_uri).is_some();
     let fail = |error: &str, description: &str| {
+        if !loopback {
+            return error_page(StatusCode::BAD_REQUEST, &format!("{error}: {description}"));
+        }
         let mut params = vec![("error", error), ("error_description", description)];
         if let Some(s) = &state {
             params.push(("state", s.as_str()));

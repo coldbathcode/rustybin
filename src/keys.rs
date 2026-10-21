@@ -736,6 +736,10 @@ pub fn is_exempt(method: &Method, path: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
         || (path == crate::control_auth::READY_PATH
             && (method == Method::GET || method == Method::HEAD))
+        // OAuth discovery for the management MCP server: public metadata an
+        // agent reads before it holds any credential.
+        || (crate::control_oauth::is_discovery_path(path)
+            && (method == Method::GET || method == Method::HEAD))
 }
 
 fn is_control(path: &str) -> bool {

@@ -616,6 +616,33 @@ async fn request_errors_go_back_to_the_client() {
         param(&location(&resp), "error").as_deref(),
         Some("invalid_scope")
     );
+
+    // Not to an https redirect URI: anyone can register one, so an error
+    // there would be an open redirect. A page instead.
+    let web = "https://app.example/cb";
+    let (_, reg) = register(&app, &[web]).await;
+    let id = reg["client_id"].as_str().expect("id");
+    let resp = send(
+        &app,
+        "GET",
+        &authorize_url(id, web, Some("root")),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(location(&resp).is_empty());
+}
+
+#[tokio::test]
+async fn discovery_needs_no_api_key() {
+    let mut c = token_config();
+    c.require_key = true;
+    let app = app(c);
+    for path in [PRM_PATH, AS_METADATA_PATH] {
+        let resp = send(&app, "GET", path, &[], None).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{path}");
+    }
 }
 
 #[tokio::test]
