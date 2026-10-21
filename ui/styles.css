@@ -410,6 +410,7 @@ hr.sep { border: 0; border-top: 1px solid var(--border); margin: 6px 0; }
 .token-box .t-h { color: var(--err); } .token-box .t-p { color: var(--violet); } .token-box .t-s { color: var(--info); }
 .countdown { font: 700 20px var(--mono); }
 details.disclosure > summary { cursor: pointer; color: var(--text-2); font-size: 13px; font-weight: 600; padding: 4px 0; }
+details.disclosure > summary svg { width: 15px; height: 15px; vertical-align: -3px; }
 .dialog-like { border: 1px dashed var(--border-strong); border-radius: var(--radius); padding: 12px; background: var(--surface-2); }
 .step { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 10px; }
 @media (max-width: 960px) { .hide-sm { display: none !important; } }

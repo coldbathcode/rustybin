@@ -112,6 +112,18 @@ def goto_view(page, view):
     page.evaluate(f"location.hash = '#/{view}'")
     page.wait_for_function(f"document.title.includes('Rustybin') && location.hash === '#/{view}'")
     page.wait_for_selector("#view .view-head h1", timeout=TIMEOUT)
+    assert_icons_sized(page, view)
+
+
+def assert_icons_sized(page, where):
+    # An icon without a CSS size rule stretches to its container's width.
+    big = page.evaluate("""() => [...document.querySelectorAll('svg')].flatMap((s) => {
+        const r = s.getBoundingClientRect();
+        if (r.width <= 48 && r.height <= 48) return [];
+        const host = s.parentElement.closest('[id], [class]');
+        return [`${Math.round(r.width)}x${Math.round(r.height)} in <${s.parentElement.tagName.toLowerCase()}> under ${host ? (host.id ? '#' + host.id : '.' + host.className) : '?'}`];
+    })""")
+    assert not big, f"oversized icons on {where}: {big}"
 
 
 def run_theme(browser, theme):
@@ -302,6 +314,7 @@ def run_theme(browser, theme):
         expect(panel).to_contain_text("This instance needs no credential")
         expect(panel.get_by_role("button", name="Show the token")).to_have_count(0)
         expect(panel.locator("code", has_text="rustybin mcp-stdio --server " + url)).to_have_count(1)
+        assert_icons_sized(page, "the agent panel")
         shot(page, theme, "19-agent-panel")
 
     step("connect an AI agent panel (open instance)", agent_panel)
