@@ -23,6 +23,8 @@ const VIEWS = [
   { section: 'Resilience and security' },
   { id: 'chaos', title: 'Chaos and health', icon: 'chaos', load: () => import('./views/chaos.js') },
   { id: 'tokens', title: 'Token lab', icon: 'token', load: () => import('./views/tokens.js') },
+  // Reached from an agent's sign-in (/_rustybin/oauth/authorize), never from the navigation.
+  { id: 'authorize', title: 'Sign in an AI agent', icon: 'shield', hidden: true, load: () => import('./views/authorize.js') },
 ];
 
 const app = document.getElementById('app');
@@ -66,6 +68,7 @@ function buildNav() {
       nav.appendChild(h('div', { class: 'nav-section' }, v.section));
       continue;
     }
+    if (v.hidden) continue;
     const count = h('span', { class: 'nav-count', hidden: true });
     const a = h('a', { class: 'nav-link', href: '#/' + v.id }, icon(v.icon), h('span', null, v.title), count);
     a.addEventListener('click', () => app.classList.remove('nav-open'));
@@ -384,7 +387,7 @@ function start() {
   renderSignIn();
   document.addEventListener('keydown', (e) => {
     if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-9]$/.test(e.key)) {
-      const views = VIEWS.filter((v) => v.id);
+      const views = VIEWS.filter((v) => v.id && !v.hidden);
       const v = views[Number(e.key) - 1];
       if (v) { location.hash = '#/' + v.id; e.preventDefault(); }
     }

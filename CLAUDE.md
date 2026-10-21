@@ -12,7 +12,14 @@ separate from the mock server at `/mcp`. Its tools call `src/mocks/service.rs`, 
 a new mock feature belongs in the service layer and then in both. Keep the rules when adding tools: a `Right` per
 tool and the role-filtered `tools/list`, annotations plus confirmation (elicitation, else `confirm: true`) on
 destructive tools, captured or mocked content only under `untrusted_*` fields (truncated, never in the text
-summary), audit lines without arguments.
+summary), audit lines without arguments. In-process requests from tools (`try_request` and friends) carry only
+the caller's API key, never their control credentials (captures would expose them).
+
+OAuth sign-in to `/_rustybin/mcp` ([docs/plans/control-oauth.md](docs/plans/control-oauth.md), 2026-10-21):
+`src/control_oauth.rs` is a small authorization server for the control plane (metadata, stateless client
+registration, PKCE, a consent API the console's `#/authorize/<id>` view calls with its own credential, HS256
+tokens bound to the `/_rustybin/mcp` URL). Its tokens must stay accepted on `/_rustybin/mcp` only
+(`control_auth::enforce` checks them there; `admin::admin_check` must never accept them).
 
 ## Hosted self-service mocks (built)
 
@@ -72,6 +79,7 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
 - `src/inspector.rs`: bounded ring buffer + broadcast feed of captured requests, `/_rustybin/requests*`.
 - `src/control.rs`: `/_rustybin/config`, `/_rustybin/version`, `/_rustybin/ready` (readiness, never authenticated),
   `git_sha()` / `build_info()` (build.rs sets `RUSTYBIN_GIT_SHA`), `is_control_path()` (`/_rustybin/*`, `/ui/*`).
+- `src/control_oauth.rs`: OAuth sign-in to the management MCP server (`RUSTYBIN_CONTROL_OAUTH*`), see above.
 - `src/control_auth.rs`: `RUSTYBIN_CONTROL_AUTH` (`open` / `token` / `jwt`), Ed25519 JWT verification with scopes
   (`inspector`, `console`, `admin`), the `enforce` middleware (protects `/_rustybin/*` except `/_rustybin/ready`;
   `/ui/*` static files stay open). Tests sign tokens with the keys in `tests/common/control_jwt_keys.rs`

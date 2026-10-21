@@ -56,6 +56,105 @@ rustybin mcp-stdio --server https://<host> --header 'X-Rustybin-Mock-Token: rbm_
 `--server` falls back to `RUSTYBIN_MCP_URL` (a bare base URL gets `/_rustybin/mcp`
 appended) and `--token` to `RUSTYBIN_TOKEN` or `RUSTYBIN_ADMIN_TOKEN`.
 
+On an instance whose control plane asks for credentials you can also leave the
+header out and [sign in through the browser](#sign-in-with-oauth).
+
+## Sign in with OAuth
+
+Where the control plane asks for credentials (`RUSTYBIN_CONTROL_AUTH=token` or
+`jwt`), an agent can sign in instead of you pasting a token:
+
+```bash
+claude mcp add --transport http rustybin https://<host>/_rustybin/mcp
+```
+
+The first call answers `401` with an [RFC 9728](https://www.rfc-editor.org/rfc/rfc9728)
+`resource_metadata` pointer. The client reads the metadata, finds Rustybin's own
+authorization server at `/_rustybin/oauth`, registers itself and opens your browser
+on the console's consent page (`/ui/#/authorize/<id>`). Sign in to the console there
+if it asks (with the admin token or a control JWT, as usual), check the agent's name
+and where the browser will be sent back to (a warning shows when that is not your own
+machine), choose what to grant and approve. The agent gets a token and carries on.
+
+```hurl
+{{#include ../examples/agent/manage_oauth.hurl:oauth_challenge}}
+```
+
+```hurl
+{{#include ../examples/agent/manage_oauth.hurl:oauth_metadata}}
+```
+
+**What you can grant.** The consent page offers full access (`admin`), read only
+(`console`) and traffic only (`inspector`), the same scopes as [control
+JWTs](concepts/control-plane-security.md), but never more than the credential the
+console holds: a console signed in with a `console` scope token can let an agent read,
+not change anything. An `admin` grant is admin on the management server, like the
+admin token there.
+
+**What the token opens.** Only `/_rustybin/mcp` on this instance and host: the token
+is bound to that URL (RFC 8707), and every other control-plane route, the data plane's
+admin checks and other instances refuse it. Access tokens last an hour; the agent
+renews them with a refresh token (30 days) without asking you again, and a refresh can
+narrow the scopes, never widen them.
+
+**The key.** Client registrations and tokens are signed with a key, never stored, so
+nothing grows on the server. The key comes from `RUSTYBIN_CONTROL_OAUTH_KEY` (32
+characters or more), else from `RUSTYBIN_ADMIN_TOKEN`, else it is random per process.
+Rotating it (or the admin token it derives from) signs every agent out. With a random
+key a restart signs agents out too, and several replicas behind one URL need
+`RUSTYBIN_CONTROL_OAUTH_KEY` set to the same value. Single tokens cannot be revoked.
+
+**Clients.** Registration is open ([RFC 7591](https://www.rfc-editor.org/rfc/rfc7591)),
+for public clients with PKCE (S256) only. Redirect URIs are `https`, `http` on a
+loopback address (any port when the agent signs in, as native apps pick a free one)
+or an app's own scheme (`cursor://...`). A failed request goes back to the agent
+only when it waits on a loopback address; for any other redirect URI the browser
+shows the error, so the server never redirects anywhere on someone else's behalf.
+
+These are the requests an agent makes, step by step. The console's part is the
+consent API, called with its credential:
+
+```hurl
+{{#include ../examples/agent/manage_oauth.hurl:oauth_register}}
+```
+
+```hurl
+{{#include ../examples/agent/manage_oauth.hurl:oauth_authorize}}
+```
+
+```hurl
+{{#include ../examples/agent/manage_oauth.hurl:oauth_consent}}
+```
+
+```hurl
+{{#include ../examples/agent/manage_oauth.hurl:oauth_token}}
+```
+
+```hurl
+{{#include ../examples/agent/manage_oauth.hurl:oauth_use}}
+```
+
+```hurl
+{{#include ../examples/agent/manage_oauth.hurl:oauth_refresh}}
+```
+
+```hurl
+{{#include ../examples/agent/manage_oauth.hurl:oauth_errors}}
+```
+
+**An external issuer.** With `RUSTYBIN_CONTROL_OAUTH_ISSUER=https://...` the metadata
+names that authorization server instead and the built-in one answers `404`. The tokens
+it issues must be the [control JWTs](concepts/control-plane-security.md) the instance
+already accepts (`RUSTYBIN_CONTROL_JWT_PUBLIC_KEY`, `aud` equal to
+`RUSTYBIN_CONTROL_JWT_AUDIENCE`): the way for a hosting platform to sign agents in
+with its own accounts.
+
+**When it is off.** On an open control plane (nothing asks for credentials, so no
+`401` starts the flow), in shared mode (API keys authenticate there), and with
+`RUSTYBIN_CONTROL_OAUTH=off`. The metadata documents need no API key even with
+`RUSTYBIN_REQUIRE_KEY`, since an agent reads them before it holds anything.
+Self-service visitors keep sending their visit's manage token as a header.
+
 ## Credentials and what they allow
 
 The agent gets the rights its credential has, no more. `tools/list` shows only the
@@ -328,4 +427,6 @@ so [plan limits](concepts/plans-and-limits.md) apply as for the REST routes.
 - Fetching a spec from a URL on the server: the agent reads the file and sends its
   content.
 - The self-service email step: consent stays in the console.
-- OAuth sign-in to the management server (RFC 9728 metadata): use a bearer header.
+- OAuth sign-in for self-service visitors and shared-mode key holders (they send their
+  manage token or API key as a header), revoking a single signed-in agent, and client
+  ID metadata documents (the server would have to fetch a URL).

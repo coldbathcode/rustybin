@@ -37,12 +37,15 @@ Environment:
     LEADS_FILE                its RUSTYBIN_LEADS_FILE
 """
 
+import base64
 import glob
+import hashlib
 import json
 import os
 import re
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 from playwright.sync_api import sync_playwright, expect
@@ -620,6 +623,79 @@ def run_jwt(browser):
 
     step("jwt: agent panel masks the control token", agent_panel_with_token)
 
+    def agent_sign_in_read_only():
+        # Fresh context: no console token yet, so the sign-in screen comes first.
+        ctx2 = browser.new_context(viewport={"width": 1280, "height": 860})
+        p2 = ctx2.new_page()
+        p2.set_default_timeout(TIMEOUT)
+        p2.on("pageerror", lambda e: console_errors.append(f"[jwt consent] uncaught: {e}"))
+        redirect = "http://127.0.0.1:47911/callback"
+        verifier = "e2e-" + "v" * 50
+        client_id, req_id = oauth_start(jwt_base, redirect, "E2E <b>agent</b>", verifier)
+        landed = []
+
+        def callback(route):
+            landed.append(route.request.url)
+            route.fulfill(status=200, content_type="text/plain", body="callback reached")
+
+        ctx2.route("http://127.0.0.1:47911/**", callback)
+        p2.goto(jwt_base + "/ui/#/authorize/" + req_id)
+        p2.wait_for_selector("#signin")
+        p2.fill("#signin-token", "ui-admin-token")
+        p2.get_by_role("button", name="Sign in").click()
+        client = p2.locator("#authorize-client")
+        # The registered name is shown as text, never parsed as HTML.
+        expect(client).to_have_text("E2E <b>agent</b>")
+        expect(p2.locator("#view")).to_contain_text("127.0.0.1:47911")
+        expect(p2.locator("#view .notice.warn")).to_have_count(0)
+        # The admin token may grant everything; full access is the default.
+        expect(p2.locator("input[name=authorize-scope][value=admin]")).to_be_checked()
+        expect(p2.locator("nav a[href='#/authorize']")).to_have_count(0)
+        shot(p2, "jwt", "24-agent-consent")
+        p2.locator("label[data-scope=console]").click()
+        p2.locator("#authorize-approve").click()
+        p2.wait_for_url(re.compile(r"^http://127\.0\.0\.1:47911/callback\?"))
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(landed[-1]).query)
+        assert "code" in q, landed
+        assert q.get("iss") == [jwt_base + "/_rustybin/oauth"], q
+        tokens = oauth_token(jwt_base, client_id, q["code"][0], redirect, verifier)
+        assert tokens["scope"] == "console", tokens
+        names = mcp_tool_names(jwt_base, tokens["access_token"])
+        assert "list_mocks" in names and "create_mock" not in names, names
+        ctx2.close()
+
+    step("jwt: agent sign-in (sign in first, read only, approve)", agent_sign_in_read_only)
+
+    def agent_sign_in_web_redirect_denied():
+        # The main page is signed in with a console-scope token: admin is not grantable.
+        redirect = "https://agent.example.com/oauth/cb"
+        _, req_id = oauth_start(jwt_base, redirect, "Web agent", "e2e-" + "w" * 50)
+        landed = []
+
+        def callback(route):
+            landed.append(route.request.url)
+            route.fulfill(status=200, content_type="text/plain", body="callback reached")
+
+        page.context.route("https://agent.example.com/**", callback)
+        page.goto(jwt_base + "/ui/#/authorize/" + req_id)
+        expect(page.locator("#authorize-client")).to_have_text("Web agent")
+        warn = page.locator("#view .notice.warn")
+        expect(warn).to_contain_text("agent.example.com")
+        expect(warn).to_contain_text("website")
+        expect(page.locator("input[name=authorize-scope][value=admin]")).to_be_disabled()
+        expect(page.locator("input[name=authorize-scope][value=console]")).to_be_checked()
+        shot(page, "jwt", "25-agent-consent-web")
+        page.locator("#authorize-deny").click()
+        page.wait_for_url(re.compile(r"^https://agent\.example\.com/oauth/cb\?"))
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(landed[-1]).query)
+        assert q.get("error") == ["access_denied"], q
+        page.context.unroute("https://agent.example.com/**")
+        # Answered once: the page now says to start again.
+        page.goto(jwt_base + "/ui/#/authorize/" + req_id)
+        expect(page.locator("#view .notice")).to_contain_text("Start the sign-in again")
+
+    step("jwt: agent sign-in to a website warns, console token caps, deny", agent_sign_in_web_redirect_denied)
+
     def expiry_and_sign_out():
         page.goto(jwt_base + "/ui/#/overview&token=" + control_jwt("console", ttl=3))
         page.wait_for_selector("text=Requests captured")
@@ -756,6 +832,57 @@ def run_self_service(browser):
     step("self-service: manage link, end the visit", manage_link_and_end)
     ctx2.close()
     ctx.close()
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):  # noqa: ARG002 - keep the 302
+        return None
+
+
+def oauth_start(base, redirect, name, verifier):
+    """Register a client and start an authorization; returns (client_id, request id)."""
+    reg = urllib.request.Request(base + "/_rustybin/oauth/register", method="POST",
+                                 data=json.dumps({"redirect_uris": [redirect], "client_name": name}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(reg, timeout=10) as r:
+        client_id = json.loads(r.read())["client_id"]
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    query = urllib.parse.urlencode({
+        "response_type": "code", "client_id": client_id, "redirect_uri": redirect,
+        "code_challenge": challenge, "code_challenge_method": "S256", "state": "e2e",
+    })
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        opener.open(base + "/_rustybin/oauth/authorize?" + query, timeout=10)
+        raise AssertionError("authorize did not redirect")
+    except urllib.error.HTTPError as e:
+        assert e.code == 302, e.code
+        location = e.headers["Location"]
+    prefix = "/ui/#/authorize/"
+    assert location.startswith(prefix), location
+    return client_id, location[len(prefix):]
+
+
+def oauth_token(base, client_id, code, redirect, verifier):
+    body = urllib.parse.urlencode({
+        "grant_type": "authorization_code", "client_id": client_id, "code": code,
+        "redirect_uri": redirect, "code_verifier": verifier,
+    }).encode()
+    req = urllib.request.Request(base + "/_rustybin/oauth/token", method="POST", data=body,
+                                 headers={"Content-Type": "application/x-www-form-urlencoded"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read())
+
+
+def mcp_tool_names(base, token):
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}}}}).encode()
+    req = urllib.request.Request(base + "/_rustybin/mcp", method="POST", data=body, headers={
+        "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+        "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list", "Authorization": "Bearer " + token})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return [t["name"] for t in json.loads(r.read())["result"]["tools"]]
 
 
 def http_at(base, path):

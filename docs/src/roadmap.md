@@ -5,6 +5,8 @@ for the features that exist today describe current behaviour.
 
 ## Recently built
 
+- [OAuth sign-in for agents](agent-mcp.md#sign-in-with-oauth): connect an agent to
+  `/_rustybin/mcp` with no token; it signs in through a consent page in the console.
 - Mock collections as a Bruno collection and an Insomnia export, next to Postman,
   Hurl, curl, `.http` and k6.
 - [Configure Rustybin from an AI agent](agent-mcp.md): a management MCP server at
@@ -24,6 +26,6 @@ for the features that exist today describe current behaviour.
   without routing each mock to one of them.
 - **Stateful mode for visitor mocks**, with tight caps on what a mock may store
   (items, bytes, text only).
-- **OAuth sign-in to the management MCP server**: RFC 9728 metadata on
-  `/_rustybin/mcp` so agents sign in through an issuer (platform-issued tokens on
-  hosted instances) instead of pasting a bearer token.
+- **A platform authorization server for hosted instances**: Rustybin already
+  points its OAuth metadata at an external issuer (`RUSTYBIN_CONTROL_OAUTH_ISSUER`);
+  the platform side that issues control tokens to agents is not built.

@@ -82,6 +82,13 @@ API, AI and agent gateway demos.
   are logged without arguments and counted in `rustybin_manage_mcp_calls_total`.
   The console shows the `claude mcp add` command for the instance, and
   `rustybin mcp-stdio` bridges stdio-only clients.
+- **OAuth sign-in to the management MCP server**: where the control plane asks for
+  credentials, agents sign in through the browser instead of pasting a token. A
+  built-in authorization server (RFC 9728 and RFC 8414 metadata, dynamic client
+  registration, PKCE, refresh tokens) sends the browser to a consent page in the
+  console, which grants at most what the approver's own credential allows. Tokens
+  open `/_rustybin/mcp` only. `RUSTYBIN_CONTROL_OAUTH`, `RUSTYBIN_CONTROL_OAUTH_KEY`,
+  and `RUSTYBIN_CONTROL_OAUTH_ISSUER` for an external authorization server.
 - **Plan limits** for hosted offerings (`RUSTYBIN_PLAN`, `RUSTYBIN_LIMIT_*`,
   `RUSTYBIN_USAGE_FILE`): rate, concurrency, streams and daily or monthly request and
   egress quotas, per instance or per session, with IETF RateLimit headers on 429s and
@@ -91,6 +98,10 @@ API, AI and agent gateway demos.
 
 ### Operations and hosting
 
+- The management MCP server no longer passes the caller's control credentials
+  into the requests its tools send to the data plane, and captures (inspector,
+  bins, mock traffic) store `X-Rustybin-Admin-Token` and `X-Rustybin-Mock-Token` as
+  `[redacted]`. Mock traffic now redacts API keys like the inspector does.
 - A workflow publishes the image to `ghcr.io/coldbathcode/rustybin` on pushes to
   `main` and on `v*` tags.
 - Control-plane authentication (`RUSTYBIN_CONTROL_AUTH`): `token` (admin token) or

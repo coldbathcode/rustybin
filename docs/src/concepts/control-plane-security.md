@@ -130,6 +130,19 @@ sent (no token in a query string). When the token is missing, refused or expired
 can be pasted, with a link back to `RUSTYBIN_CONSOLE_BACKLINK` when one is set.
 **Console settings, Sign out** forgets the token.
 
+### Agents sign in with OAuth
+
+In `token` and `jwt` mode the management MCP server (`/_rustybin/mcp`) also lets an
+AI agent sign in through the browser: its `401` points at RFC 9728 metadata, the
+agent registers with Rustybin's built-in authorization server (`/_rustybin/oauth`),
+and you approve it on the console's consent page with the credential the console
+holds. The agent's token is capped by that credential's scopes and opens
+`/_rustybin/mcp` only, never the rest of the control plane. `RUSTYBIN_CONTROL_OAUTH`
+turns it off, `RUSTYBIN_CONTROL_OAUTH_KEY` keeps sign-ins across restarts and
+replicas, and `RUSTYBIN_CONTROL_OAUTH_ISSUER` hands sign-in to an external
+authorization server that issues control JWTs. See [Sign in with
+OAuth](../agent-mcp.md#sign-in-with-oauth).
+
 ## Hosted mode
 
 `RUSTYBIN_HOSTED_MODE=true` is a preset for platforms that run one instance per

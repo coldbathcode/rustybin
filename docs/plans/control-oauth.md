@@ -1,6 +1,7 @@
 # Plan: OAuth sign-in to the management MCP server
 
-Status: **building.** Planned 2026-10-20. Keep this status line and section 9 ("As built") current.
+Status: **built** (phases 1 to 3, 2026-10-21). Section 9 lists where the build differs. User docs:
+`docs/src/agent-mcp.md` ("Sign in with OAuth"). Planned 2026-10-20.
 
 ## 1. Goal
 
@@ -94,4 +95,19 @@ the console's own credential allows), Approve and Deny.
 
 ## 9. As built
 
-Nothing built yet.
+Server `src/control_oauth.rs` (tests in `src/control_oauth/tests.rs`), consent view `ui/views/authorize.js`,
+SDK check `conformance/mcp/test_manage_oauth.py` (a second, token-mode instance in `run.sh`), browser check
+in `conformance/ui/console_e2e.py`, Hurl examples `docs/examples/agent/manage_oauth.hurl`. Differences:
+
+- **No open redirect**: errors at the authorization endpoint go back to the client automatically only for a
+  loopback `http` redirect URI; for `https` and app redirect URIs (anyone can register one) they show an error
+  page (RFC 9700 4.11.2). Approvals and denials redirect after the user acted on the consent page.
+- **Discovery needs no API key**: the three metadata documents are exempt from the key layer, so
+  `RUSTYBIN_REQUIRE_KEY` does not hide the sign-in.
+- **The admin token is never taken for an OAuth token** on `/_rustybin/mcp`, whatever it looks like.
+- **Before the build**, the management MCP's in-process requests stopped forwarding the caller's control
+  credentials (they would have carried OAuth tokens into captures too), and captures now redact
+  `X-Rustybin-Admin-Token` and `X-Rustybin-Mock-Token` (commit `bc110ac`).
+- The consent view is reachable only by URL (not in the navigation); a tab without a console token shows the
+  sign-in screen first and resumes.
+- `GET /_rustybin/config` reports `control_oauth` (`off`, `built-in` or `external`), never the key.

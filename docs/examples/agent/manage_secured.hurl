@@ -11,7 +11,7 @@ Mcp-Method: tools/list
 {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}}}}
 HTTP 401
 [Asserts]
-header "WWW-Authenticate" == "Bearer realm=\"rustybin-control\""
+header "WWW-Authenticate" == "Bearer realm=\"rustybin-control\", resource_metadata=\"{{secured_url}}/.well-known/oauth-protected-resource/_rustybin/mcp\""
 # ANCHOR_END: secured_no_token
 
 # ANCHOR: secured_console_scope

@@ -134,6 +134,9 @@ to the default. `GET /_rustybin/config` shows the effective configuration. Detai
 | `RUSTYBIN_PUBLIC_MODE` | `false` | Hardening for shared instances: lower caps, session-scoped inspector, global mutations need the admin token |
 | `RUSTYBIN_ADMIN_TOKEN` | unset | Required (Bearer or `X-Rustybin-Admin-Token`) for health toggles, global flaky reset and clearing all captured requests |
 | `RUSTYBIN_CONTROL_AUTH` | `open` | Protect `/_rustybin/*` (except `/_rustybin/ready`): `token` (admin token) or `jwt` (admin token or Ed25519 JWT with scope `inspector`, `console` or `admin`) |
+| `RUSTYBIN_CONTROL_OAUTH` | `true` | With `token` / `jwt` control auth: agents sign in to `/_rustybin/mcp` through the browser (RFC 9728 metadata, built-in authorization server at `/_rustybin/oauth`, consent in the console) |
+| `RUSTYBIN_CONTROL_OAUTH_ISSUER` | unset | Name an external authorization server instead (its tokens must be control JWTs) |
+| `RUSTYBIN_CONTROL_OAUTH_KEY` | derived | Secret (32+ characters) signing OAuth client ids and tokens; unset: derived from the admin token, else random per process |
 | `RUSTYBIN_CONTROL_JWT_PUBLIC_KEY` / `_AUDIENCE` | unset / instance id | Ed25519 public key (PEM or base64) and required `aud` of control-plane JWTs |
 | `RUSTYBIN_HOSTED_MODE` | `false` | Preset for one-instance-per-customer platforms: control auth `jwt` and JSON logs |
 | `RUSTYBIN_GRPC_ON_HTTP` | `false` | Also serve gRPC (`content-type: application/grpc*`) on the HTTP and HTTPS listeners |
