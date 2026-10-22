@@ -9,6 +9,15 @@ the pages for the features that exist today describe current behaviour.
   the same API at `/mock/<name>/_rustybin/mcp`, one tool per operation, answered by
   the mock engine (rules, examples, stateful data, mocked security). For MCP gateway
   demos with the customer's own API instead of fake weather tools.
+- **Harness mode** (after the mock MCP server): Rustybin as the load client as well as the upstream. One
+  instance loops traffic through a gateway back to itself, or a cluster of client and
+  server instances drives load and chaos through a gateway at scale. Both sides
+  correlate every request, so a run separates the gateway's own responses, lost
+  requests and the overhead the gateway adds. Ramp, step, target, breakpoint, spike,
+  pulse and burst patterns, plus burst attacks that check rate limiting (window edges,
+  distributed bursts, key and IP spraying), all tunable live. Driven from the API, MCP
+  or the console, or headless; the cluster elects a new leader if the current one
+  dies. Off by default and limited to allowlisted targets.
 
 ## Recently built
 

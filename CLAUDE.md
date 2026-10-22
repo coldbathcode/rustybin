@@ -9,6 +9,12 @@ serves MCP at `/mock/<name>/_rustybin/mcp`, one tool per operation, calls answer
 `mocks::handlers::serve` so REST and MCP never drift apart. Start with phase 1 (tools from a spec). Update the
 plan's status and `docs/src/roadmap.md` ("Next") as phases land.
 
+After that: [docs/plans/harness.md](docs/plans/harness.md) (planned 2026-10-22), harness mode: Rustybin as a load
+client and correlating upstream, single node (loop-through) or a cluster (an elected leader, clients, servers),
+traffic layers with run patterns and rate-limit burst attacks, every parameter from one schema in the API, MCP and
+console (tunable live), or headless. It is the first feature that sends outbound traffic, so its safety section (allowlist,
+target verification, leases) comes first.
+
 ## Management MCP server (built)
 
 [docs/plans/management-mcp.md](docs/plans/management-mcp.md) is built (phases 0 to 5, 2026-10-20; its section 13
