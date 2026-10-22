@@ -719,6 +719,29 @@ lost requests and gateway overhead separated out. Phase 3b makes it survive losi
 and 5 give the traffic shapes and the rate-limit testing. Phases 6 and 7 make it realistic and mean.
 Phase 8 makes it usable without reading this file.
 
+### Estimate (2026-10-22)
+
+About 16 to 19 days of build sessions, after the mock MCP server (1 to 2 days). This is calibrated on the
+earlier plans: OpenAPI mocks about 2 days, management MCP about 3, hosted mocks about 1.
+
+| Phase | Days |
+|---|---|
+| 0. Spike | 0.5 |
+| 1. Single-node engine | 2 |
+| 2. Correlation | 1 |
+| 3. Cluster | 2 |
+| 3b. Leadership and failover | 2 to 3 |
+| 4. Patterns, scale and live tuning | 2 |
+| 5. Burst attacks and rate-limit analysis | 2 |
+| 6. Mock-driven traffic and identities | 1 |
+| 7. Chaos and protocols | 2 to 3 |
+| 8. Docs and conformance | 1 |
+
+The headline demo (phases 0 to 3) is about a week in, and rate-limit testing (through phase 5) about two
+weeks in. Not included: throughput tuning on real machines against a real gateway (the tests prove
+correctness at low rates, not scale), and the platform side (its own plan in `rustybin-platform`). The
+largest risk to the estimate is phase 3b.
+
 ## 16. Testing
 
 - Unit tests next to each part: scenario validation, scheduler timing (on the injectable clock that
