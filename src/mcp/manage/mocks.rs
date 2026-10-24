@@ -25,8 +25,12 @@ fn mock_summary(detail: &Value, verb: &str) -> String {
         .map(|a| a.len())
         .unwrap_or(0);
     let report = &detail["report"];
+    let mcp = match detail["mcp"]["url"].as_str() {
+        Some(url) if detail["mcp"]["serving"] == true => format!("; MCP server: {url}"),
+        _ => String::new(),
+    };
     format!(
-        "{verb} mock {:?} ({}, {} operation(s), state {}, checks: {} error(s), {} warning(s)): {}{}",
+        "{verb} mock {:?} ({}, {} operation(s), state {}, checks: {} error(s), {} warning(s)): {}{mcp}{}",
         detail["name"].as_str().unwrap_or("?"),
         detail["title"].as_str().unwrap_or(""),
         ops,
@@ -419,8 +423,14 @@ pub fn deploy_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
         Ok(r) => ok(
             ctx,
             format!(
-                "Deployed mock {name:?} as revision {} ({} error(s), {} warning(s))",
-                r["revision"], r["report"]["errors"], r["report"]["warnings"]
+                "Deployed mock {name:?} as revision {} ({} error(s), {} warning(s)){}",
+                r["revision"],
+                r["report"]["errors"],
+                r["report"]["warnings"],
+                r["mcp_url"]
+                    .as_str()
+                    .map(|u| format!("; MCP server: {u}"))
+                    .unwrap_or_default()
             ),
             r,
         ),

@@ -616,6 +616,18 @@ pub fn served_spec(c: &Compiled, server: &str, idp_base: &str, name: &str) -> Va
             "servers".into(),
             json!([{ "url": server, "description": description }]),
         );
+        if c.settings.mcp.enabled {
+            // The mock's MCP server lives below the mock root, which is the
+            // server URL without the spec's path prefix.
+            let base = server
+                .strip_suffix(c.path_prefix())
+                .filter(|_| !c.path_prefix().is_empty())
+                .unwrap_or(server);
+            m.insert(
+                "x-rustybin-mcp".into(),
+                json!({ "url": format!("{base}/_rustybin/mcp") }),
+            );
+        }
         if c.settings.security.enabled {
             if let Some(Value::Object(schemes)) = m
                 .get_mut("components")

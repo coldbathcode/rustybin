@@ -489,7 +489,36 @@ pub fn detail(
         );
         m.insert("revisions".into(), json!(revisions(s)));
         m.insert("draft_changes".into(), json!(draft_changes(s)));
+        m.insert("mcp".into(), mcp_detail(s, root, host));
         m.insert("limits".into(), limits);
+    }
+    out
+}
+
+/// The mock's MCP server: URLs, on/off and the tools of the live revision
+/// (the draft's before the first deploy).
+fn mcp_detail(s: &Snapshot, root: &str, host: Option<&HostBase>) -> Value {
+    let c = s.live.as_ref().unwrap_or(&s.draft);
+    let set = c.mcp_tools();
+    let tools: Vec<Value> = set
+        .tools
+        .iter()
+        .map(|t| {
+            json!({
+                "name": t.name, "operation": t.operation, "method": t.method, "path": t.path,
+                "read_only": t.read_only, "destructive": t.destructive,
+            })
+        })
+        .collect();
+    let mut out = json!({
+        "url": format!("{root}/_rustybin/mcp"),
+        "enabled": c.settings.mcp.enabled,
+        "serving": s.live.is_some() && s.enabled && c.settings.mcp.enabled,
+        "tools": tools,
+        "skipped": set.skipped,
+    });
+    if let Some(h) = host.filter(|_| !s.owner.is_visitor()) {
+        out["host_url"] = json!(h.url(&s.name, "/_rustybin/mcp"));
     }
     out
 }
@@ -986,11 +1015,13 @@ impl Svc {
     pub fn deploy(&self, name: &str, force: bool) -> SvcResult<Value> {
         self.manageable(name)?;
         let s = self.store().deploy(name, force)?;
+        let root = self.links.mock_base(&s.owner, &s.name);
         Ok(json!({
             "deployed": true,
             "revision": s.live.as_ref().map(|l| l.revision),
             "report": { "ok": s.draft.report.ok, "errors": s.draft.report.errors, "warnings": s.draft.report.warnings },
             "mock": s.summary(),
+            "mcp_url": s.draft.settings.mcp.enabled.then(|| format!("{root}/_rustybin/mcp")),
         }))
     }
 

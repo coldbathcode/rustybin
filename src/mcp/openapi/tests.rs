@@ -460,6 +460,10 @@ async fn the_spec_is_a_resource() {
         doc["servers"][0]["url"],
         "http://rustybin.test/mock/petstore/v1"
     );
+    assert_eq!(
+        doc["x-rustybin-mcp"]["url"],
+        "http://rustybin.test/mock/petstore/_rustybin/mcp"
+    );
     let (status, _) = rpc(
         &app,
         PETSTORE,
@@ -681,4 +685,67 @@ async fn visitor_mocks_serve_mcp_on_the_mocks_domain_only() {
     assert_eq!(status, StatusCode::OK, "{text}");
     let r: Value = serde_json::from_str(&text).expect("json");
     assert_eq!(r["result"]["structuredContent"]["body"]["id"], 5, "{r}");
+}
+
+#[tokio::test]
+async fn the_mock_detail_describes_its_mcp_server() {
+    let mut config = Config::for_tests();
+    config.mocks_host = Some("mock.test".into());
+    let app = test_app_with(test_state_with(config));
+    let get = |uri: &str| {
+        Request::builder()
+            .uri(uri)
+            .header("host", "rustybin.test")
+            .body(Body::empty())
+            .expect("request")
+    };
+    let (_, text) = send(&app, get("/_rustybin/mocks/petstore")).await;
+    let d: Value = serde_json::from_str(&text).expect("json");
+    let mcp = &d["mcp"];
+    assert_eq!(
+        mcp["url"],
+        "http://rustybin.test/mock/petstore/_rustybin/mcp"
+    );
+    assert_eq!(mcp["host_url"], "http://petstore.mock.test/_rustybin/mcp");
+    assert_eq!(mcp["enabled"], true);
+    assert_eq!(mcp["serving"], true);
+    assert_eq!(mcp["tools"].as_array().map(Vec::len), Some(6));
+    assert_eq!(mcp["tools"][0]["name"], "listPets");
+    assert_eq!(mcp["skipped"], json!([]));
+
+    patch_petstore(
+        &app,
+        json!({ "mcp": { "enabled": false, "exclude": ["listPets"] } }),
+    )
+    .await;
+    let (_, text) = send(&app, get("/_rustybin/mocks/petstore")).await;
+    let d: Value = serde_json::from_str(&text).expect("json");
+    // The live revision still serves; the draft is not deployed yet.
+    assert_eq!(d["mcp"]["serving"], true);
+    assert!(d["draft_changes"].to_string().contains("mcp"));
+    assert_eq!(d["settings"]["mcp"]["enabled"], false);
+
+    let resp = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/_rustybin/mocks/petstore/deploy",
+            &json!({}),
+        ))
+        .await
+        .expect("response");
+    let out: Value = serde_json::from_str(&body_string(resp).await).expect("json");
+    assert_eq!(out["mcp_url"], Value::Null);
+    let (_, text) = send(&app, get("/_rustybin/mocks/petstore")).await;
+    let d: Value = serde_json::from_str(&text).expect("json");
+    assert_eq!(d["mcp"]["serving"], false);
+    assert_eq!(d["mcp"]["skipped"][0]["operation"], "listPets");
+    let (_, text) = send(&app, get("/mock/petstore/_rustybin/openapi.json")).await;
+    let doc: Value = serde_json::from_str(&text).expect("json");
+    assert!(doc.get("x-rustybin-mcp").is_none());
+
+    // Exported as configuration.
+    let (_, text) = send(&app, get("/_rustybin/mocks/petstore/export")).await;
+    assert!(text.contains("mcp:"), "{text}");
+    assert!(text.contains("- listPets"), "{text}");
 }

@@ -1,7 +1,7 @@
 // Detail of one mock (#/mocks/{name}[/{tab}[/{operation}]]): header with the
 // URL, on/off switch, Deploy and more actions, then tabs for operations (with
-// the response editor), Try it, Security, Settings, Traffic and the deploy
-// report with revision history.
+// the response editor), Try it, Security, the mock's MCP server, Settings,
+// Traffic and the deploy report with revision history.
 import { h, replace, clear, card, icon, notice, spinner, empty, methodBadge, badge, input, select, textarea, toast, copyButton, copyText, toggleSwitch, tabs, kvgrid, debounce } from '../../lib/dom.js';
 import { copyableCode } from '../../lib/format.js';
 import { toCurl, trimBase } from '../../lib/http.js';
@@ -9,12 +9,12 @@ import { jsonView } from '../../lib/format.js';
 import { api, errorText, report, readOnlyReason, mockReadOnly, setMockBase, nameProblem, statePill, securityLabel, relTime, groupByTag, download, readFile, sampleToRequest, MODES, COLLECTIONS, isStateful, plural, dispositionName } from '../../lib/mockapi.js';
 import * as visit from '../../lib/visit.js';
 import { operationEditor, checkIcon, responseChecks } from './operation.js';
-import { tryPanel, securityPanel, trafficPanel } from './panels.js';
+import { tryPanel, securityPanel, trafficPanel, mcpPanel } from './panels.js';
 import { checksFailed, wireDrop } from './wizard.js';
 import * as settings from '../../lib/settings.js';
 
 const enc = encodeURIComponent;
-const TABS = [['operations', 'Operations'], ['try', 'Try it'], ['data', 'Data'], ['security', 'Security'], ['settings', 'Settings'], ['traffic', 'Traffic'], ['report', 'Deploy report']];
+const TABS = [['operations', 'Operations'], ['try', 'Try it'], ['data', 'Data'], ['security', 'Security'], ['mcp', 'MCP server'], ['settings', 'Settings'], ['traffic', 'Traffic'], ['report', 'Deploy report']];
 const SOURCE_LABEL = { examples: 'Example', generated: 'Generated', static: 'Static', stateful: 'Stateful', override: 'Override', custom: 'Custom', rules: 'Rules' };
 
 /** Mount the detail of mock `name` into `root`. Returns {destroy, route(sub)}. */
@@ -326,6 +326,7 @@ export function mountDetail(root, name, sub) {
     panels.operations = operationsPanel();
     panels.try = tryPanel(ctx);
     panels.security = securityPanel(ctx);
+    panels.mcp = mcpPanel(ctx);
     panels.settings = settingsPanel();
     panels.traffic = trafficPanel(ctx);
     panels.report = reportPanel();

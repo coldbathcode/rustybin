@@ -301,6 +301,42 @@ def run_theme(browser, theme):
 
     step("mock apis (detail, try it, on/off, rule preview, collection, duplicate, stateful, wizard, bulk)", mocks)
 
+    def mock_mcp():
+        mcp_url = BASE + "/mock/petstore/_rustybin/mcp"
+        page.evaluate("location.hash = '#/mocks/petstore/mcp'")
+        tab = page.get_by_role("tab", name="MCP server")
+        expect(tab).to_have_attribute("aria-selected", "true")
+        panel = page.locator(".card", has_text="Connect an MCP client")
+        panel.locator("text=Serving 6 tools").wait_for()
+        expect(panel.locator("pre.code").first).to_have_text(f"claude mcp add --transport http petstore '{mcp_url}'")
+        snippet = json.loads(panel.locator("pre.code").nth(1).inner_text())
+        assert snippet == {"mcpServers": {"petstore": {"type": "http", "url": mcp_url}}}, snippet
+        assert_icons_sized(page, "the mock MCP tab")
+        shot(page, theme, "20-mock-mcp")
+        # A tool call through the MCP server shows in Traffic with its badge.
+        call = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+            "name": "getPetById", "arguments": {"petId": 5},
+            "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                      "io.modelcontextprotocol/clientCapabilities": {}}}})
+        status = http("POST", "/mock/petstore/_rustybin/mcp", {
+            "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "getPetById"}, call)
+        assert status == 200, f"tools/call answered {status}"
+        page.get_by_role("tab", name="Traffic").click()
+        page.locator(".mt-row", has_text="/v1/pets/5").locator(".badge", has_text="MCP").first.wait_for()
+        # Untick an operation: saved to the draft, live after deploy.
+        page.get_by_role("tab", name="MCP server").click()
+        page.get_by_label("Tool for deletePet").uncheck()
+        page.locator(".card", has_text="Tools").get_by_role("button", name="Save to draft").click()
+        page.wait_for_selector("text=Saved to the draft")
+        page.locator(".mock-head").get_by_role("button", name="Deploy").click()
+        panel.locator("text=Serving 5 tools").wait_for()
+        # Restore the sample for the next theme.
+        http("PATCH", "/_rustybin/mocks/petstore", {"Content-Type": "application/json"},
+             json.dumps({"mcp": {"enabled": True, "exclude": []}, "deploy": True}))
+
+    step("mock MCP server tab (connect snippets, traffic badge, exclude)", mock_mcp)
+
     def agent_panel():
         # Open control plane and no admin token held: the command has no header.
         goto_view(page, "mocks")

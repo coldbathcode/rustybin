@@ -380,6 +380,14 @@ export function outcomeBadge(o) {
 }
 
 /** ctx: {name, readOnly, detail(), refresh()}. Returns {el, show(), destroy(), clearLocal()}. */
+/** A small MCP marker for calls the mock's MCP server sent (tools/call). */
+function mcpBadge(e) {
+  const b = badge('MCP', 'info');
+  b.title = 'Sent by the MCP tool ' + e.tool;
+  b.style.marginRight = '6px';
+  return b;
+}
+
 export function trafficPanel(ctx) {
   let started = false;
   let feed = null;
@@ -469,8 +477,8 @@ export function trafficPanel(ctx) {
       const valid = e.validation && e.validation.length ? h('span', { class: 'check-icon warn', title: e.validation.length + ' validation issue(s)' }, icon('alert')) : e.operation ? h('span', { class: 'check-icon ok', title: 'request matches the spec (or validation is off)' }, icon('check')) : h('span');
       listEl.appendChild(h('button', { class: 'list-item mt-row', type: 'button', 'aria-selected': String(e.seq === selected), onclick: () => { selected = e.seq; render(); } },
         h('span', { class: 'mono tiny muted' }, '#' + e.seq), methodBadge(e.method),
-        h('span', { style: { minWidth: 0 } }, h('div', { class: 'mono ellipsis' }, e.path + (e.query ? '?' + e.query : '')),
-          h('div', { class: 'tiny muted ellipsis' }, [e.operation || 'no operation', e.auth].filter(Boolean).join(' | '))),
+        h('span', { style: { minWidth: 0 } }, h('div', { class: 'mono ellipsis' }, e.channel === 'mcp' ? mcpBadge(e) : null, e.path + (e.query ? '?' + e.query : '')),
+          h('div', { class: 'tiny muted ellipsis' }, [e.operation || 'no operation', e.channel === 'mcp' ? 'MCP tool ' + e.tool : null, e.auth].filter(Boolean).join(' | '))),
         h('span', { class: 'st st-' + Math.floor(e.status / 100) }, String(e.status)),
         h('span', { class: 'mt-outcome' }, outcomeBadge(e.outcome)), valid,
         h('span', { class: 'mono tiny muted mt-time' }, fmtTime(e.timestamp).slice(0, 8))));
@@ -487,6 +495,7 @@ export function trafficPanel(ctx) {
     replace(detailEl, h('div', null,
       h('div', { class: 'row', style: { padding: '10px 14px', borderBottom: '1px solid var(--border)' } },
         methodBadge(e.method), h('span', { class: 'mono break grow' }, e.full_path + (e.query ? '?' + e.query : '')),
+        e.channel === 'mcp' ? badge('MCP tool ' + e.tool, 'info') : null,
         statusBadge(e.status), outcomeBadge(e.outcome)),
       tabs([
         { id: 'request', label: 'Request', render: () => h('div', { class: 'stack-sm', style: { padding: '12px' } },
@@ -549,4 +558,102 @@ export function trafficPanel(ctx) {
       if (feed) { const f = feed; feed = null; f.abort(); }
     },
   };
+}
+
+// ── MCP server ──
+
+function shellQuote(s) {
+  return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
+/** The API key header an MCP client should send to reach secured tools, or null. */
+function mcpKeyHeader(d) {
+  const c = d.credentials || {};
+  if (!c.enabled) return null;
+  const keys = (c.api_key && c.api_key.keys) || [];
+  const key = keys[0] && keys[0] !== '<redacted>' ? keys[0] : '<api-key>';
+  if (c.mode === 'api_key') return { name: c.api_key.header, value: key };
+  if (c.mode === 'spec') {
+    const s = (c.schemes || []).find((x) => x.type === 'api_key' && x.in === 'header');
+    if (s) return { name: s.name, value: key };
+  }
+  return null;
+}
+
+/**
+ * The mock's MCP server (/mock/{name}/_rustybin/mcp): status, connection
+ * snippets for Claude Code and other clients, and which operations are
+ * tools (saved to the draft as settings mcp.enabled / mcp.exclude).
+ */
+export function mcpPanel(ctx) {
+  const el = h('div', { class: 'stack' });
+  let dirty = false;
+  function render() {
+    dirty = false;
+    const d = ctx.detail();
+    const m = d.mcp || { tools: [], skipped: [] };
+    const cfg = (d.settings && d.settings.mcp) || { enabled: true, exclude: [] };
+    const excluded = new Set(cfg.exclude || []);
+    const status = m.serving
+      ? notice('ok', 'Serving ', String(m.tools.length), m.tools.length === 1 ? ' tool' : ' tools', ' from the live revision.')
+      : d.live_revision === null
+        ? notice('info', 'Deploy the mock to start its MCP server.')
+        : !d.enabled
+          ? notice('warn', 'The mock is switched off, so its MCP server answers 404.')
+          : notice('warn', 'The MCP server is disabled in the live revision: switch it on below and deploy.');
+    const url = m.url;
+    const key = mcpKeyHeader(d);
+    let claude = 'claude mcp add --transport http ' + d.name + ' ' + shellQuote(url);
+    if (key) claude += ' --header ' + shellQuote(key.name + ': ' + key.value);
+    const server = { type: 'http', url };
+    if (key) server.headers = { [key.name]: key.value };
+    const json = JSON.stringify({ mcpServers: { [d.name]: server } }, null, 2);
+    const secured = d.credentials && d.credentials.enabled;
+    const connect = card('Connect an MCP client', { hint: 'one tool per operation' }, h('div', { class: 'stack-sm' },
+      status,
+      h('p', { style: { margin: 0 } }, 'Every call runs through this mock (rules, examples, stateful data, mocked security), so a tool returns what the REST call returns. Calls show up in Traffic with an MCP badge.'),
+      h('div', { class: 'row nowrap url-bar' }, h('code', { class: 'grow break' }, url), copyButton(url, { label: 'Copy URL', toast: 'MCP URL copied' })),
+      m.host_url ? h('div', { class: 'row nowrap url-bar' }, h('span', { class: 'tiny muted' }, 'Host'), h('code', { class: 'grow break' }, m.host_url), copyButton(m.host_url, { label: 'Copy', title: 'Copy the host-based MCP URL', toast: 'Host MCP URL copied' })) : null,
+      h('div', { class: 'row', style: { alignItems: 'center' } }, h('strong', { class: 'small' }, 'Claude Code'), h('span', { class: 'grow' }), copyButton(() => claude, { label: 'Copy command' })),
+      codeBlock(claude),
+      h('div', { class: 'row', style: { alignItems: 'center' } }, h('strong', { class: 'small' }, 'Other MCP clients (mcpServers JSON)'), h('span', { class: 'grow' }), copyButton(() => json, { label: 'Copy JSON' })),
+      codeBlock(json),
+      secured ? h('p', { class: 'tiny muted', style: { margin: 0 } }, 'Mocked security is on: the MCP request\'s Authorization header, cookies and API key headers are passed to every call. ',
+        key ? 'The snippets send the API key; ' : '', 'bearer tools need a token, for example from the Security tab.') : null));
+
+    const enabledBox = h('input', { type: 'checkbox', checked: cfg.enabled });
+    const saveBtn = h('button', { class: 'btn primary', type: 'button' }, 'Save to draft');
+    const reasons = new Map((m.skipped || []).filter((s) => !excluded.has(s.operation)).map((s) => [s.operation, s.reason]));
+    const toolOf = new Map((m.tools || []).map((t) => [t.operation, t]));
+    const boxes = [];
+    const rows = (d.operations || []).map((op) => {
+      const reason = reasons.get(op.id);
+      const box = h('input', { type: 'checkbox', checked: !excluded.has(op.id) && !reason, disabled: !!reason || !!ctx.readOnly, 'aria-label': 'Tool for ' + op.id });
+      boxes.push([op.id, box, !!reason]);
+      const tool = toolOf.get(op.id);
+      return h('tr', null,
+        h('td', null, box),
+        h('td', { class: 'mono small' }, tool ? tool.name : op.id),
+        h('td', null, methodBadge(op.method), ' ', h('span', { class: 'mono small' }, op.path)),
+        h('td', { class: 'small' }, reason ? h('span', { class: 'muted' }, reason)
+          : tool ? [tool.read_only ? badge('read only', 'outline') : null, tool.destructive ? badge('destructive', 'warn') : null] : null));
+    });
+    const table = h('table', { class: 'table' },
+      h('thead', null, h('tr', null, h('th', null, 'Tool'), h('th', null, 'Name'), h('th', null, 'Operation'), h('th', null, ''))),
+      h('tbody', null, ...rows));
+    const form = h('fieldset', { class: 'plain stack-sm', disabled: !!ctx.readOnly },
+      h('label', { class: 'check' }, enabledBox, 'Serve an MCP server for this mock'),
+      h('div', { class: 'table-wrap' }, table),
+      ctx.readOnly ? null : h('div', { class: 'row' }, h('span', { class: 'hint grow' }, 'Unticked operations are not tools (settings mcp.exclude). Deploy to publish the change.'), saveBtn));
+    form.addEventListener('change', () => { dirty = true; });
+    saveBtn.addEventListener('click', async () => {
+      const exclude = boxes.filter(([, box, skipped]) => !skipped && !box.checked).map(([id]) => id);
+      saveBtn.disabled = true;
+      const r = await api('PATCH', '/' + enc(ctx.name), { mcp: { enabled: enabledBox.checked, exclude } });
+      saveBtn.disabled = false;
+      if (report(r, 'Saved to the draft. Deploy to publish it.', 'Saving')) { dirty = false; ctx.refresh(); }
+    });
+    replace(el, connect, card('Tools', { hint: 'saved to the draft' }, form));
+  }
+  return { el, update() { if (!dirty) render(); } };
 }
