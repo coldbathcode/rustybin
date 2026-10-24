@@ -252,6 +252,39 @@ pub struct MockSettings {
     pub security: SecuritySettings,
     /// Per-operation settings keyed by operationId.
     pub operations: BTreeMap<String, OperationSettings>,
+    /// The mock's MCP server (`/mock/{name}/_rustybin/mcp`).
+    #[serde(skip_serializing_if = "McpSettings::is_default")]
+    pub mcp: McpSettings,
+}
+
+/// Most entries in `mcp.exclude`.
+pub const MAX_MCP_EXCLUDE: usize = 1000;
+
+/// The MCP server of a mock: one tool per operation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct McpSettings {
+    /// Serve the MCP server (on by default: it exposes nothing the REST
+    /// endpoints do not).
+    pub enabled: bool,
+    /// operationIds that are not tools.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+}
+
+impl Default for McpSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            exclude: Vec::new(),
+        }
+    }
+}
+
+impl McpSettings {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 /// Validation limits that depend on the instance.
@@ -418,6 +451,17 @@ impl MockSettings {
         }
         if self.operations.len() > 1000 {
             return Err("at most 1000 operation entries".into());
+        }
+        if self.mcp.exclude.len() > MAX_MCP_EXCLUDE {
+            return Err(format!("mcp.exclude: at most {MAX_MCP_EXCLUDE} entries"));
+        }
+        if self
+            .mcp
+            .exclude
+            .iter()
+            .any(|e| e.is_empty() || e.len() > 256)
+        {
+            return Err("mcp.exclude: entries are operationIds of 1 to 256 characters".into());
         }
         for (op, cfg) in &self.operations {
             if let Some(d) = cfg.delay_ms {

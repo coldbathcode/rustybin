@@ -88,7 +88,7 @@ static TEMPLATES: &[Template] = &[
 ];
 
 fn visible(profile: &Profile, servers: &[&str]) -> bool {
-    profile.server.is_none_or(|s| servers.contains(&s))
+    profile.serves_demo_data() && profile.server.is_none_or(|s| servers.contains(&s))
 }
 
 fn resource_json(r: &StaticResource) -> Value {

@@ -114,6 +114,7 @@ pub async fn mock_root(
         uri,
         headers,
         body,
+        None,
     )
     .await
 }
@@ -140,6 +141,7 @@ pub async fn mock_sub(
         uri,
         headers,
         body,
+        None,
     )
     .await
 }
@@ -154,6 +156,8 @@ struct Incoming<'a> {
     ip: Option<std::net::IpAddr>,
     started: Instant,
     max_body: usize,
+    /// The MCP tool that sent this request in process (`None`: HTTP).
+    mcp_tool: Option<&'a str>,
 }
 
 struct Outcome<'a> {
@@ -232,6 +236,8 @@ fn capture_entry(
         response_body,
         response_truncated,
         duration_ms: inc.started.elapsed().as_millis() as u64,
+        channel: inc.mcp_tool.map(|_| "mcp"),
+        tool: inc.mcp_tool.map(str::to_string),
     }
 }
 
@@ -243,8 +249,8 @@ fn count(state: &AppState, name: &str, outcome: &'static str) {
     }
 }
 
-/// `/mock/{name}/_rustybin/...` belongs to Rustybin (the served spec), never
-/// to the mock's operations.
+/// `/mock/{name}/_rustybin/...` belongs to Rustybin (the served spec, the
+/// MCP server), never to the mock's operations.
 fn is_reserved_sub_path(sub_path: &str) -> bool {
     sub_path == "/_rustybin" || sub_path.starts_with("/_rustybin/")
 }
@@ -260,8 +266,12 @@ fn add_mock_headers(resp: &mut Response, name: &str, op: Option<&str>) {
     }
 }
 
+/// Answer one request to the mock `name` (everything below `/mock/{name}`
+/// except the reserved `_rustybin` paths). The mock's MCP server calls it in
+/// process for every tool call (`mcp_tool`), so REST and MCP answers are the
+/// same by construction.
 #[allow(clippy::too_many_arguments)]
-async fn serve(
+pub(crate) async fn serve(
     state: AppState,
     name: String,
     ip: Option<std::net::IpAddr>,
@@ -271,6 +281,7 @@ async fn serve(
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
+    mcp_tool: Option<&str>,
 ) -> Response {
     let started = Instant::now();
     let store = &state.mocks;
@@ -282,7 +293,7 @@ async fn serve(
     if is_reserved_sub_path(&sub_path) {
         return problem(
             404,
-            "reserved path: below /_rustybin a mock serves only openapi.json and openapi.yaml",
+            "reserved path: below /_rustybin a mock serves only openapi.json, openapi.yaml and mcp",
             json!({ "mock": name }),
         );
     }
@@ -295,6 +306,7 @@ async fn serve(
         ip,
         started,
         max_body: store.limits().max_captured_body,
+        mcp_tool,
     };
     let live = match store.lookup(&name) {
         Lookup::Missing => {
@@ -652,7 +664,7 @@ fn rewrite_flows(scheme: &mut Value, base: &str) {
 /// Server URL and identity provider base of the served spec. Through a
 /// host-based URL (`petstore.mock.example.com`) the server is that host
 /// itself and the identity provider is the mocks domain.
-fn served_bases(
+pub(crate) fn served_bases(
     c: &Compiled,
     name: &str,
     headers: &HeaderMap,

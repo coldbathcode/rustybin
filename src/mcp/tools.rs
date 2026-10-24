@@ -358,6 +358,9 @@ pub static TOOLS: &[ToolDef] = &[
 
 /// Tools visible on a profile, in deterministic order.
 pub fn list(profile: &Profile) -> Vec<&'static ToolDef> {
+    if !profile.serves_demo_data() {
+        return Vec::new();
+    }
     TOOLS
         .iter()
         .filter(|t| profile.server.is_none_or(|s| t.servers.contains(&s)))

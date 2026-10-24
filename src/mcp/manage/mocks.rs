@@ -244,6 +244,10 @@ pub fn create_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
             Ok(v) => v,
             Err(e) => return e,
         },
+        mcp: match settings_from(args, "mcp") {
+            Ok(v) => v,
+            Err(e) => return e,
+        },
     };
     match svc(ctx, access).create(body) {
         Ok(d) => {
@@ -283,6 +287,10 @@ pub fn update_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
             Ok(v) => v,
             Err(e) => return e,
         },
+        mcp: match settings_from(args, "mcp") {
+            Ok(v) => v,
+            Err(e) => return e,
+        },
         deploy: arg_bool(args, "deploy"),
         force: arg_bool(args, "force"),
     };
@@ -292,9 +300,10 @@ pub fn update_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
         && body.responses.is_none()
         && body.security.is_none()
         && body.operations.is_none()
+        && body.mcp.is_none()
         && body.deploy.is_none();
     if nothing {
-        return err("nothing to change: give spec, responses, security, operations, strip_server_prefix, rename or deploy");
+        return err("nothing to change: give spec, responses, security, operations, mcp, strip_server_prefix, rename or deploy");
     }
     let deployed = body.deploy == Some(true);
     match svc(ctx, access).update(name, body) {

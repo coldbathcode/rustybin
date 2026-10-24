@@ -116,7 +116,7 @@ static PROMPTS: &[PromptDef] = &[
 ];
 
 fn visible(profile: &Profile, p: &PromptDef) -> bool {
-    profile.server.is_none_or(|s| p.servers.contains(&s))
+    profile.serves_demo_data() && profile.server.is_none_or(|s| p.servers.contains(&s))
 }
 
 fn prompt_json(p: &PromptDef) -> Value {

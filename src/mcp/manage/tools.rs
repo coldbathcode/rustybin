@@ -58,6 +58,7 @@ fn settings_props() -> Map<String, Value> {
     m.insert("security".into(), json!({ "type": "object", "description": "Mocked security: enabled, mode (spec, api_key, basic, bearer, jwt, none) and the scheme's settings (keys, users, tokens, issuer, audience, scopes). Same shape as rustybin.yaml." }));
     m.insert("operations".into(), json!({ "type": "object", "description": "Per-operation settings keyed by operationId: respond (status, body, headers, delay_ms), rules, mode, public. Same shape as rustybin.yaml.", "additionalProperties": { "type": "object" } }));
     m.insert("strip_server_prefix".into(), json!({ "type": "boolean", "description": "Serve paths without the servers[0] path prefix (e.g. /v1)" }));
+    m.insert("mcp".into(), json!({ "type": "object", "description": "The mock's own MCP server at /mock/{name}/_rustybin/mcp (one tool per operation): enabled (default true) and exclude (operationIds that are not tools).", "properties": { "enabled": { "type": "boolean" }, "exclude": { "type": "array", "items": { "type": "string" } } }, "additionalProperties": false }));
     m
 }
 
@@ -118,7 +119,7 @@ pub static TOOLS: &[ToolDef] = &[
         props.insert("enabled".into(), json!({ "type": "boolean", "default": true }));
         obj(Value::Object(props), &["spec"])
     }),
-    tool!("update_mock", "Update a mock", "Replace the draft's spec and/or settings (responses, security, operations, strip_server_prefix) or rename it; deploy true publishes the draft (force to ignore check errors). Settings given replace the whole section; use set_operation for one operation.", Right::Manage, ro=false, destructive=false, idem=false, confirm=false, || {
+    tool!("update_mock", "Update a mock", "Replace the draft's spec and/or settings (responses, security, operations, mcp, strip_server_prefix) or rename it; deploy true publishes the draft (force to ignore check errors). Settings given replace the whole section; use set_operation for one operation.", Right::Manage, ro=false, destructive=false, idem=false, confirm=false, || {
         let mut props = settings_props();
         props.insert("name".into(), name_prop());
         props.insert("spec".into(), spec_prop());

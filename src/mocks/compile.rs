@@ -2,9 +2,10 @@
 //! route table + deploy-check report. Requests only ever read it.
 
 use chrono::{DateTime, Utc};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use super::checks::{self, Report};
+use super::mcp::{self, ToolSet};
 use super::model::{MockSettings, SettingsLimits};
 use super::spec::{self, Operation, ParseLimits, ParsedSpec};
 
@@ -28,6 +29,8 @@ pub struct Compiled {
     pub report: Report,
     /// Compiled for a self-service mock (restricted settings and responses).
     pub visitor: bool,
+    /// The MCP tools of this revision, built on first use.
+    mcp_tools: OnceLock<Arc<ToolSet>>,
 }
 
 /// One segment of a path template.
@@ -188,9 +191,17 @@ impl Compiled {
             routes,
             report: Report::default(),
             visitor: limits.settings.visitor,
+            mcp_tools: OnceLock::new(),
         };
         compiled.report = checks::run(&compiled);
         Ok(compiled)
+    }
+
+    /// The MCP tools of this revision (one per operation; built once).
+    pub fn mcp_tools(&self) -> Arc<ToolSet> {
+        self.mcp_tools
+            .get_or_init(|| Arc::new(mcp::build(self)))
+            .clone()
     }
 
     /// The prefix requests must carry below the mock root (`/v1`), if any.

@@ -23,7 +23,8 @@ use super::compile::{Compiled, RouteMatch};
 use super::config_file;
 use super::host::{self, HostBase};
 use super::model::{
-    MockSettings, OperationSettings, ResponseMode, ResponseSettings, Rule, SecuritySettings,
+    McpSettings, MockSettings, OperationSettings, ResponseMode, ResponseSettings, Rule,
+    SecuritySettings,
 };
 use super::request;
 use super::respond::{self, BodyChoice, RequestView};
@@ -207,6 +208,7 @@ pub struct CreateBody {
     pub responses: Option<ResponseSettings>,
     pub security: Option<SecuritySettings>,
     pub operations: Option<BTreeMap<String, OperationSettings>>,
+    pub mcp: Option<McpSettings>,
 }
 
 #[derive(Deserialize)]
@@ -218,6 +220,7 @@ pub struct PatchBody {
     pub responses: Option<ResponseSettings>,
     pub security: Option<SecuritySettings>,
     pub operations: Option<BTreeMap<String, OperationSettings>>,
+    pub mcp: Option<McpSettings>,
     pub deploy: Option<bool>,
     pub force: Option<bool>,
 }
@@ -419,6 +422,9 @@ fn draft_changes(s: &Snapshot) -> Vec<String> {
     }
     if a.security != b.security {
         out.push("security".to_string());
+    }
+    if a.mcp != b.mcp {
+        out.push("mcp".to_string());
     }
     let ids: std::collections::BTreeSet<&String> =
         a.operations.keys().chain(b.operations.keys()).collect();
@@ -810,6 +816,7 @@ impl Svc {
             responses: req.responses.unwrap_or_default(),
             security: req.security.unwrap_or_default(),
             operations: req.operations.unwrap_or_default(),
+            mcp: req.mcp.unwrap_or_default(),
         };
         let compiled = self
             .store()
@@ -917,7 +924,8 @@ impl Svc {
             || req.strip_server_prefix.is_some()
             || req.responses.is_some()
             || req.security.is_some()
-            || req.operations.is_some();
+            || req.operations.is_some()
+            || req.mcp.is_some();
         let compiled = if changes_definition {
             let source = match &req.spec {
                 Some(v) => Some(spec_text(v).map_err(ServiceError::bad_request)?),
@@ -935,6 +943,9 @@ impl Svc {
             }
             if let Some(v) = req.operations {
                 settings.operations = v;
+            }
+            if let Some(v) = req.mcp {
+                settings.mcp = v;
             }
             Some(
                 self.store()

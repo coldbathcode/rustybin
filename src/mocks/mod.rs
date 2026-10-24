@@ -22,6 +22,7 @@ pub mod config_file;
 pub mod handlers;
 pub mod host;
 pub mod leads;
+pub mod mcp;
 pub mod model;
 pub mod persist;
 pub mod request;
@@ -369,7 +370,7 @@ pub fn catalog() -> Vec<Endpoint> {
         )
         .description(
             "POST {spec (text or object), name?, enabled?, deploy? (default true), force?, \
-             strip_server_prefix?, responses?, security?, operations?}. The name defaults to a slug of \
+             strip_server_prefix?, responses?, security?, operations?, mcp?}. The name defaults to a slug of \
              info.title. Deploying runs the checks; errors answer 422 with the report unless force is set.",
         )
         .example(Example::get("List mocks", "/_rustybin/mocks"))
@@ -501,7 +502,7 @@ pub fn catalog() -> Vec<Endpoint> {
             "A mock's details (GET), edit its draft (PATCH) or delete it",
         )
         .description(
-            "PATCH {name?, spec?, strip_server_prefix?, responses?, security?, operations?, deploy?, \
+            "PATCH {name?, spec?, strip_server_prefix?, responses?, security?, operations?, mcp?, deploy?, \
              force?} replaces the given sections of the draft; deploy publishes it.",
         )
         .example(Example::get("Sample mock details", "/_rustybin/mocks/petstore"))
@@ -730,7 +731,8 @@ pub fn openapi_paths() -> Value {
                     "strip_server_prefix": { "type": "boolean" },
                     "responses": { "type": "object" },
                     "security": { "type": "object" },
-                    "operations": { "type": "object" }
+                    "operations": { "type": "object" },
+                    "mcp": { "type": "object", "description": "{enabled, exclude}: the mock's MCP server" }
                 }
             })),
         );

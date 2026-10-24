@@ -866,6 +866,204 @@ pub(crate) fn cached_regex(pattern: &str) -> Option<Regex> {
     compiled
 }
 
+/// `$ref` depth followed by [`inline`].
+pub const INLINE_DEPTH: usize = 8;
+/// Schema nodes [`inline`] writes for one schema.
+pub const INLINE_NODES: usize = 4_000;
+
+/// Keywords whose value is one subschema.
+const SUBSCHEMA_KEYS: &[&str] = &[
+    "items",
+    "additionalProperties",
+    "not",
+    "contains",
+    "propertyNames",
+    "unevaluatedProperties",
+    "unevaluatedItems",
+    "if",
+    "then",
+    "else",
+];
+/// Keywords whose value is a list of subschemas.
+const SUBSCHEMA_LISTS: &[&str] = &["allOf", "anyOf", "oneOf", "prefixItems"];
+/// OpenAPI keywords that are not JSON Schema.
+const OPENAPI_ONLY: &[&str] = &["nullable", "discriminator", "xml", "externalDocs"];
+
+/// A self-contained JSON Schema (what MCP clients expect) from an OpenAPI
+/// schema: `$ref`s are replaced by their targets, to [`INLINE_DEPTH`] (a
+/// recursive or deeper reference becomes `{}` with a description); 3.0
+/// `nullable` becomes a `null` type, boolean exclusive bounds become numeric
+/// ones, `example` becomes `examples`, OpenAPI-only keywords and `x-`
+/// extensions are dropped, and `readOnly` (requests) or `writeOnly`
+/// (responses) properties are left out.
+pub fn inline(schema: &Value, root: &Value, direction: Direction) -> Value {
+    let mut budget = INLINE_NODES;
+    let mut stack = Vec::new();
+    inline_node(schema, root, direction, &mut stack, &mut budget)
+}
+
+fn inline_node(
+    schema: &Value,
+    root: &Value,
+    direction: Direction,
+    stack: &mut Vec<String>,
+    budget: &mut usize,
+) -> Value {
+    let Value::Object(obj) = schema else {
+        // `true` / `false` schemas (3.1) stay as they are.
+        return schema.clone();
+    };
+    if *budget == 0 {
+        return json!({ "description": "Not expanded: the schema is too large to inline" });
+    }
+    *budget -= 1;
+    if let Some(reference) = obj.get("$ref").and_then(Value::as_str) {
+        if stack.iter().any(|s| s == reference) || stack.len() >= INLINE_DEPTH {
+            return json!({
+                "description": format!("Recursive or deeply nested reference {reference}: not expanded")
+            });
+        }
+        let Ok(target) = resolve_pointer(root, reference) else {
+            return json!({});
+        };
+        stack.push(reference.to_string());
+        let mut out = inline_node(target, root, direction, stack, budget);
+        stack.pop();
+        // 3.1 allows annotations next to `$ref`; they describe this use.
+        if let Value::Object(o) = &mut out {
+            for key in ["title", "description"] {
+                if let Some(v) = obj.get(key) {
+                    o.insert(key.into(), v.clone());
+                }
+            }
+        }
+        return out;
+    }
+    let mut out = Map::new();
+    for (key, value) in obj {
+        let key = key.as_str();
+        if key.starts_with("x-") || OPENAPI_ONLY.contains(&key) {
+            continue;
+        }
+        if key == "example" {
+            if !obj.contains_key("examples") {
+                out.insert("examples".into(), json!([value]));
+            }
+            continue;
+        }
+        if key == "examples" && !value.is_array() {
+            // A 3.0 schema has no `examples`; a map is not valid JSON Schema.
+            continue;
+        }
+        if key == "properties" || key == "patternProperties" {
+            let Some(props) = value.as_object() else {
+                continue;
+            };
+            let mut kept = Map::new();
+            for (name, prop) in props {
+                if key == "properties" && hidden(prop, root, direction) {
+                    continue;
+                }
+                kept.insert(
+                    name.clone(),
+                    inline_node(prop, root, direction, stack, budget),
+                );
+            }
+            out.insert(key.into(), Value::Object(kept));
+            continue;
+        }
+        if SUBSCHEMA_KEYS.contains(&key) {
+            let inlined = match value {
+                // Draft 4 tuple form of `items`.
+                Value::Array(list) => Value::Array(
+                    list.iter()
+                        .map(|s| inline_node(s, root, direction, stack, budget))
+                        .collect(),
+                ),
+                other => inline_node(other, root, direction, stack, budget),
+            };
+            out.insert(key.into(), inlined);
+            continue;
+        }
+        if SUBSCHEMA_LISTS.contains(&key) {
+            if let Value::Array(list) = value {
+                out.insert(
+                    key.into(),
+                    Value::Array(
+                        list.iter()
+                            .map(|s| inline_node(s, root, direction, stack, budget))
+                            .collect(),
+                    ),
+                );
+            }
+            continue;
+        }
+        out.insert(key.into(), value.clone());
+    }
+    // `required` must not name the properties left out above.
+    if let (Some(Value::Object(props)), Some(Value::Array(required))) =
+        (obj.get("properties"), out.get_mut("required"))
+    {
+        required.retain(|r| {
+            r.as_str()
+                .and_then(|n| props.get(n))
+                .is_none_or(|p| !hidden(p, root, direction))
+        });
+    }
+    for (exclusive, bound) in [
+        ("exclusiveMinimum", "minimum"),
+        ("exclusiveMaximum", "maximum"),
+    ] {
+        if let Some(Value::Bool(flag)) = out.get(exclusive).cloned() {
+            out.remove(exclusive);
+            if flag {
+                if let Some(limit) = out.remove(bound) {
+                    out.insert(exclusive.into(), limit);
+                }
+            }
+        }
+    }
+    if obj.get("nullable").and_then(Value::as_bool) == Some(true) {
+        if out.contains_key("type") || out.contains_key("enum") {
+            make_nullable(&mut out);
+        } else if !out.is_empty() {
+            // `nullable` next to `allOf` (a common 3.0 idiom for a nullable `$ref`).
+            return json!({ "anyOf": [Value::Object(out), { "type": "null" }] });
+        }
+    }
+    Value::Object(out)
+}
+
+/// Is this property left out in `direction` (`readOnly` in requests,
+/// `writeOnly` in responses)?
+fn hidden(prop: &Value, root: &Value, direction: Direction) -> bool {
+    let flag = match direction {
+        Direction::Request => "readOnly",
+        Direction::Response => "writeOnly",
+    };
+    prop.get(flag).and_then(Value::as_bool) == Some(true)
+        || deref(prop, root).get(flag).and_then(Value::as_bool) == Some(true)
+}
+
+/// 3.0 `nullable: true` in JSON Schema terms.
+fn make_nullable(out: &mut Map<String, Value>) {
+    match out.get_mut("type") {
+        Some(Value::String(t)) => {
+            let t = t.clone();
+            out.insert("type".into(), json!([t, "null"]));
+        }
+        Some(Value::Array(types)) if !types.iter().any(|t| t == "null") => {
+            types.push(json!("null"));
+        }
+        _ => {}
+    }
+    if let Some(Value::Array(values)) = out.get_mut("enum") {
+        if !values.iter().any(Value::is_null) {
+            values.push(Value::Null);
+        }
+    }
+}
+
 /// Validate `value` against `schema`; at most 50 issues.
 pub fn validate(value: &Value, schema: &Value, root: &Value, direction: Direction) -> Vec<Issue> {
     let mut v = Validator {
@@ -1290,6 +1488,103 @@ mod tests {
                 "Square": { "type": "object", "required": ["kind", "side"], "properties": { "kind": { "type": "string" }, "side": { "type": "number" } } }
             }}
         })
+    }
+
+    #[test]
+    fn inline_resolves_refs_and_converts_the_openapi_dialect() {
+        let root = components();
+        let pet = json!({ "$ref": "#/components/schemas/Pet" });
+        let req = inline(&pet, &root, Direction::Request);
+        let props = req["properties"].as_object().expect("properties");
+        // readOnly id is not part of a request, writeOnly password is.
+        assert!(!props.contains_key("id"));
+        assert!(props.contains_key("password"));
+        assert_eq!(req["required"], json!(["name"]));
+        assert_eq!(props["tag"]["type"], json!(["string", "null"]));
+        assert_eq!(props["weight"]["exclusiveMinimum"], json!(0));
+        assert!(props["weight"].get("minimum").is_none());
+        // Person is inlined; its self references stop with a description.
+        let owner = &props["owner"];
+        assert_eq!(owner["properties"]["email"]["format"], "email");
+        let best = &owner["properties"]["best"];
+        assert!(best.get("properties").is_none());
+        assert!(best["description"]
+            .as_str()
+            .is_some_and(|d| d.contains("Recursive")));
+        let friends = &owner["properties"]["friends"]["items"];
+        assert!(friends["description"]
+            .as_str()
+            .is_some_and(|d| d.contains("Recursive")));
+        assert!(!req.to_string().contains("$ref"));
+
+        let resp = inline(&pet, &root, Direction::Response);
+        let props = resp["properties"].as_object().expect("properties");
+        assert!(props.contains_key("id"));
+        assert!(!props.contains_key("password"));
+        assert_eq!(resp["required"], json!(["id", "name"]));
+
+        let shape = inline(
+            &json!({ "$ref": "#/components/schemas/Shape" }),
+            &root,
+            Direction::Response,
+        );
+        assert!(shape.get("discriminator").is_none());
+        assert_eq!(shape["oneOf"][0]["required"], json!(["kind", "r"]));
+    }
+
+    #[test]
+    fn inline_handles_nullable_refs_examples_and_extensions() {
+        let root = components();
+        let s = json!({
+            "nullable": true,
+            "allOf": [{ "$ref": "#/components/schemas/Circle" }],
+            "example": { "kind": "circle", "r": 1 },
+            "x-internal": true
+        });
+        let out = inline(&s, &root, Direction::Response);
+        assert_eq!(out["anyOf"][1], json!({ "type": "null" }));
+        let inner = &out["anyOf"][0];
+        assert_eq!(inner["examples"], json!([{ "kind": "circle", "r": 1 }]));
+        assert!(inner.get("x-internal").is_none());
+        assert_eq!(inner["allOf"][0]["properties"]["r"]["type"], "number");
+        let e = inline(
+            &json!({ "type": "string", "enum": ["a"], "nullable": true }),
+            &root,
+            Direction::Request,
+        );
+        assert_eq!(e["enum"], json!(["a", null]));
+        // An unresolvable reference is an empty (accept anything) schema.
+        let missing = inline(&json!({ "$ref": "#/nope" }), &root, Direction::Request);
+        assert_eq!(missing, json!({}));
+        assert_eq!(inline(&json!(true), &root, Direction::Request), json!(true));
+    }
+
+    #[test]
+    fn inline_is_bounded() {
+        // A wide schema of many references stops at the node budget.
+        let mut schemas = Map::new();
+        for i in 0..20 {
+            let mut props = Map::new();
+            for j in 0..20 {
+                props.insert(
+                    format!("p{j}"),
+                    json!({ "$ref": format!("#/components/schemas/S{}", (i + 1) % 20) }),
+                );
+            }
+            schemas.insert(
+                format!("S{i}"),
+                json!({ "type": "object", "properties": props }),
+            );
+        }
+        let root = json!({ "components": { "schemas": schemas } });
+        let out = inline(
+            &json!({ "$ref": "#/components/schemas/S0" }),
+            &root,
+            Direction::Request,
+        );
+        let text = out.to_string();
+        assert!(text.contains("too large to inline"));
+        assert!(text.len() < 2_000_000);
     }
 
     #[test]

@@ -51,6 +51,12 @@ pub struct MockCapture {
     pub response_body: Option<String>,
     pub response_truncated: bool,
     pub duration_ms: u64,
+    /// `mcp` when the mock's MCP server sent the request (a tool call).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<&'static str>,
+    /// The MCP tool that sent it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
 }
 
 impl MockCapture {
@@ -66,6 +72,7 @@ impl MockCapture {
             + self.body_base64.as_ref().map_or(0, String::len)
             + self.response_body.as_ref().map_or(0, String::len)
             + self.full_path.len()
+            + self.tool.as_ref().map_or(0, String::len)
             + self.query.as_ref().map_or(0, String::len)
             + self
                 .params
@@ -267,6 +274,8 @@ mod tests {
             response_body: None,
             response_truncated: false,
             duration_ms: 0,
+            channel: None,
+            tool: None,
         }
     }
 

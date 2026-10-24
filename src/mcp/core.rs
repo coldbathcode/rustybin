@@ -10,6 +10,7 @@ use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 
 use super::manage;
+use super::openapi;
 use super::protocol::{self, RpcError, Version};
 use super::sessions::{CancelToken, Session};
 use super::{prompts, resources, tools, Profile, Shared};
@@ -170,11 +171,13 @@ pub fn server_info(profile: &Profile, version: Version) -> Value {
         info["title"] = json!(profile.title());
     }
     if version >= Version::V2025_11_25 {
-        info["description"] = json!(if profile.is_manage() {
-            manage::SERVER_DESCRIPTION
-        } else {
-            "Mock MCP server for API and AI gateway demos. All data is fake and deterministic."
-        });
+        info["description"] = match (profile.family, &profile.mock) {
+            (super::Family::Manage, _) => json!(manage::SERVER_DESCRIPTION),
+            (super::Family::OpenApi, Some(m)) => json!(m.server_description()),
+            _ => json!(
+                "Mock MCP server for API and AI gateway demos. All data is fake and deterministic."
+            ),
+        };
     }
     info
 }
@@ -186,6 +189,11 @@ pub fn capabilities(profile: &Profile, version: Version) -> Value {
     if profile.is_manage() {
         caps.insert("resources".into(), json!({ "listChanged": false }));
         caps.insert("prompts".into(), json!({ "listChanged": false }));
+        caps.insert("logging".into(), json!({}));
+        return Value::Object(caps);
+    }
+    if profile.family == super::Family::OpenApi {
+        caps.insert("resources".into(), json!({ "listChanged": false }));
         caps.insert("logging".into(), json!({}));
         return Value::Object(caps);
     }
@@ -206,6 +214,9 @@ pub fn capabilities(profile: &Profile, version: Version) -> Value {
 pub fn instructions(profile: &Profile) -> String {
     if profile.is_manage() {
         return manage::INSTRUCTIONS.to_string();
+    }
+    if let Some(m) = &profile.mock {
+        return m.instructions();
     }
     format!(
         "Rustybin mock MCP server ({}). Everything is fake test data for gateway demos: \
@@ -286,8 +297,9 @@ struct RenderedList {
 /// when that page holds the whole list; `None` otherwise (the caller then
 /// dispatches normally).
 pub fn cached_list(ctx: &CallCtx, method: &str, params: &Value) -> Option<Arc<str>> {
-    // The management server's lists depend on the caller's rights.
-    if ctx.profile.is_manage() {
+    // The management server's lists depend on the caller's rights, and a
+    // mock's on its live revision.
+    if !ctx.profile.serves_demo_data() {
         return None;
     }
     let m = STATIC_LISTS.iter().position(|x| *x == method)?;
@@ -426,6 +438,11 @@ pub fn paginate<T: Clone>(
 pub async fn dispatch(ctx: &CallCtx, method: &str, params: &Value) -> Result<Value, RpcError> {
     if ctx.profile.is_manage() {
         return manage::dispatch(ctx, method, params)
+            .await
+            .map(|result| finalize(ctx, result));
+    }
+    if ctx.profile.family == super::Family::OpenApi {
+        return openapi::dispatch(ctx, method, params)
             .await
             .map(|result| finalize(ctx, result));
     }

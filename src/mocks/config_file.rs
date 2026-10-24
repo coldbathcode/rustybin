@@ -23,7 +23,9 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use super::model::{MockSettings, OperationSettings, ResponseSettings, SecuritySettings};
+use super::model::{
+    McpSettings, MockSettings, OperationSettings, ResponseSettings, SecuritySettings,
+};
 use super::spec::{parse_document, slugify};
 use super::store::{Definition, Snapshot};
 
@@ -69,6 +71,8 @@ pub struct MockDoc {
     pub security: SecuritySettings,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub operations: BTreeMap<String, OperationSettings>,
+    #[serde(default, skip_serializing_if = "McpSettings::is_default")]
+    pub mcp: McpSettings,
 }
 
 impl MockDoc {
@@ -78,6 +82,7 @@ impl MockDoc {
             responses: self.responses.clone(),
             security: self.security.clone(),
             operations: self.operations.clone(),
+            mcp: self.mcp.clone(),
         }
     }
 }
@@ -365,6 +370,12 @@ pub fn export(snapshots: &[Snapshot], reveal: bool) -> String {
                     serde_json::to_value(&settings.operations).unwrap_or(Value::Null),
                 );
             }
+            if !settings.mcp.is_default() {
+                doc.insert(
+                    "mcp".into(),
+                    serde_json::to_value(&settings.mcp).unwrap_or(Value::Null),
+                );
+            }
             doc.insert("spec_inline".into(), c.spec.root.clone());
             Value::Object(doc)
         })
@@ -440,7 +451,11 @@ pub fn json_schema() -> Value {
             "type": "object",
             "description": "Keyed by operationId",
             "additionalProperties": operation
-        }
+        },
+        "mcp": object(json!({
+            "enabled": { "type": "boolean", "default": true, "description": "Serve the mock's MCP server at /mock/{name}/_rustybin/mcp" },
+            "exclude": { "type": "array", "items": { "type": "string" }, "description": "operationIds that are not tools" }
+        }))
     }));
     if let Value::Object(m) = &mut mock {
         m.insert("required".into(), json!(["name"]));

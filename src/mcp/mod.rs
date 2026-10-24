@@ -21,6 +21,7 @@ pub mod auth;
 pub mod core;
 pub mod data;
 pub mod manage;
+pub mod openapi;
 pub mod prompts;
 pub mod protocol;
 pub mod resources;
@@ -172,13 +173,15 @@ pub enum Access {
     ApiKey,
 }
 
-/// Which server a profile serves: the mock demo server (`/mcp*`) or the
-/// management server (`/_rustybin/mcp`, see [`manage`]). Both share the
-/// protocol and transport code and differ in their tool registries.
+/// Which server a profile serves: the mock demo server (`/mcp*`), the
+/// management server (`/_rustybin/mcp`, see [`manage`]) or the server of an
+/// OpenAPI mock (`/mock/{name}/_rustybin/mcp`, see [`openapi`]). They share
+/// the protocol and transport code and differ in their tool registries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Family {
     Mock,
     Manage,
+    OpenApi,
 }
 
 /// One served MCP server variant.
@@ -191,6 +194,9 @@ pub struct Profile {
     /// Tool/resource/prompt subset (`None` = everything).
     pub server: Option<&'static str>,
     pub family: Family,
+    /// The OpenAPI mock this profile serves (`Family::OpenApi` only; built
+    /// per request from the live revision).
+    pub mock: Option<Arc<openapi::MockTarget>>,
 }
 
 impl Profile {
@@ -201,6 +207,7 @@ impl Profile {
             access: Access::Open,
             server: None,
             family: Family::Mock,
+            mock: None,
         }
     }
 
@@ -211,6 +218,7 @@ impl Profile {
             access: Access::OAuth,
             server: None,
             family: Family::Mock,
+            mock: None,
         }
     }
 
@@ -221,6 +229,7 @@ impl Profile {
             access: Access::ApiKey,
             server: None,
             family: Family::Mock,
+            mock: None,
         }
     }
 
@@ -232,6 +241,7 @@ impl Profile {
             access: Access::Open,
             server: Some(server),
             family: Family::Mock,
+            mock: None,
         })
     }
 
@@ -243,6 +253,19 @@ impl Profile {
             access: Access::Open,
             server: None,
             family: Family::Manage,
+            mock: None,
+        }
+    }
+
+    /// The server of one OpenAPI mock (session namespace `mock:<name>`).
+    pub fn openapi(target: Arc<openapi::MockTarget>) -> Self {
+        Self {
+            key: format!("{}{}", openapi::PROFILE_PREFIX, target.name),
+            path: openapi::path_for(&target.name),
+            access: Access::Open,
+            server: None,
+            family: Family::OpenApi,
+            mock: Some(target),
         }
     }
 
@@ -250,9 +273,18 @@ impl Profile {
         self.family == Family::Manage
     }
 
+    /// Does this profile serve the fake demo tools, resources and prompts?
+    pub fn serves_demo_data(&self) -> bool {
+        self.family == Family::Mock
+    }
+
     pub fn server_name(&self) -> String {
         match (self.family, self.server) {
             (Family::Manage, _) => manage::SERVER_NAME.to_string(),
+            (Family::OpenApi, _) => match &self.mock {
+                Some(m) => format!("rustybin-mock-{}", m.name),
+                None => "rustybin-mock".to_string(),
+            },
             (_, Some(s)) => format!("rustybin-mcp-{s}"),
             (_, None) => "rustybin-mcp".to_string(),
         }
@@ -261,6 +293,10 @@ impl Profile {
     pub fn title(&self) -> String {
         match (self.family, self.server, self.access) {
             (Family::Manage, _, _) => "Rustybin management".into(),
+            (Family::OpenApi, _, _) => match &self.mock {
+                Some(m) => m.title(),
+                None => "Rustybin mock".into(),
+            },
             (_, Some(s), _) => format!("Rustybin MCP: {s}"),
             (_, None, Access::OAuth) => "Rustybin MCP (OAuth protected)".into(),
             (_, None, Access::ApiKey) => "Rustybin MCP (API key)".into(),
@@ -398,6 +434,12 @@ pub fn router_with(shared: Arc<Shared>) -> Router<AppState> {
             "/mcp/servers/{name}",
             post(named_handler).get(named_handler).delete(named_handler),
         )
+        .route(
+            "/mock/{name}/_rustybin/mcp",
+            post(openapi::handler)
+                .get(openapi::handler)
+                .delete(openapi::handler),
+        )
         .route("/mcp/sse", get(transport_sse_legacy::sse_handler))
         .route(
             "/mcp/messages",
@@ -416,6 +458,9 @@ const DISCOVER_BODY: &str = r#"{"jsonrpc":"2.0","id":1,"method":"server/discover
 const TOOLS_LIST_BODY: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
 const WEATHER_BODY: &str = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_weather","arguments":{"city":"Paris"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
 const MODERN_ACCEPT: &str = "application/json, text/event-stream";
+const MOCK_MCP: &str = "/mock/petstore/_rustybin/mcp";
+const MOCK_INIT_BODY: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"demo","version":"1.0.0"}}}"#;
+const MOCK_CALL_BODY: &str = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"getPetById","arguments":{"petId":1},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
 
 fn modern(ex: Example, method: &'static str) -> Example {
     ex.header("Accept", MODERN_ACCEPT)
@@ -526,6 +571,42 @@ pub fn catalog() -> Vec<Endpoint> {
         .example(
             modern(Example::post("Devtools server tools/list", "/mcp/servers/devtools"), "tools/list")
                 .json(TOOLS_LIST_BODY),
+        ),
+        Endpoint::new(
+            "/mock/{name}/_rustybin/mcp",
+            &["POST", "GET", "DELETE"],
+            category::MOCKS,
+            "MCP server of an OpenAPI mock: one tool per operation",
+        )
+        .description(
+            "Every deployed mock is also an MCP server (Streamable HTTP, the same protocol versions \
+             as /mcp): one tool per operation (named after the operationId, arguments from the path, \
+             query, header and cookie parameters plus `body`), the served spec as a resource. Each \
+             call runs through the mock (rules, examples, stateful data, mocked security, captures), \
+             so the tool returns what the REST call would: structuredContent {status, body}, and a \
+             status outside 2xx is a tool error. Credentials for mocked security come from the MCP \
+             request (Authorization, cookies, the API key headers and query parameters of the spec). \
+             On RUSTYBIN_MOCKS_HOST also at <name>.<domain>/_rustybin/mcp. Off with settings \
+             mcp.enabled false; mcp.exclude hides operations.",
+        )
+        .example(
+            Example::post("initialize (2025-06-18 session)", MOCK_MCP)
+                .header("Accept", MODERN_ACCEPT)
+                .json(MOCK_INIT_BODY),
+        )
+        .example(
+            modern(Example::post("tools/list (2026-07-28)", MOCK_MCP), "tools/list")
+                .json(TOOLS_LIST_BODY),
+        )
+        .example(
+            modern(Example::post("Call getPetById (2026-07-28)", MOCK_MCP), "tools/call")
+                .header("Mcp-Name", "getPetById")
+                .json(MOCK_CALL_BODY),
+        )
+        .example(
+            modern(Example::post("A mock that does not exist (404)", "/mock/missing/_rustybin/mcp"), "tools/list")
+                .json(TOOLS_LIST_BODY)
+                .expect_status(404),
         ),
         Endpoint::new(
             "/mcp/sse",
@@ -643,6 +724,17 @@ pub fn openapi_paths() -> Value {
             );
         }
     }
+    let mut mock_mcp = mcp_path_item("OpenAPI mock MCP server", "mockMcp", None);
+    for op in ["post", "get", "delete"] {
+        mock_mcp[op]["tags"] = json!(["Mocks"]);
+        if let Some(params) = mock_mcp[op]["parameters"].as_array_mut() {
+            params.insert(
+                0,
+                json!({ "name": "name", "in": "path", "required": true,
+                        "schema": { "type": "string" }, "description": "The mock's name" }),
+            );
+        }
+    }
     let prm = json!({
         "tags": ["MCP"],
         "summary": "OAuth 2.0 Protected Resource Metadata (RFC 9728) for /mcp/protected",
@@ -665,6 +757,7 @@ pub fn openapi_paths() -> Value {
         "/mcp/protected": mcp_path_item("Protected MCP", "mcpProtected", Some("bearerAuth")),
         "/mcp/apikey": mcp_path_item("API key MCP", "mcpApiKey", Some("mcpApiKey")),
         "/mcp/servers/{name}": named,
+        "/mock/{name}/_rustybin/mcp": mock_mcp,
         "/mcp/sse": { "get": {
             "tags": ["MCP"],
             "summary": "Legacy HTTP+SSE transport (2024-11-05) event stream",
