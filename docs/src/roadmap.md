@@ -5,11 +5,7 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-- **An MCP server for every OpenAPI mock**: deploy a mock and get an MCP server for
-  the same API at `/mock/<name>/_rustybin/mcp`, one tool per operation, answered by
-  the mock engine (rules, examples, stateful data, mocked security). For MCP gateway
-  demos with the customer's own API instead of fake weather tools.
-- **Harness mode** (after the mock MCP server): Rustybin as the load client as well as the upstream. One
+- **Harness mode**: Rustybin as the load client as well as the upstream. One
   instance loops traffic through a gateway back to itself, or a cluster of client and
   server instances drives load and chaos through a gateway at scale. Both sides
   correlate every request, so a run separates the gateway's own responses, lost
@@ -21,6 +17,10 @@ the pages for the features that exist today describe current behaviour.
 
 ## Recently built
 
+- [An MCP server for every OpenAPI mock](mocks/mcp.md): deploy a mock and get an MCP
+  server for the same API at `/mock/<name>/_rustybin/mcp`, one tool per operation,
+  answered by the mock (rules, examples, stateful data, mocked security). For MCP
+  gateway demos with the customer's own API instead of fake weather tools.
 - [OAuth sign-in for agents](agent-mcp.md#sign-in-with-oauth): connect an agent to
   `/_rustybin/mcp` with no token; it signs in through a consent page in the console.
 - Mock collections as a Bruno collection and an Insomnia export, next to Postman,

@@ -1,6 +1,7 @@
 # Plan: an MCP server for every OpenAPI mock
 
-Status: **next to build** (planned 2026-10-21). Nothing is built yet.
+Status: **built** (phases 1 to 4, 2026-10-24). Section 13 lists where the build differs from this plan; user
+docs in `docs/src/mocks/mcp.md`.
 
 ## 1. Goal
 
@@ -211,3 +212,32 @@ endpoints do not. Visitor mocks get it too, with the same restrictions (section 
 3. **Grouped arguments** (`path`, `query`, `body` objects) as an opt-in setting if flat names confuse
    specific clients.
 4. **Prompts**: one prompt per tag ("explore the Pets API") is cheap to add if it helps demos.
+
+## 13. Where the build differs
+
+- **Modules**: the generator is `src/mocks/mcp.rs` (tests in `src/mocks/mcp/tests.rs`), the endpoint and the
+  `Family::OpenApi` dispatch `src/mcp/openapi.rs` (tests in `src/mcp/openapi/tests.rs`). The route is registered
+  with the mock MCP router so it shares its `Shared` (session store, limits), so its catalogue and OpenAPI entries
+  live in `src/mcp/mod.rs`, in the Mock APIs category. `Profile` gained `mock: Option<Arc<MockTarget>>`, built per
+  request from the live revision; the static demo tools, resources and prompts are gated on the family.
+- **Argument validation**: no separate validation against the input schema. A call is refused before anything is
+  sent only for unknown arguments, missing required path parameters or body, and values of the wrong kind (an
+  object for a path parameter, a header value that is not valid). Everything else is the mock's own request
+  validation (`responses.validate_requests`), so `off`, `warn` and `enforce` behave as over REST.
+- **Output**: the text content is the serialised `structuredContent` (`{status, body}`), as the MCP specification
+  recommends for structured results, cut at 32 KB when structured content is sent and at the MCP server's
+  large-output cap (1 MB, 256 KB public) otherwise. When a tool declares an output schema and a 2xx body does not
+  match it (a rule or override), the result is a tool error naming the mismatch rather than structured content the
+  client would reject (the Python SDK validates every non-error result). Error results also carry
+  `structuredContent`.
+- **Tool `_meta`**: each tool carries `_meta["rustybin.dev/operation"]` `{operationId, method, path}`.
+- **Progress**: a call that has not answered after a second sends `notifications/progress` every second (when the
+  client gave a progress token), whatever the cause of the wait.
+- **404 answers**: instance mocks get the reason (not deployed, switched off, `mcp.enabled` false); visitor mocks
+  and unknown names get one shared message.
+- **Visitor mocks**: the restrictions apply to tool results (they come from `serve`); the MCP transport's own
+  responses are not passed through `restrict::harden`, which would rewrite `text/event-stream`.
+- **Surfaces**: the detail field also has `serving` (deployed, on, MCP enabled); `deploy` answers `mcp_url`
+  (null when disabled); draft changes list `mcp`. The console tab is called "MCP server" and lets the user untick
+  operations (saved as `mcp.exclude`).
+

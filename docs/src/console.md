@@ -102,8 +102,11 @@ The **Mock APIs** view (`/ui/#/mocks`) manages the instance's
   and which operations are public.
 - **Data** (stateful mocks only): the items the mock stored, per collection, with
   Refresh and Reset.
+- **MCP server**: the mock's [MCP server](mocks/mcp.md): its URL, the
+  `claude mcp add` command and `mcpServers` JSON, and which operations are tools.
 - **Traffic**: the mock's captured calls, live, with the matched operation and its
-  path parameters, status, validation and authentication result.
+  path parameters, status, validation and authentication result; calls from the
+  mock's MCP server carry an **MCP** badge and the tool name.
 - **Deploy report**: the [deploy checks](mocks/responses.md#deploy-checks) per
   operation, deploy, revisions and rollback, and export as `rustybin.yaml`.
 

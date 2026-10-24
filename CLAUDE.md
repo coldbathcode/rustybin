@@ -2,18 +2,22 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Next to build: an MCP server for every OpenAPI mock
+## Next to build: harness mode
 
-[docs/plans/mock-mcp.md](docs/plans/mock-mcp.md) (planned 2026-10-21, not started): each deployed mock also
-serves MCP at `/mock/<name>/_rustybin/mcp`, one tool per operation, calls answered through
-`mocks::handlers::serve` so REST and MCP never drift apart. Start with phase 1 (tools from a spec). Update the
-plan's status and `docs/src/roadmap.md` ("Next") as phases land.
+[docs/plans/harness.md](docs/plans/harness.md) (planned 2026-10-22, not started): Rustybin as a load client and
+correlating upstream, single node (loop-through) or a cluster (an elected leader, clients, servers), traffic layers
+with run patterns and rate-limit burst attacks, every parameter from one schema in the API, MCP and console (tunable
+live), or headless. It is the first feature that sends outbound traffic, so its safety section (allowlist, target
+verification, leases) comes first. Update the plan's status and `docs/src/roadmap.md` ("Next") as phases land.
 
-After that: [docs/plans/harness.md](docs/plans/harness.md) (planned 2026-10-22), harness mode: Rustybin as a load
-client and correlating upstream, single node (loop-through) or a cluster (an elected leader, clients, servers),
-traffic layers with run patterns and rate-limit burst attacks, every parameter from one schema in the API, MCP and
-console (tunable live), or headless. It is the first feature that sends outbound traffic, so its safety section (allowlist,
-target verification, leases) comes first.
+## MCP server for every OpenAPI mock (built)
+
+[docs/plans/mock-mcp.md](docs/plans/mock-mcp.md) is built (phases 1 to 4, 2026-10-24; its section 13 lists where the
+build differs; user docs in `docs/src/mocks/mcp.md`). `/mock/<name>/_rustybin/mcp` serves one tool per operation:
+`src/mocks/mcp.rs` builds the tools from a `Compiled` revision (cached on it), `src/mcp/openapi.rs` is the
+`Family::OpenApi` profile whose `tools/call` runs in process through `mocks::handlers::serve` (so REST and MCP never
+drift apart; captures carry `channel: "mcp"` and the tool). A new mock feature that changes responses needs nothing
+here; one that changes how requests are built (new parameter styles, body media types) belongs in both.
 
 ## Management MCP server (built)
 
@@ -123,7 +127,7 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   (`RUSTYBIN_MOCKS_STATE_DIR`: API-created mocks saved as JSON, loaded by `new_store`), `host.rs`
   (`RUSTYBIN_MOCKS_HOST`: `<name>.<domain>` rewritten to `/mock/<name>` by a layer wrapping the finished router in
   `build_app`), `collections.rs` (a mock as Postman / Hurl / curl / .http / k6 / Bruno / Insomnia), `config_file.rs` (`rustybin.yaml`,
-  `RUSTYBIN_MOCKS_DIR`, export), `cli.rs` (`rustybin mock ...`), `service.rs` (the control-plane logic shared by
+  `RUSTYBIN_MOCKS_DIR`, export), `cli.rs` (`rustybin mock ...`), `mcp.rs` (a revision's MCP tools), `service.rs` (the control-plane logic shared by
   the REST handlers and the management MCP), `handlers.rs` (`/mock/{name}/...` data plane, thin
   `/_rustybin/mocks*` handlers over `service.rs`; access through `selfservice.rs`). Self-service (`RUSTYBIN_MOCKS_SELF_SERVICE`):
   `visits.rs` (`Owner` of every mock: instance, visit by manage-token hash, or API key; the visit clock and daily
@@ -133,7 +137,8 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   file through a bounded retry queue; addresses are never logged). Mocks are matched inside the handler (operations change at runtime), never as
   axum routes. The built-in `petstore` sample (`petstore.yaml`, `RUSTYBIN_MOCKS_SAMPLE`) is what catalogue
   examples and tests call. File-defined mocks load in `server::start_with_state` and reload on SIGHUP.
-- `src/mcp/`: the mock MCP server at `/mcp` (protocol, transports, sessions, fake tools) and `src/mcp/manage/`, the
+- `src/mcp/`: the mock MCP server at `/mcp` (protocol, transports, sessions, fake tools), `src/mcp/openapi.rs` (the
+  MCP server of each OpenAPI mock) and `src/mcp/manage/`, the
   management MCP server at `/_rustybin/mcp` (`tools.rs` registry, `access.rs` rights, `stdio.rs` for
   `rustybin mcp-stdio`).
 - `src/fault.rs`: `X-Rustybin-Delay` / `X-Rustybin-Fail` middleware.

@@ -80,6 +80,9 @@ mocks:
             respond: { status: 404 }
           - when: { header.x-tier: { equals: gold }, query.expand: { exists: true } }
             respond: { status: 200, body: { orderId: 1, total: 0 } }
+    mcp:                         # the mock's MCP server (/mock/orders/_rustybin/mcp)
+      enabled: true
+      exclude: [deleteOrder]     # operationIds that are not tools
 ```
 
 Every field except `name` (and one of `spec` / `spec_inline`) is optional, with the
@@ -87,7 +90,8 @@ defaults shown. Unknown fields are errors, so a typo does not go unnoticed: in a
 on disk the entry with the typo is skipped (with a warning naming the field) and the
 other entries load; a document sent to `POST /_rustybin/mocks/apply` is refused. The
 response fields are described in [Responses, rules and validation](responses.md),
-the security fields in [Mocked security](security.md).
+the security fields in [Mocked security](security.md), the `mcp` fields in
+[An MCP server for every mock](mcp.md).
 
 ### Editor completion
 

@@ -70,6 +70,14 @@ API, AI and agent gateway demos.
   (`GET /_rustybin/mocks/{name}/collections/bruno|insomnia`, `rustybin mock
   collection`, the console and the management MCP's `export_collection`), in the
   same shapes as `/export/bruno.json` and `/export/insomnia.json`.
+- **An MCP server for every OpenAPI mock** at `/mock/{name}/_rustybin/mcp` (and
+  `<name>.<domain>/_rustybin/mcp` on the mocks host): one tool per operation, with
+  flat arguments from the parameters and body, annotations from the method, an
+  output schema from the default response, and the served spec as a resource. Each
+  call runs through the mock (rules, examples, stateful data, mocked security with
+  the MCP request's credentials, delays, captures marked as MCP), so tools return
+  what the REST calls return; a status outside 2xx is a tool error. Settings
+  `mcp.enabled` and `mcp.exclude`; an "MCP server" tab in the console.
 - **Management MCP server** at `/_rustybin/mcp`: configure a Rustybin from an AI
   agent such as Claude Code. Tools for the instance, OpenAPI mocks (create, edit,
   check, deploy, roll back, delete, collections, `rustybin.yaml` export and apply),

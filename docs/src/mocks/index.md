@@ -14,6 +14,9 @@ that you cannot reach from a demo laptop.
   Rules, overrides and the `Prefer` header pick other documented responses. See
   [Responses, rules and validation](responses.md).
 - Requests are validated against the spec (warn by default, or enforce with `400`).
+- Every deployed mock is also an MCP server at `/mock/<name>/_rustybin/mcp`, one tool
+  per operation, answered by the same mock. See [An MCP server for every
+  mock](mcp.md).
 - Each mock has a draft and a live revision: edits are checked (a valid request and
   response per operation) before they are deployed, and a deploy can be rolled back.
 - Mocks are created in the [web console](../console.md#mock-apis), through the

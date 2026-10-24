@@ -65,6 +65,8 @@ General setup, whatever the gateway:
 | Streaming | SSE pass-through, buffering off | `stream: true` with `X-Rustybin-Tokens-Per-Second` | Tokens arrive at the configured pace |
 | Observability | Logging, metrics, tracing | any | `X-Rustybin-Request-Id` and `/ai/requests/{id}` |
 | MCP gateway | Route on `Mcp-Method` / `Mcp-Name`, OAuth for `/mcp/protected`, tool filtering, server aggregation | `/mcp`, `/mcp/servers/*` | `inspect_request` shows injected identity headers |
+| MCP gateway with the customer's API | Per-tool authorization, rate limits and guardrails, credential injection (key or token exchange) | `/mock/<name>/_rustybin/mcp` ([MCP server of a mock](mocks/mcp.md)) | Tools named after their operations; the mock's Traffic tab shows each call with the injected credential and an MCP badge |
+| REST to MCP conversion | The gateway's conversion of a REST API into MCP tools | the mock's spec (`/mock/<name>/_rustybin/openapi.json`) as input, the mock as upstream | Compare with the mock's own MCP server: same data behind both |
 | Agent (A2A) gateway | Route per agent, authenticate, rewrite Agent Card URLs | `/a2a/*`, `/.well-known/agent-card.json` | Card URLs pointing at the gateway (with `RUSTYBIN_TRUST_FORWARD`) |
 
 ## Vendor examples

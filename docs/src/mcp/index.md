@@ -17,6 +17,7 @@ Inspector CLI) in `conformance/mcp/`.
 | `POST, GET, DELETE /mcp/servers/{name}` | Named servers with tool subsets: `weather`, `crm`, `devtools` |
 | `GET /mcp/sse` + `POST /mcp/messages?sessionId=` | Legacy HTTP+SSE transport (2024-11-05) |
 | `GET /.well-known/oauth-protected-resource` and `.../oauth-protected-resource/mcp/protected` | RFC 9728 metadata of `/mcp/protected` |
+| `POST, GET, DELETE /mock/{name}/_rustybin/mcp` | The MCP server of an [OpenAPI mock](../mocks/mcp.md): the customer's own operations as tools instead of fake data |
 
 Every Streamable HTTP response carries `X-Rustybin-Mcp-Server`,
 `X-Rustybin-Mcp-Session` (`stateless` for 2026-07-28 requests),

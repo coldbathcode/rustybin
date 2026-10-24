@@ -43,6 +43,7 @@
 - [OpenAPI mocks](mocks/index.md)
   - [Responses, rules and validation](mocks/responses.md)
   - [Mocked security](mocks/security.md)
+  - [An MCP server for every mock](mocks/mcp.md)
   - [Configuration as code](mocks/config.md)
   - [CLI](mocks/cli.md)
   - [Self-service mocks](mocks/self-service.md)

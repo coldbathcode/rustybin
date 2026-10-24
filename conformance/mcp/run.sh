@@ -2,7 +2,8 @@
 # Build Rustybin, start it on ports 18400-18402 (open control plane) and on
 # 18403-18405 (RUSTYBIN_CONTROL_AUTH=token, for OAuth sign-in to the management
 # server), run the MCP conformance scripts with the official Python MCP SDK
-# against the mock server (/mcp) and the management server (/_rustybin/mcp),
+# against the mock server (/mcp), an OpenAPI mock's server
+# (/mock/petstore/_rustybin/mcp) and the management server (/_rustybin/mcp),
 # optionally the Inspector CLI, then stop the servers.
 #
 # Usage: PYTHON=/path/to/venv/bin/python conformance/mcp/run.sh [--inspector]
@@ -44,7 +45,7 @@ done
 
 status=0
 cd "$HERE"
-for script in test_streamable_modern.py test_streamable_legacy.py test_sse_legacy.py test_variants.py test_manage.py test_manage_oauth.py; do
+for script in test_streamable_modern.py test_streamable_legacy.py test_sse_legacy.py test_variants.py test_mock_mcp.py test_manage.py test_manage_oauth.py; do
   echo "#### $script"
   "$PYTHON" -W ignore "$script" || status=1
 done
