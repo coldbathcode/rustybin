@@ -3,6 +3,26 @@
 Status: **planned** (2026-10-22), to build after the mock MCP server ([mock-mcp.md](mock-mcp.md)). Nothing
 is built yet.
 
+> **Build marker (2026-10-24): START HERE.** Approved scope for the next session is phases 0, 1 and 2
+> (section 15). No harness code has been written; there is no `src/harness/` yet and `main` is clean.
+> Begin with:
+> 1. **Phase 0 (spike):** move `hyper-util` from dev-dependencies to dependencies and add `hdrhistogram`;
+>    benchmark a hyper client on its own tokio runtime against a local Rustybin with no gateway; confirm
+>    or adjust the default caps in section 10.
+> 2. **Phase 1 (single-node engine):** new module `src/harness/` (`mod.rs`, `scenario.rs`, `pattern.rs`,
+>    `engine.rs`, `safety.rs`, `report.rs`, `cli.rs`), registered in `ROUTERS` / `SOURCES` /
+>    `MODULE_PATHS`. The `RUSTYBIN_HARNESS*` env (section 5), `POST /_rustybin/harness/runs`, the safety
+>    module first (allowlist, address pinning, caps, kill switch), report JSON, CLI `run` / `validate` /
+>    `report`, headless exit codes, `GET /_rustybin/harness/schema`, the first MCP tools and the
+>    schema-generated console builder with the parity test. Off by default; fatal with public mode or
+>    self-service.
+> 3. **Phase 2 (correlation):** harness headers and HMAC signing, the server correlation layer in
+>    `build_app`, client classification (`upstream` / `gateway` / `transport` / `lost`), loop-through
+>    `both`, inspector sampling, metrics, the shaped `/harness/{*path}` endpoint, and the in-repo
+>    `src/harness/test_proxy.rs`.
+>
+> Keep this status line and `docs/src/roadmap.md` ("Next") updated as phases land. Commit as oliwynn.
+
 ## 1. Goal
 
 Rustybin today is the upstream: a gateway sends traffic to it. Harness mode lets Rustybin also be the
