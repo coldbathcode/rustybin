@@ -1,0 +1,47 @@
+# Grow the load, then hold it: where does latency bend, and does the gateway
+# keep up once the rate is steady? Two layers: the ramp and a probe that keeps
+# a low, constant rate so the hold can be compared against an unloaded baseline.
+name: ramp-to-target
+description: Ramp from 10 to 500 requests per second over a minute, hold for two minutes, with a 1 rps probe alongside.
+targets:
+  - url: http://127.0.0.1:8080
+    weight: 1
+scale:
+  virtual_clients: 50
+layers:
+  - name: customers
+    source:
+      requests:
+        - path: /status/200
+          weight: 8
+        - method: POST
+          path: /echo/{{vu}}
+          headers:
+            X-Rustybin-Seq: "{{seq}}"
+          body:
+            order: "{{seq}}"
+            client: "{{vu}}"
+          weight: 2
+    pattern:
+      type: ramp
+      from: 10
+      to: 500
+      over: 1m
+      then:
+        type: constant
+        rate: 500
+        for: 2m
+  - name: probe
+    source:
+      request:
+        path: /status/200
+    pattern:
+      type: constant
+      rate: 1
+      for: 3m
+timeout: 10s
+thresholds:
+  error_rate: 0.01
+  latency_p99_ms: 1000
+  min_achieved: 0.98
+  saturated: false

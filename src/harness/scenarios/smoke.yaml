@@ -1,0 +1,19 @@
+# The smallest useful run: a steady, low rate against one target for a few
+# seconds, with strict pass criteria. Copy it, change the target and go.
+name: smoke
+description: 50 requests per second to /status/200 for 10 seconds; fails on any error or saturation.
+target: http://127.0.0.1:8080
+source:
+  request:
+    method: GET
+    path: /status/200
+pattern:
+  type: constant
+  rate: 50
+  for: 10s
+timeout: 5s
+thresholds:
+  error_rate: 0
+  not_sent: 0
+  latency_p99_ms: 500
+  saturated: false

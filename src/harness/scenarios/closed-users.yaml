@@ -1,0 +1,24 @@
+# The closed model: a number of users, each waiting for its answer and
+# thinking before the next request, like a pool of clients behind a gateway.
+# The pattern shapes the number of active users instead of the rate.
+name: closed-users
+description: 5 users growing to 40 over a minute, each pausing 200 ms between requests.
+target: http://127.0.0.1:8080
+scale:
+  virtual_clients: 40
+model: closed
+think_time: 200ms
+source:
+  request:
+    path: /delay/50
+pattern:
+  type: ramp
+  from: 5
+  to: 40
+  over: 1m
+  then:
+    type: constant
+    rate: 40
+    for: 1m
+thresholds:
+  error_rate: 0.01

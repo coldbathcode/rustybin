@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Build Rustybin, start it on ports 18700-18702 (control plane open), a
-# second instance on 18703 with RUSTYBIN_CONTROL_AUTH=jwt and a third on 18704
-# in public mode with self-service mocks, run the browser end-to-end check of
-# the web console (light and dark mode, the sign-in flow, visitors), then stop
-# the servers.
+# second instance on 18703 with RUSTYBIN_CONTROL_AUTH=jwt, a third on 18704
+# in public mode with self-service mocks and a fourth on 18705 in harness
+# mode (loop-through), run the browser end-to-end check of the web console
+# (light and dark mode, the sign-in flow, visitors, the harness builder), then
+# stop the servers.
 #
 # Usage: PYTHON=/path/to/venv/bin/python conformance/ui/run.sh
 # (the venv needs `pip install playwright pyjwt cryptography`; Chromium comes
 # from $PLAYWRIGHT_BROWSERS_PATH or `python -m playwright install chromium`).
 #
-# RUSTYBIN_UI_PORT moves the five ports (default 18700).
+# RUSTYBIN_UI_PORT moves the six ports (default 18700).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -18,9 +19,11 @@ PYTHON="${PYTHON:-python3}"
 PORT="${RUSTYBIN_UI_PORT:-18700}"
 JWT_PORT=$((PORT + 3))
 SS_PORT=$((PORT + 4))
+HARNESS_PORT=$((PORT + 5))
 export RUSTYBIN_URL="http://127.0.0.1:$PORT"
 export RUSTYBIN_JWT_URL="http://127.0.0.1:$JWT_PORT"
 export RUSTYBIN_SS_URL="http://127.0.0.1:$SS_PORT"
+export RUSTYBIN_HARNESS_URL="http://127.0.0.1:$HARNESS_PORT"
 export SCREENSHOT_DIR="${SCREENSHOT_DIR:-$HERE/screenshots}"
 
 (cd "$ROOT" && cargo build --quiet)
@@ -59,9 +62,16 @@ export LEADS_FILE="$TMP/ss/leads.jsonl"
   RUSTYBIN_LEADS_FILE="$LEADS_FILE" RUSTYBIN_PRIVACY_URL=https://example.com/privacy \
   "$BIN") &
 SS_SERVER=$!
-trap 'kill $SERVER $JWT_SERVER $SS_SERVER 2>/dev/null || true; rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/harness"
+(cd "$TMP/harness" && exec env RUSTYBIN_HTTP_PORT="$HARNESS_PORT" RUSTYBIN_HTTPS_PORT=0 RUSTYBIN_GRPC_PORT=0 \
+  RUSTYBIN_HOST=127.0.0.1 RUSTYBIN_LOG_LEVEL=warn \
+  RUSTYBIN_HARNESS=on RUSTYBIN_HARNESS_ROLES=both RUSTYBIN_HARNESS_TARGETS=127.0.0.1,localhost \
+  RUSTYBIN_HARNESS_THREADS=1 \
+  "$BIN") &
+HARNESS_SERVER=$!
+trap 'kill $SERVER $JWT_SERVER $SS_SERVER $HARNESS_SERVER 2>/dev/null || true; rm -rf "$TMP"' EXIT
 
-for url in "$RUSTYBIN_URL" "$RUSTYBIN_JWT_URL" "$RUSTYBIN_SS_URL"; do
+for url in "$RUSTYBIN_URL" "$RUSTYBIN_JWT_URL" "$RUSTYBIN_SS_URL" "$RUSTYBIN_HARNESS_URL"; do
   for _ in $(seq 1 50); do
     curl -sf -o /dev/null "$url/" && break
     sleep 0.2

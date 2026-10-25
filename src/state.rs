@@ -51,6 +51,10 @@ pub struct AppState {
     /// The finished application (set by `build_app`): the management MCP
     /// server's `try_request` sends requests through it in process.
     pub router: Arc<OnceLock<axum::Router>>,
+    /// Harness mode (`RUSTYBIN_HARNESS`): the node's engine, runs and kill
+    /// switch, shared by the control API, the MCP tools, headless mode and
+    /// (phase 2) the correlation layer. `None` when harness mode is off.
+    pub harness: Option<Arc<crate::harness::Harness>>,
 }
 
 impl AppState {
@@ -106,6 +110,7 @@ impl AppState {
         );
         let keys = Arc::new(Keys::new(&config, metrics.clone(), clock.clone()));
         let mocks = crate::mocks::new_store_with(&config, clock, metrics.clone());
+        let harness = crate::harness::Harness::new(&config);
         Self {
             keys,
             limits,
@@ -118,6 +123,7 @@ impl AppState {
             metrics,
             mocks,
             router: Arc::new(OnceLock::new()),
+            harness,
         }
     }
 }

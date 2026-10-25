@@ -35,6 +35,10 @@ Environment:
                               (RUSTYBIN_MOCKS_VISIT_MINUTES=5, _ANON_VISITS_PER_DAY=0:
                               Extend is always open, the email step comes first)
     LEADS_FILE                its RUSTYBIN_LEADS_FILE
+    RUSTYBIN_HARNESS_URL      base URL of an instance with RUSTYBIN_HARNESS=on (roles both,
+                              targets 127.0.0.1): the Harness view, its schema-generated
+                              builder (a control for every non-shorthand schema property,
+                              the parity check of docs/plans/harness.md) and a short run
 """
 
 import base64
@@ -80,7 +84,7 @@ def chromium_path():
     if os.environ.get("CHROMIUM_PATH"):
         return os.environ["CHROMIUM_PATH"]
     root = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers")
-    hits = sorted(glob.glob(os.path.join(root, "chromium-*", "chrome-linux", "chrome")))
+    hits = sorted(glob.glob(os.path.join(root, "chromium-*", "chrome-linux*", "chrome")))
     return hits[-1] if hits else None
 
 
@@ -1005,6 +1009,129 @@ def http_at(base, path):
         return e.code
 
 
+def run_harness(browser):
+    """The Harness view against an instance with RUSTYBIN_HARNESS=on."""
+    base = os.environ["RUSTYBIN_HARNESS_URL"].rstrip("/")
+    print(f"harness: {base}")
+    ctx = browser.new_context(viewport={"width": 1440, "height": 900})
+    page = ctx.new_page()
+    page.set_default_timeout(TIMEOUT)
+    page.on("console", lambda msg: console_errors.append(f"[harness] {msg.text}") if msg.type == "error" and "Failed to load resource" not in msg.text else None)
+    page.on("pageerror", lambda e: console_errors.append(f"[harness] uncaught: {e}"))
+    page.on("dialog", lambda d: d.accept())
+
+    def nav_shows_the_view():
+        page.goto(base + "/ui/#/overview")
+        page.wait_for_selector("nav a[href='#/harness']")
+        page.click("nav a[href='#/harness']")
+        page.wait_for_selector("#view .view-head h1")
+        expect(page.locator("#view .view-head h1")).to_have_text("Harness")
+        page.wait_for_selector("#scenario-form")
+        expect(page.locator("#harness-kill")).to_be_visible()
+        shot(page, "harness", "40-harness")
+
+    step("harness: the view appears when harness mode is on", nav_shows_the_view)
+
+    def builder_covers_the_schema():
+        schema = json.load(urllib.request.urlopen(base + "/_rustybin/harness/schema", timeout=10))
+        page.select_option("#harness-builtin", "smoke")
+        page.wait_for_function("document.querySelectorAll('#scenario-form [aria-label]').length > 10")
+
+        def resolve(node):
+            while node and "$ref" in node:
+                cur = schema
+                for seg in node["$ref"].lstrip("#/").split("/"):
+                    cur = cur[seg]
+                node = dict(cur, **{k: v for k, v in node.items() if k != "$ref"})
+            return node or {}
+
+        def labels():
+            return set(page.evaluate("[...document.querySelectorAll('#scenario-form [aria-label]')].map((e) => e.getAttribute('aria-label'))"))
+
+        def discriminated(node):
+            return "oneOf" in node and all("type" in (resolve(b).get("properties") or {}) for b in node["oneOf"])
+
+        def has_control(here):
+            ls = labels()
+            return here in ls or any(l.startswith(here + " ") and not l.endswith(" add") for l in ls)
+
+        def ensure(here):
+            # Optional parts (a `then` stage, an empty list or map) are added
+            # with their button, so their fields can be checked too.
+            if not has_control(here):
+                btn = page.locator(f"#scenario-form [aria-label='{here} add']")
+                if btn.count():
+                    btn.first.click()
+
+        missing = []
+
+        def check_prop(sub, here):
+            sub_r = resolve(sub)
+            if sub.get("x-shorthand") or sub_r.get("x-shorthand"):
+                return
+            if here.count(".then") > 1:
+                return
+            items = resolve(sub_r.get("items", {})) if sub_r.get("type") == "array" else None
+            if items is not None and (items.get("properties") or "oneOf" in items):
+                ensure(here)
+                item_schema = items if items.get("properties") else next((resolve(b) for b in items["oneOf"] if resolve(b).get("properties")), items)
+                walk(item_schema, f"{here}[0]")
+                return
+            if discriminated(sub_r):
+                ensure(here)
+                walk(sub_r, here)
+                return
+            if sub_r.get("properties"):
+                walk(sub_r, here)
+                return
+            if sub_r.get("additionalProperties") and isinstance(sub_r["additionalProperties"], dict):
+                ensure(here)
+                if not has_control(here):
+                    missing.append(here)
+                return
+            if not has_control(here):
+                missing.append(here)
+
+        def walk(node, path):
+            node = resolve(node)
+            if discriminated(node):
+                sel = f"#scenario-form [aria-label='{path}.type']"
+                if not page.locator(sel).count():
+                    missing.append(path + ".type")
+                    return
+                for b in node["oneOf"]:
+                    b = resolve(b)
+                    kind = b["properties"]["type"].get("const")
+                    page.select_option(sel, kind)
+                    for name, sub in b["properties"].items():
+                        if name != "type":
+                            check_prop(sub, f"{path}.{name}")
+                return
+            for name, sub in (node.get("properties") or {}).items():
+                check_prop(sub, f"{path}.{name}" if path else name)
+
+        walk(schema, "")
+        assert not missing, f"schema properties without a builder control: {sorted(set(missing))}"
+
+    step("harness: the builder renders a control for every schema property", builder_covers_the_schema)
+
+    def validate_and_run():
+        page.select_option("#harness-builtin", "smoke")
+        page.wait_for_function("document.querySelector('#scenario-form [aria-label=\"targets[0].url\"]')")
+        page.fill("#scenario-form [aria-label='targets[0].url']", base)
+        page.fill("#scenario-form [aria-label='layers[0].pattern.for']", "2s")
+        page.click("#harness-validate")
+        page.wait_for_selector("#view .notice.ok")
+        page.click("#harness-run")
+        page.wait_for_selector("text=Answered", timeout=TIMEOUT)
+        page.wait_for_selector("text=exit code", timeout=TIMEOUT)
+        expect(page.locator("#view")).to_contain_text("PASS")
+        shot(page, "harness", "41-harness-report")
+
+    step("harness: validate, run and report", validate_and_run)
+    ctx.close()
+
+
 def main():
     print(f"console e2e against {BASE}")
     with sync_playwright() as p:
@@ -1016,6 +1143,8 @@ def main():
             run_jwt(browser)
         if os.environ.get("RUSTYBIN_SS_URL"):
             run_self_service(browser)
+        if os.environ.get("RUSTYBIN_HARNESS_URL"):
+            run_harness(browser)
         browser.close()
     for e in console_errors:
         failures.append("console: " + e)

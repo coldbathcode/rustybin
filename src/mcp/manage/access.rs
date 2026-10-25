@@ -35,6 +35,9 @@ pub enum Right {
     Visitor,
     /// Self-service operator routes (admin, self-service on).
     Operator,
+    /// The harness: runs and the kill switch (the `harness` scope, or
+    /// admin; on an open control plane whoever passes the admin guard).
+    Harness,
 }
 
 impl Right {
@@ -46,6 +49,7 @@ impl Right {
             Right::Admin => "admin",
             Right::Visitor => "visitor",
             Right::Operator => "operator",
+            Right::Harness => "harness",
         }
     }
 }
@@ -162,6 +166,10 @@ impl Access {
             Right::Admin => self.caller.admin,
             Right::Visitor => self.self_service && self.caller.visit().is_some(),
             Right::Operator => self.self_service && self.caller.admin,
+            Right::Harness => match self.grant {
+                Some(g) => g.harness,
+                None => self.caller.admin,
+            },
         }
     }
 
@@ -201,6 +209,13 @@ impl Access {
                     "the visit operator tools need admin rights".into()
                 }
             }
+            Right::Harness => match self.caller.admin_guard {
+                Err((_, m)) if self.grant.is_none() => {
+                    format!("starting and stopping harness runs needs admin rights ({m})")
+                }
+                _ => "starting and stopping harness runs needs a control token with the harness scope (or the admin token)"
+                    .into(),
+            },
         }
     }
 
@@ -246,6 +261,7 @@ impl Access {
             Right::Admin,
             Right::Visitor,
             Right::Operator,
+            Right::Harness,
         ]
         .iter()
         .filter(|r| self.allows(**r))

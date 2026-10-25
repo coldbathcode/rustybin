@@ -57,7 +57,7 @@ const REQUESTS_PREFIX: &str = "/_rustybin/oauth/requests/";
 pub const CONSENT_PAGE: &str = "/ui/#/authorize/";
 
 /// Scopes, most powerful first (the control-plane scopes).
-pub const SCOPES: &[&str] = &["admin", "console", "inspector"];
+pub const SCOPES: &[&str] = &["admin", "console", "inspector", "harness"];
 pub const ACCESS_TTL_SECS: i64 = 3600;
 pub const REFRESH_TTL_SECS: i64 = 30 * 24 * 3600;
 pub const PENDING_TTL_SECS: i64 = 600;
@@ -434,6 +434,7 @@ fn grant_allows(grant: &Grant, scope: &str) -> bool {
         "admin" => grant.admin,
         "console" => grant.console,
         "inspector" => grant.inspector,
+        "harness" => grant.harness,
         _ => false,
     }
 }
@@ -911,7 +912,10 @@ async fn authorize_handler(State(app): State<AppState>, st: St, req: Request) ->
         return fail("invalid_request", "invalid code_challenge");
     }
     let Some(scopes) = parse_scopes(q.get("scope").map(String::as_str)) else {
-        return fail("invalid_scope", "scopes are admin, console and inspector");
+        return fail(
+            "invalid_scope",
+            "scopes are admin, console, inspector and harness",
+        );
     };
     let resource = resource_url(&base);
     if let Some(r) = q.get("resource") {
@@ -1055,7 +1059,7 @@ async fn request_post_handler(
         let Some(chosen) = chosen else {
             return consent_error(
                 StatusCode::BAD_REQUEST,
-                "scope must name admin, console or inspector",
+                "scope must name admin, console, inspector or harness",
             );
         };
         if chosen.iter().any(|s| !p.scopes.contains(s)) {
@@ -1301,7 +1305,7 @@ pub fn openapi_paths() -> Value {
                       "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
                       "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["decision"], "properties": {
                           "decision": { "type": "string", "enum": ["approve", "deny"] },
-                          "scope": { "type": "string", "description": "Space separated: admin, console, inspector (default: what the agent asked for, capped by the approver's grant)" }
+                          "scope": { "type": "string", "description": "Space separated: admin, console, inspector, harness (default: what the agent asked for, capped by the approver's grant)" }
                       } } } } },
                       "responses": { "200": { "description": "Where to send the browser (redirect_to)" }, "403": { "description": "The approver's credential cannot grant the scopes" }, "404": { "description": "Unknown or expired" } } }
         },

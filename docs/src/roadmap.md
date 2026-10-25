@@ -5,17 +5,24 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-- **Harness mode**: Rustybin as the load client as well as the upstream. One
-  instance loops traffic through a gateway back to itself, or a cluster of client and
-  server instances drives load and chaos through a gateway at scale. Both sides
-  correlate every request, so a run separates the gateway's own responses, lost
-  requests and the overhead the gateway adds. Ramp, step, target, breakpoint, spike,
-  pulse and burst patterns, plus burst attacks that check rate limiting (window edges,
-  distributed bursts, key and IP spraying), all tunable live. Driven from the API, MCP
-  or the console, or headless; the cluster elects a new leader if the current one
-  dies. Off by default and limited to allowlisted targets.
+- **Harness mode, the next phases** (`docs/plans/harness.md`): phase 2, correlation.
+  Harness headers signed per run, a server layer on every data-plane route that
+  records arrivals and answers with `Server-Timing` and a served-by tag, so the client
+  classifies every answer as `upstream`, `gateway` or `transport` and the report
+  shows lost requests and the overhead the gateway adds. Then phase 3, a cluster of
+  client and server nodes with an elected leader, phase 4, every pattern (step,
+  target, breakpoint, spike, pulse, burst, wave) with live tuning, and phase 5, the
+  burst attacks that check rate limiting (window edges, distributed bursts, key and
+  IP spraying).
 
 ## Recently built
+
+- [Harness mode, single node](configuration.md#harness-mode) (phase 1): Rustybin as
+  the load client. A scenario with targets, layers, open or closed load models,
+  constant and ramp patterns and thresholds runs from the API, the management MCP,
+  the console builder (generated from one JSON Schema), headless at startup or
+  `rustybin harness run --local-server`. Targets are allowlisted and pinned, the
+  client watches itself for saturation, reports come as JSON, text and JUnit.
 
 - [An MCP server for every OpenAPI mock](mocks/mcp.md): deploy a mock and get an MCP
   server for the same API at `/mock/<name>/_rustybin/mcp`, one tool per operation,

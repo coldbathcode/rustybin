@@ -1,0 +1,1528 @@
+//! The scenario: every parameter of a run (`docs/plans/harness.md`, section
+//! 6). There is one model, one validation and one JSON Schema generated next
+//! to it ([`schema`]); the API, scenario files, the MCP tools and the console
+//! builder all read and write that same model.
+//!
+//! Phase 1 covers targets with weights, a request template source (with
+//! `{{seq}}`, `{{vu}}`, `{{run}}`, `{{node}}`, `{{layer}}` and `{{rand}}`
+//! placeholders), open and closed load models, layers with `constant` and
+//! `ramp` patterns, the scale block (virtual clients, a per-node rate cap),
+//! the request timeout and the thresholds a run is judged by. Mock and LLM
+//! sources, identities, chaos and the other patterns are later phases and
+//! are refused by name rather than silently ignored (`deny_unknown_fields`).
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+
+use super::pattern::{Pattern, Stage};
+use super::safety;
+use crate::config::HarnessConfig;
+
+pub const MAX_LAYERS: usize = 8;
+pub const MAX_TARGETS: usize = 16;
+pub const MAX_REQUESTS_PER_LAYER: usize = 64;
+pub const MAX_BODY_BYTES: usize = 64 * 1024;
+pub const MAX_HEADERS: usize = 32;
+pub const MAX_VIRTUAL_CLIENTS: u32 = 100_000;
+pub const MAX_NAME_LEN: usize = 64;
+pub const MAX_DESCRIPTION_LEN: usize = 1024;
+/// Longest scenario document accepted (JSON or YAML text).
+pub const MAX_SCENARIO_BYTES: usize = 256 * 1024;
+pub const MIN_TIMEOUT: Duration = Duration::from_millis(1);
+pub const MAX_TIMEOUT: Duration = Duration::from_secs(60);
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+pub const MAX_THINK_TIME: Duration = Duration::from_secs(60);
+pub const MAX_STARTS_AFTER: Duration = Duration::from_secs(24 * 3600);
+/// Placeholders a request template may use.
+pub const PLACEHOLDERS: &[&str] = &["seq", "vu", "run", "node", "layer", "rand"];
+
+// ── Durations ───────────────────────────────────────────────────────
+
+/// A duration written as `500ms`, `30s`, `2m`, `1h` or a number of seconds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Dur(pub Duration);
+
+impl Dur {
+    pub fn secs(s: u64) -> Self {
+        Dur(Duration::from_secs(s))
+    }
+}
+
+/// Parse `1.5s`, `250ms`, `2m`, `1h`, `1d` or a plain number of seconds.
+pub fn parse_duration(raw: &str) -> Option<Duration> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.len() > 32 {
+        return None;
+    }
+    let (number, unit) = match raw.find(|c: char| c.is_ascii_alphabetic()) {
+        Some(i) => (&raw[..i], raw[i..].trim()),
+        None => (raw, "s"),
+    };
+    let value: f64 = number.trim().parse().ok()?;
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    let secs = match unit {
+        "ms" => value / 1000.0,
+        "s" | "sec" | "secs" => value,
+        "m" | "min" | "mins" => value * 60.0,
+        "h" | "hr" | "hrs" => value * 3600.0,
+        "d" => value * 86_400.0,
+        _ => return None,
+    };
+    if secs > 366.0 * 86_400.0 {
+        return None;
+    }
+    Some(Duration::from_secs_f64(secs))
+}
+
+/// The shortest exact rendering: `2h`, `90s`, `1500ms`, `0.5ms`.
+pub fn format_duration(d: Duration) -> String {
+    let ms = d.as_millis();
+    if !d.as_nanos().is_multiple_of(1_000_000) {
+        return format!("{}ms", d.as_secs_f64() * 1000.0);
+    }
+    if ms.is_multiple_of(3_600_000) && ms > 0 {
+        format!("{}h", ms / 3_600_000)
+    } else if ms.is_multiple_of(60_000) && ms > 0 {
+        format!("{}m", ms / 60_000)
+    } else if ms.is_multiple_of(1000) {
+        format!("{}s", ms / 1000)
+    } else {
+        format!("{ms}ms")
+    }
+}
+
+impl Serialize for Dur {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&format_duration(self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for Dur {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Number(f64),
+            Text(String),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Number(n) if n.is_finite() && (0.0..=366.0 * 86_400.0).contains(&n) => {
+                Ok(Dur(Duration::from_secs_f64(n)))
+            }
+            Raw::Number(n) => Err(serde::de::Error::custom(format!(
+                "{n} is not a duration (seconds, 0 or more)"
+            ))),
+            Raw::Text(t) => parse_duration(&t).map(Dur).ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "{t:?} is not a duration (e.g. 500ms, 30s, 2m, 1h)"
+                ))
+            }),
+        }
+    }
+}
+
+// ── Caps ────────────────────────────────────────────────────────────
+
+/// The node's limits, the bounds of every scenario it accepts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Caps {
+    /// Requests per second (the sum of every layer's peak).
+    pub max_rate: u64,
+    /// Requests in flight (also the most virtual users of a closed layer).
+    pub max_inflight: usize,
+    /// Longest run.
+    pub max_duration_secs: u64,
+}
+
+impl Caps {
+    pub fn from_config(config: &HarnessConfig) -> Self {
+        Self {
+            max_rate: config.max_rate,
+            max_inflight: config.max_inflight,
+            max_duration_secs: config.max_duration.as_secs(),
+        }
+    }
+
+    pub fn max_duration(&self) -> Duration {
+        Duration::from_secs(self.max_duration_secs)
+    }
+}
+
+impl Default for Caps {
+    fn default() -> Self {
+        Self::from_config(&HarnessConfig::default())
+    }
+}
+
+// ── Model ───────────────────────────────────────────────────────────
+
+/// How a target is reached.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpVersion {
+    /// HTTP/1.1 on plain connections, ALPN (h2 or http/1.1) on TLS.
+    #[default]
+    Auto,
+    /// HTTP/1.1 only.
+    H1,
+    /// HTTP/2 over TLS (ALPN h2 only).
+    H2,
+    /// HTTP/2 with prior knowledge on a plain connection.
+    H2c,
+}
+
+impl HttpVersion {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HttpVersion::Auto => "auto",
+            HttpVersion::H1 => "h1",
+            HttpVersion::H2 => "h2",
+            HttpVersion::H2c => "h2c",
+        }
+    }
+}
+
+/// One gateway (or gateway node) the load goes to.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Target {
+    pub url: String,
+    pub weight: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    pub http: HttpVersion,
+    pub insecure: bool,
+}
+
+impl Target {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            weight: 1,
+            host: None,
+            http: HttpVersion::Auto,
+            insecure: false,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Target {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Full {
+            url: String,
+            #[serde(default = "one")]
+            weight: u32,
+            #[serde(default)]
+            host: Option<String>,
+            #[serde(default)]
+            http: HttpVersion,
+            #[serde(default)]
+            insecure: bool,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Url(String),
+            Full(Full),
+        }
+        Ok(match Raw::deserialize(d)? {
+            Raw::Url(url) => Target::new(url),
+            Raw::Full(f) => Target {
+                url: f.url,
+                weight: f.weight,
+                host: f.host,
+                http: f.http,
+                insecure: f.insecure,
+            },
+        })
+    }
+}
+
+fn one() -> u32 {
+    1
+}
+
+fn get() -> String {
+    "GET".into()
+}
+
+fn root() -> String {
+    "/".into()
+}
+
+/// How big the run is, apart from how hard it pushes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scale {
+    /// Distinct virtual clients (`{{vu}}` cycles through them; closed layers
+    /// never run more users than this).
+    #[serde(default = "one")]
+    pub virtual_clients: u32,
+    /// A rate cap below the node's own, to keep the client well under saturation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rate_per_node: Option<u64>,
+}
+
+impl Default for Scale {
+    fn default() -> Self {
+        Self {
+            virtual_clients: 1,
+            max_rate_per_node: None,
+        }
+    }
+}
+
+/// Open: requests leave at their intended times whatever the answers.
+/// Closed: a number of users, each waiting for its answer plus a think time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Model {
+    #[default]
+    Open,
+    Closed,
+}
+
+impl Model {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Model::Open => "open",
+            Model::Closed => "closed",
+        }
+    }
+}
+
+/// One request to send, with placeholders.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestTemplate {
+    #[serde(default = "get")]
+    pub method: String,
+    /// Path with an optional query, appended to the target URL.
+    #[serde(default = "root")]
+    pub path: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    /// A string is sent as is; any other JSON value is sent as JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<Value>,
+    /// Statuses that count as expected (default: 2xx and 3xx).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expect_status: Vec<u16>,
+    /// Relative share when a layer has several requests.
+    #[serde(default = "one")]
+    pub weight: u32,
+}
+
+impl Default for RequestTemplate {
+    fn default() -> Self {
+        Self {
+            method: get(),
+            path: root(),
+            headers: BTreeMap::new(),
+            body: None,
+            expect_status: Vec::new(),
+            weight: 1,
+        }
+    }
+}
+
+impl RequestTemplate {
+    /// Does `status` count as the expected answer?
+    pub fn expects(&self, status: u16) -> bool {
+        if self.expect_status.is_empty() {
+            (200..400).contains(&status)
+        } else {
+            self.expect_status.contains(&status)
+        }
+    }
+}
+
+/// Where a layer's requests come from.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Source {
+    /// One request template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<RequestTemplate>,
+    /// Several templates, picked by weight.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requests: Vec<RequestTemplate>,
+}
+
+impl Source {
+    /// Every template of the source, in order.
+    pub fn templates(&self) -> Vec<&RequestTemplate> {
+        self.request.iter().chain(self.requests.iter()).collect()
+    }
+}
+
+/// One stream of traffic inside a run.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Layer {
+    pub name: String,
+    pub source: Source,
+    pub pattern: Pattern,
+    #[serde(default)]
+    pub model: Model,
+    /// Delay before the layer starts (relative to the run).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starts_after: Option<Dur>,
+    /// Closed model: the pause of a user between its answer and its next
+    /// request (default 0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub think_time: Option<Dur>,
+}
+
+/// Pass criteria. A run that misses any of them exits with code 1.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Thresholds {
+    /// Transport errors plus unexpected statuses, as a fraction of the
+    /// requests sent (0 to 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_rate: Option<f64>,
+    /// Most requests the client may skip at its in-flight cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_sent: Option<u64>,
+    /// Latency from the intended send time, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_p50_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_p99_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_max_ms: Option<f64>,
+    /// Least fraction of the requested requests that must have been
+    /// answered (0 to 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_achieved: Option<f64>,
+    /// `false`: fail when the client saturated (the report would be about
+    /// the client, not the gateway).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saturated: Option<bool>,
+}
+
+/// A scenario as written: the shorthand fields (`target`, `source`,
+/// `pattern`, `model`, `think_time`) describe a single layer and are folded
+/// into `targets` and `layers` by [`Scenario::normalise`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scenario {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Shorthand for one target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<Target>,
+    #[serde(default)]
+    pub scale: Scale,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<Layer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<Source>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<Pattern>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<Model>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub think_time: Option<Dur>,
+    /// Per-request timeout (default 10s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<Dur>,
+    #[serde(default)]
+    pub thresholds: Thresholds,
+}
+
+/// What a scenario amounts to, for previews, listings and the report.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Summary {
+    pub name: String,
+    pub duration_secs: f64,
+    /// Sum of the layers' peak rates (open layers only).
+    pub peak_rate: f64,
+    /// Expected requests over the whole run (open layers only).
+    pub expected_requests: f64,
+    pub layers: Vec<LayerSummary>,
+    pub targets: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct LayerSummary {
+    pub name: String,
+    pub model: Model,
+    pub starts_after_secs: f64,
+    pub duration_secs: f64,
+    pub peak: f64,
+    pub stages: Vec<Stage>,
+}
+
+impl Scenario {
+    /// Parse JSON or YAML text.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        if text.len() > MAX_SCENARIO_BYTES {
+            return Err(format!(
+                "the scenario is longer than {MAX_SCENARIO_BYTES} bytes"
+            ));
+        }
+        if text.trim().is_empty() {
+            return Err("the scenario is empty".into());
+        }
+        serde_yaml::from_str(text).map_err(|e| format!("invalid scenario: {e}"))
+    }
+
+    /// Parse a JSON value (the API and the MCP tools).
+    pub fn from_value(value: &Value) -> Result<Self, String> {
+        if !value.is_object() {
+            return Err("the scenario must be an object".into());
+        }
+        serde_json::from_value(value.clone()).map_err(|e| format!("invalid scenario: {e}"))
+    }
+
+    /// Fold the single-layer shorthand into `targets` and `layers`.
+    pub fn normalise(&mut self) {
+        if let Some(url) = self.target.take() {
+            self.targets.insert(0, Target::new(url));
+        }
+        let has_shorthand = self.source.is_some()
+            || self.pattern.is_some()
+            || self.model.is_some()
+            || self.think_time.is_some();
+        if has_shorthand {
+            let layer = Layer {
+                name: "main".into(),
+                source: self.source.take().unwrap_or_default(),
+                pattern: self.pattern.take().unwrap_or(Pattern::Constant {
+                    rate: 0.0,
+                    hold: Dur::secs(0),
+                    then: None,
+                }),
+                model: self.model.take().unwrap_or_default(),
+                starts_after: None,
+                think_time: self.think_time.take(),
+            };
+            self.layers.insert(0, layer);
+        }
+    }
+
+    /// The request timeout.
+    pub fn timeout(&self) -> Duration {
+        self.timeout.map_or(DEFAULT_TIMEOUT, |d| d.0)
+    }
+
+    /// Total run time: the longest layer end.
+    pub fn duration(&self) -> Duration {
+        self.layers
+            .iter()
+            .map(|l| l.starts_after.map_or(Duration::ZERO, |d| d.0) + l.pattern.duration())
+            .max()
+            .unwrap_or(Duration::ZERO)
+    }
+
+    /// Sum of the open layers' peak rates.
+    pub fn peak_rate(&self) -> f64 {
+        self.layers
+            .iter()
+            .filter(|l| l.model == Model::Open)
+            .map(|l| l.pattern.peak())
+            .sum()
+    }
+
+    pub fn summary(&self) -> Summary {
+        Summary {
+            name: self.name.clone(),
+            duration_secs: self.duration().as_secs_f64(),
+            peak_rate: self.peak_rate(),
+            expected_requests: self
+                .layers
+                .iter()
+                .filter(|l| l.model == Model::Open)
+                .map(|l| {
+                    l.pattern
+                        .expected_between(Duration::ZERO, l.pattern.duration())
+                })
+                .sum(),
+            layers: self
+                .layers
+                .iter()
+                .map(|l| LayerSummary {
+                    name: l.name.clone(),
+                    model: l.model,
+                    starts_after_secs: l.starts_after.map_or(0.0, |d| d.0.as_secs_f64()),
+                    duration_secs: l.pattern.duration().as_secs_f64(),
+                    peak: l.pattern.peak(),
+                    stages: l.pattern.stages(),
+                })
+                .collect(),
+            targets: self.targets.len(),
+        }
+    }
+
+    /// SHA-256 of the normalised scenario's JSON, as hex.
+    pub fn hash(&self) -> String {
+        let bytes = serde_json::to_vec(self).unwrap_or_default();
+        let digest = Sha256::digest(&bytes);
+        digest.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Every problem with a normalised scenario, against the node's caps.
+    /// An empty list means the scenario may run.
+    pub fn validate(&self, caps: &Caps) -> Vec<String> {
+        let mut p = Vec::new();
+        if self.target.is_some()
+            || self.source.is_some()
+            || self.pattern.is_some()
+            || self.model.is_some()
+            || self.think_time.is_some()
+        {
+            p.push("internal: validate a normalised scenario".into());
+        }
+        if self.name.trim().is_empty() {
+            p.push("name: required".into());
+        } else if self.name.chars().count() > MAX_NAME_LEN
+            || !self
+                .name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' '))
+        {
+            p.push(format!(
+                "name: letters, digits, space, - _ . only, at most {MAX_NAME_LEN} characters"
+            ));
+        }
+        if self
+            .description
+            .as_ref()
+            .is_some_and(|d| d.chars().count() > MAX_DESCRIPTION_LEN)
+        {
+            p.push(format!(
+                "description: at most {MAX_DESCRIPTION_LEN} characters"
+            ));
+        }
+        if self.targets.is_empty() {
+            p.push("targets: at least one target URL is required".into());
+        } else if self.targets.len() > MAX_TARGETS {
+            p.push(format!("targets: at most {MAX_TARGETS}"));
+        }
+        let mut prefixes = Vec::new();
+        for (i, t) in self.targets.iter().enumerate() {
+            match safety::parse_target_url(&t.url) {
+                Ok(parsed) => {
+                    if t.http == HttpVersion::H2 && !parsed.tls() {
+                        p.push(format!(
+                            "targets[{i}].http: h2 needs an https target (use h2c for a plain connection)"
+                        ));
+                    }
+                    if t.http == HttpVersion::H2c && parsed.tls() {
+                        p.push(format!(
+                            "targets[{i}].http: h2c is for plain connections (use h2 with https)"
+                        ));
+                    }
+                    prefixes.push(parsed.path);
+                }
+                Err(e) => {
+                    p.push(format!("targets[{i}].url: {e}"));
+                    prefixes.push(String::new());
+                }
+            }
+            if t.weight == 0 || t.weight > 1000 {
+                p.push(format!("targets[{i}].weight: 1 to 1000"));
+            }
+            if let Some(host) = &t.host {
+                let (name, port) = match host.rsplit_once(':') {
+                    Some((n, port)) if port.parse::<u16>().is_ok() => (n, true),
+                    _ => (host.as_str(), false),
+                };
+                let _ = port;
+                if !safety::valid_hostname(name.trim_end_matches('.'))
+                    && name.parse::<std::net::IpAddr>().is_err()
+                {
+                    p.push(format!("targets[{i}].host: not a host name"));
+                }
+            }
+        }
+        if self.scale.virtual_clients == 0 || self.scale.virtual_clients > MAX_VIRTUAL_CLIENTS {
+            p.push(format!("scale.virtual_clients: 1 to {MAX_VIRTUAL_CLIENTS}"));
+        }
+        let node_rate = match self.scale.max_rate_per_node {
+            Some(0) => {
+                p.push("scale.max_rate_per_node: must be 1 or more".into());
+                caps.max_rate
+            }
+            Some(r) if r > caps.max_rate => {
+                p.push(format!(
+                    "scale.max_rate_per_node: {r} is over this node's cap of {} requests per second",
+                    caps.max_rate
+                ));
+                caps.max_rate
+            }
+            Some(r) => r,
+            None => caps.max_rate,
+        };
+        if self.layers.is_empty() {
+            p.push(
+                "layers: at least one layer (or a top-level source and pattern) is required".into(),
+            );
+        } else if self.layers.len() > MAX_LAYERS {
+            p.push(format!("layers: at most {MAX_LAYERS}"));
+        }
+        let mut names = Vec::new();
+        for (i, layer) in self.layers.iter().enumerate() {
+            let here = format!("layers[{i}]");
+            if layer.name.trim().is_empty() {
+                p.push(format!("{here}.name: required"));
+            } else if layer.name.chars().count() > MAX_NAME_LEN
+                || !layer
+                    .name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            {
+                p.push(format!(
+                    "{here}.name: letters, digits, - _ . only, at most {MAX_NAME_LEN} characters"
+                ));
+            } else if names.contains(&layer.name) {
+                p.push(format!(
+                    "{here}.name: duplicate layer name {:?}",
+                    layer.name
+                ));
+            } else {
+                names.push(layer.name.clone());
+            }
+            let templates = layer.source.templates();
+            if templates.is_empty() {
+                p.push(format!(
+                    "{here}.source: a request (or requests) template is required (mock and llm sources come in a later phase)"
+                ));
+            } else if templates.len() > MAX_REQUESTS_PER_LAYER {
+                p.push(format!(
+                    "{here}.source.requests: at most {MAX_REQUESTS_PER_LAYER}"
+                ));
+            }
+            for (j, t) in templates.iter().enumerate() {
+                let tp = if j == 0 && layer.source.request.is_some() {
+                    format!("{here}.source.request")
+                } else {
+                    let k = j - usize::from(layer.source.request.is_some());
+                    format!("{here}.source.requests[{k}]")
+                };
+                validate_template(t, &tp, &prefixes, &mut p);
+            }
+            layer.pattern.validate(&format!("{here}.pattern"), &mut p);
+            if let Some(after) = layer.starts_after {
+                if after.0 > MAX_STARTS_AFTER {
+                    p.push(format!("{here}.starts_after: at most 24h"));
+                }
+            }
+            if let Some(think) = layer.think_time {
+                if think.0 > MAX_THINK_TIME {
+                    p.push(format!("{here}.think_time: at most 60s"));
+                }
+                if layer.model == Model::Open {
+                    p.push(format!(
+                        "{here}.think_time: only a closed layer has a think time"
+                    ));
+                }
+            }
+            if layer.model == Model::Closed {
+                let peak = layer.pattern.peak();
+                if peak > self.scale.virtual_clients as f64 {
+                    p.push(format!(
+                        "{here}.pattern: a closed layer runs at most scale.virtual_clients ({}) users, the pattern asks for {peak}",
+                        self.scale.virtual_clients
+                    ));
+                }
+                if peak > caps.max_inflight as f64 {
+                    p.push(format!(
+                        "{here}.pattern: {peak} users is over this node's in-flight cap of {}",
+                        caps.max_inflight
+                    ));
+                }
+            }
+        }
+        let peak = self.peak_rate();
+        if peak > node_rate as f64 {
+            p.push(format!(
+                "layers: the peak rates add up to {peak} requests per second, over the cap of {node_rate} (RUSTYBIN_HARNESS_MAX_RATE, scale.max_rate_per_node)"
+            ));
+        }
+        let duration = self.duration();
+        if duration > caps.max_duration() {
+            p.push(format!(
+                "layers: the run would last {}, over the cap of {} (RUSTYBIN_HARNESS_MAX_DURATION)",
+                format_duration(duration),
+                format_duration(caps.max_duration())
+            ));
+        }
+        if !self.layers.is_empty() && duration.is_zero() {
+            p.push("layers: the run would last 0 seconds".into());
+        }
+        let timeout = self.timeout();
+        if timeout < MIN_TIMEOUT || timeout > MAX_TIMEOUT {
+            p.push("timeout: 1ms to 60s".into());
+        }
+        let t = &self.thresholds;
+        let fraction = |name: &str, v: Option<f64>, p: &mut Vec<String>| {
+            if let Some(v) = v {
+                if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+                    p.push(format!("thresholds.{name}: a fraction from 0 to 1"));
+                }
+            }
+        };
+        fraction("error_rate", t.error_rate, &mut p);
+        fraction("min_achieved", t.min_achieved, &mut p);
+        for (name, v) in [
+            ("latency_p50_ms", t.latency_p50_ms),
+            ("latency_p99_ms", t.latency_p99_ms),
+            ("latency_max_ms", t.latency_max_ms),
+        ] {
+            if let Some(v) = v {
+                if !v.is_finite() || !(0.0..=3_600_000.0).contains(&v) {
+                    p.push(format!("thresholds.{name}: 0 to 3600000 milliseconds"));
+                }
+            }
+        }
+        p
+    }
+}
+
+fn validate_template(t: &RequestTemplate, path: &str, prefixes: &[String], p: &mut Vec<String>) {
+    let method = t.method.to_ascii_uppercase();
+    if !matches!(
+        method.as_str(),
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"
+    ) {
+        p.push(format!(
+            "{path}.method: one of GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS"
+        ));
+    }
+    if !t.path.starts_with('/') {
+        p.push(format!("{path}.path: must start with /"));
+    } else if t.path.len() > 2048 {
+        p.push(format!("{path}.path: at most 2048 characters"));
+    } else if t.path.contains(['\r', '\n', ' ']) {
+        p.push(format!(
+            "{path}.path: must not contain spaces or line breaks"
+        ));
+    } else {
+        let bare = strip_placeholders(&t.path);
+        if safety::is_control_prefix(&bare)
+            || prefixes
+                .iter()
+                .any(|pre| safety::is_control_prefix(&format!("{pre}{bare}")))
+        {
+            p.push(format!(
+                "{path}.path: a run never targets a Rustybin control plane (/_rustybin, /ui)"
+            ));
+        }
+    }
+    if t.headers.len() > MAX_HEADERS {
+        p.push(format!("{path}.headers: at most {MAX_HEADERS}"));
+    }
+    for (name, value) in &t.headers {
+        if axum::http::HeaderName::from_bytes(name.as_bytes()).is_err() {
+            p.push(format!("{path}.headers.{name}: not a header name"));
+        }
+        if value.contains(['\r', '\n']) || value.len() > 8192 {
+            p.push(format!(
+                "{path}.headers.{name}: no line breaks, at most 8192 characters"
+            ));
+        }
+        for ph in placeholders(value) {
+            if !PLACEHOLDERS.contains(&ph.as_str()) {
+                p.push(format!(
+                    "{path}.headers.{name}: unknown placeholder {{{{{ph}}}}} (known: {})",
+                    PLACEHOLDERS.join(", ")
+                ));
+            }
+        }
+    }
+    for ph in placeholders(&t.path) {
+        if !PLACEHOLDERS.contains(&ph.as_str()) {
+            p.push(format!(
+                "{path}.path: unknown placeholder {{{{{ph}}}}} (known: {})",
+                PLACEHOLDERS.join(", ")
+            ));
+        }
+    }
+    if let Some(body) = &t.body {
+        let text = match body {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        if text.len() > MAX_BODY_BYTES {
+            p.push(format!("{path}.body: at most {MAX_BODY_BYTES} bytes"));
+        }
+        for ph in placeholders(&text) {
+            if !PLACEHOLDERS.contains(&ph.as_str()) {
+                p.push(format!(
+                    "{path}.body: unknown placeholder {{{{{ph}}}}} (known: {})",
+                    PLACEHOLDERS.join(", ")
+                ));
+            }
+        }
+    }
+    for s in &t.expect_status {
+        if !(100..=599).contains(s) {
+            p.push(format!("{path}.expect_status: statuses are 100 to 599"));
+            break;
+        }
+    }
+    if t.weight == 0 || t.weight > 1000 {
+        p.push(format!("{path}.weight: 1 to 1000"));
+    }
+}
+
+/// The `{{name}}` placeholders in a template string.
+pub fn placeholders(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        match after.find("}}") {
+            Some(end) => {
+                out.push(after[..end].trim().to_string());
+                rest = &after[end + 2..];
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+/// A template path with every placeholder replaced by `x` (for the control
+/// plane fence).
+fn strip_placeholders(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut rest = path;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find("}}") {
+            Some(end) => {
+                out.push('x');
+                rest = &after[end + 2..];
+            }
+            None => {
+                rest = after;
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+// ── JSON Schema ─────────────────────────────────────────────────────
+
+/// Schema id served by `GET /_rustybin/harness/schema`.
+pub const SCHEMA_ID: &str = "https://rustybin.dev/schemas/harness-scenario.json";
+
+fn prop(ty: &str, description: &str) -> Value {
+    json!({ "type": ty, "description": description })
+}
+
+fn number(description: &str, min: f64, max: f64) -> Value {
+    json!({ "type": "number", "description": description, "minimum": min, "maximum": max })
+}
+
+fn integer(description: &str, min: u64, max: u64) -> Value {
+    json!({ "type": "integer", "description": description, "minimum": min, "maximum": max })
+}
+
+fn string(description: &str, max_len: usize) -> Value {
+    json!({ "type": "string", "description": description, "maxLength": max_len })
+}
+
+fn duration(description: &str, max_secs: u64) -> Value {
+    json!({
+        "type": ["string", "number"],
+        "format": "duration",
+        "description": format!("{description} A duration: 500ms, 30s, 2m, 1h, or a number of seconds."),
+        "pattern": "^\\s*[0-9]+(\\.[0-9]+)?\\s*(ms|s|m|h|d)?\\s*$",
+        "minimum": 0,
+        "maximum": max_secs
+    })
+}
+
+/// Mark a top-level property as shorthand for a layer field: the console
+/// builder edits the normalised form and skips it.
+fn shorthand(mut v: Value) -> Value {
+    v["x-shorthand"] = json!("layers");
+    v
+}
+
+fn enumeration(description: &str, values: &[&str], default: &str) -> Value {
+    json!({ "type": "string", "description": description, "enum": values, "default": default })
+}
+
+/// The JSON Schema (draft 2020-12) of a scenario, with this node's caps as
+/// bounds. Every property carries a description, every number its bounds:
+/// the console builder, the MCP tools and the parity test rely on it.
+pub fn schema(caps: &Caps) -> Value {
+    let max_dur = caps.max_duration_secs;
+    let max_rate = caps.max_rate as f64;
+    let pattern_then = json!({
+        "$ref": "#/$defs/pattern",
+        "description": "The next stage, started when this one ends (at most 16 stages in a chain)."
+    });
+    let pattern = json!({
+        "type": "object",
+        "description": "The shape of the layer's load over time: the request rate per second (open model) or the number of active users (closed model).",
+        "oneOf": [
+            {
+                "title": "constant",
+                "type": "object",
+                "description": "A steady rate for a while: baselines and soaks.",
+                "properties": {
+                    "type": { "const": "constant", "type": "string", "description": "Pattern type." },
+                    "rate": number("Requests per second (open) or users (closed).", 0.0, max_rate),
+                    "for": duration("How long to hold the rate.", max_dur),
+                    "then": pattern_then
+                },
+                "required": ["type", "rate", "for"],
+                "additionalProperties": false
+            },
+            {
+                "title": "ramp",
+                "type": "object",
+                "description": "From one rate to another over a period: where latency bends as load grows.",
+                "properties": {
+                    "type": { "const": "ramp", "type": "string", "description": "Pattern type." },
+                    "from": number("Rate (or users) at the start.", 0.0, max_rate),
+                    "to": number("Rate (or users) at the end.", 0.0, max_rate),
+                    "over": duration("How long the ramp takes.", max_dur),
+                    "curve": enumeration("Linear, or exponential (from and to above 0).", &["linear", "exponential"], "linear"),
+                    "then": pattern_then
+                },
+                "required": ["type", "from", "to", "over"],
+                "additionalProperties": false
+            }
+        ]
+    });
+    let template = json!({
+        "type": "object",
+        "description": "A request to send. Placeholders: {{seq}} (request number), {{vu}} (virtual client), {{run}}, {{node}}, {{layer}}, {{rand}}.",
+        "properties": {
+            "method": enumeration("HTTP method.", &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], "GET"),
+            "path": json!({ "type": "string", "description": "Path with an optional query, appended to the target URL. Never a Rustybin control plane path.", "default": "/", "maxLength": 2048, "pattern": "^/" }),
+            "headers": json!({
+                "type": "object",
+                "description": "Request headers (values may use placeholders).",
+                "additionalProperties": { "type": "string", "description": "A header value (placeholders allowed).", "maxLength": 8192 },
+                "maxProperties": MAX_HEADERS
+            }),
+            "body": json!({ "description": "Request body: a string is sent as is, any other JSON value is sent as JSON (Content-Type application/json unless a header says otherwise). At most 64 KB.", "type": ["string", "object", "array", "number", "boolean", "null"] }),
+            "expect_status": json!({
+                "type": "array",
+                "description": "Statuses that count as expected (default: 2xx and 3xx). Anything else is an error in the report.",
+                "items": integer("An HTTP status.", 100, 599),
+                "maxItems": 32
+            }),
+            "weight": integer("Relative share when a layer has several requests.", 1, 1000)
+        },
+        "additionalProperties": false
+    });
+    let source = json!({
+        "type": "object",
+        "description": "Where the layer's requests come from: one request template, or several picked by weight.",
+        "properties": {
+            "request": template,
+            "requests": { "type": "array", "description": "Several templates, picked by weight.", "items": { "$ref": "#/$defs/request" }, "maxItems": MAX_REQUESTS_PER_LAYER }
+        },
+        "additionalProperties": false
+    });
+    let layer = json!({
+        "type": "object",
+        "description": "One stream of traffic with its own source, model and pattern. Layers run at the same time and are reported separately.",
+        "properties": {
+            "name": string("Layer name (letters, digits, - _ .).", MAX_NAME_LEN),
+            "source": { "$ref": "#/$defs/source" },
+            "pattern": { "$ref": "#/$defs/pattern" },
+            "model": enumeration("Open: requests leave at their intended times whatever the answers (latency is measured from the intended send). Closed: the pattern gives the number of users, each waiting for its answer plus a think time.", &["open", "closed"], "open"),
+            "starts_after": duration("Delay before the layer starts, relative to the run.", 24 * 3600),
+            "think_time": duration("Closed model: a user's pause between its answer and its next request.", 60)
+        },
+        "required": ["name", "source", "pattern"],
+        "additionalProperties": false
+    });
+    let target = json!({
+        "description": "A target URL, or an object with the URL and its options. Every target must be allowed by RUSTYBIN_HARNESS_TARGETS on the node.",
+        "oneOf": [
+            json!({ "type": "string", "description": "The target URL (http or https).", "maxLength": 2048, "format": "uri" }),
+            {
+                "type": "object",
+                "description": "A target with options.",
+                "properties": {
+                    "url": json!({ "type": "string", "description": "The target URL (http or https), without query or fragment.", "maxLength": 2048, "format": "uri" }),
+                    "weight": integer("Share of the requests this target gets.", 1, 1000),
+                    "host": string("Host header and TLS server name to send instead of the URL's host.", 253),
+                    "http": enumeration("Protocol: auto (ALPN on TLS, HTTP/1.1 on plain), h1, h2 (TLS only), h2c (prior knowledge on plain connections).", &["auto", "h1", "h2", "h2c"], "auto"),
+                    "insecure": prop("boolean", "Skip TLS certificate verification (demo gateways with self-signed certificates).")
+                },
+                "required": ["url"],
+                "additionalProperties": false
+            }
+        ]
+    });
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": SCHEMA_ID,
+        "title": "Rustybin harness scenario",
+        "description": "Every parameter of a harness run: where to send, what to send, the shape of the load over time, the scale and the pass criteria. A scenario with one layer can be written with top-level source and pattern fields instead of layers.",
+        "type": "object",
+        "properties": {
+            "name": string("Scenario name (letters, digits, space, - _ .).", MAX_NAME_LEN),
+            "description": string("What the scenario shows.", MAX_DESCRIPTION_LEN),
+            "target": json!({ "type": "string", "description": "Shorthand for one target URL.", "maxLength": 2048, "format": "uri", "x-shorthand": "targets" }),
+            "targets": { "type": "array", "description": "The gateways (or gateway nodes) the load goes to, with weights.", "items": target, "maxItems": MAX_TARGETS },
+            "scale": {
+                "type": "object",
+                "description": "How big the run is, apart from how hard it pushes.",
+                "properties": {
+                    "virtual_clients": integer("Distinct virtual clients ({{vu}} cycles through them; closed layers never run more users).", 1, MAX_VIRTUAL_CLIENTS as u64),
+                    "max_rate_per_node": integer("A rate cap below the node's own (RUSTYBIN_HARNESS_MAX_RATE).", 1, caps.max_rate)
+                },
+                "additionalProperties": false
+            },
+            "layers": { "type": "array", "description": "The traffic layers of the run.", "items": { "$ref": "#/$defs/layer" }, "maxItems": MAX_LAYERS },
+            "source": { "$ref": "#/$defs/source", "description": "Shorthand: the source of a single layer.", "x-shorthand": "layers" },
+            "pattern": { "$ref": "#/$defs/pattern", "description": "Shorthand: the pattern of a single layer.", "x-shorthand": "layers" },
+            "model": shorthand(enumeration("Shorthand: the load model of a single layer.", &["open", "closed"], "open")),
+            "think_time": shorthand(duration("Shorthand: the think time of a single closed layer.", 60)),
+            "timeout": duration("Per-request timeout (default 10s).", 60),
+            "thresholds": {
+                "type": "object",
+                "description": "Pass criteria: a run that misses any of them fails (exit code 1).",
+                "properties": {
+                    "error_rate": number("Most transport errors plus unexpected statuses, as a fraction of the requests sent.", 0.0, 1.0),
+                    "not_sent": integer("Most requests the client may skip at its in-flight cap.", 0, u64::MAX / 2),
+                    "latency_p50_ms": number("Highest median latency from the intended send time, in milliseconds.", 0.0, 3_600_000.0),
+                    "latency_p99_ms": number("Highest p99 latency from the intended send time, in milliseconds.", 0.0, 3_600_000.0),
+                    "latency_max_ms": number("Highest latency of any request, in milliseconds.", 0.0, 3_600_000.0),
+                    "min_achieved": number("Least fraction of the requested requests that must have been answered.", 0.0, 1.0),
+                    "saturated": prop("boolean", "false: fail when the client itself saturated (the results would describe the client, not the gateway).")
+                },
+                "additionalProperties": false
+            }
+        },
+        "required": ["name"],
+        "additionalProperties": false,
+        "$defs": {
+            "pattern": pattern,
+            "request": template,
+            "source": source,
+            "layer": layer
+        },
+        "x-caps": caps
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::harness::pattern::Curve;
+
+    pub(crate) fn smoke(url: &str) -> Scenario {
+        let mut s = Scenario::parse(&format!(
+            "name: smoke\ntarget: {url}\nsource: {{ request: {{ path: /status/200 }} }}\npattern: {{ type: constant, rate: 50, for: 2s }}\n"
+        ))
+        .unwrap();
+        s.normalise();
+        s
+    }
+
+    #[test]
+    fn durations() {
+        for (text, ms) in [
+            ("500ms", 500),
+            ("30s", 30_000),
+            ("2m", 120_000),
+            ("1h", 3_600_000),
+            ("1.5s", 1500),
+            ("90", 90_000),
+            (" 2 m ", 120_000),
+        ] {
+            assert_eq!(
+                parse_duration(text),
+                Some(Duration::from_millis(ms)),
+                "{text}"
+            );
+        }
+        for bad in ["", "-1s", "1w", "abc", "1 2", "1e400"] {
+            assert_eq!(parse_duration(bad), None, "{bad}");
+        }
+        assert_eq!(format_duration(Duration::from_secs(7200)), "2h");
+        assert_eq!(format_duration(Duration::from_secs(90)), "90s");
+        assert_eq!(format_duration(Duration::from_millis(1500)), "1500ms");
+        assert_eq!(format_duration(Duration::from_micros(500)), "0.5ms");
+        let d: Dur = serde_yaml::from_str("30s").unwrap();
+        assert_eq!(d, Dur::secs(30));
+        let d: Dur = serde_yaml::from_str("45").unwrap();
+        assert_eq!(d, Dur::secs(45));
+        assert!(serde_yaml::from_str::<Dur>("\"1w\"").is_err());
+        assert_eq!(serde_yaml::to_string(&Dur::secs(60)).unwrap().trim(), "1m");
+    }
+
+    #[test]
+    fn shorthand_is_folded_into_one_layer() {
+        let s = smoke("http://127.0.0.1:1");
+        assert!(s.target.is_none() && s.source.is_none() && s.pattern.is_none());
+        assert_eq!(s.targets.len(), 1);
+        assert_eq!(s.layers.len(), 1);
+        assert_eq!(s.layers[0].name, "main");
+        assert_eq!(s.duration(), Duration::from_secs(2));
+        assert_eq!(s.peak_rate(), 50.0);
+        let sum = s.summary();
+        assert!((sum.expected_requests - 100.0).abs() < 0.01);
+        assert!(
+            s.validate(&Caps::default()).is_empty(),
+            "{:?}",
+            s.validate(&Caps::default())
+        );
+        assert_eq!(s.hash().len(), 64);
+    }
+
+    #[test]
+    fn target_strings_and_objects() {
+        let s = Scenario::parse(
+            "name: t\ntargets:\n  - http://a:8080\n  - { url: https://b, weight: 3, host: api.b, http: h2, insecure: true }\n",
+        )
+        .unwrap();
+        assert_eq!(s.targets[0], Target::new("http://a:8080"));
+        assert_eq!(s.targets[1].weight, 3);
+        assert_eq!(s.targets[1].http, HttpVersion::H2);
+        assert!(s.targets[1].insecure);
+        let text = serde_yaml::to_string(&s).unwrap();
+        let back = Scenario::parse(&text).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn unknown_fields_and_sources_are_refused_by_name() {
+        let err = Scenario::parse("name: x\nchaos: { preset: mad }\n").unwrap_err();
+        assert!(err.contains("chaos"), "{err}");
+        let err = Scenario::parse("name: x\nsource: { mock: petstore }\n").unwrap_err();
+        assert!(err.contains("mock"), "{err}");
+        assert!(Scenario::parse("").is_err());
+        assert!(Scenario::parse(&"x".repeat(MAX_SCENARIO_BYTES + 1)).is_err());
+        assert!(Scenario::from_value(&json!([1])).is_err());
+    }
+
+    #[test]
+    fn validation_lists_every_problem() {
+        let mut s = Scenario::parse(
+            "name: ''\ntargets: [ 'ftp://x', { url: 'http://gw/_rustybin', weight: 0 }, { url: 'http://plain', http: h2 } ]\nscale: { virtual_clients: 0, max_rate_per_node: 999999 }\nlayers:\n  - name: 'bad name!'\n    source: {}\n    pattern: { type: constant, rate: 100000, for: 30h }\n    think_time: 90s\n  - name: a\n    source: { request: { method: FETCH, path: 'nope', headers: { 'bad header': 'x', 'ok': \"line\\nbreak\" }, body: '{{nope}}', expect_status: [99], weight: 0 } }\n    pattern: { type: ramp, from: 1, to: 2, over: 1s }\n  - name: a\n    model: closed\n    source: { request: { path: '/ui/{{seq}}' } }\n    pattern: { type: constant, rate: 5, for: 1s }\ntimeout: 5m\nthresholds: { error_rate: 2, latency_p99_ms: -1, min_achieved: 1.5 }\n",
+        )
+        .unwrap();
+        s.normalise();
+        let caps = Caps {
+            max_rate: 1000,
+            max_inflight: 100,
+            max_duration_secs: 3600,
+        };
+        let problems = s.validate(&caps);
+        let text = problems.join("\n");
+        for needle in [
+            "name: required",
+            "targets[0].url",
+            "targets[1].url: the target URL points at a Rustybin control plane",
+            "targets[1].weight",
+            "targets[2].http: h2 needs an https target",
+            "scale.virtual_clients",
+            "scale.max_rate_per_node: 999999 is over",
+            "layers[0].name",
+            "layers[0].source: a request",
+            "layers[0].think_time: only a closed layer",
+            "layers[0].think_time: at most 60s",
+            "layers[1].source.request.method",
+            "layers[1].source.request.path: must start with /",
+            "layers[1].source.request.headers.bad header",
+            "layers[1].source.request.headers.ok",
+            "layers[1].source.request.body: unknown placeholder {{nope}}",
+            "layers[1].source.request.expect_status",
+            "layers[1].source.request.weight",
+            "layers[2].name: duplicate",
+            "layers[2].source.request.path: a run never targets a Rustybin control plane",
+            "layers[2].pattern: a closed layer runs at most scale.virtual_clients",
+            "layers: the peak rates add up to",
+            "layers: the run would last 30h",
+            "timeout: 1ms to 60s",
+            "thresholds.error_rate",
+            "thresholds.latency_p99_ms",
+            "thresholds.min_achieved",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+        }
+    }
+
+    #[test]
+    fn placeholders_are_found() {
+        assert_eq!(placeholders("/a/{{seq}}/{{ vu }}"), vec!["seq", "vu"]);
+        assert_eq!(placeholders("/a/{{open"), Vec::<String>::new());
+        assert_eq!(strip_placeholders("/{{a}}/_rustybin"), "/x/_rustybin");
+    }
+
+    /// A scenario with every field set, for the schema parity test.
+    pub(crate) fn full() -> Scenario {
+        let template = RequestTemplate {
+            method: "POST".into(),
+            path: "/echo/{{seq}}".into(),
+            headers: BTreeMap::from([("X-Vu".to_string(), "{{vu}}".to_string())]),
+            body: Some(json!({ "n": 1 })),
+            expect_status: vec![200, 404],
+            weight: 2,
+        };
+        Scenario {
+            name: "full".into(),
+            description: Some("every field".into()),
+            target: Some("http://127.0.0.1:1".into()),
+            targets: vec![Target {
+                url: "http://127.0.0.1:2".into(),
+                weight: 2,
+                host: Some("api.example".into()),
+                http: HttpVersion::H1,
+                insecure: true,
+            }],
+            scale: Scale {
+                virtual_clients: 10,
+                max_rate_per_node: Some(100),
+            },
+            layers: vec![Layer {
+                name: "l".into(),
+                source: Source {
+                    request: Some(template.clone()),
+                    requests: vec![template.clone()],
+                },
+                pattern: Pattern::Ramp {
+                    from: 1.0,
+                    to: 2.0,
+                    over: Dur::secs(1),
+                    curve: Curve::Exponential,
+                    then: Some(Box::new(Pattern::Constant {
+                        rate: 2.0,
+                        hold: Dur::secs(1),
+                        then: None,
+                    })),
+                },
+                model: Model::Closed,
+                starts_after: Some(Dur::secs(1)),
+                think_time: Some(Dur::secs(1)),
+            }],
+            source: Some(Source {
+                request: Some(template),
+                requests: Vec::new(),
+            }),
+            pattern: Some(Pattern::Constant {
+                rate: 1.0,
+                hold: Dur::secs(1),
+                then: None,
+            }),
+            model: Some(Model::Closed),
+            think_time: Some(Dur::secs(1)),
+            timeout: Some(Dur::secs(5)),
+            thresholds: Thresholds {
+                error_rate: Some(0.1),
+                not_sent: Some(0),
+                latency_p50_ms: Some(1.0),
+                latency_p99_ms: Some(2.0),
+                latency_max_ms: Some(3.0),
+                min_achieved: Some(0.9),
+                saturated: Some(false),
+            },
+        }
+    }
+
+    /// Resolve `$ref`s against the root schema.
+    fn resolve<'a>(root: &'a Value, node: &'a Value) -> &'a Value {
+        match node.get("$ref").and_then(Value::as_str) {
+            Some(r) => {
+                let path = r.trim_start_matches("#/");
+                let mut cur = root;
+                for seg in path.split('/') {
+                    cur = &cur[seg];
+                }
+                resolve(root, cur)
+            }
+            None => node,
+        }
+    }
+
+    /// The schema for a property name inside `node` (object properties,
+    /// `additionalProperties`, or the matching `oneOf` branch).
+    fn property<'a>(
+        root: &'a Value,
+        node: &'a Value,
+        key: &str,
+        value: &Value,
+    ) -> Option<&'a Value> {
+        let node = resolve(root, node);
+        if let Some(p) = node.get("properties").and_then(|p| p.get(key)) {
+            return Some(p);
+        }
+        if let Some(ap) = node.get("additionalProperties").filter(|v| v.is_object()) {
+            return Some(ap);
+        }
+        if let Some(branches) = node.get("oneOf").and_then(Value::as_array) {
+            for b in branches {
+                let b = resolve(root, b);
+                let matches_type = match value.get("type").and_then(Value::as_str) {
+                    Some(t) => b
+                        .pointer("/properties/type/const")
+                        .and_then(Value::as_str)
+                        .is_none_or(|c| c == t),
+                    None => true,
+                };
+                if matches_type {
+                    if let Some(p) = b.get("properties").and_then(|p| p.get(key)) {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn walk(root: &Value, node: &Value, value: &Value, path: &str, missing: &mut Vec<String>) {
+        let node = resolve(root, node);
+        match value {
+            Value::Object(map) => {
+                // The matching oneOf branch: by `type` when the value has one
+                // (patterns), else the object branch (targets).
+                let node = match node.get("oneOf").and_then(Value::as_array) {
+                    Some(branches) if node.get("properties").is_none() => {
+                        let wanted = value.get("type").and_then(Value::as_str);
+                        branches
+                            .iter()
+                            .map(|b| resolve(root, b))
+                            .find(|b| match wanted {
+                                Some(t) => {
+                                    b.pointer("/properties/type/const").and_then(Value::as_str)
+                                        == Some(t)
+                                }
+                                None => b["type"] == "object" || b.get("properties").is_some(),
+                            })
+                            .unwrap_or(node)
+                    }
+                    _ => node,
+                };
+                // A free-form object (a request body): anything goes.
+                if node.get("properties").is_none()
+                    && node.get("additionalProperties").is_none()
+                    && node.get("oneOf").is_none()
+                {
+                    return;
+                }
+                for (k, v) in map {
+                    let here = format!("{path}.{k}");
+                    match property(root, node, k, value) {
+                        Some(p) => walk(root, p, v, &here, missing),
+                        None => missing.push(here),
+                    }
+                }
+            }
+            Value::Array(items) => {
+                let Some(item_schema) = node.get("items") else {
+                    missing.push(format!("{path}[] (no items)"));
+                    return;
+                };
+                for (i, v) in items.iter().enumerate() {
+                    walk(root, item_schema, v, &format!("{path}[{i}]"), missing);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn check_described(
+        root: &Value,
+        node: &Value,
+        path: &str,
+        problems: &mut Vec<String>,
+        seen: &mut Vec<String>,
+    ) {
+        if let Some(r) = node.get("$ref").and_then(Value::as_str) {
+            if seen.contains(&r.to_string()) {
+                return;
+            }
+            seen.push(r.to_string());
+            check_described(root, resolve(root, node), path, problems, seen);
+            return;
+        }
+        if node.get("description").is_none() {
+            problems.push(format!("{path}: no description"));
+        }
+        let ty = node.get("type");
+        let is_number = ty.is_some_and(|t| t == "number" || t == "integer")
+            || ty
+                .and_then(Value::as_array)
+                .is_some_and(|a| a.iter().all(|t| t == "number" || t == "integer"))
+            || node.get("format").is_some_and(|f| f == "duration");
+        if is_number && (node.get("minimum").is_none() || node.get("maximum").is_none()) {
+            problems.push(format!("{path}: a number without minimum and maximum"));
+        }
+        if let Some(props) = node.get("properties").and_then(Value::as_object) {
+            for (k, v) in props {
+                check_described(root, v, &format!("{path}.{k}"), problems, seen);
+            }
+        }
+        if let Some(ap) = node.get("additionalProperties").filter(|v| v.is_object()) {
+            check_described(root, ap, &format!("{path}.*"), problems, seen);
+        }
+        if let Some(items) = node.get("items") {
+            check_described(root, items, &format!("{path}[]"), problems, seen);
+        }
+        if let Some(branches) = node.get("oneOf").and_then(Value::as_array) {
+            for (i, b) in branches.iter().enumerate() {
+                check_described(root, b, &format!("{path}|{i}"), problems, seen);
+            }
+        }
+    }
+
+    /// Parity (plan section 6.6): every field of the model is in the schema,
+    /// and every schema property has a description and, for numbers, bounds.
+    #[test]
+    fn schema_covers_the_model_and_describes_everything() {
+        let root = schema(&Caps::default());
+        let value = serde_json::to_value(full()).unwrap();
+        let mut missing = Vec::new();
+        walk(&root, &root, &value, "scenario", &mut missing);
+        assert!(
+            missing.is_empty(),
+            "model fields missing from the schema: {missing:#?}"
+        );
+        let mut problems = Vec::new();
+        let mut seen = Vec::new();
+        check_described(&root, &root, "schema", &mut problems, &mut seen);
+        for (name, def) in root["$defs"].as_object().unwrap() {
+            check_described(
+                &root,
+                def,
+                &format!("$defs.{name}"),
+                &mut problems,
+                &mut seen,
+            );
+        }
+        assert!(problems.is_empty(), "{problems:#?}");
+        assert_eq!(root["x-caps"]["max_rate"], 50_000);
+    }
+
+    #[test]
+    fn full_scenario_normalises_and_validates() {
+        let mut s = full();
+        s.normalise();
+        assert_eq!(s.targets.len(), 2);
+        assert_eq!(s.layers.len(), 2);
+        assert_eq!(s.layers[0].name, "main");
+        let caps = Caps::default();
+        let problems = s.validate(&caps);
+        assert!(problems.is_empty(), "{problems:#?}");
+    }
+}

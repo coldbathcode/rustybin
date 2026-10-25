@@ -22,6 +22,8 @@ const VIEWS = [
   { id: 'a2a', title: 'A2A client', icon: 'a2a', load: () => import('./views/a2a.js') },
   { section: 'Resilience and security' },
   { id: 'chaos', title: 'Chaos and health', icon: 'chaos', load: () => import('./views/chaos.js') },
+  // Shown once /_rustybin/status says harness mode is on (RUSTYBIN_HARNESS=on).
+  { id: 'harness', title: 'Harness', icon: 'send', hidden: true, feature: 'harness', load: () => import('./views/harness.js') },
   { id: 'tokens', title: 'Token lab', icon: 'token', load: () => import('./views/tokens.js') },
   // Reached from an agent's sign-in (/_rustybin/oauth/authorize), never from the navigation.
   { id: 'authorize', title: 'Sign in an AI agent', icon: 'shield', hidden: true, load: () => import('./views/authorize.js') },
@@ -79,6 +81,27 @@ function buildNav() {
     h('a', { href: SERVER + '/' }, 'Endpoint list'),
     h('a', { href: SERVER + '/docs' }, 'OpenAPI docs'),
     h('span', { id: 'foot-version' }, '')));
+}
+
+// Views behind an instance feature (harness mode) appear in the navigation
+// once the status reports the feature on.
+function showFeatureViews(st) {
+  let changed = false;
+  for (const v of VIEWS) {
+    if (!v.feature) continue;
+    const on = !!(st && st[v.feature] && st[v.feature].enabled);
+    if (v.hidden === !on) continue;
+    v.hidden = !on;
+    changed = true;
+  }
+  if (changed) {
+    navLinks.clear();
+    buildNav();
+    for (const [vid, { a }] of navLinks) {
+      if (vid === currentId) a.setAttribute('aria-current', 'page');
+    }
+    updateTrafficCount();
+  }
 }
 
 function updateTrafficCount() {
@@ -340,6 +363,7 @@ async function loadInstance() {
     settings.instance.status = st;
     settings.instance.publicMode = !!st.public_mode;
     settings.instance.adminTokenConfigured = !!st.admin_token_configured;
+    showFeatureViews(st);
     const foot = document.getElementById('foot-version');
     if (foot) foot.textContent = 'v' + st.version + ' | up ' + fmtDuration(st.uptime_seconds);
     if (st.public_mode && !settings.get('session')) {

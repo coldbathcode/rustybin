@@ -19,6 +19,7 @@ const MODULE_PATHS: &[fn() -> Value] = &[
     crate::mcp::manage::openapi_paths,
     crate::control_oauth::openapi_paths,
     crate::control::openapi_paths,
+    crate::harness::openapi_paths,
     crate::metrics::openapi_paths,
     crate::limits::openapi_paths,
     crate::keys::openapi_paths,
@@ -46,6 +47,7 @@ const MODULE_PATHS: &[fn() -> Value] = &[
 /// Per-module OpenAPI components fragments (e.g. `{"schemas": {...}}`).
 const MODULE_COMPONENTS: &[fn() -> Value] = &[
     crate::inspector::openapi_components,
+    crate::harness::openapi_components,
     crate::mcp::openapi_components,
     crate::ai::openapi_components,
 ];

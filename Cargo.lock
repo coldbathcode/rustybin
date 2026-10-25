@@ -2414,6 +2414,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jsonwebtoken",
+ "libc",
  "prost",
  "protoc-bin-vendored",
  "quick-xml",

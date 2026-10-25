@@ -1,27 +1,21 @@
 # Plan: harness mode, load and chaos through a gateway
 
-Status: **phase 0 done** (2026-10-25): the engine spike is `examples/harness_spike.rs`, its numbers and
-what they change are in [Phase 0 results](#phase-0-results-2026-10-25). Phases 1 and 2 are next. Planned
-2026-10-22.
+Status: **phases 0 and 1 done** (2026-10-25): the engine spike is `examples/harness_spike.rs`
+([Phase 0 results](#phase-0-results-2026-10-25)); the single-node engine is `src/harness/`
+([Phase 1 build notes](#phase-1-build-notes-2026-10-25) list where the build differs from this plan).
+Phase 2 is next. Planned 2026-10-22.
 
-> **Build marker (2026-10-25): START HERE.** Phase 0 is done (see [its results](#phase-0-results-2026-10-25),
-> which change the engine design below). Approved scope for the next session is phases 1 and 2 (section 15).
-> There is still no `src/harness/`; the spike is an example that only targets the server it starts.
-> 1. **Phase 1 (single-node engine):** move `hyper`, `hyper-util` (`client-legacy`, `http1`) and
->    `hdrhistogram` from dev-dependencies to dependencies; new module `src/harness/` (`mod.rs`,
->    `scenario.rs`, `pattern.rs`, `engine.rs`, `safety.rs`, `report.rs`, `cli.rs`), registered in
->    `ROUTERS` / `SOURCES` / `MODULE_PATHS`. The `RUSTYBIN_HARNESS*` env (section 5),
->    `POST /_rustybin/harness/runs`, the safety module first (allowlist, address pinning, caps, kill
->    switch), report JSON, CLI `run` / `validate` / `report`, headless exit codes,
->    `GET /_rustybin/harness/schema`, the first MCP tools and the schema-generated console builder with
->    the parity test. Off by default; fatal with public mode or self-service. Build the engine the way
->    phase 0 found it must work: a dedicated scheduler thread, worker threads that leave it a core, the
->    in-flight cap from the descriptor limit, per-worker histograms, `TCP_NODELAY`, and saturation judged
->    per second.
-> 2. **Phase 2 (correlation):** harness headers and HMAC signing, the server correlation layer in
->    `build_app`, client classification (`upstream` / `gateway` / `transport` / `lost`), loop-through
->    `both`, inspector sampling, metrics, the shaped `/harness/{*path}` endpoint, and the in-repo
->    `src/harness/test_proxy.rs`.
+> **Build marker (2026-10-25): START HERE.** Phases 0 and 1 are done. Approved scope for the next session
+> is phase 2 (section 15), on top of what phase 1 built (`src/harness/`, see the build notes):
+> **Phase 2 (correlation):** harness headers and HMAC signing (`X-Rustybin-Harness`, `traceparent`; the
+> client already sends `X-Request-Id: <run>-<node>-<seq>`), the server correlation layer in `build_app`
+> (next to inspector capture; `AppState.harness` already exists for it), client classification
+> (`upstream` / `gateway` / `transport` / `lost`) replacing phase 1's `ok` / `unexpected_status` /
+> `transport` in `report.rs`, loop-through `both` with exact legs, inspector sampling, the
+> `rustybin_harness_*` metrics, the shaped `/harness/{*path}` endpoint, and the in-repo
+> `src/harness/test_proxy.rs` (section 16). Keep the one-model rule: new parameters go into
+> `scenario.rs` (model, validation, `schema()`), and the parity tests cover the MCP tool schemas and the
+> console builder.
 >
 > Keep this status line and `docs/src/roadmap.md` ("Next") updated as phases land. Commit as oliwynn.
 
@@ -796,6 +790,77 @@ What it shows:
 - **Caps** (section 10): 50,000 rps per client node confirmed; the in-flight cap now also follows the
   descriptor limit. The 1-hour duration, bucket and sample limits are unaffected by these numbers.
 
+### Phase 1 build notes (2026-10-25)
+
+What phase 1 built, and where it differs from the sections above:
+
+- **Module layout**: `src/harness/` has `mod.rs` (roles, `check_startup`, the `Harness` state, bounded runs,
+  target verification, router, catalogue, OpenAPI, headless mode), `safety.rs`, `scenario.rs`, `pattern.rs`,
+  `engine.rs`, `report.rs`, `api.rs` (the handlers, split out of `mod.rs` for size), `cli.rs`,
+  `scenarios/*.yaml` and `tests.rs`. `chaos.rs`, `correlate.rs`, `cluster.rs` and `ratelimit.rs` come with
+  their phases. `AppState.harness: Option<Arc<Harness>>` exists already (the MCP tools, headless mode and
+  the CLI's local server need it), `None` when harness mode is off.
+- **Routes** (section 9, the single-node subset): `GET /_rustybin/harness` (status, answers on every node),
+  `GET .../schema`, `GET .../scenarios` and `.../scenarios/{name}` (built-ins only; saved scenarios are
+  phase 4), `POST .../validate`, `GET, POST .../runs` (POST validates, pins, verifies and starts: there is
+  no separate start call on a single node; 202 with a `Location`), `GET .../runs/{run}` (live view),
+  `POST .../runs/{run}/stop`, `GET .../runs/{run}/report` (`?format=json|text|junit`), `POST .../stop`
+  (the kill switch) and the data-plane `GET /.well-known/rustybin-harness`. One run at a time per node
+  (409). Routes other than the status, the schema, the scenarios and validation answer 404 when harness
+  mode is off. The cluster, leader, node and preview routes are phases 3, 3b and 4.
+- **Scenario model**: targets (a URL string or `{url, weight, host, http: auto|h1|h2|h2c, insecure}`),
+  `scale: {virtual_clients, max_rate_per_node}`, layers with `source: {request | requests}` (templates
+  with method, path, headers, body, `expect_status`, weight and the placeholders `{{seq}}`, `{{vu}}`,
+  `{{run}}`, `{{node}}`, `{{layer}}`, `{{rand}}`), `model: open | closed`, `starts_after`, `think_time`,
+  `pattern` (`constant`, `ramp` with `curve`, chained with `then`), `timeout` and `thresholds`
+  (`error_rate`, `not_sent`, `latency_p50_ms`, `latency_p99_ms`, `latency_max_ms`, `min_achieved`,
+  `saturated`). The single-layer shorthand (`target`, `source`, `pattern`, `model`, `think_time`) is folded
+  into `targets` and `layers` by `normalise()`; the schema marks those properties `x-shorthand`, and the
+  console builder edits the normalised form. Unknown fields are refused by name (`deny_unknown_fields`),
+  so mock and LLM sources, identities, chaos and the other patterns fail validation until their phase
+  lands. `connections_per_client`, `client_nodes`, `server_nodes` and `identities` come with phases 3
+  and 6. The JSON Schema is hand-written next to the model (no schema crate); the parity test in
+  `scenario.rs` walks a fully populated scenario through it and checks every property has a description
+  and every number its bounds.
+- **Caps** (section 10): `RUSTYBIN_HARNESS_MAX_RATE` 50,000, `MAX_INFLIGHT` 10,000 (and the descriptor
+  rule: soft limit raised to the hard limit, 256 kept free, two descriptors per request in `both`
+  mode), `MAX_DURATION` 1 hour (at most 24), 20 runs kept per node with a 24 hour TTL, 1,000 samples, 8
+  layers, 16 targets, 64 templates per layer, 64 KB bodies, 16 stages per pattern chain, 100,000 virtual
+  clients. The timeline has one-second buckets for the first hour and ten-second buckets after.
+- **Safety** (section 11): the allowlist takes names, `*.domain` wildcards, IPs and CIDRs with optional
+  ports; unknown names are refused before resolution unless a network entry could contain them; every
+  resolved address is checked against the forbidden list (link-local, `169.254.169.254`,
+  `fd00:ec2::254`, unspecified, multicast, broadcast) and pinned for the run. Loopback and private
+  addresses are allowed when listed (loop-through demos). Target paths and request templates may never
+  reach `/_rustybin` or `/ui`. Verification (`RUSTYBIN_HARNESS_VERIFY_TARGETS`, on in hosted mode) uses a
+  per-process token served at `/.well-known/rustybin-harness`; the DNS TXT alternative is not built.
+  The `harness` control scope exists (`control_auth::Grant`, the OAuth server's scope list, the
+  management MCP's `Right::Harness`); on an open control plane mutations follow the admin guard.
+  Credential-looking header values are redacted in reports.
+- **Engine**: per phase 0. The open model schedules each layer by integrating `1 / rate(t)`; a layer
+  with rate 0 skips ahead in 10 ms steps. The closed model adjusts its users every 100 ms. Latency is
+  recorded from the intended and the actual send. Per-worker shards (threads plus two) hold 3-digit
+  histograms for the totals and 2-digit ones per layer and target, rolled by the scheduler each second
+  into the totals and a timeline bucket; saturation is a bucket with `not_sent` or a lag p99 over 5 ms,
+  two in a row flag the run. The achieved rate takes the median latency off the elapsed time. HTTP/1.1,
+  HTTP/2 (ALPN or prior knowledge), TLS with SNI override and `insecure`; mTLS with the demo PKI is not
+  built. Reports go to `RUSTYBIN_HARNESS_REPORT_DIR` as `<run_id>.json` when set.
+- **Report** (section 12, the client-side subset): totals (`requested`, `sent`, `not_sent`, `completed`,
+  `ok`, `unexpected_status`, `transport`, statuses, transport kinds), latency percentiles for the
+  intended and the actual send, per layer and per target, the timeline, saturation (cap, descriptor
+  limit, scheduler lag, CPU seconds), thresholds with the measured values, samples with their
+  `X-Request-Id`, and `exit_code` (0 pass, 1 fail, 2 stopped or failed). Phase 2 replaces `ok` /
+  `unexpected_status` by the correlation classes and adds the overhead.
+- **Surfaces**: MCP tools `harness_status`, `validate_scenario`, `list_scenarios`, `get_scenario`,
+  `create_run` (confirmed, `openWorldHint`), `list_runs`, `get_run`, `stop_run`, `get_run_report`,
+  `harness_stop`, and the prompt `load_test_gateway`; the console view `ui/views/harness.js` with the
+  schema-generated builder `ui/lib/scenarioform.js` (shown only when harness mode is on; the browser check
+  in `conformance/ui` renders it against a harness instance); the CLI `rustybin harness run | validate |
+  report` (`--local-server` loops through an in-process Rustybin); headless mode through
+  `RUSTYBIN_HARNESS_SCENARIO`, `_START`, `_REPORT`, `_EXIT` (`run_with_exit` in `server.rs`).
+- **Not in phase 1**: metrics (phase 2), saved scenarios and previews (phase 4), `X-Request-Id` is the
+  only harness header until phase 2 signs them.
+
 ### Estimate (2026-10-22)
 
 About 16 to 19 days of build sessions, after the mock MCP server (1 to 2 days). This is calibrated on the
@@ -804,7 +869,7 @@ earlier plans: OpenAPI mocks about 2 days, management MCP about 3, hosted mocks 
 | Phase | Days |
 |---|---|
 | 0. Spike | 0.5 (done, 2026-10-25) |
-| 1. Single-node engine | 2 |
+| 1. Single-node engine | 2 (done, 2026-10-25) |
 | 2. Correlation | 1 |
 | 3. Cluster | 2 |
 | 3b. Leadership and failover | 2 to 3 |

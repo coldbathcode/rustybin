@@ -14,6 +14,8 @@ PYTHON=/path/to/venv/bin/python conformance/ui/run.sh
 `run.sh` builds the binary, starts it on ports 18700 (HTTP), 18701 (HTTPS) and
 18702 (gRPC), plus a second instance on 18703 with `RUSTYBIN_CONTROL_AUTH=jwt`
 (a signing key generated with openssl for the run, a console title and back link),
+a third on 18704 in public mode with self-service mocks and a fourth on 18705 in
+harness mode (`RUSTYBIN_HARNESS=on`, roles `both`, loop-through),
 runs the script and stops the servers. `RUSTYBIN_UI_PORT` moves the ports. Screenshots land in
 `conformance/ui/screenshots/` (override with `SCREENSHOT_DIR`).
 
@@ -37,6 +39,7 @@ Other knobs: `THEMES=dark` (one theme only), `HEADED=1` (visible browser),
 | Mock APIs | petstore sample listed, operation editor (rules with the live "would match" preview, schema check), Try it (200 with the mock headers), live traffic, on/off switch (503 while off), collection download (Hurl), duplicate into a stateful copy (create through Try it, item shown in Data), create a mock from a pasted spec with the wizard, bulk switch off and delete; read-only list and menu with a console-scope token on the jwt instance |
 | API explorer | catalogue search, Try it, response viewer |
 | AI playground | streaming chat with OpenAI chat, OpenAI Responses, Anthropic, Gemini, Ollama and Bedrock (non-stream), tool call round trip, raw wire panel |
+| Harness (harness instance) | the view appears only when harness mode is on; the builder generated from `GET /_rustybin/harness/schema` has a control for every non-shorthand schema property (the parity check of the harness plan); validate, run a two-second smoke scenario through the instance itself, read the report |
 | MCP inspector | 2026-07-28 connect, tools list, `slow_task` with progress, elicitation (multi round-trip), resources, 2025-11-25 session connect, `/mcp/protected` OAuth discovery and token |
 | A2A client | travel planner stream with artifacts, approval agent input-required continuation, secure agent auth-required continuation |
 | Chaos and health | flaky counters, load generator (histogram, percentiles) |

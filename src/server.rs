@@ -113,14 +113,36 @@ impl RunningServer {
 /// Run the server until SIGTERM/SIGINT. Errors only when the HTTP listener
 /// cannot bind or fails; HTTPS and gRPC problems are logged and tolerated.
 pub async fn run(config: Config) -> Result<(), Error> {
-    let server = start(config).await?;
+    run_with_exit(config).await.map(|_| ())
+}
+
+/// [`run`] with the process exit code: 0, or the result of a headless
+/// harness run (`RUSTYBIN_HARNESS_SCENARIO`, `RUSTYBIN_HARNESS_START`,
+/// `RUSTYBIN_HARNESS_EXIT`: 0 when the thresholds pass, 1 when they fail,
+/// 2 on an error).
+pub async fn run_with_exit(config: Config) -> Result<u8, Error> {
+    let certs = Arc::new(crate::cert_state::CertState::for_config(&config));
+    let jwt = Arc::new(crate::jwt_state::JwtState::generate());
+    let state = AppState::from_parts(config, jwt, certs);
+    let server = start_with_state(state.clone()).await?;
     let trigger = server.shutdown_trigger();
     tokio::spawn(async move {
         shutdown_signal().await;
         tracing::info!("shutdown signal received, draining connections");
         trigger.trigger();
     });
-    server.wait().await
+    let mut code = 0;
+    if state.config.harness.headless() {
+        if let Some(harness) = state.harness.clone() {
+            code = crate::harness::run_headless(&harness).await;
+            if state.config.harness.exit {
+                tracing::info!("headless harness run ended with exit code {code}, shutting down");
+                server.shutdown();
+            }
+        }
+    }
+    server.wait().await?;
+    Ok(code)
 }
 
 /// Generate the application state (keys, PKI) and start all listeners.
@@ -135,6 +157,9 @@ pub async fn start(config: Config) -> Result<RunningServer, Error> {
 /// the bound addresses are reported on the returned [`RunningServer`].
 pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
     let config = state.config.clone();
+    // Harness mode in public mode, with self-service, or a client without
+    // targets: fatal, never a warning.
+    crate::harness::check_startup(&config)?;
     let (shutdown_tx, _) = watch::channel(false);
     let shutdown = Arc::new(shutdown_tx);
     let mut app = crate::build_app(state.clone());

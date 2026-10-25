@@ -142,6 +142,21 @@ API, AI and agent gateway demos.
   key on a normal instance.
 - Optional cargo feature `quota-postgres`: replicas share daily quotas through
   PostgreSQL (`RUSTYBIN_QUOTA_STORE`), with `rustybin_quota_store_up` in the metrics.
+- **Harness mode, single node** (`RUSTYBIN_HARNESS=on`, phase 1 of the harness plan):
+  Rustybin as a load client with its own engine runtime, a dedicated scheduler
+  thread, an in-flight cap from the descriptor limit and saturation detection, so a
+  slow client is never read as a slow gateway. Scenarios (targets with weights,
+  request templates with placeholders, open and closed load models, `constant` and
+  `ramp` patterns chained with `then`, thresholds) are validated against the node's
+  caps and one JSON Schema (`GET /_rustybin/harness/schema`) drives the API, the
+  management MCP tools (`validate_scenario`, `create_run` with confirmation,
+  `get_run_report`, `harness_stop`) and the console's scenario builder. Targets must
+  be in `RUSTYBIN_HARNESS_TARGETS` and are pinned to their resolved addresses;
+  link-local, metadata and control-plane targets are always refused; optional target
+  verification through `/.well-known/rustybin-harness`; a kill switch at
+  `POST /_rustybin/harness/stop`; the `harness` control scope. Reports as JSON, text
+  and JUnit; headless runs at startup with exit codes; `rustybin harness run |
+  validate | report`.
 
 ### Changed
 

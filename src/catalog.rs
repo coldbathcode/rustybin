@@ -46,6 +46,7 @@ pub mod category {
     pub const REQUEST_BIN: &str = "Request Bin & Webhooks";
     pub const MOCKS: &str = "Mock APIs (OpenAPI)";
     pub const HEALTH: &str = "Health & Identity";
+    pub const HARNESS: &str = "Harness";
     pub const CONTROL: &str = "Control Plane";
     pub const DOCS: &str = "Docs & Exports";
 }
@@ -77,6 +78,7 @@ pub const CATEGORY_ORDER: &[&str] = &[
     category::REQUEST_BIN,
     category::MOCKS,
     category::HEALTH,
+    category::HARNESS,
     category::CONTROL,
     category::DOCS,
 ];
@@ -354,6 +356,7 @@ const SOURCES: &[fn() -> Vec<Endpoint>] = &[
     crate::identity::catalog,
     crate::inspector::catalog,
     crate::control::catalog,
+    crate::harness::catalog,
     crate::metrics::catalog,
     crate::limits::catalog,
     crate::keys::catalog,

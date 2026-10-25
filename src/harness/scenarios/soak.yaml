@@ -1,0 +1,22 @@
+# A long, steady run: latency drift, leaks and limits that only show after a
+# while. Raise `for` up to the node's RUSTYBIN_HARNESS_MAX_DURATION.
+name: soak
+description: 100 requests per second for 30 minutes against the echo route.
+target: http://127.0.0.1:8080
+scale:
+  virtual_clients: 20
+source:
+  request:
+    method: POST
+    path: /echo
+    headers:
+      Content-Type: application/json
+    body: '{"vu": "{{vu}}", "seq": {{seq}}}'
+pattern:
+  type: constant
+  rate: 100
+  for: 30m
+thresholds:
+  error_rate: 0.001
+  latency_p99_ms: 500
+  saturated: false

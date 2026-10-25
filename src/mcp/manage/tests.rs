@@ -216,7 +216,7 @@ async fn open_instance_discovers_lists_and_reads() {
         .unwrap_or("")
         .contains("mocks"));
     let (_, j) = rpc(&app, &[], "prompts/list", json!({})).await;
-    assert_eq!(j["result"]["prompts"].as_array().map(|a| a.len()), Some(3));
+    assert_eq!(j["result"]["prompts"].as_array().map(|a| a.len()), Some(4));
     let (_, j) = rpc(
         &app,
         &[],
@@ -1148,4 +1148,177 @@ async fn legacy_session_handshake_works_on_the_management_server() {
         .await
         .expect("response");
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ── Harness ─────────────────────────────────────────────────────────
+
+fn harness_config() -> Config {
+    let mut c = open_config();
+    c.harness.enabled = true;
+    c.harness.roles = vec![crate::harness::Role::Client, crate::harness::Role::Server];
+    c.harness.targets = vec!["127.0.0.1".into()];
+    c.harness.threads = Some(1);
+    c
+}
+
+#[tokio::test]
+async fn harness_tools_when_off_and_on() {
+    // Off: the read tools answer, the run tools say how to turn it on.
+    let app = app_with(open_config());
+    let names = tool_names(&app, &[]).await;
+    for t in [
+        "harness_status",
+        "validate_scenario",
+        "list_scenarios",
+        "get_scenario",
+        "create_run",
+        "list_runs",
+        "get_run",
+        "stop_run",
+        "get_run_report",
+        "harness_stop",
+    ] {
+        assert!(
+            names.contains(&t.to_string()),
+            "{t} missing from tools/list"
+        );
+    }
+    let r = tool(&app, &[], "harness_status", json!({})).await;
+    assert!(!is_error(&r));
+    assert_eq!(r["structuredContent"]["enabled"], false);
+    let r = tool(&app, &[], "list_runs", json!({})).await;
+    assert!(is_error(&r));
+    assert!(text_of(&r).contains("RUSTYBIN_HARNESS=on"));
+    let r = tool(&app, &[], "validate_scenario", json!({ "scenario": "name: x\ntarget: http://127.0.0.1:1\nsource: { request: { path: / } }\npattern: { type: constant, rate: 1, for: 1s }\n" })).await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["valid"], true);
+    let r = tool(&app, &[], "get_scenario", json!({ "name": "smoke" })).await;
+    assert_eq!(r["structuredContent"]["scenario"]["name"], "smoke");
+    assert!(r["structuredContent"]["yaml"]
+        .as_str()
+        .unwrap()
+        .contains("name: smoke"));
+    // create_run carries openWorldHint and the confirmation rule.
+    let (status, j) = rpc(&app, &[], "tools/list", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let create = j["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "create_run")
+        .unwrap();
+    assert_eq!(create["annotations"]["openWorldHint"], true);
+    assert_eq!(create["annotations"]["readOnlyHint"], false);
+
+    // On: a run through the tools, with confirmation.
+    let state = test_state_with(harness_config());
+    let server = crate::server::start_with_state(state.clone())
+        .await
+        .expect("server");
+    let app = test_app_with(state.clone());
+    let url = format!("http://{}", server.http_addr);
+    let scenario = json!({ "name": "mcp", "target": url, "source": { "request": { "path": "/status/200" } }, "pattern": { "type": "constant", "rate": 20, "for": "1s" }, "thresholds": { "error_rate": 0 } });
+    let r = tool(&app, &[], "harness_status", json!({})).await;
+    assert_eq!(r["structuredContent"]["enabled"], true);
+    assert!(text_of(&r).contains("127.0.0.1"));
+    // Without confirmation nothing starts.
+    let r = tool(&app, &[], "create_run", json!({ "scenario": scenario })).await;
+    assert!(is_error(&r), "{r}");
+    assert!(text_of(&r).contains("confirm"));
+    let r = tool(&app, &[], "list_runs", json!({})).await;
+    assert_eq!(r["structuredContent"]["runs"].as_array().unwrap().len(), 0);
+    // An invalid scenario is refused before confirmation.
+    let r = tool(
+        &app,
+        &[],
+        "create_run",
+        json!({ "scenario": { "name": "x" }, "confirm": true }),
+    )
+    .await;
+    assert!(is_error(&r));
+    assert!(text_of(&r).contains("nothing was started"));
+    // Confirmed: it runs.
+    let r = tool(
+        &app,
+        &[],
+        "create_run",
+        json!({ "scenario": scenario, "confirm": true }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    let id = r["structuredContent"]["run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(text_of(&r).contains(&id));
+    for _ in 0..200 {
+        let r = tool(&app, &[], "get_run", json!({ "run_id": id })).await;
+        if r["structuredContent"]["report_ready"] == true {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let r = tool(&app, &[], "get_run_report", json!({ "run_id": id })).await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["state"], "finished");
+    assert_eq!(r["structuredContent"]["passed"], true);
+    assert!(text_of(&r).contains("thresholds pass"));
+    let r = tool(
+        &app,
+        &[],
+        "get_run_report",
+        json!({ "run_id": id, "format": "text" }),
+    )
+    .await;
+    assert!(r["structuredContent"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Result: PASS"));
+    let r = tool(&app, &[], "stop_run", json!({ "run_id": id })).await;
+    assert_eq!(r["structuredContent"]["stopped"], false);
+    let r = tool(&app, &[], "harness_stop", json!({})).await;
+    assert_eq!(r["structuredContent"]["stopped"], json!([]));
+    let r = tool(&app, &[], "get_run", json!({ "run_id": "nope" })).await;
+    assert!(is_error(&r));
+    server.shutdown();
+    let _ = server.wait().await;
+}
+
+#[tokio::test]
+async fn harness_tools_follow_the_control_scopes() {
+    let mut c = jwt_config();
+    c.harness.enabled = true;
+    c.harness.roles = vec![crate::harness::Role::Server];
+    let app = app_with(c);
+    let console = control_jwt(Some("console"));
+    let names = tool_names(&app, &[("authorization", &format!("Bearer {console}"))]).await;
+    assert!(names.contains(&"harness_status".to_string()));
+    assert!(names.contains(&"get_run_report".to_string()));
+    assert!(!names.contains(&"create_run".to_string()));
+    assert!(!names.contains(&"harness_stop".to_string()));
+    let harness = control_jwt(Some("harness"));
+    let names = tool_names(&app, &[("authorization", &format!("Bearer {harness}"))]).await;
+    assert!(names.contains(&"create_run".to_string()));
+    assert!(names.contains(&"harness_stop".to_string()));
+    // The harness scope alone does not read the rest of the instance.
+    assert!(!names.contains(&"list_mocks".to_string()));
+    let r = tool(
+        &app,
+        &[("authorization", &format!("Bearer {console}"))],
+        "harness_stop",
+        json!({}),
+    )
+    .await;
+    assert!(is_error(&r));
+    assert!(text_of(&r).contains("harness scope"), "{}", text_of(&r));
+    // The prompt exists.
+    let (status, j) = rpc(&app, &[("authorization", &format!("Bearer {console}"))], "prompts/get", json!({ "name": "load_test_gateway", "arguments": { "target": "https://gw.example", "rate": "250" } })).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    let text = j["result"]["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        text.contains("https://gw.example") && text.contains("250"),
+        "{j}"
+    );
 }

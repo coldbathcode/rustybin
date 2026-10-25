@@ -366,6 +366,15 @@ async fn status_handler(State(state): State<AppState>) -> Response {
             "https": state.config.https_port,
             "grpc": state.config.grpc_port,
         },
+        "harness": match &state.harness {
+            Some(h) => json!({
+                "enabled": true,
+                "roles": h.config.roles.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
+                "client": h.is_client(),
+                "active_run": h.active_run().map(|r| r.id.clone()),
+            }),
+            None => json!({ "enabled": false }),
+        },
     }))
     .into_response()
 }

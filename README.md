@@ -99,6 +99,12 @@ a runnable example, and `/docs` for the OpenAPI reference. See the
   filesystem ([control-plane security](docs/src/concepts/control-plane-security.md)).
 - Collections for Postman, Insomnia, Bruno, curl, `.http`, Hurl, k6 and HAR,
   generated from the same route catalogue as everything else.
+- **Harness mode** (`RUSTYBIN_HARNESS=on`): Rustybin as the load client too. A
+  scenario (targets, layers with constant and ramp patterns, open or closed load
+  model, thresholds) runs from the API, the management MCP, the console, headless at
+  startup or `rustybin harness run --local-server`; the report separates what the
+  client itself could not do (saturation) from what the gateway did. Off by default,
+  targets allowlisted, never in public mode.
 
 ## Web console
 
@@ -166,6 +172,11 @@ to the default. `GET /_rustybin/config` shows the effective configuration. Detai
 | `RUSTYBIN_AI_API_KEY` | unset | The only accepted AI key (implies `RUSTYBIN_AI_REQUIRE_AUTH`) |
 | `RUSTYBIN_A2A_PUSH_ALLOWLIST` | unset | Hosts A2A push notifications may be delivered to |
 | `RUSTYBIN_A2A_PUSH_ALLOW_ALL` | `false` | Allow push notifications to any URL (ignored in public mode) |
+| `RUSTYBIN_HARNESS` | `off` | Harness mode: this instance generates load against allowlisted targets ([configuration](docs/src/configuration.md#harness-mode), [plan](docs/plans/harness.md)) |
+| `RUSTYBIN_HARNESS_ROLES` / `_TARGETS` | `server` / unset | Roles (`client`, `server`, `both`, `coordinator`) and the hosts, domains, IPs or CIDRs a client may send load to (required for the client role) |
+| `RUSTYBIN_HARNESS_MAX_RATE` / `_MAX_INFLIGHT` / `_MAX_DURATION` | `50000` / `10000` / `1h` | Per-node caps; the in-flight cap also follows the descriptor limit |
+| `RUSTYBIN_HARNESS_VERIFY_TARGETS` / `_DATA_PLANE` / `_THREADS` / `_REPORT_DIR` | `false` / `on` / cores | Target verification, a smaller surface on client nodes, engine threads, where reports are kept |
+| `RUSTYBIN_HARNESS_SCENARIO` / `_START` / `_REPORT` / `_EXIT` | unset | Headless mode: run a scenario at startup, write the report, exit 0 / 1 / 2 |
 
 ## Development
 
@@ -518,6 +529,22 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | POST | `/health/unhealthy` | Mark the instance unhealthy: 200 here, then /health returns 503 (admin-guarded) |
 | POST | `/health/toggle` | Flip the health state, 200 with the new state (admin-guarded) |
 | ANY | `/identity` | Instance identity: id, hostname, uptime, /identity request count, ports and config (load-balancing demos) |
+
+### Harness
+
+| Methods | Path | Description |
+|---|---|---|
+| GET | `/_rustybin/harness` | Harness node status: roles, caps, allowlist, the active run |
+| GET | `/_rustybin/harness/schema` | JSON Schema of a scenario, with this node's caps as bounds |
+| GET | `/_rustybin/harness/scenarios` | The built-in scenarios (smoke, ramp-to-target, soak, closed-users) |
+| GET | `/_rustybin/harness/scenarios/{name}` | One built-in scenario as JSON (?format=yaml for YAML) |
+| POST | `/_rustybin/harness/validate` | Validate a scenario (JSON or YAML) against this node's caps without sending anything |
+| GET POST | `/_rustybin/harness/runs` | Runs on this node; POST a scenario (JSON or YAML) to validate, pin its targets and start it |
+| GET | `/_rustybin/harness/runs/{run}` | Live stats of a run: progress, counts, latency so far, the last second |
+| POST | `/_rustybin/harness/runs/{run}/stop` | Stop a run (it drains and reports) |
+| GET | `/_rustybin/harness/runs/{run}/report` | Final report (JSON; ?format=text or junit) |
+| POST | `/_rustybin/harness/stop` | Kill switch: stop all load on this node now |
+| GET | `/.well-known/rustybin-harness` | This node's target verification token (RUSTYBIN_HARNESS_VERIFY_TARGETS) |
 
 ### Control Plane
 

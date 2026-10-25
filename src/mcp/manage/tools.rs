@@ -6,7 +6,7 @@
 use serde_json::{json, Map, Value};
 
 use super::access::{Access, Right};
-use super::{instance, mocks, testing, traffic, visits};
+use super::{harness, instance, mocks, testing, traffic, visits};
 use crate::mcp::core::{self, CallCtx};
 use crate::mcp::protocol::{RpcError, Version};
 use crate::mcp::tools as mock_tools;
@@ -29,6 +29,9 @@ pub struct ToolDef {
     pub idempotent: bool,
     /// Needs confirmation (elicitation or `confirm: true`).
     pub confirm: bool,
+    /// Reaches outside the instance (`openWorldHint`): harness runs send
+    /// load to the targets a scenario names.
+    pub open_world: bool,
     pub input_schema: fn() -> Value,
 }
 
@@ -73,9 +76,24 @@ macro_rules! tool {
             destructive: $d,
             idempotent: $i,
             confirm: $c,
+            open_world: false,
             input_schema: $schema,
         }
     };
+}
+
+fn scenario_prop() -> Value {
+    json!({
+        "description": "The scenario: an object in the harness scenario schema (GET /_rustybin/harness/schema, resource rustybin://harness.schema.json), or the same as JSON or YAML text. Shorthand: name, target, source.request.path, pattern {type: constant, rate, for}.",
+        "oneOf": [
+            { "type": "object" },
+            { "type": "string" }
+        ]
+    })
+}
+
+fn run_id_prop() -> Value {
+    json!({ "type": "string", "description": "The run id (from create_run or list_runs)" })
 }
 
 pub static TOOLS: &[ToolDef] = &[
@@ -245,6 +263,31 @@ pub static TOOLS: &[ToolDef] = &[
     }), &[])),
     tool!("pause_self_service", "Pause self-service", "No new visits or visitor mocks until resumed (operator). Confirmed.", Right::Operator, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({ "confirm": confirm_prop() }), &[])),
     tool!("resume_self_service", "Resume self-service", "Resume visits after a pause (operator).", Right::Operator, ro=false, destructive=false, idem=true, confirm=false, no_args),
+    // ── Harness ──
+    tool!("harness_status", "Harness status", "Harness mode (this Rustybin as a load client): whether it is on, the node's roles, caps (rate, in flight, duration), engine, allowed targets, the active run and the console URL. Start here before any load test.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("validate_scenario", "Validate a scenario", "Check a harness scenario against this node's caps without sending anything: every problem, the normalised scenario, its hash and a summary (duration, peak rate, expected requests). Always call it before create_run.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "scenario": scenario_prop() }), &["scenario"])),
+    tool!("list_scenarios", "List scenarios", "The built-in harness scenarios (smoke, ramp-to-target, soak, closed-users) with their summaries, a starting point to copy and tune.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("get_scenario", "Get a scenario", "One built-in harness scenario as an object and as YAML.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "name": { "type": "string", "description": "A built-in scenario name (list_scenarios)" } }), &["name"])),
+    ToolDef {
+        name: "create_run",
+        title: "Start a harness run",
+        description: "Validate a scenario, pin and (when configured) verify its targets and START SENDING LOAD to them from this node. Targets must be in RUSTYBIN_HARNESS_TARGETS; one run at a time per node. Asks the user to confirm (elicitation) or needs \"confirm\": true, which you set only after the user agreed to this scenario against these targets. Then poll get_run until report_ready and call get_run_report.",
+        right: Right::Harness,
+        read_only: false,
+        destructive: false,
+        idempotent: false,
+        confirm: true,
+        open_world: true,
+        input_schema: || obj(json!({ "scenario": scenario_prop(), "confirm": confirm_prop() }), &["scenario"]),
+    },
+    tool!("list_runs", "List runs", "The harness runs this node keeps (newest first) and the active one.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("get_run", "Run status", "Live view of a harness run: progress, counts (sent, completed, ok, errors, not sent, in flight), latency so far, the last second, saturation, report_ready.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "run_id": run_id_prop() }), &["run_id"])),
+    tool!("stop_run", "Stop a run", "Stop a harness run early: it drains its requests and reports.", Right::Harness, ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "run_id": run_id_prop() }), &["run_id"])),
+    tool!("get_run_report", "Run report", "The final report of a finished harness run: totals, latency percentiles (from the intended and the actual send time), per layer and per target, the timeline, saturation, thresholds with pass or fail, samples with their X-Request-Id. format json (default), text or junit.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "run_id": run_id_prop(),
+        "format": { "type": "string", "enum": ["json", "text", "junit"], "default": "json" }
+    }), &["run_id"])),
+    tool!("harness_stop", "Kill switch", "Stop every harness run on this node now (no confirmation: it only stops load).", Right::Harness, ro=false, destructive=false, idem=true, confirm=false, no_args),
 ];
 
 /// The tools the caller may use.
@@ -271,7 +314,7 @@ pub fn tool_json(t: &ToolDef, version: Version) -> Value {
             "readOnlyHint": t.read_only,
             "destructiveHint": t.destructive,
             "idempotentHint": t.idempotent,
-            "openWorldHint": false,
+            "openWorldHint": t.open_world,
         });
     }
     v
@@ -571,6 +614,17 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         "end_visit" => visits::end_visit(ctx, access, &args, params).await,
         "pause_self_service" => visits::set_paused(ctx, access, &args, params, true).await,
         "resume_self_service" => visits::set_paused(ctx, access, &args, params, false).await,
+        // Harness
+        "harness_status" => harness::harness_status(ctx, access),
+        "validate_scenario" => harness::validate_scenario(ctx, &args),
+        "list_scenarios" => harness::list_scenarios(ctx),
+        "get_scenario" => harness::get_scenario(ctx, &args),
+        "create_run" => harness::create_run(ctx, access, &args, params).await,
+        "list_runs" => harness::list_runs(ctx),
+        "get_run" => harness::get_run(ctx, access, &args),
+        "stop_run" => harness::stop_run(ctx, &args),
+        "get_run_report" => harness::get_run_report(ctx, &args),
+        "harness_stop" => harness::harness_stop(ctx),
         _ => return Err(RpcError::invalid_params(format!("Unknown tool: {name}"))),
     };
     let outcome = if result.get("isError").and_then(Value::as_bool) == Some(true) {
@@ -593,6 +647,7 @@ fn audit(def: &ToolDef, access: &Access, args: &Value, outcome: &str) {
     let target = arg_str(args, "name")
         .or_else(|| arg_str(args, "id"))
         .or_else(|| arg_str(args, "mock"))
+        .or_else(|| arg_str(args, "run_id"))
         .unwrap_or("-");
     tracing::info!(
         target: "rustybin::manage",

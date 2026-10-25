@@ -37,6 +37,15 @@ static PROMPTS: &[PromptDef] = &[
         ],
     },
     PromptDef {
+        name: "load_test_gateway",
+        title: "Load test a gateway",
+        description: "Drive load through a gateway from this Rustybin: check harness mode and the allowed targets, build and validate a scenario, dry-run it at a low rate, then run it for real and read the report.",
+        args: &[
+            Arg { name: "target", description: "The gateway URL to send load to (must be in RUSTYBIN_HARNESS_TARGETS)", required: false },
+            Arg { name: "rate", description: "Requests per second for the real run (default 100)", required: false },
+        ],
+    },
+    PromptDef {
         name: "secure_a_mock",
         title: "Secure a mock",
         description: "Pick a mocked security mode for a mock (API key, basic, bearer, JWT or the spec's schemes) and show the credentials a gateway must present.",
@@ -134,6 +143,29 @@ pub fn get(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
                  answered and why (source, outcome).\n\
                  4. If nothing arrived, check get_usage (plan limits, 429s), whether the mock is on and \
                  deployed (get_mock), and that the gateway targets the mock's URL."
+            )
+        }
+        "load_test_gateway" => {
+            let target = arg(params, "target").unwrap_or("the gateway URL the user names");
+            let rate = arg(params, "rate").unwrap_or("100");
+            format!(
+                "Load test a gateway from the Rustybin at {base}.\n\
+                 1. Call harness_status: harness mode must be on with the client role, and {target} must \
+                 be covered by the allowed targets. If not, tell the user which RUSTYBIN_HARNESS* settings \
+                 the node needs and stop.\n\
+                 2. Build a scenario (get_scenario smoke is a template): the target, a request template for \
+                 a route the gateway proxies to this Rustybin (for example /status/200 or /echo), a \
+                 constant pattern, and thresholds (error_rate, latency_p99_ms, not_sent 0, saturated \
+                 false). Call validate_scenario and fix every problem.\n\
+                 3. Dry run: create_run at 5 requests per second for 10 seconds (the user confirms), \
+                 poll get_run until report_ready, read get_run_report: every request must answer with \
+                 the expected status. Check the gateway logs with a sample's X-Request-Id if asked.\n\
+                 4. The real run: the same scenario at {rate} requests per second (the user confirms \
+                 again). Report sent, errors, latency p50 / p99 / max, the achieved against the \
+                 requested rate, and the thresholds. If the report says the client saturated, say so \
+                 first: the numbers then describe this node, not the gateway, and the rate must come \
+                 down or more client nodes are needed.\n\
+                 5. stop_run ends a run early; harness_stop stops everything on the node."
             )
         }
         "secure_a_mock" => {

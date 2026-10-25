@@ -2,15 +2,20 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Next to build: harness mode
+## Harness mode: phase 1 built, phase 2 next
 
 [docs/plans/harness.md](docs/plans/harness.md) (planned 2026-10-22; phase 0, the engine spike in
-`examples/harness_spike.rs`, done 2026-10-25 with its findings in the plan; phases 1 and 2 next): Rustybin as a load client and
+`examples/harness_spike.rs`, and phase 1, the single-node engine in `src/harness/`, done 2026-10-25; the plan's
+"Phase 1 build notes" list where the build differs; phase 2, correlation, is next): Rustybin as a load client and
 correlating upstream, single node (loop-through) or a cluster (an elected leader, clients, servers), traffic layers
 with run patterns and rate-limit burst attacks, every parameter from one schema in the API, MCP and console (tunable
 live), or headless. It is the first feature that sends load to targets the caller chooses (A2A push notifications,
-the leads webhook and the key registry URL already send outbound requests, with their own allowlists), so its safety
-section (allowlist, target verification, leases) comes first. Update the plan's status and `docs/src/roadmap.md` ("Next") as phases land.
+the leads webhook and the key registry URL already send outbound requests, with their own allowlists), so
+`src/harness/safety.rs` (allowlist, pinning, forbidden addresses, verification, kill switch) comes first and every
+new way to aim load goes through it. One model, one schema: a scenario parameter lives in `scenario.rs` (model,
+validation, `schema()`), and the parity tests fail when the schema, the MCP tool schemas or the console builder
+(`ui/lib/scenarioform.js`, renders every non-shorthand schema property) miss it. Update the plan's status and
+`docs/src/roadmap.md` ("Next") as phases land.
 
 ## MCP server for every OpenAPI mock (built)
 
@@ -62,6 +67,7 @@ RUSTYBIN_UPDATE_README=1 cargo test readme_endpoints   # regenerate README endpo
 cargo run -- --print-endpoints-markdown      # print them instead
 cargo run -- mock validate src/mocks/petstore.yaml   # OpenAPI mocks CLI (offline: validate, init, sample, check-config)
 cargo run --release --example harness_spike -- --sweep   # harness phase 0 spike: load sweep against an in-process Rustybin
+cargo run -- harness run src/harness/scenarios/smoke.yaml --local-server   # a harness run looped through an in-process Rustybin
 RUSTYBIN_HTTP_PORT=8080 cargo run
 docs/examples/run.sh                         # documentation examples (Hurl) against fresh servers (open, plan, secured, shared, keyed)
 mdbook build docs                            # documentation site
@@ -145,6 +151,14 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   MCP server of each OpenAPI mock) and `src/mcp/manage/`, the
   management MCP server at `/_rustybin/mcp` (`tools.rs` registry, `access.rs` rights, `stdio.rs` for
   `rustybin mcp-stdio`).
+- `src/harness/`: harness mode (`RUSTYBIN_HARNESS`), see above. `mod.rs` (roles, `check_startup`, the `Harness`
+  state in `AppState.harness` with bounded runs, target verification, router, catalogue, OpenAPI, headless mode),
+  `safety.rs`, `scenario.rs` (model, `Caps`, validation, JSON Schema), `pattern.rs` (`constant`, `ramp`, `then`),
+  `engine.rs` (own tokio runtime, a scheduler thread per run, `PinnedConnector` with TLS and ALPN, per-worker
+  histogram shards rolled into a per-second timeline, closed-model users, saturation), `report.rs` (JSON, text,
+  JUnit), `api.rs` (handlers; 404 when off except status, schema, scenarios and validate), `cli.rs` (`rustybin
+  harness run | validate | report`), `scenarios/*.yaml` (built-ins). MCP tools in `src/mcp/manage/harness.rs`
+  (`Right::Harness`), console view `ui/views/harness.js`. The `harness` control scope (`control_auth::Grant`).
 - `src/fault.rs`: `X-Rustybin-Delay` / `X-Rustybin-Fail` middleware.
 - `src/admin.rs`: `require_admin(&headers, &config)` guard for instance-global mutations.
 - `src/session.rs`: `session_key(&headers, client_ip)`, `client_ip(...)`, extractors `Session`, `ClientIp`, `PeerAddr`.

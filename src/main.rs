@@ -9,6 +9,7 @@ USAGE:
     rustybin [--config rustybin.yaml]          run the server
     rustybin mock <command> ...                 OpenAPI mocks (rustybin mock --help)
     rustybin mcp-stdio --server <url> ...       stdio bridge to a management MCP server (--help)
+    rustybin harness <command> ...              load through a gateway (rustybin harness --help)
     rustybin [--print-endpoints-markdown | --version | --help]
 
 Configuration is read from RUSTYBIN_* environment variables (see README.md).
@@ -35,6 +36,7 @@ async fn main() -> ExitCode {
         }
         Some("mock") => return rustybin::mocks::cli::run(&args[1..]).await,
         Some("mcp-stdio") => return rustybin::mcp::manage::stdio::run(&args[1..]).await,
+        Some("harness") => return rustybin::harness::cli::run(&args[1..]).await,
         Some("--config") => match args.get(1) {
             Some(path) if args.len() == 2 => config_file = Some(path.clone()),
             _ => {
@@ -59,8 +61,8 @@ async fn main() -> ExitCode {
         config.config_file = Some("rustybin.yaml".to_string());
     }
 
-    match rustybin::run(config).await {
-        Ok(()) => ExitCode::SUCCESS,
+    match rustybin::server::run_with_exit(config).await {
+        Ok(code) => ExitCode::from(code),
         Err(e) => {
             tracing::error!("fatal: {e}");
             eprintln!("rustybin: fatal: {e}");

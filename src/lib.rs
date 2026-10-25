@@ -31,6 +31,7 @@ pub mod flaky;
 pub mod graphql;
 pub mod grpc;
 pub mod guardrails;
+pub mod harness;
 pub mod health;
 pub mod identity;
 pub mod image;
@@ -126,6 +127,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     inspector::router,
     control::router,
     control_oauth::router,
+    harness::router,
     metrics::router,
     limits::router,
     keys::router,
@@ -202,6 +204,17 @@ pub fn build_app(state: AppState) -> Router {
         config.limits.active() || state.keys.shared(),
     ) {
         router = router.layer(cors);
+    }
+
+    // A client-only harness node with RUSTYBIN_HARNESS_DATA_PLANE=off serves
+    // only the liveness root, the control plane, the console and the
+    // verification token: a smaller surface on a load generator.
+    if config.harness.enabled
+        && !config.harness.data_plane
+        && config.harness.is_client()
+        && !config.harness.is_server()
+    {
+        router = router.layer(middleware::from_fn(harness::api::data_plane_off));
     }
 
     let router = router

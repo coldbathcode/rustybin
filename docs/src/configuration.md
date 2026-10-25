@@ -201,6 +201,37 @@ See [Faults, latency, credentials, inspection](ai/gateway-features.md#credential
 | `RUSTYBIN_A2A_PUSH_ALLOWLIST` | unset | Comma-separated `host` or `host:port` entries that push notification URLs may point to. The built-in sink `/a2a/webhook-sink/{id}` on this server is always allowed. |
 | `RUSTYBIN_A2A_PUSH_ALLOW_ALL` | `false` | Allow push notifications to any http(s) URL, including loopback and private addresses. Ignored in public mode. |
 
+## Harness mode
+
+Rustybin as a load client (phase 1 of `docs/plans/harness.md`: one node, its own
+engine, allowlisted targets). Off by default. Starting with `RUSTYBIN_HARNESS=on` in
+public mode, with self-service mocks, or with the client role and no targets is a
+fatal error, never a warning. The control routes live under `/_rustybin/harness`;
+starting and stopping runs needs the `harness` (or `admin`) control scope when the
+control plane is protected, and follows the admin token on an open one.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RUSTYBIN_HARNESS` | `off` | Turn harness mode on. |
+| `RUSTYBIN_HARNESS_ROLES` | `server` | `client` (generates load), `server` (an upstream), `both` (loop-through: the node sends to a gateway that routes back to it), `coordinator`; comma separated. |
+| `RUSTYBIN_HARNESS_TARGETS` | unset | What a client may send load to: host names, `*.domain` wildcards, IP addresses and CIDRs, each with an optional `:port`, comma separated. Nothing is allowed without it. Names are resolved once per run and the connections pinned to those addresses; link-local, cloud metadata, multicast and the node's own control plane are always refused. |
+| `RUSTYBIN_HARNESS_VERIFY_TARGETS` | `false` (`true` in hosted mode) | Before a run every target must serve this node's token at `/.well-known/rustybin-harness`. A gateway routing to the node passes, which also proves the route before any load is sent. |
+| `RUSTYBIN_HARNESS_MAX_RATE` | `50000` | Requests per second per node (the sum of a scenario's layer peaks). |
+| `RUSTYBIN_HARNESS_MAX_INFLIGHT` | `10000` | Requests in flight per node, and at most what the descriptor limit allows (the engine raises the soft limit to the hard limit at startup and keeps 256 descriptors free; in `both` mode each request costs two). Beyond it requests are counted as `not_sent` and the run is flagged as saturated. |
+| `RUSTYBIN_HARNESS_MAX_DURATION` | `1h` | Longest run (`30m`, `2h`, up to `24h`). |
+| `RUSTYBIN_HARNESS_THREADS` | half the cores (`both`), all but one (client only) | Worker threads of the engine runtime; the scheduler has its own thread. |
+| `RUSTYBIN_HARNESS_DATA_PLANE` | `on` | `off` on a client-only node serves only `/`, `/_rustybin/*`, `/ui` and the verification path. |
+| `RUSTYBIN_HARNESS_REPORT_DIR` | unset | Every final report is also written here as `<run_id>.json`. |
+| `RUSTYBIN_HARNESS_SCENARIO` | unset | Headless mode: the scenario file to run at startup. |
+| `RUSTYBIN_HARNESS_START` | `manual` | `immediately` starts the scenario once the node is up (`on-quorum` is the same on a single node). |
+| `RUSTYBIN_HARNESS_REPORT` | unset | Headless mode: where the final report goes (`-` for stdout, else a file). |
+| `RUSTYBIN_HARNESS_EXIT` | `false` | Headless mode: exit after the run with code 0 (thresholds pass), 1 (they fail) or 2 (error). |
+
+The same engine runs from the command line: `rustybin harness run scenario.yaml
+--local-server` loops a scenario through an in-process Rustybin, `rustybin harness
+validate` checks a scenario offline, `rustybin harness report` renders a saved report
+(text or JUnit). `GET /_rustybin/harness/schema` is the JSON Schema of a scenario.
+
 ## Development only
 
 | Variable | Used by |
@@ -208,7 +239,7 @@ See [Faults, latency, credentials, inspection](ai/gateway-features.md#credential
 | `RUSTYBIN_UPDATE_README` | `RUSTYBIN_UPDATE_README=1 cargo test readme_endpoints` rewrites the endpoint tables in `README.md`. |
 | `RUSTYBIN_BIN`, `RUSTYBIN_DOCS_PORT`, `REQUIRE_ALL_TOOLS` | `docs/examples/run.sh` (see [How the examples work](examples.md)). |
 | `PYTHON`, `RUSTYBIN_CONFORMANCE_PORT`, `RUSTYBIN_URL`, `MCP_BASE` | The SDK conformance scripts under `conformance/`. |
-| `RUSTYBIN_UI_PORT`, `RUSTYBIN_JWT_URL`, `CONTROL_JWT_PRIVATE_KEY`, `CONTROL_JWT_AUDIENCE` | `conformance/ui/run.sh` and `console_e2e.py` (the console check, including the sign-in flow). |
+| `RUSTYBIN_UI_PORT`, `RUSTYBIN_JWT_URL`, `RUSTYBIN_SS_URL`, `RUSTYBIN_HARNESS_URL`, `CONTROL_JWT_PRIVATE_KEY`, `CONTROL_JWT_AUDIENCE` | `conformance/ui/run.sh` and `console_e2e.py` (the console check, including the sign-in flow, self-service and the harness builder). |
 | `RUSTYBIN_GIT_SHA` | Build time: the commit reported by `/_rustybin/version` and the metrics when the source tree has no `.git` (Docker builds: `--build-arg RUSTYBIN_GIT_SHA=<commit>`). |
 
 ## Limits that are not configurable

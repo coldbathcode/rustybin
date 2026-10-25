@@ -131,7 +131,128 @@ pub struct Config {
     /// Self-service mocks for visitors of a public instance
     /// (`RUSTYBIN_MOCKS_SELF_SERVICE` and friends).
     pub self_service: SelfServiceConfig,
+    /// Harness mode (`RUSTYBIN_HARNESS` and friends): Rustybin as a load
+    /// client, see `docs/plans/harness.md`.
+    pub harness: HarnessConfig,
 }
+
+/// Harness mode (`crate::harness`). Off by default; nothing sends a request
+/// unless `RUSTYBIN_HARNESS=on`. Whether the combination is allowed at all
+/// (public mode, self-service, a client without targets) is decided at
+/// startup by `crate::harness::check_startup`, which is fatal.
+#[derive(Clone, Debug)]
+pub struct HarnessConfig {
+    /// `RUSTYBIN_HARNESS`.
+    pub enabled: bool,
+    /// `RUSTYBIN_HARNESS_ROLES` (default `server`).
+    pub roles: Vec<crate::harness::Role>,
+    /// `RUSTYBIN_HARNESS_TARGETS`: hosts, wildcard domains, IPs and CIDRs
+    /// (each with an optional `:port`) a client may send load to. Nothing is
+    /// allowed without it.
+    pub targets: Vec<String>,
+    /// `RUSTYBIN_HARNESS_VERIFY_TARGETS`: every target must serve this
+    /// node's verification token at `/.well-known/rustybin-harness` before
+    /// a run (default on in hosted mode).
+    pub verify_targets: bool,
+    /// `RUSTYBIN_HARNESS_THREADS`: worker threads of the engine runtime
+    /// (default: half the cores in `both` mode, all but one on a client-only
+    /// node, at least one).
+    pub threads: Option<usize>,
+    /// `RUSTYBIN_HARNESS_MAX_RATE`: requests per second per node.
+    pub max_rate: u64,
+    /// `RUSTYBIN_HARNESS_MAX_INFLIGHT`: requests in flight per node (also
+    /// capped by the descriptor limit at startup).
+    pub max_inflight: usize,
+    /// `RUSTYBIN_HARNESS_MAX_DURATION`: longest run (at most 24 hours).
+    pub max_duration: Duration,
+    /// `RUSTYBIN_HARNESS_DATA_PLANE`: `off` on a client-only node serves
+    /// only `/`, `/_rustybin/*`, `/ui` and the verification path.
+    pub data_plane: bool,
+    /// `RUSTYBIN_HARNESS_REPORT_DIR`: every final report is also written
+    /// here as `<run_id>.json`.
+    pub report_dir: Option<PathBuf>,
+    /// `RUSTYBIN_HARNESS_SCENARIO`: headless mode, the scenario file to run.
+    pub scenario: Option<PathBuf>,
+    /// `RUSTYBIN_HARNESS_START`: `manual` (default) or `immediately`
+    /// (`on-quorum` is the same on a single node).
+    pub start: crate::harness::StartMode,
+    /// `RUSTYBIN_HARNESS_REPORT`: headless mode, where the final report
+    /// goes (`-` for stdout).
+    pub report: Option<String>,
+    /// `RUSTYBIN_HARNESS_EXIT`: headless mode, exit after the run (0 when
+    /// the thresholds pass, 1 when they fail, 2 on error).
+    pub exit: bool,
+}
+
+impl Default for HarnessConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            roles: vec![crate::harness::Role::Server],
+            targets: Vec::new(),
+            verify_targets: false,
+            threads: None,
+            max_rate: DEFAULT_HARNESS_MAX_RATE,
+            max_inflight: DEFAULT_HARNESS_MAX_INFLIGHT,
+            max_duration: Duration::from_secs(DEFAULT_HARNESS_MAX_DURATION_SECS),
+            data_plane: true,
+            report_dir: None,
+            scenario: None,
+            start: crate::harness::StartMode::Manual,
+            report: None,
+            exit: false,
+        }
+    }
+}
+
+impl HarnessConfig {
+    pub fn has_role(&self, role: crate::harness::Role) -> bool {
+        self.roles.contains(&role)
+    }
+
+    /// The node generates load (`client` or `both`).
+    pub fn is_client(&self) -> bool {
+        self.enabled && self.has_role(crate::harness::Role::Client)
+    }
+
+    /// The node is an upstream too (`server` or `both`).
+    pub fn is_server(&self) -> bool {
+        self.enabled && self.has_role(crate::harness::Role::Server)
+    }
+
+    /// Headless mode: a scenario that starts on its own.
+    pub fn headless(&self) -> bool {
+        self.enabled && self.scenario.is_some() && self.start != crate::harness::StartMode::Manual
+    }
+
+    /// The effective configuration without secrets (there are none here).
+    pub fn public_view(&self) -> serde_json::Value {
+        serde_json::json!({
+            "enabled": self.enabled,
+            "roles": self.roles.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
+            "targets": self.targets,
+            "verify_targets": self.verify_targets,
+            "threads": self.threads,
+            "max_rate": self.max_rate,
+            "max_inflight": self.max_inflight,
+            "max_duration_secs": self.max_duration.as_secs(),
+            "data_plane": self.data_plane,
+            "report_dir_configured": self.report_dir.is_some(),
+            "headless": self.headless(),
+            "start": self.start.as_str(),
+            "exit": self.exit,
+        })
+    }
+}
+
+/// Default `RUSTYBIN_HARNESS_MAX_RATE` (requests per second per node).
+pub const DEFAULT_HARNESS_MAX_RATE: u64 = 50_000;
+/// Default `RUSTYBIN_HARNESS_MAX_INFLIGHT`.
+pub const DEFAULT_HARNESS_MAX_INFLIGHT: usize = 10_000;
+/// Default `RUSTYBIN_HARNESS_MAX_DURATION` in seconds (1 hour).
+pub const DEFAULT_HARNESS_MAX_DURATION_SECS: u64 = 3_600;
+/// Upper bound of `RUSTYBIN_HARNESS_MAX_DURATION` (24 hours).
+pub const MAX_HARNESS_MAX_DURATION_SECS: u64 = 24 * 3_600;
 
 /// What the email form asks for (`RUSTYBIN_LEADS_CONSENT`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -489,6 +610,7 @@ impl Config {
             shared_mode || control_auth == ControlAuth::Open,
             &mut warnings,
         );
+        let harness = parse_harness(&get, hosted_mode, &mut warnings);
 
         let config = Self {
             http_port: parse_or(&get, "RUSTYBIN_HTTP_PORT", 80, &mut warnings),
@@ -548,6 +670,7 @@ impl Config {
             mocks_state_dir: get("RUSTYBIN_MOCKS_STATE_DIR"),
             mocks_host: get("RUSTYBIN_MOCKS_HOST").and_then(|h| normalise_domain(&h)),
             self_service,
+            harness,
         };
         (config, warnings)
     }
@@ -603,6 +726,7 @@ impl Config {
             mocks_state_dir: None,
             mocks_host: None,
             self_service: SelfServiceConfig::default(),
+            harness: HarnessConfig::default(),
         }
     }
 
@@ -674,6 +798,7 @@ impl Config {
                 "leads_enabled".into(),
                 (ss.enabled && ss.leads_enabled()).into(),
             );
+            m.insert("harness".into(), self.harness.public_view());
         }
         view
     }
@@ -938,6 +1063,104 @@ where
         );
     }
     cfg
+}
+
+/// `RUSTYBIN_HARNESS*` (`crate::harness`). Invalid values warn and default
+/// like every other setting; the fatal combinations are refused at startup.
+fn parse_harness<G>(get: &G, hosted_mode: bool, warnings: &mut Vec<String>) -> HarnessConfig
+where
+    G: Fn(&str) -> Option<String>,
+{
+    use crate::harness::{Role, StartMode};
+    let d = HarnessConfig::default();
+    let enabled = parse_bool_or(get, "RUSTYBIN_HARNESS", false, warnings);
+    let roles = match get("RUSTYBIN_HARNESS_ROLES") {
+        None => d.roles.clone(),
+        Some(raw) => match Role::parse_list(&raw) {
+            Ok(roles) => roles,
+            Err(bad) => {
+                warnings.push(format!(
+                    "invalid RUSTYBIN_HARNESS_ROLES {raw:?} (unknown role {bad:?}; roles are client, server, coordinator, both), using server"
+                ));
+                d.roles.clone()
+            }
+        },
+    };
+    let targets: Vec<String> = get("RUSTYBIN_HARNESS_TARGETS")
+        .map(|raw| {
+            raw.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let threads = match get("RUSTYBIN_HARNESS_THREADS") {
+        None => None,
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(n) if (1..=1024).contains(&n) => Some(n),
+            _ => {
+                warnings.push(format!(
+                    "invalid RUSTYBIN_HARNESS_THREADS {raw:?} (1 to 1024), using the default"
+                ));
+                None
+            }
+        },
+    };
+    let max_rate = parse_or(get, "RUSTYBIN_HARNESS_MAX_RATE", d.max_rate, warnings).max(1);
+    let max_inflight = parse_or(
+        get,
+        "RUSTYBIN_HARNESS_MAX_INFLIGHT",
+        d.max_inflight,
+        warnings,
+    )
+    .max(1);
+    let max_duration = match get("RUSTYBIN_HARNESS_MAX_DURATION") {
+        None => d.max_duration,
+        Some(raw) => match crate::harness::scenario::parse_duration(&raw) {
+            Some(dur) if dur.as_secs() >= 1 && dur.as_secs() <= MAX_HARNESS_MAX_DURATION_SECS => {
+                dur
+            }
+            _ => {
+                warnings.push(format!(
+                    "invalid RUSTYBIN_HARNESS_MAX_DURATION {raw:?} (1s to 24h, e.g. 30m), using 1h"
+                ));
+                d.max_duration
+            }
+        },
+    };
+    let start = match get("RUSTYBIN_HARNESS_START") {
+        None => StartMode::Manual,
+        Some(raw) => match StartMode::parse(&raw) {
+            Some(mode) => mode,
+            None => {
+                warnings.push(format!(
+                    "invalid RUSTYBIN_HARNESS_START {raw:?} (manual, immediately or on-quorum), using manual"
+                ));
+                StartMode::Manual
+            }
+        },
+    };
+    HarnessConfig {
+        enabled,
+        roles,
+        targets,
+        verify_targets: parse_bool_or(
+            get,
+            "RUSTYBIN_HARNESS_VERIFY_TARGETS",
+            hosted_mode,
+            warnings,
+        ),
+        threads,
+        max_rate,
+        max_inflight,
+        max_duration,
+        data_plane: parse_bool_or(get, "RUSTYBIN_HARNESS_DATA_PLANE", true, warnings),
+        report_dir: get("RUSTYBIN_HARNESS_REPORT_DIR").map(PathBuf::from),
+        scenario: get("RUSTYBIN_HARNESS_SCENARIO").map(PathBuf::from),
+        start,
+        report: get("RUSTYBIN_HARNESS_REPORT"),
+        exit: parse_bool_or(get, "RUSTYBIN_HARNESS_EXIT", false, warnings),
+    }
 }
 
 fn parse_or<T, G>(get: &G, key: &str, default: T, warnings: &mut Vec<String>) -> T

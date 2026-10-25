@@ -72,6 +72,13 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-
 webpki-roots = "1"
 tokio-postgres = { version = "0.7.13", optional = true, default-features = false, features = ["runtime", "with-chrono-0_4"] }
 tokio-postgres-rustls = { version = "0.14", optional = true, features = ["aws-lc-rs"] }
+# Harness mode (docs/plans/harness.md): the load engine's HTTP client, TLS to
+# targets, latency histograms and the descriptor limit.
+hyper = { version = "1", features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1", "http2"] }
+tokio-rustls = "0.26"
+hdrhistogram = { version = "7.5", default-features = false }
+libc = "0.2"
 
 [build-dependencies]
 tonic-build = "0.12"
@@ -80,12 +87,6 @@ protoc-bin-vendored = "3"
 [dev-dependencies]
 tokio-tungstenite = "0.24"
 tempfile = "3"
-tokio-rustls = "0.26"
-hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
-# Harness phase 0 spike (examples/harness_spike.rs); phase 1 moves these to
-# [dependencies] together with the engine (docs/plans/harness.md).
-hyper = { version = "1", features = ["client", "http1"] }
-hdrhistogram = { version = "7.5", default-features = false }
 # examples/ is found automatically (no [[example]] table: the Docker build copies
 # Cargo.toml without examples/); `cargo test --all-targets` runs its tests.
 

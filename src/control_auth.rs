@@ -13,6 +13,8 @@
 //!   - `inspector`: read-only `/_rustybin/requests*`;
 //!   - `console` (the default when `scope` is absent): read-only
 //!     `/_rustybin/*`;
+//!   - `harness`: the harness control routes (`/_rustybin/harness*`),
+//!     reads and mutations (runs send load to allowlisted targets);
 //!   - `admin`: everything, including mutations.
 //!
 //! Mutations (any method other than GET, HEAD, OPTIONS) need the admin token
@@ -90,6 +92,9 @@ pub struct Grant {
     pub console: bool,
     /// `inspector` scope: read-only `/_rustybin/requests*`.
     pub inspector: bool,
+    /// `harness` scope: `/_rustybin/harness*`, including starting and
+    /// stopping runs.
+    pub harness: bool,
 }
 
 impl Grant {
@@ -97,6 +102,7 @@ impl Grant {
         admin: true,
         console: true,
         inspector: true,
+        harness: true,
     };
 
     /// Grants named by a `scope` claim (absent: `console`). Unknown scope
@@ -118,6 +124,7 @@ impl Grant {
             admin,
             console: admin || has("console"),
             inspector: admin || has("console") || has("inspector"),
+            harness: admin || has("harness"),
         }
     }
 
@@ -132,6 +139,9 @@ impl Grant {
         }
         if self.inspector {
             v.push("inspector");
+        }
+        if self.harness {
+            v.push("harness");
         }
         v
     }
@@ -150,6 +160,11 @@ impl Grant {
         // grant (any scope may approve what it holds).
         if crate::control_oauth::is_consent_path(path) {
             return true;
+        }
+        // The harness: reads for the console and harness scopes, runs and
+        // stops only for the harness scope (and admin).
+        if crate::harness::is_harness_path(path) {
+            return self.harness || (is_safe(method) && self.console);
         }
         if !is_safe(method) {
             return self.console && method == Method::POST && is_read_only_post(path);

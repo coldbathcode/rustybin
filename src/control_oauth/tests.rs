@@ -331,11 +331,11 @@ async fn full_flow_with_a_read_only_grant() {
     assert_eq!(req["redirect_kind"], "loopback");
     assert_eq!(
         req["scopes_requested"],
-        json!(["admin", "console", "inspector"])
+        json!(["admin", "console", "inspector", "harness"])
     );
     assert_eq!(
         req["scopes_grantable"],
-        json!(["admin", "console", "inspector"])
+        json!(["admin", "console", "inspector", "harness"])
     );
 
     let (status, ans) = answer(
@@ -397,7 +397,7 @@ async fn full_flow_with_a_read_only_grant() {
 async fn admin_scope_is_admin_on_the_management_server() {
     let app = app(token_config());
     let (_, tokens) = sign_in(&app, ADMIN, None).await;
-    assert_eq!(tokens["scope"], "admin console inspector");
+    assert_eq!(tokens["scope"], "admin console inspector harness");
     let access = tokens["access_token"].as_str().expect("access");
     let names = tool_names(&app, access).await;
     for n in [
@@ -731,7 +731,7 @@ fn key_sources_and_debug() {
 fn scope_parsing() {
     assert_eq!(
         parse_scopes(None),
-        Some(vec!["admin", "console", "inspector"])
+        Some(vec!["admin", "console", "inspector", "harness"])
     );
     assert_eq!(
         parse_scopes(Some("inspector console")),
