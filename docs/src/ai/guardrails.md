@@ -59,7 +59,8 @@ just the redacted text (with `?mode=` and `?types=` as query parameters).
 `Violence`), `blocklistNames`, `haltOnBlocklistHit` and `outputType`
 (`FourSeverityLevels` reports 0, 2, 4, 6; `EightSeverityLevels` 0 to 7) and
 returns `categoriesAnalysis` and `blocklistsMatch` (every requested blocklist name
-contains the demo items). `text:shieldPrompt` takes `userPrompt` and `documents`
+contains the demo items, one row per name and matched item; at most 10 names per
+request). `text:shieldPrompt` takes `userPrompt` and `documents`
 and returns `userPromptAnalysis.attackDetected` and
 `documentsAnalysis[].attackDetected`.
 

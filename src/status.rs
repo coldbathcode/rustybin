@@ -83,6 +83,12 @@ fn choose(choices: &[(u16, f64)]) -> Result<u16, String> {
     if choices.len() == 1 {
         return Ok(choices[0].0);
     }
+    // Each weight is finite, but their sum can still overflow (1e308 twice),
+    // and sampling from an infinite total panics.
+    let total: f64 = choices.iter().map(|(_, w)| *w).sum();
+    if !total.is_finite() {
+        return Err("the weights add up to more than the largest number".to_string());
+    }
     let dist = WeightedIndex::new(choices.iter().map(|(_, w)| *w))
         .map_err(|_| "at least one weight must be greater than zero".to_string())?;
     Ok(choices[dist.sample(&mut rand::thread_rng())].0)
@@ -183,6 +189,15 @@ mod tests {
             .oneshot(get_request(uri))
             .await
             .expect("response")
+    }
+
+    #[tokio::test]
+    async fn weights_whose_sum_overflows_are_refused() {
+        // Each weight is finite; the sum is not (it used to panic the task).
+        let resp = get("/status/200:1e308,500:1e308").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let resp = get("/status/200:1e300,500:1e300").await;
+        assert!(resp.status() == StatusCode::OK || resp.status().as_u16() == 500);
     }
 
     #[tokio::test]
