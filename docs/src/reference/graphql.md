@@ -63,6 +63,9 @@ The response media type follows `Accept`:
 
 Query depth 10, complexity 500 and 30 aliases (fragments expanded), so you can show
 a gateway's own GraphQL protection in front of a server that also defends itself.
+Before a query is parsed at all, its brackets may nest at most 64 levels deep: a
+deeper query gets `NESTING_LIMIT_EXCEEDED`, and over WebSocket the connection
+closes with code 1008.
 
 ```hurl
 {{#include ../../examples/protocols/graphql.hurl:depth_limit}}

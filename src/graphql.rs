@@ -891,6 +891,82 @@ pub const APQ_CAPACITY: usize = 1_000;
 pub const APQ_TTL: Duration = Duration::from_secs(24 * 3600);
 /// Largest query stored in the APQ cache.
 const APQ_MAX_QUERY_LEN: usize = 64 * 1024;
+/// Deepest `{`, `[` or `(` nesting a query may have before it is parsed. The
+/// grammar parser is recursive, so a query nested thousands of levels deep
+/// would overflow the stack (and abort the process) before `limit_depth`,
+/// which runs on the parsed document, could refuse it. The AST walk after the
+/// grammar parse has the same limit.
+pub const MAX_NESTING: usize = 64;
+
+/// Does `query` nest brackets deeper than [`MAX_NESTING`]? Strings, block
+/// strings and comments are skipped. Unbalanced input is left to the parser.
+fn nesting_too_deep(query: &str) -> bool {
+    let b = query.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'#' => {
+                while i < b.len() && b[i] != b'\n' && b[i] != b'\r' {
+                    i += 1;
+                }
+            }
+            b'"' if b[i..].starts_with(b"\"\"\"") => {
+                i += 3;
+                loop {
+                    if i >= b.len() {
+                        return false;
+                    }
+                    if b[i..].starts_with(b"\\\"\"\"") {
+                        i += 4;
+                    } else if b[i..].starts_with(b"\"\"\"") {
+                        i += 3;
+                        break;
+                    } else {
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' && b[i] != b'\n' {
+                    if b[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'{' | b'[' | b'(' => {
+                depth += 1;
+                if depth > MAX_NESTING {
+                    return true;
+                }
+            }
+            b'}' | b']' | b')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The refusal for a query over [`MAX_NESTING`].
+fn nesting_message() -> String {
+    format!("Query is nested too deeply (more than {MAX_NESTING} levels)")
+}
+
+/// Does a WebSocket message (`start` or `subscribe`, either protocol) carry a
+/// query over [`MAX_NESTING`]? Other messages and invalid JSON are left to the
+/// protocol handler.
+fn ws_query_too_deep(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.pointer("/payload/query"))
+        .and_then(|q| q.as_str())
+        .is_some_and(nesting_too_deep)
+}
 
 fn build_schema() -> GqlSchema {
     Schema::build(QueryRoot, MutationRoot, SubscriptionRoot)
@@ -1186,6 +1262,9 @@ async fn execute(
         return bad_request(mode, "Must provide query string.", "BAD_REQUEST");
     };
 
+    if nesting_too_deep(&query) {
+        return document_error(mode, &nesting_message(), "NESTING_LIMIT_EXCEEDED");
+    }
     if let Ok(doc) = async_graphql::parser::parse_query(&query) {
         if is_get
             && selected_operation_type(&doc, req.operation_name.as_deref())
@@ -1411,10 +1490,30 @@ async fn graphql_ws(
         .on_upgrade(move |socket| async move {
             let _open = crate::metrics::open_ws(&tracker);
             let lease = lease.map(|Extension(l)| l);
-            let (mut sink, mut stream) = futures_util::StreamExt::split(socket);
+            let (mut sink, stream) = futures_util::StreamExt::split(socket);
+            // A query nested too deeply would overflow the parser's stack, so
+            // the connection ends (1008) before the schema ever sees it.
+            let refused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = refused.clone();
+            let stream = futures_util::StreamExt::take_while(stream, move |msg| {
+                let deep = matches!(msg, Ok(axum::extract::ws::Message::Text(t)) if ws_query_too_deep(t.as_str()));
+                if deep {
+                    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                std::future::ready(!deep)
+            });
+            let mut stream = std::pin::pin!(stream);
             let serve = GraphQLWebSocket::new_with_pair(&mut sink, &mut stream, schema, protocol).serve();
             tokio::select! {
-                _ = tokio::time::timeout(limits.max_lifetime, serve) => {}
+                _ = tokio::time::timeout(limits.max_lifetime, serve) => {
+                    if refused.load(std::sync::atomic::Ordering::Relaxed) {
+                        let frame = axum::extract::ws::CloseFrame {
+                            code: axum::extract::ws::close_code::POLICY,
+                            reason: nesting_message().into(),
+                        };
+                        let _ = futures_util::SinkExt::send(&mut sink, axum::extract::ws::Message::Close(Some(frame))).await;
+                    }
+                }
                 _ = crate::limits::lease_expired(&lease) => {
                     // The plan's stream lifetime: close 1008 with a reason.
                     let frame = axum::extract::ws::CloseFrame {
@@ -2207,5 +2306,112 @@ mod tests {
         assert!(sdl.contains("type Product"));
         assert!(sdl.contains("type Order"));
         assert!(sdl.contains("enum UserRole"));
+    }
+    fn nested(depth: usize) -> String {
+        format!(
+            "{{{}{}}}",
+            "a{".repeat(depth.saturating_sub(1)),
+            "}".repeat(depth.saturating_sub(1))
+        )
+    }
+
+    #[test]
+    fn nesting_is_counted_outside_strings_and_comments() {
+        assert!(!nesting_too_deep(&nested(MAX_NESTING)));
+        assert!(nesting_too_deep(&nested(MAX_NESTING + 1)));
+        let noise = "{".repeat(MAX_NESTING * 2);
+        assert!(!nesting_too_deep(&format!("{{ a(s: \"{noise}\") }}")));
+        assert!(!nesting_too_deep(&format!(
+            "{{ a(s: \"\"\"{noise}\\\"\"\"\"\"\") }}"
+        )));
+        assert!(!nesting_too_deep(&format!("{{ a }} # {noise}\n")));
+        assert!(nesting_too_deep(&format!(
+            "# {noise}\n{}",
+            nested(MAX_NESTING + 1)
+        )));
+        assert!(nesting_too_deep(&format!(
+            "{{ a(v: {}) }}",
+            "[".repeat(MAX_NESTING + 1)
+        )));
+        assert!(!nesting_too_deep("{ a(s: \"unterminated"));
+        assert!(!nesting_too_deep("\"\"\"unterminated block"));
+    }
+
+    async fn gql_post(query: &str) -> (StatusCode, serde_json::Value) {
+        let body = serde_json::json!({ "query": query });
+        let resp = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/graphql")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).expect("json")))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status = resp.status();
+        (status, json_body(resp).await)
+    }
+
+    #[tokio::test]
+    async fn deeply_nested_queries_are_refused_before_parsing() {
+        // Thousands of levels would overflow the parser's stack and abort the
+        // process; the guard refuses them as a document error instead.
+        let (status, json) = gql_post(&nested(20_000)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json["errors"][0]["extensions"]["code"],
+            "NESTING_LIMIT_EXCEEDED"
+        );
+        let (_, json) = gql_post(&nested(MAX_NESTING + 1)).await;
+        assert_eq!(
+            json["errors"][0]["extensions"]["code"],
+            "NESTING_LIMIT_EXCEEDED"
+        );
+    }
+
+    #[tokio::test]
+    async fn queries_at_the_nesting_limit_reach_the_parser() {
+        // The deepest query the guard lets through must parse without
+        // exhausting the stack (it then fails the selection depth limit).
+        let (status, json) = gql_post(&nested(MAX_NESTING)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_ne!(
+            json["errors"][0]["extensions"]["code"],
+            "NESTING_LIMIT_EXCEEDED"
+        );
+        assert!(json["errors"][0]["message"].is_string(), "{json}");
+    }
+
+    #[tokio::test]
+    async fn deeply_nested_subscriptions_close_the_socket() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+        use tokio_tungstenite::tungstenite::Message as TMessage;
+        let addr = spawn_server().await;
+        let mut socket = ws_connect(addr, "graphql-transport-ws").await;
+        socket
+            .send(TMessage::Text(r#"{"type":"connection_init"}"#.into()))
+            .await
+            .expect("send");
+        assert_eq!(next_json(&mut socket).await["type"], "connection_ack");
+        let subscribe = serde_json::json!({
+            "id": "deep",
+            "type": "subscribe",
+            "payload": { "query": format!("subscription {}", nested(20_000)) }
+        });
+        socket
+            .send(TMessage::Text(subscribe.to_string()))
+            .await
+            .expect("send");
+        let closed = loop {
+            match tokio::time::timeout(Duration::from_secs(5), socket.next()).await {
+                Ok(Some(Ok(TMessage::Close(frame)))) => break frame,
+                Ok(Some(Ok(_))) => continue,
+                other => panic!("expected a close frame, got {other:?}"),
+            }
+        };
+        assert_eq!(closed.map(|f| f.code), Some(CloseCode::Policy));
     }
 }
