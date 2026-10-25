@@ -742,7 +742,11 @@ fn extract_params(op: &Operation, path: &str, prefix: &str) -> Vec<(String, Stri
     let actual: Vec<&str> = rest.trim_matches('/').split('/').collect();
     let mut out = Vec::new();
     for (t, a) in template.iter().zip(actual.iter()) {
+        // Same rule as `compile::parse_template`: a `}` before the `{` is literal.
         if let (Some(open), Some(close)) = (t.find('{'), t.find('}')) {
+            if open > close {
+                continue;
+            }
             let prefix_lit = &t[..open];
             let suffix_lit = &t[close + 1..];
             if let Some(inner) = a
@@ -845,6 +849,44 @@ mod tests {
         "Error": {"type": "object", "required": ["code"], "properties": {"code": {"type": "integer"}}}
       }}
     }"##;
+
+    /// A spec with one GET `/a` whose 200 response has `schema`.
+    fn with_schema(schema: serde_json::Value) -> String {
+        json!({"openapi": "3.0.3", "info": {"title": "t", "version": "1"},
+            "paths": {"/a": {"get": {"responses": {"200": {"description": "ok",
+                "content": {"application/json": {"schema": schema}}}}}}}})
+        .to_string()
+    }
+
+    #[test]
+    fn odd_specs_compile_without_panicking() {
+        // Each of these used to panic while parsing, compiling or checking.
+        let braces = r#"{"openapi":"3.0.3","info":{"title":"t","version":"1"},
+            "paths":{"/a/}{x":{"get":{"responses":{"200":{"description":"ok"}}}}}}"#;
+        let c = compile(braces, MockSettings::default());
+        assert_eq!(c.report.errors, 0, "{:#?}", c.report);
+
+        let multibyte = r#"{"openapi":"3.0.3","info":{"title":"t","version":"1"},
+            "paths":{"/a":{"get":{"responses":{"\u20ac":{"description":"odd"},"200":{"description":"ok"}}}}}}"#;
+        let c = compile(multibyte, MockSettings::default());
+        assert!(
+            c.spec
+                .warnings
+                .iter()
+                .any(|w| w.contains("not a status code")),
+            "{:?}",
+            c.spec.warnings
+        );
+
+        for schema in [
+            json!({"type": "integer", "exclusiveMinimum": 1e300}),
+            json!({"type": "integer", "exclusiveMaximum": -1e300}),
+            json!({"type": "integer", "minimum": 9.2e18, "multipleOf": 7}),
+            json!({"type": "integer", "minimum": -1e300, "maximum": 1e300}),
+        ] {
+            compile(&with_schema(schema), MockSettings::default());
+        }
+    }
 
     #[test]
     fn report_flags_bad_examples_and_overrides() {

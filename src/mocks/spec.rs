@@ -1041,9 +1041,7 @@ fn parse_responses(
             || status
                 .parse::<u16>()
                 .is_ok_and(|c| (100..=599).contains(&c))
-            || (status.len() == 3
-                && status[1..].eq_ignore_ascii_case("XX")
-                && matches!(&status[..1], "1" | "2" | "3" | "4" | "5"));
+            || matches!(status.as_bytes(), [b'1'..=b'5', b'x' | b'X', b'x' | b'X']);
         if !valid {
             warnings.push(format!(
                 "{label}: response key {status:?} is not a status code, skipped"

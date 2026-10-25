@@ -532,13 +532,13 @@ impl Gen<'_, '_> {
             v = v.max(m.ceil() as i64);
         }
         if let Some(m) = xmin {
-            v = v.max(m.floor() as i64 + 1);
+            v = v.max((m.floor() as i64).saturating_add(1));
         }
         if let Some(m) = max {
             v = v.min(m.floor() as i64);
         }
         if let Some(m) = xmax {
-            v = v.min(m.ceil() as i64 - 1);
+            v = v.min((m.ceil() as i64).saturating_sub(1));
         }
         if let Some(m) = obj
             .get("multipleOf")
@@ -548,7 +548,7 @@ impl Gen<'_, '_> {
             let lower = min.map(|x| x.ceil() as i64).unwrap_or(i64::MIN);
             let mut candidate = (v / m) * m;
             if candidate < lower {
-                candidate += m;
+                candidate = candidate.checked_add(m).unwrap_or(candidate);
             }
             v = candidate;
         }

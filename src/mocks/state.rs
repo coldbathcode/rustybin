@@ -354,7 +354,10 @@ fn new_id(state: &MockState, key: &str, template: Option<&Value>) -> Value {
         !matches!(template, Some(Value::String(_))) && ids.iter().all(|i| i.parse::<i64>().is_ok());
     if numeric {
         let max = ids.iter().filter_map(|i| i.parse::<i64>().ok()).max();
-        return json!(max.unwrap_or(0) + 1);
+        // A client may have stored `i64::MAX` itself: then fall back to a UUID.
+        if let Some(next) = max.unwrap_or(0).checked_add(1) {
+            return json!(next);
+        }
     }
     json!(uuid::Uuid::new_v4().to_string())
 }
@@ -569,6 +572,25 @@ mod tests {
             .as_ref()
             .and_then(Body::as_json)
             .unwrap_or(Value::Null)
+    }
+
+    #[test]
+    fn next_id_after_the_largest_integer_falls_back_to_a_uuid() {
+        let c = compile(SPEC, MockSettings::default());
+        let s = MockState::new(100, 100_000);
+        let max = json!({"id": i64::MAX, "name": "Max"});
+        call(&c, &s, "create", "/pets", &[], Some(max)).expect("create max");
+        let next = call(
+            &c,
+            &s,
+            "create",
+            "/pets",
+            &[],
+            Some(json!({"name": "Next"})),
+        )
+        .expect("create");
+        assert_eq!(next.status, 201);
+        assert!(body(&next)["id"].is_string(), "{}", body(&next));
     }
 
     #[test]
