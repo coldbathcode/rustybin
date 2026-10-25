@@ -278,7 +278,9 @@ a key, like every data-plane request in shared mode.
 With `RUSTYBIN_MOCKS_STATE_DIR`, visitor mocks are saved with their owner, and
 visits and the day's ledger in `_visits.json`, so a restart keeps visits running;
 mocks of visits that ended meanwhile are deleted on load. Captured traffic and
-email addresses are never saved.
+email addresses are never saved: the ledger keeps salted hashes of addresses. It
+does keep each visit's session key, which is the client IP when the visitor sends no
+`X-Rustybin-Session`, to count anonymous visits per day.
 
 Visits live in memory on one instance. Run a self-service demo as a single
 instance, or route every request for a mock (its host on the mocks domain) to the

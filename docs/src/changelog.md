@@ -168,3 +168,30 @@ API, AI and agent gateway demos.
   used by the SOAP endpoint). SOAP field values still decode `&amp;`, character
   references and the other predefined entities; unknown entities are a Sender fault.
 - CI runs `cargo audit` on every push.
+
+### Fixed
+
+From a full code review (2026-10-25):
+
+- **GraphQL**: a query nested thousands of levels deep overflowed the parser's stack
+  and aborted the whole process. Queries nested more than 64 levels are refused before
+  parsing (`NESTING_LIMIT_EXCEEDED`, WebSocket close 1008).
+- **Credentials in captures**: `Authorization: Bearer` with the admin token or a
+  control JWT is captured as `[redacted]`; the `rb_key` query is redacted in OpenAPI
+  mock captures; AI request records redact `X-Rustybin-Key` and `rb_key` and, in
+  shared mode, are scoped by key.
+- **Console**: the API explorer shows the console's own credentials masked; a valid
+  token with a narrow scope signs in; the admin token is kept for the tab only.
+- **MCP**: tool scopes are checked inside JSON-RPC batches on `/mcp/protected`; the
+  legacy HTTP+SSE transport caps requests in flight per session.
+- **Self-service**: redirects that browsers read as off-domain (`/\host`) are refused;
+  a trailing-dot `Host` no longer reaches the console on the mocks domain; rotating a
+  manage token can no longer drop the visit's mocks; every saved visitor mock loads
+  after a restart; a visitor mock's spec answers only on the mocks domain.
+- **OpenAPI mocks**: odd path templates, multibyte response keys and huge integer
+  bounds no longer panic; validation, `minLength` and stateful collections are bounded.
+- `/status` with weights whose sum overflows answers `400`; the Azure-shaped
+  `text:analyze` caps blocklist names and repeated rows; `/response-headers` keeps
+  reflected values inert under any `Content-Type`.
+- File-defined mocks load before the HTTP listener serves; JWT control auth warns when
+  the token audience would change on every restart; `/openapi.json` is built once.

@@ -8,7 +8,8 @@ mock URL and you have a realistic upstream for an API that does not exist yet, o
 that you cannot reach from a demo laptop.
 
 - OpenAPI 3.0 and 3.1, as JSON or YAML, one bundled file (local `#/...` references
-  only; external `$ref`s and Swagger 2.0 are refused with a clear message).
+  only; external `$ref`s are refused with a clear message). Swagger 2.0 is converted
+  to OpenAPI 3.0 on import, with a warning saying so.
 - Responses come from the spec's examples or are generated from the schemas,
   deterministically, with path parameters echoed (`GET /pets/42` returns `"id": 42`).
   Rules, overrides and the `Prefer` header pick other documented responses. See

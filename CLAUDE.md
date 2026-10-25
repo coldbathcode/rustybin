@@ -7,8 +7,9 @@ HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is
 [docs/plans/harness.md](docs/plans/harness.md) (planned 2026-10-22, not started): Rustybin as a load client and
 correlating upstream, single node (loop-through) or a cluster (an elected leader, clients, servers), traffic layers
 with run patterns and rate-limit burst attacks, every parameter from one schema in the API, MCP and console (tunable
-live), or headless. It is the first feature that sends outbound traffic, so its safety section (allowlist, target
-verification, leases) comes first. Update the plan's status and `docs/src/roadmap.md` ("Next") as phases land.
+live), or headless. It is the first feature that sends load to targets the caller chooses (A2A push notifications,
+the leads webhook and the key registry URL already send outbound requests, with their own allowlists), so its safety
+section (allowlist, target verification, leases) comes first. Update the plan's status and `docs/src/roadmap.md` ("Next") as phases land.
 
 ## MCP server for every OpenAPI mock (built)
 
@@ -80,14 +81,15 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
 
 - `src/main.rs`: thin CLI (`--print-endpoints-markdown`, `--version`), exits non-zero on fatal errors.
 - `src/lib.rs`: module list, `ROUTERS` (every module's router), `build_app(state)` with the middleware stack
-  (outermost first): request id, trace, metrics, request id propagation, CORS, control-plane auth, plan limits,
-  time-to-headers timeout, inspector capture, body limit, fault injection. JSON 404 fallback.
+  (outermost first): mock host rewrite (wraps the finished router, `mocks::host`), request id, trace, metrics,
+  request id propagation, CORS, control-plane auth, API keys (`keys::enforce`), plan limits, time-to-headers timeout,
+  inspector capture, body limit, fault injection. JSON 404 fallback.
 - `src/server.rs`: `run(config)`, `start(config)`, `start_with_state(state)` -> `RunningServer`
   (bound addresses, `shutdown()`, `wait()`). HTTP bind failure is fatal; HTTPS and gRPC failures only warn.
   Ports may be 0. Graceful shutdown on SIGTERM/SIGINT with a 10 s grace period. With `RUSTYBIN_GRPC_ON_HTTP`
   the HTTP/HTTPS app is wrapped in `grpc::GrpcOnHttp` (content-type `application/grpc*` goes to tonic).
 - `src/config.rs`: `Config` from `RUSTYBIN_*` env vars (invalid values warn and default), `Config::for_tests()`.
-- `src/state.rs`: `AppState { config, jwt, certs, identity, inspector, health, limits, metrics, mocks }`, `FromRef` for
+- `src/state.rs`: `AppState { config, jwt, certs, identity, inspector, health, limits, metrics, keys, mocks }`, `FromRef` for
   each part (handlers can keep extracting `State<Arc<Config>>`).
 - `src/catalog.rs`: route catalogue, the single source of truth (landing page, `/export/*`, README tables)
   plus the consistency tests.
@@ -98,8 +100,8 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   `git_sha()` / `build_info()` (build.rs sets `RUSTYBIN_GIT_SHA`), `is_control_path()` (`/_rustybin/*`, `/ui/*`).
 - `src/control_oauth.rs`: OAuth sign-in to the management MCP server (`RUSTYBIN_CONTROL_OAUTH*`), see above.
 - `src/control_auth.rs`: `RUSTYBIN_CONTROL_AUTH` (`open` / `token` / `jwt`), Ed25519 JWT verification with scopes
-  (`inspector`, `console`, `admin`), the `enforce` middleware (protects `/_rustybin/*` except `/_rustybin/ready`;
-  `/ui/*` static files stay open). Tests sign tokens with the keys in `tests/common/control_jwt_keys.rs`
+  (`inspector`, `console`, `admin`), the `enforce` middleware (protects `/_rustybin/*` except `/_rustybin/ready` and
+  the OAuth sign-in endpoints `/_rustybin/oauth/{register,authorize,token}`; `/ui/*` static files stay open). Tests sign tokens with the keys in `tests/common/control_jwt_keys.rs`
   (`test_support::control_jwt`).
 - `src/metrics.rs`: `Metrics` (in `AppState`), the `track` middleware (route label = `MatchedPath` template),
   `/_rustybin/metrics`. Every label is bounded; WebSocket handlers hold a guard from `metrics::open_ws`.

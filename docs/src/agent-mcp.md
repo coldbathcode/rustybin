@@ -56,6 +56,13 @@ rustybin mcp-stdio --server https://<host> --header 'X-Rustybin-Mock-Token: rbm_
 `--server` falls back to `RUSTYBIN_MCP_URL` (a bare base URL gets `/_rustybin/mcp`
 appended) and `--token` to `RUSTYBIN_TOKEN` or `RUSTYBIN_ADMIN_TOKEN`.
 
+The bridge handles one request at a time and does not relay requests the server
+sends while a call runs. Clients on protocol 2026-07-28 get confirmation questions
+inside the call's own response, so they work. An older client that declares
+elicitation never sees the question through the bridge, and destructive tools fail
+after the server's wait: there, leave elicitation out and let the model pass
+`"confirm": true` after the user agreed (see [Confirmations](#confirmations)).
+
 On an instance whose control plane asks for credentials you can also leave the
 header out and [sign in through the browser](#sign-in-with-oauth).
 
@@ -406,7 +413,8 @@ Every call that changes something, and every refused call, is logged as one line
 never logged, since they may hold secrets or spec bodies.
 
 `/_rustybin/metrics` counts calls in `rustybin_manage_mcp_calls_total{tool, outcome}`
-(outcome `ok`, `denied`, `invalid` or `error`). Tool calls are control-plane requests,
+(outcome `ok`, `denied` or `error`; invalid arguments count as `error`, and a request
+refused before it reaches a tool, such as an unknown tool name, is not counted). Tool calls are control-plane requests,
 so [plan limits](concepts/plans-and-limits.md) apply as for the REST routes.
 
 ## What to ask

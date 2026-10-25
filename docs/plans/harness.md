@@ -594,8 +594,10 @@ gateway.
 
 ## 11. Safety
 
-Load generation is the first time Rustybin sends traffic on someone's behalf, so the fences come first
-and are tested first.
+Load generation is the first time Rustybin sends load to targets a caller chooses, so the fences come
+first and are tested first. (A2A push notifications already send single requests to caller-supplied URLs,
+behind `RUSTYBIN_A2A_PUSH_ALLOWLIST`; the leads webhook and the key registry URL are operator-set. The
+harness allowlist and verification follow the same idea at load scale.)
 
 - Off by default; fatal with public mode or self-service (section 5). The hosted demo never enables it.
 - **Target allowlist** on every client node (`RUSTYBIN_HARNESS_TARGETS`). Names are resolved, and the

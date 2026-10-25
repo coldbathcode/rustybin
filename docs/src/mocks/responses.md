@@ -33,7 +33,10 @@ error status (empty otherwise); `204`, `304` and `1xx` are always empty. Respons
 headers documented in the spec are sent with values from their examples or
 schemas; configured `headers` are added on top (and replace documented ones with
 the same name). The media type follows `Accept` among the response's `content`
-entries, JSON by default.
+entries, JSON by default. Bodies are JSON or plain text: a non-JSON media type
+(`application/xml`, `text/csv`) is served as declared when its example is a string,
+and otherwise as `application/json` (Rustybin does not write XML or CSV from a
+schema).
 
 `X-Rustybin-Mock-Source` says what happened: `example:<name>` (a named example),
 `example` (an unnamed one), `generated`, `static` (a configured body), `empty`, or

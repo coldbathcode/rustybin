@@ -45,9 +45,15 @@ warning: GET /b/{x}: no responses documented, answers 200 with an empty body
 0 error(s), 3 warning(s)
 ```
 
+A Swagger 2.0 file is converted to OpenAPI 3.0 first, and the report says so:
+
 ```text
 $ rustybin mock validate swagger.json
-rustybin mock: Swagger 2.0 is not supported yet: convert the spec to OpenAPI 3 first (for example with swagger2openapi)
+Legacy 1 (OpenAPI 3.0.3)
+1 operation(s), server prefix "/v1", suggested name "legacy"
+  GET     /pets                                    listPets                 ok
+warning: converted from Swagger 2.0 to OpenAPI 3.0
+0 error(s), 1 warning(s)
 ```
 
 ### init

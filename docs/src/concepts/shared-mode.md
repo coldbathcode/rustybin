@@ -109,6 +109,10 @@ and open streams are counted per key id, in the same bounded map as session coun
 usual [plan limit 429](plans-and-limits.md#responses) with `Retry-After`.
 
 The daily quotas (`requests`, `egress_bytes`) reset at 00:00 UTC and never roll over.
+Their counters are bounded too: at most three times `RUSTYBIN_KEYS_MAX` (key, day)
+pairs, at least 1,024. Past that cap a key without a counter yet is let through
+uncounted for the day and a warning is logged once, which only happens when
+`RUSTYBIN_KEYS_MAX` is set far below the number of keys actually in use.
 A key over a quota gets `429` until midnight UTC, with `Retry-After` in seconds and a
 body naming the reset time and, when `RUSTYBIN_QUOTA_UPGRADE_URL` is set, an upgrade
 link (`null` otherwise):

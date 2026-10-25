@@ -26,7 +26,7 @@ This list is checked against `src/config.rs` and every `std::env::var` call in
 | `RUSTYBIN_LOG_FORMAT` | `text` | `text` or `json` (one JSON object per line, with the request's `method`, `path` and `request_id` in a `span` object). `json` by default in hosted mode. See [Logs](concepts/control-plane-security.md#logs). |
 | `RUSTYBIN_GRPC_ON_HTTP` | `false` | Also serve the gRPC services on the HTTP and HTTPS listeners for requests with `content-type: application/grpc*` (HTTP/2; the HTTPS listener then offers `h2` through ALPN), so a TLS-terminating proxy can forward gRPC on 443. See [gRPC](reference/grpc.md#on-the-http-and-https-ports). |
 | `RUSTYBIN_INSTANCE_ID` | random UUID | Instance name returned by `/identity`, `/health`, the mock LLM (`X-Rustybin-Instance`) and the gRPC `EchoService`. Set it per replica for load balancing demos. |
-| `RUSTYBIN_REQUEST_TIMEOUT` | `120` | Seconds until the response headers must be ready, else `503`. Streaming bodies (SSE, WebSocket, slow drips) are not cut once headers are sent. `0` disables the timeout. |
+| `RUSTYBIN_REQUEST_TIMEOUT` | `120` | Seconds until the response headers must be ready, else `503`. Streaming bodies (SSE, WebSocket, slow drips) are not cut once headers are sent. `0` disables the timeout. A request that times out is counted in the metrics but does not appear in the request inspector. |
 | `RUSTYBIN_BODY_LIMIT` | `1048576` | Maximum request body in bytes; larger bodies get `413`. Also the size up to which `/echo` shows a body. |
 
 The process stops gracefully on SIGTERM or SIGINT: listeners stop accepting and
