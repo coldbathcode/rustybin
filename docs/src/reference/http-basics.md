@@ -67,8 +67,9 @@ or `text/xml`, with q-values. They never answer `406` and always send
 ```
 
 A comma-separated list picks at random: `/status/200,500` uniformly, or with
-weights, `/status/200:0.9,500:0.1` (weights are relative, at most 20 codes). The
-body then has `chosen_from`.
+weights, `/status/200:0.9,500:0.1` (weights are relative, at most 20 codes; each
+must be a finite non-negative number, at least one above zero, and their sum finite,
+else `400`). The body then has `chosen_from`.
 
 ```hurl
 {{#include ../../examples/http/status.hurl:status_weighted}}

@@ -102,8 +102,9 @@ bounded (1000, idle TTL 30 minutes; 200 and 10 minutes in public mode).
 `GET /mcp/sse` opens a stream whose first event is `endpoint`, carrying
 `/mcp/messages?sessionId=...`. The client POSTs JSON-RPC messages there and gets
 `202 Accepted`; responses and notifications arrive as `message` events on the
-stream. The session ends with the stream. Because the two halves must run at the
-same time, this transport has no Hurl example; `conformance/mcp/test_sse_legacy.py`
+stream. The session ends with the stream. Since the POST returns at once, a
+session may have at most 64 requests running; the next one gets `429`. Because the
+two halves must run at the same time, this transport has no Hurl example; `conformance/mcp/test_sse_legacy.py`
 drives it with the Python SDK.
 
 ## Tools, resources and prompts
@@ -181,7 +182,9 @@ so that agents never see it.
    plain client credentials token works; set it to `none` for strict audience
    checks).
 5. `cancel_order` needs `mcp:tools:write`; without it the call gets `403` with an
-   `insufficient_scope` challenge (step-up authorization).
+   `insufficient_scope` challenge (step-up authorization). A JSON-RPC batch
+   (2025-03-26) that holds such a call gets the same `403` as a whole, before any of
+   its messages runs.
 
 The base URL comes from the request, like the built-in IdP's issuer: `https` on the
 HTTPS listener, the `Host` header, and `Forwarded` / `X-Forwarded-Proto` /

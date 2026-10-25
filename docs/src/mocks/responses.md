@@ -62,6 +62,7 @@ when one of those chose the response.
 | `examples` (default) | The media type's `example`, else its first named example, else data generated from the schema (schema `example` values are used where they exist) |
 | `generated` | Always generated from the schema; falls back to the examples only when there is no schema |
 | `static` | Only bodies you configured (`respond.body`, `example`); anything else is empty |
+| `stateful` | A small in-memory store behind the mock: what clients create, change and delete is what later reads return ([below](#stateful-mode)) |
 
 A per-operation `mode` overrides the mock's. Examples are returned exactly as
 written in the spec.
@@ -89,6 +90,34 @@ one `...id` parameter a property called `id` gets it too.
 ```hurl
 {{#include ../../examples/mocks/responses.hurl:mode_static}}
 ```
+
+### Stateful mode
+
+In `stateful` mode the mock remembers data, keyed by the request path, so a demo
+can create something and read it back:
+
+| Request | Answer |
+|---|---|
+| `POST /pets` | Stores the body (on top of the documented response's example) under its id field, or a new id when the body has none: the next integer when the collection's ids are integers, else a UUID |
+| `GET /pets` | The collection, in insertion order; `?limit=` and `?offset=` page it, and a wrapper object (`{"total": 9, "data": [...]}`) keeps its shape with `total` / `count` updated |
+| `GET /pets/{id}` | The stored item |
+| `PUT /pets/{id}` | Replaces the item (or creates it) |
+| `PATCH /pets/{id}` | Merges the body's fields into the item |
+| `DELETE /pets/{id}` | Removes it; the item is returned when the spec documents a response body |
+
+A collection starts with the items of its list operation's example the first time
+it is used. A missing item answers `404`, with the spec's own `404` response when it
+documents one, else `application/problem+json`. Operations that do not look like
+CRUD (a `POST` on an item, a path ending in an action) answer as in `examples` mode.
+`X-Rustybin-Mock-Source` names the action (`state create`, `state read`, `state miss`,
+...).
+
+The store is bounded per mock (1,000 items and 2 MiB, 200 items and 256 KiB in public
+mode): the oldest items are evicted to make room, an item larger than the whole
+budget gets `507`, and collections count too, since a path parameter above the
+collection (`/users/{uid}/pets`) opens one per URL. `GET /_rustybin/mocks/{name}/state`
+shows what a mock stored and `DELETE` resets it. Stateful mode is not available for
+[self-service](self-service.md) visitor mocks.
 
 ## Operation settings
 
@@ -165,6 +194,13 @@ the request body's presence, content type, JSON syntax and schema.
 
 Pointers address a virtual document: `/path/productId`, `/query/limit`,
 `/header/x-request-id`, `/body/items/0/quantity`.
+
+Array and object parameters are read in the default `form` style (`?tags=a,b` or
+repeated `?tags=a&tags=b`); `spaceDelimited`, `pipeDelimited` and `deepObject` are
+not interpreted yet, so validate such operations in `warn` mode. One validation makes
+at most 500,000 schema checks: a schema whose `anyOf` / `oneOf` alternatives refer back
+to themselves stops there with a `validation stopped` issue instead of running for
+minutes.
 
 ```hurl
 {{#include ../../examples/mocks/responses.hurl:validation_warn}}

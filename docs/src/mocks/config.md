@@ -13,7 +13,8 @@ exported from mocks you built in the console.
 | The built-in sample | `RUSTYBIN_MOCKS_SAMPLE` (default `true`, `false` in public mode) |
 
 Both can be used together; a mock in the config file wins over a spec file of
-the same name in the directory. Nothing stops the server from starting: a file that
+the same name in the directory. They load before the server answers its first
+request, so a platform that routes on readiness never sees them missing. Nothing stops the server from starting: a file that
 cannot be read or parsed, an unset environment variable or a spec that does not
 compile is logged as a warning and listed in `load_errors` of
 `GET /_rustybin/mocks` (and in the console), and the other mocks load normally.

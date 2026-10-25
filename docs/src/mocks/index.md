@@ -290,6 +290,7 @@ themselves (`/mock/*`) are data plane and never need a control-plane token.
 | Previous revisions kept for rollback | 5 | 2 |
 | Captured requests per mock | 200 (1 MiB) | 50 (256 KiB) |
 | Captured request body | 64 KiB | 64 KiB |
+| [Stateful data](responses.md#stateful-mode) per mock | 1,000 items, 2 MiB | 200 items, 256 KiB |
 | `delay_ms` | 30 s | 10 s |
 | Lifetime of mocks created through the console or API | unlimited | 24 hours |
 
@@ -297,6 +298,9 @@ Mocks from `rustybin.yaml`, the mocks directory and the sample never expire. Oth
 fixed caps: 20 headers per configured response, `matches` patterns up to 256
 characters, 50 API keys, bearer tokens and basic users per mock, `$ref` chains up
 to 32 deep, a `rustybin.yaml` up to 8 MiB and 200 files in the mocks directory.
+Generated strings are padded to `minLength` up to 64 KiB (a larger minimum gives a
+value that fails its own schema, which the deploy checks report), and one request
+validation makes at most 500,000 schema checks.
 `GET /_rustybin/mocks` returns the instance's limits as `limits`.
 
 ## Control API

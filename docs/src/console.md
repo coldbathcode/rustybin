@@ -76,7 +76,7 @@ The **Mock APIs** view (`/ui/#/mocks`) manages the instance's
   security schemes and warnings (`POST /_rustybin/mocks/import`) and a name with the
   resulting URL; the last step picks how responses are produced (spec examples,
   generated data, your own responses, or "Remember changes", the
-  [stateful mode](mocks/responses.md)), whether the mock is secured and how
+  [stateful mode](mocks/responses.md#stateful-mode)), whether the mock is secured and how
   requests are validated, then creates and deploys it.
 - **Header menu**: Rename, Duplicate (a copy under a new name, deployed when the
   source is, with empty traffic), Export YAML, Download spec (as uploaded),

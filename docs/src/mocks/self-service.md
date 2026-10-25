@@ -178,7 +178,10 @@ systems such as Safe Browsing can flag together with it):
   route answer `404` there. The bare domain redirects to
   `RUSTYBIN_MOCKS_SELF_SERVICE_HOME` (else `404`).
 - On the main host, `/mock/<name>` of a visitor mock answers `404` with the right
-  URL. Instance mocks keep working on both.
+  URL, and so do its served spec (`/mock/<name>/_rustybin/openapi.json`, `.yaml`)
+  and its MCP server. Instance mocks keep working on both.
+- Hosts are compared without a trailing dot: `rustybin-mock.dev.` is the mocks
+  domain like `rustybin-mock.dev`.
 
 ```hurl
 {{#include ../../examples/mocks/self_service.hurl:ss_main_host}}
@@ -206,7 +209,9 @@ Whatever the spec or the settings say, every response of a visitor mock:
   `Content-Security-Policy: sandbox; default-src 'none'; frame-ancestors 'none'`;
 - never sets `Set-Cookie`, Content-Security-Policy, HSTS, `Clear-Site-Data` or
   `Access-Control-Allow-Credentials`, and never redirects to another host
-  (`Location`, `Refresh` and `Content-Location` with an absolute URL are dropped);
+  (`Location`, `Refresh` and `Content-Location` are dropped when a browser would
+  leave the domain: an absolute URL, `//host`, or `/\host` and `\/host`, since
+  browsers read `\` as `/`; tabs and newlines are ignored as browsers do);
 - serves only inert media types: JSON (`*+json`), XML, YAML, CSV, plain text,
   `application/octet-stream` and form data. HTML, SVG, JavaScript and anything else
   go out as `text/plain`.

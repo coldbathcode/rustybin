@@ -55,7 +55,7 @@ the instance only needs the public key. A token must have:
 | Claim | Rule |
 |---|---|
 | header `alg` | `EdDSA` (Ed25519); any other algorithm is refused |
-| `aud` | equal to `RUSTYBIN_CONTROL_JWT_AUDIENCE` (default: `RUSTYBIN_INSTANCE_ID`), so a token for one instance does not open another |
+| `aud` | equal to `RUSTYBIN_CONTROL_JWT_AUDIENCE` (default: `RUSTYBIN_INSTANCE_ID`), so a token for one instance does not open another. With neither set the instance id is a fresh UUID on every start, so tokens stop working after a restart: the server warns at startup |
 | `exp` | required; 30 seconds of clock skew are tolerated (also for `nbf` when present) |
 | `scope` | optional: a space separated string or an array; absent means `console` |
 
