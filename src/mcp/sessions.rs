@@ -193,16 +193,18 @@ impl Session {
         }
     }
 
-    /// Track an in-flight client request so it can be cancelled.
-    pub fn track_inflight(&self, id: &Value, token: CancelToken) {
+    /// Track an in-flight client request so it can be cancelled. False when
+    /// the session already has [`MAX_INFLIGHT`] requests running.
+    pub fn track_inflight(&self, id: &Value, token: CancelToken) -> bool {
         let mut st = self.state();
         if st.inflight.len() >= MAX_INFLIGHT {
             st.inflight.retain(|_, t| !t.is_cancelled());
             if st.inflight.len() >= MAX_INFLIGHT {
-                return;
+                return false;
             }
         }
         st.inflight.insert(id_key(id), token);
+        true
     }
 
     pub fn finish_inflight(&self, id: &Value) {

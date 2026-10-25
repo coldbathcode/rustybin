@@ -303,6 +303,7 @@ impl Config {
             }
         };
 
+        let instance_id_set = get("RUSTYBIN_INSTANCE_ID").is_some();
         let instance_id = get("RUSTYBIN_INSTANCE_ID").unwrap_or_else(|| Uuid::new_v4().to_string());
         let hosted_mode = parse_bool_or(&get, "RUSTYBIN_HOSTED_MODE", false, &mut warnings);
         let admin_token = get("RUSTYBIN_ADMIN_TOKEN");
@@ -333,8 +334,21 @@ impl Config {
             }
             key
         });
+        let audience_set = get("RUSTYBIN_CONTROL_JWT_AUDIENCE").is_some();
         let control_jwt_audience =
             get("RUSTYBIN_CONTROL_JWT_AUDIENCE").unwrap_or_else(|| instance_id.clone());
+        if control_auth == ControlAuth::Jwt
+            && control_jwt_key.is_some()
+            && !audience_set
+            && !instance_id_set
+        {
+            // The default audience is the instance id, a fresh UUID each start.
+            warnings.push(format!(
+                "control-plane JWTs must carry the audience {control_jwt_audience:?}, a random \
+                 instance id that changes on every restart: set RUSTYBIN_CONTROL_JWT_AUDIENCE \
+                 or RUSTYBIN_INSTANCE_ID so tokens keep working"
+            ));
+        }
         let control_oauth = parse_bool_or(&get, "RUSTYBIN_CONTROL_OAUTH", true, &mut warnings);
         let control_oauth_issuer = get("RUSTYBIN_CONTROL_OAUTH_ISSUER").and_then(|raw| {
             let issuer = raw.trim().trim_end_matches('/').to_string();
@@ -971,6 +985,25 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         Config::from_lookup(|k| map.get(k).cloned())
+    }
+
+    #[test]
+    fn jwt_mode_warns_when_the_audience_changes_on_every_start() {
+        let key = crate::test_support::control_keys::CONTROL_JWT_PUBLIC_PEM;
+        let random = |w: &[String]| w.iter().any(|m| m.contains("changes on every restart"));
+        let (_, w) = load(&[
+            ("RUSTYBIN_HOSTED_MODE", "true"),
+            ("RUSTYBIN_CONTROL_JWT_PUBLIC_KEY", key),
+        ]);
+        assert!(random(&w), "{w:?}");
+        for pinned in ["RUSTYBIN_CONTROL_JWT_AUDIENCE", "RUSTYBIN_INSTANCE_ID"] {
+            let (_, w) = load(&[
+                ("RUSTYBIN_CONTROL_AUTH", "jwt"),
+                ("RUSTYBIN_CONTROL_JWT_PUBLIC_KEY", key),
+                (pinned, "inst-1"),
+            ]);
+            assert!(!random(&w), "{pinned}: {w:?}");
+        }
     }
 
     #[test]

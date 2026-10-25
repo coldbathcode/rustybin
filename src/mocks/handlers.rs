@@ -33,7 +33,7 @@ use super::service::{
     self, CreateBody, PatchBody, RuleTestBody, SampleQuery, ServiceError, Svc, ValidateBody,
 };
 use super::spec;
-use super::store::{Lookup, MockStore};
+use super::store::Lookup;
 use crate::config::Config;
 use crate::request_bin::BinHeader;
 use crate::server::TlsConnectionInfo;
@@ -710,8 +710,18 @@ pub(crate) fn served_bases(
     (format!("{base}/mock/{name}{}", c.path_prefix()), base)
 }
 
-fn spec_lookup(store: &MockStore, name: &str) -> Option<Arc<Compiled>> {
-    match store.lookup(name) {
+/// The deployed revision whose spec this request may read. A visitor mock
+/// answers only on the mocks domain when there is one, like its REST and MCP
+/// endpoints (the same 404 as an unknown name).
+fn spec_lookup(state: &AppState, name: &str, extensions: &Extensions) -> Option<Arc<Compiled>> {
+    match state.mocks.lookup(name) {
+        Lookup::Ready(l)
+            if l.visitor
+                && state.config.self_service.host.is_some()
+                && extensions.get::<host::ViaMocksDomain>().is_none() =>
+        {
+            None
+        }
         Lookup::Ready(l) => Some(l.compiled),
         _ => None,
     }
@@ -724,7 +734,7 @@ pub async fn spec_json(
     extensions: Extensions,
     uri: Uri,
 ) -> Response {
-    let Some(c) = spec_lookup(&state.mocks, &name) else {
+    let Some(c) = spec_lookup(&state, &name, &extensions) else {
         return json_error(StatusCode::NOT_FOUND, "mock not found or not deployed");
     };
     let (server, idp) = served_bases(&c, &name, &headers, &extensions, &uri, &state.config);
@@ -738,7 +748,7 @@ pub async fn spec_yaml(
     extensions: Extensions,
     uri: Uri,
 ) -> Response {
-    let Some(c) = spec_lookup(&state.mocks, &name) else {
+    let Some(c) = spec_lookup(&state, &name, &extensions) else {
         return json_error(StatusCode::NOT_FOUND, "mock not found or not deployed");
     };
     let (server, idp) = served_bases(&c, &name, &headers, &extensions, &uri, &state.config);

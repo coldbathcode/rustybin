@@ -20,8 +20,10 @@ pub type Error = Box<dyn std::error::Error + Send + Sync>;
 /// finish after a shutdown signal before they are dropped.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
-/// A started server. Dropping it does not stop the listeners; call
-/// [`RunningServer::shutdown`] and [`RunningServer::wait`].
+/// A started server. Call [`RunningServer::shutdown`] and
+/// [`RunningServer::wait`] to stop it. Dropping it also starts a graceful
+/// shutdown (the listeners stop when the last shutdown sender, this value or a
+/// [`ShutdownTrigger`], is gone), so keep it alive while the server should run.
 pub struct RunningServer {
     /// Bound HTTP address (useful with port 0).
     pub http_addr: SocketAddr,
@@ -173,6 +175,11 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
         config.grpc_on_http,
     );
 
+    // Mocks from RUSTYBIN_CONFIG_FILE / RUSTYBIN_MOCKS_DIR load before any
+    // request is served: the socket is bound (a busy port still fails fast)
+    // but nothing answers until they are in place, so no early 404s.
+    crate::mocks::load_startup(&state);
+
     let http_task = {
         // Tag requests with the listener so handlers report scheme and port.
         let app = app
@@ -192,8 +199,8 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
         })
     };
 
-    // Mocks from RUSTYBIN_CONFIG_FILE / RUSTYBIN_MOCKS_DIR, reloaded on SIGHUP.
-    crate::mocks::load_startup(&state);
+    // Mocks from RUSTYBIN_CONFIG_FILE / RUSTYBIN_MOCKS_DIR (loaded before the
+    // HTTP listener serves, above), reloaded on SIGHUP.
     #[cfg(unix)]
     if config.config_file.is_some() || config.mocks_dir.is_some() {
         let mocks_state = state.clone();

@@ -671,7 +671,9 @@ pub async fn run(
     let cancel = ctx.cancel.clone();
     let session = ctx.session.clone();
     if let Some(s) = &session {
-        s.track_inflight(&id, cancel.clone());
+        // The HTTP request carries the work here, so an untracked one is
+        // still bounded by its connection; it only cannot be cancelled.
+        let _ = s.track_inflight(&id, cancel.clone());
     }
     let (tx, mut rx) = mpsc::channel::<Value>(64);
     if sse_ok {

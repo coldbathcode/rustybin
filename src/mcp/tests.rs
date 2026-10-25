@@ -1240,6 +1240,15 @@ async fn legacy_http_sse_transport() {
     let r: Value = serde_json::from_str(&events[0].1).expect("result");
     assert_eq!(r["id"], 2);
     assert_eq!(r["result"]["content"][0]["text"], "over sse");
+    // The POST returns at once, so the session's running requests are capped.
+    let slow = json!({ "name": "slow_task", "arguments": { "duration_ms": 5000, "steps": 1 } });
+    for i in 0..crate::mcp::sessions::MAX_INFLIGHT {
+        let resp = post(rpc(100 + i as i64, "tools/call", slow.clone())).await;
+        assert_eq!(resp.status(), StatusCode::ACCEPTED, "request {i}");
+    }
+    let resp = post(rpc(999, "tools/call", slow)).await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body_json(resp).await["id"], 999);
     // Unknown session.
     let resp = app
         .clone()

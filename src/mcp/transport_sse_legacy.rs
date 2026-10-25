@@ -188,7 +188,21 @@ pub async fn messages_handler(
                     )
                 };
                 let cancel = CancelToken::new();
-                session.track_inflight(&id, cancel.clone());
+                // Answers go out on the stream and the POST returns at once,
+                // so nothing else bounds the work one session starts.
+                if !session.track_inflight(&id, cancel.clone()) {
+                    let e = RpcError::new(
+                        protocol::SERVER_ERROR,
+                        format!(
+                            "Too many requests in flight for this session (at most {})",
+                            crate::mcp::sessions::MAX_INFLIGHT
+                        ),
+                    );
+                    return decorate(
+                        rpc_error(StatusCode::TOO_MANY_REQUESTS, Some(&id), &e),
+                        &echo,
+                    );
+                }
                 let ctx = CallCtx {
                     shared: sh.clone(),
                     profile,

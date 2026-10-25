@@ -1433,16 +1433,16 @@ fn capitalize(s: &str) -> String {
 
 // ── Handlers ────────────────────────────────────────────────────
 
-async fn openapi_json_handler() -> Response {
-    let spec = build_spec();
-    match serde_json::to_string_pretty(&spec) {
-        Ok(json) => (
+/// A serialised document, built on first use: the document never changes at
+/// run time, and building it merges every module's fragments.
+type Rendered = Result<axum::body::Bytes, String>;
+
+fn rendered_response(doc: &Rendered, content_type: &'static str) -> Response {
+    match doc {
+        Ok(body) => (
             StatusCode::OK,
-            [(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json"),
-            )],
-            json,
+            [(header::CONTENT_TYPE, HeaderValue::from_static(content_type))],
+            body.clone(),
         )
             .into_response(),
         Err(e) => (
@@ -1453,24 +1453,24 @@ async fn openapi_json_handler() -> Response {
     }
 }
 
+async fn openapi_json_handler() -> Response {
+    static DOC: std::sync::OnceLock<Rendered> = std::sync::OnceLock::new();
+    let doc = DOC.get_or_init(|| {
+        serde_json::to_string_pretty(&build_spec())
+            .map(axum::body::Bytes::from)
+            .map_err(|e| e.to_string())
+    });
+    rendered_response(doc, "application/json")
+}
+
 async fn openapi_yaml_handler() -> Response {
-    let spec = build_spec();
-    match serde_yaml::to_string(&spec) {
-        Ok(yaml) => (
-            StatusCode::OK,
-            [(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("text/yaml; charset=utf-8"),
-            )],
-            yaml,
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to serialize OpenAPI spec: {e}"),
-        )
-            .into_response(),
-    }
+    static DOC: std::sync::OnceLock<Rendered> = std::sync::OnceLock::new();
+    let doc = DOC.get_or_init(|| {
+        serde_yaml::to_string(&build_spec())
+            .map(axum::body::Bytes::from)
+            .map_err(|e| e.to_string())
+    });
+    rendered_response(doc, "text/yaml; charset=utf-8")
 }
 
 async fn docs_handler() -> Html<&'static str> {

@@ -292,6 +292,12 @@ async fn the_mocks_domain_serves_only_mocks() {
     let (status, _, out) = call(&app, "GET", &format!("/mock/{name}/items/1"), &[], None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(out["url"], format!("https://{host}"));
+    // So does its served spec, like its REST and MCP endpoints.
+    for spec in ["openapi.json", "openapi.yaml"] {
+        let path = format!("/mock/{name}/_rustybin/{spec}");
+        let (status, _, _) = call(&app, "GET", &path, &[], None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    }
     // The mocks domain serves it, and nothing else.
     let (status, h, out) = call(&app, "GET", "/items/1", &[("host", &host)], None).await;
     assert_eq!(status, StatusCode::OK, "{out}");
