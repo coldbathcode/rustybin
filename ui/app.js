@@ -197,7 +197,7 @@ function openSettings() {
     signedIn,
     field('Session (X-Rustybin-Session)', session, 'Tags the requests this console sends, scopes per-client state (flaky counters, bins, tasks). Required to see traffic in public mode. Letters, digits and . _ : - only.'),
     field('Gateway base URL', gateway, 'Views offer "via gateway" to send their requests through this URL instead of directly to Rustybin. Cross-origin calls need CORS on the gateway.'),
-    field('Admin token', admin, settings.instance.adminTokenConfigured ? 'This instance requires it for health toggles and clearing all captured requests.' : 'Not required by this instance.'),
+    field('Admin token', admin, (settings.instance.adminTokenConfigured ? 'This instance requires it for health toggles and clearing all captured requests.' : 'Not required by this instance.') + ' Kept in this tab only.'),
     field('Theme', theme),
     h('details', { class: 'disclosure', id: 'agent-panel' },
       h('summary', null, 'Connect an AI agent (MCP)'),
@@ -264,6 +264,7 @@ const REASONS = {
   malformed: 'The token is malformed.',
   invalid_token: 'The token was refused.',
   missing_token: 'The token did not reach the server.',
+  unreachable: 'Rustybin could not be reached to check the token: try again.',
 };
 
 function renderSignIn() {
@@ -310,14 +311,21 @@ function renderSignIn() {
 }
 
 async function verifyAndResume() {
-  // Check the new token once; a 401 brings the sign-in screen back with the reason.
+  // Check the new token once. A 401 already brought the sign-in screen back
+  // with the reason; an unreachable server says so instead of doing nothing.
   const r = await send({ url: SERVER + '/_rustybin/status', session: false, timeout: 15000 });
-  if (r.ok) {
-    renderSignIn();
-    currentId = null;
-    route();
-    loadInstance().then(() => traffic.connect());
+  if (r.status === 401) return;
+  if (r.error) {
+    auth.markUnauthorized('unreachable');
+    return;
   }
+  // Signed in. A 403 is a valid token whose scope does not cover the overview
+  // (an inspector token): the views it may read work, the others say why.
+  renderSignIn();
+  currentId = null;
+  route();
+  loadInstance().then(() => traffic.connect());
+  if (r.status === 403) toast('Signed in with a limited token: some views need a wider scope.');
 }
 
 // ── Start ──────────────────────────────────────────────────────────

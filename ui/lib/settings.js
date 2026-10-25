@@ -1,7 +1,11 @@
-// Console settings persisted per browser (theme, session, admin token,
-// gateway URL), plus instance facts loaded at start (public mode, ...).
+// Console settings persisted per browser (theme, session, gateway URL),
+// secrets per tab (the admin token, like the control token in auth.js), plus
+// instance facts loaded at start (public mode, ...).
 
 const KEY = 'rustybin.console.v1';
+const SECRET_KEY = 'rustybin.console.v1.secrets';
+/** Settings kept in this tab only (sessionStorage), never on disk. */
+const SECRETS = ['adminToken'];
 const listeners = new Set();
 
 const defaults = {
@@ -12,13 +16,35 @@ const defaults = {
   trafficSessionOnly: false,
 };
 
-function load() {
+function read(storage, key) {
   try {
-    const raw = localStorage.getItem(KEY);
-    return Object.assign({}, defaults, raw ? JSON.parse(raw) : {});
+    const raw = storage.getItem(key);
+    return raw ? JSON.parse(raw) : {};
   } catch {
-    return Object.assign({}, defaults);
+    return {};
   }
+}
+
+function save(all) {
+  const kept = {};
+  const secret = {};
+  for (const [k, v] of Object.entries(all)) (SECRETS.includes(k) ? secret : kept)[k] = v;
+  try { localStorage.setItem(KEY, JSON.stringify(kept)); } catch { /* storage may be unavailable */ }
+  try { sessionStorage.setItem(SECRET_KEY, JSON.stringify(secret)); } catch { /* memory only */ }
+}
+
+function load() {
+  const kept = read(localStorage, KEY);
+  const secret = read(sessionStorage, SECRET_KEY);
+  // Older consoles kept the admin token in localStorage: move it to this tab.
+  const moved = SECRETS.filter((k) => k in kept);
+  for (const k of moved) {
+    if (!(k in secret)) secret[k] = kept[k];
+    delete kept[k];
+  }
+  const all = Object.assign({}, defaults, kept, secret);
+  if (moved.length) save(all);
+  return all;
 }
 
 const state = load();
@@ -33,7 +59,7 @@ export function get(key) {
 export function set(key, value) {
   if (state[key] === value) return;
   state[key] = value;
-  try { localStorage.setItem(KEY, JSON.stringify(state)); } catch { /* storage may be unavailable */ }
+  save(state);
   for (const fn of listeners) {
     try { fn(key, value); } catch (e) { console.error(e); }
   }

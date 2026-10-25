@@ -29,8 +29,9 @@ When the instance protects its control plane (`RUSTYBIN_CONTROL_AUTH=token` or
 `/ui/#token=<token>` (or `/ui/#/traffic&token=<token>`), or paste it on the sign-in
 screen. The console keeps it for the browser tab only, strips it from the address
 bar, sends it as `Authorization: Bearer` (the live traffic feed included), and
-shows the sign-in screen again when the token is refused or its `exp` passes.
-**Console settings, Sign out** forgets it. Details:
+shows the sign-in screen again when the token is refused or its `exp` passes. A
+valid token with a narrow scope (`inspector`) signs in too, and the views it may not
+read say so. **Console settings, Sign out** forgets it. Details:
 [Control-plane security](concepts/control-plane-security.md#the-console-with-a-token).
 
 `RUSTYBIN_CONSOLE_TITLE` (up to 80 characters) is shown as a badge in the header and
@@ -142,7 +143,8 @@ get **New mock** without an admin token:
 
 ## Settings
 
-The settings dialog (gear icon) stores, in the browser:
+The settings dialog (gear icon) stores, in the browser (the admin token in this tab
+only, like the sign-in token; the others across visits):
 
 | Setting | Effect |
 |---|---|

@@ -508,6 +508,26 @@ def run_theme(browser, theme):
         page.get_by_label("Session (X-Rustybin-Session)").fill("e2e-session")
         page.get_by_role("button", name="Save").click()
         page.wait_for_selector("text=e2e-session")
+        # The admin token stays in this tab, never in localStorage.
+        page.get_by_role("button", name="Console settings").click()
+        page.get_by_label("Admin token").fill("e2e-admin-secret")
+        page.get_by_role("button", name="Save").click()
+        page.wait_for_function("(sessionStorage.getItem('rustybin.console.v1.secrets') || '').includes('e2e-admin-secret')")
+        assert "e2e-admin-secret" not in (page.evaluate("localStorage.getItem('rustybin.console.v1')") or ""), "admin token on disk"
+        # One saved by an older console moves out of localStorage on load.
+        page.evaluate("""(() => {
+            const s = JSON.parse(localStorage.getItem('rustybin.console.v1') || '{}');
+            s.adminToken = 'e2e-old-secret';
+            localStorage.setItem('rustybin.console.v1', JSON.stringify(s));
+            sessionStorage.removeItem('rustybin.console.v1.secrets');
+        })()""")
+        page.reload()
+        page.wait_for_selector("#view h1")
+        assert "e2e-old-secret" not in (page.evaluate("localStorage.getItem('rustybin.console.v1')") or ""), "old admin token kept on disk"
+        assert "e2e-old-secret" in (page.evaluate("sessionStorage.getItem('rustybin.console.v1.secrets')") or ""), "old admin token lost"
+        page.get_by_role("button", name="Console settings").click()
+        page.get_by_label("Admin token").fill("")
+        page.get_by_role("button", name="Save").click()
         page.keyboard.press("Alt+1")
         page.wait_for_function("location.hash === '#/overview'")
 
@@ -602,6 +622,19 @@ def run_jwt(browser):
 
     step("jwt: sign-in screen, wrong token refused", sign_in_screen)
 
+    def limited_token_signs_in():
+        # An inspector token is valid but may not read the overview (403):
+        # the console opens and says so instead of keeping the sign-in screen.
+        page.fill("#signin-token", control_jwt("inspector"))
+        page.get_by_role("button", name="Sign in").click()
+        expect(page.locator("#signin")).to_have_count(0)
+        expect(page.locator(".toast")).to_contain_text("limited token")
+        page.evaluate("sessionStorage.removeItem('rustybin.console.controlToken')")
+        page.reload()
+        page.wait_for_selector("#signin")
+
+    step("jwt: a limited-scope token signs in", limited_token_signs_in)
+
     def fragment_token():
         token = control_jwt("console")
         page.goto(jwt_base + "/ui/#/overview&token=" + token)
@@ -623,6 +656,13 @@ def run_jwt(browser):
         # A reload keeps the session (sessionStorage), without the fragment.
         page.reload()
         page.wait_for_selector("#view h1")
+        # An empty token= is dropped and the rest of the route still applies.
+        page.evaluate("location.hash = '#/overview'")
+        page.wait_for_selector("text=Requests captured")
+        page.evaluate("location.hash = '#/traffic&token='")
+        page.wait_for_function("location.hash === '#/traffic'")
+        page.wait_for_selector("text=live feed")
+        assert page.evaluate("sessionStorage.getItem('rustybin.console.controlToken')") == token, "token lost"
         expect(page.locator("#signin")).to_have_count(0)
 
     step("jwt: #token= fragment signs in, live feed with bearer", fragment_token)

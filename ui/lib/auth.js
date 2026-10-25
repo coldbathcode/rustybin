@@ -141,7 +141,8 @@ export function consumeFragment() {
   }
   const hash = rest.length ? '#' + rest.join('&') : '';
   try { history.replaceState(history.state, '', location.pathname + location.search + hash); } catch { location.hash = hash; }
-  if (found) setToken(found);
+  if (!found) return false; // an empty token=: just route the rest
+  setToken(found);
   return true;
 }
 
