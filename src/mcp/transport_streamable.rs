@@ -1000,6 +1000,10 @@ async fn batch(mut req: Req, items: Vec<Value>) -> Response {
     if items.is_empty() || items.len() > 50 {
         return reject(&req, "Invalid Request: batch must hold 1 to 50 messages");
     }
+    // The same header checks as a single message.
+    if let Err(resp) = legacy_header_version(&req, None) {
+        return decorate(resp, &req.echo);
+    }
     let session = match require_session(&req, None) {
         Ok(s) => s,
         Err(_) => return reject(
@@ -1015,6 +1019,18 @@ async fn batch(mut req: Req, items: Vec<Value>) -> Response {
     }
     req.echo.session = Some(session.id.clone());
     req.echo.version = Some(Version::V2025_03_26.as_str());
+    // Scopes are checked for every tool call before any item runs: a batch
+    // holding a call the token may not make is refused as a whole, with the
+    // same 403 and step-up challenge as the single call (nothing half done).
+    for item in &items {
+        if let Ok(Message::Request { id, method, params }) = protocol::classify(item) {
+            if method == "tools/call" {
+                if let Some(resp) = scope_check(&req, &id, &params) {
+                    return decorate(resp, &req.echo);
+                }
+            }
+        }
+    }
     let mut out = Vec::new();
     for item in items {
         match protocol::classify(&item) {

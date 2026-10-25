@@ -1345,6 +1345,68 @@ async fn protected_call(
         .expect("response")
 }
 
+/// A legacy (2025-03-26) request to `/mcp/protected` as `token`.
+async fn protected_legacy(
+    app: &Router,
+    token: &str,
+    sid: Option<&str>,
+    body: Value,
+) -> Response<Body> {
+    app.clone()
+        .oneshot(
+            legacy_req("/mcp/protected", sid, None)
+                .header("host", "localhost")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response")
+}
+
+#[tokio::test]
+async fn protected_batches_check_scopes_like_single_calls() {
+    let app = app();
+    let reader = mint("http://localhost/mcp/protected", "openid mcp:tools");
+    let init = rpc(
+        0,
+        "initialize",
+        json!({ "protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } }),
+    );
+    let resp = protected_legacy(&app, &reader, None, init).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let sid = resp.headers()["mcp-session-id"]
+        .to_str()
+        .expect("sid")
+        .to_string();
+    let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+    protected_legacy(&app, &reader, Some(&sid), note).await;
+
+    // A batch hiding a write call is refused as a whole, like the single call.
+    let cancel = json!({ "name": "cancel_order", "arguments": { "order_id": "o5" } });
+    let batch = json!([rpc(1, "ping", json!({})), rpc(2, "tools/call", cancel)]);
+    let resp = protected_legacy(&app, &reader, Some(&sid), batch).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let challenge = resp.headers()["www-authenticate"]
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        challenge.contains("error=\"insufficient_scope\""),
+        "{challenge}"
+    );
+    assert!(
+        challenge.contains("scope=\"mcp:tools:write\""),
+        "{challenge}"
+    );
+
+    // Batches within the token's scopes still run.
+    let batch = json!([rpc(3, "ping", json!({})), rpc(4, "tools/list", json!({}))]);
+    let resp = protected_legacy(&app, &reader, Some(&sid), batch).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await.as_array().map(Vec::len), Some(2));
+}
+
 #[tokio::test]
 async fn protected_variant_oauth() {
     let app = app();
