@@ -71,9 +71,12 @@ instance-global mutation guarded by the [admin token](sessions.md#admin-token):
 Rustybin's own credentials are never stored as sent: `X-Rustybin-Admin-Token` and a
 visit's `X-Rustybin-Mock-Token` are captured as `[redacted]`, and an API key
 (`X-Rustybin-Key`, `rb_key`) as `rbk_...` plus its last 4 characters. The same applies
-to [request bins](../reference/request-bin.md) and to the traffic of OpenAPI mocks.
-Every other header, `Authorization` included, is captured as it arrived, since seeing
-what a gateway sent is the point.
+to [request bins](../reference/request-bin.md), to the traffic of OpenAPI mocks and to
+[AI request records](../ai/gateway-features.md). `Authorization` is captured as
+`[redacted]` when it carries a Rustybin control credential: `Bearer` with the admin
+token, or a control JWT this instance accepts. Every other header, any other
+`Authorization` value included, is captured as it arrived, since seeing what a
+gateway sent is the point.
 
 ## Public mode
 

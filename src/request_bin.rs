@@ -585,8 +585,10 @@ struct BinSubPath {
     path: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn capture_root(
     Extension(store): Extension<RequestBins>,
+    State(config): State<Arc<Config>>,
     Path(BinPath { id }): Path<BinPath>,
     ClientIp(ip): ClientIp,
     method: Method,
@@ -594,11 +596,22 @@ async fn capture_root(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    capture(store, id, "/".to_string(), ip, method, uri, headers, body).await
+    let control = crate::keys::authorization_is_control(&headers, &config);
+    let req = Captured {
+        ip,
+        method,
+        uri,
+        headers,
+        body,
+        control,
+    };
+    capture(store, id, "/".to_string(), req).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn capture_sub(
     Extension(store): Extension<RequestBins>,
+    State(config): State<Arc<Config>>,
     Path(BinSubPath { id, path }): Path<BinSubPath>,
     ClientIp(ip): ClientIp,
     method: Method,
@@ -606,30 +619,38 @@ async fn capture_sub(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    capture(
-        store,
-        id,
-        format!("/{path}"),
+    let control = crate::keys::authorization_is_control(&headers, &config);
+    let req = Captured {
         ip,
         method,
         uri,
         headers,
         body,
-    )
-    .await
+        control,
+    };
+    capture(store, id, format!("/{path}"), req).await
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn capture(
-    store: RequestBins,
-    id: String,
-    sub_path: String,
+/// One request to a bin, as received.
+struct Captured {
     ip: Option<std::net::IpAddr>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
-) -> Response {
+    /// `Authorization` carries a control credential (redacted when stored).
+    control: bool,
+}
+
+async fn capture(store: RequestBins, id: String, sub_path: String, req: Captured) -> Response {
+    let Captured {
+        ip,
+        method,
+        uri,
+        headers,
+        body,
+        control,
+    } = req;
     let Some(response) = store.response_for(&id) else {
         return bin_not_found(&id);
     };
@@ -662,7 +683,7 @@ async fn capture(
             .iter()
             .map(|(k, v)| BinHeader {
                 name: k.as_str().to_string(),
-                value: crate::keys::redact_header(k.as_str(), v.as_bytes()),
+                value: crate::keys::redact_header(k.as_str(), v.as_bytes(), control),
             })
             .collect(),
         content_type: headers

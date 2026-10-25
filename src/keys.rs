@@ -678,15 +678,50 @@ pub fn redact_uri(uri: &Uri) -> String {
     }
 }
 
+/// Does the request's `Authorization` carry a Rustybin control credential:
+/// `Bearer` with the admin token, or a control JWT this instance accepts?
+/// Captures redact it then. Every other `Authorization` value (the auth demo
+/// routes, a gateway's own tokens) stays visible, since showing it is the point.
+pub fn authorization_is_control(headers: &HeaderMap, config: &Config) -> bool {
+    let Some(token) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            let (scheme, token) = v.trim().split_once(' ')?;
+            scheme.eq_ignore_ascii_case("bearer").then(|| token.trim())
+        })
+    else {
+        return false;
+    };
+    if config
+        .admin_token
+        .as_deref()
+        .is_some_and(|expected| crate::control_auth::constant_time_eq(token, expected))
+    {
+        return true;
+    }
+    token.matches('.').count() == 2 && crate::control_auth::verify_jwt(token, config).is_ok()
+}
+
+/// Is `name` a header that always carries a Rustybin credential (the API key,
+/// admin token or visit manage token header)?
+pub fn is_credential_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case(KEY_HEADER)
+        || name.eq_ignore_ascii_case(crate::admin::ADMIN_TOKEN_HEADER)
+        || name.eq_ignore_ascii_case(crate::mocks::visits::TOKEN_HEADER)
+}
+
 /// A header value as captured: `X-Rustybin-Key` is redacted to its tail,
 /// the admin token and visit manage token headers entirely (they are
-/// Rustybin credentials, never something a gateway test needs to read).
-pub fn redact_header(name: &str, value: &[u8]) -> String {
+/// Rustybin credentials, never something a gateway test needs to read), and
+/// `Authorization` too when it carries a control credential
+/// (`control_authorization`, from [`authorization_is_control`]).
+pub fn redact_header(name: &str, value: &[u8], control_authorization: bool) -> String {
     let text = String::from_utf8_lossy(value);
     if name.eq_ignore_ascii_case(KEY_HEADER) {
         redact_key(text.trim())
-    } else if name.eq_ignore_ascii_case(crate::admin::ADMIN_TOKEN_HEADER)
-        || name.eq_ignore_ascii_case(crate::mocks::visits::TOKEN_HEADER)
+    } else if is_credential_header(name)
+        || (control_authorization && name.eq_ignore_ascii_case(header::AUTHORIZATION.as_str()))
     {
         "[redacted]".to_string()
     } else {

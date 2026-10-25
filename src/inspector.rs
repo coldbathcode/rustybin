@@ -484,12 +484,13 @@ pub async fn capture(State(state): State<AppState>, req: Request, next: Next) ->
         .get("x-request-id")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
+    let control_auth = crate::keys::authorization_is_control(&parts.headers, &state.config);
     let headers = parts
         .headers
         .iter()
         .map(|(k, v)| CapturedHeader {
             name: k.as_str().to_string(),
-            value: crate::keys::redact_header(k.as_str(), v.as_bytes()),
+            value: crate::keys::redact_header(k.as_str(), v.as_bytes(), control_auth),
         })
         .collect();
     let body_size = bytes.len();

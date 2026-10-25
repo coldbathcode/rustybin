@@ -68,12 +68,12 @@ fn query_pairs(uri: &Uri) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-fn header_list(headers: &HeaderMap) -> Vec<BinHeader> {
+fn header_list(headers: &HeaderMap, control_authorization: bool) -> Vec<BinHeader> {
     headers
         .iter()
         .map(|(k, v)| BinHeader {
             name: k.as_str().to_string(),
-            value: crate::keys::redact_header(k.as_str(), v.as_bytes()),
+            value: crate::keys::redact_header(k.as_str(), v.as_bytes(), control_authorization),
         })
         .collect()
 }
@@ -158,6 +158,8 @@ struct Incoming<'a> {
     max_body: usize,
     /// The MCP tool that sent this request in process (`None`: HTTP).
     mcp_tool: Option<&'a str>,
+    /// `Authorization` carries a control credential (redacted in captures).
+    control_authorization: bool,
 }
 
 struct Outcome<'a> {
@@ -205,8 +207,12 @@ fn capture_entry(
         method: inc.method.to_string(),
         path: inc.sub_path.to_string(),
         full_path: inc.uri.path().to_string(),
-        query: inc.uri.query().map(str::to_string),
-        headers: header_list(inc.headers),
+        // API keys (X-Rustybin-Key, ?rb_key=) are redacted like in the inspector.
+        query: inc
+            .uri
+            .query()
+            .map(|q| crate::keys::redact_query(q).unwrap_or_else(|| q.to_string())),
+        headers: header_list(inc.headers, inc.control_authorization),
         content_type: inc
             .headers
             .get(header::CONTENT_TYPE)
@@ -232,7 +238,7 @@ fn capture_entry(
         source: out.source,
         validation: out.validation,
         auth: out.auth,
-        response_headers: header_list(resp.headers()),
+        response_headers: header_list(resp.headers(), false),
         response_body,
         response_truncated,
         duration_ms: inc.started.elapsed().as_millis() as u64,
@@ -307,6 +313,7 @@ pub(crate) async fn serve(
         started,
         max_body: store.limits().max_captured_body,
         mcp_tool,
+        control_authorization: crate::keys::authorization_is_control(&headers, &state.config),
     };
     let live = match store.lookup(&name) {
         Lookup::Missing => {

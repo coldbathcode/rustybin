@@ -133,7 +133,9 @@ client IP). `GET /ai/requests` lists recent exchanges, newest first (`?limit=`,
 default 50, at most 200; `?session=`).
 
 Records are kept for an hour, at most 1000 (200 in public mode). In public mode
-callers only see their own session (`X-Rustybin-Session` or the client IP).
+callers only see their own session (`X-Rustybin-Session` or the client IP). In
+[shared mode](../concepts/shared-mode.md) records are also scoped by API key, and the
+key itself (`X-Rustybin-Key`, `rb_key`) is stored redacted.
 
 ```hurl
 {{#include ../../examples/ai/faults_auth.hurl:inspect}}

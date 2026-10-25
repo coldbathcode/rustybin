@@ -17,6 +17,9 @@ pub struct AiRecord {
     pub timestamp: String,
     #[serde(skip)]
     pub session: String,
+    /// Shared mode: the API key that sent it (records are scoped by key).
+    #[serde(skip)]
+    pub key_id: Option<String>,
     pub provider: &'static str,
     pub method: String,
     pub endpoint: String,
@@ -83,13 +86,20 @@ impl RequestStore {
     }
 
     /// Newest first; `session` filters when given.
-    pub fn list(&self, session: Option<&str>, limit: usize) -> Vec<Arc<AiRecord>> {
+    /// The newest records, of one session and (shared mode) one key when set.
+    pub fn list(
+        &self,
+        session: Option<&str>,
+        key_id: Option<&str>,
+        limit: usize,
+    ) -> Vec<Arc<AiRecord>> {
         let now = Instant::now();
         lock(&self.entries)
             .iter()
             .rev()
             .filter(|(t, _)| now.duration_since(*t) <= self.ttl)
             .filter(|(_, r)| session.is_none_or(|s| r.session == s))
+            .filter(|(_, r)| key_id.is_none_or(|k| r.key_id.as_deref() == Some(k)))
             .take(limit)
             .map(|(_, r)| r.clone())
             .collect()
@@ -157,6 +167,7 @@ mod tests {
             request_id: id.into(),
             timestamp: String::new(),
             session: session.into(),
+            key_id: None,
             provider: "openai",
             method: "POST".into(),
             endpoint: "/x".into(),
@@ -184,7 +195,7 @@ mod tests {
         assert_eq!(s.len(), 3);
         assert!(s.get("9").is_some());
         assert!(s.get("1").is_none());
-        assert_eq!(s.list(Some("b"), 10).len(), 2);
+        assert_eq!(s.list(Some("b"), None, 10).len(), 2);
     }
 
     #[test]

@@ -136,8 +136,11 @@ pub struct AiCtx {
     pub provider: Provider,
     pub request_id: String,
     pub session: String,
+    /// Shared mode: the API key that sent the request (records are scoped by key).
+    pub key_id: Option<String>,
     pub method: String,
     pub path: String,
+    /// As recorded: `rb_key` values are redacted.
     pub query_string: Option<String>,
     pub query: HashMap<String, String>,
     pub mode_header: Option<Mode>,
@@ -197,6 +200,7 @@ impl AiCtx {
             request_id: self.request_id.clone(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             session: self.session.clone(),
+            key_id: self.key_id.clone(),
             provider: self.provider.as_str(),
             method: self.method.clone(),
             endpoint: self.path.clone(),
@@ -348,7 +352,9 @@ fn redacted_headers(h: &HeaderMap) -> Vec<(String, String)> {
         .map(|(k, v)| {
             let name = k.as_str().to_string();
             let raw = String::from_utf8_lossy(v.as_bytes()).into_owned();
-            let value = if SECRET_HEADERS.contains(&name.as_str()) {
+            let value = if crate::keys::is_credential_header(&name) {
+                crate::keys::redact_header(&name, v.as_bytes(), false)
+            } else if SECRET_HEADERS.contains(&name.as_str()) {
                 match raw.split_once(' ') {
                     Some((scheme, rest)) if name.ends_with("authorization") => {
                         if scheme.starts_with("AWS4") {
@@ -382,8 +388,17 @@ pub async fn ai_layer(
     let path = req.uri().path().to_string();
     let provider = Provider::from_path(&path);
     let headers = req.headers().clone();
-    let query_string = req.uri().query().map(str::to_string);
-    let query = parse_query(query_string.as_deref());
+    let query = parse_query(req.uri().query());
+    // Recorded with API keys (`?rb_key=`) redacted, like the inspector.
+    let query_string = req
+        .uri()
+        .query()
+        .map(|q| crate::keys::redact_query(q).unwrap_or_else(|| q.to_string()));
+    let key_id = req
+        .extensions()
+        .get::<crate::keys::KeyContext>()
+        .filter(|k| k.shared)
+        .map(|k| k.key.id.to_string());
     let request_id = header_str(&headers, "x-request-id")
         .filter(|s| !s.is_empty() && s.len() <= 200)
         .map(str::to_string)
@@ -489,6 +504,7 @@ pub async fn ai_layer(
         provider,
         request_id: request_id.clone(),
         session,
+        key_id,
         method: req.method().to_string(),
         path: path.clone(),
         query_string,
@@ -578,17 +594,26 @@ fn record_json(shared: &AiShared, r: &AiRecord) -> Value {
     v
 }
 
+/// Shared mode: the caller's API key id. Records are scoped by key there, so
+/// one key never reads another key's prompts, whatever the session.
+fn caller_key(key: Option<Extension<crate::keys::KeyContext>>) -> Option<String> {
+    key.filter(|Extension(k)| k.shared)
+        .map(|Extension(k)| k.key.id.to_string())
+}
+
 async fn list_requests(
     Extension(shared): Extension<Arc<AiShared>>,
     crate::session::ClientIp(ip): crate::session::ClientIp,
+    key: Option<Extension<crate::keys::KeyContext>>,
     headers: HeaderMap,
     Query(q): Query<InspectQuery>,
 ) -> Response {
     let session = allowed_session(&shared, &headers, ip, &q);
+    let key_id = caller_key(key);
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let items: Vec<Value> = shared
         .store
-        .list(session.as_deref(), limit)
+        .list(session.as_deref(), key_id.as_deref(), limit)
         .iter()
         .map(|r| {
             json!({
@@ -611,13 +636,18 @@ async fn list_requests(
 async fn get_request(
     Extension(shared): Extension<Arc<AiShared>>,
     crate::session::ClientIp(ip): crate::session::ClientIp,
+    key: Option<Extension<crate::keys::KeyContext>>,
     headers: HeaderMap,
     Path(id): Path<String>,
     Query(q): Query<InspectQuery>,
 ) -> Response {
     let session = allowed_session(&shared, &headers, ip, &q);
+    let key_id = caller_key(key);
     match shared.store.get(&id) {
-        Some(r) if session.as_deref().is_none_or(|s| r.session == s) => {
+        Some(r)
+            if session.as_deref().is_none_or(|s| r.session == s)
+                && key_id.is_none_or(|k| r.key_id.as_deref() == Some(k.as_str())) =>
+        {
             Json(record_json(&shared, &r)).into_response()
         }
         _ => (

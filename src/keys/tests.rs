@@ -182,16 +182,26 @@ fn redaction_helpers() {
     let uri: Uri = format!("/echo?rb_key={KEY_B}").parse().expect("uri");
     assert_eq!(redact_uri(&uri), "/echo?rb_key=rbk_...bbb2");
     assert_eq!(
-        redact_header("X-Rustybin-Key", KEY_A.as_bytes()),
+        redact_header("X-Rustybin-Key", KEY_A.as_bytes(), false),
         "rbk_...aaa1"
     );
-    assert_eq!(redact_header("x-other", b"v"), "v");
+    assert_eq!(redact_header("x-other", b"v", false), "v");
+    // Authorization only when it carries a control credential.
     assert_eq!(
-        redact_header("X-Rustybin-Admin-Token", b"s3cret"),
+        redact_header("authorization", b"Bearer demo", false),
+        "Bearer demo"
+    );
+    assert_eq!(
+        redact_header("Authorization", b"Bearer s3cret", true),
+        "[redacted]"
+    );
+    assert_eq!(redact_header("x-other", b"v", true), "v");
+    assert_eq!(
+        redact_header("X-Rustybin-Admin-Token", b"s3cret", false),
         "[redacted]"
     );
     assert_eq!(
-        redact_header("x-rustybin-mock-token", b"rbm_x"),
+        redact_header("x-rustybin-mock-token", b"rbm_x", false),
         "[redacted]"
     );
 }
@@ -419,6 +429,162 @@ async fn keys_are_redacted_in_the_inspector() {
     let text = body_string(resp).await;
     assert!(text.contains("rbk_...aaa1"), "{text}");
     assert!(!text.contains(KEY_A), "{text}");
+}
+
+#[test]
+fn authorization_is_control_only_for_rustybin_credentials() {
+    let config = crate::test_support::jwt_config();
+    let with = |value: &str| {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(value).expect("value"),
+        );
+        authorization_is_control(&h, &config)
+    };
+    assert!(with("Bearer admin-secret"));
+    assert!(with("bearer  admin-secret "));
+    assert!(with(&format!(
+        "Bearer {}",
+        crate::test_support::control_jwt(Some("admin"))
+    )));
+    assert!(!with("Bearer admin-secreT"));
+    assert!(!with("Basic admin-secret"));
+    assert!(!with("Bearer a.b.c"));
+    let other = crate::test_support::sign_control_jwt(
+        &json!({"aud": "test-instance", "exp": Utc::now().timestamp() + 600}),
+        true,
+    );
+    assert!(!with(&format!("Bearer {other}")));
+    assert!(!authorization_is_control(&HeaderMap::new(), &config));
+}
+
+#[tokio::test]
+async fn control_credentials_in_authorization_are_redacted_in_captures() {
+    let state = crate::test_support::test_state_with(crate::test_support::jwt_config());
+    let app = test_app_with(state.clone());
+    let jwt = crate::test_support::control_jwt(Some("admin"));
+    for value in ["Bearer admin-secret".to_string(), format!("Bearer {jwt}")] {
+        send(&app, "GET", "/echo", &[("authorization", value.as_str())]).await;
+    }
+    send(
+        &app,
+        "GET",
+        "/echo",
+        &[("authorization", "Bearer demo-token")],
+    )
+    .await;
+    let entries = state.inspector.list(&InspectorQuery::default());
+    assert_eq!(entries.len(), 3);
+    let values: Vec<String> = entries
+        .iter()
+        .filter_map(|e| e.headers.iter().find(|h| h.name == "authorization"))
+        .map(|h| h.value.clone())
+        .collect();
+    assert_eq!(
+        values.iter().filter(|v| *v == "[redacted]").count(),
+        2,
+        "{values:?}"
+    );
+    assert!(
+        values.iter().any(|v| v == "Bearer demo-token"),
+        "{values:?}"
+    );
+    let text = serde_json::to_string(&entries.iter().map(|e| e.as_ref()).collect::<Vec<_>>())
+        .expect("json");
+    assert!(
+        !text.contains("admin-secret") && !text.contains(&jwt),
+        "{text}"
+    );
+
+    // Request bins apply the same rule.
+    let bin = body_json(send(&app, "POST", "/bin", &[]).await).await;
+    let id = bin["id"].as_str().expect("bin id").to_string();
+    send(
+        &app,
+        "POST",
+        &format!("/bin/{id}"),
+        &[("authorization", "Bearer admin-secret")],
+    )
+    .await;
+    let text = body_string(send(&app, "GET", &format!("/bin/{id}/requests"), &[]).await).await;
+    assert!(
+        text.contains("[redacted]") && !text.contains("admin-secret"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn keys_are_redacted_in_mock_captures() {
+    let state = shared_state(&two_keys());
+    let app = test_app_with(state.clone());
+    let resp = send(
+        &app,
+        "GET",
+        &format!("/mock/petstore/v1/pets?rb_key={KEY_B}"),
+        &[],
+    )
+    .await;
+    assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+    let resp = send(
+        &app,
+        "GET",
+        "/_rustybin/mocks/petstore/requests",
+        &[("x-rustybin-admin-token", ADMIN)],
+    )
+    .await;
+    let text = body_string(resp).await;
+    assert!(text.contains("rb_key=rbk_...bbb2"), "{text}");
+    assert!(!text.contains(KEY_B), "{text}");
+}
+
+#[tokio::test]
+async fn ai_records_redact_keys_and_stay_with_their_key() {
+    let state = shared_state(&two_keys());
+    let app = test_app_with(state.clone());
+    let body = json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]});
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri(format!("/ai/openai/v1/chat/completions?rb_key={KEY_A}"))
+                .header("content-type", "application/json")
+                .header("x-rustybin-key", KEY_A)
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let id = hdr(&resp, crate::ai::REQUEST_ID_HEADER)
+        .expect("request id")
+        .to_string();
+
+    // Another key never sees it, whatever session it names.
+    for uri in [
+        format!("/ai/requests/{id}"),
+        format!("/ai/requests/{id}?session=s-guess"),
+    ] {
+        let resp = send(&app, "GET", &uri, &[("x-rustybin-key", KEY_B)]).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri}");
+    }
+    let list =
+        body_json(send(&app, "GET", "/ai/requests", &[("x-rustybin-key", KEY_B)]).await).await;
+    assert_eq!(list["count"], 0, "{list}");
+
+    // Its own key reads it, with the key redacted in the headers and query.
+    let resp = send(
+        &app,
+        "GET",
+        &format!("/ai/requests/{id}"),
+        &[("x-rustybin-key", KEY_A)],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let text = body_string(resp).await;
+    assert!(!text.contains(KEY_A), "{text}");
+    assert!(text.contains("rbk_...aaa1"), "{text}");
 }
 
 // ── Quotas and limits ───────────────────────────────────────────────
