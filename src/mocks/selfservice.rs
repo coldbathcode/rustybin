@@ -328,15 +328,18 @@ pub fn extend(state: &AppState, c: &Caller, input: &EmailInput) -> Result<Value,
 /// A new manage token for the caller's visit (`POST /_rustybin/mocks/visit/token`).
 pub fn rotate(state: &AppState, c: &Caller) -> Result<Value, ServiceError> {
     let visits = visits_of(state)?.clone();
-    let rotated = c
-        .visit()
-        .and_then(|h| visits.rotate(h).map(|r| (h.to_string(), r)));
-    let Some((old, (token, hash))) = rotated else {
+    let Some(old) = c.visit().map(str::to_string) else {
         return Err(visit_error(VisitError::NotFound, &state.config));
     };
-    state
-        .mocks
-        .reassign(&Owner::Visit(old), Owner::Visit(hash.clone()));
+    // The token changes and the mocks move in one step (see reassign_with).
+    let rotated = state.mocks.reassign_with(&Owner::Visit(old.clone()), || {
+        visits
+            .rotate(&old)
+            .map(|(token, hash)| (Owner::Visit(hash.clone()), (token, hash)))
+    });
+    let Some((token, hash)) = rotated else {
+        return Err(visit_error(VisitError::NotFound, &state.config));
+    };
     Ok(json!({ "manage_token": token, "visit": visit_json(state, &hash) }))
 }
 

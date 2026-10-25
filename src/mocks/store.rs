@@ -490,22 +490,35 @@ impl MockStore {
     }
 
     /// Give `from`'s mocks to `to` (a rotated manage token).
-    pub fn reassign(&self, from: &Owner, to: Owner) {
-        let changed: Vec<Snapshot> = {
+    /// Move every mock of `from` to the owner `swap` returns, with the store
+    /// locked throughout. `swap` (a manage token rotation) runs inside the
+    /// lock, so no write in between (another creation, the sweep) sees `from`
+    /// as ended and drops its mocks. Lock order is the store, then the visits,
+    /// as everywhere else. `None` (nothing moved) when `swap` returns `None`.
+    pub fn reassign_with<T>(
+        &self,
+        from: &Owner,
+        swap: impl FnOnce() -> Option<(Owner, T)>,
+    ) -> Option<T> {
+        let (changed, out): (Vec<Snapshot>, T) = {
             let mut map = self.inner.write().unwrap_or_else(|p| p.into_inner());
-            map.iter_mut()
+            let (to, out) = swap()?;
+            let changed = map
+                .iter_mut()
                 .filter(|(_, e)| &e.owner == from)
                 .map(|(n, e)| {
                     e.owner = to.clone();
                     snapshot(n, e)
                 })
-                .collect()
+                .collect();
+            (changed, out)
         };
         if let Some(dir) = &self.persist_dir {
             for s in &changed {
                 super::persist::save(dir, s);
             }
         }
+        Some(out)
     }
 
     /// Delete every mock of `owner`; returns their names.

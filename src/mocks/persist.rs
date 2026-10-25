@@ -135,7 +135,22 @@ pub fn load(store: &MockStore, dir: &Path) -> (Vec<String>, Vec<String>) {
         .collect();
     files.sort();
     let limits = store.limits();
-    for path in files.into_iter().take(limits.max_mocks) {
+    // The directory holds instance mocks, visitor mocks (their own cap) and
+    // possibly a saved copy of the sample; each kind's cap applies on restore.
+    let visitor_cap = store.visits().map_or(0, |v| v.config().max_mocks);
+    let cap = limits
+        .max_mocks
+        .saturating_add(visitor_cap)
+        .saturating_add(1);
+    if files.len() > cap {
+        for path in files.split_off(cap) {
+            problems.push(format!(
+                "{}: skipped, more saved mocks than this instance holds ({cap})",
+                path.display()
+            ));
+        }
+    }
+    for path in files {
         let shown = path.display().to_string();
         let result = std::fs::metadata(&path)
             .map_err(|e| e.to_string())
@@ -204,6 +219,7 @@ fn restore(store: &MockStore, saved: Saved, dir: &Path) -> Result<String, String
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::mocks::store::MockLimits;
     use crate::mocks::{sample_settings, SAMPLE_SPEC};
 
     const SPEC: &str = r#"{"openapi":"3.0.3","info":{"title":"T","version":"1"},
@@ -211,6 +227,30 @@ mod tests {
 
     fn store_in(dir: &Path) -> MockStore {
         MockStore::new(&Config::for_tests()).with_persistence(dir.to_path_buf())
+    }
+
+    #[test]
+    fn saved_mocks_over_the_cap_are_reported_not_dropped_silently() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut roomy = MockLimits::for_config(&Config::for_tests());
+        roomy.max_mocks = 5;
+        let s = MockStore::with_limits(roomy).with_persistence(tmp.path().to_path_buf());
+        for name in ["m1", "m2", "m3", "m4"] {
+            let c = s.compile(SPEC, MockSettings::default()).expect("compile");
+            s.create(name, c, Origin::Api, true, true, false)
+                .expect("create");
+        }
+        // A smaller instance (no self-service) reads at most 1 + 1 files.
+        let mut small = MockLimits::for_config(&Config::for_tests());
+        small.max_mocks = 1;
+        let s = MockStore::with_limits(small);
+        let (loaded, problems) = load(&s, tmp.path());
+        assert_eq!(loaded.len() + problems.len(), 4, "{loaded:?} {problems:?}");
+        assert_eq!(
+            problems.iter().filter(|p| p.contains("skipped")).count(),
+            2,
+            "{problems:?}"
+        );
     }
 
     #[test]
