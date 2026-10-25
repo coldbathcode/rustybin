@@ -110,7 +110,10 @@ by up to 20 percent either way. For delays on any other route use the
 `GET /response-headers?Name=value&...` sets each query parameter as a response
 header (repeat a key for several values; at most 50) and returns them as JSON. Use it
 to show a gateway stripping, rewriting or adding response headers, or caching by
-`Cache-Control`.
+`Cache-Control`. A `Content-Type` parameter replaces the JSON one, but the reflected
+values stay inert: `<`, `>` and `&` are sent as JSON escapes, and every response also
+carries `Content-Security-Policy: sandbox; default-src 'none'` and
+`X-Content-Type-Options: nosniff`, whatever policy the query sets.
 
 ```hurl
 {{#include ../../examples/http/shaping.hurl:response_headers}}

@@ -223,13 +223,28 @@ async fn response_headers_handler(uri: Uri, headers: HeaderMap) -> Response {
         }
     }
 
-    let mut resp = (
-        [(header::CONTENT_TYPE, "application/json")],
-        serde_json::Value::Object(set).to_string(),
-    )
-        .into_response();
+    // The caller may pick any Content-Type, text/html included, so the
+    // reflected values must stay inert: `<`, `>` and `&` are written as JSON
+    // escapes (the same JSON once parsed), and a sandboxing policy is added
+    // after the caller's headers (policies only add up, so a caller-set one
+    // cannot loosen it).
+    let body = serde_json::Value::Object(set)
+        .to_string()
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026");
+    let mut resp = ([(header::CONTENT_TYPE, "application/json")], body).into_response();
     // Replaces our Content-Type when the caller sets one.
     resp.headers_mut().extend(custom);
+    let h = resp.headers_mut();
+    h.append(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("sandbox; default-src 'none'"),
+    );
+    h.append(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
     resp
 }
 
@@ -522,6 +537,41 @@ mod tests {
         assert_eq!(resp.headers()["x-another"], "world");
         let json = body_json(resp).await;
         assert_eq!(json["x-custom"], serde_json::json!(["hello", "again"]));
+    }
+
+    #[tokio::test]
+    async fn response_headers_never_reflect_active_markup() {
+        // A crafted link picks text/html and a policy of its own; the
+        // reflected values stay inert either way.
+        let resp = test_app()
+            .oneshot(req(
+                "/response-headers?content-type=text/html&content-security-policy=script-src%20*\
+                 &x=%3Cscript%3Ealert(1)%3C%2Fscript%3E%26",
+                &[],
+            ))
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "text/html");
+        let policies: Vec<&str> = resp
+            .headers()
+            .get_all(header::CONTENT_SECURITY_POLICY)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect();
+        assert!(
+            policies.contains(&"sandbox; default-src 'none'"),
+            "{policies:?}"
+        );
+        assert_eq!(resp.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains('<') && !text.contains('&'), "{text}");
+        // Still the same JSON once parsed.
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["x"], "<script>alert(1)</script>&");
     }
 
     #[tokio::test]
