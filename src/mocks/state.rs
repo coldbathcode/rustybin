@@ -85,7 +85,7 @@ impl MockState {
         if self.known(key) {
             return;
         }
-        self.lock().collections.entry(key.to_string()).or_default();
+        self.open(&mut self.lock(), key);
         for (id, v) in items {
             let _ = self.put(key, &id, v);
         }
@@ -119,6 +119,7 @@ impl MockState {
                 break;
             }
         }
+        self.open(&mut inner, key);
         let seq = inner.next_seq;
         inner.next_seq += 1;
         inner
@@ -130,6 +131,28 @@ impl MockState {
         inner.items += 1;
         inner.bytes += size;
         Ok(())
+    }
+
+    /// Create the collection `key` (no-op when it exists). Collections are
+    /// keyed by request path, so they count toward the budget too: their key
+    /// bytes, and at most `max_items` of them. Room is made by dropping empty
+    /// collections first, then the oldest items.
+    fn open(&self, inner: &mut Inner, key: &str) {
+        if inner.collections.contains_key(key) {
+            return;
+        }
+        while !inner.collections.is_empty()
+            && (inner.collections.len() >= self.max_items
+                || inner.bytes + key.len() > self.max_bytes)
+        {
+            if !drop_one(inner) {
+                break;
+            }
+        }
+        inner
+            .collections
+            .insert(key.to_string(), Collection::default());
+        inner.bytes += key.len();
     }
 
     fn remove(&self, key: &str, id: &str) -> Option<Value> {
@@ -182,6 +205,22 @@ impl MockState {
     pub fn item_count(&self) -> usize {
         self.lock().items
     }
+}
+
+/// Drop an empty collection, else the oldest item (whose collection the next
+/// call may then drop). False when there is nothing left to drop.
+fn drop_one(inner: &mut Inner) -> bool {
+    let empty = inner
+        .collections
+        .iter()
+        .find(|(_, c)| c.items.is_empty())
+        .map(|(k, _)| k.clone());
+    if let Some(key) = empty {
+        inner.collections.remove(&key);
+        inner.bytes = inner.bytes.saturating_sub(key.len());
+        return true;
+    }
+    evict_oldest(inner)
 }
 
 fn evict_oldest(inner: &mut Inner) -> bool {
@@ -572,6 +611,30 @@ mod tests {
             .as_ref()
             .and_then(Body::as_json)
             .unwrap_or(Value::Null)
+    }
+
+    #[test]
+    fn collections_per_path_stay_within_the_budget() {
+        // Stateful data is keyed by request path, so a parameter above the
+        // collection (`/u/{uid}/pets`) opens one collection per URL.
+        let s = MockState::new(50, 100_000);
+        for n in 0..1_400 {
+            let key = format!("/u/user{n}/pets");
+            s.seed(&key, vec![]);
+            if n % 3 == 0 {
+                s.put(&key, "1", json!({"id": 1})).expect("put");
+            }
+        }
+        let dump = s.dump();
+        let collections = dump["collections"].as_object().map_or(0, |c| c.len());
+        assert!(collections <= 50, "{collections} collections");
+        assert!(s.item_count() <= 50);
+        assert!(
+            dump["bytes"].as_u64().unwrap_or(u64::MAX) <= 100_000,
+            "{dump}"
+        );
+        // The newest collection is the one kept.
+        assert!(dump["collections"].get("/u/user1399/pets").is_some());
     }
 
     #[test]

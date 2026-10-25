@@ -50,6 +50,14 @@ impl Issue {
 const MAX_DEPTH: usize = 24;
 const MAX_NODES: usize = 5_000;
 const MAX_ISSUES: usize = 50;
+/// Longest string the generator pads to for `minLength`.
+const MAX_GENERATED_STRING: usize = 64 * 1024;
+/// Schema checks one validation may make, sub-checks of `anyOf`, `oneOf`,
+/// `not` and `if` included (about 175 ms in a release build). A schema whose
+/// alternatives refer back to themselves would otherwise multiply the work at
+/// every level. Real bodies stay far below it: only a 1 MiB array of tiny
+/// values gets near it, and then validation reports that it stopped.
+const MAX_CHECKS: usize = 500_000;
 /// Optional properties are dropped below this depth (keeps output readable).
 const OPTIONAL_DEPTH: usize = 8;
 
@@ -589,13 +597,20 @@ impl Gen<'_, '_> {
                 None => self.named_string(name, h, index),
             },
         };
-        let min = obj.get("minLength").and_then(Value::as_u64).unwrap_or(0) as usize;
+        // Padded once, up to MAX_GENERATED_STRING: a larger minLength gives a
+        // value that fails its own schema, which the deploy checks report.
+        let min = obj
+            .get("minLength")
+            .and_then(Value::as_u64)
+            .map_or(0, |m| usize::try_from(m).unwrap_or(usize::MAX))
+            .min(MAX_GENERATED_STRING);
         let max = obj
             .get("maxLength")
             .and_then(Value::as_u64)
-            .map(|m| m as usize);
-        while s.chars().count() < min {
-            s.push('x');
+            .map(|m| usize::try_from(m).unwrap_or(usize::MAX));
+        let len = s.chars().count();
+        if len < min {
+            s.extend(std::iter::repeat_n('x', min - len));
         }
         if let Some(max) = max {
             if s.chars().count() > max {
@@ -1066,13 +1081,21 @@ fn make_nullable(out: &mut Map<String, Value>) {
 
 /// Validate `value` against `schema`; at most 50 issues.
 pub fn validate(value: &Value, schema: &Value, root: &Value, direction: Direction) -> Vec<Issue> {
+    let budget = std::rc::Rc::new(std::cell::Cell::new(MAX_CHECKS));
     let mut v = Validator {
         root,
         direction,
         issues: Vec::new(),
         allof_props: None,
+        budget: budget.clone(),
     };
     v.check(value, schema, "", 0);
+    if budget.get() == 0 {
+        v.push(
+            "",
+            format!("validation stopped: the schema needs more than {MAX_CHECKS} checks"),
+        );
+    }
     v.issues
 }
 
@@ -1084,6 +1107,8 @@ struct Validator<'a> {
     /// pointer: `additionalProperties: false` in one part does not reject
     /// them (strict JSON Schema would; OpenAPI authors rarely mean that).
     allof_props: Option<(String, Vec<String>)>,
+    /// Checks left for the whole validation, shared with sub-validators.
+    budget: std::rc::Rc<std::cell::Cell<usize>>,
 }
 
 fn describe(v: &Value) -> String {
@@ -1144,15 +1169,18 @@ impl Validator<'_> {
             direction: self.direction,
             issues: Vec::new(),
             allof_props: self.allof_props.clone(),
+            budget: self.budget.clone(),
         };
         sub.check(value, schema, ptr, depth);
         sub.issues.is_empty()
     }
 
     fn check(&mut self, value: &Value, schema: &Value, ptr: &str, depth: usize) {
-        if depth > MAX_DEPTH * 2 || self.full() {
+        let left = self.budget.get();
+        if depth > MAX_DEPTH * 2 || self.full() || left == 0 {
             return;
         }
+        self.budget.set(left - 1);
         let Some(obj) = schema.as_object() else {
             if schema == &Value::Bool(false) {
                 self.push(ptr, "no value is allowed here".into());
@@ -1452,6 +1480,58 @@ mod tests {
                 echo: &[],
             },
         )
+    }
+
+    #[test]
+    fn self_referencing_alternatives_stop_at_the_check_budget() {
+        // Each level tries three alternatives that are the schema itself, and
+        // the sibling type always fails: unbounded, that is 3^depth checks.
+        let root = json!({"components": {"schemas": {"A": {
+            "type": "integer",
+            "anyOf": [
+                {"$ref": "#/components/schemas/A"},
+                {"$ref": "#/components/schemas/A"},
+                {"$ref": "#/components/schemas/A"}
+            ]
+        }}}});
+        let schema = json!({"$ref": "#/components/schemas/A"});
+        let started = std::time::Instant::now();
+        let issues = validate(&json!("x"), &schema, &root, Direction::Request);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message.contains("validation stopped")),
+            "{issues:?}"
+        );
+        // Generation for the same schema is bounded already.
+        gen(&schema, &root, Direction::Response);
+    }
+
+    #[test]
+    fn huge_min_length_is_capped_and_padded_once() {
+        let root = json!({});
+        let started = std::time::Instant::now();
+        let v = gen(
+            &json!({"type": "string", "minLength": 1_000_000_000u64}),
+            &root,
+            Direction::Response,
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(
+            v.as_str().map(|s| s.chars().count()),
+            Some(MAX_GENERATED_STRING)
+        );
+        let v = gen(
+            &json!({"type": "string", "minLength": 40, "maxLength": 40}),
+            &root,
+            Direction::Response,
+        );
+        assert_eq!(v.as_str().map(|s| s.chars().count()), Some(40));
     }
 
     fn components() -> Value {
