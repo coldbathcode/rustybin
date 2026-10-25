@@ -672,6 +672,29 @@ def run_jwt(browser):
 
     step("jwt: agent panel masks the control token", agent_panel_with_token)
 
+    def explorer_masks_the_control_token():
+        token = page.evaluate("sessionStorage.getItem('rustybin.console.controlToken')")
+        assert token, "not signed in"
+        goto_view(page, "explorer")
+        page.wait_for_selector("text=Try it")
+        page.get_by_label("Search endpoints").fill("/_rustybin/status")
+        page.locator(".list-item", has_text="/_rustybin/status").first.click()
+        page.get_by_role("button", name="Send", exact=True).click()
+        page.wait_for_selector("#view .card .badge.ok")
+        masked = "Bearer " + token[:4] + "..." + token[-2:]
+        for tab in ["Request", "curl"]:
+            page.locator("#view").get_by_role("tab", name=tab).click()
+            expect(page.locator("#view")).to_contain_text(masked)
+            assert token not in page.content(), f"control token shown in the {tab} tab"
+        # Copy as curl still gives a command that works.
+        response_card = page.locator("#view .card", has=page.locator(".badge.ok")).last
+        response_card.get_by_role("button", name="Copy as curl").click()
+        page.wait_for_function("navigator.clipboard.readText().then((t) => t.startsWith('curl'))")
+        copied = page.evaluate("navigator.clipboard.readText()")
+        assert "Bearer " + token in copied, copied
+
+    step("jwt: api explorer masks the control token", explorer_masks_the_control_token)
+
     def agent_sign_in_read_only():
         # Fresh context: no console token yet, so the sign-in screen comes first.
         ctx2 = browser.new_context(viewport={"width": 1280, "height": 860})

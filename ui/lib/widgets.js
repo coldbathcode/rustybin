@@ -38,7 +38,10 @@ export function targetPicker(key, onchange) {
 /** Render a send() result: status line, body, headers, request and curl. */
 export function responseView(result, opts = {}) {
   const req = result.request || {};
+  // Shown with the console's own credentials masked; the copy buttons copy a working command.
   const curl = toCurl({ method: req.method, url: req.url, headers: req.headers, body: req.body });
+  const shownHeaders = req.shown || req.headers || [];
+  const shownCurl = toCurl({ method: req.method, url: req.url, headers: shownHeaders, body: req.body });
   const head = h('div', { class: 'row', style: { padding: '10px 14px', borderBottom: '1px solid var(--border)' } },
     result.error ? statusBadge(0, 'no response') : statusBadge(result.status, result.statusText),
     h('span', { class: 'muted small' }, fmtMs(result.ms)),
@@ -50,14 +53,14 @@ export function responseView(result, opts = {}) {
   if (result.error) {
     items.push({ id: 'error', label: 'Error', render: () => h('div', { class: 'card-body stack-sm' }, notice('err', result.error),
       isCrossOrigin(req.url || '') ? h('p', { class: 'small muted' }, 'Tip: the same request sent with curl is not subject to CORS.') : null,
-      copyableCode(curl)) });
+      copyableCode(shownCurl, undefined, undefined, curl)) });
   } else {
     items.push({ id: 'body', label: 'Body', render: () => h('div', { class: 'card-body' }, bodyView(result.text, result.contentType, { cls: 'tall' })) });
     items.push({ id: 'headers', label: `Headers (${result.headers.length})`, render: () => h('div', { class: 'card-body flush' }, headersTable(result.headers, { noHighlight: true })) });
   }
   items.push({ id: 'request', label: 'Request', render: () => h('div', { class: 'card-body stack-sm' },
-    headersTable(req.headers || []), req.body ? bodyView(String(req.body), headerValue(req.headers, 'content-type')) : null) });
-  items.push({ id: 'curl', label: 'curl', render: () => h('div', { class: 'card-body' }, copyableCode(curl)) });
+    headersTable(shownHeaders), req.body ? bodyView(String(req.body), headerValue(shownHeaders, 'content-type')) : null) });
+  items.push({ id: 'curl', label: 'curl', render: () => h('div', { class: 'card-body' }, copyableCode(shownCurl, undefined, undefined, curl)) });
   const t = tabs(items, opts.initialTab && items.some((i) => i.id === opts.initialTab) ? opts.initialTab : items[0].id);
   return h('div', { class: 'card' }, head, t.el);
 }

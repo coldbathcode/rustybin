@@ -66,8 +66,9 @@ export function codeBlock(text, lang, cls) {
 }
 
 /** Code block with a copy button in the corner. */
-export function copyableCode(text, lang, cls) {
-  return h('div', { class: 'code-wrap' }, codeBlock(text, lang, cls), h('span', { class: 'copy-fab' }, copyButton(text, { icon: true, title: 'Copy' })));
+/** A code block with a copy button; `copy` is what the button copies (default: the text shown). */
+export function copyableCode(text, lang, cls, copy = text) {
+  return h('div', { class: 'code-wrap' }, codeBlock(text, lang, cls), h('span', { class: 'copy-fab' }, copyButton(copy, { icon: true, title: 'Copy' })));
 }
 
 export function prettyXml(xml) {

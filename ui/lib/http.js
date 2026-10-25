@@ -99,19 +99,35 @@ export function explainNetworkError(url, err, timeoutMs, timedOut) {
 
 /**
  * Send a request. Never throws: resolves to
- * {ok, status, statusText, headers: [[k, v]], header(name), text, json, ms, url, error, contentType, request}.
+ * {ok, status, statusText, headers: [[k, v]], header(name), text, json, ms, url, error, contentType, request},
+ * where request.headers is what was sent and request.shown the same with console credentials masked.
  */
+/** Headers the console adds on its own that carry a credential. */
+const CREDENTIAL_HEADERS = ['authorization', 'x-rustybin-admin-token', visit.HEADER.toLowerCase()];
+
+/** A credential for the screen: its scheme (`Bearer `), then the first 4 and last 2 characters. */
+export function maskCredential(value) {
+  const v = String(value);
+  const m = /^([A-Za-z]+\s+)(\S.*)$/.exec(v);
+  const [scheme, secret] = m ? [m[1], m[2]] : ['', v];
+  return scheme + (secret.length > 8 ? secret.slice(0, 4) + '...' + secret.slice(-2) : '...');
+}
+
 export async function send(req) {
   const method = (req.method || 'GET').toUpperCase();
   const url = req.url;
   const timeoutMs = req.timeout ?? 30000;
-  const headers = withConsoleHeaders(headerList(req.headers), req);
+  const own = headerList(req.headers);
+  const headers = withConsoleHeaders(own, req);
+  // Credentials the console added itself (control token, admin token, manage
+  // tokens) go out as they are but are shown masked: the console may be on a projector.
+  const shown = headers.map(([k, v], i) => (i >= own.length && CREDENTIAL_HEADERS.includes(k.toLowerCase()) ? [k, maskCredential(v)] : [k, v]));
   const ctrl = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, timeoutMs);
   const onAbort = () => ctrl.abort();
   if (req.signal) req.signal.addEventListener('abort', onAbort);
-  const request = { method, url, headers, body: req.body ?? null };
+  const request = { method, url, headers, shown, body: req.body ?? null };
   const started = performance.now();
   const result = { ok: false, status: 0, statusText: '', headers: [], text: '', json: undefined, ms: 0, url, error: null, contentType: '', request };
   result.header = (name) => {
