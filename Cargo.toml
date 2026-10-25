@@ -86,11 +86,8 @@ hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
 # [dependencies] together with the engine (docs/plans/harness.md).
 hyper = { version = "1", features = ["client", "http1"] }
 hdrhistogram = { version = "7.5", default-features = false }
-
-[[example]]
-name = "harness_spike"
-# Its saturation test runs with `cargo test`.
-test = true
+# examples/ is found automatically (no [[example]] table: the Docker build copies
+# Cargo.toml without examples/); `cargo test --all-targets` runs its tests.
 
 # RSA key generation (startup, tests) is very slow without optimisations.
 [profile.dev.package.num-bigint-dig]
