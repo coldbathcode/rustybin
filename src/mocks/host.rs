@@ -235,4 +235,51 @@ mod tests {
             serde_json::from_str(&body_string(resp).await).expect("json");
         assert_eq!(detail["host_url"], "http://petstore.mock.test/v1");
     }
+
+    #[tokio::test]
+    async fn the_mocks_domain_serves_nothing_else_with_a_trailing_dot() {
+        let mut config = Config::for_tests();
+        config.public_mode = true;
+        config.self_service.enabled = true;
+        config.self_service.host = Some("mocks.test".into());
+        let app = crate::build_app(test_state_with(config));
+        let get = |host: &'static str, path: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    axum::http::Request::builder()
+                        .uri(path)
+                        .header("host", host)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response")
+            }
+        };
+        // The bare domain and unknown names never reach the console or the
+        // control plane, with or without the fully qualified trailing dot.
+        for host in [
+            "mocks.test",
+            "mocks.test.",
+            "MOCKS.test.:8080",
+            "a.b.mocks.test.",
+        ] {
+            for path in ["/ui/", "/_rustybin/mocks", "/uuid"] {
+                let resp = get(host, path).await;
+                assert_ne!(resp.status(), StatusCode::OK, "{host}{path}");
+                let body = body_string(resp).await;
+                assert!(
+                    !body.contains("<html") && !body.contains("\"mocks\""),
+                    "{host}{path}: {body}"
+                );
+            }
+        }
+        // A mock name with a trailing dot still reaches its mock.
+        let resp = get("petstore.mocks.test.", "/v1/pets?limit=1").await;
+        assert_eq!(
+            resp.headers().get("x-rustybin-mock").map(|v| v.as_bytes()),
+            Some(&b"petstore"[..])
+        );
+    }
 }

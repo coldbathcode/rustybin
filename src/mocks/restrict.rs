@@ -28,17 +28,28 @@ const DENIED: &[&str] = &[
 ];
 
 /// A value pointing at another host (`https://...`, `//host`, `javascript:`).
+///
+/// Browsers parse a redirect target with the WHATWG URL parser: it removes
+/// ASCII tab and newline anywhere, trims leading spaces and control
+/// characters, and treats `\` like `/` in http(s) URLs. So `/\host`,
+/// `\/host` and `/<TAB>/host` all leave the origin, and are refused here like
+/// `//host`.
 fn points_elsewhere(value: &str) -> bool {
-    let v = value.trim().to_ascii_lowercase();
+    let cleaned: String = value
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let v = cleaned.trim_matches(|c: char| c <= ' ');
     // `Refresh: 0; url=...` carries the URL after `url=`.
     let target = v
         .split_once("url=")
-        .map_or(v.as_str(), |(_, rest)| rest.trim_matches(['"', '\'', ' ']));
-    target.starts_with("//")
-        || target.starts_with("\\\\")
+        .map_or(v, |(_, rest)| rest.trim_matches(['"', '\'', ' ']))
+        .trim_matches(|c: char| c <= ' ');
+    matches!(target.as_bytes(), [b'/' | b'\\', b'/' | b'\\', ..])
         || target
             .split_once(':')
-            .is_some_and(|(scheme, _)| !scheme.is_empty() && !scheme.contains('/'))
+            .is_some_and(|(scheme, _)| !scheme.is_empty() && !scheme.contains(['/', '\\']))
 }
 
 /// May a visitor mock send this header?
@@ -190,6 +201,16 @@ mod tests {
             ("location", "//evil.example/x"),
             ("Location", "javascript:alert(1)"),
             ("Refresh", "0; url=https://evil.example/"),
+            // Browsers read `\` as `/` and drop tabs, so these leave the origin too.
+            ("Location", "/\\evil.example/"),
+            ("Location", "\\/evil.example/"),
+            ("Location", "\\\\evil.example/"),
+            ("Location", "/\t/evil.example/"),
+            ("Location", " //evil.example/"),
+            ("Location", "\tjavascript:alert(1)"),
+            ("Refresh", "0; url=/\\evil.example/"),
+            ("Refresh", "0;url='//evil.example/'"),
+            ("Content-Location", "/\\evil.example/"),
             ("Content-Security-Policy", "default-src *"),
             ("Access-Control-Allow-Credentials", "true"),
             ("Strict-Transport-Security", "max-age=1"),
@@ -200,6 +221,9 @@ mod tests {
         for (name, value) in [
             ("Location", "/v1/pets/1"),
             ("Location", "pets/1"),
+            ("Location", "/"),
+            ("Location", "/v1/pets?next=//x"),
+            ("Location", "./a\\b"),
             ("Refresh", "5"),
             ("X-Rate-Limit", "10"),
             ("Cache-Control", "no-store"),

@@ -329,6 +329,9 @@ pub fn split_host_port(raw: &str) -> Option<(String, Option<u16>)> {
             None => (raw.to_string(), None),
         }
     };
+    // `example.com.` (the fully qualified form) names the same host as
+    // `example.com`: compare and route on the form without the dot.
+    let host = host.trim_end_matches('.');
     let valid = !host.is_empty()
         && host
             .bytes()
@@ -643,6 +646,15 @@ mod tests {
             split_host_port("example.com"),
             Some(("example.com".to_string(), None))
         );
+        assert_eq!(
+            split_host_port("Example.com.:8080"),
+            Some(("example.com".into(), Some(8080)))
+        );
+        assert_eq!(
+            split_host_port("mock.dev.."),
+            Some(("mock.dev".into(), None))
+        );
+        assert_eq!(split_host_port("."), None);
         assert_eq!(split_host_port("bad host"), None);
         assert_eq!(split_host_port("x:99999"), None);
         assert_eq!(split_host_port("[::1"), None);
