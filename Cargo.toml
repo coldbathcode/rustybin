@@ -81,7 +81,16 @@ protoc-bin-vendored = "3"
 tokio-tungstenite = "0.24"
 tempfile = "3"
 tokio-rustls = "0.26"
-hyper-util = { version = "0.1", features = ["tokio"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
+# Harness phase 0 spike (examples/harness_spike.rs); phase 1 moves these to
+# [dependencies] together with the engine (docs/plans/harness.md).
+hyper = { version = "1", features = ["client", "http1"] }
+hdrhistogram = { version = "7.5", default-features = false }
+
+[[example]]
+name = "harness_spike"
+# Its saturation test runs with `cargo test`.
+test = true
 
 # RSA key generation (startup, tests) is very slow without optimisations.
 [profile.dev.package.num-bigint-dig]
