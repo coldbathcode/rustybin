@@ -1,22 +1,24 @@
 # Plan: harness mode, load and chaos through a gateway
 
-Status: **planned** (2026-10-22), to build after the mock MCP server ([mock-mcp.md](mock-mcp.md)). Nothing
-is built yet.
+Status: **phase 0 done** (2026-10-25): the engine spike is `examples/harness_spike.rs`, its numbers and
+what they change are in [Phase 0 results](#phase-0-results-2026-10-25). Phases 1 and 2 are next. Planned
+2026-10-22.
 
-> **Build marker (2026-10-24): START HERE.** Approved scope for the next session is phases 0, 1 and 2
-> (section 15). No harness code has been written; there is no `src/harness/` yet and `main` is clean.
-> Begin with:
-> 1. **Phase 0 (spike):** move `hyper-util` from dev-dependencies to dependencies and add `hdrhistogram`;
->    benchmark a hyper client on its own tokio runtime against a local Rustybin with no gateway; confirm
->    or adjust the default caps in section 10.
-> 2. **Phase 1 (single-node engine):** new module `src/harness/` (`mod.rs`, `scenario.rs`, `pattern.rs`,
->    `engine.rs`, `safety.rs`, `report.rs`, `cli.rs`), registered in `ROUTERS` / `SOURCES` /
->    `MODULE_PATHS`. The `RUSTYBIN_HARNESS*` env (section 5), `POST /_rustybin/harness/runs`, the safety
->    module first (allowlist, address pinning, caps, kill switch), report JSON, CLI `run` / `validate` /
->    `report`, headless exit codes, `GET /_rustybin/harness/schema`, the first MCP tools and the
->    schema-generated console builder with the parity test. Off by default; fatal with public mode or
->    self-service.
-> 3. **Phase 2 (correlation):** harness headers and HMAC signing, the server correlation layer in
+> **Build marker (2026-10-25): START HERE.** Phase 0 is done (see [its results](#phase-0-results-2026-10-25),
+> which change the engine design below). Approved scope for the next session is phases 1 and 2 (section 15).
+> There is still no `src/harness/`; the spike is an example that only targets the server it starts.
+> 1. **Phase 1 (single-node engine):** move `hyper`, `hyper-util` (`client-legacy`, `http1`) and
+>    `hdrhistogram` from dev-dependencies to dependencies; new module `src/harness/` (`mod.rs`,
+>    `scenario.rs`, `pattern.rs`, `engine.rs`, `safety.rs`, `report.rs`, `cli.rs`), registered in
+>    `ROUTERS` / `SOURCES` / `MODULE_PATHS`. The `RUSTYBIN_HARNESS*` env (section 5),
+>    `POST /_rustybin/harness/runs`, the safety module first (allowlist, address pinning, caps, kill
+>    switch), report JSON, CLI `run` / `validate` / `report`, headless exit codes,
+>    `GET /_rustybin/harness/schema`, the first MCP tools and the schema-generated console builder with
+>    the parity test. Off by default; fatal with public mode or self-service. Build the engine the way
+>    phase 0 found it must work: a dedicated scheduler thread, worker threads that leave it a core, the
+>    in-flight cap from the descriptor limit, per-worker histograms, `TCP_NODELAY`, and saturation judged
+>    per second.
+> 2. **Phase 2 (correlation):** harness headers and HMAC signing, the server correlation layer in
 >    `build_app`, client classification (`upstream` / `gateway` / `transport` / `lost`), loop-through
 >    `both`, inspector sampling, metrics, the shaped `/harness/{*path}` endpoint, and the in-repo
 >    `src/harness/test_proxy.rs`.
@@ -112,10 +114,17 @@ gateway), and it generates traffic from the same OpenAPI mocks the upstream serv
   HTTP/1.1, HTTP/2 (ALPN and prior knowledge), TLS with SNI override, optional client certificate from
   the demo PKI for mTLS gateways.
 - **Separate runtime**: the engine runs on its own multi-threaded tokio runtime
-  (`RUSTYBIN_HARNESS_THREADS`, default half the cores in `both` mode, all of them on client-only
+  (`RUSTYBIN_HARNESS_THREADS`, default half the cores in `both` mode, all of them but one on client-only
   nodes). Load generation therefore never starves the node's own data plane in loop-through.
-- **Histograms**: `hdrhistogram` (mergeable, serialisable). Nodes ship compressed histogram deltas in
-  heartbeats; the coordinator merges them exactly, with no averaging of percentiles.
+- **Scheduler thread** (phase 0): send times are kept by one dedicated OS thread, outside every runtime,
+  which sleeps with `std::thread::sleep` and spawns each request onto the engine runtime. Scheduling on
+  the engine runtime queued it behind the request tasks (10 ms of dispatch lag at 5,000 rps), and
+  tokio's timer ticks in milliseconds. Worker threads leave the scheduler a core: when the process had
+  more busy threads than cores, single lag spikes of 10 to 25 ms appeared even at 1,000 rps.
+- **Histograms**: `hdrhistogram` (mergeable, serialisable). Each worker thread records into its own
+  histograms, merged per one-second bucket (the spike's single locked histogram is not how the engine
+  should do it). Nodes ship compressed histogram deltas in heartbeats; the coordinator merges them
+  exactly, with no averaging of percentiles.
 - **Mocks**: requests can be generated from a deployed mock (`mocks::checks` already builds a valid
   request per operation; `schema.rs` generates bodies). The scenario names a mock, and the client asks
   its own instance or the coordinator for the spec.
@@ -569,8 +578,8 @@ follows the redirect. The platform stores the cluster's eligible URLs and asks a
 
 | Limit | Default | Notes |
 |---|---|---|
-| Rate per client node | 50,000 rps | `RUSTYBIN_HARNESS_MAX_RATE`; also cluster-wide in the scenario |
-| In-flight per node | 10,000 | Beyond it: `not_sent` plus a saturation flag |
+| Rate per client node | 50,000 rps | `RUSTYBIN_HARNESS_MAX_RATE`; also cluster-wide in the scenario. Confirmed by phase 0: a safety cap, near what one client core can send; a node with more cores may raise it |
+| In-flight per node | 10,000, and at most what the descriptor limit allows | Beyond it: `not_sent` plus a saturation flag. HTTP/1 holds one connection per request in flight, and in `both` mode each costs two descriptors (client and server side). At start the engine raises its soft `RLIMIT_NOFILE` to the hard limit and caps in flight at (limit minus 256) divided by 2 in `both` mode, or minus 256 on client-only nodes, and says so in the status and report. Running out of sockets is client saturation, never a gateway or transport result (phase 0) |
 | Run duration | 1 hour | `RUSTYBIN_HARNESS_MAX_DURATION`, at most 24 hours |
 | Nodes per cluster | 64 | at most 1,024 |
 | Clusters per coordinator | 4 | |
@@ -590,7 +599,10 @@ follows the redirect. The platform stores the cluster's eligible URLs and asks a
 
 The client also measures itself: scheduler lag (intended versus actual send), event loop lag, CPU and
 open sockets. When it saturates, the report says so first, so a slow client is never read as a slow
-gateway.
+gateway. Saturation is judged per one-second bucket and needs two buckets in a row (phase 0 saw single
+lag spikes in a VM that one bucket would misread), and the achieved rate is counted by completion time
+in those buckets: dividing all answers by the run's elapsed time reads a 100 ms upstream as 3 percent
+short over 3 s, since the last requests finish one latency after the window.
 
 ## 11. Safety
 
@@ -741,6 +753,49 @@ lost requests and gateway overhead separated out. Phase 3b makes it survive losi
 and 5 give the traffic shapes and the rate-limit testing. Phases 6 and 7 make it realistic and mean.
 Phase 8 makes it usable without reading this file.
 
+### Phase 0 results (2026-10-25)
+
+`cargo run --release --example harness_spike -- --sweep` starts Rustybin in process (or `--upstream bare`,
+a minimal axum server answering `ok`) and steps the rate up in 3 s runs until one is not sustained: a
+request not sent at the in-flight cap, an error, scheduler lag p99 over 5 ms, or an achieved rate under 98
+percent. Machine: 4 vCPU (Xeon, 2.1 GHz), 15 GB, a VM with negligible steal (14 of 2,408 ticks under
+load), release build, `GET /status/200`, HTTP/1.1, the client on its own runtime plus the scheduler
+thread.
+
+| Upstream | Server threads | Client threads | Sustained rps | Requests per CPU second (client and server) |
+|---|---|---|---|---|
+| Rustybin | 1 | 1 | 20,000 | about 12,000 |
+| Rustybin | 2 | 1 | 25,000 to 30,000 | about 10,000 |
+| Rustybin | 3 | 1 | 30,000 | about 8,800 |
+| bare | 2 | 1 | 30,000 to 50,000 | about 16,000 to 25,000 |
+| bare | 1 | 2 | 25,000 to 75,000 | about 13,000 to 26,000 |
+
+Ranges are repeated sweeps of the same configuration: on four cores with five busy threads the
+scheduler is sometimes preempted, and a single lag spike ends a sweep early. Latency p50 stays under
+0.5 ms up to the sustained rate; p99 has isolated spikes of 30 to 70 ms from the same contention.
+
+What it shows:
+
+- **The client is cheap; Rustybin's own data plane is the cost.** The client and a bare server together
+  use about 40 to 60 us of CPU per request, so the client, about half of that, sends roughly 30,000 to
+  50,000 rps per core.
+  In loop-through Rustybin uses about 115 us per request, about 90 us of it on the server side, which
+  is the full middleware stack (inspector capture, metrics, trace, CORS, limits, fault injection) on a
+  trivial route. A 4-core loop-through node therefore tops out near 30,000 rps, a server node near
+  10,000 to 15,000 rps per core. Profiling the data plane is worth a session before scale tests; phase 2's
+  inspector sampling removes one of the costs for harness traffic.
+- **Saturation detection works** at real rates: past the sustained rate the in-flight cap fills, the
+  requests are counted as `not_sent`, and the run is flagged instead of slowing down (two tests in the
+  example check it against a stand-in upstream).
+- **Descriptors are the first hard limit.** 2,000 requests in flight against a 100 ms upstream ran
+  cleanly with 20,000 descriptors; with 1,024 (a common default) 45,272 of 60,000 requests failed and
+  some waited out the 10 s timeout. Hence the in-flight rule in section 10. HTTP/2 to the target
+  multiplexes requests over few connections and avoids it.
+- **The scheduler needs its own thread** (section 4) and `TCP_NODELAY` on every connection; a fresh
+  connection pool per run showed up as p99 spikes, so pools live as long as the run's targets.
+- **Caps** (section 10): 50,000 rps per client node confirmed; the in-flight cap now also follows the
+  descriptor limit. The 1-hour duration, bucket and sample limits are unaffected by these numbers.
+
 ### Estimate (2026-10-22)
 
 About 16 to 19 days of build sessions, after the mock MCP server (1 to 2 days). This is calibrated on the
@@ -748,7 +803,7 @@ earlier plans: OpenAPI mocks about 2 days, management MCP about 3, hosted mocks 
 
 | Phase | Days |
 |---|---|
-| 0. Spike | 0.5 |
+| 0. Spike | 0.5 (done, 2026-10-25) |
 | 1. Single-node engine | 2 |
 | 2. Correlation | 1 |
 | 3. Cluster | 2 |

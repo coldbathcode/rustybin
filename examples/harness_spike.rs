@@ -71,8 +71,13 @@ impl Report {
         self.ok + self.errors
     }
 
+    /// Answers per second. The last requests finish one latency after the
+    /// send window, so the median latency is taken off the elapsed time
+    /// (otherwise a 100 ms upstream reads as 3 percent short over 3 s).
     fn achieved(&self) -> f64 {
-        self.answered() as f64 / self.elapsed.as_secs_f64().max(1e-9)
+        let tail = Duration::from_micros(self.corrected.value_at_quantile(0.5));
+        let window = self.elapsed.saturating_sub(tail).as_secs_f64().max(1e-9);
+        self.answered() as f64 / window
     }
 
     /// Why this run does not count as sustained, if it does not.
@@ -101,6 +106,17 @@ struct Shared {
 }
 
 type HttpClient = Client<HttpConnector, Empty<Bytes>>;
+
+/// One client for every run, so its connection pool stays warm (a fresh pool
+/// per run showed up as p99 spikes from connection setup at each step).
+fn client(max_idle: usize) -> HttpClient {
+    let mut connector = HttpConnector::new();
+    connector.set_nodelay(true);
+    Client::builder(TokioExecutor::new())
+        .pool_max_idle_per_host(max_idle)
+        .pool_idle_timeout(Duration::from_secs(30))
+        .build(connector)
+}
 
 async fn request(
     client: HttpClient,
@@ -144,12 +160,13 @@ fn cpu_seconds() -> Option<f64> {
     Some((utime + stime) / 100.0)
 }
 
-/// Send `rate` requests per second for `duration` on the current runtime.
-async fn run(cfg: RunConfig) -> Report {
-    let client: HttpClient = Client::builder(TokioExecutor::new())
-        .pool_max_idle_per_host(cfg.max_inflight)
-        .pool_idle_timeout(Duration::from_secs(30))
-        .build_http();
+/// Send `rate` requests per second for `duration`. The scheduler runs on the
+/// calling thread: `std::thread::sleep` is finer than tokio's 1 ms timer, and
+/// a dedicated thread is never queued behind the request tasks, which run on
+/// `workers`. (Sharing the workers' runtime gave 10 ms of dispatch lag at
+/// 5,000 rps on four cores.)
+fn run(cfg: RunConfig, client: &HttpClient, workers: &tokio::runtime::Handle) -> Report {
+    let _enter = workers.enter();
     let uri: hyper::Uri = format!("{}{}", cfg.target, cfg.path)
         .parse()
         .expect("target URI");
@@ -169,10 +186,11 @@ async fn run(cfg: RunConfig) -> Report {
     let mut i = 0u64;
     while i < total {
         let next = at(i);
-        if next > Instant::now() {
-            tokio::time::sleep_until(next.into()).await;
+        let now = Instant::now();
+        if next > now {
+            std::thread::sleep(next - now);
         }
-        // Everything due by now goes out (timers tick in milliseconds).
+        // Everything due by now goes out.
         let now = Instant::now();
         while i < total && at(i) <= now {
             let intended = at(i);
@@ -181,7 +199,7 @@ async fn run(cfg: RunConfig) -> Report {
                 not_sent += 1;
             } else {
                 shared.inflight.fetch_add(1, Ordering::Relaxed);
-                tokio::spawn(request(
+                workers.spawn(request(
                     client.clone(),
                     uri.clone(),
                     intended,
@@ -194,7 +212,7 @@ async fn run(cfg: RunConfig) -> Report {
     }
     let drain_until = Instant::now() + cfg.timeout + Duration::from_secs(1);
     while shared.inflight.load(Ordering::Relaxed) > 0 && Instant::now() < drain_until {
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        std::thread::sleep(Duration::from_millis(1));
     }
     let elapsed = start.elapsed();
     let cpu_secs = cpu_before.zip(cpu_seconds()).map(|(a, b)| b - a);
@@ -226,6 +244,11 @@ struct Args {
     inflight: usize,
     path: String,
     sweep: bool,
+    /// `rustybin` (default) or `bare`: a minimal in-process axum server, to
+    /// tell the client's cost from Rustybin's.
+    upstream: String,
+    /// `bare` only: answer after this many milliseconds (many requests in flight).
+    delay_ms: u64,
 }
 
 fn parse_args() -> Args {
@@ -238,6 +261,8 @@ fn parse_args() -> Args {
         inflight: 10_000,
         path: "/status/200".into(),
         sweep: false,
+        upstream: "rustybin".into(),
+        delay_ms: 0,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -251,6 +276,8 @@ fn parse_args() -> Args {
             "--inflight" => a.inflight = value().parse().expect("--inflight"),
             "--path" => a.path = value(),
             "--sweep" => a.sweep = true,
+            "--upstream" => a.upstream = value(),
+            "--delay-ms" => a.delay_ms = value().parse().expect("--delay-ms"),
             other => panic!("unknown flag {other} (see the module docs)"),
         }
     }
@@ -297,24 +324,39 @@ fn main() {
     let args = parse_args();
     let server_rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(args.server_threads)
-        .thread_name("rustybin-server")
+        .thread_name("server")
         .enable_all()
         .build()
         .expect("server runtime");
-    let server = server_rt
-        .block_on(rustybin::server::start(
-            rustybin::config::Config::for_tests(),
-        ))
-        .expect("start rustybin");
-    let target = format!("http://{}", server.http_addr);
+    // Kept until the end of main: dropping it stops the server.
+    let mut server = None;
+    let target = match args.upstream.as_str() {
+        "bare" => server_rt.block_on(bare_upstream(Duration::from_millis(args.delay_ms))),
+        "rustybin" => {
+            let config = rustybin::config::Config::for_tests();
+            let s = server_rt
+                .block_on(rustybin::server::start(config))
+                .expect("start rustybin");
+            let target = format!("http://{}", s.http_addr);
+            server = Some(s);
+            target
+        }
+        other => panic!("unknown --upstream {other} (rustybin or bare)"),
+    };
     let client_rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(args.client_threads)
         .thread_name("harness-client")
         .enable_all()
         .build()
         .expect("client runtime");
+    let workers = client_rt.handle();
+    let http = {
+        let _enter = workers.enter();
+        client(args.inflight)
+    };
     println!(
-        "rustybin at {target}{} | {} cores | server threads {} | client threads {} | in-flight cap {}",
+        "{} at {target}{} | {} cores | server threads {} | client threads {} (+1 scheduler) | in-flight cap {}",
+        args.upstream,
         args.path,
         std::thread::available_parallelism().map_or(0, |n| n.get()),
         args.server_threads,
@@ -330,7 +372,7 @@ fn main() {
         timeout: Duration::from_secs(10),
     };
     // Warm up connections and caches.
-    client_rt.block_on(run(cfg(500, 1.0)));
+    run(cfg(500, 1.0), &http, workers);
     header();
     if args.sweep {
         let mut last_good = None;
@@ -338,7 +380,7 @@ fn main() {
             1_000u64, 2_000, 5_000, 10_000, 15_000, 20_000, 25_000, 30_000, 40_000, 50_000, 75_000,
             100_000,
         ] {
-            let r = client_rt.block_on(run(cfg(rate, args.step)));
+            let r = run(cfg(rate, args.step), &http, workers);
             row(&r);
             if r.saturated().is_some() {
                 break;
@@ -350,32 +392,32 @@ fn main() {
             None => println!("\nno rate was sustained"),
         }
     } else {
-        row(&client_rt.block_on(run(cfg(args.rate, args.duration))));
+        row(&run(cfg(args.rate, args.duration), &http, workers));
     }
+    drop(server);
+}
+
+/// A minimal upstream: every path answers `ok` after `delay`.
+async fn bare_upstream(delay: Duration) -> String {
+    let app = axum::Router::new().fallback(move || async move {
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        "ok"
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A stand-in upstream answering `GET /slow` after `delay`.
-    async fn upstream(delay: Duration) -> String {
-        let app = axum::Router::new().route(
-            "/slow",
-            axum::routing::get(move || async move {
-                tokio::time::sleep(delay).await;
-                "ok"
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        format!("http://{addr}")
-    }
 
     fn cfg(target: String, rate: u64, millis: u64, max_inflight: usize) -> RunConfig {
         RunConfig {
@@ -388,21 +430,31 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_in_flight_cap_is_reported_as_saturation() {
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime")
+    }
+
+    #[test]
+    fn the_in_flight_cap_is_reported_as_saturation() {
         // 400 rps against 5 slots of 50 ms each: about 100 rps of capacity.
-        let target = upstream(Duration::from_millis(50)).await;
-        let r = run(cfg(target, 400, 500, 5)).await;
+        let rt = runtime();
+        let target = rt.block_on(bare_upstream(Duration::from_millis(50)));
+        let r = run(cfg(target, 400, 500, 5), &client(5), rt.handle());
         assert!(r.not_sent > 0, "{r:?}");
         assert_eq!(r.saturated(), Some("in-flight cap reached"));
         assert_eq!(r.errors, 0);
         assert_eq!(r.ok + r.not_sent, 200);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_unsaturated_run_sends_everything_on_schedule() {
-        let target = upstream(Duration::ZERO).await;
-        let r = run(cfg(target, 200, 300, 1_000)).await;
+    #[test]
+    fn an_unsaturated_run_sends_everything_on_schedule() {
+        let rt = runtime();
+        let target = rt.block_on(bare_upstream(Duration::ZERO));
+        let r = run(cfg(target, 200, 300, 1_000), &client(1_000), rt.handle());
         assert_eq!((r.ok, r.errors, r.not_sent), (60, 0, 0), "{r:?}");
         // Measured from the intended send, latency never undercuts service time.
         assert!(r.corrected.max() >= r.service.max());

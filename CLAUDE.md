@@ -4,7 +4,8 @@ HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is
 
 ## Next to build: harness mode
 
-[docs/plans/harness.md](docs/plans/harness.md) (planned 2026-10-22, not started): Rustybin as a load client and
+[docs/plans/harness.md](docs/plans/harness.md) (planned 2026-10-22; phase 0, the engine spike in
+`examples/harness_spike.rs`, done 2026-10-25 with its findings in the plan; phases 1 and 2 next): Rustybin as a load client and
 correlating upstream, single node (loop-through) or a cluster (an elected leader, clients, servers), traffic layers
 with run patterns and rate-limit burst attacks, every parameter from one schema in the API, MCP and console (tunable
 live), or headless. It is the first feature that sends load to targets the caller chooses (A2A push notifications,
@@ -60,6 +61,7 @@ cargo test --features quota-postgres         # + the PostgreSQL quota store (set
 RUSTYBIN_UPDATE_README=1 cargo test readme_endpoints   # regenerate README endpoint tables
 cargo run -- --print-endpoints-markdown      # print them instead
 cargo run -- mock validate src/mocks/petstore.yaml   # OpenAPI mocks CLI (offline: validate, init, sample, check-config)
+cargo run --release --example harness_spike -- --sweep   # harness phase 0 spike: load sweep against an in-process Rustybin
 RUSTYBIN_HTTP_PORT=8080 cargo run
 docs/examples/run.sh                         # documentation examples (Hurl) against fresh servers (open, plan, secured, shared, keyed)
 mdbook build docs                            # documentation site
