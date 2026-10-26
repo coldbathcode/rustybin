@@ -29,6 +29,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -48,12 +49,15 @@ use tokio::runtime::{Handle, Runtime};
 use tokio::sync::watch;
 
 use super::correlate::{self, Correlator, Marker, RunEntry, RunKey, Tag};
+use super::live::{Change, Controls, Level, LiveView, StageLog};
 use super::report::{
     self, histogram, Breakdown, Bucket, Counts, Percentiles, Report, Sample, Saturation,
     TargetReport, ThresholdResult, WireHist, LAG_SATURATION_MS, MAX_SAMPLES,
 };
 use super::safety::{KillSwitch, Lease, ParsedTarget};
-use super::scenario::{Caps, HttpVersion, Layer, Model, RequestTemplate, Scenario, Target};
+use super::scenario::{
+    Caps, HttpVersion, Layer, Model, RequestTemplate, Scenario, Target, MAX_LAYERS,
+};
 use super::wire::{HistSet, NodeStats, WirePart};
 use crate::config::HarnessConfig;
 use crate::metrics::{HarnessRoll, Metrics};
@@ -75,6 +79,14 @@ pub const FINE_TIMELINE_SECS: u64 = 3_600;
 pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// Shard-local samples kept until the next roll.
 const SHARD_SAMPLES: usize = 32;
+/// The open scheduler's longest step: the rate is re-read at least this
+/// often (and at every edge of the pattern).
+const RATE_STEP: f64 = 0.010;
+
+/// How often the scheduler notes where each layer's pattern is.
+const NOTE_EVERY: Duration = Duration::from_millis(100);
+/// Seconds the roller may fall behind before the scheduler waits for it.
+const ROLL_QUEUE: usize = 64;
 /// Most transport-failed sequence numbers remembered for the `lost` count.
 pub const MAX_FAILED_SEQS: usize = 1 << 20;
 /// Most failed sequence numbers a node ships to its leader at the end of a
@@ -639,6 +651,12 @@ impl PartShard {
     }
 
     fn merge_from(&mut self, src: &mut PartShard) {
+        // Nothing recorded since the last roll: most layer slots stay empty
+        // (they are room for layers added while the run runs), and merging
+        // a histogram walks all its buckets.
+        if src.counts.completed == 0 {
+            return;
+        }
         let _ = self.corrected.add(&src.corrected);
         let _ = self.overhead.add(&src.overhead);
         src.corrected.reset();
@@ -909,6 +927,9 @@ pub struct RunParams {
     pub lease: Option<Arc<Lease>>,
     /// The cluster the run belongs to.
     pub cluster: Option<String>,
+    /// Live changes already made (a cluster member joining a run late);
+    /// default: none.
+    pub controls: Option<Controls>,
 }
 
 /// One execution of a scenario on this node.
@@ -940,7 +961,6 @@ pub struct Run {
     report: OnceLock<Report>,
     done: watch::Sender<bool>,
     target_weights: Vec<u32>,
-    layer_weights: Vec<Vec<u32>>,
     /// Per layer: requested, sent and not sent (scheduler and user side).
     layer_sched: Vec<[AtomicU64; 3]>,
     key: RunKey,
@@ -951,6 +971,13 @@ pub struct Run {
     /// This node's part of a cluster run; the leader changes it when it
     /// re-splits the rate (read by the scheduler on every pass).
     share: Mutex<Share>,
+    /// Live changes and the closed loops' state (section 6.5).
+    controls: Mutex<Controls>,
+    /// The layers as the scheduler evaluates them (rebuilt on a change).
+    view: Mutex<Arc<LiveView>>,
+    /// Where each layer's pattern was as the run went (the closed loops
+    /// and the report's stages read it).
+    stages: Mutex<StageLog>,
     pub start_at: Option<Instant>,
     start_lag: OnceLock<Duration>,
     lease: Option<Arc<Lease>>,
@@ -960,16 +987,21 @@ pub struct Run {
 impl Run {
     pub fn new(params: RunParams) -> Arc<Self> {
         let shard_count = params.threads + 2;
-        let layers = params.scenario.layers.len();
+        // Room for layers added while running.
+        let layers = MAX_LAYERS.max(params.scenario.layers.len());
         let targets = params.targets.len();
         let (done, _) = watch::channel(false);
         let target_weights = cumulative(params.targets.iter().map(|t| t.target.weight));
-        let layer_weights = params
-            .scenario
-            .layers
-            .iter()
-            .map(|l| cumulative(l.source.templates().iter().map(|t| t.weight)))
-            .collect();
+        let controls = params
+            .controls
+            .unwrap_or_else(|| Controls::for_scenario(&params.scenario));
+        let view = Arc::new(LiveView::build(
+            &params.scenario,
+            &controls,
+            &params.id,
+            &params.node_id,
+            params.share,
+        ));
         Arc::new(Self {
             hash: params.scenario.hash(),
             id: params.id,
@@ -1000,7 +1032,6 @@ impl Run {
             report: OnceLock::new(),
             done,
             target_weights,
-            layer_weights,
             layer_sched: (0..layers)
                 .map(|_| [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)])
                 .collect(),
@@ -1010,6 +1041,9 @@ impl Run {
             correlator: params.correlator,
             metrics: params.metrics,
             share: Mutex::new(params.share),
+            controls: Mutex::new(controls),
+            view: Mutex::new(view),
+            stages: Mutex::new(StageLog::default()),
             start_at: params.start_at,
             start_lag: OnceLock::new(),
             lease: params.lease,
@@ -1087,12 +1121,146 @@ impl Run {
 
     /// A new share from the leader (a re-split). Returns whether it changed.
     pub fn set_share(&self, share: Share) -> bool {
-        let mut cur = self.share.lock().unwrap_or_else(|p| p.into_inner());
-        if *cur == share {
-            return false;
+        {
+            let mut cur = self.share.lock().unwrap_or_else(|p| p.into_inner());
+            if *cur == share {
+                return false;
+            }
+            *cur = share;
         }
-        *cur = share;
+        // The phase of `sync: node` patterns follows the share.
+        self.rebuild_view();
         true
+    }
+
+    /// The run as the scheduler evaluates it now: the layers (added ones
+    /// too) with their patterns and live changes.
+    pub fn view(&self) -> Arc<LiveView> {
+        self.view.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    pub fn controls(&self) -> Controls {
+        self.controls
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    fn rebuild_view(&self) {
+        let controls = self.controls();
+        let view = LiveView::build(
+            &self.scenario,
+            &controls,
+            &self.id,
+            &self.node_id,
+            self.share(),
+        );
+        *self.view.lock().unwrap_or_else(|p| p.into_inner()) = Arc::new(view);
+        // A change shows in the stages from the moment it is made.
+        self.note_stages();
+    }
+
+    /// Note where each layer is now (every 100 ms from the scheduler, and
+    /// on every change).
+    fn note_stages(&self) {
+        if self.started.get().is_none() {
+            return;
+        }
+        let mut log = self.stages.lock().unwrap_or_else(|p| p.into_inner());
+        log.note(&self.view(), self.run_secs());
+    }
+
+    /// The layers stop sending: the seconds after (the drain) are in no
+    /// stage.
+    fn end_stages(&self) {
+        let layers = self.view().layers.len();
+        let t = self.run_secs();
+        self.stages
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .end(layers, t);
+    }
+
+    /// Install controls (a change, the closed loops, or the leader's): the
+    /// scheduler applies them on its next pass.
+    pub fn set_controls(&self, controls: Controls) {
+        *self.controls.lock().unwrap_or_else(|p| p.into_inner()) = controls;
+        self.rebuild_view();
+    }
+
+    /// Seconds on the run's clock: since the scheduler started (0 before).
+    pub fn run_secs(&self) -> f64 {
+        self.started
+            .get()
+            .map_or(0.0, |s| s.elapsed().as_secs_f64())
+    }
+
+    /// A live change on a single-node run: checked like a new scenario
+    /// (this node's caps included), then applied on the next pass.
+    pub fn apply_change(&self, change: &Change) -> Result<Controls, Vec<String>> {
+        if !self.is_active() {
+            return Err(vec!["the run has finished".into()]);
+        }
+        let current = self.controls();
+        let next = current.apply(&self.scenario, change, self.run_secs())?;
+        let problems = next.check(&self.scenario, &self.caps, self.share().fraction());
+        if !problems.is_empty() {
+            return Err(problems);
+        }
+        self.set_controls(next.clone());
+        tracing::info!(
+            target: "rustybin::harness",
+            run = %self.id,
+            version = next.version,
+            change = %change.describe(),
+            "harness run changed"
+        );
+        Ok(next)
+    }
+
+    /// Controls from the leader (a cluster member): checked against this
+    /// node's caps for its share. Returns the problems when refused.
+    pub fn follow_controls(&self, controls: Controls) -> Result<(), Vec<String>> {
+        if controls.version <= self.controls().version {
+            return Ok(());
+        }
+        let problems = controls.check(&self.scenario, &self.caps, self.share().fraction());
+        if !problems.is_empty() {
+            return Err(problems);
+        }
+        self.set_controls(controls);
+        Ok(())
+    }
+
+    /// A single-node run's closed loops over the seconds rolled so far
+    /// (`last`: the run ended, judge what is open). A cluster's leader runs
+    /// them on the merged results instead.
+    fn run_loops(&self, last: bool) {
+        if self.cluster.is_some() {
+            return;
+        }
+        let view = self.view();
+        let looping = view.layers.iter().any(|l| {
+            l.compiled.stages.iter().any(|s| {
+                matches!(
+                    s.shape,
+                    super::pattern::Shape::Closed { .. } | super::pattern::Shape::Growth { .. }
+                )
+            })
+        });
+        if !looping {
+            return;
+        }
+        let mut controls = self.controls();
+        let changed = {
+            let totals = self.totals.lock().unwrap_or_else(|p| p.into_inner());
+            let stages = self.stages.lock().unwrap_or_else(|p| p.into_inner());
+            super::live::run_loops(&mut controls, &view, &stages, &totals.timeline, last)
+        };
+        if changed {
+            controls.version += 1;
+            self.set_controls(controls);
+        }
     }
 
     /// This node's virtual clients `(base, count)`: `{{vu}}` runs from
@@ -1149,22 +1317,32 @@ impl Run {
         let totals = self.totals.lock().unwrap_or_else(|p| p.into_inner());
         let last = totals.timeline.last().cloned();
         let latency = Percentiles::from_histogram(&totals.corrected);
-        let layers: Vec<Value> = self
-            .scenario
+        let view = self.view();
+        let share = self.share().fraction();
+        let run_secs = self.run_secs();
+        let layers: Vec<Value> = view
             .layers
             .iter()
             .zip(&totals.layers)
-            .map(|(l, p)| {
+            .enumerate()
+            .map(|(i, (l, p))| {
+                let target_now = match view.level(i, run_secs) {
+                    Level::Run(v) if self.is_active() => Some(v * share),
+                    _ => None,
+                };
                 json!({
-                    "name": l.name,
-                    "model": l.model.as_str(),
+                    "name": l.def.name,
+                    "model": l.def.model.as_str(),
                     "completed": p.counts.completed,
                     "ok": p.counts.ok,
                     "errors": p.counts.errors(),
                     "p99_ms": Percentiles::from_histogram(&p.corrected).p99_ms,
-                    "target_now": l.pattern.value_at(
-                        self.elapsed().saturating_sub(l.starts_after.map_or(Duration::ZERO, |d| d.0))
-                    ),
+                    "target_now": target_now,
+                    "multiplier": l.control.multiplier,
+                    "paused": l.control.paused || view.paused,
+                    "held": l.control.held_at.is_some(),
+                    "removed": l.control.removed,
+                    "stage": view.position(i, run_secs).map(|(s, part)| json!({ "index": s, "part": part, "type": l.compiled.stages.get(s).map(|st| st.kind) })),
                 })
             })
             .collect();
@@ -1178,6 +1356,9 @@ impl Run {
             "state": self.state().as_str(),
             "created_at": self.created_at.to_rfc3339(),
             "elapsed_secs": elapsed,
+            "multiplier": view.multiplier,
+            "paused": view.paused,
+            "controls_version": view.version,
             "planned_secs": planned,
             "progress": if planned > 0.0 { (elapsed / planned).min(1.0) } else { 1.0 },
             "requested": self.requested.load(Ordering::Relaxed),
@@ -1228,13 +1409,15 @@ impl Run {
     /// sequence numbers for the `lost` check.
     pub fn export(&self, timeline_from: usize) -> NodeStats {
         let report = self.report.get();
+        let nlayers = self.view().layers.len();
+        let controls_version = self.controls().version;
         let totals = self.totals.lock().unwrap_or_else(|p| p.into_inner());
         let part = |p: &PartShard| WirePart {
             counts: p.counts.clone(),
             corrected: WireHist::encode(&p.corrected),
             overhead: WireHist::encode(&p.overhead),
         };
-        let mut layers: Vec<WirePart> = totals.layers.iter().map(part).collect();
+        let mut layers: Vec<WirePart> = totals.layers.iter().take(nlayers).map(part).collect();
         for (w, c) in layers.iter_mut().zip(&self.layer_sched) {
             w.counts.requested = c[0].load(Ordering::Relaxed);
             w.counts.sent = c[1].load(Ordering::Relaxed);
@@ -1303,6 +1486,7 @@ impl Run {
                 .unwrap_or_default(),
             failed_seqs,
             failed_untracked,
+            controls_version,
         }
     }
 
@@ -1327,7 +1511,10 @@ impl Run {
     }
 
     fn pick_template(&self, layer: usize, seq: u64) -> usize {
-        self.layer_weights.get(layer).map_or(0, |w| pick(w, seq))
+        self.view()
+            .layers
+            .get(layer)
+            .map_or(0, |l| pick(&l.weights, seq))
     }
 
     fn expand(&self, text: &str, layer: &str, seq: u64, vu: u32) -> String {
@@ -1362,7 +1549,8 @@ impl Run {
         vu: u32,
     ) -> Result<Built, String> {
         use axum::http::{HeaderMap, HeaderName, HeaderValue};
-        let layer = &self.scenario.layers[layer_idx];
+        let view = self.view();
+        let layer = &view.layers.get(layer_idx).ok_or("the layer is gone")?.def;
         let path = self.expand(&tpl.path, &layer.name, seq, vu);
         let uri: Uri = format!("{}{}{}", target.authority, target.parsed.path, path)
             .parse()
@@ -1456,8 +1644,9 @@ impl Run {
         self.set_state(State::Running);
     }
 
-    /// Roll every shard into the totals and one timeline bucket.
-    fn roll(&self, bucket: &mut SchedBucket, start: Instant, lag: &mut Histogram<u64>) {
+    /// Roll every shard into the totals and one timeline bucket: the
+    /// second `bucket`, with the scheduler lag of its sends.
+    fn roll(&self, bucket: &SchedBucket, lag: &Histogram<u64>) {
         let mut merged = histogram(3);
         let mut merged_service = histogram(3);
         let mut merged_upstream = histogram(3);
@@ -1527,9 +1716,8 @@ impl Run {
                 inflight: self.inflight.load(Ordering::Relaxed) as i64,
             });
         }
-        let _ = totals.lag.add(&*lag);
+        let _ = totals.lag.add(lag);
         let lag_p = Percentiles::from_histogram(lag);
-        lag.reset();
         let p = Percentiles::from_histogram(&merged);
         let width = bucket
             .end
@@ -1628,14 +1816,6 @@ impl Run {
         } else {
             totals.timeline.push(entry);
         }
-        drop(totals);
-        let elapsed = start.elapsed();
-        *bucket = SchedBucket {
-            start: bucket.end,
-            end: bucket.end + Duration::from_secs(1),
-            ..SchedBucket::default()
-        };
-        let _ = elapsed;
     }
 
     /// Build the final report, store it and finish the run.
@@ -1724,14 +1904,16 @@ impl Run {
                 })
                 .collect()
         };
-        let mut layers = breakdown(
-            self.scenario
-                .layers
-                .iter()
-                .map(|l| l.name.clone())
-                .collect(),
-            &totals.layers,
+        // The layers as they ran (added ones too), and their stages.
+        let view = self.view();
+        let controls = self.controls();
+        let names: Vec<String> = view.layers.iter().map(|l| l.def.name.clone()).collect();
+        let stages = report::stage_reports(
+            &totals.timeline,
+            &names,
+            &self.stages.lock().unwrap_or_else(|p| p.into_inner()),
         );
+        let mut layers = breakdown(names, &totals.layers);
         for (b, c) in layers.iter_mut().zip(&self.layer_sched) {
             b.counts.requested = c[0].load(Ordering::Relaxed);
             b.counts.sent = c[1].load(Ordering::Relaxed);
@@ -1794,6 +1976,9 @@ impl Run {
                 &serde_json::to_value(&self.scenario).unwrap_or(Value::Null),
             ),
             cluster: None,
+            findings: controls.findings.clone(),
+            changes: controls.log.clone(),
+            stages,
         };
         drop(totals);
         if let Some(dir) = &self.report_dir {
@@ -1867,6 +2052,90 @@ struct SchedBucket {
     not_sent: u64,
 }
 
+/// A second that ended, for the roller.
+struct RollJob {
+    bucket: SchedBucket,
+    lag: Histogram<u64>,
+    /// Run the closed loops after it (not while draining).
+    loops: bool,
+}
+
+/// Rolls each second into the totals and the timeline off the scheduler
+/// thread: merging histograms walks all their buckets (a few milliseconds
+/// a second in a release build, tens in a debug one), and the send times
+/// must not wait for it. Rolls inline when the thread cannot start.
+struct Roller {
+    tx: Option<SyncSender<RollJob>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Roller {
+    fn start(run: &Arc<Run>) -> Self {
+        let (tx, rx) = sync_channel::<RollJob>(ROLL_QUEUE);
+        let worker = run.clone();
+        let spawned = std::thread::Builder::new()
+            .name("rustybin-harness-roll".into())
+            .spawn(move || {
+                for job in rx {
+                    worker.roll(&job.bucket, &job.lag);
+                    if job.loops {
+                        worker.run_loops(false);
+                    }
+                }
+            });
+        match spawned {
+            Ok(handle) => Self {
+                tx: Some(tx),
+                handle: Some(handle),
+            },
+            Err(e) => {
+                tracing::warn!(
+                    target: "rustybin::harness",
+                    run = %run.id,
+                    "harness: no roller thread ({e}); the scheduler rolls each second itself"
+                );
+                Self {
+                    tx: None,
+                    handle: None,
+                }
+            }
+        }
+    }
+
+    /// Hand the second that ended to the roller and start the next one.
+    fn roll(&self, run: &Run, bucket: &mut SchedBucket, lag: &mut Histogram<u64>, loops: bool) {
+        let next = SchedBucket {
+            start: bucket.end,
+            end: bucket.end + Duration::from_secs(1),
+            ..SchedBucket::default()
+        };
+        let job = RollJob {
+            bucket: std::mem::replace(bucket, next),
+            lag: std::mem::replace(lag, histogram(3)),
+            loops,
+        };
+        let job = match &self.tx {
+            Some(tx) => match tx.send(job) {
+                Ok(()) => return,
+                Err(e) => e.0,
+            },
+            None => job,
+        };
+        run.roll(&job.bucket, &job.lag);
+        if job.loops {
+            run.run_loops(false);
+        }
+    }
+
+    /// Wait until every second handed over is rolled.
+    fn finish(mut self) {
+        drop(self.tx.take());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 /// Why a request failed, as a bounded set of kinds.
 fn classify_error(e: &hyper_util::client::legacy::Error) -> &'static str {
     if e.is_connect() {
@@ -1938,8 +2207,12 @@ async fn send_one(run: Arc<Run>, job: Job) {
         intended,
         start,
     } = job;
-    let layer = &run.scenario.layers[layer_idx];
-    let templates = layer.source.templates();
+    let view = run.view();
+    let Some(live) = view.layers.get(layer_idx) else {
+        run.inflight.fetch_sub(1, Ordering::Relaxed);
+        return;
+    };
+    let templates = live.def.source.templates();
     let Some(tpl) = templates.get(tpl_idx).copied() else {
         run.inflight.fetch_sub(1, Ordering::Relaxed);
         return;
@@ -2061,8 +2334,9 @@ struct User {
 
 struct LayerSched {
     idx: usize,
-    starts_after: Duration,
     finished: bool,
+    /// Open: the fraction of the next request the rate has paid so far.
+    credit: f64,
     seq: u64,
     model: Model,
     /// Open: the next intended send (offset from the run start).
@@ -2074,17 +2348,18 @@ struct LayerSched {
 }
 
 impl LayerSched {
-    fn new(idx: usize, layer: &Layer) -> Self {
-        let starts_after = layer.starts_after.map_or(Duration::ZERO, |d| d.0);
+    /// A layer whose pattern starts at run time `starts_at` (seconds).
+    fn new(idx: usize, layer: &Layer, starts_at: f64) -> Self {
+        let starts_at = Duration::from_secs_f64(starts_at.max(0.0));
         Self {
             idx,
-            starts_after,
             finished: false,
+            credit: 0.0,
             seq: 0,
             model: layer.model,
-            next_at: starts_after,
+            next_at: starts_at,
             users: Vec::new(),
-            next_adjust: starts_after,
+            next_adjust: starts_at,
             vu_cursor: 0,
         }
     }
@@ -2113,23 +2388,37 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
     run.mark_started();
     let start = Instant::now();
     let total_vus = run.scenario.scale.virtual_clients;
-    let mut layers: Vec<LayerSched> = run
-        .scenario
-        .layers
-        .iter()
-        .enumerate()
-        .map(|(i, l)| LayerSched::new(i, l))
-        .collect();
+    // One per layer of the view; layers added while running join here.
+    let mut layers: Vec<LayerSched> = Vec::new();
     let mut bucket = SchedBucket {
         start: Duration::ZERO,
         end: Duration::from_secs(1),
         ..SchedBucket::default()
     };
     let mut lag = histogram(3);
+    let roller = Roller::start(&run);
     let mut vu_cursor: u32 = 0;
+    let max_duration = run.caps.max_duration();
+    let mut next_note = Duration::ZERO;
     loop {
         if run.stop_requested() {
             break;
+        }
+        // The layers, their patterns and the live changes, as of now.
+        let view = run.view();
+        if let Some(reason) = &view.stop {
+            run.stop(reason);
+            break;
+        }
+        // A run never outlasts the node's duration cap (a held pattern
+        // would).
+        if start.elapsed() >= max_duration {
+            run.stop("max_duration");
+            break;
+        }
+        while layers.len() < view.layers.len() {
+            let l = &view.layers[layers.len()];
+            layers.push(LayerSched::new(layers.len(), &l.def, l.starts_at));
         }
         // The share can change mid-run (the leader re-splits the rate).
         let part = run.share();
@@ -2138,33 +2427,65 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
         let (vu_base, vu_count) = part.virtual_clients(total_vus);
         let vu_count = vu_count.max(1);
         let now = start.elapsed();
+        if now >= next_note {
+            run.note_stages();
+            next_note = now + NOTE_EVERY;
+        }
         if now >= bucket.end {
-            run.roll(&mut bucket, start, &mut lag);
+            roller.roll(&run, &mut bucket, &mut lag, true);
             continue;
         }
-        let mut earliest = bucket.end;
+        let mut earliest = bucket.end.min(next_note);
         let mut all_finished = true;
         for layer in layers.iter_mut().filter(|l| !l.finished) {
             all_finished = false;
-            let def = &run.scenario.layers[layer.idx];
+            let Some(live) = view.layers.get(layer.idx) else {
+                layer.finished = true;
+                continue;
+            };
             match layer.model {
                 Model::Open => {
+                    // `next_at` is a cursor: the rate's integral up to it is
+                    // in `credit`. A request is due when the credit reaches
+                    // one, so a curve that climbs from zero is followed
+                    // second by second. Steps are at most 10 ms and never
+                    // cross a pattern edge (a burst starts on time).
+                    let mut wake = None;
                     while layer.next_at <= now && !layer.finished {
-                        let intended = start + layer.next_at;
-                        let Some(rate) = def
-                            .pattern
-                            .value_at(layer.next_at.saturating_sub(layer.starts_after))
-                        else {
-                            layer.finished = true;
-                            break;
+                        let t = layer.next_at.as_secs_f64();
+                        let rate = match view.level(layer.idx, t) {
+                            Level::Ended => {
+                                layer.finished = true;
+                                break;
+                            }
+                            Level::Waiting => 0.0,
+                            Level::Run(r) => r,
                         };
                         let rate = if whole { rate } else { rate * share };
+                        let edge = view.next_boundary(layer.idx, t);
+                        let step = (edge - t).clamp(1e-6, RATE_STEP);
                         if rate <= 0.0 {
-                            // Skip ahead to where the pattern sends again.
-                            layer.next_at += Duration::from_millis(10);
+                            // Nothing to send: on to the next edge or step.
+                            layer.next_at += Duration::from_secs_f64(step);
                             continue;
                         }
-                        lag.saturating_record(micros(now.saturating_sub(layer.next_at)));
+                        let to_next = (1.0 - layer.credit).max(0.0) / rate;
+                        if to_next > step {
+                            // The rate may change before then: bank the step.
+                            layer.credit += rate * step;
+                            layer.next_at += Duration::from_secs_f64(step);
+                            continue;
+                        }
+                        let due = layer.next_at + Duration::from_secs_f64(to_next);
+                        if due > now {
+                            // Sleep until it is due (the cursor stays).
+                            wake = Some(due);
+                            break;
+                        }
+                        layer.next_at = due;
+                        layer.credit = 0.0;
+                        let intended = start + due;
+                        lag.saturating_record(micros(now.saturating_sub(due)));
                         bucket.requested += 1;
                         run.requested.fetch_add(1, Ordering::Relaxed);
                         let seq = run.seq.fetch_add(1, Ordering::Relaxed);
@@ -2179,7 +2500,7 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
                             run.count_layer(layer.idx, true);
                             let vu = vu_base + vu_cursor % vu_count;
                             vu_cursor = vu_cursor.wrapping_add(1);
-                            let tpl = run.pick_template(layer.idx, layer.seq);
+                            let tpl = pick(&live.weights, layer.seq);
                             let target = run.pick_target(seq);
                             handle.spawn(send_one(
                                 run.clone(),
@@ -2195,24 +2516,23 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
                             ));
                         }
                         layer.seq += 1;
-                        layer.next_at += Duration::from_secs_f64(1.0 / rate);
                     }
                     if !layer.finished {
-                        earliest = earliest.min(layer.next_at);
+                        earliest = earliest.min(wake.unwrap_or(layer.next_at));
                     }
                 }
                 Model::Closed => {
                     if layer.next_adjust <= now {
-                        let t = now.saturating_sub(layer.starts_after);
-                        match def.pattern.value_at(t) {
-                            None => {
+                        match view.level(layer.idx, now.as_secs_f64()) {
+                            Level::Ended => {
                                 for u in layer.users.drain(..) {
                                     u.stop.store(true, Ordering::Relaxed);
                                 }
                                 layer.finished = true;
                                 continue;
                             }
-                            Some(users) => {
+                            Level::Waiting => {}
+                            Level::Run(users) => {
                                 let desired = part
                                     .users(users)
                                     .min(vu_count as usize)
@@ -2222,8 +2542,10 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
                                         u.stop.store(true, Ordering::Relaxed);
                                     }
                                 }
-                                let end = start + layer.starts_after + def.pattern.duration();
-                                let think = def.think_time.map_or(Duration::ZERO, |d| d.0);
+                                // Users end when the scheduler stops them (the
+                                // pattern's end moves with live changes).
+                                let end = start + max_duration;
+                                let think = live.def.think_time.map_or(Duration::ZERO, |d| d.0);
                                 while layer.users.len() < desired {
                                     let stop = Arc::new(AtomicBool::new(false));
                                     let vu = vu_base + layer.vu_cursor % vu_count;
@@ -2247,7 +2569,7 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
                 }
             }
         }
-        if all_finished {
+        if all_finished && layers.len() >= view.layers.len() {
             break;
         }
         let now = start.elapsed();
@@ -2255,6 +2577,7 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
             std::thread::sleep((earliest - now).min(MAX_SLEEP));
         }
     }
+    run.end_stages();
     // Stop the users of closed layers and drain what is in flight.
     for layer in &mut layers {
         for u in layer.users.drain(..) {
@@ -2265,13 +2588,15 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
     let drain_until = Instant::now() + run.scenario.timeout() + DRAIN_GRACE;
     while run.inflight.load(Ordering::Relaxed) > 0 && Instant::now() < drain_until {
         if start.elapsed() >= bucket.end {
-            run.roll(&mut bucket, start, &mut lag);
+            roller.roll(&run, &mut bucket, &mut lag, false);
         }
         std::thread::sleep(Duration::from_millis(5));
     }
     // The last, partial bucket.
     bucket.end = start.elapsed().max(bucket.start + Duration::from_millis(1));
-    run.roll(&mut bucket, start, &mut lag);
+    roller.roll(&run, &mut bucket, &mut lag, false);
+    roller.finish();
+    run.run_loops(true);
     run.finish(start, cpu_before, None);
 }
 

@@ -46,6 +46,9 @@ pub async fn lead(h: Weak<Harness>, cluster: Weak<Cluster>) {
         }
         c.tick();
         hand_back(&h, &c);
+        for event in c.take_hook_requests() {
+            spawn_hook(&h, &c, event);
+        }
         let quorum = c.has_quorum();
         if quorum != had_quorum {
             had_quorum = quorum;
@@ -72,6 +75,53 @@ fn hand_back(h: &Arc<Harness>, c: &Cluster) {
     c.shed_own_load(|run_id| {
         if let Some(run) = h.run(run_id).filter(|r| r.is_active()) {
             run.stop("handed its share back: this node leads the cluster now");
+        }
+    });
+}
+
+/// Send a `scale_request` to the controller hook (`RUSTYBIN_HARNESS_SCALE_HOOK`):
+/// only to an address the node's allowlist allows (and never a forbidden
+/// one), signed with the cluster secret (`X-Rustybin-Signature: sha256=<hex>`
+/// of the body). Best effort: the run waits for nodes either way.
+fn spawn_hook(h: &Arc<Harness>, c: &Cluster, event: serde_json::Value) {
+    let Some(url) = h.config.scale_hook.clone() else {
+        return;
+    };
+    let body = serde_json::to_vec(&event).unwrap_or_default();
+    let signature = format!("sha256={}", c.sign(&body));
+    let cluster = c.id.clone();
+    let h = h.clone();
+    tokio::spawn(async move {
+        let parsed = match super::safety::parse_target_url(&url) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(target: "rustybin::harness", %cluster, "harness scale hook not called: {e}");
+                return;
+            }
+        };
+        if let Err(e) = super::safety::pin(&parsed, &h.allowlist).await {
+            tracing::warn!(target: "rustybin::harness", %cluster, "harness scale hook not called: {e} (the hook must be in RUSTYBIN_HARNESS_TARGETS)");
+            return;
+        }
+        let Ok(client) = super::member::http_client() else {
+            return;
+        };
+        let sent = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("x-rustybin-signature", signature)
+            .header("x-rustybin-cluster", cluster.clone())
+            .timeout(Duration::from_secs(5))
+            .body(body)
+            .send()
+            .await;
+        match sent {
+            Ok(r) => {
+                tracing::info!(target: "rustybin::harness", %cluster, status = %r.status(), "harness scale request sent to the hook")
+            }
+            Err(e) => {
+                tracing::warn!(target: "rustybin::harness", %cluster, "harness scale hook failed: {e}")
+            }
         }
     });
 }

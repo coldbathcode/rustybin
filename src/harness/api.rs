@@ -119,14 +119,37 @@ fn scenario_listing(name: &str, text: &str) -> Value {
     }
 }
 
-/// `GET /_rustybin/harness/scenarios`.
-pub async fn list_scenarios() -> Response {
+/// `GET /_rustybin/harness/scenarios`: the built-in scenarios and the ones
+/// saved on this node.
+pub async fn list_scenarios(State(state): State<AppState>) -> Response {
+    let saved: Vec<Value> = state
+        .harness
+        .as_ref()
+        .map(|h| {
+            h.saved
+                .list()
+                .into_iter()
+                .map(|s| {
+                    let mut sc = s.scenario.clone();
+                    sc.normalise();
+                    json!({
+                        "name": s.name,
+                        "description": sc.description,
+                        "builtin": false,
+                        "saved_at": s.saved_at,
+                        "summary": sc.summary(),
+                        "links": { "self": format!("{PREFIX}/scenarios/{}", s.name) },
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Json(json!({
         "scenarios": builtin_scenarios()
             .iter()
             .map(|(name, text)| scenario_listing(name, text))
             .collect::<Vec<_>>(),
-        "saved": [],
+        "saved": saved,
     }))
     .into_response()
 }
@@ -137,13 +160,28 @@ pub struct FormatQuery {
     pub format: Option<String>,
 }
 
-/// `GET /_rustybin/harness/scenarios/{name}`.
-pub async fn get_scenario(Path(name): Path<String>, Query(q): Query<FormatQuery>) -> Response {
+/// `GET /_rustybin/harness/scenarios/{name}`: a built-in or saved scenario.
+pub async fn get_scenario(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<FormatQuery>,
+) -> Response {
     let Some((_, text)) = builtin_scenarios().iter().find(|(n, _)| *n == name) else {
-        return error(
-            StatusCode::NOT_FOUND,
-            format!("no built-in scenario {name:?}"),
-        );
+        let saved = state.harness.as_ref().and_then(|h| h.saved.get(&name));
+        return match saved {
+            Some(s) => match q.format.as_deref() {
+                Some("yaml") | Some("yml") => (
+                    [(header::CONTENT_TYPE, "application/yaml; charset=utf-8")],
+                    serde_yaml::to_string(&s.scenario).unwrap_or_default(),
+                )
+                    .into_response(),
+                _ => Json(serde_json::to_value(&s.scenario).unwrap_or(Value::Null)).into_response(),
+            },
+            None => error(
+                StatusCode::NOT_FOUND,
+                format!("no built-in or saved scenario {name:?}"),
+            ),
+        };
     };
     match q.format.as_deref() {
         Some("yaml") | Some("yml") => (
@@ -1005,4 +1043,356 @@ pub async fn node_elected(
             format!("no cluster {id:?} on this node"),
         ),
     }
+}
+
+// ── Phase 4: live changes, preview, saved scenarios, the run feed ──
+
+/// A live change body: JSON (or YAML).
+#[allow(clippy::result_large_err)]
+fn parse_change(body: &Bytes) -> Result<super::live::Change, Response> {
+    let text = std::str::from_utf8(body)
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "the change must be UTF-8 text"))?;
+    serde_json::from_str(text)
+        .or_else(|_| serde_yaml::from_str(text))
+        .map_err(|e| error(StatusCode::BAD_REQUEST, format!("invalid change: {e}")))
+}
+
+fn problems(status: StatusCode, error: &str, problems: Vec<String>) -> Response {
+    (
+        status,
+        Json(json!({ "error": error, "problems": problems })),
+    )
+        .into_response()
+}
+
+/// `PATCH /_rustybin/harness/runs/{run}`: a live change of a single-node run.
+pub async fn patch_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = guard_mutation(&state, &headers) {
+        return resp;
+    }
+    let Some(run) = h.run(&id) else {
+        return error(StatusCode::NOT_FOUND, format!("no run {id:?} on this node"));
+    };
+    if run.cluster.is_some() {
+        return error(
+            StatusCode::CONFLICT,
+            "this run is part of a cluster run: change it on the leader (PATCH .../clusters/{id}/runs/{run})",
+        );
+    }
+    let change = match parse_change(&body) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match run.apply_change(&change) {
+        Ok(controls) => Json(json!({
+            "run_id": id,
+            "applied": change.describe(),
+            "controls": controls,
+        }))
+        .into_response(),
+        Err(p) if !run.is_active() => problems(StatusCode::CONFLICT, "the run has finished", p),
+        Err(p) => problems(StatusCode::BAD_REQUEST, "the change was refused", p),
+    }
+}
+
+/// `PATCH /_rustybin/harness/clusters/{id}/runs/{run}`: a live change of a
+/// cluster run; every client node follows it on its next heartbeat.
+pub async fn patch_cluster_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, run_id)): Path<(String, String)>,
+    req_uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = guard_mutation(&state, &headers) {
+        return resp;
+    }
+    let c = match led_cluster(&h, &id, req_uri.path()) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    let change = match parse_change(&body) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match c.change_run(&run_id, &change) {
+        Ok((run, controls)) => Json(json!({
+            "run_id": run.id,
+            "cluster_id": c.id,
+            "applied": change.describe(),
+            "controls": controls,
+        }))
+        .into_response(),
+        Err(e) => run_error(e),
+    }
+}
+
+/// `POST /_rustybin/harness/preview`: the expected rate per second per layer
+/// and in total, without sending anything (works with harness mode off).
+pub async fn preview(State(state): State<AppState>, body: Bytes) -> Response {
+    let mut scenario = match parse_body(&body) {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    scenario.normalise();
+    let caps = caps_of(&state);
+    let problems = scenario.validate(&caps);
+    let mut v = scenario.preview();
+    v["valid"] = json!(problems.is_empty());
+    v["problems"] = json!(problems);
+    v["caps"] = json!(caps);
+    Json(v).into_response()
+}
+
+/// `PUT /_rustybin/harness/scenarios/{name}`: save a scenario (validated
+/// against this node's caps) under a name.
+pub async fn put_scenario(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = guard_mutation(&state, &headers) {
+        return resp;
+    }
+    if builtin_scenarios().iter().any(|(n, _)| *n == name) {
+        return error(
+            StatusCode::CONFLICT,
+            format!("{name:?} is a built-in scenario: save the copy under another name"),
+        );
+    }
+    let scenario = match parse_body(&body) {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let mut check = scenario.clone();
+    check.normalise();
+    let p = check.validate(&h.caps());
+    if !p.is_empty() {
+        return problems(StatusCode::BAD_REQUEST, "the scenario has problems", p);
+    }
+    match h.saved.put(&name, scenario) {
+        Ok(created) => (
+            if created {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            },
+            Json(json!({
+                "name": name,
+                "saved": true,
+                "summary": check.summary(),
+                "links": { "self": format!("{PREFIX}/scenarios/{name}") },
+            })),
+        )
+            .into_response(),
+        Err(e) => error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+/// `DELETE /_rustybin/harness/scenarios/{name}`.
+pub async fn delete_scenario(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = guard_mutation(&state, &headers) {
+        return resp;
+    }
+    if builtin_scenarios().iter().any(|(n, _)| *n == name) {
+        return error(StatusCode::CONFLICT, "built-in scenarios cannot be deleted");
+    }
+    if h.saved.delete(&name) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        error(StatusCode::NOT_FOUND, format!("no saved scenario {name:?}"))
+    }
+}
+
+/// Events for a run feed: the new log entries and findings since `seen`.
+fn control_events(
+    controls: &super::live::Controls,
+    seen_log: &mut usize,
+    seen_findings: &mut usize,
+) -> Vec<axum::response::sse::Event> {
+    use axum::response::sse::Event;
+    let mut out = Vec::new();
+    // The log is bounded (oldest dropped): look for entries by version.
+    let new: Vec<&super::live::LogEntry> = controls
+        .log
+        .iter()
+        .filter(|e| e.version as usize > *seen_log)
+        .collect();
+    for e in new {
+        *seen_log = e.version as usize;
+        if let Ok(ev) = Event::default().event("change").json_data(e) {
+            out.push(ev);
+        }
+    }
+    for f in controls.findings.iter().skip(*seen_findings) {
+        if let Ok(ev) = Event::default().event("finding").json_data(f) {
+            out.push(ev);
+        }
+    }
+    *seen_findings = controls.findings.len();
+    out
+}
+
+/// `GET /_rustybin/harness/runs/{run}/events`: the run's feed: a `snapshot`
+/// every second, `change` and `finding` events, and `finished` with the
+/// report's summary, after which the stream ends. The console reads it with
+/// `send({stream: true})` (control-plane feeds need their credential).
+pub async fn run_events(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    let Some(run) = h.run(&id) else {
+        return error(StatusCode::NOT_FOUND, format!("no run {id:?} on this node"));
+    };
+    let until = std::time::Instant::now()
+        + run.scenario.duration()
+        + h.caps().max_duration()
+        + std::time::Duration::from_secs(60);
+    let stream = async_stream::stream! {
+        let mut seen_log = 0usize;
+        let mut seen_findings = 0usize;
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            tick.tick().await;
+            for ev in control_events(&run.controls(), &mut seen_log, &mut seen_findings) {
+                yield Ok::<Event, std::convert::Infallible>(ev);
+            }
+            if let Ok(ev) = Event::default()
+                .event("snapshot")
+                .json_data(super::engine::with_links(run.snapshot(), PREFIX, &run.id))
+            {
+                yield Ok(ev);
+            }
+            if let Some(report) = run.report() {
+                if let Ok(ev) = Event::default().event("finished").json_data(json!({
+                    "run_id": run.id,
+                    "state": report.state,
+                    "passed": report.passed,
+                    "exit_code": report.exit_code,
+                    "report": format!("{PREFIX}/runs/{}/report", run.id),
+                })) {
+                    yield Ok(ev);
+                }
+                break;
+            }
+            if std::time::Instant::now() > until {
+                break;
+            }
+        }
+    };
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// `GET /_rustybin/harness/clusters/{id}/runs/{run}/events`: the cluster
+/// run's feed, like a single node's, plus `leader_changed` (this node no
+/// longer leads: the event names the new leader, then the stream ends; a
+/// controller reconnects there) and `scale_request`.
+pub async fn cluster_run_events(
+    State(state): State<AppState>,
+    Path((id, run_id)): Path<(String, String)>,
+    req_uri: axum::http::Uri,
+) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    let c = match led_cluster(&h, &id, req_uri.path()) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    let Some(run) = c.run(&run_id) else {
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("no run {run_id:?} in cluster {id}"),
+        );
+    };
+    let until = std::time::Instant::now()
+        + run.scenario.duration()
+        + h.caps().max_duration()
+        + std::time::Duration::from_secs(60);
+    let h2 = h.clone();
+    let stream = async_stream::stream! {
+        let mut seen_log = 0usize;
+        let mut seen_findings = 0usize;
+        let mut seen_scale = 0usize;
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            tick.tick().await;
+            if c.is_stale() || h2.coordinator.get(&c.id).is_none_or(|led| !Arc::ptr_eq(&led, &c)) {
+                let leader = h2.membership().map(|m| m.leader());
+                let control_url = leader
+                    .as_ref()
+                    .and_then(|l| l.control_url.clone())
+                    .map(|u| format!("{}{PREFIX}/clusters/{}/runs/{}/events", u.trim_end_matches('/'), c.id, run.id));
+                if let Ok(ev) = Event::default().event("leader_changed").json_data(json!({
+                    "leader": leader,
+                    "events": control_url,
+                })) {
+                    yield Ok::<Event, std::convert::Infallible>(ev);
+                }
+                break;
+            }
+            for ev in control_events(&c.run_controls(&run), &mut seen_log, &mut seen_findings) {
+                yield Ok(ev);
+            }
+            for req in c.scale_requests(&run).into_iter().skip(seen_scale) {
+                seen_scale += 1;
+                if let Ok(ev) = Event::default().event("scale_request").json_data(req) {
+                    yield Ok(ev);
+                }
+            }
+            if let Ok(ev) = Event::default().event("snapshot").json_data(c.run_snapshot(&run)) {
+                yield Ok(ev);
+            }
+            if let Some(report) = run.report() {
+                if let Ok(ev) = Event::default().event("finished").json_data(json!({
+                    "run_id": run.id,
+                    "state": report.state,
+                    "passed": report.passed,
+                    "exit_code": report.exit_code,
+                    "report": format!("{PREFIX}/clusters/{}/runs/{}/report", c.id, run.id),
+                })) {
+                    yield Ok(ev);
+                }
+                break;
+            }
+            if std::time::Instant::now() > until {
+                break;
+            }
+        }
+    };
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }

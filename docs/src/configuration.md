@@ -222,6 +222,8 @@ control plane is protected, and follows the admin token on an open one.
 | `RUSTYBIN_HARNESS_THREADS` | half the cores (`both`), all but one (client only) | Worker threads of the engine runtime; the scheduler has its own thread. |
 | `RUSTYBIN_HARNESS_DATA_PLANE` | `on` | `off` on a client-only node serves only `/`, `/_rustybin/*`, `/ui` and the verification path. |
 | `RUSTYBIN_HARNESS_REPORT_DIR` | unset | Every final report is also written here as `<run_id>.json`. |
+| `RUSTYBIN_HARNESS_STATE_DIR` | unset | Saved scenarios are also written here (`scenarios/<name>.json`) and loaded at startup; without it they live in memory. |
+| `RUSTYBIN_HARNESS_SCALE_HOOK` | unset | Where the leader of a cluster POSTs a run's `scale_request` when `scale.client_nodes` is `auto` and its client nodes are not enough (`http` or `https`; the host must be allowed by `RUSTYBIN_HARNESS_TARGETS`). Set it on every node that may lead. See below for the signature. |
 | `RUSTYBIN_HARNESS_SCENARIO` | unset | Headless mode: the scenario file to run at startup. |
 | `RUSTYBIN_HARNESS_START` | `manual` | `immediately` starts the scenario once the node is up; `on-quorum` on a coordinator waits until the nodes the scenario asks for (`scale.client_nodes`, `scale.server_nodes`) have joined its cluster (on a single node it is the same as `immediately`). |
 | `RUSTYBIN_HARNESS_REPORT` | unset | Headless mode: where the final report goes (`-` for stdout, else a file). |
@@ -288,6 +290,60 @@ the leader) to rejoin the cluster. The node routes
 (`.../nodes`, `.../nodes/<node>/heartbeat`, `.../election/vote` and
 `.../election/elected`) authenticate with the join token and the node credential
 instead of the control-plane credentials.
+
+Each layer's `pattern` says how hard it pushes over time, as a rate (open model) or
+a number of users (closed model):
+
+| Pattern | Parameters |
+|---|---|
+| `constant` | `rate`, `for` |
+| `ramp` | `from`, `to`, `over`, `curve: linear \| exponential` |
+| `step` | `start`, `step`, `every`, `max`, `hold` (how much longer the last plateau lasts); each plateau is reported on its own |
+| `target` | `rate` or `users`, reached `within` and held for `hold`; or `overhead_p99_ms` (a closed loop: the rate moves every second toward the gateway overhead goal, from `start` up to `max`) |
+| `breakpoint` | `start`, `growth` (a fraction per plateau), `every`, `until` (`error_rate`, `latency_p99_ms`, `overhead_p99_ms`), `max`: the run stops at the first plateau that fails and reports the last good rate |
+| `spike` | `base`, `peak`, `rise`, `hold`, `fall`, `recover` |
+| `pulse` | `high`, `low`, `on`, `off`, `cycles` |
+| `burst` | `base`, `size` requests sent `within` a window, `every`, `for` |
+| `wave` | `min`, `max`, `period`, `shape: sine \| triangle \| sawtooth`, `for` |
+
+Patterns chain with `then:` (up to 16 stages). Every pattern takes `jitter` (0 to 1: each
+second the value varies by up to that fraction, the same on every node for a given run)
+and `sync`: `cluster` (the default) has every client node follow the curve in lockstep
+on the cluster clock, so a burst reaches the gateway as one burst; `node` gives each node
+its own phase and its own jitter, which spreads the load. `POST /_rustybin/harness/preview`
+returns the expected requests per second of a scenario, each layer and the total, from
+the pattern math (one point per second, coarser past an hour). The built-in scenarios
+include `step-plateaus`, `breakpoint`, `spike-and-recover`, `pulse`, `burst` and
+`daily-wave`; `PUT /_rustybin/harness/scenarios/<name>` saves your own next to them
+(validated, at most 100 per node, kept in `RUSTYBIN_HARNESS_STATE_DIR` when set) and
+`DELETE` removes one.
+
+A running run takes changes without stopping: `PATCH /_rustybin/harness/runs/<run>` (or
+`.../clusters/<id>/runs/<run>`) with any of `rate_multiplier` (0 to 10), `pause`,
+`resume`, `hold` (freeze the pattern where it is; `false` releases it), `skip_stage`,
+`set` (`{"<layer>.pattern.<field>": value}`; `then.` reaches the next stage of a chain),
+`add_layer` and `remove_layer`, for the whole run or one `layer`. A change is checked
+like a new scenario, against the caps of every client node for its share, applied on
+the scheduler's next pass (in a cluster, the heartbeats bring it to every node at once),
+logged with the run time it was made at, and carried in the snapshot, so it survives a
+failover. The report lists the changes, the findings of the closed loops and every
+stage as it ran (a hold stretches its stage, a skip cuts it short) with the run's
+results in each. `GET .../runs/<run>/events` is the run's feed (server-sent events):
+a `snapshot` every second, `change`, `finding` and `finished`, plus `leader_changed`
+and `scale_request` for a cluster run.
+
+`scale.client_nodes: auto` lets the leader size a cluster run: when the client nodes
+it has cannot carry the run's peak rate (their `RUSTYBIN_HARNESS_MAX_RATE`, or
+`scale.max_rate_per_node` when lower), the run waits and the leader emits a
+`scale_request` (`needed_client_nodes`, `client_nodes`, `reason`) on the feed and, with
+`RUSTYBIN_HARNESS_SCALE_HOOK`, POSTs it to the hook with `X-Rustybin-Cluster: <id>` and
+`X-Rustybin-Signature: sha256=<hex>`, the HMAC-SHA256 of the body keyed with the hex
+SHA-256 of the cluster's join token. A controller that provisions nodes makes them join;
+the run starts once they are there, or after `scale.scale_timeout` (5 minutes by
+default) undersized, with a warning in the report. Rustybin never starts machines
+itself. `scale.connections_per_client` caps the keep-alive connections of each virtual
+client (the pool per target is the node's virtual clients times this, within the in-flight cap), which sets
+how many connections the gateway sees.
 
 The same engine runs from the command line: `rustybin harness run scenario.yaml
 --local-server` loops a scenario through an in-process Rustybin, `rustybin harness

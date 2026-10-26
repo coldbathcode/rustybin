@@ -536,11 +536,13 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 |---|---|---|
 | GET | `/_rustybin/harness` | Harness node status: roles, caps, allowlist, the active run |
 | GET | `/_rustybin/harness/schema` | JSON Schema of a scenario, with this node's caps as bounds |
-| GET | `/_rustybin/harness/scenarios` | The built-in scenarios (smoke, ramp-to-target, soak, closed-users) |
-| GET | `/_rustybin/harness/scenarios/{name}` | One built-in scenario as JSON (?format=yaml for YAML) |
+| GET | `/_rustybin/harness/scenarios` | The built-in scenarios (smoke, ramp-to-target, soak, closed-users, step-plateaus, breakpoint, spike-and-recover, pulse, burst, daily-wave) and the saved ones |
+| GET PUT DELETE | `/_rustybin/harness/scenarios/{name}` | A built-in or saved scenario (?format=yaml for YAML); PUT saves one under a name, DELETE removes it |
+| POST | `/_rustybin/harness/preview` | The expected rate per second per layer and in total, without sending anything |
 | POST | `/_rustybin/harness/validate` | Validate a scenario (JSON or YAML) against this node's caps without sending anything |
 | GET POST | `/_rustybin/harness/runs` | Runs on this node; POST a scenario (JSON or YAML) to validate, pin its targets and start it |
-| GET | `/_rustybin/harness/runs/{run}` | Live stats of a run: progress, counts, latency so far, the last second |
+| GET PATCH | `/_rustybin/harness/runs/{run}` | Live stats of a run; PATCH tunes it while it runs (rate_multiplier, pause, resume, hold, skip_stage, set, add_layer, remove_layer) |
+| GET | `/_rustybin/harness/runs/{run}/events` | The run's feed: a snapshot every second, change and finding events, finished at the end (SSE) |
 | POST | `/_rustybin/harness/runs/{run}/stop` | Stop a run (it drains and reports) |
 | GET | `/_rustybin/harness/runs/{run}/report` | Final report (JSON; ?format=text or junit) |
 | POST | `/_rustybin/harness/stop` | Kill switch: stop all load on this node now |
@@ -555,7 +557,8 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | POST | `/_rustybin/harness/clusters/{id}/nodes` | Node route: join with the join token (bearer); returns a node credential and a lease |
 | POST | `/_rustybin/harness/clusters/{id}/nodes/{node}/heartbeat` | Node route: heartbeat with the node credential; a long poll carrying stats, returning assignments |
 | GET POST | `/_rustybin/harness/clusters/{id}/runs` | Cluster runs; POST a scenario to submit it (validated, not started) |
-| GET | `/_rustybin/harness/clusters/{id}/runs/{run}` | Live merged stats of a cluster run, with its quorum |
+| GET PATCH | `/_rustybin/harness/clusters/{id}/runs/{run}` | Live merged stats of a cluster run, with its quorum; PATCH tunes it on every client node |
+| GET | `/_rustybin/harness/clusters/{id}/runs/{run}/events` | The cluster run's feed: snapshots, changes, findings, scale_request, leader_changed, finished (SSE) |
 | POST | `/_rustybin/harness/clusters/{id}/runs/{run}/start` | Start a cluster run: the rate split by capacity and a synchronised start (409 without the quorum) |
 | POST | `/_rustybin/harness/clusters/{id}/runs/{run}/stop` | Stop a cluster run on every client node |
 | GET | `/_rustybin/harness/clusters/{id}/runs/{run}/report` | The merged report of a cluster run (JSON; ?format=text or junit) |

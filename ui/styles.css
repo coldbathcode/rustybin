@@ -449,6 +449,7 @@ dialog::backdrop { background: rgba(10, 12, 16, .45); }
 .linklike { border: 0; background: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; }
 .linklike:hover { text-decoration: underline; }
 .err-text { color: var(--err); }
+.warn-text { color: var(--warn, var(--status-warning)); }
 .clamp-3 { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 fieldset.plain { border: 0; padding: 0; margin: 0; min-width: 0; }
 fieldset.plain > legend { padding: 0; margin-bottom: 6px; }

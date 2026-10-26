@@ -1,0 +1,25 @@
+# Find the highest rate the gateway sustains: plateaus 25 percent apart,
+# each held for 10 seconds, until one fails a threshold. The run then stops
+# and the report's findings name the last good rate.
+name: breakpoint
+description: Grow from 50 requests per second by 25 percent every 10 seconds, up to 5000, until errors pass 1 percent or the p99 latency passes 500 ms.
+targets:
+  - url: http://127.0.0.1:8080
+    weight: 1
+scale:
+  virtual_clients: 100
+layers:
+  - name: main
+    source:
+      request:
+        path: /status/200
+    pattern:
+      type: breakpoint
+      start: 50
+      growth: 0.25
+      every: 10s
+      max: 5000
+      until:
+        error_rate: 0.01
+        latency_p99_ms: 500
+timeout: 5s

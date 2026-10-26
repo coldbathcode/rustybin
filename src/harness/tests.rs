@@ -75,7 +75,7 @@ fn smoke(url: &str, rate: u64, secs: &str) -> Value {
     })
 }
 
-async fn wait_for_report(app: &Router, id: &str) -> Value {
+pub(super) async fn wait_for_report(app: &Router, id: &str) -> Value {
     for _ in 0..600 {
         let (status, run) = send(
             app,
@@ -202,7 +202,18 @@ async fn api_when_harness_is_off() {
         .collect();
     assert_eq!(
         names,
-        vec!["smoke", "ramp-to-target", "soak", "closed-users"]
+        vec![
+            "smoke",
+            "ramp-to-target",
+            "soak",
+            "closed-users",
+            "step-plateaus",
+            "breakpoint",
+            "spike-and-recover",
+            "pulse",
+            "burst",
+            "daily-wave"
+        ]
     );
     for s in list["scenarios"].as_array().unwrap() {
         assert!(

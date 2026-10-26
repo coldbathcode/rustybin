@@ -306,6 +306,29 @@ pub static TOOLS: &[ToolDef] = &[
         open_world: true,
         input_schema: || obj(json!({ "cluster_id": cluster_id_prop(), "run_id": run_id_prop(), "confirm": confirm_prop() }), &["cluster_id", "run_id"]),
     },
+    tool!("list_patterns", "List patterns", "The pattern types (constant, ramp, step, target, breakpoint, spike, pulse, burst, wave) with their parameters, from the scenario schema. Chain them with then:; every one takes jitter and sync.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("preview_scenario", "Preview a scenario", "The expected requests per second of every layer and in total (users for closed layers), from the patterns' exact math, plus the validation's problems. Sends nothing: call it before create_run.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "scenario": scenario_prop() }), &["scenario"])),
+    tool!("save_scenario", "Save a scenario", "Keep a scenario by name on this node (validated against its caps; at most 100), next to the built-in ones. list_scenarios shows it, get_scenario returns it.", Right::Harness, ro=false, destructive=false, idem=true, confirm=false, || obj(json!({
+        "name": { "type": "string", "description": "Letters, digits, . _ - (not a built-in name)" },
+        "scenario": scenario_prop()
+    }), &["name", "scenario"])),
+    ToolDef {
+        name: "update_run",
+        title: "Change a running run",
+        description: "Tune a running harness run without stopping it: rate_multiplier (0 to 10, the run or one layer), pause / resume, hold (freeze the pattern; false releases), skip_stage, set ({\"<layer>.pattern.<field>\": value}), add_layer, remove_layer; layer aims a change at one layer. Checked like a new scenario, caps included; with cluster_id every client node follows on its next heartbeat. A change that may send more load asks the user to confirm (elicitation) or needs \"confirm\": true.",
+        right: Right::Harness,
+        read_only: false,
+        destructive: false,
+        idempotent: false,
+        confirm: true,
+        open_world: true,
+        input_schema: || obj(json!({
+            "run_id": run_id_prop(),
+            "cluster_id": cluster_id_prop(),
+            "change": { "type": "object", "description": "The change (the schema is $defs.change of GET /_rustybin/harness/schema): layer, rate_multiplier, pause, resume, hold, skip_stage, set, add_layer, remove_layer." },
+            "confirm": confirm_prop()
+        }), &["run_id", "change"]),
+    },
     tool!("list_runs", "List runs", "The harness runs this node keeps (newest first) and the active one.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
     tool!("get_run", "Run status", "Live view of a harness run: progress, counts (sent, completed, ok, errors, not sent, in flight), latency so far, the last second, saturation, report_ready.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "run_id": run_id_prop(), "cluster_id": cluster_id_prop() }), &["run_id"])),
     tool!("stop_run", "Stop a run", "Stop a harness run early: it drains its requests and reports. With cluster_id, every client node of the cluster run stops.", Right::Harness, ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "run_id": run_id_prop(), "cluster_id": cluster_id_prop() }), &["run_id"])),
@@ -656,6 +679,10 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         "list_cluster_nodes" => harness::list_cluster_nodes(ctx, &args),
         "export_upstreams" => harness::export_upstreams(ctx, &args),
         "get_leader" => harness::get_leader(ctx, &args),
+        "list_patterns" => harness::list_patterns(ctx),
+        "preview_scenario" => harness::preview_scenario(ctx, &args),
+        "save_scenario" => harness::save_scenario(ctx, &args),
+        "update_run" => harness::update_run(ctx, &args, params).await,
         "start_run" => harness::start_run(ctx, &args, params).await,
         _ => return Err(RpcError::invalid_params(format!("Unknown tool: {name}"))),
     };

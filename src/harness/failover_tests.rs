@@ -482,3 +482,92 @@ async fn a_two_node_cluster_stops_on_leader_loss() {
         n.stop().await;
     }
 }
+
+#[tokio::test]
+async fn live_changes_reach_every_node_and_survive_a_failover() {
+    let id = "fo-6";
+    let (l, url) = lead(coordinator(), "f6-leader", id).await;
+    let a = node_named(eligible(client_config(1000), LeaderPolicy::Auto), "f6-a").await;
+    let b = node_named(eligible(client_config(1000), LeaderPolicy::Auto), "f6-b").await;
+    let s = node_named(harness_config(&[Role::Server], &[]), "f6-s").await;
+    for n in [&a, &b, &s] {
+        join(n, &url).await;
+    }
+    wait_for_alive(&l, id, 2, 1).await;
+    let mut sc = scenario(&s.base(), 200, "8s");
+    sc["scale"] = json!({ "virtual_clients": 20, "client_nodes": 2, "server_nodes": 1 });
+    let run_id = start(&l, id, sc).await;
+    let a_run = local_run(&a, &run_id).await;
+    let b_run = local_run(&b, &run_id).await;
+    // A change on the leader: both nodes follow on their next heartbeat.
+    let (status, v) = send(
+        &l.app,
+        Method::PATCH,
+        &format!("/_rustybin/harness/clusters/{id}/runs/{run_id}"),
+        Some(json!({ "rate_multiplier": 0.5 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let changed = Instant::now();
+    wait_until(
+        "both nodes run at half the rate",
+        Duration::from_secs(1),
+        || a_run.controls().multiplier == 0.5 && b_run.controls().multiplier == 0.5,
+    )
+    .await;
+    assert!(
+        changed.elapsed() < Duration::from_millis(800),
+        "{:?}",
+        changed.elapsed()
+    );
+    // A change over a node's caps is refused (two nodes of 1000: x10 is
+    // 2000 for 1000 each, fine; x10 on a 1000-a-second rate would not be).
+    let (status, v) = send(
+        &l.app,
+        Method::PATCH,
+        &format!("/_rustybin/harness/clusters/{id}/runs/{run_id}"),
+        Some(json!({ "set": { "main.pattern.rate": 5000 } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    // The leader goes: the change survives in the snapshot.
+    isolate(&l);
+    wait_until("a or b leads", LEASE, || leads(&a, id) || leads(&b, id)).await;
+    let new_leader = if leads(&a, id) { &a } else { &b };
+    let (_, run) = send(
+        &new_leader.app,
+        Method::GET,
+        &format!("/_rustybin/harness/clusters/{id}/runs/{run_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(run["layers"][0]["multiplier"], 1.0, "{run}");
+    let c = harness(new_leader).coordinator.get(id).unwrap();
+    let controls = c.run_controls(&c.run(&run_id).unwrap());
+    assert_eq!(controls.multiplier, 0.5, "the change survived the failover");
+    assert_eq!(controls.log.len(), 1);
+    // And the new leader takes changes: the other node follows.
+    let (status, v) = send(
+        &new_leader.app,
+        Method::PATCH,
+        &format!("/_rustybin/harness/clusters/{id}/runs/{run_id}"),
+        Some(json!({ "rate_multiplier": 1 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let other = if std::ptr::eq(new_leader, &a) {
+        &b_run
+    } else {
+        &a_run
+    };
+    wait_until(
+        "the other node follows the new leader's change",
+        Duration::from_secs(1),
+        || other.controls().multiplier == 1.0,
+    )
+    .await;
+    heal(&l);
+    for n in [a, b, s, l] {
+        n.stop().await;
+    }
+}

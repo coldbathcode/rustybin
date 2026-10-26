@@ -27,10 +27,12 @@ pub mod cluster;
 pub mod correlate;
 pub mod election;
 pub mod engine;
+pub mod live;
 pub mod member;
 pub mod pattern;
 pub mod report;
 pub mod safety;
+pub mod saved;
 pub mod scenario;
 pub mod shaped;
 #[cfg(test)]
@@ -291,6 +293,8 @@ pub struct RunOptions {
     /// The token the targets must serve (the cluster's, served by its
     /// server nodes), instead of this node's own.
     pub verification_token: Option<String>,
+    /// Live changes made before this node started its part.
+    pub controls: Option<live::Controls>,
 }
 
 /// The harness of one node: configuration, the engine (client role), the
@@ -320,6 +324,8 @@ pub struct Harness {
     bound: OnceLock<SocketAddr>,
     /// `RUSTYBIN_HARNESS_CONTROL_URL` with `auto` resolved once bound.
     control: OnceLock<Option<String>>,
+    /// Scenarios saved by name (`RUSTYBIN_HARNESS_STATE_DIR` keeps them).
+    pub saved: saved::SavedScenarios,
 }
 
 /// A node id safe for request ids: letters, digits, `.`, `_`, `-`, at most 32.
@@ -405,6 +411,7 @@ impl Harness {
             membership: Mutex::new(None),
             bound: OnceLock::new(),
             control: OnceLock::new(),
+            saved: saved::SavedScenarios::new(hc.state_dir.as_deref()),
         })
     }
 
@@ -700,6 +707,18 @@ impl Harness {
                 problems: Vec::new(),
             });
         }
+        // scale.connections_per_client: the keep-alive pool per target is
+        // this node's virtual clients times it (at most the in-flight cap).
+        let pool = scenario
+            .scale
+            .connections_per_client
+            .map_or(engine.inflight_cap, |c| {
+                let vus = options
+                    .share
+                    .virtual_clients(scenario.scale.virtual_clients)
+                    .1;
+                (vus as usize * c as usize).clamp(1, engine.inflight_cap)
+            });
         let mut targets = Vec::with_capacity(scenario.targets.len());
         let mut refused = Vec::new();
         for (i, t) in scenario.targets.iter().enumerate() {
@@ -711,16 +730,12 @@ impl Harness {
                 }
             };
             match safety::pin(&parsed, &self.allowlist).await {
-                Ok(addrs) => match PinnedTarget::new(
-                    &engine.handle(),
-                    t.clone(),
-                    parsed,
-                    addrs,
-                    engine.inflight_cap,
-                ) {
-                    Ok(pt) => targets.push(pt),
-                    Err(e) => refused.push(format!("targets[{i}]: {e}")),
-                },
+                Ok(addrs) => {
+                    match PinnedTarget::new(&engine.handle(), t.clone(), parsed, addrs, pool) {
+                        Ok(pt) => targets.push(pt),
+                        Err(e) => refused.push(format!("targets[{i}]: {e}")),
+                    }
+                }
                 Err(e) => refused.push(format!("targets[{i}].url: {e}")),
             }
         }
@@ -779,6 +794,7 @@ impl Harness {
             start_at: options.start_at,
             lease: options.lease,
             cluster: options.cluster,
+            controls: options.controls,
         });
         {
             let mut runs = self.runs.lock().unwrap_or_else(|p| p.into_inner());
@@ -1054,6 +1070,18 @@ pub fn builtin_scenarios() -> &'static [(&'static str, &'static str)] {
         ),
         ("soak", include_str!("scenarios/soak.yaml")),
         ("closed-users", include_str!("scenarios/closed-users.yaml")),
+        (
+            "step-plateaus",
+            include_str!("scenarios/step-plateaus.yaml"),
+        ),
+        ("breakpoint", include_str!("scenarios/breakpoint.yaml")),
+        (
+            "spike-and-recover",
+            include_str!("scenarios/spike-and-recover.yaml"),
+        ),
+        ("pulse", include_str!("scenarios/pulse.yaml")),
+        ("burst", include_str!("scenarios/burst.yaml")),
+        ("daily-wave", include_str!("scenarios/daily-wave.yaml")),
     ]
 }
 
@@ -1075,14 +1103,21 @@ pub fn router(_state: &AppState) -> Router<AppState> {
         .route("/_rustybin/harness/scenarios", get(api::list_scenarios))
         .route(
             "/_rustybin/harness/scenarios/{name}",
-            get(api::get_scenario),
+            get(api::get_scenario)
+                .put(api::put_scenario)
+                .delete(api::delete_scenario),
         )
+        .route("/_rustybin/harness/preview", post(api::preview))
         .route("/_rustybin/harness/validate", post(api::validate))
         .route(
             "/_rustybin/harness/runs",
             get(api::list_runs).post(api::create_run),
         )
-        .route("/_rustybin/harness/runs/{run}", get(api::get_run))
+        .route(
+            "/_rustybin/harness/runs/{run}",
+            get(api::get_run).patch(api::patch_run),
+        )
+        .route("/_rustybin/harness/runs/{run}/events", get(api::run_events))
         .route("/_rustybin/harness/runs/{run}/stop", post(api::stop_run))
         .route("/_rustybin/harness/runs/{run}/report", get(api::run_report))
         .route("/_rustybin/harness/stop", post(api::stop_all))
@@ -1126,7 +1161,11 @@ pub fn router(_state: &AppState) -> Router<AppState> {
         )
         .route(
             "/_rustybin/harness/clusters/{id}/runs/{run}",
-            get(api::get_cluster_run),
+            get(api::get_cluster_run).patch(api::patch_cluster_run),
+        )
+        .route(
+            "/_rustybin/harness/clusters/{id}/runs/{run}/events",
+            get(api::cluster_run_events),
         )
         .route(
             "/_rustybin/harness/clusters/{id}/runs/{run}/start",
@@ -1172,19 +1211,44 @@ pub fn catalog() -> Vec<Endpoint> {
             "/_rustybin/harness/scenarios",
             &["GET"],
             category::HARNESS,
-            "The built-in scenarios (smoke, ramp-to-target, soak, closed-users)",
+            "The built-in scenarios (smoke, ramp-to-target, soak, closed-users, step-plateaus, breakpoint, spike-and-recover, pulse, burst, daily-wave) and the saved ones",
         )
         .example(Example::get("Built-in scenarios", "/_rustybin/harness/scenarios")),
         Endpoint::new(
             "/_rustybin/harness/scenarios/{name}",
-            &["GET"],
+            &["GET", "PUT", "DELETE"],
             category::HARNESS,
-            "One built-in scenario as JSON (?format=yaml for YAML)",
+            "A built-in or saved scenario (?format=yaml for YAML); PUT saves one under a name, DELETE removes it",
+        )
+        .description(
+            "Saved scenarios are validated against this node's caps, kept by name (at most 100; \
+             RUSTYBIN_HARNESS_STATE_DIR writes them to disk) and listed next to the built-in ones, \
+             whose names are taken.",
         )
         .example(Example::get("The smoke scenario", "/_rustybin/harness/scenarios/smoke"))
         .example(
             Example::get("As YAML", "/_rustybin/harness/scenarios/smoke?format=yaml"),
+        )
+        .example(
+            Example::new("Save a scenario", "PUT", "/_rustybin/harness/scenarios/my-smoke")
+                .json(SMOKE_JSON)
+                .expect_status(404),
+        )
+        .example(
+            Example::delete("Delete a saved scenario", "/_rustybin/harness/scenarios/my-smoke")
+                .expect_status(404),
         ),
+        Endpoint::new(
+            "/_rustybin/harness/preview",
+            &["POST"],
+            category::HARNESS,
+            "The expected rate per second per layer and in total, without sending anything",
+        )
+        .description(
+            "Patterns are integrated exactly, so a 50 ms burst shows in its second. One point per \
+             second (coarser past an hour, at most 3600). Works with harness mode off.",
+        )
+        .example(Example::post("Preview", "/_rustybin/harness/preview").json(SMOKE_JSON)),
         Endpoint::new(
             "/_rustybin/harness/validate",
             &["POST"],
@@ -1212,11 +1276,30 @@ pub fn catalog() -> Vec<Endpoint> {
         ),
         Endpoint::new(
             "/_rustybin/harness/runs/{run}",
+            &["GET", "PATCH"],
+            category::HARNESS,
+            "Live stats of a run; PATCH tunes it while it runs (rate_multiplier, pause, resume, hold, skip_stage, set, add_layer, remove_layer)",
+        )
+        .description(
+            "A change is checked like a new scenario (the caps included), applied on the next \
+             scheduler pass and recorded in the run's log and report.",
+        )
+        .example(Example::get("A run", "/_rustybin/harness/runs/missing").expect_status(404))
+        .example(
+            Example::new("Halve the rate", "PATCH", "/_rustybin/harness/runs/missing")
+                .json(r#"{"rate_multiplier":0.5}"#)
+                .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/harness/runs/{run}/events",
             &["GET"],
             category::HARNESS,
-            "Live stats of a run: progress, counts, latency so far, the last second",
+            "The run's feed: a snapshot every second, change and finding events, finished at the end",
         )
-        .example(Example::get("A run", "/_rustybin/harness/runs/missing").expect_status(404)),
+        .sse()
+        .example(
+            Example::get("Run feed", "/_rustybin/harness/runs/missing/events").expect_status(404),
+        ),
         Endpoint::new(
             "/_rustybin/harness/runs/{run}/stop",
             &["POST"],
@@ -1386,13 +1469,41 @@ pub fn catalog() -> Vec<Endpoint> {
         ),
         Endpoint::new(
             "/_rustybin/harness/clusters/{id}/runs/{run}",
-            &["GET"],
+            &["GET", "PATCH"],
             category::HARNESS,
-            "Live merged stats of a cluster run, with its quorum",
+            "Live merged stats of a cluster run, with its quorum; PATCH tunes it on every client node",
+        )
+        .description(
+            "A change is checked against every client node's declared capacity for its share, \
+             recorded in the run's log, carried in the cluster snapshot (it survives a failover), \
+             and followed by the nodes on their next heartbeat.",
         )
         .example(
             Example::get("A cluster run", "/_rustybin/harness/clusters/perf-1/runs/missing")
                 .expect_status(404),
+        )
+        .example(
+            Example::new(
+                "Hold the pattern",
+                "PATCH",
+                "/_rustybin/harness/clusters/perf-1/runs/missing",
+            )
+            .json(r#"{"hold":true}"#)
+            .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/harness/clusters/{id}/runs/{run}/events",
+            &["GET"],
+            category::HARNESS,
+            "The cluster run's feed: snapshots, changes, findings, scale_request, leader_changed, finished",
+        )
+        .sse()
+        .example(
+            Example::get(
+                "Cluster run feed",
+                "/_rustybin/harness/clusters/perf-1/runs/missing/events",
+            )
+            .expect_status(404),
         ),
         Endpoint::new(
             "/_rustybin/harness/clusters/{id}/runs/{run}/start",
@@ -1615,7 +1726,84 @@ pub fn openapi_paths() -> Value {
     ) {
         all.extend(more);
     }
+    live_openapi_paths(&mut paths, &tag, &off, &scenario_body);
     paths
+}
+
+/// The OpenAPI of phase 4: live changes, the preview, saved scenarios and
+/// the run feeds (operations added to the paths above, and new paths).
+fn live_openapi_paths(paths: &mut Value, tag: &Value, off: &Value, scenario_body: &Value) {
+    let change_body = json!({
+        "required": true,
+        "content": { "application/json": { "schema": { "type": "object", "description": "A live change: rate_multiplier, pause, resume, hold, skip_stage, set, add_layer, remove_layer, and layer to aim one (the schema is $defs.change of GET /_rustybin/harness/schema)." } } }
+    });
+    let sse = json!({ "description": "Server-Sent Events", "content": { "text/event-stream": { "schema": { "type": "string" } } } });
+    paths["/_rustybin/harness/scenarios/{name}"]["put"] = json!({
+        "tags": tag,
+        "summary": "Save a scenario",
+        "description": "Validated against this node's caps and kept under the name (at most 100; RUSTYBIN_HARNESS_STATE_DIR writes them to disk). Built-in names are taken.",
+        "operationId": "saveHarnessScenario",
+        "parameters": [path_param("name")],
+        "requestBody": scenario_body,
+        "responses": { "201": json_ok("Saved"), "200": json_ok("Replaced"), "400": { "description": "Invalid scenario or name" }, "409": { "description": "A built-in name" }, "404": off }
+    });
+    paths["/_rustybin/harness/scenarios/{name}"]["delete"] = json!({
+        "tags": tag,
+        "summary": "Delete a saved scenario",
+        "operationId": "deleteHarnessScenario",
+        "parameters": [path_param("name")],
+        "responses": { "204": { "description": "Deleted" }, "409": { "description": "A built-in scenario" }, "404": off }
+    });
+    paths["/_rustybin/harness/runs/{run}"]["patch"] = json!({
+        "tags": tag,
+        "summary": "Change a running run",
+        "description": "Checked like a new scenario (the caps included), applied on the next scheduler pass, recorded in the run's log and report.",
+        "operationId": "changeHarnessRun",
+        "parameters": [path_param("run")],
+        "requestBody": change_body,
+        "responses": { "200": json_ok("The run's controls after the change"), "400": { "description": "Refused (`problems`)" }, "409": { "description": "Finished, or a cluster run (change it on the leader)" }, "404": off }
+    });
+    paths["/_rustybin/harness/clusters/{id}/runs/{run}"]["patch"] = json!({
+        "tags": tag,
+        "summary": "Change a running cluster run",
+        "description": "Checked against every client node's capacity for its share, carried in the cluster snapshot, followed by the nodes on their next heartbeat.",
+        "operationId": "changeHarnessClusterRun",
+        "parameters": [path_param("id"), path_param("run")],
+        "requestBody": change_body,
+        "responses": { "200": json_ok("The run's controls after the change"), "400": { "description": "Refused (`problems`)" }, "409": { "description": "Finished" }, "307": { "description": "This node is a member; the leader answers" }, "404": off }
+    });
+    if let Value::Object(all) = paths {
+        all.insert("/_rustybin/harness/preview".into(), json!({
+            "post": {
+                "tags": tag,
+                "summary": "Preview a scenario",
+                "description": "The expected rate per second per layer and in total (users for closed layers), from the patterns' exact integrals, with the validation's problems. Sends nothing; works with harness mode off.",
+                "operationId": "previewHarnessScenario",
+                "requestBody": scenario_body,
+                "responses": { "200": json_ok("`layers[].series`, `total`, `step_secs`, `valid`, `problems`"), "400": { "description": "Unparseable scenario" } }
+            }
+        }));
+        all.insert("/_rustybin/harness/runs/{run}/events".into(), json!({
+            "get": {
+                "tags": tag,
+                "summary": "Run feed",
+                "description": "Server-Sent Events: `snapshot` every second, `change` and `finding`, then `finished` with the report's summary.",
+                "operationId": "harnessRunEvents",
+                "parameters": [path_param("run")],
+                "responses": { "200": sse, "404": off }
+            }
+        }));
+        all.insert("/_rustybin/harness/clusters/{id}/runs/{run}/events".into(), json!({
+            "get": {
+                "tags": tag,
+                "summary": "Cluster run feed",
+                "description": "Server-Sent Events: `snapshot` every second, `change`, `finding`, `scale_request`, `leader_changed` (this node no longer leads; reconnect to the URL in the event), then `finished`.",
+                "operationId": "harnessClusterRunEvents",
+                "parameters": [path_param("id"), path_param("run")],
+                "responses": { "200": sse, "307": { "description": "This node is a member; the leader answers" }, "404": off }
+            }
+        }));
+    }
 }
 
 /// The OpenAPI paths of the cluster routes (phases 3 and 3b).
@@ -1872,5 +2060,7 @@ pub fn openapi_components() -> Value {
 mod cluster_tests;
 #[cfg(test)]
 mod failover_tests;
+#[cfg(test)]
+mod live_tests;
 #[cfg(test)]
 mod tests;

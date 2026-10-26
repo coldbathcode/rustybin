@@ -75,7 +75,11 @@ pub const INSTRUCTIONS: &str = "This server manages one Rustybin instance: an HT
     stop it. A cluster spreads the load over several nodes: create_cluster on the coordinator, \
     nodes join with its join token, create_run with cluster_id submits the scenario and start_run \
     (confirmed) starts it on every client node at once. When the leader is lost, the eligible \
-    nodes elect a new one: get_leader on any member names it.";
+    nodes elect a new one: get_leader on any member names it. list_patterns describes the run \
+    patterns and preview_scenario the expected requests per second before a run; update_run \
+    changes a running run (rate multiplier, pause, hold, skip a stage, set a pattern field, add or \
+    remove a layer) and asks the user to confirm a change that may raise the load; save_scenario \
+    keeps a scenario by name.";
 
 /// The router: `POST, GET, DELETE /_rustybin/mcp`.
 pub fn router(state: &AppState) -> Router<AppState> {

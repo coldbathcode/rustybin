@@ -1,21 +1,21 @@
 # Plan: load test mode (the harness), load tests through a gateway
 
-Status: **phases 0, 1, 2, 3 and 3b done** (2026-10-26): the engine spike is `examples/harness_spike.rs`
-([Phase 0 results](#phase-0-results-2026-10-25)); the single-node engine, the correlation, the cluster and its
-failover are `src/harness/` ([Phase 1 build notes](#phase-1-build-notes-2026-10-25),
-[Phase 2 build notes](#phase-2-build-notes-2026-10-25), [Phase 3 build notes](#phase-3-build-notes-2026-10-26)
-and [Phase 3b build notes](#phase-3b-build-notes-2026-10-26) list where the build differs from this plan).
-Phase 4 is next. Planned 2026-10-22.
+Status: **phases 0, 1, 2, 3, 3b and 4 done** (2026-10-26): the engine spike is `examples/harness_spike.rs`
+([Phase 0 results](#phase-0-results-2026-10-25)); the single-node engine, the correlation, the cluster, its
+failover, the patterns and live tuning are `src/harness/` ([Phase 1 build notes](#phase-1-build-notes-2026-10-25),
+[Phase 2 build notes](#phase-2-build-notes-2026-10-25), [Phase 3 build notes](#phase-3-build-notes-2026-10-26),
+[Phase 3b build notes](#phase-3b-build-notes-2026-10-26) and [Phase 4 build notes](#phase-4-build-notes-2026-10-26)
+list where the build differs from this plan). Phase 5 is next. Planned 2026-10-22.
 
-> **Build marker (2026-10-26): START HERE.** Phases 0 to 3b are done. Approved scope for the next
-> session is phase 4 (section 15): layers and every pattern of section 6.2 with `then:` and `sync`, the
-> closed-loop `target`, `breakpoint`, the scale block and `scale_request`, `PATCH` live changes through the
-> snapshot (they must survive a failover), preview, saved scenarios, and the run's SSE feed with the
-> console's run controls. Build on what exists: `pattern.rs` (`constant`, `ramp`, `then`), `scenario.rs`
-> (the one model: a new parameter goes in the model, its validation and `schema()`, and the parity tests
-> cover the MCP tools and the console builder), `engine::drive` (reads the node's share on every pass, so a
-> live change can follow the same path), and the snapshot in `cluster.rs` (`SnapRun` carries the scenario a
-> successor resumes with).
+> **Build marker (2026-10-26): START HERE.** Phases 0 to 4 are done. Next, when the user says go, is
+> phase 5 (section 15): the `limit_test` pattern with the tests of section 6.3, `expect`, and
+> the rate-limit analysis in the report. Build on what exists: `pattern.rs` (a new pattern is a variant
+> compiled into stages, with its validation and schema), `live.rs` (the stage log and the closed loops
+> show how per-second results are judged; findings go in the report), `report.rs`, the test proxy in
+> `test_proxy.rs` (it needs the limiters the phase is tested against: fixed window, sliding window, token
+> bucket, per-node local counters), and the server side of section 7 for upstream protection. Tests that
+> need many identities or forwarded addresses (`many_keys`, `many_ips`) may use a simple pool now; the
+> credential and address pools proper are phase 6.
 >
 > Keep this status line and `docs/src/roadmap.md` ("Next") updated as phases land. Commit as oliwynn.
 
@@ -1033,6 +1033,78 @@ What phase 3b built, and where it differs from section 9.1:
   survives, credentials stay valid, a newer term makes a leader stale). A real `kill -9` of the leader of
   a five-process cluster: the standby led after about 3.5 s, the clients never stopped, the report
   counted 2000 of 2000 requests with `unreported` 0.
+
+### Phase 4 build notes (2026-10-26)
+
+What phase 4 built, and where it differs from sections 6.2, 6.4 and 6.5:
+
+- **Files**: `pattern.rs` (every pattern of section 6.2 compiled into stages with an exact value and
+  integral, jitter and phase), `live.rs` (the `Change` of a `PATCH`, the `Controls` every node applies
+  on top of the scenario, the `LiveView` the scheduler evaluates, the stage log, the closed loops),
+  `saved.rs` (saved scenarios), the `PATCH`, preview, saved scenario and feed routes in `api.rs`, a
+  capacity per second in `test_proxy.rs` (503 over it), and `live_tests.rs` (every pattern followed
+  second by second, a burst's window at the gateway, a breakpoint at the proxy's capacity, live changes
+  and the feed, a hold in the report, `client_nodes: auto` with the hook, saved scenarios and the
+  preview).
+- **Patterns**: as in section 6.2, with these names: `constant`, `burst` and `wave` last `for`; `step`
+  takes `hold` as extra time at the last plateau; `target` takes `overhead_p99_ms` (not
+  `overhead_p99`), and `start` and `max` for its loop; `breakpoint` takes `every` (the plateau length),
+  `growth` as a fraction per plateau and `until` with `error_rate`, `latency_p99_ms` and
+  `overhead_p99_ms`. A chain has at most 16 stages. `burst`, `breakpoint` and `target` on a rate or the
+  overhead need the open model, `target` on users the closed one. `limit_test` is phase 5, `replay`
+  later.
+- **The cluster clock, not a leader tick**: every node evaluates the same compiled pattern on the
+  synchronised run clock of phase 3, so the nodes switch at the same instant without a tick from the
+  leader; the leader only distributes changes and loop decisions (`Controls`, versioned). `jitter`
+  varies the value once a second, seeded by run and layer (and node with `sync: node`), so every node
+  draws the same values under `sync: cluster`; `sync: node` also shifts a periodic pattern by the node's
+  place in the split (the start of its share), which spreads pulses, bursts and waves over the period.
+- **Scheduler**: the open model sends from the integral of the rate (a credit that reaches one sends a
+  request), in steps of at most 10 ms that never cross an edge of the pattern, so a curve that climbs
+  from zero and a burst of `size` within `within` are followed exactly (tests: every pattern within 2
+  percent or 2 requests per second; 200 requests within 100 ms reach the proxy within 160 ms).
+- **Closed loops** read the per-second results of the whole run (all layers together: per-layer
+  per-second results would need per-layer timelines on the wire), run by the engine on a single node and
+  by the leader on the merged complete seconds of a cluster. `breakpoint` judges a plateau when it ends,
+  leaving out its first second, and stops the run at the first that fails, with a finding that names the
+  last good rate. `target` on overhead multiplies the rate by goal over measured, clamped to 0.8 to 1.25,
+  every second, and reports a finding once the overhead stays within 10 percent of the goal for 3
+  seconds; it needs answers tagged by a Rustybin server (section 7).
+- **Live changes**: `layer`, `rate_multiplier`, `pause` / `resume`, `hold`, `skip_stage`, `set` (paths
+  `<layer>.pattern.<field>`, `then.` for the next stage, or the whole `<layer>.pattern`; a pattern's type
+  cannot change), `add_layer`, `remove_layer`. `faults` comes with phase 7. Times are on the run clock
+  (the leader's for a cluster), so a hold freezes the same point on every node. The controls travel in
+  heartbeats (to nodes behind the version) and in the snapshot; a node checks them against its own caps
+  and stops its part when they are over. The log keeps the last 64 changes, at most 32 findings.
+- **Stages in the report**: a stage log notes which stage and part each layer runs, with the controls in
+  effect then, every 100 ms on a single node and every tick on the leader (and on every change), so a
+  hold stretches a part and a skip cuts one short in the report. It is bounded (1000 marks) and in the
+  snapshot. Like the loops, a stage's numbers are the run's, all layers together.
+- **Scale**: `client_nodes: auto` compares the run's peak with the declared capacity of the live client
+  nodes (`RUSTYBIN_HARNESS_MAX_RATE`, or `max_rate_per_node` when lower), not a measured one. The hook
+  is node configuration (`RUSTYBIN_HARNESS_SCALE_HOOK`, on every node that may lead), allowlisted and
+  pinned like a target, one POST per request (5 s timeout, no retry), signed with HMAC-SHA256 keyed with
+  the join token's SHA-256 in hex: a controller knows the token, not the cluster's internal secret, and
+  the hash is in the snapshot, so a new leader signs the same way. `scale_timeout` is 5 minutes by
+  default, at most 1 hour. `connections_per_client` sets the keep-alive pool per target (the node's
+  virtual clients times it, within the in-flight cap). `identities` is phase 6.
+- **Preview**: each layer's and the total expected requests per second from the pattern math (the exact
+  integral over each second; closed layers show users), without jitter, at most 3600 points (coarser
+  past an hour). `POST /_rustybin/harness/preview` works with the harness off, like `validate`.
+- **Saved scenarios**: per node and not replicated, at most 100, validated against the node's caps, not
+  under a built-in's name; files under `RUSTYBIN_HARNESS_STATE_DIR/scenarios`.
+- **The feed**: `GET .../runs/{run}/events` (server-sent events): `snapshot` every second, `change`,
+  `finding`, `finished`, and `leader_changed` and `scale_request` on a cluster run. The console reads it
+  with `send({stream: true})` and falls back to polling.
+- **Surfaces**: MCP tools `list_patterns`, `preview_scenario`, `save_scenario` and `update_run`
+  (confirmation when a change may raise the load); in the console, the preview chart, saved scenarios
+  with Save as, the live controls and the report's changes, findings and stages.
+- **The roll has its own thread**: since phase 1 the scheduler merged the shard histograms into the
+  timeline itself, once a second, and sent nothing meanwhile (1 to 3 ms in a release build, about 20 ms
+  in a debug build, enough to read a slow debug run as saturated). A roller thread per run now takes
+  each second's counters and lag over a bounded queue, merges, and runs the closed loops; the scheduler
+  waits for it only at the end, before the report. Layer slots kept free for `add_layer` are skipped
+  when nothing was recorded in them.
 
 ### Estimate (2026-10-22)
 

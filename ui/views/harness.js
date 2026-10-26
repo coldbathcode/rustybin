@@ -3,10 +3,13 @@
 // scenario builder generated from the server's JSON Schema (with a YAML view
 // and the built-in scenarios), validation, a live run view with a per-second
 // chart, the kill switch, and the final report with its thresholds. A run
-// goes to this node or to a cluster it leads.
+// goes to this node or to a cluster it leads. Phase 4: a preview chart that
+// redraws as the scenario changes, saved scenarios, live controls on a
+// running run (rate multiplier, pause, hold, skip stage, set), and the run's
+// event feed (read with send({stream: true}), polling when it is not there).
 import { h, s, replace, clear, card, kvgrid, notice, badge, spinner, toast, select, textarea, input, fmtMs, copyButton } from '../lib/dom.js';
 import { jsonView } from '../lib/format.js';
-import { SERVER, send, getJson } from '../lib/http.js';
+import { SERVER, send, getJson, sseParser, readText } from '../lib/http.js';
 import { scenarioForm, toYaml } from '../lib/scenarioform.js';
 import * as settings from '../lib/settings.js';
 
@@ -19,6 +22,13 @@ function tile(label, value, cls) {
 function num(v, digits = 0) {
   if (v === undefined || v === null) return '-';
   return Number(v).toLocaleString(undefined, { maximumFractionDigits: digits });
+}
+
+// "step 1, part 2": a pattern stage counted from 1 and, for stepped and
+// periodic stages, its part (a plateau, half a pulse cycle or a burst).
+const PARTED = ['step', 'breakpoint', 'pulse', 'burst'];
+function stageLabel(type, index, part) {
+  return `${type} ${index + 1}${PARTED.includes(type) ? `, part ${part + 1}` : ''}`;
 }
 
 // A per-second chart: completed per second (bars), p99 latency (line).
@@ -45,6 +55,27 @@ function timelineChart(buckets) {
   return svg;
 }
 
+// The preview: expected requests per second, the total and each layer.
+function previewChart(p) {
+  const W = 640, H = 140, pad = 28;
+  const total = p.total || [];
+  if (!total.length) return h('p', { class: 'muted small' }, 'Nothing to preview.');
+  const layers = p.layers || [];
+  const max = Math.max(1, ...total, ...layers.flatMap((l) => l.series || []));
+  const n = total.length;
+  const x = (i) => pad + (i + 0.5) * ((W - pad * 2) / n);
+  const y = (v) => H - pad - (v / max) * (H - pad * 2);
+  const svg = s('svg', { class: 'chart', viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Expected requests per second' });
+  svg.appendChild(s('line', { x1: pad, y1: H - pad, x2: W - pad, y2: H - pad, stroke: 'var(--border)' }));
+  const line = (series, color, width) => s('polyline', { points: series.map((v, i) => `${x(i)},${y(v)}`).join(' '), fill: 'none', stroke: color, 'stroke-width': width });
+  const colors = ['var(--info)', 'var(--status-warning)', 'var(--status-good)', 'var(--text-3)'];
+  if (layers.length > 1) layers.forEach((l, i) => svg.appendChild(line(l.series || [], colors[i % colors.length], 1)));
+  svg.appendChild(line(total, 'var(--text)', 2));
+  svg.appendChild(s('text', { x: pad, y: 12, fill: 'var(--text-3)', 'font-size': 10 }, `expected requests per second (max ${num(max)}), ${num(p.duration_secs)} s${p.step_secs > 1 ? `, ${p.step_secs} s per point` : ''}`));
+  return h('div', { class: 'stack-sm' }, svg,
+    layers.length > 1 ? h('p', { class: 'muted small' }, layers.map((l) => `${l.name}: peak ${num(l.peak)}`).join(', ')) : null);
+}
+
 export default {
   id: 'harness',
   mount(root) {
@@ -63,6 +94,9 @@ export default {
     const nodeEl = h('div', null, spinner('Reading the node status'));
     const builderEl = h('div', null, spinner('Loading the scenario schema'));
     const runEl = h('div', null, h('p', { class: 'muted small' }, 'No run yet. Validate a scenario and start it.'));
+    // Live controls of the running run, and its log (changes, findings).
+    const controlsEl = h('div', { id: 'harness-controls' });
+    const logEl = h('div', { class: 'stack-sm small', id: 'harness-log' });
     const reportEl = h('div', null, h('p', { class: 'muted small' }, 'The report appears when a run finishes.'));
     const killMsg = h('div');
     const killBtn = h('button', { class: 'btn sm', type: 'button', id: 'harness-kill', onclick: killSwitch }, 'Kill switch: stop all load');
@@ -72,7 +106,7 @@ export default {
 
     root.appendChild(h('div', { class: 'grid grid-2' },
       card('Node', { hint: 'GET /_rustybin/harness', actions: h('div', { class: 'row' }, killBtn) }, nodeEl, killMsg),
-      card('Run', { hint: 'live, one second at a time' }, runEl)));
+      card('Run', { hint: 'live, one second at a time' }, runEl, controlsEl, logEl)));
     root.appendChild(clusterCard);
     root.appendChild(card('Scenario', { hint: 'generated from GET /_rustybin/harness/schema' }, builderEl));
     root.appendChild(card('Report', { hint: 'thresholds, totals, latency, timeline' }, reportEl));
@@ -104,7 +138,7 @@ export default {
         n.engine_error ? notice('err', n.engine_error) : null));
       if (n.active_run && !st.runId && !st.cluster) {
         st.runId = n.active_run.run_id;
-        startPolling();
+        startFeed();
       }
       renderCluster(n);
       return n;
@@ -237,7 +271,8 @@ export default {
       }
       schema = sr.json;
       const builtins = (lr.json && lr.json.scenarios) || [];
-      builtinSel = select([['', 'Built-in scenarios...'], ...builtins.map((b) => [b.name, `${b.name}: ${b.description || ''}`.slice(0, 90)])], '', { 'aria-label': 'Built-in scenario', id: 'harness-builtin' });
+      const savedList = (lr.json && lr.json.saved) || [];
+      builtinSel = select([['', 'Scenarios...'], ...builtins.map((b) => [b.name, `${b.name}: ${b.description || ''}`.slice(0, 90)]), ...savedList.map((b) => [b.name, `saved: ${b.name}`])], '', { 'aria-label': 'Built-in or saved scenario', id: 'harness-builtin' });
       builtinSel.addEventListener('change', async () => {
         if (!builtinSel.value) return;
         const r = await send({ url: `${SERVER}${PREFIX}/scenarios/${builtinSel.value}`, timeout: 10000 });
@@ -255,6 +290,9 @@ export default {
         initial = (r.ok && r.json) || { name: 'smoke' };
       }
       form = scenarioForm(schema, normalise(initial));
+      // The preview redraws as the scenario changes.
+      form.el.addEventListener('input', schedulePreview);
+      form.el.addEventListener('change', schedulePreview);
       yamlArea = textarea({ rows: 12, id: 'harness-yaml', 'aria-label': 'Scenario as YAML' });
       yamlArea.value = toYaml(normalise(initial));
       const modes = h('div', { class: 'seg', role: 'group' });
@@ -276,9 +314,41 @@ export default {
       }
       replace(builderEl, h('div', { class: 'stack' },
         h('div', { class: 'row' }, builtinSel, modes, h('span', { class: 'grow' }),
+          h('button', { class: 'btn', type: 'button', id: 'harness-save', onclick: saveAs }, 'Save as'),
           h('button', { class: 'btn', type: 'button', id: 'harness-validate', onclick: () => validate(false) }, 'Validate'),
           h('button', { class: 'btn primary', type: 'button', id: 'harness-run', onclick: () => validate(true) }, 'Run')),
-        summaryEl, problemsEl, formPane, yamlPane));
+        summaryEl, problemsEl, previewEl, formPane, yamlPane));
+      schedulePreview();
+    }
+
+    // ── Preview and saved scenarios ──
+    const previewEl = h('div', { id: 'harness-preview' });
+    let previewTimer = null;
+    function schedulePreview() {
+      clearTimeout(previewTimer);
+      previewTimer = setTimeout(runPreview, 500);
+    }
+    async function runPreview() {
+      if (!form || !alive) return;
+      let value;
+      try { value = form.value(); } catch { return; }
+      const r = await send({ method: 'POST', url: SERVER + PREFIX + '/preview', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value), timeout: 10000 });
+      if (!alive || !r.ok || !r.json) return;
+      replace(previewEl, previewChart(r.json));
+    }
+
+    async function saveAs() {
+      let value;
+      try { value = form.value(); } catch (e) { replace(problemsEl, notice('err', e.message)); return; }
+      const name = window.prompt('Save the scenario as (letters, digits, . _ -):', (value.name || 'scenario').replace(/[^A-Za-z0-9._-]/g, '-'));
+      if (!name) return;
+      const r = await send({ method: 'PUT', url: `${SERVER}${PREFIX}/scenarios/${encodeURIComponent(name)}`, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value), admin: true, timeout: 10000 });
+      if (r.ok) {
+        toast(`Saved as ${name}`);
+        if (builtinSel && ![...builtinSel.options].some((o) => o.value === name)) builtinSel.append(h('option', { value: name }, `saved: ${name}`));
+      } else {
+        replace(problemsEl, notice('err', h('div', null, (r.json && r.json.error) || r.error || `answered ${r.status}`, r.json && r.json.problems ? h('ul', null, ...r.json.problems.map((p) => h('li', null, p))) : null)));
+      }
     }
 
     // The builder edits the normalised form (targets and layers); the
@@ -298,6 +368,7 @@ export default {
 
     function setScenario(sc) {
       const n = normalise(sc);
+      schedulePreview();
       form.set(n);
       yamlArea.value = toYaml(n);
       st.scenarioText = JSON.stringify(n);
@@ -312,6 +383,7 @@ export default {
       form.set(r.json.scenario);
       st.scenarioText = JSON.stringify(r.json.scenario);
       showValidation(r.json);
+      schedulePreview();
     }
 
     function showValidation(v) {
@@ -351,12 +423,14 @@ export default {
       replace(reportEl, h('p', { class: 'muted small' }, 'Running...'));
       toast('Run ' + st.runId + ' started');
       renderRun(run.json);
-      startPolling();
+      replace(logEl);
+      startFeed();
       loadNode();
     }
 
     // ── Run ──
     function renderRun(r) {
+      renderControls(r);
       const last = r.last_second;
       if (last && (!liveBuckets.length || liveBuckets[liveBuckets.length - 1].t_secs !== last.t_secs)) liveBuckets.push(last);
       const active = r.state !== 'finished';
@@ -402,6 +476,125 @@ export default {
       if (pollTimer) clearInterval(pollTimer);
       pollTimer = setInterval(poll, 1000);
       poll();
+    }
+
+    // The run's feed: a snapshot every second, the changes and findings,
+    // `finished` at the end. Polling when the feed is not there.
+    let feedCtrl = null;
+    function stopFeed() {
+      if (feedCtrl) feedCtrl.abort();
+      feedCtrl = null;
+    }
+    function addLog(text, kind) {
+      const line = h('div', { class: kind === 'warn' ? 'warn-text' : kind === 'ok' ? 'ok' : 'muted' }, text);
+      logEl.prepend(line);
+      while (logEl.children.length > 30) logEl.lastChild.remove();
+    }
+    async function startFeed() {
+      stopFeed();
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      const id = st.runId;
+      if (!id || !alive) return;
+      const ctrl = new AbortController();
+      feedCtrl = ctrl;
+      const r = await send({ url: `${SERVER}${runBase()}/runs/${id}/events`, stream: true, timeout: 15000, signal: ctrl.signal });
+      if (r.error || !r.response || !r.contentType.includes('event-stream')) {
+        if (!ctrl.signal.aborted) startPolling();
+        return;
+      }
+      let finished = false;
+      try {
+        await readText(r.response, sseParser((ev) => {
+          let data = null;
+          try { data = JSON.parse(ev.data); } catch { data = null; }
+          if (!data) return;
+          if (ev.event === 'snapshot') renderRun(data);
+          else if (ev.event === 'change') addLog(`${num(data.at_secs, 1)} s: ${data.what}`);
+          else if (ev.event === 'finding') addLog(data.summary, 'ok');
+          else if (ev.event === 'scale_request') addLog(`scale request: ${data.needed_client_nodes} client node(s) needed, ${data.client_nodes} here (${data.reason})`, 'warn');
+          else if (ev.event === 'leader_changed') addLog(`the leader changed${data.leader ? `: ${data.leader.node_id}, term ${data.leader.term}` : ''}; follow the run there`, 'warn');
+          else if (ev.event === 'finished') {
+            finished = true;
+            loadReport(id);
+            loadNode();
+          }
+        }), ctrl.signal);
+      } catch { /* the stream broke off */ }
+      if (feedCtrl === ctrl) feedCtrl = null;
+      // A feed that ended early: poll instead.
+      if (!finished && alive && !ctrl.signal.aborted && st.runId === id) startPolling();
+    }
+
+    // Live changes (PATCH): applied on the next pass, on every node.
+    let controlsKey = '';
+    async function change(body) {
+      if (!st.runId) return;
+      const r = await send({ method: 'PATCH', url: `${SERVER}${runBase()}/runs/${st.runId}`, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), admin: true, timeout: 10000 });
+      if (r.ok) {
+        toast(`Applied: ${r.json.applied}`);
+        controlsKey = '';
+      } else {
+        const problems = (r.json && r.json.problems) || [];
+        toast(((r.json && r.json.error) || r.error || `answered ${r.status}`) + (problems.length ? `: ${problems.join('; ')}` : ''), 'err');
+      }
+    }
+    // The panel is rebuilt only when the controls change (so the inputs keep
+    // what is being typed); the level and stage cells follow every snapshot.
+    let controlCells = new Map();
+    function fillControlCells(layers) {
+      for (const l of layers) {
+        const c = controlCells.get(l.name);
+        if (!c) continue;
+        c.now.textContent = l.target_now === null || l.target_now === undefined ? '-' : num(l.target_now, 1);
+        replace(c.stage, l.stage ? stageLabel(l.stage.type, l.stage.index, l.stage.part) : '-', l.held ? badge('held', 'warn') : null, l.paused ? badge('paused', 'warn') : null);
+      }
+    }
+    function renderControls(r) {
+      const active = !['finished', 'collecting', 'created'].includes(r.state);
+      const layers = r.layers || [];
+      const key = `${r.run_id}|${active}|${r.controls_version}|${layers.map((l) => `${l.name}:${l.paused}:${l.held}:${l.removed}:${l.multiplier}`).join(',')}`;
+      if (key === controlsKey) { fillControlCells(layers); return; }
+      controlsKey = key;
+      controlCells = new Map();
+      if (!active) { replace(controlsEl); return; }
+      const mult = r.multiplier ?? 1;
+      const slider = h('input', { type: 'range', min: '0', max: '3', step: '0.1', value: String(mult), 'aria-label': 'Rate multiplier of the run', id: 'harness-mult' });
+      const shown = h('span', { class: 'mono small' }, `x${mult}`);
+      slider.addEventListener('input', () => { shown.textContent = 'x' + slider.value; });
+      slider.addEventListener('change', () => change({ rate_multiplier: Number(slider.value) }));
+      const setPath = input({ placeholder: `${(layers[0] && layers[0].name) || 'main'}.pattern.rate`, 'aria-label': 'Pattern parameter to set', id: 'harness-set-path', style: { maxWidth: '16em' } });
+      const setValue = input({ placeholder: 'value', 'aria-label': 'New value', id: 'harness-set-value', style: { maxWidth: '8em' } });
+      const applySet = () => {
+        const path = setPath.value.trim();
+        if (!path) return;
+        let value = setValue.value.trim();
+        try { value = JSON.parse(value); } catch { /* a string such as 30s */ }
+        change({ set: { [path]: value } });
+      };
+      replace(controlsEl, h('div', { class: 'stack-sm' },
+        h('h3', null, 'Live controls'),
+        h('div', { class: 'row' }, h('span', { class: 'small' }, 'Rate'), slider, shown,
+          h('button', { class: 'btn sm', type: 'button', onclick: () => change(r.paused ? { resume: true } : { pause: true }) }, r.paused ? 'Resume' : 'Pause'),
+          h('button', { class: 'btn sm', type: 'button', onclick: () => change({ hold: !layers.every((l) => l.held) }) }, layers.length && layers.every((l) => l.held) ? 'Release' : 'Hold'),
+          h('button', { class: 'btn sm', type: 'button', onclick: () => change({ skip_stage: true }) }, 'Skip stage')),
+        layers.length > 1 || (layers[0] && (layers[0].held || layers[0].paused || layers[0].multiplier !== 1)) ? h('table', { class: 'table' },
+          h('thead', null, h('tr', null, h('th', null, 'Layer'), h('th', null, 'Now'), h('th', null, 'Stage'), h('th', null, 'x'), h('th', null, ''))),
+          h('tbody', null, ...layers.map((l) => {
+            const now = h('td', { class: 'mono' });
+            const stage = h('td');
+            controlCells.set(l.name, { now, stage });
+            return h('tr', null,
+              h('td', null, l.name, l.removed ? badge('removed', 'outline') : null),
+              now, stage,
+              h('td', { class: 'mono' }, `x${l.multiplier ?? 1}`),
+              h('td', null, l.removed ? null : h('div', { class: 'row' },
+                h('button', { class: 'btn sm', type: 'button', onclick: () => change(l.paused ? { layer: l.name, resume: true } : { layer: l.name, pause: true }) }, l.paused ? 'Resume' : 'Pause'),
+                h('button', { class: 'btn sm', type: 'button', onclick: () => change({ layer: l.name, hold: !l.held }) }, l.held ? 'Release' : 'Hold'),
+                h('button', { class: 'btn sm', type: 'button', onclick: () => change({ layer: l.name, skip_stage: true }) }, 'Skip'))));
+          }))) : null,
+        h('div', { class: 'row' }, h('span', { class: 'small' }, 'Set'), setPath, setValue,
+          h('button', { class: 'btn sm', type: 'button', onclick: applySet }, 'Apply'))));
+      fillControlCells(layers);
     }
 
     async function poll() {
@@ -464,6 +657,15 @@ export default {
             ['Changed', `${num(rep.server.changes.headers_changed)} header values, ${num(rep.server.changes.body_changed)} bodies, ${num(rep.server.changes.path_changed)} paths`],
             ['Rejected markers', num(rep.rejected_markers)],
           ])) : null,
+        ...((rep.cluster && rep.cluster.warnings) || []).map((w) => notice('warn', w)),
+        (rep.findings || []).length ? h('div', { class: 'stack-sm' }, h('h3', null, 'Findings'),
+          ...rep.findings.map((f) => notice(f.failed && f.failed.length ? 'warn' : 'ok', f.summary))) : null,
+        (rep.changes || []).length ? h('details', { class: 'disclosure', open: true }, h('summary', null, `Live changes (${rep.changes.length})`),
+          h('ul', { class: 'small' }, ...rep.changes.map((c) => h('li', null, `${num(c.at_secs, 1)} s (v${c.version}): ${c.what}`)))) : null,
+        (rep.stages || []).length > 1 ? h('details', { class: 'disclosure' }, h('summary', null, `Stages (${rep.stages.length}), the run's results in each`),
+          h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
+            h('thead', null, h('tr', null, h('th', null, 'Layer'), h('th', null, 'Stage'), h('th', null, 'Target'), h('th', null, 'From'), h('th', null, 'To'), h('th', null, 'Answered/s'), h('th', null, 'Errors'), h('th', null, 'p99 max'))),
+            h('tbody', null, ...rep.stages.slice(0, 200).map((x) => h('tr', null, h('td', null, x.layer), h('td', null, stageLabel(x.type, x.stage, x.part)), h('td', { class: 'mono' }, num(x.target, 1)), h('td', { class: 'mono' }, `${num(x.from_secs, 1)} s`), h('td', { class: 'mono' }, `${num(x.to_secs, 1)} s`), h('td', { class: 'mono' }, num(x.rate, 1)), h('td', { class: x.errors ? 'err-text' : '' }, num(x.errors)), h('td', { class: 'mono' }, fmtMs(x.p99_ms_max)))))))) : null,
         rep.thresholds && rep.thresholds.length ? h('table', { class: 'table' },
           h('thead', null, h('tr', null, h('th', null, 'Threshold'), h('th', null, 'Limit'), h('th', null, 'Measured'), h('th', null, 'Result'))),
           h('tbody', null, ...rep.thresholds.map((th) => h('tr', null, h('td', null, th.name), h('td', { class: 'mono' }, String(th.limit)), h('td', { class: 'mono' }, String(th.measured)), h('td', null, badge(th.pass ? 'pass' : 'fail', th.pass ? 'ok' : 'err')))))) : h('p', { class: 'muted small' }, 'No thresholds in the scenario.'),
@@ -481,11 +683,13 @@ export default {
     }
 
     loadNode().then((n) => { if (n && n.enabled) loadBuilder(); else replace(builderEl, h('p', { class: 'muted small' }, 'Turn harness mode on to build and run scenarios.')); });
-    if (st.runId) startPolling();
+    if (st.runId) startFeed();
     const refresh = setInterval(loadNode, 15000);
 
     return () => {
       alive = false;
+      stopFeed();
+      clearTimeout(previewTimer);
       if (pollTimer) clearInterval(pollTimer);
       clearInterval(refresh);
       clear(root);

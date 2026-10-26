@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use super::cluster::MinNodes;
 use super::engine::Share;
+use super::live::{Controls, StageLog};
 use super::report::{Bucket, Counts, Sample, Saturation, TargetReport, WireHist};
 use super::scenario::{Scenario, ServerProfile};
 use super::Role;
@@ -262,6 +263,9 @@ pub struct RunControl {
     /// node gone, or a new leader handing its own share back). Empty: stop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share: Option<Share>,
+    /// The run's live changes, when newer than the node's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controls: Option<Box<Controls>>,
 }
 
 /// What a client node runs: the scenario, its share of the rate, its
@@ -281,6 +285,9 @@ pub struct ClientAssignment {
     /// converts it with its clock offset.
     pub start_at_ns: u64,
     pub verification_token: String,
+    /// The run's live changes so far.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controls: Option<Controls>,
 }
 
 impl std::fmt::Debug for ClientAssignment {
@@ -387,6 +394,9 @@ pub struct NodeStats {
     /// Transport failures not in `failed_seqs` (over the cap).
     #[serde(default)]
     pub failed_untracked: u64,
+    /// The version of the live changes the node runs with.
+    #[serde(default)]
+    pub controls_version: u64,
 }
 
 /// A server node's cumulative view of one run.
@@ -516,6 +526,12 @@ pub struct SnapRun {
     pub start_at_ns: u64,
     pub clients: Vec<SnapClient>,
     pub servers: Vec<SnapServer>,
+    /// The run's live changes and its closed loops' state.
+    #[serde(default)]
+    pub controls: Controls,
+    /// Where each layer's pattern was as the run went.
+    #[serde(default, skip_serializing_if = "StageLog::is_empty")]
+    pub stages: StageLog,
 }
 
 impl std::fmt::Debug for SnapRun {

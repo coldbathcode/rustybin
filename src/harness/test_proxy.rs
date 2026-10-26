@@ -45,6 +45,9 @@ pub struct ProxyConfig {
     pub drop_every: Option<u64>,
     /// Prepend this to the forwarded path.
     pub path_prefix: String,
+    /// A gateway at capacity: requests over this many in a wall-clock
+    /// second are answered 503 by the proxy.
+    pub capacity_per_sec: Option<u64>,
 }
 
 #[derive(Default)]
@@ -53,11 +56,18 @@ pub struct Counters {
     pub forwarded: AtomicU64,
     pub own_answers: AtomicU64,
     pub dropped: AtomicU64,
+    /// Answered 503 over `capacity_per_sec`.
+    pub over_capacity: AtomicU64,
+    /// When each request arrived (the first 100 000).
+    pub arrivals: std::sync::Mutex<Vec<std::time::Instant>>,
 }
 
 struct Inner {
     /// The upstream pool, round robin by request count.
     upstreams: Vec<SocketAddr>,
+    started: std::time::Instant,
+    /// The current wall-clock second and the requests in it (capacity).
+    second: std::sync::Mutex<(u64, u64)>,
     config: ProxyConfig,
     counters: Arc<Counters>,
     client: Client<HttpConnector, Full<Bytes>>,
@@ -84,6 +94,35 @@ impl Proxy {
 
 async fn forward(State(inner): State<Arc<Inner>>, req: Request) -> Response {
     let n = inner.counters.requests.fetch_add(1, Ordering::Relaxed) + 1;
+    {
+        let mut arrivals = inner
+            .counters
+            .arrivals
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if arrivals.len() < 100_000 {
+            arrivals.push(std::time::Instant::now());
+        }
+    }
+    if let Some(cap) = inner.config.capacity_per_sec {
+        let sec = inner.started.elapsed().as_secs();
+        let over = {
+            let mut cur = inner.second.lock().unwrap_or_else(|p| p.into_inner());
+            if cur.0 != sec {
+                *cur = (sec, 0);
+            }
+            cur.1 += 1;
+            cur.1 > cap
+        };
+        if over {
+            inner.counters.over_capacity.fetch_add(1, Ordering::Relaxed);
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "over the test proxy's capacity",
+            )
+                .into_response();
+        }
+    }
     if let Some(every) = inner.config.drop_every {
         if every > 0 && n % every == 0 {
             inner.counters.dropped.fetch_add(1, Ordering::Relaxed);
@@ -172,6 +211,8 @@ pub async fn start_pool(upstreams: Vec<SocketAddr>, config: ProxyConfig) -> Prox
         .build(connector);
     let inner = Arc::new(Inner {
         upstreams,
+        started: std::time::Instant::now(),
+        second: std::sync::Mutex::new((0, 0)),
         config,
         counters: counters.clone(),
         client,

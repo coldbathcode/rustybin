@@ -1,0 +1,23 @@
+# A day's traffic compressed into minutes: a smooth wave between a night
+# low and a daytime peak, with some jitter on top.
+name: daily-wave
+description: A sine wave between 20 and 200 requests per second, two minutes per day, for ten minutes, with 10 percent jitter.
+targets:
+  - url: http://127.0.0.1:8080
+    weight: 1
+scale:
+  virtual_clients: 50
+layers:
+  - name: main
+    source:
+      request:
+        path: /status/200
+    pattern:
+      type: wave
+      min: 20
+      max: 200
+      period: 2m
+      shape: sine
+      for: 10m
+      jitter: 0.1
+timeout: 10s

@@ -127,14 +127,37 @@ pub fn list_scenarios(ctx: &CallCtx) -> Value {
         .iter()
         .map(|(n, _)| *n)
         .collect();
+    let saved: Vec<Value> = ctx
+        .app
+        .harness
+        .as_ref()
+        .map(|h| {
+            h.saved
+                .list()
+                .into_iter()
+                .map(|s| {
+                    let mut sc = s.scenario.clone();
+                    sc.normalise();
+                    json!({
+                        "name": s.name,
+                        "description": sc.description,
+                        "builtin": false,
+                        "saved_at": s.saved_at,
+                        "summary": sc.summary(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     ok(
         ctx,
         format!(
-            "{} built-in scenario(s): {}. get_scenario returns one to copy and tune; saved scenarios come in a later phase.",
+            "{} built-in scenario(s): {}; {} saved on this node. get_scenario returns one to copy and tune; save_scenario keeps one by name.",
             names.len(),
-            names.join(", ")
+            names.join(", "),
+            saved.len()
         ),
-        json!({ "scenarios": scenarios, "saved": [] }),
+        json!({ "scenarios": scenarios, "saved": saved }),
     )
 }
 
@@ -147,7 +170,22 @@ pub fn get_scenario(ctx: &CallCtx, args: &Value) -> Value {
         .iter()
         .find(|(n, _)| *n == name)
     else {
-        return err(format!("no built-in scenario {name:?}"));
+        return match ctx.app.harness.as_ref().and_then(|h| h.saved.get(name)) {
+            Some(s) => ok(
+                ctx,
+                format!(
+                    "Saved scenario {name}: {}",
+                    s.scenario.description.clone().unwrap_or_default()
+                ),
+                json!({
+                    "name": name,
+                    "saved_at": s.saved_at,
+                    "scenario": s.scenario,
+                    "yaml": serde_yaml::to_string(&s.scenario).unwrap_or_default(),
+                }),
+            ),
+            None => err(format!("no built-in or saved scenario {name:?}")),
+        };
     };
     let Some(scenario) = harness::builtin_scenario(name) else {
         return err("the built-in scenario does not parse");
@@ -792,4 +830,194 @@ pub fn get_leader(ctx: &CallCtx, args: &Value) -> Value {
         }
     );
     ok(ctx, text, view)
+}
+
+// ── Phase 4: patterns, preview, saved scenarios, live changes ──────
+
+/// `list_patterns`: the pattern types with their parameters, from the
+/// scenario schema (so the tool never drifts from the model).
+pub fn list_patterns(ctx: &CallCtx) -> Value {
+    let caps = match &ctx.app.harness {
+        Some(h) => h.caps(),
+        None => crate::harness::scenario::Caps::from_config(&ctx.app.config.harness),
+    };
+    let schema = crate::harness::scenario::schema(&caps);
+    let patterns: Vec<Value> = schema["$defs"]["pattern"]["oneOf"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|b| {
+            let params: serde_json::Map<String, Value> = b["properties"]
+                .as_object()
+                .map(|p| {
+                    p.iter()
+                        .filter(|(k, _)| *k != "type" && *k != "then")
+                        .map(|(k, v)| (k.clone(), v["description"].clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            json!({
+                "type": b["title"],
+                "description": b["description"],
+                "required": b["required"],
+                "parameters": params,
+            })
+        })
+        .collect();
+    let text = patterns
+        .iter()
+        .map(|p| {
+            format!(
+                "{}: {}",
+                p["type"].as_str().unwrap_or(""),
+                p["description"].as_str().unwrap_or("")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    ok(
+        ctx,
+        format!(
+            "{} pattern types (chain them with then:; every one takes jitter and sync):\n{text}",
+            patterns.len()
+        ),
+        json!({ "patterns": patterns }),
+    )
+}
+
+/// `preview_scenario`: the expected rate per second, nothing sent.
+pub fn preview_scenario(ctx: &CallCtx, args: &Value) -> Value {
+    let mut scenario = match scenario_arg(args) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    scenario.normalise();
+    let caps = match &ctx.app.harness {
+        Some(h) => h.caps(),
+        None => crate::harness::scenario::Caps::from_config(&ctx.app.config.harness),
+    };
+    let problems = scenario.validate(&caps);
+    let mut v = scenario.preview();
+    let peak_total = v["total"]
+        .as_array()
+        .map(|t| t.iter().filter_map(Value::as_f64).fold(0.0, f64::max))
+        .unwrap_or(0.0);
+    let text = format!(
+        "{}: {:.0} s, {} layer(s), the busiest second {:.0} requests, peak rate {:.0} per second{}.",
+        scenario.name,
+        v["duration_secs"].as_f64().unwrap_or(0.0),
+        scenario.layers.len(),
+        peak_total,
+        v["peak_rate"].as_f64().unwrap_or(0.0),
+        if problems.is_empty() {
+            String::new()
+        } else {
+            format!("; {} problem(s): {}", problems.len(), problems.join("; "))
+        }
+    );
+    v["valid"] = json!(problems.is_empty());
+    v["problems"] = json!(problems);
+    ok(ctx, text, v)
+}
+
+/// `save_scenario`: keep a scenario by name on this node.
+pub fn save_scenario(ctx: &CallCtx, args: &Value) -> Value {
+    let h = match harness_of(ctx) {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
+    let Some(name) = arg_str(args, "name") else {
+        return err("name is required (letters, digits, . _ -)");
+    };
+    if harness::builtin_scenarios().iter().any(|(n, _)| *n == name) {
+        return err(format!(
+            "{name:?} is a built-in scenario: save the copy under another name"
+        ));
+    }
+    let scenario = match scenario_arg(args) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let mut check = scenario.clone();
+    check.normalise();
+    let problems = check.validate(&h.caps());
+    if !problems.is_empty() {
+        return err(format!(
+            "the scenario has {} problem(s), nothing was saved: {}",
+            problems.len(),
+            problems.join("; ")
+        ));
+    }
+    match h.saved.put(name, scenario) {
+        Ok(created) => ok(
+            ctx,
+            format!(
+                "Scenario {name} {}; list_scenarios shows it, create_run runs it.",
+                if created { "saved" } else { "replaced" }
+            ),
+            json!({ "name": name, "saved": true, "summary": check.summary() }),
+        ),
+        Err(e) => err(e),
+    }
+}
+
+/// `update_run`: a live change of a running run (this node's, or a
+/// cluster run with `cluster_id`). A change that may send more load asks
+/// the user to confirm.
+pub async fn update_run(ctx: &CallCtx, args: &Value, params: &Value) -> Value {
+    let h = match harness_of(ctx) {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
+    let Some(run_id) = arg_str(args, "run_id") else {
+        return err("run_id is required");
+    };
+    let change: crate::harness::live::Change = match args.get("change") {
+        Some(v) => match serde_json::from_value(v.clone()) {
+            Ok(c) => c,
+            Err(e) => return err(format!("change: {e}")),
+        },
+        None => return err("change is required: rate_multiplier, pause, resume, hold, skip_stage, set, add_layer or remove_layer"),
+    };
+    if change.may_raise_load() {
+        let action = format!("change harness run {run_id}: {}", change.describe());
+        match confirm(ctx, "update_run", args, params, &action).await {
+            Confirm::Yes => {}
+            Confirm::Answer(v) => return v,
+        }
+    }
+    let result = if arg_str(args, "cluster_id").is_some() {
+        let c = match cluster_of(&h, args) {
+            Ok(c) => c,
+            Err(e) => return e,
+        };
+        c.change_run(run_id, &change).map(|(_, controls)| controls)
+    } else {
+        match h.run(run_id) {
+            Some(run) if run.cluster.is_none() => run
+                .apply_change(&change)
+                .map_err(crate::harness::RunError::invalid),
+            Some(_) => Err(crate::harness::RunError::new(
+                409,
+                "this run is part of a cluster run: pass its cluster_id on the leader",
+            )),
+            None => Err(crate::harness::RunError::new(
+                404,
+                format!("no run {run_id:?} on this node"),
+            )),
+        }
+    };
+    match result {
+        Ok(controls) => ok(
+            ctx,
+            format!(
+                "Run {run_id} changed ({}); the nodes apply it on their next pass. The run's log has {} change(s).",
+                change.describe(),
+                controls.log.len()
+            ),
+            json!({ "run_id": run_id, "controls": controls }),
+        ),
+        Err(e) => run_error_value(e),
+    }
 }

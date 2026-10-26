@@ -1,0 +1,24 @@
+# Capacity plateaus: each step is held for 30 seconds and reported on its
+# own (the report's stages), so the step where latency bends is easy to see.
+name: step-plateaus
+description: From 50 to 400 requests per second in steps of 50, each held 30 seconds, then 30 more at 400.
+targets:
+  - url: http://127.0.0.1:8080
+    weight: 1
+scale:
+  virtual_clients: 100
+layers:
+  - name: main
+    source:
+      request:
+        path: /status/200
+    pattern:
+      type: step
+      start: 50
+      step: 50
+      every: 30s
+      max: 400
+      hold: 30s
+timeout: 10s
+thresholds:
+  error_rate: 0.01

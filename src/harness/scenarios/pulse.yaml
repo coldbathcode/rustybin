@@ -1,0 +1,22 @@
+# A square wave: bursts of load with pauses between them, for autoscaling,
+# connection pools and rate limiters that refill between pulses.
+name: pulse
+description: 300 requests per second for 10 seconds, then 20 for 20 seconds, six times.
+targets:
+  - url: http://127.0.0.1:8080
+    weight: 1
+scale:
+  virtual_clients: 50
+layers:
+  - name: main
+    source:
+      request:
+        path: /status/200
+    pattern:
+      type: pulse
+      high: 300
+      low: 20
+      on: 10s
+      off: 20s
+      cycles: 6
+timeout: 10s

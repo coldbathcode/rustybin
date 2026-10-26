@@ -205,6 +205,12 @@ pub struct HarnessConfig {
     /// before an election starts (default 3 s; a cluster keeps it below its
     /// lease).
     pub election_timeout: Duration,
+    /// `RUSTYBIN_HARNESS_STATE_DIR`: saved scenarios are written here and
+    /// loaded at startup.
+    pub state_dir: Option<PathBuf>,
+    /// `RUSTYBIN_HARNESS_SCALE_HOOK`: a leader POSTs its `scale_request`
+    /// events here (allowlisted like targets, signed with the cluster secret).
+    pub scale_hook: Option<String>,
 }
 
 impl Default for HarnessConfig {
@@ -231,6 +237,8 @@ impl Default for HarnessConfig {
             control_url: None,
             leader: crate::harness::wire::LeaderPolicy::Auto,
             election_timeout: Duration::from_secs(3),
+            state_dir: None,
+            scale_hook: None,
         }
     }
 }
@@ -279,6 +287,8 @@ impl HarnessConfig {
             "control_url": self.control_url,
             "leader": self.leader.as_str(),
             "election_timeout_ms": self.election_timeout.as_millis() as u64,
+            "state_dir_configured": self.state_dir.is_some(),
+            "scale_hook": self.scale_hook,
         })
     }
 }
@@ -1264,6 +1274,21 @@ where
             }
         },
     };
+    let scale_hook = match get("RUSTYBIN_HARNESS_SCALE_HOOK") {
+        Some(raw)
+            if (raw.trim().starts_with("http://") || raw.trim().starts_with("https://"))
+                && raw.trim().len() <= 2048 =>
+        {
+            Some(raw.trim().to_string())
+        }
+        Some(raw) => {
+            warnings.push(format!(
+                "invalid RUSTYBIN_HARNESS_SCALE_HOOK {raw:?} (an http or https URL), ignored"
+            ));
+            None
+        }
+        None => None,
+    };
     HarnessConfig {
         enabled,
         roles,
@@ -1291,6 +1316,8 @@ where
         control_url,
         leader,
         election_timeout,
+        state_dir: get("RUSTYBIN_HARNESS_STATE_DIR").map(PathBuf::from),
+        scale_hook,
     }
 }
 

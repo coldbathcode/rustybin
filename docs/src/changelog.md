@@ -196,6 +196,24 @@ API, AI and agent gateway demos.
   `unreported`. `GET .../clusters/{id}/leader` on any member, vote and announcement
   node routes, the MCP tool `get_leader`, and the leader, term, history and succession
   in the console.
+- **Harness patterns and live tuning** (phase 4): layers run every pattern
+  (`constant`, `ramp`, `step`, `target`, `breakpoint`, `spike`, `pulse`, `burst`,
+  `wave`), chained with `then:`, with `jitter` and `sync: cluster | node`; the scheduler
+  follows the exact curve second by second and lands a burst within its window. Closed
+  loops: `target` on `overhead_p99_ms` moves the rate toward the gateway overhead goal,
+  `breakpoint` stops at the first plateau that fails `until` and reports the last good
+  rate. `PATCH .../runs/{run}` changes a running run (rate multiplier, pause and resume,
+  hold, skip stage, `set` on any pattern field, add and remove layers), checked against
+  the caps, logged, and carried in the cluster snapshot through a failover;
+  `GET .../runs/{run}/events` is the run's feed (server-sent events). Reports gain the
+  changes, the findings and every stage as it ran. `POST /_rustybin/harness/preview`
+  returns the expected curve; saved scenarios (`PUT` and `DELETE
+  /_rustybin/harness/scenarios/{name}`, `RUSTYBIN_HARNESS_STATE_DIR`) and six new
+  built-ins. `scale.client_nodes: auto` waits for nodes and emits `scale_request`, also
+  POSTed to a signed controller hook (`RUSTYBIN_HARNESS_SCALE_HOOK`), with
+  `scale.scale_timeout`; `scale.connections_per_client`. MCP tools `list_patterns`,
+  `preview_scenario`, `save_scenario`, `update_run`; in the console, a preview chart,
+  saved scenarios, live run controls and the feed.
 
 ### Changed
 

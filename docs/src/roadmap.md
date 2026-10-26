@@ -5,14 +5,21 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-- **Load test mode (harness), the next phases** (`docs/plans/harness.md`): phase 4,
-  every run pattern (step, target, breakpoint, spike, pulse, burst, wave) with `then:`
-  and `sync`, the scale block, live tuning through the snapshot, preview curves, saved
-  scenarios and the run's live feed. Then the rate-limit tests and their analysis
-  (phase 5).
+- **Load test mode (harness), the next phases** (`docs/plans/harness.md`): phase 5,
+  the rate-limit tests (`limit_test` with `over_limit`, `many_keys`, `many_ips`,
+  `retry_wave`, `slow_rise` and the others of section 6.3), `expect`, and the rate-limit
+  analysis (admission per window, rate-limit headers, time to the first 429, recovery,
+  collateral damage, upstream protection). Then mock-driven traffic and identities
+  (phase 6).
 
 ## Recently built
 
+- [Harness patterns and live tuning](configuration.md#harness-mode) (phase 4): every
+  run pattern (step, target, breakpoint, spike, pulse, burst, wave) chained with
+  `then:`, with jitter and cluster or node sync; the closed loops `target` on gateway
+  overhead and `breakpoint`; live changes to a running run (multiplier, pause, hold,
+  skip, `set`, layers) that survive a failover; the run's feed; preview curves; saved
+  scenarios; `client_nodes: auto` with a signed scale hook.
 - [Harness failover](configuration.md#harness-mode) (phase 3b): eligible nodes, a
   succession ordered by work with standbys first, a replicated snapshot with
   checkpoints, elections by a majority of the eligible nodes, terms that make an old

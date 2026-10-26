@@ -49,6 +49,7 @@ use tokio::sync::watch;
 
 use super::correlate::{now_ns, ChangesReport, RunKey, ServerReport};
 use super::engine::Share;
+use super::live::{Change, Controls, LiveView, StageLog};
 use super::report::{
     self, decode_numbers, encode_numbers, histogram, Breakdown, Bucket, ClusterReport, Counts,
     NodeReport, Percentiles, Report, Sample, Saturation, TargetReport, MAX_SAMPLES,
@@ -297,6 +298,9 @@ struct MemberView {
 pub enum RunState {
     /// Validated, not started.
     Created,
+    /// `client_nodes: auto`: waiting for enough client nodes (a
+    /// `scale_request` is out), at most `scale.scale_timeout`.
+    Waiting,
     /// Assigned; the synchronised start is ahead.
     Starting,
     Running,
@@ -309,6 +313,7 @@ impl RunState {
     pub fn as_str(self) -> &'static str {
         match self {
             RunState::Created => "created",
+            RunState::Waiting => "waiting",
             RunState::Starting => "starting",
             RunState::Running => "running",
             RunState::Collecting => "collecting",
@@ -319,7 +324,7 @@ impl RunState {
     pub fn active(self) -> bool {
         matches!(
             self,
-            RunState::Starting | RunState::Running | RunState::Collecting
+            RunState::Waiting | RunState::Starting | RunState::Running | RunState::Collecting
         )
     }
 }
@@ -407,6 +412,19 @@ struct RunInner {
     servers: Vec<ServerPart>,
     collect: Option<CollectState>,
     finished: Option<Instant>,
+    /// Live changes and the closed loops (the nodes follow them).
+    controls: Controls,
+    /// Where each layer's pattern was as the run went (noted on every
+    /// tick; the closed loops and the report's stages read it).
+    stages: StageLog,
+    /// `client_nodes: auto`: since when the run waits for client nodes.
+    waiting_since: Option<Instant>,
+    /// The scale requests made for the run (the feed shows them).
+    scale_requests: Vec<Value>,
+    /// Scale requests not yet sent to the controller hook.
+    hook_pending: Vec<Value>,
+    /// Shown in the report (a run started undersized).
+    warnings: Vec<String>,
 }
 
 /// One run of a scenario on a cluster.
@@ -519,6 +537,8 @@ impl ClusterRun {
                     stats: p.stats.clone(),
                 })
                 .collect(),
+            controls: inner.controls.clone(),
+            stages: inner.stages.clone(),
         }
     }
 
@@ -527,8 +547,10 @@ impl ClusterRun {
         let key = RunKey::from_hex(&r.key).ok_or("the snapshot's run key is not valid")?;
         let mut scenario = r.scenario.clone();
         scenario.normalise();
+        let scenario_for_controls = scenario.clone();
         let state = match r.state.as_str() {
             "created" => RunState::Created,
+            "waiting" => RunState::Waiting,
             "starting" => RunState::Starting,
             // A run that was collecting collects again: its clients send
             // their final stats to the new leader.
@@ -608,6 +630,16 @@ impl ClusterRun {
                 servers,
                 collect: None,
                 finished: None,
+                controls: if r.controls.layers.is_empty() {
+                    Controls::for_scenario(&scenario_for_controls)
+                } else {
+                    r.controls.clone()
+                },
+                stages: r.stages.clone(),
+                waiting_since: (state == RunState::Waiting).then_some(now),
+                scale_requests: Vec::new(),
+                hook_pending: Vec::new(),
+                warnings: Vec::new(),
             }),
             report: OnceLock::new(),
             done,
@@ -675,6 +707,23 @@ impl ClusterRun {
             inner.state = RunState::Running;
             inner.started = Some(now);
         }
+        // Where each layer's pattern is now; nowhere once the run stops.
+        if inner.state == RunState::Running {
+            let t = run_secs(&inner);
+            if inner.stop_reason.is_none() {
+                let view = LiveView::build(
+                    &self.scenario,
+                    &inner.controls,
+                    &self.id,
+                    "",
+                    Share::default(),
+                );
+                inner.stages.note(&view, t);
+            } else {
+                let layers = inner.controls.layer_names(&self.scenario).len();
+                inner.stages.end(layers, t);
+            }
+        }
         // A client node silent past its lease has stopped sending: its share
         // goes to the others, so the cluster-wide rate stays as planned.
         if matches!(inner.state, RunState::Starting | RunState::Running)
@@ -708,6 +757,36 @@ impl ClusterRun {
                 changed = true;
             }
         }
+        // The closed loops (target on overhead, breakpoint), on the seconds
+        // every client still sending has reported: the nodes follow the
+        // controls they write, a breakpoint found stops the run.
+        if inner.state == RunState::Running
+            && inner.controls.stop.is_none()
+            && inner.controls.has_loops(&self.scenario)
+        {
+            let n = complete_seconds(&inner);
+            let timeline = merged_timeline(&inner, n);
+            let view = LiveView::build(
+                &self.scenario,
+                &inner.controls,
+                &self.id,
+                "",
+                Share::default(),
+            );
+            let mut controls = inner.controls.clone();
+            if super::live::run_loops(&mut controls, &view, &inner.stages, &timeline, false) {
+                controls.version += 1;
+                inner.controls = controls;
+                changed = true;
+            }
+            if let Some(reason) = inner.controls.stop.clone() {
+                if inner.stop_reason.is_none() {
+                    tracing::info!(target: "rustybin::harness", cluster = %cluster.id, run = %self.id, "harness: {reason}");
+                    inner.stop_reason = Some(reason);
+                    changed = true;
+                }
+            }
+        }
         if matches!(inner.state, RunState::Starting | RunState::Running) {
             let past_deadline = inner.deadline.is_some_and(|d| now >= d);
             let done = inner.clients.iter().all(|p| {
@@ -717,6 +796,32 @@ impl ClusterRun {
                     || past_deadline
             });
             if done {
+                let layers = inner.controls.layer_names(&self.scenario).len();
+                let t = run_secs(&inner);
+                inner.stages.end(layers, t);
+                // The loops judge what is still open (the last plateau).
+                if inner.controls.stop.is_none() && inner.controls.has_loops(&self.scenario) {
+                    let n = inner
+                        .clients
+                        .iter()
+                        .map(|p| p.timeline.len())
+                        .max()
+                        .unwrap_or(0);
+                    let timeline = merged_timeline(&inner, n);
+                    let view = LiveView::build(
+                        &self.scenario,
+                        &inner.controls,
+                        &self.id,
+                        "",
+                        Share::default(),
+                    );
+                    let mut controls = inner.controls.clone();
+                    if super::live::run_loops(&mut controls, &view, &inner.stages, &timeline, true)
+                    {
+                        controls.version += 1;
+                        inner.controls = controls;
+                    }
+                }
                 if inner.started.is_none() {
                     inner.started = Some(now);
                 }
@@ -814,7 +919,7 @@ impl ClusterRun {
     fn stop(&self, reason: &str, cluster: &ClusterInfo) -> bool {
         let mut inner = lock(&self.inner);
         match inner.state {
-            RunState::Created => {
+            RunState::Created | RunState::Waiting => {
                 inner.stop_reason = Some(reason.to_string());
                 inner.state = RunState::Collecting;
                 inner.collect = Some(CollectState {
@@ -859,22 +964,37 @@ impl ClusterRun {
             .checked_sub(1)
             .and_then(|i| m.timeline.get(i))
             .cloned();
-        let layers: Vec<Value> = self
-            .scenario
+        let view = LiveView::build(
+            &self.scenario,
+            &inner.controls,
+            &self.id,
+            "",
+            Share::default(),
+        );
+        let running = inner.started.is_some() && inner.state != RunState::Finished;
+        let layers: Vec<Value> = view
             .layers
             .iter()
             .zip(&m.layers)
-            .map(|(l, p)| {
-                let t = Duration::from_secs_f64(elapsed)
-                    .saturating_sub(l.starts_after.map_or(Duration::ZERO, |d| d.0));
+            .enumerate()
+            .map(|(i, (l, p))| {
+                let target_now = match view.level(i, elapsed) {
+                    super::live::Level::Run(v) if running => Some(v),
+                    _ => None,
+                };
                 json!({
-                    "name": l.name,
-                    "model": l.model.as_str(),
+                    "name": l.def.name,
+                    "model": l.def.model.as_str(),
                     "completed": p.counts.completed,
                     "ok": p.counts.ok,
                     "errors": p.counts.errors(),
                     "p99_ms": Percentiles::from_histogram(&p.corrected).p99_ms,
-                    "target_now": if inner.started.is_some() && inner.state != RunState::Finished { l.pattern.value_at(t) } else { None },
+                    "target_now": target_now,
+                    "multiplier": l.control.multiplier,
+                    "paused": l.control.paused || view.paused,
+                    "held": l.control.held_at.is_some(),
+                    "removed": l.control.removed,
+                    "stage": view.position(i, elapsed).map(|(s, part)| json!({ "index": s, "part": part, "type": l.compiled.stages.get(s).map(|st| st.kind) })),
                 })
             })
             .collect();
@@ -918,6 +1038,11 @@ impl ClusterRun {
             "run_id": self.id,
             "cluster": true,
             "scenario": self.scenario.name,
+            "multiplier": inner.controls.multiplier,
+            "paused": inner.controls.paused,
+            "controls_version": inner.controls.version,
+            "findings": inner.controls.findings,
+            "warnings": inner.warnings,
             "hash": self.hash,
             "state": inner.state.as_str(),
             "stop_reason": inner.stop_reason,
@@ -1074,7 +1199,7 @@ fn resplit(
         })
         .collect();
     let total: u64 = caps.iter().sum();
-    let peak = run.scenario.peak_rate();
+    let peak = inner.controls.peak_rate(&run.scenario);
     let carried = if peak > total as f64 {
         total as f64 / peak
     } else {
@@ -1130,6 +1255,49 @@ struct MergedPart {
     corrected: hdrhistogram::Histogram<u64>,
 }
 
+/// The seconds every client part still sending has reported (all of them
+/// once none is sending).
+/// Seconds on the run's clock (since its synchronised start), measured on
+/// the leader's.
+fn run_secs(inner: &RunInner) -> f64 {
+    inner.start_at.or(inner.started).map_or(0.0, |s| {
+        Instant::now().saturating_duration_since(s).as_secs_f64()
+    })
+}
+
+fn complete_seconds(inner: &RunInner) -> usize {
+    let sending: Vec<usize> = inner
+        .clients
+        .iter()
+        .filter(|p| !p.gone && !p.complete())
+        .map(|p| p.timeline.len())
+        .collect();
+    match sending.iter().min() {
+        Some(n) => *n,
+        None => inner
+            .clients
+            .iter()
+            .map(|p| p.timeline.len())
+            .max()
+            .unwrap_or(0),
+    }
+}
+
+/// The first `n` seconds of the run, merged over the client nodes (the
+/// counters only; per-second percentiles are the slowest node's).
+fn merged_timeline(inner: &RunInner, n: usize) -> Vec<Bucket> {
+    let mut out: Vec<Bucket> = Vec::with_capacity(n);
+    for p in &inner.clients {
+        for (i, b) in p.timeline.iter().take(n).enumerate() {
+            match out.get_mut(i) {
+                Some(into) => merge_bucket(into, b),
+                None => out.push(b.clone()),
+            }
+        }
+    }
+    out
+}
+
 /// Add one bucket of another node (same second) into `into`.
 fn merge_bucket(into: &mut Bucket, b: &Bucket) {
     into.width_secs = into.width_secs.max(b.width_secs);
@@ -1162,7 +1330,8 @@ fn merge_bucket(into: &mut Bucket, b: &Bucket) {
 }
 
 fn merge(run: &ClusterRun, inner: &RunInner) -> Merged {
-    let nlayers = run.scenario.layers.len();
+    // Layers added while running too.
+    let nlayers = inner.controls.layer_names(&run.scenario).len();
     let ntargets = run.scenario.targets.len();
     let part = || MergedPart {
         counts: Counts::default(),
@@ -1401,7 +1570,7 @@ fn build_report(
         .layers
         .iter()
         .all(|l| l.model == super::scenario::Model::Open);
-    let peak = run.scenario.peak_rate();
+    let peak = inner.controls.peak_rate(&run.scenario);
     let report_at = Instant::now();
     let mut unreported_total = 0u64;
     for p in &inner.clients {
@@ -1499,7 +1668,9 @@ fn build_report(
         "finished"
     };
     let exit_code = Report::exit_code_for(state, &thresholds);
-    let layer_names: Vec<String> = run.scenario.layers.iter().map(|l| l.name.clone()).collect();
+    let layer_names: Vec<String> = inner.controls.layer_names(&run.scenario);
+    // The stages each layer ran, on the merged timeline.
+    let stages = report::stage_reports(&m.timeline, &layer_names, &inner.stages);
     let breakdown = |names: Vec<String>, parts: &[MergedPart]| -> Vec<Breakdown> {
         names
             .into_iter()
@@ -1611,7 +1782,11 @@ fn build_report(
             lost_check,
             unreported: unreported_total,
             history: cluster.history.clone(),
+            warnings: inner.warnings.clone(),
         }),
+        findings: inner.controls.findings.clone(),
+        changes: inner.controls.log.clone(),
+        stages,
     }
 }
 
@@ -1684,6 +1859,33 @@ impl Drop for PollGuard<'_> {
             m.polling = m.polling.saturating_sub(1);
             m.last_seen = Instant::now();
         }
+    }
+}
+
+/// What `client_nodes: auto` still needs.
+struct CapacityNeed {
+    peak: f64,
+    have: usize,
+    capacity: u64,
+    missing: f64,
+    needed: usize,
+}
+
+impl CapacityNeed {
+    /// A `scale_request` event: `{needed_client_nodes, reason, ...}`.
+    fn request(&self, cluster: &str, run: &str, reason: &str) -> Value {
+        json!({
+            "event": "scale_request",
+            "cluster_id": cluster,
+            "run_id": run,
+            "needed_client_nodes": self.needed,
+            "client_nodes": self.have,
+            "capacity_rate": self.capacity,
+            "peak_rate": self.peak,
+            "missing_rate": self.missing,
+            "reason": reason,
+            "at": chrono::Utc::now().to_rfc3339(),
+        })
     }
 }
 
@@ -1902,6 +2104,7 @@ impl Cluster {
     /// the succession current and, while a run is active, checkpoint it
     /// into the snapshot every [`CHECKPOINT_EVERY`].
     pub fn tick(&self) {
+        self.check_waiting();
         let runs: Vec<Arc<ClusterRun>> = {
             let inner = lock(&self.inner);
             inner
@@ -2269,8 +2472,17 @@ impl Cluster {
                         vu_to: p.vu_to,
                         start_at_ns: inner.start_at_ns,
                         verification_token: self.verification_token.clone(),
+                        controls: Some(inner.controls.clone()),
                     }
                 });
+                // The live changes, when the node runs an older version.
+                let known = p
+                    .stats
+                    .as_ref()
+                    .filter(|_| !p.from_checkpoint)
+                    .map_or(0, |s| s.controls_version);
+                let controls =
+                    (inner.controls.version > known).then(|| Box::new(inner.controls.clone()));
                 runs.push(RunControl {
                     run_id: run.id.clone(),
                     stop: inner.stop_reason.is_some() || p.gone,
@@ -2278,6 +2490,7 @@ impl Cluster {
                     timeline_ack: p.timeline.len(),
                     final_ack: p.complete(),
                     share: (!p.gone).then_some(p.share),
+                    controls,
                 });
             }
             if let Some(p) = inner.servers.iter().find(|p| p.node_id == node_id) {
@@ -2563,7 +2776,7 @@ impl Cluster {
             if !matches!(inner.state, RunState::Starting | RunState::Running) {
                 continue;
             }
-            let peak = run.scenario.peak_rate();
+            let peak = inner.controls.peak_rate(&run.scenario);
             for p in inner.clients.iter().filter(|p| !p.gone) {
                 *assigned.entry(p.node_id.clone()).or_default() += peak * p.share.fraction();
             }
@@ -2635,7 +2848,7 @@ impl Cluster {
         let need_clients = (scenario
             .scale
             .client_nodes
-            .unwrap_or(1)
+            .map_or(1, |c| c.count())
             .max(self.min_nodes.client))
         .max(1) as usize;
         let need_servers = scenario
@@ -2669,6 +2882,7 @@ impl Cluster {
         }
         let id = super::random_hex(6);
         let (done, _) = watch::channel(false);
+        let controls = Controls::for_scenario(&scenario);
         let run = Arc::new(ClusterRun {
             hash: scenario.hash(),
             id: id.clone(),
@@ -2687,6 +2901,12 @@ impl Cluster {
                 servers: Vec::new(),
                 collect: None,
                 finished: None,
+                controls,
+                stages: StageLog::default(),
+                waiting_since: None,
+                scale_requests: Vec::new(),
+                hook_pending: Vec::new(),
+                warnings: Vec::new(),
             }),
             report: OnceLock::new(),
             done,
@@ -2769,6 +2989,169 @@ impl Cluster {
                 ),
             ));
         }
+        // client_nodes: auto: as many client nodes as the peak rate needs.
+        if run.scenario.scale.client_nodes.is_some_and(|c| c.is_auto()) {
+            let need = self.capacity_need(&run);
+            if need.missing > 0.0 {
+                {
+                    let mut inner = lock(&run.inner);
+                    inner.state = RunState::Waiting;
+                    inner.waiting_since = Some(Instant::now());
+                    let req = need.request(
+                        &self.id,
+                        &run.id,
+                        "the client nodes cannot carry the peak rate yet",
+                    );
+                    inner.scale_requests.push(req.clone());
+                    inner.hook_pending.push(req);
+                }
+                self.bump();
+                tracing::info!(
+                    target: "rustybin::harness",
+                    cluster = %self.id,
+                    run = %run_id,
+                    needed = need.needed,
+                    have = need.have,
+                    "harness cluster run waits for client nodes (scale_request)"
+                );
+                return Ok(run);
+            }
+        }
+        self.assign(&run, false)?;
+        Ok(run)
+    }
+
+    /// What `client_nodes: auto` still needs: the client nodes there, their
+    /// capacity, and how many nodes the peak rate wants.
+    fn capacity_need(&self, run: &ClusterRun) -> CapacityNeed {
+        let per_node_cap = run.scenario.scale.max_rate_per_node;
+        let mut caps: Vec<u64> = {
+            let inner = lock(&self.inner);
+            inner
+                .members
+                .iter()
+                .filter(|m| m.has(Role::Client) && m.alive(self.lease))
+                .map(|m| {
+                    per_node_cap
+                        .map_or(m.capacity.max_rate, |p| m.capacity.max_rate.min(p))
+                        .max(1)
+                })
+                .collect()
+        };
+        caps.sort_unstable_by(|a, b| b.cmp(a));
+        let peak = lock(&run.inner).controls.peak_rate(&run.scenario);
+        let total: u64 = caps.iter().sum();
+        let missing = (peak - total as f64).max(0.0);
+        let needed = if missing <= 0.0 {
+            let mut acc = 0u64;
+            caps.iter()
+                .position(|c| {
+                    acc += c;
+                    acc as f64 >= peak
+                })
+                .map_or(caps.len(), |k| k + 1)
+                .max(1)
+        } else {
+            let avg = if caps.is_empty() {
+                1.0
+            } else {
+                total as f64 / caps.len() as f64
+            };
+            caps.len() + (missing / avg.max(1.0)).ceil() as usize
+        };
+        CapacityNeed {
+            peak,
+            have: caps.len(),
+            capacity: total,
+            missing,
+            needed,
+        }
+    }
+
+    /// The scale requests of a run (the run feed shows them).
+    pub fn scale_requests(&self, run: &ClusterRun) -> Vec<Value> {
+        lock(&run.inner).scale_requests.clone()
+    }
+
+    /// Scale requests for the controller hook, taken once.
+    pub fn take_hook_requests(&self) -> Vec<Value> {
+        let mut out = Vec::new();
+        for run in self.runs() {
+            out.append(&mut lock(&run.inner).hook_pending);
+        }
+        out
+    }
+
+    /// The signature of a hook body: HMAC-SHA256 keyed with the SHA-256 of
+    /// the join token (lowercase hex), hex. The operator's controller knows
+    /// the token; every eligible node has its hash, so a new leader signs
+    /// the same way.
+    pub fn sign(&self, body: &[u8]) -> String {
+        let Ok(mut mac) = HmacSha256::new_from_slice(self.join_hash.as_bytes()) else {
+            return String::new();
+        };
+        mac.update(body);
+        mac.finalize()
+            .into_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    /// A run waiting for client nodes: start it when they are there, or
+    /// undersized (with a warning) after `scale.scale_timeout`.
+    fn check_waiting(&self) {
+        for run in self.runs() {
+            let since = {
+                let inner = lock(&run.inner);
+                if inner.state != RunState::Waiting {
+                    continue;
+                }
+                inner.waiting_since.unwrap_or_else(Instant::now)
+            };
+            let need = self.capacity_need(&run);
+            let timeout = run
+                .scenario
+                .scale
+                .scale_timeout
+                .map_or(super::scenario::DEFAULT_SCALE_TIMEOUT, |d| d.0);
+            if need.missing <= 0.0 {
+                if let Err(e) = self.assign(&run, false) {
+                    tracing::warn!(target: "rustybin::harness", cluster = %self.id, run = %run.id, "harness: the waiting run could not start: {}", e.error);
+                }
+            } else if since.elapsed() >= timeout && need.have > 0 {
+                let warning = format!(
+                    "started undersized after {}s: {} client node(s) carry {} of {:.0} requests per second",
+                    timeout.as_secs(),
+                    need.have,
+                    need.capacity,
+                    need.peak
+                );
+                {
+                    let mut inner = lock(&run.inner);
+                    let req = need.request(
+                        &self.id,
+                        &run.id,
+                        "scale_timeout: the run starts undersized",
+                    );
+                    inner.scale_requests.push(req.clone());
+                    inner.hook_pending.push(req);
+                    if inner.warnings.len() < 16 {
+                        inner.warnings.push(warning.clone());
+                    }
+                }
+                tracing::warn!(target: "rustybin::harness", cluster = %self.id, run = %run.id, "harness: {warning}");
+                if let Err(e) = self.assign(&run, true) {
+                    tracing::warn!(target: "rustybin::harness", cluster = %self.id, run = %run.id, "harness: the waiting run could not start: {}", e.error);
+                }
+            }
+        }
+    }
+
+    /// Assign the shares and the synchronised start. `undersized`: the
+    /// client nodes may carry less than the peak (each runs at its cap).
+    fn assign(&self, run: &Arc<ClusterRun>, undersized: bool) -> Result<(), RunError> {
+        let run_id = run.id.clone();
         // The client and server nodes now, in a stable order.
         let (mut clients, mut servers, max_error) = {
             let inner = lock(&self.inner);
@@ -2804,21 +3187,34 @@ impl Cluster {
             .map(|(_, c)| per_node_cap.map_or(*c, |p| (*c).min(p)).max(1))
             .collect();
         let total: u64 = caps.iter().sum();
-        let peak = run.scenario.peak_rate();
+        if total == 0 {
+            return Err(RunError::new(
+                409,
+                "no client node is there to carry the run",
+            ));
+        }
+        let peak = lock(&run.inner).controls.peak_rate(&run.scenario);
+        // Undersized: the nodes carry what they can, the rest of the rate
+        // is not sent.
+        let carried = if undersized && peak > total as f64 {
+            total as f64 / peak
+        } else {
+            1.0
+        };
         let mut problems = Vec::new();
         let mut cuts = Vec::with_capacity(clients.len());
         let mut acc = 0u64;
         for ((node, _), cap) in clients.iter().zip(&caps) {
-            let from = acc as f64 / total as f64;
+            let from = acc as f64 / total as f64 * carried;
             acc += cap;
-            let to = if acc == total {
+            let to = if acc == total && carried >= 1.0 {
                 1.0
             } else {
-                acc as f64 / total as f64
+                acc as f64 / total as f64 * carried
             };
             let share = Share { from, to };
             let rate = peak * share.fraction();
-            if rate > *cap as f64 + 1e-9 {
+            if rate > *cap as f64 + 1e-6 {
                 problems.push(format!(
                     "{node}: its share is {rate:.1} requests per second, over its cap of {cap}"
                 ));
@@ -2847,7 +3243,7 @@ impl Cluster {
             + Duration::from_secs(10);
         {
             let mut inner = lock(&run.inner);
-            if inner.state != RunState::Created {
+            if !matches!(inner.state, RunState::Created | RunState::Waiting) {
                 return Err(RunError::new(409, format!("run {run_id} already started")));
             }
             inner.clients = clients
@@ -2883,7 +3279,93 @@ impl Cluster {
             lead_ms = lead.as_millis() as u64,
             "harness cluster run starting"
         );
-        Ok(run)
+        Ok(())
+    }
+
+    /// `PATCH .../runs/{run}`: a live change, checked against every client
+    /// node's declared capacity for its share, then followed by the nodes on
+    /// their next heartbeat (the cluster's long polls answer at once).
+    pub fn change_run(
+        &self,
+        run_id: &str,
+        change: &Change,
+    ) -> Result<(Arc<ClusterRun>, Controls), RunError> {
+        let Some(run) = self.run(run_id) else {
+            return Err(RunError::new(
+                404,
+                format!("no run {run_id:?} in cluster {}", self.id),
+            ));
+        };
+        let caps: HashMap<String, Caps> = self
+            .members_view()
+            .into_iter()
+            .map(|(id, m)| {
+                (
+                    id,
+                    Caps {
+                        max_rate: m.capacity.max_rate,
+                        max_inflight: m.capacity.max_inflight,
+                        max_duration_secs: m.capacity.max_duration_secs,
+                    },
+                )
+            })
+            .collect();
+        let controls = {
+            let mut inner = lock(&run.inner);
+            if matches!(inner.state, RunState::Collecting | RunState::Finished) {
+                return Err(RunError::new(409, "the run has finished"));
+            }
+            let now = run_secs(&inner);
+            let next = inner
+                .controls
+                .apply(&run.scenario, change, now)
+                .map_err(RunError::invalid)?;
+            let mut problems = Vec::new();
+            if inner.clients.is_empty() {
+                // Not started: the cluster's client nodes together.
+                let total = Caps {
+                    max_rate: caps.values().map(|c| c.max_rate).sum::<u64>().max(1),
+                    max_inflight: caps.values().map(|c| c.max_inflight).sum::<usize>().max(1),
+                    max_duration_secs: caps
+                        .values()
+                        .map(|c| c.max_duration_secs)
+                        .max()
+                        .unwrap_or(0),
+                };
+                problems = next.check(&run.scenario, &total, 1.0);
+            }
+            for p in inner.clients.iter().filter(|p| !p.gone && !p.done()) {
+                if let Some(c) = caps.get(&p.node_id) {
+                    for e in next.check(&run.scenario, c, p.share.fraction()) {
+                        problems.push(format!("{}: {e}", p.node_id));
+                    }
+                }
+            }
+            if !problems.is_empty() {
+                return Err(RunError::invalid(problems));
+            }
+            inner.controls = next.clone();
+            if inner.state == RunState::Running && inner.stop_reason.is_none() {
+                let view = LiveView::build(&run.scenario, &next, &run.id, "", Share::default());
+                inner.stages.note(&view, now);
+            }
+            next
+        };
+        self.bump();
+        tracing::info!(
+            target: "rustybin::harness",
+            cluster = %self.id,
+            run = %run_id,
+            version = controls.version,
+            change = %change.describe(),
+            "harness cluster run changed"
+        );
+        Ok((run, controls))
+    }
+
+    /// The live changes of a run.
+    pub fn run_controls(&self, run: &ClusterRun) -> Controls {
+        lock(&run.inner).controls.clone()
     }
 
     /// `POST .../runs/{run}/stop`.
@@ -2911,8 +3393,10 @@ impl Cluster {
         let info = self.info();
         let mut stopped = Vec::new();
         for run in self.runs() {
-            if matches!(run.state(), RunState::Starting | RunState::Running)
-                && run.stop(reason, &info)
+            if matches!(
+                run.state(),
+                RunState::Waiting | RunState::Starting | RunState::Running
+            ) && run.stop(reason, &info)
             {
                 stopped.push(run.id.clone());
             }

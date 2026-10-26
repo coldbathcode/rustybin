@@ -1,0 +1,23 @@
+# Short spikes on a low base rate: 500 requests within 100 ms every 10
+# seconds. Queueing and burst allowances (token buckets) show here; with
+# sync: cluster every client node bursts at the same instant.
+name: burst
+description: 500 requests within 100 ms every 10 seconds on top of 20 per second, for two minutes.
+targets:
+  - url: http://127.0.0.1:8080
+    weight: 1
+scale:
+  virtual_clients: 100
+layers:
+  - name: main
+    source:
+      request:
+        path: /status/200
+    pattern:
+      type: burst
+      base: 20
+      size: 500
+      within: 100ms
+      every: 10s
+      for: 2m
+timeout: 10s

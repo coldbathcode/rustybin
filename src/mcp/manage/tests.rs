@@ -1177,6 +1177,10 @@ async fn harness_tools_when_off_and_on() {
         "stop_run",
         "get_run_report",
         "harness_stop",
+        "list_patterns",
+        "preview_scenario",
+        "save_scenario",
+        "update_run",
     ] {
         assert!(
             names.contains(&t.to_string()),
@@ -1411,6 +1415,110 @@ async fn harness_cluster_tools() {
     )
     .await;
     assert!(is_error(&r));
+    server.shutdown();
+    let _ = server.wait().await;
+}
+
+#[tokio::test]
+async fn harness_pattern_preview_save_and_update_tools() {
+    let state = test_state_with(harness_config());
+    let server = crate::server::start_with_state(state.clone())
+        .await
+        .expect("server");
+    let app = test_app_with(state.clone());
+    let url = format!("http://{}", server.http_addr);
+    let r = tool(&app, &[], "list_patterns", json!({})).await;
+    assert!(!is_error(&r), "{r}");
+    let kinds: Vec<&str> = r["structuredContent"]["patterns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, crate::harness::pattern::Pattern::kinds());
+    assert!(text_of(&r).contains("burst"));
+    let scenario = json!({ "name": "mcp-live", "target": url, "source": { "request": { "path": "/status/200" } }, "pattern": { "type": "pulse", "high": 40, "low": 10, "on": "1s", "off": "1s", "cycles": 2 } });
+    let r = tool(
+        &app,
+        &[],
+        "preview_scenario",
+        json!({ "scenario": scenario }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(
+        r["structuredContent"]["total"],
+        json!([40.0, 10.0, 40.0, 10.0])
+    );
+    let r = tool(
+        &app,
+        &[],
+        "save_scenario",
+        json!({ "name": "my-pulse", "scenario": scenario }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    let r = tool(
+        &app,
+        &[],
+        "save_scenario",
+        json!({ "name": "smoke", "scenario": scenario }),
+    )
+    .await;
+    assert!(is_error(&r));
+    let r = tool(&app, &[], "list_scenarios", json!({})).await;
+    assert_eq!(r["structuredContent"]["saved"][0]["name"], "my-pulse");
+    let r = tool(&app, &[], "get_scenario", json!({ "name": "my-pulse" })).await;
+    assert_eq!(
+        r["structuredContent"]["scenario"]["pattern"]["type"],
+        "pulse"
+    );
+    // A run, then live changes through update_run.
+    let r = tool(
+        &app,
+        &[],
+        "create_run",
+        json!({ "scenario": scenario, "confirm": true }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    let id = r["structuredContent"]["run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Pausing sends less: no confirmation.
+    let r = tool(
+        &app,
+        &[],
+        "update_run",
+        json!({ "run_id": id, "change": { "pause": true } }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["controls"]["paused"], true);
+    // Raising the rate needs it.
+    let r = tool(
+        &app,
+        &[],
+        "update_run",
+        json!({ "run_id": id, "change": { "resume": true, "rate_multiplier": 2 } }),
+    )
+    .await;
+    assert!(is_error(&r));
+    assert!(text_of(&r).contains("confirm"));
+    let r = tool(&app, &[], "update_run", json!({ "run_id": id, "change": { "resume": true, "rate_multiplier": 2 }, "confirm": true })).await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["controls"]["multiplier"], 2.0);
+    let r = tool(
+        &app,
+        &[],
+        "update_run",
+        json!({ "run_id": id, "change": { "faults": {} } }),
+    )
+    .await;
+    assert!(is_error(&r));
+    let r = tool(&app, &[], "stop_run", json!({ "run_id": id })).await;
+    assert!(!is_error(&r), "{r}");
     server.shutdown();
     let _ = server.wait().await;
 }

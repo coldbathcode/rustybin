@@ -271,9 +271,10 @@ pub struct Scale {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_rate_per_node: Option<u64>,
     /// Cluster runs: the client nodes the run waits for before it starts
-    /// (the rate is split over the client nodes by declared capacity).
+    /// (the rate is split over the client nodes by declared capacity), or
+    /// `auto`: as many as the peak rate needs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_nodes: Option<u32>,
+    pub client_nodes: Option<NodeCount>,
     /// Cluster runs: the server nodes (the gateway's upstream pool) the run
     /// waits for before it starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -283,7 +284,51 @@ pub struct Scale {
     /// nodes (default true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leader_sheds_load: Option<bool>,
+    /// Keep-alive connections per virtual client (the connections the
+    /// gateway sees: this node's virtual clients times this, at most the
+    /// in-flight cap).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections_per_client: Option<u32>,
+    /// With `client_nodes: auto`: how long to wait for enough client nodes
+    /// before starting undersized, with a warning (default 5m).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_timeout: Option<Dur>,
 }
+
+/// `scale.client_nodes`: a number of nodes, or `auto`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum NodeCount {
+    Count(u32),
+    Auto(AutoWord),
+}
+
+/// The word `auto`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoWord {
+    Auto,
+}
+
+impl NodeCount {
+    /// The number of nodes to wait for (`auto`: at least one).
+    pub fn count(self) -> u32 {
+        match self {
+            NodeCount::Count(n) => n,
+            NodeCount::Auto(_) => 1,
+        }
+    }
+
+    pub fn is_auto(self) -> bool {
+        matches!(self, NodeCount::Auto(_))
+    }
+}
+
+/// Most connections per virtual client.
+pub const MAX_CONNECTIONS_PER_CLIENT: u32 = 64;
+/// The default and the longest `scale.scale_timeout`.
+pub const DEFAULT_SCALE_TIMEOUT: Duration = Duration::from_secs(300);
+pub const MAX_SCALE_TIMEOUT: Duration = Duration::from_secs(3600);
 
 impl Default for Scale {
     fn default() -> Self {
@@ -293,6 +338,8 @@ impl Default for Scale {
             client_nodes: None,
             server_nodes: None,
             leader_sheds_load: None,
+            connections_per_client: None,
+            scale_timeout: None,
         }
     }
 }
@@ -606,6 +653,8 @@ impl Scenario {
                 pattern: self.pattern.take().unwrap_or(Pattern::Constant {
                     rate: 0.0,
                     hold: Dur::secs(0),
+                    jitter: None,
+                    sync: None,
                     then: None,
                 }),
                 model: self.model.take().unwrap_or_default(),
@@ -637,6 +686,70 @@ impl Scenario {
             .filter(|l| l.model == Model::Open)
             .map(|l| l.pattern.peak())
             .sum()
+    }
+
+    /// The expected load over time without sending anything: per layer
+    /// and in total, the requests per second (open layers, from the exact
+    /// integral, so a 50 ms burst shows) or the users (closed layers), one
+    /// point per second (coarser past an hour: at most 3600 points).
+    pub fn preview(&self) -> Value {
+        let total = self.duration().as_secs_f64();
+        let step = if total <= 3600.0 {
+            1.0
+        } else {
+            (total / 3600.0).ceil()
+        };
+        let points = (total / step).ceil() as usize;
+        let mut sum = vec![0.0; points];
+        let round = |v: f64| (v * 100.0).round() / 100.0;
+        let layers: Vec<Value> = self
+            .layers
+            .iter()
+            .map(|l| {
+                let compiled = l.pattern.compile();
+                let after = l.starts_after.map_or(0.0, |d| d.0.as_secs_f64());
+                let series: Vec<f64> = (0..points)
+                    .map(|k| {
+                        let t0 = k as f64 * step - after;
+                        let v = match l.model {
+                            Model::Open => compiled.integral(t0.max(0.0), (t0 + step).max(0.0)) / step,
+                            Model::Closed => compiled
+                                .value_at(t0 + step / 2.0, &super::pattern::Ctx::default())
+                                .unwrap_or(0.0),
+                        };
+                        round(v)
+                    })
+                    .collect();
+                if l.model == Model::Open {
+                    for (acc, v) in sum.iter_mut().zip(&series) {
+                        *acc += v;
+                    }
+                }
+                json!({
+                    "name": l.name,
+                    "model": l.model.as_str(),
+                    "unit": if l.model == Model::Open { "requests per second" } else { "users" },
+                    "starts_after_secs": after,
+                    "peak": round(l.pattern.peak()),
+                    "expected_requests": match l.model {
+                        Model::Open => Some(round(compiled.integral(0.0, compiled.total_secs))),
+                        Model::Closed => None,
+                    },
+                    "closed_loop": l.pattern.has_closed_loop() || l.pattern.chain().iter().any(|p| p.kind() == "breakpoint"),
+                    "stages": compiled.stages,
+                    "series": series,
+                })
+            })
+            .collect();
+        json!({
+            "name": self.name,
+            "duration_secs": total,
+            "step_secs": step,
+            "points": points,
+            "peak_rate": round(self.peak_rate()),
+            "layers": layers,
+            "total": sum.into_iter().map(round).collect::<Vec<_>>(),
+        })
     }
 
     pub fn summary(&self) -> Summary {
@@ -766,9 +879,26 @@ impl Scenario {
         if self.scale.virtual_clients == 0 || self.scale.virtual_clients > MAX_VIRTUAL_CLIENTS {
             p.push(format!("scale.virtual_clients: 1 to {MAX_VIRTUAL_CLIENTS}"));
         }
-        if let Some(n) = self.scale.client_nodes {
+        if let Some(NodeCount::Count(n)) = self.scale.client_nodes {
             if n == 0 || n > MAX_CLUSTER_NODES {
-                p.push(format!("scale.client_nodes: 1 to {MAX_CLUSTER_NODES}"));
+                p.push(format!(
+                    "scale.client_nodes: 1 to {MAX_CLUSTER_NODES}, or auto"
+                ));
+            }
+        }
+        if let Some(c) = self.scale.connections_per_client {
+            if c == 0 || c > MAX_CONNECTIONS_PER_CLIENT {
+                p.push(format!(
+                    "scale.connections_per_client: 1 to {MAX_CONNECTIONS_PER_CLIENT}"
+                ));
+            }
+        }
+        if let Some(t) = self.scale.scale_timeout {
+            if t.0 > MAX_SCALE_TIMEOUT {
+                p.push("scale.scale_timeout: at most 1h".into());
+            }
+            if !self.scale.client_nodes.is_some_and(|c| c.is_auto()) {
+                p.push("scale.scale_timeout: only with client_nodes: auto".into());
             }
         }
         if let Some(n) = self.scale.server_nodes {
@@ -840,6 +970,37 @@ impl Scenario {
                 validate_template(t, &tp, &prefixes, &mut p);
             }
             layer.pattern.validate(&format!("{here}.pattern"), &mut p);
+            // Which model a pattern needs: users for closed layers, rates
+            // (and the closed loops) for open ones.
+            for (k, part) in layer
+                .pattern
+                .chain()
+                .into_iter()
+                .take(super::pattern::MAX_STAGES)
+                .enumerate()
+            {
+                let at = format!("{here}.pattern{}", ".then".repeat(k));
+                let open_only = match part {
+                    Pattern::Target { users: Some(_), .. } => {
+                        if layer.model == Model::Open {
+                            p.push(format!(
+                                "{at}.users: a target of users needs model: closed (an open layer's target is a rate)"
+                            ));
+                        }
+                        false
+                    }
+                    Pattern::Target { .. } | Pattern::Breakpoint { .. } | Pattern::Burst { .. } => {
+                        true
+                    }
+                    _ => false,
+                };
+                if open_only && layer.model == Model::Closed {
+                    p.push(format!(
+                        "{at}: a {} pattern needs the open model",
+                        part.kind()
+                    ));
+                }
+            }
             if let Some(after) = layer.starts_after {
                 if after.0 > MAX_STARTS_AFTER {
                     p.push(format!("{here}.starts_after: at most 24h"));
@@ -1123,6 +1284,135 @@ fn enumeration(description: &str, values: &[&str], default: &str) -> Value {
     json!({ "type": "string", "description": description, "enum": values, "default": default })
 }
 
+/// One pattern type of the schema: its `type` constant, its own
+/// properties, and `jitter`, `sync` and `then`, which every type takes.
+fn pattern_variant(
+    kind: &str,
+    description: &str,
+    props: Value,
+    required: &[&str],
+    then: &Value,
+) -> Value {
+    let mut properties = serde_json::Map::new();
+    properties.insert(
+        "type".into(),
+        json!({ "const": kind, "type": "string", "description": "Pattern type." }),
+    );
+    if let Value::Object(own) = props {
+        properties.extend(own);
+    }
+    properties.insert(
+        "jitter".into(),
+        number(
+            "Random variation of each second's value, a fraction either way (0.1: up to 10 percent).",
+            0.0,
+            1.0,
+        ),
+    );
+    properties.insert(
+        "sync".into(),
+        enumeration(
+            "Cluster runs: cluster keeps every client node in lockstep (a burst reaches the gateway as one burst); node gives each node its own phase of a periodic pattern and its own jitter, which spreads the load.",
+            &["cluster", "node"],
+            "cluster",
+        ),
+    );
+    properties.insert("then".into(), then.clone());
+    let mut req = vec!["type"];
+    req.extend_from_slice(required);
+    json!({
+        "title": kind,
+        "type": "object",
+        "description": description,
+        "properties": properties,
+        "required": req,
+        "additionalProperties": false
+    })
+}
+
+/// The schema of a pattern: one branch per type, told apart by `type`.
+fn pattern_schema(max_rate: f64, max_dur: u64, then: &Value) -> Value {
+    use super::pattern::{MAX_BURST, MAX_CYCLES};
+    let rate = |d: &str| number(d, 0.0, max_rate);
+    json!({
+        "type": "object",
+        "description": "The shape of the layer's load over time: the request rate per second (open model) or the number of active users (closed model).",
+        "oneOf": [
+            pattern_variant("constant", "A steady rate for a while: baselines and soaks.", json!({
+                "rate": rate("Requests per second (open) or users (closed)."),
+                "for": duration("How long to hold the rate.", max_dur)
+            }), &["rate", "for"], then),
+            pattern_variant("ramp", "From one rate to another over a period: where latency bends as load grows.", json!({
+                "from": rate("Rate (or users) at the start."),
+                "to": rate("Rate (or users) at the end."),
+                "over": duration("How long the ramp takes.", max_dur),
+                "curve": enumeration("Linear, or exponential (from and to above 0).", &["linear", "exponential"], "linear")
+            }), &["from", "to", "over"], then),
+            pattern_variant("step", "Capacity plateaus: start, start + step, ... up to max, each held for every and reported on its own, then hold on the last one.", json!({
+                "start": rate("Rate (or users) of the first plateau."),
+                "step": number("Increase from one plateau to the next.", 0.0, max_rate),
+                "every": duration("How long each plateau lasts.", max_dur),
+                "max": rate("The highest plateau: the steps stop at or below it."),
+                "hold": duration("How long to stay on the last plateau after the steps.", max_dur)
+            }), &["start", "step", "every", "max"], then),
+            pattern_variant("target", "Reach a load target within a time and hold it. With overhead_p99_ms it is a closed loop: the rate is adjusted every second until the gateway overhead sits at the target.", json!({
+                "rate": rate("The rate to reach (open model)."),
+                "users": rate("The users to reach (closed model)."),
+                "overhead_p99_ms": number("A closed loop on the gateway overhead p99 (from answers tagged by Rustybin servers), in milliseconds: the rate goes up while the overhead is below it and down while it is above.", 0.0, 60_000.0),
+                "within": duration("How long to reach the target: a ramp from start, or the time the loop has to settle.", max_dur),
+                "hold": duration("How long to hold the target once there.", max_dur),
+                "start": rate("Where to start: the ramp's first value (default 0), or the loop's first rate (default 10)."),
+                "max": rate("The loop's highest rate (required with overhead_p99_ms).")
+            }), &["within", "hold"], then),
+            pattern_variant("breakpoint", "Find the maximum sustainable rate: grow plateau by plateau until one fails a threshold, then stop the run and report the last good rate.", json!({
+                "start": rate("The first plateau's rate."),
+                "growth": number("Growth per plateau, a fraction (0.1: each plateau 10 percent above the last).", 0.0, 10.0),
+                "every": duration("How long each plateau lasts; its results decide.", max_dur),
+                "max": rate("The highest rate tried."),
+                "until": {
+                    "type": "object",
+                    "description": "The thresholds: the first plateau that fails one stops the run.",
+                    "properties": {
+                        "error_rate": number("Errors (transport and unexpected statuses) per answer.", 0.0, 1.0),
+                        "latency_p99_ms": number("Latency p99 from the intended send, in milliseconds.", 0.0, 600_000.0),
+                        "overhead_p99_ms": number("Gateway overhead p99, in milliseconds (needs answers tagged by Rustybin servers).", 0.0, 600_000.0)
+                    },
+                    "additionalProperties": false
+                }
+            }), &["start", "growth", "every", "until", "max"], then),
+            pattern_variant("spike", "A sudden surge and the recovery after it: base to peak over rise, held, back over fall, then recover at base.", json!({
+                "base": rate("The rate before and after the spike."),
+                "peak": rate("The rate at the top of the spike."),
+                "rise": duration("How long the rise takes (0 for an instant jump).", max_dur),
+                "hold": duration("How long the peak lasts.", max_dur),
+                "fall": duration("How long the fall takes.", max_dur),
+                "recover": duration("How long to watch the recovery at base.", max_dur)
+            }), &["base", "peak", "rise", "hold", "fall", "recover"], then),
+            pattern_variant("pulse", "A square wave: high for on, low for off, cycles times (autoscaling, pools and limiters that refill between pulses).", json!({
+                "high": rate("The rate while on."),
+                "low": rate("The rate while off."),
+                "on": duration("How long each pulse lasts.", max_dur),
+                "off": duration("How long the pause between pulses lasts.", max_dur),
+                "cycles": integer("How many pulses (default 1).", 1, MAX_CYCLES as u64)
+            }), &["high", "low", "on", "off"], then),
+            pattern_variant("burst", "Short spikes on a base rate: size requests sent within within (1000 within 50ms), every every. Queueing and burst allowances such as token buckets.", json!({
+                "base": rate("The rate between bursts."),
+                "size": integer("Requests in each burst.", 1, MAX_BURST as u64),
+                "within": duration("How quickly a burst is sent.", max_dur),
+                "every": duration("How often a burst comes (longer than within).", max_dur),
+                "for": duration("How long the pattern lasts.", max_dur)
+            }), &["base", "size", "within", "every", "for"], then),
+            pattern_variant("wave", "Smooth periodic load between min and max, starting at min: a daily curve compressed in time.", json!({
+                "min": rate("The lowest rate."),
+                "max": rate("The highest rate."),
+                "period": duration("How long one wave takes.", max_dur),
+                "shape": enumeration("Sine, triangle or sawtooth.", &["sine", "triangle", "sawtooth"], "sine"),
+                "for": duration("How long the pattern lasts.", max_dur)
+            }), &["min", "max", "period", "for"], then)
+        ]
+    })
+}
+
 /// The JSON Schema (draft 2020-12) of a scenario, with this node's caps as
 /// bounds. Every property carries a description, every number its bounds:
 /// the console builder, the MCP tools and the parity test rely on it.
@@ -1133,40 +1423,7 @@ pub fn schema(caps: &Caps) -> Value {
         "$ref": "#/$defs/pattern",
         "description": "The next stage, started when this one ends (at most 16 stages in a chain)."
     });
-    let pattern = json!({
-        "type": "object",
-        "description": "The shape of the layer's load over time: the request rate per second (open model) or the number of active users (closed model).",
-        "oneOf": [
-            {
-                "title": "constant",
-                "type": "object",
-                "description": "A steady rate for a while: baselines and soaks.",
-                "properties": {
-                    "type": { "const": "constant", "type": "string", "description": "Pattern type." },
-                    "rate": number("Requests per second (open) or users (closed).", 0.0, max_rate),
-                    "for": duration("How long to hold the rate.", max_dur),
-                    "then": pattern_then
-                },
-                "required": ["type", "rate", "for"],
-                "additionalProperties": false
-            },
-            {
-                "title": "ramp",
-                "type": "object",
-                "description": "From one rate to another over a period: where latency bends as load grows.",
-                "properties": {
-                    "type": { "const": "ramp", "type": "string", "description": "Pattern type." },
-                    "from": number("Rate (or users) at the start.", 0.0, max_rate),
-                    "to": number("Rate (or users) at the end.", 0.0, max_rate),
-                    "over": duration("How long the ramp takes.", max_dur),
-                    "curve": enumeration("Linear, or exponential (from and to above 0).", &["linear", "exponential"], "linear"),
-                    "then": pattern_then
-                },
-                "required": ["type", "from", "to", "over"],
-                "additionalProperties": false
-            }
-        ]
-    });
+    let pattern = pattern_schema(max_rate, max_dur, &pattern_then);
     let template = json!({
         "type": "object",
         "description": "A request to send. Placeholders: {{seq}} (request number), {{vu}} (virtual client), {{run}}, {{node}}, {{layer}}, {{rand}}.",
@@ -1249,9 +1506,18 @@ pub fn schema(caps: &Caps) -> Value {
                 "properties": {
                     "virtual_clients": integer("Distinct virtual clients ({{vu}} cycles through them; closed layers never run more users).", 1, MAX_VIRTUAL_CLIENTS as u64),
                     "max_rate_per_node": integer("A rate cap below the node's own (RUSTYBIN_HARNESS_MAX_RATE).", 1, caps.max_rate),
-                    "client_nodes": integer("Cluster runs: the client nodes to wait for before the run starts; the rate is split over them by declared capacity.", 1, MAX_CLUSTER_NODES as u64),
+                    "client_nodes": {
+                        "type": ["integer", "string"],
+                        "description": "Cluster runs: the client nodes to wait for before the run starts (the rate is split over them by declared capacity), or auto: as many as the peak rate needs; the leader emits a scale_request while it waits.",
+                        "oneOf": [
+                            integer("A number of client nodes.", 1, MAX_CLUSTER_NODES as u64),
+                            { "type": "string", "const": "auto", "description": "As many as the peak rate needs." }
+                        ]
+                    },
                     "server_nodes": integer("Cluster runs: the server nodes (the gateway's upstream pool) to wait for before the run starts.", 0, MAX_CLUSTER_NODES as u64),
-                    "leader_sheds_load": prop("boolean", "Cluster runs: a node that takes over as leader during the run stops its own client part, and its share is re-split over the other client nodes (default true).")
+                    "leader_sheds_load": prop("boolean", "Cluster runs: a node that takes over as leader during the run stops its own client part, and its share is re-split over the other client nodes (default true)."),
+                    "connections_per_client": integer("Keep-alive connections per virtual client: the connections the gateway sees are this node's virtual clients times this (at most the in-flight cap).", 1, MAX_CONNECTIONS_PER_CLIENT as u64),
+                    "scale_timeout": duration("With client_nodes: auto, how long to wait for enough client nodes before starting undersized (default 5m).", MAX_SCALE_TIMEOUT.as_secs())
                 },
                 "additionalProperties": false
             },
@@ -1311,7 +1577,8 @@ pub fn schema(caps: &Caps) -> Value {
             "pattern": pattern,
             "request": template,
             "source": source,
-            "layer": layer
+            "layer": layer,
+            "change": super::live::change_schema()
         },
         "x-caps": caps
     })
@@ -1320,7 +1587,7 @@ pub fn schema(caps: &Caps) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::harness::pattern::Curve;
+    use crate::harness::pattern::{Curve, SyncMode};
 
     pub(crate) fn smoke(url: &str) -> Scenario {
         let mut s = Scenario::parse(&format!(
@@ -1486,31 +1753,59 @@ mod tests {
             scale: Scale {
                 virtual_clients: 10,
                 max_rate_per_node: Some(100),
-                client_nodes: Some(2),
+                client_nodes: Some(NodeCount::Auto(AutoWord::Auto)),
                 server_nodes: Some(1),
                 leader_sheds_load: Some(false),
+                connections_per_client: Some(2),
+                scale_timeout: Some(Dur::secs(30)),
             },
-            layers: vec![Layer {
-                name: "l".into(),
-                source: Source {
-                    request: Some(template.clone()),
-                    requests: vec![template.clone()],
+            layers: vec![
+                Layer {
+                    name: "l".into(),
+                    source: Source {
+                        request: Some(template.clone()),
+                        requests: vec![template.clone()],
+                    },
+                    pattern: Pattern::Ramp {
+                        from: 1.0,
+                        to: 2.0,
+                        over: Dur::secs(1),
+                        curve: Curve::Exponential,
+                        jitter: Some(0.1),
+                        sync: Some(SyncMode::Node),
+                        then: Some(Box::new(Pattern::Constant {
+                            rate: 2.0,
+                            hold: Dur::secs(1),
+                            jitter: None,
+                            sync: None,
+                            then: Some(Box::new(
+                                serde_yaml::from_str(
+                                    "type: target\nusers: 2\nwithin: 1s\nhold: 1s\nstart: 1",
+                                )
+                                .expect("target pattern"),
+                            )),
+                        })),
+                    },
+                    model: Model::Closed,
+                    starts_after: Some(Dur::secs(1)),
+                    think_time: Some(Dur::secs(1)),
                 },
-                pattern: Pattern::Ramp {
-                    from: 1.0,
-                    to: 2.0,
-                    over: Dur::secs(1),
-                    curve: Curve::Exponential,
-                    then: Some(Box::new(Pattern::Constant {
-                        rate: 2.0,
-                        hold: Dur::secs(1),
-                        then: None,
-                    })),
+                Layer {
+                    name: "m".into(),
+                    source: Source {
+                        request: Some(template.clone()),
+                        requests: Vec::new(),
+                    },
+                    // Every other pattern type, chained.
+                    pattern: serde_yaml::from_str(
+                        "type: step\nstart: 1\nstep: 1\nevery: 1s\nmax: 3\nhold: 1s\nthen:\n  type: spike\n  base: 1\n  peak: 5\n  rise: 1s\n  hold: 1s\n  fall: 1s\n  recover: 1s\n  then:\n    type: pulse\n    high: 4\n    low: 1\n    on: 1s\n    off: 1s\n    cycles: 2\n    then:\n      type: burst\n      base: 1\n      size: 2\n      within: 100ms\n      every: 1s\n      for: 2s\n      then:\n        type: wave\n        min: 1\n        max: 4\n        period: 2s\n        shape: triangle\n        for: 2s\n        then:\n          type: breakpoint\n          start: 1\n          growth: 0.5\n          every: 1s\n          max: 5\n          until: { error_rate: 0.01, latency_p99_ms: 500, overhead_p99_ms: 50 }\n          then:\n            type: target\n            overhead_p99_ms: 5\n            within: 1s\n            hold: 1s\n            start: 1\n            max: 10\n",
+                    )
+                    .expect("chained patterns"),
+                    model: Model::Open,
+                    starts_after: None,
+                    think_time: None,
                 },
-                model: Model::Closed,
-                starts_after: Some(Dur::secs(1)),
-                think_time: Some(Dur::secs(1)),
-            }],
+            ],
             source: Some(Source {
                 request: Some(template),
                 requests: Vec::new(),
@@ -1518,6 +1813,8 @@ mod tests {
             pattern: Some(Pattern::Constant {
                 rate: 1.0,
                 hold: Dur::secs(1),
+                jitter: None,
+                sync: None,
                 then: None,
             }),
             model: Some(Model::Closed),
@@ -1728,7 +2025,7 @@ mod tests {
         let mut s = full();
         s.normalise();
         assert_eq!(s.targets.len(), 2);
-        assert_eq!(s.layers.len(), 2);
+        assert_eq!(s.layers.len(), 3);
         assert_eq!(s.layers[0].name, "main");
         let caps = Caps::default();
         let problems = s.validate(&caps);

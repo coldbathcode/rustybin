@@ -1,0 +1,30 @@
+# A sudden surge on a steady load: how far latency and errors climb, and how
+# long the gateway takes to get back to the baseline once the surge is over
+# (the report's stages show each part on its own).
+name: spike-and-recover
+description: 50 requests per second, a jump to 500 within 5 seconds held for 30, back down, then a minute to recover.
+targets:
+  - url: http://127.0.0.1:8080
+    weight: 1
+scale:
+  virtual_clients: 100
+layers:
+  - name: main
+    source:
+      request:
+        path: /status/200
+    pattern:
+      type: constant
+      rate: 50
+      for: 30s
+      then:
+        type: spike
+        base: 50
+        peak: 500
+        rise: 5s
+        hold: 30s
+        fall: 5s
+        recover: 60s
+timeout: 10s
+thresholds:
+  error_rate: 0.05

@@ -754,6 +754,7 @@ impl Membership {
     fn process(self: &Arc<Self>, h: &Arc<Harness>, resp: HeartbeatResponse) {
         let mut to_start: Vec<(String, ClientAssignment, Arc<Lease>, i64)> = Vec::new();
         let mut reshare: Vec<(Arc<Run>, Share)> = Vec::new();
+        let mut follow: Vec<(Arc<Run>, super::live::Controls)> = Vec::new();
         let mut st = lock(&self.state);
         if resp.leader.term > st.leader.term || resp.leader.node_id != st.leader.node_id {
             // A new leader: it gets everything again (cumulative stats).
@@ -799,6 +800,9 @@ impl Membership {
                     cr.timeline_ack = rc.timeline_ack;
                     cr.final_acked = rc.final_ack;
                     if let Some(run) = &cr.run {
+                        if let Some(c) = rc.controls {
+                            follow.push((run.clone(), *c));
+                        }
                         if rc.stop {
                             if run.is_active() {
                                 run.stop(if rc.share.is_none() {
@@ -885,6 +889,22 @@ impl Membership {
         }
         st.server_runs.retain(|k, _| server_listed.contains(k));
         drop(st);
+        // Live changes: checked against this node's caps for its share.
+        for (run, controls) in follow {
+            let version = controls.version;
+            if let Err(problems) = run.follow_controls(controls) {
+                tracing::warn!(
+                    target: "rustybin::harness",
+                    cluster = %self.cluster_id,
+                    run = %run.id,
+                    "harness: a live change over this node's caps is refused, its part stops: {}",
+                    problems.join("; ")
+                );
+                run.stop("the leader's live change is over this node's caps");
+            } else {
+                tracing::debug!(target: "rustybin::harness", run = %run.id, version, "harness: following a live change");
+            }
+        }
         // A new share is checked against this node's caps like the first.
         for (run, share) in reshare {
             let problems = if share.valid() {
@@ -1440,6 +1460,7 @@ async fn start_assignment(
         lease: Some(lease),
         cluster: Some(asg.cluster_id.clone()),
         verification_token: Some(asg.verification_token.clone()),
+        controls: asg.controls.clone(),
     };
     h.start_local_run(asg.scenario, options).await.map_err(|e| {
         if e.problems.is_empty() {

@@ -227,6 +227,9 @@ pub struct ClusterReport {
     /// The cluster's leader changes, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<super::wire::LeaderChange>,
+    /// What the report should say first (a run started undersized).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Latency percentiles in milliseconds.
@@ -568,7 +571,103 @@ pub struct Report {
     /// checked. Absent on a single-node run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cluster: Option<ClusterReport>,
+    /// What the closed loops found: a breakpoint's last good rate, the rate
+    /// a target on overhead settled at.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<super::live::Finding>,
+    /// The live changes made during the run, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<super::live::LogEntry>,
+    /// The stages of each layer as they ran (plateaus of `step` and
+    /// `breakpoint` on their own), with the run's results during each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<StageReport>,
 }
+
+/// One stage (or plateau) of a layer as it ran. The numbers are the
+/// run's (all layers) during the stage.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct StageReport {
+    pub layer: String,
+    pub stage: usize,
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// The plateau, pulse half or burst period within the stage.
+    #[serde(default)]
+    pub part: u64,
+    /// The nominal rate (or users) of the part.
+    pub target: f64,
+    pub from_secs: f64,
+    pub to_secs: f64,
+    pub requested: u64,
+    pub completed: u64,
+    pub errors: u64,
+    /// Answers per second.
+    pub rate: f64,
+    /// The highest per-second p99 latency in the stage.
+    pub p99_ms_max: f64,
+}
+
+/// Group the timeline into the stage parts each layer ran, as the run's
+/// stage log noted them (holds, skips and `set` changes included): a
+/// second belongs to the part in effect at its middle, and consecutive
+/// seconds in the same part make one entry.
+pub fn stage_reports(
+    timeline: &[Bucket],
+    layers: &[String],
+    log: &super::live::StageLog,
+) -> Vec<StageReport> {
+    let mut out: Vec<StageReport> = Vec::new();
+    for (li, name) in layers.iter().enumerate() {
+        // The mark (its index in the log) and the entry being filled.
+        let mut current: Option<(usize, StageReport)> = None;
+        for b in timeline {
+            let mid = b.t_secs + b.width_secs / 2.0;
+            let mark = log.at(li, mid).filter(|(_, m)| m.stage.is_some());
+            let same = matches!((&current, mark), (Some((ci, _)), Some((mi, _))) if *ci == mi);
+            if !same {
+                if let Some((_, c)) = current.take() {
+                    out.push(c);
+                }
+                if let Some((mi, m)) = mark {
+                    current = Some((
+                        mi,
+                        StageReport {
+                            layer: name.clone(),
+                            stage: m.stage.unwrap_or(0),
+                            kind: m.kind.clone(),
+                            part: m.part,
+                            target: m.target,
+                            from_secs: b.t_secs,
+                            to_secs: b.t_secs,
+                            ..StageReport::default()
+                        },
+                    ));
+                }
+            }
+            if let Some((_, c)) = current.as_mut() {
+                c.to_secs = b.t_secs + b.width_secs;
+                c.requested += b.requested;
+                c.completed += b.completed;
+                c.errors += b.errors;
+                c.p99_ms_max = c.p99_ms_max.max(b.p99_ms);
+                let secs = (c.to_secs - c.from_secs).max(1e-9);
+                c.rate = (c.completed as f64 / secs * 100.0).round() / 100.0;
+            }
+            if out.len() >= MAX_STAGE_REPORTS {
+                return out;
+            }
+        }
+        if let Some((_, c)) = current.take() {
+            out.push(c);
+        }
+    }
+    out.truncate(MAX_STAGE_REPORTS);
+    out
+}
+
+/// Most stage entries in a report.
+pub const MAX_STAGE_REPORTS: usize = 1000;
 
 /// Evaluate the thresholds against what was measured. `arrivals` is what
 /// the server side saw (`None` without a server side).
@@ -936,6 +1035,55 @@ impl Report {
                 ));
             }
         }
+        if let Some(c) = &self.cluster {
+            for w in &c.warnings {
+                out.push_str(&format!("\nWarning: {w}\n"));
+            }
+        }
+        if !self.findings.is_empty() {
+            out.push_str("\nFindings:\n");
+            for f in &self.findings {
+                out.push_str(&format!("  {}\n", f.summary));
+            }
+        }
+        if !self.changes.is_empty() {
+            out.push_str("\nLive changes:\n");
+            for c in &self.changes {
+                out.push_str(&format!(
+                    "  {:>8.1}s  v{}  {}\n",
+                    c.at_secs, c.version, c.what
+                ));
+            }
+        }
+        if self.stages.len() > 1 {
+            out.push_str(
+                "\nStages              target    from     to   answered    rate/s  errors  p99 max\n",
+            );
+            for st in self.stages.iter().take(60) {
+                out.push_str(&format!(
+                    "  {:<10} {:>2}.{:<3} {:>8.1} {:>6.1} {:>6.1} {:>10} {:>9.1} {:>7} {:>8.2}\n",
+                    format!("{}:{}", st.layer, st.kind)
+                        .chars()
+                        .take(10)
+                        .collect::<String>(),
+                    st.stage,
+                    st.part,
+                    st.target,
+                    st.from_secs,
+                    st.to_secs,
+                    st.completed,
+                    st.rate,
+                    st.errors,
+                    st.p99_ms_max
+                ));
+            }
+            if self.stages.len() > 60 {
+                out.push_str(&format!(
+                    "  ... {} more in the JSON report\n",
+                    self.stages.len() - 60
+                ));
+            }
+        }
         out.push_str(&format!(
             "\nResult: {} (exit code {})\n",
             if self.passed { "PASS" } else { "FAIL" },
@@ -1105,6 +1253,9 @@ mod tests {
             samples: Vec::new(),
             scenario: json!({}),
             cluster: None,
+            findings: Vec::new(),
+            changes: Vec::new(),
+            stages: Vec::new(),
         }
     }
 
