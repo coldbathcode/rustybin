@@ -227,6 +227,16 @@ control plane is protected, and follows the admin token on an open one.
 | `RUSTYBIN_HARNESS_REPORT` | unset | Headless mode: where the final report goes (`-` for stdout, else a file). |
 | `RUSTYBIN_HARNESS_EXIT` | `false` | Headless mode: exit after the run with code 0 (thresholds pass), 1 (they fail) or 2 (error). |
 
+Every harness request is signed with a per-run key (`X-Rustybin-Harness`) and
+carries an `X-Request-Id` and a `traceparent`; a server layer on every data-plane route
+records what arrived, samples captures into the inspector (the scenario's
+`servers.capture_sample`, 1 in N plus every anomaly) and tags every answer
+(`Server-Timing: rb`, `X-Rustybin-Served-By`), so the report separates `upstream`,
+`gateway`, `transport` and `lost` requests and shows the gateway's overhead and what it
+changed on the way. `/harness/{*path}` is a shaped upstream that answers with the run's
+`servers` profile (latency, status mix, body size, streaming). The metrics gain
+`rustybin_harness_*` series with a run label bounded to the active run plus the last 4.
+
 The same engine runs from the command line: `rustybin harness run scenario.yaml
 --local-server` loops a scenario through an in-process Rustybin, `rustybin harness
 validate` checks a scenario offline, `rustybin harness report` renders a saved report

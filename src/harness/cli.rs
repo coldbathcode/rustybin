@@ -349,7 +349,7 @@ async fn run_scenario(args: &Args) -> ExitCode {
         if let Err(e) = super::check_startup(&config) {
             return fail(&e);
         }
-        Harness::from_harness_config(&config.harness, &config.instance_id)
+        Harness::from_harness_config(&config.harness, &config.instance_id, None)
     };
     if let Some(url) = args.value("--target") {
         scenario.target = None;

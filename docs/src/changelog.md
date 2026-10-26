@@ -157,6 +157,17 @@ API, AI and agent gateway demos.
   `POST /_rustybin/harness/stop`; the `harness` control scope. Reports as JSON, text
   and JUnit; headless runs at startup with exit codes; `rustybin harness run |
   validate | report`.
+- **Harness correlation** (phase 2): every harness request carries a signed marker
+  (`X-Rustybin-Harness`), an `X-Request-Id` and a `traceparent`; a server layer
+  records arrivals, processing time and what the gateway changed (headers added,
+  removed, rewritten, bodies, paths), samples captures into the inspector and tags
+  every answer (`Server-Timing: rb`, `X-Rustybin-Served-By`). The client classifies
+  answers as `upstream`, `gateway` (by status) or `transport`, counts `lost`
+  requests after the run, and reports the gateway overhead and, in loop-through,
+  one-way legs. Thresholds `gateway_overhead_p99_ms`, `lost`, `upstream_reach`; the
+  scenario's `servers` block drives the shaped upstream `/harness/{*path}` (log-normal
+  latency, status mix, body size, chunked streaming) and inspector sampling;
+  `rustybin_harness_*` metrics with a bounded run label.
 
 ### Changed
 

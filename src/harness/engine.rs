@@ -47,6 +47,7 @@ use tokio::net::TcpStream;
 use tokio::runtime::{Handle, Runtime};
 use tokio::sync::watch;
 
+use super::correlate::{self, Correlator, Marker, RunEntry, RunKey, Tag};
 use super::report::{
     self, Breakdown, Bucket, Counts, Percentiles, Report, Sample, Saturation, TargetReport,
     ThresholdResult, LAG_SATURATION_MS, MAX_SAMPLES,
@@ -54,6 +55,7 @@ use super::report::{
 use super::safety::{KillSwitch, ParsedTarget};
 use super::scenario::{Caps, HttpVersion, Layer, Model, RequestTemplate, Scenario, Target};
 use crate::config::HarnessConfig;
+use crate::metrics::{HarnessRoll, Metrics};
 
 /// Descriptors kept free for the node itself (listeners, logs, the control plane).
 pub const DESCRIPTOR_RESERVE: u64 = 256;
@@ -72,6 +74,36 @@ pub const FINE_TIMELINE_SECS: u64 = 3_600;
 pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// Shard-local samples kept until the next roll.
 const SHARD_SAMPLES: usize = 32;
+/// Most transport-failed sequence numbers remembered for the `lost` count.
+pub const MAX_FAILED_SEQS: usize = 1 << 20;
+
+/// How the client classifies an answer (plan section 7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Class {
+    /// A valid served-by tag of this run: an upstream answered.
+    Upstream,
+    /// An answer without a valid tag: the gateway made it.
+    Gateway,
+    /// No answer: connect, TLS, timeout, reset, protocol.
+    Transport,
+}
+
+impl Class {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Class::Upstream => "upstream",
+            Class::Gateway => "gateway",
+            Class::Transport => "transport",
+        }
+    }
+}
+
+/// Histogram values as (seconds, count) pairs, for the metrics.
+fn pairs(h: &Histogram<u64>) -> Vec<(f64, u64)> {
+    h.iter_recorded()
+        .map(|v| (v.value_iterated_to() as f64 / 1e6, v.count_at_value()))
+        .collect()
+}
 
 fn micros(d: Duration) -> u64 {
     u64::try_from(d.as_micros()).unwrap_or(u64::MAX).max(1)
@@ -525,12 +557,21 @@ pub struct Outcome {
     pub corrected: Duration,
     pub service: Duration,
     pub at: Duration,
+    pub class: Class,
+    /// The server's processing time (`Server-Timing: rb`), tagged answers only.
+    pub upstream: Option<Duration>,
+    /// `service` minus `upstream`: gateway plus network.
+    pub overhead: Option<Duration>,
+    /// One-way legs when client and server share a clock (loop-through).
+    pub request_leg: Option<Duration>,
+    pub response_leg: Option<Duration>,
 }
 
 /// Per-layer or per-target accumulator in a shard.
 struct PartShard {
     counts: Counts,
     corrected: Histogram<u64>,
+    overhead: Histogram<u64>,
 }
 
 impl PartShard {
@@ -538,6 +579,57 @@ impl PartShard {
         Self {
             counts: Counts::default(),
             corrected: histogram(2),
+            overhead: histogram(2),
+        }
+    }
+
+    fn merge_from(&mut self, src: &mut PartShard) {
+        let _ = self.corrected.add(&src.corrected);
+        let _ = self.overhead.add(&src.overhead);
+        src.corrected.reset();
+        src.overhead.reset();
+        self.counts.add(&std::mem::take(&mut src.counts));
+    }
+
+    fn record(&mut self, o: &Outcome, corrected: u64) {
+        self.counts.completed += 1;
+        self.counts.bytes_received += o.bytes;
+        self.corrected.saturating_record(corrected);
+        if let Some(over) = o.overhead {
+            self.overhead.saturating_record(micros(over));
+        }
+        count_class(&mut self.counts, o);
+    }
+}
+
+/// Count one answer's status, class and expectation.
+fn count_class(counts: &mut Counts, o: &Outcome) {
+    match (o.status, o.transport) {
+        (Some(status), _) => {
+            *counts.statuses.entry(status.to_string()).or_default() += 1;
+            if o.expected {
+                counts.ok += 1;
+            } else {
+                counts.unexpected_status += 1;
+            }
+            match o.class {
+                Class::Upstream => counts.upstream += 1,
+                Class::Gateway => {
+                    counts.gateway += 1;
+                    *counts
+                        .gateway_statuses
+                        .entry(status.to_string())
+                        .or_default() += 1;
+                }
+                Class::Transport => {}
+            }
+        }
+        (None, kind) => {
+            counts.transport += 1;
+            *counts
+                .transport_kinds
+                .entry(kind.unwrap_or("other").to_string())
+                .or_default() += 1;
         }
     }
 }
@@ -547,9 +639,15 @@ struct Shard {
     counts: Counts,
     corrected: Histogram<u64>,
     service: Histogram<u64>,
+    upstream: Histogram<u64>,
+    overhead: Histogram<u64>,
+    request_leg: Histogram<u64>,
+    response_leg: Histogram<u64>,
     layers: Vec<PartShard>,
     targets: Vec<PartShard>,
     samples: Vec<Sample>,
+    /// Sequence numbers of transport failures (for the `lost` count).
+    failed_seqs: Vec<u64>,
 }
 
 impl Shard {
@@ -558,9 +656,14 @@ impl Shard {
             counts: Counts::default(),
             corrected: histogram(3),
             service: histogram(3),
+            upstream: histogram(3),
+            overhead: histogram(3),
+            request_leg: histogram(3),
+            response_leg: histogram(3),
             layers: (0..layers).map(|_| PartShard::new()).collect(),
             targets: (0..targets).map(|_| PartShard::new()).collect(),
             samples: Vec::new(),
+            failed_seqs: Vec::new(),
         }
     }
 
@@ -569,49 +672,29 @@ impl Shard {
         let service = micros(o.service);
         self.counts.completed += 1;
         self.counts.bytes_received += o.bytes;
-        match (o.status, o.transport) {
-            (Some(status), _) => {
-                *self.counts.statuses.entry(status.to_string()).or_default() += 1;
-                if o.expected {
-                    self.counts.ok += 1;
-                } else {
-                    self.counts.unexpected_status += 1;
-                }
-            }
-            (None, kind) => {
-                self.counts.transport += 1;
-                *self
-                    .counts
-                    .transport_kinds
-                    .entry(kind.unwrap_or("other").to_string())
-                    .or_default() += 1;
-            }
-        }
+        count_class(&mut self.counts, o);
         self.corrected.saturating_record(corrected);
         self.service.saturating_record(service);
-        for (part, idx) in [(&mut self.layers, o.layer), (&mut self.targets, o.target)] {
-            if let Some(p) = part.get_mut(idx) {
-                p.counts.completed += 1;
-                p.counts.bytes_received += o.bytes;
-                p.corrected.saturating_record(corrected);
-                match (o.status, o.transport) {
-                    (Some(status), _) => {
-                        *p.counts.statuses.entry(status.to_string()).or_default() += 1;
-                        if o.expected {
-                            p.counts.ok += 1;
-                        } else {
-                            p.counts.unexpected_status += 1;
-                        }
-                    }
-                    (None, kind) => {
-                        p.counts.transport += 1;
-                        *p.counts
-                            .transport_kinds
-                            .entry(kind.unwrap_or("other").to_string())
-                            .or_default() += 1;
-                    }
-                }
-            }
+        if let Some(up) = o.upstream {
+            self.upstream.saturating_record(micros(up));
+        }
+        if let Some(over) = o.overhead {
+            self.overhead.saturating_record(micros(over));
+        }
+        if let Some(leg) = o.request_leg {
+            self.request_leg.saturating_record(micros(leg));
+        }
+        if let Some(leg) = o.response_leg {
+            self.response_leg.saturating_record(micros(leg));
+        }
+        if o.class == Class::Transport && self.failed_seqs.len() < MAX_FAILED_SEQS {
+            self.failed_seqs.push(o.seq);
+        }
+        if let Some(p) = self.layers.get_mut(o.layer) {
+            p.record(o, corrected);
+        }
+        if let Some(p) = self.targets.get_mut(o.target) {
+            p.record(o, corrected);
         }
         let is_error = o.transport.is_some() || !o.expected;
         if is_error || self.samples.len() < SHARD_SAMPLES {
@@ -625,6 +708,7 @@ impl Shard {
             }
             self.samples.push(Sample {
                 kind: if is_error { "error" } else { "slowest" }.into(),
+                class: o.class.as_str().into(),
                 seq: o.seq,
                 request_id: o.request_id.clone(),
                 layer: layer_name.into(),
@@ -635,6 +719,7 @@ impl Shard {
                 error: o.transport.map(str::to_string),
                 latency_ms: o.corrected.as_secs_f64() * 1000.0,
                 service_ms: o.service.as_secs_f64() * 1000.0,
+                upstream_ms: o.upstream.map(|d| d.as_secs_f64() * 1000.0),
                 at_secs: o.at.as_secs_f64(),
             });
         }
@@ -646,10 +731,16 @@ struct Totals {
     counts: Counts,
     corrected: Histogram<u64>,
     service: Histogram<u64>,
+    upstream: Histogram<u64>,
+    overhead: Histogram<u64>,
+    request_leg: Histogram<u64>,
+    response_leg: Histogram<u64>,
     layers: Vec<PartShard>,
     targets: Vec<PartShard>,
     lag: Histogram<u64>,
     samples: Vec<Sample>,
+    failed_seqs: Vec<u64>,
+    failed_overflow: u64,
     timeline: Vec<Bucket>,
     saturated_buckets: Vec<f64>,
     saturation_reasons: Vec<String>,
@@ -663,10 +754,16 @@ impl Totals {
             counts: Counts::default(),
             corrected: histogram(3),
             service: histogram(3),
+            upstream: histogram(3),
+            overhead: histogram(3),
+            request_leg: histogram(3),
+            response_leg: histogram(3),
             layers: (0..layers).map(|_| PartShard::new()).collect(),
             targets: (0..targets).map(|_| PartShard::new()).collect(),
             lag: histogram(3),
             samples: Vec::new(),
+            failed_seqs: Vec::new(),
+            failed_overflow: 0,
             timeline: Vec::new(),
             saturated_buckets: Vec::new(),
             saturation_reasons: Vec::new(),
@@ -742,6 +839,12 @@ pub struct RunParams {
     pub descriptor_limit: Option<u64>,
     pub report_dir: Option<PathBuf>,
     pub kill: Arc<KillSwitch>,
+    /// Signs the markers and verifies the tags.
+    pub key: RunKey,
+    /// This node's server side of the run (`None` on a client-only node).
+    pub entry: Option<Arc<RunEntry>>,
+    pub correlator: Arc<Correlator>,
+    pub metrics: Option<Arc<Metrics>>,
 }
 
 /// One execution of a scenario on this node.
@@ -776,6 +879,11 @@ pub struct Run {
     layer_weights: Vec<Vec<u32>>,
     /// Per layer: requested, sent and not sent (scheduler and user side).
     layer_sched: Vec<[AtomicU64; 3]>,
+    key: RunKey,
+    entry: Option<Arc<RunEntry>>,
+    correlator: Arc<Correlator>,
+    metrics: Option<Arc<Metrics>>,
+    rejected_before: u64,
 }
 
 impl Run {
@@ -825,7 +933,17 @@ impl Run {
             layer_sched: (0..layers)
                 .map(|_| [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)])
                 .collect(),
+            key: params.key,
+            entry: params.entry,
+            rejected_before: params.correlator.rejected(),
+            correlator: params.correlator,
+            metrics: params.metrics,
         })
+    }
+
+    /// The run key (tests spoof markers with another one).
+    pub fn key(&self) -> &RunKey {
+        &self.key
     }
 
     /// Count a request the scheduler (or a user) asked for in `layer`:
@@ -931,9 +1049,16 @@ impl Run {
             "completed": totals.counts.completed,
             "ok": totals.counts.ok,
             "errors": totals.counts.errors(),
+            "upstream": totals.counts.upstream,
+            "gateway": totals.counts.gateway,
+            "transport": totals.counts.transport,
             "statuses": totals.counts.statuses,
+            "gateway_statuses": totals.counts.gateway_statuses,
             "transport_kinds": totals.counts.transport_kinds,
             "latency": latency,
+            "upstream_latency": Percentiles::from_histogram(&totals.upstream),
+            "overhead": Percentiles::from_histogram(&totals.overhead),
+            "server_arrivals": self.entry.as_ref().map(|e| e.stats.lock().unwrap_or_else(|p| p.into_inner()).arrivals),
             "last_second": last,
             "saturated": totals.saturated,
             "layers": layers,
@@ -1012,42 +1137,95 @@ impl Run {
         target: &PinnedTarget,
         seq: u64,
         vu: u32,
-    ) -> Result<(Request<Full<Bytes>>, String), String> {
+    ) -> Result<Built, String> {
+        use axum::http::{HeaderMap, HeaderName, HeaderValue};
         let layer = &self.scenario.layers[layer_idx];
         let path = self.expand(&tpl.path, &layer.name, seq, vu);
         let uri: Uri = format!("{}{}{}", target.authority, target.parsed.path, path)
             .parse()
             .map_err(|e| format!("request URI: {e}"))?;
+        let method: axum::http::Method = tpl
+            .method
+            .to_ascii_uppercase()
+            .parse()
+            .map_err(|_| "request method".to_string())?;
         let request_id = format!("{}-{}-{seq}", self.id, self.node_id);
-        let mut builder = Request::builder()
-            .method(tpl.method.to_ascii_uppercase().as_str())
-            .uri(uri)
-            .header("x-request-id", &request_id)
-            .header(
-                "user-agent",
-                concat!("rustybin-harness/", env!("CARGO_PKG_VERSION")),
-            );
+        let mut headers = HeaderMap::new();
+        fn set(headers: &mut HeaderMap, name: &str, value: String) -> Result<(), String> {
+            let n = HeaderName::from_bytes(name.as_bytes())
+                .map_err(|e| format!("header {name}: {e}"))?;
+            let v = HeaderValue::from_str(&value).map_err(|e| format!("header {name}: {e}"))?;
+            headers.append(n, v);
+            Ok(())
+        }
+        set(
+            &mut headers,
+            "user-agent",
+            concat!("rustybin-harness/", env!("CARGO_PKG_VERSION")).to_string(),
+        )?;
         let mut has_content_type = false;
         for (name, value) in &tpl.headers {
             if name.eq_ignore_ascii_case("content-type") {
                 has_content_type = true;
             }
-            builder = builder.header(name.as_str(), self.expand(value, &layer.name, seq, vu));
+            set(&mut headers, name, self.expand(value, &layer.name, seq, vu))?;
         }
         let body = match &tpl.body {
             None => Bytes::new(),
             Some(Value::String(s)) => Bytes::from(self.expand(s, &layer.name, seq, vu)),
             Some(other) => {
                 if !has_content_type {
-                    builder = builder.header("content-type", "application/json");
+                    set(&mut headers, "content-type", "application/json".to_string())?;
                 }
                 Bytes::from(self.expand(&other.to_string(), &layer.name, seq, vu))
             }
         };
-        let req = builder
+        // The marker: the names of the headers set above (sorted, unique),
+        // their digest, the body digest and the path digest, signed.
+        let mut names: Vec<String> = headers.keys().map(|k| k.as_str().to_string()).collect();
+        names.sort();
+        names.dedup();
+        let (headers_digest, _) = correlate::digest_headers(&names, &headers);
+        let path_and_query = uri
+            .path_and_query()
+            .map(|p| p.as_str().to_string())
+            .unwrap_or_else(|| "/".into());
+        let sent_ns = correlate::now_ns();
+        let mut marker = Marker {
+            run: self.id.clone(),
+            node: self.node_id.clone(),
+            seq,
+            vu,
+            sent_ns,
+            names,
+            headers_digest,
+            body_digest: if body.is_empty() {
+                String::new()
+            } else {
+                correlate::digest([body.as_ref()])
+            },
+            path_digest: correlate::digest_path(&method, &path_and_query),
+            sig: String::new(),
+        };
+        marker.sign(&self.key);
+        set(&mut headers, "x-request-id", request_id.clone())?;
+        set(
+            &mut headers,
+            "traceparent",
+            correlate::traceparent(&self.id, &self.node_id, seq),
+        )?;
+        set(&mut headers, correlate::HEADER, marker.to_header())?;
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
             .body(Full::new(body))
             .map_err(|e| format!("request: {e}"))?;
-        Ok((req, request_id))
+        *req.headers_mut() = headers;
+        Ok(Built {
+            req,
+            request_id,
+            sent_ns,
+        })
     }
 
     fn mark_started(&self) {
@@ -1059,6 +1237,8 @@ impl Run {
     fn roll(&self, bucket: &mut SchedBucket, start: Instant, lag: &mut Histogram<u64>) {
         let mut merged = histogram(3);
         let mut merged_service = histogram(3);
+        let mut merged_upstream = histogram(3);
+        let mut merged_overhead = histogram(3);
         let mut counts = Counts::default();
         let mut samples = Vec::new();
         let mut totals = self.totals.lock().unwrap_or_else(|p| p.into_inner());
@@ -1066,26 +1246,64 @@ impl Run {
             let mut s = shard.lock().unwrap_or_else(|p| p.into_inner());
             let _ = merged.add(&s.corrected);
             let _ = merged_service.add(&s.service);
+            let _ = merged_upstream.add(&s.upstream);
+            let _ = merged_overhead.add(&s.overhead);
             let _ = totals.corrected.add(&s.corrected);
             let _ = totals.service.add(&s.service);
+            let _ = totals.upstream.add(&s.upstream);
+            let _ = totals.overhead.add(&s.overhead);
+            let _ = totals.request_leg.add(&s.request_leg);
+            let _ = totals.response_leg.add(&s.response_leg);
             s.corrected.reset();
             s.service.reset();
+            s.upstream.reset();
+            s.overhead.reset();
+            s.request_leg.reset();
+            s.response_leg.reset();
             let c = std::mem::take(&mut s.counts);
             counts.add(&c);
             totals.counts.add(&c);
             for (dst, src) in totals.layers.iter_mut().zip(s.layers.iter_mut()) {
-                let _ = dst.corrected.add(&src.corrected);
-                src.corrected.reset();
-                dst.counts.add(&std::mem::take(&mut src.counts));
+                dst.merge_from(src);
             }
             for (dst, src) in totals.targets.iter_mut().zip(s.targets.iter_mut()) {
-                let _ = dst.corrected.add(&src.corrected);
-                src.corrected.reset();
-                dst.counts.add(&std::mem::take(&mut src.counts));
+                dst.merge_from(src);
             }
             samples.append(&mut s.samples);
+            let room = MAX_FAILED_SEQS.saturating_sub(totals.failed_seqs.len());
+            let take = s.failed_seqs.len().min(room);
+            totals.failed_overflow += (s.failed_seqs.len() - take) as u64;
+            totals.failed_seqs.extend(s.failed_seqs.drain(..take));
+            s.failed_seqs.clear();
         }
         totals.keep_samples(samples);
+        if let Some(metrics) = &self.metrics {
+            let mut requests: Vec<(&'static str, String, u64)> = Vec::new();
+            for (status, n) in &counts.statuses {
+                let gateway = counts.gateway_statuses.get(status).copied().unwrap_or(0);
+                if *n > gateway {
+                    requests.push(("upstream", status.clone(), n - gateway));
+                }
+                if gateway > 0 {
+                    requests.push(("gateway", status.clone(), gateway));
+                }
+            }
+            for (kind, n) in &counts.transport_kinds {
+                requests.push(("transport", kind.clone(), *n));
+            }
+            metrics.harness_roll(HarnessRoll {
+                run: &self.id,
+                requests,
+                latency: vec![
+                    ("total", pairs(&merged)),
+                    ("service", pairs(&merged_service)),
+                    ("upstream", pairs(&merged_upstream)),
+                    ("overhead", pairs(&merged_overhead)),
+                ],
+                lag: pairs(lag),
+                inflight: self.inflight.load(Ordering::Relaxed) as i64,
+            });
+        }
         let _ = totals.lag.add(&*lag);
         let lag_p = Percentiles::from_histogram(lag);
         lag.reset();
@@ -1130,11 +1348,15 @@ impl Run {
             status_3xx: s3,
             status_4xx: s4,
             status_5xx: s5,
+            upstream: counts.upstream,
+            gateway: counts.gateway,
             rate: counts.completed as f64 / width,
             p50_ms: p.p50_ms,
             p99_ms: p.p99_ms,
             max_ms: p.max_ms,
             service_p99_ms: Percentiles::from_histogram(&merged_service).p99_ms,
+            upstream_p99_ms: Percentiles::from_histogram(&merged_upstream).p99_ms,
+            overhead_p99_ms: Percentiles::from_histogram(&merged_overhead).p99_ms,
             lag_p99_ms: lag_p.p99_ms,
             lag_max_ms: lag_p.max_ms,
             in_flight: self.inflight.load(Ordering::Relaxed) as u64,
@@ -1197,7 +1419,30 @@ impl Run {
     fn finish(&self, start: Instant, cpu_before: Option<f64>, error: Option<String>) {
         self.set_state(State::Finished);
         let elapsed = start.elapsed();
-        let totals = self.totals.lock().unwrap_or_else(|p| p.into_inner());
+        let mut totals = self.totals.lock().unwrap_or_else(|p| p.into_inner());
+        // Lost: a transport failure the server side never saw. With no
+        // server side on this node, nothing can be told apart.
+        let server = self.entry.as_ref().map(|e| {
+            let stats = e.stats.lock().unwrap_or_else(|p| p.into_inner());
+            let mut lost = 0;
+            let mut after = 0;
+            let mut untracked = 0;
+            for seq in &totals.failed_seqs {
+                match stats.was_seen(*seq) {
+                    Some(true) => after += 1,
+                    Some(false) => lost += 1,
+                    None => untracked += 1,
+                }
+            }
+            (stats.report(), lost, after, untracked)
+        });
+        if let Some((_, lost, after, untracked)) = &server {
+            totals.counts.lost = *lost;
+            totals.counts.transport_after_upstream = *after;
+            totals.counts.transport_untracked = *untracked + totals.failed_overflow;
+        }
+        let server = server.map(|(r, _, _, _)| r);
+        let totals = totals;
         let stopped_by = self
             .stop_reason
             .lock()
@@ -1212,6 +1457,8 @@ impl Run {
         };
         let latency = Percentiles::from_histogram(&totals.corrected);
         let service_latency = Percentiles::from_histogram(&totals.service);
+        let upstream_latency = Percentiles::from_histogram(&totals.upstream);
+        let overhead = Percentiles::from_histogram(&totals.overhead);
         // Answers per second over the send window: the last answers arrive
         // one latency after the window ends, so the median latency is taken
         // off the elapsed time (plan section 10).
@@ -1238,6 +1485,8 @@ impl Run {
             &self.scenario.thresholds,
             &totals.counts,
             &latency,
+            &overhead,
+            server.as_ref().map(|s| s.arrivals),
             &saturation,
         );
         let exit_code = Report::exit_code_for(state, &thresholds);
@@ -1299,20 +1548,19 @@ impl Run {
             totals: totals.counts.clone(),
             latency,
             service_latency,
+            upstream_latency,
+            overhead,
+            request_leg: Percentiles::from_histogram(&totals.request_leg),
+            response_leg: Percentiles::from_histogram(&totals.response_leg),
+            server,
+            rejected_markers: self
+                .correlator
+                .rejected()
+                .saturating_sub(self.rejected_before),
             achieved_rate,
             requested_rate,
-            layers: breakdown(
-                self.scenario
-                    .layers
-                    .iter()
-                    .map(|l| l.name.clone())
-                    .collect(),
-                &totals.layers,
-            ),
-            targets_breakdown: breakdown(
-                self.targets.iter().map(|t| t.target.url.clone()).collect(),
-                &totals.targets,
-            ),
+            layers,
+            targets_breakdown,
             timeline: totals.timeline.clone(),
             saturation,
             passed: exit_code == 0,
@@ -1346,7 +1594,11 @@ impl Run {
             completed = report.totals.completed,
             errors = report.totals.errors(),
             not_sent = report.totals.not_sent,
+            upstream = report.totals.upstream,
+            gateway = report.totals.gateway,
+            lost = report.totals.lost,
             p99_ms = report.latency.p99_ms,
+            overhead_p99_ms = report.overhead.p99_ms,
             saturated = report.saturation.saturated,
             exit_code,
             "harness run ended"
@@ -1372,6 +1624,13 @@ fn pick(cumulative: &[u32], seq: u64) -> usize {
     };
     let point = (seq % u64::from(total.max(1))) as u32;
     cumulative.iter().position(|&c| point < c).unwrap_or(0)
+}
+
+/// A built request with its marker facts.
+struct Built {
+    req: Request<Full<Bytes>>,
+    request_id: String,
+    sent_ns: u64,
 }
 
 /// Scheduler-side counters of the current bucket.
@@ -1462,7 +1721,11 @@ async fn send_one(run: Arc<Run>, job: Job) {
         return;
     };
     let target = &run.targets[target_idx];
-    let (req, request_id) = match run.build_request(layer_idx, tpl, target, seq, vu) {
+    let Built {
+        req,
+        request_id,
+        sent_ns,
+    } = match run.build_request(layer_idx, tpl, target, seq, vu) {
         Ok(r) => r,
         Err(e) => {
             tracing::debug!("harness request {seq} not built: {e}");
@@ -1485,15 +1748,49 @@ async fn send_one(run: Arc<Run>, job: Job) {
             .await
             .map_err(|e| classify_error(&e))?;
         let status = resp.status().as_u16();
+        // The tag and the upstream timing, verified with the run key.
+        let tag = resp
+            .headers()
+            .get(correlate::SERVED_BY)
+            .and_then(|v| v.to_str().ok())
+            .and_then(Tag::parse)
+            .filter(|t| t.run == run.id && t.seq == seq && t.verify(&run.key));
+        let upstream_ms = resp
+            .headers()
+            .get("server-timing")
+            .and_then(|v| v.to_str().ok())
+            .and_then(correlate::parse_server_timing);
         let bytes = read_body(resp.into_body()).await?;
-        Ok::<(u16, u64), &'static str>((status, bytes))
+        Ok::<(u16, u64, Option<Tag>, Option<f64>), &'static str>((status, bytes, tag, upstream_ms))
     })
     .await;
     let done = Instant::now();
-    let (status, transport, bytes, expected) = match result {
-        Ok(Ok((status, bytes))) => (Some(status), None, bytes, tpl.expects(status)),
-        Ok(Err(kind)) => (None, Some(kind), 0, false),
-        Err(_) => (None, Some("timeout"), 0, false),
+    let done_ns = correlate::now_ns();
+    let (status, transport, bytes, expected, tag, upstream_ms) = match result {
+        Ok(Ok((status, bytes, tag, up))) => {
+            (Some(status), None, bytes, tpl.expects(status), tag, up)
+        }
+        Ok(Err(kind)) => (None, Some(kind), 0, false, None, None),
+        Err(_) => (None, Some("timeout"), 0, false, None, None),
+    };
+    let service = done.saturating_duration_since(sent);
+    let class = match (status, &tag) {
+        (None, _) => Class::Transport,
+        (Some(_), Some(_)) => Class::Upstream,
+        (Some(_), None) => Class::Gateway,
+    };
+    let upstream = match (&tag, upstream_ms) {
+        (Some(_), Some(ms)) if ms >= 0.0 => Some(Duration::from_secs_f64(ms / 1000.0)),
+        _ => None,
+    };
+    let overhead = upstream.map(|up| service.saturating_sub(up));
+    // One-way legs when the answering node shares this clock (loop-through).
+    let (request_leg, response_leg) = match &tag {
+        Some(t) if t.node == run.node_id => (
+            Some(Duration::from_nanos(t.arrived_ns.saturating_sub(sent_ns))),
+            Some(Duration::from_nanos(done_ns.saturating_sub(t.done_ns))),
+        ),
+        _ => (None, None),
     };
     run.inflight.fetch_sub(1, Ordering::Relaxed);
     run.record(Outcome {
@@ -1508,8 +1805,13 @@ async fn send_one(run: Arc<Run>, job: Job) {
         expected,
         bytes,
         corrected: done.saturating_duration_since(intended),
-        service: done.saturating_duration_since(sent),
+        service,
         at: sent.saturating_duration_since(start),
+        class,
+        upstream,
+        overhead,
+        request_leg,
+        response_leg,
     });
 }
 

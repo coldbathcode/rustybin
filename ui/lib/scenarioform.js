@@ -186,12 +186,15 @@ function lazy(root, node, label, value, path) {
   return { el: slot, read: () => (inner ? inner.read() : undefined) };
 }
 
-/** key = value rows for a map of strings (headers). */
+/** key = value rows for a map (headers, status weights); values follow the
+ *  additionalProperties type. */
 function mapEditor(node, label, value, path) {
+  const valueType = typeOf(node.additionalProperties || {})[0];
+  const numeric = valueType === 'integer' || valueType === 'number';
   const rows = h('div', { class: 'stack-sm' });
   function row(k, v) {
-    const key = input({ value: k || '', placeholder: 'Header-Name', class: 'input mono', 'aria-label': path + ' key' });
-    const val = input({ value: v || '', placeholder: 'value', class: 'input mono', 'aria-label': path + ' value' });
+    const key = input({ value: k || '', placeholder: numeric ? '200' : 'Header-Name', class: 'input mono', 'aria-label': path + ' key' });
+    const val = input({ value: v === undefined || v === null ? '' : String(v), placeholder: numeric ? '1' : 'value', class: 'input mono', 'aria-label': path + ' value', type: numeric ? 'number' : 'text' });
     const del = h('button', { class: 'btn sm ghost', type: 'button', 'aria-label': 'Remove', onclick: () => r.remove() }, 'x');
     const r = h('div', { class: 'row nowrap' }, key, val, del);
     r.dataset.row = '1';
@@ -206,7 +209,14 @@ function mapEditor(node, label, value, path) {
       const out = {};
       for (const r of rows.querySelectorAll('[data-row]')) {
         const [k, v] = r.read();
-        if (k) out[k] = v;
+        if (!k) continue;
+        if (numeric) {
+          const n = Number(v);
+          if (v === '' || Number.isNaN(n)) throw new Error(`${path}.${k} must be a number`);
+          out[k] = n;
+        } else {
+          out[k] = v;
+        }
       }
       return Object.keys(out).length ? out : undefined;
     },

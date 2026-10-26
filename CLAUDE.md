@@ -2,11 +2,12 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Harness mode: phase 1 built, phase 2 next
+## Harness mode: phases 1 and 2 built, phase 3 next
 
 [docs/plans/harness.md](docs/plans/harness.md) (planned 2026-10-22; phase 0, the engine spike in
-`examples/harness_spike.rs`, and phase 1, the single-node engine in `src/harness/`, done 2026-10-25; the plan's
-"Phase 1 build notes" list where the build differs; phase 2, correlation, is next): Rustybin as a load client and
+`examples/harness_spike.rs`, phase 1, the single-node engine in `src/harness/`, and phase 2, correlation, done
+2026-10-25; the plan's "Phase 1 build notes" and "Phase 2 build notes" list where the build differs; phase 3, the
+cluster, is next): Rustybin as a load client and
 correlating upstream, single node (loop-through) or a cluster (an elected leader, clients, servers), traffic layers
 with run patterns and rate-limit burst attacks, every parameter from one schema in the API, MCP and console (tunable
 live), or headless. It is the first feature that sends load to targets the caller chooses (A2A push notifications,
@@ -91,7 +92,7 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
 - `src/lib.rs`: module list, `ROUTERS` (every module's router), `build_app(state)` with the middleware stack
   (outermost first): mock host rewrite (wraps the finished router, `mocks::host`), request id, trace, metrics,
   request id propagation, CORS, control-plane auth, API keys (`keys::enforce`), plan limits, time-to-headers timeout,
-  inspector capture, body limit, fault injection. JSON 404 fallback.
+  harness correlation (harness mode only), inspector capture, body limit, fault injection. JSON 404 fallback.
 - `src/server.rs`: `run(config)`, `start(config)`, `start_with_state(state)` -> `RunningServer`
   (bound addresses, `shutdown()`, `wait()`). HTTP bind failure is fatal; HTTPS and gRPC failures only warn.
   Ports may be 0. Graceful shutdown on SIGTERM/SIGINT with a 10 s grace period. With `RUSTYBIN_GRPC_ON_HTTP`
@@ -155,10 +156,15 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   state in `AppState.harness` with bounded runs, target verification, router, catalogue, OpenAPI, headless mode),
   `safety.rs`, `scenario.rs` (model, `Caps`, validation, JSON Schema), `pattern.rs` (`constant`, `ramp`, `then`),
   `engine.rs` (own tokio runtime, a scheduler thread per run, `PinnedConnector` with TLS and ALPN, per-worker
-  histogram shards rolled into a per-second timeline, closed-model users, saturation), `report.rs` (JSON, text,
-  JUnit), `api.rs` (handlers; 404 when off except status, schema, scenarios and validate), `cli.rs` (`rustybin
-  harness run | validate | report`), `scenarios/*.yaml` (built-ins). MCP tools in `src/mcp/manage/harness.rs`
-  (`Right::Harness`), console view `ui/views/harness.js`. The `harness` control scope (`control_auth::Grant`).
+  histogram shards rolled into a per-second timeline, closed-model users, saturation, the marker on every
+  request and the classification of every answer), `correlate.rs` (the run key, the signed marker and tag,
+  digests, the `Correlator` with per-run server stats and the seen-sequence bitmap, the `layer` in `build_app`
+  outside inspector capture, `CaptureDecision` the inspector honours), `shaped.rs` (`/harness/{*path}`, the
+  run's `servers` profile), `report.rs` (JSON, text, JUnit; classes, overhead, legs, the server side),
+  `api.rs` (handlers; 404 when off except status, schema, scenarios and validate), `cli.rs` (`rustybin
+  harness run | validate | report`), `scenarios/*.yaml` (built-ins), `test_proxy.rs` (tests: a misbehaving
+  gateway). MCP tools in `src/mcp/manage/harness.rs` (`Right::Harness`), console view `ui/views/harness.js`,
+  `rustybin_harness_*` in `metrics.rs`. The `harness` control scope (`control_auth::Grant`).
 - `src/fault.rs`: `X-Rustybin-Delay` / `X-Rustybin-Fail` middleware.
 - `src/admin.rs`: `require_admin(&headers, &config)` guard for instance-global mutations.
 - `src/session.rs`: `session_key(&headers, client_ip)`, `client_ip(...)`, extractors `Session`, `ClientIp`, `PeerAddr`.

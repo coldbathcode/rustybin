@@ -137,7 +137,8 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
 /// Build the complete application: all module routers plus the middleware
 /// stack (outermost first): request id, tracing, metrics, request id
 /// propagation, CORS, control-plane auth, API keys, plan limits,
-/// time-to-headers timeout, inspector capture, body limit, fault injection.
+/// time-to-headers timeout, harness correlation, inspector capture, body
+/// limit, fault injection.
 pub fn build_app(state: AppState) -> Router {
     let config = state.config.clone();
 
@@ -159,6 +160,16 @@ pub fn build_app(state: AppState) -> Router {
             state.clone(),
             inspector::capture,
         ));
+
+    // Harness correlation (RUSTYBIN_HARNESS): verifies the marker of a
+    // harness request, records what arrived, decides whether the inspector
+    // captures it, and tags the answer. One header lookup otherwise.
+    if state.harness.is_some() {
+        router = router.layer(middleware::from_fn_with_state(
+            state.clone(),
+            harness::correlate::layer,
+        ));
+    }
 
     // Time-to-headers timeout: tower-http's TimeoutLayer bounds the time until
     // the response future resolves, never the streaming body, so SSE and

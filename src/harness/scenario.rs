@@ -381,6 +381,75 @@ pub struct Layer {
     pub think_time: Option<Dur>,
 }
 
+/// Upstream latency of the shaped endpoint, as a log-normal distribution
+/// given by its median and its 99th percentile.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerLatency {
+    #[serde(default)]
+    pub p50: Dur,
+    #[serde(default)]
+    pub p99: Dur,
+}
+
+fn default_sample() -> u32 {
+    100
+}
+
+fn default_body_bytes() -> u32 {
+    256
+}
+
+fn default_status() -> BTreeMap<String, u32> {
+    BTreeMap::from([("200".to_string(), 1)])
+}
+
+/// The server side of a run: how the shaped endpoint `/harness/{*path}`
+/// answers marked requests (latency, status mix, body, streaming) and how
+/// the inspector samples harness traffic. Pushed to server nodes with the
+/// run (single node: the node itself).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerProfile {
+    #[serde(default)]
+    pub latency: ServerLatency,
+    /// Status codes with weights (`{"200": 97, "503": 3}`).
+    #[serde(default = "default_status")]
+    pub status: BTreeMap<String, u32>,
+    /// Response body size (JSON padded to this length).
+    #[serde(default = "default_body_bytes")]
+    pub body_bytes: u32,
+    /// Stream the body in chunks instead of one piece.
+    #[serde(default)]
+    pub chunked: bool,
+    /// Delay before the first byte (on top of the latency).
+    #[serde(default)]
+    pub first_byte_delay: Dur,
+    /// The inspector captures 1 in N marked requests (plus every anomaly);
+    /// 0 captures none.
+    #[serde(default = "default_sample")]
+    pub capture_sample: u32,
+}
+
+impl Default for ServerProfile {
+    fn default() -> Self {
+        Self {
+            latency: ServerLatency::default(),
+            status: default_status(),
+            body_bytes: default_body_bytes(),
+            chunked: false,
+            first_byte_delay: Dur::default(),
+            capture_sample: default_sample(),
+        }
+    }
+}
+
+/// Longest shaped latency, first-byte delay or p99.
+pub const MAX_SERVER_DELAY: Duration = Duration::from_secs(30);
+/// Largest shaped body.
+pub const MAX_SERVER_BODY: u32 = 1024 * 1024;
+pub const MAX_SERVER_STATUSES: usize = 16;
+
 /// Pass criteria. A run that misses any of them exits with code 1.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -407,6 +476,18 @@ pub struct Thresholds {
     /// the client, not the gateway).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saturated: Option<bool>,
+    /// Highest p99 of the gateway overhead (total minus upstream processing)
+    /// in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_overhead_p99_ms: Option<f64>,
+    /// Most requests the gateway may swallow (sent, seen by no server, no
+    /// answer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lost: Option<u64>,
+    /// Least fraction of the sent requests that must have reached the
+    /// server side (0 to 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_reach: Option<f64>,
 }
 
 /// A scenario as written: the shorthand fields (`target`, `source`,
@@ -441,6 +522,9 @@ pub struct Scenario {
     pub timeout: Option<Dur>,
     #[serde(default)]
     pub thresholds: Thresholds,
+    /// The server side: the shaped endpoint's profile and inspector sampling.
+    #[serde(default)]
+    pub servers: ServerProfile,
 }
 
 /// What a scenario amounts to, for previews, listings and the report.
@@ -768,6 +852,34 @@ impl Scenario {
         if timeout < MIN_TIMEOUT || timeout > MAX_TIMEOUT {
             p.push("timeout: 1ms to 60s".into());
         }
+        let sv = &self.servers;
+        if sv.latency.p50.0 > sv.latency.p99.0 {
+            p.push("servers.latency: p50 must not be above p99".into());
+        }
+        if sv.latency.p99.0 > MAX_SERVER_DELAY || sv.first_byte_delay.0 > MAX_SERVER_DELAY {
+            p.push("servers: latencies and the first-byte delay are at most 30s".into());
+        }
+        if sv.status.is_empty() {
+            p.push("servers.status: at least one status with a weight".into());
+        } else if sv.status.len() > MAX_SERVER_STATUSES {
+            p.push(format!(
+                "servers.status: at most {MAX_SERVER_STATUSES} statuses"
+            ));
+        }
+        for (code, weight) in &sv.status {
+            if !code.parse::<u16>().is_ok_and(|c| (100..=599).contains(&c)) {
+                p.push(format!("servers.status.{code}: statuses are 100 to 599"));
+            }
+            if *weight == 0 || *weight > 1000 {
+                p.push(format!("servers.status.{code}: weights are 1 to 1000"));
+            }
+        }
+        if sv.body_bytes > MAX_SERVER_BODY {
+            p.push(format!("servers.body_bytes: at most {MAX_SERVER_BODY}"));
+        }
+        if sv.capture_sample > 1_000_000 {
+            p.push("servers.capture_sample: at most 1000000".into());
+        }
         let t = &self.thresholds;
         let fraction = |name: &str, v: Option<f64>, p: &mut Vec<String>| {
             if let Some(v) = v {
@@ -778,10 +890,12 @@ impl Scenario {
         };
         fraction("error_rate", t.error_rate, &mut p);
         fraction("min_achieved", t.min_achieved, &mut p);
+        fraction("upstream_reach", t.upstream_reach, &mut p);
         for (name, v) in [
             ("latency_p50_ms", t.latency_p50_ms),
             ("latency_p99_ms", t.latency_p99_ms),
             ("latency_max_ms", t.latency_max_ms),
+            ("gateway_overhead_p99_ms", t.gateway_overhead_p99_ms),
         ] {
             if let Some(v) = v {
                 if !v.is_finite() || !(0.0..=3_600_000.0).contains(&v) {
@@ -1108,7 +1222,36 @@ pub fn schema(caps: &Caps) -> Value {
                     "latency_p99_ms": number("Highest p99 latency from the intended send time, in milliseconds.", 0.0, 3_600_000.0),
                     "latency_max_ms": number("Highest latency of any request, in milliseconds.", 0.0, 3_600_000.0),
                     "min_achieved": number("Least fraction of the requested requests that must have been answered.", 0.0, 1.0),
-                    "saturated": prop("boolean", "false: fail when the client itself saturated (the results would describe the client, not the gateway).")
+                    "saturated": prop("boolean", "false: fail when the client itself saturated (the results would describe the client, not the gateway)."),
+                    "gateway_overhead_p99_ms": number("Highest p99 of the gateway overhead (total latency minus upstream processing time), in milliseconds.", 0.0, 3_600_000.0),
+                    "lost": integer("Most requests the gateway may swallow: sent, seen by no server, no answer.", 0, u64::MAX / 2),
+                    "upstream_reach": number("Least fraction of the sent requests that must have reached the server side.", 0.0, 1.0)
+                },
+                "additionalProperties": false
+            },
+            "servers": {
+                "type": "object",
+                "description": "The server side: how the shaped endpoint /harness/{*path} answers marked requests, and how the inspector samples harness traffic.",
+                "properties": {
+                    "latency": {
+                        "type": "object",
+                        "description": "Upstream processing time as a log-normal distribution given by its median and 99th percentile.",
+                        "properties": {
+                            "p50": duration("Median processing time.", 30),
+                            "p99": duration("99th percentile of the processing time (at least the median).", 30)
+                        },
+                        "additionalProperties": false
+                    },
+                    "status": json!({
+                        "type": "object",
+                        "description": "Status codes with weights, for example {\"200\": 97, \"503\": 3}.",
+                        "additionalProperties": integer("The weight of this status.", 1, 1000),
+                        "maxProperties": MAX_SERVER_STATUSES
+                    }),
+                    "body_bytes": integer("Response body size: a JSON object padded to this length.", 0, MAX_SERVER_BODY as u64),
+                    "chunked": prop("boolean", "Stream the body in chunks instead of one piece."),
+                    "first_byte_delay": duration("Delay before the first byte, on top of the latency.", 30),
+                    "capture_sample": integer("The inspector captures 1 in N marked requests, plus every anomaly (0: none).", 0, 1_000_000)
                 },
                 "additionalProperties": false
             }
@@ -1336,6 +1479,20 @@ mod tests {
                 latency_max_ms: Some(3.0),
                 min_achieved: Some(0.9),
                 saturated: Some(false),
+                gateway_overhead_p99_ms: Some(10.0),
+                lost: Some(0),
+                upstream_reach: Some(0.99),
+            },
+            servers: ServerProfile {
+                latency: ServerLatency {
+                    p50: Dur(Duration::from_millis(5)),
+                    p99: Dur(Duration::from_millis(50)),
+                },
+                status: BTreeMap::from([("200".to_string(), 9), ("503".to_string(), 1)]),
+                body_bytes: 512,
+                chunked: true,
+                first_byte_delay: Dur(Duration::from_millis(1)),
+                capture_sample: 10,
             },
         }
     }

@@ -32,7 +32,7 @@ function timelineChart(buckets) {
   buckets.forEach((b, i) => {
     const x = pad + i * bw;
     const hr = ((b.completed || 0) / maxRate) * (H - pad * 2);
-    svg.appendChild(s('rect', { x: x + 1, y: H - pad - hr, width: Math.max(1, bw - 2), height: hr, fill: b.saturated ? 'var(--status-critical)' : b.errors ? 'var(--status-warning)' : 'var(--status-good)' }, s('title', null, `${b.t_secs}s: ${b.completed} answered, ${b.errors} errors, ${b.not_sent} not sent, p99 ${fmtMs(b.p99_ms)}`)));
+    svg.appendChild(s('rect', { x: x + 1, y: H - pad - hr, width: Math.max(1, bw - 2), height: hr, fill: b.saturated ? 'var(--status-critical)' : b.errors ? 'var(--status-warning)' : 'var(--status-good)' }, s('title', null, `${b.t_secs}s: ${b.completed} answered (${b.upstream || 0} upstream, ${b.gateway || 0} gateway), ${b.errors} errors, ${b.not_sent} not sent, p99 ${fmtMs(b.p99_ms)}, overhead p99 ${fmtMs(b.overhead_p99_ms)}`)));
     const hq = ((b.requested || 0) / maxRate) * (H - pad * 2);
     svg.appendChild(s('line', { x1: x + 1, y1: H - pad - hq, x2: x + bw - 1, y2: H - pad - hq, stroke: 'var(--text-3)', 'stroke-dasharray': '2 2' }));
   });
@@ -255,8 +255,10 @@ export default {
           tile('OK', num(r.ok), 'ok'),
           tile('Errors', num(r.errors), r.errors ? 'err-text' : ''),
           tile('Not sent', num(r.not_sent), r.not_sent ? 'err-text' : ''),
+          tile('Upstream / gateway', `${num(r.upstream)} / ${num(r.gateway)}`, r.gateway ? 'err-text' : ''),
           tile('In flight', num(r.in_flight)),
           tile('p50 / p99', `${fmtMs(r.latency && r.latency.p50_ms)} / ${fmtMs(r.latency && r.latency.p99_ms)}`),
+          tile('Overhead p99', r.overhead && r.overhead.count ? fmtMs(r.overhead.p99_ms) : '-'),
           tile('Last second', last ? `${num(last.rate)} /s, lag p99 ${fmtMs(last.lag_p99_ms)}` : '-')),
         timelineChart(liveBuckets),
         r.layers && r.layers.length > 1 ? h('table', { class: 'table' },
@@ -312,12 +314,30 @@ export default {
         h('div', { class: 'tiles' },
           tile('Requested', num(t.requested)), tile('Sent', num(t.sent)), tile('Answered', num(t.completed)), tile('OK', num(t.ok), 'ok'),
           tile('Unexpected status', num(t.unexpected_status), t.unexpected_status ? 'err-text' : ''), tile('Transport', num(t.transport), t.transport ? 'err-text' : ''),
-          tile('Not sent', num(t.not_sent), t.not_sent ? 'err-text' : ''), tile('Achieved', `${num(rep.achieved_rate, 1)} /s of ${num(rep.requested_rate, 1)}`)),
+          tile('Not sent', num(t.not_sent), t.not_sent ? 'err-text' : ''), tile('Achieved', `${num(rep.achieved_rate, 1)} /s of ${num(rep.requested_rate, 1)}`),
+          tile('Upstream', num(t.upstream), 'ok'), tile('Gateway', num(t.gateway), t.gateway ? 'err-text' : ''),
+          tile('Lost', num(t.lost), t.lost ? 'err-text' : ''), tile('Overhead p50 / p99', rep.overhead && rep.overhead.count ? `${fmtMs(rep.overhead.p50_ms)} / ${fmtMs(rep.overhead.p99_ms)}` : 'no tagged answers')),
+        t.gateway_statuses && Object.keys(t.gateway_statuses).length ? h('p', { class: 'small' }, 'Gateway answers by status: ', Object.entries(t.gateway_statuses).map(([k, v]) => `${k}: ${num(v)}`).join(', ')) : null,
         h('table', { class: 'table' },
           h('thead', null, h('tr', null, h('th', null, 'Latency'), h('th', null, 'p50'), h('th', null, 'p90'), h('th', null, 'p99'), h('th', null, 'p99.9'), h('th', null, 'max'), h('th', null, 'mean'))),
           h('tbody', null,
             h('tr', null, h('td', null, 'from the intended send'), ...['p50_ms', 'p90_ms', 'p99_ms', 'p999_ms', 'max_ms', 'mean_ms'].map((k) => h('td', { class: 'mono' }, fmtMs(lat[k])))),
-            h('tr', null, h('td', null, 'from the actual send'), ...['p50_ms', 'p90_ms', 'p99_ms', 'p999_ms', 'max_ms', 'mean_ms'].map((k) => h('td', { class: 'mono' }, fmtMs((rep.service_latency || {})[k])))))),
+            h('tr', null, h('td', null, 'from the actual send'), ...['p50_ms', 'p90_ms', 'p99_ms', 'p999_ms', 'max_ms', 'mean_ms'].map((k) => h('td', { class: 'mono' }, fmtMs((rep.service_latency || {})[k])))),
+            rep.upstream_latency && rep.upstream_latency.count ? h('tr', null, h('td', null, 'upstream processing (Server-Timing)'), ...['p50_ms', 'p90_ms', 'p99_ms', 'p999_ms', 'max_ms', 'mean_ms'].map((k) => h('td', { class: 'mono' }, fmtMs(rep.upstream_latency[k])))) : null,
+            rep.overhead && rep.overhead.count ? h('tr', null, h('td', null, 'gateway overhead (total minus upstream)'), ...['p50_ms', 'p90_ms', 'p99_ms', 'p999_ms', 'max_ms', 'mean_ms'].map((k) => h('td', { class: 'mono' }, fmtMs(rep.overhead[k])))) : null,
+            rep.request_leg && rep.request_leg.count ? h('tr', null, h('td', null, 'request leg (one clock)'), ...['p50_ms', 'p90_ms', 'p99_ms', 'p999_ms', 'max_ms', 'mean_ms'].map((k) => h('td', { class: 'mono' }, fmtMs(rep.request_leg[k])))) : null,
+            rep.response_leg && rep.response_leg.count ? h('tr', null, h('td', null, 'response leg (one clock)'), ...['p50_ms', 'p90_ms', 'p99_ms', 'p999_ms', 'max_ms', 'mean_ms'].map((k) => h('td', { class: 'mono' }, fmtMs(rep.response_leg[k])))) : null)),
+        rep.server ? h('div', { class: 'stack-sm' },
+          h('h3', null, 'Server side'),
+          kvgrid([
+            ['Arrivals', `${num(rep.server.arrivals)} of ${num(t.sent)} sent`],
+            ['Processing', `p50 ${fmtMs(rep.server.processing.p50_ms)}, p99 ${fmtMs(rep.server.processing.p99_ms)}`],
+            ['Captured in the inspector', num(rep.server.captured)],
+            ['Headers added by the gateway', Object.keys(rep.server.changes.headers_added).length ? Object.entries(rep.server.changes.headers_added).map(([k, v]) => `${k} (${num(v)})`).join(', ') : 'none'],
+            ['Headers missing', Object.keys(rep.server.changes.headers_missing).length ? Object.entries(rep.server.changes.headers_missing).map(([k, v]) => `${k} (${num(v)})`).join(', ') : 'none'],
+            ['Changed', `${num(rep.server.changes.headers_changed)} header values, ${num(rep.server.changes.body_changed)} bodies, ${num(rep.server.changes.path_changed)} paths`],
+            ['Rejected markers', num(rep.rejected_markers)],
+          ])) : null,
         rep.thresholds && rep.thresholds.length ? h('table', { class: 'table' },
           h('thead', null, h('tr', null, h('th', null, 'Threshold'), h('th', null, 'Limit'), h('th', null, 'Measured'), h('th', null, 'Result'))),
           h('tbody', null, ...rep.thresholds.map((th) => h('tr', null, h('td', null, th.name), h('td', { class: 'mono' }, String(th.limit)), h('td', { class: 'mono' }, String(th.measured)), h('td', null, badge(th.pass ? 'pass' : 'fail', th.pass ? 'ok' : 'err')))))) : h('p', { class: 'muted small' }, 'No thresholds in the scenario.'),
@@ -328,8 +348,8 @@ export default {
         sat.reasons && sat.reasons.length ? notice('warn', sat.reasons.join(' ')) : null,
         h('details', { class: 'disclosure' }, h('summary', null, `Samples (${(rep.samples || []).length}) with their X-Request-Id`),
           h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
-            h('thead', null, h('tr', null, h('th', null, 'Kind'), h('th', null, 'Request id'), h('th', null, 'Request'), h('th', null, 'Status'), h('th', null, 'Latency'))),
-            h('tbody', null, ...(rep.samples || []).slice(0, 50).map((x) => h('tr', null, h('td', null, x.kind), h('td', { class: 'mono' }, x.request_id), h('td', { class: 'mono' }, `${x.method} ${x.path}`), h('td', null, x.status !== null && x.status !== undefined ? String(x.status) : (x.error || '-')), h('td', null, fmtMs(x.latency_ms)))))))),
+            h('thead', null, h('tr', null, h('th', null, 'Kind'), h('th', null, 'Class'), h('th', null, 'Request id'), h('th', null, 'Request'), h('th', null, 'Status'), h('th', null, 'Latency'), h('th', null, 'Upstream'))),
+            h('tbody', null, ...(rep.samples || []).slice(0, 50).map((x) => h('tr', null, h('td', null, x.kind), h('td', null, x.class || '-'), h('td', { class: 'mono' }, x.request_id), h('td', { class: 'mono' }, `${x.method} ${x.path}`), h('td', null, x.status !== null && x.status !== undefined ? String(x.status) : (x.error || '-')), h('td', null, fmtMs(x.latency_ms)), h('td', null, x.upstream_ms !== undefined && x.upstream_ms !== null ? fmtMs(x.upstream_ms) : '-'))))))),
         h('details', { class: 'disclosure' }, h('summary', null, 'Full report (JSON)'), jsonView(rep))));
     }
 

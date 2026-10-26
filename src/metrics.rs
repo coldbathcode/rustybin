@@ -152,6 +152,17 @@ struct Histogram {
 }
 
 impl Histogram {
+    /// Count `n` observations of the same value.
+    fn observe_n(&mut self, secs: f64, n: u64) {
+        for (i, bound) in BUCKETS.iter().enumerate() {
+            if secs <= *bound {
+                self.buckets[i] += n;
+            }
+        }
+        self.count += n;
+        self.sum += secs * n as f64;
+    }
+
     fn observe(&mut self, secs: f64) {
         for (i, bound) in BUCKETS.iter().enumerate() {
             if secs <= *bound {
@@ -183,6 +194,37 @@ struct Inner {
     leads: HashMap<&'static str, u64>,
     /// Management MCP tool calls by tool and outcome (fixed label sets).
     manage_calls: HashMap<(&'static str, &'static str), u64>,
+    /// Harness runs, oldest first (the run label is bounded to
+    /// [`MAX_HARNESS_RUNS`]: the active run plus the last ones).
+    harness_order: Vec<String>,
+    harness: HashMap<String, HarnessSeries>,
+}
+
+/// Most harness runs kept in the metrics (the active run plus the last 4).
+pub const MAX_HARNESS_RUNS: usize = 5;
+/// Most (class, status) series per harness run.
+pub const MAX_HARNESS_SERIES: usize = 64;
+
+/// The series of one harness run.
+#[derive(Default)]
+pub struct HarnessSeries {
+    requests: HashMap<(&'static str, String), u64>,
+    latency: HashMap<&'static str, Histogram>,
+    lag: Histogram,
+    inflight: i64,
+    server_arrivals: u64,
+}
+
+/// One second of a harness run, as the engine reports it to the metrics.
+pub struct HarnessRoll<'a> {
+    pub run: &'a str,
+    /// (class, status, count) of the answers of this second.
+    pub requests: Vec<(&'static str, String, u64)>,
+    /// (kind, (seconds, count) pairs) of this second's latencies.
+    pub latency: Vec<(&'static str, Vec<(f64, u64)>)>,
+    /// (seconds, count) pairs of the scheduler lag.
+    pub lag: Vec<(f64, u64)>,
+    pub inflight: i64,
 }
 
 /// Process-wide metric counters.
@@ -350,6 +392,55 @@ impl Metrics {
     /// `outcome` is `ok`, `denied`, `invalid` or `error`.
     pub fn count_manage_call(&self, tool: &'static str, outcome: &'static str) {
         *self.lock().manage_calls.entry((tool, outcome)).or_insert(0) += 1;
+    }
+
+    fn harness_series<'a>(inner: &'a mut Inner, run: &str) -> &'a mut HarnessSeries {
+        if !inner.harness.contains_key(run) {
+            while inner.harness_order.len() >= MAX_HARNESS_RUNS {
+                let oldest = inner.harness_order.remove(0);
+                inner.harness.remove(&oldest);
+            }
+            inner.harness_order.push(run.to_string());
+            inner
+                .harness
+                .insert(run.to_string(), HarnessSeries::default());
+        }
+        inner
+            .harness
+            .get_mut(run)
+            .unwrap_or_else(|| unreachable!("inserted above"))
+    }
+
+    /// One second of a harness run (`rustybin_harness_*`).
+    pub fn harness_roll(&self, roll: HarnessRoll<'_>) {
+        let mut inner = self.lock();
+        let series = Self::harness_series(&mut inner, roll.run);
+        for (class, status, n) in roll.requests {
+            let key = (class, status);
+            if let Some(v) = series.requests.get_mut(&key) {
+                *v += n;
+            } else if series.requests.len() < MAX_HARNESS_SERIES {
+                series.requests.insert(key, n);
+            } else {
+                *series.requests.entry((class, "other".into())).or_default() += n;
+            }
+        }
+        for (kind, values) in roll.latency {
+            let h = series.latency.entry(kind).or_default();
+            for (secs, n) in values {
+                h.observe_n(secs, n);
+            }
+        }
+        for (secs, n) in roll.lag {
+            series.lag.observe_n(secs, n);
+        }
+        series.inflight = roll.inflight;
+    }
+
+    /// A marked request arrived on this node's server side.
+    pub fn harness_arrival(&self, run: &str) {
+        let mut inner = self.lock();
+        Self::harness_series(&mut inner, run).server_arrivals += 1;
     }
 
     /// Running self-service visits (negative: not reported).
@@ -590,6 +681,101 @@ impl Metrics {
             out.push_str("# HELP rustybin_quota_store_up 1 when the last exchange with the quota store (RUSTYBIN_QUOTA_STORE) succeeded.\n");
             out.push_str("# TYPE rustybin_quota_store_up gauge\n");
             let _ = writeln!(out, "rustybin_quota_store_up {}", u8::from(up));
+        }
+
+        if !inner.harness.is_empty() {
+            let mut runs: Vec<(&String, &HarnessSeries)> = inner.harness.iter().collect();
+            runs.sort_by(|a, b| a.0.cmp(b.0));
+            out.push_str("# HELP rustybin_harness_requests_total Harness answers by run, class (upstream, gateway, transport) and status or failure kind.\n");
+            out.push_str("# TYPE rustybin_harness_requests_total counter\n");
+            for (run, s) in &runs {
+                let mut series: Vec<_> = s.requests.iter().collect();
+                series.sort();
+                for ((class, status), n) in series {
+                    let _ = writeln!(
+                        out,
+                        "rustybin_harness_requests_total{{run=\"{}\",class=\"{class}\",status=\"{}\"}} {n}",
+                        escape(run),
+                        escape(status)
+                    );
+                }
+            }
+            out.push_str("# HELP rustybin_harness_latency_seconds Harness latency by run and kind (total from the intended send, service from the actual send, upstream processing, gateway overhead).\n");
+            out.push_str("# TYPE rustybin_harness_latency_seconds histogram\n");
+            for (run, s) in &runs {
+                let mut kinds: Vec<_> = s.latency.iter().collect();
+                kinds.sort_by(|a, b| a.0.cmp(b.0));
+                for (kind, h) in kinds {
+                    let labels = format!("run=\"{}\",kind=\"{kind}\"", escape(run));
+                    for (bound, n) in BUCKETS.iter().zip(h.buckets.iter()) {
+                        let _ = writeln!(
+                            out,
+                            "rustybin_harness_latency_seconds_bucket{{{labels},le=\"{bound}\"}} {n}"
+                        );
+                    }
+                    let _ = writeln!(
+                        out,
+                        "rustybin_harness_latency_seconds_bucket{{{labels},le=\"+Inf\"}} {}",
+                        h.count
+                    );
+                    let _ = writeln!(
+                        out,
+                        "rustybin_harness_latency_seconds_sum{{{labels}}} {}",
+                        h.sum
+                    );
+                    let _ = writeln!(
+                        out,
+                        "rustybin_harness_latency_seconds_count{{{labels}}} {}",
+                        h.count
+                    );
+                }
+            }
+            out.push_str("# HELP rustybin_harness_scheduler_lag_seconds Intended versus actual send time of the harness scheduler, by run.\n");
+            out.push_str("# TYPE rustybin_harness_scheduler_lag_seconds histogram\n");
+            for (run, s) in &runs {
+                let labels = format!("run=\"{}\"", escape(run));
+                for (bound, n) in BUCKETS.iter().zip(s.lag.buckets.iter()) {
+                    let _ = writeln!(
+                        out,
+                        "rustybin_harness_scheduler_lag_seconds_bucket{{{labels},le=\"{bound}\"}} {n}"
+                    );
+                }
+                let _ = writeln!(
+                    out,
+                    "rustybin_harness_scheduler_lag_seconds_bucket{{{labels},le=\"+Inf\"}} {}",
+                    s.lag.count
+                );
+                let _ = writeln!(
+                    out,
+                    "rustybin_harness_scheduler_lag_seconds_sum{{{labels}}} {}",
+                    s.lag.sum
+                );
+                let _ = writeln!(
+                    out,
+                    "rustybin_harness_scheduler_lag_seconds_count{{{labels}}} {}",
+                    s.lag.count
+                );
+            }
+            out.push_str("# HELP rustybin_harness_inflight Harness requests in flight, by run.\n");
+            out.push_str("# TYPE rustybin_harness_inflight gauge\n");
+            for (run, s) in &runs {
+                let _ = writeln!(
+                    out,
+                    "rustybin_harness_inflight{{run=\"{}\"}} {}",
+                    escape(run),
+                    s.inflight
+                );
+            }
+            out.push_str("# HELP rustybin_harness_server_arrivals_total Marked harness requests that reached this node's server side, by run.\n");
+            out.push_str("# TYPE rustybin_harness_server_arrivals_total counter\n");
+            for (run, s) in &runs {
+                let _ = writeln!(
+                    out,
+                    "rustybin_harness_server_arrivals_total{{run=\"{}\"}} {}",
+                    escape(run),
+                    s.server_arrivals
+                );
+            }
         }
 
         out.push_str("# HELP rustybin_build_info Build information (always 1).\n");
@@ -889,7 +1075,7 @@ pub fn openapi_paths() -> Value {
             "get": {
                 "tags": ["Control Plane"],
                 "summary": "Prometheus metrics",
-                "description": "Prometheus text exposition (version 0.0.4): rustybin_requests_total{route,method,status_class}, rustybin_request_duration_seconds{route} (histogram, buckets 1 ms to 60 s), rustybin_streams_open, rustybin_egress_bytes_total, rustybin_protocol_requests_total{protocol}, rustybin_llm_tokens_total{provider,model_family,direction}, rustybin_llm_requests_total{provider,model_family,streaming}, rustybin_llm_faults_total{provider,kind}, rustybin_limit_rejections_total{dimension}, rustybin_faults_injected_total{kind}, rustybin_build_info{version,git_sha}; with API keys also rustybin_keys_active, rustybin_keys_last_sync_timestamp_seconds and (with a quota store) rustybin_quota_store_up. The route label is the matched route template.",
+                "description": "Prometheus text exposition (version 0.0.4): rustybin_requests_total{route,method,status_class}, rustybin_request_duration_seconds{route} (histogram, buckets 1 ms to 60 s), rustybin_streams_open, rustybin_egress_bytes_total, rustybin_protocol_requests_total{protocol}, rustybin_llm_tokens_total{provider,model_family,direction}, rustybin_llm_requests_total{provider,model_family,streaming}, rustybin_llm_faults_total{provider,kind}, rustybin_limit_rejections_total{dimension}, rustybin_faults_injected_total{kind}, rustybin_build_info{version,git_sha}; in harness mode rustybin_harness_requests_total{run,class,status}, rustybin_harness_latency_seconds{run,kind}, rustybin_harness_scheduler_lag_seconds{run}, rustybin_harness_inflight{run} and rustybin_harness_server_arrivals_total{run} (the run label is bounded to the active run plus the last 4); with API keys also rustybin_keys_active, rustybin_keys_last_sync_timestamp_seconds and (with a quota store) rustybin_quota_store_up. The route label is the matched route template.",
                 "operationId": "getRustybinMetrics",
                 "responses": {
                     "200": { "description": "Metrics", "content": { "text/plain": { "schema": { "type": "string" } } } },

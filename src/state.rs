@@ -110,7 +110,7 @@ impl AppState {
         );
         let keys = Arc::new(Keys::new(&config, metrics.clone(), clock.clone()));
         let mocks = crate::mocks::new_store_with(&config, clock, metrics.clone());
-        let harness = crate::harness::Harness::new(&config);
+        let harness = crate::harness::Harness::new(&config, Some(metrics.clone()));
         Self {
             keys,
             limits,

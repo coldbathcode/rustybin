@@ -23,11 +23,15 @@
 
 pub mod api;
 pub mod cli;
+pub mod correlate;
 pub mod engine;
 pub mod pattern;
 pub mod report;
 pub mod safety;
 pub mod scenario;
+pub mod shaped;
+#[cfg(test)]
+pub mod test_proxy;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -40,6 +44,7 @@ use serde_json::{json, Value};
 use crate::catalog::{category, Endpoint, Example};
 use crate::config::{Config, HarnessConfig};
 use crate::state::AppState;
+use correlate::{Correlator, RunKey};
 use engine::{Engine, PinnedTarget, Run, RunParams};
 use safety::{Allowlist, KillSwitch};
 use scenario::{Caps, Scenario};
@@ -230,6 +235,9 @@ pub struct Harness {
     /// Served at [`WELL_KNOWN_PATH`]; targets must echo it when
     /// `verify_targets` is on. Random per process.
     pub verification_token: String,
+    /// The server side: run keys, server profiles and what arrived.
+    pub correlator: Arc<Correlator>,
+    metrics: Option<Arc<crate::metrics::Metrics>>,
     started: Instant,
 }
 
@@ -255,18 +263,26 @@ fn random_hex(bytes: usize) -> String {
 
 impl Harness {
     /// The node's harness, `None` when harness mode is off.
-    pub fn new(config: &Config) -> Option<Arc<Self>> {
+    pub fn new(
+        config: &Config,
+        metrics: Option<Arc<crate::metrics::Metrics>>,
+    ) -> Option<Arc<Self>> {
         if !config.harness.enabled {
             return None;
         }
         Some(Self::from_harness_config(
             &config.harness,
             &config.instance_id,
+            metrics,
         ))
     }
 
     /// Build from the harness settings alone (the CLI has no `AppState`).
-    pub fn from_harness_config(hc: &HarnessConfig, instance_id: &str) -> Arc<Self> {
+    pub fn from_harness_config(
+        hc: &HarnessConfig,
+        instance_id: &str,
+        metrics: Option<Arc<crate::metrics::Metrics>>,
+    ) -> Arc<Self> {
         let (allowlist, allowlist_warnings) = Allowlist::parse(&hc.targets);
         for w in &allowlist_warnings {
             tracing::warn!("{w}");
@@ -301,6 +317,8 @@ impl Harness {
             kill: KillSwitch::new(),
             runs: Mutex::new(Vec::new()),
             verification_token: random_hex(16),
+            correlator: Correlator::new(),
+            metrics,
             started: Instant::now(),
         })
     }
@@ -381,6 +399,7 @@ impl Harness {
             "active_run": active.map(|r| r.summary()),
             "runs": self.runs().len(),
             "kill_switch": self.kill.is_set(),
+            "rejected_markers": self.correlator.rejected(),
             "uptime_secs": self.started.elapsed().as_secs(),
             "report_dir_configured": self.config.report_dir.is_some(),
             "headless": self.config.headless(),
@@ -479,6 +498,12 @@ impl Harness {
             }
         }
         let id = random_hex(6);
+        // The run key signs the markers; this node's server side learns it
+        // now (cluster nodes get it from the leader in phase 3).
+        let key = RunKey::random();
+        let entry = self
+            .correlator
+            .register(&id, key.clone(), scenario.servers.clone());
         let run = Run::new(RunParams {
             id: id.clone(),
             node_id: self.node_id.clone(),
@@ -490,6 +515,10 @@ impl Harness {
             descriptor_limit: engine.descriptor_limit,
             report_dir: self.config.report_dir.clone(),
             kill: self.kill.clone(),
+            key,
+            entry: self.is_server().then_some(entry),
+            correlator: self.correlator.clone(),
+            metrics: self.metrics.clone(),
         });
         {
             let mut runs = self.runs.lock().unwrap_or_else(|p| p.into_inner());
@@ -683,6 +712,8 @@ pub fn router(_state: &AppState) -> Router<AppState> {
         .route("/_rustybin/harness/runs/{run}/report", get(api::run_report))
         .route("/_rustybin/harness/stop", post(api::stop_all))
         .route(WELL_KNOWN_PATH, get(api::well_known))
+        .route("/harness", axum::routing::any(shaped::handler))
+        .route("/harness/{*path}", axum::routing::any(shaped::handler))
 }
 
 const SMOKE_JSON: &str = r#"{"name":"smoke","target":"http://127.0.0.1:8080","source":{"request":{"path":"/status/200"}},"pattern":{"type":"constant","rate":50,"for":"5s"}}"#;
@@ -782,6 +813,26 @@ pub fn catalog() -> Vec<Endpoint> {
             "Kill switch: stop all load on this node now",
         )
         .example(Example::post("Kill switch", "/_rustybin/harness/stop").expect_status(404)),
+        Endpoint::new(
+            "/harness",
+            &["ANY"],
+            category::HARNESS,
+            "Shaped upstream: answers with the run's server profile (latency, status mix, body)",
+        )
+        .example(Example::get("Shaped root", "/harness")),
+        Endpoint::new(
+            "/harness/{*path}",
+            &["ANY"],
+            category::HARNESS,
+            "Shaped upstream at any path: a marked request gets its run's profile, anything else the default",
+        )
+        .description(
+            "The server side of a run (scenario `servers`): a log-normal latency from p50 and p99, a \
+             weighted status mix, a JSON body padded to body_bytes, optionally streamed in chunks \
+             after a first-byte delay. Without a harness marker: 200, 256 bytes, no delay.",
+        )
+        .example(Example::get("Shaped path", "/harness/orders/42"))
+        .example(Example::post("Shaped POST", "/harness/orders").json("{}")),
         Endpoint::new(
             WELL_KNOWN_PATH,
             &["GET"],
@@ -926,6 +977,8 @@ pub fn openapi_paths() -> Value {
                 "responses": { "200": { "description": "Stopped runs", "content": { "application/json": { "schema": { "type": "object" } } } }, "404": off }
             }
         },
+        "/harness": shaped_item("getShapedRoot", &tag),
+        "/harness/{path}": shaped_item("getShapedPath", &tag),
         WELL_KNOWN_PATH: {
             "get": {
                 "tags": tag,
@@ -936,6 +989,25 @@ pub fn openapi_paths() -> Value {
             }
         }
     })
+}
+
+/// OpenAPI path item of the shaped endpoint (every method).
+fn shaped_item(id: &str, tag: &Value) -> Value {
+    let mut item = serde_json::Map::new();
+    for method in ["get", "post", "put", "patch", "delete"] {
+        let mut op = json!({
+            "tags": tag,
+            "summary": "Shaped upstream",
+            "description": "Answers with the run's server profile (scenario `servers`: log-normal latency, status mix, padded JSON body, chunked streaming, first-byte delay) when the request carries a verified harness marker, else 200 with a 256 byte body.",
+            "operationId": format!("{id}{}", method.to_ascii_uppercase()),
+            "responses": { "200": { "description": "The shaped answer (any configured status)", "content": { "application/json": { "schema": { "type": "object" } } } } }
+        });
+        if id.ends_with("Path") {
+            op["parameters"] = json!([{ "name": "path", "in": "path", "required": true, "schema": { "type": "string" } }]);
+        }
+        item.insert(method.into(), op);
+    }
+    Value::Object(item)
 }
 
 pub fn openapi_components() -> Value {

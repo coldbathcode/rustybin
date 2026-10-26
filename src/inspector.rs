@@ -448,6 +448,15 @@ pub async fn capture(State(state): State<AppState>, req: Request, next: Next) ->
     if is_excluded(req.uri().path()) {
         return next.run(req).await;
     }
+    // Harness traffic is sampled by the correlation layer (1 in N plus every
+    // anomaly), so a load run never floods the ring buffer or its feed.
+    if req
+        .extensions()
+        .get::<crate::harness::correlate::CaptureDecision>()
+        .is_some_and(|d| !d.0)
+    {
+        return next.run(req).await;
+    }
     let session = crate::session::session_header(req.headers());
     let key = req.extensions().get::<KeyContext>().cloned();
     if state.config.public_mode && session.is_none() && key.is_none() {

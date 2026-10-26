@@ -544,6 +544,8 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | POST | `/_rustybin/harness/runs/{run}/stop` | Stop a run (it drains and reports) |
 | GET | `/_rustybin/harness/runs/{run}/report` | Final report (JSON; ?format=text or junit) |
 | POST | `/_rustybin/harness/stop` | Kill switch: stop all load on this node now |
+| ANY | `/harness` | Shaped upstream: answers with the run's server profile (latency, status mix, body) |
+| ANY | `/harness/{*path}` | Shaped upstream at any path: a marked request gets its run's profile, anything else the default |
 | GET | `/.well-known/rustybin-harness` | This node's target verification token (RUSTYBIN_HARNESS_VERIFY_TARGETS) |
 
 ### Control Plane

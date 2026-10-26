@@ -5,18 +5,23 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-- **Harness mode, the next phases** (`docs/plans/harness.md`): phase 2, correlation.
-  Harness headers signed per run, a server layer on every data-plane route that
-  records arrivals and answers with `Server-Timing` and a served-by tag, so the client
-  classifies every answer as `upstream`, `gateway` or `transport` and the report
-  shows lost requests and the overhead the gateway adds. Then phase 3, a cluster of
-  client and server nodes with an elected leader, phase 4, every pattern (step,
-  target, breakpoint, spike, pulse, burst, wave) with live tuning, and phase 5, the
-  burst attacks that check rate limiting (window edges, distributed bursts, key and
-  IP spraying).
+- **Harness mode, the next phases** (`docs/plans/harness.md`): phase 3, the cluster.
+  A coordinator that client and server nodes join, heartbeats with leases (a client
+  stops when it loses its leader), clock sync, the cluster-wide rate split over the
+  clients by capacity, synchronised starts, merged histograms and one report, the
+  server nodes exported as a gateway's upstream pool, and headless clusters that
+  start on quorum. Then failover with an elected leader (phase 3b), every pattern
+  (step, target, breakpoint, spike, pulse, burst, wave) with live tuning (phase 4),
+  and the burst attacks that check rate limiting (phase 5).
 
 ## Recently built
 
+- [Harness correlation](configuration.md#harness-mode) (phase 2): every harness
+  request is signed, the server side tags and times every answer, and the report
+  tells `upstream` from `gateway` from `transport` from `lost` requests, with the
+  gateway's overhead, what it changed on the way (headers added, removed, rewritten,
+  bodies, paths), one-way legs in loop-through, sampled inspector captures,
+  `rustybin_harness_*` metrics and a shaped upstream at `/harness/{*path}`.
 - [Harness mode, single node](configuration.md#harness-mode) (phase 1): Rustybin as
   the load client. A scenario with targets, layers, open or closed load models,
   constant and ramp patterns and thresholds runs from the API, the management MCP,

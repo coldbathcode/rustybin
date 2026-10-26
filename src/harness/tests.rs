@@ -399,7 +399,9 @@ async fn smoke_run_through_the_real_listener() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["stopped"], false);
     // The inspector saw the load (every request went over TCP to this node).
-    assert!(state.inspector.total_recorded() >= sent);
+    // Harness traffic is sampled into the inspector (1 in 100 by default).
+    assert!(state.inspector.total_recorded() >= sent / 100);
+    assert!(state.inspector.total_recorded() < sent);
     server.shutdown();
     let _ = server.wait().await;
 }
@@ -831,7 +833,7 @@ async fn headless_run_returns_the_exit_code() {
     hc.report = Some(report_file.display().to_string());
     hc.exit = true;
     assert!(hc.headless());
-    let h = Harness::from_harness_config(&hc, "headless-node");
+    let h = Harness::from_harness_config(&hc, "headless-node", None);
     let code = super::run_headless(&h).await;
     assert_eq!(code, 0);
     let written: Value =
@@ -846,13 +848,13 @@ async fn headless_run_returns_the_exit_code() {
     assert_eq!(entries.len(), 1);
     // A missing scenario file is an error (2).
     hc.scenario = Some(dir.path().join("missing.yaml"));
-    let h = Harness::from_harness_config(&hc, "headless-node");
+    let h = Harness::from_harness_config(&hc, "headless-node", None);
     assert_eq!(super::run_headless(&h).await, 2);
     // A failing threshold is 1.
     std::fs::write(&path, format!("name: failing\ntarget: {url}\nsource: {{ request: {{ path: /status/500 }} }}\npattern: {{ type: constant, rate: 20, for: 1s }}\nthresholds: {{ error_rate: 0 }}\n")).unwrap();
     hc.scenario = Some(path);
     hc.report = None;
-    let h = Harness::from_harness_config(&hc, "headless-node");
+    let h = Harness::from_harness_config(&hc, "headless-node", None);
     assert_eq!(super::run_headless(&h).await, 1);
     server.shutdown();
     let _ = server.wait().await;
@@ -876,6 +878,390 @@ async fn runs_are_bounded() {
     assert_eq!(harness.runs().len(), super::MAX_RUNS_KEPT);
     let (_, list) = send(&app, Method::GET, "/_rustybin/harness/runs", None).await;
     assert_eq!(list["runs"].as_array().unwrap().len(), super::MAX_RUNS_KEPT);
+    server.shutdown();
+    let _ = server.wait().await;
+}
+
+// ── Phase 2: correlation ────────────────────────────────────────────
+
+use super::test_proxy::{self, ProxyConfig};
+
+fn marked(url: &str, rate: u64, secs: &str, path: &str) -> Value {
+    json!({
+        "name": "correlated",
+        "target": url,
+        "source": { "request": { "path": path, "headers": { "X-Demo": "{{seq}}", "Accept": "application/json" } } },
+        "pattern": { "type": "constant", "rate": rate, "for": secs },
+        "timeout": "2s",
+        "servers": { "capture_sample": 10 }
+    })
+}
+
+#[tokio::test]
+async fn loop_through_tags_every_answer_and_measures_the_legs() {
+    let (server, app, state) = running(harness_config(
+        &[Role::Client, Role::Server],
+        &["127.0.0.1"],
+    ))
+    .await;
+    let url = format!("http://{}", server.http_addr);
+    state.inspector.clear();
+    let (status, run) = send(
+        &app,
+        Method::POST,
+        "/_rustybin/harness/runs",
+        Some(marked(&url, 100, "1s", "/status/200")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{run}");
+    let id = run["run_id"].as_str().unwrap().to_string();
+    let report = wait_for_report(&app, &id).await;
+    let t = &report["totals"];
+    let sent = t["sent"].as_u64().unwrap();
+    assert_eq!(t["upstream"], sent, "{t}");
+    assert_eq!(t["gateway"], 0);
+    assert_eq!(t["transport"], 0);
+    assert_eq!(t["lost"], 0);
+    // Upstream timing and the overhead (gateway plus network) exist.
+    assert_eq!(report["upstream_latency"]["count"], sent);
+    assert_eq!(report["overhead"]["count"], sent);
+    assert!(report["overhead"]["p50_ms"].as_f64().unwrap() >= 0.0);
+    assert!(
+        report["upstream_latency"]["p99_ms"].as_f64().unwrap()
+            < report["service_latency"]["p99_ms"].as_f64().unwrap() + 0.001
+    );
+    // One clock: both legs are measured.
+    assert_eq!(report["request_leg"]["count"], sent);
+    assert_eq!(report["response_leg"]["count"], sent);
+    // The server side saw everything, nothing changed on the way.
+    let server_side = &report["server"];
+    assert_eq!(server_side["arrivals"], sent);
+    assert_eq!(
+        server_side["by_node"][&state.harness.as_ref().unwrap().node_id],
+        sent
+    );
+    assert_eq!(server_side["by_route"]["/status/{code}"], sent);
+    assert_eq!(server_side["changes"]["headers_changed"], 0);
+    assert_eq!(server_side["changes"]["body_changed"], 0);
+    assert_eq!(server_side["changes"]["path_changed"], 0);
+    assert_eq!(server_side["changes"]["headers_added"], json!({}));
+    assert_eq!(server_side["processing"]["count"], sent);
+    assert_eq!(report["rejected_markers"], 0);
+    // Inspector sampling: 1 in 10 (no anomalies), not every request.
+    let captured = server_side["captured"].as_u64().unwrap();
+    assert!(
+        (sent / 10).saturating_sub(2) <= captured && captured <= sent / 10 + 2,
+        "captured {captured} of {sent}"
+    );
+    assert!(
+        state.inspector.len() as u64 <= captured + 5,
+        "inspector holds {}",
+        state.inspector.len()
+    );
+    assert_eq!(report["samples"][0]["class"], "upstream");
+    assert!(report["samples"][0]["upstream_ms"].is_number());
+    // Live view and metrics carry the classes.
+    let (_, live) = send(
+        &app,
+        Method::GET,
+        &format!("/_rustybin/harness/runs/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(live["upstream"], sent);
+    assert_eq!(live["server_arrivals"], sent);
+    let metrics = state.metrics.render();
+    assert!(metrics.contains(&format!("rustybin_harness_requests_total{{run=\"{id}\",class=\"upstream\",status=\"200\"}} {sent}")), "{metrics}");
+    assert!(metrics.contains(&format!(
+        "rustybin_harness_server_arrivals_total{{run=\"{id}\"}} {sent}"
+    )));
+    assert!(metrics.contains(&format!(
+        "rustybin_harness_latency_seconds_count{{run=\"{id}\",kind=\"overhead\"}} {sent}"
+    )));
+    assert!(metrics.contains(&format!("rustybin_harness_inflight{{run=\"{id}\"}} 0")));
+    server.shutdown();
+    let _ = server.wait().await;
+}
+
+#[tokio::test]
+async fn through_a_gateway_every_class_and_lost_are_counted_exactly() {
+    let (server, app, _state) = running(harness_config(
+        &[Role::Client, Role::Server],
+        &["127.0.0.1"],
+    ))
+    .await;
+    // The gateway adds and removes headers, delays 20 ms, answers every
+    // 5th request itself with 429, and swallows every 7th.
+    let proxy = test_proxy::start(
+        server.http_addr,
+        ProxyConfig {
+            add_request_headers: vec![
+                ("via".into(), "1.1 test-proxy".into()),
+                ("x-forwarded-for".into(), "203.0.113.9".into()),
+            ],
+            remove_request_headers: vec!["accept".into()],
+            rewrite_request_headers: vec![("x-demo".into(), "rewritten".into())],
+            delay: Duration::from_millis(20),
+            own_answer_every: Some((5, 429)),
+            drop_every: Some(7),
+            ..ProxyConfig::default()
+        },
+    )
+    .await;
+    let mut scenario = marked(&proxy.url(), 70, "1s", "/status/200");
+    scenario["thresholds"] =
+        json!({ "lost": 0, "upstream_reach": 0.6, "gateway_overhead_p99_ms": 1000 });
+    let (status, run) = send(
+        &app,
+        Method::POST,
+        "/_rustybin/harness/runs",
+        Some(scenario),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{run}");
+    let report = wait_for_report(&app, run["run_id"].as_str().unwrap()).await;
+    let t = &report["totals"];
+    let sent = t["sent"].as_u64().unwrap();
+    let own = proxy
+        .counters
+        .own_answers
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let dropped = proxy
+        .counters
+        .dropped
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let forwarded = proxy
+        .counters
+        .forwarded
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(t["gateway"], own, "{t}");
+    assert_eq!(t["gateway_statuses"]["429"], own);
+    assert_eq!(t["upstream"], forwarded, "{t}");
+    assert_eq!(t["transport"], dropped);
+    assert_eq!(t["lost"], dropped, "swallowed requests are lost: {t}");
+    assert_eq!(t["transport_after_upstream"], 0);
+    assert_eq!(t["upstream"].as_u64().unwrap() + own + dropped, sent);
+    assert_eq!(t["transport_kinds"]["timeout"], dropped);
+    // The overhead is the proxy's 20 ms delay (plus a little network).
+    let overhead = &report["overhead"];
+    assert_eq!(overhead["count"], forwarded);
+    let p50 = overhead["p50_ms"].as_f64().unwrap();
+    assert!((19.0..=60.0).contains(&p50), "overhead p50 {p50} ms");
+    assert!(report["upstream_latency"]["p50_ms"].as_f64().unwrap() < 10.0);
+    // Legs are not measured through a gateway... but the node is the same, so they are.
+    assert_eq!(report["request_leg"]["count"], forwarded);
+    // The server side: what the gateway changed.
+    let srv = &report["server"];
+    assert_eq!(srv["arrivals"], forwarded);
+    let changes = &srv["changes"];
+    assert_eq!(changes["headers_changed"], forwarded, "{changes}");
+    assert_eq!(changes["headers_missing"]["accept"], forwarded);
+    assert_eq!(changes["headers_added"]["via"], forwarded);
+    assert_eq!(changes["headers_added"]["x-forwarded-for"], forwarded);
+    assert_eq!(changes["body_changed"], 0);
+    assert_eq!(changes["path_changed"], 0);
+    // Every anomaly is captured.
+    assert_eq!(srv["captured"], forwarded);
+    // Thresholds: lost failed, reach passed (every 7th swallowed), overhead passed.
+    let th: std::collections::BTreeMap<&str, bool> = report["thresholds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| (x["name"].as_str().unwrap(), x["pass"].as_bool().unwrap()))
+        .collect();
+    assert_eq!(th["lost"], dropped == 0);
+    assert!(th["upstream_reach"], "{:?}", report["thresholds"]);
+    assert!(th["gateway_overhead_p99_ms"]);
+    let (_, text) = send(
+        &app,
+        Method::GET,
+        &format!(
+            "/_rustybin/harness/runs/{}/report?format=text",
+            run["run_id"].as_str().unwrap()
+        ),
+        None,
+    )
+    .await;
+    let text = text.as_str().unwrap();
+    assert!(
+        text.contains("Classes:")
+            && text.contains("Server side:")
+            && text.contains("gateway changed:"),
+        "{text}"
+    );
+    server.shutdown();
+    let _ = server.wait().await;
+}
+
+#[tokio::test]
+async fn a_gateway_that_strips_the_tag_or_rewrites_the_path_is_seen() {
+    let (server, app, _state) = running(harness_config(
+        &[Role::Client, Role::Server],
+        &["127.0.0.1"],
+    ))
+    .await;
+    let proxy = test_proxy::start(
+        server.http_addr,
+        ProxyConfig {
+            strip_response_headers: vec![
+                super::correlate::SERVED_BY.into(),
+                "server-timing".into(),
+            ],
+            path_prefix: "/echo".into(),
+            ..ProxyConfig::default()
+        },
+    )
+    .await;
+    let scenario = json!({
+        "name": "stripped",
+        "target": proxy.url(),
+        "source": { "request": { "method": "POST", "path": "/orders", "body": { "n": "{{seq}}" } } },
+        "pattern": { "type": "constant", "rate": 40, "for": "1s" },
+        "timeout": "2s"
+    });
+    let (status, run) = send(
+        &app,
+        Method::POST,
+        "/_rustybin/harness/runs",
+        Some(scenario),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{run}");
+    let report = wait_for_report(&app, run["run_id"].as_str().unwrap()).await;
+    let t = &report["totals"];
+    let sent = t["sent"].as_u64().unwrap();
+    // Without the tag every answer reads as the gateway's, even with a 200.
+    assert_eq!(t["gateway"], sent, "{t}");
+    assert_eq!(t["upstream"], 0);
+    assert_eq!(t["gateway_statuses"]["200"], sent);
+    assert_eq!(report["overhead"]["count"], 0);
+    // The server side still saw them, with the path rewritten and the body intact.
+    let srv = &report["server"];
+    assert_eq!(srv["arrivals"], sent);
+    assert_eq!(srv["changes"]["path_changed"], sent);
+    assert_eq!(srv["changes"]["body_changed"], 0);
+    assert_eq!(srv["by_route"]["/echo/{*path}"], sent);
+    server.shutdown();
+    let _ = server.wait().await;
+}
+
+#[tokio::test]
+async fn spoofed_markers_are_rejected_and_never_counted() {
+    let (server, app, state) = running(harness_config(
+        &[Role::Client, Role::Server],
+        &["127.0.0.1"],
+    ))
+    .await;
+    let harness = state.harness.clone().unwrap();
+    let url = format!("http://{}", server.http_addr);
+    let (status, run) = send(
+        &app,
+        Method::POST,
+        "/_rustybin/harness/runs",
+        Some(marked(&url, 10, "1s", "/status/200")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{run}");
+    let id = run["run_id"].as_str().unwrap().to_string();
+    // A marker signed with another key, one for an unknown run, and garbage.
+    let other = super::correlate::RunKey::random();
+    let mut m = super::correlate::Marker {
+        run: id.clone(),
+        node: "spoof".into(),
+        seq: 999_999,
+        vu: 0,
+        sent_ns: 0,
+        names: Vec::new(),
+        headers_digest: "00000000".into(),
+        body_digest: String::new(),
+        path_digest: "00000000".into(),
+        sig: String::new(),
+    };
+    m.sign(&other);
+    for raw in [m.to_header(), "v1; run=nope; node=x; seq=1; vu=0; sent=0; h=; hd=00000000; b=; p=00000000; sig=00000000000000000000000000000000".to_string(), "garbage".to_string()] {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/status/200")
+            .header(super::correlate::HEADER, raw)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get(super::correlate::SERVED_BY).is_none(), "a spoofed request is never tagged");
+    }
+    let report = wait_for_report(&app, &id).await;
+    assert_eq!(report["rejected_markers"], 3);
+    assert_eq!(report["server"]["arrivals"], report["totals"]["sent"]);
+    assert!(report["server"]["by_node"].get("spoof").is_none());
+    assert_eq!(harness.correlator.rejected(), 3);
+    // A genuine marker of the finished run still verifies (the key is kept).
+    let entry = harness.correlator.entry(&id).expect("entry kept");
+    let mut genuine = m.clone();
+    genuine.sign(&entry.key);
+    assert!(genuine.verify(&entry.key));
+    server.shutdown();
+    let _ = server.wait().await;
+}
+
+#[tokio::test]
+async fn the_shaped_endpoint_follows_the_run_profile() {
+    let (server, app, _state) = running(harness_config(
+        &[Role::Client, Role::Server],
+        &["127.0.0.1"],
+    ))
+    .await;
+    let url = format!("http://{}", server.http_addr);
+    // Without a marker: the default profile.
+    let (status, body) = send(&app, Method::GET, "/harness/orders/1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["shaped"], true);
+    assert_eq!(body["run"], Value::Null);
+    assert_eq!(body.to_string().len(), 256);
+    let scenario = json!({
+        "name": "shaped",
+        "target": url,
+        "source": { "request": { "path": "/harness/orders/{{seq}}", "expect_status": [200, 503] } },
+        "pattern": { "type": "constant", "rate": 100, "for": "1s" },
+        "timeout": "5s",
+        "servers": {
+            "latency": { "p50": "10ms", "p99": "40ms" },
+            "status": { "200": 3, "503": 1 },
+            "body_bytes": 2048,
+            "chunked": true,
+            "first_byte_delay": "1ms",
+            "capture_sample": 0
+        },
+        "thresholds": { "error_rate": 0, "lost": 0 }
+    });
+    let (status, run) = send(
+        &app,
+        Method::POST,
+        "/_rustybin/harness/runs",
+        Some(scenario),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{run}");
+    let report = wait_for_report(&app, run["run_id"].as_str().unwrap()).await;
+    let t = &report["totals"];
+    let sent = t["sent"].as_u64().unwrap();
+    assert_eq!(t["upstream"], sent, "{t}");
+    assert_eq!(t["ok"], sent, "both statuses were expected");
+    let errors = t["statuses"]["503"].as_u64().unwrap_or(0);
+    assert!((5..=50).contains(&errors), "503s: {errors} of {sent}");
+    assert_eq!(t["bytes_received"], sent * 2048);
+    let up = &report["upstream_latency"];
+    assert!(
+        (6.0..=20.0).contains(&up["p50_ms"].as_f64().unwrap()),
+        "{up}"
+    );
+    assert!(up["p99_ms"].as_f64().unwrap() >= 20.0, "{up}");
+    // capture_sample 0: only anomalies (the 503s) are captured.
+    assert_eq!(
+        report["server"]["captured"], errors,
+        "{:?}",
+        report["server"]
+    );
+    assert_eq!(report["passed"], true, "{:?}", report["thresholds"]);
     server.shutdown();
     let _ = server.wait().await;
 }

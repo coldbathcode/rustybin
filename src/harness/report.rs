@@ -13,6 +13,7 @@ use hdrhistogram::Histogram;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::correlate::ServerReport;
 use super::scenario::{Caps, Thresholds};
 
 /// Most samples kept per run.
@@ -72,6 +73,24 @@ pub struct Counts {
     pub unexpected_status: u64,
     /// Connect, TLS, timeout, reset and protocol failures.
     pub transport: u64,
+    /// Answered by an upstream of this run (a valid served-by tag).
+    #[serde(default)]
+    pub upstream: u64,
+    /// Answered without a valid tag: the gateway made the answer (a rate
+    /// limit, an auth failure, a gateway error, a cached answer).
+    #[serde(default)]
+    pub gateway: u64,
+    /// Sent, seen by no server, no answer: the gateway swallowed it
+    /// (counted after the run from the transport failures).
+    #[serde(default)]
+    pub lost: u64,
+    /// Transport failures of requests the server side did see (the answer
+    /// was lost on the way back).
+    #[serde(default)]
+    pub transport_after_upstream: u64,
+    /// Transport failures above the seen-sequence cap, neither lost nor not.
+    #[serde(default)]
+    pub transport_untracked: u64,
     pub bytes_received: u64,
     /// Answers by status code.
     #[serde(default)]
@@ -79,6 +98,9 @@ pub struct Counts {
     /// Transport failures by kind.
     #[serde(default)]
     pub transport_kinds: BTreeMap<String, u64>,
+    /// Gateway-made answers by status code.
+    #[serde(default)]
+    pub gateway_statuses: BTreeMap<String, u64>,
 }
 
 impl Counts {
@@ -103,12 +125,29 @@ impl Counts {
         self.ok += other.ok;
         self.unexpected_status += other.unexpected_status;
         self.transport += other.transport;
+        self.upstream += other.upstream;
+        self.gateway += other.gateway;
+        self.lost += other.lost;
+        self.transport_after_upstream += other.transport_after_upstream;
+        self.transport_untracked += other.transport_untracked;
         self.bytes_received += other.bytes_received;
         for (k, v) in &other.statuses {
             *self.statuses.entry(k.clone()).or_default() += v;
         }
         for (k, v) in &other.transport_kinds {
             *self.transport_kinds.entry(k.clone()).or_default() += v;
+        }
+        for (k, v) in &other.gateway_statuses {
+            *self.gateway_statuses.entry(k.clone()).or_default() += v;
+        }
+    }
+
+    /// The fraction of the sent requests the server side saw.
+    pub fn reach(&self, arrivals: u64) -> f64 {
+        if self.sent == 0 {
+            1.0
+        } else {
+            (arrivals as f64 / self.sent as f64).min(1.0)
         }
     }
 }
@@ -138,6 +177,10 @@ pub struct Bucket {
     pub status_3xx: u64,
     pub status_4xx: u64,
     pub status_5xx: u64,
+    #[serde(default)]
+    pub upstream: u64,
+    #[serde(default)]
+    pub gateway: u64,
     /// Answers per second, counted by completion time.
     pub rate: f64,
     /// From the intended send time.
@@ -146,6 +189,10 @@ pub struct Bucket {
     pub max_ms: f64,
     /// From the actual send time.
     pub service_p99_ms: f64,
+    #[serde(default)]
+    pub upstream_p99_ms: f64,
+    #[serde(default)]
+    pub overhead_p99_ms: f64,
     pub lag_p99_ms: f64,
     pub lag_max_ms: f64,
     /// Requests in flight at the end of the bucket.
@@ -168,11 +215,15 @@ impl Bucket {
         self.status_3xx += other.status_3xx;
         self.status_4xx += other.status_4xx;
         self.status_5xx += other.status_5xx;
+        self.upstream += other.upstream;
+        self.gateway += other.gateway;
         self.rate = self.completed as f64 / self.width_secs.max(1e-9);
         self.p50_ms = self.p50_ms.max(other.p50_ms);
         self.p99_ms = self.p99_ms.max(other.p99_ms);
         self.max_ms = self.max_ms.max(other.max_ms);
         self.service_p99_ms = self.service_p99_ms.max(other.service_p99_ms);
+        self.upstream_p99_ms = self.upstream_p99_ms.max(other.upstream_p99_ms);
+        self.overhead_p99_ms = self.overhead_p99_ms.max(other.overhead_p99_ms);
         self.lag_p99_ms = self.lag_p99_ms.max(other.lag_p99_ms);
         self.lag_max_ms = self.lag_max_ms.max(other.lag_max_ms);
         self.in_flight = other.in_flight;
@@ -213,6 +264,9 @@ pub struct ThresholdResult {
 pub struct Sample {
     /// `slowest` or `error`.
     pub kind: String,
+    /// `upstream`, `gateway`, `transport` or `lost`.
+    #[serde(default)]
+    pub class: String,
     pub seq: u64,
     /// The `X-Request-Id` sent, to look up in gateway logs.
     pub request_id: String,
@@ -225,6 +279,9 @@ pub struct Sample {
     /// From the intended send time.
     pub latency_ms: f64,
     pub service_ms: f64,
+    /// The server's processing time (`Server-Timing: rb`), when tagged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_ms: Option<f64>,
     pub at_secs: f64,
 }
 
@@ -267,6 +324,25 @@ pub struct Report {
     pub latency: Percentiles,
     /// From the actual send time.
     pub service_latency: Percentiles,
+    /// The server's processing time of tagged answers (`Server-Timing: rb`).
+    #[serde(default)]
+    pub upstream_latency: Percentiles,
+    /// Gateway plus network: the actual-send latency minus the upstream
+    /// processing time, for tagged answers.
+    #[serde(default)]
+    pub overhead: Percentiles,
+    /// One-way legs (loop-through, one clock): client send to server arrival.
+    #[serde(default)]
+    pub request_leg: Percentiles,
+    /// Server done to client done.
+    #[serde(default)]
+    pub response_leg: Percentiles,
+    /// What this node's server side saw of the run (`None` on a client-only node).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<ServerReport>,
+    /// Markers this node refused (unknown run or bad signature) while the run was on.
+    #[serde(default)]
+    pub rejected_markers: u64,
     /// Answers per second over the send window.
     pub achieved_rate: f64,
     pub requested_rate: f64,
@@ -282,11 +358,14 @@ pub struct Report {
     pub scenario: Value,
 }
 
-/// Evaluate the thresholds against what was measured.
+/// Evaluate the thresholds against what was measured. `arrivals` is what
+/// the server side saw (`None` without a server side).
 pub fn evaluate(
     th: &Thresholds,
     totals: &Counts,
     latency: &Percentiles,
+    overhead: &Percentiles,
+    arrivals: Option<u64>,
     saturation: &Saturation,
 ) -> Vec<ThresholdResult> {
     let mut out = Vec::new();
@@ -339,6 +418,32 @@ pub fn evaluate(
             saturation.saturated.into(),
             allowed || !saturation.saturated,
         );
+    }
+    if let Some(limit) = th.gateway_overhead_p99_ms {
+        let m = overhead.p99_ms;
+        push(
+            "gateway_overhead_p99_ms",
+            limit.into(),
+            round(m).into(),
+            overhead.count > 0 && m <= limit,
+        );
+    }
+    if let Some(limit) = th.lost {
+        push(
+            "lost",
+            limit.into(),
+            totals.lost.into(),
+            totals.lost <= limit,
+        );
+    }
+    if let Some(limit) = th.upstream_reach {
+        match arrivals {
+            Some(a) => {
+                let m = totals.reach(a);
+                push("upstream_reach", limit.into(), round(m).into(), m >= limit);
+            }
+            None => push("upstream_reach", limit.into(), Value::Null, false),
+        }
     }
     out
 }
@@ -401,6 +506,27 @@ impl Report {
             t.requested, t.sent, t.not_sent, t.completed, t.ok, t.unexpected_status, t.transport
         ));
         out.push_str(&format!(
+            "Classes: {} upstream, {} gateway, {} transport ({} after the upstream saw them, {} lost{})\n",
+            t.upstream,
+            t.gateway,
+            t.transport,
+            t.transport_after_upstream,
+            t.lost,
+            if t.transport_untracked > 0 {
+                format!(", {} untracked", t.transport_untracked)
+            } else {
+                String::new()
+            }
+        ));
+        if !t.gateway_statuses.is_empty() {
+            let statuses: Vec<String> = t
+                .gateway_statuses
+                .iter()
+                .map(|(k, v)| format!("{k}: {v}"))
+                .collect();
+            out.push_str(&format!("Gateway answers: {}\n", statuses.join(", ")));
+        }
+        out.push_str(&format!(
             "Rate: {:.1} answers/s achieved, {:.1}/s requested | error rate {:.2}% | {} bytes received\n",
             self.achieved_rate,
             self.requested_rate,
@@ -427,7 +553,12 @@ impl Report {
         for (name, p) in [
             ("intended send", &self.latency),
             ("actual send  ", &self.service_latency),
+            ("upstream     ", &self.upstream_latency),
+            ("overhead     ", &self.overhead),
         ] {
+            if p.count == 0 && name.starts_with(['u', 'o']) {
+                continue;
+            }
             out.push_str(&format!(
                 "  {name} {:>8.2} {:>8.2} {:>8.2} {:>8.2} {:>8.2} {:>8.2}\n",
                 p.p50_ms, p.p90_ms, p.p99_ms, p.p999_ms, p.max_ms, p.mean_ms
@@ -448,6 +579,62 @@ impl Report {
                     ));
                 }
             }
+        }
+        if self.request_leg.count > 0 {
+            out.push_str(&format!(
+                "  legs (one clock): request p50 {:.2} ms, p99 {:.2} ms | response p50 {:.2} ms, p99 {:.2} ms\n",
+                self.request_leg.p50_ms,
+                self.request_leg.p99_ms,
+                self.response_leg.p50_ms,
+                self.response_leg.p99_ms
+            ));
+        }
+        if let Some(server) = &self.server {
+            out.push_str(&format!(
+                "\nServer side: {} arrivals ({:.1}% of sent) | processing p50 {:.2} ms, p99 {:.2} ms | {} captured",
+                server.arrivals,
+                t.reach(server.arrivals) * 100.0,
+                server.processing.p50_ms,
+                server.processing.p99_ms,
+                server.captured
+            ));
+            let c = &server.changes;
+            if c.headers_changed + c.body_changed + c.path_changed > 0
+                || !c.headers_missing.is_empty()
+                || !c.headers_added.is_empty()
+            {
+                out.push_str(&format!(
+                    "\n  gateway changed: {} header values, {} bodies, {} paths; missing {}; added {}",
+                    c.headers_changed,
+                    c.body_changed,
+                    c.path_changed,
+                    if c.headers_missing.is_empty() {
+                        "none".to_string()
+                    } else {
+                        c.headers_missing
+                            .iter()
+                            .map(|(k, v)| format!("{k} ({v})"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    },
+                    if c.headers_added.is_empty() {
+                        "none".to_string()
+                    } else {
+                        c.headers_added
+                            .iter()
+                            .map(|(k, v)| format!("{k} ({v})"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                ));
+            }
+            out.push('\n');
+        }
+        if self.rejected_markers > 0 {
+            out.push_str(&format!(
+                "Rejected markers on this node: {}\n",
+                self.rejected_markers
+            ));
         }
         let s = &self.saturation;
         out.push_str(&format!(
@@ -633,6 +820,12 @@ mod tests {
                 ..Percentiles::default()
             },
             service_latency: Percentiles::default(),
+            upstream_latency: Percentiles::default(),
+            overhead: Percentiles::default(),
+            request_leg: Percentiles::default(),
+            response_leg: Percentiles::default(),
+            server: None,
+            rejected_markers: 0,
             achieved_rate: 50.0,
             requested_rate: 50.0,
             layers: Vec::new(),
@@ -670,7 +863,14 @@ mod tests {
             p99_ms: 4.0,
             ..Percentiles::default()
         };
-        let results = evaluate(&th, &totals, &latency, &Saturation::default());
+        let results = evaluate(
+            &th,
+            &totals,
+            &latency,
+            &Percentiles::default(),
+            None,
+            &Saturation::default(),
+        );
         let by_name: BTreeMap<_, _> = results.iter().map(|r| (r.name.as_str(), r.pass)).collect();
         assert!(!by_name["error_rate"]);
         assert!(by_name["not_sent"]);
@@ -680,6 +880,47 @@ mod tests {
         assert_eq!(Report::exit_code_for("finished", &results), 1);
         assert_eq!(Report::exit_code_for("stopped", &results), 2);
         assert_eq!(Report::exit_code_for("finished", &[]), 0);
+        // Correlation thresholds: overhead needs tagged answers, reach needs
+        // a server side, lost counts after the run.
+        let th = Thresholds {
+            gateway_overhead_p99_ms: Some(5.0),
+            lost: Some(0),
+            upstream_reach: Some(0.9),
+            ..Thresholds::default()
+        };
+        let overhead = Percentiles {
+            count: 10,
+            p99_ms: 2.0,
+            ..Percentiles::default()
+        };
+        let mut totals = totals;
+        totals.lost = 1;
+        let results = evaluate(
+            &th,
+            &totals,
+            &latency,
+            &overhead,
+            Some(95),
+            &Saturation::default(),
+        );
+        let by_name: BTreeMap<_, _> = results.iter().map(|r| (r.name.as_str(), r.pass)).collect();
+        assert!(by_name["gateway_overhead_p99_ms"]);
+        assert!(!by_name["lost"]);
+        assert!(by_name["upstream_reach"]);
+        let results = evaluate(
+            &th,
+            &totals,
+            &latency,
+            &Percentiles::default(),
+            None,
+            &Saturation::default(),
+        );
+        let by_name: BTreeMap<_, _> = results.iter().map(|r| (r.name.as_str(), r.pass)).collect();
+        assert!(
+            !by_name["gateway_overhead_p99_ms"],
+            "no tagged answers: cannot pass"
+        );
+        assert!(!by_name["upstream_reach"], "no server side: cannot pass");
     }
 
     #[test]

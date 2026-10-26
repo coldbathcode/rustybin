@@ -252,7 +252,7 @@ pub fn get_run(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     };
     let s = run.snapshot();
     let text = format!(
-        "Run {} ({}) is {}: {:.1} of {:.0} s, {} sent, {} completed, {} ok, {} errors, {} not sent, p99 {:.2} ms{}{}.",
+        "Run {} ({}) is {}: {:.1} of {:.0} s, {} sent, {} completed, {} ok, {} errors, {} not sent ({} upstream, {} gateway), p99 {:.2} ms{}{}.",
         run.id,
         run.scenario.name,
         run.state().as_str(),
@@ -263,6 +263,8 @@ pub fn get_run(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
         s["ok"],
         s["errors"],
         s["not_sent"],
+        s["upstream"],
+        s["gateway"],
         s["latency"]["p99_ms"].as_f64().unwrap_or(0.0),
         if s["saturated"] == true { ", the client is saturated" } else { "" },
         if s["report_ready"] == true { ", report ready" } else { "" }
@@ -327,7 +329,7 @@ pub fn get_run_report(ctx: &CallCtx, args: &Value) -> Value {
         _ => serde_json::to_value(report).unwrap_or(Value::Null),
     };
     let text = format!(
-        "Run {} {}: {} sent, {} completed, {} ok, {} errors ({:.2}%), {} not sent; latency p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms; {:.1} answers/s of {:.1} requested; {}; thresholds {} (exit code {}).",
+        "Run {} {}: {} sent, {} completed, {} ok, {} errors ({:.2}%), {} not sent; classes: {} upstream, {} gateway{}, {} transport, {} lost; latency p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms{}; {:.1} answers/s of {:.1} requested; {}{}; thresholds {} (exit code {}).",
         report.run_id,
         report.state,
         report.totals.sent,
@@ -336,15 +338,52 @@ pub fn get_run_report(ctx: &CallCtx, args: &Value) -> Value {
         report.totals.errors(),
         report.totals.error_rate() * 100.0,
         report.totals.not_sent,
+        report.totals.upstream,
+        report.totals.gateway,
+        if report.totals.gateway_statuses.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " ({})",
+                report
+                    .totals
+                    .gateway_statuses
+                    .iter()
+                    .map(|(k, v)| format!("{k}: {v}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        },
+        report.totals.transport,
+        report.totals.lost,
         report.latency.p50_ms,
         report.latency.p99_ms,
         report.latency.max_ms,
+        if report.overhead.count > 0 {
+            format!(
+                "; gateway overhead p50 {:.2} ms, p99 {:.2} ms (upstream processing p50 {:.2} ms)",
+                report.overhead.p50_ms, report.overhead.p99_ms, report.upstream_latency.p50_ms
+            )
+        } else {
+            String::new()
+        },
         report.achieved_rate,
         report.requested_rate,
         if report.saturation.saturated {
             "the CLIENT SATURATED (the numbers describe the client, not the gateway)"
         } else {
             "the client was not saturated"
+        },
+        match &report.server {
+            Some(srv) => format!(
+                "; server side saw {} arrivals, gateway added {} header name(s), changed {} values, {} bodies, {} paths",
+                srv.arrivals,
+                srv.changes.headers_added.len(),
+                srv.changes.headers_changed,
+                srv.changes.body_changed,
+                srv.changes.path_changed
+            ),
+            None => String::new(),
         },
         if report.passed { "pass" } else { "FAIL" },
         report.exit_code

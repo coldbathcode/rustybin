@@ -1,21 +1,20 @@
 # Plan: harness mode, load and chaos through a gateway
 
-Status: **phases 0 and 1 done** (2026-10-25): the engine spike is `examples/harness_spike.rs`
-([Phase 0 results](#phase-0-results-2026-10-25)); the single-node engine is `src/harness/`
-([Phase 1 build notes](#phase-1-build-notes-2026-10-25) list where the build differs from this plan).
-Phase 2 is next. Planned 2026-10-22.
+Status: **phases 0, 1 and 2 done** (2026-10-25): the engine spike is `examples/harness_spike.rs`
+([Phase 0 results](#phase-0-results-2026-10-25)); the single-node engine and the correlation are
+`src/harness/` ([Phase 1 build notes](#phase-1-build-notes-2026-10-25) and
+[Phase 2 build notes](#phase-2-build-notes-2026-10-25) list where the build differs from this plan).
+Phase 3 is next. Planned 2026-10-22.
 
-> **Build marker (2026-10-25): START HERE.** Phases 0 and 1 are done. Approved scope for the next session
-> is phase 2 (section 15), on top of what phase 1 built (`src/harness/`, see the build notes):
-> **Phase 2 (correlation):** harness headers and HMAC signing (`X-Rustybin-Harness`, `traceparent`; the
-> client already sends `X-Request-Id: <run>-<node>-<seq>`), the server correlation layer in `build_app`
-> (next to inspector capture; `AppState.harness` already exists for it), client classification
-> (`upstream` / `gateway` / `transport` / `lost`) replacing phase 1's `ok` / `unexpected_status` /
-> `transport` in `report.rs`, loop-through `both` with exact legs, inspector sampling, the
-> `rustybin_harness_*` metrics, the shaped `/harness/{*path}` endpoint, and the in-repo
-> `src/harness/test_proxy.rs` (section 16). Keep the one-model rule: new parameters go into
-> `scenario.rs` (model, validation, `schema()`), and the parity tests cover the MCP tool schemas and the
-> console builder.
+> **Build marker (2026-10-25): START HERE.** Phases 0, 1 and 2 are done. Approved scope for the next
+> session is phase 3 (section 15), the cluster: the coordinator with join and heartbeat routes, leases,
+> clock sync, the rate split by capacity, synchronised starts, merged histograms and reports, upstream
+> export, the headless env for clusters and `on-quorum`. Build on what exists: `src/harness/correlate.rs`
+> holds the run key and the server registry (`Correlator::register` is what a heartbeat assignment calls
+> on a server node), `engine.rs` reports cumulative counters and `hdrhistogram`s per run (ship them as
+> deltas in heartbeats), `report.rs` has the merge-ready shapes. Keep the one-model rule: new parameters
+> (`scale.client_nodes`, `server_nodes`, ...) go into `scenario.rs` (model, validation, `schema()`), and
+> the parity tests cover the MCP tool schemas and the console builder.
 >
 > Keep this status line and `docs/src/roadmap.md` ("Next") updated as phases land. Commit as oliwynn.
 
@@ -861,6 +860,56 @@ What phase 1 built, and where it differs from the sections above:
 - **Not in phase 1**: metrics (phase 2), saved scenarios and previews (phase 4), `X-Request-Id` is the
   only harness header until phase 2 signs them.
 
+### Phase 2 build notes (2026-10-25)
+
+What phase 2 built, and where it differs from sections 7, 8 and 12:
+
+- **Headers**: `X-Request-Id: <run>-<node>-<seq>`, a `traceparent` (trace id from the run, node and
+  sequence; span id from the sequence) and the marker `X-Rustybin-Harness: v1; run; node; seq; vu;
+  sent=<unix ns>; h=<header names the client set>; hd=<digest of those headers>; b=<body digest>;
+  p=<method and path digest>; sig=<HMAC-SHA256, 128 bits>`. The run key is random per run, held by the
+  run and registered with the node's `Correlator` (a cluster's leader hands it to server nodes in phase
+  3). Markers with an unknown run, a bad shape or a bad signature are served as ordinary requests and
+  counted as `rejected_markers` (status and report).
+- **Server layer** (`correlate::layer`, in `build_app` outside inspector capture): per run it records
+  arrivals by node and route (bounded), statuses, processing time, and what the gateway changed: listed
+  headers with other values (`headers_changed`), listed headers that did not arrive (`headers_missing`,
+  by name), headers that arrived unlisted (`headers_added`, by name; `host`, `content-length` and the
+  harness headers are never listed), body and path digests. The client's header digest covers the
+  headers it set, the server recomputes it over the same names, so a rewrite is seen without sending
+  per-header hashes. Answers get `Server-Timing: rb;dur=<ms>` and `X-Rustybin-Served-By: <node>;
+  run; seq; t=<arrived ns>,<done ns>; sig`. The layer samples captures into the inspector (`servers.
+  capture_sample`, 1 in N, default 100, plus every anomaly: a change, a missing header, a 5xx);
+  the inspector honours the decision through a request extension.
+- **Classes**: `upstream` (a valid tag of this run and sequence), `gateway` (an answer without one,
+  by status in `gateway_statuses`), `transport` (by kind). `lost` is counted after the run: the server
+  side keeps a per-run bitmap of the sequence numbers it saw (bounded to 2^26, `seen_overflow`
+  above), the client keeps the sequence numbers of its transport failures (bounded to 2^20), and a
+  failure the server never saw is lost; one it did see is `transport_after_upstream`. Without a server
+  side on the node (a client-only node), `lost` stays 0 and `upstream_reach` cannot pass; phase 3
+  merges the server nodes' views. Phase 1's `ok` / `unexpected_status` stay next to the classes: one
+  says whether the status was the expected one, the other who answered.
+- **Latency**: `upstream_latency` (the server's processing time), `overhead` (actual-send latency
+  minus processing, for tagged answers), and in loop-through the `request_leg` and `response_leg`
+  (the tag carries the server's arrival and completion times; legs are measured when the answering
+  node is this node, one clock). Per bucket: `upstream`, `gateway`, `upstream_p99_ms`,
+  `overhead_p99_ms`. New thresholds: `gateway_overhead_p99_ms`, `lost`, `upstream_reach`.
+- **Metrics** (section 12): `rustybin_harness_requests_total{run,class,status}`,
+  `rustybin_harness_latency_seconds{run,kind}` (total, service, upstream, overhead),
+  `rustybin_harness_scheduler_lag_seconds{run}`, `rustybin_harness_inflight{run}`,
+  `rustybin_harness_server_arrivals_total{run}`; the run label is bounded to the active run plus the
+  last 4. The engine feeds them once per second from the roll, not per request.
+- **Shaped endpoint** `/harness` and `/harness/{*path}` (any method): the scenario's `servers` block
+  (`latency: {p50, p99}` as a log-normal, `status` weights, `body_bytes`, `chunked`,
+  `first_byte_delay`, `capture_sample`) is registered with the run; a marked request of that run gets
+  it, anything else the default (200, 256 bytes). Node churn and flapping health are phase 7.
+- **Test proxy** (`src/harness/test_proxy.rs`, tests only): an axum server in front of the node that
+  adds, removes and rewrites request headers, strips response headers, delays, answers every n-th
+  request itself and swallows every n-th; the rate limiters come with phase 5. The tests check that
+  every class and `lost` are counted exactly against its counters, that the overhead matches its delay,
+  that a stripped tag reads as `gateway`, that a rewritten path and removed headers are reported, that
+  spoofed markers are rejected, that sampling holds, and that the shaped endpoint follows its profile.
+
 ### Estimate (2026-10-22)
 
 About 16 to 19 days of build sessions, after the mock MCP server (1 to 2 days). This is calibrated on the
@@ -870,7 +919,7 @@ earlier plans: OpenAPI mocks about 2 days, management MCP about 3, hosted mocks 
 |---|---|
 | 0. Spike | 0.5 (done, 2026-10-25) |
 | 1. Single-node engine | 2 (done, 2026-10-25) |
-| 2. Correlation | 1 |
+| 2. Correlation | 1 (done, 2026-10-25) |
 | 3. Cluster | 2 |
 | 3b. Leadership and failover | 2 to 3 |
 | 4. Patterns, scale and live tuning | 2 |
