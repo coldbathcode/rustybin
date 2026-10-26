@@ -438,6 +438,11 @@ pub async fn enforce(State(state): State<AppState>, mut req: Request, next: Next
     if config.control_auth == ControlAuth::Open || !is_protected_path(req.uri().path()) {
         return next.run(req).await;
     }
+    // Harness cluster members calling their leader present the join token
+    // or their node credential, which the handlers check.
+    if crate::harness::is_node_path(req.method(), req.uri().path()) {
+        return next.run(req).await;
+    }
     // A token from the built-in OAuth server, on /_rustybin/mcp only.
     match crate::control_oauth::authorize_manage(&req, config) {
         Some(Ok(grant)) => {

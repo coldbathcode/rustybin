@@ -2,12 +2,12 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Load test mode (harness): phases 1 and 2 built, phase 3 next
+## Load test mode (harness): phases 1 to 3 built, phase 3b next
 
 [docs/plans/harness.md](docs/plans/harness.md) (planned 2026-10-22; phase 0, the engine spike in
 `examples/harness_spike.rs`, phase 1, the single-node engine in `src/harness/`, and phase 2, correlation, done
-2026-10-25; the plan's "Phase 1 build notes" and "Phase 2 build notes" list where the build differs; phase 3, the
-cluster, is next): Rustybin as a load client and
+2026-10-25; phase 3, the cluster, done 2026-10-26; the plan's "Phase 1/2/3 build notes" list where the build
+differs; phase 3b, failover, is next): Rustybin as a load client and
 correlating upstream, single node (loop-through) or a cluster (an elected leader, clients, servers), traffic layers
 with run patterns and rate-limit tests, every parameter from one schema in the API, MCP and console (tunable
 live), or headless. It is the first feature that sends load to targets the caller chooses (A2A push notifications,
@@ -164,7 +164,11 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   `api.rs` (handlers; 404 when off except status, schema, scenarios and validate), `cli.rs` (`rustybin
   harness run | validate | report`), `scenarios/*.yaml` (built-ins), `test_proxy.rs` (tests: a misbehaving
   gateway). MCP tools in `src/mcp/manage/harness.rs` (`Right::Harness`), console view `ui/views/harness.js`,
-  `rustybin_harness_*` in `metrics.rs`. The `harness` control scope (`control_auth::Grant`).
+  `rustybin_harness_*` in `metrics.rs`. The `harness` control scope (`control_auth::Grant`). Clusters:
+  `cluster.rs` (the leader: `Coordinator`, `Cluster`, `ClusterRun`, split, merge, report), `member.rs` (the
+  agent each member runs: join, heartbeat, lease, clock), `wire.rs` (the protocol), `cluster_tests.rs`; the
+  node routes (`harness::is_node_path`) authenticate with the join token or node credential and skip the
+  control-plane auth, key layer and plan limits.
 - `src/fault.rs`: `X-Rustybin-Delay` / `X-Rustybin-Fail` middleware.
 - `src/admin.rs`: `require_admin(&headers, &config)` guard for instance-global mutations.
 - `src/session.rs`: `session_key(&headers, client_ip)`, `client_ip(...)`, extractors `Session`, `ClientIp`, `PeerAddr`.

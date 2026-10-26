@@ -2,8 +2,9 @@
 //! axum server that forwards to an upstream and misbehaves on command. It
 //! adds and removes request headers, strips response headers (the served-by
 //! tag), delays, answers its own status without forwarding every n-th
-//! request, and drops (never answers) every n-th request. Several instances
-//! stand in for a gateway fleet. The reference rate limiters come with
+//! request, and drops (never answers) every n-th request. It forwards to one
+//! upstream or round robin over a pool (a cluster's server nodes). Several
+//! instances stand in for a gateway fleet. The reference rate limiters come with
 //! phase 5.
 
 use std::net::SocketAddr;
@@ -55,7 +56,8 @@ pub struct Counters {
 }
 
 struct Inner {
-    upstream: SocketAddr,
+    /// The upstream pool, round robin by request count.
+    upstreams: Vec<SocketAddr>,
     config: ProxyConfig,
     counters: Arc<Counters>,
     client: Client<HttpConnector, Full<Bytes>>,
@@ -115,15 +117,12 @@ async fn forward(State(inner): State<Arc<Inner>>, req: Request) -> Response {
         .path_and_query()
         .map(|p| p.as_str().to_string())
         .unwrap_or_else(|| "/".into());
-    let uri: hyper::Uri = match format!(
-        "http://{}{}{}",
-        inner.upstream, inner.config.path_prefix, path
-    )
-    .parse()
-    {
-        Ok(u) => u,
-        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
-    };
+    let upstream = inner.upstreams[(n as usize) % inner.upstreams.len()];
+    let uri: hyper::Uri =
+        match format!("http://{}{}{}", upstream, inner.config.path_prefix, path).parse() {
+            Ok(u) => u,
+            Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+        };
     parts.uri = uri;
     parts.headers.remove("host");
     let bytes = match body.collect().await {
@@ -158,6 +157,13 @@ fn apply_headers(headers: &mut axum::http::HeaderMap, list: &[(String, String)])
 
 /// Start a proxy in front of `upstream` on an ephemeral loopback port.
 pub async fn start(upstream: SocketAddr, config: ProxyConfig) -> Proxy {
+    start_pool(vec![upstream], config).await
+}
+
+/// Start a proxy in front of an upstream pool (round robin), as a gateway
+/// in front of a cluster's server nodes.
+pub async fn start_pool(upstreams: Vec<SocketAddr>, config: ProxyConfig) -> Proxy {
+    assert!(!upstreams.is_empty(), "an upstream pool needs a member");
     let counters = Arc::new(Counters::default());
     let mut connector = HttpConnector::new();
     connector.set_nodelay(true);
@@ -165,7 +171,7 @@ pub async fn start(upstream: SocketAddr, config: ProxyConfig) -> Proxy {
         .pool_max_idle_per_host(1024)
         .build(connector);
     let inner = Arc::new(Inner {
-        upstream,
+        upstreams,
         config,
         counters: counters.clone(),
         client,

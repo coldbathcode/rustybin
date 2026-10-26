@@ -5,17 +5,21 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-- **Load test mode (harness), the next phases** (`docs/plans/harness.md`): phase 3, the cluster.
-  A coordinator that client and server nodes join, heartbeats with leases (a client
-  stops when it loses its leader), clock sync, the cluster-wide rate split over the
-  clients by capacity, synchronised starts, merged histograms and one report, the
-  server nodes exported as a gateway's upstream pool, and headless clusters that
-  start on quorum. Then failover with an elected leader (phase 3b), every pattern
-  (step, target, breakpoint, spike, pulse, burst, wave) with live tuning (phase 4),
-  and the rate-limit test that check rate limiting (phase 5).
+- **Load test mode (harness), the next phases** (`docs/plans/harness.md`): phase 3b,
+  failover. Eligible nodes, a succession list ordered by work, a replicated cluster
+  snapshot with checkpoints, an elected leader that takes over within the lease with
+  no gap in client load, and the old leader stepping down when it returns. Then every
+  pattern (step, target, breakpoint, spike, pulse, burst, wave) with live tuning
+  (phase 4), and the rate-limit tests that check rate limiting (phase 5).
 
 ## Recently built
 
+- [Harness clusters](configuration.md#harness-mode) (phase 3): a coordinator that
+  client and server nodes join, heartbeats with leases (a client stops when it loses
+  its leader), clock sync, the rate split over the clients by capacity, synchronised
+  starts, one report merged from every node's histograms with `lost` checked against
+  every server node, the server nodes exported as the gateway's upstream pool, and
+  headless clusters that start on quorum.
 - [Harness correlation](configuration.md#harness-mode) (phase 2): every harness
   request is signed, the server side tags and times every answer, and the report
   tells `upstream` from `gateway` from `transport` from `lost` requests, with the

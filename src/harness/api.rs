@@ -1,5 +1,6 @@
-//! The harness control API under `/_rustybin/harness*` (plan section 9, the
-//! single-node subset) and the verification token path.
+//! The harness control API under `/_rustybin/harness*` (plan section 9):
+//! single-node runs, the clusters this node leads, the node routes members
+//! call (join and heartbeat) and the verification token path.
 //!
 //! The status, the schema, the built-in scenarios and validation work on
 //! every node (they send nothing). Everything else needs harness mode (404
@@ -18,7 +19,11 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::cluster::{run_links, Cluster, CreateCluster, NodeError};
+use super::correlate::now_ns;
+use super::member::{self, JoinTarget};
 use super::scenario::{Caps, Scenario};
+use super::wire::{HeartbeatRequest, JoinRequest};
 use super::{builtin_scenario, builtin_scenarios, Harness, RunError, PREFIX};
 use crate::state::AppState;
 
@@ -286,19 +291,7 @@ pub async fn run_report(
         )
             .into_response();
     };
-    match q.format.as_deref() {
-        Some("text") => (
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            report.to_text(),
-        )
-            .into_response(),
-        Some("junit") | Some("xml") => (
-            [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
-            report.to_junit(),
-        )
-            .into_response(),
-        _ => Json(serde_json::to_value(report).unwrap_or(Value::Null)).into_response(),
-    }
+    report_response(report, q.format.as_deref())
 }
 
 /// `POST /_rustybin/harness/stop`: the kill switch.
@@ -322,7 +315,7 @@ pub async fn well_known(State(state): State<AppState>) -> Response {
                 (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
                 (header::CACHE_CONTROL, "no-store"),
             ],
-            h.verification_token.clone(),
+            h.served_verification_token(),
         )
             .into_response(),
         None => error(
@@ -347,4 +340,531 @@ pub async fn data_plane_off(req: Request, next: Next) -> Response {
         })),
     )
         .into_response()
+}
+
+// ── Clusters (plan section 9, phase 3) ─────────────────────────────
+
+/// The bearer token of a node route (the join token or the node credential).
+fn bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            let (scheme, token) = v.trim().split_once(' ')?;
+            scheme.eq_ignore_ascii_case("bearer").then(|| token.trim())
+        })
+        .filter(|t| !t.is_empty())
+}
+
+fn node_error(e: NodeError) -> Response {
+    let status = StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_REQUEST);
+    let mut resp = (status, Json(json!({ "error": e.error }))).into_response();
+    if status == StatusCode::UNAUTHORIZED {
+        resp.headers_mut()
+            .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    }
+    resp
+}
+
+/// The cluster `id` this node leads. A member of a cluster another node
+/// leads answers `307` to the same path on the leader (with
+/// `X-Rustybin-Harness-Leader`), so a controller can ask any node.
+#[allow(clippy::result_large_err)]
+fn led_cluster(h: &Harness, id: &str, path: &str) -> Result<Arc<Cluster>, Response> {
+    if let Some(c) = h.coordinator.get(id) {
+        return Ok(c);
+    }
+    if let Some(m) = h.membership() {
+        if m.cluster_id == id {
+            if let Some(url) = &m.url {
+                let rest = path
+                    .strip_prefix(&format!("{PREFIX}/clusters/{id}"))
+                    .unwrap_or("");
+                let leader = m.describe()["leader"].clone();
+                let location = format!("{url}{rest}");
+                let mut resp = (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    Json(json!({
+                        "error": "this node is a member, not the leader, of the cluster",
+                        "leader": leader,
+                        "location": location,
+                    })),
+                )
+                    .into_response();
+                if let Ok(v) = HeaderValue::from_str(&location) {
+                    resp.headers_mut().insert(header::LOCATION, v);
+                }
+                let tag = format!(
+                    "{}; term={}",
+                    leader["node_id"].as_str().unwrap_or(""),
+                    leader["term"].as_u64().unwrap_or(1)
+                );
+                if let Ok(v) = HeaderValue::from_str(&tag) {
+                    resp.headers_mut().insert(super::LEADER_HEADER, v);
+                }
+                return Err(resp);
+            }
+        }
+    }
+    Err(error(
+        StatusCode::NOT_FOUND,
+        format!("no cluster {id:?} on this node"),
+    ))
+}
+
+/// `GET /_rustybin/harness/clusters`.
+pub async fn list_clusters(State(state): State<AppState>) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    let clusters: Vec<Value> = h.coordinator.list().iter().map(|c| c.summary()).collect();
+    Json(json!({
+        "clusters": clusters,
+        "member_of": h.membership().map(|m| m.cluster_id.clone()),
+    }))
+    .into_response()
+}
+
+/// `POST /_rustybin/harness/clusters`: create a cluster led by this node.
+/// The join token is in the answer once. A node that also has the client
+/// or server role joins its own cluster.
+pub async fn create_cluster(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = guard_mutation(&state, &headers) {
+        return resp;
+    }
+    let req: CreateCluster = if body.iter().all(u8::is_ascii_whitespace) {
+        CreateCluster::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
+        }
+    };
+    match super::create_cluster(&h, req).await {
+        Ok((cluster, token)) => {
+            let mut v = cluster.describe();
+            v["join_token"] = json!(token);
+            let mut resp = (StatusCode::CREATED, Json(v)).into_response();
+            if let Ok(loc) = HeaderValue::from_str(&format!("{PREFIX}/clusters/{}", cluster.id)) {
+                resp.headers_mut().insert(header::LOCATION, loc);
+            }
+            resp
+        }
+        Err(e) => run_error(e),
+    }
+}
+
+/// `GET /_rustybin/harness/clusters/{id}`.
+pub async fn get_cluster(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    req_uri: axum::http::Uri,
+) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    match led_cluster(&h, &id, req_uri.path()) {
+        Ok(c) => Json(c.describe()).into_response(),
+        Err(resp) => resp,
+    }
+}
+
+/// `DELETE /_rustybin/harness/clusters/{id}` (no active run).
+pub async fn delete_cluster(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = guard_mutation(&state, &headers) {
+        return resp;
+    }
+    if let Err(e) = h.coordinator.remove(&id) {
+        return run_error(e);
+    }
+    // The leader's own membership of the cluster ends with it.
+    if h.membership()
+        .is_some_and(|m| m.cluster_id == id && m.url.is_none())
+    {
+        h.leave().await;
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `GET /_rustybin/harness/clusters/{id}/upstreams`: the server nodes'
+/// advertised URLs, for the gateway's upstream pool.
+pub async fn upstreams(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    req_uri: axum::http::Uri,
+) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    match led_cluster(&h, &id, req_uri.path()) {
+        Ok(c) => Json(json!(c.upstreams())).into_response(),
+        Err(resp) => resp,
+    }
+}
+
+/// `POST /_rustybin/harness/clusters/{id}/nodes`: a node joins with the
+/// join token (bearer). Not behind the control-plane auth: the token is
+/// the credential.
+pub async fn node_join(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let t2 = now_ns();
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    let Some(cluster) = h.coordinator.get(&id) else {
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("no cluster {id:?} on this node"),
+        );
+    };
+    let Some(token) = bearer(&headers) else {
+        return node_error(NodeError {
+            status: 401,
+            error: "the join token is required (Authorization: Bearer)".into(),
+        });
+    };
+    let req: JoinRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                format!("invalid join request: {e}"),
+            )
+        }
+    };
+    match cluster.join(token, req, t2) {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => node_error(e),
+    }
+}
+
+/// `POST /_rustybin/harness/clusters/{id}/nodes/{node}/heartbeat`: a long
+/// poll with the node credential (bearer).
+pub async fn node_heartbeat(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, node)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    let t2 = now_ns();
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    let Some(cluster) = h.coordinator.get(&id) else {
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("no cluster {id:?} on this node"),
+        );
+    };
+    let Some(credential) = bearer(&headers).map(str::to_string) else {
+        return node_error(NodeError {
+            status: 401,
+            error: "the node credential is required (Authorization: Bearer)".into(),
+        });
+    };
+    let mut req: HeartbeatRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid heartbeat: {e}")),
+    };
+    // The long poll ends well inside the time-to-headers timeout.
+    if state.config.request_timeout_secs > 0 {
+        let room = state.config.request_timeout_secs.saturating_sub(1) * 1000;
+        req.wait_ms = req.wait_ms.min(room);
+    }
+    match cluster.heartbeat(&node, &credential, req, t2).await {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => node_error(e),
+    }
+}
+
+/// `GET /_rustybin/harness/clusters/{id}/runs`.
+pub async fn list_cluster_runs(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    req_uri: axum::http::Uri,
+) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    let c = match led_cluster(&h, &id, req_uri.path()) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    let runs: Vec<Value> = c
+        .runs()
+        .iter()
+        .rev()
+        .map(|r| {
+            let mut v = r.summary();
+            v["links"] = run_links(&c.id, &r.id);
+            v
+        })
+        .collect();
+    Json(json!({ "runs": runs, "active": c.active_run().map(|r| r.id.clone()) })).into_response()
+}
+
+/// `POST /_rustybin/harness/clusters/{id}/runs`: submit a scenario
+/// (validated against the cluster, not started).
+pub async fn create_cluster_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    req_uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = guard_mutation(&state, &headers) {
+        return resp;
+    }
+    let c = match led_cluster(&h, &id, req_uri.path()) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    let scenario = match parse_body(&body) {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    match c.create_run(scenario, &h.caps()) {
+        Ok(run) => {
+            let mut v = c.run_snapshot(&run);
+            v["quorum"] = json!(c.quorum(&run.scenario));
+            let mut resp = (StatusCode::CREATED, Json(v)).into_response();
+            if let Ok(loc) =
+                HeaderValue::from_str(&format!("{PREFIX}/clusters/{}/runs/{}", c.id, run.id))
+            {
+                resp.headers_mut().insert(header::LOCATION, loc);
+            }
+            resp
+        }
+        Err(e) => run_error(e),
+    }
+}
+
+/// `GET /_rustybin/harness/clusters/{id}/runs/{run}`: live merged stats.
+pub async fn get_cluster_run(
+    State(state): State<AppState>,
+    Path((id, run_id)): Path<(String, String)>,
+    req_uri: axum::http::Uri,
+) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    let c = match led_cluster(&h, &id, req_uri.path()) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match c.run(&run_id) {
+        Some(run) => {
+            let mut v = c.run_snapshot(&run);
+            v["quorum"] = json!(c.quorum(&run.scenario));
+            Json(v).into_response()
+        }
+        None => error(
+            StatusCode::NOT_FOUND,
+            format!("no run {run_id:?} in cluster {id}"),
+        ),
+    }
+}
+
+/// `POST /_rustybin/harness/clusters/{id}/runs/{run}/start`: the shares
+/// and the synchronised start, once the quorum is there (409 before).
+pub async fn start_cluster_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, run_id)): Path<(String, String)>,
+    req_uri: axum::http::Uri,
+) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = guard_mutation(&state, &headers) {
+        return resp;
+    }
+    let c = match led_cluster(&h, &id, req_uri.path()) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match c.start_run(&run_id) {
+        Ok(run) => (StatusCode::ACCEPTED, Json(c.run_snapshot(&run))).into_response(),
+        Err(e) => run_error(e),
+    }
+}
+
+/// `POST /_rustybin/harness/clusters/{id}/runs/{run}/stop`.
+pub async fn stop_cluster_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, run_id)): Path<(String, String)>,
+    req_uri: axum::http::Uri,
+) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = guard_mutation(&state, &headers) {
+        return resp;
+    }
+    let c = match led_cluster(&h, &id, req_uri.path()) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match c.stop_run(&run_id, "user") {
+        Ok((run, changed)) => (
+            if changed {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::OK
+            },
+            Json(json!({ "run_id": run.id, "state": run.state().as_str(), "stopped": changed })),
+        )
+            .into_response(),
+        Err(e) => run_error(e),
+    }
+}
+
+/// `GET /_rustybin/harness/clusters/{id}/runs/{run}/report`: the merged report.
+pub async fn cluster_run_report(
+    State(state): State<AppState>,
+    Path((id, run_id)): Path<(String, String)>,
+    Query(q): Query<FormatQuery>,
+    req_uri: axum::http::Uri,
+) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    let c = match led_cluster(&h, &id, req_uri.path()) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    let Some(run) = c.run(&run_id) else {
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("no run {run_id:?} in cluster {id}"),
+        );
+    };
+    c.tick();
+    let Some(report) = run.report() else {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "the run has not finished",
+                "state": run.state().as_str(),
+                "hint": format!("poll GET {PREFIX}/clusters/{id}/runs/{run_id} until the state is finished"),
+            })),
+        )
+            .into_response();
+    };
+    report_response(report, q.format.as_deref())
+}
+
+fn report_response(report: &super::report::Report, format: Option<&str>) -> Response {
+    match format {
+        Some("text") => (
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            report.to_text(),
+        )
+            .into_response(),
+        Some("junit") | Some("xml") => (
+            [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
+            report.to_junit(),
+        )
+            .into_response(),
+        _ => Json(serde_json::to_value(report).unwrap_or(Value::Null)).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JoinBody {
+    /// The cluster URL (`<leader>/_rustybin/harness/clusters/<id>`).
+    pub url: String,
+    pub join_token: String,
+    /// A server node's data-plane URL as the gateway reaches it.
+    #[serde(default)]
+    pub advertise: Option<String>,
+}
+
+/// `POST /_rustybin/harness/join`: a controller tells this node to join a
+/// cluster (orchestrated). The URL is checked like every outbound address:
+/// never link-local, metadata or other forbidden addresses.
+pub async fn join(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = guard_mutation(&state, &headers) {
+        return resp;
+    }
+    let req: JoinBody = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
+    };
+    if let Some(a) = &req.advertise {
+        if !(a.starts_with("http://") || a.starts_with("https://")) || a.len() > 2048 {
+            return error(StatusCode::BAD_REQUEST, "advertise: an http or https URL");
+        }
+    }
+    let (url, _) = match member::cluster_url(&req.url, None) {
+        Ok(u) => u,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    if let Err(e) = super::safety::check_join_url(&url).await {
+        return error(StatusCode::FORBIDDEN, e);
+    }
+    let advertise = req.advertise.or_else(|| h.config.advertise.clone());
+    match member::join(&h, JoinTarget::Url(url), req.join_token, advertise).await {
+        Ok(m) => Json(json!({ "joined": true, "cluster": m.describe() })).into_response(),
+        Err(e) => error(StatusCode::CONFLICT, e),
+    }
+}
+
+/// `POST /_rustybin/harness/leave`: leave the cluster (its runs stop on
+/// this node).
+pub async fn leave(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = guard_mutation(&state, &headers) {
+        return resp;
+    }
+    match h.leave().await {
+        Some(id) => Json(json!({ "left": id })).into_response(),
+        None => error(
+            StatusCode::NOT_FOUND,
+            "this node is not a member of a cluster",
+        ),
+    }
 }

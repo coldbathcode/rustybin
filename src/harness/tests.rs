@@ -20,7 +20,7 @@ use crate::control_auth::Grant;
 use crate::state::AppState;
 use crate::test_support::{body_string, control_jwt, jwt_config, test_app_with};
 
-fn harness_config(roles: &[Role], targets: &[&str]) -> Config {
+pub(super) fn harness_config(roles: &[Role], targets: &[&str]) -> Config {
     let mut c = Config::for_tests();
     c.harness.enabled = true;
     c.harness.roles = roles.to_vec();
@@ -30,7 +30,7 @@ fn harness_config(roles: &[Role], targets: &[&str]) -> Config {
 }
 
 /// A real server (the load goes over TCP) plus its app for control calls.
-async fn running(config: Config) -> (crate::RunningServer, Router, AppState) {
+pub(super) async fn running(config: Config) -> (crate::RunningServer, Router, AppState) {
     let state = AppState::for_tests(config);
     let server = crate::server::start_with_state(state.clone())
         .await
@@ -39,7 +39,7 @@ async fn running(config: Config) -> (crate::RunningServer, Router, AppState) {
     (server, app, state)
 }
 
-async fn send(
+pub(super) async fn send(
     app: &Router,
     method: Method,
     path: &str,

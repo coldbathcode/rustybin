@@ -68,7 +68,7 @@ brotli = "8"
 ruzstd = "0.9.1"
 regex = "1"
 regex-syntax = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots-no-provider"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots-no-provider", "json"] }
 webpki-roots = "1"
 tokio-postgres = { version = "0.7.13", optional = true, default-features = false, features = ["runtime", "with-chrono-0_4"] }
 tokio-postgres-rustls = { version = "0.14", optional = true, features = ["aws-lc-rs"] }

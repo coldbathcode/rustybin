@@ -182,6 +182,18 @@ pub struct HarnessConfig {
     /// `RUSTYBIN_HARNESS_EXIT`: headless mode, exit after the run (0 when
     /// the thresholds pass, 1 when they fail, 2 on error).
     pub exit: bool,
+    /// `RUSTYBIN_HARNESS_CLUSTER`: the cluster id to create (a coordinator)
+    /// or to join (with a base URL in `RUSTYBIN_HARNESS_JOIN`).
+    pub cluster: Option<String>,
+    /// `RUSTYBIN_HARNESS_JOIN`: the cluster URL to join at startup
+    /// (`https://leader/_rustybin/harness/clusters/<id>`).
+    pub join: Option<String>,
+    /// `RUSTYBIN_HARNESS_JOIN_TOKEN`: the shared join secret. Never logged
+    /// or shown.
+    pub join_token: Option<String>,
+    /// `RUSTYBIN_HARNESS_ADVERTISE`: a server node's data-plane URL as the
+    /// gateway reaches it (the upstream export).
+    pub advertise: Option<String>,
 }
 
 impl Default for HarnessConfig {
@@ -201,6 +213,10 @@ impl Default for HarnessConfig {
             start: crate::harness::StartMode::Manual,
             report: None,
             exit: false,
+            cluster: None,
+            join: None,
+            join_token: None,
+            advertise: None,
         }
     }
 }
@@ -225,7 +241,8 @@ impl HarnessConfig {
         self.enabled && self.scenario.is_some() && self.start != crate::harness::StartMode::Manual
     }
 
-    /// The effective configuration without secrets (there are none here).
+    /// The effective configuration without secrets (the join token is
+    /// only reported as configured or not).
     pub fn public_view(&self) -> serde_json::Value {
         serde_json::json!({
             "enabled": self.enabled,
@@ -241,6 +258,10 @@ impl HarnessConfig {
             "headless": self.headless(),
             "start": self.start.as_str(),
             "exit": self.exit,
+            "cluster": self.cluster,
+            "join": self.join,
+            "join_token_configured": self.join_token.is_some(),
+            "advertise": self.advertise,
         })
     }
 }
@@ -1140,6 +1161,47 @@ where
             }
         },
     };
+    let cluster = match get("RUSTYBIN_HARNESS_CLUSTER") {
+        Some(raw) if crate::harness::cluster::safe_id(raw.trim()) => Some(raw.trim().to_string()),
+        Some(raw) => {
+            warnings.push(format!(
+                "invalid RUSTYBIN_HARNESS_CLUSTER {raw:?} (letters, digits, . _ - only, at most 64), ignored"
+            ));
+            None
+        }
+        None => None,
+    };
+    let join = get("RUSTYBIN_HARNESS_JOIN")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let join_token = match get("RUSTYBIN_HARNESS_JOIN_TOKEN") {
+        Some(t)
+            if t.trim().len() >= crate::harness::cluster::MIN_TOKEN_LEN
+                && t.trim().len() <= 256 =>
+        {
+            Some(t.trim().to_string())
+        }
+        Some(_) => {
+            warnings.push(format!(
+                "invalid RUSTYBIN_HARNESS_JOIN_TOKEN (at least {} characters, at most 256), ignored",
+                crate::harness::cluster::MIN_TOKEN_LEN
+            ));
+            None
+        }
+        None => None,
+    };
+    let advertise = match get("RUSTYBIN_HARNESS_ADVERTISE") {
+        Some(raw) if raw.trim().starts_with("http://") || raw.trim().starts_with("https://") => {
+            Some(raw.trim().trim_end_matches('/').to_string())
+        }
+        Some(raw) => {
+            warnings.push(format!(
+                "invalid RUSTYBIN_HARNESS_ADVERTISE {raw:?} (an http or https URL), ignored"
+            ));
+            None
+        }
+        None => None,
+    };
     HarnessConfig {
         enabled,
         roles,
@@ -1160,6 +1222,10 @@ where
         start,
         report: get("RUSTYBIN_HARNESS_REPORT"),
         exit: parse_bool_or(get, "RUSTYBIN_HARNESS_EXIT", false, warnings),
+        cluster,
+        join,
+        join_token,
+        advertise,
     }
 }
 

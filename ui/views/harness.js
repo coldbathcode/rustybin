@@ -1,8 +1,10 @@
-// Harness: this Rustybin as a load client. Node status and caps, a scenario
-// builder generated from the server's JSON Schema (with a YAML view and the
-// built-in scenarios), validation, a live run view with a per-second chart,
-// the kill switch, and the final report with its thresholds.
-import { h, s, replace, clear, card, kvgrid, notice, badge, spinner, toast, select, textarea, fmtMs, copyButton } from '../lib/dom.js';
+// Harness: this Rustybin as a load client. Node status and caps, the
+// cluster (members, leader, upstreams; create one on a coordinator), a
+// scenario builder generated from the server's JSON Schema (with a YAML view
+// and the built-in scenarios), validation, a live run view with a per-second
+// chart, the kill switch, and the final report with its thresholds. A run
+// goes to this node or to a cluster it leads.
+import { h, s, replace, clear, card, kvgrid, notice, badge, spinner, toast, select, textarea, input, fmtMs, copyButton } from '../lib/dom.js';
 import { jsonView } from '../lib/format.js';
 import { SERVER, send, getJson } from '../lib/http.js';
 import { scenarioForm, toYaml } from '../lib/scenarioform.js';
@@ -49,7 +51,9 @@ export default {
     let alive = true;
     let pollTimer = null;
     let liveBuckets = [];
-    const st = settings.recall('harness.state', { runId: null, scenarioText: '', builtin: 'smoke' });
+    const st = settings.recall('harness.state', { runId: null, scenarioText: '', builtin: 'smoke', cluster: null });
+    // Where runs go: this node, or a cluster it leads.
+    const runBase = () => (st.cluster ? `${PREFIX}/clusters/${encodeURIComponent(st.cluster)}` : PREFIX);
     settings.remember('harness.state', st);
 
     root.appendChild(h('div', { class: 'view-head' },
@@ -62,10 +66,14 @@ export default {
     const reportEl = h('div', null, h('p', { class: 'muted small' }, 'The report appears when a run finishes.'));
     const killMsg = h('div');
     const killBtn = h('button', { class: 'btn sm', type: 'button', id: 'harness-kill', onclick: killSwitch }, 'Kill switch: stop all load');
+    const clusterEl = h('div');
+    const clusterCard = card('Cluster', { hint: 'GET /_rustybin/harness/clusters/{id}' }, clusterEl);
+    clusterCard.hidden = true;
 
     root.appendChild(h('div', { class: 'grid grid-2' },
       card('Node', { hint: 'GET /_rustybin/harness', actions: h('div', { class: 'row' }, killBtn) }, nodeEl, killMsg),
       card('Run', { hint: 'live, one second at a time' }, runEl)));
+    root.appendChild(clusterCard);
     root.appendChild(card('Scenario', { hint: 'generated from GET /_rustybin/harness/schema' }, builderEl));
     root.appendChild(card('Report', { hint: 'thresholds, totals, latency, timeline' }, reportEl));
 
@@ -94,11 +102,88 @@ export default {
           ['Runs kept', String(n.runs || 0)],
         ]),
         n.engine_error ? notice('err', n.engine_error) : null));
-      if (n.active_run && !st.runId) {
+      if (n.active_run && !st.runId && !st.cluster) {
         st.runId = n.active_run.run_id;
         startPolling();
       }
+      renderCluster(n);
       return n;
+    }
+
+    // ── Cluster ──
+    let joinToken = null;
+    async function renderCluster(n) {
+      const leads = n.clusters || [];
+      const coordinator = (n.roles || []).includes('coordinator');
+      clusterCard.hidden = !coordinator && !leads.length && !n.cluster;
+      if (clusterCard.hidden) return;
+      if (st.cluster && !leads.some((c) => c.cluster_id === st.cluster)) st.cluster = null;
+      const parts = [];
+      if (joinToken) {
+        parts.push(notice('ok', h('div', { class: 'stack-sm' },
+          h('div', null, `Cluster ${joinToken.id} created. Nodes join with RUSTYBIN_HARNESS_JOIN=${joinToken.url} and this join token (shown once):`),
+          h('div', { class: 'row' }, h('code', null, joinToken.token), copyButton(() => joinToken.token, { label: 'Copy token' })))));
+      }
+      for (const c of leads) {
+        const r = await send({ url: `${SERVER}${PREFIX}/clusters/${encodeURIComponent(c.cluster_id)}`, timeout: 10000 });
+        if (!alive) return;
+        if (!r.ok || !r.json) { parts.push(notice('err', r.error || `answered ${r.status}`)); continue; }
+        const d = r.json;
+        const ups = await send({ url: `${SERVER}${PREFIX}/clusters/${encodeURIComponent(c.cluster_id)}/upstreams`, timeout: 10000 });
+        const upstreams = (ups.ok && Array.isArray(ups.json)) ? ups.json : [];
+        parts.push(h('div', { class: 'stack-sm' },
+          h('div', { class: 'row' }, h('strong', null, d.cluster_id), badge(`leader ${d.leader.node_id}, term ${d.term}`, 'violet'),
+            badge(`${d.alive.clients} client(s), ${d.alive.servers} server(s) alive`, 'outline'),
+            d.current_run ? badge(`run ${d.current_run.run_id} ${d.current_run.state}`, d.current_run.state === 'finished' ? 'outline' : 'ok') : null,
+            h('span', { class: 'grow' }),
+            h('label', { class: 'row small' }, h('input', { type: 'radio', name: 'harness-run-on', checked: st.cluster === d.cluster_id, onchange: () => { st.cluster = d.cluster_id; st.runId = null; toast(`Runs go to cluster ${d.cluster_id}`); } }), 'Run on this cluster')),
+          h('p', { class: 'muted small' }, `Lease ${num(d.lease_ms)} ms: a client stops sending when the leader has not answered for that long. Failover: ${d.failover}.`),
+          h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
+            h('thead', null, h('tr', null, h('th', null, 'Node'), h('th', null, 'Roles'), h('th', null, 'Health'), h('th', null, 'Capacity'), h('th', null, 'Clock offset'), h('th', null, 'In flight'), h('th', null, 'Advertise'))),
+            h('tbody', null, ...(d.members || []).map((m) => h('tr', null,
+              h('td', { class: 'mono' }, m.node_id, m.node_id === d.leader.node_id ? ' (leader)' : ''),
+              h('td', null, (m.roles || []).join(', ')),
+              h('td', null, badge(m.health, m.health === 'healthy' ? 'ok' : m.health === 'late' ? 'warn' : 'err')),
+              h('td', null, `${num(m.capacity.max_rate)} /s`),
+              h('td', { class: 'mono' }, m.clock_offset_ms === null || m.clock_offset_ms === undefined ? '-' : `${num(m.clock_offset_ms, 2)} ms (+/- ${num(m.clock_error_ms, 2)})`),
+              h('td', null, num(m.in_flight)),
+              h('td', { class: 'mono' }, m.advertise || '-')))))),
+          upstreams.length ? h('div', { class: 'row small' }, h('span', null, `Upstreams for the gateway: ${upstreams.join(', ')}`), copyButton(() => upstreams.join('\n'), { label: 'Copy' })) : h('p', { class: 'muted small' }, 'No server node with an advertised URL yet.')));
+      }
+      if (leads.length) {
+        parts.push(h('label', { class: 'row small' }, h('input', { type: 'radio', name: 'harness-run-on', checked: !st.cluster, onchange: () => { st.cluster = null; st.runId = null; toast('Runs go to this node'); } }), 'Run on this node only'));
+      }
+      if (n.cluster) {
+        const m = n.cluster;
+        parts.push(kvgrid([
+          ['Member of', h('code', null, m.cluster_id)],
+          ['Leader', m.leader && m.leader.node_id ? `${m.leader.node_id}, term ${m.leader.term}` : 'not joined yet'],
+          ['Leader URL', m.url || 'this node (in process)'],
+          ['Last answer', m.last_answer_ms === null || m.last_answer_ms === undefined ? '-' : `${num(m.last_answer_ms)} ms ago (lease ${num(m.lease_ms)} ms)`],
+          ['Clock offset', m.clock_offset_ms === null || m.clock_offset_ms === undefined ? '-' : `${num(m.clock_offset_ms, 2)} ms (+/- ${num(m.clock_error_ms, 2)})`],
+          ['Last error', m.last_error || 'none'],
+        ]));
+      }
+      if (coordinator && !leads.length) {
+        const idIn = input({ placeholder: 'cluster id (optional)', 'aria-label': 'Cluster id', id: 'harness-cluster-id' });
+        const minC = input({ type: 'number', min: '0', value: '1', 'aria-label': 'Client nodes to wait for', style: { width: '6em' } });
+        const minS = input({ type: 'number', min: '0', value: '0', 'aria-label': 'Server nodes to wait for', style: { width: '6em' } });
+        const msg = h('div');
+        const create = async () => {
+          const body = { min_nodes: { client: Number(minC.value) || 0, server: Number(minS.value) || 0 } };
+          if (idIn.value.trim()) body.cluster_id = idIn.value.trim();
+          const r = await send({ method: 'POST', url: SERVER + PREFIX + '/clusters', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), admin: true, timeout: 10000 });
+          if (r.status !== 201 || !r.json) { replace(msg, notice('err', (r.json && r.json.error) || r.error || `answered ${r.status}`)); return; }
+          joinToken = { id: r.json.cluster_id, token: r.json.join_token, url: location.origin.replace(/\/$/, '') + SERVER + PREFIX + '/clusters/' + r.json.cluster_id };
+          st.cluster = r.json.cluster_id;
+          loadNode();
+        };
+        parts.push(h('div', { class: 'stack-sm' },
+          h('p', { class: 'small' }, 'This node is a coordinator: create a cluster, then start client and server nodes with its join URL and token. Its client nodes share the rate by capacity and its server nodes are the gateway\'s upstreams.'),
+          h('div', { class: 'row' }, idIn, h('span', { class: 'small' }, 'wait for'), minC, h('span', { class: 'small' }, 'client(s) and'), minS, h('span', { class: 'small' }, 'server(s)'),
+            h('button', { class: 'btn sm', type: 'button', id: 'harness-create-cluster', onclick: create }, 'Create cluster')), msg));
+      }
+      replace(clusterEl, h('div', { class: 'stack' }, ...parts));
     }
 
     async function killSwitch() {
@@ -222,11 +307,19 @@ export default {
       if (r.status === 400) { replace(problemsEl, notice('err', r.json.error)); return; }
       if (!showValidation(r.json) || !thenRun) return;
       const targets = (r.json.scenario.targets || []).map((t) => t.url).join(', ');
-      if (!window.confirm(`Send load to ${targets} for ${num(r.json.summary.duration_secs)} s at a peak of ${num(r.json.summary.peak_rate)} requests/s?`)) return;
-      const run = await send({ method: 'POST', url: SERVER + PREFIX + '/runs', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value), admin: true, timeout: 20000 });
+      const where = st.cluster ? ` from the client nodes of cluster ${st.cluster}` : '';
+      if (!window.confirm(`Send load to ${targets}${where} for ${num(r.json.summary.duration_secs)} s at a peak of ${num(r.json.summary.peak_rate)} requests/s?`)) return;
+      const showError = (res) => replace(problemsEl, notice('err', h('div', null, res.json.error, res.json.problems ? h('ul', null, ...res.json.problems.map((p) => h('li', null, p))) : null)));
+      let run = await send({ method: 'POST', url: SERVER + runBase() + '/runs', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value), admin: true, timeout: 20000 });
       if (!run.json) { replace(problemsEl, notice('err', run.error || `answered ${run.status}`)); return; }
+      if (st.cluster) {
+        // A cluster run is submitted, then started once the quorum is there.
+        if (run.status !== 201) { showError(run); return; }
+        run = await send({ method: 'POST', url: `${SERVER}${runBase()}/runs/${run.json.run_id}/start`, admin: true, timeout: 20000 });
+        if (!run.json) { replace(problemsEl, notice('err', run.error || `answered ${run.status}`)); return; }
+      }
       if (run.status !== 202) {
-        replace(problemsEl, notice('err', h('div', null, run.json.error, run.json.problems ? h('ul', null, ...run.json.problems.map((p) => h('li', null, p))) : null)));
+        showError(run);
         return;
       }
       st.runId = run.json.run_id;
@@ -261,6 +354,14 @@ export default {
           tile('Overhead p99', r.overhead && r.overhead.count ? fmtMs(r.overhead.p99_ms) : '-'),
           tile('Last second', last ? `${num(last.rate)} /s, lag p99 ${fmtMs(last.lag_p99_ms)}` : '-')),
         timelineChart(liveBuckets),
+        r.cluster && r.nodes ? h('table', { class: 'table' },
+          h('thead', null, h('tr', null, h('th', null, 'Node'), h('th', null, 'Role'), h('th', null, 'Share'), h('th', null, 'State'), h('th', null, 'Sent'), h('th', null, 'Answered / arrivals'), h('th', null, 'Start lag'))),
+          h('tbody', null, ...r.nodes.map((x) => h('tr', null, h('td', { class: 'mono' }, x.node_id), h('td', null, x.role),
+            h('td', null, x.role === 'client' ? `${num(x.share * 100, 1)}%` : '-'),
+            h('td', null, x.role === 'client' ? badge(x.state, x.error ? 'err' : 'outline') : badge(x.alive ? 'alive' : 'gone', x.alive ? 'ok' : 'err')),
+            h('td', null, x.role === 'client' ? num(x.sent) : '-'),
+            h('td', null, num(x.role === 'client' ? x.completed : x.arrivals)),
+            h('td', null, x.start_lag_ms === null || x.start_lag_ms === undefined ? '-' : fmtMs(x.start_lag_ms)))))) : null,
         r.layers && r.layers.length > 1 ? h('table', { class: 'table' },
           h('thead', null, h('tr', null, h('th', null, 'Layer'), h('th', null, 'Model'), h('th', null, 'Target now'), h('th', null, 'Answered'), h('th', null, 'Errors'), h('th', null, 'p99'))),
           h('tbody', null, ...r.layers.map((l) => h('tr', null, h('td', null, l.name), h('td', null, l.model), h('td', null, l.target_now === null || l.target_now === undefined ? 'done' : num(l.target_now, 1)), h('td', null, num(l.completed)), h('td', null, num(l.errors)), h('td', null, fmtMs(l.p99_ms)))))) : null));
@@ -268,7 +369,7 @@ export default {
 
     async function stopRun() {
       if (!st.runId) return;
-      const r = await send({ method: 'POST', url: `${SERVER}${PREFIX}/runs/${st.runId}/stop`, admin: true, timeout: 10000 });
+      const r = await send({ method: 'POST', url: `${SERVER}${runBase()}/runs/${st.runId}/stop`, admin: true, timeout: 10000 });
       if (r.ok) toast('Stopping the run');
       else toast((r.json && r.json.error) || r.error || `answered ${r.status}`, 'err');
     }
@@ -281,7 +382,7 @@ export default {
 
     async function poll() {
       if (!alive || !st.runId) return;
-      const r = await send({ url: `${SERVER}${PREFIX}/runs/${st.runId}`, timeout: 10000 });
+      const r = await send({ url: `${SERVER}${runBase()}/runs/${st.runId}`, timeout: 10000 });
       if (!alive) return;
       if (!r.ok || !r.json) {
         if (r.status === 404) { clearInterval(pollTimer); pollTimer = null; st.runId = null; }
@@ -298,7 +399,8 @@ export default {
 
     // ── Report ──
     async function loadReport(id) {
-      const r = await send({ url: `${SERVER}${PREFIX}/runs/${id}/report`, timeout: 15000 });
+      const base = runBase();
+      const r = await send({ url: `${SERVER}${base}/runs/${id}/report`, timeout: 15000 });
       if (!alive || !r.ok || !r.json) return;
       const rep = r.json;
       const t = rep.totals || {};
@@ -308,9 +410,9 @@ export default {
       replace(reportEl, h('div', { class: 'stack' },
         h('div', { class: 'row' }, badge(rep.passed ? 'PASS' : 'FAIL', rep.passed ? 'ok' : 'err'), badge(rep.state, 'outline'), h('span', { class: 'muted small' }, `exit code ${rep.exit_code}`),
           sat.saturated ? badge('client saturated: read the client, not the gateway', 'err') : badge('client not saturated', 'ok'), h('span', { class: 'grow' }),
-          h('a', { class: 'btn sm', href: `${SERVER}${PREFIX}/runs/${id}/report`, target: '_blank', rel: 'noopener' }, 'JSON'),
-          h('a', { class: 'btn sm', href: `${SERVER}${PREFIX}/runs/${id}/report?format=text`, target: '_blank', rel: 'noopener' }, 'Text'),
-          h('a', { class: 'btn sm', href: `${SERVER}${PREFIX}/runs/${id}/report?format=junit`, target: '_blank', rel: 'noopener' }, 'JUnit')),
+          h('a', { class: 'btn sm', href: `${SERVER}${base}/runs/${id}/report`, target: '_blank', rel: 'noopener' }, 'JSON'),
+          h('a', { class: 'btn sm', href: `${SERVER}${base}/runs/${id}/report?format=text`, target: '_blank', rel: 'noopener' }, 'Text'),
+          h('a', { class: 'btn sm', href: `${SERVER}${base}/runs/${id}/report?format=junit`, target: '_blank', rel: 'noopener' }, 'JUnit')),
         h('div', { class: 'tiles' },
           tile('Requested', num(t.requested)), tile('Sent', num(t.sent)), tile('Answered', num(t.completed)), tile('OK', num(t.ok), 'ok'),
           tile('Unexpected status', num(t.unexpected_status), t.unexpected_status ? 'err-text' : ''), tile('Transport', num(t.transport), t.transport ? 'err-text' : ''),
@@ -341,6 +443,7 @@ export default {
         rep.thresholds && rep.thresholds.length ? h('table', { class: 'table' },
           h('thead', null, h('tr', null, h('th', null, 'Threshold'), h('th', null, 'Limit'), h('th', null, 'Measured'), h('th', null, 'Result'))),
           h('tbody', null, ...rep.thresholds.map((th) => h('tr', null, h('td', null, th.name), h('td', { class: 'mono' }, String(th.limit)), h('td', { class: 'mono' }, String(th.measured)), h('td', null, badge(th.pass ? 'pass' : 'fail', th.pass ? 'ok' : 'err')))))) : h('p', { class: 'muted small' }, 'No thresholds in the scenario.'),
+        rep.cluster ? h('p', { class: 'small' }, `Cluster ${rep.cluster.cluster_id}, led by ${rep.cluster.leader} (term ${rep.cluster.term}): ${rep.cluster.nodes.length} node(s), clock error bound ${fmtMs(rep.cluster.clock_error_ms)}, lost check ${rep.cluster.lost_check}.`) : null,
         timelineChart(liveBuckets),
         (rep.layers || []).length > 1 || (rep.targets_breakdown || []).length > 1 ? h('table', { class: 'table' },
           h('thead', null, h('tr', null, h('th', null, 'Breakdown'), h('th', null, 'Sent'), h('th', null, 'OK'), h('th', null, 'Errors'), h('th', null, 'p50'), h('th', null, 'p99'))),

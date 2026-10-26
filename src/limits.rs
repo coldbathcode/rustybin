@@ -1228,6 +1228,7 @@ pub fn is_exempt(method: &Method, path: &str) -> bool {
             || path == crate::control_auth::READY_PATH
             || path == crate::metrics::METRICS_PATH)
             && (method == Method::GET || method == Method::HEAD))
+        || crate::harness::is_node_path(method, path)
 }
 
 fn is_websocket_upgrade(headers: &HeaderMap) -> bool {

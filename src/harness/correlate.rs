@@ -57,8 +57,9 @@ pub const MAX_HEADER_LEN: usize = 4096;
 pub const MAX_NAMES: usize = 48;
 /// Runs the server side keeps statistics for (the active run plus the last ones).
 pub const KEPT_RUNS: usize = 8;
-/// Seen-sequence bitmap cap per run (bits); sequences above it are counted,
-/// not tracked, and `lost` becomes a lower bound.
+/// Seen-sequence bitmap cap per run (bits, over every client node of the
+/// run); sequences above it are counted, not tracked, and `lost` becomes a
+/// lower bound.
 pub const SEEN_CAP_BITS: u64 = 1 << 26;
 /// Most distinct nodes and header names tracked per run.
 pub const MAX_LABELS: usize = 64;
@@ -101,6 +102,27 @@ impl RunKey {
             *b = rand::random();
         }
         Self(bytes)
+    }
+
+    /// Hex, for the cluster assignment (sent only over the node routes).
+    pub fn to_hex(&self) -> String {
+        self.0.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    pub fn from_hex(hex: &str) -> Option<Self> {
+        if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let mut bytes = [0u8; 32];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
+        }
+        Some(Self(bytes))
+    }
+
+    /// Same key (constant time).
+    pub fn same(&self, other: &RunKey) -> bool {
+        crate::control_auth::constant_time_eq(&self.to_hex(), &other.to_hex())
     }
 
     /// 128-bit HMAC-SHA256 tag of `message`, as hex.
@@ -417,7 +439,10 @@ pub struct ServerStats {
     pub headers_missing: HashMap<String, u64>,
     pub headers_added: HashMap<String, u64>,
     pub captured: u64,
-    seen: Vec<u64>,
+    /// Seen sequence numbers per client node (bitmaps), within
+    /// [`SEEN_CAP_BITS`] over all of them.
+    seen: HashMap<String, Vec<u64>>,
+    seen_words: u64,
     pub seen_overflow: u64,
 }
 
@@ -428,41 +453,58 @@ impl ServerStats {
             by_node: HashMap::new(),
             by_route: HashMap::new(),
             statuses: HashMap::new(),
-            processing: Histogram::new_with_bounds(1, 60_000_000, 2)
-                .unwrap_or_else(|_| Histogram::new(2).unwrap_or_else(|_| unreachable!())),
+            processing: super::report::histogram(2),
             headers_changed: 0,
             body_changed: 0,
             path_changed: 0,
             headers_missing: HashMap::new(),
             headers_added: HashMap::new(),
             captured: 0,
-            seen: Vec::new(),
+            seen: HashMap::new(),
+            seen_words: 0,
             seen_overflow: 0,
         }
     }
 
-    fn mark_seen(&mut self, seq: u64) {
-        if seq >= SEEN_CAP_BITS {
+    fn mark_seen(&mut self, node: &str, seq: u64) {
+        let word = seq / 64;
+        let have = self.seen.get(node).map_or(0, |v| v.len() as u64);
+        let grow = (word + 1).saturating_sub(have);
+        if seq >= SEEN_CAP_BITS
+            || self.seen_words + grow > SEEN_CAP_BITS / 64
+            || (!self.seen.contains_key(node) && self.seen.len() >= MAX_LABELS)
+        {
             self.seen_overflow += 1;
             return;
         }
-        let word = (seq / 64) as usize;
-        if self.seen.len() <= word {
-            self.seen.resize(word + 1, 0);
+        let bits = self.seen.entry(node.to_string()).or_default();
+        if grow > 0 {
+            bits.resize(word as usize + 1, 0);
+            self.seen_words += grow;
         }
-        self.seen[word] |= 1 << (seq % 64);
+        bits[word as usize] |= 1 << (seq % 64);
     }
 
-    /// Did a request with this sequence number arrive? `None` above the cap.
-    pub fn was_seen(&self, seq: u64) -> Option<bool> {
+    /// Did request `seq` of client node `node` arrive? `None` when it could
+    /// not be tracked (above the cap, or the bitmap budget was spent).
+    pub fn was_seen(&self, node: &str, seq: u64) -> Option<bool> {
         if seq >= SEEN_CAP_BITS {
             return None;
         }
-        Some(
-            self.seen
-                .get((seq / 64) as usize)
-                .is_some_and(|w| w & (1 << (seq % 64)) != 0),
-        )
+        match self.seen.get(node) {
+            Some(bits) => match bits.get((seq / 64) as usize) {
+                Some(w) => Some(w & (1 << (seq % 64)) != 0),
+                None if self.seen_overflow > 0 => None,
+                None => Some(false),
+            },
+            None if self.seen_overflow > 0 => None,
+            None => Some(false),
+        }
+    }
+
+    /// The processing-time histogram (microseconds).
+    pub fn processing(&self) -> &Histogram<u64> {
+        &self.processing
     }
 
     fn record(
@@ -501,7 +543,7 @@ impl ServerStats {
         if captured {
             self.captured += 1;
         }
-        self.mark_seen(marker.seq);
+        self.mark_seen(&marker.node, marker.seq);
     }
 
     pub fn report(&self) -> ServerReport {
@@ -600,8 +642,14 @@ impl Correlator {
     }
 
     /// Make a run known to the server side (single node: at run creation;
-    /// cluster nodes get it from the leader in phase 3).
+    /// cluster nodes when the leader's heartbeat answer assigns it). A run
+    /// already known with the same key keeps its entry and its stats, so a
+    /// loop-through node registering twice (client and server) counts once.
     pub fn register(&self, id: &str, key: RunKey, profile: ServerProfile) -> Arc<RunEntry> {
+        let mut runs = self.runs.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(existing) = runs.iter().find(|r| r.id == id && r.key.same(&key)) {
+            return existing.clone();
+        }
         let entry = Arc::new(RunEntry {
             id: id.to_string(),
             key,
@@ -609,7 +657,6 @@ impl Correlator {
             stats: Mutex::new(ServerStats::new()),
             created: Instant::now(),
         });
-        let mut runs = self.runs.lock().unwrap_or_else(|p| p.into_inner());
         runs.retain(|r| r.id != id);
         while runs.len() >= KEPT_RUNS {
             runs.remove(0);
@@ -898,9 +945,10 @@ mod tests {
         }
         assert_eq!(s.by_node.len(), MAX_LABELS + 1);
         assert_eq!(s.by_node["other"], 5);
-        assert_eq!(s.was_seen(3), Some(true));
-        assert_eq!(s.was_seen(4), Some(false));
-        assert_eq!(s.was_seen(SEEN_CAP_BITS + 1), None);
+        assert_eq!(s.was_seen("node-1", 3), Some(true));
+        assert_eq!(s.was_seen("node-1", 4), Some(false));
+        assert_eq!(s.was_seen("node-2", 3), Some(false), "seen is per node");
+        assert_eq!(s.was_seen("node-1", SEEN_CAP_BITS + 1), None);
         let mut big = m.clone();
         big.seq = SEEN_CAP_BITS + 1;
         s.record(
@@ -911,7 +959,10 @@ mod tests {
             &Changes::default(),
             false,
         );
-        assert_eq!(s.seen_overflow, 1);
+        // Five nodes past the label cap, plus the sequence over the cap.
+        assert_eq!(s.seen_overflow, 6);
+        // Past the label cap a new node is not tracked.
+        assert_eq!(s.was_seen("node-99", 3), None);
         let r = s.report();
         assert_eq!(r.arrivals, MAX_LABELS as u64 + 6);
         assert_eq!(r.by_route["/status/{code}"], MAX_LABELS as u64 + 5);
@@ -930,5 +981,17 @@ mod tests {
         assert!(c.entry("run0").is_none());
         assert!(c.entry(&format!("run{}", KEPT_RUNS + 2)).is_some());
         assert_eq!(c.rejected(), 0);
+        // Registering again with the same key keeps the entry (and stats).
+        let key = RunKey::random();
+        let a = c.register("again", key.clone(), ServerProfile::default());
+        let b = c.register("again", key.clone(), ServerProfile::default());
+        assert!(Arc::ptr_eq(&a, &b));
+        let other = c.register("again", RunKey::random(), ServerProfile::default());
+        assert!(!Arc::ptr_eq(&a, &other));
+        assert_eq!(
+            RunKey::from_hex(&key.to_hex()).map(|k| k.same(&key)),
+            Some(true)
+        );
+        assert!(RunKey::from_hex("zz").is_none());
     }
 }

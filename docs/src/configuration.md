@@ -203,8 +203,8 @@ See [Faults, latency, credentials, inspection](ai/gateway-features.md#credential
 
 ## Harness mode
 
-Rustybin as a load client (phase 1 of `docs/plans/harness.md`: one node, its own
-engine, allowlisted targets). Off by default. Starting with `RUSTYBIN_HARNESS=on` in
+Rustybin as a load client (`docs/plans/harness.md`): one node with its own engine and
+allowlisted targets, or a cluster of nodes led by a coordinator. Off by default. Starting with `RUSTYBIN_HARNESS=on` in
 public mode, with self-service mocks, or with the client role and no targets is a
 fatal error, never a warning. The control routes live under `/_rustybin/harness`;
 starting and stopping runs needs the `harness` (or `admin`) control scope when the
@@ -223,9 +223,13 @@ control plane is protected, and follows the admin token on an open one.
 | `RUSTYBIN_HARNESS_DATA_PLANE` | `on` | `off` on a client-only node serves only `/`, `/_rustybin/*`, `/ui` and the verification path. |
 | `RUSTYBIN_HARNESS_REPORT_DIR` | unset | Every final report is also written here as `<run_id>.json`. |
 | `RUSTYBIN_HARNESS_SCENARIO` | unset | Headless mode: the scenario file to run at startup. |
-| `RUSTYBIN_HARNESS_START` | `manual` | `immediately` starts the scenario once the node is up (`on-quorum` is the same on a single node). |
+| `RUSTYBIN_HARNESS_START` | `manual` | `immediately` starts the scenario once the node is up; `on-quorum` on a coordinator waits until the nodes the scenario asks for (`scale.client_nodes`, `scale.server_nodes`) have joined its cluster (on a single node it is the same as `immediately`). |
 | `RUSTYBIN_HARNESS_REPORT` | unset | Headless mode: where the final report goes (`-` for stdout, else a file). |
 | `RUSTYBIN_HARNESS_EXIT` | `false` | Headless mode: exit after the run with code 0 (thresholds pass), 1 (they fail) or 2 (error). |
+| `RUSTYBIN_HARNESS_CLUSTER` | unset | The cluster id a coordinator creates at startup (it needs `RUSTYBIN_HARNESS_JOIN_TOKEN`), or the id a node joins when `RUSTYBIN_HARNESS_JOIN` is the leader's base URL. |
+| `RUSTYBIN_HARNESS_JOIN` | unset | A client or server node joins this cluster at startup, retrying until the leader answers: `https://leader:8080/_rustybin/harness/clusters/<id>`, or `https://leader:8080` with `RUSTYBIN_HARNESS_CLUSTER`. |
+| `RUSTYBIN_HARNESS_JOIN_TOKEN` | unset | The cluster's join secret (16 to 256 characters), shared by the coordinator and its nodes. Never logged or shown. |
+| `RUSTYBIN_HARNESS_ADVERTISE` | the listener's address | A server node's data-plane URL as the gateway reaches it, exported at `GET /_rustybin/harness/clusters/<id>/upstreams` for the gateway's upstream pool. |
 
 Every harness request is signed with a per-run key (`X-Rustybin-Harness`) and
 carries an `X-Request-Id` and a `traceparent`; a server layer on every data-plane route
@@ -236,6 +240,26 @@ records what arrived, samples captures into the inspector (the scenario's
 changed on the way. `/harness/{*path}` is a shaped upstream that answers with the run's
 `servers` profile (latency, status mix, body size, streaming). The metrics gain
 `rustybin_harness_*` series with a run label bounded to the active run plus the last 4.
+
+A cluster spreads a run over several nodes. A coordinator creates it
+(`RUSTYBIN_HARNESS_CLUSTER` and `RUSTYBIN_HARNESS_JOIN_TOKEN` at startup, or
+`POST /_rustybin/harness/clusters`); client and server nodes join it with the join
+token (`RUSTYBIN_HARNESS_JOIN`, or `POST /_rustybin/harness/join`) and then pull from
+the leader: a heartbeat long poll carries their stats and clock stamps and brings
+back assignments. A scenario submitted to `POST .../clusters/<id>/runs` starts with
+`.../start` once its quorum is there: the rate is split over the client nodes by their
+declared `RUSTYBIN_HARNESS_MAX_RATE`, each gets its own range of virtual clients, and
+all of them start at the same instant on the leader's clock. Server nodes get the
+run key and correlate; after the run the leader asks them which failed requests they
+saw, so `lost` is exact across the cluster. The report is one merge of every node's
+counters and histograms (no averaged percentiles), with the nodes, their shares,
+clock offsets and start lag. Each node checks its assignment against its own caps
+and its own `RUSTYBIN_HARNESS_TARGETS`, so a leader cannot aim a node anywhere its
+operator did not allow. A client stops sending when the leader has not answered for
+the cluster's lease (5 s by default): the leader is the node the cluster was created
+on, and without it the run stops on every node. The node routes that members call
+(`.../nodes` and `.../nodes/<node>/heartbeat`) authenticate with the join token and
+the node credential instead of the control-plane credentials.
 
 The same engine runs from the command line: `rustybin harness run scenario.yaml
 --local-server` loops a scenario through an in-process Rustybin, `rustybin harness

@@ -1,20 +1,21 @@
 # Plan: load test mode (the harness), load tests through a gateway
 
-Status: **phases 0, 1 and 2 done** (2026-10-25): the engine spike is `examples/harness_spike.rs`
-([Phase 0 results](#phase-0-results-2026-10-25)); the single-node engine and the correlation are
-`src/harness/` ([Phase 1 build notes](#phase-1-build-notes-2026-10-25) and
-[Phase 2 build notes](#phase-2-build-notes-2026-10-25) list where the build differs from this plan).
-Phase 3 is next. Planned 2026-10-22.
+Status: **phases 0, 1, 2 and 3 done** (2026-10-26): the engine spike is `examples/harness_spike.rs`
+([Phase 0 results](#phase-0-results-2026-10-25)); the single-node engine, the correlation and the
+cluster are `src/harness/` ([Phase 1 build notes](#phase-1-build-notes-2026-10-25),
+[Phase 2 build notes](#phase-2-build-notes-2026-10-25) and
+[Phase 3 build notes](#phase-3-build-notes-2026-10-26) list where the build differs from this plan).
+Phase 3b is next. Planned 2026-10-22.
 
-> **Build marker (2026-10-25): START HERE.** Phases 0, 1 and 2 are done. Approved scope for the next
-> session is phase 3 (section 15), the cluster: the coordinator with join and heartbeat routes, leases,
-> clock sync, the rate split by capacity, synchronised starts, merged histograms and reports, upstream
-> export, the headless env for clusters and `on-quorum`. Build on what exists: `src/harness/correlate.rs`
-> holds the run key and the server registry (`Correlator::register` is what a heartbeat assignment calls
-> on a server node), `engine.rs` reports cumulative counters and `hdrhistogram`s per run (ship them as
-> deltas in heartbeats), `report.rs` has the merge-ready shapes. Keep the one-model rule: new parameters
-> (`scale.client_nodes`, `server_nodes`, ...) go into `scenario.rs` (model, validation, `schema()`), and
-> the parity tests cover the MCP tool schemas and the console builder.
+> **Build marker (2026-10-26): START HERE.** Phases 0 to 3 are done. Approved scope for the next
+> session is phase 3b (section 15), leadership and failover: eligibility (`RUSTYBIN_HARNESS_CONTROL_URL`,
+> `RUSTYBIN_HARNESS_LEADER`), work reports and the succession list, the replicated snapshot with
+> checkpoints, the vote and announce routes, terms and fencing, `GET .../leader`, load shedding and the
+> re-split on promotion. Build on what exists: `src/harness/cluster.rs` (the leader: `Coordinator`,
+> `Cluster`, `ClusterRun`; every answer already carries `Leader { node_id, term }`, fixed at term 1),
+> `member.rs` (the agent: join, heartbeat, the lease, the clock estimate; a `Link` is HTTP or in
+> process), `wire.rs` (the protocol). Nodes already report cumulative stats, so a new leader can take
+> over from the last checkpoint. Keep the one-model rule for new parameters (`leader_sheds_load`).
 >
 > Keep this status line and `docs/src/roadmap.md` ("Next") updated as phases land. Commit as oliwynn.
 
@@ -909,6 +910,63 @@ What phase 2 built, and where it differs from sections 7, 8 and 12:
   every class and `lost` are counted exactly against its counters, that the overhead matches its delay,
   that a stripped tag reads as `gateway`, that a rewritten path and removed headers are reported, that
   spoofed markers are rejected, that sampling holds, and that the shaped endpoint follows its profile.
+
+### Phase 3 build notes (2026-10-26)
+
+What phase 3 built, and where it differs from sections 5, 9 and 10:
+
+- **Files**: `cluster.rs` (the leader: `Coordinator` with the clusters this node leads, `Cluster` with
+  members, runs and a version that wakes long polls, `ClusterRun` with the split, the merge and the
+  report), `member.rs` (the agent on every member: join, heartbeat loop, lease, clock estimate, starting
+  its assignment, answering the `lost` lookup), `wire.rs` (join, heartbeat and assignment shapes),
+  `cluster_tests.rs` (several `start_with_state` servers in one process).
+- **Who leads**: creating a cluster needs the `coordinator` role. The node it was created on leads it,
+  term 1, with no failover (`failover: unavailable` in `GET .../clusters/{id}`). A coordinator that also
+  has the client or server role joins its own cluster over an in-process link (no HTTP), so one node can
+  be a whole cluster. A node is a member of one cluster at a time and leads at most 4.
+- **Credentials**: only the join token's SHA-256 is kept. A node credential is an HMAC of the cluster
+  secret over cluster, node id and a per-join incarnation, recomputed on every heartbeat, never stored.
+  A rejoin with the same node id replaces the old member. The node routes (`.../nodes`,
+  `.../nodes/{node}/heartbeat`, POST only, `harness::is_node_path`) skip the control-plane auth, the key
+  layer and the plan limits: the token and the credential are their authentication.
+- **Heartbeats**: a long poll of up to 10 s (capped below the time-to-headers timeout) that the leader
+  answers at once when the cluster version changes; while a node sends load it heartbeats every lease /
+  4 (100 ms to 1 s) with `wait_ms: 0`. Stats are **cumulative** from the start (the leader replaces the
+  node's last stats, so a lost or repeated heartbeat never double counts); only timeline buckets the
+  leader has not acknowledged travel. Histograms go as exact bucket lists (varint deltas, deflate,
+  base64; bounded on decode), so the merge equals a merge in one process.
+- **Clock**: NTP-style stamps on join and every heartbeat; the node keeps the 8 latest samples and uses
+  the one with the shortest round trip (offset, half the round trip as error bound) and reports it to
+  the leader. The synchronised start is `now + 4 x worst error + 300 ms`, clamped to 0.5 to 5 s, sent
+  on the leader's clock and converted by each node.
+- **The split**: by declared `max_rate` (capped by `scale.max_rate_per_node`), as cumulative intervals
+  `[from, to)` of 0 to 1 (`engine::Share`). Rates scale by the fraction; closed-model users and virtual
+  clients use cumulative rounding so the nodes' users add up to the pattern exactly and their virtual
+  clients are disjoint ranges. Submitting validates one share against the leader's caps; starting
+  refuses (409) when a node's share is over its cap or the quorum is missing. Each node validates its
+  part against its own caps and pins targets against its own allowlist; a refusal shows as a `failed`
+  node in the report.
+- **Lost, cluster-wide**: when every client has sent its final stats (or is gone, or a deadline passed),
+  the run goes to `collecting`: the leader sends each server node the failed sequence numbers per client
+  node (at most 65536 per node, the rest `untracked`) and each answers which it saw. The report's
+  `cluster.lost_check` says `complete` or why `lost` is a lower bound.
+- **Verification**: a cluster has its own verification token. Members serve it at
+  `/.well-known/rustybin-harness` and clients verify targets against it, so a gateway routing to any
+  server node of the cluster passes.
+- **Redirects**: controller routes asked on a member that does not lead the cluster answer `307` with
+  `Location`, `X-Rustybin-Harness-Leader: <node>; term=1` and a JSON body naming the leader.
+- **Shutdown**: a member leaves on shutdown (its runs stop, the leader marks it `left`) and the leader
+  releases held heartbeats, so a graceful shutdown never waits for a long poll.
+- **Not built yet**: `GET .../leader`, elections and terms (3b); the run's SSE feed, `PATCH`, preview and
+  saved scenarios (phase 4); the CLI `coordinator` subcommand (headless env covers it); an MCP
+  `get_leader` tool (3b). MCP gained `create_cluster`, `list_cluster_nodes`, `export_upstreams`,
+  `start_run` and an optional `cluster_id` on `create_run`, `get_run`, `stop_run`, `get_run_report`;
+  the console a cluster card (members, health, clock offsets, upstreams, create, run on the cluster).
+- **Tests**: join and wrong tokens, quorum and the split (1:3 capacities give 50 / 150 of 200 requests,
+  disjoint virtual clients), the merged totals equal to the nodes' and the test proxy's counts (now a
+  round-robin pool over two server nodes) with `lost` exact, upstream export, redirects, lease expiry
+  stopping the only client within the lease after the leader is gone, an assignment outside a node's
+  allowlist, headless `on-quorum`, env parsing, and the MCP tools on a one-node cluster.
 
 ### Estimate (2026-10-22)
 

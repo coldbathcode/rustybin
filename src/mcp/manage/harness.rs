@@ -168,6 +168,9 @@ pub async fn create_run(ctx: &CallCtx, access: &Access, args: &Value, params: &V
         Ok(h) => h,
         Err(e) => return e,
     };
+    if arg_str(args, "cluster_id").is_some() {
+        return create_cluster_run(ctx, access, &h, args);
+    }
     let mut scenario = match scenario_arg(args) {
         Ok(s) => s,
         Err(e) => return e,
@@ -244,6 +247,9 @@ pub fn get_run(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
         Ok(h) => h,
         Err(e) => return e,
     };
+    if arg_str(args, "cluster_id").is_some() {
+        return get_cluster_run(ctx, &h, args);
+    }
     let Some(id) = arg_str(args, "run_id") else {
         return err("run_id is required");
     };
@@ -283,6 +289,9 @@ pub fn stop_run(ctx: &CallCtx, args: &Value) -> Value {
         Ok(h) => h,
         Err(e) => return e,
     };
+    if arg_str(args, "cluster_id").is_some() {
+        return stop_cluster_run(ctx, &h, args);
+    }
     let Some(id) = arg_str(args, "run_id") else {
         return err("run_id is required");
     };
@@ -313,14 +322,25 @@ pub fn get_run_report(ctx: &CallCtx, args: &Value) -> Value {
     let Some(id) = arg_str(args, "run_id") else {
         return err("run_id is required");
     };
-    let Some(run) = h.run(id) else {
-        return err(format!("no run {id:?} on this node"));
-    };
-    let Some(report) = run.report() else {
-        return err(format!(
-            "run {id} is {}: the report comes when it finishes (poll get_run)",
-            run.state().as_str()
-        ));
+    let mut cluster_run = None;
+    let local;
+    let report = if arg_str(args, "cluster_id").is_some() {
+        match cluster_report(&h, args, &mut cluster_run) {
+            Ok(r) => r,
+            Err(e) => return e,
+        }
+    } else {
+        let Some(run) = h.run(id) else {
+            return err(format!("no run {id:?} on this node"));
+        };
+        local = run;
+        let Some(report) = local.report() else {
+            return err(format!(
+                "run {id} is {}: the report comes when it finishes (poll get_run)",
+                local.state().as_str()
+            ));
+        };
+        report
     };
     let format = arg_str(args, "format").unwrap_or("json");
     let structured = match format {
@@ -407,4 +427,318 @@ pub fn harness_stop(ctx: &CallCtx) -> Value {
         },
         json!({ "stopped": stopped, "kill_switch": true }),
     )
+}
+
+// ── Clusters (phase 3) ──────────────────────────────────────────────
+
+/// The cluster `cluster_id` names, led by this node. On a member of a
+/// cluster another node leads, the error names the leader to call instead.
+fn cluster_of(
+    h: &Harness,
+    args: &Value,
+) -> Result<std::sync::Arc<harness::cluster::Cluster>, Value> {
+    let Some(id) = arg_str(args, "cluster_id") else {
+        return Err(err("cluster_id is required"));
+    };
+    if let Some(c) = h.coordinator.get(id) {
+        return Ok(c);
+    }
+    if let Some(m) = h.membership().filter(|m| m.cluster_id == id) {
+        if let Some(url) = &m.url {
+            return Err(err(format!(
+                "this node is a member of cluster {id}, not its leader: call the leader's management MCP server (its cluster URL is {url})"
+            )));
+        }
+    }
+    Err(err(format!("no cluster {id:?} on this node")))
+}
+
+fn run_error_value(e: harness::RunError) -> Value {
+    let mut v = err(format!(
+        "{} ({}){}",
+        e.error,
+        e.status,
+        if e.problems.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", e.problems.join("; "))
+        }
+    ));
+    v["structuredContent"] = e.to_json();
+    v
+}
+
+/// `create_cluster`: a cluster led by this node. The join token is in the
+/// structured result only, never in the text.
+pub async fn create_cluster(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
+    let h = match harness_of(ctx) {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
+    let mut body = args.clone();
+    if let Value::Object(m) = &mut body {
+        m.remove("confirm");
+    }
+    let req: harness::cluster::CreateCluster = match serde_json::from_value(body) {
+        Ok(r) => r,
+        Err(e) => return err(format!("invalid arguments: {e}")),
+    };
+    match harness::create_cluster(&h, req).await {
+        Ok((cluster, token)) => {
+            let base = access.links.base_url();
+            let mut v = cluster.describe();
+            v["join_token"] = json!(token);
+            v["join_url"] = json!(format!("{base}{PREFIX}/clusters/{}", cluster.id));
+            ok(
+                ctx,
+                format!(
+                    "Cluster {} created, led by node {} (lease {} ms). Nodes join with RUSTYBIN_HARNESS_JOIN={base}{PREFIX}/clusters/{} and the join token in structuredContent.join_token (shown once), or POST {PREFIX}/join on each node. Then create_run with cluster_id, and start_run.",
+                    cluster.id,
+                    cluster.leader,
+                    cluster.lease.as_millis(),
+                    cluster.id
+                ),
+                v,
+            )
+        }
+        Err(e) => run_error_value(e),
+    }
+}
+
+/// `list_cluster_nodes`.
+pub fn list_cluster_nodes(ctx: &CallCtx, args: &Value) -> Value {
+    let h = match harness_of(ctx) {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
+    let c = match cluster_of(&h, args) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let v = c.describe();
+    let members = v["members"].as_array().cloned().unwrap_or_default();
+    let text = format!(
+        "Cluster {} (leader {}, term 1): {} member(s), {} client(s) and {} server(s) alive{}.",
+        c.id,
+        c.leader,
+        members.len(),
+        v["alive"]["clients"],
+        v["alive"]["servers"],
+        members
+            .iter()
+            .map(|m| format!(
+                "; {} [{}] {}",
+                m["node_id"].as_str().unwrap_or(""),
+                m["roles"]
+                    .as_array()
+                    .map(|r| r
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", "))
+                    .unwrap_or_default(),
+                m["health"].as_str().unwrap_or("")
+            ))
+            .collect::<String>()
+    );
+    ok(ctx, text, v)
+}
+
+/// `export_upstreams`: the server nodes' URLs for the gateway's pool.
+pub fn export_upstreams(ctx: &CallCtx, args: &Value) -> Value {
+    let h = match harness_of(ctx) {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
+    let c = match cluster_of(&h, args) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let ups = c.upstreams();
+    ok(
+        ctx,
+        if ups.is_empty() {
+            format!(
+                "Cluster {} has no server node with an advertised URL yet.",
+                c.id
+            )
+        } else {
+            format!(
+                "Point the gateway's upstream pool at the {} server node(s) of cluster {}: {}.",
+                ups.len(),
+                c.id,
+                ups.join(", ")
+            )
+        },
+        json!({ "cluster_id": c.id, "upstreams": ups }),
+    )
+}
+
+/// `create_run` with `cluster_id`: submit the scenario to the cluster
+/// (validated, not started; nothing is sent until `start_run`).
+pub fn create_cluster_run(ctx: &CallCtx, access: &Access, h: &Harness, args: &Value) -> Value {
+    let c = match cluster_of(h, args) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let scenario = match scenario_arg(args) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match c.create_run(scenario, &h.caps()) {
+        Ok(run) => {
+            let q = c.quorum(&run.scenario);
+            let base = access.links.base_url();
+            let mut v = c.run_snapshot(&run);
+            v["quorum"] = json!(q);
+            v["urls"] =
+                json!({ "self": format!("{base}{PREFIX}/clusters/{}/runs/{}", c.id, run.id) });
+            ok(
+                ctx,
+                format!(
+                    "Run {} submitted to cluster {} (not started). Quorum: {} of {} client node(s), {} of {} server node(s){}. start_run starts it; it asks the user to confirm.",
+                    run.id,
+                    c.id,
+                    q.clients,
+                    q.need_clients,
+                    q.servers,
+                    q.need_servers,
+                    if q.met { ", met" } else { ", waiting" }
+                ),
+                v,
+            )
+        }
+        Err(e) => run_error_value(e),
+    }
+}
+
+/// `start_run`: start a cluster run. Sends real traffic: confirmed.
+pub async fn start_run(ctx: &CallCtx, args: &Value, params: &Value) -> Value {
+    let h = match harness_of(ctx) {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
+    let c = match cluster_of(&h, args) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(id) = arg_str(args, "run_id") else {
+        return err("run_id is required");
+    };
+    let Some(run) = c.run(id) else {
+        return err(format!("no run {id:?} in cluster {}", c.id));
+    };
+    let summary = run.scenario.summary();
+    let targets: Vec<&str> = run
+        .scenario
+        .targets
+        .iter()
+        .map(|t| t.url.as_str())
+        .collect();
+    let action = format!(
+        "start cluster run {} ({}) of cluster {} against {} ({:.0} s, peak {:.0} requests/s over the client nodes)",
+        run.id,
+        run.scenario.name,
+        c.id,
+        targets.join(", "),
+        summary.duration_secs,
+        summary.peak_rate
+    );
+    match confirm(ctx, "start_run", args, params, &action).await {
+        Confirm::Yes => {}
+        Confirm::Answer(v) => return v,
+    }
+    match c.start_run(id) {
+        Ok(run) => ok(
+            ctx,
+            format!(
+                "Cluster run {} is starting on every client node at once. Poll get_run (with cluster_id) until the state is finished, then get_run_report.",
+                run.id
+            ),
+            c.run_snapshot(&run),
+        ),
+        Err(e) => run_error_value(e),
+    }
+}
+
+/// `get_run` with `cluster_id`.
+pub fn get_cluster_run(ctx: &CallCtx, h: &Harness, args: &Value) -> Value {
+    let c = match cluster_of(h, args) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(id) = arg_str(args, "run_id") else {
+        return err("run_id is required");
+    };
+    let Some(run) = c.run(id) else {
+        return err(format!("no run {id:?} in cluster {}", c.id));
+    };
+    let mut v = c.run_snapshot(&run);
+    v["quorum"] = json!(c.quorum(&run.scenario));
+    let text = format!(
+        "Cluster run {} ({}) of cluster {} is {}: {} sent, {} completed, {} errors so far over {} client node(s){}.",
+        run.id,
+        run.scenario.name,
+        c.id,
+        run.state().as_str(),
+        v["sent"],
+        v["completed"],
+        v["errors"],
+        v["nodes"]
+            .as_array()
+            .map_or(0, |n| n.iter().filter(|x| x["role"] == "client").count()),
+        if run.report().is_some() { ", report ready" } else { "" }
+    );
+    ok(ctx, text, v)
+}
+
+/// `stop_run` with `cluster_id`.
+pub fn stop_cluster_run(ctx: &CallCtx, h: &Harness, args: &Value) -> Value {
+    let c = match cluster_of(h, args) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(id) = arg_str(args, "run_id") else {
+        return err("run_id is required");
+    };
+    match c.stop_run(id, "user") {
+        Ok((run, changed)) => {
+            ok(
+                ctx,
+                if changed {
+                    format!("Cluster run {id} is stopping on every client node; the merged report follows.")
+                } else {
+                    format!(
+                        "Cluster run {id} is {}: nothing to stop.",
+                        run.state().as_str()
+                    )
+                },
+                json!({ "run_id": id, "state": run.state().as_str(), "stopped": changed }),
+            )
+        }
+        Err(e) => run_error_value(e),
+    }
+}
+
+/// The finished report of a cluster run, if `cluster_id` is given.
+pub fn cluster_report<'a>(
+    h: &Harness,
+    args: &Value,
+    keep: &'a mut Option<std::sync::Arc<harness::cluster::ClusterRun>>,
+) -> Result<&'a harness::report::Report, Value> {
+    let c = cluster_of(h, args)?;
+    let Some(id) = arg_str(args, "run_id") else {
+        return Err(err("run_id is required"));
+    };
+    let Some(run) = c.run(id) else {
+        return Err(err(format!("no run {id:?} in cluster {}", c.id)));
+    };
+    c.tick();
+    let run = keep.insert(run);
+    run.report().ok_or_else(|| {
+        err(format!(
+            "cluster run {id} is {}: the report comes when it finishes (poll get_run)",
+            run.state().as_str()
+        ))
+    })
 }

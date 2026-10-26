@@ -188,6 +188,19 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
         .await
         .map_err(|e| format!("failed to bind HTTP listener on {http_bind}: {e}"))?;
     let http_addr = http_listener.local_addr()?;
+    // Harness clusters (RUSTYBIN_HARNESS_CLUSTER, RUSTYBIN_HARNESS_JOIN):
+    // a coordinator creates its cluster, a member starts joining. A bad
+    // setting is fatal like the other harness startup checks.
+    if let Some(h) = &state.harness {
+        h.set_bound(http_addr);
+        crate::harness::start_cluster_from_config(h).await?;
+        let h = h.clone();
+        let rx = shutdown.subscribe();
+        tokio::spawn(async move {
+            wait_for(rx).await;
+            h.shutdown_clusters().await;
+        });
+    }
 
     tracing::info!(
         "rustybin v{} starting | instance={} | public_mode={} | keys={} | plan={} | control_auth={} | grpc_on_http={}",

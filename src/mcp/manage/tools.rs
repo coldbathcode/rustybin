@@ -96,6 +96,10 @@ fn run_id_prop() -> Value {
     json!({ "type": "string", "description": "The run id (from create_run or list_runs)" })
 }
 
+fn cluster_id_prop() -> Value {
+    json!({ "type": "string", "description": "A cluster this node leads (create_cluster): the run is the cluster's, split over its client nodes. Omit for a run on this node alone." })
+}
+
 pub static TOOLS: &[ToolDef] = &[
     // ── Instance ──
     tool!("get_instance", "Instance", "What this Rustybin is: version, modes (public, shared, hosted, self-service), control auth, limits, the public configuration view, the caller's rights and the console and docs URLs. Start here.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
@@ -271,20 +275,41 @@ pub static TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "create_run",
         title: "Start a harness run",
-        description: "Validate a scenario, pin and (when configured) verify its targets and START SENDING LOAD to them from this node. Targets must be in RUSTYBIN_HARNESS_TARGETS; one run at a time per node. Asks the user to confirm (elicitation) or needs \"confirm\": true, which you set only after the user agreed to this scenario against these targets. Then poll get_run until report_ready and call get_run_report.",
+        description: "Validate a scenario, pin and (when configured) verify its targets and START SENDING LOAD to them from this node. Targets must be in RUSTYBIN_HARNESS_TARGETS; one run at a time per node. Asks the user to confirm (elicitation) or needs \"confirm\": true, which you set only after the user agreed to this scenario against these targets. Then poll get_run until report_ready and call get_run_report. With cluster_id the scenario is only submitted to that cluster (validated, nothing sent, no confirmation): start it with start_run.",
         right: Right::Harness,
         read_only: false,
         destructive: false,
         idempotent: false,
         confirm: true,
         open_world: true,
-        input_schema: || obj(json!({ "scenario": scenario_prop(), "confirm": confirm_prop() }), &["scenario"]),
+        input_schema: || obj(json!({ "scenario": scenario_prop(), "cluster_id": cluster_id_prop(), "confirm": confirm_prop() }), &["scenario"]),
+    },
+    tool!("create_cluster", "Create a cluster", "Create a harness cluster led by this node (coordinator role): client nodes send the load, server nodes are the gateway's upstreams, the rate is split over the clients by capacity and one report is merged. Returns the join URL and the join token (once) that nodes join with (RUSTYBIN_HARNESS_JOIN and RUSTYBIN_HARNESS_JOIN_TOKEN, or POST /_rustybin/harness/join).", Right::Harness, ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
+        "cluster_id": { "type": "string", "description": "Letters, digits, . _ - (default: random)" },
+        "min_nodes": { "type": "object", "description": "Nodes a run waits for, per role", "properties": { "client": { "type": "integer", "minimum": 0 }, "server": { "type": "integer", "minimum": 0 } }, "additionalProperties": false },
+        "lease": { "type": "string", "description": "How long a client keeps sending without an answer from the leader (500ms to 60s, default 5s)" },
+        "join_token": { "type": "string", "description": "A join secret to use (16 to 256 characters); random when absent" }
+    }), &[])),
+    tool!("list_cluster_nodes", "Cluster nodes", "A cluster's members: roles, health, declared capacity, clock offset and error bound, in-flight requests; the leader, the current run and recent membership events.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "cluster_id": cluster_id_prop() }), &["cluster_id"])),
+    tool!("export_upstreams", "Export upstreams", "The server nodes' advertised URLs of a cluster, to configure the gateway's upstream pool.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "cluster_id": cluster_id_prop() }), &["cluster_id"])),
+    ToolDef {
+        name: "start_run",
+        title: "Start a cluster run",
+        description: "START SENDING LOAD from every client node of a cluster at once: the run submitted with create_run (cluster_id), once the nodes it waits for have joined. Asks the user to confirm (elicitation) or needs \"confirm\": true, which you set only after the user agreed. Then poll get_run (with cluster_id) until the state is finished and call get_run_report.",
+        right: Right::Harness,
+        read_only: false,
+        destructive: false,
+        idempotent: false,
+        confirm: true,
+        open_world: true,
+        input_schema: || obj(json!({ "cluster_id": cluster_id_prop(), "run_id": run_id_prop(), "confirm": confirm_prop() }), &["cluster_id", "run_id"]),
     },
     tool!("list_runs", "List runs", "The harness runs this node keeps (newest first) and the active one.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
-    tool!("get_run", "Run status", "Live view of a harness run: progress, counts (sent, completed, ok, errors, not sent, in flight), latency so far, the last second, saturation, report_ready.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "run_id": run_id_prop() }), &["run_id"])),
-    tool!("stop_run", "Stop a run", "Stop a harness run early: it drains its requests and reports.", Right::Harness, ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "run_id": run_id_prop() }), &["run_id"])),
+    tool!("get_run", "Run status", "Live view of a harness run: progress, counts (sent, completed, ok, errors, not sent, in flight), latency so far, the last second, saturation, report_ready.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "run_id": run_id_prop(), "cluster_id": cluster_id_prop() }), &["run_id"])),
+    tool!("stop_run", "Stop a run", "Stop a harness run early: it drains its requests and reports. With cluster_id, every client node of the cluster run stops.", Right::Harness, ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "run_id": run_id_prop(), "cluster_id": cluster_id_prop() }), &["run_id"])),
     tool!("get_run_report", "Run report", "The final report of a finished harness run: totals and classes (upstream, gateway by status, transport, lost), latency percentiles (from the intended and the actual send time, upstream processing, gateway overhead), per layer and per target, the server side (arrivals, what the gateway changed), the timeline, saturation, thresholds with pass or fail, samples with their X-Request-Id. format json (default), text or junit.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "run_id": run_id_prop(),
+        "cluster_id": cluster_id_prop(),
         "format": { "type": "string", "enum": ["json", "text", "junit"], "default": "json" }
     }), &["run_id"])),
     tool!("harness_stop", "Kill switch", "Stop every harness run on this node now (no confirmation: it only stops load).", Right::Harness, ro=false, destructive=false, idem=true, confirm=false, no_args),
@@ -625,6 +650,10 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         "stop_run" => harness::stop_run(ctx, &args),
         "get_run_report" => harness::get_run_report(ctx, &args),
         "harness_stop" => harness::harness_stop(ctx),
+        "create_cluster" => harness::create_cluster(ctx, access, &args).await,
+        "list_cluster_nodes" => harness::list_cluster_nodes(ctx, &args),
+        "export_upstreams" => harness::export_upstreams(ctx, &args),
+        "start_run" => harness::start_run(ctx, &args, params).await,
         _ => return Err(RpcError::invalid_params(format!("Unknown tool: {name}"))),
     };
     let outcome = if result.get("isError").and_then(Value::as_bool) == Some(true) {

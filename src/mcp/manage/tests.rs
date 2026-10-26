@@ -1285,6 +1285,129 @@ async fn harness_tools_when_off_and_on() {
 }
 
 #[tokio::test]
+async fn harness_cluster_tools() {
+    // A coordinator that is also a client and a server: a cluster of one,
+    // the node joined to itself over the in-process link.
+    let mut c = harness_config();
+    c.harness.roles.push(crate::harness::Role::Coordinator);
+    let state = test_state_with(c);
+    let server = crate::server::start_with_state(state.clone())
+        .await
+        .expect("server");
+    let app = test_app_with(state.clone());
+    let url = format!("http://{}", server.http_addr);
+    let r = tool(
+        &app,
+        &[],
+        "create_cluster",
+        json!({ "cluster_id": "mcp-1", "lease": "2s" }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    let token = r["structuredContent"]["join_token"].as_str().unwrap();
+    assert!(
+        !text_of(&r).contains(token),
+        "the join token stays out of the text"
+    );
+    let r = tool(
+        &app,
+        &[],
+        "list_cluster_nodes",
+        json!({ "cluster_id": "mcp-1" }),
+    )
+    .await;
+    assert_eq!(
+        r["structuredContent"]["members"].as_array().unwrap().len(),
+        1,
+        "{r}"
+    );
+    let r = tool(
+        &app,
+        &[],
+        "export_upstreams",
+        json!({ "cluster_id": "mcp-1" }),
+    )
+    .await;
+    assert_eq!(r["structuredContent"]["upstreams"], json!([url]));
+    // Submitting sends nothing and needs no confirmation.
+    let scenario = json!({ "name": "mcp-cluster", "target": url, "source": { "request": { "path": "/status/200" } }, "pattern": { "type": "constant", "rate": 20, "for": "1s" }, "scale": { "server_nodes": 1 }, "thresholds": { "error_rate": 0 } });
+    let r = tool(
+        &app,
+        &[],
+        "create_run",
+        json!({ "scenario": scenario, "cluster_id": "mcp-1" }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["quorum"]["met"], true);
+    let id = r["structuredContent"]["run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Starting sends load: confirmation first.
+    let r = tool(
+        &app,
+        &[],
+        "start_run",
+        json!({ "cluster_id": "mcp-1", "run_id": id }),
+    )
+    .await;
+    assert!(is_error(&r));
+    assert!(text_of(&r).contains("confirm"));
+    let r = tool(
+        &app,
+        &[],
+        "start_run",
+        json!({ "cluster_id": "mcp-1", "run_id": id, "confirm": true }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    for _ in 0..200 {
+        let r = tool(
+            &app,
+            &[],
+            "get_run",
+            json!({ "run_id": id, "cluster_id": "mcp-1" }),
+        )
+        .await;
+        if r["structuredContent"]["report_ready"] == true {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let r = tool(
+        &app,
+        &[],
+        "get_run_report",
+        json!({ "run_id": id, "cluster_id": "mcp-1" }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["passed"], true);
+    assert_eq!(r["structuredContent"]["cluster"]["cluster_id"], "mcp-1");
+    assert_eq!(r["structuredContent"]["totals"]["sent"], 20);
+    assert_eq!(r["structuredContent"]["server"]["arrivals"], 20);
+    let r = tool(
+        &app,
+        &[],
+        "stop_run",
+        json!({ "run_id": id, "cluster_id": "mcp-1" }),
+    )
+    .await;
+    assert_eq!(r["structuredContent"]["stopped"], false);
+    let r = tool(
+        &app,
+        &[],
+        "list_cluster_nodes",
+        json!({ "cluster_id": "nope" }),
+    )
+    .await;
+    assert!(is_error(&r));
+    server.shutdown();
+    let _ = server.wait().await;
+}
+
+#[tokio::test]
 async fn harness_tools_follow_the_control_scopes() {
     let mut c = jwt_config();
     c.harness.enabled = true;

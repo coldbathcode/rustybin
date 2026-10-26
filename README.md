@@ -544,6 +544,18 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | POST | `/_rustybin/harness/runs/{run}/stop` | Stop a run (it drains and reports) |
 | GET | `/_rustybin/harness/runs/{run}/report` | Final report (JSON; ?format=text or junit) |
 | POST | `/_rustybin/harness/stop` | Kill switch: stop all load on this node now |
+| POST | `/_rustybin/harness/join` | Join a cluster: {url, join_token, advertise?} (orchestrated) |
+| POST | `/_rustybin/harness/leave` | Leave the cluster (this node's runs of it stop) |
+| GET POST | `/_rustybin/harness/clusters` | Clusters this node leads; POST {cluster_id?, min_nodes?, lease?, join_token?} creates one |
+| GET DELETE | `/_rustybin/harness/clusters/{id}` | A cluster: members, roles, health, clock offsets, the current run |
+| GET | `/_rustybin/harness/clusters/{id}/upstreams` | The server nodes' advertised URLs, for the gateway's upstream pool |
+| POST | `/_rustybin/harness/clusters/{id}/nodes` | Node route: join with the join token (bearer); returns a node credential and a lease |
+| POST | `/_rustybin/harness/clusters/{id}/nodes/{node}/heartbeat` | Node route: heartbeat with the node credential; a long poll carrying stats, returning assignments |
+| GET POST | `/_rustybin/harness/clusters/{id}/runs` | Cluster runs; POST a scenario to submit it (validated, not started) |
+| GET | `/_rustybin/harness/clusters/{id}/runs/{run}` | Live merged stats of a cluster run, with its quorum |
+| POST | `/_rustybin/harness/clusters/{id}/runs/{run}/start` | Start a cluster run: the rate split by capacity and a synchronised start (409 without the quorum) |
+| POST | `/_rustybin/harness/clusters/{id}/runs/{run}/stop` | Stop a cluster run on every client node |
+| GET | `/_rustybin/harness/clusters/{id}/runs/{run}/report` | The merged report of a cluster run (JSON; ?format=text or junit) |
 | ANY | `/harness` | Shaped upstream: answers with the run's server profile (latency, status mix, body) |
 | ANY | `/harness/{*path}` | Shaped upstream at any path: a marked request gets its run's profile, anything else the default |
 | GET | `/.well-known/rustybin-harness` | This node's target verification token (RUSTYBIN_HARNESS_VERIFY_TARGETS) |

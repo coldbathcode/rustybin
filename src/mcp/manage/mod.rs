@@ -72,7 +72,9 @@ pub const INSTRUCTIONS: &str = "This server manages one Rustybin instance: an HT
     change the mock. Harness mode (harness_status) makes this instance a load client: \
     validate_scenario first, then create_run, which sends real traffic to the scenario's targets \
     and asks the user to confirm; get_run and get_run_report follow it, stop_run and harness_stop \
-    stop it.";
+    stop it. A cluster spreads the load over several nodes: create_cluster on the coordinator, \
+    nodes join with its join token, create_run with cluster_id submits the scenario and start_run \
+    (confirmed) starts it on every client node at once.";
 
 /// The router: `POST, GET, DELETE /_rustybin/mcp`.
 pub fn router(state: &AppState) -> Router<AppState> {

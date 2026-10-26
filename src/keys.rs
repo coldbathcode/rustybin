@@ -775,6 +775,8 @@ pub fn is_exempt(method: &Method, path: &str) -> bool {
         // agent reads before it holds any credential.
         || (crate::control_oauth::is_discovery_path(path)
             && (method == Method::GET || method == Method::HEAD))
+        // Harness cluster members: the join token or node credential.
+        || crate::harness::is_node_path(method, path)
 }
 
 fn is_control(path: &str) -> bool {

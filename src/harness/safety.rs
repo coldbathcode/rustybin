@@ -554,6 +554,90 @@ impl KillSwitch {
     }
 }
 
+/// The dead man's switch of a cluster run (plan section 9): a client keeps
+/// sending only while its leader answers heartbeats. Every answer renews
+/// the lease; a run whose lease expired stops (`lease_expired`), so a lost
+/// leader, a partition or a dead coordinator never leaves a client sending.
+pub struct Lease {
+    period: Duration,
+    renewed: std::sync::Mutex<std::time::Instant>,
+}
+
+impl Lease {
+    pub fn new(period: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            period,
+            renewed: std::sync::Mutex::new(std::time::Instant::now()),
+        })
+    }
+
+    pub fn period(&self) -> Duration {
+        self.period
+    }
+
+    pub fn renew(&self) {
+        *self.renewed.lock().unwrap_or_else(|p| p.into_inner()) = std::time::Instant::now();
+    }
+
+    /// Time since the last renewal.
+    pub fn age(&self) -> Duration {
+        self.renewed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .elapsed()
+    }
+
+    pub fn expired(&self) -> bool {
+        self.age() > self.period
+    }
+}
+
+/// Check a coordinator URL before joining: `http` or `https`, no
+/// credentials, and never a host that resolves to a forbidden address
+/// (link-local, cloud metadata, unspecified, multicast). Joining sends a few
+/// small requests to the URL a controller names, never to those places.
+pub async fn check_join_url(url: &str) -> Result<(), String> {
+    if url.len() > 2048 {
+        return Err("the join URL is longer than 2048 characters".into());
+    }
+    let parsed = reqwest::Url::parse(url.trim()).map_err(|e| format!("invalid join URL: {e}"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("the join URL must use http or https".into());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("the join URL must not contain credentials".into());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or("the join URL has no host")?
+        .trim_matches(['[', ']'])
+        .to_string();
+    let port = parsed
+        .port_or_known_default()
+        .ok_or("the join URL has no port")?;
+    let resolved = tokio::time::timeout(
+        RESOLVE_TIMEOUT,
+        tokio::net::lookup_host((host.as_str(), port)),
+    )
+    .await
+    .map_err(|_| format!("resolving {host} timed out"))?
+    .map_err(|e| format!("cannot resolve {host}: {e}"))?;
+    let mut any = false;
+    for addr in resolved.take(MAX_PINNED_ADDRS) {
+        any = true;
+        if let Some(why) = forbidden_address(addr.ip()) {
+            return Err(format!(
+                "{host} resolves to {} ({why}): never a coordinator",
+                addr.ip()
+            ));
+        }
+    }
+    if !any {
+        return Err(format!("{host} does not resolve"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

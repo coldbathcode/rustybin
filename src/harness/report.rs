@@ -20,6 +20,199 @@ use super::scenario::{Caps, Thresholds};
 pub const MAX_SAMPLES: usize = 1_000;
 /// Scheduler lag p99 over which a one-second bucket counts as saturated.
 pub const LAG_SATURATION_MS: f64 = 5.0;
+/// Most numbers one encoded list may decode to (histogram buckets count
+/// twice: value and count).
+pub const MAX_WIRE_NUMBERS: usize = 1 << 21;
+/// Largest inflated size of one encoded list.
+pub const MAX_WIRE_INFLATED: usize = 16 * 1024 * 1024;
+
+/// Microsecond histogram, 1 us to 60 s, the shape every harness histogram
+/// has (so buckets from one node land in the same buckets on another).
+pub fn histogram(sigfig: u8) -> Histogram<u64> {
+    Histogram::new_with_bounds(1, 60_000_000, sigfig).unwrap_or_else(|_| {
+        // The bounds above are valid; this is never reached.
+        Histogram::new(2).unwrap_or_else(|_| unreachable!("histogram with 2 significant digits"))
+    })
+}
+
+// ── Wire encodings (cluster heartbeats) ─────────────────────────────
+
+/// Encode a list of numbers compactly: delta from the previous number
+/// (wrapping, so any order works), LEB128 varints, deflate, base64.
+pub fn encode_numbers(values: &[u64]) -> String {
+    use base64::Engine;
+    use std::io::Write;
+    if values.is_empty() {
+        return String::new();
+    }
+    let mut raw = Vec::with_capacity(values.len() * 2);
+    let mut prev = 0u64;
+    for &v in values {
+        let mut d = v.wrapping_sub(prev);
+        prev = v;
+        loop {
+            let byte = (d & 0x7f) as u8;
+            d >>= 7;
+            if d == 0 {
+                raw.push(byte);
+                break;
+            }
+            raw.push(byte | 0x80);
+        }
+    }
+    let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+    if enc.write_all(&raw).is_err() {
+        return String::new();
+    }
+    let packed = enc.finish().unwrap_or_default();
+    base64::engine::general_purpose::STANDARD_NO_PAD.encode(packed)
+}
+
+/// Decode [`encode_numbers`], refusing more than `max` numbers or an
+/// inflated size over [`MAX_WIRE_INFLATED`].
+pub fn decode_numbers(text: &str, max: usize) -> Result<Vec<u64>, String> {
+    use base64::Engine;
+    use std::io::Read;
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    let packed = base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(text.trim_end_matches('='))
+        .map_err(|_| "encoded numbers: not base64".to_string())?;
+    let mut raw = Vec::new();
+    flate2::read::DeflateDecoder::new(packed.as_slice())
+        .take(MAX_WIRE_INFLATED as u64 + 1)
+        .read_to_end(&mut raw)
+        .map_err(|_| "encoded numbers: not deflate".to_string())?;
+    if raw.len() > MAX_WIRE_INFLATED {
+        return Err("encoded numbers: too large".into());
+    }
+    let mut out = Vec::new();
+    let mut prev = 0u64;
+    let mut cur = 0u64;
+    let mut shift = 0u32;
+    for byte in raw {
+        if shift >= 64 {
+            return Err("encoded numbers: varint too long".into());
+        }
+        cur |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            prev = prev.wrapping_add(cur);
+            out.push(prev);
+            if out.len() > max {
+                return Err(format!("encoded numbers: more than {max}"));
+            }
+            cur = 0;
+            shift = 0;
+        } else {
+            shift += 7;
+        }
+    }
+    if shift != 0 {
+        return Err("encoded numbers: truncated".into());
+    }
+    Ok(out)
+}
+
+/// A histogram on the wire: its significant digits and every recorded
+/// bucket (highest equivalent value, count), encoded. Decoding into a
+/// histogram of the same shape restores the same buckets, so a merge on
+/// the coordinator equals a merge in one process: no percentile averaging.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireHist {
+    pub sigfig: u8,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub data: String,
+}
+
+impl WireHist {
+    pub fn encode(h: &Histogram<u64>) -> Self {
+        let mut flat = Vec::new();
+        for v in h.iter_recorded() {
+            flat.push(v.value_iterated_to());
+            flat.push(v.count_at_value());
+        }
+        Self {
+            sigfig: h.sigfig(),
+            data: encode_numbers(&flat),
+        }
+    }
+
+    /// Add the buckets into `into` (any histogram of the harness shape).
+    pub fn add_to(&self, into: &mut Histogram<u64>) -> Result<(), String> {
+        let flat = decode_numbers(&self.data, MAX_WIRE_NUMBERS)?;
+        if flat.len() % 2 != 0 {
+            return Err("histogram: odd number of values".into());
+        }
+        let high = into.high();
+        for pair in flat.as_chunks::<2>().0 {
+            let value = pair[0].clamp(1, high);
+            let _ = into.record_n(value, pair[1]);
+        }
+        Ok(())
+    }
+
+    /// The histogram itself (empty on a decoding error).
+    pub fn decode(&self) -> Histogram<u64> {
+        let mut h = histogram(self.sigfig.clamp(1, 5));
+        let _ = self.add_to(&mut h);
+        h
+    }
+}
+
+/// One node of a cluster run as the report shows it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct NodeReport {
+    pub node_id: String,
+    pub roles: Vec<String>,
+    /// Client nodes: the share of the cluster-wide rate (0 to 1).
+    #[serde(default)]
+    pub share: f64,
+    /// Client nodes: the virtual clients `[from, to)` this node ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtual_clients: Option<[u32; 2]>,
+    /// `finished`, `stopped`, `failed`, `lost` (no final stats), `server`.
+    pub state: String,
+    #[serde(default)]
+    pub sent: u64,
+    #[serde(default)]
+    pub completed: u64,
+    #[serde(default)]
+    pub errors: u64,
+    #[serde(default)]
+    pub saturated: bool,
+    /// Server nodes: marked requests that reached this node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrivals: Option<u64>,
+    /// The leader's clock minus this node's, and the error bound of that
+    /// estimate (half the best round trip), in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_offset_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_error_ms: Option<f64>,
+    /// How late the node started after the synchronised start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_lag_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// The cluster side of a report (`None` for a single-node run).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClusterReport {
+    pub cluster_id: String,
+    /// The node that led the run (the coordinator).
+    pub leader: String,
+    pub term: u64,
+    /// The synchronised start, on the leader's clock.
+    pub start_at: String,
+    pub nodes: Vec<NodeReport>,
+    /// The worst clock-sync error bound over the nodes, in milliseconds.
+    pub clock_error_ms: f64,
+    /// `complete` when every server node answered which failed requests it
+    /// saw; otherwise why `lost` is a lower bound.
+    pub lost_check: String,
+}
 
 /// Latency percentiles in milliseconds.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -356,6 +549,10 @@ pub struct Report {
     pub samples: Vec<Sample>,
     /// The normalised scenario (credential-looking header values redacted).
     pub scenario: Value,
+    /// A cluster run: the nodes, their shares and clocks, how `lost` was
+    /// checked. Absent on a single-node run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<ClusterReport>,
 }
 
 /// Evaluate the thresholds against what was measured. `arrivals` is what
@@ -500,6 +697,43 @@ impl Report {
                 target.pinned.join(", "),
                 if target.verified { ", verified" } else { "" }
             ));
+        }
+        if let Some(c) = &self.cluster {
+            out.push_str(&format!(
+                "\nCluster {} (leader {}, term {}), start at {}, clock error up to {:.2} ms, lost check: {}\n",
+                c.cluster_id, c.leader, c.term, c.start_at, c.clock_error_ms, c.lost_check
+            ));
+            for n in &c.nodes {
+                let clock = match (n.clock_offset_ms, n.clock_error_ms) {
+                    (Some(o), Some(e)) => format!(", clock {o:+.2} ms +/- {e:.2}"),
+                    _ => String::new(),
+                };
+                let role = n.roles.join(",");
+                let what = if n.arrivals.is_some() && n.share == 0.0 {
+                    format!("{} arrivals", n.arrivals.unwrap_or(0))
+                } else {
+                    format!(
+                        "share {:.1}%, {} sent, {} completed, {} errors{}{}",
+                        n.share * 100.0,
+                        n.sent,
+                        n.completed,
+                        n.errors,
+                        if n.saturated { ", SATURATED" } else { "" },
+                        n.arrivals
+                            .map(|a| format!(", {a} arrivals"))
+                            .unwrap_or_default()
+                    )
+                };
+                out.push_str(&format!(
+                    "  {} [{role}] {}: {what}{clock}{}\n",
+                    n.node_id,
+                    n.state,
+                    n.error
+                        .as_deref()
+                        .map(|e| format!(" | {e}"))
+                        .unwrap_or_default()
+                ));
+            }
         }
         out.push_str(&format!(
             "\nRequests: {} requested, {} sent, {} not sent, {} completed, {} ok, {} unexpected status, {} transport\n",
@@ -837,7 +1071,40 @@ mod tests {
             passed,
             samples: Vec::new(),
             scenario: json!({}),
+            cluster: None,
         }
+    }
+
+    #[test]
+    fn wire_histograms_merge_exactly() {
+        let mut a = histogram(3);
+        let mut b = histogram(3);
+        for i in 1..5_000u64 {
+            a.record(i * 37 % 90_000 + 1).unwrap();
+            b.record(i * i % 7_000_000 + 1).unwrap();
+        }
+        let mut direct = histogram(3);
+        direct.add(&a).unwrap();
+        direct.add(&b).unwrap();
+        let mut wired = histogram(3);
+        WireHist::encode(&a).add_to(&mut wired).unwrap();
+        WireHist::encode(&b).add_to(&mut wired).unwrap();
+        assert_eq!(wired.len(), direct.len());
+        assert_eq!(
+            Percentiles::from_histogram(&wired),
+            Percentiles::from_histogram(&direct)
+        );
+        for q in [0.5, 0.9, 0.99, 0.999] {
+            assert_eq!(wired.value_at_quantile(q), direct.value_at_quantile(q));
+        }
+        assert_eq!(WireHist::encode(&histogram(2)).data, "");
+        assert!(WireHist::encode(&histogram(2)).decode().is_empty());
+        // Numbers round trip in any order; garbage is refused.
+        let nums = vec![5, 3, u64::MAX, 0, 1 << 40, 7];
+        assert_eq!(decode_numbers(&encode_numbers(&nums), 10).unwrap(), nums);
+        assert!(decode_numbers(&encode_numbers(&nums), 3).is_err());
+        assert!(decode_numbers("not base64!", 10).is_err());
+        assert!(decode_numbers("AAAA", 10).is_err());
     }
 
     #[test]

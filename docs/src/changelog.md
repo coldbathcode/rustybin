@@ -168,6 +168,20 @@ API, AI and agent gateway demos.
   scenario's `servers` block drives the shaped upstream `/harness/{*path}` (log-normal
   latency, status mix, body size, chunked streaming) and inspector sampling;
   `rustybin_harness_*` metrics with a bounded run label.
+- **Harness clusters** (phase 3): a coordinator creates a cluster
+  (`POST /_rustybin/harness/clusters`, or `RUSTYBIN_HARNESS_CLUSTER` with
+  `RUSTYBIN_HARNESS_JOIN_TOKEN`); client and server nodes join with the token
+  (`RUSTYBIN_HARNESS_JOIN`, `POST /_rustybin/harness/join`) and heartbeat with a long
+  poll, carrying cumulative stats and NTP-style clock stamps. Runs are submitted, then
+  started once the quorum is there (`scale.client_nodes`, `scale.server_nodes`, the
+  cluster's `min_nodes`; headless `RUSTYBIN_HARNESS_START=on-quorum`): the rate is split
+  by declared capacity, virtual clients by disjoint ranges, the start is synchronised,
+  and one report merges every node's exact histograms, with `lost` checked against
+  every server node. Leases stop a client that loses its leader. The server nodes are
+  exported for the gateway's upstream pool (`GET .../clusters/{id}/upstreams`); members
+  redirect controllers to the leader. MCP tools `create_cluster`, `list_cluster_nodes`,
+  `export_upstreams`, `start_run` (and `cluster_id` on the run tools); a cluster card in
+  the console.
 
 ### Changed
 

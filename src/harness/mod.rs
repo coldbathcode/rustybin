@@ -23,8 +23,10 @@
 
 pub mod api;
 pub mod cli;
+pub mod cluster;
 pub mod correlate;
 pub mod engine;
+pub mod member;
 pub mod pattern;
 pub mod report;
 pub mod safety;
@@ -32,8 +34,10 @@ pub mod scenario;
 pub mod shaped;
 #[cfg(test)]
 pub mod test_proxy;
+pub mod wire;
 
-use std::sync::{Arc, Mutex};
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::routing::{get, post};
@@ -45,14 +49,17 @@ use crate::catalog::{category, Endpoint, Example};
 use crate::config::{Config, HarnessConfig};
 use crate::state::AppState;
 use correlate::{Correlator, RunKey};
-use engine::{Engine, PinnedTarget, Run, RunParams};
-use safety::{Allowlist, KillSwitch};
+use engine::{Engine, PinnedTarget, Run, RunParams, Share};
+use member::Membership;
+use safety::{Allowlist, KillSwitch, Lease};
 use scenario::{Caps, Scenario};
 
 /// Prefix of every harness control route.
 pub const PREFIX: &str = "/_rustybin/harness";
 /// Where a node serves its verification token (data plane).
 pub const WELL_KNOWN_PATH: &str = "/.well-known/rustybin-harness";
+/// On a redirect to the leader: `<node_id>; term=<n>`.
+pub const LEADER_HEADER: &str = "x-rustybin-harness-leader";
 /// The control API version reported in the status.
 pub const HARNESS_API: u32 = 1;
 /// Runs kept per node (the oldest finished run is dropped first).
@@ -148,6 +155,28 @@ pub fn is_harness_path(path: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
+/// The routes cluster members call on their leader: join (with the join
+/// token) and heartbeat (with the node credential). They authenticate
+/// themselves, so the control-plane auth, the key layer and the plan limits
+/// leave them alone.
+pub fn is_node_path(method: &axum::http::Method, path: &str) -> bool {
+    if method != axum::http::Method::POST {
+        return false;
+    }
+    let Some(rest) = path
+        .strip_prefix(PREFIX)
+        .and_then(|r| r.strip_prefix("/clusters/"))
+    else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('/').collect();
+    match parts.as_slice() {
+        [id, "nodes"] => cluster::safe_id(id),
+        [id, "nodes", node, "heartbeat"] => cluster::safe_id(id) && cluster::safe_id(node),
+        _ => false,
+    }
+}
+
 /// The combinations refused at startup (fatal, not a warning): harness mode
 /// in public mode, with self-service mocks, or a client without targets.
 pub fn check_startup(config: &Config) -> Result<(), String> {
@@ -166,6 +195,18 @@ pub fn check_startup(config: &Config) -> Result<(), String> {
             "RUSTYBIN_HARNESS=on is refused with RUSTYBIN_MOCKS_SELF_SERVICE (a self-service instance never generates load)"
                 .into(),
         );
+    }
+    if h.has_role(Role::Coordinator) && h.cluster.is_some() && h.join_token.is_none() {
+        return Err(
+            "RUSTYBIN_HARNESS_CLUSTER on a coordinator needs RUSTYBIN_HARNESS_JOIN_TOKEN, the secret its nodes join with"
+                .into(),
+        );
+    }
+    if h.join.is_some() && h.join_token.is_none() {
+        return Err("RUSTYBIN_HARNESS_JOIN needs RUSTYBIN_HARNESS_JOIN_TOKEN".into());
+    }
+    if h.join.is_some() && !h.has_role(Role::Client) && !h.has_role(Role::Server) {
+        return Err("RUSTYBIN_HARNESS_JOIN needs the client or server role".into());
     }
     if h.has_role(Role::Client) {
         let (allowlist, warnings) = Allowlist::parse(&h.targets);
@@ -221,6 +262,26 @@ impl RunError {
     }
 }
 
+/// How a run starts on this node. A single-node run takes the defaults; a
+/// cluster member's part of a run carries what its leader assigned.
+#[derive(Default)]
+pub struct RunOptions {
+    /// The cluster's run id (a single-node run gets a random one).
+    pub id: Option<String>,
+    /// The cluster's run key (a single-node run gets a random one).
+    pub key: Option<RunKey>,
+    /// This node's share of the rate and the users.
+    pub share: Share,
+    /// The synchronised start.
+    pub start_at: Option<Instant>,
+    /// The dead man's switch: no leader answer for its period stops the run.
+    pub lease: Option<Arc<Lease>>,
+    pub cluster: Option<String>,
+    /// The token the targets must serve (the cluster's, served by its
+    /// server nodes), instead of this node's own.
+    pub verification_token: Option<String>,
+}
+
 /// The harness of one node: configuration, the engine (client role), the
 /// runs it keeps, the kill switch and the verification token.
 pub struct Harness {
@@ -239,6 +300,13 @@ pub struct Harness {
     pub correlator: Arc<Correlator>,
     metrics: Option<Arc<crate::metrics::Metrics>>,
     started: Instant,
+    /// The clusters this node leads (phase 3: the node a cluster was
+    /// created on leads it).
+    pub coordinator: cluster::Coordinator,
+    /// The cluster this node is a member of (one at a time).
+    membership: Mutex<Option<Arc<Membership>>>,
+    /// The HTTP listener's address, once bound (the default advertise URL).
+    bound: OnceLock<SocketAddr>,
 }
 
 /// A node id safe for request ids: letters, digits, `.`, `_`, `-`, at most 32.
@@ -320,7 +388,77 @@ impl Harness {
             correlator: Correlator::new(),
             metrics,
             started: Instant::now(),
+            coordinator: cluster::Coordinator::default(),
+            membership: Mutex::new(None),
+            bound: OnceLock::new(),
         })
+    }
+
+    /// The cluster this node is a member of.
+    pub fn membership(&self) -> Option<Arc<Membership>> {
+        self.membership
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .filter(|m| !m.is_stopped())
+    }
+
+    /// Become a member; false when this node is a member of a cluster already.
+    pub fn set_membership(&self, m: Arc<Membership>) -> bool {
+        let mut slot = self.membership.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.as_ref().is_some_and(|old| !old.is_stopped()) {
+            return false;
+        }
+        *slot = Some(m);
+        true
+    }
+
+    /// Leave the cluster this node is a member of. Returns its id.
+    pub async fn leave(self: &Arc<Self>) -> Option<String> {
+        let m = self
+            .membership
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()?;
+        m.leave(self).await;
+        Some(m.cluster_id.clone())
+    }
+
+    /// The server is shutting down: leave the cluster this node is a
+    /// member of (its runs of it stop) and release the heartbeats held by
+    /// the clusters it leads.
+    pub async fn shutdown_clusters(self: &Arc<Self>) {
+        self.coordinator.close();
+        self.leave().await;
+    }
+
+    /// Record the HTTP listener's address (the server calls this once bound).
+    pub fn set_bound(&self, addr: SocketAddr) {
+        let _ = self.bound.set(addr);
+    }
+
+    /// A server node's URL when `RUSTYBIN_HARNESS_ADVERTISE` is unset: the
+    /// listener's address, when it is a specific one (not `0.0.0.0`).
+    pub fn default_advertise(&self) -> Option<String> {
+        let addr = self.bound.get()?;
+        if addr.ip().is_unspecified() {
+            return None;
+        }
+        Some(format!("http://{addr}"))
+    }
+
+    /// The engine's worker threads (0 without the client role).
+    pub fn engine_threads(&self) -> usize {
+        self.engine.as_ref().map_or(0, |e| e.threads)
+    }
+
+    /// The token served at [`WELL_KNOWN_PATH`]: the cluster's when this
+    /// node is a member (its clients verify the gateway routes to the
+    /// cluster's servers), else this node's own.
+    pub fn served_verification_token(&self) -> String {
+        self.membership()
+            .and_then(|m| m.verification_token())
+            .unwrap_or_else(|| self.verification_token.clone())
     }
 
     pub fn is_client(&self) -> bool {
@@ -358,7 +496,7 @@ impl Harness {
     /// The kill switch: stop every run now. Returns the ids stopped.
     pub fn stop_all(&self) -> Vec<String> {
         self.kill.set();
-        let stopped: Vec<String> = self
+        let mut stopped: Vec<String> = self
             .runs()
             .iter()
             .filter(|r| r.is_active())
@@ -367,6 +505,16 @@ impl Harness {
                 r.id.clone()
             })
             .collect();
+        // The leader stops its clusters' runs; a member tells its leader on
+        // the next heartbeat.
+        for id in self.coordinator.stop_all("kill_switch") {
+            if !stopped.contains(&id) {
+                stopped.push(id);
+            }
+        }
+        if let Some(m) = self.membership() {
+            m.request_kill();
+        }
         tracing::warn!(
             target: "rustybin::harness",
             runs = ?stopped,
@@ -403,9 +551,24 @@ impl Harness {
             "uptime_secs": self.started.elapsed().as_secs(),
             "report_dir_configured": self.config.report_dir.is_some(),
             "headless": self.config.headless(),
-            "cluster": Value::Null,
-            "leader": Value::Null,
+            "cluster": self.membership().map(|m| m.describe()),
+            "leader": self.leader_view(),
+            "clusters": self.coordinator.list().iter().map(|c| c.summary()).collect::<Vec<_>>(),
         })
+    }
+
+    /// The leader as this node sees it: itself for the clusters it leads,
+    /// else its membership's leader.
+    fn leader_view(&self) -> Value {
+        if let Some(m) = self.membership() {
+            return m.describe()["leader"].clone();
+        }
+        match self.coordinator.list().first() {
+            Some(c) => {
+                json!({ "node_id": c.leader, "term": 1, "since": c.created_at.to_rfc3339() })
+            }
+            None => Value::Null,
+        }
     }
 
     /// Validate a scenario (normalised in place) against this node.
@@ -416,9 +579,17 @@ impl Harness {
 
     /// Validate, pin and verify the targets, then start the run on its
     /// scheduler thread. Only one run is active at a time per node.
-    pub async fn create_run(
+    pub async fn create_run(self: &Arc<Self>, scenario: Scenario) -> Result<Arc<Run>, RunError> {
+        self.start_local_run(scenario, RunOptions::default()).await
+    }
+
+    /// [`Harness::create_run`] with the options of a cluster member's part:
+    /// the share is validated against this node's caps, the targets against
+    /// this node's own allowlist.
+    pub async fn start_local_run(
         self: &Arc<Self>,
         mut scenario: Scenario,
+        options: RunOptions,
     ) -> Result<Arc<Run>, RunError> {
         if !self.is_client() {
             return Err(RunError::new(
@@ -434,7 +605,11 @@ impl Harness {
                     .unwrap_or_else(|| "the harness engine is not running".into()),
             ));
         };
-        let problems = self.validate(&mut scenario);
+        if !options.share.valid() {
+            return Err(RunError::new(400, "the share must be within 0 to 1"));
+        }
+        scenario.normalise();
+        let problems = scenario.validate_scaled(&self.caps(), options.share.fraction());
         if !problems.is_empty() {
             return Err(RunError::invalid(problems));
         }
@@ -488,22 +663,34 @@ impl Harness {
             });
         }
         if self.config.verify_targets {
+            let token = options
+                .verification_token
+                .clone()
+                .unwrap_or_else(|| self.verification_token.clone());
             for target in &mut targets {
-                self.verify_target(target).await.map_err(|e| RunError {
-                    status: 403,
-                    error: "target verification failed".into(),
-                    problems: vec![e],
-                })?;
+                self.verify_target(target, &token)
+                    .await
+                    .map_err(|e| RunError {
+                        status: 403,
+                        error: "target verification failed".into(),
+                        problems: vec![e],
+                    })?;
                 target.verified = true;
             }
         }
-        let id = random_hex(6);
-        // The run key signs the markers; this node's server side learns it
-        // now (cluster nodes get it from the leader in phase 3).
-        let key = RunKey::random();
-        let entry = self
-            .correlator
-            .register(&id, key.clone(), scenario.servers.clone());
+        let id = options.id.clone().unwrap_or_else(|| random_hex(6));
+        // The run key signs the markers. On a single node its server side
+        // learns it now; the server nodes of a cluster get it from the
+        // leader, which also does the `lost` lookup.
+        let key = options.key.clone().unwrap_or_else(RunKey::random);
+        let entry = if options.cluster.is_none() && self.is_server() {
+            Some(
+                self.correlator
+                    .register(&id, key.clone(), scenario.servers.clone()),
+            )
+        } else {
+            None
+        };
         let run = Run::new(RunParams {
             id: id.clone(),
             node_id: self.node_id.clone(),
@@ -516,9 +703,13 @@ impl Harness {
             report_dir: self.config.report_dir.clone(),
             kill: self.kill.clone(),
             key,
-            entry: self.is_server().then_some(entry),
+            entry,
             correlator: self.correlator.clone(),
             metrics: self.metrics.clone(),
+            share: options.share,
+            start_at: options.start_at,
+            lease: options.lease,
+            cluster: options.cluster,
         });
         {
             let mut runs = self.runs.lock().unwrap_or_else(|p| p.into_inner());
@@ -550,7 +741,7 @@ impl Harness {
 
     /// `GET <target>/.well-known/rustybin-harness` must answer this node's
     /// token (a gateway routing to this node does; so does the node itself).
-    async fn verify_target(&self, target: &PinnedTarget) -> Result<(), String> {
+    async fn verify_target(&self, target: &PinnedTarget, token: &str) -> Result<(), String> {
         let uri: hyper::Uri = format!(
             "{}{}{WELL_KNOWN_PATH}",
             target.authority, target.parsed.path
@@ -591,7 +782,7 @@ impl Harness {
             ));
         }
         let text = String::from_utf8_lossy(&bytes).trim().to_string();
-        if !crate::control_auth::constant_time_eq(&text, &self.verification_token) {
+        if !crate::control_auth::constant_time_eq(&text, token) {
             return Err(format!(
                 "{}: {WELL_KNOWN_PATH} does not serve this node's verification token (another instance, or not routed to this cluster)",
                 target.target.url
@@ -599,6 +790,58 @@ impl Harness {
         }
         Ok(())
     }
+}
+
+/// Create a cluster led by this node (the coordinator role). A node that
+/// also has the client or server role joins it over the in-process link.
+pub async fn create_cluster(
+    h: &Arc<Harness>,
+    req: cluster::CreateCluster,
+) -> Result<(Arc<cluster::Cluster>, String), RunError> {
+    if !h.config.has_role(Role::Coordinator) {
+        return Err(RunError::new(
+            403,
+            "this node has no coordinator role (RUSTYBIN_HARNESS_ROLES=coordinator, with client or server as well if it should send or serve)",
+        ));
+    }
+    let (cluster, token) = h
+        .coordinator
+        .create(&h.node_id, req, h.config.report_dir.clone())?;
+    if (h.is_client() || h.is_server()) && h.membership().is_none() {
+        let advertise = h.config.advertise.clone();
+        if let Err(e) = member::join(
+            h,
+            member::JoinTarget::Local(cluster.id.clone()),
+            token.clone(),
+            advertise,
+        )
+        .await
+        {
+            tracing::warn!(target: "rustybin::harness", cluster = %cluster.id, "harness: the leader could not join its own cluster: {e}");
+        }
+    }
+    Ok((cluster, token))
+}
+
+/// At startup, once the HTTP listener is bound: a coordinator with
+/// `RUSTYBIN_HARNESS_CLUSTER` creates its cluster, a node with
+/// `RUSTYBIN_HARNESS_JOIN` starts joining (retried until the leader answers).
+pub async fn start_cluster_from_config(h: &Arc<Harness>) -> Result<(), String> {
+    let hc = &h.config;
+    if hc.has_role(Role::Coordinator) {
+        if let (Some(id), Some(token)) = (&hc.cluster, &hc.join_token) {
+            let req = cluster::CreateCluster {
+                cluster_id: Some(id.clone()),
+                join_token: Some(token.clone()),
+                ..Default::default()
+            };
+            create_cluster(h, req)
+                .await
+                .map_err(|e| format!("harness cluster {id}: {}", e.error))?;
+            return Ok(());
+        }
+    }
+    member::spawn_from_config(h)
 }
 
 /// Headless mode (`RUSTYBIN_HARNESS_SCENARIO` with `RUSTYBIN_HARNESS_START`
@@ -624,6 +867,11 @@ pub async fn run_headless(harness: &Arc<Harness>) -> u8 {
             return 2;
         }
     };
+    if let Some(id) = &hc.cluster {
+        if let Some(cluster) = harness.coordinator.get(id) {
+            return headless_cluster(harness, &cluster, scenario).await;
+        }
+    }
     let run = match harness.create_run(scenario).await {
         Ok(r) => r,
         Err(e) => {
@@ -635,6 +883,54 @@ pub async fn run_headless(harness: &Arc<Harness>) -> u8 {
     let Some(report) = run.report() else {
         return 2;
     };
+    write_headless_report(hc, &run.id, report)
+}
+
+/// Headless on a coordinator: submit the scenario to its cluster, start it
+/// (`on-quorum`: once the nodes it waits for have joined; `immediately`:
+/// now, an error without them), wait and report.
+async fn headless_cluster(
+    harness: &Arc<Harness>,
+    cluster: &Arc<cluster::Cluster>,
+    scenario: Scenario,
+) -> u8 {
+    let hc = &harness.config;
+    let run = match cluster.create_run(scenario, &harness.caps()) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("headless harness: {} {}", e.error, e.problems.join("; "));
+            return 2;
+        }
+    };
+    let mut waited = Instant::now();
+    loop {
+        let q = cluster.quorum(&run.scenario);
+        if q.met || hc.start == StartMode::Immediately {
+            break;
+        }
+        if waited.elapsed() >= Duration::from_secs(10) {
+            tracing::info!(
+                "headless harness: waiting for the quorum of cluster {}: {} of {} client node(s), {} of {} server node(s)",
+                cluster.id, q.clients, q.need_clients, q.servers, q.need_servers
+            );
+            waited = Instant::now();
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    if let Err(e) = cluster.start_run(&run.id) {
+        tracing::error!("headless harness: {} {}", e.error, e.problems.join("; "));
+        return 2;
+    }
+    run.wait().await;
+    let Some(report) = run.report() else {
+        return 2;
+    };
+    write_headless_report(hc, &run.id, report)
+}
+
+/// Write a headless report where `RUSTYBIN_HARNESS_REPORT` says and return
+/// the exit code.
+fn write_headless_report(hc: &HarnessConfig, run_id: &str, report: &report::Report) -> u8 {
     match hc.report.as_deref() {
         Some("-") => {
             use std::io::Write;
@@ -655,7 +951,7 @@ pub async fn run_headless(harness: &Arc<Harness>) -> u8 {
     }
     tracing::info!(
         "headless harness run {} {}: {} sent, {} errors, p99 {:.2} ms, {}",
-        run.id,
+        run_id,
         report.state,
         report.totals.sent,
         report.totals.errors(),
@@ -711,6 +1007,48 @@ pub fn router(_state: &AppState) -> Router<AppState> {
         .route("/_rustybin/harness/runs/{run}/stop", post(api::stop_run))
         .route("/_rustybin/harness/runs/{run}/report", get(api::run_report))
         .route("/_rustybin/harness/stop", post(api::stop_all))
+        .route("/_rustybin/harness/join", post(api::join))
+        .route("/_rustybin/harness/leave", post(api::leave))
+        .route(
+            "/_rustybin/harness/clusters",
+            get(api::list_clusters).post(api::create_cluster),
+        )
+        .route(
+            "/_rustybin/harness/clusters/{id}",
+            get(api::get_cluster).delete(api::delete_cluster),
+        )
+        .route(
+            "/_rustybin/harness/clusters/{id}/upstreams",
+            get(api::upstreams),
+        )
+        .route(
+            "/_rustybin/harness/clusters/{id}/nodes",
+            post(api::node_join),
+        )
+        .route(
+            "/_rustybin/harness/clusters/{id}/nodes/{node}/heartbeat",
+            post(api::node_heartbeat),
+        )
+        .route(
+            "/_rustybin/harness/clusters/{id}/runs",
+            get(api::list_cluster_runs).post(api::create_cluster_run),
+        )
+        .route(
+            "/_rustybin/harness/clusters/{id}/runs/{run}",
+            get(api::get_cluster_run),
+        )
+        .route(
+            "/_rustybin/harness/clusters/{id}/runs/{run}/start",
+            post(api::start_cluster_run),
+        )
+        .route(
+            "/_rustybin/harness/clusters/{id}/runs/{run}/stop",
+            post(api::stop_cluster_run),
+        )
+        .route(
+            "/_rustybin/harness/clusters/{id}/runs/{run}/report",
+            get(api::cluster_run_report),
+        )
         .route(WELL_KNOWN_PATH, get(api::well_known))
         .route("/harness", axum::routing::any(shaped::handler))
         .route("/harness/{*path}", axum::routing::any(shaped::handler))
@@ -813,6 +1151,157 @@ pub fn catalog() -> Vec<Endpoint> {
             "Kill switch: stop all load on this node now",
         )
         .example(Example::post("Kill switch", "/_rustybin/harness/stop").expect_status(404)),
+        Endpoint::new(
+            "/_rustybin/harness/join",
+            &["POST"],
+            category::HARNESS,
+            "Join a cluster: {url, join_token, advertise?} (orchestrated)",
+        )
+        .description(
+            "Tells this node (client or server role) to join the cluster at url \
+             (<leader>/_rustybin/harness/clusters/<id>). The node then heartbeats to the leader; \
+             assignments are checked against this node's own caps and allowlist.",
+        )
+        .example(
+            Example::post("Join", "/_rustybin/harness/join")
+                .json(r#"{"url":"http://127.0.0.1:8080/_rustybin/harness/clusters/perf-1","join_token":"0123456789abcdef"}"#)
+                .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/harness/leave",
+            &["POST"],
+            category::HARNESS,
+            "Leave the cluster (this node's runs of it stop)",
+        )
+        .example(Example::post("Leave", "/_rustybin/harness/leave").expect_status(404)),
+        Endpoint::new(
+            "/_rustybin/harness/clusters",
+            &["GET", "POST"],
+            category::HARNESS,
+            "Clusters this node leads; POST {cluster_id?, min_nodes?, lease?, join_token?} creates one",
+        )
+        .description(
+            "Needs the coordinator role. The answer carries the join token once (only its hash is \
+             kept). A coordinator that is also a client or server joins its own cluster.",
+        )
+        .example(Example::get("List clusters", "/_rustybin/harness/clusters").expect_status(404))
+        .example(
+            Example::post("Create a cluster", "/_rustybin/harness/clusters")
+                .json(r#"{"cluster_id":"perf-1","min_nodes":{"client":2,"server":1}}"#)
+                .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/harness/clusters/{id}",
+            &["GET", "DELETE"],
+            category::HARNESS,
+            "A cluster: members, roles, health, clock offsets, the current run",
+        )
+        .description(
+            "On a member of the cluster that is not its leader: 307 to the leader, with \
+             X-Rustybin-Harness-Leader. DELETE needs no active run.",
+        )
+        .example(
+            Example::get("A cluster", "/_rustybin/harness/clusters/perf-1").expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/harness/clusters/{id}/upstreams",
+            &["GET"],
+            category::HARNESS,
+            "The server nodes' advertised URLs, for the gateway's upstream pool",
+        )
+        .example(
+            Example::get("Upstreams", "/_rustybin/harness/clusters/perf-1/upstreams")
+                .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/harness/clusters/{id}/nodes",
+            &["POST"],
+            category::HARNESS,
+            "Node route: join with the join token (bearer); returns a node credential and a lease",
+        )
+        .example(
+            Example::post("Join (node)", "/_rustybin/harness/clusters/perf-1/nodes")
+                .json("{}")
+                .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/harness/clusters/{id}/nodes/{node}/heartbeat",
+            &["POST"],
+            category::HARNESS,
+            "Node route: heartbeat with the node credential; a long poll carrying stats, returning assignments",
+        )
+        .example(
+            Example::post(
+                "Heartbeat (node)",
+                "/_rustybin/harness/clusters/perf-1/nodes/n1/heartbeat",
+            )
+            .json(r#"{"t1":0}"#)
+            .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/harness/clusters/{id}/runs",
+            &["GET", "POST"],
+            category::HARNESS,
+            "Cluster runs; POST a scenario to submit it (validated, not started)",
+        )
+        .example(
+            Example::get("Cluster runs", "/_rustybin/harness/clusters/perf-1/runs")
+                .expect_status(404),
+        )
+        .example(
+            Example::post("Submit a scenario", "/_rustybin/harness/clusters/perf-1/runs")
+                .json(SMOKE_JSON)
+                .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/harness/clusters/{id}/runs/{run}",
+            &["GET"],
+            category::HARNESS,
+            "Live merged stats of a cluster run, with its quorum",
+        )
+        .example(
+            Example::get("A cluster run", "/_rustybin/harness/clusters/perf-1/runs/missing")
+                .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/harness/clusters/{id}/runs/{run}/start",
+            &["POST"],
+            category::HARNESS,
+            "Start a cluster run: the rate split by capacity and a synchronised start (409 without the quorum)",
+        )
+        .example(
+            Example::post(
+                "Start a cluster run",
+                "/_rustybin/harness/clusters/perf-1/runs/missing/start",
+            )
+            .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/harness/clusters/{id}/runs/{run}/stop",
+            &["POST"],
+            category::HARNESS,
+            "Stop a cluster run on every client node",
+        )
+        .example(
+            Example::post(
+                "Stop a cluster run",
+                "/_rustybin/harness/clusters/perf-1/runs/missing/stop",
+            )
+            .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/harness/clusters/{id}/runs/{run}/report",
+            &["GET"],
+            category::HARNESS,
+            "The merged report of a cluster run (JSON; ?format=text or junit)",
+        )
+        .example(
+            Example::get(
+                "A cluster report",
+                "/_rustybin/harness/clusters/perf-1/runs/missing/report",
+            )
+            .expect_status(404),
+        ),
         Endpoint::new(
             "/harness",
             &["ANY"],
@@ -977,6 +1466,162 @@ pub fn openapi_paths() -> Value {
                 "responses": { "200": { "description": "Stopped runs", "content": { "application/json": { "schema": { "type": "object" } } } }, "404": off }
             }
         },
+        "/_rustybin/harness/join": {
+            "post": {
+                "tags": tag,
+                "summary": "Join a cluster",
+                "description": "Tells this node to join the cluster at `url` with `join_token` (orchestrated). The URL must not resolve to a forbidden address.",
+                "operationId": "joinHarnessCluster",
+                "requestBody": { "required": true, "content": { "application/json": { "schema": {
+                    "type": "object", "required": ["url", "join_token"],
+                    "properties": { "url": { "type": "string" }, "join_token": { "type": "string" }, "advertise": { "type": "string" } }
+                } } } },
+                "responses": { "200": json_ok("Joined"), "400": { "description": "Invalid body or URL" }, "403": { "description": "Forbidden join address" }, "409": { "description": "Already a member, or the leader refused" }, "404": off }
+            }
+        },
+        "/_rustybin/harness/leave": {
+            "post": {
+                "tags": tag,
+                "summary": "Leave the cluster",
+                "operationId": "leaveHarnessCluster",
+                "responses": { "200": json_ok("Left"), "404": off }
+            }
+        },
+        "/_rustybin/harness/clusters": {
+            "get": {
+                "tags": tag,
+                "summary": "Clusters this node leads",
+                "operationId": "listHarnessClusters",
+                "responses": { "200": json_ok("Clusters"), "404": off }
+            },
+            "post": {
+                "tags": tag,
+                "summary": "Create a cluster",
+                "description": "Needs the coordinator role. Returns the cluster and its join token (once).",
+                "operationId": "createHarnessCluster",
+                "requestBody": { "required": false, "content": { "application/json": { "schema": {
+                    "type": "object",
+                    "properties": {
+                        "cluster_id": { "type": "string" },
+                        "min_nodes": { "type": "object", "properties": { "client": { "type": "integer" }, "server": { "type": "integer" } } },
+                        "lease": { "type": "string", "description": "500ms to 60s, default 5s" },
+                        "join_token": { "type": "string", "description": "At least 16 characters; random when absent" }
+                    }
+                } } } },
+                "responses": { "201": json_ok("The cluster and its join token"), "400": { "description": "Invalid body" }, "403": { "description": "No coordinator role" }, "409": { "description": "The id exists, or too many clusters" }, "404": off }
+            }
+        },
+        "/_rustybin/harness/clusters/{id}": {
+            "get": {
+                "tags": tag,
+                "summary": "A cluster",
+                "operationId": "getHarnessCluster",
+                "parameters": [path_param("id")],
+                "responses": { "200": json_ok("Members, health, clock offsets, the current run"), "307": { "description": "This node is a member; the leader answers" }, "404": off }
+            },
+            "delete": {
+                "tags": tag,
+                "summary": "Delete a cluster",
+                "operationId": "deleteHarnessCluster",
+                "parameters": [path_param("id")],
+                "responses": { "204": { "description": "Deleted" }, "409": { "description": "A run is active" }, "404": off }
+            }
+        },
+        "/_rustybin/harness/clusters/{id}/upstreams": {
+            "get": {
+                "tags": tag,
+                "summary": "Server nodes' URLs",
+                "operationId": "getHarnessUpstreams",
+                "parameters": [path_param("id")],
+                "responses": { "200": { "description": "Advertised URLs", "content": { "application/json": { "schema": { "type": "array", "items": { "type": "string" } } } } }, "307": { "description": "This node is a member; the leader answers" }, "404": off }
+            }
+        },
+        "/_rustybin/harness/clusters/{id}/nodes": {
+            "post": {
+                "tags": tag,
+                "summary": "Node join",
+                "description": "Called by nodes with the join token as bearer. Returns a node credential and a lease.",
+                "operationId": "harnessNodeJoin",
+                "security": [],
+                "parameters": [path_param("id")],
+                "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+                "responses": { "200": json_ok("Credential, lease, leader, clock stamps"), "401": { "description": "Invalid join token" }, "404": off }
+            }
+        },
+        "/_rustybin/harness/clusters/{id}/nodes/{node}/heartbeat": {
+            "post": {
+                "tags": tag,
+                "summary": "Node heartbeat",
+                "description": "Called by nodes with their node credential as bearer: a long poll (up to 10 s) carrying cumulative stats; returns assignments, stops and the lease.",
+                "operationId": "harnessNodeHeartbeat",
+                "security": [],
+                "parameters": [path_param("id"), path_param("node")],
+                "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+                "responses": { "200": json_ok("Assignments and the lease"), "401": { "description": "Invalid node credential" }, "404": off }
+            }
+        },
+        "/_rustybin/harness/clusters/{id}/runs": {
+            "get": {
+                "tags": tag,
+                "summary": "Cluster runs",
+                "operationId": "listHarnessClusterRuns",
+                "parameters": [path_param("id")],
+                "responses": { "200": json_ok("Runs"), "307": { "description": "This node is a member; the leader answers" }, "404": off }
+            },
+            "post": {
+                "tags": tag,
+                "summary": "Submit a scenario",
+                "description": "Validated against the cluster (each client's share against the caps), not started.",
+                "operationId": "createHarnessClusterRun",
+                "parameters": [path_param("id")],
+                "requestBody": scenario_body.clone(),
+                "responses": { "201": json_ok("The run and its quorum"), "400": { "description": "Invalid scenario (`problems`)" }, "307": { "description": "This node is a member; the leader answers" }, "404": off }
+            }
+        },
+        "/_rustybin/harness/clusters/{id}/runs/{run}": {
+            "get": {
+                "tags": tag,
+                "summary": "Live merged stats of a cluster run",
+                "operationId": "getHarnessClusterRun",
+                "parameters": [path_param("id"), path_param("run")],
+                "responses": { "200": json_ok("Live view"), "307": { "description": "This node is a member; the leader answers" }, "404": off }
+            }
+        },
+        "/_rustybin/harness/clusters/{id}/runs/{run}/start": {
+            "post": {
+                "tags": tag,
+                "summary": "Start a cluster run",
+                "operationId": "startHarnessClusterRun",
+                "parameters": [path_param("id"), path_param("run")],
+                "responses": { "202": json_ok("Starting (synchronised)"), "409": { "description": "No quorum, a run is active, or the clients cannot carry the rate" }, "404": off }
+            }
+        },
+        "/_rustybin/harness/clusters/{id}/runs/{run}/stop": {
+            "post": {
+                "tags": tag,
+                "summary": "Stop a cluster run",
+                "operationId": "stopHarnessClusterRun",
+                "parameters": [path_param("id"), path_param("run")],
+                "responses": { "202": json_ok("Stopping"), "200": json_ok("Already stopped or finished"), "404": off }
+            }
+        },
+        "/_rustybin/harness/clusters/{id}/runs/{run}/report": {
+            "get": {
+                "tags": tag,
+                "summary": "Merged report of a cluster run",
+                "operationId": "getHarnessClusterReport",
+                "parameters": [
+                    path_param("id"),
+                    path_param("run"),
+                    { "name": "format", "in": "query", "required": false, "schema": { "type": "string", "enum": ["json", "text", "junit"] } }
+                ],
+                "responses": {
+                    "200": { "description": "The report", "content": { "application/json": { "schema": { "type": "object" } }, "text/plain": { "schema": { "type": "string" } }, "application/xml": { "schema": { "type": "string" } } } },
+                    "409": { "description": "The run has not finished" },
+                    "404": off
+                }
+            }
+        },
         "/harness": shaped_item("getShapedRoot", &tag),
         "/harness/{path}": shaped_item("getShapedPath", &tag),
         WELL_KNOWN_PATH: {
@@ -989,6 +1634,14 @@ pub fn openapi_paths() -> Value {
             }
         }
     })
+}
+
+fn json_ok(description: &str) -> Value {
+    json!({ "description": description, "content": { "application/json": { "schema": { "type": "object" } } } })
+}
+
+fn path_param(name: &str) -> Value {
+    json!({ "name": name, "in": "path", "required": true, "schema": { "type": "string" } })
 }
 
 /// OpenAPI path item of the shaped endpoint (every method).
@@ -1036,5 +1689,7 @@ pub fn openapi_components() -> Value {
     })
 }
 
+#[cfg(test)]
+mod cluster_tests;
 #[cfg(test)]
 mod tests;

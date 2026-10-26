@@ -49,11 +49,12 @@ use tokio::sync::watch;
 
 use super::correlate::{self, Correlator, Marker, RunEntry, RunKey, Tag};
 use super::report::{
-    self, Breakdown, Bucket, Counts, Percentiles, Report, Sample, Saturation, TargetReport,
-    ThresholdResult, LAG_SATURATION_MS, MAX_SAMPLES,
+    self, histogram, Breakdown, Bucket, Counts, Percentiles, Report, Sample, Saturation,
+    TargetReport, ThresholdResult, WireHist, LAG_SATURATION_MS, MAX_SAMPLES,
 };
-use super::safety::{KillSwitch, ParsedTarget};
+use super::safety::{KillSwitch, Lease, ParsedTarget};
 use super::scenario::{Caps, HttpVersion, Layer, Model, RequestTemplate, Scenario, Target};
+use super::wire::{HistSet, NodeStats, WirePart};
 use crate::config::HarnessConfig;
 use crate::metrics::{HarnessRoll, Metrics};
 
@@ -76,6 +77,65 @@ pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const SHARD_SAMPLES: usize = 32;
 /// Most transport-failed sequence numbers remembered for the `lost` count.
 pub const MAX_FAILED_SEQS: usize = 1 << 20;
+/// Most failed sequence numbers a node ships to its leader at the end of a
+/// cluster run (the rest are counted as untracked).
+pub const MAX_WIRE_FAILED: usize = 65_536;
+/// Most samples a node ships to its leader with its final stats.
+pub const MAX_WIRE_SAMPLES: usize = 100;
+
+/// The part of a cluster run's load one client node sends: the interval
+/// `[from, to)` of the cumulative capacity shares (0 to 1). A single node
+/// sends all of it.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Share {
+    pub from: f64,
+    pub to: f64,
+}
+
+impl Default for Share {
+    fn default() -> Self {
+        Self { from: 0.0, to: 1.0 }
+    }
+}
+
+impl Share {
+    /// The fraction of the rate this node sends.
+    pub fn fraction(&self) -> f64 {
+        (self.to - self.from).clamp(0.0, 1.0)
+    }
+
+    pub fn is_whole(&self) -> bool {
+        self.from <= 0.0 && self.to >= 1.0
+    }
+
+    /// Valid: `0 <= from <= to <= 1`.
+    pub fn valid(&self) -> bool {
+        self.from.is_finite()
+            && self.to.is_finite()
+            && 0.0 <= self.from
+            && self.from <= self.to
+            && self.to <= 1.0
+    }
+
+    /// This node's users out of `total`, by cumulative rounding: the shares
+    /// of every node add up to `total` exactly.
+    pub fn users(&self, total: f64) -> usize {
+        let t = total.round().max(0.0);
+        let hi = (t * self.to + 1e-9).floor();
+        let lo = (t * self.from + 1e-9).floor();
+        (hi - lo).max(0.0) as usize
+    }
+
+    /// This node's virtual clients `(base, count)` of `total`: disjoint
+    /// ranges over the nodes (at least one each).
+    pub fn virtual_clients(&self, total: u32) -> (u32, u32) {
+        let total = total.max(1);
+        let t = f64::from(total);
+        let lo = ((t * self.from + 1e-9).floor() as u32).min(total - 1);
+        let hi = ((t * self.to + 1e-9).floor() as u32).min(total);
+        (lo, hi.saturating_sub(lo).max(1))
+    }
+}
 
 /// How the client classifies an answer (plan section 7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,14 +167,6 @@ fn pairs(h: &Histogram<u64>) -> Vec<(f64, u64)> {
 
 fn micros(d: Duration) -> u64 {
     u64::try_from(d.as_micros()).unwrap_or(u64::MAX).max(1)
-}
-
-/// Microsecond histogram, 1 us to 60 s.
-fn histogram(sigfig: u8) -> Histogram<u64> {
-    Histogram::new_with_bounds(1, 60_000_000, sigfig).unwrap_or_else(|_| {
-        // The bounds above are valid; this is never reached.
-        Histogram::new(2).unwrap_or_else(|_| unreachable!("histogram with 2 significant digits"))
-    })
 }
 
 /// Process CPU time (user plus system) in seconds, Linux only.
@@ -845,6 +897,15 @@ pub struct RunParams {
     pub entry: Option<Arc<RunEntry>>,
     pub correlator: Arc<Correlator>,
     pub metrics: Option<Arc<Metrics>>,
+    /// A cluster run: this node's share of the load (default: all of it).
+    pub share: Share,
+    /// The synchronised start (cluster runs): the scheduler waits for it.
+    pub start_at: Option<Instant>,
+    /// The dead man's switch (cluster runs): no leader answer for the lease
+    /// period stops the run.
+    pub lease: Option<Arc<Lease>>,
+    /// The cluster the run belongs to.
+    pub cluster: Option<String>,
 }
 
 /// One execution of a scenario on this node.
@@ -884,6 +945,15 @@ pub struct Run {
     correlator: Arc<Correlator>,
     metrics: Option<Arc<Metrics>>,
     rejected_before: u64,
+    pub share: Share,
+    /// This node's virtual clients: `{{vu}}` runs from `vu_base` over
+    /// `vu_count` values.
+    pub vu_base: u32,
+    pub vu_count: u32,
+    pub start_at: Option<Instant>,
+    start_lag: OnceLock<Duration>,
+    lease: Option<Arc<Lease>>,
+    pub cluster: Option<String>,
 }
 
 impl Run {
@@ -899,6 +969,9 @@ impl Run {
             .iter()
             .map(|l| cumulative(l.source.templates().iter().map(|t| t.weight)))
             .collect();
+        let (vu_base, vu_count) = params
+            .share
+            .virtual_clients(params.scenario.scale.virtual_clients);
         Arc::new(Self {
             hash: params.scenario.hash(),
             id: params.id,
@@ -938,6 +1011,13 @@ impl Run {
             rejected_before: params.correlator.rejected(),
             correlator: params.correlator,
             metrics: params.metrics,
+            share: params.share,
+            vu_base,
+            vu_count,
+            start_at: params.start_at,
+            start_lag: OnceLock::new(),
+            lease: params.lease,
+            cluster: params.cluster,
         })
     }
 
@@ -986,7 +1066,35 @@ impl Run {
             self.stop("kill_switch");
             return true;
         }
+        if self.lease.as_ref().is_some_and(|l| l.expired()) {
+            tracing::warn!(
+                target: "rustybin::harness",
+                run = %self.id,
+                cluster = ?self.cluster,
+                "harness lease expired (no answer from the leader): the run stops"
+            );
+            self.stop("lease_expired");
+            return true;
+        }
         false
+    }
+
+    /// Requests sent so far.
+    pub fn sent(&self) -> u64 {
+        self.sent.load(Ordering::Relaxed)
+    }
+
+    /// Why the run was asked to stop, if it was.
+    pub fn stop_reason(&self) -> Option<String> {
+        self.stop_reason
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// How late the scheduler started after the synchronised start.
+    pub fn start_lag(&self) -> Option<Duration> {
+        self.start_lag.get().copied()
     }
 
     pub fn report(&self) -> Option<&Report> {
@@ -1037,6 +1145,8 @@ impl Run {
             "scenario": self.scenario.name,
             "hash": self.hash,
             "node_id": self.node_id,
+            "cluster": self.cluster,
+            "share": self.share.fraction(),
             "state": self.state().as_str(),
             "created_at": self.created_at.to_rfc3339(),
             "elapsed_secs": elapsed,
@@ -1073,6 +1183,7 @@ impl Run {
         json!({
             "run_id": self.id,
             "scenario": self.scenario.name,
+            "cluster": self.cluster,
             "state": self.state().as_str(),
             "created_at": self.created_at.to_rfc3339(),
             "elapsed_secs": self.elapsed().as_secs_f64(),
@@ -1081,6 +1192,88 @@ impl Run {
             "passed": self.report.get().map(|r| r.passed),
             "exit_code": self.report.get().map(|r| r.exit_code),
         })
+    }
+
+    /// The cumulative stats a cluster member sends its leader: counters and
+    /// exact histograms since the run started, the timeline from bucket
+    /// `timeline_from` on, and (once the run ended) samples and the failed
+    /// sequence numbers for the `lost` check.
+    pub fn export(&self, timeline_from: usize) -> NodeStats {
+        let report = self.report.get();
+        let totals = self.totals.lock().unwrap_or_else(|p| p.into_inner());
+        let part = |p: &PartShard| WirePart {
+            counts: p.counts.clone(),
+            corrected: WireHist::encode(&p.corrected),
+            overhead: WireHist::encode(&p.overhead),
+        };
+        let mut layers: Vec<WirePart> = totals.layers.iter().map(part).collect();
+        for (w, c) in layers.iter_mut().zip(&self.layer_sched) {
+            w.counts.requested = c[0].load(Ordering::Relaxed);
+            w.counts.sent = c[1].load(Ordering::Relaxed);
+            w.counts.not_sent = c[2].load(Ordering::Relaxed);
+        }
+        let mut targets: Vec<WirePart> = totals.targets.iter().map(part).collect();
+        for w in &mut targets {
+            w.counts.sent = w.counts.completed;
+            w.counts.requested = w.counts.completed;
+        }
+        let from = timeline_from.min(totals.timeline.len());
+        let (failed_seqs, failed_untracked) = if report.is_some() {
+            let take = totals.failed_seqs.len().min(MAX_WIRE_FAILED);
+            (
+                report::encode_numbers(&totals.failed_seqs[..take]),
+                (totals.failed_seqs.len() - take) as u64 + totals.failed_overflow,
+            )
+        } else {
+            (String::new(), 0)
+        };
+        let saturation = match report {
+            Some(r) => r.saturation.clone(),
+            None => Saturation {
+                saturated: totals.saturated,
+                reasons: totals.saturation_reasons.clone(),
+                buckets_secs: totals.saturated_buckets.clone(),
+                inflight_cap: self.inflight_cap,
+                descriptor_limit: self.descriptor_limit,
+                threads: self.threads,
+                scheduler_lag: Percentiles::from_histogram(&totals.lag),
+                cpu_seconds: None,
+            },
+        };
+        NodeStats {
+            run_id: self.id.clone(),
+            state: match report {
+                Some(r) => r.state.clone(),
+                None => self.state().as_str().into(),
+            },
+            done: report.is_some(),
+            error: report.and_then(|r| r.error.clone()),
+            stopped_by: self.stop_reason(),
+            elapsed_secs: report.map_or(self.elapsed().as_secs_f64(), |r| r.duration_secs),
+            start_lag_ms: self.start_lag().map(|d| d.as_secs_f64() * 1000.0),
+            in_flight: self.inflight.load(Ordering::Relaxed) as u64,
+            counts: totals.counts.clone(),
+            hist: HistSet {
+                corrected: WireHist::encode(&totals.corrected),
+                service: WireHist::encode(&totals.service),
+                upstream: WireHist::encode(&totals.upstream),
+                overhead: WireHist::encode(&totals.overhead),
+                request_leg: WireHist::encode(&totals.request_leg),
+                response_leg: WireHist::encode(&totals.response_leg),
+                lag: WireHist::encode(&totals.lag),
+            },
+            layers,
+            targets,
+            target_reports: self.targets.iter().map(PinnedTarget::report).collect(),
+            timeline_from: from,
+            timeline: totals.timeline[from..].to_vec(),
+            saturation,
+            samples: report
+                .map(|r| r.samples.iter().take(MAX_WIRE_SAMPLES).cloned().collect())
+                .unwrap_or_default(),
+            failed_seqs,
+            failed_untracked,
+        }
     }
 
     fn record(&self, outcome: Outcome) {
@@ -1428,7 +1621,7 @@ impl Run {
             let mut after = 0;
             let mut untracked = 0;
             for seq in &totals.failed_seqs {
-                match stats.was_seen(*seq) {
+                match stats.was_seen(&self.node_id, *seq) {
                     Some(true) => after += 1,
                     Some(false) => lost += 1,
                     None => untracked += 1,
@@ -1570,6 +1763,7 @@ impl Run {
             scenario: report::redact_scenario(
                 &serde_json::to_value(&self.scenario).unwrap_or(Value::Null),
             ),
+            cluster: None,
         };
         drop(totals);
         if let Some(dir) = &self.report_dir {
@@ -1871,9 +2065,27 @@ impl LayerSched {
 pub fn drive(run: Arc<Run>, handle: Handle) {
     let _enter = handle.enter();
     let cpu_before = cpu_seconds();
+    // A cluster run starts at the synchronised start, on every node at once.
+    if let Some(at) = run.start_at {
+        loop {
+            let now = Instant::now();
+            if now >= at {
+                let _ = run.start_lag.set(now - at);
+                break;
+            }
+            if run.stop_requested() {
+                run.finish(Instant::now(), cpu_before, None);
+                return;
+            }
+            std::thread::sleep((at - now).min(MAX_SLEEP));
+        }
+    }
     run.mark_started();
     let start = Instant::now();
-    let virtual_clients = run.scenario.scale.virtual_clients.max(1);
+    let vu_count = run.vu_count.max(1);
+    let vu_base = run.vu_base;
+    let share = run.share.fraction();
+    let whole = run.share.is_whole();
     let mut layers: Vec<LayerSched> = run
         .scenario
         .layers
@@ -1913,6 +2125,7 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
                             layer.finished = true;
                             break;
                         };
+                        let rate = if whole { rate } else { rate * share };
                         if rate <= 0.0 {
                             // Skip ahead to where the pattern sends again.
                             layer.next_at += Duration::from_millis(10);
@@ -1931,7 +2144,7 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
                             bucket.sent += 1;
                             run.sent.fetch_add(1, Ordering::Relaxed);
                             run.count_layer(layer.idx, true);
-                            let vu = vu_cursor % virtual_clients;
+                            let vu = vu_base + vu_cursor % vu_count;
                             vu_cursor = vu_cursor.wrapping_add(1);
                             let tpl = run.pick_template(layer.idx, layer.seq);
                             let target = run.pick_target(seq);
@@ -1967,8 +2180,10 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
                                 continue;
                             }
                             Some(users) => {
-                                let desired = (users.round().max(0.0) as usize)
-                                    .min(virtual_clients as usize)
+                                let desired = run
+                                    .share
+                                    .users(users)
+                                    .min(vu_count as usize)
                                     .min(run.inflight_cap);
                                 while layer.users.len() > desired {
                                     if let Some(u) = layer.users.pop() {
@@ -1979,7 +2194,7 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
                                 let think = def.think_time.map_or(Duration::ZERO, |d| d.0);
                                 while layer.users.len() < desired {
                                     let stop = Arc::new(AtomicBool::new(false));
-                                    let vu = layer.vu_cursor % virtual_clients;
+                                    let vu = vu_base + layer.vu_cursor % vu_count;
                                     layer.vu_cursor = layer.vu_cursor.wrapping_add(1);
                                     handle.spawn(user_loop(
                                         run.clone(),
@@ -2133,6 +2348,45 @@ mod tests {
         let picks: Vec<usize> = (0..8).map(|s| pick(&w, s)).collect();
         assert_eq!(picks, vec![0, 0, 0, 1, 0, 0, 0, 1]);
         assert_eq!(pick(&[], 5), 0);
+    }
+
+    #[test]
+    fn shares_split_users_and_virtual_clients_exactly() {
+        // Three nodes with capacities 1, 1, 1 and 1, 2, 5.
+        for cuts in [
+            vec![0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0],
+            vec![0.0, 0.125, 0.375, 1.0],
+        ] {
+            let shares: Vec<Share> = cuts
+                .windows(2)
+                .map(|w| Share {
+                    from: w[0],
+                    to: w[1],
+                })
+                .collect();
+            for total in [0.0, 1.0, 2.0, 7.0, 10.0, 99.6, 1000.0] {
+                let sum: usize = shares.iter().map(|s| s.users(total)).sum();
+                assert_eq!(sum, total.round() as usize, "{cuts:?} {total}");
+            }
+            let mut next = 0;
+            for s in &shares {
+                let (base, count) = s.virtual_clients(100);
+                assert_eq!(base, next, "disjoint, in order");
+                next = base + count;
+            }
+            assert_eq!(next, 100);
+            let fractions: f64 = shares.iter().map(Share::fraction).sum();
+            assert!((fractions - 1.0).abs() < 1e-12);
+        }
+        // Fewer virtual clients than nodes: everyone still gets one.
+        let s = Share {
+            from: 0.5,
+            to: 0.75,
+        };
+        assert_eq!(s.virtual_clients(1), (0, 1));
+        assert!(Share::default().is_whole() && Share::default().valid());
+        assert!(!Share { from: 0.6, to: 0.5 }.valid());
+        assert_eq!(Share::default().users(4.4), 4);
     }
 
     #[test]

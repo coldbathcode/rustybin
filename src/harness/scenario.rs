@@ -28,6 +28,8 @@ pub const MAX_REQUESTS_PER_LAYER: usize = 64;
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 pub const MAX_HEADERS: usize = 32;
 pub const MAX_VIRTUAL_CLIENTS: u32 = 100_000;
+/// Most nodes in a cluster (plan section 10).
+pub const MAX_CLUSTER_NODES: u32 = 64;
 pub const MAX_NAME_LEN: usize = 64;
 pub const MAX_DESCRIPTION_LEN: usize = 1024;
 /// Longest scenario document accepted (JSON or YAML text).
@@ -268,6 +270,14 @@ pub struct Scale {
     /// A rate cap below the node's own, to keep the client well under saturation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_rate_per_node: Option<u64>,
+    /// Cluster runs: the client nodes the run waits for before it starts
+    /// (the rate is split over the client nodes by declared capacity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_nodes: Option<u32>,
+    /// Cluster runs: the server nodes (the gateway's upstream pool) the run
+    /// waits for before it starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_nodes: Option<u32>,
 }
 
 impl Default for Scale {
@@ -275,6 +285,8 @@ impl Default for Scale {
         Self {
             virtual_clients: 1,
             max_rate_per_node: None,
+            client_nodes: None,
+            server_nodes: None,
         }
     }
 }
@@ -661,6 +673,18 @@ impl Scenario {
     /// Every problem with a normalised scenario, against the node's caps.
     /// An empty list means the scenario may run.
     pub fn validate(&self, caps: &Caps) -> Vec<String> {
+        self.validate_scaled(caps, 1.0)
+    }
+
+    /// [`Scenario::validate`] for a node that runs `share` (0 to 1) of the
+    /// load: the rates and users it would send are checked against `caps`.
+    /// A cluster run splits the load over its client nodes this way.
+    pub fn validate_scaled(&self, caps: &Caps, share: f64) -> Vec<String> {
+        let share = if share.is_finite() && share > 0.0 {
+            share.min(1.0)
+        } else {
+            1.0
+        };
         let mut p = Vec::new();
         if self.target.is_some()
             || self.source.is_some()
@@ -735,6 +759,16 @@ impl Scenario {
         }
         if self.scale.virtual_clients == 0 || self.scale.virtual_clients > MAX_VIRTUAL_CLIENTS {
             p.push(format!("scale.virtual_clients: 1 to {MAX_VIRTUAL_CLIENTS}"));
+        }
+        if let Some(n) = self.scale.client_nodes {
+            if n == 0 || n > MAX_CLUSTER_NODES {
+                p.push(format!("scale.client_nodes: 1 to {MAX_CLUSTER_NODES}"));
+            }
+        }
+        if let Some(n) = self.scale.server_nodes {
+            if n > MAX_CLUSTER_NODES {
+                p.push(format!("scale.server_nodes: 0 to {MAX_CLUSTER_NODES}"));
+            }
         }
         let node_rate = match self.scale.max_rate_per_node {
             Some(0) => {
@@ -816,11 +850,12 @@ impl Scenario {
                 }
             }
             if layer.model == Model::Closed {
-                let peak = layer.pattern.peak();
-                if peak > self.scale.virtual_clients as f64 {
+                let peak = layer.pattern.peak() * share;
+                if layer.pattern.peak() > self.scale.virtual_clients as f64 {
                     p.push(format!(
-                        "{here}.pattern: a closed layer runs at most scale.virtual_clients ({}) users, the pattern asks for {peak}",
-                        self.scale.virtual_clients
+                        "{here}.pattern: a closed layer runs at most scale.virtual_clients ({}) users, the pattern asks for {}",
+                        self.scale.virtual_clients,
+                        layer.pattern.peak()
                     ));
                 }
                 if peak > caps.max_inflight as f64 {
@@ -831,10 +866,15 @@ impl Scenario {
                 }
             }
         }
-        let peak = self.peak_rate();
-        if peak > node_rate as f64 {
+        let peak = self.peak_rate() * share;
+        if peak > node_rate as f64 + 1e-9 {
+            let whose = if share < 1.0 {
+                format!(" (this node's share of {:.1}%)", share * 100.0)
+            } else {
+                String::new()
+            };
             p.push(format!(
-                "layers: the peak rates add up to {peak} requests per second, over the cap of {node_rate} (RUSTYBIN_HARNESS_MAX_RATE, scale.max_rate_per_node)"
+                "layers: the peak rates add up to {peak} requests per second{whose}, over the cap of {node_rate} (RUSTYBIN_HARNESS_MAX_RATE, scale.max_rate_per_node)"
             ));
         }
         let duration = self.duration();
@@ -1202,7 +1242,9 @@ pub fn schema(caps: &Caps) -> Value {
                 "description": "How big the run is, apart from how hard it pushes.",
                 "properties": {
                     "virtual_clients": integer("Distinct virtual clients ({{vu}} cycles through them; closed layers never run more users).", 1, MAX_VIRTUAL_CLIENTS as u64),
-                    "max_rate_per_node": integer("A rate cap below the node's own (RUSTYBIN_HARNESS_MAX_RATE).", 1, caps.max_rate)
+                    "max_rate_per_node": integer("A rate cap below the node's own (RUSTYBIN_HARNESS_MAX_RATE).", 1, caps.max_rate),
+                    "client_nodes": integer("Cluster runs: the client nodes to wait for before the run starts; the rate is split over them by declared capacity.", 1, MAX_CLUSTER_NODES as u64),
+                    "server_nodes": integer("Cluster runs: the server nodes (the gateway's upstream pool) to wait for before the run starts.", 0, MAX_CLUSTER_NODES as u64)
                 },
                 "additionalProperties": false
             },
@@ -1437,6 +1479,8 @@ mod tests {
             scale: Scale {
                 virtual_clients: 10,
                 max_rate_per_node: Some(100),
+                client_nodes: Some(2),
+                server_nodes: Some(1),
             },
             layers: vec![Layer {
                 name: "l".into(),
