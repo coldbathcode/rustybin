@@ -5,7 +5,7 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-- **Harness mode, the next phases** (`docs/plans/harness.md`): phase 3, the cluster.
+- **Load test mode (harness), the next phases** (`docs/plans/harness.md`): phase 3, the cluster.
   A coordinator that client and server nodes join, heartbeats with leases (a client
   stops when it loses its leader), clock sync, the cluster-wide rate split over the
   clients by capacity, synchronised starts, merged histograms and one report, the
@@ -22,7 +22,7 @@ the pages for the features that exist today describe current behaviour.
   gateway's overhead, what it changed on the way (headers added, removed, rewritten,
   bodies, paths), one-way legs in loop-through, sampled inspector captures,
   `rustybin_harness_*` metrics and a shaped upstream at `/harness/{*path}`.
-- [Harness mode, single node](configuration.md#harness-mode) (phase 1): Rustybin as
+- [Load test mode (harness), single node](configuration.md#harness-mode) (phase 1): Rustybin as
   the load client. A scenario with targets, layers, open or closed load models,
   constant and ramp patterns and thresholds runs from the API, the management MCP,
   the console builder (generated from one JSON Schema), headless at startup or

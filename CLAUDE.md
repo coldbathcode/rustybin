@@ -2,7 +2,7 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Harness mode: phases 1 and 2 built, phase 3 next
+## Load test mode (harness): phases 1 and 2 built, phase 3 next
 
 [docs/plans/harness.md](docs/plans/harness.md) (planned 2026-10-22; phase 0, the engine spike in
 `examples/harness_spike.rs`, phase 1, the single-node engine in `src/harness/`, and phase 2, correlation, done
@@ -13,7 +13,7 @@ with run patterns and rate-limit tests, every parameter from one schema in the A
 live), or headless. It is the first feature that sends load to targets the caller chooses (A2A push notifications,
 the leads webhook and the key registry URL already send outbound requests, with their own allowlists), so
 `src/harness/safety.rs` (allowlist, pinning, forbidden addresses, verification, kill switch) comes first and every
-new way to aim load goes through it. One model, one schema: a scenario parameter lives in `scenario.rs` (model,
+new way to point load goes through it. One model, one schema: a scenario parameter lives in `scenario.rs` (model,
 validation, `schema()`), and the parity tests fail when the schema, the MCP tool schemas or the console builder
 (`ui/lib/scenarioform.js`, renders every non-shorthand schema property) miss it. Update the plan's status and
 `docs/src/roadmap.md` ("Next") as phases land.
@@ -92,7 +92,7 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
 - `src/lib.rs`: module list, `ROUTERS` (every module's router), `build_app(state)` with the middleware stack
   (outermost first): mock host rewrite (wraps the finished router, `mocks::host`), request id, trace, metrics,
   request id propagation, CORS, control-plane auth, API keys (`keys::enforce`), plan limits, time-to-headers timeout,
-  harness correlation (harness mode only), inspector capture, body limit, fault injection. JSON 404 fallback.
+  harness correlation (load test mode only), inspector capture, body limit, fault injection. JSON 404 fallback.
 - `src/server.rs`: `run(config)`, `start(config)`, `start_with_state(state)` -> `RunningServer`
   (bound addresses, `shutdown()`, `wait()`). HTTP bind failure is fatal; HTTPS and gRPC failures only warn.
   Ports may be 0. Graceful shutdown on SIGTERM/SIGINT with a 10 s grace period. With `RUSTYBIN_GRPC_ON_HTTP`
@@ -152,7 +152,7 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   MCP server of each OpenAPI mock) and `src/mcp/manage/`, the
   management MCP server at `/_rustybin/mcp` (`tools.rs` registry, `access.rs` rights, `stdio.rs` for
   `rustybin mcp-stdio`).
-- `src/harness/`: harness mode (`RUSTYBIN_HARNESS`), see above. `mod.rs` (roles, `check_startup`, the `Harness`
+- `src/harness/`: load test mode (`RUSTYBIN_HARNESS`), see above. `mod.rs` (roles, `check_startup`, the `Harness`
   state in `AppState.harness` with bounded runs, target verification, router, catalogue, OpenAPI, headless mode),
   `safety.rs`, `scenario.rs` (model, `Caps`, validation, JSON Schema), `pattern.rs` (`constant`, `ramp`, `then`),
   `engine.rs` (own tokio runtime, a scheduler thread per run, `PinnedConnector` with TLS and ALPN, per-worker
