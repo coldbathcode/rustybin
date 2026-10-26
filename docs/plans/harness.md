@@ -1,21 +1,21 @@
 # Plan: load test mode (the harness), load tests through a gateway
 
-Status: **phases 0, 1, 2 and 3 done** (2026-10-26): the engine spike is `examples/harness_spike.rs`
-([Phase 0 results](#phase-0-results-2026-10-25)); the single-node engine, the correlation and the
-cluster are `src/harness/` ([Phase 1 build notes](#phase-1-build-notes-2026-10-25),
-[Phase 2 build notes](#phase-2-build-notes-2026-10-25) and
-[Phase 3 build notes](#phase-3-build-notes-2026-10-26) list where the build differs from this plan).
-Phase 3b is next. Planned 2026-10-22.
+Status: **phases 0, 1, 2, 3 and 3b done** (2026-10-26): the engine spike is `examples/harness_spike.rs`
+([Phase 0 results](#phase-0-results-2026-10-25)); the single-node engine, the correlation, the cluster and its
+failover are `src/harness/` ([Phase 1 build notes](#phase-1-build-notes-2026-10-25),
+[Phase 2 build notes](#phase-2-build-notes-2026-10-25), [Phase 3 build notes](#phase-3-build-notes-2026-10-26)
+and [Phase 3b build notes](#phase-3b-build-notes-2026-10-26) list where the build differs from this plan).
+Phase 4 is next. Planned 2026-10-22.
 
-> **Build marker (2026-10-26): START HERE.** Phases 0 to 3 are done. Approved scope for the next
-> session is phase 3b (section 15), leadership and failover: eligibility (`RUSTYBIN_HARNESS_CONTROL_URL`,
-> `RUSTYBIN_HARNESS_LEADER`), work reports and the succession list, the replicated snapshot with
-> checkpoints, the vote and announce routes, terms and fencing, `GET .../leader`, load shedding and the
-> re-split on promotion. Build on what exists: `src/harness/cluster.rs` (the leader: `Coordinator`,
-> `Cluster`, `ClusterRun`; every answer already carries `Leader { node_id, term }`, fixed at term 1),
-> `member.rs` (the agent: join, heartbeat, the lease, the clock estimate; a `Link` is HTTP or in
-> process), `wire.rs` (the protocol). Nodes already report cumulative stats, so a new leader can take
-> over from the last checkpoint. Keep the one-model rule for new parameters (`leader_sheds_load`).
+> **Build marker (2026-10-26): START HERE.** Phases 0 to 3b are done. Approved scope for the next
+> session is phase 4 (section 15): layers and every pattern of section 6.2 with `then:` and `sync`, the
+> closed-loop `target`, `breakpoint`, the scale block and `scale_request`, `PATCH` live changes through the
+> snapshot (they must survive a failover), preview, saved scenarios, and the run's SSE feed with the
+> console's run controls. Build on what exists: `pattern.rs` (`constant`, `ramp`, `then`), `scenario.rs`
+> (the one model: a new parameter goes in the model, its validation and `schema()`, and the parity tests
+> cover the MCP tools and the console builder), `engine::drive` (reads the node's share on every pass, so a
+> live change can follow the same path), and the snapshot in `cluster.rs` (`SnapRun` carries the scenario a
+> successor resumes with).
 >
 > Keep this status line and `docs/src/roadmap.md` ("Next") updated as phases land. Commit as oliwynn.
 
@@ -967,6 +967,72 @@ What phase 3 built, and where it differs from sections 5, 9 and 10:
   round-robin pool over two server nodes) with `lost` exact, upstream export, redirects, lease expiry
   stopping the only client within the lease after the leader is gone, an assignment outside a node's
   allowlist, headless `on-quorum`, env parsing, and the MCP tools on a one-node cluster.
+
+### Phase 3b build notes (2026-10-26)
+
+What phase 3b built, and where it differs from section 9.1:
+
+- **Files**: `election.rs` (the leader's ticker: runs, checkpoints, the quorum check, probing for a newer
+  leader; promotion from a snapshot; stepping down), the candidate and voter rules in `member.rs`
+  (`stand`, `vote`, `elected`, `not_leader`, `join_redirect`), the snapshot, succession and re-split in
+  `cluster.rs`, the protocol types in `wire.rs` (`Snapshot`, `VoteRequest`, `ElectedRequest`, `NotLeader`,
+  `WorkReport`), `test_net.rs` (tests: partitions that refuse or drop calls) and `failover_tests.rs`.
+- **Eligibility**: a node with `RUSTYBIN_HARNESS_CONTROL_URL` (`auto` is the listener's address when it
+  binds a specific one) and `RUSTYBIN_HARNESS_LEADER` other than `never`. The leader is always a member
+  of its own cluster (in process) and counts among the eligible nodes; a coordinator-only node with a
+  control URL and `RUSTYBIN_HARNESS_JOIN` joins as a standby. Eligibility is declared at join: a join
+  token holder that declares a control URL gets the snapshot's secrets (the trust model is the join
+  token, as before).
+- **Snapshot and checkpoints**: versioned `(term, seq)`; the public part (leader, term, eligible nodes,
+  succession, history) goes to every node, the state (members with incarnations, every run that has
+  not finished with its scenario, key, assignments and a checkpoint of the stats, the cluster secret,
+  the join token's hash, the verification token) to eligible nodes only. A checkpoint is a new version
+  every 5 s, or every lease when shorter, while a run is active; the snapshot is built when sent, so it
+  holds the freshest stats. Counters travel for every client part, histograms and failures only for the
+  parts that will not report again (the leader's own, silent nodes). Finished reports stay on the node
+  that led the run (and in `RUSTYBIN_HARNESS_REPORT_DIR`).
+- **Succession and work**: live eligible members, `prefer` first, then by work score (the rate a node
+  is assigned + arrivals per second + requests in flight + 100 per busy CPU core + 1 per millisecond of
+  scheduler lag p99), then by node id; recomputed on joins, starts and checkpoints. Silent nodes leave
+  the line but still count for the majority.
+- **Timing**: the election timeout `E` is per cluster (`election_timeout` on create, default
+  `RUSTYBIN_HARNESS_ELECTION_TIMEOUT`, always below the lease). Idle long polls last at most `E/3`,
+  active nodes heartbeat every `min(lease/4, E/3)`, a heartbeat counts as unanswered after its wait plus
+  `E/2`. Position `k` stands at `E + k x E/6` after the last answer (the plan's 500 ms at `E` = 3 s).
+  Votes are counted as they arrive, so a silent voter never delays a won election; members look for the
+  new leader by asking every node of the succession at once. In tests with a 2 s lease and `E` = 600 ms,
+  the failover finishes well inside the lease, also when the old leader drops packets.
+- **Votes**: granted when the candidate's term is newer, the voter has not voted for another candidate
+  in it, it has not heard the leader for `E/2`, and the candidate's snapshot is at least as recent. The
+  leader itself always refuses. A majority of the eligible nodes in the snapshot wins; the winner
+  announces the term to the eligible nodes; the others learn it from any node they ask (a member
+  answers a heartbeat with `409` naming its leader).
+- **Check quorum**: with three or more eligible nodes, a leader that has not heard a majority of them
+  within `E` answers heartbeats with `503` (no lease renewal), so the minority side of a partition stops
+  sending, and asks the eligible nodes every `E/2` whether a newer leader exists; it steps down when one
+  does. A node that sees a newer term in a heartbeat or an announcement steps down at once.
+- **Load across a failover**: nodes report everything again to a new leader (cumulative stats; timelines
+  in parts of 600 buckets). The new leader hands its own client share back (`scale.leader_sheds_load`,
+  default true) only once another client node, not the old leader, has reported to it, and stops its own
+  part before the re-split is visible: the cluster never sends more than planned (a dip of at most one
+  heartbeat). A client part silent past its lease plus a heartbeat is gone and its share re-split (the
+  phase 3 behaviour without failover lost that share for the rest of the run).
+- **Unreported**: for a client part without final stats from its node, `unreported` is an upper bound:
+  its rate since its last stats until it surely stopped, plus one second (counters are rolled up once per
+  second), plus what it had in flight; the run fails with the bound in the error, never silently.
+- **Not built**: a leader transfer on purpose (open question 1); the `leader_changed` SSE event (the feed
+  comes with phase 4); MCP tools do not follow redirects in process (they name the leader instead). A
+  crashed leader that restarts is a new node: restarted as a standby with `RUSTYBIN_HARNESS_JOIN`
+  pointing at any eligible member, it is sent on to the leader.
+- **Tests**: the least loaded eligible node takes over within the lease while the clients keep sending,
+  with the old leader dropping packets; a `prefer` standby wins over an idle node with a lower id; the old
+  leader's own part is reported up to its checkpoint and the rest within the `unreported` bound; the old
+  leader steps down and redirects controllers when it returns; a minority partition stops sending while
+  the majority carries on; a two-node cluster stops on leader loss; a node joins through a member that
+  does not lead; the snapshot round trip (state for eligible nodes only, secrets out of `Debug`, a stop
+  survives, credentials stay valid, a newer term makes a leader stale). A real `kill -9` of the leader of
+  a five-process cluster: the standby led after about 3.5 s, the clients never stopped, the report
+  counted 2000 of 2000 requests with `unreported` 0.
 
 ### Estimate (2026-10-22)
 

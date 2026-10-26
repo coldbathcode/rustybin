@@ -288,9 +288,11 @@ pub static TOOLS: &[ToolDef] = &[
         "cluster_id": { "type": "string", "description": "Letters, digits, . _ - (default: random)" },
         "min_nodes": { "type": "object", "description": "Nodes a run waits for, per role", "properties": { "client": { "type": "integer", "minimum": 0 }, "server": { "type": "integer", "minimum": 0 } }, "additionalProperties": false },
         "lease": { "type": "string", "description": "How long a client keeps sending without an answer from the leader (500ms to 60s, default 5s)" },
+        "election_timeout": { "type": "string", "description": "How long without the leader before the eligible nodes elect a new one (200ms, below the lease; default 3s)" },
         "join_token": { "type": "string", "description": "A join secret to use (16 to 256 characters); random when absent" }
     }), &[])),
     tool!("list_cluster_nodes", "Cluster nodes", "A cluster's members: roles, health, declared capacity, clock offset and error bound, in-flight requests; the leader, the current run and recent membership events.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "cluster_id": cluster_id_prop() }), &["cluster_id"])),
+    tool!("get_leader", "Cluster leader", "Who leads a cluster as this node sees it: the leader, its term and control URL, whether failover is available (three or more nodes with RUSTYBIN_HARNESS_CONTROL_URL), the succession with each node's work score and the history of leader changes. Every member answers.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "cluster_id": cluster_id_prop() }), &["cluster_id"])),
     tool!("export_upstreams", "Export upstreams", "The server nodes' advertised URLs of a cluster, to configure the gateway's upstream pool.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "cluster_id": cluster_id_prop() }), &["cluster_id"])),
     ToolDef {
         name: "start_run",
@@ -653,6 +655,7 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         "create_cluster" => harness::create_cluster(ctx, access, &args).await,
         "list_cluster_nodes" => harness::list_cluster_nodes(ctx, &args),
         "export_upstreams" => harness::export_upstreams(ctx, &args),
+        "get_leader" => harness::get_leader(ctx, &args),
         "start_run" => harness::start_run(ctx, &args, params).await,
         _ => return Err(RpcError::invalid_params(format!("Unknown tool: {name}"))),
     };

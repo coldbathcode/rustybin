@@ -194,6 +194,17 @@ pub struct HarnessConfig {
     /// `RUSTYBIN_HARNESS_ADVERTISE`: a server node's data-plane URL as the
     /// gateway reaches it (the upstream export).
     pub advertise: Option<String>,
+    /// `RUSTYBIN_HARNESS_CONTROL_URL`: this node's control URL as the other
+    /// nodes of a cluster reach it. Set means it may lead; `auto` is the
+    /// listener's address when it binds a specific one (a local demo).
+    pub control_url: Option<String>,
+    /// `RUSTYBIN_HARNESS_LEADER`: `auto` (eligible with a control URL),
+    /// `prefer` (a standby, first in the succession) or `never`.
+    pub leader: crate::harness::wire::LeaderPolicy,
+    /// `RUSTYBIN_HARNESS_ELECTION_TIMEOUT`: how long without the leader
+    /// before an election starts (default 3 s; a cluster keeps it below its
+    /// lease).
+    pub election_timeout: Duration,
 }
 
 impl Default for HarnessConfig {
@@ -217,6 +228,9 @@ impl Default for HarnessConfig {
             join: None,
             join_token: None,
             advertise: None,
+            control_url: None,
+            leader: crate::harness::wire::LeaderPolicy::Auto,
+            election_timeout: Duration::from_secs(3),
         }
     }
 }
@@ -262,6 +276,9 @@ impl HarnessConfig {
             "join": self.join,
             "join_token_configured": self.join_token.is_some(),
             "advertise": self.advertise,
+            "control_url": self.control_url,
+            "leader": self.leader.as_str(),
+            "election_timeout_ms": self.election_timeout.as_millis() as u64,
         })
     }
 }
@@ -1202,6 +1219,51 @@ where
         }
         None => None,
     };
+    let control_url = match get("RUSTYBIN_HARNESS_CONTROL_URL") {
+        Some(raw) if raw.trim().eq_ignore_ascii_case("auto") => Some("auto".to_string()),
+        Some(raw)
+            if (raw.trim().starts_with("http://") || raw.trim().starts_with("https://"))
+                && raw.trim().len() <= 2048 =>
+        {
+            Some(raw.trim().trim_end_matches('/').to_string())
+        }
+        Some(raw) => {
+            warnings.push(format!(
+                "invalid RUSTYBIN_HARNESS_CONTROL_URL {raw:?} (an http or https URL, or auto), ignored: this node never leads"
+            ));
+            None
+        }
+        None => None,
+    };
+    let leader = match get("RUSTYBIN_HARNESS_LEADER") {
+        None => crate::harness::wire::LeaderPolicy::Auto,
+        Some(raw) => match crate::harness::wire::LeaderPolicy::parse(&raw) {
+            Some(p) => p,
+            None => {
+                warnings.push(format!(
+                    "invalid RUSTYBIN_HARNESS_LEADER {raw:?} (auto, prefer or never), using auto"
+                ));
+                crate::harness::wire::LeaderPolicy::Auto
+            }
+        },
+    };
+    let election_timeout = match get("RUSTYBIN_HARNESS_ELECTION_TIMEOUT") {
+        None => d.election_timeout,
+        Some(raw) => match crate::harness::scenario::parse_duration(&raw) {
+            Some(dur)
+                if dur >= crate::harness::cluster::MIN_ELECTION_TIMEOUT
+                    && dur <= crate::harness::cluster::MAX_LEASE =>
+            {
+                dur
+            }
+            _ => {
+                warnings.push(format!(
+                    "invalid RUSTYBIN_HARNESS_ELECTION_TIMEOUT {raw:?} (200ms to 60s), using 3s"
+                ));
+                d.election_timeout
+            }
+        },
+    };
     HarnessConfig {
         enabled,
         roles,
@@ -1226,6 +1288,9 @@ where
         join,
         join_token,
         advertise,
+        control_url,
+        leader,
+        election_timeout,
     }
 }
 

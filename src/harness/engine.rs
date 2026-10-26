@@ -82,6 +82,9 @@ pub const MAX_FAILED_SEQS: usize = 1 << 20;
 pub const MAX_WIRE_FAILED: usize = 65_536;
 /// Most samples a node ships to its leader with its final stats.
 pub const MAX_WIRE_SAMPLES: usize = 100;
+/// Most timeline buckets in one heartbeat (a node that follows a new leader
+/// sends its whole timeline again, in parts this size).
+pub const MAX_WIRE_BUCKETS: usize = 600;
 
 /// The part of a cluster run's load one client node sends: the interval
 /// `[from, to)` of the cumulative capacity shares (0 to 1). A single node
@@ -945,11 +948,9 @@ pub struct Run {
     correlator: Arc<Correlator>,
     metrics: Option<Arc<Metrics>>,
     rejected_before: u64,
-    pub share: Share,
-    /// This node's virtual clients: `{{vu}}` runs from `vu_base` over
-    /// `vu_count` values.
-    pub vu_base: u32,
-    pub vu_count: u32,
+    /// This node's part of a cluster run; the leader changes it when it
+    /// re-splits the rate (read by the scheduler on every pass).
+    share: Mutex<Share>,
     pub start_at: Option<Instant>,
     start_lag: OnceLock<Duration>,
     lease: Option<Arc<Lease>>,
@@ -969,9 +970,6 @@ impl Run {
             .iter()
             .map(|l| cumulative(l.source.templates().iter().map(|t| t.weight)))
             .collect();
-        let (vu_base, vu_count) = params
-            .share
-            .virtual_clients(params.scenario.scale.virtual_clients);
         Arc::new(Self {
             hash: params.scenario.hash(),
             id: params.id,
@@ -1011,9 +1009,7 @@ impl Run {
             rejected_before: params.correlator.rejected(),
             correlator: params.correlator,
             metrics: params.metrics,
-            share: params.share,
-            vu_base,
-            vu_count,
+            share: Mutex::new(params.share),
             start_at: params.start_at,
             start_lag: OnceLock::new(),
             lease: params.lease,
@@ -1084,6 +1080,38 @@ impl Run {
         self.sent.load(Ordering::Relaxed)
     }
 
+    /// This node's share of a cluster run (all of it on a single node).
+    pub fn share(&self) -> Share {
+        *self.share.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// A new share from the leader (a re-split). Returns whether it changed.
+    pub fn set_share(&self, share: Share) -> bool {
+        let mut cur = self.share.lock().unwrap_or_else(|p| p.into_inner());
+        if *cur == share {
+            return false;
+        }
+        *cur = share;
+        true
+    }
+
+    /// This node's virtual clients `(base, count)`: `{{vu}}` runs from
+    /// `base` over `count` values.
+    pub fn virtual_clients(&self) -> (u32, u32) {
+        self.share()
+            .virtual_clients(self.scenario.scale.virtual_clients)
+    }
+
+    /// The scheduler lag p99 of the last full second, in milliseconds.
+    pub fn last_lag_p99_ms(&self) -> f64 {
+        self.totals
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .timeline
+            .last()
+            .map_or(0.0, |b| b.lag_p99_ms)
+    }
+
     /// Why the run was asked to stop, if it was.
     pub fn stop_reason(&self) -> Option<String> {
         self.stop_reason
@@ -1146,7 +1174,7 @@ impl Run {
             "hash": self.hash,
             "node_id": self.node_id,
             "cluster": self.cluster,
-            "share": self.share.fraction(),
+            "share": self.share().fraction(),
             "state": self.state().as_str(),
             "created_at": self.created_at.to_rfc3339(),
             "elapsed_secs": elapsed,
@@ -1218,6 +1246,7 @@ impl Run {
             w.counts.requested = w.counts.completed;
         }
         let from = timeline_from.min(totals.timeline.len());
+        let to = (from + MAX_WIRE_BUCKETS).min(totals.timeline.len());
         let (failed_seqs, failed_untracked) = if report.is_some() {
             let take = totals.failed_seqs.len().min(MAX_WIRE_FAILED);
             (
@@ -1266,7 +1295,8 @@ impl Run {
             targets,
             target_reports: self.targets.iter().map(PinnedTarget::report).collect(),
             timeline_from: from,
-            timeline: totals.timeline[from..].to_vec(),
+            timeline: totals.timeline[from..to].to_vec(),
+            timeline_total: totals.timeline.len(),
             saturation,
             samples: report
                 .map(|r| r.samples.iter().take(MAX_WIRE_SAMPLES).cloned().collect())
@@ -2082,10 +2112,7 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
     }
     run.mark_started();
     let start = Instant::now();
-    let vu_count = run.vu_count.max(1);
-    let vu_base = run.vu_base;
-    let share = run.share.fraction();
-    let whole = run.share.is_whole();
+    let total_vus = run.scenario.scale.virtual_clients;
     let mut layers: Vec<LayerSched> = run
         .scenario
         .layers
@@ -2104,6 +2131,12 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
         if run.stop_requested() {
             break;
         }
+        // The share can change mid-run (the leader re-splits the rate).
+        let part = run.share();
+        let share = part.fraction();
+        let whole = part.is_whole();
+        let (vu_base, vu_count) = part.virtual_clients(total_vus);
+        let vu_count = vu_count.max(1);
         let now = start.elapsed();
         if now >= bucket.end {
             run.roll(&mut bucket, start, &mut lag);
@@ -2180,8 +2213,7 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
                                 continue;
                             }
                             Some(users) => {
-                                let desired = run
-                                    .share
+                                let desired = part
                                     .users(users)
                                     .min(vu_count as usize)
                                     .min(run.inflight_cap);

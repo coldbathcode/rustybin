@@ -444,7 +444,7 @@ fn cluster_of(
         return Ok(c);
     }
     if let Some(m) = h.membership().filter(|m| m.cluster_id == id) {
-        if let Some(url) = &m.url {
+        if let Some(url) = m.url() {
             return Err(err(format!(
                 "this node is a member of cluster {id}, not its leader: call the leader's management MCP server (its cluster URL is {url})"
             )));
@@ -741,4 +741,55 @@ pub fn cluster_report<'a>(
             run.state().as_str()
         ))
     })
+}
+
+/// `get_leader`: the cluster's leader as this node sees it. Every member
+/// answers (the leader too), so an agent can always find the leader.
+pub fn get_leader(ctx: &CallCtx, args: &Value) -> Value {
+    let h = match harness_of(ctx) {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
+    let Some(id) = arg_str(args, "cluster_id") else {
+        return err("cluster_id is required");
+    };
+    let view = if let Some(c) = h.coordinator.get(id) {
+        c.tick();
+        c.leader_view()
+    } else if let Some(m) = h.membership().filter(|m| m.cluster_id == id) {
+        m.leader_view()
+    } else {
+        return err(format!("this node is not a member of cluster {id:?}"));
+    };
+    let succession: Vec<String> = view["succession"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|s| {
+                    format!(
+                        "{}{} (work {})",
+                        s["node_id"].as_str().unwrap_or(""),
+                        if s["prefer"] == true { ", standby" } else { "" },
+                        s["work_score"]
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let text = format!(
+        "Cluster {id}: leader {} (term {}{}), failover {}; next in line: {}.",
+        view["leader"]["node_id"].as_str().unwrap_or("unknown"),
+        view["term"],
+        view["leader"]["control_url"]
+            .as_str()
+            .map(|u| format!(", at {u}"))
+            .unwrap_or_default(),
+        view["failover"].as_str().unwrap_or(""),
+        if succession.is_empty() {
+            "nobody".to_string()
+        } else {
+            succession.join(", ")
+        }
+    );
+    ok(ctx, text, view)
 }

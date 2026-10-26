@@ -195,6 +195,13 @@ pub struct NodeReport {
     pub start_lag_ms: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Client nodes without final stats: an upper bound of the requests
+    /// they may have sent that no stats cover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unreported: Option<u64>,
+    /// Why the node's share changed during the run (re-split).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// The cluster side of a report (`None` for a single-node run).
@@ -212,6 +219,14 @@ pub struct ClusterReport {
     /// `complete` when every server node answered which failed requests it
     /// saw; otherwise why `lost` is a lower bound.
     pub lost_check: String,
+    /// An upper bound of the requests no stats cover: client nodes that
+    /// never delivered their final stats (gone silent, or an old leader's
+    /// own part after a failover). Zero when every node reported.
+    #[serde(default)]
+    pub unreported: u64,
+    /// The cluster's leader changes, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<super::wire::LeaderChange>,
 }
 
 /// Latency percentiles in milliseconds.
@@ -703,6 +718,20 @@ impl Report {
                 "\nCluster {} (leader {}, term {}), start at {}, clock error up to {:.2} ms, lost check: {}\n",
                 c.cluster_id, c.leader, c.term, c.start_at, c.clock_error_ms, c.lost_check
             ));
+            if c.history.len() > 1 {
+                let changes: Vec<String> = c
+                    .history
+                    .iter()
+                    .map(|h| format!("term {} {} ({}, {})", h.term, h.node_id, h.reason, h.at))
+                    .collect();
+                out.push_str(&format!("  leaders: {}\n", changes.join(" -> ")));
+            }
+            if c.unreported > 0 {
+                out.push_str(&format!(
+                    "  unreported: up to {} requests no stats cover (nodes without final stats)\n",
+                    c.unreported
+                ));
+            }
             for n in &c.nodes {
                 let clock = match (n.clock_offset_ms, n.clock_error_ms) {
                     (Some(o), Some(e)) => format!(", clock {o:+.2} ms +/- {e:.2}"),
@@ -725,9 +754,13 @@ impl Report {
                     )
                 };
                 out.push_str(&format!(
-                    "  {} [{role}] {}: {what}{clock}{}\n",
+                    "  {} [{role}] {}: {what}{clock}{}{}\n",
                     n.node_id,
                     n.state,
+                    n.note
+                        .as_deref()
+                        .map(|e| format!(" | {e}"))
+                        .unwrap_or_default(),
                     n.error
                         .as_deref()
                         .map(|e| format!(" | {e}"))

@@ -230,6 +230,9 @@ control plane is protected, and follows the admin token on an open one.
 | `RUSTYBIN_HARNESS_JOIN` | unset | A client or server node joins this cluster at startup, retrying until the leader answers: `https://leader:8080/_rustybin/harness/clusters/<id>`, or `https://leader:8080` with `RUSTYBIN_HARNESS_CLUSTER`. |
 | `RUSTYBIN_HARNESS_JOIN_TOKEN` | unset | The cluster's join secret (16 to 256 characters), shared by the coordinator and its nodes. Never logged or shown. |
 | `RUSTYBIN_HARNESS_ADVERTISE` | the listener's address | A server node's data-plane URL as the gateway reaches it, exported at `GET /_rustybin/harness/clusters/<id>/upstreams` for the gateway's upstream pool. |
+| `RUSTYBIN_HARNESS_CONTROL_URL` | unset | This node's control URL as the other nodes of a cluster reach it. Set means it may lead (eligible); unset means it never does. `auto` uses the listener's address when it binds a specific one (`RUSTYBIN_HOST=127.0.0.1` in a local demo). |
+| `RUSTYBIN_HARNESS_LEADER` | `auto` | `auto` (eligible with a control URL), `prefer` (a standby: first in the succession whatever its work) or `never`. A node with only the coordinator role, a control URL and `RUSTYBIN_HARNESS_JOIN` joins as a standby. |
+| `RUSTYBIN_HARNESS_ELECTION_TIMEOUT` | `3s` | How long without the leader before the eligible nodes elect a new one, for the clusters this node creates (200 ms to 60 s; a cluster keeps it below its lease, `election_timeout` on `POST .../clusters` sets it per cluster). |
 
 Every harness request is signed with a per-run key (`X-Rustybin-Harness`) and
 carries an `X-Request-Id` and a `traceparent`; a server layer on every data-plane route
@@ -255,11 +258,36 @@ saw, so `lost` is exact across the cluster. The report is one merge of every nod
 counters and histograms (no averaged percentiles), with the nodes, their shares,
 clock offsets and start lag. Each node checks its assignment against its own caps
 and its own `RUSTYBIN_HARNESS_TARGETS`, so a leader cannot aim a node anywhere its
-operator did not allow. A client stops sending when the leader has not answered for
-the cluster's lease (5 s by default): the leader is the node the cluster was created
-on, and without it the run stops on every node. The node routes that members call
-(`.../nodes` and `.../nodes/<node>/heartbeat`) authenticate with the join token and
-the node credential instead of the control-plane credentials.
+operator did not allow. A client stops sending when no leader has answered for the
+cluster's lease (5 s by default).
+
+The leader can fail over. The node a cluster was created on leads term 1 and is a
+member of its own cluster. Nodes with `RUSTYBIN_HARNESS_CONTROL_URL` are eligible to
+lead; the leader replicates a versioned snapshot to every node (who leads, the term,
+who leads next), and to the eligible nodes also the members, the runs with a
+checkpoint of their stats (every 5 s, or every lease when shorter) and the cluster's
+secrets. It orders the live eligible nodes into a succession: `prefer` standbys
+first, then by work (the rate a node is assigned, the requests arriving at it,
+requests in flight, CPU and scheduler lag). When the leader has not answered for the
+election timeout, the first node in line stands for election, the next ones after
+a short wait each; it needs the votes of a majority of the eligible nodes, so a
+cluster needs three of them for failover (`GET .../clusters/<id>/leader` says
+whether it has). The new leader takes over from the snapshot within the lease, so
+the clients never stop: they report their cumulative stats to it again, which fills
+the gap exactly. It hands its own client share back (`scale.leader_sheds_load`,
+default true) once another client node carries the run with it, and takes the share
+of a client node that went silent once that node's lease has surely expired, so the
+cluster never sends more than planned. Requests the old leader's own client part may
+have sent after its last checkpoint are reported as `unreported`, an upper bound,
+never dropped silently. A leader that does not hear a majority of the eligible nodes
+stops renewing leases, so the minority side of a partition stops sending; when it
+hears a newer term it steps down and follows the new leader as a member. A crashed
+leader that restarts is a new, empty node: start it as a standby (with
+`RUSTYBIN_HARNESS_JOIN` pointing at the leader or any eligible member, which names
+the leader) to rejoin the cluster. The node routes
+(`.../nodes`, `.../nodes/<node>/heartbeat`, `.../election/vote` and
+`.../election/elected`) authenticate with the join token and the node credential
+instead of the control-plane credentials.
 
 The same engine runs from the command line: `rustybin harness run scenario.yaml
 --local-server` loops a scenario through an in-process Rustybin, `rustybin harness

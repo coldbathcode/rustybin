@@ -278,6 +278,11 @@ pub struct Scale {
     /// waits for before it starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_nodes: Option<u32>,
+    /// Cluster runs: a node that takes over as leader during the run stops
+    /// its own client part and its share is re-split over the other client
+    /// nodes (default true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leader_sheds_load: Option<bool>,
 }
 
 impl Default for Scale {
@@ -287,6 +292,7 @@ impl Default for Scale {
             max_rate_per_node: None,
             client_nodes: None,
             server_nodes: None,
+            leader_sheds_load: None,
         }
     }
 }
@@ -1244,7 +1250,8 @@ pub fn schema(caps: &Caps) -> Value {
                     "virtual_clients": integer("Distinct virtual clients ({{vu}} cycles through them; closed layers never run more users).", 1, MAX_VIRTUAL_CLIENTS as u64),
                     "max_rate_per_node": integer("A rate cap below the node's own (RUSTYBIN_HARNESS_MAX_RATE).", 1, caps.max_rate),
                     "client_nodes": integer("Cluster runs: the client nodes to wait for before the run starts; the rate is split over them by declared capacity.", 1, MAX_CLUSTER_NODES as u64),
-                    "server_nodes": integer("Cluster runs: the server nodes (the gateway's upstream pool) to wait for before the run starts.", 0, MAX_CLUSTER_NODES as u64)
+                    "server_nodes": integer("Cluster runs: the server nodes (the gateway's upstream pool) to wait for before the run starts.", 0, MAX_CLUSTER_NODES as u64),
+                    "leader_sheds_load": prop("boolean", "Cluster runs: a node that takes over as leader during the run stops its own client part, and its share is re-split over the other client nodes (default true).")
                 },
                 "additionalProperties": false
             },
@@ -1481,6 +1488,7 @@ mod tests {
                 max_rate_per_node: Some(100),
                 client_nodes: Some(2),
                 server_nodes: Some(1),
+                leader_sheds_load: Some(false),
             },
             layers: vec![Layer {
                 name: "l".into(),

@@ -182,6 +182,20 @@ API, AI and agent gateway demos.
   redirect controllers to the leader. MCP tools `create_cluster`, `list_cluster_nodes`,
   `export_upstreams`, `start_run` (and `cluster_id` on the run tools); a cluster card in
   the console.
+- **Harness failover** (phase 3b): nodes with `RUSTYBIN_HARNESS_CONTROL_URL` are
+  eligible to lead (`RUSTYBIN_HARNESS_LEADER=prefer` makes a standby). The leader
+  replicates a versioned snapshot (members, runs with a checkpoint of their stats,
+  secrets to eligible nodes only) and orders the live eligible nodes by work; when it
+  goes silent for the election timeout (`RUSTYBIN_HARNESS_ELECTION_TIMEOUT`, 3 s), the
+  first in line is elected by a majority of the eligible nodes and takes over within
+  the lease, so clients never stop. Every message carries the term; an old leader
+  steps down, a leader without a majority stops renewing leases (a minority partition
+  stops sending). The new leader hands its own client share back and re-splits the
+  share of silent clients once their lease expired, never sending more than planned;
+  what an old leader's own part sent after its last checkpoint is reported as
+  `unreported`. `GET .../clusters/{id}/leader` on any member, vote and announcement
+  node routes, the MCP tool `get_leader`, and the leader, term, history and succession
+  in the console.
 
 ### Changed
 

@@ -112,12 +112,24 @@ export default {
 
     // ── Cluster ──
     let joinToken = null;
+    // The leader changes of a cluster, oldest first.
+    function historyLine(history) {
+      if (!history || !history.length) return null;
+      return h('p', { class: 'small' }, 'Leaders: ', history.map((x) => `term ${x.term} ${x.node_id} (${x.reason})`).join(', then '));
+    }
+    // Who leads next: standbys first, then by work score.
+    function successionLine(succession) {
+      if (!succession || !succession.length) return h('p', { class: 'muted small' }, 'No other node may lead: set RUSTYBIN_HARNESS_CONTROL_URL on at least two more nodes for failover.');
+      return h('p', { class: 'small' }, 'Next in line: ', succession.map((x, i) => `${i + 1}. ${x.node_id}${x.prefer ? ' (standby)' : ''}, work ${num(x.work_score, 1)}`).join('; '));
+    }
     async function renderCluster(n) {
       const leads = n.clusters || [];
       const coordinator = (n.roles || []).includes('coordinator');
       clusterCard.hidden = !coordinator && !leads.length && !n.cluster;
       if (clusterCard.hidden) return;
       if (st.cluster && !leads.some((c) => c.cluster_id === st.cluster)) st.cluster = null;
+      // Without the client role, runs can only go to a cluster.
+      if (!st.cluster && leads.length && !(n.roles || []).includes('client')) st.cluster = leads[0].cluster_id;
       const parts = [];
       if (joinToken) {
         parts.push(notice('ok', h('div', { class: 'stack-sm' },
@@ -133,28 +145,38 @@ export default {
         const upstreams = (ups.ok && Array.isArray(ups.json)) ? ups.json : [];
         parts.push(h('div', { class: 'stack-sm' },
           h('div', { class: 'row' }, h('strong', null, d.cluster_id), badge(`leader ${d.leader.node_id}, term ${d.term}`, 'violet'),
+            d.quorum === false ? badge('no majority of the eligible nodes: leases not renewed', 'err') : null,
             badge(`${d.alive.clients} client(s), ${d.alive.servers} server(s) alive`, 'outline'),
             d.current_run ? badge(`run ${d.current_run.run_id} ${d.current_run.state}`, d.current_run.state === 'finished' ? 'outline' : 'ok') : null,
             h('span', { class: 'grow' }),
             h('label', { class: 'row small' }, h('input', { type: 'radio', name: 'harness-run-on', checked: st.cluster === d.cluster_id, onchange: () => { st.cluster = d.cluster_id; st.runId = null; toast(`Runs go to cluster ${d.cluster_id}`); } }), 'Run on this cluster')),
-          h('p', { class: 'muted small' }, `Lease ${num(d.lease_ms)} ms: a client stops sending when the leader has not answered for that long. Failover: ${d.failover}.`),
+          h('p', { class: 'muted small' }, `Lease ${num(d.lease_ms)} ms: a client stops sending when no leader has answered for that long. Election timeout ${num(d.election_timeout_ms)} ms. Failover: ${d.failover} (${num(d.eligible)} eligible).`),
+          historyLine(d.history),
           h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
-            h('thead', null, h('tr', null, h('th', null, 'Node'), h('th', null, 'Roles'), h('th', null, 'Health'), h('th', null, 'Capacity'), h('th', null, 'Clock offset'), h('th', null, 'In flight'), h('th', null, 'Advertise'))),
+            h('thead', null, h('tr', null, h('th', null, 'Node'), h('th', null, 'Roles'), h('th', null, 'Health'), h('th', null, 'Next'), h('th', null, 'Work'), h('th', null, 'Capacity'), h('th', null, 'Clock offset'), h('th', null, 'In flight'), h('th', null, 'Advertise'))),
             h('tbody', null, ...(d.members || []).map((m) => h('tr', null,
               h('td', { class: 'mono' }, m.node_id, m.node_id === d.leader.node_id ? ' (leader)' : ''),
               h('td', null, (m.roles || []).join(', ')),
               h('td', null, badge(m.health, m.health === 'healthy' ? 'ok' : m.health === 'late' ? 'warn' : 'err')),
+              h('td', null, m.leader ? 'leads' : m.succession ? `#${m.succession}${m.leader_policy === 'prefer' ? ' (standby)' : ''}` : m.eligible ? '-' : 'never'),
+              h('td', { class: 'mono' }, m.work_score === undefined ? '-' : num(m.work_score, 1)),
               h('td', null, `${num(m.capacity.max_rate)} /s`),
               h('td', { class: 'mono' }, m.clock_offset_ms === null || m.clock_offset_ms === undefined ? '-' : `${num(m.clock_offset_ms, 2)} ms (+/- ${num(m.clock_error_ms, 2)})`),
               h('td', null, num(m.in_flight)),
               h('td', { class: 'mono' }, m.advertise || '-')))))),
           upstreams.length ? h('div', { class: 'row small' }, h('span', null, `Upstreams for the gateway: ${upstreams.join(', ')}`), copyButton(() => upstreams.join('\n'), { label: 'Copy' })) : h('p', { class: 'muted small' }, 'No server node with an advertised URL yet.')));
       }
-      if (leads.length) {
+      if (leads.length && (n.roles || []).includes('client')) {
         parts.push(h('label', { class: 'row small' }, h('input', { type: 'radio', name: 'harness-run-on', checked: !st.cluster, onchange: () => { st.cluster = null; st.runId = null; toast('Runs go to this node'); } }), 'Run on this node only'));
       }
-      if (n.cluster) {
+      if (n.cluster && !leads.some((c) => c.cluster_id === n.cluster.cluster_id)) {
         const m = n.cluster;
+        // Every member answers who leads, as its snapshot says.
+        const lr = await send({ url: `${SERVER}${PREFIX}/clusters/${encodeURIComponent(m.cluster_id)}/leader`, timeout: 10000 });
+        if (!alive) return;
+        const lv = (lr.ok && lr.json) || {};
+        parts.push(h('div', { class: 'row' }, h('strong', null, m.cluster_id), m.leader && m.leader.node_id ? badge(`leader ${m.leader.node_id}, term ${m.leader.term}`, 'violet') : badge('not joined yet', 'outline'),
+          lv.failover ? badge(`failover ${lv.failover.split(':')[0]}`, lv.failover === 'available' ? 'ok' : 'outline') : null));
         parts.push(kvgrid([
           ['Member of', h('code', null, m.cluster_id)],
           ['Leader', m.leader && m.leader.node_id ? `${m.leader.node_id}, term ${m.leader.term}` : 'not joined yet'],
@@ -163,6 +185,8 @@ export default {
           ['Clock offset', m.clock_offset_ms === null || m.clock_offset_ms === undefined ? '-' : `${num(m.clock_offset_ms, 2)} ms (+/- ${num(m.clock_error_ms, 2)})`],
           ['Last error', m.last_error || 'none'],
         ]));
+        if (lv.succession) parts.push(successionLine(lv.succession));
+        parts.push(historyLine(lv.history));
       }
       if (coordinator && !leads.length) {
         const idIn = input({ placeholder: 'cluster id (optional)', 'aria-label': 'Cluster id', id: 'harness-cluster-id' });

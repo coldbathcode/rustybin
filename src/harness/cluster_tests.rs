@@ -18,35 +18,44 @@ use super::Role;
 use crate::config::Config;
 use crate::state::AppState;
 
-const TOKEN: &str = "cluster-test-token-0123456789";
+pub(super) const TOKEN: &str = "cluster-test-token-0123456789";
 
-fn client_config(max_rate: u64) -> Config {
+pub(super) fn client_config(max_rate: u64) -> Config {
     let mut c = harness_config(&[Role::Client], &["127.0.0.1"]);
     c.harness.max_rate = max_rate;
     c
 }
 
 /// A node of the test cluster.
-struct Node {
-    server: crate::RunningServer,
-    app: Router,
-    state: AppState,
+pub(super) struct Node {
+    pub(super) server: crate::RunningServer,
+    pub(super) app: Router,
+    pub(super) state: AppState,
 }
 
 /// Every node gets its own id (the instance id of a real deployment).
-async fn node(mut config: Config) -> Node {
+pub(super) async fn node(config: Config) -> Node {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
-    config.instance_id = format!("node-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    node_named(
+        config,
+        &format!("node-{}", NEXT.fetch_add(1, Ordering::Relaxed)),
+    )
+    .await
+}
+
+/// A node with a chosen id.
+pub(super) async fn node_named(mut config: Config, id: &str) -> Node {
+    config.instance_id = id.to_string();
     let (server, app, state) = running(config).await;
     Node { server, app, state }
 }
 
 impl Node {
-    fn base(&self) -> String {
+    pub(super) fn base(&self) -> String {
         format!("http://{}", self.server.http_addr)
     }
 
-    async fn stop(self) {
+    pub(super) async fn stop(self) {
         self.server.shutdown();
         let _ = self.server.wait().await;
     }
@@ -72,7 +81,7 @@ async fn leader(id: &str, extra: Value) -> (Node, String) {
     (l, url)
 }
 
-async fn join(n: &Node, url: &str) {
+pub(super) async fn join(n: &Node, url: &str) {
     let (status, v) = send(
         &n.app,
         Method::POST,
@@ -84,7 +93,7 @@ async fn join(n: &Node, url: &str) {
     assert_eq!(v["joined"], true);
 }
 
-async fn wait_for_alive(l: &Node, id: &str, clients: u64, servers: u64) -> Value {
+pub(super) async fn wait_for_alive(l: &Node, id: &str, clients: u64, servers: u64) -> Value {
     for _ in 0..200 {
         let (_, c) = send(
             &l.app,
@@ -101,7 +110,7 @@ async fn wait_for_alive(l: &Node, id: &str, clients: u64, servers: u64) -> Value
     panic!("the cluster did not reach {clients} clients and {servers} servers");
 }
 
-async fn wait_for_cluster_report(l: &Node, id: &str, run: &str) -> Value {
+pub(super) async fn wait_for_cluster_report(l: &Node, id: &str, run: &str) -> Value {
     let path = format!("/_rustybin/harness/clusters/{id}/runs/{run}/report");
     for _ in 0..800 {
         let (status, report) = send(&l.app, Method::GET, &path, None).await;
@@ -114,7 +123,7 @@ async fn wait_for_cluster_report(l: &Node, id: &str, run: &str) -> Value {
     panic!("cluster run {run} did not finish");
 }
 
-fn scenario(target: &str, rate: u64, secs: &str) -> Value {
+pub(super) fn scenario(target: &str, rate: u64, secs: &str) -> Value {
     json!({
         "name": "cluster",
         "target": target,
@@ -167,7 +176,8 @@ async fn a_cluster_splits_the_rate_and_merges_one_report() {
         join(n, &url).await;
     }
     let cluster = wait_for_alive(&l, "perf-1", 2, 2).await;
-    assert_eq!(cluster["members"].as_array().unwrap().len(), 4);
+    // Four nodes, and the leader itself (a member of its own cluster).
+    assert_eq!(cluster["members"].as_array().unwrap().len(), 5);
     // A wrong join token is refused; the node routes need no control token.
     let (status, _) = send(
         &l.app,
@@ -256,16 +266,13 @@ async fn a_cluster_splits_the_rate_and_merges_one_report() {
         .unwrap()
         .run(&run_id)
         .expect("c2 run");
-    assert!((local1.share.fraction() - 0.25).abs() < 1e-9);
+    assert!((local1.share().fraction() - 0.25).abs() < 1e-9);
     // Disjoint ranges of the 40 virtual clients, in node id order.
-    assert_eq!((local1.vu_count, local2.vu_count), (10, 30));
-    let (first, second) = if id1 < id2 {
-        (&local1, &local2)
-    } else {
-        (&local2, &local1)
-    };
-    assert_eq!(first.vu_base, 0);
-    assert_eq!(second.vu_base, first.vu_count);
+    let (vu1, vu2) = (local1.virtual_clients(), local2.virtual_clients());
+    assert_eq!((vu1.1, vu2.1), (10, 30));
+    let (first, second) = if id1 < id2 { (vu1, vu2) } else { (vu2, vu1) };
+    assert_eq!(first.0, 0);
+    assert_eq!(second.0, first.1);
     assert_eq!(local1.report().unwrap().totals.sent, sent1);
     assert_eq!(local2.report().unwrap().totals.sent, sent2);
 

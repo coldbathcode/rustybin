@@ -7,24 +7,97 @@
 //! as exact bucket lists, [`WireHist`]): the leader replaces a node's last
 //! stats with the new ones, so a lost or repeated heartbeat never counts
 //! twice or drops anything. Only the timeline travels as the buckets the
-//! leader has not acknowledged yet.
+//! leader has not acknowledged yet. A node that follows a new leader sends
+//! everything again, so the new leader's view fills the gap exactly.
+//!
+//! Failover (section 9.1): every message carries the leader's term, the
+//! leader replicates a versioned [`Snapshot`] (with the state and secrets a
+//! successor needs, to eligible nodes only), and eligible nodes elect a new
+//! leader with [`VoteRequest`] and announce it with [`ElectedRequest`].
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::cluster::MinNodes;
 use super::engine::Share;
 use super::report::{Bucket, Counts, Sample, Saturation, TargetReport, WireHist};
 use super::scenario::{Scenario, ServerProfile};
 use super::Role;
 use crate::harness::correlate::ServerReport;
 
-/// The leader of a cluster as a node sees it (one term in phase 3: the
-/// leader is the coordinator, and there is no failover yet).
+/// The leader of a cluster as a node sees it. A term has one leader; a
+/// newer term always wins.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Leader {
     pub node_id: String,
     pub term: u64,
+    /// Where the other nodes reach it (unset: the URL they joined).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_url: Option<String>,
+    /// When its term began (RFC 3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+}
+
+/// Whether a node may lead (`RUSTYBIN_HARNESS_LEADER`). A node is eligible
+/// only with a control URL the other nodes reach.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaderPolicy {
+    /// Eligible when the control URL is set.
+    #[default]
+    Auto,
+    /// A standby: first in the succession, whatever its work.
+    Prefer,
+    /// Never leads.
+    Never,
+}
+
+impl LeaderPolicy {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "prefer" | "standby" => Some(Self::Prefer),
+            "never" | "off" => Some(Self::Never),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Prefer => "prefer",
+            Self::Never => "never",
+        }
+    }
+}
+
+/// A snapshot's version: newer terms first, then the leader's sequence.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub struct SnapshotVersion {
+    pub term: u64,
+    pub seq: u64,
+}
+
+/// What a node reports of its load on every heartbeat; the leader turns it
+/// into the work score that orders the succession.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorkReport {
+    /// Virtual clients of its running client parts.
+    #[serde(default)]
+    pub virtual_clients: u32,
+    /// Marked requests arriving per second (server role).
+    #[serde(default)]
+    pub arrivals_per_sec: f64,
+    /// CPU busy, in cores (Linux only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<f64>,
+    /// The scheduler lag p99 of its running client part, in milliseconds.
+    #[serde(default)]
+    pub lag_p99_ms: f64,
 }
 
 /// What a node declares about itself when it joins: the rate split over
@@ -54,6 +127,12 @@ pub struct JoinRequest {
     /// The node's clock when it sent the request (Unix ns), for clock sync.
     #[serde(default)]
     pub t1: u64,
+    /// The node's control URL as the other nodes reach it: set means it may
+    /// lead (unless `leader` is `never`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_url: Option<String>,
+    #[serde(default)]
+    pub leader: LeaderPolicy,
 }
 
 /// The join answer: the node credential for heartbeats and the lease.
@@ -66,6 +145,9 @@ pub struct JoinResponse {
     pub lease_ms: u64,
     /// How often a node heartbeats while it has load to report.
     pub heartbeat_ms: u64,
+    /// How long without the leader before an election starts.
+    #[serde(default)]
+    pub election_timeout_ms: u64,
     pub leader: Leader,
     /// Served at `/.well-known/rustybin-harness` by the cluster's server
     /// nodes, and expected there by its clients (`RUSTYBIN_HARNESS_VERIFY_TARGETS`).
@@ -123,6 +205,15 @@ pub struct HeartbeatRequest {
     /// Requests in flight on the node now (its work report).
     #[serde(default)]
     pub in_flight: u64,
+    /// The term of the leader this node follows: a leader that sees a newer
+    /// one steps down.
+    #[serde(default)]
+    pub term: u64,
+    /// The snapshot this node holds; a newer one comes with the answer.
+    #[serde(default)]
+    pub snapshot: SnapshotVersion,
+    #[serde(default)]
+    pub work: WorkReport,
 }
 
 /// The heartbeat answer.
@@ -132,8 +223,13 @@ pub struct HeartbeatResponse {
     pub leader: Leader,
     pub lease_ms: u64,
     pub heartbeat_ms: u64,
+    #[serde(default)]
+    pub election_timeout_ms: u64,
     pub t2: u64,
     pub t3: u64,
+    /// The cluster snapshot, when it changed since the node's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<Box<Snapshot>>,
     /// Client side: one entry per run this node has a part in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<RunControl>,
@@ -162,6 +258,10 @@ pub struct RunControl {
     /// The leader has the node's final stats: stop sending them.
     #[serde(default)]
     pub final_ack: bool,
+    /// The node's share now: it changes when the rate is re-split (a client
+    /// node gone, or a new leader handing its own share back). Empty: stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share: Option<Share>,
 }
 
 /// What a client node runs: the scenario, its share of the rate, its
@@ -271,6 +371,10 @@ pub struct NodeStats {
     pub timeline_from: usize,
     #[serde(default)]
     pub timeline: Vec<Bucket>,
+    /// The node's buckets so far (`timeline` may carry only a part, the
+    /// rest comes on the next heartbeats).
+    #[serde(default)]
+    pub timeline_total: usize,
     #[serde(default)]
     pub saturation: Saturation,
     /// Final stats only: the node's most telling samples.
@@ -307,4 +411,199 @@ pub struct Collected {
     pub seen: BTreeMap<String, String>,
     #[serde(default)]
     pub untracked: BTreeMap<String, String>,
+}
+
+// ── Failover (section 9.1) ──────────────────────────────────────────
+
+/// The replicated cluster state. Every node gets the public part (the
+/// leader, the term, who leads next and where); eligible nodes also get
+/// `state`, which holds what a successor needs to carry on, secrets included.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Snapshot {
+    pub cluster_id: String,
+    pub version: SnapshotVersion,
+    pub leader: Leader,
+    pub lease_ms: u64,
+    pub election_timeout_ms: u64,
+    /// The nodes that may lead (the leader included): elections need a
+    /// majority of them.
+    pub eligible: Vec<String>,
+    /// Who leads next, in order: standbys first, then by work, then by id.
+    pub succession: Vec<Successor>,
+    /// Leader changes, oldest first (bounded).
+    #[serde(default)]
+    pub history: Vec<LeaderChange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<SnapState>,
+}
+
+impl Snapshot {
+    /// A majority of the eligible nodes.
+    pub fn majority(&self) -> usize {
+        self.eligible.len() / 2 + 1
+    }
+
+    /// Failover needs three eligible nodes: with two, a majority is both.
+    pub fn failover_available(&self) -> bool {
+        self.eligible.len() >= 3
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Successor {
+    pub node_id: String,
+    pub control_url: String,
+    #[serde(default)]
+    pub prefer: bool,
+    #[serde(default)]
+    pub work_score: f64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaderChange {
+    pub term: u64,
+    pub node_id: String,
+    /// RFC 3339.
+    pub at: String,
+    /// `created`, `elected`.
+    pub reason: String,
+}
+
+/// What a successor needs to lead: members, runs with their assignments
+/// and last stats (the checkpoint), and the secrets.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SnapState {
+    pub created_at: String,
+    pub min_nodes: MinNodes,
+    pub members: Vec<SnapMember>,
+    pub runs: Vec<SnapRun>,
+    pub secrets: SnapSecrets,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SnapMember {
+    pub node_id: String,
+    pub roles: Vec<Role>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertise: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_url: Option<String>,
+    #[serde(default)]
+    pub leader: LeaderPolicy,
+    pub capacity: Capacity,
+    #[serde(default)]
+    pub version: String,
+    /// Part of the node credential (with the cluster secret).
+    pub incarnation: String,
+    pub joined_at: String,
+    #[serde(default)]
+    pub left: bool,
+}
+
+/// A run that has not finished, as a successor resumes it.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SnapRun {
+    pub id: String,
+    pub scenario: Scenario,
+    pub hash: String,
+    /// The run key (hex). Secret.
+    pub key: String,
+    pub created_at: String,
+    /// `created`, `starting`, `running` or `collecting`.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    pub start_at_ns: u64,
+    pub clients: Vec<SnapClient>,
+    pub servers: Vec<SnapServer>,
+}
+
+impl std::fmt::Debug for SnapRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnapRun")
+            .field("id", &self.id)
+            .field("state", &self.state)
+            .field("key", &"[redacted]")
+            .finish_non_exhaustive()
+    }
+}
+
+/// A client part with the checkpoint of its stats: counters for every
+/// node (they report again to a new leader), histograms too for the nodes
+/// that will not (gone, or the leader's own part).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SnapClient {
+    pub node_id: String,
+    pub share: Share,
+    pub vu_from: u32,
+    pub vu_to: u32,
+    /// Its share was re-split over the others (the node is gone, or it
+    /// leads now).
+    #[serde(default)]
+    pub gone: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<NodeStats>,
+    /// When the leader got those stats (its clock, Unix ns).
+    #[serde(default)]
+    pub stats_at_ns: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SnapServer {
+    pub node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<ServerStatsWire>,
+}
+
+/// The cluster secret (node credentials derive from it), the join token's
+/// hash and the verification token. Eligible nodes only; never logged.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct SnapSecrets {
+    pub secret: String,
+    pub join_hash: String,
+    pub verification_token: String,
+}
+
+impl std::fmt::Debug for SnapSecrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SnapSecrets([redacted])")
+    }
+}
+
+/// `POST .../election/vote`: a candidate asks for a vote (its node
+/// credential as bearer).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VoteRequest {
+    pub term: u64,
+    pub candidate: String,
+    pub snapshot: SnapshotVersion,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct VoteResponse {
+    pub granted: bool,
+    /// The voter's term (newer than the candidate's: the candidate stands down).
+    pub term: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leader: Option<Leader>,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// `POST .../election/elected`: a new leader announces its term (its node
+/// credential as bearer).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ElectedRequest {
+    pub leader: Leader,
+}
+
+/// A node that does not lead the cluster answers a heartbeat with the
+/// leader it knows (409), so members find the new leader.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct NotLeader {
+    pub error: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leader: Option<Leader>,
 }

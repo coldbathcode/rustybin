@@ -5,15 +5,20 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-- **Load test mode (harness), the next phases** (`docs/plans/harness.md`): phase 3b,
-  failover. Eligible nodes, a succession list ordered by work, a replicated cluster
-  snapshot with checkpoints, an elected leader that takes over within the lease with
-  no gap in client load, and the old leader stepping down when it returns. Then every
-  pattern (step, target, breakpoint, spike, pulse, burst, wave) with live tuning
-  (phase 4), and the rate-limit tests that check rate limiting (phase 5).
+- **Load test mode (harness), the next phases** (`docs/plans/harness.md`): phase 4,
+  every run pattern (step, target, breakpoint, spike, pulse, burst, wave) with `then:`
+  and `sync`, the scale block, live tuning through the snapshot, preview curves, saved
+  scenarios and the run's live feed. Then the rate-limit tests and their analysis
+  (phase 5).
 
 ## Recently built
 
+- [Harness failover](configuration.md#harness-mode) (phase 3b): eligible nodes, a
+  succession ordered by work with standbys first, a replicated snapshot with
+  checkpoints, elections by a majority of the eligible nodes, terms that make an old
+  leader step down, and a new leader that takes over within the lease, so the
+  clients never stop. A minority partition stops sending; a two-node cluster has no
+  failover.
 - [Harness clusters](configuration.md#harness-mode) (phase 3): a coordinator that
   client and server nodes join, heartbeats with leases (a client stops when it loses
   its leader), clock sync, the rate split over the clients by capacity, synchronised

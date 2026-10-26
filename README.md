@@ -546,9 +546,12 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | POST | `/_rustybin/harness/stop` | Kill switch: stop all load on this node now |
 | POST | `/_rustybin/harness/join` | Join a cluster: {url, join_token, advertise?} (orchestrated) |
 | POST | `/_rustybin/harness/leave` | Leave the cluster (this node's runs of it stop) |
-| GET POST | `/_rustybin/harness/clusters` | Clusters this node leads; POST {cluster_id?, min_nodes?, lease?, join_token?} creates one |
+| GET POST | `/_rustybin/harness/clusters` | Clusters this node leads; POST {cluster_id?, min_nodes?, lease?, election_timeout?, join_token?} creates one |
 | GET DELETE | `/_rustybin/harness/clusters/{id}` | A cluster: members, roles, health, clock offsets, the current run |
 | GET | `/_rustybin/harness/clusters/{id}/upstreams` | The server nodes' advertised URLs, for the gateway's upstream pool |
+| GET | `/_rustybin/harness/clusters/{id}/leader` | The leader, its term, the succession with work scores and the history of leader changes |
+| POST | `/_rustybin/harness/clusters/{id}/election/vote` | Node route: a candidate asks an eligible node for its vote (node credential) |
+| POST | `/_rustybin/harness/clusters/{id}/election/elected` | Node route: a new leader announces its term (node credential); an older leader steps down |
 | POST | `/_rustybin/harness/clusters/{id}/nodes` | Node route: join with the join token (bearer); returns a node credential and a lease |
 | POST | `/_rustybin/harness/clusters/{id}/nodes/{node}/heartbeat` | Node route: heartbeat with the node credential; a long poll carrying stats, returning assignments |
 | GET POST | `/_rustybin/harness/clusters/{id}/runs` | Cluster runs; POST a scenario to submit it (validated, not started) |

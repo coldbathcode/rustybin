@@ -23,7 +23,7 @@ use super::cluster::{run_links, Cluster, CreateCluster, NodeError};
 use super::correlate::now_ns;
 use super::member::{self, JoinTarget};
 use super::scenario::{Caps, Scenario};
-use super::wire::{HeartbeatRequest, JoinRequest};
+use super::wire::{ElectedRequest, HeartbeatRequest, JoinRequest, VoteRequest};
 use super::{builtin_scenario, builtin_scenarios, Harness, RunError, PREFIX};
 use crate::state::AppState;
 
@@ -376,11 +376,11 @@ fn led_cluster(h: &Harness, id: &str, path: &str) -> Result<Arc<Cluster>, Respon
     }
     if let Some(m) = h.membership() {
         if m.cluster_id == id {
-            if let Some(url) = &m.url {
+            if let Some(url) = m.url() {
                 let rest = path
                     .strip_prefix(&format!("{PREFIX}/clusters/{id}"))
                     .unwrap_or("");
-                let leader = m.describe()["leader"].clone();
+                let leader = m.leader();
                 let location = format!("{url}{rest}");
                 let mut resp = (
                     StatusCode::TEMPORARY_REDIRECT,
@@ -394,11 +394,7 @@ fn led_cluster(h: &Harness, id: &str, path: &str) -> Result<Arc<Cluster>, Respon
                 if let Ok(v) = HeaderValue::from_str(&location) {
                     resp.headers_mut().insert(header::LOCATION, v);
                 }
-                let tag = format!(
-                    "{}; term={}",
-                    leader["node_id"].as_str().unwrap_or(""),
-                    leader["term"].as_u64().unwrap_or(1)
-                );
+                let tag = format!("{}; term={}", leader.node_id, leader.term);
                 if let Ok(v) = HeaderValue::from_str(&tag) {
                     resp.headers_mut().insert(super::LEADER_HEADER, v);
                 }
@@ -497,7 +493,7 @@ pub async fn delete_cluster(
     }
     // The leader's own membership of the cluster ends with it.
     if h.membership()
-        .is_some_and(|m| m.cluster_id == id && m.url.is_none())
+        .is_some_and(|m| m.cluster_id == id && m.url().is_none())
     {
         h.leave().await;
     }
@@ -535,17 +531,25 @@ pub async fn node_join(
         Ok(h) => h,
         Err(resp) => return resp,
     };
-    let Some(cluster) = h.coordinator.get(&id) else {
-        return error(
-            StatusCode::NOT_FOUND,
-            format!("no cluster {id:?} on this node"),
-        );
-    };
     let Some(token) = bearer(&headers) else {
         return node_error(NodeError {
             status: 401,
             error: "the join token is required (Authorization: Bearer)".into(),
         });
+    };
+    let Some(cluster) = h.coordinator.get(&id) else {
+        // Not the leader: an eligible member names it (409), so a node can
+        // join through any eligible member.
+        if let Some(m) = h.membership().filter(|m| m.cluster_id == id) {
+            return match m.join_redirect(token) {
+                Ok(answer) => (StatusCode::CONFLICT, Json(answer)).into_response(),
+                Err(e) => node_error(e),
+            };
+        }
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("no cluster {id:?} on this node"),
+        );
     };
     let req: JoinRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -575,17 +579,25 @@ pub async fn node_heartbeat(
         Ok(h) => h,
         Err(resp) => return resp,
     };
-    let Some(cluster) = h.coordinator.get(&id) else {
-        return error(
-            StatusCode::NOT_FOUND,
-            format!("no cluster {id:?} on this node"),
-        );
-    };
     let Some(credential) = bearer(&headers).map(str::to_string) else {
         return node_error(NodeError {
             status: 401,
             error: "the node credential is required (Authorization: Bearer)".into(),
         });
+    };
+    let Some(cluster) = h.coordinator.get(&id) else {
+        // Not the leader: a member names the leader it follows (409), so a
+        // node that lost its leader finds the new one.
+        if let Some(m) = h.membership().filter(|m| m.cluster_id == id) {
+            return match m.not_leader(&node, &credential) {
+                Ok(answer) => (StatusCode::CONFLICT, Json(answer)).into_response(),
+                Err(e) => node_error(e),
+            };
+        }
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("no cluster {id:?} on this node"),
+        );
     };
     let mut req: HeartbeatRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -865,6 +877,132 @@ pub async fn leave(State(state): State<AppState>, headers: HeaderMap) -> Respons
         None => error(
             StatusCode::NOT_FOUND,
             "this node is not a member of a cluster",
+        ),
+    }
+}
+
+/// `GET /_rustybin/harness/clusters/{id}/leader`: the leader, the term, the
+/// succession with each node's work score and the history of leader
+/// changes. Answered by every member (never redirected), so a controller
+/// can always find the leader.
+pub async fn get_leader(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    if let Some(c) = h.coordinator.get(&id) {
+        c.tick();
+        return Json(c.leader_view()).into_response();
+    }
+    match h.membership().filter(|m| m.cluster_id == id) {
+        Some(m) => Json(m.leader_view()).into_response(),
+        None => error(
+            StatusCode::NOT_FOUND,
+            format!("this node is not a member of cluster {id:?}"),
+        ),
+    }
+}
+
+/// `POST /_rustybin/harness/clusters/{id}/election/vote`: a candidate asks
+/// for this node's vote (its node credential as bearer).
+pub async fn node_vote(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    let Some(credential) = bearer(&headers) else {
+        return node_error(NodeError::new(
+            401,
+            "the node credential is required (Authorization: Bearer)",
+        ));
+    };
+    let req: VoteRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                format!("invalid vote request: {e}"),
+            )
+        }
+    };
+    let answer = if let Some(c) = h.coordinator.get(&id) {
+        c.answer_vote(credential, &req)
+    } else if let Some(m) = h.membership().filter(|m| m.cluster_id == id) {
+        m.vote(credential, &req)
+    } else {
+        Err(NodeError::new(
+            404,
+            format!("no cluster {id:?} on this node"),
+        ))
+    };
+    match answer {
+        Ok(v) => {
+            tracing::info!(
+                target: "rustybin::harness",
+                cluster = %id,
+                candidate = %req.candidate,
+                term = req.term,
+                granted = v.granted,
+                reason = %v.reason,
+                "harness: vote requested"
+            );
+            Json(v).into_response()
+        }
+        Err(e) => node_error(e),
+    }
+}
+
+/// `POST /_rustybin/harness/clusters/{id}/election/elected`: a new leader
+/// announces its term (its node credential as bearer). A node that led an
+/// older term steps down; a member follows.
+pub async fn node_elected(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    let Some(credential) = bearer(&headers) else {
+        return node_error(NodeError::new(
+            401,
+            "the node credential is required (Authorization: Bearer)",
+        ));
+    };
+    let req: ElectedRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                format!("invalid announcement: {e}"),
+            )
+        }
+    };
+    if let Some(c) = h.coordinator.get(&id) {
+        if let Err(e) = c.authenticate(&req.leader.node_id, credential) {
+            return node_error(e);
+        }
+        if req.leader.term > c.term {
+            super::election::step_down(&h, &c, Some(req.leader.clone()));
+            return Json(json!({ "accepted": true, "stepped_down": true })).into_response();
+        }
+        return Json(json!({ "accepted": false, "term": c.term })).into_response();
+    }
+    match h.membership().filter(|m| m.cluster_id == id) {
+        Some(m) => match m.elected(credential, &req) {
+            Ok(followed) => Json(json!({ "accepted": followed })).into_response(),
+            Err(e) => node_error(e),
+        },
+        None => error(
+            StatusCode::NOT_FOUND,
+            format!("no cluster {id:?} on this node"),
         ),
     }
 }

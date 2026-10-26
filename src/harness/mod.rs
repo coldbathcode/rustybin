@@ -25,6 +25,7 @@ pub mod api;
 pub mod cli;
 pub mod cluster;
 pub mod correlate;
+pub mod election;
 pub mod engine;
 pub mod member;
 pub mod pattern;
@@ -32,6 +33,8 @@ pub mod report;
 pub mod safety;
 pub mod scenario;
 pub mod shaped;
+#[cfg(test)]
+pub mod test_net;
 #[cfg(test)]
 pub mod test_proxy;
 pub mod wire;
@@ -155,10 +158,10 @@ pub fn is_harness_path(path: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
-/// The routes cluster members call on their leader: join (with the join
-/// token) and heartbeat (with the node credential). They authenticate
-/// themselves, so the control-plane auth, the key layer and the plan limits
-/// leave them alone.
+/// The routes cluster nodes call on each other: join (with the join token),
+/// heartbeat, vote and the new leader's announcement (with the node
+/// credential). They authenticate themselves, so the control-plane auth,
+/// the key layer and the plan limits leave them alone.
 pub fn is_node_path(method: &axum::http::Method, path: &str) -> bool {
     if method != axum::http::Method::POST {
         return false;
@@ -173,6 +176,7 @@ pub fn is_node_path(method: &axum::http::Method, path: &str) -> bool {
     match parts.as_slice() {
         [id, "nodes"] => cluster::safe_id(id),
         [id, "nodes", node, "heartbeat"] => cluster::safe_id(id) && cluster::safe_id(node),
+        [id, "election", "vote" | "elected"] => cluster::safe_id(id),
         _ => false,
     }
 }
@@ -205,8 +209,15 @@ pub fn check_startup(config: &Config) -> Result<(), String> {
     if h.join.is_some() && h.join_token.is_none() {
         return Err("RUSTYBIN_HARNESS_JOIN needs RUSTYBIN_HARNESS_JOIN_TOKEN".into());
     }
-    if h.join.is_some() && !h.has_role(Role::Client) && !h.has_role(Role::Server) {
-        return Err("RUSTYBIN_HARNESS_JOIN needs the client or server role".into());
+    if h.join.is_some()
+        && !h.has_role(Role::Client)
+        && !h.has_role(Role::Server)
+        && (h.control_url.is_none() || h.leader == wire::LeaderPolicy::Never)
+    {
+        return Err(
+            "RUSTYBIN_HARNESS_JOIN needs the client or server role, or RUSTYBIN_HARNESS_CONTROL_URL to stand by as leader"
+                .into(),
+        );
     }
     if h.has_role(Role::Client) {
         let (allowlist, warnings) = Allowlist::parse(&h.targets);
@@ -307,6 +318,8 @@ pub struct Harness {
     membership: Mutex<Option<Arc<Membership>>>,
     /// The HTTP listener's address, once bound (the default advertise URL).
     bound: OnceLock<SocketAddr>,
+    /// `RUSTYBIN_HARNESS_CONTROL_URL` with `auto` resolved once bound.
+    control: OnceLock<Option<String>>,
 }
 
 /// A node id safe for request ids: letters, digits, `.`, `_`, `-`, at most 32.
@@ -391,7 +404,39 @@ impl Harness {
             coordinator: cluster::Coordinator::default(),
             membership: Mutex::new(None),
             bound: OnceLock::new(),
+            control: OnceLock::new(),
         })
+    }
+
+    /// This node's control URL as the other nodes reach it: set means it
+    /// may lead. `auto` is the listener's address when it binds a specific
+    /// one (unset before the listener is bound).
+    pub fn control_url(&self) -> Option<String> {
+        match self.config.control_url.as_deref() {
+            None => None,
+            Some("auto") => self.control.get().cloned().flatten(),
+            Some(url) => Some(url.to_string()),
+        }
+    }
+
+    /// Whether this node may lead a cluster it is a member of.
+    pub fn may_lead(&self) -> bool {
+        self.config.leader != wire::LeaderPolicy::Never && self.control_url().is_some()
+    }
+
+    /// This node as the leader of a cluster.
+    pub fn leader_info(&self) -> cluster::LeaderInfo {
+        cluster::LeaderInfo {
+            node_id: self.node_id.clone(),
+            control_url: self.control_url(),
+            report_dir: self.config.report_dir.clone(),
+            election_timeout: self.config.election_timeout,
+        }
+    }
+
+    /// The HTTP listener's port, once bound.
+    pub fn bound_port(&self) -> Option<u16> {
+        self.bound.get().map(|a| a.port())
     }
 
     /// The cluster this node is a member of.
@@ -435,6 +480,16 @@ impl Harness {
     /// Record the HTTP listener's address (the server calls this once bound).
     pub fn set_bound(&self, addr: SocketAddr) {
         let _ = self.bound.set(addr);
+        if self.config.control_url.as_deref() == Some("auto") {
+            let url = (!addr.ip().is_unspecified()).then(|| format!("http://{addr}"));
+            if url.is_none() {
+                tracing::warn!(
+                    "RUSTYBIN_HARNESS_CONTROL_URL=auto needs a listener on a specific address (RUSTYBIN_HOST), not {}: this node never leads",
+                    addr.ip()
+                );
+            }
+            let _ = self.control.set(url);
+        }
     }
 
     /// A server node's URL when `RUSTYBIN_HARNESS_ADVERTISE` is unset: the
@@ -537,7 +592,10 @@ impl Harness {
             "enabled": true,
             "harness_api": HARNESS_API,
             "node_id": self.node_id,
-            "roles": self.config.roles.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
+            "roles": self.roles().iter().map(|r| r.as_str()).collect::<Vec<_>>(),
+            "control_url": self.control_url(),
+            "may_lead": self.may_lead(),
+            "leader_policy": self.config.leader.as_str(),
             "caps": self.caps(),
             "engine": self.engine.as_ref().map(Engine::describe),
             "engine_error": self.engine_error,
@@ -557,16 +615,27 @@ impl Harness {
         })
     }
 
+    /// The configured roles, plus `coordinator` while it leads a cluster
+    /// (a node that won an election takes the role on).
+    pub fn roles(&self) -> Vec<Role> {
+        let mut roles = self.config.roles.clone();
+        if !roles.contains(&Role::Coordinator) && !self.coordinator.is_empty() {
+            roles.push(Role::Coordinator);
+        }
+        roles
+    }
+
     /// The leader as this node sees it: itself for the clusters it leads,
     /// else its membership's leader.
     fn leader_view(&self) -> Value {
         if let Some(m) = self.membership() {
-            return m.describe()["leader"].clone();
+            if let Some(c) = self.coordinator.get(&m.cluster_id) {
+                return json!(c.leader_ref());
+            }
+            return json!(m.leader());
         }
         match self.coordinator.list().first() {
-            Some(c) => {
-                json!({ "node_id": c.leader, "term": 1, "since": c.created_at.to_rfc3339() })
-            }
+            Some(c) => json!(c.leader_ref()),
             None => Value::Null,
         }
     }
@@ -804,21 +873,30 @@ pub async fn create_cluster(
             "this node has no coordinator role (RUSTYBIN_HARNESS_ROLES=coordinator, with client or server as well if it should send or serve)",
         ));
     }
-    let (cluster, token) = h
-        .coordinator
-        .create(&h.node_id, req, h.config.report_dir.clone())?;
-    if (h.is_client() || h.is_server()) && h.membership().is_none() {
-        let advertise = h.config.advertise.clone();
-        if let Err(e) = member::join(
-            h,
-            member::JoinTarget::Local(cluster.id.clone()),
-            token.clone(),
-            advertise,
-        )
-        .await
-        {
-            tracing::warn!(target: "rustybin::harness", cluster = %cluster.id, "harness: the leader could not join its own cluster: {e}");
-        }
+    if let Some(m) = h.membership() {
+        return Err(RunError::new(
+            409,
+            format!(
+                "this node is a member of cluster {} already: leave it first (POST {PREFIX}/leave)",
+                m.cluster_id
+            ),
+        ));
+    }
+    let (cluster, token) = h.coordinator.create(&h.leader_info(), req)?;
+    election::spawn_lead(h, &cluster);
+    // The leader is a member of its own cluster (in process): it counts
+    // among the eligible nodes, and after a failover it carries on as an
+    // ordinary member of the new leader.
+    let advertise = h.config.advertise.clone();
+    if let Err(e) = member::join(
+        h,
+        member::JoinTarget::Local(cluster.id.clone()),
+        token.clone(),
+        advertise,
+    )
+    .await
+    {
+        tracing::warn!(target: "rustybin::harness", cluster = %cluster.id, "harness: the leader could not join its own cluster: {e}");
     }
     Ok((cluster, token))
 }
@@ -828,7 +906,8 @@ pub async fn create_cluster(
 /// `RUSTYBIN_HARNESS_JOIN` starts joining (retried until the leader answers).
 pub async fn start_cluster_from_config(h: &Arc<Harness>) -> Result<(), String> {
     let hc = &h.config;
-    if hc.has_role(Role::Coordinator) {
+    // A coordinator with a join URL is a standby: it joins.
+    if hc.has_role(Role::Coordinator) && hc.join.is_none() {
         if let (Some(id), Some(token)) = (&hc.cluster, &hc.join_token) {
             let req = cluster::CreateCluster {
                 cluster_id: Some(id.clone()),
@@ -1022,6 +1101,18 @@ pub fn router(_state: &AppState) -> Router<AppState> {
             get(api::upstreams),
         )
         .route(
+            "/_rustybin/harness/clusters/{id}/leader",
+            get(api::get_leader),
+        )
+        .route(
+            "/_rustybin/harness/clusters/{id}/election/vote",
+            post(api::node_vote),
+        )
+        .route(
+            "/_rustybin/harness/clusters/{id}/election/elected",
+            post(api::node_elected),
+        )
+        .route(
             "/_rustybin/harness/clusters/{id}/nodes",
             post(api::node_join),
         )
@@ -1178,7 +1269,7 @@ pub fn catalog() -> Vec<Endpoint> {
             "/_rustybin/harness/clusters",
             &["GET", "POST"],
             category::HARNESS,
-            "Clusters this node leads; POST {cluster_id?, min_nodes?, lease?, join_token?} creates one",
+            "Clusters this node leads; POST {cluster_id?, min_nodes?, lease?, election_timeout?, join_token?} creates one",
         )
         .description(
             "Needs the coordinator role. The answer carries the join token once (only its hash is \
@@ -1212,6 +1303,46 @@ pub fn catalog() -> Vec<Endpoint> {
         .example(
             Example::get("Upstreams", "/_rustybin/harness/clusters/perf-1/upstreams")
                 .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/harness/clusters/{id}/leader",
+            &["GET"],
+            category::HARNESS,
+            "The leader, its term, the succession with work scores and the history of leader changes",
+        )
+        .description(
+            "Answered by every member, never redirected, so a controller can always find the \
+             leader. failover is available with three or more eligible nodes \
+             (RUSTYBIN_HARNESS_CONTROL_URL).",
+        )
+        .example(
+            Example::get("The leader", "/_rustybin/harness/clusters/perf-1/leader")
+                .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/harness/clusters/{id}/election/vote",
+            &["POST"],
+            category::HARNESS,
+            "Node route: a candidate asks an eligible node for its vote (node credential)",
+        )
+        .example(
+            Example::post("Vote (node)", "/_rustybin/harness/clusters/perf-1/election/vote")
+                .json(r#"{"term":2,"candidate":"n2","snapshot":{"term":1,"seq":7}}"#)
+                .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/harness/clusters/{id}/election/elected",
+            &["POST"],
+            category::HARNESS,
+            "Node route: a new leader announces its term (node credential); an older leader steps down",
+        )
+        .example(
+            Example::post(
+                "Announce (node)",
+                "/_rustybin/harness/clusters/perf-1/election/elected",
+            )
+            .json(r#"{"leader":{"node_id":"n2","term":2}}"#)
+            .expect_status(404),
         ),
         Endpoint::new(
             "/_rustybin/harness/clusters/{id}/nodes",
@@ -1346,7 +1477,7 @@ pub fn openapi_paths() -> Value {
     });
     let off = json!({ "description": "Harness mode is off (RUSTYBIN_HARNESS=on), or no such run" });
     let tag = json!(["Harness"]);
-    json!({
+    let mut paths = json!({
         "/_rustybin/harness": {
             "get": {
                 "tags": tag,
@@ -1466,6 +1597,30 @@ pub fn openapi_paths() -> Value {
                 "responses": { "200": { "description": "Stopped runs", "content": { "application/json": { "schema": { "type": "object" } } } }, "404": off }
             }
         },
+        "/harness": shaped_item("getShapedRoot", &tag),
+        "/harness/{path}": shaped_item("getShapedPath", &tag),
+        WELL_KNOWN_PATH: {
+            "get": {
+                "tags": tag,
+                "summary": "Harness verification token",
+                "operationId": "getHarnessVerificationToken",
+                "security": [],
+                "responses": { "200": { "description": "The token", "content": { "text/plain": { "schema": { "type": "string" } } } }, "404": off }
+            }
+        }
+    });
+    if let (Value::Object(all), Value::Object(more)) = (
+        &mut paths,
+        cluster_openapi_paths(&tag, &off, &scenario_body),
+    ) {
+        all.extend(more);
+    }
+    paths
+}
+
+/// The OpenAPI paths of the cluster routes (phases 3 and 3b).
+fn cluster_openapi_paths(tag: &Value, off: &Value, scenario_body: &Value) -> Value {
+    json!({
         "/_rustybin/harness/join": {
             "post": {
                 "tags": tag,
@@ -1505,6 +1660,7 @@ pub fn openapi_paths() -> Value {
                         "cluster_id": { "type": "string" },
                         "min_nodes": { "type": "object", "properties": { "client": { "type": "integer" }, "server": { "type": "integer" } } },
                         "lease": { "type": "string", "description": "500ms to 60s, default 5s" },
+                        "election_timeout": { "type": "string", "description": "How long without the leader before an election starts: 200ms, below the lease (default RUSTYBIN_HARNESS_ELECTION_TIMEOUT, 3s)" },
                         "join_token": { "type": "string", "description": "At least 16 characters; random when absent" }
                     }
                 } } } },
@@ -1536,6 +1692,40 @@ pub fn openapi_paths() -> Value {
                 "responses": { "200": { "description": "Advertised URLs", "content": { "application/json": { "schema": { "type": "array", "items": { "type": "string" } } } } }, "307": { "description": "This node is a member; the leader answers" }, "404": off }
             }
         },
+        "/_rustybin/harness/clusters/{id}/leader": {
+            "get": {
+                "tags": tag,
+                "summary": "The cluster's leader",
+                "description": "The leader (node, control URL, term, since), the eligible nodes, whether failover is available (three or more), the succession with work scores and the history of leader changes. Every member answers; never redirected.",
+                "operationId": "getHarnessLeader",
+                "parameters": [path_param("id")],
+                "responses": { "200": json_ok("The leader as this node sees it"), "404": off }
+            }
+        },
+        "/_rustybin/harness/clusters/{id}/election/vote": {
+            "post": {
+                "tags": tag,
+                "summary": "Node vote",
+                "description": "A candidate asks an eligible node for its vote: `{term, candidate, snapshot}` with the candidate's node credential as bearer. Granted when the node lost the leader too, has not voted in the term and the candidate's snapshot is at least as recent.",
+                "operationId": "harnessNodeVote",
+                "security": [],
+                "parameters": [path_param("id")],
+                "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+                "responses": { "200": json_ok("`{granted, term, leader?, reason}`"), "401": { "description": "Invalid node credential" }, "403": { "description": "This node is not eligible" }, "404": off }
+            }
+        },
+        "/_rustybin/harness/clusters/{id}/election/elected": {
+            "post": {
+                "tags": tag,
+                "summary": "New leader announcement",
+                "description": "A new leader announces its term (its node credential as bearer). A node that led an older term steps down; a member follows the new leader.",
+                "operationId": "harnessNodeElected",
+                "security": [],
+                "parameters": [path_param("id")],
+                "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+                "responses": { "200": json_ok("`{accepted}`"), "401": { "description": "Invalid node credential" }, "404": off }
+            }
+        },
         "/_rustybin/harness/clusters/{id}/nodes": {
             "post": {
                 "tags": tag,
@@ -1552,7 +1742,7 @@ pub fn openapi_paths() -> Value {
             "post": {
                 "tags": tag,
                 "summary": "Node heartbeat",
-                "description": "Called by nodes with their node credential as bearer: a long poll (up to 10 s) carrying cumulative stats; returns assignments, stops and the lease.",
+                "description": "Called by nodes with their node credential as bearer: a long poll (up to 10 s, at most a third of the election timeout) carrying cumulative stats, the term and a work report; returns assignments, shares, stops, the lease and the snapshot when it changed. A node that does not lead answers 409 naming the leader it knows; a leader without a majority of the eligible nodes answers 503 (no lease renewal).",
                 "operationId": "harnessNodeHeartbeat",
                 "security": [],
                 "parameters": [path_param("id"), path_param("node")],
@@ -1621,17 +1811,6 @@ pub fn openapi_paths() -> Value {
                     "404": off
                 }
             }
-        },
-        "/harness": shaped_item("getShapedRoot", &tag),
-        "/harness/{path}": shaped_item("getShapedPath", &tag),
-        WELL_KNOWN_PATH: {
-            "get": {
-                "tags": tag,
-                "summary": "Harness verification token",
-                "operationId": "getHarnessVerificationToken",
-                "security": [],
-                "responses": { "200": { "description": "The token", "content": { "text/plain": { "schema": { "type": "string" } } } }, "404": off }
-            }
         }
     })
 }
@@ -1691,5 +1870,7 @@ pub fn openapi_components() -> Value {
 
 #[cfg(test)]
 mod cluster_tests;
+#[cfg(test)]
+mod failover_tests;
 #[cfg(test)]
 mod tests;

@@ -1321,6 +1321,14 @@ async fn harness_cluster_tools() {
         1,
         "{r}"
     );
+    let r = tool(&app, &[], "get_leader", json!({ "cluster_id": "mcp-1" })).await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["term"], 1);
+    assert!(r["structuredContent"]["failover"]
+        .as_str()
+        .unwrap()
+        .starts_with("unavailable"));
+    assert!(text_of(&r).contains("term 1"), "{}", text_of(&r));
     let r = tool(
         &app,
         &[],
