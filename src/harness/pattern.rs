@@ -4,7 +4,7 @@
 //! `then:` and the chain is flattened into [`Stage`]s.
 //!
 //! Phase 1 ships `constant` and `ramp`; the other patterns of the plan
-//! (step, target, breakpoint, spike, pulse, burst, wave, burst attacks)
+//! (step, target, breakpoint, spike, pulse, burst, wave, rate-limit test)
 //! arrive with phases 4 and 5 and will extend this enum, the schema in
 //! `scenario.rs` and the console builder in the same change.
 

@@ -9,7 +9,7 @@ HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is
 2026-10-25; the plan's "Phase 1 build notes" and "Phase 2 build notes" list where the build differs; phase 3, the
 cluster, is next): Rustybin as a load client and
 correlating upstream, single node (loop-through) or a cluster (an elected leader, clients, servers), traffic layers
-with run patterns and rate-limit burst attacks, every parameter from one schema in the API, MCP and console (tunable
+with run patterns and rate-limit tests, every parameter from one schema in the API, MCP and console (tunable
 live), or headless. It is the first feature that sends load to targets the caller chooses (A2A push notifications,
 the leads webhook and the key registry URL already send outbound requests, with their own allowlists), so
 `src/harness/safety.rs` (allowlist, pinning, forbidden addresses, verification, kill switch) comes first and every

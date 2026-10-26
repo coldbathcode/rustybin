@@ -12,7 +12,7 @@ the pages for the features that exist today describe current behaviour.
   server nodes exported as a gateway's upstream pool, and headless clusters that
   start on quorum. Then failover with an elected leader (phase 3b), every pattern
   (step, target, breakpoint, spike, pulse, burst, wave) with live tuning (phase 4),
-  and the burst attacks that check rate limiting (phase 5).
+  and the rate-limit test that check rate limiting (phase 5).
 
 ## Recently built
 

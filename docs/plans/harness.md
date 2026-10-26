@@ -65,8 +65,8 @@ gateway), and it generates traffic from the same OpenAPI mocks the upstream serv
 | **Succession list** | Eligible nodes ordered by least work, computed by the leader and replicated to every node, so all nodes agree on who takes over |
 | **Scenario** | What to send, where, how fast, with which chaos and pass criteria (section 6) |
 | **Run** | One execution of a scenario on a cluster: `run_id`, stages, live stats, final report |
-| **Layer** | One stream of traffic inside a run, with its own source, identities and pattern (customers, an attacker, LLM calls); layers run at the same time and are reported separately (section 6) |
-| **Pattern** | The shape of a layer's load over time: ramp, step, target, breakpoint, spike, pulse, burst, wave, burst attack (section 6.2) |
+| **Layer** | One stream of traffic inside a run, with its own source, identities and pattern (customers, a heavy consumer, LLM calls); layers run at the same time and are reported separately (section 6) |
+| **Pattern** | The shape of a layer's load over time: ramp, step, target, breakpoint, spike, pulse, burst, wave, rate-limit test (section 6.2) |
 | **Scale** | How big a run is: client and server nodes, virtual clients, connections, identities (section 6.4) |
 | **Virtual client (VU)** | One simulated client inside a client node: its own credentials, session, connection pool and source identity |
 | **Headless mode** | Everything comes from env vars and a scenario file. Nodes self-assemble, the run starts on quorum, and the report goes to a file or stdout with an exit code. No controller is needed during the run |
@@ -90,7 +90,7 @@ gateway), and it generates traffic from the same OpenAPI mocks the upstream serv
 
 - **New module `src/harness/`** with `mod.rs` (router, catalogue, OpenAPI), `scenario.rs` (model,
   validation, JSON Schema, built-in scenarios embedded from `src/harness/scenarios/*.yaml`), `pattern.rs`
-  (pattern math and preview), `ratelimit.rs` (attacks and the rate-limit analysis), `engine.rs`
+  (pattern math and preview), `ratelimit.rs` (rate-limit tests and their analysis), `engine.rs`
   (scheduler, virtual clients, HTTP client), `chaos.rs`, `correlate.rs` (headers, signing, the server
   layer), `cluster.rs` (coordinator, membership, leases, clock sync, elections),
   `report.rs` (histograms, timelines, thresholds), `safety.rs` (allowlist, caps, target verification),
@@ -160,7 +160,7 @@ and default like other config.
 ```bash
 # coordinator: waits for 4 clients and 2 servers, runs the scenario, writes the report, exits 0 or 1
 RUSTYBIN_HARNESS=on RUSTYBIN_HARNESS_ROLES=coordinator RUSTYBIN_HARNESS_CLUSTER=perf-1 \
-RUSTYBIN_HARNESS_JOIN_TOKEN=... RUSTYBIN_HARNESS_SCENARIO=gateway-smash.yaml \
+RUSTYBIN_HARNESS_JOIN_TOKEN=... RUSTYBIN_HARNESS_SCENARIO=gateway-load.yaml \
 RUSTYBIN_HARNESS_START=on-quorum RUSTYBIN_HARNESS_REPORT=- RUSTYBIN_HARNESS_EXIT=on rustybin
 
 # every other node: a role, the join URL and the token
@@ -188,7 +188,7 @@ generated from it. The API, scenario files, the MCP tools and the console all re
 model, so every parameter can be set and tuned from any of them (section 6.6).
 
 ```yaml
-name: rate-limit-under-attack
+name: rate-limit-under-load
 targets:
   - url: https://gw.example.com          # must be in RUSTYBIN_HARNESS_TARGETS
     weight: 3
@@ -205,10 +205,10 @@ layers:                                  # traffic layers run at the same time, 
     source: { mock: petstore, operations: { exclude: [deletePet] }, invalid_fraction: 0.02 }
     identities: { api_keys: { header: apikey, mint: 200 } }
     pattern: { type: ramp, from: 100, to: 3000, over: 2m, then: { type: constant, rate: 3000, for: 10m } }
-  - name: attacker                       # one consumer far over its limit
+  - name: heavy_user                      # one consumer far over its limit
     source: { request: { method: GET, path: /echo?n={{seq}} } }
-    identities: { api_keys: { header: apikey, values: [victim-key] } }
-    pattern: { type: burst_attack, attack: window_edge, window: 60s, burst: 500, every: 1 }
+    identities: { api_keys: { header: apikey, values: [test-key] } }
+    pattern: { type: limit_test, test: window_edge, window: 60s, burst: 500, every: 1 }
     starts_after: 3m
     expect: { limit: 100, window: 60s, per: key }   # section 6.3
   - name: llm
@@ -227,16 +227,16 @@ thresholds:
   upstream_reach: 0.98
   layers:
     customers: { rate_limited: 0.001 }   # collateral damage: legitimate traffic must not be throttled
-    attacker: { over_admission: 0.02 }   # the limiter may let at most 2 percent too many through
+    heavy_user: { over_admission: 0.02 }   # the limiter may let at most 2 percent too many through
 ```
 
 Validation is offline and lists every problem (targets outside the allowlist, unknown mocks, rates over
 the caps, durations over the maximum, layers whose peak rates add up to more than the scale allows).
 
-**Traffic layers** are the main idea. A real gateway serves legitimate users while being hammered, so a
+**Traffic layers** are the main idea. A real gateway serves legitimate users while it is under heavy load, so a
 run has several layers, each with its own source, identities and pattern, running at the same time. Every
 result is reported per layer as well as in total. A rate-limit test can therefore show both sides: the
-attacker being throttled, and the customers not being throttled (collateral damage). A scenario with one
+heavy consumer being throttled, and the customers not being throttled (collateral damage). A scenario with one
 layer is the simple case and can be written without `layers:`.
 
 ### 6.1 Load models
@@ -265,29 +265,29 @@ same tick.
 | `pulse` | `high`, `low`, `on`, `off`, `cycles`, `jitter` | A square wave: autoscaling, connection pools and limiters that refill between pulses |
 | `burst` | `base`, `size`, `within`, `every`, `jitter` | Short spikes: `size` requests sent within `within` (for example 1,000 in 50 ms) every `every`, on top of a base rate; queueing and burst allowances (token buckets) |
 | `wave` | `min`, `max`, `period`, `shape: sine \| triangle \| sawtooth` | Smooth periodic load, a daily curve compressed in time |
-| `burst_attack` | section 6.3 | Rate limiting and abuse protection |
+| `limit_test` | section 6.3 | Rate limiting and overuse protection |
 | `replay` (later) | a recorded timeline | Real traffic shapes (open question 4) |
 
 Every pattern accepts `jitter` (random variation per tick) and `sync: cluster | node`. With `cluster`
 (the default), all client nodes follow the same curve in lockstep, so a burst arrives at the gateway as one
 burst. With `node`, each node runs its own phase, which spreads the load.
 
-### 6.3 Burst attacks: testing rate limiting
+### 6.3 Rate-limit tests
 
-`burst_attack` patterns are built to break rate limiters, and the report checks the limiter against what
+`limit_test` patterns probe rate limiters for their known weak spots, and the report checks the limiter against what
 the scenario expects (`expect: {limit, window, per: key | ip | consumer | route | global}`).
 
-| Attack | What it sends | What it finds |
+| Test | What it sends | What it finds |
 |---|---|---|
-| `flood` | One identity at a multiple of its limit (`factor: 10`) | Basic enforcement, time to the first 429, how many got through |
+| `over_limit` | One identity at a multiple of its limit (`factor: 10`) | Basic enforcement, time to the first 429, how many got through |
 | `window_edge` | `burst` requests just before a window boundary and again just after, aligned to the wall clock | Fixed-window double dipping (up to twice the limit within one window length) |
 | `just_under` | 90 to 100 percent of the limit, for a long time | False positives: legitimate users throttled under the limit |
 | `distributed` | All client nodes burst the same identity at the same cluster tick, through several gateway nodes | Limiters whose counters are local to each gateway node, or slow to sync: over-admission per gateway node |
-| `key_spray` | Many identities, each under its limit, adding up to far more than a global or per-IP limit | Whether global, per-IP and per-route limits hold when per-key limits are dodged |
-| `ip_spray` | Rotating `X-Forwarded-For` (and real source addresses where the host has several) | Per-IP limits, and whether the gateway trusts forwarded headers it should not |
-| `retry_storm` | Throttled clients retry at once, ignoring `Retry-After` (or honouring it, `honour_retry_after: true`) | Recovery under retries, and the difference that compliant clients make |
+| `many_keys` | Many identities, each under its limit, adding up to far more than a global or per-IP limit | Whether global, per-IP and per-route limits hold when per-key limits are dodged |
+| `many_ips` | Rotating `X-Forwarded-For` (and real source addresses where the host has several) | Per-IP limits, and whether the gateway trusts forwarded headers it should not |
+| `retry_wave` | Throttled clients retry at once, ignoring `Retry-After` (or honouring it, `honour_retry_after: true`) | Recovery under retries, and the difference that compliant clients make |
 | `concurrency` | A burst of simultaneous new connections and in-flight requests rather than a rate | Connection and concurrency limits, accept queues |
-| `slow_burn` | Rate rising slowly from under to over the limit | The exact rate where enforcement starts, compared with the configured limit |
+| `slow_rise` | Rate rising slowly from under to over the limit | The exact rate where enforcement starts, compared with the configured limit |
 | `limit_probe` | Binary search on the rate for one identity | The effective limit and window, measured, when the configuration is unknown |
 
 The rate-limit analysis in the report (per layer and per identity, sampled up to a bounded number of
@@ -295,11 +295,11 @@ identities):
 
 - requests admitted per window against the expected limit: over-admission and under-admission, per
   gateway node when the gateway exposes one (`Via`, or a configured response header);
-- time to the first 429 and time to recovery after the attack stops;
+- time to the first 429 and time to recovery after the test stops;
 - rate-limit headers: whether `RateLimit` / `RateLimit-Policy` (the IETF draft), `X-RateLimit-*` and
   `Retry-After` are present, consistent with what happened, and counting down correctly;
-- collateral damage: throttling and latency in other layers during the attack;
-- upstream protection: what reached the server nodes during the attack (from the correlation layer),
+- collateral damage: throttling and latency in other layers during the test;
+- upstream protection: what reached the server nodes during the test (from the correlation layer),
   which shows whether the limiter shields the upstream or only rewrites responses.
 
 ### 6.4 Scale
@@ -332,7 +332,7 @@ A running run can be tuned without stopping it.
 - `pause` and `resume` (all layers or one);
 - `hold` (freeze the pattern at its current point);
 - `skip_stage` (jump to the next `then:`);
-- `set` (change any pattern parameter of a layer, for example `attacker.pattern.burst: 1000`);
+- `set` (change any pattern parameter of a layer, for example `heavy_user.pattern.burst: 1000`);
 - `add_layer` and `remove_layer`;
 - `chaos` (change the preset or a behaviour).
 
@@ -364,7 +364,7 @@ The parameters are the source of control, and none of the surfaces can drift fro
     to any pattern parameter.
 - **Built-in scenarios**: YAML files under `src/harness/scenarios/`, embedded in the binary like `ui/`:
   `smoke`, `soak`, `ramp-to-target`, `breakpoint`, `spike-and-recover`, `pulse`, `burst`, and one per
-  attack in section 6.3. They are listed next to saved scenarios and are a starting point to copy and tune.
+  test in section 6.3. They are listed next to saved scenarios and are a starting point to copy and tune.
 - **Parity test**: a unit test walks the JSON Schema and fails when a parameter has no description or
   bounds, or is missing from the MCP tool schemas. A browser check (`conformance/ui/`) fails when the
   builder does not render a field for every schema property.
@@ -390,7 +390,7 @@ shared instance never pollute a run.
   them and records sampled header adds, removes and rewrites, plus body integrity;
 - answers with `Server-Timing: rb;dur=<ms>` and `X-Rustybin-Served-By: <node>; run=<run_id>; sig=<hmac>`;
 - samples captures into the inspector (1 in N plus every anomaly) instead of capturing every request, so
-  a 20,000 rps run never floods the ring buffer or its feed.
+  a 20,000 rps run never fills the ring buffer or its feed.
 
 **Client side** classifies every response:
 
@@ -418,13 +418,13 @@ and `trace_id`, so logs from clients, servers and the gateway join on the same i
 
 Client behaviours, each with a probability or rate, all bounded by the caps:
 
-- connection churn (new connection per request, TLS handshake storms), keep-alive abuse;
+- connection churn (new connection per request, TLS handshake bursts), long-held keep-alive connections;
 - abandoned requests (cancel after n ms), half-open connections, resets mid-body;
 - slow request bodies (a bounded trickle), oversized headers near common limits, malformed JSON, wrong
   content types;
-- retry storms (immediate retries on 5xx), thundering herd (synchronised bursts across all nodes at the
+- retry waves (immediate retries on 5xx), synchronised bursts (synchronised bursts across all nodes at the
   same coordinator tick), credential churn (expired and revoked tokens);
-- protocol mix (HTTP/1.1 and HTTP/2 against the same route), WebSocket floods and SSE readers that never
+- protocol mix (HTTP/1.1 and HTTP/2 against the same route), WebSocket connection bursts and SSE readers that never
   read (phase 7).
 
 Server behaviours, applied by server nodes to authentic harness traffic only:
@@ -435,7 +435,7 @@ Server behaviours, applied by server nodes to authentic harness traffic only:
 - node churn: the coordinator tells a server node to stop accepting for n seconds or to leave and
   rejoin, which exercises the gateway's health checks and circuit breakers.
 
-Presets: `calm`, `jittery`, `flaky-upstream`, `retry-storm`, `thundering-herd`, `churn`, `mad` (all of
+Presets: `calm`, `jittery`, `flaky-upstream`, `retries`, `synchronised`, `churn`, `all` (all of
 them at once). A preset is just a named chaos block; scenarios can override any field.
 
 ## 9. Cluster protocol
@@ -479,11 +479,11 @@ body.
   range of virtual clients and credentials, the scenario hash, and a `start_at` in the node's own clock.
   Server nodes get the server profile and the run key.
 - **Clock sync**: NTP-style timestamps on every heartbeat. The coordinator keeps an offset and an error
-  bound per node, used for synchronised starts, thundering-herd ticks and one-way legs.
+  bound per node, used for synchronised starts, synchronised ticks and one-way legs.
 - **Leases, the dead man's switch**: a client stops sending if it has had no heartbeat answer from a
   leader for a lease period (default 5 s, renewed by any leader of the current or a newer term). An
   election finishes inside the lease, so a failover does not stop the load. A cluster that cannot elect a
-  leader in time (a partition, too few nodes left) stops sending, and can never leave a herd running.
+  leader in time (a partition, too few nodes left) stops sending, and never leaves clients sending.
 
 ### 9.1 Leadership and failover
 
@@ -614,7 +614,7 @@ harness allowlist and verification follow the same idea at load scale.)
   publish it as a DNS TXT record at `_rustybin-harness.<host>`. Server nodes in the cluster answer that
   path themselves. A gateway that routes to them therefore passes automatically, which also proves the
   route reaches the cluster before a single load request is sent. This is what lets a platform offer
-  harness runs without becoming a way to flood third parties.
+  harness runs without becoming a way to send load to third parties.
 - **Authorisation**: a new control scope `harness`. The admin token and the `admin` scope imply it.
   The management MCP gets `Right::Harness`. Node routes accept only join tokens and node credentials,
   never control tokens. Join tokens and node credentials are compared in constant time and never logged.
@@ -683,7 +683,7 @@ Every parameter is set the same way from the API, MCP and UI, from one schema (s
   - each tool has its `Right` and is filtered by role in `tools/list`;
   - prompts: `load_test_gateway` walks an agent through allowlist, scenario, preview, a dry run at a low
     rate, then the real run; `test_rate_limits` asks for the configured limits and builds the matching
-    burst attacks with `expect` set.
+    rate-limit test with `expect` set.
 - **Console**: a Harness page, shown only when harness mode is on:
   - cluster members (role, health, clock offset, work score, succession position) and a leader badge
     with the term and its history;
@@ -729,10 +729,10 @@ additions, UI).
 | 3. Cluster | Coordinator, join, heartbeat with leases, clock sync, rate split by capacity, synchronised start, merged histograms and reports, upstream export, headless env and `on-quorum` | Multi-node test in one process (several `start_with_state` servers): join, split, merge equal to the single-node totals, lease expiry stops clients, losing the only leader (no eligible successor) leaves no sender |
 | 3b. Leadership and failover | Eligibility, work reports, succession list, replicated snapshot with checkpoints, cumulative reporting, vote and announce routes, terms and fencing, leader redirects, `GET .../leader`, load shedding and re-split on promotion, stop surviving failover | In-process cluster tests: kill the leader mid-run and the least-loaded eligible node takes over within the lease with no gap in client load; a `prefer` standby wins over busier nodes; totals equal a run without failover except the reported `unreported` bound; the old leader returning steps down; a minority partition stops sending; a two-node cluster stops on leader loss |
 | 4. Patterns, scale and live tuning | Layers, every pattern of section 6.2 with `then:` and `sync`, the closed-loop `target`, `breakpoint`, the scale block and `scale_request`, `PATCH` live changes through the snapshot, preview, saved and built-in scenarios, the schema route | Preview curves match the pattern math; achieved rate follows each pattern within 2 percent per second at test rates; a `burst` lands within its `within` window at the test proxy; a `breakpoint` stops at the proxy's capacity; live changes apply on the next tick on every node and survive a failover |
-| 5. Burst attacks and rate-limit analysis | Every attack of section 6.3, `expect`, the rate-limit analysis (admission per window, headers, time to first 429, recovery, collateral damage, upstream protection) | Against the test proxy's limiters (fixed window, sliding window, token bucket, per-node local counters): `window_edge` finds the fixed window's double dip, `distributed` finds the local counters' over-admission, `limit_probe` measures the configured limit within 5 percent, `just_under` reports no false positives on a correct limiter |
+| 5. Rate-limit tests and analysis | Every test of section 6.3, `expect`, the rate-limit analysis (admission per window, headers, time to first 429, recovery, collateral damage, upstream protection) | Against the test proxy's limiters (fixed window, sliding window, token bucket, per-node local counters): `window_edge` finds the fixed window's double dip, `distributed` finds the local counters' over-admission, `limit_probe` measures the configured limit within 5 percent, `just_under` reports no false positives on a correct limiter |
 | 6. Mock-driven traffic and identities | Requests from mocks (per-operation weights, invalid fraction, stateful create then read), credential pools, minted JWTs from the built-in IdP, OAuth client credentials against the gateway, `X-Forwarded-For` pools, source address binding | Petstore scenario through the test proxy: every operation exercised, per-credential breakdown in the report |
 | 7. Chaos and protocols | Client and server chaos behaviours, presets, node churn; SSE and LLM streaming (TTFT, inter-token latency, tokens/s), WebSocket, gRPC, MCP tool calls | Each behaviour has a test that observes it at the test proxy; LLM streaming metrics checked against `/ai` with known token timings |
-| 8. Docs and conformance | `docs/src/harness.md` (patterns, attacks, scale, tuning, failover) with Hurl examples, a compose example (a leader, a standby, 2 clients, 2 servers, a stand-in gateway), README tables, changelog, roadmap | `conformance/harness/run.sh` runs the compose cluster, kills the leader mid-run and asserts the report; `docs/examples/run.sh` and `check_includes.py` pass |
+| 8. Docs and conformance | `docs/src/harness.md` (patterns, rate-limit tests, scale, tuning, failover) with Hurl examples, a compose example (a leader, a standby, 2 clients, 2 servers, a stand-in gateway), README tables, changelog, roadmap | `conformance/harness/run.sh` runs the compose cluster, kills the leader mid-run and asserts the report; `docs/examples/run.sh` and `check_includes.py` pass |
 
 **Surfaces land with each phase, not at the end.** From phase 1 on, the schema route, the matching MCP
 tools and the schema-generated console builder exist. Each phase's parameters therefore appear in the
@@ -741,9 +741,9 @@ console's cluster and leader views come with phases 3 and 3b, the run controls w
 rate-limit analysis view with phase 5. Catalogue and OpenAPI entries come with each route, as for any
 module.
 
-Phases 1 to 3 already give the headline demo: a cluster smashing a gateway, with gateway-made responses,
+Phases 1 to 3 already give the headline demo: a cluster driving load through a gateway, with gateway-made responses,
 lost requests and gateway overhead separated out. Phase 3b makes it survive losing its leader. Phases 4
-and 5 give the traffic shapes and the rate-limit testing. Phases 6 and 7 make it realistic and mean.
+and 5 give the traffic shapes and the rate-limit testing. Phases 6 and 7 make it realistic and demanding.
 Phase 8 makes it usable without reading this file.
 
 ### Phase 0 results (2026-10-25)
@@ -923,7 +923,7 @@ earlier plans: OpenAPI mocks about 2 days, management MCP about 3, hosted mocks 
 | 3. Cluster | 2 |
 | 3b. Leadership and failover | 2 to 3 |
 | 4. Patterns, scale and live tuning | 2 |
-| 5. Burst attacks and rate-limit analysis | 2 |
+| 5. Rate-limit tests and analysis | 2 |
 | 6. Mock-driven traffic and identities | 1 |
 | 7. Chaos and protocols | 2 to 3 |
 | 8. Docs and conformance | 1 |
@@ -945,7 +945,7 @@ largest risk to the estimate is phase 3b.
   "the gateway": it adds and removes headers, answers its own 429 and 503, delays, and drops requests on
   command. It runs several instances to stand in for a gateway fleet. It has small reference rate
   limiters (fixed window, sliding window, token bucket; shared or per instance counters) with known
-  flaws to switch on, so every burst attack has something to find. It is vendor neutral and fast.
+  flaws to switch on, so every rate-limit test has something to find. It is vendor neutral and fast.
 - Pattern tests check the preview curve against the math and the achieved rate against the preview, on
   the injectable clock.
 - Full-app tests start real servers on ephemeral ports (the `tests/integration.rs` pattern). Rates in
