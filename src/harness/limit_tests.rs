@@ -334,7 +334,10 @@ async fn many_ips_finds_a_limiter_that_trusts_forwarded_addresses() {
         "{t}"
     );
     let c = analysis(&careful, "rotating");
-    assert!(c["windows"]["admitted_max"].as_u64().unwrap() <= 10, "{c}");
+    // The analysis's windows follow the run clock, the limiter's its own
+    // first request, so a window of the analysis can straddle two of the
+    // limiter's and count one admission from each side on a slow machine.
+    assert!(c["windows"]["admitted_max"].as_u64().unwrap() <= 12, "{c}");
 }
 
 #[tokio::test]

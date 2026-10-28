@@ -262,7 +262,7 @@ async fn retries_on_5xx_and_expired_tokens() {
                 &flaky.url(),
                 status_200(),
                 20,
-                "1s",
+                "3s",
                 faults(json!({ "retry_on_5xx": { "retries": 1, "synchronised": synchronised } })),
             ),
         )
@@ -270,12 +270,13 @@ async fn retries_on_5xx_and_expired_tokens() {
         let report = wait_for_report(&app, &id).await;
         let t = totals(&report);
         let retried = t["faults"]["retry_on_5xx"].as_u64().unwrap_or(0);
-        assert!(retried >= 8, "{t}");
+        assert!(retried >= 24, "{t}");
         // Retries are requests of the layer: more were sent than the
         // pattern asked for on its own (a retry due after the pattern
-        // ended is dropped).
-        assert!(t["sent"].as_u64().unwrap() > 20, "{t}");
-        assert!(t["sent"].as_u64().unwrap() <= 20 + retried, "{t}");
+        // ended is dropped, which on a slow machine is most of the last
+        // second's, hence three seconds).
+        assert!(t["sent"].as_u64().unwrap() > 60, "{t}");
+        assert!(t["sent"].as_u64().unwrap() <= 60 + retried, "{t}");
     }
     // Credential churn: every token expired, refused by the JWT check.
     let plain = test_proxy::start(server.http_addr, ProxyConfig::default()).await;

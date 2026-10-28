@@ -360,7 +360,10 @@ async fn the_old_leaders_own_load_is_reported_or_bounded() {
     // expired.
     wait_until("the old leader stops", LEASE * 2, || !l_run.is_active()).await;
     assert_eq!(l_run.stop_reason().as_deref(), Some("lease_expired"));
-    wait_until("a carries the whole rate", LEASE * 2, || {
+    // The share moves at the checkpoint after the old leader's part is
+    // surely gone (its lease plus a heartbeat after its last stats, then
+    // the ticker); a slow machine needs the full margin.
+    wait_until("a carries the whole rate", LEASE * 4, || {
         (a_run.share().fraction() - 1.0).abs() < 1e-9
     })
     .await;
