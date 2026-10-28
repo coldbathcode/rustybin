@@ -242,6 +242,19 @@ API, AI and agent gateway demos.
   The report breaks the answers down by operation and by credential (labels without
   secrets) and says when invalid requests got through; listed keys and client secrets
   are redacted. The `petstore-customers` built-in.
+- **Harness faults and protocols** (phase 7): a `faults` block with presets (`calm`,
+  `jittery`, `flaky-upstream`, `retries`, `synchronised`, `churn`, `all`) and the live
+  change `faults`. Client faults by fraction: connection churn, abandoned requests, slow
+  bodies, malformed JSON, wrong content types, oversized headers, immediate (or
+  synchronised) retries on 5xx, expired tokens, an HTTP/2 mix. Server faults on the
+  run's marked requests: drops after the headers, stalls, flapping `/health`, and node
+  churn (the server nodes down in turn, 503 with the connection closed). Protocol
+  sources: `llm` (streamed chat completions timed token by token), `sse`, `websocket`
+  (upgrade and masked frames on the pinned connections), `grpc` (unary echo over HTTP/2,
+  judged by `grpc-status`) and `mcp` (stateless `tools/call`). The report's `streams`
+  (time to first token, inter-token latency, tokens per second, stalls), the injected
+  faults by name, `abandoned` and `unattributed` counts. Built-ins `llm-streaming`,
+  `flaky-upstream` and `jittery-clients`.
 
 ### Changed
 

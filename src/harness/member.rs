@@ -887,7 +887,13 @@ impl Membership {
             server_listed.push(sa.run_id.clone());
             self.serve(h, &mut st, sa);
         }
-        st.server_runs.retain(|k, _| server_listed.contains(k));
+        st.server_runs.retain(|k, sr| {
+            let keep = server_listed.contains(k);
+            if !keep {
+                sr.entry.finish();
+            }
+            keep
+        });
         drop(st);
         // Live changes: checked against this node's caps for its share.
         for (run, controls) in follow {
@@ -965,6 +971,7 @@ impl Membership {
                 return;
             };
             let entry = h.correlator.register(&sa.run_id, key, sa.profile.clone());
+            h.watch_server_faults(entry.clone());
             st.server_runs.insert(
                 sa.run_id.clone(),
                 ServerRunState {
@@ -977,6 +984,10 @@ impl Membership {
         let Some(sr) = st.server_runs.get_mut(&sa.run_id) else {
             return;
         };
+        if sr.entry.faults() != sa.faults {
+            sr.entry
+                .set_faults(sa.faults.clone(), sa.churn_slot.unwrap_or([0, 1]));
+        }
         if let (Some(collect), None) = (sa.collect, &sr.collected) {
             let stats = lock(&sr.entry.stats);
             let mut answer = Collected::default();

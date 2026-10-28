@@ -440,6 +440,17 @@ pub struct Source {
     /// gateway route maps the mock's own paths).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_path: Option<String>,
+    /// Protocol sources (phase 7, [`super::protocols`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm: Option<super::protocols::LlmSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sse: Option<super::protocols::SseSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket: Option<super::protocols::WsSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grpc: Option<super::protocols::GrpcSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<super::protocols::McpSource>,
 }
 
 /// The operations of a mock source.
@@ -462,9 +473,15 @@ pub const MAX_OPERATION_NAMES: usize = 256;
 
 impl Source {
     /// Every template of the source, in order (none for a mock source: its
-    /// requests are generated when the run starts).
+    /// requests are generated when the run starts, nor for a protocol
+    /// source: [`super::protocols::template_of`]).
     pub fn templates(&self) -> Vec<&RequestTemplate> {
         self.request.iter().chain(self.requests.iter()).collect()
+    }
+
+    /// The protocol of the source (HTTP unless it is a protocol source).
+    pub fn protocol(&self) -> super::protocols::Protocol {
+        super::protocols::protocol_of(self).unwrap_or_default()
     }
 
     /// The path a mock source's requests start with.
@@ -922,6 +939,9 @@ pub struct Scenario {
     /// The server side: the shaped endpoint's profile and inspector sampling.
     #[serde(default)]
     pub servers: ServerProfile,
+    /// Fault injection (section 8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faults: Option<super::faults::Faults>,
 }
 
 /// What a scenario amounts to, for previews, listings and the report.
@@ -1285,16 +1305,34 @@ impl Scenario {
                 names.push(layer.name.clone());
             }
             let templates = layer.source.templates();
-            if layer.source.mock.is_some() {
-                validate_mock_source(&layer.source, &here, &mut p);
-                if !templates.is_empty() {
+            let protocol = super::protocols::protocol_of(&layer.source);
+            super::protocols::validate(&layer.source, &format!("{here}.source"), &mut p);
+            if protocol.is_ok_and(|pr| pr != super::protocols::Protocol::Http) {
+                if protocol == Ok(super::protocols::Protocol::Websocket)
+                    && self
+                        .targets
+                        .iter()
+                        .any(|t| matches!(t.http, HttpVersion::H2 | HttpVersion::H2c))
+                {
                     p.push(format!(
-                        "{here}.source: a mock or request templates, not both"
+                        "{here}.source.websocket: needs an HTTP/1.1 target (http: auto or h1)"
                     ));
                 }
+                if protocol == Ok(super::protocols::Protocol::Grpc)
+                    && self
+                        .targets
+                        .iter()
+                        .any(|t| matches!(t.http, HttpVersion::H1))
+                {
+                    p.push(format!(
+                        "{here}.source.grpc: needs an HTTP/2 target (http: h2c on plain targets, h2 or auto with TLS)"
+                    ));
+                }
+            } else if layer.source.mock.is_some() {
+                validate_mock_source(&layer.source, &here, &mut p);
             } else if templates.is_empty() {
                 p.push(format!(
-                    "{here}.source: a request (or requests) template, or a mock, is required (llm sources come in a later phase)"
+                    "{here}.source: a request (or requests) template, a mock, or a protocol source (llm, sse, websocket, grpc, mcp) is required"
                 ));
             } else if templates.len() > MAX_REQUESTS_PER_LAYER {
                 p.push(format!(
@@ -1431,6 +1469,17 @@ impl Scenario {
         }
         if sv.capture_sample > 1_000_000 {
             p.push("servers.capture_sample: at most 1000000".into());
+        }
+        if let Some(f) = &self.faults {
+            f.validate("faults", &mut p);
+            if f.client().expired_tokens.is_some_and(|v| v > 0.0)
+                && !self
+                    .layers
+                    .iter()
+                    .any(|l| l.identities.as_ref().is_some_and(|i| i.jwt.is_some()))
+            {
+                p.push("faults.client.expired_tokens: needs a layer with identities.jwt (the tokens to expire)".into());
+            }
         }
         let t = &self.thresholds;
         let fraction = |name: &str, v: Option<f64>, p: &mut Vec<String>| {
@@ -2089,9 +2138,9 @@ pub fn schema(caps: &Caps) -> Value {
         },
         "additionalProperties": false
     });
-    let source = json!({
+    let mut source = json!({
         "type": "object",
-        "description": "Where the layer's requests come from: one request template, several picked by weight, or the operations of an OpenAPI mock.",
+        "description": "Where the layer's requests come from: one request template, several picked by weight, the operations of an OpenAPI mock, or a protocol source (llm, sse, websocket, grpc, mcp). One kind per layer.",
         "properties": {
             "request": template,
             "requests": { "type": "array", "description": "Several templates, picked by weight.", "items": { "$ref": "#/$defs/request" }, "maxItems": MAX_REQUESTS_PER_LAYER },
@@ -2112,6 +2161,12 @@ pub fn schema(caps: &Caps) -> Value {
         },
         "additionalProperties": false
     });
+    if let (Some(Value::Object(props)), Value::Object(extra)) = (
+        source.get_mut("properties"),
+        super::protocols::schema_properties(duration),
+    ) {
+        props.extend(extra);
+    }
     let layer = json!({
         "type": "object",
         "description": "One stream of traffic with its own source, model and pattern. Layers run at the same time and are reported separately.",
@@ -2328,7 +2383,8 @@ pub fn schema(caps: &Caps) -> Value {
                     "capture_sample": integer("The inspector captures 1 in N marked requests, plus every anomaly (0: none).", 0, 1_000_000)
                 },
                 "additionalProperties": false
-            }
+            },
+            "faults": { "$ref": "#/$defs/faults" }
         },
         "required": ["name"],
         "additionalProperties": false,
@@ -2337,6 +2393,7 @@ pub fn schema(caps: &Caps) -> Value {
             "request": template,
             "source": source,
             "layer": layer,
+            "faults": super::faults::schema(duration),
             "change": super::live::change_schema()
         },
         "x-caps": caps
@@ -2427,8 +2484,8 @@ mod tests {
     fn unknown_fields_and_sources_are_refused_by_name() {
         let err = Scenario::parse("name: x\nchaos: { preset: mad }\n").unwrap_err();
         assert!(err.contains("chaos"), "{err}");
-        let err = Scenario::parse("name: x\nsource: { llm: { path: /ai } }\n").unwrap_err();
-        assert!(err.contains("llm"), "{err}");
+        let err = Scenario::parse("name: x\nsource: { tcp: { port: 1 } }\n").unwrap_err();
+        assert!(err.contains("tcp"), "{err}");
         assert!(Scenario::parse("").is_err());
         assert!(Scenario::parse(&"x".repeat(MAX_SCENARIO_BYTES + 1)).is_err());
         assert!(Scenario::from_value(&json!([1])).is_err());
@@ -2682,6 +2739,12 @@ mod tests {
                 first_byte_delay: Dur(Duration::from_millis(1)),
                 capture_sample: 10,
             },
+            faults: Some(
+                serde_yaml::from_str(
+                    "preset: all\nclient:\n  connection_churn: 0.1\n  abandon: { fraction: 0.1, after: 50ms }\n  slow_body: { fraction: 0.1, bytes_per_second: 100 }\n  malformed_json: 0.1\n  wrong_content_type: 0.1\n  oversized_headers: { fraction: 0.1, bytes: 9000 }\n  retry_on_5xx: { retries: 2, synchronised: true }\n  expired_tokens: 0.1\n  http2: 0.5\nserver:\n  drop: 0.1\n  stall: { fraction: 0.1, for: 2s }\n  flapping_health: { every: 10s, down_for: 2s }\n  churn: { every: 20s, down_for: 5s }\n",
+                )
+                .expect("faults"),
+            ),
         }
     }
 
@@ -2839,6 +2902,18 @@ mod tests {
         let value = serde_json::to_value(full()).unwrap();
         let mut missing = Vec::new();
         walk(&root, &root, &value, "scenario", &mut missing);
+        // The protocol sources, one layer each (a layer has one kind).
+        for yaml in [
+            "llm: { path: /ai/v1/chat/completions, model: m, prompt: p, tokens: 5, stream: true, headers: { x-a: b } }",
+            "sse: { path: /sse, events: 3, hold_unread: 1s, headers: { x-a: b } }",
+            "websocket: { path: /ws, messages: 2, size: 8, hold: 1s, headers: { x-a: b } }",
+            "grpc: { path: /x/Y, message: hi, headers: { x-a: b } }",
+            "mcp: { path: /mcp, tool: echo, arguments: { a: 1 }, headers: { x-a: b } }",
+        ] {
+            let source: Source = serde_yaml::from_str(yaml).expect("source");
+            let value = serde_json::to_value(&source).unwrap();
+            walk(&root, &root["$defs"]["source"], &value, "source", &mut missing);
+        }
         assert!(
             missing.is_empty(),
             "model fields missing from the schema: {missing:#?}"

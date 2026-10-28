@@ -1,0 +1,30 @@
+# A flaky upstream behind the gateway: the server nodes drop 2 percent of
+# the answers after the headers, stall 1 percent for 5 seconds (past the
+# client's timeout), and /health flaps down for 5 seconds every 30. The
+# gateway's retries, timeouts, health checks and circuit breakers show in
+# what the clients see.
+name: flaky-upstream
+description: 50 requests per second for two minutes to the shaped endpoint, with the flaky-upstream fault preset on the server nodes.
+targets:
+  - url: http://127.0.0.1:8080
+    weight: 1
+scale:
+  virtual_clients: 100
+layers:
+  - name: main
+    source:
+      request:
+        path: /harness/orders
+    pattern:
+      type: constant
+      rate: 50
+      for: 2m
+servers:
+  latency:
+    p50: 20ms
+    p99: 100ms
+faults:
+  preset: flaky-upstream
+thresholds:
+  error_rate: 0.05
+timeout: 3s

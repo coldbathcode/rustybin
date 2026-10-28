@@ -1513,10 +1513,19 @@ async fn harness_pattern_preview_save_and_update_tools() {
         &app,
         &[],
         "update_run",
-        json!({ "run_id": id, "change": { "faults": {} } }),
+        json!({ "run_id": id, "change": { "chaos": {} } }),
     )
     .await;
     assert!(is_error(&r));
+    // A fault preset set live.
+    let r = tool(
+        &app,
+        &[],
+        "update_run",
+        json!({ "run_id": id, "change": { "faults": { "preset": "jittery" } }, "confirm": true }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
     let r = tool(&app, &[], "stop_run", json!({ "run_id": id })).await;
     assert!(!is_error(&r), "{r}");
     server.shutdown();

@@ -217,6 +217,9 @@ async fn api_when_harness_is_off() {
             "limit-probe",
             "many-ips",
             "petstore-customers",
+            "llm-streaming",
+            "flaky-upstream",
+            "jittery-clients",
         ]
     );
     for s in list["scenarios"].as_array().unwrap() {

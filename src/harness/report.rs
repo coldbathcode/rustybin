@@ -316,6 +316,17 @@ pub struct Counts {
     /// Gateway-made answers by status code.
     #[serde(default)]
     pub gateway_statuses: BTreeMap<String, u64>,
+    /// Answered over a protocol that carries no served-by tag (WebSocket,
+    /// gRPC): neither upstream nor gateway can be told.
+    #[serde(default)]
+    pub unattributed: u64,
+    /// Sent and cancelled by the client on purpose (the `abandon` fault):
+    /// neither answered nor failed.
+    #[serde(default)]
+    pub abandoned: u64,
+    /// Injected client faults by name (section 8).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub faults: BTreeMap<String, u64>,
 }
 
 impl Counts {
@@ -355,6 +366,11 @@ impl Counts {
         }
         for (k, v) in &other.gateway_statuses {
             *self.gateway_statuses.entry(k.clone()).or_default() += v;
+        }
+        self.unattributed += other.unattributed;
+        self.abandoned += other.abandoned;
+        for (k, v) in &other.faults {
+            *self.faults.entry(k.clone()).or_default() += v;
         }
     }
 
@@ -607,6 +623,10 @@ pub struct Report {
     /// not be had, an added layer's unknown mock).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Layers with streamed answers (llm, sse, websocket): time to the
+    /// first item, the gaps between items, items per second, stalls.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub streams: Vec<super::protocols::StreamReport>,
 }
 
 /// One stage (or plateau) of a layer as it ran. The numbers are the
@@ -1071,6 +1091,48 @@ impl Report {
                 out.push_str(&format!("  {}\n", f.summary));
             }
         }
+        if self.totals.abandoned > 0
+            || self.totals.unattributed > 0
+            || !self.totals.faults.is_empty()
+        {
+            out.push_str(&format!(
+                "\nFaults: {} abandoned, {} unattributed answers (WebSocket, gRPC){}\n",
+                self.totals.abandoned,
+                self.totals.unattributed,
+                if self.totals.faults.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "; injected: {}",
+                        self.totals
+                            .faults
+                            .iter()
+                            .map(|(k, v)| format!("{k} {v}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            ));
+        }
+        if !self.streams.is_empty() {
+            out.push_str(
+                "\nStreams                 streams    items  items/s  first p50  first p99    gap p50    gap p99  stalled\n",
+            );
+            for s in &self.streams {
+                out.push_str(&format!(
+                    "  {:<22} {:>7} {:>8} {:>8.1} {:>10.2} {:>10.2} {:>10.2} {:>10.2} {:>8}\n",
+                    truncate(&format!("{} ({})", s.layer, s.protocol), 22),
+                    s.streams,
+                    s.items,
+                    s.items_per_second,
+                    s.first_item.p50_ms,
+                    s.first_item.p99_ms,
+                    s.gap.p50_ms,
+                    s.gap.p99_ms,
+                    s.stalled + s.incomplete
+                ));
+            }
+        }
         for (title, rows) in [
             ("Operations", &self.operations),
             ("Credentials", &self.credentials),
@@ -1337,6 +1399,7 @@ mod tests {
             operations: Vec::new(),
             credentials: Vec::new(),
             warnings: Vec::new(),
+            streams: Vec::new(),
         }
     }
 

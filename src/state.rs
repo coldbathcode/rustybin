@@ -110,11 +110,13 @@ impl AppState {
         );
         let keys = Arc::new(Keys::new(&config, metrics.clone(), clock.clone()));
         let mocks = crate::mocks::new_store_with(&config, clock, metrics.clone());
+        let health = Arc::new(HealthState::new());
         let harness = crate::harness::Harness::new(&config, Some(metrics.clone()));
         if let Some(h) = &harness {
             h.attach(crate::harness::Resources {
                 mocks: mocks.clone(),
                 jwt: jwt.clone(),
+                health: health.clone(),
             });
         }
         Self {
@@ -125,7 +127,7 @@ impl AppState {
             certs,
             identity: Arc::new(IdentityState::new()),
             inspector,
-            health: Arc::new(HealthState::new()),
+            health,
             metrics,
             mocks,
             router: Arc::new(OnceLock::new()),

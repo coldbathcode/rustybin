@@ -461,6 +461,30 @@ pub fn get_run_report(ctx: &CallCtx, args: &Value) -> Value {
             ));
         }
     }
+    for s in &report.streams {
+        text.push_str(&format!(
+            "\nStreams of {} ({}): {} streams, {:.1} items per stream, {:.1} items/s, first item p50 {:.1} ms p99 {:.1} ms, gap p50 {:.1} ms p99 {:.1} ms, {} stalled, {} incomplete",
+            s.layer, s.protocol, s.streams, s.items_per_stream, s.items_per_second,
+            s.first_item.p50_ms, s.first_item.p99_ms, s.gap.p50_ms, s.gap.p99_ms, s.stalled, s.incomplete
+        ));
+    }
+    if report.totals.abandoned > 0
+        || report.totals.unattributed > 0
+        || !report.totals.faults.is_empty()
+    {
+        text.push_str(&format!(
+            "\nFaults: {} abandoned, {} unattributed; injected: {}",
+            report.totals.abandoned,
+            report.totals.unattributed,
+            report
+                .totals
+                .faults
+                .iter()
+                .map(|(k, v)| format!("{k} {v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     for w in &report.warnings {
         text.push_str(&format!("\nWarning: {w}"));
     }

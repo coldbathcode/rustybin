@@ -1,0 +1,30 @@
+# Clients that misbehave: a fifth of the requests on a new connection, 2
+# percent abandoned after 100 ms, 2 percent with a body trickled at 1 KB
+# per second, half over HTTP/2 and half over HTTP/1.1 (the jittery preset),
+# plus one percent each of malformed JSON and a wrong content type, which
+# expect a 4xx from the gateway or the API.
+name: jittery-clients
+description: 50 requests per second for two minutes with the jittery client fault preset, malformed JSON and wrong content types.
+targets:
+  - url: http://127.0.0.1:8080
+    weight: 1
+scale:
+  virtual_clients: 100
+layers:
+  - name: main
+    source:
+      request:
+        method: POST
+        path: /anything
+        body:
+          order: "{{seq}}"
+    pattern:
+      type: constant
+      rate: 50
+      for: 2m
+faults:
+  preset: jittery
+  client:
+    malformed_json: 0.01
+    wrong_content_type: 0.01
+timeout: 5s

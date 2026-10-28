@@ -101,8 +101,9 @@ a runnable example, and `/docs` for the OpenAPI reference. See the
   generated from the same route catalogue as everything else.
 - **Harness mode** (`RUSTYBIN_HARNESS=on`): Rustybin as the load client too. A
   scenario (targets, traffic layers with run patterns from ramps to breakpoints, open
-  or closed load model, rate-limit tests, traffic from OpenAPI mocks, identities from
-  API keys to minted JWTs and OAuth clients, thresholds) runs on one node or a cluster,
+  or closed load model, rate-limit tests, traffic from OpenAPI mocks, LLM streams,
+  SSE, WebSocket, gRPC and MCP calls, identities from API keys to minted JWTs and OAuth
+  clients, fault presets, thresholds) runs on one node or a cluster,
   from the API, the management MCP, the console, headless at startup or `rustybin
   harness run --local-server`; the report separates what the client itself could not
   do (saturation) from what the gateway did, and says what its rate limiter did

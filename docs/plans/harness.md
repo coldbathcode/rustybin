@@ -1230,6 +1230,66 @@ What phase 6 built, and where it differs from sections 6 and 12:
   which made an untouched request template sit next to a mock source; the builder check opens collapsed
   sections before clicking an add button.
 
+### Phase 7 build notes (2026-10-28)
+
+What phase 7 built, and where it differs from section 8 and the protocol sources of section 6:
+
+- **Files**: `faults.rs` (the `faults` block, presets, draws, schema), `protocols.rs` (the `llm`, `sse`,
+  `websocket`, `grpc` and `mcp` sources, SSE parsing, WebSocket frames, gRPC framing, stream
+  statistics), `fault_tests.rs`; the shaped endpoint, the correlator's `RunEntry` (faults, churn turn,
+  `done`), a server fault task on the harness (`watch_server_faults`), `ServerAssignment.faults` and
+  `churn_slot`, and a test proxy that counts connections and HTTP/2 requests and forwards as HTTP/1.1.
+- **Client faults** are drawn per request from a seed of the run id (`draws`), so every node draws the
+  same way for the same request. Built: `connection_churn` (a pool-less client per target), `abandon`
+  (the exchange is cancelled after `after`; `totals.abandoned`, neither answered nor failed), `slow_body`
+  (the request body streamed in pieces every 100 ms: the client body became a `BoxBody`), `malformed_json`
+  (the body cut in half), `wrong_content_type` (`text/plain`), `oversized_headers` (`X-Rustybin-Padding`),
+  `retry_on_5xx` (`synchronised` waits for the next whole second of the run clock), `expired_tokens`
+  (a JWT expired a minute ago, needs `identities.jwt`) and `http2` (every target has an HTTP/1.1-only
+  and an HTTP/2-only client: ALPN on TLS, prior knowledge on plain targets; the fraction picks). Requests
+  made to be refused expect any 4xx. Not built: half-open connections and resets mid-body on the client
+  side (`abandon` cancels whole exchanges), revoked tokens (no revocation registry to churn), TLS
+  handshake bursts beyond what `connection_churn` makes. Synchronised bursts are the patterns' `sync:
+  cluster` (phase 4); WebSocket bursts are the `websocket` source under a `burst` pattern; SSE readers
+  that never read are `sse.hold_unread`.
+- **Server faults** act only on the run's marked requests at `/harness/{*path}` and on `/health`, never
+  on other routes. `drop` sends the headers and the body's first byte, then an error ends the body (the
+  connection is reset; through a gateway that forwards bodies the client sees the same); `stall` sends
+  the headers then nothing for `for`; `flapping_health` and `churn` flip the node's `HealthState` from a
+  task per run on the node (50 ms ticks) that stops when the run ends and leaves the node healthy. Churn
+  is by turns without a leader tick: the leader gives each server node its index and the count
+  (`churn_slot`), and node `index` is down during window `index` of every `count` windows of `every`;
+  while down, marked requests get a 503 with `Connection: close`. A single node takes turn 0 of 1. Not
+  built: `leave and rejoin` (a server node leaving the cluster and coming back); churn stops the node
+  serving instead.
+- **Presets** are named blocks resolved field by field (a field set in the scenario replaces the
+  preset's): `calm`, `jittery`, `flaky-upstream`, `retries`, `synchronised`, `churn`, `all`. The live
+  change `faults` replaces the block whole; server nodes take it on their next heartbeat.
+- **Protocol sources** resolve into one request template per layer (no node resources needed), read by
+  protocol in the engine: `llm` and `sse` stream event by event (SSE parsing in the engine, an item
+  per token or event, the request timeout as the idle timeout between bytes, a stream never longer
+  than ten timeouts plus a hold), `websocket` upgrades over the HTTP/1.1 client and speaks masked
+  frames itself (no new dependency; a round trip is an item; pings answered; a close frame at the end),
+  `grpc` sends a prost-encoded `EchoRequest` in a length-prefixed frame over HTTP/2 and reads
+  `grpc-status` from the trailers (or the headers of a trailers-only answer), `mcp` sends a stateless
+  2026-07-28 `tools/call` with its `_meta` and the `Mcp-Method` / `Mcp-Name` headers and reads the
+  result's `isError`. Only unary gRPC and `tools/call` are built; the streaming gRPC methods and other
+  MCP methods are not. The request timeout bounds HTTP, gRPC and MCP exchanges whole.
+- **Attribution**: a gRPC answer never carries the served-by tag (its service is outside the server
+  layer); a WebSocket upgrade through a Rustybin server's layer does. Without a tag these count as
+  `unattributed`, a fourth class next to upstream, gateway and transport (never as gateway-made).
+- **Stream metrics** per layer (`report.streams`): streams, items per stream and per second, the time to
+  the first item, the gaps between items, the stream length (exact histograms, merged across nodes
+  through the final stats), stalled and incomplete streams. A streamed answer's latency is the
+  stream's length; the gateway overhead and the response leg are not measured on streamed answers
+  (they would be the stream's length too). Checked against the mock LLM's pacing
+  headers (`X-Rustybin-TTFT-Ms`, `X-Rustybin-Tokens-Per-Second`): a 200 ms TTFT and 50 tokens per
+  second come out as a first-token p50 near 200 ms and a 20 ms gap.
+- **Surfaces**: the schema (`$defs.faults`, the five source kinds, the `faults` change), so the MCP tool
+  schemas and the console builder have them; the report's `streams`, `totals.faults`, `abandoned` and
+  `unattributed` in JSON, text, the console and the MCP summary; built-ins `llm-streaming`,
+  `flaky-upstream` and `jittery-clients`. No new routes.
+
 ### Estimate (2026-10-22)
 
 About 16 to 19 days of build sessions, after the mock MCP server (1 to 2 days). This is calibrated on the
@@ -1245,7 +1305,7 @@ earlier plans: OpenAPI mocks about 2 days, management MCP about 3, hosted mocks 
 | 4. Patterns, scale and live tuning | 2 |
 | 5. Rate-limit tests and analysis | 2 (done, 2026-10-28) |
 | 6. Mock-driven traffic and identities | 1 (done, 2026-10-28) |
-| 7. Faults and protocols | 2 to 3 |
+| 7. Faults and protocols | 2 to 3 (done, 2026-10-28) |
 | 8. Docs and conformance | 1 |
 
 The headline demo (phases 0 to 3) is about a week in, and rate-limit testing (through phase 5) about two

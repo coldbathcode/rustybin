@@ -8,7 +8,8 @@
 // running run (rate multiplier, pause, hold, skip stage, set), and the run's
 // event feed (read with send({stream: true}), polling when it is not there).
 // Phase 5: the report's rate-limit analysis, layer by layer. Phase 6: the
-// report's breakdowns by operation (mock layers) and by credential.
+// report's breakdowns by operation (mock layers) and by credential. Phase
+// 7: the streams (llm, sse, websocket layers) and the injected faults.
 import { h, s, replace, clear, card, kvgrid, notice, badge, spinner, toast, select, textarea, input, fmtMs, copyButton } from '../lib/dom.js';
 import { jsonView } from '../lib/format.js';
 import { SERVER, send, getJson, sseParser, readText } from '../lib/http.js';
@@ -79,6 +80,26 @@ function keyTable(title, rows) {
     h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
       h('thead', null, h('tr', null, h('th', null, 'Layer'), h('th', null, title.replace(/^By /, '')), h('th', null, 'Answered'), h('th', null, 'OK'), h('th', null, 'Errors'), h('th', null, 'Refused'), h('th', null, 'p50'), h('th', null, 'p99'))),
       h('tbody', null, ...rows.map((r) => h('tr', null, h('td', null, r.layer), h('td', { class: 'mono' }, r.name), h('td', null, num(r.answered)), h('td', null, num(r.ok)), h('td', { class: r.errors ? 'err-text' : '' }, num(r.errors)), h('td', null, num(r.limited)), h('td', null, fmtMs(r.p50_ms)), h('td', null, fmtMs(r.p99_ms))))))));
+}
+
+// Streamed answers by layer (report.streams).
+function streamTable(rows) {
+  if (!rows || !rows.length) return null;
+  return h('div', { class: 'stack-sm' }, h('h3', null, 'Streams'),
+    h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
+      h('thead', null, h('tr', null, h('th', null, 'Layer'), h('th', null, 'Protocol'), h('th', null, 'Streams'), h('th', null, 'Items/stream'), h('th', null, 'Items/s'), h('th', null, 'First item p50 / p99'), h('th', null, 'Gap p50 / p99'), h('th', null, 'Stalled'), h('th', null, 'Incomplete'))),
+      h('tbody', null, ...rows.map((s) => h('tr', null, h('td', null, s.layer), h('td', null, s.protocol), h('td', null, num(s.streams)), h('td', null, num(s.items_per_stream, 1)), h('td', null, num(s.items_per_second, 1)), h('td', { class: 'mono' }, `${fmtMs(s.first_item.p50_ms)} / ${fmtMs(s.first_item.p99_ms)}`), h('td', { class: 'mono' }, `${fmtMs(s.gap.p50_ms)} / ${fmtMs(s.gap.p99_ms)}`), h('td', { class: s.stalled ? 'err-text' : '' }, num(s.stalled)), h('td', { class: s.incomplete ? 'err-text' : '' }, num(s.incomplete))))))));
+}
+
+// The injected faults and what they came to (report.totals).
+function faultsLine(t) {
+  const names = Object.keys(t.faults || {});
+  if (!t.abandoned && !t.unattributed && !names.length) return null;
+  const parts = [];
+  if (t.abandoned) parts.push(`${num(t.abandoned)} abandoned on purpose`);
+  if (t.unattributed) parts.push(`${num(t.unattributed)} unattributed answers (gRPC, WebSocket without a tag)`);
+  if (names.length) parts.push('injected: ' + names.map((k) => `${k} ${num(t.faults[k])}`).join(', '));
+  return h('p', { class: 'small' }, 'Faults: ', parts.join('; '));
 }
 
 // A per-second chart: completed per second (bars), p99 latency (line).
@@ -711,6 +732,8 @@ export default {
         (rep.findings || []).length ? h('div', { class: 'stack-sm' }, h('h3', null, 'Findings'),
           ...rep.findings.map((f) => notice(f.failed && f.failed.length ? 'warn' : 'ok', f.summary))) : null,
         ...(rep.warnings || []).map((w) => notice('warn', w)),
+        faultsLine(t),
+        streamTable(rep.streams),
         keyTable('By operation', rep.operations),
         keyTable('By credential', rep.credentials),
         ...(rep.rate_limits || []).map(rateLimitView),

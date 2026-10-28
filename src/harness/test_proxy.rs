@@ -289,6 +289,10 @@ pub struct Counters {
     pub recorded: std::sync::Mutex<Vec<String>>,
     /// The peers' addresses, as they arrived (the first 10 000).
     pub peers: std::sync::Mutex<Vec<std::net::IpAddr>>,
+    /// Distinct client connections (peer address and port).
+    pub connections: std::sync::Mutex<std::collections::HashSet<SocketAddr>>,
+    /// Requests that came over HTTP/2.
+    pub http2: AtomicU64,
 }
 
 struct Inner {
@@ -380,6 +384,17 @@ async fn forward(State(inner): State<Arc<Inner>>, req: Request) -> Response {
         if peers.len() < 10_000 {
             peers.push(peer.0.ip());
         }
+        let mut conns = inner
+            .counters
+            .connections
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if conns.len() < 10_000 {
+            conns.insert(peer.0);
+        }
+    }
+    if req.version() == axum::http::Version::HTTP_2 {
+        inner.counters.http2.fetch_add(1, Ordering::Relaxed);
     }
     let mut limit_headers = Vec::new();
     let mut refuse_after_forwarding = false;
@@ -441,6 +456,8 @@ async fn forward(State(inner): State<Arc<Inner>>, req: Request) -> Response {
             Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
         };
     parts.uri = uri;
+    // A gateway speaks HTTP/1.1 to its upstream whatever the client spoke.
+    parts.version = axum::http::Version::HTTP_11;
     parts.headers.remove("host");
     let bytes = match body.collect().await {
         Ok(c) => c.to_bytes(),

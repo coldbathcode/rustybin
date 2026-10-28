@@ -307,6 +307,12 @@ pub struct ServerAssignment {
     pub run_id: String,
     pub key: String,
     pub profile: ServerProfile,
+    /// The run's server faults (section 8), the live change's when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faults: Option<super::faults::ServerFaults>,
+    /// Node churn: this node's turn of the run's server nodes.
+    #[serde(default)]
+    pub churn_slot: Option<[u32; 2]>,
     /// The failed requests of the run's clients, by client node (encoded
     /// sequence numbers): answer which ones arrived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -329,6 +335,9 @@ pub struct WirePart {
     pub counts: Counts,
     pub corrected: WireHist,
     pub overhead: WireHist,
+    /// The layer's streams (llm, sse, websocket layers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streams: Option<super::protocols::StreamWire>,
 }
 
 /// The run-wide histograms of a node.

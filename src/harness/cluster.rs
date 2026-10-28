@@ -1254,6 +1254,7 @@ struct Merged {
 struct MergedPart {
     counts: Counts,
     corrected: hdrhistogram::Histogram<u64>,
+    streams: super::protocols::StreamAcc,
 }
 
 /// The seconds every client part still sending has reported (all of them
@@ -1338,6 +1339,7 @@ fn merge(run: &ClusterRun, inner: &RunInner) -> Merged {
     let part = || MergedPart {
         counts: Counts::default(),
         corrected: histogram(2),
+        streams: super::protocols::StreamAcc::default(),
     };
     let mut m = Merged {
         counts: Counts::default(),
@@ -1377,6 +1379,9 @@ fn merge(run: &ClusterRun, inner: &RunInner) -> Merged {
         for (dst, src) in m.layers.iter_mut().zip(&st.layers) {
             dst.counts.add(&src.counts);
             let _ = src.corrected.add_to(&mut dst.corrected);
+            if let Some(w) = &src.streams {
+                dst.streams.merge_wire(w);
+            }
         }
         for (dst, src) in m.targets.iter_mut().zip(&st.targets) {
             dst.counts.add(&src.counts);
@@ -1727,6 +1732,14 @@ fn build_report(
             .collect()
     };
     let layers = breakdown(layer_names, &m.layers);
+    let streams: Vec<super::protocols::StreamReport> = inner
+        .controls
+        .effective_layers(&run.scenario)
+        .iter()
+        .zip(&m.layers)
+        .filter(|(_, p)| !p.streams.is_empty())
+        .map(|((l, _), p)| p.streams.report(&l.name, l.source.protocol()))
+        .collect();
     let targets_breakdown = breakdown(
         run.scenario.targets.iter().map(|t| t.url.clone()).collect(),
         &m.targets,
@@ -1835,6 +1848,7 @@ fn build_report(
         operations,
         credentials,
         warnings,
+        streams,
     }
 }
 
@@ -2541,7 +2555,19 @@ impl Cluster {
                     controls,
                 });
             }
-            if let Some(p) = inner.servers.iter().find(|p| p.node_id == node_id) {
+            if let Some((index, p)) = inner
+                .servers
+                .iter()
+                .enumerate()
+                .find(|(_, p)| p.node_id == node_id)
+            {
+                let faults = inner
+                    .controls
+                    .faults
+                    .as_ref()
+                    .or(run.scenario.faults.as_ref())
+                    .and_then(|f| f.server());
+                let churn_slot = Some([index as u32, inner.servers.len() as u32]);
                 let collect =
                     (inner.state == RunState::Collecting && p.collected.is_none()).then(|| {
                         inner
@@ -2554,6 +2580,8 @@ impl Cluster {
                     run_id: run.id.clone(),
                     key: run.key.to_hex(),
                     profile: run.scenario.servers.clone(),
+                    faults,
+                    churn_slot,
                     collect,
                 });
             }

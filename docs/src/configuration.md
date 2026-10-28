@@ -315,7 +315,8 @@ its own phase and its own jitter, which spreads the load. `POST /_rustybin/harne
 returns the expected requests per second of a scenario, each layer and the total, from
 the pattern math (one point per second, coarser past an hour). The built-in scenarios
 include `step-plateaus`, `breakpoint`, `spike-and-recover`, `pulse`, `burst`,
-`daily-wave`, `rate-limit`, `limit-probe`, `many-ips` and `petstore-customers`;
+`daily-wave`, `rate-limit`, `limit-probe`, `many-ips`, `petstore-customers`,
+`llm-streaming`, `flaky-upstream` and `jittery-clients`;
 `PUT /_rustybin/harness/scenarios/<name>` saves your own next to them
 (validated, at most 100 per node, kept in `RUSTYBIN_HARNESS_STATE_DIR` when set) and
 `DELETE` removes one.
@@ -390,6 +391,56 @@ without the secret: the minted key's name, `key <n>` for listed keys, the JWT su
 the OAuth client id, the address), with answers, errors, refusals and approximate p50
 and p99, merged across a cluster's client nodes. Listed API keys and client secrets are
 redacted in reports.
+
+**Protocol sources.** A layer's `source` can also be `llm` (a chat completion in the
+OpenAI shape, streamed by default: `path`, `model`, `prompt`, `tokens`, `stream`,
+`headers`; the mock LLM's `X-Rustybin-TTFT-Ms` and `X-Rustybin-Tokens-Per-Second`
+headers give it known timings), `sse` (a server-sent event stream: `path`, `events` to
+read, or `hold_unread` for a reader that never reads), `websocket` (a session on an
+HTTP/1.1 target: `messages` of `size` bytes, each echo awaited, an optional `hold`),
+`grpc` (a unary call of Rustybin's echo service over HTTP/2: `http: h2c` on plain
+targets; `path`, `message`) or `mcp` (a stateless `tools/call`: `path`, `tool`,
+`arguments`). The report's `streams` has, per streamed layer (llm, sse, websocket), the
+streams, items per stream and per second (tokens, events, round trips), the time to the
+first item (time to first token), the gaps between items (inter-token latency), the
+stream length, and the streams that stalled (no item for the request timeout) or ended
+early. A streamed answer's latency is the stream's length; the gateway overhead is not
+measured on streamed answers. A gRPC answer is judged by its `grpc-status`, an MCP answer by its JSON-RPC
+result (`isError` is an unexpected answer), a WebSocket session by its echoes. Answers
+that cannot carry the served-by tag (gRPC always, WebSocket upgrades outside a Rustybin
+server's layer) are `unattributed`, neither upstream nor gateway.
+
+**Fault injection.** The scenario's `faults` block (and the live change `faults`, which
+replaces it whole) names a `preset` and overrides any field. Client faults are drawn per
+request by fraction, the same way on every node:
+
+| `faults.client` | What it does |
+|---|---|
+| `connection_churn` | The fraction sent on a new connection, closed after the answer |
+| `abandon: {fraction, after}` | Cancelled `after` sending; counted as `abandoned`, neither answered nor failed |
+| `slow_body: {fraction, bytes_per_second}` | Request bodies trickled at that rate |
+| `malformed_json` | JSON bodies cut short (they expect a 4xx) |
+| `wrong_content_type` | JSON bodies sent as `text/plain` (they expect a 4xx) |
+| `oversized_headers: {fraction, bytes}` | An extra header of `bytes` (default 8192; they expect a 4xx) |
+| `retry_on_5xx: {retries, synchronised}` | Immediate retries of 5xx answers; `synchronised` retries at the next whole second of the run clock on every node at once |
+| `expired_tokens` | Minted JWTs (`identities.jwt`) sent expired (they expect a 4xx) |
+| `http2` | The fraction sent over HTTP/2 (ALPN on TLS targets, prior knowledge on plain ones), the rest over HTTP/1.1 |
+
+Server faults travel to the server nodes with the run and act on marked requests at
+`/harness/*` and on `/health`:
+
+| `faults.server` | What it does |
+|---|---|
+| `drop` | The connection is reset after the headers |
+| `stall: {fraction, for}` | Nothing comes after the headers for `for` (longer than the client's timeout: a timeout) |
+| `flapping_health: {every, down_for}` | `/health` answers 503 for `down_for` of every `every` |
+| `churn: {every, down_for}` | Node churn: in each `every`, one server node in turn is down for `down_for`: marked requests get a 503 with the connection closed and `/health` answers 503, which exercises the gateway's health checks and circuit breakers |
+
+Presets: `calm`, `jittery` (connection churn, abandoned requests, slow bodies, an HTTP/2
+mix), `flaky-upstream` (drops, stalls, flapping health), `retries`, `synchronised`,
+`churn` and `all`. The report counts the injected faults by name (`totals.faults`), the
+abandoned and unattributed answers, and the built-ins `llm-streaming`, `flaky-upstream`
+and `jittery-clients` show them.
 
 A running run takes changes without stopping: `PATCH /_rustybin/harness/runs/<run>` (or
 `.../clusters/<id>/runs/<run>`) with any of `rate_multiplier` (0 to 10), `pause`,

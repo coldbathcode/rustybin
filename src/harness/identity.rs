@@ -114,12 +114,30 @@ impl JwtPool {
         if let Some(s) = &self.scope {
             claims.insert("scope".into(), json!(s));
         }
-        let token = match self.alg {
-            JwtAlg::Rs256 => self.state.sign_rs256(&claims, "JWT")?,
-            JwtAlg::Hs256 => self.state.sign_hs256(&claims)?,
-        };
+        let token = self.sign(&claims)?;
         *cached = Some((token.clone(), exp));
         Ok(token)
+    }
+
+    fn sign(&self, claims: &Map<String, Value>) -> Result<String, String> {
+        match self.alg {
+            JwtAlg::Rs256 => self.state.sign_rs256(claims, "JWT"),
+            JwtAlg::Hs256 => self.state.sign_hs256(claims),
+        }
+    }
+
+    /// A token of subject `i` that expired a minute ago (credential churn).
+    fn expired(&self, i: u32) -> Result<String, String> {
+        let now = chrono::Utc::now().timestamp();
+        let mut claims = Map::new();
+        claims.insert("iss".into(), json!(self.issuer));
+        claims.insert("sub".into(), json!(self.subject(i)));
+        claims.insert("iat".into(), json!(now - 3600));
+        claims.insert("exp".into(), json!(now - 60));
+        if let Some(a) = &self.audience {
+            claims.insert("aud".into(), json!(a));
+        }
+        self.sign(&claims)
     }
 }
 
@@ -203,7 +221,7 @@ impl OAuthPool {
                 "user-agent",
                 concat!("rustybin-harness/", env!("CARGO_PKG_VERSION")),
             )
-            .body(Full::new(Bytes::from(body)))
+            .body(Full::new(Bytes::from(body)).boxed())
             .map_err(|e| format!("token request: {e}"))?;
         let answer = tokio::time::timeout(TOKEN_TIMEOUT, async {
             let resp = self
@@ -354,6 +372,28 @@ impl LayerIdentities {
     /// The source addresses the layer connects from.
     pub fn sources(&self) -> &[IpAddr] {
         &self.sources
+    }
+
+    /// Whether the layer mints JWTs (the `expired_tokens` fault needs them).
+    pub fn has_jwt(&self) -> bool {
+        self.jwt.is_some()
+    }
+
+    /// [`LayerIdentities::resolve`] with an expired JWT instead of a valid
+    /// one (the `expired_tokens` fault).
+    pub async fn resolve_expired(&self, i: u32) -> Resolved {
+        let mut out = self.resolve(i).await;
+        if let Some(j) = &self.jwt {
+            match j.expired(i) {
+                Ok(t) => {
+                    out.headers.retain(|(n, _)| n != "authorization");
+                    out.headers
+                        .push(("authorization".into(), format!("Bearer {t}")));
+                }
+                Err(e) => out.error = Some(format!("expired JWT for {}: {e}", j.subject(i))),
+            }
+        }
+        out
     }
 
     /// What identity `i` adds to a request.

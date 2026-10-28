@@ -641,6 +641,59 @@ pub struct RunEntry {
     pub profile: ServerProfile,
     pub stats: Mutex<ServerStats>,
     pub created: Instant,
+    /// The server faults in force (section 8), set with the assignment and
+    /// by the live change.
+    faults: Mutex<Option<super::faults::ServerFaults>>,
+    /// Node churn: this node's turn (`index`) of `count` server nodes.
+    churn_slot: Mutex<[u32; 2]>,
+    /// The run ended on this node (its fault task stops).
+    pub done: std::sync::atomic::AtomicBool,
+}
+
+impl RunEntry {
+    pub fn faults(&self) -> Option<super::faults::ServerFaults> {
+        self.faults
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Set the faults and this node's churn turn.
+    pub fn set_faults(&self, faults: Option<super::faults::ServerFaults>, slot: [u32; 2]) {
+        *self.faults.lock().unwrap_or_else(|p| p.into_inner()) = faults;
+        *self.churn_slot.lock().unwrap_or_else(|p| p.into_inner()) = slot;
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.done.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn finish(&self) {
+        self.done.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether this node is down for churn now: in each `every`, server
+    /// node `index` of `count` is down for the first `down_for`.
+    pub fn churn_down(&self) -> bool {
+        let Some(c) = self.faults().and_then(|f| f.churn) else {
+            return false;
+        };
+        let [index, count] = *self.churn_slot.lock().unwrap_or_else(|p| p.into_inner());
+        let every = c.every.0.as_secs_f64().max(1e-3);
+        let t = self.created.elapsed().as_secs_f64();
+        let period = (t / every).floor() as u64;
+        period % u64::from(count.max(1)) == u64::from(index)
+            && t - period as f64 * every < c.down_for.0.as_secs_f64()
+    }
+
+    /// Whether `/health` flaps down now.
+    pub fn flap_down(&self) -> bool {
+        let Some(f) = self.faults().and_then(|f| f.flapping_health) else {
+            return false;
+        };
+        let every = f.every.0.as_secs_f64().max(1e-3);
+        self.created.elapsed().as_secs_f64().rem_euclid(every) < f.down_for.0.as_secs_f64()
+    }
 }
 
 /// The server side's registry of runs (bounded to [`KEPT_RUNS`]).
@@ -670,10 +723,18 @@ impl Correlator {
             profile,
             stats: Mutex::new(ServerStats::new()),
             created: Instant::now(),
+            faults: Mutex::new(None),
+            churn_slot: Mutex::new([0, 1]),
+            done: std::sync::atomic::AtomicBool::new(false),
         });
-        runs.retain(|r| r.id != id);
+        runs.retain(|r| {
+            if r.id == id {
+                r.finish();
+            }
+            r.id != id
+        });
         while runs.len() >= KEPT_RUNS {
-            runs.remove(0);
+            runs.remove(0).finish();
         }
         runs.push(entry.clone());
         entry

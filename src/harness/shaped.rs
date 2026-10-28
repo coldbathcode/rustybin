@@ -3,7 +3,10 @@
 //! run gets that run's server profile (a log-normal latency from its p50 and
 //! p99, a weighted status mix, a padded JSON body, optionally streamed in
 //! chunks after a first-byte delay); anything else gets the default profile
-//! (200, 256 bytes, no delay), so the route is a plain stub too.
+//! (200, 256 bytes, no delay), so the route is a plain stub too. The run's
+//! server faults (section 8) act here on marked requests: a dropped
+//! connection after the headers, a stall, and a node down for churn (503,
+//! connection closed).
 
 use std::time::Duration;
 
@@ -95,10 +98,65 @@ pub async fn handler(OriginalUri(uri): OriginalUri, req: Request) -> Response {
         profile.body_bytes as usize,
     );
     let first_byte = profile.first_byte_delay.0.min(MAX_SERVER_DELAY);
+    // The server faults of the run, drawn per request.
+    let faults = marked.as_ref().and_then(|m| m.entry.faults());
+    if let (Some(m), true) = (
+        &marked,
+        marked.as_ref().is_some_and(|m| m.entry.churn_down()),
+    ) {
+        let _ = m;
+        let mut resp = (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "this upstream node is down (harness churn)",
+        )
+            .into_response();
+        resp.headers_mut()
+            .insert(header::CONNECTION, HeaderValue::from_static("close"));
+        return resp;
+    }
+    let seq = marked.as_ref().map_or(0, |m| m.seq);
+    let seed = marked
+        .as_ref()
+        .map_or(0, |m| super::pattern::seed_of(&[&m.run]));
+    let drop = faults
+        .as_ref()
+        .and_then(|f| f.drop)
+        .is_some_and(|fr| super::faults::draws(seed, seq, 40, fr));
+    let stall = faults.as_ref().and_then(|f| {
+        f.stall
+            .as_ref()
+            .filter(|s| super::faults::draws(seed, seq, 41, s.fraction))
+            .map(|s| {
+                s.hold
+                    .0
+                    .min(Duration::from_secs(super::faults::MAX_WINDOW_SECS))
+            })
+    });
     if !latency.is_zero() {
         tokio::time::sleep(latency).await;
     }
-    let mut resp = if profile.chunked {
+    let mut resp = if drop || stall.is_some() {
+        // Headers first (with the body's first byte, so they are flushed),
+        // then the connection is reset (an error ends the body) or nothing
+        // comes for a while.
+        let stream = async_stream::stream! {
+            if let Some(hold) = stall {
+                tokio::time::sleep(hold).await;
+                yield Ok::<Bytes, std::io::Error>(Bytes::from(body));
+            } else {
+                yield Ok(Bytes::copy_from_slice(&body[..body.len().min(1)]));
+                // Let the headers and the first byte go out before the reset.
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                yield Err(std::io::Error::other("dropped by the harness"));
+            }
+        };
+        let mut resp = (status, Body::from_stream(stream)).into_response();
+        if drop {
+            resp.headers_mut()
+                .insert(header::CONNECTION, HeaderValue::from_static("close"));
+        }
+        resp
+    } else if profile.chunked {
         let chunk = body.len().div_ceil(CHUNKS).max(1);
         let pieces: Vec<Bytes> = body.chunks(chunk).map(Bytes::copy_from_slice).collect();
         let gap = (latency / 4).min(Duration::from_millis(250));

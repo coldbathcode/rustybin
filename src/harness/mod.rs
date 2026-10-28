@@ -28,12 +28,14 @@ pub mod cluster;
 pub mod correlate;
 pub mod election;
 pub mod engine;
+pub mod faults;
 pub mod identity;
 pub mod limit_test;
 pub mod live;
 pub mod member;
 pub mod mocksource;
 pub mod pattern;
+pub mod protocols;
 pub mod ratelimit;
 pub mod report;
 pub mod safety;
@@ -341,7 +343,14 @@ pub struct Harness {
 pub struct Resources {
     pub mocks: crate::mocks::store::MockStore,
     pub jwt: Arc<crate::jwt_state::JwtState>,
+    /// The node's `/health` toggle (flapping health, churn).
+    pub health: Arc<crate::health::HealthState>,
 }
+
+/// How often the server fault task looks at the clock.
+const FAULT_TICK: Duration = Duration::from_millis(50);
+/// The longest a server fault task runs after its run was registered.
+const FAULT_TASK_MAX: Duration = Duration::from_secs(25 * 3600);
 
 /// A layer's extras on this node: its mock plan (resolved against the
 /// node's live revision) and its identities (`oauth`: the pool the caller
@@ -502,6 +511,33 @@ impl Harness {
 
     pub fn resources(&self) -> Option<&Resources> {
         self.resources.get()
+    }
+
+    /// Follow a run's server faults on this node: `/health` answers 503
+    /// while health flaps down or the node is down for churn, and is
+    /// healthy again when the run ends (the task stops with the entry).
+    pub fn watch_server_faults(&self, entry: Arc<correlate::RunEntry>) {
+        let Some(health) = self.resources().map(|r| r.health.clone()) else {
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        handle.spawn(async move {
+            let until = Instant::now() + FAULT_TASK_MAX;
+            let mut forced_down = false;
+            while !entry.is_done() && Instant::now() < until {
+                let down = entry.flap_down() || entry.churn_down();
+                if down != forced_down {
+                    health.set(!down);
+                    forced_down = down;
+                }
+                tokio::time::sleep(FAULT_TICK).await;
+            }
+            if forced_down {
+                health.set(true);
+            }
+        });
     }
 
     /// The pool of a layer's OAuth clients: the token URL pinned like a
@@ -944,10 +980,12 @@ impl Harness {
         // leader, which also does the `lost` lookup.
         let key = options.key.clone().unwrap_or_else(RunKey::random);
         let entry = if options.cluster.is_none() && self.is_server() {
-            Some(
-                self.correlator
-                    .register(&id, key.clone(), scenario.servers.clone()),
-            )
+            let entry = self
+                .correlator
+                .register(&id, key.clone(), scenario.servers.clone());
+            entry.set_faults(scenario.faults.as_ref().and_then(|f| f.server()), [0, 1]);
+            self.watch_server_faults(entry.clone());
+            Some(entry)
         } else {
             None
         };
@@ -1018,7 +1056,9 @@ impl Harness {
                 "user-agent",
                 concat!("rustybin-harness/", env!("CARGO_PKG_VERSION")),
             )
-            .body(http_body_util::Full::new(bytes::Bytes::new()))
+            .body(http_body_util::BodyExt::boxed(http_body_util::Full::new(
+                bytes::Bytes::new(),
+            )))
             .map_err(|e| format!("verification request: {e}"))?;
         let client = target.client.clone();
         let url = target.target.url.clone();
@@ -1266,6 +1306,18 @@ pub fn builtin_scenarios() -> &'static [(&'static str, &'static str)] {
         (
             "petstore-customers",
             include_str!("scenarios/petstore-customers.yaml"),
+        ),
+        (
+            "llm-streaming",
+            include_str!("scenarios/llm-streaming.yaml"),
+        ),
+        (
+            "flaky-upstream",
+            include_str!("scenarios/flaky-upstream.yaml"),
+        ),
+        (
+            "jittery-clients",
+            include_str!("scenarios/jittery-clients.yaml"),
         ),
     ]
 }
@@ -2245,6 +2297,8 @@ pub fn openapi_components() -> Value {
 mod cluster_tests;
 #[cfg(test)]
 mod failover_tests;
+#[cfg(test)]
+mod fault_tests;
 #[cfg(test)]
 mod limit_tests;
 #[cfg(test)]

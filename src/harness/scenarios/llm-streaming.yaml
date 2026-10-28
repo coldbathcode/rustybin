@@ -1,0 +1,25 @@
+# Streamed chat completions against the mock LLM (or a gateway in front of
+# it): 200 tokens each, the mock paced at a 300 ms time to first token and
+# 40 tokens per second, so the report's stream metrics (first token, the
+# gap between tokens, tokens per second, stalls) have known values to show
+# a gateway's overhead against.
+name: llm-streaming
+description: 5 streamed chat completions per second for two minutes, 200 tokens each, the mock LLM paced at 300 ms TTFT and 40 tokens per second.
+targets:
+  - url: http://127.0.0.1:8080
+    weight: 1
+scale:
+  virtual_clients: 50
+layers:
+  - name: chat
+    source:
+      llm:
+        tokens: 200
+        headers:
+          X-Rustybin-TTFT-Ms: "300"
+          X-Rustybin-Tokens-Per-Second: "40"
+    pattern:
+      type: constant
+      rate: 5
+      for: 2m
+timeout: 30s

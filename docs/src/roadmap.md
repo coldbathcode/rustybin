@@ -5,13 +5,20 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-- **Load test mode (harness), the next phases** (`docs/plans/harness.md`): phase 7,
-  faults and protocols (client and server fault behaviours with presets, node churn;
-  SSE and LLM streaming with time to first token and tokens per second, WebSocket,
-  gRPC, MCP tool calls). Then the harness docs and the conformance run (phase 8).
+- **Load test mode (harness), the last phase** (`docs/plans/harness.md`): phase 8,
+  the harness docs (`docs/src/harness.md` with Hurl examples, a compose example with a
+  leader, a standby, clients, servers and a stand-in gateway) and the conformance run
+  (`conformance/harness/run.sh`: the compose cluster, the leader killed mid-run, the
+  report asserted).
 
 ## Recently built
 
+- [Harness faults and protocols](configuration.md#harness-mode) (phase 7): fault
+  presets with client faults (connection churn, abandoned requests, slow and malformed
+  bodies, wrong content types, oversized headers, retries on 5xx, expired tokens, an
+  HTTP/2 mix) and server faults (drops, stalls, flapping health, node churn), and the
+  `llm`, `sse`, `websocket`, `grpc` and `mcp` sources with stream metrics (time to first
+  token, inter-token latency, tokens per second).
 - [Harness mock-driven traffic and identities](configuration.md#harness-mode) (phase
   6): layers that send an OpenAPI mock's operations (weights, invalid requests, create
   then read), identities (API keys, minted JWTs, OAuth client credentials, forwarded

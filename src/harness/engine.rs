@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use hdrhistogram::Histogram;
+use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::{Request, Uri};
@@ -56,8 +57,10 @@ use tokio::sync::watch;
 
 use super::breakdown::{self, Answer, LayerKeys};
 use super::correlate::{self, Correlator, Marker, RunEntry, RunKey, Tag};
+use super::faults::{draws, ClientFaults};
 use super::limit_test::{identity_ip, MAX_RETRY_WAIT};
 use super::live::{Change, Controls, LayerExtras, Level, LiveView, StageLog};
+use super::protocols::{self, Protocol, StreamAcc, StreamOutcome};
 use super::ratelimit::{self, Grid, LimitAcc, Obs};
 use super::report::{
     self, histogram, Breakdown, Bucket, Counts, Percentiles, Report, Sample, Saturation,
@@ -173,6 +176,8 @@ pub enum Class {
     Gateway,
     /// No answer: connect, TLS, timeout, reset, protocol.
     Transport,
+    /// Answered over a protocol that carries no tag (WebSocket, gRPC).
+    Unattributed,
 }
 
 impl Class {
@@ -181,6 +186,7 @@ impl Class {
             Class::Upstream => "upstream",
             Class::Gateway => "gateway",
             Class::Transport => "transport",
+            Class::Unattributed => "unattributed",
         }
     }
 }
@@ -438,6 +444,12 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
 
 /// rustls client configuration for a target.
 pub fn tls_config(target: &Target) -> Result<rustls::ClientConfig, String> {
+    tls_config_with(target, target.http)
+}
+
+/// [`tls_config`] with the ALPN of `http` instead of the target's (the
+/// protocol mix fault).
+pub fn tls_config_with(target: &Target, http: HttpVersion) -> Result<rustls::ClientConfig, String> {
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
@@ -452,7 +464,7 @@ pub fn tls_config(target: &Target) -> Result<rustls::ClientConfig, String> {
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         builder.with_root_certificates(roots).with_no_client_auth()
     };
-    config.alpn_protocols = match target.http {
+    config.alpn_protocols = match http {
         HttpVersion::Auto => vec![b"h2".to_vec(), b"http/1.1".to_vec()],
         HttpVersion::H1 | HttpVersion::H2c => vec![b"http/1.1".to_vec()],
         HttpVersion::H2 => vec![b"h2".to_vec()],
@@ -587,7 +599,18 @@ impl tower::Service<Uri> for PinnedConnector {
     }
 }
 
-pub type HttpClient = Client<PinnedConnector, Full<Bytes>>;
+/// The request body: whole, or streamed (the `slow_body` fault).
+pub type ReqBody = BoxBody<Bytes, std::convert::Infallible>;
+pub type HttpClient = Client<PinnedConnector, ReqBody>;
+
+/// Which of a target's clients sends a request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClientChoice {
+    Default,
+    Churn,
+    H1,
+    H2,
+}
 
 /// A target with its pinned addresses and its client.
 pub struct PinnedTarget {
@@ -602,13 +625,19 @@ pub struct PinnedTarget {
     pub bound: Vec<(std::net::IpAddr, HttpClient)>,
     connector: PinnedConnector,
     pool_size: usize,
+    /// HTTP/1.1 only (WebSocket upgrades, the protocol mix).
+    h1: HttpClient,
+    /// HTTP/2 only: ALPN h2 on TLS, prior knowledge on plain targets.
+    h2: HttpClient,
+    /// No pool: a connection per request (the `connection_churn` fault).
+    churn: HttpClient,
 }
 
 fn make_client(handle: &Handle, connector: PinnedConnector, pool: usize, h2c: bool) -> HttpClient {
     let _enter = handle.enter();
     let mut builder = Client::builder(TokioExecutor::new());
     builder
-        .pool_max_idle_per_host(pool.max(1))
+        .pool_max_idle_per_host(pool)
         .pool_idle_timeout(Duration::from_secs(60))
         .pool_timer(TokioTimer::new())
         .timer(TokioTimer::new());
@@ -641,7 +670,31 @@ impl PinnedTarget {
         let client = make_client(
             handle,
             connector.clone(),
-            pool_size,
+            pool_size.max(1),
+            target.http == HttpVersion::H2c,
+        );
+        let (h1, h2) = if parsed.tls() {
+            (
+                PinnedConnector::new(
+                    addrs.clone(),
+                    Some(tls_config_with(&target, HttpVersion::H1)?),
+                    &server_name,
+                )?,
+                PinnedConnector::new(
+                    addrs.clone(),
+                    Some(tls_config_with(&target, HttpVersion::H2)?),
+                    &server_name,
+                )?,
+            )
+        } else {
+            (connector.clone(), connector.clone())
+        };
+        let h1 = make_client(handle, h1, pool_size.max(1), false);
+        let h2 = make_client(handle, h2, pool_size.max(1), true);
+        let churn = make_client(
+            handle,
+            connector.clone(),
+            0,
             target.http == HttpVersion::H2c,
         );
         let authority = match &target.host {
@@ -666,7 +719,22 @@ impl PinnedTarget {
             bound: Vec::new(),
             connector,
             pool_size,
+            h1,
+            h2,
+            churn,
         })
+    }
+
+    /// The client of a protocol or fault choice: a connection per request
+    /// (`churn`), HTTP/2 or HTTP/1.1 only, else the one connecting from
+    /// `source` (the default without).
+    pub fn client_of(&self, choice: ClientChoice, source: Option<std::net::IpAddr>) -> &HttpClient {
+        match choice {
+            ClientChoice::Churn => &self.churn,
+            ClientChoice::H1 => &self.h1,
+            ClientChoice::H2 => &self.h2,
+            ClientChoice::Default => self.client_for(source),
+        }
     }
 
     /// Add a client for each source address (identities send from them).
@@ -683,7 +751,7 @@ impl PinnedTarget {
             let client = make_client(
                 handle,
                 connector,
-                self.pool_size,
+                self.pool_size.max(1),
                 self.target.http == HttpVersion::H2c,
             );
             self.bound.push((*ip, client));
@@ -744,6 +812,12 @@ pub struct Outcome {
     pub op: Option<(u16, u8)>,
     /// The identity it carried.
     pub ident: Option<u32>,
+    /// Cancelled on purpose (the `abandon` fault): not an answer.
+    pub abandoned: bool,
+    /// The client fault injected into the request.
+    pub fault: Option<&'static str>,
+    /// A streamed answer's timings.
+    pub stream: Option<StreamOutcome>,
 }
 
 /// Per-layer or per-target accumulator in a shard.
@@ -751,6 +825,7 @@ struct PartShard {
     counts: Counts,
     corrected: Histogram<u64>,
     overhead: Histogram<u64>,
+    streams: StreamAcc,
 }
 
 impl PartShard {
@@ -759,6 +834,7 @@ impl PartShard {
             counts: Counts::default(),
             corrected: histogram(2),
             overhead: histogram(2),
+            streams: StreamAcc::default(),
         }
     }
 
@@ -766,17 +842,28 @@ impl PartShard {
         // Nothing recorded since the last roll: most layer slots stay empty
         // (they are room for layers added while the run runs), and merging
         // a histogram walks all its buckets.
-        if src.counts.completed == 0 {
+        if src.counts.completed == 0 && src.counts.abandoned == 0 {
             return;
         }
         let _ = self.corrected.add(&src.corrected);
         let _ = self.overhead.add(&src.overhead);
         src.corrected.reset();
         src.overhead.reset();
+        if !src.streams.is_empty() {
+            self.streams.merge(&src.streams);
+            src.streams = StreamAcc::default();
+        }
         self.counts.add(&std::mem::take(&mut src.counts));
     }
 
     fn record(&mut self, o: &Outcome, corrected: u64) {
+        if o.abandoned {
+            count_class(&mut self.counts, o);
+            return;
+        }
+        if let Some(st) = &o.stream {
+            self.streams.record(st);
+        }
         self.counts.completed += 1;
         self.counts.bytes_received += o.bytes;
         self.corrected.saturating_record(corrected);
@@ -789,6 +876,13 @@ impl PartShard {
 
 /// Count one answer's status, class and expectation.
 fn count_class(counts: &mut Counts, o: &Outcome) {
+    if let Some(f) = o.fault {
+        *counts.faults.entry(f.to_string()).or_default() += 1;
+    }
+    if o.abandoned {
+        counts.abandoned += 1;
+        return;
+    }
     match (o.status, o.transport) {
         (Some(status), _) => {
             *counts.statuses.entry(status.to_string()).or_default() += 1;
@@ -810,6 +904,7 @@ fn count_class(counts: &mut Counts, o: &Outcome) {
                         .or_default() += 1;
                 }
                 Class::Transport => {}
+                Class::Unattributed => counts.unattributed += 1,
             }
         }
         (None, kind) => {
@@ -877,6 +972,13 @@ impl Shard {
     fn record(&mut self, o: &Outcome, layer_name: &str, target_url: &str) {
         let corrected = micros(o.corrected);
         let service = micros(o.service);
+        if o.abandoned {
+            count_class(&mut self.counts, o);
+            if let Some(p) = self.layers.get_mut(o.layer) {
+                p.record(o, corrected);
+            }
+            return;
+        }
         self.counts.completed += 1;
         self.counts.bytes_received += o.bytes;
         count_class(&mut self.counts, o);
@@ -1156,6 +1258,8 @@ pub struct Run {
     /// What went wrong setting up identities or added layers (first few)
     /// and how often.
     warnings: Mutex<(Vec<String>, u64)>,
+    /// Seeds the client fault draws (the same on every node of the run).
+    fault_seed: u64,
 }
 
 /// Most distinct warnings a run keeps.
@@ -1172,6 +1276,7 @@ impl Run {
         let controls = params
             .controls
             .unwrap_or_else(|| Controls::for_scenario(&params.scenario));
+        let fault_seed = super::pattern::seed_of(&[&params.id, "faults"]);
         let view = Arc::new(
             LiveView::build(
                 &params.scenario,
@@ -1232,6 +1337,7 @@ impl Run {
             extras: Mutex::new(params.extras),
             resources: params.resources,
             warnings: Mutex::new((Vec::new(), 0)),
+            fault_seed,
         })
     }
 
@@ -1640,6 +1746,7 @@ impl Run {
             counts: p.counts.clone(),
             corrected: WireHist::encode(&p.corrected),
             overhead: WireHist::encode(&p.overhead),
+            streams: (!p.streams.is_empty()).then(|| p.streams.to_wire()),
         };
         let mut layers: Vec<WirePart> = totals.layers.iter().take(nlayers).map(part).collect();
         for (w, c) in layers.iter_mut().zip(&self.layer_sched) {
@@ -1796,6 +1903,8 @@ impl Run {
             test,
             identity,
             follow,
+            faults,
+            body: ready_body,
         } = *what;
         let view = self.view();
         let live = view.layers.get(layer_idx).ok_or("the layer is gone")?;
@@ -1846,6 +1955,22 @@ impl Run {
             }
             set(&mut headers, name, self.expand(value, &x))?;
         }
+        if faults.websocket {
+            set(&mut headers, "connection", "Upgrade".into())?;
+            set(&mut headers, "upgrade", "websocket".into())?;
+            set(&mut headers, "sec-websocket-version", "13".into())?;
+            set(&mut headers, "sec-websocket-key", protocols::ws_key())?;
+        }
+        if let Some(n) = faults.oversized {
+            set(&mut headers, "x-rustybin-padding", "p".repeat(n as usize))?;
+        }
+        if faults.wrong_content_type && (tpl.body.is_some() || ready_body.is_some()) {
+            headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("text/plain"),
+            );
+            has_content_type = true;
+        }
         // The identity's credentials and forwarded address replace what the
         // template set under the same names.
         for (name, value) in identity.map_or(&[][..], |r| &r.headers[..]) {
@@ -1865,16 +1990,26 @@ impl Run {
                 set(&mut headers, name, identity_ip(id))?;
             }
         }
-        let body = match &tpl.body {
-            None => Bytes::new(),
-            Some(Value::String(s)) => Bytes::from(self.expand(s, &x)),
-            Some(other) => {
+        let mut body = match (&tpl.body, ready_body) {
+            (_, Some(ready)) => Bytes::copy_from_slice(ready),
+            (None, None) => Bytes::new(),
+            (Some(Value::String(s)), None) => Bytes::from(self.expand(s, &x)),
+            (Some(other), None) => {
                 if !has_content_type {
-                    set(&mut headers, "content-type", "application/json".to_string())?;
+                    let ct = if faults.wrong_content_type {
+                        "text/plain"
+                    } else {
+                        "application/json"
+                    };
+                    set(&mut headers, "content-type", ct.to_string())?;
                 }
                 Bytes::from(self.expand(&other.to_string(), &x))
             }
         };
+        if faults.malformed_json && body.len() > 2 {
+            // Cut mid-way: never a JSON document.
+            body = body.slice(..body.len() / 2);
+        }
         // The marker: the names of the headers set above (sorted, unique),
         // their digest, the body digest and the path digest, signed.
         let mut names: Vec<String> = headers.keys().map(|k| k.as_str().to_string()).collect();
@@ -1911,10 +2046,27 @@ impl Run {
             correlate::traceparent(&self.id, &self.node_id, seq),
         )?;
         set(&mut headers, correlate::HEADER, marker.to_header())?;
+        let req_body: ReqBody = match faults.slow_body {
+            Some(rate) if !body.is_empty() => {
+                // A trickle: a piece every 100 ms.
+                let piece = (rate / 10).max(1) as usize;
+                let pieces: Vec<Bytes> = body.chunks(piece).map(Bytes::copy_from_slice).collect();
+                let stream = async_stream::stream! {
+                    for (i, p) in pieces.into_iter().enumerate() {
+                        if i > 0 {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                        yield Ok::<_, std::convert::Infallible>(hyper::body::Frame::data(p));
+                    }
+                };
+                BoxBody::new(http_body_util::StreamBody::new(stream))
+            }
+            _ => Full::new(body).boxed(),
+        };
         let mut req = Request::builder()
             .method(method)
             .uri(uri)
-            .body(Full::new(body))
+            .body(req_body)
             .map_err(|e| format!("request: {e}"))?;
         *req.headers_mut() = headers;
         Ok(Built {
@@ -2149,6 +2301,9 @@ impl Run {
     /// Build the final report, store it and finish the run.
     fn finish(&self, start: Instant, cpu_before: Option<f64>, error: Option<String>) {
         self.set_state(State::Finished);
+        if let Some(e) = &self.entry {
+            e.finish();
+        }
         let elapsed = start.elapsed();
         let mut totals = self.totals.lock().unwrap_or_else(|p| p.into_inner());
         // Lost: a transport failure the server side never saw. With no
@@ -2250,6 +2405,13 @@ impl Run {
             &self.stages.lock().unwrap_or_else(|p| p.into_inner()),
         );
         let (operations, credentials) = breakdown::reports(&names, &totals.keys);
+        let streams: Vec<protocols::StreamReport> = view
+            .layers
+            .iter()
+            .zip(&totals.layers)
+            .filter(|(_, p)| !p.streams.is_empty())
+            .map(|(l, p)| p.streams.report(&l.def.name, l.protocol))
+            .collect();
         let mut warnings = self.warnings();
         warnings.extend(breakdown::findings(&operations));
         let mut layers = breakdown(names, &totals.layers);
@@ -2322,6 +2484,7 @@ impl Run {
             operations,
             credentials,
             warnings,
+            streams,
         };
         drop(totals);
         if let Some(dir) = &self.report_dir {
@@ -2378,6 +2541,69 @@ struct Sending<'a> {
     test: Option<TestReq>,
     identity: Option<&'a super::identity::Resolved>,
     follow: Option<&'a str>,
+    faults: Faulted,
+    /// A ready body (gRPC) instead of the template's.
+    body: Option<&'a [u8]>,
+}
+
+/// The client faults drawn for one request.
+#[derive(Clone, Copy, Debug, Default)]
+struct Faulted {
+    malformed_json: bool,
+    wrong_content_type: bool,
+    oversized: Option<u32>,
+    slow_body: Option<u64>,
+    expired_token: bool,
+    /// The upgrade headers of a WebSocket session (its key).
+    websocket: bool,
+}
+
+impl Faulted {
+    /// The faults' names, for the counts (the first; they rarely overlap).
+    fn label(&self) -> Option<&'static str> {
+        if self.malformed_json {
+            Some("malformed_json")
+        } else if self.wrong_content_type {
+            Some("wrong_content_type")
+        } else if self.oversized.is_some() {
+            Some("oversized_headers")
+        } else if self.slow_body.is_some() {
+            Some("slow_body")
+        } else if self.expired_token {
+            Some("expired_tokens")
+        } else {
+            None
+        }
+    }
+
+    /// The request is made to be refused: a 4xx is the expected answer.
+    fn expects_refusal(&self) -> bool {
+        self.malformed_json
+            || self.wrong_content_type
+            || self.oversized.is_some()
+            || self.expired_token
+    }
+}
+
+/// Draw the faults of request `seq` from the run's client faults.
+fn draw_faults(seed: u64, seq: u64, f: &ClientFaults, has_body: bool, has_jwt: bool) -> Faulted {
+    let d = |slot: u8, fraction: Option<f64>| fraction.is_some_and(|fr| draws(seed, seq, slot, fr));
+    Faulted {
+        malformed_json: has_body && d(1, f.malformed_json),
+        wrong_content_type: has_body && d(2, f.wrong_content_type),
+        oversized: f
+            .oversized_headers
+            .as_ref()
+            .filter(|o| draws(seed, seq, 3, o.fraction))
+            .map(|o| o.bytes.unwrap_or(8192).min(super::faults::MAX_HEADER_BYTES)),
+        slow_body: f
+            .slow_body
+            .as_ref()
+            .filter(|s| has_body && draws(seed, seq, 4, s.fraction))
+            .map(|s| s.bytes_per_second.max(super::faults::MIN_BODY_RATE)),
+        expired_token: has_jwt && d(5, f.expired_tokens),
+        websocket: false,
+    }
 }
 
 /// What the placeholders of a request stand for.
@@ -2427,6 +2653,9 @@ fn request_of(
     l: &super::live::LiveLayer,
     idx: usize,
 ) -> Option<(&RequestTemplate, Option<&super::mocksource::PlannedRequest>)> {
+    if let Some(t) = &l.proto_template {
+        return Some((t, None));
+    }
     match l.extras.as_ref().and_then(|x| x.mock.as_ref()) {
         Some(plan) => plan.requests.get(idx).map(|r| (&r.template, Some(r))),
         None => l
@@ -2449,7 +2678,7 @@ fn pick(cumulative: &[u32], seq: u64) -> usize {
 
 /// A built request with its marker facts.
 struct Built {
-    req: Request<Full<Bytes>>,
+    req: Request<ReqBody>,
     request_id: String,
     sent_ns: u64,
 }
@@ -2612,6 +2841,8 @@ struct Job {
     ident: Option<u32>,
     /// A read after a create: the created item's id.
     follow: Option<Arc<str>>,
+    /// Retries left on a 5xx (the `retry_on_5xx` fault).
+    retries_5xx: u32,
 }
 
 /// A request of a rate-limit test: its identity, the test's pattern in the
@@ -2637,6 +2868,7 @@ async fn send_one(run: Arc<Run>, job: Job) {
         test,
         ident,
         follow,
+        retries_5xx,
     } = job.clone();
     let view = run.view();
     let Some(live) = view.layers.get(layer_idx) else {
@@ -2647,11 +2879,49 @@ async fn send_one(run: Arc<Run>, job: Job) {
         run.inflight.fetch_sub(1, Ordering::Relaxed);
         return;
     };
-    // The identity's credentials (an OAuth token may be fetched here).
+    let protocol = live.protocol;
+    // The client faults drawn for this request.
     let ids = live.extras.as_ref().and_then(|x| x.identities.clone());
+    let mut faults = draw_faults(
+        run.fault_seed,
+        seq,
+        &view.faults,
+        tpl.body.is_some() || live.grpc_body.is_some(),
+        ident.is_some() && ids.as_ref().is_some_and(|i| i.has_jwt()),
+    );
+    faults.websocket = protocol == Protocol::Websocket;
+    let choice = if draws(
+        run.fault_seed,
+        seq,
+        6,
+        view.faults.connection_churn.unwrap_or(0.0),
+    ) {
+        ClientChoice::Churn
+    } else if protocol == Protocol::Websocket {
+        ClientChoice::H1
+    } else if let Some(h2) = view.faults.http2 {
+        if draws(run.fault_seed, seq, 7, h2) {
+            ClientChoice::H2
+        } else {
+            ClientChoice::H1
+        }
+    } else {
+        ClientChoice::Default
+    };
+    let abandon_after = view
+        .faults
+        .abandon
+        .as_ref()
+        .filter(|a| draws(run.fault_seed, seq, 8, a.fraction))
+        .map(|a| a.after.0);
+    // The identity's credentials (an OAuth token may be fetched here).
     let resolved = match (ident, &ids) {
         (Some(i), Some(ids)) => {
-            let r = ids.resolve(i).await;
+            let r = if faults.expired_token {
+                ids.resolve_expired(i).await
+            } else {
+                ids.resolve(i).await
+            };
             if let Some(e) = &r.error {
                 run.warn(e.clone());
             }
@@ -2674,6 +2944,8 @@ async fn send_one(run: Arc<Run>, job: Job) {
             test,
             identity: resolved.as_ref(),
             follow: follow.as_deref(),
+            faults,
+            body: live.grpc_body.as_deref(),
         },
     ) {
         Ok(r) => r,
@@ -2683,6 +2955,11 @@ async fn send_one(run: Arc<Run>, job: Job) {
             return;
         }
     };
+    let ws_key = req
+        .headers()
+        .get("sec-websocket-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let method = req.method().to_string();
     let path = req
         .uri()
@@ -2697,9 +2974,23 @@ async fn send_one(run: Arc<Run>, job: Job) {
     let node_header = live.node_header.clone();
     // A create of a stateful pair keeps its answer for the created id.
     let then_read = planned.and_then(|p| p.follow.clone());
-    let client = target.client_for(resolved.as_ref().and_then(|r| r.source));
+    let keep_body = then_read.is_some() || protocol == Protocol::Mcp;
+    let client = target.client_of(choice, resolved.as_ref().and_then(|r| r.source));
+    let source = &live.def.source;
     let sent = Instant::now();
-    let result = tokio::time::timeout(timeout, async {
+    // Streams and sessions are bounded by their own idle timeouts; a whole
+    // exchange never outlasts ten timeouts plus any hold on purpose.
+    let hold = source
+        .websocket
+        .as_ref()
+        .and_then(|w| w.hold)
+        .or(source.sse.as_ref().and_then(|s| s.hold_unread))
+        .map_or(Duration::ZERO, |d| d.0);
+    let budget = match protocol {
+        Protocol::Http | Protocol::Mcp | Protocol::Grpc => timeout,
+        _ => timeout * 10 + hold,
+    };
+    let exchange = async {
         let resp = client.request(req).await.map_err(|e| classify_error(&e))?;
         let status = resp.status().as_u16();
         // The tag and the upstream timing, verified with the run key.
@@ -2719,43 +3010,106 @@ async fn send_one(run: Arc<Run>, job: Job) {
         } else {
             ratelimit::Observed::default()
         };
-        let (bytes, kept) = read_body(resp.into_body(), then_read.is_some()).await?;
-        Ok::<_, &'static str>((status, bytes, tag, upstream_ms, observed, kept))
-    })
-    .await;
+        let mut ex = Exchange {
+            status,
+            tag,
+            upstream_ms,
+            observed,
+            ..Exchange::default()
+        };
+        match protocol {
+            Protocol::Http | Protocol::Mcp => {
+                let (bytes, kept) = read_body(resp.into_body(), keep_body).await?;
+                ex.bytes = bytes;
+                if protocol == Protocol::Mcp {
+                    ex.proto_ok = Some(mcp_ok(kept.as_deref().unwrap_or(&[])));
+                } else {
+                    ex.kept = kept;
+                }
+            }
+            Protocol::Grpc => {
+                let (ok, bytes) = read_grpc(resp).await?;
+                ex.bytes = bytes;
+                ex.proto_ok = Some(ok);
+            }
+            Protocol::Llm | Protocol::Sse => {
+                let max_events = source
+                    .sse
+                    .as_ref()
+                    .and_then(|s| s.events)
+                    .unwrap_or(u32::MAX);
+                let unread = source.sse.as_ref().and_then(|s| s.hold_unread).map(|d| d.0);
+                let (bytes, stream) = read_stream(
+                    resp.into_body(),
+                    protocol,
+                    timeout,
+                    max_events,
+                    unread,
+                    sent,
+                )
+                .await;
+                ex.bytes = bytes;
+                ex.stream = Some(stream);
+            }
+            Protocol::Websocket => {
+                let w = source.websocket.clone().unwrap_or_default();
+                let (ok, stream) = ws_session(resp, ws_key.as_deref(), &w, timeout, sent).await;
+                ex.proto_ok = Some(ok);
+                ex.stream = Some(stream);
+            }
+        }
+        Ok::<_, &'static str>(ex)
+    };
+    let result = match abandon_after {
+        Some(after) => match tokio::time::timeout(after.min(budget), exchange).await {
+            Ok(r) => Ok(r),
+            Err(_) => Err(true),
+        },
+        None => tokio::time::timeout(budget, exchange)
+            .await
+            .map_err(|_| false),
+    };
     let done = Instant::now();
     let done_ns = correlate::now_ns();
-    let (status, transport, bytes, expected, tag, upstream_ms, observed, kept) = match result {
-        Ok(Ok((status, bytes, tag, up, observed, kept))) => (
-            Some(status),
-            None,
-            bytes,
-            tpl.expects(status),
-            tag,
-            up,
-            observed,
-            kept,
-        ),
-        Ok(Err(kind)) => (
-            None,
-            Some(kind),
-            0,
-            false,
-            None,
-            None,
-            Default::default(),
-            None,
-        ),
-        Err(_) => (
-            None,
-            Some("timeout"),
-            0,
-            false,
-            None,
-            None,
-            Default::default(),
-            None,
-        ),
+    let abandoned = matches!(result, Err(true));
+    let ex = match result {
+        Ok(Ok(ex)) => Some(ex),
+        Ok(Err(kind)) => Some(Exchange {
+            transport: Some(kind),
+            ..Exchange::default()
+        }),
+        Err(true) => None,
+        Err(false) => Some(Exchange {
+            transport: Some("timeout"),
+            ..Exchange::default()
+        }),
+    };
+    let Exchange {
+        status,
+        transport,
+        bytes,
+        tag,
+        upstream_ms,
+        observed,
+        kept,
+        stream,
+        proto_ok,
+    } = ex.unwrap_or_default();
+    let status = if transport.is_some() {
+        None
+    } else {
+        Some(status)
+    };
+    // Expected: the template's statuses, a protocol's own verdict (a
+    // grpc-status, an MCP result without error, a WebSocket session that
+    // echoed), and a 4xx for a request made to be refused.
+    let expected = match status {
+        None => false,
+        Some(st) if faults.expects_refusal() => (400..500).contains(&st),
+        Some(st) => match proto_ok {
+            Some(ok) => tpl.expects(st) && ok,
+            None => tpl.expects(st),
+        },
     };
     // Stateful: a create that worked is followed by a read of its item.
     if let (Some((read, param)), Some(body), Some(200..=299)) = (&then_read, &kept, status) {
@@ -2781,18 +3135,25 @@ async fn send_one(run: Arc<Run>, job: Job) {
     let class = match (status, &tag) {
         (None, _) => Class::Transport,
         (Some(_), Some(_)) => Class::Upstream,
+        (Some(_), None) if protocol.unattributed() => Class::Unattributed,
         (Some(_), None) => Class::Gateway,
     };
     let upstream = match (&tag, upstream_ms) {
         (Some(_), Some(ms)) if ms >= 0.0 => Some(Duration::from_secs_f64(ms / 1000.0)),
         _ => None,
     };
-    let overhead = upstream.map(|up| service.saturating_sub(up));
+    // A streamed answer's length is the stream's, not the gateway's
+    // overhead: it is reported in `streams` instead.
+    let overhead = upstream
+        .filter(|_| stream.is_none())
+        .map(|up| service.saturating_sub(up));
     // One-way legs when the answering node shares this clock (loop-through).
     let (request_leg, response_leg) = match &tag {
         Some(t) if t.node == run.node_id => (
             Some(Duration::from_nanos(t.arrived_ns.saturating_sub(sent_ns))),
-            Some(Duration::from_nanos(done_ns.saturating_sub(t.done_ns))),
+            stream
+                .is_none()
+                .then(|| Duration::from_nanos(done_ns.saturating_sub(t.done_ns))),
         ),
         _ => (None, None),
     };
@@ -2821,8 +3182,42 @@ async fn send_one(run: Arc<Run>, job: Job) {
             );
         }
     }
+    // The `retry_on_5xx` fault: at once, or at the next whole second of the
+    // run clock so every node's retries land together.
+    let mut fault = faults.label();
+    if status.is_some_and(|s| (500..600).contains(&s)) && retries_5xx > 0 {
+        let synchronised = view
+            .faults
+            .retry_on_5xx
+            .as_ref()
+            .and_then(|r| r.synchronised)
+            .unwrap_or(false);
+        let wait = if synchronised {
+            let now = start.elapsed();
+            Duration::from_secs(now.as_secs() + 1).saturating_sub(now)
+        } else {
+            Duration::ZERO
+        };
+        fault = fault.or(Some("retry_on_5xx"));
+        resend(
+            run.clone(),
+            Job {
+                retries_5xx: retries_5xx - 1,
+                test: None,
+                ..job.clone()
+            },
+            wait,
+        );
+    }
+    if abandoned {
+        fault = Some("abandoned");
+    } else if choice == ClientChoice::Churn {
+        fault = fault.or(Some("connection_churn"));
+    } else if choice == ClientChoice::H2 && view.faults.http2.is_some() {
+        fault = fault.or(Some("http2"));
+    }
     let at = sent.saturating_duration_since(start);
-    let limit = grid.map(|g| {
+    let limit = grid.filter(|_| !abandoned).map(|g| {
         (
             g,
             Obs {
@@ -2876,7 +3271,257 @@ async fn send_one(run: Arc<Run>, job: Job) {
             (p.operation as u16, kind)
         }),
         ident: ident.filter(|_| ids.is_some()),
+        abandoned,
+        fault,
+        stream,
     });
+}
+
+/// What one exchange came to, whatever the protocol.
+#[derive(Default)]
+struct Exchange {
+    status: u16,
+    transport: Option<&'static str>,
+    bytes: u64,
+    tag: Option<Tag>,
+    upstream_ms: Option<f64>,
+    observed: ratelimit::Observed,
+    kept: Option<Vec<u8>>,
+    stream: Option<StreamOutcome>,
+    /// The protocol's own verdict (gRPC status, MCP result, a WebSocket
+    /// session), `None` for plain HTTP.
+    proto_ok: Option<bool>,
+}
+
+/// Whether a JSON-RPC answer is a result without `isError`.
+fn mcp_ok(body: &[u8]) -> bool {
+    // The answer may come as JSON or as one SSE event.
+    let text = String::from_utf8_lossy(body);
+    let json = if text.trim_start().starts_with('{') {
+        text.to_string()
+    } else {
+        text.lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .map(str::trim)
+            .find(|d| d.starts_with('{'))
+            .unwrap_or("")
+            .to_string()
+    };
+    serde_json::from_str::<Value>(&json)
+        .ok()
+        .is_some_and(|v| v.get("error").is_none() && v["result"]["isError"] != true)
+}
+
+/// Read a gRPC answer: the status is `grpc-status` in the trailers (or in
+/// the headers of a trailers-only answer); `0` is success.
+async fn read_grpc(resp: hyper::Response<Incoming>) -> Result<(bool, u64), &'static str> {
+    let mut grpc_status = resp
+        .headers()
+        .get("grpc-status")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let mut body = resp.into_body();
+    let mut total = 0u64;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| "reset")?;
+        if let Some(data) = frame.data_ref() {
+            total += data.len() as u64;
+            if total > MAX_RESPONSE_BYTES as u64 {
+                return Err("protocol");
+            }
+        }
+        if let Some(t) = frame.trailers_ref() {
+            grpc_status = t
+                .get("grpc-status")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+        }
+    }
+    Ok((grpc_status.as_deref() == Some("0"), total))
+}
+
+/// Read a streamed answer (LLM tokens, SSE events) item by item: the time
+/// to the first item, the gaps, items per stream. `idle` is the longest
+/// wait for the next bytes before the stream counts as stalled; `unread`
+/// holds the stream open without reading it (a reader that never reads).
+async fn read_stream(
+    mut body: Incoming,
+    protocol: Protocol,
+    idle: Duration,
+    max_events: u32,
+    unread: Option<Duration>,
+    sent: Instant,
+) -> (u64, StreamOutcome) {
+    let mut out = StreamOutcome::default();
+    if let Some(hold) = unread {
+        tokio::time::sleep(hold.min(protocols::MAX_HOLD)).await;
+        out.total_us = micros(sent.elapsed());
+        return (0, out);
+    }
+    let mut parser = protocols::SseParser::default();
+    let mut total = 0u64;
+    let mut last = sent;
+    let mut ended = false;
+    loop {
+        let next = match tokio::time::timeout(idle, body.frame()).await {
+            Ok(Some(Ok(frame))) => frame,
+            Ok(Some(Err(_))) => {
+                out.incomplete = true;
+                break;
+            }
+            Ok(None) => break,
+            Err(_) => {
+                out.stalled = true;
+                break;
+            }
+        };
+        let Some(data) = next.data_ref() else {
+            continue;
+        };
+        total += data.len() as u64;
+        if total > MAX_RESPONSE_BYTES as u64 {
+            out.incomplete = true;
+            break;
+        }
+        for event in parser.feed(data) {
+            let (item, done) = match protocol {
+                Protocol::Llm => protocols::llm_event(&event),
+                _ => (true, false),
+            };
+            if item {
+                let now = Instant::now();
+                if out.items == 0 {
+                    out.first_us = Some(micros(now.saturating_duration_since(sent)));
+                } else if out.gaps_us.len() < protocols::MAX_GAPS {
+                    out.gaps_us
+                        .push(micros(now.saturating_duration_since(last)));
+                }
+                last = now;
+                out.items += 1;
+            }
+            if done || out.items >= u64::from(max_events) {
+                ended = true;
+            }
+        }
+        if ended {
+            break;
+        }
+    }
+    out.total_us = micros(sent.elapsed());
+    (total, out)
+}
+
+/// A WebSocket session on an upgraded connection: `messages` text frames
+/// sent one by one, each echo awaited (a round trip is an item), an
+/// optional hold, then a close frame.
+async fn ws_session(
+    mut resp: hyper::Response<Incoming>,
+    key: Option<&str>,
+    w: &protocols::WsSource,
+    idle: Duration,
+    sent: Instant,
+) -> (bool, StreamOutcome) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut out = StreamOutcome::default();
+    let accepted = key.is_some_and(|k| {
+        resp.headers()
+            .get("sec-websocket-accept")
+            .and_then(|v| v.to_str().ok())
+            == Some(protocols::ws_accept(k).as_str())
+    });
+    if resp.status().as_u16() != 101 || !accepted {
+        out.incomplete = true;
+        out.total_us = micros(sent.elapsed());
+        return (false, out);
+    }
+    let upgraded = match hyper::upgrade::on(&mut resp).await {
+        Ok(u) => u,
+        Err(_) => {
+            out.incomplete = true;
+            out.total_us = micros(sent.elapsed());
+            return (false, out);
+        }
+    };
+    let mut io = TokioIo::new(upgraded);
+    let size = w.size.unwrap_or(64).clamp(1, protocols::MAX_WS_SIZE) as usize;
+    let messages = w.messages.unwrap_or(10).min(protocols::MAX_WS_MESSAGES);
+    let payload = "m".repeat(size);
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = vec![0u8; 16 * 1024];
+    let mut last = sent;
+    let mut ok = true;
+    'session: for _ in 0..messages {
+        if io
+            .write_all(&protocols::ws_frame(1, payload.as_bytes()))
+            .await
+            .is_err()
+        {
+            ok = false;
+            break;
+        }
+        // Read until a text frame (pings are answered, control frames
+        // skipped).
+        loop {
+            if let Some((op, frame, used)) = protocols::ws_parse(&buf) {
+                buf.drain(..used);
+                match op {
+                    1 | 2 => {
+                        let now = Instant::now();
+                        if out.items == 0 {
+                            out.first_us = Some(micros(now.saturating_duration_since(sent)));
+                        } else if out.gaps_us.len() < protocols::MAX_GAPS {
+                            out.gaps_us
+                                .push(micros(now.saturating_duration_since(last)));
+                        }
+                        last = now;
+                        out.items += 1;
+                        if frame.len() != payload.len() {
+                            ok = false;
+                        }
+                        break;
+                    }
+                    8 => {
+                        ok = false;
+                        break 'session;
+                    }
+                    9 => {
+                        let _ = io.write_all(&protocols::ws_frame(10, &frame)).await;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            match tokio::time::timeout(idle, io.read(&mut chunk)).await {
+                Ok(Ok(0)) | Ok(Err(_)) => {
+                    out.incomplete = true;
+                    ok = false;
+                    break 'session;
+                }
+                Ok(Ok(n)) => {
+                    if buf.len() + n > 4 * protocols::MAX_WS_SIZE as usize {
+                        out.incomplete = true;
+                        ok = false;
+                        break 'session;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                Err(_) => {
+                    out.stalled = true;
+                    ok = false;
+                    break 'session;
+                }
+            }
+        }
+    }
+    if let Some(hold) = w.hold {
+        tokio::time::sleep(hold.0.min(protocols::MAX_HOLD)).await;
+    }
+    let _ = io
+        .write_all(&protocols::ws_frame(8, &1000u16.to_be_bytes()))
+        .await;
+    let _ = tokio::time::timeout(Duration::from_millis(200), io.read(&mut chunk)).await;
+    out.total_us = micros(sent.elapsed());
+    (ok && out.items == u64::from(messages), out)
 }
 
 /// Send `job` as a new request after `wait` (a `retry_wave` retry, a read
@@ -3147,6 +3792,11 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
                                     test,
                                     ident,
                                     follow: None,
+                                    retries_5xx: view
+                                        .faults
+                                        .retry_on_5xx
+                                        .as_ref()
+                                        .map_or(0, |r| r.retries),
                                 },
                             ));
                         }
@@ -3292,6 +3942,7 @@ async fn user_loop(
                 test: None,
                 ident,
                 follow: None,
+                retries_5xx: 0,
             },
         )
         .await;

@@ -79,6 +79,9 @@ pub struct Change {
     /// A layer to stop for the rest of the run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remove_layer: Option<String>,
+    /// The run's fault injection, replaced whole (section 8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faults: Option<super::faults::Faults>,
 }
 
 impl Change {
@@ -89,6 +92,9 @@ impl Change {
             || self.pause == Some(false)
             || self.add_layer.is_some()
             || !self.set.is_empty()
+            || self.faults.as_ref().is_some_and(|f| {
+                f.client().retry_on_5xx.is_some() || f.client().connection_churn.is_some()
+            })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -100,6 +106,7 @@ impl Change {
             && self.set.is_empty()
             && self.add_layer.is_none()
             && self.remove_layer.is_none()
+            && self.faults.is_none()
     }
 
     /// A short text for the log (what changed, not the values of `set`).
@@ -138,6 +145,12 @@ impl Change {
         }
         if let Some(l) = &self.remove_layer {
             parts.push(format!("remove layer {l}"));
+        }
+        if let Some(f) = &self.faults {
+            parts.push(match &f.preset {
+                Some(p) => format!("faults {p}"),
+                None => "faults".to_string(),
+            });
         }
         parts.join("; ")
     }
@@ -279,6 +292,9 @@ pub struct Controls {
     pub stop: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<Finding>,
+    /// The fault injection set live (`None`: the scenario's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faults: Option<super::faults::Faults>,
 }
 
 impl Default for Controls {
@@ -292,6 +308,7 @@ impl Default for Controls {
             log: Vec::new(),
             stop: None,
             findings: Vec::new(),
+            faults: None,
         }
     }
 }
@@ -310,7 +327,8 @@ pub fn change_schema() -> Value {
             "skip_stage": { "type": "boolean", "description": "Jump to the next stage of the pattern." },
             "set": { "type": "object", "description": "Pattern parameters by path: {\"<layer>.pattern.<field>\": value}; then. reaches the next pattern of the chain; \"<layer>.pattern\" replaces the pattern.", "additionalProperties": { "description": "The new value." }, "maxProperties": 32 },
             "add_layer": { "$ref": "#/$defs/layer", "description": "A new layer, started now (its starts_after counts from now)." },
-            "remove_layer": { "type": "string", "description": "A layer to stop for the rest of the run.", "maxLength": 64 }
+            "remove_layer": { "type": "string", "description": "A layer to stop for the rest of the run.", "maxLength": 64 },
+            "faults": { "$ref": "#/$defs/faults", "description": "The run's fault injection, replaced whole (a preset and overrides); the server nodes take the server side on their next heartbeat." }
         },
         "additionalProperties": false
     })
@@ -507,6 +525,14 @@ impl Controls {
                 None => problems.push(format!("remove_layer: no layer {name:?} in the run")),
             }
         }
+        if let Some(f) = &change.faults {
+            let mut fp = Vec::new();
+            f.validate("faults", &mut fp);
+            if fp.is_empty() {
+                c.faults = Some(f.clone());
+            }
+            problems.extend(fp);
+        }
         if !problems.is_empty() {
             return Err(problems);
         }
@@ -696,6 +722,12 @@ pub struct LiveLayer {
     pub node_header: Option<String>,
     /// The node's mock plan and identities for the layer.
     pub extras: Option<Arc<LayerExtras>>,
+    /// How the layer's answers are read.
+    pub protocol: super::protocols::Protocol,
+    /// A protocol source's one request template.
+    pub proto_template: Option<super::scenario::RequestTemplate>,
+    /// A gRPC source's framed request body.
+    pub grpc_body: Option<Vec<u8>>,
 }
 
 /// A layer's level at an instant.
@@ -721,6 +753,8 @@ pub struct LiveView {
     /// A layer asks for the rate-limit analysis: every layer is counted
     /// (the others for collateral damage).
     pub analysed: bool,
+    /// The client faults in force (the live change's, else the scenario's).
+    pub faults: super::faults::ClientFaults,
 }
 
 fn cumulative(weights: impl Iterator<Item = u32>) -> Vec<u32> {
@@ -777,6 +811,9 @@ impl LiveView {
                         .and_then(|e| e.node_header.as_ref())
                         .map(|h| h.to_ascii_lowercase()),
                     extras: None,
+                    protocol: def.source.protocol(),
+                    proto_template: super::protocols::template_of(&def.source),
+                    grpc_body: super::protocols::grpc_body(&def.source),
                     def,
                     compiled,
                     starts_at,
@@ -792,6 +829,12 @@ impl LiveView {
             paused: controls.paused,
             stop: controls.stop.clone(),
             analysed,
+            faults: controls
+                .faults
+                .as_ref()
+                .or(s.faults.as_ref())
+                .map(|f| f.client())
+                .unwrap_or_default(),
         }
     }
 
@@ -1703,6 +1746,6 @@ mod tests {
         assert_eq!(back, c);
         assert!(change(r#"{"rate_multiplier": 2}"#).may_raise_load());
         assert!(!change(r#"{"pause": true}"#).may_raise_load());
-        assert!(serde_json::from_str::<Change>(r#"{"faults": {}}"#).is_err());
+        assert!(serde_json::from_str::<Change>(r#"{"chaos": {}}"#).is_err());
     }
 }
