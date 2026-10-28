@@ -866,7 +866,13 @@ async fn shared_control_plane_needs_admin_except_for_a_keys_own_data() {
         "/_rustybin/catalog",
         KEYS_USAGE_PATH,
     ] {
+        // A valid key is forbidden there (403), not signed out (401).
         let resp = send(&app, "GET", path, &key).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{path}");
+        assert_eq!(body_json(resp).await["error"], "rustybin_admin_required");
+        let resp = send(&app, "GET", path, &[]).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{path}");
+        let resp = send(&app, "GET", path, &[("x-rustybin-key", "rbk_nope")]).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{path}");
         assert_eq!(
             send(&app, "GET", path, &admin).await.status(),
@@ -876,9 +882,51 @@ async fn shared_control_plane_needs_admin_except_for_a_keys_own_data() {
     }
     // A key cannot clear the inspector or flip instance-wide state.
     let resp = send(&app, "DELETE", "/_rustybin/requests", &key).await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let resp = send(&app, "POST", "/health/toggle", &key).await;
     assert_ne!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn shared_status_is_the_keys_view_for_a_key_and_complete_for_admin() {
+    let state = shared_state(&two_keys());
+    let app = test_app_with(state);
+    let resp = send(
+        &app,
+        "GET",
+        "/_rustybin/status",
+        &[("x-rustybin-key", KEY_A)],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp).await;
+    assert_eq!(v["key"]["id"], "ka1");
+    assert_eq!(v["shared_mode"], true);
+    assert_eq!(v["harness"]["enabled"], false);
+    assert!(v["healthy"].is_boolean());
+    assert!(v["version"].is_string());
+    // Nothing about the instance or the other tenants.
+    for field in [
+        "hostname",
+        "instance_id",
+        "inspector",
+        "identity_requests",
+        "ports",
+    ] {
+        assert!(v.get(field).is_none(), "{field}");
+    }
+    let resp = send(&app, "GET", "/_rustybin/status", &[]).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let resp = send(
+        &app,
+        "GET",
+        "/_rustybin/status",
+        &[("authorization", "Bearer admin-secret")],
+    )
+    .await;
+    let v = body_json(resp).await;
+    assert!(v["hostname"].is_string());
+    assert!(v.get("key").is_none());
 }
 
 #[tokio::test]
@@ -952,6 +1000,18 @@ async fn control_jwt_bound_to_a_key_sees_only_that_key() {
     .await;
     assert_eq!(body_json(resp).await["key_id"], "kb2");
     // Bound tokens are still read-only inspector and usage tokens.
+    // The console signs in with the status: the key's view, so a bound token
+    // keeps its console (a 401 here sent it back to the sign-in screen).
+    let resp = send(
+        &app,
+        "GET",
+        "/_rustybin/status",
+        &[("authorization", &bound)],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["key"]["id"], "kb2");
+    // Other routes: forbidden for the valid token (403), never a sign-out (401).
     let resp = send(
         &app,
         "GET",
@@ -959,7 +1019,7 @@ async fn control_jwt_bound_to_a_key_sees_only_that_key() {
         &[("authorization", &bound)],
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
     let unknown = jwt("inspector", Some("nope"));
     let resp = send(

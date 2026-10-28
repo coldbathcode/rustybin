@@ -27,7 +27,7 @@ use std::sync::atomic::Ordering;
 use std::sync::OnceLock;
 
 use axum::extract::{Path, RawQuery, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, Extensions, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -334,7 +334,39 @@ async fn catalog_handler() -> Response {
 
 // ── /_rustybin/status ───────────────────────────────────────────────
 
-async fn status_handler(State(state): State<AppState>) -> Response {
+/// The instance status (the console reads it to sign in).
+pub const STATUS_PATH: &str = "/_rustybin/status";
+
+/// A key holder's view of the status in shared mode: what the console needs
+/// (version, health, modes, its own title and backlink) and nothing about the
+/// other tenants (no hostname, no instance-wide inspector counts, no harness).
+fn key_status(state: &AppState, key: &crate::keys::KeyContext) -> Response {
+    Json(json!({
+        "name": env!("CARGO_PKG_NAME"),
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime_seconds": state.identity.start_time.elapsed().as_secs(),
+        "healthy": state.health.is_healthy(),
+        "public_mode": state.config.public_mode,
+        "shared_mode": true,
+        "control_auth": state.config.control_auth.as_str(),
+        "hosted_mode": state.config.hosted_mode,
+        "console": {
+            "title": state.config.console_title,
+            "backlink": state.config.console_backlink,
+        },
+        "key": { "id": &*key.key.id },
+        "harness": { "enabled": false },
+    }))
+    .into_response()
+}
+
+async fn status_handler(State(state): State<AppState>, extensions: Extensions) -> Response {
+    if let Some(key) = extensions
+        .get::<crate::keys::KeyContext>()
+        .filter(|k| k.shared && k.control)
+    {
+        return key_status(&state, key);
+    }
     let uptime = state.identity.start_time.elapsed();
     let started = chrono::Utc::now()
         - chrono::Duration::from_std(uptime).unwrap_or_else(|_| chrono::Duration::zero());
@@ -387,7 +419,7 @@ pub fn router(_state: &AppState) -> Router<AppState> {
         .route("/ui/", get(ui_index))
         .route("/ui/{*path}", get(ui_path))
         .route("/_rustybin/catalog", get(catalog_handler))
-        .route("/_rustybin/status", get(status_handler))
+        .route(STATUS_PATH, get(status_handler))
 }
 
 pub fn catalog() -> Vec<Endpoint> {

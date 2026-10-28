@@ -87,10 +87,28 @@ jsonpath "$.requests[0].key_id" == "kdocsalpha"
 jsonpath "$.requests[1].key_id" == "kdocsalpha"
 # ANCHOR_END: jwt_bound
 
+# ANCHOR: key_status
+# The status, as a key sees it (the console signs in with it): no hostname,
+# no instance-wide counters.
+GET {{shared_url}}/_rustybin/status
+Authorization: Bearer {{key_inspector_token}}
+HTTP 200
+[Asserts]
+jsonpath "$.key.id" == "kdocsalpha"
+jsonpath "$.shared_mode" == true
+jsonpath "$.hostname" not exists
+# ANCHOR_END: key_status
+
 # ANCHOR: admin_only
-# Everything else on the control plane needs the admin token.
+# Everything else on the control plane needs the admin token: 403 for a valid
+# key (its reach ends here), 401 without a credential.
 GET {{shared_url}}/_rustybin/config
 X-Rustybin-Key: {{alpha_key}}
+HTTP 403
+[Asserts]
+jsonpath "$.error" == "rustybin_admin_required"
+
+GET {{shared_url}}/_rustybin/config
 HTTP 401
 [Asserts]
 jsonpath "$.error" == "rustybin_admin_required"

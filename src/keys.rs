@@ -12,10 +12,11 @@
 //! - daily quotas (requests, response bytes) reset at 00:00 UTC: over a
 //!   quota, `429` with `Retry-After` and
 //!   `{"error":"rustybin_quota_exceeded","quota":..,"reset_at":..,"upgrade_url":..}`;
-//! - control plane: `GET /_rustybin/requests*` and `GET /_rustybin/usage`
-//!   accept the data key (or a control JWT with scope `inspector` and claim
-//!   `rb_key=<key id>`) and only show that key's data; everything else under
-//!   `/_rustybin/*` needs the admin token (or a JWT with scope `admin`).
+//! - control plane: `GET /_rustybin/requests*`, `GET /_rustybin/usage` and
+//!   `GET /_rustybin/status` accept the data key (or a control JWT with
+//!   scope `inspector` and claim `rb_key=<key id>`) and only show that key's
+//!   data; everything else under `/_rustybin/*` needs the admin token (or a
+//!   JWT with scope `admin`): `403` for a valid key, `401` without one.
 //!
 //! With `RUSTYBIN_REQUIRE_KEY` a normal instance only checks the key on the
 //! data plane: no per-key limits, control-plane auth unchanged.
@@ -793,11 +794,13 @@ fn is_mock_route(path: &str) -> bool {
     path == "/_rustybin/mocks" || path.starts_with("/_rustybin/mocks/")
 }
 
-/// Control-plane routes a key may read in shared mode.
+/// Control-plane routes a key may read in shared mode: its inspector entries,
+/// its usage and the status (the key's view, see `crate::ui`), which the
+/// console reads to sign in.
 fn is_key_readable(method: &Method, path: &str) -> bool {
     let inspector = path == "/_rustybin/requests" || path.starts_with("/_rustybin/requests/");
     (method == Method::GET || method == Method::HEAD)
-        && (inspector || path == crate::limits::USAGE_PATH)
+        && (inspector || path == crate::limits::USAGE_PATH || path == crate::ui::STATUS_PATH)
 }
 
 /// The key layer (installed by `build_app` when keys are enabled), outside
@@ -858,7 +861,12 @@ pub async fn enforce(State(state): State<AppState>, mut req: Request, next: Next
 }
 
 /// Shared mode, `/_rustybin/*`: admin for everything, a key (or a JWT bound
-/// to a key) for its own inspector entries and usage.
+/// to a key) for its own inspector entries, usage and status.
+///
+/// A valid key on a route it may not use gets `403`, not `401`: the
+/// credential is good, only its reach ends there. The console signs out on a
+/// `401`, so a key-bound console stays signed in and says which views need a
+/// wider scope.
 async fn control(state: AppState, mut req: Request, next: Next) -> Response {
     let config = &state.config;
     if crate::admin::require_admin(req.headers(), config).is_ok() {
@@ -872,59 +880,32 @@ async fn control(state: AppState, mut req: Request, next: Next) -> Response {
     // The management MCP server scopes a key holder to its own mocks,
     // inspector entries and usage itself.
     let manage = req.uri().path() == crate::mcp::manage::MANAGE_PATH;
-    if !self_service && !manage && !is_key_readable(req.method(), req.uri().path()) {
-        let message = "in shared mode this control-plane route needs the admin token";
-        let status = if config.admin_token.is_some() {
-            StatusCode::UNAUTHORIZED
-        } else {
-            StatusCode::FORBIDDEN
-        };
-        return (
-            status,
-            Json(json!({ "error": "rustybin_admin_required", "message": message })),
-        )
-            .into_response();
-    }
-    let record = if let Some(k) = presented_key(req.headers(), req.uri()) {
-        match state.keys.lookup(Some(&k)) {
-            Lookup::Found(r) => r,
-            other => return key_error(&other),
+    let allowed = self_service || manage || is_key_readable(req.method(), req.uri().path());
+    let record = match key_credential(&state, &req) {
+        Ok(Some(r)) if allowed => r,
+        Ok(Some(_)) => {
+            return error(
+                StatusCode::FORBIDDEN,
+                "rustybin_admin_required",
+                "in shared mode this control-plane route needs the admin token: a key (or a \
+                 token bound to one) reads its own requests, usage and status",
+            )
         }
-    } else if let Some(token) = crate::control_auth::presented_token(req.headers()) {
-        match crate::control_auth::verify_jwt_claims(token, config) {
-            Ok((grant, claims)) if grant.inspector => {
-                let Some(id) = claims.get("rb_key").and_then(Value::as_str) else {
-                    return error(
-                        StatusCode::FORBIDDEN,
-                        "rustybin_admin_required",
-                        "in shared mode a control JWT needs the admin scope, or the inspector scope and an rb_key claim",
-                    );
-                };
-                match state.keys.current() {
-                    None => return key_error(&Lookup::Unavailable),
-                    Some(set) => match set.by_id(id) {
-                        Some(r) => r,
-                        None => return key_error(&Lookup::Invalid),
-                    },
-                }
-            }
-            Ok(_) => {
-                return error(
-                    StatusCode::FORBIDDEN,
-                    "rustybin_admin_required",
-                    "the token's scope does not include this control-plane route",
-                )
-            }
-            Err(e) => {
-                return error(
-                    StatusCode::UNAUTHORIZED,
-                    ERR_INVALID,
-                    &format!("invalid control-plane token ({})", e.as_str()),
-                )
-            }
+        Ok(None) | Err(_) if !allowed => {
+            let message = "in shared mode this control-plane route needs the admin token";
+            let status = if config.admin_token.is_some() {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::FORBIDDEN
+            };
+            return (
+                status,
+                Json(json!({ "error": "rustybin_admin_required", "message": message })),
+            )
+                .into_response();
         }
-    } else {
-        return key_error(&Lookup::Missing);
+        Ok(None) => return key_error(&Lookup::Missing),
+        Err(resp) => return resp,
     };
     req.extensions_mut().insert(KeyContext {
         key: record,
@@ -932,6 +913,52 @@ async fn control(state: AppState, mut req: Request, next: Next) -> Response {
         control: true,
     });
     next.run(req).await
+}
+
+/// The key a control-plane request presents: the data key, else a control
+/// JWT with the inspector scope and an `rb_key` claim. `Ok(None)`: neither.
+/// `Err`: a credential that does not hold (unknown key, bad token, a token
+/// without `rb_key`), as the response to send.
+#[allow(clippy::result_large_err)]
+fn key_credential(state: &AppState, req: &Request) -> Result<Option<Arc<KeyRecord>>, Response> {
+    let config = &state.config;
+    if let Some(k) = presented_key(req.headers(), req.uri()) {
+        return match state.keys.lookup(Some(&k)) {
+            Lookup::Found(r) => Ok(Some(r)),
+            other => Err(key_error(&other)),
+        };
+    }
+    let Some(token) = crate::control_auth::presented_token(req.headers()) else {
+        return Ok(None);
+    };
+    match crate::control_auth::verify_jwt_claims(token, config) {
+        Ok((grant, claims)) if grant.inspector => {
+            let Some(id) = claims.get("rb_key").and_then(Value::as_str) else {
+                return Err(error(
+                    StatusCode::FORBIDDEN,
+                    "rustybin_admin_required",
+                    "in shared mode a control JWT needs the admin scope, or the inspector scope and an rb_key claim",
+                ));
+            };
+            match state.keys.current() {
+                None => Err(key_error(&Lookup::Unavailable)),
+                Some(set) => match set.by_id(id) {
+                    Some(r) => Ok(Some(r)),
+                    None => Err(key_error(&Lookup::Invalid)),
+                },
+            }
+        }
+        Ok(_) => Err(error(
+            StatusCode::FORBIDDEN,
+            "rustybin_admin_required",
+            "the token's scope does not include this control-plane route",
+        )),
+        Err(e) => Err(error(
+            StatusCode::UNAUTHORIZED,
+            ERR_INVALID,
+            &format!("invalid control-plane token ({})", e.as_str()),
+        )),
+    }
 }
 
 /// The 429 of a used-up daily quota.

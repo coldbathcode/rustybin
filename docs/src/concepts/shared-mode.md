@@ -196,13 +196,28 @@ routes for that key only. The example token is minted with
 {{#include ../../examples/concepts/shared.hurl:jwt_bound}}
 ```
 
+### The console for one key
+
+The web console signs in with such a token: open `/ui/#token=<token>` (or paste it on
+the sign-in page) and it shows that key's traffic, live. `GET /_rustybin/status`, which
+the console reads to sign in, answers a key (or a token bound to one) with the key's
+view: version, health, the modes and the console's title and backlink, plus `key.id`,
+but no hostname and no instance-wide counters. With
+[self-service mocks](../mocks/self-service.md) on, the same token manages the key's own
+mocks.
+
+```hurl
+{{#include ../../examples/concepts/shared.hurl:key_status}}
+```
+
 ## The rest of the control plane
 
 Everything else under `/_rustybin/*` needs the admin token (`RUSTYBIN_ADMIN_TOKEN`, or
-a control JWT with the `admin` scope); without an admin token configured it is
-forbidden. That includes the web console's API calls, so in shared mode the console is
-an admin tool. Instance-wide mutations (health toggles, clearing all captured
-requests) stay forbidden without the admin token, as in public mode.
+a control JWT with the `admin` scope). A valid key, or a token bound to one, gets `403`
+there: the credential holds, only its reach ends, so the console stays signed in and
+says which views need a wider scope. Without a credential the answer is `401` (`403`
+when no admin token is configured). Instance-wide mutations (health toggles, clearing
+all captured requests) stay forbidden without the admin token, as in public mode.
 
 ```hurl
 {{#include ../../examples/concepts/shared.hurl:admin_only}}

@@ -169,6 +169,8 @@ function renderMeta() {
     meta.appendChild(h('span', { class: 'badge ' + (healthy ? 'ok' : 'err'), title: healthy ? 'GET /health returns 200' : 'GET /health returns 503' },
       h('span', { class: 'dot ' + (healthy ? 'ok' : 'err') }), healthy ? 'healthy' : 'unhealthy'));
     if (st.public_mode) meta.appendChild(h('span', { class: 'badge warn', title: 'RUSTYBIN_PUBLIC_MODE: tighter limits, session scoped data' }, 'public mode'));
+    // Shared mode: signed in for one API key, which sees its own data only.
+    if (st.key && st.key.id) meta.appendChild(h('span', { class: 'badge outline', title: 'Signed in for this API key: its requests, usage and mocks only' }, 'key ' + st.key.id));
   }
   const ts = traffic.getStatus();
   const live = ts.status === 'live';

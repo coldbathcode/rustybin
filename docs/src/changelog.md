@@ -282,6 +282,11 @@ From a full code review (2026-10-25):
   shared mode, are scoped by key.
 - **Console**: the API explorer shows the console's own credentials masked; a valid
   token with a narrow scope signs in; the admin token is kept for the tab only.
+- **Shared mode console**: a token bound to a key (`inspector` scope, `rb_key`) was
+  sent back to the sign-in screen when an admin token was configured: the console's
+  `GET /_rustybin/status` and every other route outside the key's reach answered `401`.
+  The status now answers a key with the key's view, and a valid key gets `403` on the
+  routes it may not use (`401` stays for a missing or invalid credential).
 - **MCP**: tool scopes are checked inside JSON-RPC batches on `/mcp/protected`; the
   legacy HTTP+SSE transport caps requests in flight per session.
 - **Self-service**: redirects that browsers read as off-domain (`/\host`) are refused;
