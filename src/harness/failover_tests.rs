@@ -345,7 +345,11 @@ async fn the_old_leaders_own_load_is_reported_or_bounded() {
         join(n, &url).await;
     }
     wait_for_alive(&l, id, 2, 1).await;
-    let mut sc = scenario(&b.base(), 200, "6s");
+    // Long enough for the three waits below on a slow machine (a lease
+    // and a checkpoint, the election, two leases for the old part to be
+    // surely gone and the re-split): the run must still be on when the
+    // share moves.
+    let mut sc = scenario(&b.base(), 200, "12s");
     sc["scale"] = json!({ "virtual_clients": 20, "client_nodes": 2, "server_nodes": 1 });
     let run_id = start(&l, id, sc).await;
     let l_run = local_run(&l, &run_id).await;
