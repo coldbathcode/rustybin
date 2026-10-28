@@ -397,6 +397,10 @@ pub struct NodeStats {
     /// The version of the live changes the node runs with.
     #[serde(default)]
     pub controls_version: u64,
+    /// Final stats only: the rate-limit counters by layer (runs that
+    /// analyse rate limits).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limits: Vec<Option<super::ratelimit::LimitAcc>>,
 }
 
 /// A server node's cumulative view of one run.

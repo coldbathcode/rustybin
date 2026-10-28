@@ -22,6 +22,12 @@
 //! intended send, the coordinated omission correction, and from the actual
 //! send). Closed layers run the number of users the pattern gives, each
 //! waiting for its answer plus a think time.
+//!
+//! While a `limit_test` runs, a request carries an identity of the test's
+//! pool (`{{id}}`, `{{ip}}`, a rotating forwarded address with `many_ips`),
+//! and a refused request is retried with `retry_wave`. A run that analyses
+//! rate limits counts every answer in its layer's [`LimitAcc`] (per worker,
+//! merged with the shards).
 
 use std::cell::Cell;
 use std::future::Future;
@@ -49,7 +55,9 @@ use tokio::runtime::{Handle, Runtime};
 use tokio::sync::watch;
 
 use super::correlate::{self, Correlator, Marker, RunEntry, RunKey, Tag};
+use super::limit_test::{identity_ip, MAX_RETRY_WAIT};
 use super::live::{Change, Controls, Level, LiveView, StageLog};
+use super::ratelimit::{self, Grid, LimitAcc, Obs};
 use super::report::{
     self, histogram, Breakdown, Bucket, Counts, Percentiles, Report, Sample, Saturation,
     TargetReport, ThresholdResult, WireHist, LAG_SATURATION_MS, MAX_SAMPLES,
@@ -87,6 +95,9 @@ const RATE_STEP: f64 = 0.010;
 const NOTE_EVERY: Duration = Duration::from_millis(100);
 /// Seconds the roller may fall behind before the scheduler waits for it.
 const ROLL_QUEUE: usize = 64;
+/// Rate-limit observations a worker buffers between two rolls (more are
+/// counted as dropped).
+const MAX_SHARD_OBS: usize = 65_536;
 /// Most transport-failed sequence numbers remembered for the `lost` count.
 pub const MAX_FAILED_SEQS: usize = 1 << 20;
 /// Most failed sequence numbers a node ships to its leader at the end of a
@@ -632,6 +643,10 @@ pub struct Outcome {
     /// One-way legs when client and server share a clock (loop-through).
     pub request_leg: Option<Duration>,
     pub response_leg: Option<Duration>,
+    /// Answered with one of the layer's rate-limit refusal statuses.
+    pub limited: bool,
+    /// What the rate-limit analysis counts (runs that analyse rate limits).
+    pub limit: Option<(Grid, Obs)>,
 }
 
 /// Per-layer or per-target accumulator in a shard.
@@ -680,6 +695,9 @@ fn count_class(counts: &mut Counts, o: &Outcome) {
     match (o.status, o.transport) {
         (Some(status), _) => {
             *counts.statuses.entry(status.to_string()).or_default() += 1;
+            if o.limited {
+                counts.limited += 1;
+            }
             if o.expected {
                 counts.ok += 1;
             } else {
@@ -721,11 +739,19 @@ struct Shard {
     samples: Vec<Sample>,
     /// Sequence numbers of transport failures (for the `lost` count).
     failed_seqs: Vec<u64>,
+    /// The rate-limit observations since the last roll (layer, grid,
+    /// observation): the roll counts them into the run's accumulators, in
+    /// this worker's completion order.
+    limits: Vec<(usize, Grid, Obs)>,
+    /// Per layer: observations over [`MAX_SHARD_OBS`].
+    limits_dropped: Vec<u64>,
 }
 
 impl Shard {
     fn new(layers: usize, targets: usize) -> Self {
         Self {
+            limits: Vec::new(),
+            limits_dropped: vec![0; layers],
             counts: Counts::default(),
             corrected: histogram(3),
             service: histogram(3),
@@ -768,6 +794,13 @@ impl Shard {
         }
         if let Some(p) = self.targets.get_mut(o.target) {
             p.record(o, corrected);
+        }
+        if let Some((grid, obs)) = &o.limit {
+            if self.limits.len() < MAX_SHARD_OBS {
+                self.limits.push((o.layer, *grid, obs.clone()));
+            } else if let Some(n) = self.limits_dropped.get_mut(o.layer) {
+                *n += 1;
+            }
         }
         let is_error = o.transport.is_some() || !o.expected;
         if is_error || self.samples.len() < SHARD_SAMPLES {
@@ -819,11 +852,14 @@ struct Totals {
     saturation_reasons: Vec<String>,
     saturated: bool,
     consecutive_saturated: u32,
+    /// Per layer: the rate-limit counters of the run.
+    limits: Vec<Option<LimitAcc>>,
 }
 
 impl Totals {
     fn new(layers: usize, targets: usize) -> Self {
         Self {
+            limits: vec![None; layers],
             counts: Counts::default(),
             corrected: histogram(3),
             service: histogram(3),
@@ -982,6 +1018,9 @@ pub struct Run {
     start_lag: OnceLock<Duration>,
     lease: Option<Arc<Lease>>,
     pub cluster: Option<String>,
+    /// Unix time (seconds) of the run's start: stages aligned to the wall
+    /// clock and the rate-limit grids follow it.
+    wall_start: OnceLock<f64>,
 }
 
 impl Run {
@@ -1048,6 +1087,7 @@ impl Run {
             start_lag: OnceLock::new(),
             lease: params.lease,
             cluster: params.cluster,
+            wall_start: OnceLock::new(),
         })
     }
 
@@ -1154,7 +1194,8 @@ impl Run {
             &self.id,
             &self.node_id,
             self.share(),
-        );
+        )
+        .with_wall(self.wall_start.get().copied());
         *self.view.lock().unwrap_or_else(|p| p.into_inner()) = Arc::new(view);
         // A change shows in the stages from the moment it is made.
         self.note_stages();
@@ -1487,6 +1528,11 @@ impl Run {
             failed_seqs,
             failed_untracked,
             controls_version,
+            limits: if report.is_some() {
+                totals.limits.iter().take(nlayers).cloned().collect()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -1517,18 +1563,20 @@ impl Run {
             .map_or(0, |l| pick(&l.weights, seq))
     }
 
-    fn expand(&self, text: &str, layer: &str, seq: u64, vu: u32) -> String {
+    fn expand(&self, text: &str, layer: &str, seq: u64, vu: u32, id: u32) -> String {
         if !text.contains("{{") {
             return text.to_string();
         }
         let mut out = text.to_string();
-        let replacements: [(&str, String); 6] = [
+        let replacements: [(&str, String); 8] = [
             ("seq", seq.to_string()),
             ("vu", vu.to_string()),
             ("run", self.id.clone()),
             ("node", self.node_id.clone()),
             ("layer", layer.to_string()),
             ("rand", rand::random::<u32>().to_string()),
+            ("id", id.to_string()),
+            ("ip", identity_ip(id)),
         ];
         for (name, value) in &replacements {
             for form in [format!("{{{{{name}}}}}"), format!("{{{{ {name} }}}}")] {
@@ -1547,11 +1595,14 @@ impl Run {
         target: &PinnedTarget,
         seq: u64,
         vu: u32,
+        test: Option<TestReq>,
     ) -> Result<Built, String> {
         use axum::http::{HeaderMap, HeaderName, HeaderValue};
         let view = self.view();
-        let layer = &view.layers.get(layer_idx).ok_or("the layer is gone")?.def;
-        let path = self.expand(&tpl.path, &layer.name, seq, vu);
+        let live = view.layers.get(layer_idx).ok_or("the layer is gone")?;
+        let layer = &live.def;
+        let id = test.map_or(0, |t| t.id);
+        let path = self.expand(&tpl.path, &layer.name, seq, vu, id);
         let uri: Uri = format!("{}{}{}", target.authority, target.parsed.path, path)
             .parse()
             .map_err(|e| format!("request URI: {e}"))?;
@@ -1579,16 +1630,31 @@ impl Run {
             if name.eq_ignore_ascii_case("content-type") {
                 has_content_type = true;
             }
-            set(&mut headers, name, self.expand(value, &layer.name, seq, vu))?;
+            set(
+                &mut headers,
+                name,
+                self.expand(value, &layer.name, seq, vu, id),
+            )?;
+        }
+        // `many_ips`: the identity's address in the forwarded header,
+        // unless the template sets that header itself.
+        let forwarded = test
+            .and_then(|t| live.behaviours.get(t.chain))
+            .and_then(|b| b.as_ref())
+            .and_then(|b| b.forwarded_header.as_deref());
+        if let Some(name) = forwarded {
+            if !headers.contains_key(name) {
+                set(&mut headers, name, identity_ip(id))?;
+            }
         }
         let body = match &tpl.body {
             None => Bytes::new(),
-            Some(Value::String(s)) => Bytes::from(self.expand(s, &layer.name, seq, vu)),
+            Some(Value::String(s)) => Bytes::from(self.expand(s, &layer.name, seq, vu, id)),
             Some(other) => {
                 if !has_content_type {
                     set(&mut headers, "content-type", "application/json".to_string())?;
                 }
-                Bytes::from(self.expand(&other.to_string(), &layer.name, seq, vu))
+                Bytes::from(self.expand(&other.to_string(), &layer.name, seq, vu, id))
             }
         };
         // The marker: the names of the headers set above (sorted, unique),
@@ -1607,6 +1673,7 @@ impl Run {
             node: self.node_id.clone(),
             seq,
             vu,
+            layer: layer_idx as u32,
             sent_ns,
             names,
             headers_digest,
@@ -1640,7 +1707,18 @@ impl Run {
     }
 
     fn mark_started(&self) {
-        let _ = self.started.set(Instant::now());
+        let now = Instant::now();
+        let _ = self.started.set(now);
+        // The wall time of the start: a cluster's synchronised start, so
+        // every node aligns to the same windows.
+        let unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64());
+        let late = self
+            .start_at
+            .map_or(0.0, |at| now.saturating_duration_since(at).as_secs_f64());
+        let _ = self.wall_start.set(unix - late);
+        self.rebuild_view();
         self.set_state(State::Running);
     }
 
@@ -1680,6 +1758,19 @@ impl Run {
             }
             for (dst, src) in totals.targets.iter_mut().zip(s.targets.iter_mut()) {
                 dst.merge_from(src);
+            }
+            for (layer, grid, obs) in s.limits.drain(..) {
+                if let Some(slot) = totals.limits.get_mut(layer) {
+                    slot.get_or_insert_with(|| LimitAcc::new(grid)).record(&obs);
+                }
+            }
+            for (layer, n) in s.limits_dropped.iter_mut().enumerate() {
+                if *n > 0 {
+                    if let Some(Some(acc)) = totals.limits.get_mut(layer) {
+                        acc.cells_dropped += *n;
+                    }
+                    *n = 0;
+                }
             }
             samples.append(&mut s.samples);
             let room = MAX_FAILED_SEQS.saturating_sub(totals.failed_seqs.len());
@@ -1761,6 +1852,7 @@ impl Run {
             status_5xx: s5,
             upstream: counts.upstream,
             gateway: counts.gateway,
+            limited: counts.limited,
             rate: counts.completed as f64 / width,
             p50_ms: p.p50_ms,
             p99_ms: p.p99_ms,
@@ -1884,7 +1976,7 @@ impl Run {
             scheduler_lag: Percentiles::from_histogram(&totals.lag),
             cpu_seconds: cpu_before.zip(cpu_seconds()).map(|(a, b)| b - a),
         };
-        let thresholds: Vec<ThresholdResult> = report::evaluate(
+        let mut thresholds: Vec<ThresholdResult> = report::evaluate(
             &self.scenario.thresholds,
             &totals.counts,
             &latency,
@@ -1892,6 +1984,15 @@ impl Run {
             server.as_ref().map(|s| s.arrivals),
             &saturation,
         );
+        // The rate-limit analysis and the layers' own thresholds.
+        let controls = self.controls();
+        let (rate_limits, layer_thresholds) = ratelimit::analyse(
+            &self.scenario,
+            &controls,
+            &totals.limits,
+            server.as_ref().map(|s| &s.by_layer),
+        );
+        thresholds.extend(layer_thresholds);
         let exit_code = Report::exit_code_for(state, &thresholds);
         let breakdown = |names: Vec<String>, parts: &[PartShard]| -> Vec<Breakdown> {
             names
@@ -1906,7 +2007,6 @@ impl Run {
         };
         // The layers as they ran (added ones too), and their stages.
         let view = self.view();
-        let controls = self.controls();
         let names: Vec<String> = view.layers.iter().map(|l| l.def.name.clone()).collect();
         let stages = report::stage_reports(
             &totals.timeline,
@@ -1979,6 +2079,7 @@ impl Run {
             findings: controls.findings.clone(),
             changes: controls.log.clone(),
             stages,
+            rate_limits,
         };
         drop(totals);
         if let Some(dir) = &self.report_dir {
@@ -2194,6 +2295,18 @@ struct Job {
     vu: u32,
     intended: Instant,
     start: Instant,
+    /// Sent while a rate-limit test runs.
+    test: Option<TestReq>,
+}
+
+/// A request of a rate-limit test: its identity, the test's pattern in the
+/// chain, the retries it has left (`retry_wave`), and whether it is one.
+#[derive(Clone, Copy, Debug)]
+struct TestReq {
+    id: u32,
+    chain: usize,
+    retries_left: u32,
+    retry: bool,
 }
 
 /// Send one request and record its outcome. The caller counted it in flight.
@@ -2206,6 +2319,7 @@ async fn send_one(run: Arc<Run>, job: Job) {
         vu,
         intended,
         start,
+        test,
     } = job;
     let view = run.view();
     let Some(live) = view.layers.get(layer_idx) else {
@@ -2222,7 +2336,7 @@ async fn send_one(run: Arc<Run>, job: Job) {
         req,
         request_id,
         sent_ns,
-    } = match run.build_request(layer_idx, tpl, target, seq, vu) {
+    } = match run.build_request(layer_idx, tpl, target, seq, vu, test) {
         Ok(r) => r,
         Err(e) => {
             tracing::debug!("harness request {seq} not built: {e}");
@@ -2237,6 +2351,11 @@ async fn send_one(run: Arc<Run>, job: Job) {
         .map(|p| p.to_string())
         .unwrap_or_default();
     let timeout = run.scenario.timeout();
+    // The rate-limit headers are read on runs that analyse rate limits, and
+    // for `Retry-After` on retries.
+    let grid = live.grid;
+    let read_headers = grid.is_some() || test.is_some_and(|t| t.retries_left > 0);
+    let node_header = live.node_header.clone();
     let sent = Instant::now();
     let result = tokio::time::timeout(timeout, async {
         let resp = target
@@ -2257,19 +2376,39 @@ async fn send_one(run: Arc<Run>, job: Job) {
             .get("server-timing")
             .and_then(|v| v.to_str().ok())
             .and_then(correlate::parse_server_timing);
+        let observed = if read_headers {
+            ratelimit::observe(resp.headers(), node_header.as_deref())
+        } else {
+            ratelimit::Observed::default()
+        };
         let bytes = read_body(resp.into_body()).await?;
-        Ok::<(u16, u64, Option<Tag>, Option<f64>), &'static str>((status, bytes, tag, upstream_ms))
+        Ok::<_, &'static str>((status, bytes, tag, upstream_ms, observed))
     })
     .await;
     let done = Instant::now();
     let done_ns = correlate::now_ns();
-    let (status, transport, bytes, expected, tag, upstream_ms) = match result {
-        Ok(Ok((status, bytes, tag, up))) => {
-            (Some(status), None, bytes, tpl.expects(status), tag, up)
-        }
-        Ok(Err(kind)) => (None, Some(kind), 0, false, None, None),
-        Err(_) => (None, Some("timeout"), 0, false, None, None),
+    let (status, transport, bytes, expected, tag, upstream_ms, observed) = match result {
+        Ok(Ok((status, bytes, tag, up, observed))) => (
+            Some(status),
+            None,
+            bytes,
+            tpl.expects(status),
+            tag,
+            up,
+            observed,
+        ),
+        Ok(Err(kind)) => (None, Some(kind), 0, false, None, None, Default::default()),
+        Err(_) => (
+            None,
+            Some("timeout"),
+            0,
+            false,
+            None,
+            None,
+            Default::default(),
+        ),
     };
+    let limited = status.is_some_and(|s| live.limited.contains(&s));
     let service = done.saturating_duration_since(sent);
     let class = match (status, &tag) {
         (None, _) => Class::Transport,
@@ -2289,6 +2428,55 @@ async fn send_one(run: Arc<Run>, job: Job) {
         ),
         _ => (None, None),
     };
+    // `retry_wave`: a refused request goes again, at once or after its
+    // `Retry-After`.
+    if let Some(t) = test.filter(|t| limited && t.retries_left > 0) {
+        if let Some(b) = live.behaviours.get(t.chain).and_then(|b| b.as_ref()) {
+            let wait = if b.honour_retry_after {
+                observed
+                    .retry_after_secs
+                    .map_or(b.retry_delay, Duration::from_secs_f64)
+            } else {
+                b.retry_delay
+            };
+            retry(
+                run.clone(),
+                Job {
+                    test: Some(TestReq {
+                        retries_left: t.retries_left - 1,
+                        retry: true,
+                        ..t
+                    }),
+                    ..job
+                },
+                wait.min(MAX_RETRY_WAIT),
+            );
+        }
+    }
+    let at = sent.saturating_duration_since(start);
+    let limit = grid.map(|g| {
+        (
+            g,
+            Obs {
+                at: at.as_secs_f64(),
+                // Identities are followed one by one when the test has a pool.
+                id: test.and_then(|t| {
+                    live.behaviours
+                        .get(t.chain)?
+                        .as_ref()
+                        .filter(|b| b.identities > 1)
+                        .map(|_| t.id)
+                }),
+                target: target_idx,
+                limited,
+                error: status.is_none(),
+                retry: test.is_some_and(|t| t.retry),
+                tagged: class == Class::Upstream,
+                latency_us: micros(done.saturating_duration_since(intended)),
+                headers: observed,
+            },
+        )
+    });
     run.inflight.fetch_sub(1, Ordering::Relaxed);
     run.record(Outcome {
         layer: layer_idx,
@@ -2303,12 +2491,62 @@ async fn send_one(run: Arc<Run>, job: Job) {
         bytes,
         corrected: done.saturating_duration_since(intended),
         service,
-        at: sent.saturating_duration_since(start),
+        at,
         class,
         upstream,
         overhead,
         request_leg,
         response_leg,
+        limited,
+        limit,
+    });
+}
+
+/// Send `job` again after `wait` (a `retry_wave` retry): a new request of
+/// the same layer, identity and target. It counts in flight while it waits,
+/// so the drain waits for it, and is dropped when the run stops sending.
+fn retry(run: Arc<Run>, job: Job, wait: Duration) {
+    if run.inflight.load(Ordering::Relaxed) >= run.inflight_cap {
+        run.not_sent.fetch_add(1, Ordering::Relaxed);
+        run.requested.fetch_add(1, Ordering::Relaxed);
+        run.count_layer(job.layer, false);
+        let mut totals = run.totals.lock().unwrap_or_else(|p| p.into_inner());
+        totals.counts.requested += 1;
+        totals.counts.not_sent += 1;
+        return;
+    }
+    run.inflight.fetch_add(1, Ordering::Relaxed);
+    tokio::spawn(async move {
+        let until = Instant::now() + wait;
+        loop {
+            if run.stop_requested() || run.state() != State::Running {
+                run.inflight.fetch_sub(1, Ordering::Relaxed);
+                return;
+            }
+            let now = Instant::now();
+            if now >= until {
+                break;
+            }
+            tokio::time::sleep((until - now).min(Duration::from_millis(100))).await;
+        }
+        let seq = run.seq.fetch_add(1, Ordering::Relaxed);
+        run.requested.fetch_add(1, Ordering::Relaxed);
+        run.sent.fetch_add(1, Ordering::Relaxed);
+        run.count_layer(job.layer, true);
+        {
+            let mut totals = run.totals.lock().unwrap_or_else(|p| p.into_inner());
+            totals.counts.requested += 1;
+            totals.counts.sent += 1;
+        }
+        send_one(
+            run.clone(),
+            Job {
+                seq,
+                intended: Instant::now(),
+                ..job
+            },
+        )
+        .await;
     });
 }
 
@@ -2502,6 +2740,13 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
                             vu_cursor = vu_cursor.wrapping_add(1);
                             let tpl = pick(&live.weights, layer.seq);
                             let target = run.pick_target(seq);
+                            // A rate-limit test: the next identity of its pool.
+                            let test = view.behaviour(layer.idx, t).map(|(chain, b)| TestReq {
+                                id: (layer.seq % u64::from(b.identities.max(1))) as u32,
+                                chain,
+                                retries_left: b.retries,
+                                retry: false,
+                            });
                             handle.spawn(send_one(
                                 run.clone(),
                                 Job {
@@ -2512,6 +2757,7 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
                                     vu,
                                     intended,
                                     start,
+                                    test,
                                 },
                             ));
                         }
@@ -2649,6 +2895,7 @@ async fn user_loop(
                 vu,
                 intended: now,
                 start,
+                test: None,
             },
         )
         .await;

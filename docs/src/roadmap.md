@@ -5,14 +5,22 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-- **Load test mode (harness), the next phases** (`docs/plans/harness.md`): phase 5,
-  the rate-limit tests (`limit_test` with `over_limit`, `many_keys`, `many_ips`,
-  `retry_wave`, `slow_rise` and the others of section 6.3), `expect`, and the rate-limit
-  analysis (admission per window, rate-limit headers, time to the first 429, recovery,
-  collateral damage, upstream protection). Then mock-driven traffic and identities
-  (phase 6).
+- **Load test mode (harness), the next phases** (`docs/plans/harness.md`): phase 6,
+  mock-driven traffic (requests from an OpenAPI mock's operations, an invalid fraction,
+  stateful create then read) and identities (credential pools, JWTs minted by the
+  built-in IdP, OAuth client credentials against the gateway, forwarded-address pools,
+  source address binding). Then faults and protocols (phase 7) and the harness docs
+  and conformance run (phase 8).
 
 ## Recently built
+
+- [Harness rate-limit tests](configuration.md#harness-mode) (phase 5): a layer's
+  `expect` and the `limit_test` pattern (`over_limit`, `window_edge`, `just_under`,
+  `distributed`, `many_keys`, `many_ips`, `retry_wave`, `concurrency`, `slow_rise`,
+  `limit_probe`), and the report's rate-limit analysis: admission per window and in
+  the worst window-long span, the first refusal, recovery, the rate-limit headers,
+  identities and gateway nodes, upstream protection and collateral damage, with
+  per-layer thresholds.
 
 - [Harness patterns and live tuning](configuration.md#harness-mode) (phase 4): every
   run pattern (step, target, breakpoint, spike, pulse, burst, wave) chained with

@@ -7,6 +7,7 @@
 // redraws as the scenario changes, saved scenarios, live controls on a
 // running run (rate multiplier, pause, hold, skip stage, set), and the run's
 // event feed (read with send({stream: true}), polling when it is not there).
+// Phase 5: the report's rate-limit analysis, layer by layer.
 import { h, s, replace, clear, card, kvgrid, notice, badge, spinner, toast, select, textarea, input, fmtMs, copyButton } from '../lib/dom.js';
 import { jsonView } from '../lib/format.js';
 import { SERVER, send, getJson, sseParser, readText } from '../lib/http.js';
@@ -26,9 +27,48 @@ function num(v, digits = 0) {
 
 // "step 1, part 2": a pattern stage counted from 1 and, for stepped and
 // periodic stages, its part (a plateau, half a pulse cycle or a burst).
-const PARTED = ['step', 'breakpoint', 'pulse', 'burst'];
+const PARTED = ['step', 'breakpoint', 'pulse', 'burst', 'limit_test'];
 function stageLabel(type, index, part) {
   return `${type} ${index + 1}${PARTED.includes(type) ? `, part ${part + 1}` : ''}`;
+}
+
+const pct = (v) => (v === undefined || v === null ? '-' : `${num(v * 100, 1)}%`);
+const secs = (v) => (v === undefined || v === null ? '-' : `${num(v, 2)} s`);
+
+function parties(list) {
+  return list.map((p) => `${p.name}: ${num(p.admitted)} admitted, ${num(p.limited)} refused, worst window ${num(p.worst_window)}`).join('; ');
+}
+
+// The rate-limit analysis of one layer (report.rate_limits[]).
+function rateLimitView(r) {
+  const e = r.expect;
+  const hd = r.headers || {};
+  const families = (m) => (Object.keys(m || {}).length ? Object.entries(m).map(([k, v]) => `${k} ${pct(v)}`).join(', ') : 'none');
+  const rows = [
+    ['Expected', e ? `${num(e.limit)} per ${e.window} per ${e.per}${e.burst ? `, burst ${num(e.burst)}` : ''}` : 'no expect: refusals only'],
+    ['Per window', `max ${num(r.windows.admitted_max)} admitted, mean ${num(r.windows.admitted_mean, 1)} (${num(r.windows.count)} windows of ${secs(r.window_secs)}, ${num(r.windows.limited)} with refusals)`],
+    ['Worst window-long span', `${num(r.windows.sliding_max)} admitted from ${secs(r.windows.sliding_at_secs)}`],
+    ['First refusal', r.first_limited_secs !== undefined ? `after ${secs(r.first_limited_secs)}, ${num(r.admitted_before_first_limited)} admitted before it${r.rate_at_first_limited !== undefined ? `, at ${num(r.rate_at_first_limited, 1)} /s` : ''}` : 'none'],
+  ];
+  if (r.recovery_secs !== undefined) rows.push(['Recovery', secs(r.recovery_secs)]);
+  if (r.measured_window_secs !== undefined) rows.push(['Measured window', secs(r.measured_window_secs)]);
+  if (r.measured_limit_rate !== undefined) rows.push(['Measured limit', `${num(r.measured_limit_rate, 2)} /s`]);
+  rows.push(['Headers on admitted', families(hd.on_admitted)], ['Headers on refusals', families(hd.on_limited)]);
+  if (hd.advertised_limits && hd.advertised_limits.length) rows.push(['Advertised limit', `${hd.advertised_limits.join(', ')}${hd.limit_matches === false ? ' (not the expected one)' : ''}`]);
+  if (hd.counting_down !== undefined) rows.push(['Remaining count', hd.counting_down ? `counts down (${num(hd.remaining_down)} down, ${num(hd.remaining_up)} up)` : `does not count down (${num(hd.remaining_down)} down, ${num(hd.remaining_up)} up, ${num(hd.remaining_same)} same)`]);
+  if (r.upstream) rows.push(['Upstream', `${num(r.upstream.reached)} reached the server side for ${num(r.upstream.admitted)} admitted${r.upstream.limited_by_upstream ? ` and ${num(r.upstream.limited_by_upstream)} refused by the upstream itself` : ''}: ${r.upstream.shielded ? 'shielded' : 'not shielded'}`]);
+  if (r.retries) rows.push(['Retries', `${num(r.retries.admitted + r.retries.limited)} sent, ${num(r.retries.admitted)} admitted`]);
+  if ((r.gateway_nodes || []).length) rows.push(['Gateway nodes', parties(r.gateway_nodes)]);
+  if ((r.identities || []).length) rows.push([`Identities (${num(r.identities_seen)})`, parties(r.identities.slice(0, 8))]);
+  for (const c of r.collateral || []) rows.push([`Collateral: ${c.layer}`, `${pct(c.limited_fraction_during)} refused during the test (${pct(c.limited_fraction_outside)} outside), latency ${fmtMs(c.latency_ms_during)} (${fmtMs(c.latency_ms_outside)} outside)`]);
+  const over = r.over_admission;
+  return h('div', { class: 'stack-sm se-group' },
+    h('h3', null, `Rate limits: ${r.layer}${(r.tests || []).length ? ` (${r.tests.join(', ')})` : ''}`),
+    h('div', { class: 'tiles' },
+      tile('Admitted', num(r.admitted), 'ok'), tile('Refused', `${num(r.limited)} (${pct(r.limited_fraction)})`, r.limited ? 'err-text' : ''),
+      tile('Over-admission', pct(over), over ? 'err-text' : ''), tile('Under-admission', pct(r.under_admission), r.under_admission > 0.05 ? 'err-text' : '')),
+    kvgrid(rows),
+    ...(r.findings || []).map((f) => notice('warn', f)));
 }
 
 // A per-second chart: completed per second (bars), p99 latency (line).
@@ -660,6 +700,7 @@ export default {
         ...((rep.cluster && rep.cluster.warnings) || []).map((w) => notice('warn', w)),
         (rep.findings || []).length ? h('div', { class: 'stack-sm' }, h('h3', null, 'Findings'),
           ...rep.findings.map((f) => notice(f.failed && f.failed.length ? 'warn' : 'ok', f.summary))) : null,
+        ...(rep.rate_limits || []).map(rateLimitView),
         (rep.changes || []).length ? h('details', { class: 'disclosure', open: true }, h('summary', null, `Live changes (${rep.changes.length})`),
           h('ul', { class: 'small' }, ...rep.changes.map((c) => h('li', null, `${num(c.at_secs, 1)} s (v${c.version}): ${c.what}`)))) : null,
         (rep.stages || []).length > 1 ? h('details', { class: 'disclosure' }, h('summary', null, `Stages (${rep.stages.length}), the run's results in each`),
@@ -672,8 +713,8 @@ export default {
         rep.cluster ? h('p', { class: 'small' }, `Cluster ${rep.cluster.cluster_id}, led by ${rep.cluster.leader} (term ${rep.cluster.term}): ${rep.cluster.nodes.length} node(s), clock error bound ${fmtMs(rep.cluster.clock_error_ms)}, lost check ${rep.cluster.lost_check}.`) : null,
         timelineChart(liveBuckets),
         (rep.layers || []).length > 1 || (rep.targets_breakdown || []).length > 1 ? h('table', { class: 'table' },
-          h('thead', null, h('tr', null, h('th', null, 'Breakdown'), h('th', null, 'Sent'), h('th', null, 'OK'), h('th', null, 'Errors'), h('th', null, 'p50'), h('th', null, 'p99'))),
-          h('tbody', null, ...[...(rep.layers || []).map((b) => ['layer', b]), ...(rep.targets_breakdown || []).map((b) => ['target', b])].map(([kind, b]) => h('tr', null, h('td', null, `${kind} ${b.name}`), h('td', null, num(b.counts.sent)), h('td', null, num(b.counts.ok)), h('td', null, num(b.counts.unexpected_status + b.counts.transport)), h('td', null, fmtMs(b.latency.p50_ms)), h('td', null, fmtMs(b.latency.p99_ms)))))) : null,
+          h('thead', null, h('tr', null, h('th', null, 'Breakdown'), h('th', null, 'Sent'), h('th', null, 'OK'), h('th', null, 'Errors'), h('th', null, 'Refused'), h('th', null, 'p50'), h('th', null, 'p99'))),
+          h('tbody', null, ...[...(rep.layers || []).map((b) => ['layer', b]), ...(rep.targets_breakdown || []).map((b) => ['target', b])].map(([kind, b]) => h('tr', null, h('td', null, `${kind} ${b.name}`), h('td', null, num(b.counts.sent)), h('td', null, num(b.counts.ok)), h('td', null, num(b.counts.unexpected_status + b.counts.transport)), h('td', null, num(b.counts.limited || 0)), h('td', null, fmtMs(b.latency.p50_ms)), h('td', null, fmtMs(b.latency.p99_ms)))))) : null,
         sat.reasons && sat.reasons.length ? notice('warn', sat.reasons.join(' ')) : null,
         h('details', { class: 'disclosure' }, h('summary', null, `Samples (${(rep.samples || []).length}) with their X-Request-Id`),
           h('div', { class: 'table-wrap' }, h('table', { class: 'table' },

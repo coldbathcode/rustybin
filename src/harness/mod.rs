@@ -27,9 +27,11 @@ pub mod cluster;
 pub mod correlate;
 pub mod election;
 pub mod engine;
+pub mod limit_test;
 pub mod live;
 pub mod member;
 pub mod pattern;
+pub mod ratelimit;
 pub mod report;
 pub mod safety;
 pub mod saved;
@@ -1082,6 +1084,9 @@ pub fn builtin_scenarios() -> &'static [(&'static str, &'static str)] {
         ("pulse", include_str!("scenarios/pulse.yaml")),
         ("burst", include_str!("scenarios/burst.yaml")),
         ("daily-wave", include_str!("scenarios/daily-wave.yaml")),
+        ("rate-limit", include_str!("scenarios/rate-limit.yaml")),
+        ("limit-probe", include_str!("scenarios/limit-probe.yaml")),
+        ("many-ips", include_str!("scenarios/many-ips.yaml")),
     ]
 }
 
@@ -2060,6 +2065,8 @@ pub fn openapi_components() -> Value {
 mod cluster_tests;
 #[cfg(test)]
 mod failover_tests;
+#[cfg(test)]
+mod limit_tests;
 #[cfg(test)]
 mod live_tests;
 #[cfg(test)]

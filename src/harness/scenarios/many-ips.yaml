@@ -1,0 +1,27 @@
+# A per-IP limit against rotating forwarded addresses: 50 identities, each
+# with an X-Forwarded-For address from 198.18.0.0/15, at five times the
+# limit together. A gateway that trusts the header lets them all through.
+name: many-ips
+description: Rotating X-Forwarded-For addresses at five times a per-IP limit of 10 per second.
+targets:
+  - url: http://127.0.0.1:8080
+    weight: 1
+scale:
+  virtual_clients: 50
+layers:
+  - name: rotating
+    source:
+      request:
+        path: /status/200
+    pattern:
+      type: limit_test
+      test: many_ips
+      identities: 50
+      for: 30s
+    expect:
+      limit: 10
+      window: 1s
+      per: ip
+    thresholds:
+      over_admission: 0
+timeout: 10s

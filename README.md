@@ -100,11 +100,13 @@ a runnable example, and `/docs` for the OpenAPI reference. See the
 - Collections for Postman, Insomnia, Bruno, curl, `.http`, Hurl, k6 and HAR,
   generated from the same route catalogue as everything else.
 - **Harness mode** (`RUSTYBIN_HARNESS=on`): Rustybin as the load client too. A
-  scenario (targets, layers with constant and ramp patterns, open or closed load
-  model, thresholds) runs from the API, the management MCP, the console, headless at
-  startup or `rustybin harness run --local-server`; the report separates what the
-  client itself could not do (saturation) from what the gateway did. Off by default,
-  targets allowlisted, never in public mode.
+  scenario (targets, traffic layers with run patterns from ramps to breakpoints, open
+  or closed load model, rate-limit tests, thresholds) runs on one node or a cluster,
+  from the API, the management MCP, the console, headless at startup or `rustybin
+  harness run --local-server`; the report separates what the client itself could not
+  do (saturation) from what the gateway did, and says what its rate limiter did
+  (admission per window, refusals, headers, recovery, collateral damage). Off by
+  default, targets allowlisted, never in public mode.
 
 ## Web console
 

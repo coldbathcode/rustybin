@@ -446,6 +446,27 @@ pub fn get_run_report(ctx: &CallCtx, args: &Value) -> Value {
         if report.passed { "pass" } else { "FAIL" },
         report.exit_code
     );
+    // The rate-limit analysis: counts and findings the harness computed
+    // (no gateway-provided text: node header values stay in the structure).
+    let mut text = text;
+    for r in &report.rate_limits {
+        text.push_str(&format!(
+            "\nRate limits of {}: {} admitted, {} refused ({:.1}%), worst window-long span {} admitted{}{}",
+            r.layer,
+            r.admitted,
+            r.limited,
+            r.limited_fraction * 100.0,
+            r.windows.sliding_max,
+            r.over_admission
+                .map(|v| format!(", over-admission {:.1}%", v * 100.0))
+                .unwrap_or_default(),
+            if r.findings.is_empty() {
+                String::new()
+            } else {
+                format!(". {}", r.findings.join(". "))
+            }
+        ));
+    }
     ok(ctx, text, structured)
 }
 

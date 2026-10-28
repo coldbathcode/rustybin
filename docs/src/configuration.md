@@ -305,6 +305,7 @@ a number of users (closed model):
 | `pulse` | `high`, `low`, `on`, `off`, `cycles` |
 | `burst` | `base`, `size` requests sent `within` a window, `every`, `for` |
 | `wave` | `min`, `max`, `period`, `shape: sine \| triangle \| sawtooth`, `for` |
+| `limit_test` | `test` (below), `limit` and `window` (default: the layer's `expect`), and the test's own parameters |
 
 Patterns chain with `then:` (up to 16 stages). Every pattern takes `jitter` (0 to 1: each
 second the value varies by up to that fraction, the same on every node for a given run)
@@ -313,10 +314,47 @@ on the cluster clock, so a burst reaches the gateway as one burst; `node` gives 
 its own phase and its own jitter, which spreads the load. `POST /_rustybin/harness/preview`
 returns the expected requests per second of a scenario, each layer and the total, from
 the pattern math (one point per second, coarser past an hour). The built-in scenarios
-include `step-plateaus`, `breakpoint`, `spike-and-recover`, `pulse`, `burst` and
-`daily-wave`; `PUT /_rustybin/harness/scenarios/<name>` saves your own next to them
+include `step-plateaus`, `breakpoint`, `spike-and-recover`, `pulse`, `burst`,
+`daily-wave`, `rate-limit`, `limit-probe` and `many-ips`;
+`PUT /_rustybin/harness/scenarios/<name>` saves your own next to them
 (validated, at most 100 per node, kept in `RUSTYBIN_HARNESS_STATE_DIR` when set) and
 `DELETE` removes one.
+
+**Rate-limit tests.** A layer's `expect` says what the gateway's limiter should do with
+its traffic: `limit` requests per `window`, `per` (`key`, `ip`, `consumer`, `route`,
+`global`), an optional `burst` allowance on top of the limit, the refusal `status`
+(default 429) and a `node_header` naming the gateway node that answered (`via`, say). A
+`limit_test` pattern probes the limiter for a known weak spot:
+
+| Test | Sends | Finds |
+|---|---|---|
+| `over_limit` | `factor` (10) times the limit `for` a while | Enforcement, the time to the first refusal, how many got through |
+| `window_edge` | `size` (the limit) requests `within` 100 ms just before a window boundary and again just after, at every other boundary on the wall clock (`align: start` for windows that open with the first request), `cycles` times | Fixed-window double dipping: up to twice the limit in one window length |
+| `just_under` | `fraction` (0.9) of the limit `for` a while | False positives |
+| `distributed` | `factor` (4) times the limit at each window start, from every client node at once, over every target | Counters local to each gateway node |
+| `many_keys` | `identities` (20) keys (`{{id}}` in a header or the path) under their own limit, `factor` (5) times a global limit together | Whether global, per-IP and per-route limits hold |
+| `many_ips` | rotating forwarded addresses from 198.18.0.0/15 (`header`, default `X-Forwarded-For`; `{{ip}}`) | Per-IP limits that trust a forwarded header |
+| `retry_wave` | `factor` (3) times the limit; each refusal retried `retries` (3) times at once, or after its `Retry-After` with `honour_retry_after` | Recovery under retries |
+| `concurrency` | `size` requests at once `every` window, `cycles` times | Connection and concurrency limits |
+| `slow_rise` | from half to one and a half times the limit (`from`, `to`) `over` a while | The rate where enforcement starts |
+| `limit_probe` | a binary search between `min` and `max`, a probe `every` 2 s, `steps` (8) probes | The effective limit when nobody wrote it down |
+
+Every test but `limit_probe` takes `recover`: after the test, half the limit for that
+long, to measure the time to recovery. The report's `rate_limits` has, per layer that
+asks for it (an `expect`, a `limit_test`, or layer thresholds): admitted, refused and
+failed requests; admission per window and in the worst window-long span (over- and
+under-admission against `expect`); the time to the first refusal and the requests
+admitted before it; recovery; the window as measured (the spacing of admission resuming
+after refusals); per identity and per gateway node (target or `node_header`) breakdowns;
+the rate-limit headers (`RateLimit` and `RateLimit-Policy` in any IETF draft form,
+`X-RateLimit-*`, `Retry-After`): how often they come, whether the advertised limit is the
+expected one and whether the remaining count counts down; upstream protection (what
+reached the server side, by layer, against what was admitted: a limiter that forwards
+and then rewrites the answer does not shield the upstream); collateral damage (the other
+layers' refusals and latency during the test); and findings in words. A layer's own
+`thresholds` (`rate_limited`, `over_admission`, `under_admission`) fail the run like the
+run's. `limit_probe` is a closed loop like `breakpoint`: it reads the run's refusals per
+second (all layers), so run it on its own.
 
 A running run takes changes without stopping: `PATCH /_rustybin/harness/runs/<run>` (or
 `.../clusters/<id>/runs/<run>`) with any of `rate_multiplier` (0 to 10), `pause`,

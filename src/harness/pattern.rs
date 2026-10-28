@@ -21,13 +21,16 @@
 //! `sync`: `cluster` (the default) keeps every client node in lockstep, so a
 //! burst reaches the gateway as one burst; `node` gives each node its own
 //! phase of a periodic pattern and its own jitter, which spreads the load.
-//! The rate-limit tests (`limit_test`) come with phase 5.
+//! - `limit_test` probes a rate limiter (section 6.3, [`super::limit_test`]):
+//!   each test compiles into ordinary stages, some aligned to the wall
+//!   clock's windows (`window_edge`, `distributed`).
 
 use std::f64::consts::PI;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use super::limit_test::LimitTest;
 use super::scenario::Dur;
 
 /// Most stages in one `then:` chain.
@@ -251,6 +254,9 @@ pub enum Pattern {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         then: Option<Box<Pattern>>,
     },
+    /// A rate-limit test (section 6.3): `test` names the weak spot it
+    /// probes.
+    LimitTest(LimitTest),
 }
 
 /// What a stage's value looks like over its own time `x` (0 at its start).
@@ -299,6 +305,17 @@ pub enum Shape {
         period_secs: f64,
         form: WaveShape,
     },
+    /// Two bursts of `size` around every other window boundary
+    /// (`window_edge`): one within `within_secs` ending `lead_secs` before
+    /// the boundary, one starting `lead_secs` after it. The period is two
+    /// windows, so each window holds one burst only and a fixed window
+    /// admits both.
+    Edge {
+        size: f64,
+        window_secs: f64,
+        within_secs: f64,
+        lead_secs: f64,
+    },
     /// A closed loop decides the value (`initial` until it does).
     Closed {
         initial: f64,
@@ -324,6 +341,13 @@ pub struct Stage {
     pub jitter: f64,
     /// Which pattern of the `then:` chain the stage comes from.
     pub pattern: usize,
+    /// A periodic stage shifted so its period starts on the wall clock's
+    /// window boundaries (`window_edge`, `distributed`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub aligned: bool,
+    /// The rate-limit test the stage runs, or `recover` after one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test: Option<&'static str>,
 }
 
 fn is_zero(v: &f64) -> bool {
@@ -336,6 +360,9 @@ fn is_zero(v: &f64) -> bool {
 pub struct Ctx {
     pub seed: u64,
     pub phase: f64,
+    /// Unix time (seconds) of the layer's pattern time 0, for stages
+    /// aligned to the wall clock (0 when unknown: previews).
+    pub wall: f64,
 }
 
 /// A pseudo-random number in `[0, 1)` from a seed (splitmix64).
@@ -368,6 +395,7 @@ impl Shape {
             } => Some(on_secs + off_secs),
             Shape::Burst { every_secs, .. } => Some(*every_secs),
             Shape::Wave { period_secs, .. } => Some(*period_secs),
+            Shape::Edge { window_secs, .. } => Some(2.0 * window_secs),
             _ => None,
         }
     }
@@ -433,6 +461,22 @@ impl Shape {
                 let frac = x.rem_euclid(*period_secs) / period_secs;
                 min + (max - min) * wave(*form, frac)
             }
+            Shape::Edge {
+                size,
+                window_secs,
+                within_secs,
+                lead_secs,
+            } => {
+                let p = 2.0 * window_secs;
+                let u = x.rem_euclid(p);
+                let after = u >= *lead_secs && u < lead_secs + within_secs;
+                let before = u >= p - lead_secs - within_secs && u < p - lead_secs;
+                if after || before {
+                    size / within_secs
+                } else {
+                    0.0
+                }
+            }
             Shape::Closed { initial, .. } => *initial,
         }
     }
@@ -478,6 +522,18 @@ impl Shape {
                     WaveShape::Sawtooth => a * y * y / (2.0 * p),
                 };
                 (min * y + part, min * p + a * p / 2.0)
+            }
+            Shape::Edge {
+                size,
+                window_secs,
+                within_secs,
+                lead_secs,
+            } => {
+                let p = 2.0 * window_secs;
+                let r = size / within_secs;
+                let after = (y - lead_secs).clamp(0.0, *within_secs);
+                let before = (y - (p - lead_secs - within_secs)).clamp(0.0, *within_secs);
+                (r * (after + before), 2.0 * size)
             }
             _ => (0.0, 0.0),
         }
@@ -526,7 +582,10 @@ impl Shape {
                 }
                 total
             }
-            Shape::Square { .. } | Shape::Burst { .. } | Shape::Wave { .. } => {
+            Shape::Square { .. }
+            | Shape::Burst { .. }
+            | Shape::Wave { .. }
+            | Shape::Edge { .. } => {
                 let p = self.period().unwrap_or(1.0);
                 let f = |x: f64| {
                     let full = (x / p).floor();
@@ -577,6 +636,9 @@ impl Shape {
                 ..
             } => base + size / within_secs,
             Shape::Wave { min, max, .. } => min.max(*max),
+            Shape::Edge {
+                size, within_secs, ..
+            } => size / within_secs,
             Shape::Closed { max, .. } => *max,
         }
     }
@@ -607,6 +669,23 @@ impl Shape {
                 *every_secs,
                 *within_secs,
             ))),
+            Shape::Edge {
+                window_secs,
+                within_secs,
+                lead_secs,
+                ..
+            } => {
+                let p = 2.0 * window_secs;
+                [
+                    *lead_secs,
+                    lead_secs + within_secs,
+                    p - lead_secs - within_secs,
+                    p - lead_secs,
+                ]
+                .into_iter()
+                .map(|o| next_multiple(x, p, o))
+                .reduce(f64::min)
+            }
             _ => None,
         }
     }
@@ -633,6 +712,7 @@ impl Shape {
                 k * 2 + u64::from(x.rem_euclid(p) >= *on_secs)
             }
             Shape::Burst { every_secs, .. } => (x / every_secs).floor().max(0.0) as u64,
+            Shape::Edge { window_secs, .. } => (x / (2.0 * window_secs)).floor().max(0.0) as u64,
             _ => 0,
         }
     }
@@ -660,14 +740,27 @@ impl Stage {
         self.end_secs - self.start_secs
     }
 
-    /// The nominal value at `x` into the stage, shifted by `phase` of the
-    /// period for periodic shapes.
-    pub fn value_local(&self, x: f64, phase: f64) -> f64 {
-        let x = match self.shape.period() {
-            Some(p) => x + phase * p,
-            None => x,
-        };
-        self.shape.value(x, self.len())
+    /// How far a periodic stage's period is shifted for `ctx`: `phase` of
+    /// the period (`sync: node`), plus, for a stage aligned to the wall
+    /// clock, the offset of its start within a period of Unix time.
+    pub fn shift(&self, ctx: &Ctx) -> f64 {
+        match self.shape.period() {
+            Some(p) => {
+                let wall = if self.aligned {
+                    (ctx.wall + self.start_secs).rem_euclid(p)
+                } else {
+                    0.0
+                };
+                ctx.phase * p + wall
+            }
+            None => 0.0,
+        }
+    }
+
+    /// The nominal value at `x` into the stage, its period shifted by
+    /// `shift` seconds (see [`Stage::shift`]).
+    pub fn value_local(&self, x: f64, shift: f64) -> f64 {
+        self.shape.value(x + shift, self.len())
     }
 
     /// The part of the stage `x` is in (a plateau, a pulse half, a burst).
@@ -716,7 +809,7 @@ impl Compiled {
     /// the pattern is over.
     pub fn value_at(&self, t: f64, ctx: &Ctx) -> Option<f64> {
         let s = self.stage_at(t)?;
-        let v = s.value_local(t - s.start_secs, ctx.phase);
+        let v = s.value_local(t - s.start_secs, s.shift(ctx));
         if s.jitter > 0.0 {
             let tick = t.max(0.0).floor() as u64;
             let u = unit(ctx.seed ^ (s.index as u64) << 56 ^ tick);
@@ -754,7 +847,7 @@ impl Compiled {
             return f64::INFINITY;
         };
         let x = t - s.start_secs;
-        let shift = s.shape.period().map_or(0.0, |p| ctx.phase * p);
+        let shift = s.shift(ctx);
         let edge = s
             .shape
             .next_edge(x + shift)
@@ -787,6 +880,7 @@ impl Pattern {
             | Pattern::Pulse { then, .. }
             | Pattern::Burst { then, .. }
             | Pattern::Wave { then, .. } => then.as_deref(),
+            Pattern::LimitTest(t) => t.then.as_deref(),
         }
     }
 
@@ -801,6 +895,7 @@ impl Pattern {
             | Pattern::Pulse { then, .. }
             | Pattern::Burst { then, .. }
             | Pattern::Wave { then, .. } => then.as_deref_mut(),
+            Pattern::LimitTest(t) => t.then.as_deref_mut(),
         }
     }
 
@@ -815,6 +910,7 @@ impl Pattern {
             | Pattern::Pulse { jitter, .. }
             | Pattern::Burst { jitter, .. }
             | Pattern::Wave { jitter, .. } => jitter.unwrap_or(0.0),
+            Pattern::LimitTest(t) => t.jitter.unwrap_or(0.0),
         }
     }
 
@@ -830,6 +926,7 @@ impl Pattern {
             | Pattern::Pulse { sync, .. }
             | Pattern::Burst { sync, .. }
             | Pattern::Wave { sync, .. } => sync.unwrap_or_default(),
+            Pattern::LimitTest(t) => t.sync.unwrap_or_default(),
         }
     }
 
@@ -844,6 +941,7 @@ impl Pattern {
             Pattern::Pulse { .. } => "pulse",
             Pattern::Burst { .. } => "burst",
             Pattern::Wave { .. } => "wave",
+            Pattern::LimitTest(_) => "limit_test",
         }
     }
 
@@ -860,6 +958,7 @@ impl Pattern {
             "pulse",
             "burst",
             "wave",
+            "limit_test",
         ]
     }
 
@@ -892,7 +991,11 @@ impl Pattern {
         let mut at = 0.0;
         for (pattern, p) in self.chain().into_iter().take(MAX_STAGES).enumerate() {
             let jitter = p.jitter().clamp(0.0, 1.0);
-            let mut push = |kind: &'static str, len: f64, shape: Shape| {
+            let mut push_with = |kind: &'static str,
+                                 len: f64,
+                                 shape: Shape,
+                                 aligned: bool,
+                                 test: Option<&'static str>| {
                 let len = len.max(0.0);
                 if len <= 0.0 {
                     return;
@@ -911,11 +1014,18 @@ impl Pattern {
                     shape,
                     jitter,
                     pattern,
+                    aligned,
+                    test,
                 });
                 at += len;
             };
+            macro_rules! push {
+                ($kind:expr, $len:expr, $shape:expr $(,)?) => {
+                    push_with($kind, $len, $shape, false, None)
+                };
+            }
             match p {
-                Pattern::Constant { rate, hold, .. } => push(
+                Pattern::Constant { rate, hold, .. } => push!(
                     "constant",
                     hold.0.as_secs_f64(),
                     Shape::Line {
@@ -929,7 +1039,7 @@ impl Pattern {
                     over,
                     curve,
                     ..
-                } => push(
+                } => push!(
                     "ramp",
                     over.0.as_secs_f64(),
                     match curve {
@@ -953,7 +1063,7 @@ impl Pattern {
                 } => {
                     let plateaus = step_plateaus(*start, *step, *max);
                     let every = every.0.as_secs_f64();
-                    push(
+                    push!(
                         "step",
                         plateaus as f64 * every + hold.map_or(0.0, |h| h.0.as_secs_f64()),
                         Shape::Steps {
@@ -978,7 +1088,7 @@ impl Pattern {
                     let hold = hold.0.as_secs_f64();
                     match (rate.or(*users), overhead_p99_ms) {
                         (Some(goal), _) => {
-                            push(
+                            push!(
                                 "target",
                                 within,
                                 Shape::Line {
@@ -986,7 +1096,7 @@ impl Pattern {
                                     to: goal,
                                 },
                             );
-                            push(
+                            push!(
                                 "target",
                                 hold,
                                 Shape::Line {
@@ -995,7 +1105,7 @@ impl Pattern {
                                 },
                             );
                         }
-                        (None, _) => push(
+                        (None, _) => push!(
                             "target",
                             within + hold,
                             Shape::Closed {
@@ -1014,7 +1124,7 @@ impl Pattern {
                 } => {
                     let plateaus = growth_plateaus(*start, *growth, *max);
                     let every = every.0.as_secs_f64();
-                    push(
+                    push!(
                         "breakpoint",
                         plateaus as f64 * every,
                         Shape::Growth {
@@ -1035,7 +1145,7 @@ impl Pattern {
                     recover,
                     ..
                 } => {
-                    push(
+                    push!(
                         "spike",
                         rise.0.as_secs_f64(),
                         Shape::Line {
@@ -1043,7 +1153,7 @@ impl Pattern {
                             to: *peak,
                         },
                     );
-                    push(
+                    push!(
                         "spike",
                         hold.0.as_secs_f64(),
                         Shape::Line {
@@ -1051,7 +1161,7 @@ impl Pattern {
                             to: *peak,
                         },
                     );
-                    push(
+                    push!(
                         "spike",
                         fall.0.as_secs_f64(),
                         Shape::Line {
@@ -1059,7 +1169,7 @@ impl Pattern {
                             to: *base,
                         },
                     );
-                    push(
+                    push!(
                         "spike",
                         recover.0.as_secs_f64(),
                         Shape::Line {
@@ -1077,7 +1187,7 @@ impl Pattern {
                     ..
                 } => {
                     let (on, off) = (on.0.as_secs_f64(), off.0.as_secs_f64());
-                    push(
+                    push!(
                         "pulse",
                         f64::from(cycles.unwrap_or(1)) * (on + off),
                         Shape::Square {
@@ -1095,7 +1205,7 @@ impl Pattern {
                     every,
                     hold,
                     ..
-                } => push(
+                } => push!(
                     "burst",
                     hold.0.as_secs_f64(),
                     Shape::Burst {
@@ -1112,7 +1222,7 @@ impl Pattern {
                     shape,
                     hold,
                     ..
-                } => push(
+                } => push!(
                     "wave",
                     hold.0.as_secs_f64(),
                     Shape::Wave {
@@ -1122,6 +1232,17 @@ impl Pattern {
                         form: *shape,
                     },
                 ),
+                Pattern::LimitTest(t) => {
+                    for piece in t.pieces() {
+                        push_with(
+                            "limit_test",
+                            piece.len,
+                            piece.shape,
+                            piece.aligned,
+                            Some(piece.test),
+                        );
+                    }
+                }
             }
         }
         Compiled {
@@ -1162,7 +1283,8 @@ impl Pattern {
             .fold(0.0, f64::max)
     }
 
-    /// Whether a stage is decided by a closed loop (`target` on overhead).
+    /// Whether a stage is decided by a closed loop (`target` on overhead,
+    /// `limit_probe`).
     pub fn has_closed_loop(&self) -> bool {
         self.chain().iter().any(|p| {
             matches!(
@@ -1173,8 +1295,21 @@ impl Pattern {
                     users: None,
                     ..
                 }
-            )
+            ) || matches!(p, Pattern::LimitTest(t) if t.test == super::limit_test::TestKind::LimitProbe)
         })
+    }
+
+    /// The rate-limit test of each pattern of the chain (`None` for other
+    /// patterns), indexed like [`Stage::pattern`].
+    pub fn limit_tests(&self) -> Vec<Option<&LimitTest>> {
+        self.chain()
+            .into_iter()
+            .take(MAX_STAGES)
+            .map(|p| match p {
+                Pattern::LimitTest(t) => Some(t),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Expected number of requests between two offsets (the integral of
@@ -1458,6 +1593,7 @@ impl Pattern {
                     }
                     positive("for", hold, problems);
                 }
+                Pattern::LimitTest(t) => t.validate(&here, problems),
             }
         }
     }
@@ -1669,10 +1805,12 @@ mod tests {
         let c = p.compile();
         assert!((p.peak() - 120.0).abs() < 1e-9);
         let a = Ctx {
+            wall: 0.0,
             seed: 1,
             phase: 0.0,
         };
         let b = Ctx {
+            wall: 0.0,
             seed: 2,
             phase: 0.0,
         };
@@ -1691,6 +1829,7 @@ mod tests {
         assert_eq!(pulse.sync(), SyncMode::Node);
         let c = pulse.compile();
         let shifted = Ctx {
+            wall: 0.0,
             seed: 0,
             phase: 0.5,
         };
@@ -1771,15 +1910,48 @@ mod tests {
     }
 
     #[test]
+    fn limit_tests_round_trip_and_follow_the_math() {
+        let p = parse("type: limit_test\ntest: window_edge\nlimit: 10\nwindow: 1s\ncycles: 2\nthen: { type: constant, rate: 1, for: 1s }");
+        let back: Pattern = serde_yaml::from_str(&serde_yaml::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
+        check_integral(&p);
+        let c = p.compile();
+        assert_eq!(c.stages[0].test, Some("window_edge"));
+        assert!(c.stages[0].aligned);
+        // Two bursts of 10 around every other boundary.
+        let edge = &c.stages[0];
+        assert!(
+            (c.integral(0.0, 4.0) - 40.0).abs() < 1e-6,
+            "{}",
+            c.integral(0.0, 4.0)
+        );
+        // On the wall clock: a run that starts 0.5 s into a two-window
+        // period has its next even boundary 1.5 s in.
+        let ctx = Ctx {
+            wall: 1_000.5,
+            ..Ctx::default()
+        };
+        assert!((edge.shift(&ctx) - 0.5).abs() < 1e-9);
+        assert_eq!(c.value_at(1.53, &ctx), Some(100.0));
+        assert_eq!(c.value_at(1.40, &ctx), Some(100.0));
+        assert_eq!(c.value_at(0.53, &ctx), Some(0.0));
+        assert_eq!(c.value_at(1.30, &ctx), Some(0.0));
+        // The scheduler never steps over an edge of the bursts.
+        assert!((c.next_boundary(0.2, &ctx) - 1.375).abs() < 1e-9);
+        let err = serde_yaml::from_str::<Pattern>("type: limit_test\ntest: nope").unwrap_err();
+        assert!(err.to_string().contains("over_limit"), "{err}");
+    }
+
+    #[test]
     fn serde_round_trip_with_tag() {
         let p = ramp_then_hold();
         let text = serde_yaml::to_string(&p).unwrap();
         assert!(text.contains("type: ramp"));
         let back: Pattern = serde_yaml::from_str(&text).unwrap();
         assert_eq!(back, p);
-        let err = serde_yaml::from_str::<Pattern>("type: limit_test\nbase: 1").unwrap_err();
+        let err = serde_yaml::from_str::<Pattern>("type: replay\nbase: 1").unwrap_err();
         assert!(err.to_string().contains("unknown variant"), "{err}");
-        assert_eq!(Pattern::kinds().len(), 9);
+        assert_eq!(Pattern::kinds().len(), 10);
         for kind in Pattern::kinds() {
             assert!(
                 err.to_string().contains(kind),

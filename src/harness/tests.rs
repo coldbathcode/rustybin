@@ -212,7 +212,10 @@ async fn api_when_harness_is_off() {
             "spike-and-recover",
             "pulse",
             "burst",
-            "daily-wave"
+            "daily-wave",
+            "rate-limit",
+            "limit-probe",
+            "many-ips",
         ]
     );
     for s in list["scenarios"].as_array().unwrap() {
@@ -1181,6 +1184,7 @@ async fn spoofed_markers_are_rejected_and_never_counted() {
         node: "spoof".into(),
         seq: 999_999,
         vu: 0,
+        layer: 0,
         sent_ns: 0,
         names: Vec::new(),
         headers_digest: "00000000".into(),

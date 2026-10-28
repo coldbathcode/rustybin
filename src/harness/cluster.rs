@@ -50,6 +50,7 @@ use tokio::sync::watch;
 use super::correlate::{now_ns, ChangesReport, RunKey, ServerReport};
 use super::engine::Share;
 use super::live::{Change, Controls, LiveView, StageLog};
+use super::ratelimit::LimitAcc;
 use super::report::{
     self, decode_numbers, encode_numbers, histogram, Breakdown, Bucket, ClusterReport, Counts,
     NodeReport, Percentiles, Report, Sample, Saturation, TargetReport, MAX_SAMPLES,
@@ -1314,6 +1315,7 @@ fn merge_bucket(into: &mut Bucket, b: &Bucket) {
     into.status_5xx += b.status_5xx;
     into.upstream += b.upstream;
     into.gateway += b.gateway;
+    into.limited += b.limited;
     into.rate = into.completed as f64 / into.width_secs.max(1e-9);
     // Per-second percentiles are not shipped as histograms: the timeline
     // shows the slowest node's. The run's percentiles are exact.
@@ -1466,6 +1468,7 @@ fn build_report(
         s.arrivals += r.arrivals;
         merge_map(&mut s.by_node, &r.by_node, super::correlate::MAX_LABELS);
         merge_map(&mut s.by_route, &r.by_route, super::correlate::MAX_ROUTES);
+        merge_map(&mut s.by_layer, &r.by_layer, super::correlate::MAX_LABELS);
         merge_map(&mut s.statuses, &r.statuses, 600);
         let c: &mut ChangesReport = &mut s.changes;
         c.headers_changed += r.changes.headers_changed;
@@ -1546,7 +1549,7 @@ fn build_report(
     } else {
         0.0
     };
-    let thresholds = report::evaluate(
+    let mut thresholds = report::evaluate(
         &run.scenario.thresholds,
         &m.counts,
         &latency,
@@ -1554,6 +1557,31 @@ fn build_report(
         server.as_ref().map(|s| s.arrivals),
         &m.saturation,
     );
+    // The rate-limit analysis over the client nodes' final counters.
+    let mut limits: Vec<Option<LimitAcc>> = Vec::new();
+    for p in &inner.clients {
+        let Some(st) = p.stats.as_ref().filter(|st| st.done) else {
+            continue;
+        };
+        if limits.len() < st.limits.len() {
+            limits.resize(st.limits.len(), None);
+        }
+        for (dst, src) in limits.iter_mut().zip(&st.limits) {
+            if let Some(src) = src {
+                match dst {
+                    Some(d) => d.merge(src),
+                    None => *dst = Some(src.clone()),
+                }
+            }
+        }
+    }
+    let (rate_limits, layer_thresholds) = super::ratelimit::analyse(
+        &run.scenario,
+        &inner.controls,
+        &limits,
+        server.as_ref().map(|s| &s.by_layer),
+    );
+    thresholds.extend(layer_thresholds);
     // Node errors: a refused or failed assignment, or a node that went
     // silent before its final stats.
     let mut errors = Vec::new();
@@ -1787,6 +1815,7 @@ fn build_report(
         findings: inner.controls.findings.clone(),
         changes: inner.controls.log.clone(),
         stages,
+        rate_limits,
     }
 }
 

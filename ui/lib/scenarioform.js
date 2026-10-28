@@ -275,14 +275,19 @@ function objectForm(root, node, label, value, path, collapsible) {
     el,
     read: () => {
       const out = {};
+      const missing = [];
       for (const { key, c, required: req } of controls) {
         const v = c.read();
         if (v === undefined) {
-          if (req) throw new Error(`${path ? path + '.' : ''}${key} is required`);
+          if (req) missing.push(key);
           continue;
         }
         out[key] = v;
       }
+      // An optional nested object left empty (a layer's expect) is absent;
+      // once one of its fields is set, its required fields are too.
+      if (collapsible && !Object.keys(out).length) return undefined;
+      if (missing.length) throw new Error(`${path ? path + '.' : ''}${missing[0]} is required`);
       return Object.keys(out).length ? out : undefined;
     },
   };

@@ -1,21 +1,22 @@
 # Plan: load test mode (the harness), load tests through a gateway
 
-Status: **phases 0, 1, 2, 3, 3b and 4 done** (2026-10-26): the engine spike is `examples/harness_spike.rs`
+Status: **phases 0, 1, 2, 3, 3b, 4 and 5 done** (2026-10-28): the engine spike is `examples/harness_spike.rs`
 ([Phase 0 results](#phase-0-results-2026-10-25)); the single-node engine, the correlation, the cluster, its
-failover, the patterns and live tuning are `src/harness/` ([Phase 1 build notes](#phase-1-build-notes-2026-10-25),
+failover, the patterns and live tuning, and the rate-limit tests are `src/harness/` ([Phase 1 build notes](#phase-1-build-notes-2026-10-25),
 [Phase 2 build notes](#phase-2-build-notes-2026-10-25), [Phase 3 build notes](#phase-3-build-notes-2026-10-26),
-[Phase 3b build notes](#phase-3b-build-notes-2026-10-26) and [Phase 4 build notes](#phase-4-build-notes-2026-10-26)
-list where the build differs from this plan). Phase 5 is next. Planned 2026-10-22.
+[Phase 3b build notes](#phase-3b-build-notes-2026-10-26), [Phase 4 build notes](#phase-4-build-notes-2026-10-26)
+and [Phase 5 build notes](#phase-5-build-notes-2026-10-28) list where the build differs from this plan).
+Phase 6 is next. Planned 2026-10-22.
 
-> **Build marker (2026-10-26): START HERE.** Phases 0 to 4 are done. Next, when the user says go, is
-> phase 5 (section 15): the `limit_test` pattern with the tests of section 6.3, `expect`, and
-> the rate-limit analysis in the report. Build on what exists: `pattern.rs` (a new pattern is a variant
-> compiled into stages, with its validation and schema), `live.rs` (the stage log and the closed loops
-> show how per-second results are judged; findings go in the report), `report.rs`, the test proxy in
-> `test_proxy.rs` (it needs the limiters the phase is tested against: fixed window, sliding window, token
-> bucket, per-node local counters), and the server side of section 7 for upstream protection. Tests that
-> need many identities or forwarded addresses (`many_keys`, `many_ips`) may use a simple pool now; the
-> credential and address pools proper are phase 6.
+> **Build marker (2026-10-28): START HERE.** Phases 0 to 5 are done. Next, when the user says go, is
+> phase 6 (section 15): mock-driven traffic (a layer `source: { mock: <name> }` with per-operation weights,
+> an invalid fraction and stateful create then read, built from the mock's compiled revision the way
+> `src/mocks/mcp.rs` builds tools) and identities (the layer's `identities` block: credential pools, JWTs
+> minted by the built-in IdP, OAuth client credentials against the gateway, `X-Forwarded-For` pools,
+> source address binding), with a per-credential breakdown in the report. Build on what exists: the
+> `limit_test` identity pool (`TestReq` in `engine.rs`, `{{id}}` and `{{ip}}`, `identity_ip`) is the
+> simple form phase 6 generalises, and `ratelimit.rs` already follows identities one by one (the first
+> 64); the live change `identities` comes with it.
 >
 > Keep this status line and `docs/src/roadmap.md` ("Next") updated as phases land. Commit as oliwynn.
 
@@ -1106,6 +1107,76 @@ What phase 4 built, and where it differs from sections 6.2, 6.4 and 6.5:
   waits for it only at the end, before the report. Layer slots kept free for `add_layer` are skipped
   when nothing was recorded in them.
 
+### Phase 5 build notes (2026-10-28)
+
+What phase 5 built, and where it differs from section 6.3:
+
+- **Files**: `limit_test.rs` (the `limit_test` pattern: its parameters, the stages each test compiles
+  into, what the engine adds while it runs, validation, schema), `ratelimit.rs` (the rate-limit headers,
+  the accumulator, the analysis and its text), reference limiters in `test_proxy.rs`, `limit_tests.rs`
+  (every done-when test of section 15, the analysis around them, and a cluster run).
+- **`expect`** on a layer: `limit` per `window`, `per` (`key` by default), plus `burst` (a token
+  bucket's allowance: over-admission counts from limit plus burst), `status` (the refusal statuses,
+  429 by default; `Counts.limited` and `Bucket.limited` count them for every layer) and `node_header`
+  (a response header naming the gateway node). A `limit_test` without `limit` or `window` takes the
+  layer's `expect` (filled in by `normalise`, and for `add_layer`).
+- **Layer thresholds live on the layer** (`layers[].thresholds: {rate_limited, over_admission,
+  under_admission}`), not under `thresholds.layers.<name>` as section 6's example has them: they travel
+  with the layer (`add_layer` too) and the console builder renders them without a map editor. They
+  report as `layers.<name>.<threshold>`.
+- **The tests' parameters**: `factor` (`over_limit` 10, `distributed` 4, `many_keys` and `many_ips` 5,
+  `retry_wave` 3), `fraction` (`just_under`, 0.9), `for`, `cycles` (3), `size` (the limit), `within`
+  (a tenth of the window, at most 100 ms; 10 ms for `concurrency`), `every`, `identities` (20),
+  `header`, `retries` (3), `honour_retry_after`, `retry_delay`, `from` / `to` / `over` (`slow_rise`),
+  `min` / `max` / `steps` (`limit_probe`), `align` (`clock` or `start`) and `recover` (after the
+  test, half the limit for that long, to measure the recovery). Validation names a parameter a test does
+  not take. A limit test needs the open model.
+- **`window_edge` bursts at every other boundary**: with a burst on each side of every boundary, each
+  fixed window holds an after-burst and a before-burst and refuses the second, so nothing doubles. The
+  stage's period is two windows (shape `edge`): one burst `within` ending a quarter of `within` before
+  an even boundary, one starting as long after it. `window_edge` and `distributed` stages are aligned
+  to the wall clock (`Stage.aligned`, `Ctx.wall`, the run's Unix start time, a cluster's synchronised
+  start on every node); holds and skips are not followed by the alignment.
+- **Identities are a simple pool** for `many_keys` and `many_ips` only: the request's identity is its
+  layer sequence number modulo `identities`, `{{id}}` and `{{ip}}` (198.18.0.0/15, RFC 2544) are
+  placeholders for every layer (0 and 198.18.0.0 outside a pool), and `many_ips` sets the forwarded
+  header unless the template does. `many_keys` must use `{{id}}`. Real source addresses are phase 6.
+- **`retry_wave`**: a refused request is retried with a new sequence number, the same identity and
+  target, at once (`retry_delay`) or after its `Retry-After` (at most 60 s). Retries count in the
+  layer's sent and in flight while they wait, and are dropped once the scheduler stops (no load after
+  the patterns end).
+- **`limit_probe` is a closed loop** like `breakpoint`: the probe stage is `closed`, the loop halves
+  the range every `every` (whole seconds, at least 2 s), judging the probe's second half on the run's
+  refusals per second (`Bucket.limited`, all layers: run it on its own), and reports the highest rate
+  without a refusal as a `limit_probe` finding. The run's leader runs it on a cluster.
+- **The analysis counts by send time** in cells of a twentieth of the window (10 ms to 1 s) on a grid
+  whose windows start on the wall clock (or at the layer's start with `align: start`), at most 36 000
+  cells per layer. Over-admission is the worst window-long span (to within a cell) over limit plus
+  burst, as a fraction of the limit; under-admission the mean shortfall in windows that sent more than
+  the limit. The measured window is the median spacing of admission resuming after refusals (a limiter
+  that refills all at once). The first 64 identities, 16 gateway nodes (targets, or `node_header`
+  values) and 3600 windows each are followed one by one. Collateral damage looks at the layers without
+  a limit test during the test stages' planned times; recovery at the `recover` stage.
+- **Headers**: `RateLimit` in every IETF draft form (`limit=, remaining=`, `r=` with
+  `RateLimit-Policy: q=`, and `RateLimit-Limit` / `-Remaining` / `-Reset`), `X-RateLimit-*` and
+  `Retry-After` (seconds or a date). Whether the remaining count counts down is judged on completion
+  order, worker by worker, for layers with one identity.
+- **Upstream protection**: the marker carries the layer index (`l=`, signed), the server side counts
+  arrivals by layer (`ServerReport.by_layer`), and the analysis compares what reached it with what was
+  admitted: more is a limiter that forwards and rewrites the answer. Refusals that carry the run's
+  served-by tag were made by the upstream itself (`limited_by_upstream`) and are said so, not counted
+  against the gateway.
+- **Clusters**: each client node counts its own answers; the counters travel in the final stats only
+  (`NodeStats.limits`) and the leader merges them before the analysis, so a node that never delivered
+  its final stats is missing from it (as `unreported` says).
+- **Workers buffer observations** (at most 65 536 between two rolls; more are counted as dropped) and
+  the roller thread counts them into the run's accumulators: a per-worker accumulator indexed by run time
+  would grow with the run on every roll.
+- **Surfaces**: the schema (the `limit_test` variant, `expect`, layer `thresholds`, the placeholders),
+  so `list_patterns`, the MCP tool schemas and the console builder have them; the report's
+  `rate_limits` and its text section; the analysis in the console's report and in the MCP
+  `get_run_report` summary; built-ins `rate-limit`, `limit-probe` and `many-ips`. No new routes.
+
 ### Estimate (2026-10-22)
 
 About 16 to 19 days of build sessions, after the mock MCP server (1 to 2 days). This is calibrated on the
@@ -1119,7 +1190,7 @@ earlier plans: OpenAPI mocks about 2 days, management MCP about 3, hosted mocks 
 | 3. Cluster | 2 |
 | 3b. Leadership and failover | 2 to 3 |
 | 4. Patterns, scale and live tuning | 2 |
-| 5. Rate-limit tests and analysis | 2 |
+| 5. Rate-limit tests and analysis | 2 (done, 2026-10-28) |
 | 6. Mock-driven traffic and identities | 1 |
 | 7. Faults and protocols | 2 to 3 |
 | 8. Docs and conformance | 1 |

@@ -192,6 +192,8 @@ pub struct Marker {
     pub node: String,
     pub seq: u64,
     pub vu: u32,
+    /// The layer of the run the request belongs to (by index).
+    pub layer: u32,
     /// Unix nanoseconds at the client when the request was built.
     pub sent_ns: u64,
     /// The header names the client set (lower case), covered by `hd`.
@@ -213,11 +215,12 @@ fn safe_token(s: &str) -> bool {
 impl Marker {
     fn message(&self) -> String {
         format!(
-            "{VERSION}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "{VERSION}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             self.run,
             self.node,
             self.seq,
             self.vu,
+            self.layer,
             self.sent_ns,
             self.names.join(","),
             self.headers_digest,
@@ -238,11 +241,12 @@ impl Marker {
     /// The header value.
     pub fn to_header(&self) -> String {
         format!(
-            "{VERSION}; run={}; node={}; seq={}; vu={}; sent={}; h={}; hd={}; b={}; p={}; sig={}",
+            "{VERSION}; run={}; node={}; seq={}; vu={}; l={}; sent={}; h={}; hd={}; b={}; p={}; sig={}",
             self.run,
             self.node,
             self.seq,
             self.vu,
+            self.layer,
             self.sent_ns,
             self.names.join(","),
             self.headers_digest,
@@ -266,6 +270,7 @@ impl Marker {
             node: String::new(),
             seq: 0,
             vu: 0,
+            layer: 0,
             sent_ns: 0,
             names: Vec::new(),
             headers_digest: String::new(),
@@ -280,6 +285,7 @@ impl Marker {
                 "node" => m.node = v.to_string(),
                 "seq" => m.seq = v.parse().ok()?,
                 "vu" => m.vu = v.parse().ok()?,
+                "l" => m.layer = v.parse().ok()?,
                 "sent" => m.sent_ns = v.parse().ok()?,
                 "h" => {
                     m.names = v
@@ -431,6 +437,8 @@ pub struct ServerStats {
     pub arrivals: u64,
     pub by_node: HashMap<String, u64>,
     pub by_route: HashMap<String, u64>,
+    /// By layer index (upstream protection in the rate-limit analysis).
+    pub by_layer: HashMap<String, u64>,
     pub statuses: HashMap<u16, u64>,
     processing: Histogram<u64>,
     pub headers_changed: u64,
@@ -452,6 +460,7 @@ impl ServerStats {
             arrivals: 0,
             by_node: HashMap::new(),
             by_route: HashMap::new(),
+            by_layer: HashMap::new(),
             statuses: HashMap::new(),
             processing: super::report::histogram(2),
             headers_changed: 0,
@@ -519,6 +528,7 @@ impl ServerStats {
         self.arrivals += 1;
         bump(&mut self.by_node, &marker.node, MAX_LABELS);
         bump(&mut self.by_route, route, MAX_ROUTES);
+        bump(&mut self.by_layer, &marker.layer.to_string(), MAX_LABELS);
         *self.statuses.entry(status).or_default() += 1;
         self.processing.saturating_record(
             u64::try_from(processing.as_micros())
@@ -556,6 +566,7 @@ impl ServerStats {
             arrivals: self.arrivals,
             by_node: sorted(&self.by_node),
             by_route: sorted(&self.by_route),
+            by_layer: sorted(&self.by_layer),
             statuses: {
                 let mut v: Vec<(String, u64)> = self
                     .statuses
@@ -597,6 +608,9 @@ pub struct ServerReport {
     pub arrivals: u64,
     pub by_node: std::collections::BTreeMap<String, u64>,
     pub by_route: std::collections::BTreeMap<String, u64>,
+    /// Arrivals by layer index.
+    #[serde(default)]
+    pub by_layer: std::collections::BTreeMap<String, u64>,
     pub statuses: std::collections::BTreeMap<String, u64>,
     /// Upstream processing time (`Server-Timing: rb`).
     pub processing: Percentiles,
@@ -839,6 +853,7 @@ mod tests {
             node: "node-1".into(),
             seq: 42,
             vu: 3,
+            layer: 1,
             sent_ns: 1_700_000_000_000_000_000,
             names: vec!["accept".into(), "x-demo".into()],
             headers_digest: "0123abcd".into(),

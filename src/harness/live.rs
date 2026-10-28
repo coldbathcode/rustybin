@@ -19,7 +19,9 @@
 //!   layers together) as they complete: `target` on `overhead_p99_ms` moves
 //!   the layer's rate toward the overhead goal every second; `breakpoint`
 //!   judges each plateau when it ends and stops the run at the first that
-//!   fails a threshold, with the last good rate in the report's findings. On
+//!   fails a threshold, with the last good rate in the report's findings;
+//!   `limit_probe` (a `limit_test`) halves the range of rates every probe,
+//!   by whether the probe's second half saw a rate-limit refusal. On
 //!   a single node the engine runs them; in a cluster the leader does, on the
 //!   merged results, and the nodes follow the controls.
 
@@ -29,7 +31,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::engine::Share;
+use super::limit_test::{Behaviour, TestKind};
 use super::pattern::{seed_of, Compiled, Ctx, Pattern, Shape, SyncMode};
+use super::ratelimit::Grid;
 use super::report::Bucket;
 use super::scenario::{Caps, Layer, Model, Scenario, MAX_LAYERS};
 
@@ -165,6 +169,17 @@ pub struct LoopState {
     /// The stage the loop has finished with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_stage: Option<usize>,
+    /// `limit_probe`: the range of rates left (the highest without a
+    /// refusal, the lowest with one), the probes done, and the current
+    /// probe's seconds and refusals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lo: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hi: Option<f64>,
+    #[serde(default)]
+    pub probes: u32,
+    #[serde(default)]
+    pub probe_limited: u64,
 }
 
 /// The live state of one layer.
@@ -468,8 +483,10 @@ impl Controls {
             } else if names.len() >= MAX_LAYERS {
                 problems.push(format!("add_layer: a run has at most {MAX_LAYERS} layers"));
             } else {
+                let mut layer = layer.clone();
+                super::scenario::fill_limit_tests(&mut layer);
                 c.added.push(AddedLayer {
-                    layer: layer.clone(),
+                    layer,
                     at_secs: now.max(0.0),
                 });
                 c.control(names.len());
@@ -642,6 +659,14 @@ pub struct LiveLayer {
     pub ctx: Ctx,
     /// Cumulative weights of the layer's request templates.
     pub weights: Vec<u32>,
+    /// The statuses that count as a rate-limit refusal.
+    pub limited: Vec<u16>,
+    /// What the engine adds while a test runs, by pattern of the chain.
+    pub behaviours: Vec<Option<Behaviour>>,
+    /// The rate-limit analysis grid (runs that analyse rate limits).
+    pub grid: Option<Grid>,
+    /// The header naming the gateway node (`expect.node_header`).
+    pub node_header: Option<String>,
 }
 
 /// A layer's level at an instant.
@@ -664,6 +689,9 @@ pub struct LiveView {
     pub multiplier: f64,
     pub paused: bool,
     pub stop: Option<String>,
+    /// A layer asks for the rate-limit analysis: every layer is counted
+    /// (the others for collateral damage).
+    pub analysed: bool,
 }
 
 fn cumulative(weights: impl Iterator<Item = u32>) -> Vec<u32> {
@@ -704,21 +732,63 @@ impl LiveView {
                     ctx: Ctx {
                         seed,
                         phase: if node { share.from } else { 0.0 },
+                        wall: 0.0,
                     },
+                    limited: def.limited_statuses(),
+                    behaviours: def
+                        .pattern
+                        .limit_tests()
+                        .into_iter()
+                        .map(|t| t.map(|t| t.behaviour()))
+                        .collect(),
+                    grid: None,
+                    node_header: def
+                        .expect
+                        .as_ref()
+                        .and_then(|e| e.node_header.as_ref())
+                        .map(|h| h.to_ascii_lowercase()),
                     def,
                     compiled,
                     starts_at,
                     weights,
                 }
             })
-            .collect();
+            .collect::<Vec<LiveLayer>>();
+        let analysed = layers.iter().any(|l| l.def.analysed());
         Self {
             version: controls.version,
             layers,
             multiplier: controls.multiplier,
             paused: controls.paused,
             stop: controls.stop.clone(),
+            analysed,
         }
+    }
+
+    /// Put the view on the wall clock: `wall` is the Unix time (seconds) of
+    /// the run's start. Stages aligned to the wall clock's windows shift to
+    /// them, and the layers get their rate-limit grids.
+    pub fn with_wall(mut self, wall: Option<f64>) -> Self {
+        let Some(wall) = wall else {
+            return self;
+        };
+        let analysed = self.analysed;
+        for l in &mut self.layers {
+            l.ctx.wall = wall + l.starts_at;
+            if analysed {
+                l.grid = Some(super::ratelimit::grid_for(&l.def, l.starts_at, wall));
+            }
+        }
+        self
+    }
+
+    /// The rate-limit test running in layer `i` at run time `t`: the
+    /// pattern of the chain it comes from and what the engine adds.
+    pub fn behaviour(&self, i: usize, t: f64) -> Option<(usize, &Behaviour)> {
+        let l = self.layers.get(i)?;
+        let (stage, _) = self.position(i, t)?;
+        let chain = l.compiled.stages.get(stage)?.pattern;
+        l.behaviours.get(chain)?.as_ref().map(|b| (chain, b))
     }
 
     /// The pattern time of layer `i` at run time `t`.
@@ -990,6 +1060,56 @@ pub fn run_loops(
                     lc.watch.p99_ms = lc.watch.p99_ms.max(b.p99_ms);
                     lc.watch.overhead_p99_ms = lc.watch.overhead_p99_ms.max(b.overhead_p99_ms);
                 }
+                Shape::Closed { initial, .. } if matches!(chain.get(stage.pattern), Some(Pattern::LimitTest(t)) if t.test == TestKind::LimitProbe) =>
+                {
+                    let Some(Pattern::LimitTest(t)) = chain.get(stage.pattern) else {
+                        continue;
+                    };
+                    let every = (t.every_secs().round() as u32).max(2);
+                    // The first half of a probe settles (a window the last
+                    // probe used up); the second half decides.
+                    let settle = every / 2;
+                    let w = &mut lc.watch;
+                    if w.hi.is_none() {
+                        w.lo = Some(t.probe_min());
+                        w.hi = Some(t.probe_max());
+                    }
+                    w.seconds += 1;
+                    if w.seconds > settle {
+                        w.probe_limited += b.limited;
+                    }
+                    if w.seconds < every {
+                        continue;
+                    }
+                    let current = lc.value.unwrap_or(*initial);
+                    if w.probe_limited > 0 {
+                        w.hi = Some(current);
+                    } else {
+                        w.lo = Some(current);
+                    }
+                    w.probes += 1;
+                    w.seconds = 0;
+                    w.probe_limited = 0;
+                    let (lo, hi) = (w.lo.unwrap_or(0.0), w.hi.unwrap_or(0.0));
+                    if w.probes >= t.steps() {
+                        w.done_stage = Some(si);
+                        lc.value = Some(lo);
+                        findings.push(Finding {
+                            layer: l.def.name.clone(),
+                            kind: "limit_probe".into(),
+                            at_secs: mid,
+                            rate: Some(lo),
+                            failed_at: Some(hi),
+                            failed: Vec::new(),
+                            summary: format!(
+                                "limit_probe of {}: no refusal up to {lo:.2} requests per second, refusals from {hi:.2} (after {} probes)",
+                                l.def.name, w.probes
+                            ),
+                        });
+                    } else {
+                        lc.value = Some(((lo + hi) / 2.0 * 100.0).round() / 100.0);
+                    }
+                }
                 Shape::Closed { initial, max } => {
                     let goal = match chain.get(stage.pattern) {
                         Some(Pattern::Target {
@@ -1154,6 +1274,7 @@ fn judge(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::scenario::Dur;
 
     fn scenario(yaml_layers: &str) -> Scenario {
         let mut s = Scenario::parse(&format!(
@@ -1297,6 +1418,28 @@ mod tests {
             .unwrap();
         assert_eq!(view(&s, &c).level(1, 9.0), Level::Ended);
         assert_eq!(c.layer_names(&s), vec!["a", "b", "late"]);
+    }
+
+    #[test]
+    fn an_added_limit_test_takes_its_layers_expect() {
+        let s = two_layers();
+        let c = Controls::for_scenario(&s);
+        let next = c
+            .apply(
+                &s,
+                &change(
+                    r#"{"add_layer": {"name": "heavy", "source": {"request": {"path": "/x"}}, "pattern": {"type": "limit_test", "test": "over_limit", "for": "2s"}, "expect": {"limit": 5, "window": "1s"}}}"#,
+                ),
+                1.0,
+            )
+            .unwrap();
+        let problems = next.check(&s, &Caps::default(), 1.0);
+        assert!(problems.is_empty(), "{problems:?}");
+        let layers = next.effective_layers(&s);
+        match &layers.last().unwrap().0.pattern {
+            Pattern::LimitTest(t) => assert_eq!((t.limit, t.window), (Some(5), Some(Dur::secs(1)))),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

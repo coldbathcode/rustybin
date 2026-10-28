@@ -291,6 +291,10 @@ pub struct Counts {
     /// limit, an auth failure, a gateway error, a cached answer).
     #[serde(default)]
     pub gateway: u64,
+    /// Answered with a status the layer counts as a rate-limit refusal
+    /// (`expect.status`, 429 by default).
+    #[serde(default)]
+    pub limited: u64,
     /// Sent, seen by no server, no answer: the gateway swallowed it
     /// (counted after the run from the transport failures).
     #[serde(default)]
@@ -338,6 +342,7 @@ impl Counts {
         self.transport += other.transport;
         self.upstream += other.upstream;
         self.gateway += other.gateway;
+        self.limited += other.limited;
         self.lost += other.lost;
         self.transport_after_upstream += other.transport_after_upstream;
         self.transport_untracked += other.transport_untracked;
@@ -392,6 +397,9 @@ pub struct Bucket {
     pub upstream: u64,
     #[serde(default)]
     pub gateway: u64,
+    /// Rate-limit refusals (the layers' `expect.status`, 429 by default).
+    #[serde(default)]
+    pub limited: u64,
     /// Answers per second, counted by completion time.
     pub rate: f64,
     /// From the intended send time.
@@ -428,6 +436,7 @@ impl Bucket {
         self.status_5xx += other.status_5xx;
         self.upstream += other.upstream;
         self.gateway += other.gateway;
+        self.limited += other.limited;
         self.rate = self.completed as f64 / self.width_secs.max(1e-9);
         self.p50_ms = self.p50_ms.max(other.p50_ms);
         self.p99_ms = self.p99_ms.max(other.p99_ms);
@@ -582,6 +591,10 @@ pub struct Report {
     /// `breakpoint` on their own), with the run's results during each.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stages: Vec<StageReport>,
+    /// The rate-limit analysis of the layers that ask for it (an `expect`,
+    /// a `limit_test` or rate-limit thresholds).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rate_limits: Vec<super::ratelimit::RateLimitReport>,
 }
 
 /// One stage (or plateau) of a layer as it ran. The numbers are the
@@ -1046,6 +1059,13 @@ impl Report {
                 out.push_str(&format!("  {}\n", f.summary));
             }
         }
+        if !self.rate_limits.is_empty() {
+            out.push_str("\nRate limits\n");
+            for line in super::ratelimit::to_text(&self.rate_limits) {
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
         if !self.changes.is_empty() {
             out.push_str("\nLive changes:\n");
             for c in &self.changes {
@@ -1256,6 +1276,7 @@ mod tests {
             findings: Vec::new(),
             changes: Vec::new(),
             stages: Vec::new(),
+            rate_limits: Vec::new(),
         }
     }
 

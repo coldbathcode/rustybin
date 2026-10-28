@@ -2,12 +2,13 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Load test mode (harness): phases 1 to 4 built, phase 5 next
+## Load test mode (harness): phases 1 to 5 built, phase 6 next
 
 [docs/plans/harness.md](docs/plans/harness.md) (planned 2026-10-22; phase 0, the engine spike in
 `examples/harness_spike.rs`, phase 1, the single-node engine in `src/harness/`, and phase 2, correlation, done
-2026-10-25; phase 3, the cluster, phase 3b, failover, and phase 4, patterns and live tuning, done 2026-10-26; the
-plan's "Phase 1/2/3/3b/4 build notes" list where the build differs; phase 5, the rate-limit tests, is next):
+2026-10-25; phase 3, the cluster, phase 3b, failover, and phase 4, patterns and live tuning, done 2026-10-26; phase
+5, the rate-limit tests, done 2026-10-28; the plan's "Phase 1/2/3/3b/4/5 build notes" list where the build differs;
+phase 6, mock-driven traffic and identities, is next):
 Rustybin as a load client and correlating upstream, single node (loop-through) or a cluster (an elected leader,
 clients, servers), traffic layers with run patterns and rate-limit tests, every parameter from one schema in the
 API, MCP and console (tunable live), or headless. It is the first feature that sends load to targets the caller
@@ -156,9 +157,11 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
 - `src/harness/`: load test mode (`RUSTYBIN_HARNESS`), see above. `mod.rs` (roles, `check_startup`, the `Harness`
   state in `AppState.harness` with bounded runs, target verification, router, catalogue, OpenAPI, headless mode),
   `safety.rs`, `scenario.rs` (model, `Caps`, validation, JSON Schema, preview), `pattern.rs` (every run pattern
-  compiled into stages with an exact value and integral, `then`, jitter, sync), `live.rs` (live changes: `Change`,
-  the versioned `Controls` every node applies, the `LiveView` the scheduler evaluates, the stage log, the closed
-  loops `target` and `breakpoint`), `saved.rs` (saved scenarios, `RUSTYBIN_HARNESS_STATE_DIR`),
+  compiled into stages with an exact value and integral, `then`, jitter, sync, wall-clock alignment),
+  `limit_test.rs` (the `limit_test` pattern: its tests, their stages, identity pools, retries), `ratelimit.rs`
+  (rate-limit headers, the per-layer `LimitAcc` merged across nodes, the analysis in the report's `rate_limits`),
+  `live.rs` (live changes: `Change`, the versioned `Controls` every node applies, the `LiveView` the scheduler
+  evaluates, the stage log, the closed loops `target`, `breakpoint` and `limit_probe`), `saved.rs` (saved scenarios, `RUSTYBIN_HARNESS_STATE_DIR`),
   `engine.rs` (own tokio runtime, a scheduler thread per run, `PinnedConnector` with TLS and ALPN, per-worker
   histogram shards rolled into a per-second timeline by a roller thread, closed-model users, saturation, the marker on every
   request and the classification of every answer), `correlate.rs` (the run key, the signed marker and tag,
@@ -168,7 +171,8 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   `api.rs` (handlers, the `PATCH` changes and the SSE run feeds; 404 when off except status, schema, scenarios,
   validate and preview), `cli.rs` (`rustybin
   harness run | validate | report`), `scenarios/*.yaml` (built-ins), `test_proxy.rs` (tests: a misbehaving
-  gateway), `live_tests.rs` (patterns, loops and live changes through the test proxy). MCP tools in `src/mcp/manage/harness.rs` (`Right::Harness`), console view `ui/views/harness.js`,
+  gateway with reference rate limiters), `live_tests.rs` (patterns, loops and live changes through the test
+  proxy), `limit_tests.rs` (the rate-limit tests against the proxy's limiters). MCP tools in `src/mcp/manage/harness.rs` (`Right::Harness`), console view `ui/views/harness.js`,
   `rustybin_harness_*` in `metrics.rs`. The `harness` control scope (`control_auth::Grant`). Clusters:
   `cluster.rs` (the leader: `Coordinator`, `Cluster`, `ClusterRun`, split, merge, report), `member.rs` (the
   agent each member runs: join, heartbeat, lease, clock, and the candidate and voter rules), `wire.rs` (the

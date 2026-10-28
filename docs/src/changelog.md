@@ -214,6 +214,23 @@ API, AI and agent gateway demos.
   `scale.scale_timeout`; `scale.connections_per_client`. MCP tools `list_patterns`,
   `preview_scenario`, `save_scenario`, `update_run`; in the console, a preview chart,
   saved scenarios, live run controls and the feed.
+- **Harness rate-limit tests** (phase 5): a layer's `expect` (`limit` per `window`,
+  `per` key, ip, consumer, route or global, a `burst` allowance, the refusal `status`, a
+  `node_header`) and the `limit_test` pattern with ten tests: `over_limit`,
+  `window_edge` (bursts around window boundaries on the wall clock), `just_under`,
+  `distributed` (every client node at the same window start, over every target),
+  `many_keys` and `many_ips` (identity pools: `{{id}}`, `{{ip}}`, rotating forwarded
+  addresses from 198.18.0.0/15), `retry_wave` (refusals retried at once or after
+  `Retry-After`), `concurrency`, `slow_rise` and `limit_probe` (a closed loop: a binary
+  search for the effective limit), each with an optional `recover` stage. The report's
+  `rate_limits`: admission per window and in the worst window-long span, over- and
+  under-admission, the first refusal, recovery, the measured window, identities and
+  gateway nodes, the rate-limit headers (IETF `RateLimit` drafts, `X-RateLimit-*`,
+  `Retry-After`), upstream protection from the server side's arrivals by layer,
+  collateral damage to the other layers, and findings; per-layer `thresholds`
+  (`rate_limited`, `over_admission`, `under_admission`). Counted on every client node
+  and merged by the leader. Built-ins `rate-limit`, `limit-probe` and `many-ips`; the
+  analysis in the console's report and the MCP report summary.
 
 ### Changed
 

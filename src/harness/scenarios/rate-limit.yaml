@@ -1,0 +1,43 @@
+# A rate-limit test next to legitimate traffic: heavy_user bursts around
+# the limiter's window boundaries (a fixed window admits both bursts), then
+# sends at half its limit to show the recovery, while customers stay under
+# their own limit and must never be refused (collateral damage). Set the
+# gateway's limit for the apikey test-key to 100 per minute.
+name: rate-limit
+description: window_edge against a limit of 100 per minute next to legitimate customers, with the rate-limit analysis.
+targets:
+  - url: http://127.0.0.1:8080
+    weight: 1
+scale:
+  virtual_clients: 50
+layers:
+  - name: customers
+    source:
+      request:
+        path: /status/200
+        headers:
+          apikey: customer-key
+    pattern:
+      type: constant
+      rate: 1
+      for: 5m
+    thresholds:
+      rate_limited: 0
+  - name: heavy_user
+    source:
+      request:
+        path: /status/200
+        headers:
+          apikey: test-key
+    pattern:
+      type: limit_test
+      test: window_edge
+      cycles: 2
+      recover: 30s
+    expect:
+      limit: 100
+      window: 1m
+      per: key
+    thresholds:
+      over_admission: 0.02
+timeout: 10s

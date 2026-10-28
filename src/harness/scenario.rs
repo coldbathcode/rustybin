@@ -40,7 +40,7 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_THINK_TIME: Duration = Duration::from_secs(60);
 pub const MAX_STARTS_AFTER: Duration = Duration::from_secs(24 * 3600);
 /// Placeholders a request template may use.
-pub const PLACEHOLDERS: &[&str] = &["seq", "vu", "run", "node", "layer", "rand"];
+pub const PLACEHOLDERS: &[&str] = &["seq", "vu", "run", "node", "layer", "rand", "id", "ip"];
 
 // ── Durations ───────────────────────────────────────────────────────
 
@@ -444,6 +444,123 @@ pub struct Layer {
     /// request (default 0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub think_time: Option<Dur>,
+    /// What the gateway's rate limiter is configured to do for this layer
+    /// (section 6.3): the rate-limit analysis checks it against this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect: Option<Expect>,
+    /// The layer's own pass criteria (rate limiting).
+    #[serde(default, skip_serializing_if = "LayerThresholds::is_empty")]
+    pub thresholds: LayerThresholds,
+}
+
+impl Layer {
+    /// A layer with the defaults for everything but its name, source and
+    /// pattern.
+    pub fn new(name: impl Into<String>, source: Source, pattern: Pattern) -> Self {
+        Self {
+            name: name.into(),
+            source,
+            pattern,
+            model: Model::Open,
+            starts_after: None,
+            think_time: None,
+            expect: None,
+            thresholds: LayerThresholds::default(),
+        }
+    }
+
+    /// The statuses that mean the limiter refused a request (default 429).
+    pub fn limited_statuses(&self) -> Vec<u16> {
+        match &self.expect {
+            Some(e) if !e.status.is_empty() => e.status.clone(),
+            _ => vec![429],
+        }
+    }
+
+    /// Whether the layer asks for the rate-limit analysis: an `expect`, a
+    /// `limit_test` or rate-limit thresholds.
+    pub fn analysed(&self) -> bool {
+        self.expect.is_some()
+            || !self.thresholds.is_empty()
+            || self.pattern.limit_tests().iter().any(Option::is_some)
+    }
+}
+
+/// What a limit applies to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitScope {
+    /// Per API key (or other credential).
+    #[default]
+    Key,
+    /// Per client address.
+    Ip,
+    /// Per consumer (an identity the gateway resolves).
+    Consumer,
+    /// Per route, whoever calls it.
+    Route,
+    /// The whole service.
+    Global,
+}
+
+impl LimitScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LimitScope::Key => "key",
+            LimitScope::Ip => "ip",
+            LimitScope::Consumer => "consumer",
+            LimitScope::Route => "route",
+            LimitScope::Global => "global",
+        }
+    }
+}
+
+/// The rate limit a layer's traffic is expected to meet.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Expect {
+    /// Requests admitted per window.
+    pub limit: u64,
+    pub window: Dur,
+    #[serde(default)]
+    pub per: LimitScope,
+    /// Requests the limiter may admit on top of the limit at once (a token
+    /// bucket's burst allowance); over-admission counts from limit + burst.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst: Option<u64>,
+    /// Statuses that mean a refusal (default 429).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub status: Vec<u16>,
+    /// A response header naming the gateway node that answered (`via`, say):
+    /// admission is broken down by its values as well as by target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_header: Option<String>,
+}
+
+/// A layer's rate-limit pass criteria.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LayerThresholds {
+    /// Most answers the limiter may refuse, as a fraction (0: legitimate
+    /// traffic must never be throttled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limited: Option<f64>,
+    /// Most requests admitted over the expected limit in the worst window,
+    /// as a fraction of the limit (needs `expect`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub over_admission: Option<f64>,
+    /// Most the admitted requests may fall short of the limit in windows
+    /// where the layer sent more than it, as a fraction (needs `expect`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub under_admission: Option<f64>,
+}
+
+impl LayerThresholds {
+    pub fn is_empty(&self) -> bool {
+        self.rate_limited.is_none()
+            && self.over_admission.is_none()
+            && self.under_admission.is_none()
+    }
 }
 
 /// Upstream latency of the shaped endpoint, as a log-normal distribution
@@ -647,21 +764,23 @@ impl Scenario {
             || self.model.is_some()
             || self.think_time.is_some();
         if has_shorthand {
-            let layer = Layer {
-                name: "main".into(),
-                source: self.source.take().unwrap_or_default(),
-                pattern: self.pattern.take().unwrap_or(Pattern::Constant {
+            let mut layer = Layer::new(
+                "main",
+                self.source.take().unwrap_or_default(),
+                self.pattern.take().unwrap_or(Pattern::Constant {
                     rate: 0.0,
                     hold: Dur::secs(0),
                     jitter: None,
                     sync: None,
                     then: None,
                 }),
-                model: self.model.take().unwrap_or_default(),
-                starts_after: None,
-                think_time: self.think_time.take(),
-            };
+            );
+            layer.model = self.model.take().unwrap_or_default();
+            layer.think_time = self.think_time.take();
             self.layers.insert(0, layer);
+        }
+        for layer in &mut self.layers {
+            fill_limit_tests(layer);
         }
     }
 
@@ -970,6 +1089,7 @@ impl Scenario {
                 validate_template(t, &tp, &prefixes, &mut p);
             }
             layer.pattern.validate(&format!("{here}.pattern"), &mut p);
+            validate_limits(layer, &here, &mut p);
             // Which model a pattern needs: users for closed layers, rates
             // (and the closed loops) for open ones.
             for (k, part) in layer
@@ -1111,6 +1231,103 @@ impl Scenario {
             }
         }
         p
+    }
+}
+
+/// A `limit_test` without its own `limit` or `window` takes the layer's
+/// `expect`.
+pub fn fill_limit_tests(layer: &mut Layer) {
+    let Some(e) = layer.expect.clone() else {
+        return;
+    };
+    let mut i = 0;
+    while let Some(p) = layer.pattern.nth_mut(i) {
+        if let Pattern::LimitTest(t) = p {
+            if t.limit.is_none() && t.test != super::limit_test::TestKind::LimitProbe {
+                t.limit = Some(e.limit);
+            }
+            if t.window.is_none() {
+                t.window = Some(e.window);
+            }
+        }
+        i += 1;
+        if i > super::pattern::MAX_STAGES {
+            break;
+        }
+    }
+}
+
+/// Every problem with a layer's `expect` and rate-limit thresholds.
+fn validate_limits(layer: &Layer, here: &str, p: &mut Vec<String>) {
+    if let Some(e) = &layer.expect {
+        if e.limit == 0 || e.limit as f64 > super::pattern::MAX_VALUE {
+            p.push(format!(
+                "{here}.expect.limit: 1 to {} requests per window",
+                super::pattern::MAX_VALUE
+            ));
+        }
+        if e.window.0 < super::pattern::MIN_PERIOD || e.window.0 > Duration::from_secs(24 * 3600) {
+            p.push(format!("{here}.expect.window: 10ms to 24h"));
+        }
+        if e.burst
+            .is_some_and(|b| b as f64 > super::pattern::MAX_VALUE)
+        {
+            p.push(format!(
+                "{here}.expect.burst: at most {}",
+                super::pattern::MAX_VALUE
+            ));
+        }
+        if e.status.len() > 16 || e.status.iter().any(|s| !(100..=599).contains(s)) {
+            p.push(format!(
+                "{here}.expect.status: at most 16 statuses, 100 to 599"
+            ));
+        }
+        if let Some(h) = &e.node_header {
+            if h.len() > 64 || axum::http::HeaderName::from_bytes(h.as_bytes()).is_err() {
+                p.push(format!("{here}.expect.node_header: not a header name"));
+            }
+        }
+    }
+    let t = &layer.thresholds;
+    for (name, v) in [
+        ("rate_limited", t.rate_limited),
+        ("over_admission", t.over_admission),
+        ("under_admission", t.under_admission),
+    ] {
+        if let Some(v) = v {
+            if !v.is_finite() || !(0.0..=1000.0).contains(&v) {
+                p.push(format!("{here}.thresholds.{name}: a fraction, 0 or more"));
+            } else if name != "rate_limited" && layer.expect.is_none() {
+                p.push(format!(
+                    "{here}.thresholds.{name}: needs expect (the limit to compare with)"
+                ));
+            }
+        }
+    }
+    if t.rate_limited.is_some_and(|v| v > 1.0) {
+        p.push(format!("{here}.thresholds.rate_limited: 0 to 1"));
+    }
+    // A pool's identities must reach the request.
+    let tests = layer.pattern.limit_tests();
+    let pooled = tests
+        .iter()
+        .flatten()
+        .any(|t| t.test == super::limit_test::TestKind::ManyKeys);
+    if pooled {
+        let uses_id = layer.source.templates().iter().any(|t| {
+            placeholders(&t.path).iter().any(|p| p == "id" || p == "ip")
+                || t.headers
+                    .values()
+                    .any(|v| placeholders(v).iter().any(|p| p == "id" || p == "ip"))
+        });
+        if !uses_id {
+            p.push(format!(
+                "{here}.source: many_keys rotates identities through {{{{id}}}}: use it in a header (an API key) or the path"
+            ));
+        }
+    }
+    if layer.model == Model::Closed && tests.iter().any(Option::is_some) {
+        p.push(format!("{here}.pattern: a limit_test needs the open model"));
     }
 }
 
@@ -1408,7 +1625,10 @@ fn pattern_schema(max_rate: f64, max_dur: u64, then: &Value) -> Value {
                 "period": duration("How long one wave takes.", max_dur),
                 "shape": enumeration("Sine, triangle or sawtooth.", &["sine", "triangle", "sawtooth"], "sine"),
                 "for": duration("How long the pattern lasts.", max_dur)
-            }), &["min", "max", "period", "for"], then)
+            }), &["min", "max", "period", "for"], then),
+            pattern_variant("limit_test", "A rate-limit test: traffic that probes a limiter for a known weak spot. The report's rate-limit analysis says what the gateway did (admission per window, refusals, rate-limit headers, recovery, collateral damage, upstream protection). Set the layer's expect to judge it against the configured limit.",
+                super::limit_test::schema_properties(max_rate, max_dur, duration),
+                &["test"], then)
         ]
     })
 }
@@ -1426,7 +1646,7 @@ pub fn schema(caps: &Caps) -> Value {
     let pattern = pattern_schema(max_rate, max_dur, &pattern_then);
     let template = json!({
         "type": "object",
-        "description": "A request to send. Placeholders: {{seq}} (request number), {{vu}} (virtual client), {{run}}, {{node}}, {{layer}}, {{rand}}.",
+        "description": "A request to send. Placeholders: {{seq}} (request number), {{vu}} (virtual client), {{run}}, {{node}}, {{layer}}, {{rand}}, {{id}} (the identity of a limit test's pool, else 0) and {{ip}} (its address in 198.18.0.0/15).",
         "properties": {
             "method": enumeration("HTTP method.", &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], "GET"),
             "path": json!({ "type": "string", "description": "Path with an optional query, appended to the target URL. Never a Rustybin control plane path.", "default": "/", "maxLength": 2048, "pattern": "^/" }),
@@ -1465,7 +1685,38 @@ pub fn schema(caps: &Caps) -> Value {
             "pattern": { "$ref": "#/$defs/pattern" },
             "model": enumeration("Open: requests leave at their intended times whatever the answers (latency is measured from the intended send). Closed: the pattern gives the number of users, each waiting for its answer plus a think time.", &["open", "closed"], "open"),
             "starts_after": duration("Delay before the layer starts, relative to the run.", 24 * 3600),
-            "think_time": duration("Closed model: a user's pause between its answer and its next request.", 60)
+            "think_time": duration("Closed model: a user's pause between its answer and its next request.", 60),
+            "expect": {
+                "type": "object",
+                "description": "The rate limit the gateway is configured to apply to this layer's traffic: the rate-limit analysis checks admission per window against it.",
+                "properties": {
+                    "limit": integer("Requests admitted per window.", 1, super::pattern::MAX_VALUE as u64),
+                    "window": duration("The limiter's window.", 24 * 3600),
+                    // No `default` here: the console builder would fill it in and make
+                    // an untouched expect non-empty.
+                    "per": { "type": "string", "description": "What the limit counts by: key (an API key or other credential, the default), ip, consumer, route or global.", "enum": ["key", "ip", "consumer", "route", "global"] },
+                    "burst": integer("Requests the limiter may admit at once on top of the limit (a token bucket's burst allowance); over-admission counts from limit plus burst.", 0, super::pattern::MAX_VALUE as u64),
+                    "status": {
+                        "type": "array",
+                        "description": "Statuses that mean the limiter refused a request (default 429).",
+                        "items": integer("An HTTP status.", 100, 599),
+                        "maxItems": 16
+                    },
+                    "node_header": string("A response header naming the gateway node that answered (via, say): admission is broken down by its values as well as by target.", 64)
+                },
+                "required": ["limit", "window"],
+                "additionalProperties": false
+            },
+            "thresholds": {
+                "type": "object",
+                "description": "The layer's own pass criteria (rate limiting); a run that misses one fails.",
+                "properties": {
+                    "rate_limited": number("Most answers the limiter may refuse, as a fraction (0: legitimate traffic must never be throttled, the collateral damage check).", 0.0, 1.0),
+                    "over_admission": number("Most requests admitted over expect.limit (plus burst) in the worst window, as a fraction of the limit.", 0.0, 1000.0),
+                    "under_admission": number("Most the admitted requests may fall short of expect.limit in windows where the layer sent more than it, as a fraction of the limit.", 0.0, 1.0)
+                },
+                "additionalProperties": false
+            }
         },
         "required": ["name", "source", "pattern"],
         "additionalProperties": false
@@ -1789,6 +2040,8 @@ mod tests {
                     model: Model::Closed,
                     starts_after: Some(Dur::secs(1)),
                     think_time: Some(Dur::secs(1)),
+                    expect: None,
+                    thresholds: LayerThresholds::default(),
                 },
                 Layer {
                     name: "m".into(),
@@ -1798,12 +2051,25 @@ mod tests {
                     },
                     // Every other pattern type, chained.
                     pattern: serde_yaml::from_str(
-                        "type: step\nstart: 1\nstep: 1\nevery: 1s\nmax: 3\nhold: 1s\nthen:\n  type: spike\n  base: 1\n  peak: 5\n  rise: 1s\n  hold: 1s\n  fall: 1s\n  recover: 1s\n  then:\n    type: pulse\n    high: 4\n    low: 1\n    on: 1s\n    off: 1s\n    cycles: 2\n    then:\n      type: burst\n      base: 1\n      size: 2\n      within: 100ms\n      every: 1s\n      for: 2s\n      then:\n        type: wave\n        min: 1\n        max: 4\n        period: 2s\n        shape: triangle\n        for: 2s\n        then:\n          type: breakpoint\n          start: 1\n          growth: 0.5\n          every: 1s\n          max: 5\n          until: { error_rate: 0.01, latency_p99_ms: 500, overhead_p99_ms: 50 }\n          then:\n            type: target\n            overhead_p99_ms: 5\n            within: 1s\n            hold: 1s\n            start: 1\n            max: 10\n",
+                        "type: step\nstart: 1\nstep: 1\nevery: 1s\nmax: 3\nhold: 1s\nthen:\n  type: spike\n  base: 1\n  peak: 5\n  rise: 1s\n  hold: 1s\n  fall: 1s\n  recover: 1s\n  then:\n    type: pulse\n    high: 4\n    low: 1\n    on: 1s\n    off: 1s\n    cycles: 2\n    then:\n      type: burst\n      base: 1\n      size: 2\n      within: 100ms\n      every: 1s\n      for: 2s\n      then:\n        type: wave\n        min: 1\n        max: 4\n        period: 2s\n        shape: triangle\n        for: 2s\n        then:\n          type: breakpoint\n          start: 1\n          growth: 0.5\n          every: 1s\n          max: 5\n          until: { error_rate: 0.01, latency_p99_ms: 500, overhead_p99_ms: 50 }\n          then:\n            type: target\n            overhead_p99_ms: 5\n            within: 1s\n            hold: 1s\n            start: 1\n            max: 10\n            then:\n              type: limit_test\n              test: retry_wave\n              limit: 5\n              window: 1s\n              factor: 2\n              for: 1s\n              retries: 2\n              honour_retry_after: true\n              retry_delay: 10ms\n              recover: 1s\n              then:\n                type: limit_test\n                test: window_edge\n                size: 3\n                within: 100ms\n                cycles: 1\n                align: start\n",
                     )
                     .expect("chained patterns"),
                     model: Model::Open,
                     starts_after: None,
                     think_time: None,
+                    expect: Some(Expect {
+                        limit: 5,
+                        window: Dur::secs(1),
+                        per: LimitScope::Ip,
+                        burst: Some(1),
+                        status: vec![429, 503],
+                        node_header: Some("via".into()),
+                    }),
+                    thresholds: LayerThresholds {
+                        rate_limited: Some(0.5),
+                        over_admission: Some(0.1),
+                        under_admission: Some(0.2),
+                    },
                 },
             ],
             source: Some(Source {

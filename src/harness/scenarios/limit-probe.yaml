@@ -1,0 +1,26 @@
+# Measure a limit nobody wrote down: a binary search on the rate between 1
+# and 200 requests per second, a probe every 4 seconds, judged on whether
+# its second half saw a 429. The report names the effective limit and,
+# when the limiter refills all at once, its window.
+name: limit-probe
+description: Binary search for the effective rate limit between 1 and 200 requests per second.
+targets:
+  - url: http://127.0.0.1:8080
+    weight: 1
+scale:
+  virtual_clients: 50
+layers:
+  - name: probe
+    source:
+      request:
+        path: /status/200
+        headers:
+          apikey: test-key
+    pattern:
+      type: limit_test
+      test: limit_probe
+      min: 1
+      max: 200
+      steps: 8
+      every: 4s
+timeout: 10s
