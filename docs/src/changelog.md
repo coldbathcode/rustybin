@@ -231,6 +231,17 @@ API, AI and agent gateway demos.
   (`rate_limited`, `over_admission`, `under_admission`). Counted on every client node
   and merged by the leader. Built-ins `rate-limit`, `limit-probe` and `many-ips`; the
   analysis in the console's report and the MCP report summary.
+- **Harness mock-driven traffic and identities** (phase 6): a layer's source can be an
+  OpenAPI mock (`source: { mock: petstore }`): every operation of its live revision, with
+  generated parameters and bodies, `operations` (include, exclude, weights),
+  `invalid_fraction` (requests that expect a 4xx), `stateful` (a create followed by a
+  read of what it made) and `base_path`. A layer's `identities`: API keys (listed or
+  minted), JWTs minted by the node's built-in IdP (RS256 or the shared HS256 demo
+  secret), OAuth client credentials against an allowlisted token endpoint (fetched
+  before the run, cached, renewed), forwarded-address pools and source address binding.
+  The report breaks the answers down by operation and by credential (labels without
+  secrets) and says when invalid requests got through; listed keys and client secrets
+  are redacted. The `petstore-customers` built-in.
 
 ### Changed
 

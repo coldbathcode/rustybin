@@ -54,6 +54,8 @@ pub struct ProxyConfig {
     /// A rate limiter. Give several instances the same one for counters
     /// shared across the fleet, each its own for counters local to a node.
     pub limiter: Option<Arc<Limiter>>,
+    /// Record the values of this request header (the first 10 000).
+    pub record_header: Option<String>,
 }
 
 /// How a reference limiter counts.
@@ -283,6 +285,10 @@ pub struct Counters {
     pub over_capacity: AtomicU64,
     /// When each request arrived (the first 100 000).
     pub arrivals: std::sync::Mutex<Vec<std::time::Instant>>,
+    /// The values of `record_header`, as they arrived.
+    pub recorded: std::sync::Mutex<Vec<String>>,
+    /// The peers' addresses, as they arrived (the first 10 000).
+    pub peers: std::sync::Mutex<Vec<std::net::IpAddr>>,
 }
 
 struct Inner {
@@ -344,6 +350,35 @@ async fn forward(State(inner): State<Arc<Inner>>, req: Request) -> Response {
                 "over the test proxy's capacity",
             )
                 .into_response();
+        }
+    }
+    if let Some(name) = &inner.config.record_header {
+        let value = req
+            .headers()
+            .get(name.as_str())
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let mut rec = inner
+            .counters
+            .recorded
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if rec.len() < 10_000 {
+            rec.push(value);
+        }
+    }
+    if let Some(peer) = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+    {
+        let mut peers = inner
+            .counters
+            .peers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if peers.len() < 10_000 {
+            peers.push(peer.0.ip());
         }
     }
     let mut limit_headers = Vec::new();
@@ -479,7 +514,11 @@ pub async fn start_pool(upstreams: Vec<SocketAddr>, config: ProxyConfig) -> Prox
         .expect("bind test proxy");
     let addr = listener.local_addr().expect("proxy addr");
     let task = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
     });
     Proxy {
         addr,

@@ -409,7 +409,8 @@ impl RequestTemplate {
     }
 }
 
-/// Where a layer's requests come from.
+/// Where a layer's requests come from: request templates, or the
+/// operations of an OpenAPI mock (deployed on the client node).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Source {
@@ -419,13 +420,223 @@ pub struct Source {
     /// Several templates, picked by weight.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requests: Vec<RequestTemplate>,
+    /// A mock by name: every operation of its live revision on the client
+    /// node, with generated parameters and bodies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mock: Option<String>,
+    /// Which operations, and their weights (default: all, equally).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operations: Option<OperationFilter>,
+    /// The fraction of requests made invalid (a missing required field, a
+    /// wrong type); they expect a 4xx.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid_fraction: Option<f64>,
+    /// Create then read: a create (a POST on a collection) that succeeds is
+    /// followed by a read of the item it returned (the GET on the item path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stateful: Option<bool>,
+    /// The path the mock's routes start at on the target (default
+    /// `/mock/<name>`, as a Rustybin upstream serves it; `""` when the
+    /// gateway route maps the mock's own paths).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_path: Option<String>,
 }
 
+/// The operations of a mock source.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationFilter {
+    /// Only these operation ids (default: every operation).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+    /// Never these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+    /// Relative weights by operation id (default 1).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub weights: BTreeMap<String, u32>,
+}
+
+/// Most operation ids in an include or exclude list, or weights.
+pub const MAX_OPERATION_NAMES: usize = 256;
+
 impl Source {
-    /// Every template of the source, in order.
+    /// Every template of the source, in order (none for a mock source: its
+    /// requests are generated when the run starts).
     pub fn templates(&self) -> Vec<&RequestTemplate> {
         self.request.iter().chain(self.requests.iter()).collect()
     }
+
+    /// The path a mock source's requests start with.
+    pub fn mock_base_path(&self) -> String {
+        match (&self.base_path, &self.mock) {
+            (Some(p), _) => p.trim_end_matches('/').to_string(),
+            (None, Some(name)) => format!("/mock/{name}"),
+            (None, None) => String::new(),
+        }
+    }
+}
+
+/// The credentials and client addresses a layer's requests carry (section
+/// 6, phase 6). The layer cycles through `count` identities (default: the
+/// largest pool below); identity `n` takes the `n`th of each pool, wrapping.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Identities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_keys: Option<ApiKeys>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwt: Option<JwtMint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<OAuthClients>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forwarded: Option<Forwarded>,
+    /// Local addresses to send from (the host's own; connections bind to
+    /// them).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_addresses: Vec<String>,
+}
+
+/// API keys: listed, or minted as `<prefix><n>` (provision the same names
+/// in the gateway).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApiKeys {
+    /// The header that carries the key (default `apikey`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    /// A query parameter instead of a header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mint: Option<u32>,
+    /// Minted keys' prefix (default `harness-key-`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+}
+
+/// How minted JWTs are signed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JwtAlg {
+    /// The node's IdP key (its JWKS at `/oauth/jwks`).
+    #[default]
+    Rs256,
+    /// The demo HS256 secret, the same on every node.
+    Hs256,
+}
+
+/// JWTs minted by the client node's built-in IdP, one subject per identity.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JwtMint {
+    /// How many subjects (`<subject_prefix><n>`; default: the layer's count).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mint: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alg: Option<JwtAlg>,
+    /// Token lifetime (default 1h).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<Dur>,
+}
+
+/// One OAuth client.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OAuthClient {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+/// OAuth client credentials against a token endpoint (the gateway's or an
+/// IdP's): tokens are fetched before the run, cached, refreshed before they
+/// expire, and sent as bearer tokens.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OAuthClients {
+    /// Must be allowed by `RUSTYBIN_HARNESS_TARGETS`, like a target.
+    pub token_url: String,
+    pub clients: Vec<OAuthClient>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+}
+
+/// A pool of forwarded client addresses.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Forwarded {
+    /// Default `x-forwarded-for`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    pub count: u32,
+    /// IPv4 range the addresses come from (default 198.18.0.0/15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cidr: Option<String>,
+}
+
+/// Most listed API keys, minted keys, JWT subjects and forwarded addresses.
+pub const MAX_IDENTITIES: u32 = 100_000;
+/// Most JWT subjects (signed on first use).
+pub const MAX_JWT_SUBJECTS: u32 = 10_000;
+pub const MAX_OAUTH_CLIENTS: usize = 64;
+pub const MAX_SOURCE_ADDRESSES: usize = 16;
+
+impl Identities {
+    /// The number of identities the layer cycles through.
+    pub fn size(&self) -> u32 {
+        if let Some(c) = self.count {
+            return c.max(1);
+        }
+        let keys = self.api_keys.as_ref().map_or(0, |k| {
+            if k.values.is_empty() {
+                k.mint.unwrap_or(0)
+            } else {
+                k.values.len() as u32
+            }
+        });
+        [
+            keys,
+            self.jwt.as_ref().and_then(|j| j.mint).unwrap_or(0),
+            self.oauth.as_ref().map_or(0, |o| o.clients.len() as u32),
+            self.forwarded.as_ref().map_or(0, |f| f.count),
+            self.source_addresses.len() as u32,
+            1,
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(1)
+    }
+}
+
+/// An IPv4 CIDR (`198.18.0.0/15`): its first address and size.
+pub fn parse_cidr(text: &str) -> Option<(u32, u64)> {
+    let (ip, bits) = text.trim().split_once('/')?;
+    let ip: std::net::Ipv4Addr = ip.parse().ok()?;
+    let bits: u32 = bits.parse().ok()?;
+    if bits > 32 {
+        return None;
+    }
+    let size = 1u64 << (32 - bits);
+    let mask = if bits == 0 {
+        0
+    } else {
+        u32::MAX << (32 - bits)
+    };
+    Some((u32::from(ip) & mask, size))
 }
 
 /// One stream of traffic inside a run.
@@ -451,6 +662,9 @@ pub struct Layer {
     /// The layer's own pass criteria (rate limiting).
     #[serde(default, skip_serializing_if = "LayerThresholds::is_empty")]
     pub thresholds: LayerThresholds,
+    /// The credentials and addresses the layer's requests carry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identities: Option<Identities>,
 }
 
 impl Layer {
@@ -466,6 +680,7 @@ impl Layer {
             think_time: None,
             expect: None,
             thresholds: LayerThresholds::default(),
+            identities: None,
         }
     }
 
@@ -1070,9 +1285,16 @@ impl Scenario {
                 names.push(layer.name.clone());
             }
             let templates = layer.source.templates();
-            if templates.is_empty() {
+            if layer.source.mock.is_some() {
+                validate_mock_source(&layer.source, &here, &mut p);
+                if !templates.is_empty() {
+                    p.push(format!(
+                        "{here}.source: a mock or request templates, not both"
+                    ));
+                }
+            } else if templates.is_empty() {
                 p.push(format!(
-                    "{here}.source: a request (or requests) template is required (mock and llm sources come in a later phase)"
+                    "{here}.source: a request (or requests) template, or a mock, is required (llm sources come in a later phase)"
                 ));
             } else if templates.len() > MAX_REQUESTS_PER_LAYER {
                 p.push(format!(
@@ -1090,6 +1312,9 @@ impl Scenario {
             }
             layer.pattern.validate(&format!("{here}.pattern"), &mut p);
             validate_limits(layer, &here, &mut p);
+            if let Some(ids) = &layer.identities {
+                validate_identities(ids, &format!("{here}.identities"), &mut p);
+            }
             // Which model a pattern needs: users for closed layers, rates
             // (and the closed loops) for open ones.
             for (k, part) in layer
@@ -1253,6 +1478,201 @@ pub fn fill_limit_tests(layer: &mut Layer) {
         i += 1;
         if i > super::pattern::MAX_STAGES {
             break;
+        }
+    }
+}
+
+/// A mock name as the mock store takes it.
+pub fn valid_mock_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// The mock-only fields of a source, checked offline (whether the mock
+/// exists is the node's to say: [`super::Harness::check_sources`]).
+fn validate_mock_source(src: &Source, here: &str, p: &mut Vec<String>) {
+    if let Some(name) = &src.mock {
+        if !valid_mock_name(name) {
+            p.push(format!(
+                "{here}.source.mock: letters, digits, - _ . only, at most 64 characters"
+            ));
+        }
+    }
+    if let Some(f) = src.invalid_fraction {
+        if !f.is_finite() || !(0.0..=1.0).contains(&f) {
+            p.push(format!("{here}.source.invalid_fraction: 0 to 1"));
+        }
+    }
+    if let Some(ops) = &src.operations {
+        if ops.include.len() > MAX_OPERATION_NAMES
+            || ops.exclude.len() > MAX_OPERATION_NAMES
+            || ops.weights.len() > MAX_OPERATION_NAMES
+        {
+            p.push(format!(
+                "{here}.source.operations: at most {MAX_OPERATION_NAMES} names in each list"
+            ));
+        }
+        for (op, w) in &ops.weights {
+            if *w == 0 || *w > 1000 {
+                p.push(format!("{here}.source.operations.weights.{op}: 1 to 1000"));
+            }
+        }
+    }
+    if let Some(b) = &src.base_path {
+        if !(b.is_empty() || b.starts_with('/')) || b.len() > 512 || b.contains(['?', '#', ' ']) {
+            p.push(format!(
+                "{here}.source.base_path: empty or a path starting with /, no query"
+            ));
+        } else if safety::is_control_prefix(&format!("{b}/x")) {
+            p.push(format!(
+                "{here}.source.base_path: a run never targets a Rustybin control plane (/_rustybin, /ui)"
+            ));
+        }
+    }
+}
+
+fn header_name_ok(name: &str) -> bool {
+    name.len() <= 64 && axum::http::HeaderName::from_bytes(name.as_bytes()).is_ok()
+}
+
+fn text_ok(value: &str, max: usize) -> bool {
+    !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
+}
+
+/// Every problem with a layer's identities (whether the source addresses
+/// are local and the token URL allowed is the node's to say at start).
+fn validate_identities(ids: &Identities, here: &str, p: &mut Vec<String>) {
+    if ids.count.is_some_and(|c| c == 0 || c > MAX_IDENTITIES) {
+        p.push(format!("{here}.count: 1 to {MAX_IDENTITIES}"));
+    }
+    if let Some(k) = &ids.api_keys {
+        if k.header.is_some() && k.query.is_some() {
+            p.push(format!(
+                "{here}.api_keys: a header or a query parameter, not both"
+            ));
+        }
+        if let Some(h) = &k.header {
+            if !header_name_ok(h) {
+                p.push(format!("{here}.api_keys.header: not a header name"));
+            }
+        }
+        if let Some(q) = &k.query {
+            if !(1..=64).contains(&q.len())
+                || !q
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+            {
+                p.push(format!(
+                    "{here}.api_keys.query: letters, digits, - _ . only"
+                ));
+            }
+        }
+        match (k.values.is_empty(), k.mint) {
+            (true, None) => p.push(format!("{here}.api_keys: values or mint")),
+            (false, Some(_)) => p.push(format!("{here}.api_keys: values or mint, not both")),
+            _ => {}
+        }
+        if k.values.len() > MAX_IDENTITIES as usize {
+            p.push(format!("{here}.api_keys.values: at most {MAX_IDENTITIES}"));
+        }
+        if k.values
+            .iter()
+            .any(|v| !text_ok(v, 512) || axum::http::HeaderValue::from_str(v).is_err())
+        {
+            p.push(format!(
+                "{here}.api_keys.values: each 1 to 512 characters a header can carry"
+            ));
+        }
+        if k.mint.is_some_and(|m| m == 0 || m > MAX_IDENTITIES) {
+            p.push(format!("{here}.api_keys.mint: 1 to {MAX_IDENTITIES}"));
+        }
+        if k.prefix.as_ref().is_some_and(|x| {
+            x.len() > 64
+                || !x
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        }) {
+            p.push(format!(
+                "{here}.api_keys.prefix: letters, digits, - _ . only, at most 64"
+            ));
+        }
+    }
+    if let Some(j) = &ids.jwt {
+        if j.mint.is_some_and(|m| m == 0 || m > MAX_JWT_SUBJECTS) {
+            p.push(format!("{here}.jwt.mint: 1 to {MAX_JWT_SUBJECTS}"));
+        }
+        for (name, v, max) in [
+            ("subject_prefix", &j.subject_prefix, 64),
+            ("issuer", &j.issuer, 512),
+            ("audience", &j.audience, 512),
+            ("scope", &j.scope, 512),
+        ] {
+            if v.as_ref().is_some_and(|v| !text_ok(v, max)) {
+                p.push(format!("{here}.jwt.{name}: 1 to {max} characters"));
+            }
+        }
+        if j.ttl
+            .is_some_and(|t| t.0 < Duration::from_secs(1) || t.0 > Duration::from_secs(24 * 3600))
+        {
+            p.push(format!("{here}.jwt.ttl: 1s to 24h"));
+        }
+    }
+    if let Some(o) = &ids.oauth {
+        if ids.jwt.is_some() {
+            p.push(format!(
+                "{here}: jwt or oauth, not both (each sets the Authorization header)"
+            ));
+        }
+        if let Err(e) = safety::parse_target_url(&o.token_url) {
+            p.push(format!("{here}.oauth.token_url: {e}"));
+        }
+        if o.clients.is_empty() || o.clients.len() > MAX_OAUTH_CLIENTS {
+            p.push(format!("{here}.oauth.clients: 1 to {MAX_OAUTH_CLIENTS}"));
+        }
+        if o.clients
+            .iter()
+            .any(|c| !text_ok(&c.client_id, 512) || !text_ok(&c.client_secret, 512))
+        {
+            p.push(format!(
+                "{here}.oauth.clients: client_id and client_secret, 1 to 512 characters each"
+            ));
+        }
+        for (name, v) in [("scope", &o.scope), ("audience", &o.audience)] {
+            if v.as_ref().is_some_and(|v| !text_ok(v, 512)) {
+                p.push(format!("{here}.oauth.{name}: 1 to 512 characters"));
+            }
+        }
+    }
+    if let Some(f) = &ids.forwarded {
+        if f.count == 0 || f.count > MAX_IDENTITIES {
+            p.push(format!("{here}.forwarded.count: 1 to {MAX_IDENTITIES}"));
+        }
+        if f.header.as_ref().is_some_and(|h| !header_name_ok(h)) {
+            p.push(format!("{here}.forwarded.header: not a header name"));
+        }
+        match f.cidr.as_deref().map(parse_cidr) {
+            Some(None) => p.push(format!(
+                "{here}.forwarded.cidr: an IPv4 range (198.18.0.0/15)"
+            )),
+            Some(Some((_, size))) if u64::from(f.count) > size => p.push(format!(
+                "{here}.forwarded.count: more than the {size} addresses of the range"
+            )),
+            _ => {}
+        }
+    }
+    if ids.source_addresses.len() > MAX_SOURCE_ADDRESSES {
+        p.push(format!(
+            "{here}.source_addresses: at most {MAX_SOURCE_ADDRESSES}"
+        ));
+    }
+    for a in &ids.source_addresses {
+        if a.parse::<std::net::IpAddr>().is_err() {
+            p.push(format!(
+                "{here}.source_addresses: {a:?} is not an IP address"
+            ));
         }
     }
 }
@@ -1648,7 +2068,9 @@ pub fn schema(caps: &Caps) -> Value {
         "type": "object",
         "description": "A request to send. Placeholders: {{seq}} (request number), {{vu}} (virtual client), {{run}}, {{node}}, {{layer}}, {{rand}}, {{id}} (the identity of a limit test's pool, else 0) and {{ip}} (its address in 198.18.0.0/15).",
         "properties": {
-            "method": enumeration("HTTP method.", &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], "GET"),
+            // No `default`: the console builder would fill it in, and an untouched
+            // request would then sit next to a mock source.
+            "method": { "type": "string", "description": "HTTP method (default GET).", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
             "path": json!({ "type": "string", "description": "Path with an optional query, appended to the target URL. Never a Rustybin control plane path.", "default": "/", "maxLength": 2048, "pattern": "^/" }),
             "headers": json!({
                 "type": "object",
@@ -1669,10 +2091,24 @@ pub fn schema(caps: &Caps) -> Value {
     });
     let source = json!({
         "type": "object",
-        "description": "Where the layer's requests come from: one request template, or several picked by weight.",
+        "description": "Where the layer's requests come from: one request template, several picked by weight, or the operations of an OpenAPI mock.",
         "properties": {
             "request": template,
-            "requests": { "type": "array", "description": "Several templates, picked by weight.", "items": { "$ref": "#/$defs/request" }, "maxItems": MAX_REQUESTS_PER_LAYER }
+            "requests": { "type": "array", "description": "Several templates, picked by weight.", "items": { "$ref": "#/$defs/request" }, "maxItems": MAX_REQUESTS_PER_LAYER },
+            "mock": string("A mock by name (deployed on every client node): requests for its operations, with generated parameters and bodies, picked by weight.", 64),
+            "operations": {
+                "type": "object",
+                "description": "Mock source: which operations, and their weights (default: every operation, equally).",
+                "properties": {
+                    "include": { "type": "array", "description": "Only these operation ids.", "items": string("An operation id.", 256), "maxItems": MAX_OPERATION_NAMES },
+                    "exclude": { "type": "array", "description": "Never these operation ids.", "items": string("An operation id.", 256), "maxItems": MAX_OPERATION_NAMES },
+                    "weights": { "type": "object", "description": "Relative weights by operation id (default 1).", "additionalProperties": integer("The weight of this operation.", 1, 1000), "maxProperties": MAX_OPERATION_NAMES }
+                },
+                "additionalProperties": false
+            },
+            "invalid_fraction": number("Mock source: the fraction of requests made invalid (a missing required field, a wrong type); they expect a 4xx answer.", 0.0, 1.0),
+            "stateful": prop("boolean", "Mock source: create then read. A create (a POST on a collection) that succeeds is followed by a read of the item it returned; other item operations accept a 404."),
+            "base_path": string("Mock source: where the mock's routes start on the target (default /mock/<name>, as a Rustybin upstream serves it; empty when the gateway route maps the mock's own paths).", 512)
         },
         "additionalProperties": false
     });
@@ -1705,6 +2141,78 @@ pub fn schema(caps: &Caps) -> Value {
                     "node_header": string("A response header naming the gateway node that answered (via, say): admission is broken down by its values as well as by target.", 64)
                 },
                 "required": ["limit", "window"],
+                "additionalProperties": false
+            },
+            "identities": {
+                "type": "object",
+                "description": "The credentials and client addresses the layer's requests carry. The layer cycles through count identities (default: the largest pool); identity n takes the nth of each pool. {{id}} is the identity, {{ip}} its forwarded address.",
+                "properties": {
+                    "count": integer("How many identities the layer cycles through (default: the largest pool below).", 1, MAX_IDENTITIES as u64),
+                    "api_keys": {
+                        "type": "object",
+                        "description": "API keys: listed, or minted as <prefix><n> (provision the same names in the gateway).",
+                        "properties": {
+                            "header": string("The header that carries the key (default apikey).", 64),
+                            "query": string("A query parameter that carries the key instead of a header.", 64),
+                            "values": { "type": "array", "description": "The keys (redacted in reports).", "items": string("An API key.", 512), "maxItems": MAX_IDENTITIES },
+                            "mint": integer("How many keys to mint: <prefix>0 to <prefix><n-1>.", 1, MAX_IDENTITIES as u64),
+                            "prefix": string("The minted keys' prefix (default harness-key-).", 64)
+                        },
+                        "additionalProperties": false
+                    },
+                    "jwt": {
+                        "type": "object",
+                        "description": "JWTs minted by the client node's built-in IdP, one subject per identity, sent as Authorization: Bearer. RS256 tokens verify against the node's /oauth/jwks; HS256 uses the demo secret, the same on every node.",
+                        "properties": {
+                            "mint": integer("How many subjects (default: the layer's count).", 1, MAX_JWT_SUBJECTS as u64),
+                            "subject_prefix": string("Subjects are <prefix><n> (default harness-user-).", 64),
+                            "issuer": string("The iss claim (default rustybin-harness).", 512),
+                            "audience": string("The aud claim.", 512),
+                            "scope": string("The scope claim.", 512),
+                            "alg": { "type": "string", "description": "rs256 (the node's IdP key, the default) or hs256 (the demo secret).", "enum": ["rs256", "hs256"] },
+                            "ttl": duration("Token lifetime (default 1h).", 24 * 3600)
+                        },
+                        "additionalProperties": false
+                    },
+                    "oauth": {
+                        "type": "object",
+                        "description": "OAuth client credentials against a token endpoint (the gateway's or an IdP's): tokens are fetched before the run, cached, refreshed before they expire and sent as Authorization: Bearer.",
+                        "properties": {
+                            "token_url": json!({ "type": "string", "description": "The token endpoint, allowed by RUSTYBIN_HARNESS_TARGETS like a target.", "maxLength": 2048, "format": "uri" }),
+                            "clients": {
+                                "type": "array",
+                                "description": "The clients, one per identity (wrapping).",
+                                "items": {
+                                    "type": "object",
+                                    "description": "One client.",
+                                    "properties": {
+                                        "client_id": string("The client id.", 512),
+                                        "client_secret": string("The client secret (redacted in reports).", 512)
+                                    },
+                                    "required": ["client_id", "client_secret"],
+                                    "additionalProperties": false
+                                },
+                                "maxItems": MAX_OAUTH_CLIENTS
+                            },
+                            "scope": string("The scope to ask for.", 512),
+                            "audience": string("The audience to ask for.", 512)
+                        },
+                        "required": ["token_url", "clients"],
+                        "additionalProperties": false
+                    },
+                    "forwarded": {
+                        "type": "object",
+                        "description": "A pool of forwarded client addresses.",
+                        "properties": {
+                            "header": string("The header (default x-forwarded-for).", 64),
+                            "count": integer("How many addresses.", 1, MAX_IDENTITIES as u64),
+                            "cidr": string("The IPv4 range they come from (default 198.18.0.0/15, set aside for benchmarks).", 64)
+                        },
+                        "required": ["count"],
+                        "additionalProperties": false
+                    },
+                    "source_addresses": { "type": "array", "description": "Local addresses of the client node to send from (connections bind to them, one per identity, wrapping).", "items": string("An IP address of this host.", 64), "maxItems": MAX_SOURCE_ADDRESSES }
+                },
                 "additionalProperties": false
             },
             "thresholds": {
@@ -1919,8 +2427,8 @@ mod tests {
     fn unknown_fields_and_sources_are_refused_by_name() {
         let err = Scenario::parse("name: x\nchaos: { preset: mad }\n").unwrap_err();
         assert!(err.contains("chaos"), "{err}");
-        let err = Scenario::parse("name: x\nsource: { mock: petstore }\n").unwrap_err();
-        assert!(err.contains("mock"), "{err}");
+        let err = Scenario::parse("name: x\nsource: { llm: { path: /ai } }\n").unwrap_err();
+        assert!(err.contains("llm"), "{err}");
         assert!(Scenario::parse("").is_err());
         assert!(Scenario::parse(&"x".repeat(MAX_SCENARIO_BYTES + 1)).is_err());
         assert!(Scenario::from_value(&json!([1])).is_err());
@@ -2016,6 +2524,7 @@ mod tests {
                     source: Source {
                         request: Some(template.clone()),
                         requests: vec![template.clone()],
+                        ..Source::default()
                     },
                     pattern: Pattern::Ramp {
                         from: 1.0,
@@ -2042,12 +2551,39 @@ mod tests {
                     think_time: Some(Dur::secs(1)),
                     expect: None,
                     thresholds: LayerThresholds::default(),
+                    identities: Some(Identities {
+                        count: Some(4),
+                        api_keys: Some(ApiKeys {
+                            header: None,
+                            query: Some("key".into()),
+                            values: Vec::new(),
+                            mint: Some(3),
+                            prefix: Some("k-".into()),
+                        }),
+                        jwt: Some(JwtMint {
+                            mint: Some(2),
+                            subject_prefix: Some("user-".into()),
+                            issuer: Some("https://idp.example".into()),
+                            audience: Some("api".into()),
+                            scope: Some("read".into()),
+                            alg: Some(JwtAlg::Hs256),
+                            ttl: Some(Dur::secs(600)),
+                        }),
+                        oauth: None,
+                        forwarded: Some(Forwarded {
+                            header: Some("x-real-ip".into()),
+                            count: 4,
+                            cidr: Some("203.0.113.0/24".into()),
+                        }),
+                        source_addresses: vec!["127.0.0.1".into()],
+                    }),
                 },
                 Layer {
                     name: "m".into(),
                     source: Source {
                         request: Some(template.clone()),
                         requests: Vec::new(),
+                        ..Source::default()
                     },
                     // Every other pattern type, chained.
                     pattern: serde_yaml::from_str(
@@ -2070,11 +2606,48 @@ mod tests {
                         over_admission: Some(0.1),
                         under_admission: Some(0.2),
                     },
+                    identities: Some(Identities {
+                        api_keys: Some(ApiKeys {
+                            header: Some("x-api-key".into()),
+                            values: vec!["one".into(), "two".into()],
+                            ..ApiKeys::default()
+                        }),
+                        oauth: Some(OAuthClients {
+                            token_url: "http://127.0.0.1:2/oauth/token".into(),
+                            clients: vec![OAuthClient {
+                                client_id: "c".into(),
+                                client_secret: "s".into(),
+                            }],
+                            scope: Some("read".into()),
+                            audience: Some("api".into()),
+                        }),
+                        ..Identities::default()
+                    }),
+                },
+                Layer {
+                    source: Source {
+                        mock: Some("petstore".into()),
+                        operations: Some(OperationFilter {
+                            include: vec!["listPets".into(), "createPet".into(), "getPetById".into()],
+                            exclude: vec!["getPetById".into()],
+                            weights: BTreeMap::from([("listPets".to_string(), 3)]),
+                        }),
+                        invalid_fraction: Some(0.1),
+                        stateful: Some(true),
+                        base_path: Some("/api".into()),
+                        ..Source::default()
+                    },
+                    ..Layer::new(
+                        "k",
+                        Source::default(),
+                        serde_yaml::from_str("type: constant\nrate: 1\nfor: 1s").expect("pattern"),
+                    )
                 },
             ],
             source: Some(Source {
                 request: Some(template),
                 requests: Vec::new(),
+                ..Source::default()
             }),
             pattern: Some(Pattern::Constant {
                 rate: 1.0,
@@ -2291,7 +2864,7 @@ mod tests {
         let mut s = full();
         s.normalise();
         assert_eq!(s.targets.len(), 2);
-        assert_eq!(s.layers.len(), 3);
+        assert_eq!(s.layers.len(), 4);
         assert_eq!(s.layers[0].name, "main");
         let caps = Caps::default();
         let problems = s.validate(&caps);

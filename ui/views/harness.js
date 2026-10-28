@@ -7,7 +7,8 @@
 // redraws as the scenario changes, saved scenarios, live controls on a
 // running run (rate multiplier, pause, hold, skip stage, set), and the run's
 // event feed (read with send({stream: true}), polling when it is not there).
-// Phase 5: the report's rate-limit analysis, layer by layer.
+// Phase 5: the report's rate-limit analysis, layer by layer. Phase 6: the
+// report's breakdowns by operation (mock layers) and by credential.
 import { h, s, replace, clear, card, kvgrid, notice, badge, spinner, toast, select, textarea, input, fmtMs, copyButton } from '../lib/dom.js';
 import { jsonView } from '../lib/format.js';
 import { SERVER, send, getJson, sseParser, readText } from '../lib/http.js';
@@ -69,6 +70,15 @@ function rateLimitView(r) {
       tile('Over-admission', pct(over), over ? 'err-text' : ''), tile('Under-admission', pct(r.under_admission), r.under_admission > 0.05 ? 'err-text' : '')),
     kvgrid(rows),
     ...(r.findings || []).map((f) => notice('warn', f)));
+}
+
+// Answers by operation or credential (report.operations, .credentials).
+function keyTable(title, rows) {
+  if (!rows || !rows.length) return null;
+  return h('details', { class: 'disclosure', open: rows.length <= 12 }, h('summary', null, `${title} (${rows.length})`),
+    h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
+      h('thead', null, h('tr', null, h('th', null, 'Layer'), h('th', null, title.replace(/^By /, '')), h('th', null, 'Answered'), h('th', null, 'OK'), h('th', null, 'Errors'), h('th', null, 'Refused'), h('th', null, 'p50'), h('th', null, 'p99'))),
+      h('tbody', null, ...rows.map((r) => h('tr', null, h('td', null, r.layer), h('td', { class: 'mono' }, r.name), h('td', null, num(r.answered)), h('td', null, num(r.ok)), h('td', { class: r.errors ? 'err-text' : '' }, num(r.errors)), h('td', null, num(r.limited)), h('td', null, fmtMs(r.p50_ms)), h('td', null, fmtMs(r.p99_ms))))))));
 }
 
 // A per-second chart: completed per second (bars), p99 latency (line).
@@ -700,6 +710,9 @@ export default {
         ...((rep.cluster && rep.cluster.warnings) || []).map((w) => notice('warn', w)),
         (rep.findings || []).length ? h('div', { class: 'stack-sm' }, h('h3', null, 'Findings'),
           ...rep.findings.map((f) => notice(f.failed && f.failed.length ? 'warn' : 'ok', f.summary))) : null,
+        ...(rep.warnings || []).map((w) => notice('warn', w)),
+        keyTable('By operation', rep.operations),
+        keyTable('By credential', rep.credentials),
         ...(rep.rate_limits || []).map(rateLimitView),
         (rep.changes || []).length ? h('details', { class: 'disclosure', open: true }, h('summary', null, `Live changes (${rep.changes.length})`),
           h('ul', { class: 'small' }, ...rep.changes.map((c) => h('li', null, `${num(c.at_secs, 1)} s (v${c.version}): ${c.what}`)))) : null,

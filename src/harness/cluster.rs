@@ -1557,12 +1557,26 @@ fn build_report(
         server.as_ref().map(|s| s.arrivals),
         &m.saturation,
     );
-    // The rate-limit analysis over the client nodes' final counters.
+    // The rate-limit analysis and the breakdowns over the client nodes'
+    // final counters.
     let mut limits: Vec<Option<LimitAcc>> = Vec::new();
+    let mut keys: Vec<super::breakdown::LayerKeys> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
     for p in &inner.clients {
         let Some(st) = p.stats.as_ref().filter(|st| st.done) else {
             continue;
         };
+        if keys.len() < st.keys.len() {
+            keys.resize(st.keys.len(), Default::default());
+        }
+        for (dst, src) in keys.iter_mut().zip(&st.keys) {
+            dst.merge(src);
+        }
+        for w in &st.warnings {
+            if warnings.len() < 32 {
+                warnings.push(format!("{}: {w}", p.node_id));
+            }
+        }
         if limits.len() < st.limits.len() {
             limits.resize(st.limits.len(), None);
         }
@@ -1697,6 +1711,8 @@ fn build_report(
     };
     let exit_code = Report::exit_code_for(state, &thresholds);
     let layer_names: Vec<String> = inner.controls.layer_names(&run.scenario);
+    let (operations, credentials) = super::breakdown::reports(&layer_names, &keys);
+    warnings.extend(super::breakdown::findings(&operations));
     // The stages each layer ran, on the merged timeline.
     let stages = report::stage_reports(&m.timeline, &layer_names, &inner.stages);
     let breakdown = |names: Vec<String>, parts: &[MergedPart]| -> Vec<Breakdown> {
@@ -1816,6 +1832,9 @@ fn build_report(
         changes: inner.controls.log.clone(),
         stages,
         rate_limits,
+        operations,
+        credentials,
+        warnings,
     }
 }
 

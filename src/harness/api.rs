@@ -207,7 +207,10 @@ pub async fn validate(State(state): State<AppState>, body: Bytes) -> Response {
     };
     scenario.normalise();
     let caps = caps_of(&state);
-    let problems = scenario.validate(&caps);
+    let mut problems = scenario.validate(&caps);
+    if problems.is_empty() {
+        problems = super::check_sources(&scenario, &state.mocks);
+    }
     Json(json!({
         "valid": problems.is_empty(),
         "problems": problems,

@@ -315,7 +315,7 @@ its own phase and its own jitter, which spreads the load. `POST /_rustybin/harne
 returns the expected requests per second of a scenario, each layer and the total, from
 the pattern math (one point per second, coarser past an hour). The built-in scenarios
 include `step-plateaus`, `breakpoint`, `spike-and-recover`, `pulse`, `burst`,
-`daily-wave`, `rate-limit`, `limit-probe` and `many-ips`;
+`daily-wave`, `rate-limit`, `limit-probe`, `many-ips` and `petstore-customers`;
 `PUT /_rustybin/harness/scenarios/<name>` saves your own next to them
 (validated, at most 100 per node, kept in `RUSTYBIN_HARNESS_STATE_DIR` when set) and
 `DELETE` removes one.
@@ -355,6 +355,41 @@ layers' refusals and latency during the test); and findings in words. A layer's 
 `thresholds` (`rate_limited`, `over_admission`, `under_admission`) fail the run like the
 run's. `limit_probe` is a closed loop like `breakpoint`: it reads the run's refusals per
 second (all layers), so run it on its own.
+
+**Mock-driven traffic.** A layer's `source` can name an OpenAPI mock instead of request
+templates: `source: { mock: petstore }` sends requests for every operation of the mock's
+live revision on the client node (every client node needs the mock, from the same
+`rustybin.yaml`), with generated parameters and bodies (a few variants per operation,
+each one a request the operation accepts) under `base_path` (default `/mock/<name>`, as
+a Rustybin upstream serves it; empty when the gateway maps the mock's own paths).
+`operations` takes `include`, `exclude` and `weights` by operation id. `invalid_fraction`
+makes that share of the requests invalid (a body of the wrong type, a required query
+parameter left out, a number that is not one); they expect a 4xx, and the report says
+how many got through anyway. `stateful: true` follows every successful create (a POST on
+a collection) with a read of the item it returned, and lets the other item operations
+answer 404. `POST /_rustybin/harness/validate` and a node starting a run say when the
+mock or an operation is missing.
+
+**Identities.** A layer's `identities` say what its requests carry to tell clients apart.
+The layer cycles through `count` identities (default: the largest pool), and identity
+`n` takes the `n`th of each:
+
+| Pool | Parameters |
+|---|---|
+| `api_keys` | `header` (default `apikey`) or `query`; `values`, or `mint` keys named `<prefix><n>` (`prefix` default `harness-key-`: provision the same names in the gateway) |
+| `jwt` | JWTs minted by the client node's built-in IdP: `mint` subjects `<subject_prefix><n>` (default `harness-user-`), `issuer` (default `rustybin-harness`), `audience`, `scope`, `ttl` (1h), `alg`: `rs256` (the node's IdP key, its JWKS at `/oauth/jwks`) or `hs256` (the demo secret, the same on every node of a cluster) |
+| `oauth` | OAuth client credentials: `token_url` (allowed by `RUSTYBIN_HARNESS_TARGETS` like a target), `clients` (`client_id`, `client_secret`), `scope`, `audience`. Every client's token is fetched before the run (a run whose tokens cannot be had does not start), cached and fetched again before it expires |
+| `forwarded` | `count` addresses from `cidr` (default 198.18.0.0/15) in `header` (default `X-Forwarded-For`); `{{ip}}` in a template |
+| `source_addresses` | Local addresses of the client node to connect from (checked when the run starts) |
+
+The credentials and addresses replace a template's headers of the same names; `{{id}}`
+is the identity. Layers added while a run runs take every pool but `oauth` and
+`source_addresses`. The report breaks the answers down by `operations` (mock layers;
+invalid requests and reads after a create on their own) and by `credentials` (a label
+without the secret: the minted key's name, `key <n>` for listed keys, the JWT subject,
+the OAuth client id, the address), with answers, errors, refusals and approximate p50
+and p99, merged across a cluster's client nodes. Listed API keys and client secrets are
+redacted in reports.
 
 A running run takes changes without stopping: `PATCH /_rustybin/harness/runs/<run>` (or
 `.../clusters/<id>/runs/<run>`) with any of `rate_multiplier` (0 to 10), `pause`,

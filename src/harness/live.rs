@@ -26,6 +26,7 @@
 //!   merged results, and the nodes follow the controls.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -482,6 +483,14 @@ impl Controls {
                 problems.push(format!("add_layer: a layer named {:?} exists", layer.name));
             } else if names.len() >= MAX_LAYERS {
                 problems.push(format!("add_layer: a run has at most {MAX_LAYERS} layers"));
+            } else if layer
+                .identities
+                .as_ref()
+                .is_some_and(|i| i.oauth.is_some() || !i.source_addresses.is_empty())
+            {
+                problems.push(
+                    "add_layer: OAuth clients and source addresses are set up when the run starts; put the layer in the scenario".into(),
+                );
             } else {
                 let mut layer = layer.clone();
                 super::scenario::fill_limit_tests(&mut layer);
@@ -648,6 +657,24 @@ fn set_path(
     }
 }
 
+/// What a layer needs beyond its definition, set up on the node when the
+/// run starts (or when a layer is added): a mock source's requests and the
+/// layer's identities.
+#[derive(Default)]
+pub struct LayerExtras {
+    pub mock: Option<Arc<super::mocksource::MockPlan>>,
+    pub identities: Option<Arc<super::identity::LayerIdentities>>,
+}
+
+impl std::fmt::Debug for LayerExtras {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LayerExtras")
+            .field("mock", &self.mock.as_ref().map(|m| &m.mock))
+            .field("identities", &self.identities.as_ref().map(|i| i.size))
+            .finish()
+    }
+}
+
 /// One layer as a node evaluates it.
 #[derive(Clone, Debug)]
 pub struct LiveLayer {
@@ -667,6 +694,8 @@ pub struct LiveLayer {
     pub grid: Option<Grid>,
     /// The header naming the gateway node (`expect.node_header`).
     pub node_header: Option<String>,
+    /// The node's mock plan and identities for the layer.
+    pub extras: Option<Arc<LayerExtras>>,
 }
 
 /// A layer's level at an instant.
@@ -747,6 +776,7 @@ impl LiveView {
                         .as_ref()
                         .and_then(|e| e.node_header.as_ref())
                         .map(|h| h.to_ascii_lowercase()),
+                    extras: None,
                     def,
                     compiled,
                     starts_at,
@@ -778,6 +808,14 @@ impl LiveView {
             if analysed {
                 l.grid = Some(super::ratelimit::grid_for(&l.def, l.starts_at, wall));
             }
+        }
+        self
+    }
+
+    /// Give the layers their extras (by layer index).
+    pub fn with_extras(mut self, extras: &[Option<Arc<LayerExtras>>]) -> Self {
+        for (l, e) in self.layers.iter_mut().zip(extras) {
+            l.extras = e.clone();
         }
         self
     }

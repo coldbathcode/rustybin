@@ -5,14 +5,17 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-- **Load test mode (harness), the next phases** (`docs/plans/harness.md`): phase 6,
-  mock-driven traffic (requests from an OpenAPI mock's operations, an invalid fraction,
-  stateful create then read) and identities (credential pools, JWTs minted by the
-  built-in IdP, OAuth client credentials against the gateway, forwarded-address pools,
-  source address binding). Then faults and protocols (phase 7) and the harness docs
-  and conformance run (phase 8).
+- **Load test mode (harness), the next phases** (`docs/plans/harness.md`): phase 7,
+  faults and protocols (client and server fault behaviours with presets, node churn;
+  SSE and LLM streaming with time to first token and tokens per second, WebSocket,
+  gRPC, MCP tool calls). Then the harness docs and the conformance run (phase 8).
 
 ## Recently built
+
+- [Harness mock-driven traffic and identities](configuration.md#harness-mode) (phase
+  6): layers that send an OpenAPI mock's operations (weights, invalid requests, create
+  then read), identities (API keys, minted JWTs, OAuth client credentials, forwarded
+  addresses, source addresses), and the report's breakdowns by operation and credential.
 
 - [Harness rate-limit tests](configuration.md#harness-mode) (phase 5): a layer's
   `expect` and the `limit_test` pattern (`over_limit`, `window_edge`, `just_under`,

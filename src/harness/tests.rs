@@ -216,6 +216,7 @@ async fn api_when_harness_is_off() {
             "rate-limit",
             "limit-probe",
             "many-ips",
+            "petstore-customers",
         ]
     );
     for s in list["scenarios"].as_array().unwrap() {

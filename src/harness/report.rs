@@ -595,6 +595,18 @@ pub struct Report {
     /// a `limit_test` or rate-limit thresholds).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rate_limits: Vec<super::ratelimit::RateLimitReport>,
+    /// Mock layers: every operation's answers and latency (invalid requests
+    /// and reads after a create on their own).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<super::breakdown::KeyReport>,
+    /// Layers with identities: every credential's answers and latency, by a
+    /// label that carries no secret.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credentials: Vec<super::breakdown::KeyReport>,
+    /// What went wrong setting up identities or layers (a token that could
+    /// not be had, an added layer's unknown mock).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// One stage (or plateau) of a layer as it ran. The numbers are the
@@ -1059,6 +1071,38 @@ impl Report {
                 out.push_str(&format!("  {}\n", f.summary));
             }
         }
+        for (title, rows) in [
+            ("Operations", &self.operations),
+            ("Credentials", &self.credentials),
+        ] {
+            if rows.is_empty() {
+                continue;
+            }
+            out.push_str(&format!(
+                "\n{title:<40} answered       ok   errors  refused   p50 ms   p99 ms\n"
+            ));
+            for r in rows.iter().take(TEXT_KEY_ROWS) {
+                out.push_str(&format!(
+                    "  {:<38} {:>8} {:>8} {:>8} {:>8} {:>8.2} {:>8.2}\n",
+                    truncate(&format!("{}: {}", r.layer, r.name), 38),
+                    r.answered,
+                    r.ok,
+                    r.errors,
+                    r.limited,
+                    r.p50_ms,
+                    r.p99_ms
+                ));
+            }
+            if rows.len() > TEXT_KEY_ROWS {
+                out.push_str(&format!(
+                    "  ... {} more in the JSON report\n",
+                    rows.len() - TEXT_KEY_ROWS
+                ));
+            }
+        }
+        for w in &self.warnings {
+            out.push_str(&format!("\nWarning: {w}\n"));
+        }
         if !self.rate_limits.is_empty() {
             out.push_str("\nRate limits\n");
             for line in super::ratelimit::to_text(&self.rate_limits) {
@@ -1173,6 +1217,9 @@ fn truncate(s: &str, n: usize) -> String {
 }
 
 /// Header names whose values never appear in a report.
+/// Rows per breakdown in the text report.
+const TEXT_KEY_ROWS: usize = 20;
+
 pub fn sensitive_header(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     n.contains("authorization")
@@ -1184,8 +1231,8 @@ pub fn sensitive_header(name: &str) -> bool {
         || n.contains("password")
 }
 
-/// The scenario as stored in a report: credential-looking header values
-/// replaced by `[redacted]`.
+/// The scenario as stored in a report: credential-looking header values,
+/// listed API keys and OAuth client secrets replaced by `[redacted]`.
 pub fn redact_scenario(scenario: &Value) -> Value {
     fn walk(v: &mut Value) {
         match v {
@@ -1196,6 +1243,16 @@ pub fn redact_scenario(scenario: &Value) -> Value {
                             *value = Value::String("[redacted]".into());
                         }
                     }
+                }
+                if let Some(Value::Object(keys)) = map.get_mut("api_keys") {
+                    if let Some(Value::Array(values)) = keys.get_mut("values") {
+                        for value in values.iter_mut() {
+                            *value = Value::String("[redacted]".into());
+                        }
+                    }
+                }
+                if let Some(secret) = map.get_mut("client_secret") {
+                    *secret = Value::String("[redacted]".into());
                 }
                 for value in map.values_mut() {
                     walk(value);
@@ -1277,6 +1334,9 @@ mod tests {
             changes: Vec::new(),
             stages: Vec::new(),
             rate_limits: Vec::new(),
+            operations: Vec::new(),
+            credentials: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 
@@ -1452,5 +1512,15 @@ mod tests {
         assert_eq!(h["Authorization"], "[redacted]");
         assert_eq!(h["X-Api-Key"], "[redacted]");
         assert_eq!(h["Accept"], "json");
+        let s = json!({ "layers": [{ "identities": { "api_keys": { "values": ["a", "b"], "header": "apikey" }, "oauth": { "token_url": "http://x/token", "clients": [{ "client_id": "c", "client_secret": "s" }] } } }] });
+        let r = redact_scenario(&s);
+        let ids = &r["layers"][0]["identities"];
+        assert_eq!(
+            ids["api_keys"]["values"],
+            json!(["[redacted]", "[redacted]"])
+        );
+        assert_eq!(ids["api_keys"]["header"], "apikey");
+        assert_eq!(ids["oauth"]["clients"][0]["client_secret"], "[redacted]");
+        assert_eq!(ids["oauth"]["clients"][0]["client_id"], "c");
     }
 }

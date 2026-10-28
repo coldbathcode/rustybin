@@ -449,6 +449,21 @@ pub fn get_run_report(ctx: &CallCtx, args: &Value) -> Value {
     // The rate-limit analysis: counts and findings the harness computed
     // (no gateway-provided text: node header values stay in the structure).
     let mut text = text;
+    for (kind, rows) in [
+        ("operations", &report.operations),
+        ("credentials", &report.credentials),
+    ] {
+        if !rows.is_empty() {
+            let errors: u64 = rows.iter().map(|r| r.errors).sum();
+            text.push_str(&format!(
+                "\nBy {kind}: {} ({errors} errors over them; see the structured report)",
+                rows.len()
+            ));
+        }
+    }
+    for w in &report.warnings {
+        text.push_str(&format!("\nWarning: {w}"));
+    }
     for r in &report.rate_limits {
         text.push_str(&format!(
             "\nRate limits of {}: {} admitted, {} refused ({:.1}%), worst window-long span {} admitted{}{}",

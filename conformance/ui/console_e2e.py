@@ -1061,6 +1061,8 @@ def run_harness(browser):
             if not has_control(here):
                 btn = page.locator(f"#scenario-form [aria-label='{here} add']")
                 if btn.count():
+                    # Open the collapsed sections around it, as a user would.
+                    btn.first.evaluate("b => { for (let d = b.closest('details'); d; d = d.parentElement.closest('details')) d.open = true; }")
                     btn.first.click()
 
         missing = []

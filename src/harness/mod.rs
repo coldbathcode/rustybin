@@ -22,14 +22,17 @@
 //! start and stop runs.
 
 pub mod api;
+pub mod breakdown;
 pub mod cli;
 pub mod cluster;
 pub mod correlate;
 pub mod election;
 pub mod engine;
+pub mod identity;
 pub mod limit_test;
 pub mod live;
 pub mod member;
+pub mod mocksource;
 pub mod pattern;
 pub mod ratelimit;
 pub mod report;
@@ -328,6 +331,80 @@ pub struct Harness {
     control: OnceLock<Option<String>>,
     /// Scenarios saved by name (`RUSTYBIN_HARNESS_STATE_DIR` keeps them).
     pub saved: saved::SavedScenarios,
+    /// The node's mocks and IdP key (attached once the app state exists).
+    resources: OnceLock<Resources>,
+}
+
+/// What the harness takes from the rest of the node: the mocks a mock
+/// source names, and the IdP key minted JWTs are signed with.
+#[derive(Clone)]
+pub struct Resources {
+    pub mocks: crate::mocks::store::MockStore,
+    pub jwt: Arc<crate::jwt_state::JwtState>,
+}
+
+/// A layer's extras on this node: its mock plan (resolved against the
+/// node's live revision) and its identities (`oauth`: the pool the caller
+/// made for its OAuth clients). `None` when the layer needs neither.
+pub fn layer_extras(
+    layer: &scenario::Layer,
+    resources: Option<&Resources>,
+    oauth: Option<Arc<identity::OAuthPool>>,
+) -> Result<Option<Arc<live::LayerExtras>>, String> {
+    if layer.source.mock.is_none() && layer.identities.is_none() {
+        return Ok(None);
+    }
+    let mock = match &layer.source.mock {
+        Some(name) => {
+            let res = resources.ok_or("this node has no mocks for a mock source")?;
+            match res.mocks.lookup(name) {
+                crate::mocks::store::Lookup::Ready(live) => Some(Arc::new(mocksource::resolve(
+                    &live.compiled,
+                    &layer.source,
+                )?)),
+                crate::mocks::store::Lookup::NotDeployed(..) => {
+                    return Err(format!("mock {name} is not deployed on this node"))
+                }
+                crate::mocks::store::Lookup::Missing => {
+                    return Err(format!("no mock {name} on this node"))
+                }
+            }
+        }
+        None => None,
+    };
+    let identities = layer.identities.as_ref().map(|ids| {
+        Arc::new(identity::LayerIdentities::build(
+            ids,
+            resources.map(|r| r.jwt.clone()),
+            oauth,
+        ))
+    });
+    Ok(Some(Arc::new(live::LayerExtras { mock, identities })))
+}
+
+/// Every layer whose mock source this node cannot send (an unknown or
+/// undeployed mock, an unknown operation).
+pub fn check_sources(s: &Scenario, mocks: &crate::mocks::store::MockStore) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (i, layer) in s.layers.iter().enumerate() {
+        let Some(name) = &layer.source.mock else {
+            continue;
+        };
+        match mocks.lookup(name) {
+            crate::mocks::store::Lookup::Ready(live) => {
+                if let Err(e) = mocksource::resolve(&live.compiled, &layer.source) {
+                    problems.push(format!("layers[{i}].source: {e}"));
+                }
+            }
+            crate::mocks::store::Lookup::NotDeployed(..) => problems.push(format!(
+                "layers[{i}].source.mock: {name} is not deployed on this node"
+            )),
+            crate::mocks::store::Lookup::Missing => problems.push(format!(
+                "layers[{i}].source.mock: no mock {name} on this node"
+            )),
+        }
+    }
+    problems
 }
 
 /// A node id safe for request ids: letters, digits, `.`, `_`, `-`, at most 32.
@@ -414,7 +491,49 @@ impl Harness {
             bound: OnceLock::new(),
             control: OnceLock::new(),
             saved: saved::SavedScenarios::new(hc.state_dir.as_deref()),
+            resources: OnceLock::new(),
         })
+    }
+
+    /// Give the harness the node's mocks and IdP key (once).
+    pub fn attach(&self, resources: Resources) {
+        let _ = self.resources.set(resources);
+    }
+
+    pub fn resources(&self) -> Option<&Resources> {
+        self.resources.get()
+    }
+
+    /// The pool of a layer's OAuth clients: the token URL pinned like a
+    /// target, and every client's first token fetched (a run whose tokens
+    /// cannot be had does not start).
+    async fn oauth_pool(
+        &self,
+        engine: &Engine,
+        o: &scenario::OAuthClients,
+    ) -> Result<Arc<identity::OAuthPool>, String> {
+        let parsed = safety::parse_target_url(&o.token_url)?;
+        let addrs = safety::pin(&parsed, &self.allowlist).await?;
+        let endpoint = PinnedTarget::new(
+            &engine.handle(),
+            scenario::Target::new(o.token_url.clone()),
+            parsed,
+            addrs,
+            4,
+        )?;
+        let pool = Arc::new(identity::OAuthPool::new(
+            endpoint,
+            o.clients
+                .iter()
+                .map(|c| (c.client_id.clone(), c.client_secret.clone()))
+                .collect(),
+            o.scope.clone(),
+            o.audience.clone(),
+        ));
+        for k in 0..o.clients.len() {
+            pool.token(k as u32).await?;
+        }
+        Ok(pool)
     }
 
     /// This node's control URL as the other nodes reach it: set means it
@@ -652,7 +771,13 @@ impl Harness {
     /// Validate a scenario (normalised in place) against this node.
     pub fn validate(&self, scenario: &mut Scenario) -> Vec<String> {
         scenario.normalise();
-        scenario.validate(&self.caps())
+        let mut problems = scenario.validate(&self.caps());
+        if problems.is_empty() {
+            if let Some(r) = self.resources() {
+                problems = check_sources(scenario, &r.mocks);
+            }
+        }
+        problems
     }
 
     /// Validate, pin and verify the targets, then start the run on its
@@ -748,6 +873,55 @@ impl Harness {
                 problems: refused,
             });
         }
+        // The layers' mock plans and identities on this node: OAuth tokens
+        // are fetched now, source addresses must be this host's.
+        let mut extras = Vec::with_capacity(scenario.layers.len());
+        let mut sources: Vec<std::net::IpAddr> = Vec::new();
+        let mut unusable = Vec::new();
+        for (i, layer) in scenario.layers.iter().enumerate() {
+            let ids = layer.identities.as_ref();
+            let oauth = match ids.and_then(|x| x.oauth.as_ref()) {
+                Some(o) => match self.oauth_pool(engine, o).await {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        unusable.push(format!("layers[{i}].identities.oauth: {e}"));
+                        None
+                    }
+                },
+                None => None,
+            };
+            for a in ids.map_or(&[][..], |x| &x.source_addresses[..]) {
+                match a.parse::<std::net::IpAddr>() {
+                    Ok(ip) if std::net::TcpListener::bind((ip, 0)).is_ok() => {
+                        if !sources.contains(&ip) {
+                            sources.push(ip);
+                        }
+                    }
+                    _ => unusable.push(format!(
+                        "layers[{i}].identities.source_addresses: {a} is not an address of this host"
+                    )),
+                }
+            }
+            match layer_extras(layer, self.resources(), oauth) {
+                Ok(x) => extras.push(x),
+                Err(e) => {
+                    unusable.push(format!("layers[{i}].source: {e}"));
+                    extras.push(None);
+                }
+            }
+        }
+        for t in &mut targets {
+            if let Err(e) = t.bind_sources(&engine.handle(), &sources) {
+                unusable.push(format!("{}: {e}", t.target.url));
+            }
+        }
+        if !unusable.is_empty() {
+            return Err(RunError {
+                status: 422,
+                error: "the scenario cannot run on this node".into(),
+                problems: unusable,
+            });
+        }
         if self.config.verify_targets {
             let token = options
                 .verification_token
@@ -797,6 +971,8 @@ impl Harness {
             lease: options.lease,
             cluster: options.cluster,
             controls: options.controls,
+            extras,
+            resources: self.resources().cloned(),
         });
         {
             let mut runs = self.runs.lock().unwrap_or_else(|p| p.into_inner());
@@ -1087,6 +1263,10 @@ pub fn builtin_scenarios() -> &'static [(&'static str, &'static str)] {
         ("rate-limit", include_str!("scenarios/rate-limit.yaml")),
         ("limit-probe", include_str!("scenarios/limit-probe.yaml")),
         ("many-ips", include_str!("scenarios/many-ips.yaml")),
+        (
+            "petstore-customers",
+            include_str!("scenarios/petstore-customers.yaml"),
+        ),
     ]
 }
 
@@ -2071,3 +2251,5 @@ mod limit_tests;
 mod live_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod traffic_tests;

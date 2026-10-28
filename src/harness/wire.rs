@@ -401,6 +401,13 @@ pub struct NodeStats {
     /// analyse rate limits).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limits: Vec<Option<super::ratelimit::LimitAcc>>,
+    /// Final stats only: the breakdowns by operation and credential, by
+    /// layer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<super::breakdown::LayerKeys>,
+    /// Final stats only: what went wrong setting up identities or layers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// A server node's cumulative view of one run.

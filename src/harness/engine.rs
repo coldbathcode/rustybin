@@ -54,9 +54,10 @@ use tokio::net::TcpStream;
 use tokio::runtime::{Handle, Runtime};
 use tokio::sync::watch;
 
+use super::breakdown::{self, Answer, LayerKeys};
 use super::correlate::{self, Correlator, Marker, RunEntry, RunKey, Tag};
 use super::limit_test::{identity_ip, MAX_RETRY_WAIT};
-use super::live::{Change, Controls, Level, LiveView, StageLog};
+use super::live::{Change, Controls, LayerExtras, Level, LiveView, StageLog};
 use super::ratelimit::{self, Grid, LimitAcc, Obs};
 use super::report::{
     self, histogram, Breakdown, Bucket, Counts, Percentiles, Report, Sample, Saturation,
@@ -467,6 +468,8 @@ pub struct PinnedConnector {
     next: Arc<AtomicUsize>,
     tls: Option<Arc<rustls::ClientConfig>>,
     server_name: Option<rustls::pki_types::ServerName<'static>>,
+    /// A local address to connect from (an identity's source address).
+    bind: Option<std::net::IpAddr>,
 }
 
 impl PinnedConnector {
@@ -488,7 +491,50 @@ impl PinnedConnector {
             next: Arc::new(AtomicUsize::new(0)),
             tls: tls.map(Arc::new),
             server_name,
+            bind: None,
         })
+    }
+
+    /// The same connector, connecting from `local` (to the pinned
+    /// addresses of its family only).
+    pub fn bound_to(&self, local: std::net::IpAddr) -> Result<Self, String> {
+        let addrs: Vec<SocketAddr> = self
+            .addrs
+            .iter()
+            .filter(|a| a.is_ipv4() == local.is_ipv4())
+            .copied()
+            .collect();
+        if addrs.is_empty() {
+            return Err(format!(
+                "source address {local}: the target has no address of its family"
+            ));
+        }
+        Ok(Self {
+            addrs: Arc::new(addrs),
+            next: Arc::new(AtomicUsize::new(0)),
+            tls: self.tls.clone(),
+            server_name: self.server_name.clone(),
+            bind: Some(local),
+        })
+    }
+}
+
+/// Connect to `addr`, from `bind` when given.
+async fn connect_from(
+    addr: SocketAddr,
+    bind: Option<std::net::IpAddr>,
+) -> std::io::Result<TcpStream> {
+    match bind {
+        None => TcpStream::connect(addr).await,
+        Some(ip) => {
+            let socket = if ip.is_ipv4() {
+                tokio::net::TcpSocket::new_v4()?
+            } else {
+                tokio::net::TcpSocket::new_v6()?
+            };
+            socket.bind(SocketAddr::new(ip, 0))?;
+            socket.connect(addr).await
+        }
     }
 }
 
@@ -508,12 +554,13 @@ impl tower::Service<Uri> for PinnedConnector {
         let i = self.next.fetch_add(1, Ordering::Relaxed);
         let tls = self.tls.clone();
         let server_name = self.server_name.clone();
+        let bind = self.bind;
         Box::pin(async move {
             let addr = addrs
                 .get(i % addrs.len().max(1))
                 .copied()
                 .ok_or_else(|| ConnectError::from("no pinned address"))?;
-            let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
+            let stream = tokio::time::timeout(CONNECT_TIMEOUT, connect_from(addr, bind))
                 .await
                 .map_err(|_| ConnectError::from(format!("connect to {addr} timed out")))?
                 .map_err(|e| ConnectError::from(format!("connect to {addr}: {e}")))?;
@@ -551,6 +598,24 @@ pub struct PinnedTarget {
     pub client: HttpClient,
     /// `scheme://authority` the requests name (the Host override when set).
     pub authority: String,
+    /// Clients that connect from an identity's source address.
+    pub bound: Vec<(std::net::IpAddr, HttpClient)>,
+    connector: PinnedConnector,
+    pool_size: usize,
+}
+
+fn make_client(handle: &Handle, connector: PinnedConnector, pool: usize, h2c: bool) -> HttpClient {
+    let _enter = handle.enter();
+    let mut builder = Client::builder(TokioExecutor::new());
+    builder
+        .pool_max_idle_per_host(pool.max(1))
+        .pool_idle_timeout(Duration::from_secs(60))
+        .pool_timer(TokioTimer::new())
+        .timer(TokioTimer::new());
+    if h2c {
+        builder.http2_only(true);
+    }
+    builder.build(connector)
 }
 
 impl PinnedTarget {
@@ -573,17 +638,12 @@ impl PinnedTarget {
             None
         };
         let connector = PinnedConnector::new(addrs.clone(), tls, &server_name)?;
-        let _enter = handle.enter();
-        let mut builder = Client::builder(TokioExecutor::new());
-        builder
-            .pool_max_idle_per_host(pool_size.max(1))
-            .pool_idle_timeout(Duration::from_secs(60))
-            .pool_timer(TokioTimer::new())
-            .timer(TokioTimer::new());
-        if target.http == HttpVersion::H2c {
-            builder.http2_only(true);
-        }
-        let client = builder.build(connector);
+        let client = make_client(
+            handle,
+            connector.clone(),
+            pool_size,
+            target.http == HttpVersion::H2c,
+        );
         let authority = match &target.host {
             Some(h) => {
                 let h = h.trim_end_matches('.');
@@ -603,7 +663,39 @@ impl PinnedTarget {
             verified: false,
             client,
             authority,
+            bound: Vec::new(),
+            connector,
+            pool_size,
         })
+    }
+
+    /// Add a client for each source address (identities send from them).
+    pub fn bind_sources(
+        &mut self,
+        handle: &Handle,
+        sources: &[std::net::IpAddr],
+    ) -> Result<(), String> {
+        for ip in sources {
+            if self.bound.iter().any(|(b, _)| b == ip) {
+                continue;
+            }
+            let connector = self.connector.bound_to(*ip)?;
+            let client = make_client(
+                handle,
+                connector,
+                self.pool_size,
+                self.target.http == HttpVersion::H2c,
+            );
+            self.bound.push((*ip, client));
+        }
+        Ok(())
+    }
+
+    /// The client that connects from `source` (the default one without).
+    pub fn client_for(&self, source: Option<std::net::IpAddr>) -> &HttpClient {
+        source
+            .and_then(|ip| self.bound.iter().find(|(b, _)| *b == ip).map(|(_, c)| c))
+            .unwrap_or(&self.client)
     }
 
     pub fn report(&self) -> TargetReport {
@@ -647,6 +739,11 @@ pub struct Outcome {
     pub limited: bool,
     /// What the rate-limit analysis counts (runs that analyse rate limits).
     pub limit: Option<(Grid, Obs)>,
+    /// A mock request: its operation, and 1 for an invalid one, 2 for a
+    /// read after a create.
+    pub op: Option<(u16, u8)>,
+    /// The identity it carried.
+    pub ident: Option<u32>,
 }
 
 /// Per-layer or per-target accumulator in a shard.
@@ -745,6 +842,16 @@ struct Shard {
     limits: Vec<(usize, Grid, Obs)>,
     /// Per layer: observations over [`MAX_SHARD_OBS`].
     limits_dropped: Vec<u64>,
+    /// Answers to count by operation and identity (labelled at the roll).
+    keys: Vec<KeyObs>,
+}
+
+/// One answer of a mock request or an identity, for the breakdowns.
+struct KeyObs {
+    layer: usize,
+    op: Option<(u16, u8)>,
+    ident: Option<u32>,
+    answer: Answer,
 }
 
 impl Shard {
@@ -752,6 +859,7 @@ impl Shard {
         Self {
             limits: Vec::new(),
             limits_dropped: vec![0; layers],
+            keys: Vec::new(),
             counts: Counts::default(),
             corrected: histogram(3),
             service: histogram(3),
@@ -794,6 +902,19 @@ impl Shard {
         }
         if let Some(p) = self.targets.get_mut(o.target) {
             p.record(o, corrected);
+        }
+        if (o.op.is_some() || o.ident.is_some()) && self.keys.len() < MAX_SHARD_OBS {
+            self.keys.push(KeyObs {
+                layer: o.layer,
+                op: o.op,
+                ident: o.ident,
+                answer: Answer {
+                    ok: o.expected,
+                    transport: o.status.is_none(),
+                    limited: o.limited,
+                    latency_us: corrected,
+                },
+            });
         }
         if let Some((grid, obs)) = &o.limit {
             if self.limits.len() < MAX_SHARD_OBS {
@@ -854,11 +975,14 @@ struct Totals {
     consecutive_saturated: u32,
     /// Per layer: the rate-limit counters of the run.
     limits: Vec<Option<LimitAcc>>,
+    /// Per layer: the breakdowns by operation and credential.
+    keys: Vec<LayerKeys>,
 }
 
 impl Totals {
     fn new(layers: usize, targets: usize) -> Self {
         Self {
+            keys: vec![LayerKeys::default(); layers],
             limits: vec![None; layers],
             counts: Counts::default(),
             corrected: histogram(3),
@@ -966,6 +1090,10 @@ pub struct RunParams {
     /// Live changes already made (a cluster member joining a run late);
     /// default: none.
     pub controls: Option<Controls>,
+    /// The scenario layers' mock plans and identities on this node.
+    pub extras: Vec<Option<Arc<LayerExtras>>>,
+    /// The node's mocks and IdP key, for layers added while the run runs.
+    pub resources: Option<super::Resources>,
 }
 
 /// One execution of a scenario on this node.
@@ -1021,7 +1149,17 @@ pub struct Run {
     /// Unix time (seconds) of the run's start: stages aligned to the wall
     /// clock and the rate-limit grids follow it.
     wall_start: OnceLock<f64>,
+    /// Per layer: its mock plan and identities (added layers get theirs
+    /// when they are added).
+    extras: Mutex<Vec<Option<Arc<LayerExtras>>>>,
+    resources: Option<super::Resources>,
+    /// What went wrong setting up identities or added layers (first few)
+    /// and how often.
+    warnings: Mutex<(Vec<String>, u64)>,
 }
+
+/// Most distinct warnings a run keeps.
+const MAX_RUN_WARNINGS: usize = 16;
 
 impl Run {
     pub fn new(params: RunParams) -> Arc<Self> {
@@ -1034,13 +1172,16 @@ impl Run {
         let controls = params
             .controls
             .unwrap_or_else(|| Controls::for_scenario(&params.scenario));
-        let view = Arc::new(LiveView::build(
-            &params.scenario,
-            &controls,
-            &params.id,
-            &params.node_id,
-            params.share,
-        ));
+        let view = Arc::new(
+            LiveView::build(
+                &params.scenario,
+                &controls,
+                &params.id,
+                &params.node_id,
+                params.share,
+            )
+            .with_extras(&params.extras),
+        );
         Arc::new(Self {
             hash: params.scenario.hash(),
             id: params.id,
@@ -1088,7 +1229,47 @@ impl Run {
             lease: params.lease,
             cluster: params.cluster,
             wall_start: OnceLock::new(),
+            extras: Mutex::new(params.extras),
+            resources: params.resources,
+            warnings: Mutex::new((Vec::new(), 0)),
         })
+    }
+
+    /// Note a problem the report should mention (deduplicated, bounded).
+    pub fn warn(&self, what: String) {
+        let mut w = self.warnings.lock().unwrap_or_else(|p| p.into_inner());
+        w.1 += 1;
+        if w.0.len() < MAX_RUN_WARNINGS && !w.0.contains(&what) {
+            w.0.push(what);
+        }
+    }
+
+    fn warnings(&self) -> Vec<String> {
+        let w = self.warnings.lock().unwrap_or_else(|p| p.into_inner());
+        let mut out = w.0.clone();
+        let shown: u64 = out.len() as u64;
+        if w.1 > shown {
+            out.push(format!("{} more like these", w.1 - shown));
+        }
+        out
+    }
+
+    /// The extras of every layer of the view, making those of layers added
+    /// since (without OAuth or source addresses: refused when adding).
+    fn layer_extras(&self, view: &LiveView) -> Vec<Option<Arc<LayerExtras>>> {
+        let mut extras = self.extras.lock().unwrap_or_else(|p| p.into_inner());
+        while extras.len() < view.layers.len() {
+            let l = &view.layers[extras.len()];
+            let made = match super::layer_extras(&l.def, self.resources.as_ref(), None) {
+                Ok(x) => x,
+                Err(e) => {
+                    self.warn(format!("layer {}: {e}", l.def.name));
+                    None
+                }
+            };
+            extras.push(made);
+        }
+        extras.clone()
     }
 
     /// The run key (tests spoof markers with another one).
@@ -1196,6 +1377,8 @@ impl Run {
             self.share(),
         )
         .with_wall(self.wall_start.get().copied());
+        let extras = self.layer_extras(&view);
+        let view = view.with_extras(&extras);
         *self.view.lock().unwrap_or_else(|p| p.into_inner()) = Arc::new(view);
         // A change shows in the stages from the moment it is made.
         self.note_stages();
@@ -1533,6 +1716,16 @@ impl Run {
             } else {
                 Vec::new()
             },
+            keys: if report.is_some() && totals.keys.iter().any(|k| !k.is_empty()) {
+                totals.keys.iter().take(nlayers).cloned().collect()
+            } else {
+                Vec::new()
+            },
+            warnings: if report.is_some() {
+                self.warnings()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -1560,23 +1753,24 @@ impl Run {
         self.view()
             .layers
             .get(layer)
-            .map_or(0, |l| pick(&l.weights, seq))
+            .map_or(0, |l| pick_request(l, seq))
     }
 
-    fn expand(&self, text: &str, layer: &str, seq: u64, vu: u32, id: u32) -> String {
+    fn expand(&self, text: &str, x: &Expansion) -> String {
         if !text.contains("{{") {
             return text.to_string();
         }
         let mut out = text.to_string();
-        let replacements: [(&str, String); 8] = [
-            ("seq", seq.to_string()),
-            ("vu", vu.to_string()),
+        let replacements: [(&str, String); 9] = [
+            ("seq", x.seq.to_string()),
+            ("vu", x.vu.to_string()),
             ("run", self.id.clone()),
             ("node", self.node_id.clone()),
-            ("layer", layer.to_string()),
+            ("layer", x.layer.to_string()),
             ("rand", rand::random::<u32>().to_string()),
-            ("id", id.to_string()),
-            ("ip", identity_ip(id)),
+            ("id", x.id.to_string()),
+            ("ip", x.ip.to_string()),
+            ("follow", x.follow.to_string()),
         ];
         for (name, value) in &replacements {
             for form in [format!("{{{{{name}}}}}"), format!("{{{{ {name} }}}}")] {
@@ -1593,16 +1787,36 @@ impl Run {
         layer_idx: usize,
         tpl: &RequestTemplate,
         target: &PinnedTarget,
-        seq: u64,
-        vu: u32,
-        test: Option<TestReq>,
+        what: &Sending,
     ) -> Result<Built, String> {
         use axum::http::{HeaderMap, HeaderName, HeaderValue};
+        let Sending {
+            seq,
+            vu,
+            test,
+            identity,
+            follow,
+        } = *what;
         let view = self.view();
         let live = view.layers.get(layer_idx).ok_or("the layer is gone")?;
         let layer = &live.def;
         let id = test.map_or(0, |t| t.id);
-        let path = self.expand(&tpl.path, &layer.name, seq, vu, id);
+        let ip = identity
+            .and_then(|r| r.ip.clone())
+            .unwrap_or_else(|| identity_ip(id));
+        let x = Expansion {
+            layer: &layer.name,
+            seq,
+            vu,
+            id,
+            ip: &ip,
+            follow: follow.unwrap_or(""),
+        };
+        let mut path = self.expand(&tpl.path, &x);
+        if let Some((k, v)) = identity.and_then(|r| r.query.as_ref()) {
+            path.push(if path.contains('?') { '&' } else { '?' });
+            path.push_str(&format!("{}={}", query_encode(k), query_encode(v)));
+        }
         let uri: Uri = format!("{}{}{}", target.authority, target.parsed.path, path)
             .parse()
             .map_err(|e| format!("request URI: {e}"))?;
@@ -1630,11 +1844,15 @@ impl Run {
             if name.eq_ignore_ascii_case("content-type") {
                 has_content_type = true;
             }
-            set(
-                &mut headers,
-                name,
-                self.expand(value, &layer.name, seq, vu, id),
-            )?;
+            set(&mut headers, name, self.expand(value, &x))?;
+        }
+        // The identity's credentials and forwarded address replace what the
+        // template set under the same names.
+        for (name, value) in identity.map_or(&[][..], |r| &r.headers[..]) {
+            let n = HeaderName::from_bytes(name.as_bytes())
+                .map_err(|e| format!("header {name}: {e}"))?;
+            let v = HeaderValue::from_str(value).map_err(|e| format!("header {name}: {e}"))?;
+            headers.insert(n, v);
         }
         // `many_ips`: the identity's address in the forwarded header,
         // unless the template sets that header itself.
@@ -1649,12 +1867,12 @@ impl Run {
         }
         let body = match &tpl.body {
             None => Bytes::new(),
-            Some(Value::String(s)) => Bytes::from(self.expand(s, &layer.name, seq, vu, id)),
+            Some(Value::String(s)) => Bytes::from(self.expand(s, &x)),
             Some(other) => {
                 if !has_content_type {
                     set(&mut headers, "content-type", "application/json".to_string())?;
                 }
-                Bytes::from(self.expand(&other.to_string(), &layer.name, seq, vu, id))
+                Bytes::from(self.expand(&other.to_string(), &x))
             }
         };
         // The marker: the names of the headers set above (sorted, unique),
@@ -1731,9 +1949,27 @@ impl Run {
         let mut merged_overhead = histogram(3);
         let mut counts = Counts::default();
         let mut samples = Vec::new();
+        let view = self.view();
         let mut totals = self.totals.lock().unwrap_or_else(|p| p.into_inner());
         for shard in &self.shards {
             let mut s = shard.lock().unwrap_or_else(|p| p.into_inner());
+            for k in s.keys.drain(..) {
+                let extras = view.layers.get(k.layer).and_then(|l| l.extras.as_ref());
+                let op = k.op.and_then(|(i, kind)| {
+                    let name = extras?.mock.as_ref()?.operations.get(usize::from(i))?;
+                    Some(match kind {
+                        1 => format!("{name} (invalid)"),
+                        2 => format!("{name} (after create)"),
+                        _ => name.clone(),
+                    })
+                });
+                let cred = k
+                    .ident
+                    .and_then(|i| Some(extras?.identities.as_ref()?.label(i)));
+                if let Some(slot) = totals.keys.get_mut(k.layer) {
+                    slot.record(op.as_deref(), cred.as_deref(), &k.answer);
+                }
+            }
             let _ = merged.add(&s.corrected);
             let _ = merged_service.add(&s.service);
             let _ = merged_upstream.add(&s.upstream);
@@ -2013,6 +2249,9 @@ impl Run {
             &names,
             &self.stages.lock().unwrap_or_else(|p| p.into_inner()),
         );
+        let (operations, credentials) = breakdown::reports(&names, &totals.keys);
+        let mut warnings = self.warnings();
+        warnings.extend(breakdown::findings(&operations));
         let mut layers = breakdown(names, &totals.layers);
         for (b, c) in layers.iter_mut().zip(&self.layer_sched) {
             b.counts.requested = c[0].load(Ordering::Relaxed);
@@ -2080,6 +2319,9 @@ impl Run {
             changes: controls.log.clone(),
             stages,
             rate_limits,
+            operations,
+            credentials,
+            warnings,
         };
         drop(totals);
         if let Some(dir) = &self.report_dir {
@@ -2126,6 +2368,75 @@ fn cumulative(weights: impl Iterator<Item = u32>) -> Vec<u32> {
             total
         })
         .collect()
+}
+
+/// The facts of one request beyond its template.
+#[derive(Clone, Copy)]
+struct Sending<'a> {
+    seq: u64,
+    vu: u32,
+    test: Option<TestReq>,
+    identity: Option<&'a super::identity::Resolved>,
+    follow: Option<&'a str>,
+}
+
+/// What the placeholders of a request stand for.
+struct Expansion<'a> {
+    layer: &'a str,
+    seq: u64,
+    vu: u32,
+    id: u32,
+    ip: &'a str,
+    follow: &'a str,
+}
+
+fn query_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The identity of layer `l`'s request number `seq`: a limit test's pool
+/// first, else the layer's identities in turn.
+fn identity_for(l: &super::live::LiveLayer, seq: u64, test: Option<TestReq>) -> Option<u32> {
+    let ids = l.extras.as_ref().and_then(|x| x.identities.as_ref());
+    match (test, ids) {
+        (Some(t), _) => Some(t.id),
+        (None, Some(ids)) => Some((seq % u64::from(ids.size.max(1))) as u32),
+        (None, None) => None,
+    }
+}
+
+/// The request of layer `l` for sequence number `seq`: a template, or one
+/// of its mock plan's requests.
+fn pick_request(l: &super::live::LiveLayer, seq: u64) -> usize {
+    match l.extras.as_ref().and_then(|x| x.mock.as_ref()) {
+        Some(plan) => plan.pick(seq),
+        None => pick(&l.weights, seq),
+    }
+}
+
+/// Request `idx` of layer `l` (its mock plan's when it has one).
+fn request_of(
+    l: &super::live::LiveLayer,
+    idx: usize,
+) -> Option<(&RequestTemplate, Option<&super::mocksource::PlannedRequest>)> {
+    match l.extras.as_ref().and_then(|x| x.mock.as_ref()) {
+        Some(plan) => plan.requests.get(idx).map(|r| (&r.template, Some(r))),
+        None => l
+            .def
+            .source
+            .templates()
+            .get(idx)
+            .copied()
+            .map(|t| (t, None)),
+    }
 }
 
 fn pick(cumulative: &[u32], seq: u64) -> usize {
@@ -2286,7 +2597,7 @@ fn classify_error(e: &hyper_util::client::legacy::Error) -> &'static str {
 
 /// One request to send: which layer, target and template, its sequence
 /// number, virtual client and intended send time.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Job {
     layer: usize,
     target: usize,
@@ -2297,6 +2608,10 @@ struct Job {
     start: Instant,
     /// Sent while a rate-limit test runs.
     test: Option<TestReq>,
+    /// The identity of the layer's pool the request carries.
+    ident: Option<u32>,
+    /// A read after a create: the created item's id.
+    follow: Option<Arc<str>>,
 }
 
 /// A request of a rate-limit test: its identity, the test's pattern in the
@@ -2320,23 +2635,47 @@ async fn send_one(run: Arc<Run>, job: Job) {
         intended,
         start,
         test,
-    } = job;
+        ident,
+        follow,
+    } = job.clone();
     let view = run.view();
     let Some(live) = view.layers.get(layer_idx) else {
         run.inflight.fetch_sub(1, Ordering::Relaxed);
         return;
     };
-    let templates = live.def.source.templates();
-    let Some(tpl) = templates.get(tpl_idx).copied() else {
+    let Some((tpl, planned)) = request_of(live, tpl_idx) else {
         run.inflight.fetch_sub(1, Ordering::Relaxed);
         return;
+    };
+    // The identity's credentials (an OAuth token may be fetched here).
+    let ids = live.extras.as_ref().and_then(|x| x.identities.clone());
+    let resolved = match (ident, &ids) {
+        (Some(i), Some(ids)) => {
+            let r = ids.resolve(i).await;
+            if let Some(e) = &r.error {
+                run.warn(e.clone());
+            }
+            Some(r)
+        }
+        _ => None,
     };
     let target = &run.targets[target_idx];
     let Built {
         req,
         request_id,
         sent_ns,
-    } = match run.build_request(layer_idx, tpl, target, seq, vu, test) {
+    } = match run.build_request(
+        layer_idx,
+        tpl,
+        target,
+        &Sending {
+            seq,
+            vu,
+            test,
+            identity: resolved.as_ref(),
+            follow: follow.as_deref(),
+        },
+    ) {
         Ok(r) => r,
         Err(e) => {
             tracing::debug!("harness request {seq} not built: {e}");
@@ -2356,13 +2695,12 @@ async fn send_one(run: Arc<Run>, job: Job) {
     let grid = live.grid;
     let read_headers = grid.is_some() || test.is_some_and(|t| t.retries_left > 0);
     let node_header = live.node_header.clone();
+    // A create of a stateful pair keeps its answer for the created id.
+    let then_read = planned.and_then(|p| p.follow.clone());
+    let client = target.client_for(resolved.as_ref().and_then(|r| r.source));
     let sent = Instant::now();
     let result = tokio::time::timeout(timeout, async {
-        let resp = target
-            .client
-            .request(req)
-            .await
-            .map_err(|e| classify_error(&e))?;
+        let resp = client.request(req).await.map_err(|e| classify_error(&e))?;
         let status = resp.status().as_u16();
         // The tag and the upstream timing, verified with the run key.
         let tag = resp
@@ -2381,14 +2719,14 @@ async fn send_one(run: Arc<Run>, job: Job) {
         } else {
             ratelimit::Observed::default()
         };
-        let bytes = read_body(resp.into_body()).await?;
-        Ok::<_, &'static str>((status, bytes, tag, upstream_ms, observed))
+        let (bytes, kept) = read_body(resp.into_body(), then_read.is_some()).await?;
+        Ok::<_, &'static str>((status, bytes, tag, upstream_ms, observed, kept))
     })
     .await;
     let done = Instant::now();
     let done_ns = correlate::now_ns();
-    let (status, transport, bytes, expected, tag, upstream_ms, observed) = match result {
-        Ok(Ok((status, bytes, tag, up, observed))) => (
+    let (status, transport, bytes, expected, tag, upstream_ms, observed, kept) = match result {
+        Ok(Ok((status, bytes, tag, up, observed, kept))) => (
             Some(status),
             None,
             bytes,
@@ -2396,8 +2734,18 @@ async fn send_one(run: Arc<Run>, job: Job) {
             tag,
             up,
             observed,
+            kept,
         ),
-        Ok(Err(kind)) => (None, Some(kind), 0, false, None, None, Default::default()),
+        Ok(Err(kind)) => (
+            None,
+            Some(kind),
+            0,
+            false,
+            None,
+            None,
+            Default::default(),
+            None,
+        ),
         Err(_) => (
             None,
             Some("timeout"),
@@ -2406,8 +2754,28 @@ async fn send_one(run: Arc<Run>, job: Job) {
             None,
             None,
             Default::default(),
+            None,
         ),
     };
+    // Stateful: a create that worked is followed by a read of its item.
+    if let (Some((read, param)), Some(body), Some(200..=299)) = (&then_read, &kept, status) {
+        match super::mocksource::created_id(body, param) {
+            Some(id) => resend(
+                run.clone(),
+                Job {
+                    template: *read,
+                    follow: Some(id.into()),
+                    test: None,
+                    ..job.clone()
+                },
+                Duration::ZERO,
+            ),
+            None => run.warn(format!(
+                "a create in layer {} answered without an id to read back",
+                live.def.name
+            )),
+        }
+    }
     let limited = status.is_some_and(|s| live.limited.contains(&s));
     let service = done.saturating_duration_since(sent);
     let class = match (status, &tag) {
@@ -2439,7 +2807,7 @@ async fn send_one(run: Arc<Run>, job: Job) {
             } else {
                 b.retry_delay
             };
-            retry(
+            resend(
                 run.clone(),
                 Job {
                     test: Some(TestReq {
@@ -2447,7 +2815,7 @@ async fn send_one(run: Arc<Run>, job: Job) {
                         retry: true,
                         ..t
                     }),
-                    ..job
+                    ..job.clone()
                 },
                 wait.min(MAX_RETRY_WAIT),
             );
@@ -2499,13 +2867,23 @@ async fn send_one(run: Arc<Run>, job: Job) {
         response_leg,
         limited,
         limit,
+        op: planned.map(|p| {
+            let kind = if follow.is_some() {
+                2
+            } else {
+                u8::from(p.invalid)
+            };
+            (p.operation as u16, kind)
+        }),
+        ident: ident.filter(|_| ids.is_some()),
     });
 }
 
-/// Send `job` again after `wait` (a `retry_wave` retry): a new request of
-/// the same layer, identity and target. It counts in flight while it waits,
-/// so the drain waits for it, and is dropped when the run stops sending.
-fn retry(run: Arc<Run>, job: Job, wait: Duration) {
+/// Send `job` as a new request after `wait` (a `retry_wave` retry, a read
+/// after a create): the same layer, identity and target, a new sequence
+/// number. It counts in flight while it waits, so the drain waits for it,
+/// and is dropped when the run stops sending.
+fn resend(run: Arc<Run>, job: Job, wait: Duration) {
     if run.inflight.load(Ordering::Relaxed) >= run.inflight_cap {
         run.not_sent.fetch_add(1, Ordering::Relaxed);
         run.requested.fetch_add(1, Ordering::Relaxed);
@@ -2550,9 +2928,13 @@ fn retry(run: Arc<Run>, job: Job, wait: Duration) {
     });
 }
 
-/// Read and count a response body (bounded).
-async fn read_body(mut body: Incoming) -> Result<u64, &'static str> {
+/// The most of an answer kept to read a created id.
+const MAX_KEPT_BODY: usize = 64 * 1024;
+
+/// Read and count a response body (bounded); `keep`: also its first bytes.
+async fn read_body(mut body: Incoming, keep: bool) -> Result<(u64, Option<Vec<u8>>), &'static str> {
     let mut total = 0u64;
+    let mut kept = keep.then(Vec::new);
     while let Some(frame) = body.frame().await {
         let frame = frame.map_err(|_| "reset")?;
         if let Some(data) = frame.data_ref() {
@@ -2560,9 +2942,13 @@ async fn read_body(mut body: Incoming) -> Result<u64, &'static str> {
             if total > MAX_RESPONSE_BYTES as u64 {
                 return Err("protocol");
             }
+            if let Some(k) = kept.as_mut() {
+                let room = MAX_KEPT_BODY.saturating_sub(k.len());
+                k.extend_from_slice(&data[..data.len().min(room)]);
+            }
         }
     }
-    Ok(total)
+    Ok((total, kept))
 }
 
 /// A closed layer's running user.
@@ -2738,7 +3124,7 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
                             run.count_layer(layer.idx, true);
                             let vu = vu_base + vu_cursor % vu_count;
                             vu_cursor = vu_cursor.wrapping_add(1);
-                            let tpl = pick(&live.weights, layer.seq);
+                            let tpl = pick_request(live, layer.seq);
                             let target = run.pick_target(seq);
                             // A rate-limit test: the next identity of its pool.
                             let test = view.behaviour(layer.idx, t).map(|(chain, b)| TestReq {
@@ -2747,6 +3133,7 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
                                 retries_left: b.retries,
                                 retry: false,
                             });
+                            let ident = identity_for(live, layer.seq, test);
                             handle.spawn(send_one(
                                 run.clone(),
                                 Job {
@@ -2758,6 +3145,8 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
                                     intended,
                                     start,
                                     test,
+                                    ident,
+                                    follow: None,
                                 },
                             ));
                         }
@@ -2883,6 +3272,11 @@ async fn user_loop(
             totals.counts.sent += 1;
         }
         let tpl = run.pick_template(layer_idx, local_seq);
+        let ident = run
+            .view()
+            .layers
+            .get(layer_idx)
+            .and_then(|l| identity_for(l, local_seq, None));
         let target = run.pick_target(seq);
         let now = Instant::now();
         send_one(
@@ -2896,6 +3290,8 @@ async fn user_loop(
                 intended: now,
                 start,
                 test: None,
+                ident,
+                follow: None,
             },
         )
         .await;

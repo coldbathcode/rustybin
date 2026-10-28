@@ -123,8 +123,9 @@ fn param_value(
     schema_v: &Value,
     example: Option<&Value>,
     seed_offset: u64,
+    variant: u64,
 ) -> String {
-    if let Some(e) = example {
+    if let Some(e) = example.filter(|_| variant == 0) {
         return text_of(e);
     }
     let v = schema::generate_named(
@@ -133,8 +134,8 @@ fn param_value(
         &GenOptions {
             root: &c.spec.root,
             direction: Direction::Request,
-            seed: c.settings.responses.seed.wrapping_add(seed_offset),
-            use_examples: true,
+            seed: variant_seed(c, variant).wrapping_add(seed_offset),
+            use_examples: variant == 0,
             echo: &[],
         },
     );
@@ -144,26 +145,43 @@ fn param_value(
     }
 }
 
+/// The generation seed of request variant `variant` (0: the mock's own).
+fn variant_seed(c: &Compiled, variant: u64) -> u64 {
+    c.settings
+        .responses
+        .seed
+        .wrapping_add(variant.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+}
+
 /// A request the operation accepts (required parameters, a generated body,
 /// demo credentials when security is on).
 pub fn sample_request(c: &Compiled, op: &Operation) -> SampleRequest {
+    sample_request_variant(c, op, 0)
+}
+
+/// [`sample_request`] with other generated values: variant 0 is the sample
+/// (examples first); every other variant generates its parameters and body
+/// from the schemas with its own seed, so a harness run that sends many
+/// varies its paths and bodies. Every variant is a request the operation
+/// accepts.
+pub fn sample_request_variant(c: &Compiled, op: &Operation, variant: u64) -> SampleRequest {
     let mut path = op.path.clone();
     for p in op.params_in(Location::Path) {
-        let v = param_value(c, &p.name, &p.schema, p.example.as_ref(), 0);
+        let v = param_value(c, &p.name, &p.schema, p.example.as_ref(), 0, variant);
         path = path.replace(&format!("{{{}}}", p.name), &encode_segment(&v));
     }
     let mut query = Vec::new();
     for p in op.params_in(Location::Query).filter(|p| p.required) {
         query.push((
             p.name.clone(),
-            param_value(c, &p.name, &p.schema, p.example.as_ref(), 1),
+            param_value(c, &p.name, &p.schema, p.example.as_ref(), 1, variant),
         ));
     }
     let mut headers = Vec::new();
     for p in op.params_in(Location::Header).filter(|p| p.required) {
         headers.push((
             p.name.clone(),
-            param_value(c, &p.name, &p.schema, p.example.as_ref(), 2),
+            param_value(c, &p.name, &p.schema, p.example.as_ref(), 2, variant),
         ));
     }
     let cookies: Vec<String> = op
@@ -173,7 +191,7 @@ pub fn sample_request(c: &Compiled, op: &Operation) -> SampleRequest {
             format!(
                 "{}={}",
                 p.name,
-                param_value(c, &p.name, &p.schema, p.example.as_ref(), 3)
+                param_value(c, &p.name, &p.schema, p.example.as_ref(), 3, variant)
             )
         })
         .collect();
@@ -186,24 +204,29 @@ pub fn sample_request(c: &Compiled, op: &Operation) -> SampleRequest {
     let mut content_type = None;
     let mut body = None;
     if let Some(media) = op.request_body.as_ref().and_then(|rb| rb.json_media()) {
-        let value = media
-            .example
-            .clone()
-            .or_else(|| media.examples.first().map(|e| e.value.clone()))
-            .or_else(|| {
-                media.schema.as_ref().map(|s| {
-                    schema::generate(
-                        s,
-                        &GenOptions {
-                            root: &c.spec.root,
-                            direction: Direction::Request,
-                            seed: c.settings.responses.seed,
-                            use_examples: true,
-                            echo: &[],
-                        },
-                    )
-                })
-            });
+        let generated = || {
+            media.schema.as_ref().map(|s| {
+                schema::generate(
+                    s,
+                    &GenOptions {
+                        root: &c.spec.root,
+                        direction: Direction::Request,
+                        seed: variant_seed(c, variant),
+                        use_examples: variant == 0,
+                        echo: &[],
+                    },
+                )
+            })
+        };
+        let value = if variant == 0 {
+            media
+                .example
+                .clone()
+                .or_else(|| media.examples.first().map(|e| e.value.clone()))
+                .or_else(generated)
+        } else {
+            generated().or_else(|| media.example.clone())
+        };
         if let Some(v) = value {
             let ct = if media.media_type == "*/*" {
                 "application/json".to_string()

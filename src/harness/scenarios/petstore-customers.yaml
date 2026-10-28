@@ -1,0 +1,34 @@
+# Customers using the petstore mock's API: every operation by weight, with
+# generated parameters and bodies, 2 percent invalid requests (they expect a
+# 4xx: a gateway that validates requests refuses them), creates read back,
+# and 50 minted API keys (provision harness-key-0 to harness-key-49 in the
+# gateway). The report breaks the answers down by operation and by key.
+name: petstore-customers
+description: Every petstore operation by weight, 2 percent invalid, creates read back, 50 API keys, 20 per second for two minutes.
+targets:
+  - url: http://127.0.0.1:8080
+    weight: 1
+scale:
+  virtual_clients: 50
+layers:
+  - name: customers
+    source:
+      mock: petstore
+      operations:
+        weights:
+          listPets: 5
+          getPetById: 5
+          createPet: 2
+      invalid_fraction: 0.02
+      stateful: true
+    identities:
+      api_keys:
+        header: apikey
+        mint: 50
+      forwarded:
+        count: 50
+    pattern:
+      type: constant
+      rate: 20
+      for: 2m
+timeout: 10s

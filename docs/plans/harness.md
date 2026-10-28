@@ -1,22 +1,23 @@
 # Plan: load test mode (the harness), load tests through a gateway
 
-Status: **phases 0, 1, 2, 3, 3b, 4 and 5 done** (2026-10-28): the engine spike is `examples/harness_spike.rs`
+Status: **phases 0, 1, 2, 3, 3b, 4, 5 and 6 done** (2026-10-28): the engine spike is `examples/harness_spike.rs`
 ([Phase 0 results](#phase-0-results-2026-10-25)); the single-node engine, the correlation, the cluster, its
-failover, the patterns and live tuning, and the rate-limit tests are `src/harness/` ([Phase 1 build notes](#phase-1-build-notes-2026-10-25),
+failover, the patterns and live tuning, the rate-limit tests, and mock-driven traffic with identities are
+`src/harness/` ([Phase 1 build notes](#phase-1-build-notes-2026-10-25),
 [Phase 2 build notes](#phase-2-build-notes-2026-10-25), [Phase 3 build notes](#phase-3-build-notes-2026-10-26),
-[Phase 3b build notes](#phase-3b-build-notes-2026-10-26), [Phase 4 build notes](#phase-4-build-notes-2026-10-26)
-and [Phase 5 build notes](#phase-5-build-notes-2026-10-28) list where the build differs from this plan).
-Phase 6 is next. Planned 2026-10-22.
+[Phase 3b build notes](#phase-3b-build-notes-2026-10-26), [Phase 4 build notes](#phase-4-build-notes-2026-10-26),
+[Phase 5 build notes](#phase-5-build-notes-2026-10-28) and [Phase 6 build notes](#phase-6-build-notes-2026-10-28)
+list where the build differs from this plan). Phase 7 is next. Planned 2026-10-22.
 
-> **Build marker (2026-10-28): START HERE.** Phases 0 to 5 are done. Next, when the user says go, is
-> phase 6 (section 15): mock-driven traffic (a layer `source: { mock: <name> }` with per-operation weights,
-> an invalid fraction and stateful create then read, built from the mock's compiled revision the way
-> `src/mocks/mcp.rs` builds tools) and identities (the layer's `identities` block: credential pools, JWTs
-> minted by the built-in IdP, OAuth client credentials against the gateway, `X-Forwarded-For` pools,
-> source address binding), with a per-credential breakdown in the report. Build on what exists: the
-> `limit_test` identity pool (`TestReq` in `engine.rs`, `{{id}}` and `{{ip}}`, `identity_ip`) is the
-> simple form phase 6 generalises, and `ratelimit.rs` already follows identities one by one (the first
-> 64); the live change `identities` comes with it.
+> **Build marker (2026-10-28): START HERE.** Phases 0 to 6 are done. Next, when the user says go, is
+> phase 7 (section 15): the fault behaviours of section 8 on the client and server side with presets
+> (the scenario's `faults` block and the live change `faults`), node churn, and the protocol sources:
+> SSE and LLM streaming (`source: { llm: ... }`, refused by name today: time to first token,
+> inter-token latency, tokens per second, checked against `/ai` with known token timings), WebSocket,
+> gRPC and MCP tool calls. Build on what exists: a source variant resolves into requests on the node
+> like `mocksource.rs`, per-request extras travel in `Job` and `Sending` (`engine.rs`), the shaped
+> endpoint (`shaped.rs`) and the test proxy (`test_proxy.rs`) are where server and gateway behaviour is
+> observed, and `breakdown.rs` is the pattern for bounded per-key results merged across nodes.
 >
 > Keep this status line and `docs/src/roadmap.md` ("Next") updated as phases land. Commit as oliwynn.
 
@@ -1177,6 +1178,58 @@ What phase 5 built, and where it differs from section 6.3:
   `rate_limits` and its text section; the analysis in the console's report and in the MCP
   `get_run_report` summary; built-ins `rate-limit`, `limit-probe` and `many-ips`. No new routes.
 
+### Phase 6 build notes (2026-10-28)
+
+What phase 6 built, and where it differs from sections 6 and 12:
+
+- **Files**: `mocksource.rs` (a mock source resolved into a plan), `identity.rs` (the identities of a
+  layer), `breakdown.rs` (per-operation and per-credential results), `sample_request_variant` in
+  `mocks/checks.rs`, `traffic_tests.rs`; a test proxy that records a header and its peers' addresses.
+- **Mock sources** take the plan's flat form (`source: { mock, operations, invalid_fraction }`) plus
+  `operations.include` and `weights`, `stateful` and `base_path` (default `/mock/<name>`, empty when
+  the gateway maps the mock's own paths). Each client node resolves the mock from its own live revision
+  when the run starts (not from the coordinator): every client node needs the mock, which file-defined
+  mocks (`rustybin.yaml`) give. A layer sends at most 64 operations.
+- **Requests**: four variants per operation (the sample with examples first, then three generated from
+  the schemas with their own seeds), picked by weight with the sequence number hashed (splitmix64), so a
+  short run sees every operation. An invalid variant where the operation has one: a body of the wrong
+  type, a required query parameter left out, or a numeric path parameter that is not a number; it
+  expects any 4xx, and the report says how many were not refused (mocks validate in `warn` mode by
+  default: an unvalidating path answers them 2xx).
+- **Create then read**: a POST on a collection whose GET on the item exists is followed, when it
+  succeeds, by that GET with the id from the answer (`id`, the path parameter's name, or a field ending
+  in `id`; the answer's first 64 KB are kept for it). The read is a new request of the layer. Item
+  operations of a stateful source accept a 404 (ids nobody created).
+- **Identities live on the layer** (`identities`), not in `scale`: `count`, `api_keys` (header or
+  query; `values`, or `mint` named `<prefix><n>`, so the gateway can be provisioned with the same
+  names), `jwt`, `oauth`, `forwarded`, `source_addresses`. Identity `n` takes the `n`th of each pool;
+  a request takes the next identity in turn (the layer's sequence number), not its virtual client's;
+  a limit test's pool comes first. Identity headers replace a template's headers of the same names.
+- **JWTs** are signed by the client node's IdP key (RS256, the node's own key and JWKS: a cluster's
+  nodes sign with different keys) or the demo HS256 secret (the same everywhere), lazily, one per
+  subject, reused until 30 s before they expire. The default issuer is `rustybin-harness`.
+- **OAuth client credentials** (`client_secret_post`): the token URL is allowlisted and pinned like a
+  target, every client's first token is fetched before the run (a failure refuses the run with 422),
+  then cached and fetched again before expiry, one fetch at a time per client. A token that cannot be
+  had mid-run sends the request without it and is a warning in the report.
+- **Source addresses** must be this host's (checked by binding when the run starts); each target gets
+  a client per address, connecting to the target's addresses of the same family.
+- **Added layers** (`add_layer`) take mock sources and every pool but `oauth` and
+  `source_addresses` (refused: they are set up when the run starts). There is no live `identities`
+  change: section 6.5 does not list one.
+- **Breakdowns** (`report.operations`, `report.credentials`): answers, OK, errors, refusals and the mean,
+  with p50 and p99 from a 64-bucket log histogram (about 25 percent wide) rather than exact ones; at
+  most 256 keys per layer and kind (then `other`), 64 shown per layer. Invalid requests and reads after a
+  create are their own rows. Credential labels carry no secret: the minted key's name, `key <n>` for a
+  listed key, the JWT subject, the OAuth client id, the address. The rate-limit analysis still follows
+  the first 64 identities, not the 1,000 of section 10. Final stats carry the breakdowns and the
+  warnings; the leader merges them.
+- **Redaction**: listed API keys and client secrets join credential-looking headers as `[redacted]` in
+  reports. Saved scenarios keep them, like header values (they are the operator's configuration).
+- **Console**: the builder no longer gives `method` (or other enums inside optional objects) a default,
+  which made an untouched request template sit next to a mock source; the builder check opens collapsed
+  sections before clicking an add button.
+
 ### Estimate (2026-10-22)
 
 About 16 to 19 days of build sessions, after the mock MCP server (1 to 2 days). This is calibrated on the
@@ -1191,7 +1244,7 @@ earlier plans: OpenAPI mocks about 2 days, management MCP about 3, hosted mocks 
 | 3b. Leadership and failover | 2 to 3 |
 | 4. Patterns, scale and live tuning | 2 |
 | 5. Rate-limit tests and analysis | 2 (done, 2026-10-28) |
-| 6. Mock-driven traffic and identities | 1 |
+| 6. Mock-driven traffic and identities | 1 (done, 2026-10-28) |
 | 7. Faults and protocols | 2 to 3 |
 | 8. Docs and conformance | 1 |
 
