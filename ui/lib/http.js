@@ -27,6 +27,21 @@ export function isMocksUrl(u) {
   }
 }
 
+/** Header carrying a token bound to an API key (shared mode, data plane). */
+export const KEY_TOKEN_HEADER = 'X-Rustybin-Key-Token';
+
+/** True for URLs of this server (not a gateway or another host). */
+export function isServerUrl(u) {
+  try {
+    const url = new URL(u, location.href);
+    const base = new URL(SERVER + '/');
+    const prefix = base.pathname.replace(/\/$/, '');
+    return url.origin === base.origin && (prefix === '' || url.pathname === prefix || url.pathname.startsWith(prefix + '/'));
+  } catch {
+    return false;
+  }
+}
+
 /** True for URLs of this server's control plane (`/_rustybin` and below). */
 export function isControlUrl(u) {
   try {
@@ -76,6 +91,10 @@ export function withConsoleHeaders(list, opts = {}) {
   if (opts.session !== false && session && !hasHeader(out, SESSION_HEADER)) out.push([SESSION_HEADER, session]);
   const control = auth.getToken();
   if (control && opts.url && isControlUrl(opts.url) && !hasHeader(out, 'authorization')) out.push(['Authorization', 'Bearer ' + control]);
+  // Signed in for a shared-mode key: this server's data plane needs the key,
+  // which the console never holds; the token bound to it stands in.
+  if (control && auth.boundKey() && opts.url && isServerUrl(opts.url) && !isControlUrl(opts.url)
+    && !hasHeader(out, 'x-rustybin-key') && !hasHeader(out, KEY_TOKEN_HEADER)) out.push([KEY_TOKEN_HEADER, control]);
   // Self-service: the visitor's manage tokens, to this server's mock API only.
   const mockTokens = visit.tokens();
   if (mockTokens.length && opts.url && isMocksUrl(opts.url) && !hasHeader(out, visit.HEADER)) out.push([visit.HEADER, mockTokens.join(', ')]);
@@ -103,7 +122,7 @@ export function explainNetworkError(url, err, timeoutMs, timedOut) {
  * where request.headers is what was sent and request.shown the same with console credentials masked.
  */
 /** Headers the console adds on its own that carry a credential. */
-const CREDENTIAL_HEADERS = ['authorization', 'x-rustybin-admin-token', visit.HEADER.toLowerCase()];
+const CREDENTIAL_HEADERS = ['authorization', 'x-rustybin-admin-token', KEY_TOKEN_HEADER.toLowerCase(), visit.HEADER.toLowerCase()];
 
 /** A credential for the screen: its scheme (`Bearer `), then the first 4 and last 2 characters. */
 export function maskCredential(value) {

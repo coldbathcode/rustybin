@@ -62,6 +62,12 @@ pub use store::QuotaStore;
 
 /// Request header carrying the API key.
 pub const KEY_HEADER: &str = "x-rustybin-key";
+/// Request header carrying a control JWT bound to a key (scope `inspector`,
+/// claim `rb_key`) in place of the key itself, in shared mode: what the web
+/// console sends on its own data-plane requests when it was opened for a key
+/// (it never holds the key). Kept apart from `Authorization`, which the
+/// traffic under test may use.
+pub const KEY_TOKEN_HEADER: &str = "x-rustybin-key-token";
 /// Query parameter carrying the API key (when the header is absent).
 pub const KEY_QUERY: &str = "rb_key";
 /// Per-key daily totals for the platform collector (admin).
@@ -704,10 +710,11 @@ pub fn authorization_is_control(headers: &HeaderMap, config: &Config) -> bool {
     token.matches('.').count() == 2 && crate::control_auth::verify_jwt(token, config).is_ok()
 }
 
-/// Is `name` a header that always carries a Rustybin credential (the API key,
-/// admin token or visit manage token header)?
+/// Is `name` a header that always carries a Rustybin credential (the API key
+/// or a token bound to one, the admin token or visit manage token header)?
 pub fn is_credential_header(name: &str) -> bool {
     name.eq_ignore_ascii_case(KEY_HEADER)
+        || name.eq_ignore_ascii_case(KEY_TOKEN_HEADER)
         || name.eq_ignore_ascii_case(crate::admin::ADMIN_TOKEN_HEADER)
         || name.eq_ignore_ascii_case(crate::mocks::visits::TOKEN_HEADER)
 }
@@ -795,12 +802,16 @@ fn is_mock_route(path: &str) -> bool {
 }
 
 /// Control-plane routes a key may read in shared mode: its inspector entries,
-/// its usage and the status (the key's view, see `crate::ui`), which the
-/// console reads to sign in.
+/// its usage, the status (the key's view, see `crate::ui`), which the console
+/// reads to sign in, and the route catalogue (the landing page's list, public
+/// anyway), which its API explorer reads.
 fn is_key_readable(method: &Method, path: &str) -> bool {
     let inspector = path == "/_rustybin/requests" || path.starts_with("/_rustybin/requests/");
     (method == Method::GET || method == Method::HEAD)
-        && (inspector || path == crate::limits::USAGE_PATH || path == crate::ui::STATUS_PATH)
+        && (inspector
+            || path == crate::limits::USAGE_PATH
+            || path == crate::ui::STATUS_PATH
+            || path == crate::ui::CATALOG_PATH)
 }
 
 /// The key layer (installed by `build_app` when keys are enabled), outside
@@ -819,9 +830,21 @@ pub async fn enforce(State(state): State<AppState>, mut req: Request, next: Next
     }
 
     let presented = presented_key(req.headers(), req.uri());
-    let record = match keys.lookup(presented.as_deref()) {
-        Lookup::Found(r) => r,
-        other => return key_error(&other),
+    let token = (presented.is_none() && keys.shared())
+        .then(|| req.headers().get(KEY_TOKEN_HEADER))
+        .flatten()
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    let record = match token {
+        Some(t) => match key_from_jwt(&state, t) {
+            Ok(r) => r,
+            Err(resp) => return resp,
+        },
+        None => match keys.lookup(presented.as_deref()) {
+            Lookup::Found(r) => r,
+            other => return key_error(&other),
+        },
     };
     let shared = keys.shared();
     let day = keys.today();
@@ -921,7 +944,6 @@ async fn control(state: AppState, mut req: Request, next: Next) -> Response {
 /// without `rb_key`), as the response to send.
 #[allow(clippy::result_large_err)]
 fn key_credential(state: &AppState, req: &Request) -> Result<Option<Arc<KeyRecord>>, Response> {
-    let config = &state.config;
     if let Some(k) = presented_key(req.headers(), req.uri()) {
         return match state.keys.lookup(Some(&k)) {
             Lookup::Found(r) => Ok(Some(r)),
@@ -931,7 +953,14 @@ fn key_credential(state: &AppState, req: &Request) -> Result<Option<Arc<KeyRecor
     let Some(token) = crate::control_auth::presented_token(req.headers()) else {
         return Ok(None);
     };
-    match crate::control_auth::verify_jwt_claims(token, config) {
+    key_from_jwt(state, token).map(Some)
+}
+
+/// The key a control JWT is bound to: scope `inspector` (or wider) and the
+/// claim `rb_key`. `Err`: the response for a token that does not hold.
+#[allow(clippy::result_large_err)]
+fn key_from_jwt(state: &AppState, token: &str) -> Result<Arc<KeyRecord>, Response> {
+    match crate::control_auth::verify_jwt_claims(token, &state.config) {
         Ok((grant, claims)) if grant.inspector => {
             let Some(id) = claims.get("rb_key").and_then(Value::as_str) else {
                 return Err(error(
@@ -943,7 +972,7 @@ fn key_credential(state: &AppState, req: &Request) -> Result<Option<Arc<KeyRecor
             match state.keys.current() {
                 None => Err(key_error(&Lookup::Unavailable)),
                 Some(set) => match set.by_id(id) {
-                    Some(r) => Ok(Some(r)),
+                    Some(r) => Ok(r),
                     None => Err(key_error(&Lookup::Invalid)),
                 },
             }

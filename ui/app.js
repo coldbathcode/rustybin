@@ -368,7 +368,7 @@ async function loadInstance() {
     showFeatureViews(st);
     const foot = document.getElementById('foot-version');
     if (foot) foot.textContent = 'v' + st.version + ' | up ' + fmtDuration(st.uptime_seconds);
-    if (st.public_mode && !settings.get('session')) {
+    if (st.public_mode && !auth.boundKey() && !settings.get('session')) {
       const b = new Uint8Array(4);
       crypto.getRandomValues(b);
       settings.set('session', 'console-' + Array.from(b, (x) => x.toString(16).padStart(2, '0')).join(''));

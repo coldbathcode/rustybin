@@ -2,6 +2,7 @@
 // URLs a presenter pastes into a gateway configuration.
 import { h, replace, card, kvgrid, notice, copyButton, fmtDuration, badge, icon, spinner } from '../lib/dom.js';
 import { SERVER, getJson, send } from '../lib/http.js';
+import * as auth from '../lib/auth.js';
 import { jsonView } from '../lib/format.js';
 
 function baseUrls(cfg) {
@@ -66,7 +67,7 @@ function planBody(u) {
   return h('div', { class: 'stack-sm' },
     h('div', { class: 'row', style: { gap: '6px', flexWrap: 'wrap' } },
       badge(u.plan + ' plan', 'info'),
-      badge(u.scope === 'session' ? 'per session' : 'per instance', ''),
+      badge(u.scope === 'session' ? 'per session' : u.scope === 'key' ? 'per API key' : 'per instance', ''),
       u.persisted ? badge('usage persisted', 'ok') : null),
     usageRow(`Requests this ${period.kind || 'period'}`, u.requests.used, u.requests.limit, count),
     usageRow(`Egress this ${period.kind || 'period'}`, u.egress.used_bytes, u.egress.limit_bytes, bytes),
@@ -136,6 +137,17 @@ export default {
         uptimeBase = st.uptime_seconds;
         uptimeAt = performance.now();
         const uptime = h('span', { id: 'uptime' }, fmtDuration(st.uptime_seconds));
+        if (st.key) {
+          // Signed in for one API key of a shared instance: its view only.
+          replace(tilesEl,
+            tile('Health', h('span', { class: 'row', style: { gap: '8px' } }, h('span', { class: 'dot ' + (st.healthy ? 'ok' : 'err'), style: { width: '12px', height: '12px' } }), st.healthy ? 'Healthy' : 'Unhealthy'),
+              st.healthy ? 'GET /health answers 200' : 'GET /health answers 503'),
+            tile('Uptime', uptime, 'v' + st.version),
+            tile('API key', h('span', { class: 'mono', style: { fontSize: '16px', wordBreak: 'break-all' } }, st.key.id),
+              'This console shows this key\'s requests and usage', h('div', { class: 'row', style: { marginTop: '6px', gap: '6px' } }, badge('shared instance', 'info'))));
+          replace(urlsEl, ...baseUrls(null).filter(([label]) => label !== 'HTTPS' && label !== 'gRPC').map(row));
+          return;
+        }
         replace(tilesEl,
           tile('Health', h('span', { class: 'row', style: { gap: '8px' } }, h('span', { class: 'dot ' + (st.healthy ? 'ok' : 'err'), style: { width: '12px', height: '12px' } }), st.healthy ? 'Healthy' : 'Unhealthy'),
             st.healthy ? 'GET /health answers 200' : 'GET /health answers 503',
@@ -188,7 +200,12 @@ export default {
           ['Log level', cfg.log_level],
         ]));
       } catch (e) {
-        if (alive) replace(configEl, notice('err', 'Cannot read /_rustybin/config: ' + e.message));
+        if (!alive) return;
+        if (auth.boundKey()) {
+          replace(configEl, notice('info', 'The instance configuration is for the operator of this shared instance. Send X-Rustybin-Key with every request to it; this console sends its own requests for your key.'));
+          return;
+        }
+        replace(configEl, notice('err', 'Cannot read /_rustybin/config: ' + e.message));
       }
     }
 

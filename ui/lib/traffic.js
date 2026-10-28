@@ -29,8 +29,10 @@ function query() {
   const p = new URLSearchParams();
   const session = settings.get('session');
   // Public mode only serves the caller's session; otherwise every request is
-  // shown unless the presenter narrowed the feed to the console session.
-  if (session && (settings.instance.publicMode || settings.get('trafficSessionOnly'))) p.set('session', session);
+  // shown unless the presenter narrowed the feed to the console session. A
+  // console signed in for a shared-mode key sees that key's requests, whatever
+  // session sent them.
+  if (session && !auth.boundKey() && (settings.instance.publicMode || settings.get('trafficSessionOnly'))) p.set('session', session);
   return p.toString();
 }
 
@@ -62,7 +64,7 @@ export function connect() {
     setStatus('signed-out', 'Sign in to see the live feed.');
     return;
   }
-  if (settings.instance.publicMode && !settings.get('session')) {
+  if (settings.instance.publicMode && !auth.boundKey() && !settings.get('session')) {
     setStatus('needs-session', 'This instance runs in public mode: set a session to see your requests.');
     return;
   }

@@ -68,6 +68,17 @@ export function expiresAt() {
   return c && typeof c.exp === 'number' ? c.exp * 1000 : null;
 }
 
+/**
+ * The API key a shared instance's token is bound to (claim `rb_key`: the
+ * platform's "Open console" for a key), or null. Such a console sees that
+ * key's data only, and sends the token as X-Rustybin-Key-Token on its own
+ * data-plane requests (it never holds the key).
+ */
+export function boundKey() {
+  const c = claims();
+  return c && typeof c.rb_key === 'string' && c.rb_key ? c.rb_key : null;
+}
+
 /** Scopes of a JWT token (absent claim: console), or null for an opaque token. */
 export function scopes() {
   const c = claims();

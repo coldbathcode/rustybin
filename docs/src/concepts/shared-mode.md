@@ -202,9 +202,14 @@ The web console signs in with such a token: open `/ui/#token=<token>` (or paste 
 the sign-in page) and it shows that key's traffic, live. `GET /_rustybin/status`, which
 the console reads to sign in, answers a key (or a token bound to one) with the key's
 view: version, health, the modes and the console's title and backlink, plus `key.id`,
-but no hostname and no instance-wide counters. With
-[self-service mocks](../mocks/self-service.md) on, the same token manages the key's own
-mocks.
+but no hostname and no instance-wide counters; the route catalogue
+(`GET /_rustybin/catalog`, the API explorer's list) is readable too. The console never
+holds the key itself, so on its own data-plane requests (the API explorer, the AI
+playground, the MCP inspector) it sends the token in `X-Rustybin-Key-Token`, which
+stands in for `X-Rustybin-Key`: the request counts against that key and is captured
+under it, with the token redacted. `Authorization` stays free for the traffic under
+test. With [self-service mocks](../mocks/self-service.md) on, the same token manages
+the key's own mocks.
 
 ```hurl
 {{#include ../../examples/concepts/shared.hurl:key_status}}

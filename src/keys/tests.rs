@@ -854,18 +854,18 @@ async fn shared_control_plane_needs_admin_except_for_a_keys_own_data() {
     let key = [("x-rustybin-key", KEY_A)];
     let admin = [("authorization", "Bearer admin-secret")];
 
-    for path in ["/_rustybin/requests", "/_rustybin/usage"] {
+    for path in [
+        "/_rustybin/requests",
+        "/_rustybin/usage",
+        "/_rustybin/status",
+        "/_rustybin/catalog",
+    ] {
         assert_eq!(send(&app, "GET", path, &key).await.status(), StatusCode::OK);
         let resp = send(&app, "GET", path, &[]).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(body_json(resp).await["error"], ERR_REQUIRED);
     }
-    for path in [
-        "/_rustybin/config",
-        "/_rustybin/metrics",
-        "/_rustybin/catalog",
-        KEYS_USAGE_PATH,
-    ] {
+    for path in ["/_rustybin/config", "/_rustybin/metrics", KEYS_USAGE_PATH] {
         // A valid key is forbidden there (403), not signed out (401).
         let resp = send(&app, "GET", path, &key).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{path}");
@@ -1530,4 +1530,84 @@ fn shared_mode_configuration() {
     assert_eq!(c.keys_poll_secs, 30);
     assert_eq!(c.keys_max, 200_000);
     assert_eq!(c.quota_flush_ms, 2_000);
+}
+
+#[tokio::test]
+async fn the_console_sends_a_token_bound_to_a_key_on_the_data_plane() {
+    let mut config = crate::test_support::jwt_config();
+    config.shared_mode = true;
+    config.public_mode = true;
+    config.limits.scope = Scope::Session;
+    config.limits.period = Period::Day;
+    let state = crate::test_support::test_state_with(config);
+    state
+        .keys
+        .load_bytes(two_keys().as_bytes())
+        .expect("registry");
+    let app = test_app_with(state);
+    let token = |scope: &str, rb_key: Option<&str>| {
+        let mut claims = json!({
+            "aud": "test-instance",
+            "exp": chrono::Utc::now().timestamp() + 600,
+            "scope": scope,
+        });
+        if let Some(k) = rb_key {
+            claims["rb_key"] = json!(k);
+        }
+        sign_control_jwt(&claims, false)
+    };
+    let bound = token("inspector", Some("kb2"));
+
+    // The console opened for key kb2 holds a token, not the key: it stands in.
+    let resp = send(
+        &app,
+        "GET",
+        "/anything/from-the-console",
+        &[(KEY_TOKEN_HEADER, &bound)],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let auth = format!("Bearer {bound}");
+    let usage =
+        body_json(send(&app, "GET", "/_rustybin/usage", &[("authorization", &auth)]).await).await;
+    assert_eq!(usage["key_id"], "kb2");
+    assert_eq!(usage["requests"]["used"], 1);
+    // Captured under the key, with the token redacted.
+    let v = body_json(
+        send(
+            &app,
+            "GET",
+            "/_rustybin/requests",
+            &[("authorization", &auth)],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(v["count"], 1);
+    let captured = v["requests"][0].to_string();
+    assert!(!captured.contains(&bound), "{captured}");
+    assert!(captured.contains("[redacted]"), "{captured}");
+
+    // A token that does not hold is refused like a bad key.
+    let unbound = token("inspector", None);
+    for (t, status) in [
+        (unbound.as_str(), StatusCode::FORBIDDEN),
+        ("not-a-jwt", StatusCode::UNAUTHORIZED),
+    ] {
+        let resp = send(&app, "GET", "/anything/x", &[(KEY_TOKEN_HEADER, t)]).await;
+        assert_eq!(resp.status(), status, "{t}");
+    }
+    let unknown = token("inspector", Some("nope"));
+    let resp = send(&app, "GET", "/anything/x", &[(KEY_TOKEN_HEADER, &unknown)]).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // The API explorer reads the route catalogue: a key may too.
+    let resp = send(
+        &app,
+        "GET",
+        "/_rustybin/catalog",
+        &[("authorization", &auth)],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
 }

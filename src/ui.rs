@@ -336,6 +336,8 @@ async fn catalog_handler() -> Response {
 
 /// The instance status (the console reads it to sign in).
 pub const STATUS_PATH: &str = "/_rustybin/status";
+/// The route catalogue (the console's API explorer).
+pub const CATALOG_PATH: &str = "/_rustybin/catalog";
 
 /// A key holder's view of the status in shared mode: what the console needs
 /// (version, health, modes, its own title and backlink) and nothing about the
@@ -345,6 +347,7 @@ fn key_status(state: &AppState, key: &crate::keys::KeyContext) -> Response {
         "name": env!("CARGO_PKG_NAME"),
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_seconds": state.identity.start_time.elapsed().as_secs(),
+        "started_at": started_at(state),
         "healthy": state.health.is_healthy(),
         "public_mode": state.config.public_mode,
         "shared_mode": true,
@@ -360,6 +363,13 @@ fn key_status(state: &AppState, key: &crate::keys::KeyContext) -> Response {
     .into_response()
 }
 
+fn started_at(state: &AppState) -> String {
+    let uptime = state.identity.start_time.elapsed();
+    (chrono::Utc::now()
+        - chrono::Duration::from_std(uptime).unwrap_or_else(|_| chrono::Duration::zero()))
+    .to_rfc3339()
+}
+
 async fn status_handler(State(state): State<AppState>, extensions: Extensions) -> Response {
     if let Some(key) = extensions
         .get::<crate::keys::KeyContext>()
@@ -368,15 +378,13 @@ async fn status_handler(State(state): State<AppState>, extensions: Extensions) -
         return key_status(&state, key);
     }
     let uptime = state.identity.start_time.elapsed();
-    let started = chrono::Utc::now()
-        - chrono::Duration::from_std(uptime).unwrap_or_else(|_| chrono::Duration::zero());
     Json(json!({
         "name": env!("CARGO_PKG_NAME"),
         "version": env!("CARGO_PKG_VERSION"),
         "instance_id": state.config.instance_id,
         "hostname": gethostname::gethostname().to_string_lossy(),
         "uptime_seconds": uptime.as_secs(),
-        "started_at": started.to_rfc3339(),
+        "started_at": started_at(&state),
         "healthy": state.health.is_healthy(),
         "public_mode": state.config.public_mode,
         "admin_token_configured": state.config.admin_token.is_some(),
@@ -418,7 +426,7 @@ pub fn router(_state: &AppState) -> Router<AppState> {
         .route("/ui", get(ui_root))
         .route("/ui/", get(ui_index))
         .route("/ui/{*path}", get(ui_path))
-        .route("/_rustybin/catalog", get(catalog_handler))
+        .route(CATALOG_PATH, get(catalog_handler))
         .route(STATUS_PATH, get(status_handler))
 }
 

@@ -286,7 +286,11 @@ From a full code review (2026-10-25):
   sent back to the sign-in screen when an admin token was configured: the console's
   `GET /_rustybin/status` and every other route outside the key's reach answered `401`.
   The status now answers a key with the key's view, and a valid key gets `403` on the
-  routes it may not use (`401` stays for a missing or invalid credential).
+  routes it may not use (`401` stays for a missing or invalid credential). The
+  console's own data-plane requests send the token as `X-Rustybin-Key-Token` (it
+  stands in for the key, redacted in captures), its traffic view no longer narrows a
+  key's requests to the console session, the overview shows the key's view, and the
+  API explorer may read the route catalogue.
 - **MCP**: tool scopes are checked inside JSON-RPC batches on `/mcp/protected`; the
   legacy HTTP+SSE transport caps requests in flight per session.
 - **Self-service**: redirects that browsers read as off-domain (`/\host`) are refused;
