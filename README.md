@@ -108,7 +108,8 @@ a runnable example, and `/docs` for the OpenAPI reference. See the
   harness run --local-server`; the report separates what the client itself could not
   do (saturation) from what the gateway did, and says what its rate limiter did
   (admission per window, refusals, headers, recovery, collateral damage). Off by
-  default, targets allowlisted, never in public mode.
+  default, targets allowlisted, never in public mode
+  ([load testing through a gateway](docs/src/harness.md)).
 
 ## Web console
 
@@ -188,6 +189,7 @@ to the default. `GET /_rustybin/config` shows the effective configuration. Detai
 cargo build && cargo test
 cargo clippy --all-targets -- -D warnings
 docs/examples/run.sh          # every documentation example (Hurl) against a fresh server
+conformance/harness/run.sh    # the compose harness cluster: the leader killed mid-run, the report asserted
 mdbook build docs             # the documentation site
 ```
 

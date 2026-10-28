@@ -1050,7 +1050,11 @@ impl Membership {
         st.leader = leader;
         st.version = 0;
         st.clock.reset();
-        st.next_stand = None;
+        st.failures = 0;
+        // The new leader answers the next heartbeat; until then this node
+        // does not stand against it (its `last_ok` still points at the
+        // old leader's last answer).
+        st.next_stand = Some(Instant::now() + st.election_timeout);
         for cr in st.client_runs.values_mut() {
             cr.final_acked = false;
             cr.timeline_ack = 0;
@@ -1236,8 +1240,13 @@ impl Membership {
                 + 1;
             st.voted = Some((term, self.node_id.clone()));
             let e = st.election_timeout;
-            // The next try, if this one fails: after everyone else's turn.
-            st.next_stand = Some(Instant::now() + e + e / 6 * (snap.succession.len() as u32 + 1));
+            // The next try, if this one fails: after everyone else's turn,
+            // plus up to E/2 at random, so two candidates that split the
+            // votes do not collide again on the next try.
+            let jitter =
+                Duration::from_millis(rand::random::<u64>() % (e.as_millis() as u64 / 2).max(1));
+            st.next_stand =
+                Some(Instant::now() + e + e / 6 * (snap.succession.len() as u32 + 1) + jitter);
             (snap, term, credential, (e / 2).min(Duration::from_secs(2)))
         };
         let Some(state) = snap.state.as_ref() else {
@@ -1299,6 +1308,15 @@ impl Membership {
                 break;
             };
             let Some(a) = answer else { continue };
+            if !a.granted {
+                tracing::info!(
+                    target: "rustybin::harness",
+                    cluster = %self.cluster_id,
+                    term,
+                    "harness: a vote was refused: {}",
+                    a.reason
+                );
+            }
             if a.granted {
                 granted += 1;
             } else if a.term > term {

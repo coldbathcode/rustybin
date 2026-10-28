@@ -5,14 +5,17 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-- **Load test mode (harness), the last phase** (`docs/plans/harness.md`): phase 8,
-  the harness docs (`docs/src/harness.md` with Hurl examples, a compose example with a
-  leader, a standby, clients, servers and a stand-in gateway) and the conformance run
-  (`conformance/harness/run.sh`: the compose cluster, the leader killed mid-run, the
-  report asserted).
+Nothing is in progress. The harness plan is complete; what the hosted demo still
+needs is deployment, not code ([self-service mocks](mocks/self-service.md)). The
+candidates are under consideration below.
 
 ## Recently built
 
+- [Load testing through a gateway](harness.md) (harness phase 8, the last): the guide
+  with tested examples, a compose cluster with a leader, a standby, two clients, two
+  servers and a stand-in gateway, the harness conformance run (the leader killed
+  mid-run, the standby's report asserted) and the harness tools on the
+  [agent page](agent-mcp.md#harness).
 - [Harness faults and protocols](configuration.md#harness-mode) (phase 7): fault
   presets with client faults (connection churn, abandoned requests, slow and malformed
   bodies, wrong content types, oversized headers, retries on 5xx, expired tokens, an
@@ -83,6 +86,11 @@ the pages for the features that exist today describe current behaviour.
 
 ## Under consideration
 
+- **Harness follow-ups** (`docs/plans/harness.md`, open questions): a leader transfer
+  on purpose before maintenance; OpenTelemetry export of the run's traces and metrics;
+  HTTP/3 targets; replaying captured traffic or a HAR file as a traffic source; scenario
+  import from other tools' formats; server-to-server chains for multi-hop meshes (held
+  back until the safety model covers outbound traffic from the server role).
 - **Self-service across replicas**: visits and visitor mocks live in memory on one
   instance today. A shared store would let a hosted demo run several replicas
   without routing each mock to one of them.

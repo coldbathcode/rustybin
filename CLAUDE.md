@@ -2,14 +2,15 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Load test mode (harness): phases 1 to 7 built, phase 8 next
+## Load test mode (harness): built
 
-[docs/plans/harness.md](docs/plans/harness.md) (planned 2026-10-22; phase 0, the engine spike in
+[docs/plans/harness.md](docs/plans/harness.md) is built (planned 2026-10-22; phase 0, the engine spike in
 `examples/harness_spike.rs`, phase 1, the single-node engine in `src/harness/`, and phase 2, correlation, done
 2026-10-25; phase 3, the cluster, phase 3b, failover, and phase 4, patterns and live tuning, done 2026-10-26; phases
-5, the rate-limit tests, 6, mock-driven traffic and identities, and 7, faults and protocols, done 2026-10-28; the
-plan's "Phase 1/2/3/3b/4/5/6/7 build notes" list where the build differs; phase 8, the docs and the conformance run,
-is next):
+5, the rate-limit tests, 6, mock-driven traffic and identities, 7, faults and protocols, and 8, the docs
+(`docs/src/harness.md`, the compose cluster `docs/examples/harness/cluster/`) and the conformance run
+(`conformance/harness/run.sh`), done 2026-10-28; the plan's "Phase 1/2/3/3b/4/5/6/7/8 build notes" list where the
+build differs; follow-ups are under consideration in `docs/src/roadmap.md`):
 Rustybin as a load client and correlating upstream, single node (loop-through) or a cluster (an elected leader,
 clients, servers), traffic layers with run patterns and rate-limit tests, every parameter from one schema in the
 API, MCP and console (tunable live), or headless. It is the first feature that sends load to targets the caller
@@ -18,8 +19,9 @@ the leads webhook and the key registry URL already send outbound requests, with 
 `src/harness/safety.rs` (allowlist, pinning, forbidden addresses, verification, kill switch) comes first and every
 new way to point load goes through it. One model, one schema: a scenario parameter lives in `scenario.rs` (model,
 validation, `schema()`), and the parity tests fail when the schema, the MCP tool schemas or the console builder
-(`ui/lib/scenarioform.js`, renders every non-shorthand schema property) miss it. Update the plan's status and
-`docs/src/roadmap.md` ("Next") as phases land.
+(`ui/lib/scenarioform.js`, renders every non-shorthand schema property) miss it. A new parameter also belongs in
+the tables of `docs/src/configuration.md` and, when it changes how the harness is used, in `docs/src/harness.md`
+with a tested example in `docs/examples/harness/`.
 
 ## MCP server for every OpenAPI mock (built)
 
@@ -73,7 +75,8 @@ cargo run -- mock validate src/mocks/petstore.yaml   # OpenAPI mocks CLI (offlin
 cargo run --release --example harness_spike -- --sweep   # harness phase 0 spike: load sweep against an in-process Rustybin
 cargo run -- harness run src/harness/scenarios/smoke.yaml --local-server   # a harness run looped through an in-process Rustybin
 RUSTYBIN_HTTP_PORT=8080 cargo run
-docs/examples/run.sh                         # documentation examples (Hurl) against fresh servers (open, plan, secured, shared, keyed)
+docs/examples/run.sh                         # documentation examples (Hurl) against fresh servers (open, plan, secured, shared, keyed, self-service, harness)
+conformance/harness/run.sh                   # the compose harness cluster (docs/examples/harness/cluster): the leader killed mid-run, the report asserted
 mdbook build docs                            # documentation site
 python3 docs/tools/check_includes.py         # every docs include and example anchor resolves
 ```

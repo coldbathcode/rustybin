@@ -17,7 +17,8 @@
 #                       +6 HTTP of a fourth instance in shared mode with API keys
 #                       from a registry file in the temporary directory; +7 HTTP
 #                       of a fifth, normal instance with RUSTYBIN_REQUIRE_KEY; +8 HTTP
-#                       of a sixth, public instance with self-service mocks)
+#                       of a sixth, public instance with self-service mocks; +9 HTTP
+#                       of a seventh instance in harness mode, loop-through)
 #   REQUIRE_ALL_TOOLS=1 fail instead of skipping when grpcurl / websocat / jq are missing (CI)
 set -euo pipefail
 
@@ -32,6 +33,7 @@ SECURED_HTTPS_PORT=$((PORT + 5))
 SHARED_PORT=$((PORT + 6))
 KEYED_PORT=$((PORT + 7))
 SS_PORT=$((PORT + 8))
+HARNESS_PORT=$((PORT + 9))
 ADMIN_TOKEN="docs-admin-token"
 SECURED_AUDIENCE="docs-secured"
 SHARED_AUDIENCE="docs-shared"
@@ -182,7 +184,28 @@ mkdir -p "$TMP/ss"
   RUSTYBIN_PRIVACY_URL=https://example.com/privacy \
   "$TMP/rustybin-docs-examples") &
 SS_SERVER=$!
-ALL_SERVERS=("$SERVER" "$PLAN_SERVER" "$SECURED_SERVER" "$SHARED_SERVER" "$KEYED_SERVER" "$SS_SERVER")
+# A seventh instance in harness mode (docs/src/harness.md): roles both and
+# coordinator (loop-through: it sends load to itself through its own
+# listener and is a cluster of one), 127.0.0.1 allowed, one engine thread.
+mkdir -p "$TMP/harness"
+(cd "$TMP/harness" && exec env \
+  RUSTYBIN_HTTP_PORT="$HARNESS_PORT" \
+  RUSTYBIN_HTTPS_PORT=0 \
+  RUSTYBIN_GRPC_PORT=0 \
+  RUSTYBIN_HOST=127.0.0.1 \
+  RUSTYBIN_LOG_LEVEL=warn \
+  RUSTYBIN_INSTANCE_ID=docs-harness \
+  RUSTYBIN_ADMIN_TOKEN="$ADMIN_TOKEN" \
+  RUSTYBIN_TLS_CERT="$TMP/harness/server.crt" \
+  RUSTYBIN_TLS_KEY="$TMP/harness/server.key" \
+  RUSTYBIN_HARNESS=on \
+  RUSTYBIN_HARNESS_ROLES=both,coordinator \
+  RUSTYBIN_HARNESS_TARGETS=127.0.0.1,localhost \
+  RUSTYBIN_HARNESS_CONTROL_URL=auto \
+  RUSTYBIN_HARNESS_THREADS=1 \
+  "$TMP/rustybin-docs-examples") &
+HARNESS_SERVER=$!
+ALL_SERVERS=("$SERVER" "$PLAN_SERVER" "$SECURED_SERVER" "$SHARED_SERVER" "$KEYED_SERVER" "$SS_SERVER" "$HARNESS_SERVER")
 trap 'kill "${ALL_SERVERS[@]}" 2>/dev/null || true; wait "${ALL_SERVERS[@]}" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 
 BASE="http://127.0.0.1:$PORT"
@@ -191,7 +214,8 @@ SECURED_BASE="http://127.0.0.1:$SECURED_PORT"
 SHARED_BASE="http://127.0.0.1:$SHARED_PORT"
 KEYED_BASE="http://127.0.0.1:$KEYED_PORT"
 SS_BASE="http://127.0.0.1:$SS_PORT"
-for url in "$BASE" "$PLAN_BASE" "$SECURED_BASE" "$SHARED_BASE" "$KEYED_BASE" "$SS_BASE"; do
+HARNESS_BASE="http://127.0.0.1:$HARNESS_PORT"
+for url in "$BASE" "$PLAN_BASE" "$SECURED_BASE" "$SHARED_BASE" "$KEYED_BASE" "$SS_BASE" "$HARNESS_BASE"; do
   for _ in $(seq 1 100); do
     curl -fs -o /dev/null "$url/" && break
     sleep 0.1
@@ -258,6 +282,7 @@ if [[ ${#hurl_files[@]} -gt 0 ]]; then
     --variable "beta_key=$BETA_KEY" \
     --variable "revoked_key=$REVOKED_KEY" \
     --variable "key_inspector_token=$KEY_INSPECTOR_TOKEN" \
+    --variable "harness_url=$HARNESS_BASE" \
     "${hurl_files[@]}" || status=1
 fi
 

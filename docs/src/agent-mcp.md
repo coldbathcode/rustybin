@@ -316,6 +316,32 @@ server and a gateway's JWT validation:
 {{#include ../examples/agent/manage.hurl:issue_token}}
 ```
 
+### Harness
+
+Only when [load test mode](harness.md) is on (`RUSTYBIN_HARNESS=on`). Rights: **harness**
+is the `harness` or `admin` scope, or the admin token on an open control plane.
+
+| Tool | Right | |
+|---|---|---|
+| `harness_status` | read | Whether harness mode is on, the node's roles, caps, engine, allowed targets, the active run, the console URL. Where an agent starts |
+| `list_scenarios` / `get_scenario` / `save_scenario` | read / read / harness | The built-in scenarios to copy, one as an object and YAML, and saving your own by name |
+| `list_patterns` | read | The pattern types and their parameters, from the scenario schema |
+| `validate_scenario` / `preview_scenario` | read | Problems against the node's caps, the normalised scenario and its summary; the expected requests per second of every layer. Neither sends anything |
+| `create_run` | harness | Validate, pin and (when configured) verify the targets and **start sending load** from this node, or submit to a cluster with `cluster_id`. Confirmed (elicitation, else `confirm: true`) |
+| `start_run` | harness | Start a submitted cluster run on every client node at once. Confirmed |
+| `update_run` | harness | Tune a running run: multiplier, pause, hold, skip, `set`, layers, faults. Confirmed |
+| `list_runs` / `get_run` | read | The node's runs, and the live view of one (progress, counts, latency, the last second, saturation, `report_ready`) |
+| `stop_run` | harness | Stop a run early (it drains and reports); with `cluster_id`, on every client node |
+| `get_run_report` | read | The final report as JSON, text or JUnit |
+| `harness_stop` | harness | The kill switch: all load on this node stops now (no confirmation) |
+| `create_cluster` / `list_cluster_nodes` / `export_upstreams` / `get_leader` | harness / read / read / read | A cluster led by this node (the join token once), its members, the server nodes' URLs for the gateway's upstream pool, and who leads with the succession and the history of leader changes |
+
+Starting load reaches outside the instance, so `create_run`, `start_run` and `update_run`
+carry `openWorldHint` and ask the user to confirm; targets must be in
+`RUSTYBIN_HARNESS_TARGETS` whatever the tool. The prompt `load_test_gateway` walks an
+agent from the allowlist to a validated scenario, a dry run at a low rate and the real
+run, and `rustybin://harness.schema.json` is the scenario schema.
+
 ### Self-service
 
 Only on instances with [self-service mocks](mocks/self-service.md).
@@ -352,11 +378,13 @@ Clients that support MCP prompts offer these as commands:
 | `mock_an_api` | `spec_path`, `name` | From a spec to a deployed, tested mock: preview, create, check, try a request, hand over the URL and a collection |
 | `debug_gateway_call` | `path` | Find the request a gateway sent and explain what arrived (headers, auth, validation) against what was expected |
 | `secure_a_mock` | `name`, `mode` | Pick a mocked security mode and show the credentials a gateway must present |
+| `load_test_gateway` | `target`, `rate` | On a [harness](harness.md) node: check the allowed targets, build and validate a scenario, preview it, dry-run it at a low rate, then run it for real and read the report |
 
 | Resource | |
 |---|---|
 | `rustybin://config.schema.json` | The JSON Schema of `rustybin.yaml`, for writing configuration files |
 | `rustybin://catalogue` | The route catalogue as JSON |
+| `rustybin://harness.schema.json` | The JSON Schema of a [harness](harness.md) scenario, with the node's caps as bounds |
 
 ```hurl
 {{#include ../examples/agent/manage.hurl:resources}}

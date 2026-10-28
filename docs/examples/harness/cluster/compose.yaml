@@ -1,0 +1,135 @@
+# A harness cluster in Docker Compose (docs/src/harness.md, "A cluster"):
+# a leader, a standby, two client nodes, two server nodes and a stand-in
+# gateway (a plain reverse proxy, gateway.conf) in front of the servers.
+#
+#   cd docs/examples/harness/cluster
+#   docker compose up --build --abort-on-container-exit --exit-code-from leader
+#
+# The leader creates the cluster at startup, waits until the two clients and
+# the two servers have joined, runs gateway-load.yaml through the gateway,
+# prints the report and exits with the report's exit code (0: thresholds
+# pass, 1: they fail, 2: an error); --abort-on-container-exit then stops the
+# rest. Without --abort-on-container-exit the other nodes keep running and
+# the report is at http://localhost:18900/_rustybin/harness/clusters/perf-1/runs
+# (the leader has exited, so ask the standby on port 18901).
+#
+# The join token is a documentation value: set HARNESS_JOIN_TOKEN for your
+# own. RUSTYBIN_IMAGE names an image built elsewhere (CI) instead of building.
+# conformance/harness/run.sh runs this cluster and kills the leader mid-run.
+
+x-node: &node
+  image: ${RUSTYBIN_IMAGE:-rustybin:harness}
+  environment: &node-env
+    RUSTYBIN_LOG_LEVEL: ${RUSTYBIN_LOG_LEVEL:-info}
+    RUSTYBIN_HTTPS_PORT: "0"
+    RUSTYBIN_GRPC_PORT: "0"
+    RUSTYBIN_HARNESS: "on"
+    RUSTYBIN_HARNESS_CLUSTER: perf-1
+    RUSTYBIN_HARNESS_JOIN_TOKEN: ${HARNESS_JOIN_TOKEN:-compose-demo-join-token-change-me}
+    RUSTYBIN_HARNESS_JOIN: http://leader
+    RUSTYBIN_HARNESS_VERIFY_TARGETS: "true"
+    # Engine threads: a container sees every host core, and a few threads
+    # keep the scheduler lag low at these rates.
+    RUSTYBIN_HARNESS_THREADS: "4"
+
+services:
+  leader:
+    <<: *node
+    build:
+      context: ../../../..
+    container_name: harness-leader
+    environment:
+      <<: *node-env
+      RUSTYBIN_INSTANCE_ID: leader
+      RUSTYBIN_HARNESS_ROLES: coordinator
+      RUSTYBIN_HARNESS_JOIN: ""
+      RUSTYBIN_HARNESS_CONTROL_URL: http://leader
+      RUSTYBIN_HARNESS_ELECTION_TIMEOUT: 2s
+      # Headless: run the scenario once the quorum (2 clients, 2 servers) is
+      # there, print the report, exit with its code.
+      RUSTYBIN_HARNESS_SCENARIO: /app/scenarios/gateway-load.yaml
+      RUSTYBIN_HARNESS_START: on-quorum
+      RUSTYBIN_HARNESS_REPORT: "-"
+      RUSTYBIN_HARNESS_EXIT: "true"
+    volumes:
+      - ./gateway-load.yaml:/app/scenarios/gateway-load.yaml:ro
+    ports:
+      - "${HARNESS_LEADER_PORT:-18900}:80"
+
+  # A standby: eligible to lead, first in the succession, no other work.
+  standby:
+    <<: *node
+    container_name: harness-standby
+    environment:
+      <<: *node-env
+      RUSTYBIN_INSTANCE_ID: standby
+      RUSTYBIN_HARNESS_ROLES: coordinator
+      RUSTYBIN_HARNESS_CONTROL_URL: http://standby
+      RUSTYBIN_HARNESS_LEADER: prefer
+    ports:
+      - "${HARNESS_STANDBY_PORT:-18901}:80"
+
+  # Two client nodes send the load; client-1 is also eligible to lead, so
+  # the cluster has three eligible nodes (leader, standby, client-1) and a
+  # majority exists after any one of them is lost.
+  client-1:
+    <<: *node
+    container_name: harness-client-1
+    environment:
+      <<: *node-env
+      RUSTYBIN_INSTANCE_ID: client-1
+      RUSTYBIN_HARNESS_ROLES: client
+      RUSTYBIN_HARNESS_TARGETS: gateway
+      RUSTYBIN_HARNESS_CONTROL_URL: http://client-1
+      RUSTYBIN_HARNESS_DATA_PLANE: "off"
+    ports:
+      - "${HARNESS_CLIENT_1_PORT:-18902}:80"
+
+  client-2:
+    <<: *node
+    container_name: harness-client-2
+    environment:
+      <<: *node-env
+      RUSTYBIN_INSTANCE_ID: client-2
+      RUSTYBIN_HARNESS_ROLES: client
+      RUSTYBIN_HARNESS_TARGETS: gateway
+      RUSTYBIN_HARNESS_DATA_PLANE: "off"
+    ports:
+      - "${HARNESS_CLIENT_2_PORT:-18903}:80"
+
+  # Two server nodes are the gateway's upstreams; they correlate every
+  # marked request and tag every answer.
+  server-1:
+    <<: *node
+    container_name: harness-server-1
+    environment:
+      <<: *node-env
+      RUSTYBIN_INSTANCE_ID: server-1
+      RUSTYBIN_HARNESS_ROLES: server
+      RUSTYBIN_HARNESS_ADVERTISE: http://server-1
+    ports:
+      - "${HARNESS_SERVER_1_PORT:-18904}:80"
+
+  server-2:
+    <<: *node
+    container_name: harness-server-2
+    environment:
+      <<: *node-env
+      RUSTYBIN_INSTANCE_ID: server-2
+      RUSTYBIN_HARNESS_ROLES: server
+      RUSTYBIN_HARNESS_ADVERTISE: http://server-2
+    ports:
+      - "${HARNESS_SERVER_2_PORT:-18905}:80"
+
+  # The stand-in gateway: a reverse proxy over the two server nodes. Put
+  # your own gateway here and point it at GET .../clusters/perf-1/upstreams.
+  gateway:
+    image: nginx:1.27-alpine
+    container_name: harness-gateway
+    volumes:
+      - ./gateway.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - server-1
+      - server-2
+    ports:
+      - "${HARNESS_GATEWAY_PORT:-18906}:80"

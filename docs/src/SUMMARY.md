@@ -64,6 +64,7 @@
 - [Web console](console.md)
 - [Configure Rustybin from an AI agent](agent-mcp.md)
 - [Gateway recipes](gateway-recipes.md)
+- [Load testing through a gateway](harness.md)
 - [Collection exports and OpenAPI](exports.md)
 
 # Project

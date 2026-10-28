@@ -120,6 +120,8 @@ jobs:
           curl -fsS http://localhost:8080/_rustybin/catalog >/dev/null
           docker logs rb
           docker rm -f rb
+      - name: Harness conformance (the compose cluster, the leader killed mid-run)
+        run: RUSTYBIN_IMAGE=rustybin:ci conformance/harness/run.sh
 
   no-dashes:
     name: no em or en dashes

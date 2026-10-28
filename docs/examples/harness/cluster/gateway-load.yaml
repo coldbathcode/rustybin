@@ -1,0 +1,46 @@
+# The scenario the compose cluster runs (docs/src/harness.md): two client
+# nodes ramp from 20 to 200 requests per second through the gateway and hold
+# it, with a 2 rps probe alongside; the two server nodes answer. 40 seconds.
+name: gateway-load
+description: Ramp from 20 to 200 requests per second over 15 seconds through the gateway, hold for 25 seconds, with a probe alongside.
+target: http://gateway
+scale:
+  virtual_clients: 40
+  client_nodes: 2
+  server_nodes: 2
+layers:
+  - name: customers
+    source:
+      requests:
+        - path: /status/200
+          weight: 8
+        - method: POST
+          path: /echo/{{vu}}
+          headers:
+            X-Rustybin-Seq: "{{seq}}"
+          body:
+            order: "{{seq}}"
+            client: "{{vu}}"
+          weight: 2
+    pattern:
+      type: ramp
+      from: 20
+      to: 200
+      over: 15s
+      then:
+        type: constant
+        rate: 200
+        for: 25s
+  - name: probe
+    source:
+      request:
+        path: /status/200
+    pattern:
+      type: constant
+      rate: 2
+      for: 40s
+timeout: 5s
+thresholds:
+  error_rate: 0.01
+  latency_p99_ms: 1000
+  min_achieved: 0.95

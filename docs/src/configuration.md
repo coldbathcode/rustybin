@@ -203,7 +203,8 @@ See [Faults, latency, credentials, inspection](ai/gateway-features.md#credential
 
 ## Harness mode
 
-Rustybin as a load client (`docs/plans/harness.md`): one node with its own engine and
+The guide, with tested examples, is [Load testing through a gateway](harness.md); this
+section is the reference. Rustybin as a load client (`docs/plans/harness.md`): one node with its own engine and
 allowlisted targets, or a cluster of nodes led by a coordinator. Off by default. Starting with `RUSTYBIN_HARNESS=on` in
 public mode, with self-service mocks, or with the client role and no targets is a
 fatal error, never a warning. The control routes live under `/_rustybin/harness`;

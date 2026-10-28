@@ -40,7 +40,7 @@ docs/examples/run.sh ai/openai.hurl        # one file (paths relative to docs/ex
 ```
 
 `run.sh` builds Rustybin (or uses `RUSTYBIN_BIN`), starts a fresh instance on ports
-18800 (HTTP), 18801 (HTTPS) and 18802 (gRPC), runs the files and stops the server.
+18800 (HTTP), 18801 (HTTPS) and 18802 (gRPC), runs the files and stops the servers.
 A second instance on port 18803 (Hurl variable `plan_url`) runs the free plan with
 tiny overrides for the [plan limit](concepts/plans-and-limits.md) examples. A
 third instance on ports 18804 (HTTP, Hurl variable `secured_url`) and 18805 (HTTPS)
@@ -49,7 +49,12 @@ generated for the run, `RUSTYBIN_GRPC_ON_HTTP=true`, a console title and back li
 (the [control-plane security](concepts/control-plane-security.md) and
 [gRPC on HTTP](reference/grpc.md#on-the-http-and-https-ports) examples). Its tokens
 are minted with `concepts/_mint-control-jwt.sh` and passed as the Hurl variables
-`console_token`, `inspector_token`, `expired_token` and `other_audience_token`. The
+`console_token`, `inspector_token`, `expired_token` and `other_audience_token`. Further
+instances serve the [shared mode](concepts/shared-mode.md), `RUSTYBIN_REQUIRE_KEY` and
+[self-service](mocks/self-service.md) examples (`shared_url`, `keyed_url`, `ss_url`), and
+a last one on port 18809 runs in [harness mode](harness.md) (`harness_url`: roles `both`
+and `coordinator`, loop-through, 127.0.0.1 allowed, one engine thread), so the load test
+examples send their requests to that instance itself. The
 main instance uses these settings, which some examples rely on:
 
 | Setting | Value | Why |
@@ -63,7 +68,7 @@ main instance uses these settings, which some examples rely on:
 Requirements: `hurl` and `curl`; `grpcurl`, `websocat` and `jq` for the shell
 examples (skipped with a notice when missing, or a failure with
 `REQUIRE_ALL_TOOLS=1`, which CI sets), and `openssl` 3 for the signing key. Set
-`RUSTYBIN_DOCS_PORT` to move the six ports.
+`RUSTYBIN_DOCS_PORT` to move the ports (18800 to 18809).
 
 To run a single Hurl file against your own instance:
 

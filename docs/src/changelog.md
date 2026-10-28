@@ -255,6 +255,18 @@ API, AI and agent gateway demos.
   (time to first token, inter-token latency, tokens per second, stalls), the injected
   faults by name, `abandoned` and `unattributed` counts. Built-ins `llm-streaming`,
   `flaky-upstream` and `jittery-clients`.
+- **Harness docs and conformance** (phase 8, the last): the guide
+  [Load testing through a gateway](harness.md) with tested examples for the control API
+  (status, schema, validate, preview, a run with a live change and its report in three
+  formats, saved scenarios, the cluster API on one node, the kill switch) and the CLI;
+  a compose cluster (`docs/examples/harness/cluster`: a leader, a standby, two clients,
+  two servers and a stand-in gateway, headless on quorum); `conformance/harness/run.sh`,
+  which runs that cluster, kills the leader mid-run and asserts the standby's report; the
+  harness tools, prompt and resource on the agent page. The harness plan is complete.
+  Found by that run and fixed: a member that followed a new leader's announcement stood
+  for election itself at once, and candidates that split the votes retried in lockstep;
+  following a leader now defers the node's next stand, retries add a random wait, and
+  refused votes are logged with their reason.
 
 ### Changed
 

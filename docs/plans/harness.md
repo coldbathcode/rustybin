@@ -1,25 +1,20 @@
 # Plan: load test mode (the harness), load tests through a gateway
 
-Status: **phases 0, 1, 2, 3, 3b, 4, 5 and 6 done** (2026-10-28): the engine spike is `examples/harness_spike.rs`
+Status: **complete, phases 0 to 8 done** (2026-10-28): the engine spike is `examples/harness_spike.rs`
 ([Phase 0 results](#phase-0-results-2026-10-25)); the single-node engine, the correlation, the cluster, its
-failover, the patterns and live tuning, the rate-limit tests, and mock-driven traffic with identities are
-`src/harness/` ([Phase 1 build notes](#phase-1-build-notes-2026-10-25),
+failover, the patterns and live tuning, the rate-limit tests, mock-driven traffic with identities, and the
+faults and protocols are `src/harness/` ([Phase 1 build notes](#phase-1-build-notes-2026-10-25),
 [Phase 2 build notes](#phase-2-build-notes-2026-10-25), [Phase 3 build notes](#phase-3-build-notes-2026-10-26),
 [Phase 3b build notes](#phase-3b-build-notes-2026-10-26), [Phase 4 build notes](#phase-4-build-notes-2026-10-26),
-[Phase 5 build notes](#phase-5-build-notes-2026-10-28) and [Phase 6 build notes](#phase-6-build-notes-2026-10-28)
-list where the build differs from this plan). Phase 7 is next. Planned 2026-10-22.
+[Phase 5 build notes](#phase-5-build-notes-2026-10-28), [Phase 6 build notes](#phase-6-build-notes-2026-10-28),
+[Phase 7 build notes](#phase-7-build-notes-2026-10-28) and [Phase 8 build notes](#phase-8-build-notes-2026-10-28)
+list where the build differs from this plan); the user docs are `docs/src/harness.md`, the compose cluster
+`docs/examples/harness/cluster/` and the conformance run `conformance/harness/run.sh`. Planned 2026-10-22.
 
-> **Build marker (2026-10-28): START HERE.** Phases 0 to 6 are done. Next, when the user says go, is
-> phase 7 (section 15): the fault behaviours of section 8 on the client and server side with presets
-> (the scenario's `faults` block and the live change `faults`), node churn, and the protocol sources:
-> SSE and LLM streaming (`source: { llm: ... }`, refused by name today: time to first token,
-> inter-token latency, tokens per second, checked against `/ai` with known token timings), WebSocket,
-> gRPC and MCP tool calls. Build on what exists: a source variant resolves into requests on the node
-> like `mocksource.rs`, per-request extras travel in `Job` and `Sending` (`engine.rs`), the shaped
-> endpoint (`shaped.rs`) and the test proxy (`test_proxy.rs`) are where server and gateway behaviour is
-> observed, and `breakdown.rs` is the pattern for bounded per-key results merged across nodes.
->
-> Keep this status line and `docs/src/roadmap.md` ("Next") updated as phases land. Commit as oliwynn.
+> **Build marker (2026-10-28): the plan is complete.** Nothing is left to build from it. What may follow is
+> in section 17 (open questions) and listed under "Under consideration" in `docs/src/roadmap.md`; a new
+> plan file would start from there. When touching the harness, keep the build notes below and the user
+> docs (`docs/src/harness.md`, the tables in `docs/src/configuration.md`) in step. Commit as oliwynn.
 
 ## 1. Goal
 
@@ -1290,6 +1285,50 @@ What phase 7 built, and where it differs from section 8 and the protocol sources
   `unattributed` in JSON, text, the console and the MCP summary; built-ins `llm-streaming`,
   `flaky-upstream` and `jittery-clients`. No new routes.
 
+### Phase 8 build notes (2026-10-28)
+
+What phase 8 built, and where it differs from section 15:
+
+- **Docs**: `docs/src/harness.md` (the guide: turning it on, a scenario, running it from the API, the CLI,
+  headless, an agent or the console, what the report says, patterns, rate-limit tests, mock traffic and
+  identities, protocols and faults, live tuning, a cluster, failover, safety, testing) in the book under
+  "Using Rustybin"; the tables stay in `docs/src/configuration.md`, which now points at the guide. The
+  built-in scenarios are included from `src/harness/scenarios/` so the docs cannot drift from them. The
+  agent page gained the harness tools, the `load_test_gateway` prompt and the schema resource.
+- **Examples**: `docs/examples/harness/api.hurl` (44 requests: status, the verification token, schema,
+  scenarios, validate and its refusals, preview, the admin guard, a target outside the allowlist, a run
+  with the live view, a live change, the pending and final report in JSON, text and JUnit, saved
+  scenarios, the cluster API on a cluster of one, the kill switch) and `cli.sh` (validate, run with
+  `--local-server`, report as JUnit), run by `docs/examples/run.sh` against a seventh instance in harness
+  mode (port 18809, roles `both,coordinator`, Hurl variable `harness_url`).
+- **Compose**: `docs/examples/harness/cluster/compose.yaml` with a leader (coordinator, headless on quorum,
+  prints the report and exits with its code), a `prefer` standby, two clients (`client-1` eligible too, so
+  the cluster has three eligible nodes), two servers and a stand-in gateway (`gateway.conf`, a plain
+  reverse proxy with keep-alive over the two servers that adds `X-Forwarded-For` on the way in and `Via` on
+  the way out; the limiter lines to uncomment give a rate-limit test something to find). `gateway-load.yaml` ramps 20 to 200 requests per
+  second over the two clients for 40 s with a probe alongside. Target verification is on: the clients
+  verify the gateway's route to the servers before any load.
+- **Conformance**: `conformance/harness/run.sh` (docker compose, curl, python3; `RUSTYBIN_IMAGE` for an
+  image built elsewhere, which CI's docker job passes after its smoke test) waits for the quorum and for
+  `failover: available`, waits for the headless run, kills the leader at 10 s, waits for the standby to
+  lead term 2 and for its report, and asserts: finished and passed, the history `created` then `elected`
+  by the standby, `unreported` 0, `lost_check` complete, `lost` 0, both clients finished with a share of
+  0.5, both servers saw arrivals, `sent` grew past the count at the kill, no empty second in the
+  timeline, every answer `upstream`, p99 under a second, and the gateway's `X-Forwarded-For` seen as an
+  added request header (the server side records what changed on the way in). The compose scenario has no
+  `saturated: false` threshold: in Docker on a laptop the engine's scheduler lag passes 5 ms now and then,
+  which the report flags and the script prints as a note.
+- **Found by the conformance run**: a member that followed a new leader's announcement stood for election
+  itself a few milliseconds later (`follow()` cleared `next_stand` while `last_ok` still pointed at the old
+  leader), and two candidates that split the votes retried in lockstep. Now following a leader defers the
+  node's next stand by the election timeout, a failed stand retries with up to E/2 of random extra wait,
+  and refused votes are logged with their reason. The first conformance run took three elections and 9 s
+  (past the 5 s lease, so the clients stopped); after the fix the standby leads about 2.4 s after the kill.
+- **Not built**: a `coordinator` CLI subcommand (the headless environment covers it, as phase 3 noted);
+  the compose example has no TLS between the nodes (plain HTTP on the compose network). The README's
+  endpoint tables already carried the harness routes from phase 1; the README gained the guide link and
+  the conformance command.
+
 ### Estimate (2026-10-22)
 
 About 16 to 19 days of build sessions, after the mock MCP server (1 to 2 days). This is calibrated on the
@@ -1306,7 +1345,7 @@ earlier plans: OpenAPI mocks about 2 days, management MCP about 3, hosted mocks 
 | 5. Rate-limit tests and analysis | 2 (done, 2026-10-28) |
 | 6. Mock-driven traffic and identities | 1 (done, 2026-10-28) |
 | 7. Faults and protocols | 2 to 3 (done, 2026-10-28) |
-| 8. Docs and conformance | 1 |
+| 8. Docs and conformance | 1 (done, 2026-10-28) |
 
 The headline demo (phases 0 to 3) is about a week in, and rate-limit testing (through phase 5) about two
 weeks in. Not included: throughput tuning on real machines against a real gateway (the tests prove
