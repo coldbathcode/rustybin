@@ -10,6 +10,7 @@ import { h, replace, clear, card, field, input, select, notice, toast, icon, bad
 import { SERVER, getJson, send, trimBase } from '../lib/http.js';
 import * as settings from '../lib/settings.js';
 import * as auth from '../lib/auth.js';
+import * as assist from '../lib/assist.js';
 import { agentPanel } from '../lib/agent.js';
 import { settingsForm } from '../lib/settingsform.js';
 
@@ -17,6 +18,7 @@ import { settingsForm } from '../lib/settingsform.js';
 export const TABS = [
   { id: 'general', title: 'General', icon: 'settings', hint: 'Console title, this browser, your AI agent' },
   { id: 'signin', title: 'Sign-in', icon: 'lock', hint: 'The console user name and password, active sessions' },
+  { id: 'ai', title: 'AI', icon: 'ai', hint: 'Your model provider and key for the AI features' },
   { id: 'network', title: 'Network', icon: 'globe', hint: 'Outbound connections and recent decisions' },
 ];
 
@@ -243,6 +245,111 @@ function signinPanel(doc, reload, error) {
   return el;
 }
 
+// ── AI ──
+
+function priceText(m) {
+  const p = m.price_per_million;
+  if (!p) return 'see the provider\'s price list';
+  if (p.input === 0 && p.output === 0) return 'free';
+  return '$' + p.input + ' in, $' + p.output + ' out per 1M tokens';
+}
+
+function aiPanel(doc, reload, error) {
+  const el = h('div', { class: 'stack' });
+  const statusEl = h('div', null, spinner('Reading the AI assist status'));
+  const usageEl = h('div');
+  let st = null;
+
+  function pick(values) {
+    return send({ method: 'PATCH', url: SERVER + '/_rustybin/settings', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ values }), admin: true, session: false })
+      .then((r) => {
+        if (r.error || !r.ok) { toast(r.error || (r.json && r.json.error) || ('Save failed (' + r.status + ')'), 'err'); return; }
+        toast('Saved ' + Object.keys(values).join(', '));
+        reload(r.json);
+        document.dispatchEvent(new CustomEvent('rustybin-assist'));
+        load();
+      });
+  }
+
+  function modelsTable() {
+    const rows = [];
+    for (const p of st.providers || []) {
+      for (const m of p.models || []) {
+        const current = st.provider === p.id && (st.model === m.id || st.fast_model === m.id);
+        rows.push(h('tr', { class: current ? 'current' : '' },
+          h('td', null, p.id),
+          h('td', { class: 'mono small' }, m.id, st.provider === p.id && st.model === m.id ? h('span', null, ' ', badge('model', 'info')) : null, st.provider === p.id && st.fast_model === m.id ? h('span', null, ' ', badge('fast', 'info')) : null),
+          h('td', null, badge(m.tier, m.tier === 'fast' ? 'ok' : 'violet')),
+          h('td', { class: 'small' }, priceText(m)),
+          h('td', { class: 'small muted' }, m.note),
+          h('td', null, h('div', { class: 'row nowrap', style: { gap: '4px' } },
+            h('button', { class: 'btn sm ghost', type: 'button', 'aria-label': 'Use ' + m.id + ' as the model', onclick: () => pick({ 'assist.provider': p.id, 'assist.model': m.id }) }, 'Use'),
+            h('button', { class: 'btn sm ghost', type: 'button', 'aria-label': 'Use ' + m.id + ' as the fast model', onclick: () => pick({ 'assist.provider': p.id, 'assist.fast_model': m.id }) }, 'Fast')))));
+      }
+    }
+    return h('div', { class: 'table-wrap' }, h('table', { class: 'table', id: 'assist-models' },
+      h('thead', null, h('tr', null, h('th', null, 'Provider'), h('th', null, 'Model'), h('th', null, 'Tier'), h('th', null, 'Price'), h('th', null, ''), h('th', null, ''))),
+      h('tbody', null, rows)));
+  }
+
+  async function test(btn, out) {
+    btn.disabled = true;
+    replace(out, spinner('Calling the provider'));
+    const r = await send({ method: 'POST', url: SERVER + '/_rustybin/assist/test', admin: true, session: false, timeout: 70000 });
+    btn.disabled = false;
+    const j = r.json || {};
+    if (r.error || !r.ok) { replace(out, notice('err', r.error || j.error || ('The test failed (' + r.status + ')'))); return; }
+    replace(out, notice('ok', 'The provider answered in ' + j.latency_ms + ' ms (' + j.provider + ' / ' + j.model + '): ', h('code', null, j.answer || ''), '.'));
+    loadUsage();
+  }
+
+  async function loadUsage() {
+    try {
+      const u = (await getJson('/_rustybin/assist/usage', { admin: true, session: false })).total || {};
+      replace(usageEl, kvgrid([
+        ['Calls', String(u.calls || 0) + (u.errors ? ' (' + u.errors + ' failed)' : '')],
+        ['Tokens', (u.input_tokens || 0) + ' in, ' + (u.output_tokens || 0) + ' out'],
+        ['Estimated cost', typeof u.estimated_cost_usd === 'number' ? '$' + u.estimated_cost_usd.toFixed(4) + (u.unpriced_calls ? ' (some calls have no list price)' : '') : 'unknown (no list price for the models used)'],
+      ]));
+    } catch (e) {
+      replace(usageEl, loadError(e));
+    }
+  }
+
+  async function load() {
+    try {
+      st = await getJson('/_rustybin/assist', { session: false });
+      const testBtn = h('button', { class: 'btn sm', type: 'button', id: 'assist-test', disabled: !st.enabled }, icon('send'), 'Test the key');
+      const testOut = h('div');
+      testBtn.addEventListener('click', () => test(testBtn, testOut));
+      const mockBtn = h('button', { class: 'btn sm ghost', type: 'button', id: 'assist-use-mock', onclick: () => pick({ 'assist.provider': 'mock' }) }, 'Use the built-in mock LLM');
+      replace(statusEl,
+        st.enabled
+          ? notice('ok', icon('check'), h('div', { class: 'grow' }, h('strong', null, 'AI assist is on: '), st.provider + ' / ' + st.model + (st.fast_model && st.fast_model !== st.model ? ' (fast: ' + st.fast_model + ')' : ''), st.provider === 'mock' ? '. The built-in provider answers deterministically; nothing leaves this instance.' : '.'))
+          : notice('warn', h('div', { class: 'grow' }, h('strong', null, 'AI assist is off: '), st.reason || 'no provider', '. Pick a provider and add its key below, or use the built-in mock LLM for a demo.')),
+        h('div', { class: 'row', style: { marginTop: '10px' } }, testBtn, mockBtn, h('span', { class: 'muted small' }, 'Caps: ' + st.caps.calls_per_minute + ' calls per minute per caller, ' + st.caps.max_output_tokens + ' output tokens per answer.')),
+        testOut,
+        h('h3', { class: 'section-title', style: { marginTop: '14px' } }, 'Curated models'),
+        modelsTable());
+      loadUsage();
+    } catch (e) {
+      replace(statusEl, loadError(e));
+    }
+  }
+
+  if (doc) {
+    const form = settingsForm(doc, 'assist', { saveLabel: 'Save AI settings', onSaved: (d) => { reload(d); document.dispatchEvent(new CustomEvent('rustybin-assist')); load(); } });
+    el.appendChild(card('AI assist', { hint: 'the provider, the models, the test' }, statusEl));
+    el.appendChild(card('Provider and keys', { hint: 'keys are sealed on the instance and never shown again' }, form.el));
+    el.appendChild(card('Usage since start', { hint: 'GET /_rustybin/assist/usage' }, usageEl));
+    el.appendChild(card('Privacy', {}, h('p', { class: 'small', style: { margin: 0 } }, (st && st.privacy) || 'Prompts carry only what the task names and go to the configured provider through the outbound policy. Keys never leave the instance. Inputs that contain a stored secret or the admin token are refused. Every answer shows exactly what was sent.')));
+    load();
+  } else {
+    el.appendChild(card('AI assist', {}, loadError(error)));
+  }
+  return el;
+}
+
 // ── Network ──
 
 function purposesTable(policy) {
@@ -333,7 +440,7 @@ export default {
         b.tabIndex = tid === id ? 0 : -1;
       }
       if (location.hash !== '#/manage/' + id) history.replaceState(null, '', '#/manage/' + id);
-      const render = id === 'network' ? networkPanel : id === 'signin' ? signinPanel : generalPanel;
+      const render = id === 'network' ? networkPanel : id === 'signin' ? signinPanel : id === 'ai' ? aiPanel : generalPanel;
       replace(panel, render(doc, (d) => { if (d) { doc = d; renderStatus(); } }, error));
     }
 

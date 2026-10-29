@@ -56,13 +56,24 @@ over the variable, and `/_rustybin/status` reports the effective title:
 {{#include ../examples/concepts/settings.hurl:title}}
 ```
 
+## The assist bar
+
+With an AI provider and key set ([Bring your own AI](ai-assist.md)), the top bar
+carries **Ask Rustybin** (`Ctrl+K` / `Cmd+K`): suggestions for the view you are on,
+answers streamed into a drawer on the right with the provider, the tokens, the
+estimated cost and "What was sent", and apply cards that open a view, copy text or
+send a request when you click them. Views with AI actions carry a sparkle in the
+navigation and sparkle buttons where the work is (**Explain** on a captured request).
+Without a key the bar and the buttons point at **Management, AI**; the built-in mock
+provider (`RUSTYBIN_ASSIST_PROVIDER=mock`) shows the whole shell without one.
+
 ## Views
 
 The views, in sidebar order (`Alt+1` to `Alt+9` switch to the first nine):
 
 | View | What it does |
 |---|---|
-| **Overview** | Which instance answers, whether it is healthy, uptime and inspector counters, and the base URLs (HTTP, HTTPS, gRPC, the AI providers, MCP, A2A, OIDC) to paste into a gateway configuration |
+| **Overview** | Which instance answers, whether it is healthy, uptime and inspector counters, an **Ask Rustybin** card with three suggestions when [AI assist](ai-assist.md) is on, and the base URLs (HTTP, HTTPS, gRPC, the AI providers, MCP, A2A, OIDC) to paste into a gateway configuration |
 | **Live traffic** | The [request inspector](concepts/inspector.md) live over SSE: method, path, headers, body for every request Rustybin received, with filters, highlighting of headers gateways typically add or rewrite, copy as curl, and a compare mode that diffs two requests |
 | **Mock APIs** | [OpenAPI mocks](mocks/index.md): create one from a spec, switch mocks on and off, edit responses, rules and security, try operations and watch their traffic (see [below](#mock-apis)) |
 | **Request bins** | Create a [request bin](reference/request-bin.md) with a configured response, send a test request, watch captures arrive live |
@@ -178,6 +189,7 @@ secrets](configuration.md#state-directory-settings-and-secrets).
 |---|---|
 | General | **Console**: the title and back link everyone sees. **This browser**: the settings below, kept in the browser. **Connect an AI agent (MCP)**: the command and JSON for `claude mcp add` and other clients, with the sign-in status and Sign out when the control plane is protected. |
 | Sign-in | **Sign-in**: the control-auth mode, the user name and where it comes from, whether the password is the default, a stored hash or the environment's, who is signed in. **Change the password**: the user name and a new password, the current password required (`PUT /_rustybin/password`); every other session ends and this one continues with a fresh token. **Sessions** (password mode): the sign-in tokens issued since the last restart with their address and times, End for each, and **Sign out everywhere**. See [User name and password](concepts/control-plane-security.md#user-name-and-password). |
+| AI | **AI assist**: on or why not, **Test the key**, **Use the built-in mock LLM**, the caps, the curated models of every provider with tier and price and **Use** / **Fast** buttons. **Provider and keys**: the `assist.*` settings (provider, model, fast model, compatible base URL, one secret key per provider). **Usage since start** and the privacy note. See [Bring your own AI](ai-assist.md). |
 | Network | **Outbound connections**: the allowlist and the loopback switch (`egress.allow`, `egress.allow_loopback`). **Policy as the instance sees it**: the merged list, the always-refused addresses, each feature's own rule, and the last 100 decisions with a refresh. **Leads webhook**: the bearer token (a secret). See [Outbound connections](configuration.md#outbound-connections). |
 
 **This browser** keeps, in the browser (the admin token in this tab only, like the
@@ -197,6 +209,7 @@ sign-in token; the others across visits):
 | `GET /_rustybin/status` | Name, version, commit, instance id, hostname, uptime and start time, health, public mode, `admin_token_configured`, `control_auth`, `default_password` and the sign-in user, `hosted_mode`, console title and back link, `/identity` request count, inspector counters (stored, capacity, total captured) and ports |
 | `POST /_rustybin/login`, `POST /_rustybin/logout`, `GET /_rustybin/session` | The sign-in (never behind control auth), the sign-out and "who am I" of the password mode |
 | `GET`, `DELETE /_rustybin/sessions`, `DELETE /_rustybin/sessions/{id}`, `PUT /_rustybin/password` | The Sign-in tab (admin): the sessions, sign out everywhere, end one, change the user name and password |
+| `GET /_rustybin/assist`, `POST /_rustybin/assist/run`, `POST /_rustybin/assist/test`, `GET /_rustybin/assist/usage` | The assist bar and drawer (the status, the streamed tasks), and the AI tab's test and usage (admin) |
 | `GET /_rustybin/catalog` | The route catalogue as JSON: categories with counts, and every endpoint with methods, category, summary, description and runnable examples |
 | `GET`, `PATCH /_rustybin/settings`, `DELETE /_rustybin/settings/{key}` | The instance settings of the Management view (admin): every registered key with its value, source, lock state and schema; secrets as `{set, hint}` |
 | `GET /_rustybin/egress` | The outbound connection policy (admin): the allowlist, each feature's rule and the last decisions |

@@ -13,6 +13,7 @@
 pub mod a2a;
 pub mod admin;
 pub mod ai;
+pub mod assist;
 pub mod auth_apikey;
 pub mod auth_basic;
 pub mod auth_hmac;
@@ -134,6 +135,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     control::router,
     control_oauth::router,
     login::router,
+    assist::router,
     settings::router,
     egress::router,
     harness::router,

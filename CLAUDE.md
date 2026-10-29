@@ -2,15 +2,16 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 and 02 done)
+## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 to 03 done)
 
 [docs/plans/next/master-plan.md](docs/plans/next/master-plan.md) (planned 2026-10-29) is the plan for the next
 build: twelve steps, one file each (`docs/plans/next/step-NN-*.md`): foundations (step 01, done 2026-10-29: the
 settings store `src/settings.rs`, the egress policy `src/egress.rs`, the console's Management view
 `ui/views/manage.js`; see the step file's build notes), the console locked with a username and password (step 02,
 done 2026-10-29: `src/login.rs`, the one change of default; test and example instances that read the control plane
-without a token set `RUSTYBIN_CONTROL_AUTH=open`), AI assist with the user's own key (Anthropic, OpenAI, Gemini,
-OpenAI-compatible, or the built-in mock LLM for tests) and an AI-first console shell, AI-built mocks (specs from a
+without a token set `RUSTYBIN_CONTROL_AUTH=open`), AI assist with the user's own key (step 03, done 2026-10-29:
+`src/assist/`, see below; Anthropic, OpenAI, Gemini, OpenAI-compatible, or the built-in mock provider for tests;
+the console's assist bar, drawer and `ui/lib/assist.js`), AI-built mocks (specs from a
 prompt to the chosen OpenAPI version, example payloads with an alert when a spec has none, AI edits through a
 diff), an MCP inspector for any server with every auth mode and a relay, a mock MCP registry and registry
 browsing, a dev portal, AI agents management, the whole instance as `rustybin.yaml` with git source control, a
@@ -138,8 +139,8 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   DELETE `/{key}`, admin). `AppState.settings`.
 - `src/egress.rs`: the outbound policy (`RUSTYBIN_EGRESS_ALLOW`, `RUSTYBIN_EGRESS_ALLOW_LOOPBACK`, the settings
   `egress.*`): the `Allowlist` grammar (shared with the harness, which re-exports it from `safety.rs`), forbidden
-  addresses, `parse_url`, `pin_with`, a `Rule` per `Purpose` (A2A push, leads, key registry, registry, and the
-  later assist, MCP relay, git), `resolve` then `client` (pinned addresses, no redirects), a bounded decision ring,
+  addresses, `parse_url`, `pin_with`, a `Rule` per `Purpose` (A2A push, leads, key registry, assist, and the
+  later registry, MCP relay, git), `resolve` then `client` (pinned addresses, no redirects), a bounded decision ring,
   `/_rustybin/egress` (admin). `AppState.egress`; A2A push, leads and the key registry resolve through it.
 - `src/control.rs`: `/_rustybin/config`, `/_rustybin/version`, `/_rustybin/ready` (readiness, never authenticated),
   `git_sha()` / `build_info()` (build.rs sets `RUSTYBIN_GIT_SHA`), `is_control_path()` (`/_rustybin/*`, `/ui/*`).
@@ -152,6 +153,17 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   `Config.console_tokens` because every credential check takes `&Config`; `control_auth::verify_jwt_claims` calls
   `login::verify` for sign-in tokens, so every caller accepts them. Public mode with the default password refuses
   to start (`login::check_startup`); the default password warns at startup and sets `default_password` in the status.
+- `src/assist/`: AI assist (`RUSTYBIN_ASSIST_*`, the `assist.*` settings). `mod.rs` (`Assist` in `AppState.assist`:
+  `specs()`, `status()` resolved from the settings at every call, `sync_egress` permitting the provider's host under
+  `Purpose::Assist`, the per-caller calls-per-minute cap, bounded usage, the `suggest` cache, `run(RunParams) ->
+  OutStream` with the validate-and-repair loop, `test()`), `provider.rs` (`Kind`, `Request`, `Event`, the `Client`
+  enum, the shared `post_sse` through the egress policy, `SseParser`), `anthropic.rs` / `openai.rs` / `gemini.rs`
+  (request bodies and event mapping; structured answers through tool use, `response_format`, `responseSchema`),
+  `mock.rs` (the task's deterministic answer, streamed), `models.rs` (the curated table with tiers and list prices),
+  `redact.rs` (prompts never carry a stored secret or the admin token), `task.rs` (`Task`, input helpers, action
+  blocks, `parse_json_answer`, `validate` on `mocks::schema`), `tasks/` (`free_answer`, `explain`, `suggest`; one
+  file per task, `ALL`), `api.rs` (the routes; `RUN_PATH` is a read-only POST for control auth). A new AI feature is
+  a new task file (and, when it writes, `writes: true`), never a prompt built elsewhere.
 - `src/control_auth.rs`: `RUSTYBIN_CONTROL_AUTH` (`password` / `open` / `token` / `jwt`), Ed25519 JWT verification with scopes
   (`inspector`, `console`, `admin`), the `enforce` middleware (protects `/_rustybin/*` except `/_rustybin/ready` and
   the OAuth sign-in endpoints `/_rustybin/oauth/{register,authorize,token}`; `/ui/*` static files stay open). Tests sign tokens with the keys in `tests/common/control_jwt_keys.rs`

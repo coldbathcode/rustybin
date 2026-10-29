@@ -35,8 +35,7 @@ HTTP 200
 jsonpath "$.changed" count == 3
 jsonpath "$.settings[?(@.key == 'console.title')].value" == "Payments team"
 jsonpath "$.settings[?(@.key == 'console.title')].source" == "stored"
-jsonpath "$.settings[4].key" == "egress.allow"
-jsonpath "$.settings[4].value[0]" == "*.example.com"
+jsonpath "$.settings[?(@.key == 'egress.allow')].value[0]" == "*.example.com"
 # A secret comes back as set plus a hint, never as its value.
 jsonpath "$.settings[?(@.key == 'leads.webhook_token')].value.set" == true
 jsonpath "$.settings[?(@.key == 'leads.webhook_token')].value.hint" == "k3Qx"

@@ -62,6 +62,7 @@
 # Using Rustybin
 
 - [Web console](console.md)
+- [Bring your own AI](ai-assist.md)
 - [Configure Rustybin from an AI agent](agent-mcp.md)
 - [Gateway recipes](gateway-recipes.md)
 - [Load testing through a gateway](harness.md)

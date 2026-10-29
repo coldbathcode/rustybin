@@ -7,24 +7,26 @@ import * as settings from './lib/settings.js';
 import * as traffic from './lib/traffic.js';
 import * as auth from './lib/auth.js';
 import * as visit from './lib/visit.js';
+import * as assist from './lib/assist.js';
 import { SERVER, getJson, send, trimBase } from './lib/http.js';
 
 const VIEWS = [
   { section: 'Instance' },
-  { id: 'overview', title: 'Overview', icon: 'overview', load: () => import('./views/overview.js') },
-  { id: 'traffic', title: 'Live traffic', icon: 'traffic', load: () => import('./views/traffic.js') },
-  { id: 'mocks', title: 'Mock APIs', icon: 'mock', load: () => import('./views/mocks.js') },
+  // `ai: true` marks views with AI actions: a sparkle in the navigation when assist is on.
+  { id: 'overview', title: 'Overview', icon: 'overview', ai: true, load: () => import('./views/overview.js') },
+  { id: 'traffic', title: 'Live traffic', icon: 'traffic', ai: true, load: () => import('./views/traffic.js') },
+  { id: 'mocks', title: 'Mock APIs', icon: 'mock', ai: true, load: () => import('./views/mocks.js') },
   { id: 'bins', title: 'Request bins', icon: 'bin', load: () => import('./views/bins.js') },
   { id: 'explorer', title: 'API explorer', icon: 'explorer', load: () => import('./views/explorer.js') },
   { id: 'manage', title: 'Management', icon: 'settings', load: () => import('./views/manage.js') },
   { section: 'AI and agents' },
   { id: 'ai', title: 'AI playground', icon: 'ai', load: () => import('./views/ai.js') },
-  { id: 'mcp', title: 'MCP inspector', icon: 'mcp', load: () => import('./views/mcp.js') },
+  { id: 'mcp', title: 'MCP inspector', icon: 'mcp', ai: true, load: () => import('./views/mcp.js') },
   { id: 'a2a', title: 'A2A client', icon: 'a2a', load: () => import('./views/a2a.js') },
   { section: 'Resilience and security' },
   { id: 'chaos', title: 'Chaos and health', icon: 'chaos', load: () => import('./views/chaos.js') },
   // Shown once /_rustybin/status says harness mode is on (RUSTYBIN_HARNESS=on).
-  { id: 'harness', title: 'Harness', icon: 'send', hidden: true, feature: 'harness', load: () => import('./views/harness.js') },
+  { id: 'harness', title: 'Harness', icon: 'send', hidden: true, feature: 'harness', ai: true, load: () => import('./views/harness.js') },
   { id: 'tokens', title: 'Token lab', icon: 'token', load: () => import('./views/tokens.js') },
   // Reached from an agent's sign-in (/_rustybin/oauth/authorize), never from the navigation.
   { id: 'authorize', title: 'Sign in an AI agent', icon: 'shield', hidden: true, load: () => import('./views/authorize.js') },
@@ -73,7 +75,8 @@ function buildNav() {
     }
     if (v.hidden) continue;
     const count = h('span', { class: 'nav-count', hidden: true });
-    const a = h('a', { class: 'nav-link', href: '#/' + v.id }, icon(v.icon), h('span', null, v.title), count);
+    const spark = v.ai ? icon('ai', 'nav-spark') : null;
+    const a = h('a', { class: 'nav-link', href: '#/' + v.id }, icon(v.icon), h('span', null, v.title), spark, count);
     a.addEventListener('click', () => app.classList.remove('nav-open'));
     navLinks.set(v.id, { a, count });
     nav.appendChild(a);
@@ -105,6 +108,11 @@ function showFeatureViews(st) {
   }
 }
 
+// Sparkles next to the views with AI actions, once assist is on.
+function showAiMarks() {
+  nav.classList.toggle('assist-on', assist.enabled());
+}
+
 function updateTrafficCount() {
   const link = navLinks.get('traffic');
   if (!link) return;
@@ -133,6 +141,7 @@ async function route() {
   }
   currentId = id;
   traffic.setViewing(id === 'traffic');
+  assist.setView(id, null);
   updateTrafficCount();
   for (const [vid, { a }] of navLinks) {
     if (vid === id) a.setAttribute('aria-current', 'page');
@@ -146,6 +155,8 @@ async function route() {
     if (token !== navToken) return;
     clear(viewEl);
     cleanup = mod.default.mount(viewEl, { rest }) || null;
+    // A view may describe what it shows for the assistant (cleanup.assistContext).
+    if (cleanup && typeof cleanup.assistContext === 'function') assist.setView(id, cleanup.assistContext);
   } catch (e) {
     if (token !== navToken) return;
     console.error(e);
@@ -185,12 +196,20 @@ function backlinkLabel() {
   try { return new URL(auth.backlink).host; } catch { return 'portal'; }
 }
 
+let assistBarEl = null;
 function renderActions() {
+  // Keep the mounted bar (it holds its own state) across re-renders.
+  if (!assistBarEl) assistBarEl = document.getElementById('assist-wrap');
   clear(actions);
   if (auth.backlink) {
     actions.appendChild(h('a', { class: 'btn sm ghost backlink', href: auth.backlink, rel: 'noopener', title: 'Back to ' + auth.backlink, id: 'backlink' },
       icon('external'), h('span', { class: 'ellipsis', style: { maxWidth: '200px' } }, 'Back to ' + backlinkLabel())));
   }
+  // The assist bar sits before the chips; mounted once, re-attached on re-render.
+  const barHost = h('div', { class: 'assist-host hide-sm' });
+  actions.appendChild(barHost);
+  if (assistBarEl) barHost.appendChild(assistBarEl);
+  else assistBarEl = assist.mountBar(barHost);
   const gw = settings.get('gatewayUrl');
   const session = settings.get('session');
   const wrap = h('span', { class: 'row nowrap topbar-field hide-sm' });
@@ -395,6 +414,7 @@ async function loadInstance() {
     settings.instance.publicMode = !!st.public_mode;
     settings.instance.adminTokenConfigured = !!st.admin_token_configured;
     showFeatureViews(st);
+    showAiMarks();
     const foot = document.getElementById('foot-version');
     if (foot) foot.textContent = 'v' + st.version + ' | up ' + fmtDuration(st.uptime_seconds);
     if (st.public_mode && !auth.boundKey() && !settings.get('session')) {
@@ -453,6 +473,8 @@ function start() {
   });
   // A view that changed the instance (the password, say) asks for a fresh status.
   document.addEventListener('rustybin-status', () => loadInstance());
+  // A view that changed the AI settings asks for a fresh assist status.
+  document.addEventListener('rustybin-assist', () => assist.refresh());
   renderSignIn();
   document.addEventListener('keydown', (e) => {
     if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-9]$/.test(e.key)) {
@@ -460,9 +482,15 @@ function start() {
       const v = views[Number(e.key) - 1];
       if (v) { location.hash = '#/' + v.id; e.preventDefault(); }
     }
+    // Cmd+K / Ctrl+K: the assist bar.
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 'k' || e.key === 'K') && !auth.needsSignIn()) {
+      e.preventDefault();
+      assist.focusBar();
+    }
   });
+  assist.onChange(showAiMarks);
   route();
-  loadInstance().then(() => traffic.connect());
+  loadInstance().then(() => { traffic.connect(); assist.refresh(); });
   // Refresh the health badge and footer now and then (cheap control-plane call).
   setInterval(loadInstance, 15000);
 }

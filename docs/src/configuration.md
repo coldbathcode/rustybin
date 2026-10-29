@@ -182,7 +182,8 @@ under a **purpose** with its own rule, on only when the feature is configured:
 | `leads` | The host and port of `RUSTYBIN_LEADS_WEBHOOK_URL`. Loopback allowed. |
 | `key_registry` | The host and port of `RUSTYBIN_KEYS_URL`. Loopback allowed. |
 | `registry` | `registry.modelcontextprotocol.io` (the MCP registry). |
-| `assist`, `git` | The AI provider's host once a key is set, the git remote's host once configured (later releases). |
+| `assist` | The [AI assist](ai-assist.md) provider's host once its key is set (`api.anthropic.com`, `api.openai.com`, `generativelanguage.googleapis.com`, the compatible base URL's host). |
+| `git` | The git remote's host once configured (a later release). |
 | `mcp_relay` | No default: name the MCP servers the inspector may relay to in `RUSTYBIN_EGRESS_ALLOW`. |
 
 ```hurl
@@ -296,6 +297,21 @@ Read when the server starts.
 | `RUSTYBIN_AI_API_KEY` | unset | The only accepted key (implies `RUSTYBIN_AI_REQUIRE_AUTH`). For Bedrock SigV4 it is compared with the access key id. |
 
 See [Faults, latency, credentials, inspection](ai/gateway-features.md#credential-checks).
+
+## AI assist
+
+See [Bring your own AI](ai-assist.md). Every variable seeds an `assist.*` setting a
+value saved under Management, AI overrides.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RUSTYBIN_ASSIST_PROVIDER` | unset | `anthropic`, `openai`, `gemini`, `compatible` (any OpenAI-compatible Chat Completions endpoint) or `mock` (the built-in deterministic provider). Unset: AI assist is off and every entry point in the console invites you to set it up. Invalid: warning, off. |
+| `RUSTYBIN_ASSIST_MODEL` | provider's default | The model for specs, edits and free answers (the compatible endpoint needs one). Free text; the curated table in the console lists current ids. |
+| `RUSTYBIN_ASSIST_FAST_MODEL` | provider's fast default | The model for cheap tasks (suggestions, explanations). |
+| `RUSTYBIN_ASSIST_BASE_URL` | unset | The compatible endpoint's base URL, without `/chat/completions` (for example `http://localhost:11434/v1`; loopback needs `RUSTYBIN_EGRESS_ALLOW_LOOPBACK`). Invalid: warning, ignored. |
+| `RUSTYBIN_ASSIST_ANTHROPIC_KEY`, `RUSTYBIN_ASSIST_OPENAI_KEY`, `RUSTYBIN_ASSIST_GEMINI_KEY`, `RUSTYBIN_ASSIST_COMPATIBLE_KEY` | unset | The provider keys (secrets `assist.*_key`: sealed at rest, returned as `{set, hint}`, never in prompts, exports or captures). Not to be confused with `RUSTYBIN_AI_API_KEY`, the key the mock LLM *accepts*. |
+| `RUSTYBIN_ASSIST_MAX_CALLS_PER_MINUTE` | `20` | AI calls per minute per caller (the control principal, plus the client address on an open control plane); more answer `429` with `Retry-After`. 1 to 1000. |
+| `RUSTYBIN_ASSIST_MAX_OUTPUT_TOKENS` | `8192` | The output cap of every answer. 256 to 128000. |
 
 ## A2A agents
 

@@ -4,6 +4,7 @@
 import { h, replace, clear, icon, tabs, notice, empty, methodBadge, statusText, statusBadge, fmtMs, fmtTime, fmtBytes, copyButton, kvgrid, input, select, segmented, checkbox, toast, debounce } from '../lib/dom.js';
 import { bodyView, headersTable, diffView, normaliseBody, isGatewayHeader, codeBlock, jsonView } from '../lib/format.js';
 import { SERVER, send, toCurl } from '../lib/http.js';
+import * as assist from '../lib/assist.js';
 import * as traffic from '../lib/traffic.js';
 import * as settings from '../lib/settings.js';
 import * as auth from '../lib/auth.js';
@@ -221,6 +222,7 @@ export default {
           h('div', { class: 'row' },
             copyButton(() => curlFor(e), { label: 'Copy as curl', toast: 'curl command copied (replays directly to Rustybin)' }),
             jsonLink(e),
+            assist.assistButton('Explain', 'explain', () => ({ kind: 'request', subject: { method: e.method, uri: e.uri, path: e.uri.replace(/^https?:\/\/[^/]+/, '').split('?')[0], query: e.query, status: e.status, latency_ms: e.latency_ms, headers: Object.fromEntries((e.headers || []).map((x) => [x.name, x.value])), body: bodyOf(e).slice(0, 4000) } }), { class: 'assist-explain' }),
             h('button', { class: 'btn sm', type: 'button', onclick: () => { state.compare = true; state.a = e.id; state.b = null; renderPause(); schedule(); renderDetail(); } }, icon('diff'), 'Compare with...'))),
         t.el);
     }

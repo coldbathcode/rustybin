@@ -194,6 +194,12 @@ struct Inner {
     leads: HashMap<&'static str, u64>,
     /// Management MCP tool calls by tool and outcome (fixed label sets).
     manage_calls: HashMap<(&'static str, &'static str), u64>,
+    /// AI assist calls by provider, model, task and outcome, and tokens by
+    /// provider, model and direction (the model label is bounded to
+    /// [`MAX_ASSIST_MODELS`], then `other`).
+    assist_calls: HashMap<(&'static str, String, &'static str, &'static str), u64>,
+    assist_tokens: HashMap<(&'static str, String, &'static str), u64>,
+    assist_models: std::collections::HashSet<String>,
     /// Harness runs, oldest first (the run label is bounded to
     /// [`MAX_HARNESS_RUNS`]: the active run plus the last ones).
     harness_order: Vec<String>,
@@ -202,6 +208,8 @@ struct Inner {
 
 /// Most harness runs kept in the metrics (the active run plus the last 4).
 pub const MAX_HARNESS_RUNS: usize = 5;
+/// Most distinct assist model labels.
+pub const MAX_ASSIST_MODELS: usize = 32;
 /// Most (class, status) series per harness run.
 pub const MAX_HARNESS_SERIES: usize = 64;
 
@@ -392,6 +400,55 @@ impl Metrics {
     /// `outcome` is `ok`, `denied`, `invalid` or `error`.
     pub fn count_manage_call(&self, tool: &'static str, outcome: &'static str) {
         *self.lock().manage_calls.entry((tool, outcome)).or_insert(0) += 1;
+    }
+
+    fn assist_model_label(inner: &mut Inner, model: &str) -> String {
+        if inner.assist_models.contains(model) {
+            return model.to_string();
+        }
+        if inner.assist_models.len() >= MAX_ASSIST_MODELS {
+            return "other".to_string();
+        }
+        inner.assist_models.insert(model.to_string());
+        model.to_string()
+    }
+
+    /// An AI assist call (`rustybin_assist_calls_total`); `outcome` is `ok`,
+    /// `error`, `refused` or `invalid`.
+    pub fn count_assist_call(
+        &self,
+        provider: &'static str,
+        model: &str,
+        task: &'static str,
+        outcome: &'static str,
+    ) {
+        let mut inner = self.lock();
+        let label = Self::assist_model_label(&mut inner, model);
+        *inner
+            .assist_calls
+            .entry((provider, label, task, outcome))
+            .or_insert(0) += 1;
+    }
+
+    /// Tokens an AI assist call used (`rustybin_assist_tokens_total`).
+    pub fn record_assist_tokens(
+        &self,
+        provider: &'static str,
+        model: &str,
+        input: u64,
+        output: u64,
+    ) {
+        let mut inner = self.lock();
+        let label = Self::assist_model_label(&mut inner, model);
+        for (direction, n) in [("input", input), ("output", output)] {
+            if n == 0 {
+                continue;
+            }
+            *inner
+                .assist_tokens
+                .entry((provider, label.clone(), direction))
+                .or_insert(0) += n;
+        }
     }
 
     fn harness_series<'a>(inner: &'a mut Inner, run: &str) -> &'a mut HarnessSeries {
@@ -609,6 +666,31 @@ impl Metrics {
                 let _ = writeln!(
                     out,
                     "rustybin_manage_mcp_calls_total{{tool=\"{tool}\",outcome=\"{outcome}\"}} {n}"
+                );
+            }
+        }
+
+        if !inner.assist_calls.is_empty() {
+            out.push_str("# HELP rustybin_assist_calls_total AI assist calls by provider, model, task and outcome.\n");
+            out.push_str("# TYPE rustybin_assist_calls_total counter\n");
+            let mut rows: Vec<_> = inner.assist_calls.iter().collect();
+            rows.sort();
+            for ((provider, model, task, outcome), n) in rows {
+                let _ = writeln!(
+                    out,
+                    "rustybin_assist_calls_total{{provider=\"{provider}\",model=\"{model}\",task=\"{task}\",outcome=\"{outcome}\"}} {n}"
+                );
+            }
+        }
+        if !inner.assist_tokens.is_empty() {
+            out.push_str("# HELP rustybin_assist_tokens_total AI assist tokens by provider, model and direction.\n");
+            out.push_str("# TYPE rustybin_assist_tokens_total counter\n");
+            let mut rows: Vec<_> = inner.assist_tokens.iter().collect();
+            rows.sort();
+            for ((provider, model, direction), n) in rows {
+                let _ = writeln!(
+                    out,
+                    "rustybin_assist_tokens_total{{provider=\"{provider}\",model=\"{model}\",direction=\"{direction}\"}} {n}"
                 );
             }
         }

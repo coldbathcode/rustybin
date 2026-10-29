@@ -202,10 +202,11 @@ fn under(path: &str, prefix: &str) -> bool {
 }
 
 /// POST routes that change nothing: `/_rustybin/mocks/import`,
-/// `/_rustybin/mocks/{name}/operations/{op}/validate` and
-/// `/_rustybin/mocks/{name}/operations/{op}/rules/test`.
+/// `/_rustybin/mocks/{name}/operations/{op}/validate`,
+/// `/_rustybin/mocks/{name}/operations/{op}/rules/test` and
+/// `/_rustybin/assist/run` (read tasks; the handler checks the task).
 fn is_read_only_post(path: &str) -> bool {
-    if path == "/_rustybin/mocks/import" {
+    if path == "/_rustybin/mocks/import" || path == crate::assist::RUN_PATH {
         return true;
     }
     let Some(rest) = path.strip_prefix("/_rustybin/mocks/") else {

@@ -77,6 +77,25 @@ pub struct Config {
     /// (`RUSTYBIN_CONSOLE_PASSWORD_HASH`; seeds the secret
     /// `console.password_hash`, preferred over the plain password).
     pub console_password_hash: Option<String>,
+    /// AI assist (`crate::assist`, step 03): the provider (`anthropic`, `openai`,
+    /// `gemini`, `compatible`, `mock`), the models, the compatible base URL
+    /// (`RUSTYBIN_ASSIST_PROVIDER`, `_MODEL`, `_FAST_MODEL`, `_BASE_URL`); they
+    /// seed the `assist.*` settings.
+    pub assist_provider: Option<String>,
+    pub assist_model: Option<String>,
+    pub assist_fast_model: Option<String>,
+    pub assist_base_url: Option<String>,
+    /// The provider keys (`RUSTYBIN_ASSIST_ANTHROPIC_KEY`, `_OPENAI_KEY`,
+    /// `_GEMINI_KEY`, `_COMPATIBLE_KEY`): seeds of the `assist.*_key` secrets.
+    /// Never exposed.
+    pub assist_anthropic_key: Option<String>,
+    pub assist_openai_key: Option<String>,
+    pub assist_gemini_key: Option<String>,
+    pub assist_compatible_key: Option<String>,
+    /// Caps per caller (`RUSTYBIN_ASSIST_MAX_CALLS_PER_MINUTE`, default 20) and
+    /// per answer (`RUSTYBIN_ASSIST_MAX_OUTPUT_TOKENS`, default 8192).
+    pub assist_max_calls_per_minute: u32,
+    pub assist_max_output_tokens: u32,
     /// The runtime state of the console's sign-in tokens (`crate::login`):
     /// the generation, revoked ids, listed sessions, failed attempts. Not a
     /// setting; it lives here because every credential check takes `&Config`.
@@ -573,6 +592,52 @@ impl Config {
                     .to_string(),
             );
         }
+        let assist_provider = get("RUSTYBIN_ASSIST_PROVIDER").and_then(|raw| {
+            let name = raw.to_ascii_lowercase();
+            if crate::assist::provider::Kind::parse(&name).is_some() {
+                Some(name)
+            } else {
+                warnings.push(format!(
+                    "invalid RUSTYBIN_ASSIST_PROVIDER {raw:?} (expected anthropic, openai, gemini, \
+                     compatible or mock), AI assist is off"
+                ));
+                None
+            }
+        });
+        let assist_model = get("RUSTYBIN_ASSIST_MODEL").filter(|m| m.len() <= 128);
+        let assist_fast_model = get("RUSTYBIN_ASSIST_FAST_MODEL").filter(|m| m.len() <= 128);
+        let assist_base_url = get("RUSTYBIN_ASSIST_BASE_URL").and_then(|raw| {
+            let ok = valid_backlink(&raw);
+            if !ok {
+                warnings.push(format!(
+                    "invalid RUSTYBIN_ASSIST_BASE_URL {raw:?} (expected an http:// or https:// URL), ignored"
+                ));
+            }
+            ok.then(|| raw.trim_end_matches('/').to_string())
+        });
+        let assist_key = |var: &str| {
+            lookup(var)
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty())
+        };
+        let assist_anthropic_key = assist_key("RUSTYBIN_ASSIST_ANTHROPIC_KEY");
+        let assist_openai_key = assist_key("RUSTYBIN_ASSIST_OPENAI_KEY");
+        let assist_gemini_key = assist_key("RUSTYBIN_ASSIST_GEMINI_KEY");
+        let assist_compatible_key = assist_key("RUSTYBIN_ASSIST_COMPATIBLE_KEY");
+        let assist_max_calls_per_minute = parse_or(
+            &get,
+            "RUSTYBIN_ASSIST_MAX_CALLS_PER_MINUTE",
+            crate::assist::DEFAULT_CALLS_PER_MINUTE,
+            &mut warnings,
+        )
+        .clamp(1, 1000);
+        let assist_max_output_tokens = parse_or(
+            &get,
+            "RUSTYBIN_ASSIST_MAX_OUTPUT_TOKENS",
+            crate::assist::DEFAULT_MAX_OUTPUT_TOKENS,
+            &mut warnings,
+        )
+        .clamp(256, 128_000);
         let control_jwt_key = get("RUSTYBIN_CONTROL_JWT_PUBLIC_KEY").and_then(|raw| {
             let key = crate::control_auth::parse_public_key(&raw);
             if key.is_none() {
@@ -788,6 +853,16 @@ impl Config {
             console_user,
             console_password,
             console_password_hash,
+            assist_provider,
+            assist_model,
+            assist_fast_model,
+            assist_base_url,
+            assist_anthropic_key,
+            assist_openai_key,
+            assist_gemini_key,
+            assist_compatible_key,
+            assist_max_calls_per_minute,
+            assist_max_output_tokens,
             console_tokens: std::sync::Arc::new(crate::login::Tokens::new()),
             control_jwt_key,
             control_jwt_audience,
@@ -873,6 +948,16 @@ impl Config {
             console_user: None,
             console_password: None,
             console_password_hash: None,
+            assist_provider: None,
+            assist_model: None,
+            assist_fast_model: None,
+            assist_base_url: None,
+            assist_anthropic_key: None,
+            assist_openai_key: None,
+            assist_gemini_key: None,
+            assist_compatible_key: None,
+            assist_max_calls_per_minute: crate::assist::DEFAULT_CALLS_PER_MINUTE,
+            assist_max_output_tokens: crate::assist::DEFAULT_MAX_OUTPUT_TOKENS,
             console_tokens: std::sync::Arc::new(crate::login::Tokens::new()),
             control_jwt_key: None,
             control_jwt_audience: "test-instance".to_string(),

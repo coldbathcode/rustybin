@@ -72,6 +72,7 @@ cp "$RUSTYBIN_BIN" "$TMP/rustybin-docs-examples"
   RUSTYBIN_LOG_LEVEL=warn \
   RUSTYBIN_INSTANCE_ID=docs-examples \
   RUSTYBIN_CONTROL_AUTH=open \
+  RUSTYBIN_ASSIST_PROVIDER=mock \
   RUSTYBIN_ADMIN_TOKEN="$ADMIN_TOKEN" \
   RUSTYBIN_MTLS_IN_HEADER=X-Client-Cert \
   RUSTYBIN_TLS_CERT="$TMP/server.crt" \

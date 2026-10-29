@@ -11,6 +11,7 @@
 use axum::extract::FromRef;
 use std::sync::{Arc, OnceLock};
 
+use crate::assist::Assist;
 use crate::cert_state::CertState;
 use crate::config::Config;
 use crate::egress::Egress;
@@ -35,6 +36,9 @@ pub struct AppState {
     /// The outbound connection policy every feature that reaches out
     /// resolves through (`/_rustybin/egress`).
     pub egress: Arc<Egress>,
+    /// AI assist (`/_rustybin/assist*`): the user's provider and key, the
+    /// tasks, usage and caps.
+    pub assist: Arc<Assist>,
     /// HS256 secret and RS256 key pair (JWT + OIDC modules).
     pub jwt: Arc<JwtState>,
     /// Demo PKI (mTLS module, HTTPS listener).
@@ -116,6 +120,13 @@ impl AppState {
         let metrics = Arc::new(Metrics::new());
         let settings = Arc::new(Settings::new(&config));
         let egress = Arc::new(Egress::new(&config, settings.clone()));
+        let assist = Arc::new(Assist::new(
+            &config,
+            settings.clone(),
+            egress.clone(),
+            metrics.clone(),
+            clock.clone(),
+        ));
         let limits = Arc::new(
             Limiter::with_clock(config.limits.clone(), clock.clone()).with_metrics(metrics.clone()),
         );
@@ -141,6 +152,7 @@ impl AppState {
             config: Arc::new(config),
             settings,
             egress,
+            assist,
             jwt,
             certs,
             identity: Arc::new(IdentityState::new()),
@@ -169,6 +181,12 @@ impl FromRef<AppState> for Arc<Settings> {
 impl FromRef<AppState> for Arc<Egress> {
     fn from_ref(state: &AppState) -> Self {
         state.egress.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<Assist> {
+    fn from_ref(state: &AppState) -> Self {
+        state.assist.clone()
     }
 }
 

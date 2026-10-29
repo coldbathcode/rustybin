@@ -164,9 +164,51 @@ def run_theme(browser, theme):
         expect(page.locator(".nav-link")).to_have_count(11)
         # No plan configured (RUSTYBIN_PLAN=none): no "Plan and usage" card.
         expect(page.locator("text=Plan and usage")).to_have_count(0)
+        # AI assist with the mock provider: the Ask card offers suggestions.
+        page.wait_for_selector("text=Ask Rustybin")
+        page.wait_for_selector("#overview-ask")
         shot(page, theme, "01-overview")
 
     step("overview", overview)
+
+    def assist_bar():
+        # The bar in the top bar: suggestions for the view, a streamed answer
+        # with apply cards in the drawer, an action applied.
+        page.keyboard.press("Control+k")
+        expect(page.locator("#assist-input")).to_be_focused()
+        page.wait_for_selector("#assist-pop:not([hidden])")
+        expect(page.locator("#assist-suggestions button")).to_have_count(3)
+        expect(page.locator("#assist-hint")).to_contain_text("mock")
+        page.fill("#assist-input", "How do I see what the gateway sent?")
+        page.keyboard.press("Enter")
+        page.wait_for_selector("#assist-drawer:not([hidden])")
+        page.wait_for_selector(".assist-answer .md")
+        page.wait_for_selector(".apply-card")
+        expect(page.locator(".assist-exchange")).to_have_count(1)
+        expect(page.locator(".assist-answer")).to_contain_text("Mock assistant")
+        expect(page.locator(".assist-answer")).not_to_contain_text("```action")
+        page.wait_for_selector(".assist-foot >> text=mock / rustybin-mock")
+        page.wait_for_selector("text=What was sent")
+        shot(page, theme, "02-assist-drawer")
+        # The second card sends a request to the data plane and shows the status.
+        cards = page.locator(".apply-card")
+        expect(cards).to_have_count(2)
+        cards.nth(1).get_by_role("button", name="Apply").click()
+        page.wait_for_selector(".apply-result .badge.ok")
+        # The first opens a view.
+        cards.nth(0).get_by_role("button", name="Apply").click()
+        page.wait_for_function("location.hash === '#/traffic'")
+        # History survives a reload of the tab; Clear empties it.
+        page.reload()
+        page.wait_for_selector("#assist-drawer:not([hidden])")
+        expect(page.locator(".assist-exchange")).to_have_count(1)
+        page.locator("#assist-clear").click()
+        expect(page.locator(".assist-exchange")).to_have_count(0)
+        page.get_by_role("button", name="Close the assistant").click()
+        page.goto(BASE + "/ui/#/overview")
+        page.wait_for_selector("text=Requests captured")
+
+    step("assist bar, drawer, apply cards", assist_bar)
 
     def live_traffic():
         goto_view(page, "traffic")
@@ -565,6 +607,17 @@ def run_theme(browser, theme):
             if s["group"] == "signin":
                 expect(page.locator(f"[aria-label='{s['key']}']")).to_have_count(1)
         expect(page.locator("[aria-label='console.user']")).to_be_disabled()
+        # AI: a control per setting, the curated models, the test against the mock.
+        page.get_by_role("tab", name="AI").click()
+        page.wait_for_selector("form[aria-label='Settings: assist']")
+        for s in doc["settings"]:
+            if s["group"] == "assist":
+                expect(page.locator(f"[aria-label='{s['key']}']")).to_have_count(1)
+        page.wait_for_selector("#assist-models")
+        expect(page.locator("text=AI assist is on")).to_have_count(1)
+        page.locator("#assist-test").click()
+        page.wait_for_selector("text=The provider answered in")
+        shot(page, theme, "15-management-ai")
         page.get_by_role("tab", name="Network").click()
         for s in doc["settings"]:
             if s["group"] in ("egress", "leads"):
@@ -1262,6 +1315,11 @@ def run_password(browser):
         expect(page.locator("#signin")).to_have_count(0)
         # The banner until the password changes; the chip in the top bar.
         page.wait_for_selector("#banner .notice.warn")
+        # No AI provider here: the bar is an invitation to Management, AI.
+        page.wait_for_selector("#assist-wrap.off")
+        expect(page.locator("#assist-input")).to_have_attribute("placeholder", "Add an AI key to describe what you want")
+        expect(page.locator("text=Ask Rustybin")).to_have_count(1)
+        expect(page.locator("#overview-ask")).to_have_count(0)
         expect(page.locator("#banner")).to_contain_text("default console password")
         expect(page.locator("#signed-in")).to_contain_text("rustybin")
         expect(page.locator("#signed-in")).to_contain_text("expires in")

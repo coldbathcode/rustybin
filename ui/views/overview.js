@@ -3,6 +3,7 @@
 import { h, replace, card, kvgrid, notice, copyButton, fmtDuration, badge, icon, spinner } from '../lib/dom.js';
 import { SERVER, getJson, send } from '../lib/http.js';
 import * as auth from '../lib/auth.js';
+import * as assist from '../lib/assist.js';
 import { jsonView } from '../lib/format.js';
 
 function baseUrls(cfg) {
@@ -105,7 +106,9 @@ export default {
       h('div', { class: 'row' },
         h('a', { class: 'btn', href: '#/traffic' }, icon('traffic'), 'Live traffic'),
         h('a', { class: 'btn primary', href: '#/explorer' }, icon('explorer'), 'Try an endpoint'))));
+    const askEl = assist.askCard();
     root.appendChild(h('div', { class: 'stack' }, errEl, tilesEl,
+      card('Ask Rustybin', { hint: assist.enabled() ? 'AI assist' : 'AI assist (off)', class: 'ask-card' }, askEl),
       h('div', { class: 'grid grid-2' },
         card('Base URLs', { flush: true, hint: 'derived from this page' }, urlsEl),
         h('div', { class: 'stack' },

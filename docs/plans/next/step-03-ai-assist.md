@@ -1,6 +1,6 @@
 # Step 03: AI assist: providers, keys, the assist bar
 
-Master plan: [master-plan.md](master-plan.md). Status: **not started**. Needs: 01, 02. About 2.5 days.
+Master plan: [master-plan.md](master-plan.md). Status: **done 2026-10-29**. Needs: 01, 02. About 2.5 days.
 
 ## Goal
 
@@ -131,4 +131,59 @@ pass; committed and pushed.
 
 ## Build notes
 
-(filled in when built)
+Built 2026-10-29 in one session. Where the build differs from the design above, and why:
+
+- **An enum of clients, not a trait object.** `provider::Client` (`Anthropic`, `OpenAi {compatible}`,
+  `Gemini`, `Mock`, and `Scripted` for tests) with one `complete(&egress, &Request) -> EventStream`;
+  the three real providers share `post_sse` (resolve through the policy, pinned client, 60 s, 2 MiB,
+  an incremental SSE parser) and differ only in the body they build and the events they map. No
+  `async_trait`, no lifetimes on a boxed trait. `models()` listing endpoints were not called: the
+  table is static.
+- **The mock provider is not the mock LLM.** Rather than scripting the `/ai/*` rules engine, every
+  task carries a `mock` function that produces its deterministic answer (text for `free_answer`,
+  the structured value otherwise) and `mock.rs` streams it in word-sized deltas with estimated
+  token counts. It runs every path (validation, actions, usage, caching) with no network and no
+  rules file; `src/assist/mock_rules.yaml` was not needed.
+- **Structured output and repair.** Anthropic through a forced `answer` tool, OpenAI through
+  `response_format: json_schema` (`strict: false`), Gemini through `responseSchema` reduced to the
+  keywords it accepts (`gemini::response_schema`), a compatible endpoint through `json_object`
+  plus the schema appended to the prompt and `max_tokens` instead of `max_completion_tokens`.
+  `task::parse_json_answer` accepts bare, fenced or prose-wrapped JSON; validation uses
+  `mocks::schema::validate` (response direction); an invalid answer goes back with the issues and
+  its own text, at most twice, then the run ends with an `error` and the call counts as `invalid`.
+- **Actions ride inside text answers** as fenced `action` code blocks (one JSON object each);
+  the server validates them (`open_view` to a known view, `copy` of bounded text, `run_request`
+  with a method, a root-relative path, up to 16 string headers and a bounded body), emits each
+  as an `action` event and strips the blocks from the JSON-mode `text`. The console's markdown
+  renderer skips them and renders apply cards instead. The curated models carry list prices
+  only where known: the Anthropic ids are listed without prices (not verified against a price
+  list in this session), OpenAI's and Gemini's with theirs; a call on a model without a price
+  shows no cost rather than a guess (`unpriced_calls` in the usage).
+- **Caps and usage** live in `Assist` (not `limits.rs`): a sliding window of call instants per
+  principal (the control principal; `open@<ip>` on an open control plane; at most 256 principals),
+  usage counters per (provider, model) (at most 64 series, the smallest dropped), per task and in
+  total, with the estimated cost; the metrics bound the model label to 32 values then `other`.
+- **Egress**: `Assist::sync_egress()` runs at every status read and run, so a key saved in the
+  console allows its host at once; the compatible endpoint's host is allowed once its base URL is
+  set (a loopback endpoint still needs `egress.allow_loopback`, as the plan's rule for new
+  purposes says). Test stand-ins for the real wire formats use an endpoint override on `Assist`
+  (`override_endpoint`) rather than a settings key.
+- **Console**: no markdown renderer existed, so `ui/lib/assist.js` has a small safe one (headings,
+  paragraphs, lists, inline code, bold, links, fenced code with Copy; DOM nodes only). The drawer
+  is a fixed panel on the right (resizable, width remembered), its history in `sessionStorage`
+  (20 exchanges), reopened on reload. The bar lives in the top bar's actions and survives the
+  shell's re-renders. This step's sparkle button is **Explain** on a captured request; the other
+  entry points come with their tasks. Views may hand the bar a context function
+  (`cleanup.assistContext`) later; this step sends the instance status as context by default.
+- **Control auth**: `POST /_rustybin/assist/run` is a read-only POST for the `console` scope; the
+  handler requires admin when the task `writes` (none yet). `test` and `usage` are admin.
+- **Left out**: nothing from the design. The CLI and MCP notes stand for steps 10 and 11.
+
+Checks run: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (the assist tests:
+providers' bodies and events, the SSE parser, the model table, redaction, actions, caps and usage,
+the mock on every task, validation and repair through the scripted provider, the routes with and
+without a provider, control auth, and stand-in servers for the Anthropic, OpenAI, compatible and
+Gemini formats), `docs/examples/run.sh` (the new `assist/assist.hurl` on the main instance, which
+now has `RUSTYBIN_ASSIST_PROVIDER=mock`), the console check (the bar, the drawer, apply cards, the
+AI tab, the invitation on the password instance), `mdbook build docs`, `check_includes.py`,
+`check-no-dashes.sh`.

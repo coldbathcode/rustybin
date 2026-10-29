@@ -50,6 +50,28 @@ The build of [Rustybin 0.2](../plans/next/master-plan.md), step by step.
   a token instead"), the signed-in user and expiry in the top bar, and Management,
   Sign-in (change the user name and password, the sessions, Sign out everywhere).
   The docker image's CI smoke test signs in with the defaults.
+- **AI assist: providers, keys, the assist bar** (step 03). The console's AI features
+  run on the user's own provider and key: `RUSTYBIN_ASSIST_PROVIDER` (`anthropic`,
+  `openai`, `gemini`, `compatible`, `mock`), `_MODEL`, `_FAST_MODEL`, `_BASE_URL` and
+  one `_*_KEY` per provider seed the `assist.*` settings (keys are secrets: sealed,
+  `{set, hint}`, never in prompts, exports or captures). Every call is a task with a
+  validated input, a system and user prompt, an optional output schema (the provider's
+  native JSON mode, validated with the mocks' validator, repaired at most twice) and a
+  deterministic mock answer: `free_answer`, `explain`, `suggest` this step. Routes
+  `GET /_rustybin/assist`, `POST /_rustybin/assist/run` (SSE events `sent`, `delta`,
+  `json`, `action`, `usage`, `error`, `done`, or one JSON document),
+  `POST /_rustybin/assist/test` and `GET /_rustybin/assist/usage` (admin). Egress under
+  the `assist` purpose (the provider's host once a key is set); caps
+  `RUSTYBIN_ASSIST_MAX_CALLS_PER_MINUTE` (20, per caller, `429`) and
+  `RUSTYBIN_ASSIST_MAX_OUTPUT_TOKENS` (8192); a redact pass refuses inputs that hold a
+  stored secret or the admin token (`422`); usage per provider, model and task and the
+  metrics `rustybin_assist_calls_total`, `rustybin_assist_tokens_total`. The console:
+  the assist bar (`Ctrl+K`) with per-view suggestions, the drawer with streamed
+  markdown, "What was sent", tokens and estimated cost, apply cards (`open_view`,
+  `copy`, `run_request`), sparkles in the navigation, an **Ask Rustybin** card on the
+  overview, **Explain** on a captured request, and Management, AI (curated models with
+  prices, keys, Test the key, the built-in mock LLM, usage). New book page
+  [Bring your own AI](ai-assist.md).
 
 ## 0.1.0 (2026-10-29): the AI and agent gateway upgrade
 

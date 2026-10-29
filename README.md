@@ -129,7 +129,9 @@ generator) and Token lab. It is embedded in the binary and works offline. Set a
 gateway base URL in its settings to send every request through your gateway. It
 signs in with the console's user name and password (`rustybin` / `rustybin` until
 changed; `RUSTYBIN_CONTROL_AUTH=open` turns the sign-in off), or with a token from
-the URL fragment (`/ui/#token=...`) on platform-managed instances.
+the URL fragment (`/ui/#token=...`) on platform-managed instances. With your own AI
+key (Anthropic, OpenAI, Gemini or any OpenAI-compatible endpoint) an assist bar
+answers questions about the instance and proposes actions you apply with a click.
 
 ## Configuration
 
@@ -155,6 +157,7 @@ to the default. `GET /_rustybin/config` shows the effective configuration. Detai
 | `RUSTYBIN_ADMIN_TOKEN` | unset | Required (Bearer or `X-Rustybin-Admin-Token`) for health toggles, global flaky reset and clearing all captured requests |
 | `RUSTYBIN_CONTROL_AUTH` | `password` | `/_rustybin/*` (except `/_rustybin/ready` and the sign-in) needs a token from `POST /_rustybin/login` with the console's user name and password, the admin token or a control JWT; `open` (no credentials, the default before 0.2), `token` (admin token) or `jwt` (admin token or Ed25519 JWT with scope `inspector`, `console`, `harness` or `admin`) |
 | `RUSTYBIN_CONSOLE_USER` / `_PASSWORD` / `_PASSWORD_HASH` | `rustybin` / `rustybin` / unset | The sign-in credentials; the hash (argon2id PHC) wins over the plain password; a password changed in the console is stored as a hash and wins over both |
+| `RUSTYBIN_ASSIST_PROVIDER` / `_MODEL` / `_FAST_MODEL` / `_BASE_URL` / `_*_KEY` | unset | [Your own AI](docs/src/ai-assist.md) behind the console's assist bar: `anthropic`, `openai`, `gemini`, `compatible` (any OpenAI-compatible endpoint) or `mock`; the keys are sealed secrets that never leave the instance |
 | `RUSTYBIN_CONTROL_OAUTH` | `true` | With `token` / `jwt` control auth: agents sign in to `/_rustybin/mcp` through the browser (RFC 9728 metadata, built-in authorization server at `/_rustybin/oauth`, consent in the console) |
 | `RUSTYBIN_CONTROL_OAUTH_ISSUER` | unset | Name an external authorization server instead (its tokens must be control JWTs) |
 | `RUSTYBIN_CONTROL_OAUTH_KEY` | derived | Secret (32+ characters) signing OAuth client ids and tokens; unset: derived from the admin token, else random per process |
@@ -600,6 +603,10 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET DELETE | `/_rustybin/sessions` | Sign-in sessions (admin): list them, or DELETE to sign out everywhere |
 | DELETE | `/_rustybin/sessions/{id}` | End one sign-in session (admin) |
 | PUT | `/_rustybin/password` | Change the console user name and password (admin, current password required) |
+| GET | `/_rustybin/assist` | AI assist: the provider, models, whether a key is set, the tasks and usage |
+| POST | `/_rustybin/assist/test` | AI assist: one short call to the configured provider (admin) |
+| POST | `/_rustybin/assist/run` | AI assist: run a task (free_answer, explain, suggest) as SSE or one JSON answer |
+| GET | `/_rustybin/assist/usage` | AI assist: calls, tokens, estimated cost per provider, model and task (admin) |
 | GET DELETE | `/_rustybin/requests` | List captured requests (newest first); DELETE clears them |
 | GET | `/_rustybin/requests/stream` | Live feed of captured requests (SSE) |
 | GET | `/_rustybin/requests/{id}` | One captured request by id |

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build Rustybin, start it on ports 18700-18702 (control plane open), a
+# Build Rustybin, start it on ports 18700-18702 (control plane open, the
+# built-in mock AI provider), a
 # second instance on 18703 with RUSTYBIN_CONTROL_AUTH=jwt, a third on 18704
 # in public mode with self-service mocks, a fourth on 18705 in harness mode
 # (loop-through) and a fifth on 18706 with the default control auth (the
@@ -43,7 +44,7 @@ export CONTROL_JWT_PRIVATE_KEY="$TMP/control.key"
 export CONTROL_JWT_AUDIENCE="ui-conformance"
 
 (cd "$TMP" && exec env RUSTYBIN_HTTP_PORT="$PORT" RUSTYBIN_HTTPS_PORT=$((PORT + 1)) RUSTYBIN_GRPC_PORT=$((PORT + 2)) \
-  RUSTYBIN_HOST=127.0.0.1 RUSTYBIN_LOG_LEVEL=warn RUSTYBIN_CONTROL_AUTH=open "$BIN") &
+  RUSTYBIN_HOST=127.0.0.1 RUSTYBIN_LOG_LEVEL=warn RUSTYBIN_CONTROL_AUTH=open RUSTYBIN_ASSIST_PROVIDER=mock "$BIN") &
 SERVER=$!
 mkdir -p "$TMP/jwt"
 (cd "$TMP/jwt" && exec env RUSTYBIN_HTTP_PORT="$JWT_PORT" RUSTYBIN_HTTPS_PORT=0 RUSTYBIN_GRPC_PORT=0 \
