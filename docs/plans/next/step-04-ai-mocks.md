@@ -166,6 +166,13 @@ Built 2026-10-29 in one session. Where the build differs from the design above, 
   dialog scoped to that operation (no separate preview UI); the request_examples sparkle on MCP tools is
   the inspector's (step 05).
 
+- **Found by the console check** (a follow-up commit, after the first push): the operation editor that was
+  already open kept its old data after the examples dialog or Edit with AI saved the draft (it now gets a
+  `reload()` the AI dialogs call), and the `create_mock` apply card opened the wizard on top of a mock's detail
+  page instead of going to the list. The check also moved to the new wizard layout (the paste box sits behind
+  "Paste or upload" when a provider is set) and to locator waits where a polled `wait_for_function` ran into the
+  console's Content Security Policy.
+
 Checks run: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (the mock AI tests:
 coverage and stored examples through REST and MCP, generated examples, the describe route on the three
 versions, examples and edit through the mock provider, validation and repair through the scripted

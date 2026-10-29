@@ -240,7 +240,9 @@ export function applyCard(action) {
     detail = String(p.description || '').slice(0, 200);
     apply = () => {
       settings.remember('mocks.describe', { description: p.description, openapi_version: p.openapi_version });
-      if (location.hash.startsWith('#/mocks')) document.dispatchEvent(new CustomEvent('rustybin-describe'));
+      // On the list itself the view opens the wizard at once; anywhere else (a mock's detail page
+      // included) go to the list, which opens it when it loads.
+      if (location.hash === '#/mocks' || location.hash === '#/mocks/') document.dispatchEvent(new CustomEvent('rustybin-describe'));
       else location.hash = '#/mocks';
       toast('Opening the mock wizard');
     };

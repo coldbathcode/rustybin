@@ -37,7 +37,8 @@ export function mountDetail(root, name, sub) {
   const deployFailEl = h('div');
   const coverageEl = h('div');
   // What the AI dialogs need of this page.
-  const aiCtx = { name, detail: () => detail, refresh: () => refresh(), get readOnly() { return !!readOnly; } };
+  // After an AI dialog saved to the draft, the open operation editor re-reads its operation too.
+  const aiCtx = { name, detail: () => detail, refresh: async () => { await refresh(); if (editor && editor.reload) editor.reload(); }, get readOnly() { return !!readOnly; } };
   const bannerEl = h('div', { class: 'stack-sm mock-banners' }, createdEl, deployFailEl, stateEl, coverageEl);
   const bodyEl = h('div');
   root.append(headEl, bannerEl, bodyEl);

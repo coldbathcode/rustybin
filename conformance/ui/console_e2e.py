@@ -325,6 +325,8 @@ def run_theme(browser, theme):
         name = f"orders-{theme}"
         goto_view(page, "mocks")
         page.get_by_role("button", name="New mock").click()
+        # With an AI provider the Describe it tab comes first: paste on the other tab.
+        page.locator("dialog.wizard").get_by_role("tab", name="Paste or upload").click()
         page.get_by_label("OpenAPI document (JSON or YAML)").fill(SMALL_SPEC)
         page.get_by_role("button", name="Continue").click()
         page.get_by_label("Mock name").fill(name)
@@ -395,7 +397,7 @@ def run_theme(browser, theme):
         page.wait_for_selector("#examples-preview")
         shot(page, theme, "18-mock-examples")
         page.locator("#examples-save").click()
-        page.wait_for_function("!document.querySelector('#coverage-generate-values')")
+        expect(page.locator("#coverage-generate-values")).to_have_count(0)
         # The operation editor lists the stored example.
         page.locator(".op-row", has_text="/tickets").first.click()
         page.wait_for_selector("#stored-examples")
@@ -1430,7 +1432,7 @@ def run_password(browser):
         page.get_by_role("button", name="Change the password").click()
         page.wait_for_selector("text=Password changed")
         # The console keeps working with the fresh token; the banner is gone.
-        page.wait_for_function("!document.querySelector('#banner .notice')")
+        expect(page.locator("#banner .notice")).to_have_count(0)
         page.wait_for_selector("#manage-panel >> text=changed in the console")
         with urllib.request.urlopen(base + "/_rustybin/ready", timeout=10) as r:
             assert r.status == 200

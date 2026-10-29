@@ -458,6 +458,8 @@ export function operationEditor(opts) {
     destroy() { alive = false; if (rules) rules.destroy(); },
     /** Re-read the captured calls (new traffic) for the rule preview. */
     refreshPreview() { if (rules) rules.reload(); },
+    /** Re-read the operation (its settings changed elsewhere: stored examples, an AI edit); unsaved edits are kept. */
+    reload() { if (!dirtyFlag) load(); },
     dirty: () => dirtyFlag,
   };
 }
