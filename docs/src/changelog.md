@@ -72,6 +72,27 @@ The build of [Rustybin 0.2](../plans/next/master-plan.md), step by step.
   overview, **Explain** on a captured request, and Management, AI (curated models with
   prices, keys, Test the key, the built-in mock LLM, usage). New book page
   [Bring your own AI](ai-assist.md).
+- **AI mocks: specs from a prompt, examples, AI edit** (step 04). Four tasks:
+  `spec_from_description` (an OpenAPI 3.1.0, 3.0.3 or Swagger 2.0 document from a
+  description with auth, pagination and error style, parsed and run through the
+  deploy checks), `examples_for_operations` (example payloads for the success
+  responses that lack them, each validated against its schema, ten operations per
+  call), `edit_spec` (the whole document after an instruction, with a bounded
+  structural diff) and `request_examples`. Examples stored with a mock
+  (`operations.<id>.examples.<status>`, source `user`, `ai` or `generated`, at most 8
+  per status) are served where the spec has none and by name, by the REST routes and
+  the mock's MCP tools alike. Every revision reports its **example coverage**: a
+  banner on the detail page with **Generate with AI** and **Use generated values**
+  (the deterministic generator, no key), a `no_examples` warning in the deploy
+  report, `check_mock` and `rustybin mock validate`, the count in `get_mock`, and
+  `GET /_rustybin/mocks/{name}/coverage`. Routes `POST /_rustybin/mocks/ai/spec`,
+  `POST /_rustybin/mocks/{name}/ai/examples` and `POST /_rustybin/mocks/{name}/ai/edit`
+  (SSE progress or one JSON document); visitors need `RUSTYBIN_ASSIST_VISITORS`.
+  Console: the wizard's **Describe it** tab (first when a key is set), the coverage
+  banner, the Generate examples dialog with a preview per operation, **Edit with AI**
+  with a streamed diff and Apply as draft, stored examples in the operation editor,
+  and the apply cards `create_mock`, `edit_spec`, `generate_examples` from the assist
+  bar. New book page [Build mocks with AI](mocks/ai.md).
 
 ## 0.1.0 (2026-10-29): the AI and agent gateway upgrade
 

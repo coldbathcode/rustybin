@@ -29,8 +29,17 @@ fn mock_summary(detail: &Value, verb: &str) -> String {
         Some(url) if detail["mcp"]["serving"] == true => format!("; MCP server: {url}"),
         _ => String::new(),
     };
+    let without = detail["coverage"]["without"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let coverage = if without > 0 {
+        format!("; {without} operation(s) without examples (generate_examples, or the console's Generate)")
+    } else {
+        String::new()
+    };
     format!(
-        "{verb} mock {:?} ({}, {} operation(s), state {}, checks: {} error(s), {} warning(s)): {}{mcp}{}",
+        "{verb} mock {:?} ({}, {} operation(s), state {}, checks: {} error(s), {} warning(s)): {}{mcp}{coverage}{}",
         detail["name"].as_str().unwrap_or("?"),
         detail["title"].as_str().unwrap_or(""),
         ops,
@@ -400,12 +409,17 @@ pub fn check_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     };
     match svc(ctx, access).report(name) {
         Ok(r) => {
+            let without = r["coverage"]["without"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0);
             let summary = format!(
-                "Deploy checks of mock {name:?}: {} ({} error(s), {} warning(s), {} spec warning(s))",
+                "Deploy checks of mock {name:?}: {} ({} error(s), {} warning(s), {} spec warning(s){})",
                 if r["ok"].as_bool() == Some(true) { "ok" } else { "errors" },
                 r["errors"],
                 r["warnings"],
-                r["spec_warnings"].as_array().map(|a| a.len()).unwrap_or(0)
+                r["spec_warnings"].as_array().map(|a| a.len()).unwrap_or(0),
+                if without > 0 { format!("; {without} operation(s) without examples") } else { String::new() }
             );
             ok(ctx, summary, r)
         }

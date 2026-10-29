@@ -57,10 +57,21 @@ function mountList(root) {
     return data ? data.mocks.map((m) => m.name) : [];
   }
 
-  function wizard(text) {
+  function onDescribe() {
+    const pending = settings.recall('mocks.describe', null);
+    if (!pending || !alive) return;
+    settings.remember('mocks.describe', null);
+    setTimeout(() => wizard('', pending), 0);
+  }
+  document.addEventListener('rustybin-describe', onDescribe);
+
+  function wizard(text, describe) {
     openWizard({
       taken: names(),
       text,
+      describe: describe && describe.description,
+      version: describe && describe.openapi_version,
+      autorun: !!describe,
       maxBytes: data && data.limits ? data.limits.max_spec_bytes : 0,
       visitor: visitor ? data.self_service : null,
       onCreated: (d, deployed) => {
@@ -79,6 +90,8 @@ function mountList(root) {
       return;
     }
     data = r.json;
+    // An apply card of the assistant: open the wizard's Describe tab and run it.
+    onDescribe();
     const ss = data.self_service || {};
     visitor = !!ss.enabled && !data.can_manage_instance;
     newBtn.hidden = !!readOnly && !visitor;
@@ -278,7 +291,7 @@ function mountList(root) {
   load();
   // Calls and "last hit" change all the time: refresh quietly.
   timer = setInterval(() => { if (!document.hidden && !document.querySelector('dialog[open]') && !listEl.contains(document.activeElement)) load(); }, 5000);
-  return { destroy() { alive = false; clearInterval(timer); } };
+  return { destroy() { alive = false; clearInterval(timer); document.removeEventListener('rustybin-describe', onDescribe); } };
 }
 
 export default {

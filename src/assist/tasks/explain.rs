@@ -18,6 +18,7 @@ pub const TASK: Task = Task {
     prompt,
     mock,
     cache_key: None,
+    post: None,
 };
 
 const SYSTEM: &str = "You explain one thing the user selected in the Rustybin console: a request \

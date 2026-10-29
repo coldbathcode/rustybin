@@ -19,6 +19,7 @@ pub const TASK: Task = Task {
     prompt,
     mock,
     cache_key: Some(cache_key),
+    post: None,
 };
 
 const SYSTEM: &str = "You propose what a person testing an API or AI gateway would want to ask \

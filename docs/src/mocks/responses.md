@@ -39,7 +39,7 @@ and otherwise as `application/json` (Rustybin does not write XML or CSV from a
 schema).
 
 `X-Rustybin-Mock-Source` says what happened: `example:<name>` (a named example),
-`example` (an unnamed one), `generated`, `static` (a configured body), `empty`, or
+`example` (an unnamed one), `example:ai:<name>` or `example:generated:<name>` or `example:user:<name>` (a stored one), `generated`, `static` (a configured body), `empty`, or
 `undocumented`, prefixed with `prefer `, `rule:<name or number> ` or `override `
 when one of those chose the response.
 
@@ -59,7 +59,7 @@ when one of those chose the response.
 
 | `responses.mode` | Body of a documented response |
 |---|---|
-| `examples` (default) | The media type's `example`, else its first named example, else data generated from the schema (schema `example` values are used where they exist) |
+| `examples` (default) | The media type's `example`, else its first named example, else an example [stored with the mock](ai.md#examples-and-the-alert-when-a-spec-has-none) (written by AI, the generator or a person), else data generated from the schema (schema `example` values are used where they exist) |
 | `generated` | Always generated from the schema; falls back to the examples only when there is no schema |
 | `static` | Only bodies you configured (`respond.body`, `example`); anything else is empty |
 | `stateful` | A small in-memory store behind the mock: what clients create, change and delete is what later reads return ([below](#stateful-mode)) |
@@ -119,6 +119,14 @@ collection (`/users/{uid}/pets`) opens one per URL. `GET /_rustybin/mocks/{name}
 shows what a mock stored and `DELETE` resets it. Stateful mode is not available for
 [self-service](self-service.md) visitor mocks.
 
+## When a spec has no examples
+
+A mock reports its **example coverage**: the operations whose success responses have
+no example, in the spec or stored. The detail page shows a banner with **Generate
+with AI** and **Use generated values**, the deploy report carries a warning of class
+`no_examples`, and `GET /_rustybin/mocks/{name}/coverage` answers it. See [Build
+mocks with AI](ai.md#examples-and-the-alert-when-a-spec-has-none).
+
 ## Operation settings
 
 `PUT /_rustybin/mocks/{name}/operations/{op}` replaces one operation's settings in
@@ -131,6 +139,7 @@ sits under `operations.<operationId>` in `PATCH` bodies and in
 | `respond` | The operation's override: `status`, `example` (a named example of that status), `body` (JSON is serialised; a string is sent as is, labelled JSON when it parses as JSON, else text) and `headers` |
 | `rules` | Ordered list of `{name?, when, respond}`; the first match wins (20 per operation, 10 in public mode) |
 | `mode` | `examples`, `generated` or `static` for this operation |
+| `examples` | Examples stored with the mock, by status: `{"200": [{"name", "value", "source": "user" or "ai" or "generated"}]}`; served where the spec has none for the status, and by name with `Prefer: example=<name>`. At most 8 per status. See [Build mocks with AI](ai.md) |
 | `delay_ms` | Delay before answering (instead of `responses.delay_ms`), capped at 30 s (10 s in public mode) |
 | `public` | No [mocked security](security.md#public-operations) on this operation |
 

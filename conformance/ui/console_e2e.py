@@ -351,6 +351,84 @@ def run_theme(browser, theme):
 
     step("mock apis (detail, try it, on/off, rule preview, collection, duplicate, stateful, wizard, bulk)", mocks)
 
+    def ai_mocks():
+        # Describe it: the wizard's first tab with the mock provider.
+        def api_json(method, path, body=None):
+            req = urllib.request.Request(BASE + "/_rustybin/mocks" + path, method=method, data=json.dumps(body).encode() if body is not None else None, headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    return r.status, json.load(r)
+            except urllib.error.HTTPError as e:
+                return e.code, {}
+        for n in (f"coffee-{theme}", f"noex-{theme}", f"clone-{theme}"):
+            api_json("DELETE", "/" + n)
+        goto_view(page, "mocks")
+        page.get_by_role("button", name="New mock", exact=True).click()
+        page.wait_for_selector("dialog.wizard")
+        page.wait_for_selector("#describe-prompt")
+        expect(page.locator("dialog.wizard [role='tab'][aria-selected='true']")).to_have_text("Describe it")
+        page.fill("#describe-prompt", "An orders API for a coffee shop: customers, products, orders with line items")
+        page.locator("[data-style='auth:api_key']").click()
+        page.locator("#describe-generate").click()
+        page.wait_for_selector("dialog.wizard >> text=Review")
+        page.get_by_label("Mock name").wait_for()
+        expect(page.locator("dialog.wizard")).to_contain_text("12 operations")
+        page.get_by_label("Mock name").fill(f"coffee-{theme}")
+        shot(page, theme, "17-mock-describe-review")
+        page.locator("dialog.wizard").get_by_role("button", name="Next").click()
+        page.locator("dialog.wizard").get_by_role("button", name="Create and deploy").click()
+        page.wait_for_url(f"**#/mocks/coffee-{theme}")
+        page.locator("h1", has_text=f"coffee-{theme}").wait_for()
+        expect(page.locator(".mock-banners")).not_to_contain_text("no example")
+        # A spec without examples: the banner, Use generated values, Edit with AI.
+        status, _ = api_json("POST", "", {"name": f"noex-{theme}", "deploy": True, "spec": {
+            "openapi": "3.0.3", "info": {"title": "Tickets", "version": "1.0"},
+            "paths": {"/tickets": {"get": {"operationId": "listTickets", "responses": {"200": {"description": "ok", "content": {"application/json": {
+                "schema": {"type": "array", "items": {"$ref": "#/components/schemas/Ticket"}}}}}}}}},
+            "components": {"schemas": {"Ticket": {"type": "object", "required": ["id", "title"], "properties": {"id": {"type": "integer"}, "title": {"type": "string"}}}}}}})
+        assert status == 201, status
+        page.goto(BASE + f"/ui/#/mocks/noex-{theme}")
+        page.wait_for_selector("text=1 of 1 operation has no example")
+        page.locator("#coverage-generate-values").click()
+        page.wait_for_selector("#examples-dialog")
+        page.locator("#examples-run").click()
+        page.wait_for_selector("#examples-preview")
+        shot(page, theme, "18-mock-examples")
+        page.locator("#examples-save").click()
+        page.wait_for_function("!document.querySelector('#coverage-generate-values')")
+        # The operation editor lists the stored example.
+        page.locator(".op-row", has_text="/tickets").first.click()
+        page.wait_for_selector("#stored-examples")
+        expect(page.locator("#stored-examples")).to_contain_text("generated-1")
+        # Edit with AI: the diff, then apply as draft.
+        page.locator("#edit-with-ai").click()
+        page.wait_for_selector("#edit-dialog")
+        page.fill("#edit-instruction", "add a 404 response to every operation")
+        page.locator("#edit-run").click()
+        page.wait_for_selector("#edit-diff .d-add")
+        expect(page.locator("#edit-dialog")).to_contain_text("changed")
+        shot(page, theme, "18-mock-edit-diff")
+        page.locator("#edit-apply").click()
+        page.wait_for_selector("text=The draft has changes that are not live yet")
+        expect(page.locator(".mock-banners")).to_contain_text("spec")
+        # From the assist bar: an apply card opens the Describe tab and runs it.
+        page.keyboard.press("Control+k")
+        page.fill("#assist-input", "make me a petstore clone mock with api key auth")
+        page.keyboard.press("Enter")
+        page.wait_for_selector(".apply-card")
+        expect(page.locator(".apply-card")).to_contain_text("Create this mock")
+        page.locator(".apply-card").get_by_role("button", name="Apply").click()
+        page.wait_for_url("**#/mocks")
+        page.wait_for_selector("dialog.wizard >> text=Review", timeout=30000)
+        page.get_by_label("Mock name").fill(f"clone-{theme}")
+        page.locator("dialog.wizard").get_by_role("button", name="Close").click()
+        page.get_by_role("button", name="Close the assistant").click()
+        for n in (f"coffee-{theme}", f"noex-{theme}"):
+            api_json("DELETE", "/" + n)
+        goto_view(page, "mocks")
+
+    step("ai mocks: describe it, coverage banner, generated values, edit with ai, apply card", ai_mocks)
+
     def mock_mcp():
         mcp_url = BASE + "/mock/petstore/_rustybin/mcp"
         page.evaluate("location.hash = '#/mocks/petstore/mcp'")

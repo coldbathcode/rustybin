@@ -20,6 +20,7 @@ pub const TASK: Task = Task {
     prompt,
     mock,
     cache_key: None,
+    post: None,
 };
 
 const SYSTEM: &str = concat!(
@@ -77,6 +78,26 @@ fn mock(inputs: &Value) -> Value {
     } else {
         ("explorer", "Open the API explorer")
     };
+    // A description of an API to mock ("make me a petstore clone with OAuth")
+    // gets the wizard's Describe tab instead of the generic actions.
+    let describes_api = (lower.contains("mock") || lower.contains(" api"))
+        && [
+            "make", "create", "build", "describe", "want", "need", "clone", "generate", "write",
+        ]
+        .iter()
+        .any(|w| lower.contains(w));
+    let actions = if describes_api {
+        format!(
+            "```action\n{}\n```\n",
+            json!({ "action": "create_mock", "label": "Create this mock (opens the wizard's Describe tab)", "payload": { "description": question, "openapi_version": "3.1.0" } })
+        )
+    } else {
+        format!(
+            "```action\n{}\n```\n```action\n{}\n```\n",
+            json!({ "action": "open_view", "label": label, "payload": { "view": target } }),
+            json!({ "action": "run_request", "label": "Send GET /anything/hello?demo=1", "payload": { "method": "GET", "path": "/anything/hello?demo=1", "headers": { "X-Demo": "rustybin" } } }),
+        )
+    };
     let text = format!(
         "**Mock assistant.** No model was called and nothing left this instance: the built-in \
          provider answers deterministically, which is what demos and tests use.\n\n\
@@ -85,10 +106,7 @@ fn mock(inputs: &Value) -> Value {
          gateway's headers.\n\
          - Mock APIs serve an OpenAPI spec as a working API at `/mock/<name>/...`.\n\
          - Faults work on any route: send `X-Rustybin-Fail: 503` or `X-Rustybin-Delay: 2000`.\n\n\
-         Add a real key under Management, AI for answers about *your* question.\n\n\
-         ```action\n{}\n```\n```action\n{}\n```\n",
-        json!({ "action": "open_view", "label": label, "payload": { "view": target } }),
-        json!({ "action": "run_request", "label": "Send GET /anything/hello?demo=1", "payload": { "method": "GET", "path": "/anything/hello?demo=1", "headers": { "X-Demo": "rustybin" } } }),
+         Add a real key under Management, AI for answers about *your* question.\n\n{actions}"
     );
     Value::String(text)
 }

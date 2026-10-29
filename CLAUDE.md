@@ -2,7 +2,7 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 to 03 done)
+## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 to 04 done)
 
 [docs/plans/next/master-plan.md](docs/plans/next/master-plan.md) (planned 2026-10-29) is the plan for the next
 build: twelve steps, one file each (`docs/plans/next/step-NN-*.md`): foundations (step 01, done 2026-10-29: the
@@ -11,7 +11,9 @@ settings store `src/settings.rs`, the egress policy `src/egress.rs`, the console
 done 2026-10-29: `src/login.rs`, the one change of default; test and example instances that read the control plane
 without a token set `RUSTYBIN_CONTROL_AUTH=open`), AI assist with the user's own key (step 03, done 2026-10-29:
 `src/assist/`, see below; Anthropic, OpenAI, Gemini, OpenAI-compatible, or the built-in mock provider for tests;
-the console's assist bar, drawer and `ui/lib/assist.js`), AI-built mocks (specs from a
+the console's assist bar, drawer and `ui/lib/assist.js`), AI-built mocks (step 04, done 2026-10-29: the tasks in
+`src/assist/tasks/`, the routes in `src/mocks/ai.rs`, stored examples and coverage in the mocks model and checks,
+`ui/views/mocks/ai.js`; specs from a
 prompt to the chosen OpenAPI version, example payloads with an alert when a spec has none, AI edits through a
 diff), an MCP inspector for any server with every auth mode and a relay, a mock MCP registry and registry
 browsing, a dev portal, AI agents management, the whole instance as `rustybin.yaml` with git source control, a
@@ -160,10 +162,13 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   enum, the shared `post_sse` through the egress policy, `SseParser`), `anthropic.rs` / `openai.rs` / `gemini.rs`
   (request bodies and event mapping; structured answers through tool use, `response_format`, `responseSchema`),
   `mock.rs` (the task's deterministic answer, streamed), `models.rs` (the curated table with tiers and list prices),
-  `redact.rs` (prompts never carry a stored secret or the admin token), `task.rs` (`Task`, input helpers, action
-  blocks, `parse_json_answer`, `validate` on `mocks::schema`), `tasks/` (`free_answer`, `explain`, `suggest`; one
-  file per task, `ALL`), `api.rs` (the routes; `RUN_PATH` is a read-only POST for control auth). A new AI feature is
-  a new task file (and, when it writes, `writes: true`), never a prompt built elsewhere.
+  `redact.rs` (prompts never carry a stored secret or the admin token), `task.rs` (`Task` with an optional `post`
+  check beyond the schema, input helpers, action blocks, `parse_json_answer`, `validate` on `mocks::schema`),
+  `tasks/` (`free_answer`, `explain`, `suggest`, and the mock tasks `spec_from_description`,
+  `examples_for_operations`, `edit_spec`, `request_examples`, each with a deterministic `mock` answer and a `post`
+  that parses, compiles and checks through `tasks::compile_doc` / `check_spec`; one file per task, `ALL`), `api.rs`
+  (the routes; `RUN_PATH` is a read-only POST for control auth). A new AI feature is a new task file (and, when it
+  writes, `writes: true`), never a prompt built elsewhere.
 - `src/control_auth.rs`: `RUSTYBIN_CONTROL_AUTH` (`password` / `open` / `token` / `jwt`), Ed25519 JWT verification with scopes
   (`inspector`, `console`, `admin`), the `enforce` middleware (protects `/_rustybin/*` except `/_rustybin/ready` and
   the OAuth sign-in endpoints `/_rustybin/oauth/{register,authorize,token}`; `/ui/*` static files stay open). Tests sign tokens with the keys in `tests/common/control_jwt_keys.rs`
@@ -199,7 +204,11 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   `build_app`), `collections.rs` (a mock as Postman / Hurl / curl / .http / k6 / Bruno / Insomnia), `config_file.rs` (`rustybin.yaml`,
   `RUSTYBIN_MOCKS_DIR`, export), `cli.rs` (`rustybin mock ...`), `mcp.rs` (a revision's MCP tools), `service.rs` (the control-plane logic shared by
   the REST handlers and the management MCP), `handlers.rs` (`/mock/{name}/...` data plane, thin
-  `/_rustybin/mocks*` handlers over `service.rs`; access through `selfservice.rs`). Self-service (`RUSTYBIN_MOCKS_SELF_SERVICE`):
+  `/_rustybin/mocks*` handlers over `service.rs`; access through `selfservice.rs`). Self-service (`RUSTYBIN_MOCKS_SELF_SERVICE`): `ai.rs` holds the AI routes
+  (`/_rustybin/mocks/ai/spec`, `/{name}/ai/examples`, `/{name}/ai/edit`, `/{name}/coverage`: assist tasks plus the
+  mock context, SSE progress, `RUSTYBIN_ASSIST_VISITORS`). Examples stored with a mock live in
+  `OperationSettings.examples` (`StoredExample`, source user / ai / generated); `respond.rs` serves them after the
+  spec's and before generation; `checks::coverage` (the `no_examples` finding) says which operations lack one.
   `visits.rs` (`Owner` of every mock: instance, visit by manage-token hash, or API key; the visit clock and daily
   ledger on the injectable `limits::Clock`), `selfservice.rs` (`Caller`, `readable` / `manageable` guards: other
   people's visitor mocks are `404`; the `/_rustybin/mocks/visit*` and operator `visits*` routes), `restrict.rs`

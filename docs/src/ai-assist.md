@@ -7,9 +7,9 @@ mock provider for demos and tests. Nothing calls a model until a key is set; wit
 an **assist bar** sits in the console's top bar (`Ctrl+K` / `Cmd+K`) with suggestions
 for the view you are on, answers stream into a drawer, and **apply cards** do what
 the answer proposes (open a view, copy a command, send a request) only when you
-click them. This page is the engine and the shell; the mock-building tasks
-(describe an API, generate examples, edit a spec) and the MCP tasks come with later
-releases.
+click them. This page is the engine and the shell; the mock-building tasks (describe an API,
+generate examples, edit a spec) are on [Build mocks with AI](mocks/ai.md); the MCP
+tasks come with the inspector.
 
 ## Set it up
 
@@ -69,13 +69,13 @@ mode no feature may reach any host, so only the mock provider works there.
   the tab left it.
 - **Apply cards.** An answer may end with actions: `open_view` (a console view),
   `copy` (text to the clipboard), `run_request` (a request to this instance's own data
-  plane, whose status and body appear under the card). Nothing is applied without a
-  click. Later releases add their own (create a mock, fill examples, open the inspector
-  with arguments ready).
+  plane, whose status and body appear under the card), `create_mock` (the wizard's
+  Describe tab with the description filled in), `edit_spec` and `generate_examples`
+  (the dialogs of a mock). Nothing is applied without a click.
 - **Sparkle buttons** where the work is: **Explain** on a captured request in Live
-  traffic (this release); describe, generate and edit on mocks, generate arguments on
-  MCP tools and write a scenario on the harness builder come with their steps. Without
-  a key they say so and open Management, AI.
+  traffic, **Describe it**, **Generate with AI** and **Edit with AI** on mocks; generate
+  arguments on MCP tools and write a scenario on the harness builder come with their
+  steps. Without a key they say so and open Management, AI.
 - **The overview** gets an **Ask Rustybin** card with three suggestions, and the
   navigation marks the views with AI actions with a sparkle once assist is on.
 - **Without a key** the bar reads "Add an AI key to describe what you want" and opens
@@ -96,6 +96,10 @@ errors, at most twice.
 | `free_answer` | `question`, `view`, `context` (what the view shows, at most 32 KiB) | Markdown, with action blocks | capable |
 | `explain` | `kind` (`request`, `tool`, `operation`, `text`), `subject` | `{summary, details, gateway_notes, next_steps}` | fast |
 | `suggest` | `view`, `context` | `{suggestions: [{label, prompt}]}` (three or four), cached per view and model for an hour | fast |
+| `spec_from_description` | `description`, `openapi_version`, `style` | An OpenAPI document, parsed and checked ([mocks](mocks/ai.md)) | capable |
+| `examples_for_operations` | `spec`, `operations`, `per_response`, `persona` | `{examples: {op: {status: [...]}}}`, each validated against its schema | capable |
+| `edit_spec` | `spec`, `instruction` | The whole document, checked, with a bounded structural diff | capable |
+| `request_examples` | `spec`, `operation`, `count` | `{requests: [{path, query, headers, body}]}`, validated | fast |
 
 `POST /_rustybin/assist/run` runs one. Streamed (`stream: true`, or `Accept:
 text/event-stream`), the events are `sent` (what goes to the provider, never the

@@ -13,6 +13,7 @@
 //! - [`handlers`] serves `/mock/{name}/...` (data plane) and
 //!   `/_rustybin/mocks*` (control plane).
 
+pub mod ai;
 pub mod capture;
 pub mod checks;
 pub mod cli;
@@ -263,6 +264,10 @@ pub fn router(_state: &AppState) -> Router<AppState> {
         .route("/_rustybin/mocks/{name}/deploy", post(h::deploy))
         .route("/_rustybin/mocks/{name}/rollback", post(h::rollback))
         .route("/_rustybin/mocks/{name}/report", get(h::report))
+        .route(ai::SPEC_PATH, post(ai::spec))
+        .route(ai::EXAMPLES_PATH, post(ai::examples))
+        .route(ai::EDIT_PATH, post(ai::edit))
+        .route(ai::COVERAGE_PATH, get(ai::coverage))
         .route("/_rustybin/mocks/{name}/export", get(h::export_one))
         .route("/_rustybin/mocks/{name}/spec", get(h::spec_source))
         .route("/_rustybin/mocks/{name}/duplicate", post(h::duplicate))
@@ -307,6 +312,46 @@ const SMALL_SPEC: &str = r#"{"spec":{"openapi":"3.0.3","info":{"title":"Orders",
 
 pub fn catalog() -> Vec<Endpoint> {
     vec![
+        Endpoint::new(
+            "/_rustybin/mocks/{name}/coverage",
+            &["GET"],
+            category::MOCKS,
+            "Example coverage of a mock: which operations lack an example for their success responses",
+        )
+        .example(Example::get("Coverage of the sample mock", "/_rustybin/mocks/petstore/coverage")),
+        Endpoint::new(
+            "/_rustybin/mocks/ai/spec",
+            &["POST"],
+            category::MOCKS,
+            "AI: an OpenAPI document from a plain description, checked, nothing created",
+        )
+        .example(
+            Example::post("Describe an API", "/_rustybin/mocks/ai/spec")
+                .json(r#"{"description":"A notes API: notes with a title and a body","openapi_version":"3.1.0","stream":false}"#)
+                .expect_status(503),
+        ),
+        Endpoint::new(
+            "/_rustybin/mocks/{name}/ai/examples",
+            &["POST"],
+            category::MOCKS,
+            "AI (or the generator): examples for the operations that lack them, stored in the draft with apply",
+        )
+        .example(
+            Example::post("Generated examples for the sample mock", "/_rustybin/mocks/petstore/ai/examples")
+                .json(r#"{"source":"generated","per_response":1,"stream":false}"#)
+                .skip_check("the sample mock may already have examples for every operation"),
+        ),
+        Endpoint::new(
+            "/_rustybin/mocks/{name}/ai/edit",
+            &["POST"],
+            category::MOCKS,
+            "AI: edit the spec with an instruction, as a diff; apply saves the draft",
+        )
+        .example(
+            Example::post("Edit the sample mock", "/_rustybin/mocks/petstore/ai/edit")
+                .json(r#"{"instruction":"add a 404 response to every operation","stream":false}"#)
+                .expect_status(503),
+        ),
         Endpoint::new(
             "/mock/{name}",
             &["ANY"],
@@ -779,6 +824,40 @@ pub fn openapi_paths() -> Value {
         "/_rustybin/mocks/{name}/deploy": { "post": admin("deployMock", "Deploy the draft", json!([name, { "name": "force", "in": "query", "schema": { "type": "boolean" } }])) },
         "/_rustybin/mocks/{name}/rollback": { "post": admin("rollbackMock", "Roll back", json!([name])) },
         "/_rustybin/mocks/{name}/report": { "get": simple("getMockReport", "Deploy-check report", json!([name])) },
+        "/_rustybin/mocks/{name}/coverage": { "get": simple("getMockCoverage", "Example coverage: which operations have an example for their success responses (draft and live)", json!([name])) },
+        "/_rustybin/mocks/ai/spec": { "post": {
+            "tags": tags, "summary": "AI: an OpenAPI document from a description",
+            "description": "Runs the assist task spec_from_description on the configured provider: the document on the chosen version (3.1.0, 3.0.3, 2.0) with the style options, parsed and checked, plus its preview (as POST /_rustybin/mocks/import gives). Nothing is created. Streamed as SSE (events progress, usage, result, error, done) with Accept: text/event-stream or stream: true, else one JSON document. Operator only, unless RUSTYBIN_ASSIST_VISITORS.",
+            "operationId": "aiSpecFromDescription",
+            "requestBody": json_body(json!({ "type": "object", "required": ["description"], "properties": {
+                "description": { "type": "string" },
+                "openapi_version": { "type": "string", "enum": ["3.1.0", "3.0.3", "2.0"] },
+                "style": { "type": "object", "properties": {
+                    "auth": { "type": "string", "enum": ["none", "api_key", "bearer", "oauth2"] },
+                    "pagination": { "type": "string", "enum": ["none", "page", "cursor"] },
+                    "errors": { "type": "string", "enum": ["problem", "simple"] } } },
+                "model": { "type": "string" }, "stream": { "type": "boolean" } } })),
+            "responses": { "200": { "description": "{spec, text, preview, usage, sent}" }, "403": { "description": "Visitors need RUSTYBIN_ASSIST_VISITORS" }, "429": { "description": "The caller's AI calls per minute" }, "502": { "description": "The provider failed or the document never passed the checks" }, "503": { "description": "No AI provider or key" } }
+        } },
+        "/_rustybin/mocks/{name}/ai/examples": { "post": {
+            "tags": tags, "summary": "AI: examples for the operations that lack them",
+            "description": "Runs examples_for_operations in batches of 10 (source ai), or the deterministic generator (source generated, no key). Every example is validated against its response schema. With apply the examples are stored in the draft (operations.<id>.examples, source ai or generated); a person's examples stay.",
+            "operationId": "aiExamplesForMock", "parameters": [name],
+            "requestBody": json_body(json!({ "type": "object", "properties": {
+                "operations": { "type": "array", "items": { "type": "string" }, "description": "operationIds (default: every operation without examples)" },
+                "per_response": { "type": "integer", "minimum": 1, "maximum": 3 },
+                "persona": { "type": "string" }, "source": { "type": "string", "enum": ["ai", "generated"] },
+                "apply": { "type": "boolean" }, "model": { "type": "string" }, "stream": { "type": "boolean" } } })),
+            "responses": { "200": { "description": "{examples, source, applied, stored, coverage, usage}" }, "404": not_found, "409": { "description": "Every operation has examples" }, "503": { "description": "No AI provider or key" } }
+        } },
+        "/_rustybin/mocks/{name}/ai/edit": { "post": {
+            "tags": tags, "summary": "AI: edit the spec with an instruction",
+            "description": "Runs edit_spec: the whole document after the instruction, parsed and checked, with a structural diff (operations added, removed, changed; at most 40 percent removed without an explicit ask). With apply the new document becomes the draft.",
+            "operationId": "aiEditMock", "parameters": [name],
+            "requestBody": json_body(json!({ "type": "object", "required": ["instruction"], "properties": {
+                "instruction": { "type": "string" }, "apply": { "type": "boolean" }, "model": { "type": "string" }, "stream": { "type": "boolean" } } })),
+            "responses": { "200": { "description": "{spec, text, before_text, diff, preview, applied, detail?, usage, sent}" }, "404": not_found, "502": { "description": "The provider failed or the edit never passed the checks" }, "503": { "description": "No AI provider or key" } }
+        } },
         "/_rustybin/mocks/{name}/export": { "get": simple("exportMock", "Export one mock", json!([name])) },
         "/_rustybin/mocks/{name}/spec": { "get": simple("getMockSpecSource", "The spec as uploaded", json!([name])) },
         "/_rustybin/mocks/{name}/duplicate": { "post": with_body(admin("duplicateMock", "Copy a mock", json!([name])), json!({ "type": "object", "properties": { "name": { "type": "string" } } })) },

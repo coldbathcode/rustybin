@@ -312,6 +312,7 @@ value saved under Management, AI overrides.
 | `RUSTYBIN_ASSIST_ANTHROPIC_KEY`, `RUSTYBIN_ASSIST_OPENAI_KEY`, `RUSTYBIN_ASSIST_GEMINI_KEY`, `RUSTYBIN_ASSIST_COMPATIBLE_KEY` | unset | The provider keys (secrets `assist.*_key`: sealed at rest, returned as `{set, hint}`, never in prompts, exports or captures). Not to be confused with `RUSTYBIN_AI_API_KEY`, the key the mock LLM *accepts*. |
 | `RUSTYBIN_ASSIST_MAX_CALLS_PER_MINUTE` | `20` | AI calls per minute per caller (the control principal, plus the client address on an open control plane); more answer `429` with `Retry-After`. 1 to 1000. |
 | `RUSTYBIN_ASSIST_MAX_OUTPUT_TOKENS` | `8192` | The output cap of every answer. 256 to 128000. |
+| `RUSTYBIN_ASSIST_VISITORS` | `false` | On a [self-service](mocks/self-service.md) instance, let visitors use the instance's AI key on their own mocks (describe, generate examples, edit). Off: visitors get `403` from the AI routes; the deterministic generator stays available to them. |
 
 ## A2A agents
 

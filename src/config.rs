@@ -96,6 +96,9 @@ pub struct Config {
     /// per answer (`RUSTYBIN_ASSIST_MAX_OUTPUT_TOKENS`, default 8192).
     pub assist_max_calls_per_minute: u32,
     pub assist_max_output_tokens: u32,
+    /// Self-service visitors may use the operator's AI key for their own
+    /// mocks (`RUSTYBIN_ASSIST_VISITORS`, off by default).
+    pub assist_visitors: bool,
     /// The runtime state of the console's sign-in tokens (`crate::login`):
     /// the generation, revoked ids, listed sessions, failed attempts. Not a
     /// setting; it lives here because every credential check takes `&Config`.
@@ -638,6 +641,7 @@ impl Config {
             &mut warnings,
         )
         .clamp(256, 128_000);
+        let assist_visitors = parse_bool_or(&get, "RUSTYBIN_ASSIST_VISITORS", false, &mut warnings);
         let control_jwt_key = get("RUSTYBIN_CONTROL_JWT_PUBLIC_KEY").and_then(|raw| {
             let key = crate::control_auth::parse_public_key(&raw);
             if key.is_none() {
@@ -863,6 +867,7 @@ impl Config {
             assist_compatible_key,
             assist_max_calls_per_minute,
             assist_max_output_tokens,
+            assist_visitors,
             console_tokens: std::sync::Arc::new(crate::login::Tokens::new()),
             control_jwt_key,
             control_jwt_audience,
@@ -958,6 +963,7 @@ impl Config {
             assist_compatible_key: None,
             assist_max_calls_per_minute: crate::assist::DEFAULT_CALLS_PER_MINUTE,
             assist_max_output_tokens: crate::assist::DEFAULT_MAX_OUTPUT_TOKENS,
+            assist_visitors: false,
             console_tokens: std::sync::Arc::new(crate::login::Tokens::new()),
             control_jwt_key: None,
             control_jwt_audience: "test-instance".to_string(),

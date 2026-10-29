@@ -10,7 +10,9 @@ import { headerEditor } from '../../lib/widgets.js';
 import { schemaEditor } from '../../lib/schemaeditor.js';
 import { api, errorText, sampleToRequest, relTime } from '../../lib/mockapi.js';
 
-const SOURCES = [['example', 'Spec example'], ['generated', 'Generated'], ['stateful', 'Stateful'], ['custom', 'Custom']];
+import { storedExamplesList } from './ai.js';
+
+const SOURCES = [['example', 'Example'], ['generated', 'Generated'], ['stateful', 'Stateful'], ['custom', 'Custom']];
 const OPERATORS = [['equals', 'equals'], ['not_equals', 'does not equal'], ['exists', 'is present'], ['missing', 'is missing'], ['matches', 'matches regex']];
 const WHERE = [['path', 'path parameter'], ['query', 'query parameter'], ['header', 'header'], ['body', 'body field']];
 
@@ -199,8 +201,11 @@ export function operationEditor(opts) {
       const opts2 = [];
       if (hasUnnamed) opts2.push(['', 'Spec example']);
       for (const ex of examples) opts2.push([ex.name, ex.name + (ex.summary ? ': ' + ex.summary : '')]);
+      const stored = ((data.settings && data.settings.examples) || {})[String(status)] || [];
+      for (const ex of stored) opts2.push([ex.name, ex.name + ' (' + ex.source + ')']);
       if (!opts2.length) {
-        detail.appendChild(notice('', 'The spec has no example for ' + status + ': the mock generates one from the schema.'));
+        detail.appendChild(notice('', 'The spec has no example for ' + status + ': the mock generates one from the schema. ',
+          opts.readOnly ? null : h('button', { class: 'btn sm', type: 'button', onclick: () => opts.onGenerate && opts.onGenerate(opts.opId) }, icon('ai'), 'Generate examples')));
         exampleName = '';
       } else {
         if (!opts2.some(([v]) => v === exampleName)) exampleName = opts2[0][0];
@@ -211,6 +216,8 @@ export function operationEditor(opts) {
       const previewEl = h('div');
       detail.appendChild(previewEl);
       preview(previewEl, 'examples');
+      const storedList = storedExamplesList(data.settings && data.settings.examples, status);
+      if (storedList) detail.appendChild(storedList);
     } else if (source === 'generated') {
       const previewEl = h('div');
       detail.append(h('p', { class: 'small muted', style: { margin: 0 } }, 'Data generated from the response schema with the mock\'s seed: the same request gets the same data.'), previewEl);
@@ -355,6 +362,8 @@ export function operationEditor(opts) {
   /** Operation settings from the editor state (throws on invalid input). */
   function build() {
     const out = {};
+    // Stored examples (AI, generated, user) are kept as they are.
+    if (data.settings && data.settings.examples && Object.keys(data.settings.examples).length) out.examples = clone(data.settings.examples);
     const respond = {};
     if (status !== data.default_status) respond.status = status;
     const hs = hdrs.get();

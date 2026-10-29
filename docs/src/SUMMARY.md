@@ -42,6 +42,7 @@
 
 - [OpenAPI mocks](mocks/index.md)
   - [Responses, rules and validation](mocks/responses.md)
+  - [Build mocks with AI](mocks/ai.md)
   - [Mocked security](mocks/security.md)
   - [An MCP server for every mock](mocks/mcp.md)
   - [Configuration as code](mocks/config.md)

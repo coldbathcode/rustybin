@@ -8,6 +8,7 @@ use axum::http::{HeaderMap, HeaderValue};
 use serde_json::{json, Value};
 
 use super::compile::Compiled;
+use super::model::StoredExample;
 use super::model::{Condition, ResponseMode, ResponseOverride, Rule};
 use super::schema::{self, Direction, GenOptions};
 use super::spec::{Media, Operation, ResponseDef};
@@ -359,17 +360,33 @@ pub fn render_body(
             )
         })
     };
+    let stored: &[StoredExample] = c
+        .settings
+        .operations
+        .get(&op.id)
+        .map(|s| s.examples_for(status))
+        .unwrap_or(&[]);
     let (value, source) = match (choice.example, choice.mode) {
         (Some(name), _) if media.named_example(name).is_some() => (
             media.named_example(name).cloned(),
             format!("example:{name}"),
         ),
+        (Some(name), _) if stored.iter().any(|e| e.name == name) => {
+            let e = stored.iter().find(|e| e.name == name);
+            (
+                e.map(|e| e.value.clone()),
+                format!(
+                    "example:{}:{name}",
+                    e.map(|e| e.source.as_str()).unwrap_or("user")
+                ),
+            )
+        }
         (_, ResponseMode::Static) => (None, "empty".to_string()),
         (_, ResponseMode::Generated) => match gen(false) {
             Some(v) => (Some(v), "generated".to_string()),
-            None => spec_example(media, &gen),
+            None => spec_example(media, stored, &gen),
         },
-        (_, ResponseMode::Examples | ResponseMode::Stateful) => spec_example(media, &gen),
+        (_, ResponseMode::Examples | ResponseMode::Stateful) => spec_example(media, stored, &gen),
     };
     let Some(value) = value else {
         return (None, None, source);
@@ -394,14 +411,25 @@ pub fn render_body(
     }
 }
 
-/// The media-level example, the first named example, else generated data
-/// that uses schema examples.
-fn spec_example(media: &Media, gen: &dyn Fn(bool) -> Option<Value>) -> (Option<Value>, String) {
+/// The media-level example, the first named example, the first stored
+/// example (user, AI or generated), else generated data that uses schema
+/// examples.
+fn spec_example(
+    media: &Media,
+    stored: &[StoredExample],
+    gen: &dyn Fn(bool) -> Option<Value>,
+) -> (Option<Value>, String) {
     if let Some(e) = &media.example {
         return (Some(e.clone()), "example".into());
     }
     if let Some(e) = media.examples.first() {
         return (Some(e.value.clone()), format!("example:{}", e.name));
+    }
+    if let Some(e) = stored.first() {
+        return (
+            Some(e.value.clone()),
+            format!("example:{}:{}", e.source.as_str(), e.name),
+        );
     }
     match gen(true) {
         Some(v) => (Some(v), "generated".into()),

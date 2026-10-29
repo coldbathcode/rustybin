@@ -196,6 +196,24 @@ fn validate(args: &Args) -> Result<bool, String> {
     for f in &c.report.findings {
         say!("{:?}: {}", f.level, f.message);
     }
+    let cov = &c.report.coverage;
+    say!(
+        "examples: {} of {} operation(s) have one for their success responses{}",
+        cov.with_examples,
+        cov.operations,
+        if cov.without.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " (without: {})",
+                cov.without
+                    .iter()
+                    .map(|o| o.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    );
     say!(
         "{} error(s), {} warning(s)",
         c.report.errors,

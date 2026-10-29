@@ -235,6 +235,31 @@ export function applyCard(action) {
         h('div', { class: 'row' }, badge(String(r.status), r.ok ? 'ok' : 'err'), h('span', { class: 'muted small' }, Math.round(r.ms) + ' ms')),
         h('pre', { class: 'md-code small' }, h('code', null, r.text.slice(0, 2000)))));
     };
+  } else if (a.action === 'create_mock') {
+    title = a.label || 'Create a mock from this description';
+    detail = String(p.description || '').slice(0, 200);
+    apply = () => {
+      settings.remember('mocks.describe', { description: p.description, openapi_version: p.openapi_version });
+      if (location.hash.startsWith('#/mocks')) document.dispatchEvent(new CustomEvent('rustybin-describe'));
+      else location.hash = '#/mocks';
+      toast('Opening the mock wizard');
+    };
+  } else if (a.action === 'edit_spec') {
+    title = a.label || ('Edit ' + p.mock + ' with AI');
+    detail = String(p.instruction || '').slice(0, 200);
+    apply = () => {
+      settings.remember('mocks.edit', { mock: p.mock, instruction: p.instruction });
+      location.hash = '#/mocks/' + encodeURIComponent(p.mock);
+      toast('Opening ' + p.mock);
+    };
+  } else if (a.action === 'generate_examples') {
+    title = a.label || ('Generate examples for ' + p.mock);
+    detail = '#/mocks/' + p.mock;
+    apply = () => {
+      settings.remember('mocks.generate', { mock: p.mock });
+      location.hash = '#/mocks/' + encodeURIComponent(p.mock);
+      toast('Opening ' + p.mock);
+    };
   } else {
     return notice('', 'An action this console cannot apply yet: ' + a.action);
   }

@@ -28,6 +28,9 @@ pub enum Level {
 pub struct Finding {
     pub level: Level,
     pub message: String,
+    /// A machine-readable class for findings tools act on (`no_examples`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class: Option<&'static str>,
 }
 
 impl Finding {
@@ -35,6 +38,7 @@ impl Finding {
         Self {
             level: Level::Error,
             message: message.into(),
+            class: None,
         }
     }
 
@@ -42,7 +46,80 @@ impl Finding {
         Self {
             level: Level::Warning,
             message: message.into(),
+            class: None,
         }
+    }
+}
+
+/// The finding class of a spec whose operations lack examples.
+pub const NO_EXAMPLES: &str = "no_examples";
+
+/// Which operations have an example for their success responses, in the
+/// spec or stored with the mock. An operation counts as covered when every
+/// documented 2xx response with a JSON body has one; responses without a
+/// body need none.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Coverage {
+    pub operations: usize,
+    pub with_examples: usize,
+    /// The operations missing examples, with the statuses that lack one.
+    pub without: Vec<OperationCoverage>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct OperationCoverage {
+    pub id: String,
+    pub method: String,
+    pub path: String,
+    pub statuses: Vec<u16>,
+}
+
+impl Coverage {
+    pub fn is_complete(&self) -> bool {
+        self.without.is_empty()
+    }
+}
+
+/// The statuses of `op` that need an example and have none.
+pub fn missing_examples(c: &Compiled, op: &Operation) -> Vec<u16> {
+    let stored = c.settings.operations.get(&op.id);
+    op.responses
+        .iter()
+        .filter_map(|r| r.code().map(|code| (code, r)))
+        .filter(|(code, _)| (200..300).contains(code))
+        .filter(|(code, r)| {
+            let Some(media) = r.content.iter().find(|m| m.is_json()) else {
+                return false;
+            };
+            if media.schema.is_none() && media.example.is_none() && media.examples.is_empty() {
+                return false;
+            }
+            let in_spec = media.example.is_some() || !media.examples.is_empty();
+            let in_store = stored.is_some_and(|s| !s.examples_for(*code).is_empty());
+            !in_spec && !in_store
+        })
+        .map(|(code, _)| code)
+        .collect()
+}
+
+/// The example coverage of a revision.
+pub fn coverage(c: &Compiled) -> Coverage {
+    let mut without = Vec::new();
+    for op in &c.spec.operations {
+        let statuses = missing_examples(c, op);
+        if !statuses.is_empty() {
+            without.push(OperationCoverage {
+                id: op.id.clone(),
+                method: op.method.clone(),
+                path: op.path.clone(),
+                statuses,
+            });
+        }
+    }
+    Coverage {
+        operations: c.spec.operations.len(),
+        with_examples: c.spec.operations.len() - without.len(),
+        without,
     }
 }
 
@@ -95,6 +172,9 @@ pub struct Report {
     /// Findings not tied to one operation.
     pub findings: Vec<Finding>,
     pub operations: Vec<OperationReport>,
+    /// Which operations have examples (the `no_examples` finding's data).
+    #[serde(default)]
+    pub coverage: Coverage,
 }
 
 fn text_of(v: &Value) -> String {
@@ -817,6 +897,20 @@ pub fn run(c: &Compiled) -> Report {
              use a placeholder that may not match it (add an example to the schema)"
         )));
     }
+    let coverage = coverage(c);
+    if !coverage.is_complete() {
+        findings.push(Finding {
+            level: Level::Warning,
+            message: format!(
+                "{} of {} operation(s) have no example for a success response: the mock answers \
+                 with data generated from the schema (generate examples with AI or the generator, \
+                 or add them to the spec)",
+                coverage.without.len(),
+                coverage.operations
+            ),
+            class: Some(NO_EXAMPLES),
+        });
+    }
     let operations: Vec<OperationReport> = c
         .spec
         .operations
@@ -841,6 +935,7 @@ pub fn run(c: &Compiled) -> Report {
         spec_warnings: c.spec.warnings.clone(),
         findings,
         operations,
+        coverage,
     }
 }
 

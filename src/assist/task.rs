@@ -18,6 +18,9 @@ pub const VIEWS: &[&str] = &[
     "harness", "tokens",
 ];
 
+/// A task's post-check: `(inputs, answer) -> transformed answer | repair message`.
+pub type PostCheck = fn(&Value, Value) -> Result<Value, String>;
+
 #[derive(Clone, Copy)]
 pub struct Task {
     pub name: &'static str,
@@ -38,6 +41,10 @@ pub struct Task {
     pub mock: fn(&Value) -> Value,
     /// Answers of a task with a cache key are kept for an hour per key and model.
     pub cache_key: Option<fn(&Value) -> Option<String>>,
+    /// A check beyond the schema, with the inputs at hand (parse a spec, run
+    /// the deploy checks, validate examples against their schemas). It may
+    /// return a transformed answer; `Err` goes back to the model as a repair.
+    pub post: Option<PostCheck>,
 }
 
 impl Task {
@@ -137,7 +144,14 @@ pub fn view_field(inputs: &Value) -> Option<&'static str> {
 /// {"action": "open_view", "label": "Open Live traffic", "payload": {"view": "traffic"}}
 /// ```
 /// ````
-pub const ACTIONS: &[&str] = &["open_view", "copy", "run_request"];
+pub const ACTIONS: &[&str] = &[
+    "open_view",
+    "copy",
+    "run_request",
+    "create_mock",
+    "edit_spec",
+    "generate_examples",
+];
 
 fn valid_action(v: &Value) -> Option<Value> {
     let action = v.get("action")?.as_str()?;
@@ -166,6 +180,44 @@ fn valid_action(v: &Value) -> Option<Value> {
             }
             let mut m = Map::new();
             m.insert("text".into(), json!(text));
+            m
+        }
+        "create_mock" => {
+            // Opens the wizard's Describe tab with the description and runs it.
+            let description = payload.get("description")?.as_str()?;
+            if description.is_empty() || description.chars().count() > MAX_TEXT_CHARS {
+                return None;
+            }
+            let mut m = Map::new();
+            m.insert("description".into(), json!(description));
+            if let Some(v) = payload.get("openapi_version").and_then(Value::as_str) {
+                if matches!(v, "3.1.0" | "3.0.3" | "2.0") {
+                    m.insert("openapi_version".into(), json!(v));
+                }
+            }
+            m
+        }
+        "edit_spec" => {
+            let mock = payload.get("mock")?.as_str()?;
+            let instruction = payload.get("instruction")?.as_str()?;
+            if !crate::mocks::model::valid_name(mock)
+                || instruction.is_empty()
+                || instruction.chars().count() > MAX_TEXT_CHARS
+            {
+                return None;
+            }
+            let mut m = Map::new();
+            m.insert("mock".into(), json!(mock));
+            m.insert("instruction".into(), json!(instruction));
+            m
+        }
+        "generate_examples" => {
+            let mock = payload.get("mock")?.as_str()?;
+            if !crate::mocks::model::valid_name(mock) {
+                return None;
+            }
+            let mut m = Map::new();
+            m.insert("mock".into(), json!(mock));
             m
         }
         "run_request" => {

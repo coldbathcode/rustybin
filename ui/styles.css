@@ -222,6 +222,8 @@ p { margin: 0 0 8px; }
 .apply-result { margin-top: 8px; }
 body.assist-open .main { padding-right: 0; }
 
+.ai-progress { margin: 0; padding-left: 18px; max-height: 120px; overflow: auto; }
+.ai-progress li { margin: 1px 0; }
 .md { line-height: 1.5; overflow-wrap: anywhere; }
 .md p { margin: 0 0 8px; }
 .md h3, .md h4, .md h5, .md h6 { margin: 10px 0 4px; font-size: 14px; }

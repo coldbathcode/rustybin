@@ -219,6 +219,47 @@ pub struct Rule {
     pub respond: ResponseOverride,
 }
 
+/// Where a stored example came from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExampleSource {
+    /// Typed or pasted by a person.
+    #[default]
+    User,
+    /// Written by the AI assist (`examples_for_operations`).
+    Ai,
+    /// Produced by the deterministic generator ("Use generated values").
+    Generated,
+}
+
+impl ExampleSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExampleSource::User => "user",
+            ExampleSource::Ai => "ai",
+            ExampleSource::Generated => "generated",
+        }
+    }
+}
+
+/// An example stored with the mock (the spec's own examples stay in the
+/// spec). Served where the spec has none for the status, and by name with
+/// `Prefer: example=<name>`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StoredExample {
+    pub name: String,
+    pub value: Value,
+    pub source: ExampleSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+}
+
+/// Most stored examples per operation and status.
+pub const MAX_STORED_EXAMPLES: usize = 8;
+/// Longest stored example name.
+pub const MAX_EXAMPLE_NAME: usize = 64;
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OperationSettings {
@@ -235,6 +276,19 @@ pub struct OperationSettings {
     /// No mocked security on this operation.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub public: bool,
+    /// Examples by status (`"200"`), served where the spec has none.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub examples: BTreeMap<String, Vec<StoredExample>>,
+}
+
+impl OperationSettings {
+    /// The stored examples of a status.
+    pub fn examples_for(&self, status: u16) -> &[StoredExample] {
+        self.examples
+            .get(&status.to_string())
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
 }
 
 impl OperationSettings {
@@ -474,6 +528,44 @@ impl MockSettings {
             }
             if let Some(resp) = &cfg.respond {
                 check_response(resp, &format!("operations.{op}.respond"), limits)?;
+            }
+            for (status, examples) in &cfg.examples {
+                let at = format!("operations.{op}.examples.{status}");
+                if !status
+                    .parse::<u16>()
+                    .is_ok_and(|s| (100..=599).contains(&s))
+                {
+                    return Err(format!(
+                        "{at}: the key must be a status between 100 and 599"
+                    ));
+                }
+                if examples.len() > MAX_STORED_EXAMPLES {
+                    return Err(format!("{at}: at most {MAX_STORED_EXAMPLES} examples"));
+                }
+                let mut names = std::collections::BTreeSet::new();
+                for e in examples {
+                    if e.name.is_empty()
+                        || e.name.chars().count() > MAX_EXAMPLE_NAME
+                        || !e
+                            .name
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                    {
+                        return Err(format!(
+                            "{at}: example names are 1 to {MAX_EXAMPLE_NAME} characters of letters, digits, - _ and ."
+                        ));
+                    }
+                    if !names.insert(e.name.as_str()) {
+                        return Err(format!("{at}: the example name {:?} is used twice", e.name));
+                    }
+                    let size = e.value.to_string().len();
+                    if size > limits.max_body_bytes {
+                        return Err(format!(
+                            "{at}.{}: larger than {} bytes",
+                            e.name, limits.max_body_bytes
+                        ));
+                    }
+                }
             }
             if cfg.rules.len() > limits.max_rules {
                 return Err(format!(

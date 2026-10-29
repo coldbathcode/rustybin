@@ -251,6 +251,7 @@ async fn run_handler(
     while let Some(out) = stream.next().await {
         match out {
             Out::Sent(v) => sent = v,
+            Out::Progress(_) => {}
             Out::Delta(d) => text.push_str(&d),
             Out::Json(v) => json = Some(v),
             Out::Action(a) => actions.push(a),

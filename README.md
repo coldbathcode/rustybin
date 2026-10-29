@@ -503,6 +503,10 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | Methods | Path | Description |
 |---|---|---|
 | POST GET DELETE | `/mock/{name}/_rustybin/mcp` | MCP server of an OpenAPI mock: one tool per operation |
+| GET | `/_rustybin/mocks/{name}/coverage` | Example coverage of a mock: which operations lack an example for their success responses |
+| POST | `/_rustybin/mocks/ai/spec` | AI: an OpenAPI document from a plain description, checked, nothing created |
+| POST | `/_rustybin/mocks/{name}/ai/examples` | AI (or the generator): examples for the operations that lack them, stored in the draft with apply |
+| POST | `/_rustybin/mocks/{name}/ai/edit` | AI: edit the spec with an instruction, as a diff; apply saves the draft |
 | ANY | `/mock/{name}` | Call an OpenAPI mock (its root path) |
 | ANY | `/mock/{name}/{*path}` | Call an operation of an OpenAPI mock |
 | GET | `/mock/{name}/_rustybin/openapi.json` | The deployed spec of a mock, servers rewritten to the mock URL |

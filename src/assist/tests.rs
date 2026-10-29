@@ -711,7 +711,7 @@ async fn routes_without_and_with_a_provider() {
         .as_array()
         .is_some_and(|m| !m.is_empty()));
     assert_eq!(v["providers"][0]["key"]["set"], false);
-    assert_eq!(v["tasks"].as_array().map(Vec::len), Some(3));
+    assert_eq!(v["tasks"].as_array().map(Vec::len), Some(7));
     assert!(v["suggestions"]["overview"]
         .as_array()
         .is_some_and(|s| s.len() == 3));
@@ -1137,7 +1137,10 @@ async fn run_against_stand_in(kind: Kind, provider: &str, key_field: fn(&mut Con
         state2.assist.override_endpoint(kind, &base);
     }
     let outs = collect(run_task(&state2, "explain", json!({"subject": "x"})).expect("runs")).await;
-    match outs.get(1) {
+    match outs
+        .iter()
+        .find(|o| !matches!(o, Out::Sent(_) | Out::Progress(_)))
+    {
         Some(Out::Error {
             message,
             status: 401,

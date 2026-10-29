@@ -372,11 +372,24 @@ pub fn operation_rows(c: &Compiled, stats: &HashMap<String, OpStats>) -> Vec<Val
                 "source": source,
                 "rules": settings.map(|s| s.rules.len()).unwrap_or(0),
                 "check": check.map(|r| r.status),
+                "missing_examples": checks::missing_examples(c, op),
+                "stored_examples": settings.map(|s| s.examples.values().map(Vec::len).sum::<usize>()).unwrap_or(0),
                 "hits": stats.get(&op.id).map_or(0, |s| s.hits),
                 "last_hit": stats.get(&op.id).and_then(|s| s.last_hit.clone()),
             })
         })
         .collect()
+}
+
+/// The example coverage of a revision, as the detail and the preview show it.
+pub fn coverage_summary(c: &Compiled) -> Value {
+    let cov = &c.report.coverage;
+    json!({
+        "operations": cov.operations,
+        "with_examples": cov.with_examples,
+        "without": cov.without,
+        "complete": cov.is_complete(),
+    })
 }
 
 fn revisions(s: &Snapshot) -> Vec<Value> {
@@ -487,6 +500,7 @@ pub fn detail(
                 "spec_warnings": c.report.spec_warnings, "findings": c.report.findings,
             }),
         );
+        m.insert("coverage".into(), coverage_summary(c));
         m.insert("revisions".into(), json!(revisions(s)));
         m.insert("draft_changes".into(), json!(draft_changes(s)));
         m.insert("mcp".into(), mcp_detail(s, root, host));
@@ -747,6 +761,7 @@ impl Svc {
             "declares_security": s.declares_security(),
             "warnings": s.warnings,
             "report": { "ok": compiled.report.ok, "errors": compiled.report.errors, "warnings": compiled.report.warnings },
+            "coverage": coverage_summary(&compiled),
         }))
     }
 

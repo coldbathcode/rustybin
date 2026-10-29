@@ -570,6 +570,8 @@ impl Assist {
 pub enum Out {
     /// Exactly what goes to the provider (never the key).
     Sent(Value),
+    /// Where a structured run is: calling the model, validating, repairing.
+    Progress(String),
     Delta(String),
     /// The validated structured answer.
     Json(Value),
@@ -595,6 +597,7 @@ impl Out {
     pub fn sse(&self) -> (&'static str, Value) {
         match self {
             Out::Sent(v) => ("sent", v.clone()),
+            Out::Progress(m) => ("progress", json!({ "message": m })),
             Out::Delta(t) => ("delta", json!({ "text": t })),
             Out::Json(v) => ("json", v.clone()),
             Out::Action(v) => ("action", v.clone()),
@@ -703,6 +706,7 @@ impl Assist {
             return Ok(Box::pin(futures_util::stream::iter(events)));
         }
         let mock_answer = (kind == Kind::Mock).then(|| (task.mock)(&params.inputs));
+        let inputs = params.inputs;
         let this = self.clone();
         let egress = self.egress.clone();
         let max_output_tokens = self.max_output_tokens;
@@ -712,6 +716,13 @@ impl Assist {
             let mut prompt = user.clone();
             let (mut total_in, mut total_out) = (0u64, 0u64);
             loop {
+                if schema.is_some() {
+                    yield Out::Progress(if attempt == 0 {
+                        format!("asking {} ({})", kind.as_str(), model)
+                    } else {
+                        format!("asking {} again (repair {attempt} of {MAX_REPAIRS})", kind.as_str())
+                    });
+                }
                 let req = Request {
                     model: model.clone(),
                     system: task.system.to_string(),
@@ -780,22 +791,33 @@ impl Assist {
                     yield Out::Done;
                     return;
                 };
+                yield Out::Progress("checking the answer".to_string());
                 let problem = match task::parse_json_answer(&text) {
                     Ok(v) => match task::validate(&v, schema_v) {
                         Ok(()) => {
-                            if let Some(k) = &cache_key {
-                                this.store(k.clone(), v.clone());
+                            let checked = match task.post {
+                                Some(post) => post(&inputs, v),
+                                None => Ok(v),
+                            };
+                            match checked {
+                                Ok(v) => {
+                                    if let Some(k) = &cache_key {
+                                        this.store(k.clone(), v.clone());
+                                    }
+                                    this.record(kind, &model, task.name, "ok", total_in, total_out);
+                                    yield Out::Json(v);
+                                    yield usage;
+                                    yield Out::Done;
+                                    return;
+                                }
+                                Err(issues) => issues,
                             }
-                            this.record(kind, &model, task.name, "ok", total_in, total_out);
-                            yield Out::Json(v);
-                            yield usage;
-                            yield Out::Done;
-                            return;
                         }
                         Err(issues) => issues,
                     },
                     Err(e) => e,
                 };
+                yield Out::Progress(format!("the answer needs repair: {}", task::truncate_bytes(&problem, 400)));
                 attempt += 1;
                 if attempt > MAX_REPAIRS {
                     this.record(kind, &model, task.name, "invalid", total_in, total_out);

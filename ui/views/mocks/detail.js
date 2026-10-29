@@ -11,6 +11,8 @@ import * as visit from '../../lib/visit.js';
 import { operationEditor, checkIcon, responseChecks } from './operation.js';
 import { tryPanel, securityPanel, trafficPanel, mcpPanel } from './panels.js';
 import { checksFailed, wireDrop } from './wizard.js';
+import { coverageBanner, openEditDialog, openExamplesDialog } from './ai.js';
+import * as assist from '../../lib/assist.js';
 import * as settings from '../../lib/settings.js';
 
 const enc = encodeURIComponent;
@@ -33,7 +35,10 @@ export function mountDetail(root, name, sub) {
   const createdEl = h('div');
   const stateEl = h('div', { class: 'stack-sm' });
   const deployFailEl = h('div');
-  const bannerEl = h('div', { class: 'stack-sm mock-banners' }, createdEl, deployFailEl, stateEl);
+  const coverageEl = h('div');
+  // What the AI dialogs need of this page.
+  const aiCtx = { name, detail: () => detail, refresh: () => refresh(), get readOnly() { return !!readOnly; } };
+  const bannerEl = h('div', { class: 'stack-sm mock-banners' }, createdEl, deployFailEl, stateEl, coverageEl);
   const bodyEl = h('div');
   root.append(headEl, bannerEl, bodyEl);
   const closeMenu = (e) => { if (menu.open && !menu.contains(e.target)) menu.open = false; };
@@ -65,8 +70,14 @@ export function mountDetail(root, name, sub) {
     }
     renderHead();
     renderBanner();
-    if (first) buildTabs();
-    else {
+    if (first) {
+      buildTabs();
+      // Apply cards of the assistant land here with a request.
+      const edit = settings.recall('mocks.edit', null);
+      if (edit && edit.mock === name && !readOnly) { settings.remember('mocks.edit', null); setTimeout(() => openEditDialog(aiCtx, edit.instruction), 0); }
+      const gen = settings.recall('mocks.generate', null);
+      if (gen && gen.mock === name && !readOnly) { settings.remember('mocks.generate', null); setTimeout(() => openExamplesDialog(aiCtx, assist.enabled() ? 'ai' : 'generated'), 0); }
+    } else {
       // The Data tab exists while the mock (or an operation) is stateful.
       if (isStateful(detail) !== hasData) buildTabControl();
       if (!headerOnly) for (const p of Object.values(panels)) if (p && p.update) p.update(detail);
@@ -111,7 +122,15 @@ export function mountDetail(root, name, sub) {
         d.host_url ? h('div', { class: 'row nowrap url-bar' }, h('span', { class: 'tiny muted' }, 'Host'), h('code', { class: 'grow break' }, d.host_url), copyButton(d.host_url, { label: 'Copy', title: 'Copy the host-based URL', toast: 'Host URL copied' })) : null),
       h('div', { class: 'row mock-actions' },
         h('span', { class: 'row nowrap', style: { gap: '8px' } }, switchCtl.el, switchText),
+        readOnly ? null : editAiButton(),
         readOnly ? null : deployBtn, menu));
+  }
+
+  function editAiButton() {
+    const b = assist.assistButton('Edit with AI', 'edit_spec', () => ({}), { class: '' });
+    b.id = 'edit-with-ai';
+    b.onclick = (e) => { e.stopImmediatePropagation(); if (!assist.enabled()) { location.hash = '#/manage/ai'; toast('Add an AI key under Management, AI'); return; } openEditDialog(aiCtx); };
+    return b;
   }
 
   function buildMenu() {
@@ -122,6 +141,8 @@ export function mountDetail(root, name, sub) {
       h('div', { class: 'menu-pop', role: 'menu' },
         readOnly || d.yours ? null : item('Rename', 'edit', () => goTab('settings', null, '#mock-rename')),
         readOnly ? null : item('Duplicate', 'copy', duplicateMock),
+        readOnly ? null : item('Generate examples', 'ai', () => { if (!assist.enabled()) { location.hash = '#/manage/ai'; return; } openExamplesDialog(aiCtx, 'ai', detail.operations.map((o) => o.id)); }),
+        readOnly ? null : item('Use generated values', 'refresh', () => openExamplesDialog(aiCtx, 'generated', detail.operations.map((o) => o.id))),
         item('Export YAML', 'download', exportYaml),
         item('Download spec', 'file', () => downloadFrom('/spec', name + '.openapi.yaml')),
         item('Download collection', 'download', collectionDialog),
@@ -167,6 +188,7 @@ export function mountDetail(root, name, sub) {
         readOnly ? null : h('div', { style: { marginTop: '6px' } }, h('button', { class: 'btn sm primary', type: 'button', onclick: () => deploy(false) }, icon('up'), 'Deploy'))));
     }
     if (!detail.enabled && !(detail.load_error && detail.live_revision === null)) stateEl.appendChild(notice('', 'This mock is switched off: its URL answers ' + detail.settings.responses.disabled_status + '. Configuration and history are kept.'));
+    replace(coverageEl, coverageBanner(aiCtx));
   }
 
   function createdBanner(deployed) {
@@ -402,6 +424,7 @@ export function mountDetail(root, name, sub) {
         visitor: detail.owner === 'visit' || detail.owner === 'key',
         securityOn: detail.security.enabled, maxDelayMs: detail.limits && detail.limits.max_delay_ms,
         onSaved: () => refresh(),
+        onGenerate: (op) => openExamplesDialog(aiCtx, assist.enabled() ? 'ai' : 'generated', [op]),
         onTry: (op) => { goTab('try'); panels.try.select(op); },
         onData: () => { if (hasData) goTab('data'); else toast('Save first: the Data tab appears once the mock or an operation is stateful.'); },
       });

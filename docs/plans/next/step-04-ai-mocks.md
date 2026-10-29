@@ -1,6 +1,6 @@
 # Step 04: AI mocks: specs from a prompt, examples, AI edit
 
-Master plan: [master-plan.md](master-plan.md). Status: **not started**. Needs: 03. About 3 days.
+Master plan: [master-plan.md](master-plan.md). Status: **done 2026-10-29**. Needs: 03. About 3 days.
 
 ## Goal
 
@@ -117,4 +117,59 @@ MCP tools of the mock answer with the examples; all checks pass; committed and p
 
 ## Build notes
 
-(filled in when built)
+Built 2026-10-29 in one session. Where the build differs from the design above, and why:
+
+- **Examples live per operation, in the settings.** `OperationSettings.examples: {status: [StoredExample]}`
+  (`name`, `value`, `source: user | ai | generated`, `created_at`) rather than a mock-level map: it rides
+  along `set_operation`, the operation editor, `rustybin.yaml` and the draft diff for free, and the limits
+  are per operation and status (8). `respond.rs` serves them after the spec's own examples and before
+  generation, and by name with `Prefer: example=<name>` (`X-Rustybin-Mock-Source: example:ai:<name>`), so
+  nothing that works today changes and the mock's MCP tools return them with no change of their own.
+- **Coverage is part of the deploy report.** `checks::coverage` runs with the checks and lands in
+  `Report.coverage` plus a warning finding of class `no_examples` (`Finding` gained an optional `class`),
+  so the detail, the preview, `report`, `check_mock`, `get_mock` and `rustybin mock validate` all carry
+  it from one place; `GET /_rustybin/mocks/{name}/coverage` adds the live revision's. The rule: a 2xx
+  response with a JSON schema needs an example (spec or stored); responses without a body need none.
+- **Tasks got a `post` hook.** Schema validation alone cannot say whether a document parses or an
+  example matches its response schema, so `Task.post: fn(inputs, answer) -> Result<answer, repair
+  message>` runs after the schema and feeds the repair loop like a schema failure. The four tasks use it
+  to parse and compile through `tasks::compile_doc` (an instance mock's limits), run the checks, validate
+  examples and requests, bound the edit's removals (40 percent unless the instruction says remove, delete,
+  drop) and require the version asked for. The runner also streams `progress` events for structured
+  runs ("asking openai", "checking the answer", "the answer needs repair: ...").
+- **Swagger 2.0 is asked for, not converted.** No 3.0 to 2.0 converter exists; the model (and the mock
+  provider) write a `swagger: "2.0"` document directly, which the parser converts to 3.0 on import as any
+  2.0 upload. The preview therefore reports `openapi: 3.0.3` for a 2.0 request while the text keeps 2.0;
+  the docs say so.
+- **The mock provider's answers are real.** `spec_from_description` drafts a CRUD API from the plural
+  nouns of the description with the style asked for (and examples on every success response);
+  `examples_for_operations` and `request_examples` run the deterministic generator against the schemas;
+  `edit_spec` adds the instruction to the description, a 404 where asked and a DELETE for a named
+  resource. "Use generated values" is the same generator without any AI call (`source: generated`).
+- **Batches and merging.** The examples route batches ten operations per call, streams a progress line
+  per batch, previews by default and stores on `apply`: a new run replaces the earlier examples of its own
+  source (ai or generated) for the same status and keeps a person's. The edit route previews by default
+  and saves the new document as the draft on `apply`; the history keeps no per-revision note (the
+  `Compiled` revision has no note field; left for the config and git step, which records change notes).
+- **Visitors**: `RUSTYBIN_ASSIST_VISITORS` (off) gates the three AI routes for self-service visitors; the
+  generator stays open to them on their own mocks. The management MCP tools (`generate_spec`,
+  `generate_examples`, `edit_spec_with_ai`) and the CLI commands are step 11's and 10's as the plan says;
+  `get_mock` and `check_mock` summaries name the operations without examples now.
+- **Console**: one module `ui/views/mocks/ai.js` holds the Describe tab (first and open when assist is on,
+  present behind "Paste or upload" otherwise), the coverage banner, the Generate examples dialog (persona,
+  count, a preview per operation, Save to draft) and Edit with AI (instruction, streamed progress, the
+  existing `diffView`, Apply as draft). The operation editor lists stored examples with their source,
+  offers them in the example picker and keeps them when it saves. Apply cards `create_mock` (opens the
+  wizard's Describe tab and runs it), `edit_spec` and `generate_examples` (open the dialogs) complete the
+  path from the assist bar; the mock provider proposes `create_mock` when a question describes an API.
+- **Left out**: the per-operation "Generate examples" with a persona picker inside the editor is the same
+  dialog scoped to that operation (no separate preview UI); the request_examples sparkle on MCP tools is
+  the inspector's (step 05).
+
+Checks run: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (the mock AI tests:
+coverage and stored examples through REST and MCP, generated examples, the describe route on the three
+versions, examples and edit through the mock provider, validation and repair through the scripted
+provider, request examples, visitor refusal, no provider), `docs/examples/run.sh` (the new
+`mocks/ai.hurl`), the console check (a new "ai mocks" step: Describe it to a deployed mock, the banner,
+generated values, the stored example in the editor, Edit with AI with a diff and apply, the apply card
+from the bar), `mdbook build docs`, `check_includes.py`, `check-no-dashes.sh`.

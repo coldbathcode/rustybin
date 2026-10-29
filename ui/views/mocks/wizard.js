@@ -2,10 +2,12 @@
 // review, behaviour). The spec is parsed as soon as it arrives
 // (POST /_rustybin/mocks/import); creating runs the deploy checks and offers
 // "Create as draft" or "Deploy anyway" when they fail.
-import { h, replace, clear, icon, notice, spinner, methodBadge, badge, field, input, select, textarea, toggleSwitch } from '../../lib/dom.js';
+import { h, replace, clear, icon, notice, spinner, methodBadge, badge, field, input, select, textarea, toggleSwitch, tabs } from '../../lib/dom.js';
 import { api, errorText, nameProblem, mockUrl, readFile, groupByTag, slug } from '../../lib/mockapi.js';
 import * as visit from '../../lib/visit.js';
 import { comeBack, isComeBack, startWithEmail } from './visit.js';
+import { describeTab } from './ai.js';
+import * as assist from '../../lib/assist.js';
 
 const STEPS = ['Spec', 'Review', 'Behaviour'];
 const MODES = [
@@ -25,7 +27,9 @@ export async function sampleSpecText() {
 /**
  * Open the wizard. opts: {taken: [names], text?: spec text to parse at once,
  * maxBytes?, visitor?: the list's self_service info (a self-service visitor:
- * names get a random suffix, no stateful mode), onCreated(detail, deployed)}.
+ * names get a random suffix, no stateful mode), onCreated(detail, deployed),
+ * describe?: a description to prefill the Describe tab (with autorun: true
+ * it generates at once), version?}.
  */
 export function openWizard(opts = {}) {
   const st = { step: 0, text: opts.text || '', preview: null, name: '', strip: false, mode: 'examples', secure: false, validate: 'warn', busy: false };
@@ -37,7 +41,7 @@ export function openWizard(opts = {}) {
     h('div', { class: 'wizard-head row nowrap' }, h('h2', { id: 'wizard-title', class: 'grow' }, 'New mock API'),
       h('button', { class: 'btn ghost icon', type: 'button', 'aria-label': 'Close', title: 'Close (Esc)', onclick: () => dlg.close() }, icon('x'))),
     stepsEl, body, foot);
-  dlg.addEventListener('close', () => dlg.remove());
+  dlg.addEventListener('close', () => { if (describe) describe.destroy(); dlg.remove(); });
   document.body.appendChild(dlg);
   dlg.showModal();
 
@@ -104,20 +108,49 @@ export function openWizard(opts = {}) {
     paste.scrollTop = Math.max(0, (n - 4) * 19);
   }
 
+  // Describe (AI) or paste: Describe comes first and open when assist is on.
+  let describe = null;
   function stepSpec() {
+    const pasteBody = pasteStep();
+    const canDescribe = !opts.visitor || (assist.getStatus() && assist.getStatus().visitors);
+    if (describe) describe.destroy();
+    describe = canDescribe ? describeTab({
+      initial: opts.describe || '',
+      version: opts.version,
+      autorun: !!opts.autorun,
+      onSpec: (text, preview) => {
+        st.text = text;
+        paste.value = text;
+        st.preview = preview;
+        st.name = preview.suggested_name;
+        st.secure = !!preview.declares_security;
+        st.strip = false;
+        go(1);
+      },
+    }) : null;
+    const first = assist.enabled() || opts.describe ? 'describe' : 'paste';
+    const tabBar = describe ? tabs([
+      { id: 'describe', label: 'Describe it', render: () => describe.el },
+      { id: 'paste', label: 'Paste or upload', render: () => pasteBody },
+    ], first, () => {}) : null;
+    replace(body, tabBar ? tabBar.el : pasteBody);
+    replace(foot, h('span', { class: 'grow' }),
+      h('button', { class: 'btn', type: 'button', onclick: () => dlg.close() }, 'Cancel'),
+      h('button', { class: 'btn primary', type: 'button', onclick: () => { if (paste.value.trim()) parse(paste.value); else if (describe && tabBar && tabBar.get() === 'describe') describe.run(); else replace(specErr, notice('warn', 'Drop a file, browse for one or paste a spec first.')); } }, 'Continue'));
+    if (describe && first === 'describe') setTimeout(() => describe.focus(), 0);
+  }
+
+  function pasteStep() {
     const drop = h('div', { class: 'dropzone', 'data-autofocus': true, tabindex: '0', role: 'button', 'aria-label': 'Choose an OpenAPI file' },
       icon('upload'), h('strong', null, 'Drop an OpenAPI file here'), h('span', { class: 'muted small' }, 'JSON or YAML: OpenAPI 3.0 / 3.1 or Swagger 2.0'),
       h('span', { class: 'btn sm' }, icon('file'), 'Browse files'));
     drop.addEventListener('click', () => fileIn.click());
     drop.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileIn.click(); } });
     wireDrop(drop, loadFile);
-    replace(body, h('div', { class: 'stack' }, drop, fileIn,
+    return h('div', { class: 'stack', style: { paddingTop: '12px' } }, drop, fileIn,
       h('div', { class: 'field' }, h('span', null, 'Or paste it'), paste, h('span', { class: 'hint' }, 'Pasting parses it right away.')),
       specErr,
-      h('p', { class: 'small muted' }, 'No spec at hand? ', h('button', { class: 'linklike', type: 'button', onclick: useSample }, 'Use the Petstore sample'), '.')));
-    replace(foot, h('span', { class: 'grow' }),
-      h('button', { class: 'btn', type: 'button', onclick: () => dlg.close() }, 'Cancel'),
-      h('button', { class: 'btn primary', type: 'button', onclick: () => { if (paste.value.trim()) parse(paste.value); else replace(specErr, notice('warn', 'Drop a file, browse for one or paste a spec first.')); } }, 'Continue'));
+      h('p', { class: 'small muted' }, 'No spec at hand? ', h('button', { class: 'linklike', type: 'button', onclick: useSample }, 'Use the Petstore sample'), '.'));
   }
 
   async function useSample() {
