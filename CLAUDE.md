@@ -2,6 +2,21 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
+## Next: Rustybin 0.2, the AI-assisted mocking service (planned, not started)
+
+[docs/plans/next/master-plan.md](docs/plans/next/master-plan.md) (planned 2026-10-29) is the plan for the next
+build: twelve steps, one file each (`docs/plans/next/step-NN-*.md`): foundations (a persisted settings store with
+secrets at rest, one egress policy, a Management area), the console locked with a username and password (default
+`rustybin` / `rustybin`, the one change of default), AI assist with the user's own key (Anthropic, OpenAI, Gemini,
+OpenAI-compatible, or the built-in mock LLM for tests) and an AI-first console shell, AI-built mocks (specs from a
+prompt to the chosen OpenAPI version, example payloads with an alert when a spec has none, AI edits through a
+diff), an MCP inspector for any server with every auth mode and a relay, a mock MCP registry and registry
+browsing, a dev portal, AI agents management, the whole instance as `rustybin.yaml` with git source control, a
+`rustybin` CLI for remote instances, management MCP parity, and the 0.2.0 release. The master plan's section 4 is
+the build marker and section 5 the session protocol: build a step whole, update its status and build notes, update
+the master table, commit as oliwynn with the step number in the message, push to main. Steps go only when the
+user says go.
+
 ## Load test mode (harness): built
 
 [docs/plans/harness.md](docs/plans/harness.md) is built (planned 2026-10-22; phase 0, the engine spike in

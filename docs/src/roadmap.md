@@ -5,9 +5,16 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-Nothing is in progress. The harness plan is complete; what the hosted demo still
-needs is deployment, not code ([self-service mocks](mocks/self-service.md)). The
-candidates are under consideration below.
+**Rustybin 0.2, the AI-assisted mocking service** (`docs/plans/next/master-plan.md`, planned
+2026-10-29, nothing built yet): the console locked with a username and password out of the
+box; bring your own AI key (Anthropic, OpenAI, Gemini or any OpenAI-compatible endpoint) and an
+AI-first console that writes mock specs from a description, fills in missing example payloads
+and edits specs on request; an MCP inspector for any server with every auth mode, a relay and
+test runs; a mock MCP registry and browsing of real ones; a dev portal where testers explore
+and try what was published; management of the coding agents that talk to the instance; the
+whole instance as a `rustybin.yaml` in git with push, pull and load at startup; a `rustybin`
+CLI for remote instances; and a management MCP that covers every capability so an agent can
+build an instance. Twelve steps, each committed and pushed as it lands.
 
 ## Recently built
 
