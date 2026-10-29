@@ -7,6 +7,25 @@ All examples on this page assume Rustybin answers on `http://localhost:8080`.
 There is no published image: build it from the repository (the build compiles a
 release binary, which takes a few minutes the first time).
 
+The published image needs no build:
+
+```bash
+docker run -d --name rustybin -p 8080:80 -p 8443:443 -p 50051:50051 ghcr.io/coldbathcode/rustybin:latest
+```
+
+`latest` and `edge` follow the main branch, a release `vX.Y.Z` also publishes `X.Y.Z`, `X.Y`
+and `X`, and every build publishes `sha-<commit>`; the image is multi-arch (amd64 and
+arm64) and every push is signed with cosign, keyless, by the publishing workflow's GitHub
+identity, so you can check what you pull:
+
+```bash
+cosign verify ghcr.io/coldbathcode/rustybin:latest \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/coldbathcode/rustybin/'
+```
+
+Or build it yourself:
+
 ```bash
 git clone https://github.com/coldbathcode/rustybin && cd rustybin
 docker build -t rustybin .

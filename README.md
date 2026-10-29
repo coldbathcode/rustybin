@@ -22,6 +22,13 @@ one container, and shows you what arrived.
 ## 60 second quick start
 
 ```bash
+docker run -d --name rustybin -p 8080:80 -p 8443:443 -p 50051:50051 ghcr.io/coldbathcode/rustybin:latest
+```
+
+The image is multi-arch and signed with cosign (keyless; see the
+[quick start](docs/src/quick-start.md) to verify it). To build it yourself:
+
+```bash
 git clone https://github.com/coldbathcode/rustybin && cd rustybin
 docker build -t rustybin .
 docker run -d --name rustybin -p 8080:80 -p 8443:443 -p 50051:50051 rustybin

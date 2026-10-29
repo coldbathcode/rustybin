@@ -7,8 +7,15 @@ name: Docker image
 #
 # Tags: `latest` and `edge` follow main; a release tag `vX.Y.Z` also pushes
 # `X.Y.Z`, `X.Y` and `X`; every build pushes `sha-<commit>`. Multi-arch
-# (linux/amd64 and linux/arm64). The package must be made public once in the
-# repository's package settings (GHCR packages start private).
+# (linux/amd64 and linux/arm64). Every pushed image is signed with cosign
+# (keyless, this workflow's GitHub identity), so a deployment can verify it:
+#
+#   cosign verify ghcr.io/coldbathcode/rustybin:latest \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#     --certificate-identity-regexp '^https://github.com/coldbathcode/rustybin/'
+#
+# The package must be made public once in the repository's package settings
+# (GHCR packages start private).
 
 on:
   push:
@@ -19,6 +26,8 @@ on:
 permissions:
   contents: read
   packages: write
+  # Keyless signing: the OIDC token names this workflow in the certificate.
+  id-token: write
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
@@ -51,7 +60,9 @@ jobs:
             org.opencontainers.image.title=Rustybin
             org.opencontainers.image.description=HTTP stub service for API and AI gateway demos
             org.opencontainers.image.licenses=AGPL-3.0-only
-      - uses: docker/build-push-action@v6
+      - uses: sigstore/cosign-installer@v3
+      - id: build
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -78,3 +89,17 @@ jobs:
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}' \
             | grep -q get_instance
           docker rm -f rb
+      - name: sign the pushed image (keyless cosign, every tag by digest)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          refs=""
+          for tag in $TAGS; do refs="$refs ${tag%:*}@${DIGEST}"; done
+          # One signature per digest; the tags all point at it.
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+          cosign verify "${IMAGE}@${DIGEST}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp '^https://github.com/coldbathcode/rustybin/' > /dev/null
+          echo "signed ${IMAGE}@${DIGEST} (tags:${refs})"
