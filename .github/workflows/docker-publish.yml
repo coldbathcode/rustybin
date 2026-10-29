@@ -81,9 +81,12 @@ jobs:
             -v rb-certs:/app/certs -e RUSTYBIN_USAGE_FILE=/app/certs/usage.json -p 8080:80 \
             "$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)"
           for i in $(seq 1 60); do curl -fs http://localhost:8080/_rustybin/ready >/dev/null && break; sleep 1; done
-          curl -fsS http://localhost:8080/_rustybin/version | grep -q "${GITHUB_SHA:0:12}"
+          # The default control auth: sign in with rustybin / rustybin for a token.
+          TOKEN="$(curl -fsS -X POST http://localhost:8080/_rustybin/login -H 'Content-Type: application/json' \
+            -d '{"username":"rustybin","password":"rustybin"}' | jq -r .token)"
+          curl -fsS -H "Authorization: Bearer $TOKEN" http://localhost:8080/_rustybin/version | grep -q "${GITHUB_SHA:0:12}"
           curl -fsS http://localhost:8080/ui/ | grep -q '<html'
-          curl -fsS -X POST http://localhost:8080/_rustybin/mcp \
+          curl -fsS -X POST http://localhost:8080/_rustybin/mcp -H "Authorization: Bearer $TOKEN" \
             -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
             -H 'MCP-Protocol-Version: 2026-07-28' -H 'Mcp-Method: tools/list' \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}' \

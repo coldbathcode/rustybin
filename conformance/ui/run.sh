@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # Build Rustybin, start it on ports 18700-18702 (control plane open), a
 # second instance on 18703 with RUSTYBIN_CONTROL_AUTH=jwt, a third on 18704
-# in public mode with self-service mocks and a fourth on 18705 in harness
-# mode (loop-through), run the browser end-to-end check of the web console
-# (light and dark mode, the sign-in flow, visitors, the harness builder), then
-# stop the servers.
+# in public mode with self-service mocks, a fourth on 18705 in harness mode
+# (loop-through) and a fifth on 18706 with the default control auth (the
+# password sign-in), run the browser end-to-end check of the web console
+# (light and dark mode, the sign-in flows, visitors, the harness builder),
+# then stop the servers.
 #
 # Usage: PYTHON=/path/to/venv/bin/python conformance/ui/run.sh
 # (the venv needs `pip install playwright pyjwt cryptography`; Chromium comes
 # from $PLAYWRIGHT_BROWSERS_PATH or `python -m playwright install chromium`).
 #
-# RUSTYBIN_UI_PORT moves the six ports (default 18700).
+# RUSTYBIN_UI_PORT moves the seven ports (default 18700).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -20,10 +21,12 @@ PORT="${RUSTYBIN_UI_PORT:-18700}"
 JWT_PORT=$((PORT + 3))
 SS_PORT=$((PORT + 4))
 HARNESS_PORT=$((PORT + 5))
+PASSWORD_PORT=$((PORT + 6))
 export RUSTYBIN_URL="http://127.0.0.1:$PORT"
 export RUSTYBIN_JWT_URL="http://127.0.0.1:$JWT_PORT"
 export RUSTYBIN_SS_URL="http://127.0.0.1:$SS_PORT"
 export RUSTYBIN_HARNESS_URL="http://127.0.0.1:$HARNESS_PORT"
+export RUSTYBIN_PASSWORD_URL="http://127.0.0.1:$PASSWORD_PORT"
 export SCREENSHOT_DIR="${SCREENSHOT_DIR:-$HERE/screenshots}"
 
 (cd "$ROOT" && cargo build --quiet)
@@ -40,7 +43,7 @@ export CONTROL_JWT_PRIVATE_KEY="$TMP/control.key"
 export CONTROL_JWT_AUDIENCE="ui-conformance"
 
 (cd "$TMP" && exec env RUSTYBIN_HTTP_PORT="$PORT" RUSTYBIN_HTTPS_PORT=$((PORT + 1)) RUSTYBIN_GRPC_PORT=$((PORT + 2)) \
-  RUSTYBIN_HOST=127.0.0.1 RUSTYBIN_LOG_LEVEL=warn "$BIN") &
+  RUSTYBIN_HOST=127.0.0.1 RUSTYBIN_LOG_LEVEL=warn RUSTYBIN_CONTROL_AUTH=open "$BIN") &
 SERVER=$!
 mkdir -p "$TMP/jwt"
 (cd "$TMP/jwt" && exec env RUSTYBIN_HTTP_PORT="$JWT_PORT" RUSTYBIN_HTTPS_PORT=0 RUSTYBIN_GRPC_PORT=0 \
@@ -56,7 +59,7 @@ JWT_SERVER=$!
 mkdir -p "$TMP/ss"
 export LEADS_FILE="$TMP/ss/leads.jsonl"
 (cd "$TMP/ss" && exec env RUSTYBIN_HTTP_PORT="$SS_PORT" RUSTYBIN_HTTPS_PORT=0 RUSTYBIN_GRPC_PORT=0 \
-  RUSTYBIN_HOST=127.0.0.1 RUSTYBIN_LOG_LEVEL=warn \
+  RUSTYBIN_HOST=127.0.0.1 RUSTYBIN_LOG_LEVEL=warn RUSTYBIN_CONTROL_AUTH=open \
   RUSTYBIN_PUBLIC_MODE=true RUSTYBIN_MOCKS_SELF_SERVICE=true \
   RUSTYBIN_MOCKS_VISIT_MINUTES=5 RUSTYBIN_MOCKS_ANON_VISITS_PER_DAY=0 \
   RUSTYBIN_LEADS_FILE="$LEADS_FILE" RUSTYBIN_PRIVACY_URL=https://example.com/privacy \
@@ -64,14 +67,21 @@ export LEADS_FILE="$TMP/ss/leads.jsonl"
 SS_SERVER=$!
 mkdir -p "$TMP/harness"
 (cd "$TMP/harness" && exec env RUSTYBIN_HTTP_PORT="$HARNESS_PORT" RUSTYBIN_HTTPS_PORT=0 RUSTYBIN_GRPC_PORT=0 \
-  RUSTYBIN_HOST=127.0.0.1 RUSTYBIN_LOG_LEVEL=warn \
+  RUSTYBIN_HOST=127.0.0.1 RUSTYBIN_LOG_LEVEL=warn RUSTYBIN_CONTROL_AUTH=open \
   RUSTYBIN_HARNESS=on RUSTYBIN_HARNESS_ROLES=both RUSTYBIN_HARNESS_TARGETS=127.0.0.1,localhost \
   RUSTYBIN_HARNESS_THREADS=1 \
   "$BIN") &
 HARNESS_SERVER=$!
-trap 'kill $SERVER $JWT_SERVER $SS_SERVER $HARNESS_SERVER 2>/dev/null || true; rm -rf "$TMP"' EXIT
+# The default control auth: nothing set but the ports, so the console asks
+# for rustybin / rustybin.
+mkdir -p "$TMP/password"
+(cd "$TMP/password" && exec env RUSTYBIN_HTTP_PORT="$PASSWORD_PORT" RUSTYBIN_HTTPS_PORT=0 RUSTYBIN_GRPC_PORT=0 \
+  RUSTYBIN_HOST=127.0.0.1 RUSTYBIN_LOG_LEVEL=warn \
+  "$BIN") &
+PASSWORD_SERVER=$!
+trap 'kill $SERVER $JWT_SERVER $SS_SERVER $HARNESS_SERVER $PASSWORD_SERVER 2>/dev/null || true; rm -rf "$TMP"' EXIT
 
-for url in "$RUSTYBIN_URL" "$RUSTYBIN_JWT_URL" "$RUSTYBIN_SS_URL" "$RUSTYBIN_HARNESS_URL"; do
+for url in "$RUSTYBIN_URL" "$RUSTYBIN_JWT_URL" "$RUSTYBIN_SS_URL" "$RUSTYBIN_HARNESS_URL" "$RUSTYBIN_PASSWORD_URL"; do
   for _ in $(seq 1 50); do
     curl -sf -o /dev/null "$url/" && break
     sleep 0.2

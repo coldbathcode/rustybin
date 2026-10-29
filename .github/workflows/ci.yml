@@ -114,10 +114,15 @@ jobs:
           curl -fsS http://localhost:8080/health
           test "$(docker exec rb id -u)" = 10001
           docker exec rb test -s /app/certs/ca.crt
-          curl -fsS http://localhost:8080/_rustybin/version | grep -q "${GITHUB_SHA:0:12}"
+          # The default control auth: locked until the sign-in with rustybin / rustybin.
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/_rustybin/version)" = 401
+          TOKEN="$(curl -fsS -X POST http://localhost:8080/_rustybin/login -H 'Content-Type: application/json' \
+            -d '{"username":"rustybin","password":"rustybin"}' | jq -r .token)"
+          curl -fsS -H "Authorization: Bearer $TOKEN" http://localhost:8080/_rustybin/version | grep -q "${GITHUB_SHA:0:12}"
           # The console must be embedded in the image.
           curl -fsS http://localhost:8080/ui/ | grep -q '<html'
-          curl -fsS http://localhost:8080/_rustybin/catalog >/dev/null
+          curl -fsS -H "Authorization: Bearer $TOKEN" http://localhost:8080/_rustybin/catalog >/dev/null
+          docker logs rb 2>&1 | grep -q "default password"
           docker logs rb
           docker rm -f rb
       - name: Harness conformance (the compose cluster, the leader killed mid-run)

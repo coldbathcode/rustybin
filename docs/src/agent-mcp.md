@@ -37,11 +37,13 @@ Other clients take the usual `mcpServers` JSON:
 }
 ```
 
-The [web console](console.md) fills both in for you: "Connect an AI agent" in the
-settings dialog and in the Mock APIs view shows the command with this instance's URL
-and the credential the console already holds (the control token, the admin token or a
-visit's manage token). The token stays masked until you ask to see it; the copy
-buttons copy the real value.
+The [web console](console.md) fills both in for you: "Connect an AI agent" under
+Management, General and in the Mock APIs view shows the command with this instance's
+URL and the credential the console already holds (the token of your password
+sign-in, a control token, the admin token or a visit's manage token). The token stays
+masked until you ask to see it; the copy buttons copy the real value. A script gets
+the same token from `POST /_rustybin/login` (see [User name and
+password](concepts/control-plane-security.md#user-name-and-password)).
 
 Clients that only speak stdio use the bridge built into the binary. It reads one
 JSON-RPC message per line on stdin, posts it to the server and writes the answers to
@@ -68,8 +70,8 @@ header out and [sign in through the browser](#sign-in-with-oauth).
 
 ## Sign in with OAuth
 
-Where the control plane asks for credentials (`RUSTYBIN_CONTROL_AUTH=token` or
-`jwt`), an agent can sign in instead of you pasting a token:
+Where the control plane asks for credentials (`RUSTYBIN_CONTROL_AUTH=password`,
+the default, `token` or `jwt`), an agent can sign in instead of you pasting a token:
 
 ```bash
 claude mcp add --transport http rustybin https://<host>/_rustybin/mcp
@@ -173,7 +175,8 @@ missing, never a protocol error.
 | Open control plane, no admin token | none | All |
 | Open control plane with `RUSTYBIN_ADMIN_TOKEN` | none | Reads, tests and traffic; no changes |
 | | the admin token (`Authorization: Bearer`, or `X-Rustybin-Admin-Token`) | All |
-| `token` / `jwt` control auth | no token | `401`, like the rest of the control plane |
+| `password` control auth (the default) | the token of a sign-in with the console's user name and password (`POST /_rustybin/login`) | All |
+| `password` / `token` / `jwt` control auth | no token | `401`, like the rest of the control plane |
 | | control JWT, `console` scope | Reads, tests and traffic |
 | | control JWT, `inspector` scope | Traffic only |
 | | the admin token, or a control JWT with the `admin` scope | All |

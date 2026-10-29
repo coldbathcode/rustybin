@@ -52,13 +52,16 @@ are minted with `concepts/_mint-control-jwt.sh` and passed as the Hurl variables
 `console_token`, `inspector_token`, `expired_token` and `other_audience_token`. Further
 instances serve the [shared mode](concepts/shared-mode.md), `RUSTYBIN_REQUIRE_KEY` and
 [self-service](mocks/self-service.md) examples (`shared_url`, `keyed_url`, `ss_url`), and
-a last one on port 18809 runs in [harness mode](harness.md) (`harness_url`: roles `both`
+one on port 18809 runs in [harness mode](harness.md) (`harness_url`: roles `both`
 and `coordinator`, loop-through, 127.0.0.1 allowed, one engine thread), so the load test
-examples send their requests to that instance itself. The
-main instance uses these settings, which some examples rely on:
+examples send their requests to that instance itself, and a last one on port 18810
+(`password_url`) starts with nothing set, so it asks for `rustybin` / `rustybin`
+(the [sign-in](concepts/control-plane-security.md#user-name-and-password) examples).
+The main instance uses these settings, which some examples rely on:
 
 | Setting | Value | Why |
 |---|---|---|
+| `RUSTYBIN_CONTROL_AUTH` | `open` | the examples read the control plane without a token (the default, the password sign-in, is the last instance's) |
 | `RUSTYBIN_ADMIN_TOKEN` | `docs-admin-token` (Hurl variable `admin_token`) | to show admin-guarded mutations |
 | `RUSTYBIN_MTLS_IN_HEADER` | `X-Client-Cert` | to show mTLS header mode |
 | `RUSTYBIN_INSTANCE_ID` | `docs-examples` | stable identity in assertions |
@@ -68,7 +71,7 @@ main instance uses these settings, which some examples rely on:
 Requirements: `hurl` and `curl`; `grpcurl`, `websocat` and `jq` for the shell
 examples (skipped with a notice when missing, or a failure with
 `REQUIRE_ALL_TOOLS=1`, which CI sets), and `openssl` 3 for the signing key. Set
-`RUSTYBIN_DOCS_PORT` to move the ports (18800 to 18809).
+`RUSTYBIN_DOCS_PORT` to move the ports (18800 to 18810).
 
 To run a single Hurl file against your own instance:
 

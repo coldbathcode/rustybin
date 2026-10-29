@@ -64,8 +64,23 @@ pub struct Config {
     /// Hosted preset (`RUSTYBIN_HOSTED_MODE`): control auth `jwt` and JSON
     /// logs unless `RUSTYBIN_CONTROL_AUTH` / `RUSTYBIN_LOG_FORMAT` say otherwise.
     pub hosted_mode: bool,
-    /// Control-plane authentication (`RUSTYBIN_CONTROL_AUTH`, default `open`).
+    /// Control-plane authentication (`RUSTYBIN_CONTROL_AUTH`, default
+    /// `password`; `jwt` in hosted mode, `open` in shared mode).
     pub control_auth: ControlAuth,
+    /// The console sign-in's user name (`RUSTYBIN_CONSOLE_USER`; the
+    /// `console.user` setting, default `rustybin`).
+    pub console_user: Option<String>,
+    /// The console sign-in's password in the clear (`RUSTYBIN_CONSOLE_PASSWORD`;
+    /// default `rustybin`). Never exposed.
+    pub console_password: Option<String>,
+    /// The console sign-in's password as an argon2 PHC string
+    /// (`RUSTYBIN_CONSOLE_PASSWORD_HASH`; seeds the secret
+    /// `console.password_hash`, preferred over the plain password).
+    pub console_password_hash: Option<String>,
+    /// The runtime state of the console's sign-in tokens (`crate::login`):
+    /// the generation, revoked ids, listed sessions, failed attempts. Not a
+    /// setting; it lives here because every credential check takes `&Config`.
+    pub console_tokens: std::sync::Arc<crate::login::Tokens>,
     /// Ed25519 public key for control-plane JWTs (`RUSTYBIN_CONTROL_JWT_PUBLIC_KEY`).
     pub control_jwt_key: Option<[u8; 32]>,
     /// Required `aud` of control-plane JWTs (`RUSTYBIN_CONTROL_JWT_AUDIENCE`,
@@ -503,21 +518,61 @@ impl Config {
         let hosted_mode = parse_bool_or(&get, "RUSTYBIN_HOSTED_MODE", false, &mut warnings);
         let admin_token = get("RUSTYBIN_ADMIN_TOKEN");
 
+        // The default: the password sign-in; `jwt` in hosted mode (the
+        // platform mints tokens); `open` in shared mode (API keys
+        // authenticate the control plane there).
+        let shared_for_default = get("RUSTYBIN_SHARED_MODE").is_some_and(|v| {
+            matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on")
+        });
         let control_auth_default = if hosted_mode {
             ControlAuth::Jwt
-        } else {
+        } else if shared_for_default {
             ControlAuth::Open
+        } else {
+            ControlAuth::Password
         };
         let control_auth = match get("RUSTYBIN_CONTROL_AUTH") {
             None => control_auth_default,
             Some(raw) => ControlAuth::parse(&raw).unwrap_or_else(|| {
                 warnings.push(format!(
-                    "invalid RUSTYBIN_CONTROL_AUTH {raw:?} (expected open, token or jwt), using {}",
+                    "invalid RUSTYBIN_CONTROL_AUTH {raw:?} (expected {}), using {}",
+                    ControlAuth::NAMES,
                     control_auth_default.as_str()
                 ));
                 control_auth_default
             }),
         };
+        let console_user =
+            get("RUSTYBIN_CONSOLE_USER").and_then(|raw| match crate::login::valid_user(&raw) {
+                Ok(()) => Some(raw),
+                Err(e) => {
+                    warnings.push(format!(
+                        "invalid RUSTYBIN_CONSOLE_USER {raw:?} ({e}), using {}",
+                        crate::login::DEFAULT_USER
+                    ));
+                    None
+                }
+            });
+        let console_password = lookup("RUSTYBIN_CONSOLE_PASSWORD").filter(|p| !p.is_empty());
+        let console_password_hash = get("RUSTYBIN_CONSOLE_PASSWORD_HASH").and_then(|raw| {
+            if crate::login::valid_hash(&raw) {
+                Some(raw)
+            } else {
+                warnings.push(
+                    "invalid RUSTYBIN_CONSOLE_PASSWORD_HASH (expected an argon2 PHC string such as \
+                     $argon2id$v=19$m=19456,t=2,p=1$...), ignored"
+                        .to_string(),
+                );
+                None
+            }
+        });
+        if console_password.is_some() && console_password_hash.is_some() {
+            warnings.push(
+                "both RUSTYBIN_CONSOLE_PASSWORD and RUSTYBIN_CONSOLE_PASSWORD_HASH are set: the hash \
+                 is used"
+                    .to_string(),
+            );
+        }
         let control_jwt_key = get("RUSTYBIN_CONTROL_JWT_PUBLIC_KEY").and_then(|raw| {
             let key = crate::control_auth::parse_public_key(&raw);
             if key.is_none() {
@@ -730,6 +785,10 @@ impl Config {
             limits,
             hosted_mode,
             control_auth,
+            console_user,
+            console_password,
+            console_password_hash,
+            console_tokens: std::sync::Arc::new(crate::login::Tokens::new()),
             control_jwt_key,
             control_jwt_audience,
             control_oauth,
@@ -811,6 +870,10 @@ impl Config {
             limits: LimitsConfig::default(),
             hosted_mode: false,
             control_auth: ControlAuth::Open,
+            console_user: None,
+            console_password: None,
+            console_password_hash: None,
+            console_tokens: std::sync::Arc::new(crate::login::Tokens::new()),
             control_jwt_key: None,
             control_jwt_audience: "test-instance".to_string(),
             control_oauth: true,
@@ -867,6 +930,17 @@ impl Config {
         } else {
             "process"
         };
+        let console_user = self
+            .console_user
+            .clone()
+            .unwrap_or_else(|| crate::login::DEFAULT_USER.to_string());
+        let console_password_source = if self.console_password_hash.is_some() {
+            "env_hash"
+        } else if self.console_password.is_some() {
+            "env"
+        } else {
+            "default"
+        };
         let mut view = serde_json::json!({
             "http_port": self.http_port,
             "https_port": self.https_port,
@@ -889,6 +963,8 @@ impl Config {
             "limits": self.limits.public_view(),
             "hosted_mode": self.hosted_mode,
             "control_auth": self.control_auth.as_str(),
+            "console_user": console_user,
+            "console_password_source": console_password_source,
             "control_jwt_key_configured": self.control_jwt_key.is_some(),
             "control_jwt_audience": self.control_jwt_audience,
             "control_oauth": crate::control_oauth::mode(self),
@@ -1099,8 +1175,9 @@ where
         }
         (true, true, false) => {
             warnings.push(
-                "RUSTYBIN_MOCKS_SELF_SERVICE is ignored with RUSTYBIN_CONTROL_AUTH token or jwt: \
-                 visitors cannot reach the control plane"
+                "RUSTYBIN_MOCKS_SELF_SERVICE is ignored with RUSTYBIN_CONTROL_AUTH password, token \
+                 or jwt: visitors cannot reach the control plane; set RUSTYBIN_CONTROL_AUTH=open \
+                 on a self-service instance (public mode guards global changes with the admin token)"
                     .to_string(),
             );
             false
@@ -1526,10 +1603,19 @@ mod tests {
             ("RUSTYBIN_ADMIN_TOKEN", "t"),
         ]);
         assert!(!c.self_service.enabled);
-        assert!(w.iter().any(|w| w.contains("token or jwt")));
+        assert!(w.iter().any(|w| w.contains("password, token or jwt")));
+        // The default (password) locks visitors out too: self-service asks
+        // for an open control plane on purpose.
         let (c, w) = load(&[
             ("RUSTYBIN_MOCKS_SELF_SERVICE", "true"),
             ("RUSTYBIN_PUBLIC_MODE", "true"),
+        ]);
+        assert!(!c.self_service.enabled);
+        assert!(w.iter().any(|w| w.contains("RUSTYBIN_CONTROL_AUTH=open")));
+        let (c, w) = load(&[
+            ("RUSTYBIN_MOCKS_SELF_SERVICE", "true"),
+            ("RUSTYBIN_PUBLIC_MODE", "true"),
+            ("RUSTYBIN_CONTROL_AUTH", "open"),
             ("RUSTYBIN_MOCKS_SELF_SERVICE_HOST", ".Rustybin-Mock.dev"),
             ("RUSTYBIN_MOCKS_VISIT_MINUTES", "30"),
             ("RUSTYBIN_MOCKS_DAILY_HOURS", "2"),

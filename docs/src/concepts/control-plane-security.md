@@ -1,38 +1,51 @@
 # Control-plane security, metrics and operations
 
-By default the control plane (`/_rustybin/*`) and the [web console](../console.md) are
-open, which is what you want on a laptop or in a lab. When an instance is reachable
-by others (a team server, a shared cluster, a hosted offering that runs one instance
-per customer), lock the control plane down while the data plane stays public:
+The control plane (`/_rustybin/*`) and the [web console](../console.md) are locked by
+default: a fresh instance asks for a user name and password, `rustybin` / `rustybin`
+out of the box, and warns in its log and in the console until the password is
+changed. The data plane (everything outside `/_rustybin/`) is never affected: it is
+the product your gateway calls.
 
 ```bash
-RUSTYBIN_CONTROL_AUTH=token RUSTYBIN_ADMIN_TOKEN=change-me rustybin
+rustybin                                         # sign in with rustybin / rustybin, then change it
+RUSTYBIN_CONSOLE_PASSWORD=change-me rustybin     # or set it before the first start
+RUSTYBIN_CONTROL_AUTH=open rustybin              # a laptop or a lab: no sign-in, as before 0.2
 ```
-
-Data-plane routes (everything outside `/_rustybin/`) are never affected: they are the
-product your gateway calls.
 
 ## Modes
 
 | `RUSTYBIN_CONTROL_AUTH` | Control plane (`/_rustybin/*`) accepts |
 |---|---|
-| `open` (default) | Anyone. Single mutations still follow the [admin token rules](sessions.md). |
+| `password` (default) | A token from the [sign-in](#user-name-and-password) with the console's user name and password, plus everything `jwt` mode accepts (the admin token, control JWTs when a key is configured). `jwt` is the default in [hosted mode](#hosted-mode), `open` in [shared mode](shared-mode.md), where API keys authenticate the control plane. |
+| `open` | Anyone. Single mutations still follow the [admin token rules](sessions.md). The default before 0.2; [self-service](../mocks/self-service.md) instances choose it on purpose. |
 | `token` | Only `RUSTYBIN_ADMIN_TOKEN`, as `Authorization: Bearer <token>` or `X-Rustybin-Admin-Token: <token>`. |
 | `jwt` | The admin token, or an Ed25519 (EdDSA) JWT signed by the key in `RUSTYBIN_CONTROL_JWT_PUBLIC_KEY`. |
 
 Always reachable without credentials, in every mode:
 
-- `GET /_rustybin/ready`, the readiness probe (see below);
+- `GET /_rustybin/ready`, the readiness probe (see below), and
+  `POST /_rustybin/login`, the sign-in itself;
 - the data plane, including `GET /` (liveness) and `/health` (the demo toggle);
 - the console's static files under `/ui/`. They are the same open-source files for
   every instance and carry no instance data: a browser must be able to load them to
-  pick up a token from the URL fragment, which never reaches the server. Everything
-  the console shows comes from `/_rustybin/*` with the token.
+  show the sign-in screen or pick up a token from the URL fragment, which never
+  reaches the server. Everything the console shows comes from `/_rustybin/*` with the
+  token.
 
 Without a token the control plane answers `401` with a `WWW-Authenticate: Bearer`
 challenge and a JSON body naming the reason (`missing_token`, `expired`,
 `invalid_audience`, `invalid_signature`, `invalid_algorithm`, `not_yet_valid`,
-`missing_claim`, `malformed`, `invalid_token`):
+`missing_claim`, `malformed`, `revoked`, `invalid_token`):
+
+```hurl
+{{#include ../../examples/concepts/login.hurl:locked}}
+```
+
+Unauthenticated control-plane requests are rejected before [plan limits](plans-and-limits.md)
+count them; authenticated ones are counted but never rejected by the limiter.
+`token` mode without `RUSTYBIN_ADMIN_TOKEN` (or `jwt` mode with neither a key nor an
+admin token) refuses every control-plane request and logs a warning at startup. The
+same lock in `jwt` mode, as a hosted platform runs it:
 
 ```hurl
 {{#include ../../examples/concepts/control_auth.hurl:no_token}}
@@ -42,10 +55,98 @@ challenge and a JSON body naming the reason (`missing_token`, `expired`,
 {{#include ../../examples/concepts/control_auth.hurl:open_routes}}
 ```
 
-Unauthenticated control-plane requests are rejected before [plan limits](plans-and-limits.md)
-count them; authenticated ones are counted but never rejected by the limiter.
-`token` mode without `RUSTYBIN_ADMIN_TOKEN` (or `jwt` mode with neither a key nor an
-admin token) refuses every control-plane request and logs a warning at startup.
+## User name and password
+
+In `password` mode the console's sign-in screen, the `rustybin` CLI (a later release)
+and any script sign in with `POST /_rustybin/login` and get a **control token**: an
+HS256 JWT signed with the instance key (the one the [OAuth sign-in](#agents-sign-in-with-oauth)
+uses), scope `admin`, valid for 12 hours, carrying a session id and the token
+generation. It is a control JWT like any other, so the whole control plane, the
+[management MCP server](../agent-mcp.md) and the data plane's admin guard accept it
+as `Authorization: Bearer`, and captures redact it.
+
+| Setting | Default | Where |
+|---|---|---|
+| `RUSTYBIN_CONSOLE_USER` | `rustybin` | The setting `console.user`; a value saved in the console wins over the variable |
+| `RUSTYBIN_CONSOLE_PASSWORD` | `rustybin` | The password in the clear, for a first deployment |
+| `RUSTYBIN_CONSOLE_PASSWORD_HASH` | unset | An argon2id PHC string (`$argon2id$v=19$...`), preferred for deployments; wins over the plain password. Seeds the secret `console.password_hash` |
+
+A password changed in the console (**Management, Sign-in**, the current password
+required) or through `PUT /_rustybin/password` is stored as an argon2id hash in the
+[settings store](#settings-and-secrets-at-rest) (the secret `console.password_hash`)
+and wins over the environment, unless `RUSTYBIN_SETTINGS_LOCK` makes the
+environment authoritative. The change ends every other session; the caller gets a
+fresh token. Forgot it? `DELETE /_rustybin/settings/console.password_hash` with the
+admin token goes back to the environment's password or the default.
+
+```hurl
+{{#include ../../examples/concepts/login.hurl:wrong_password}}
+```
+
+```hurl
+{{#include ../../examples/concepts/login.hurl:login}}
+```
+
+```hurl
+{{#include ../../examples/concepts/login.hurl:use_token}}
+```
+
+```hurl
+{{#include ../../examples/concepts/login.hurl:mcp}}
+```
+
+```hurl
+{{#include ../../examples/concepts/login.hurl:change_password}}
+```
+
+```hurl
+{{#include ../../examples/concepts/login.hurl:hash_in_settings}}
+```
+
+**Sessions.** `POST /_rustybin/logout` revokes the presented token for the rest of
+its life (a bounded denylist of session ids, at most 4096, expiring with the
+tokens). `GET /_rustybin/sessions` (admin) lists the sign-in tokens issued since the
+last restart (at most 256: user, address, issue, last use and expiry times),
+`DELETE /_rustybin/sessions/{id}` ends one, and `DELETE /_rustybin/sessions` signs out
+everywhere by rotating the token generation every token carries, the caller's
+included. `GET /_rustybin/session` describes the credential a request presents
+(`obtained`: `password`, `admin_token`, `control_jwt` or `api_key`), which is how
+the console shows who is signed in.
+
+```hurl
+{{#include ../../examples/concepts/login.hurl:sessions}}
+```
+
+```hurl
+{{#include ../../examples/concepts/login.hurl:logout}}
+```
+
+```hurl
+{{#include ../../examples/concepts/login.hurl:sign_out_everywhere}}
+```
+
+**Brute force.** Five failed attempts from one client address within a minute, and
+the address waits: `429` with `Retry-After`, a minute the first time, doubling up to
+ten minutes. Every attempt is logged on the `rustybin::auth` target with the user
+name, the address and the outcome, never the password. Passwords are compared in
+constant time; hashes are verified off the request threads.
+
+**The default password.** With it the instance logs a warning at startup,
+`GET /_rustybin/status` and the sign-in answer carry `default_password: true`, and
+the console shows a banner until it is changed. A public instance
+(`RUSTYBIN_PUBLIC_MODE=true`) refuses to start with the default: set a password, or
+choose `open` on purpose.
+
+**Tokens across restarts.** Sign-in tokens are signed with the same key as the
+OAuth sign-in: `RUSTYBIN_CONTROL_OAUTH_KEY`, else derived from `RUSTYBIN_ADMIN_TOKEN`,
+else random per process. With a random key (and the default audience, a random
+instance id) a restart signs everyone out; set one of them, and
+`RUSTYBIN_INSTANCE_ID`, so sessions survive restarts and replicas.
+
+**Migration from 0.1.** Instances that relied on an open control plane now ask for
+`rustybin` / `rustybin`. Keep the old behaviour with `RUSTYBIN_CONTROL_AUTH=open`,
+or set `RUSTYBIN_CONSOLE_PASSWORD`. `token` and `jwt` mode are unchanged. Platforms
+in hosted mode keep `jwt`, shared instances keep `open` with API keys.
 
 ## Signed access tokens (`jwt` mode)
 
@@ -119,20 +220,24 @@ Any JWT library with EdDSA support works too (PyJWT with `cryptography`,
 
 ### The console with a token
 
-Open the console with the token in the URL fragment:
-`https://rustybin.example.com/ui/#token=<jwt>` (or `#/traffic&token=<jwt>` to land
-on a view). The console keeps the token in memory and in `sessionStorage` (this
-browser tab only), removes it from the address bar at once, and sends it as
+In `password` mode the console's sign-in screen asks for the user name and
+password (a pasted token is the alternative, folded under "Use a token instead");
+in `token` and `jwt` mode it asks for a token. A token can also come in the URL
+fragment: `https://rustybin.example.com/ui/#token=<jwt>` (or `#/traffic&token=<jwt>`
+to land on a view). The console keeps the token in memory and in `sessionStorage`
+(this browser tab only; **Remember me** keeps a sign-in token in `localStorage`
+until it expires), removes it from the address bar at once, and sends it as
 `Authorization: Bearer` on every control-plane call, including the live traffic
 feed, which it reads with `fetch` rather than `EventSource` so the header can be
-sent (no token in a query string). When the token is missing, refused or expired
-(the console also watches the `exp` claim), it shows a sign-in screen where a token
-can be pasted, with a link back to `RUSTYBIN_CONSOLE_BACKLINK` when one is set.
-**Console settings, Sign out** forgets the token.
+sent (no token in a query string). When the token is missing, refused, revoked or
+expired (the console also watches the `exp` claim), it shows the sign-in screen
+again, with a link back to `RUSTYBIN_CONSOLE_BACKLINK` when one is set. The top bar
+shows who is signed in and when the session expires; **Management, General, Sign
+out** revokes a sign-in token and forgets it.
 
 ### Agents sign in with OAuth
 
-In `token` and `jwt` mode the management MCP server (`/_rustybin/mcp`) also lets an
+In `password`, `token` and `jwt` mode the management MCP server (`/_rustybin/mcp`) also lets an
 AI agent sign in through the browser: its `401` points at RFC 9728 metadata, the
 agent registers with Rustybin's built-in authorization server (`/_rustybin/oauth`),
 and you approve it on the console's consent page with the credential the console

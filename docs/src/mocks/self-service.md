@@ -15,6 +15,7 @@ default**, also in public mode.
 
 ```bash
 RUSTYBIN_PUBLIC_MODE=true \
+RUSTYBIN_CONTROL_AUTH=open \
 RUSTYBIN_MOCKS_SELF_SERVICE=true \
 RUSTYBIN_MOCKS_SELF_SERVICE_HOST=rustybin-mock.dev \
 RUSTYBIN_LEADS_WEBHOOK_URL=https://hooks.example.com/rustybin-leads \
@@ -25,10 +26,12 @@ rustybin
 ```
 
 Self-service needs public mode (outside it everyone may already manage mocks) and
-a control plane visitors can reach: control auth `open`, or
-[shared mode](../concepts/shared-mode.md), where API keys own their mocks. With
-`RUSTYBIN_CONTROL_AUTH=token` or `jwt` it is ignored with a warning. Every setting
-is in [Configuration](../configuration.md#self-service-mocks).
+a control plane visitors can reach: `RUSTYBIN_CONTROL_AUTH=open`, set on purpose
+(the default, the [password sign-in](../concepts/control-plane-security.md#user-name-and-password),
+would lock visitors out; public mode still guards global changes with the admin
+token), or [shared mode](../concepts/shared-mode.md), where API keys own their
+mocks. With `password`, `token` or `jwt` control auth it is ignored with a warning.
+Every setting is in [Configuration](../configuration.md#self-service-mocks).
 
 The examples on this page run against a documentation instance with the mocks
 domain `mocks.example`, 10 minute periods (so Extend is open at once) and one

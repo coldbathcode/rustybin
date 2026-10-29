@@ -14,8 +14,9 @@ PYTHON=/path/to/venv/bin/python conformance/ui/run.sh
 `run.sh` builds the binary, starts it on ports 18700 (HTTP), 18701 (HTTPS) and
 18702 (gRPC), plus a second instance on 18703 with `RUSTYBIN_CONTROL_AUTH=jwt`
 (a signing key generated with openssl for the run, a console title and back link),
-a third on 18704 in public mode with self-service mocks and a fourth on 18705 in
-harness mode (`RUSTYBIN_HARNESS=on`, roles `both`, loop-through),
+a third on 18704 in public mode with self-service mocks, a fourth on 18705 in
+harness mode (`RUSTYBIN_HARNESS=on`, roles `both`, loop-through) and a fifth on
+18706 with nothing set (the default control auth: the password sign-in),
 runs the script and stops the servers. `RUSTYBIN_UI_PORT` moves the ports. Screenshots land in
 `conformance/ui/screenshots/` (override with `SCREENSHOT_DIR`).
 

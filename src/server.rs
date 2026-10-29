@@ -168,6 +168,8 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
     // Harness mode in public mode, with self-service, or a client without
     // targets: fatal, never a warning.
     crate::harness::check_startup(&config)?;
+    // A public instance never runs with the default console password.
+    crate::login::check_startup(&state)?;
     let (shutdown_tx, _) = watch::channel(false);
     let shutdown = Arc::new(shutdown_tx);
     let mut app = crate::build_app(state.clone());
@@ -220,6 +222,8 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
         config.control_auth.as_str(),
         config.grpc_on_http,
     );
+
+    crate::login::warn_default_password(&state);
 
     match &config.state_dir {
         Some(dir) => tracing::info!(

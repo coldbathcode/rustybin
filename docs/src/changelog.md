@@ -28,6 +28,28 @@ The build of [Rustybin 0.2](../plans/next/master-plan.md), step by step.
   opens it): General (console settings, this browser, the agent panel) and Network
   (the policy, each feature's rule, the decisions, the leads token), with forms
   generated from the settings schema.
+- **Console sign-in with a user name and password** (step 02). **Changed default:**
+  `RUSTYBIN_CONTROL_AUTH` is `password` when unset (`jwt` in hosted mode, `open` in
+  shared mode): the control plane and the console ask for `rustybin` / `rustybin`
+  (`RUSTYBIN_CONSOLE_USER`, `RUSTYBIN_CONSOLE_PASSWORD` or an argon2id
+  `RUSTYBIN_CONSOLE_PASSWORD_HASH`). Instances that relied on an open control plane
+  set `RUSTYBIN_CONTROL_AUTH=open` (self-service instances must); `token` and `jwt`
+  are unchanged. `POST /_rustybin/login` (never behind control auth) answers a 12
+  hour control token (HS256, the instance key, scope `admin`) that every
+  control-plane route, the management MCP server and the admin guard accept;
+  `POST /_rustybin/logout` revokes it; `GET /_rustybin/session` says who a credential
+  is; `GET`, `DELETE /_rustybin/sessions`, `DELETE /_rustybin/sessions/{id}` and
+  `PUT /_rustybin/password` (admin, the current password required) manage sessions
+  and the password, which is stored as the secret `console.password_hash` (the user
+  name as `console.user`). Five failed attempts per address and minute, then `429`
+  with `Retry-After`, doubling up to ten minutes; attempts are audited on
+  `rustybin::auth` without the password. With the default password the instance
+  warns at startup, `/_rustybin/status` carries `default_password: true` and the
+  console shows a banner; a public instance refuses to start. The console: a user
+  name and password sign-in screen with Remember me (the token form stays under "Use
+  a token instead"), the signed-in user and expiry in the top bar, and Management,
+  Sign-in (change the user name and password, the sessions, Sign out everywhere).
+  The docker image's CI smoke test signs in with the defaults.
 
 ## 0.1.0 (2026-10-29): the AI and agent gateway upgrade
 

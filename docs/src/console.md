@@ -23,16 +23,25 @@ captured by the inspector and ignores fault injection headers.
 
 ## Signing in, title and back link
 
-When the instance protects its control plane (`RUSTYBIN_CONTROL_AUTH=token` or
-`jwt`), the console's files still load without credentials, but every call to
-`/_rustybin/*` carries a token. Open the console with the token in the URL fragment,
-`/ui/#token=<token>` (or `/ui/#/traffic&token=<token>`), or paste it on the sign-in
-screen. The console keeps it for the browser tab only, strips it from the address
-bar, sends it as `Authorization: Bearer` (the live traffic feed included), and
-shows the sign-in screen again when the token is refused or its `exp` passes. A
-valid token with a narrow scope (`inspector`) signs in too, and the views it may not
-read say so. **Management, General, Sign out** forgets it. Details:
-[Control-plane security](concepts/control-plane-security.md#the-console-with-a-token).
+The console's files load without credentials, but every call to `/_rustybin/*`
+carries a token. By default (`RUSTYBIN_CONTROL_AUTH=password`) the sign-in screen
+asks for the console's user name and password, `rustybin` / `rustybin` until
+changed, and the instance answers a 12 hour control token; **Remember me** keeps it
+in the browser until it expires. A banner reminds you to change the default
+password, and the top bar shows who is signed in and when the session expires. With
+`token` or `jwt` control auth the screen asks for a token instead (in password mode
+that form is folded under "Use a token instead"); a token also comes in the URL
+fragment, `/ui/#token=<token>` (or `/ui/#/traffic&token=<token>`). The console
+keeps the token for the browser tab, strips it from the address bar, sends it as
+`Authorization: Bearer` (the live traffic feed included), and shows the sign-in
+screen again when the token is refused, revoked or its `exp` passes. A valid token
+with a narrow scope (`inspector`) signs in too, and the views it may not read say
+so. **Management, General, Sign out** revokes a sign-in token and forgets it.
+Details: [Control-plane security](concepts/control-plane-security.md#user-name-and-password).
+
+```hurl
+{{#include ../examples/concepts/login.hurl:login}}
+```
 
 `RUSTYBIN_CONSOLE_TITLE` (up to 80 characters) is shown as a badge in the header and
 in the browser tab title; `RUSTYBIN_CONSOLE_BACKLINK` (an `http://` or `https://`
@@ -58,7 +67,7 @@ The views, in sidebar order (`Alt+1` to `Alt+9` switch to the first nine):
 | **Mock APIs** | [OpenAPI mocks](mocks/index.md): create one from a spec, switch mocks on and off, edit responses, rules and security, try operations and watch their traffic (see [below](#mock-apis)) |
 | **Request bins** | Create a [request bin](reference/request-bin.md) with a configured response, send a test request, watch captures arrive live |
 | **API explorer** | The route catalogue with search and category filters, and a "Try it" request builder prefilled from each endpoint's examples |
-| **Management** | The instance's settings and this browser's, in tabs (see [below](#management)): General (the console title and back link, the session, gateway URL, admin token and theme of this browser, the "Connect an AI agent" panel) and Network (what the instance may connect to, each feature's rule, the last decisions, the leads webhook token). The gear in the top bar opens it |
+| **Management** | The instance's settings and this browser's, in tabs (see [below](#management)): General (the console title and back link, the session, gateway URL, admin token and theme of this browser, the "Connect an AI agent" panel), Sign-in (the console user name and password, the sessions) and Network (what the instance may connect to, each feature's rule, the last decisions, the leads webhook token). The gear in the top bar opens it |
 | **AI playground** | Chat with the [mock LLM](ai/index.md) in OpenAI chat, OpenAI Responses, Anthropic, Gemini, Ollama (streaming) and Bedrock (non-streaming) wire formats, with modes, fault and latency injection, tool calling with a tool result round trip, the raw wire frames, and the [AI request record](ai/gateway-features.md#request-inspection) of each call |
 | **MCP inspector** | An MCP client for 2026-07-28 (stateless) and 2025-11-25 (session): list and call tools with forms generated from their schemas, follow progress, read resources, get prompts, answer elicitation and sampling, a JSON-RPC message log, and the OAuth discovery steps of `/mcp/protected` |
 | **A2A client** | Agent directory and cards, blocking or streaming sends over JSON-RPC in v1.0 or v0.3 (the HTTP+JSON binding is not used), a task timeline with artifacts, input-required and auth-required continuation, cancel, and the push notification sink |
@@ -152,7 +161,7 @@ get **New mock** without an admin token:
 ## Management
 
 The Management view (the gear in the top bar, or `#/manage`) has a rail of tabs down
-the left; later releases add Sign-in, AI, Portal, Agents, Source control and Export.
+the left; later releases add AI, Portal, Agents, Source control and Export.
 
 **Instance settings** come from `GET /_rustybin/settings` and save with one `PATCH`
 per card (the admin token, or a control token with the `admin` scope). Every form is
@@ -168,6 +177,7 @@ secrets](configuration.md#state-directory-settings-and-secrets).
 | Tab | Cards |
 |---|---|
 | General | **Console**: the title and back link everyone sees. **This browser**: the settings below, kept in the browser. **Connect an AI agent (MCP)**: the command and JSON for `claude mcp add` and other clients, with the sign-in status and Sign out when the control plane is protected. |
+| Sign-in | **Sign-in**: the control-auth mode, the user name and where it comes from, whether the password is the default, a stored hash or the environment's, who is signed in. **Change the password**: the user name and a new password, the current password required (`PUT /_rustybin/password`); every other session ends and this one continues with a fresh token. **Sessions** (password mode): the sign-in tokens issued since the last restart with their address and times, End for each, and **Sign out everywhere**. See [User name and password](concepts/control-plane-security.md#user-name-and-password). |
 | Network | **Outbound connections**: the allowlist and the loopback switch (`egress.allow`, `egress.allow_loopback`). **Policy as the instance sees it**: the merged list, the always-refused addresses, each feature's own rule, and the last 100 decisions with a refresh. **Leads webhook**: the bearer token (a secret). See [Outbound connections](configuration.md#outbound-connections). |
 
 **This browser** keeps, in the browser (the admin token in this tab only, like the
@@ -184,7 +194,9 @@ sign-in token; the others across visits):
 
 | Route | Returns |
 |---|---|
-| `GET /_rustybin/status` | Name, version, commit, instance id, hostname, uptime and start time, health, public mode, `admin_token_configured`, `control_auth`, `hosted_mode`, console title and back link, `/identity` request count, inspector counters (stored, capacity, total captured) and ports |
+| `GET /_rustybin/status` | Name, version, commit, instance id, hostname, uptime and start time, health, public mode, `admin_token_configured`, `control_auth`, `default_password` and the sign-in user, `hosted_mode`, console title and back link, `/identity` request count, inspector counters (stored, capacity, total captured) and ports |
+| `POST /_rustybin/login`, `POST /_rustybin/logout`, `GET /_rustybin/session` | The sign-in (never behind control auth), the sign-out and "who am I" of the password mode |
+| `GET`, `DELETE /_rustybin/sessions`, `DELETE /_rustybin/sessions/{id}`, `PUT /_rustybin/password` | The Sign-in tab (admin): the sessions, sign out everywhere, end one, change the user name and password |
 | `GET /_rustybin/catalog` | The route catalogue as JSON: categories with counts, and every endpoint with methods, category, summary, description and runnable examples |
 | `GET`, `PATCH /_rustybin/settings`, `DELETE /_rustybin/settings/{key}` | The instance settings of the Management view (admin): every registered key with its value, source, lock state and schema; secrets as `{set, hint}` |
 | `GET /_rustybin/egress` | The outbound connection policy (admin): the allowlist, each feature's rule and the last decisions |

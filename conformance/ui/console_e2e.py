@@ -39,6 +39,10 @@ Environment:
                               targets 127.0.0.1): the Harness view, its schema-generated
                               builder (a control for every non-shorthand schema property,
                               the parity check of docs/plans/harness.md) and a short run
+    RUSTYBIN_PASSWORD_URL     base URL of an instance with the default control auth (the
+                              password sign-in, rustybin / rustybin): the sign-in screen,
+                              the default-password banner, Management, Sign-in (change the
+                              password, the sessions, sign out everywhere), remember me
 """
 
 import base64
@@ -553,6 +557,14 @@ def run_theme(browser, theme):
         for s in doc["settings"]:
             if s["group"] == "console":
                 expect(page.locator(f"[aria-label='{s['key']}']")).to_have_count(1)
+        # Sign-in: the form exists (disabled) on an open control plane too.
+        page.get_by_role("tab", name="Sign-in").click()
+        page.wait_for_selector("form[aria-label='Change the password']")
+        expect(page.locator("text=The password sign-in is off")).to_have_count(1)
+        for s in doc["settings"]:
+            if s["group"] == "signin":
+                expect(page.locator(f"[aria-label='{s['key']}']")).to_have_count(1)
+        expect(page.locator("[aria-label='console.user']")).to_be_disabled()
         page.get_by_role("tab", name="Network").click()
         for s in doc["settings"]:
             if s["group"] in ("egress", "leads"):
@@ -1203,6 +1215,158 @@ def run_harness(browser):
     ctx.close()
 
 
+def run_password(browser):
+    """The password sign-in against an instance with the default control auth."""
+    base = os.environ["RUSTYBIN_PASSWORD_URL"].rstrip("/")
+    print(f"control auth password: {base}")
+    ctx = browser.new_context(viewport={"width": 1280, "height": 860})
+    page = ctx.new_page()
+    page.set_default_timeout(TIMEOUT)
+
+    def on_console(msg):
+        if msg.type == "error" and "Failed to load resource" not in msg.text:
+            console_errors.append(f"[password] {msg.text}")
+
+    page.on("console", on_console)
+    page.on("pageerror", lambda e: console_errors.append(f"[password] uncaught: {e}"))
+    new_password = "e2e-new-secret-k3Qx"
+
+    def sign_in_screen():
+        code = urllib.request.urlopen(base + "/_rustybin/ready", timeout=10).status
+        assert code == 200, code
+        try:
+            urllib.request.urlopen(base + "/_rustybin/status", timeout=10)
+            raise AssertionError("the control plane is open")
+        except urllib.error.HTTPError as e:
+            assert e.code == 401, e.code
+        page.goto(base + "/ui/#/overview")
+        page.wait_for_selector("#signin")
+        expect(page.locator("#signin-title")).to_have_text("Sign in")
+        expect(page.locator("#signin-user")).to_be_focused()
+        shot(page, "password", "30-sign-in")
+        page.fill("#signin-user", "rustybin")
+        page.fill("#signin-password", "not-the-password")
+        page.get_by_role("button", name="Sign in", exact=True).click()
+        page.wait_for_selector("#signin .notice.err")
+        expect(page.locator("#signin")).to_contain_text("Wrong user name or password")
+        # The token form is still there, folded.
+        expect(page.locator("#signin-token-details")).to_have_count(1)
+
+    step("password: sign-in screen, wrong password refused", sign_in_screen)
+
+    def default_sign_in_and_banner():
+        page.fill("#signin-user", "rustybin")
+        page.fill("#signin-password", "rustybin")
+        page.get_by_role("button", name="Sign in", exact=True).click()
+        page.wait_for_selector("text=Requests captured")
+        expect(page.locator("#signin")).to_have_count(0)
+        # The banner until the password changes; the chip in the top bar.
+        page.wait_for_selector("#banner .notice.warn")
+        expect(page.locator("#banner")).to_contain_text("default console password")
+        expect(page.locator("#signed-in")).to_contain_text("rustybin")
+        expect(page.locator("#signed-in")).to_contain_text("expires in")
+        token = page.evaluate("sessionStorage.getItem('rustybin.console.controlToken')")
+        assert token and token.count(".") == 2, "no sign-in token"
+        assert not page.evaluate("localStorage.getItem('rustybin.console.rememberedToken')"), "remembered without asking"
+        shot(page, "password", "31-signed-in-banner")
+
+    step("password: the defaults sign in, the banner shows", default_sign_in_and_banner)
+
+    def change_password():
+        page.locator("#banner-change-password").click()
+        page.wait_for_function("location.hash === '#/manage/signin'")
+        page.wait_for_selector("form[aria-label='Change the password']")
+        expect(page.locator("#manage-panel")).to_contain_text("Default password")
+        page.wait_for_selector("#sessions-table")
+        expect(page.locator("#sessions-table tbody tr")).to_have_count(1)
+        expect(page.locator("#sessions-table")).to_contain_text("this session")
+        shot(page, "password", "32-management-sign-in")
+        # The current password is required.
+        page.fill("#signin-current", "wrong")
+        page.fill("#signin-next", new_password)
+        page.fill("#signin-confirm", new_password)
+        page.get_by_role("button", name="Change the password").click()
+        page.wait_for_selector("form[aria-label='Change the password'] .notice.err")
+        expect(page.locator("form[aria-label='Change the password']")).to_contain_text("current password is wrong")
+        page.fill("#signin-current", "rustybin")
+        page.fill("#signin-next", new_password)
+        page.fill("#signin-confirm", new_password)
+        page.get_by_role("button", name="Change the password").click()
+        page.wait_for_selector("text=Password changed")
+        # The console keeps working with the fresh token; the banner is gone.
+        page.wait_for_function("!document.querySelector('#banner .notice')")
+        page.wait_for_selector("#manage-panel >> text=changed in the console")
+        with urllib.request.urlopen(base + "/_rustybin/ready", timeout=10) as r:
+            assert r.status == 200
+        page.get_by_role("tab", name="General").click()
+        page.wait_for_selector("form[aria-label='Settings: console']")
+        page.get_by_role("tab", name="Sign-in").click()
+        page.wait_for_selector("#sessions-table")
+
+    step("password: change the password from Management, Sign-in", change_password)
+
+    def sign_out_everywhere():
+        page.once("dialog", lambda d: d.accept())
+        page.locator("#sign-out-everywhere").click()
+        page.wait_for_selector("#signin")
+        expect(page.locator("#signin")).to_contain_text("You signed out")
+        # The old password is gone, the new one signs in with Remember me.
+        page.fill("#signin-user", "rustybin")
+        page.fill("#signin-password", "rustybin")
+        page.get_by_role("button", name="Sign in", exact=True).click()
+        page.wait_for_selector("#signin .notice.err")
+        page.fill("#signin-password", new_password)
+        page.check("#signin-remember")
+        page.get_by_role("button", name="Sign in", exact=True).click()
+        # Back on the view that was open: Management, Sign-in.
+        page.wait_for_selector("#sessions-table")
+        expect(page.locator("#signin")).to_have_count(0)
+        remembered = page.evaluate("localStorage.getItem('rustybin.console.rememberedToken')")
+        assert remembered and remembered.count(".") == 2, "not remembered"
+        expect(page.locator("#banner .notice")).to_have_count(0)
+        # A new tab in the same browser is signed in from the remembered token.
+        p2 = ctx.new_page()
+        p2.goto(base + "/ui/#/overview")
+        p2.wait_for_selector("text=Requests captured")
+        expect(p2.locator("#signin")).to_have_count(0)
+        p2.close()
+
+    step("password: sign out everywhere, sign in again, remember me", sign_out_everywhere)
+
+    def sign_out():
+        page.get_by_role("button", name="Console settings", exact=True).click()
+        page.locator("#sign-out").click()
+        page.wait_for_selector("#signin")
+        expect(page.locator("#signin")).to_contain_text("You signed out")
+        assert not page.evaluate("sessionStorage.getItem('rustybin.console.controlToken')"), "token kept"
+        assert not page.evaluate("localStorage.getItem('rustybin.console.rememberedToken')"), "remembered token kept"
+        # The server revoked it: the token form refuses the old token.
+        shot(page, "password", "33-signed-out")
+
+    step("password: sign out revokes and forgets", sign_out)
+
+    def token_form_still_works():
+        # A pasted token (here: a fresh sign-in token) works through "Use a token instead".
+        body = json.dumps({"username": "rustybin", "password": new_password}).encode()
+        req = urllib.request.Request(base + "/_rustybin/login", data=body, headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            token = json.load(r)["token"]
+        page.locator("#signin-token-details summary").click()
+        page.fill("#signin-token", token)
+        page.get_by_role("button", name="Use this token").click()
+        # Back on Management, General, where the sign-out happened.
+        page.wait_for_selector("form[aria-label='Settings: console']")
+        expect(page.locator("#signin")).to_have_count(0)
+        expect(page.locator("#signed-in")).to_contain_text("rustybin")
+        # Leave the instance with the default password for the next run.
+        req = urllib.request.Request(base + "/_rustybin/settings/console.password_hash", headers={"Authorization": "Bearer " + token}, method="DELETE")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            assert r.status == 200
+
+    step("password: a pasted token still signs in", token_form_still_works)
+    ctx.close()
+
+
 def main():
     print(f"console e2e against {BASE}")
     with sync_playwright() as p:
@@ -1216,6 +1380,8 @@ def main():
             run_self_service(browser)
         if os.environ.get("RUSTYBIN_HARNESS_URL"):
             run_harness(browser)
+        if os.environ.get("RUSTYBIN_PASSWORD_URL"):
+            run_password(browser)
         browser.close()
     for e in console_errors:
         failures.append("console: " + e)

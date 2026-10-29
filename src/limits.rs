@@ -1496,7 +1496,7 @@ pub fn openapi_paths() -> Value {
                             "profile": { "type": "string" },
                             "rustc": { "type": "string" }
                         } },
-                        "control_auth": { "type": "string", "enum": ["open", "token", "jwt"] }
+                        "control_auth": { "type": "string", "enum": ["password", "open", "token", "jwt"] }
                     }
                 } } } } }
             }

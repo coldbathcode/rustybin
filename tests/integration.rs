@@ -568,6 +568,121 @@ async fn control_plane_jwt_end_to_end() {
     server.wait().await.expect("clean shutdown");
 }
 
+/// The default control auth end to end: the control plane is locked, the
+/// sign-in with `rustybin` / `rustybin` answers a token every control route
+/// and the management MCP server accept, and a public instance with the
+/// default password does not start.
+#[tokio::test]
+async fn password_sign_in_end_to_end() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut c = config(&dir);
+    c.control_auth = rustybin::control_auth::ControlAuth::Password;
+    let server = start(c).await;
+    let addr = server.http_addr;
+
+    let resp = get(addr, "/_rustybin/status").await;
+    assert_eq!(resp.status, 401);
+    assert_eq!(resp.json()["control_auth"], "password");
+    assert_eq!(get(addr, "/_rustybin/ready").await.status, 200);
+    assert_eq!(get(addr, "/echo").await.status, 200);
+    assert_eq!(get(addr, "/ui/").await.status, 200);
+
+    let resp = request(
+        addr,
+        "POST",
+        "/_rustybin/login",
+        &[("Content-Type", "application/json")],
+        r#"{"username":"rustybin","password":"wrong"}"#,
+    )
+    .await;
+    assert_eq!(resp.status, 401);
+    assert_eq!(resp.json()["reason"], "invalid_credentials");
+    let resp = request(
+        addr,
+        "POST",
+        "/_rustybin/login",
+        &[("Content-Type", "application/json")],
+        r#"{"username":"rustybin","password":"rustybin"}"#,
+    )
+    .await;
+    assert_eq!(resp.status, 200, "{}", resp.body);
+    let body = resp.json();
+    assert_eq!(body["default_password"], true);
+    let token = body["token"].as_str().expect("token").to_string();
+    let auth = format!("Bearer {token}");
+
+    let resp = request(
+        addr,
+        "GET",
+        "/_rustybin/status",
+        &[("Authorization", &auth)],
+        "",
+    )
+    .await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.json()["default_password"], true);
+    let resp = request(
+        addr,
+        "DELETE",
+        "/_rustybin/requests",
+        &[("Authorization", &auth)],
+        "",
+    )
+    .await;
+    assert_eq!(resp.status, 200);
+    let resp = request(
+        addr,
+        "POST",
+        "/_rustybin/mcp",
+        &[
+            ("Authorization", &auth),
+            ("Content-Type", "application/json"),
+            ("Accept", "application/json, text/event-stream"),
+            ("MCP-Protocol-Version", "2026-07-28"),
+            ("Mcp-Method", "tools/list"),
+        ],
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+    )
+    .await;
+    assert_eq!(resp.status, 200, "{}", resp.body);
+    assert!(resp.body.contains("set_health"), "{}", resp.body);
+
+    // Sign out: the token is refused from then on.
+    let resp = request(
+        addr,
+        "POST",
+        "/_rustybin/logout",
+        &[("Authorization", &auth)],
+        "",
+    )
+    .await;
+    assert_eq!(resp.status, 200);
+    let resp = request(
+        addr,
+        "GET",
+        "/_rustybin/status",
+        &[("Authorization", &auth)],
+        "",
+    )
+    .await;
+    assert_eq!(resp.status, 401);
+    assert_eq!(resp.json()["reason"], "revoked");
+
+    server.shutdown();
+    server.wait().await.expect("clean shutdown");
+
+    // Public mode with the default password refuses to start.
+    let mut c = config(&dir);
+    c.control_auth = rustybin::control_auth::ControlAuth::Password;
+    c.public_mode = true;
+    let err = rustybin::start_with_state(AppState::for_tests(c))
+        .await
+        .err()
+        .map(|e| e.to_string())
+        .expect("refused");
+    assert!(err.contains("default console password"), "{err}");
+}
+
 #[tokio::test]
 async fn mocks_load_from_config_file_and_directory_and_reload() {
     let dir = tempfile::tempdir().expect("tempdir");

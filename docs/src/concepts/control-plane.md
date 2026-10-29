@@ -44,8 +44,9 @@ To demonstrate a gateway's own CORS plugin, turn Rustybin's off with
 ## Control plane
 
 Routes under `/_rustybin/` describe and manage the instance. They are never
-captured by the inspector and ignore the fault injection headers. They are open by
-default; `RUSTYBIN_CONTROL_AUTH=token` or `jwt` protects them (see
+captured by the inspector and ignore the fault injection headers. By default they
+ask for a token from the sign-in with the console's user name and password
+(`rustybin` / `rustybin` out of the box); `RUSTYBIN_CONTROL_AUTH=open` opens them (see
 [Control-plane security](control-plane-security.md)).
 
 | Route | Purpose |

@@ -9,6 +9,10 @@ services:
     environment:
       - RUSTYBIN_LOG_LEVEL=info
       - RUSTYBIN_INSTANCE_ID=rustybin-01
+      # The console and the control plane sign in with rustybin / rustybin
+      # until the password is changed (Management, Sign-in) or set here:
+      # - RUSTYBIN_CONSOLE_PASSWORD=change-me
+      # An open control plane, as before 0.2: - RUSTYBIN_CONTROL_AUTH=open
       # OpenAPI mocks from a folder of specs (each file becomes /mock/<file name>):
       # - RUSTYBIN_MOCKS_DIR=/app/specs
     volumes:

@@ -159,6 +159,12 @@ impl OAuthKey {
     fn jwt_secret(&self) -> [u8; 32] {
         self.mac("jwt", b"")
     }
+
+    /// The subkey signing the console's sign-in tokens (`crate::login`):
+    /// the same instance key, a separate label.
+    pub(crate) fn console_secret(&self) -> [u8; 32] {
+        self.mac("console", b"")
+    }
 }
 
 // ── Modes ───────────────────────────────────────────────────────────
@@ -168,7 +174,10 @@ impl OAuthKey {
 /// there), unless `RUSTYBIN_CONTROL_OAUTH=off`.
 pub fn enabled(config: &Config) -> bool {
     config.control_oauth
-        && matches!(config.control_auth, ControlAuth::Token | ControlAuth::Jwt)
+        && matches!(
+            config.control_auth,
+            ControlAuth::Token | ControlAuth::Jwt | ControlAuth::Password
+        )
         && !config.shared_mode
 }
 
@@ -254,7 +263,9 @@ pub fn authorize_manage(req: &Request, config: &Config) -> Option<Result<Grant, 
         return None;
     }
     let ours = jsonwebtoken::decode_header(token).is_ok_and(|h| h.alg == Algorithm::HS256);
-    if !ours {
+    // A console sign-in token (password mode) is a control JWT like any
+    // other: control auth verifies it.
+    if !ours || crate::login::is_console_token(token) {
         return None;
     }
     let base = base_url(req.headers(), req.extensions(), req.uri(), config);
@@ -631,7 +642,7 @@ fn not_found(uri: &Uri) -> Response {
         Json(json!({
             "error": "not found",
             "path": uri.path(),
-            "hint": "OAuth sign-in to /_rustybin/mcp is offered only when RUSTYBIN_CONTROL_AUTH is token or jwt (not in shared mode, not with RUSTYBIN_CONTROL_OAUTH=off); the built-in authorization server only without RUSTYBIN_CONTROL_OAUTH_ISSUER",
+            "hint": "OAuth sign-in to /_rustybin/mcp is offered only when RUSTYBIN_CONTROL_AUTH is password, token or jwt (not in shared mode, not with RUSTYBIN_CONTROL_OAUTH=off); the built-in authorization server only without RUSTYBIN_CONTROL_OAUTH_ISSUER",
         })),
     )
         .into_response()

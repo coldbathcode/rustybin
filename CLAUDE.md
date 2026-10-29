@@ -2,13 +2,14 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: step 01 done)
+## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 and 02 done)
 
 [docs/plans/next/master-plan.md](docs/plans/next/master-plan.md) (planned 2026-10-29) is the plan for the next
 build: twelve steps, one file each (`docs/plans/next/step-NN-*.md`): foundations (step 01, done 2026-10-29: the
 settings store `src/settings.rs`, the egress policy `src/egress.rs`, the console's Management view
-`ui/views/manage.js`; see the step file's build notes), the console locked with a username and password (default
-`rustybin` / `rustybin`, the one change of default), AI assist with the user's own key (Anthropic, OpenAI, Gemini,
+`ui/views/manage.js`; see the step file's build notes), the console locked with a username and password (step 02,
+done 2026-10-29: `src/login.rs`, the one change of default; test and example instances that read the control plane
+without a token set `RUSTYBIN_CONTROL_AUTH=open`), AI assist with the user's own key (Anthropic, OpenAI, Gemini,
 OpenAI-compatible, or the built-in mock LLM for tests) and an AI-first console shell, AI-built mocks (specs from a
 prompt to the chosen OpenAPI version, example payloads with an alert when a spec has none, AI edits through a
 diff), an MCP inspector for any server with every auth mode and a relay, a mock MCP registry and registry
@@ -143,7 +144,15 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
 - `src/control.rs`: `/_rustybin/config`, `/_rustybin/version`, `/_rustybin/ready` (readiness, never authenticated),
   `git_sha()` / `build_info()` (build.rs sets `RUSTYBIN_GIT_SHA`), `is_control_path()` (`/_rustybin/*`, `/ui/*`).
 - `src/control_oauth.rs`: OAuth sign-in to the management MCP server (`RUSTYBIN_CONTROL_OAUTH*`), see above.
-- `src/control_auth.rs`: `RUSTYBIN_CONTROL_AUTH` (`open` / `token` / `jwt`), Ed25519 JWT verification with scopes
+- `src/login.rs`: the console sign-in (`RUSTYBIN_CONTROL_AUTH=password`, the default): `RUSTYBIN_CONSOLE_USER`,
+  `RUSTYBIN_CONSOLE_PASSWORD` or `_PASSWORD_HASH` (argon2id), the settings `console.user` and the secret
+  `console.password_hash`, `POST /_rustybin/login` (open) minting HS256 control tokens (the OAuth key's `console`
+  subkey, scope `admin`, 12 h, `rb_use: "console"`, `jti`, `rb_gen`), `logout`, `session`, `sessions*`, `password`.
+  `Tokens` (generation, revoked ids, listed sessions, failed attempts per address; all bounded) lives in
+  `Config.console_tokens` because every credential check takes `&Config`; `control_auth::verify_jwt_claims` calls
+  `login::verify` for sign-in tokens, so every caller accepts them. Public mode with the default password refuses
+  to start (`login::check_startup`); the default password warns at startup and sets `default_password` in the status.
+- `src/control_auth.rs`: `RUSTYBIN_CONTROL_AUTH` (`password` / `open` / `token` / `jwt`), Ed25519 JWT verification with scopes
   (`inspector`, `console`, `admin`), the `enforce` middleware (protects `/_rustybin/*` except `/_rustybin/ready` and
   the OAuth sign-in endpoints `/_rustybin/oauth/{register,authorize,token}`; `/ui/*` static files stay open). Tests sign tokens with the keys in `tests/common/control_jwt_keys.rs`
   (`test_support::control_jwt`). `admin::admin_check` answers 403 (not 401) to a valid control JWT without the
@@ -259,7 +268,7 @@ missing from the OpenAPI spec (or lacks a method), or an example returns 404/405
   mode and forbidden in public mode (`RUSTYBIN_PUBLIC_MODE`).
 - Control plane lives under `/_rustybin/*`, the web console under `/ui`; both are excluded from inspector
   capture and fault injection. Control-plane routes are protected by `control_auth::enforce` when
-  `RUSTYBIN_CONTROL_AUTH` is `token` or `jwt`; data-plane routes never are. The console must not use
+  `RUSTYBIN_CONTROL_AUTH` is `password` (the default), `token` or `jwt`; data-plane routes never are. The console must not use
   `EventSource` for control-plane feeds (no headers): use `send({stream: true})` + `sseParser`.
 - `GET /` must always return 200 (platform liveness check), `GET /_rustybin/ready` too (readiness).
   `/health` is a demo toggle that may return 503.

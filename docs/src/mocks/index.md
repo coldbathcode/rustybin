@@ -262,7 +262,7 @@ themselves (`/mock/*`) are data plane and never need a control-plane token.
   is refused (`403`), so a public instance is read-only for mocks, unless
   [self-service mocks](self-service.md) let visitors manage their own.
 - With [control-plane authentication](../concepts/control-plane-security.md)
-  (`RUSTYBIN_CONTROL_AUTH=token` or `jwt`), reading needs a token with the
+  (`RUSTYBIN_CONTROL_AUTH=password`, the default, `token` or `jwt`), reading needs a token with the
   `console` scope and every `POST`, `PUT`, `PATCH` and `DELETE` needs the admin
   token or the `admin` scope, except the read-only `POST` routes `import`,
   `.../validate` and `.../rules/test`, which the `console` scope may call.

@@ -400,6 +400,11 @@ async fn status_handler(State(state): State<AppState>, extensions: Extensions) -
         "public_mode": state.config.public_mode,
         "admin_token_configured": state.config.admin_token.is_some(),
         "control_auth": state.config.control_auth.as_str(),
+        "default_password": crate::login::default_password(&state),
+        "signin": {
+            "enabled": crate::login::enabled(&state.config),
+            "user": crate::login::enabled(&state.config).then(|| crate::login::effective_user(&state.settings)),
+        },
         "hosted_mode": state.config.hosted_mode,
         "git_sha": crate::control::git_sha(),
         "console": {

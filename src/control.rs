@@ -148,7 +148,7 @@ pub fn openapi_paths() -> Value {
                         "git_sha": { "type": ["string", "null"], "description": "Commit the binary was built from, when known" },
                         "rust_version": { "type": "string" },
                         "profile": { "type": "string" },
-                        "control_auth": { "type": "string", "enum": ["open", "token", "jwt"] },
+                        "control_auth": { "type": "string", "enum": ["password", "open", "token", "jwt"] },
                         "hosted_mode": { "type": "boolean" },
                         "grpc_on_http": { "type": "boolean" }
                     }

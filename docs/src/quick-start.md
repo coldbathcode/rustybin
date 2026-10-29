@@ -44,6 +44,31 @@ Settings are environment variables, see [Configuration](configuration.md):
 docker run -d -p 8080:80 -e RUSTYBIN_INSTANCE_ID=demo-1 -e RUSTYBIN_ADMIN_TOKEN=change-me rustybin
 ```
 
+## First sign-in
+
+The [web console](console.md) at `http://localhost:8080/ui` and the control plane
+(`/_rustybin/*`) ask for a user name and password: **`rustybin` / `rustybin`**. The
+instance warns in its log and the console shows a banner until you change it under
+**Management, Sign-in** (the current password is required; the new one is stored as
+a hash, and every other session ends). Or set it before the first start:
+
+```bash
+docker run -d -p 8080:80 -e RUSTYBIN_CONSOLE_PASSWORD=change-me rustybin
+```
+
+Scripts sign in the same way and get a token that opens everything, the
+[management MCP server](agent-mcp.md) included:
+
+```bash
+TOKEN=$(curl -s http://localhost:8080/_rustybin/login -H 'Content-Type: application/json' \
+  -d '{"username":"rustybin","password":"rustybin"}' | jq -r .token)
+curl -s http://localhost:8080/_rustybin/status -H "Authorization: Bearer $TOKEN"
+```
+
+`RUSTYBIN_CONTROL_AUTH=open` turns the sign-in off for a laptop or a lab; the data
+plane (everything your gateway calls) never needs credentials. Details:
+[Control-plane security](concepts/control-plane-security.md).
+
 ## Docker Compose
 
 `docker-compose.yml` builds the image, publishes ports 80, 443 and 50051 and keeps

@@ -1,10 +1,13 @@
 // Management: the instance's settings and this browser's, in tabs down the
-// left (General, Network; later steps add Sign-in, AI, Portal, Agents,
+// left (General, Sign-in, Network; later steps add AI, Portal, Agents,
 // Source control, Export). Instance settings come from GET /_rustybin/settings
 // and save with PATCH (admin); the browser's (session, gateway URL, admin
-// token, theme) stay in this browser as before. Routes: #/manage/<tab>.
+// token, theme) stay in this browser as before. Sign-in changes the console
+// user name and password (PUT /_rustybin/password, the current password
+// required) and lists the sign-in sessions (GET /_rustybin/sessions).
+// Routes: #/manage/<tab>.
 import { h, replace, clear, card, field, input, select, notice, toast, icon, badge, spinner, kvgrid, fmtTime } from '../lib/dom.js';
-import { SERVER, getJson, trimBase } from '../lib/http.js';
+import { SERVER, getJson, send, trimBase } from '../lib/http.js';
 import * as settings from '../lib/settings.js';
 import * as auth from '../lib/auth.js';
 import { agentPanel } from '../lib/agent.js';
@@ -13,6 +16,7 @@ import { settingsForm } from '../lib/settingsform.js';
 // The rail. Later steps append entries here; each renders its own panel.
 export const TABS = [
   { id: 'general', title: 'General', icon: 'settings', hint: 'Console title, this browser, your AI agent' },
+  { id: 'signin', title: 'Sign-in', icon: 'lock', hint: 'The console user name and password, active sessions' },
   { id: 'network', title: 'Network', icon: 'globe', hint: 'Outbound connections and recent decisions' },
 ];
 
@@ -36,7 +40,7 @@ function browserCard() {
       'Signed in to the control plane (RUSTYBIN_CONTROL_AUTH=' + auth.mode + ')',
       auth.scopes() ? ', scope ' + auth.scopes().join(' ') : '',
       exp ? ', expires ' + new Date(exp).toLocaleTimeString() : '', '.'),
-    h('button', { class: 'btn sm', type: 'button', id: 'sign-out', onclick: () => auth.signOut() }, 'Sign out'))
+    h('button', { class: 'btn sm', type: 'button', id: 'sign-out', onclick: () => auth.signOut(SERVER) }, 'Sign out'))
     : null;
   const form = h('form', { class: 'stack', 'aria-label': 'This browser' },
     signedIn,
@@ -81,6 +85,161 @@ function generalPanel(doc, reload, error) {
   el.appendChild(card(null, {}, h('details', { class: 'disclosure', id: 'agent-panel' },
     h('summary', null, 'Connect an AI agent (MCP)'),
     h('div', { style: { paddingTop: '8px' } }, agentPanel()))));
+  return el;
+}
+
+// ── Sign-in ──
+
+function settingOf(doc, key) {
+  return ((doc && doc.settings) || []).find((s) => s.key === key) || null;
+}
+
+function sourceText(setting) {
+  if (!setting) return '';
+  const src = setting.source;
+  if (src === 'stored') return 'saved in this instance';
+  if (src === 'env') return 'from the environment (' + setting.env + ')';
+  return 'the default';
+}
+
+function statusCard(doc, status) {
+  const user = settingOf(doc, 'console.user');
+  const hash = settingOf(doc, 'console.password_hash');
+  const hashState = hash && hash.value ? hash.value : {};
+  const on = auth.passwordMode();
+  const passwordText = !on ? 'not used in this mode'
+    : hashState.set ? 'a stored hash (' + (hashState.source === 'env' ? 'RUSTYBIN_CONSOLE_PASSWORD_HASH' : 'changed in the console') + ')'
+      : status && status.default_password ? h('span', { class: 'badge warn' }, 'the default: rustybin') : 'RUSTYBIN_CONSOLE_PASSWORD';
+  const pairs = [
+    ['Control-plane auth', h('span', { class: 'mono' }, auth.mode) ],
+    ['User name', user ? h('span', null, h('span', { class: 'mono' }, user.value || 'rustybin'), h('span', { class: 'muted small' }, ' ' + sourceText(user))) : 'rustybin'],
+    ['Password', passwordText],
+    ['Signed in as', auth.user() ? h('span', { class: 'mono' }, auth.user()) : (auth.getToken() ? 'a control token (not the password sign-in)' : 'nobody: the control plane is open')],
+  ];
+  if (auth.expiresAt()) pairs.push(['Session expires', new Date(auth.expiresAt()).toLocaleString()]);
+  const items = [kvgrid(pairs)];
+  if (!on) {
+    items.unshift(notice('', 'The password sign-in is off: RUSTYBIN_CONTROL_AUTH is ', h('code', null, auth.mode), '. The settings below apply once the instance runs in password mode (the default).'));
+  } else if (status && status.default_password) {
+    items.unshift(notice('warn', h('strong', null, 'Default password. '), 'Anyone who reaches this instance can sign in with rustybin / rustybin: change it below, or set RUSTYBIN_CONSOLE_PASSWORD.'));
+  }
+  if (doc && doc.locked && (user && user.locked)) items.push(notice('', icon('lock'), h('div', { class: 'grow' }, 'RUSTYBIN_SETTINGS_LOCK is on: the environment is authoritative for the user name and password (RUSTYBIN_CONSOLE_USER, RUSTYBIN_CONSOLE_PASSWORD_HASH).')));
+  return card('Sign-in', { hint: 'who may open the console and the control plane' }, h('div', { class: 'stack' }, ...items));
+}
+
+function passwordCard(doc, status, onChanged) {
+  const user = settingOf(doc, 'console.user');
+  const locked = !!(user && user.locked);
+  const on = auth.passwordMode();
+  const nameInput = input({ value: (user && user.value) || 'rustybin', 'aria-label': 'console.user', autocomplete: 'username', id: 'signin-new-user', maxlength: 64 });
+  const current = input({ type: 'password', 'aria-label': 'Current password', autocomplete: 'current-password', id: 'signin-current' });
+  const next = input({ type: 'password', 'aria-label': 'console.password_hash', autocomplete: 'new-password', id: 'signin-next', placeholder: 'at least 8 characters' });
+  const confirm = input({ type: 'password', 'aria-label': 'Confirm the new password', autocomplete: 'new-password', id: 'signin-confirm' });
+  const err = h('div');
+  const submit = h('button', { class: 'btn primary', type: 'submit', disabled: locked || !on }, 'Change the password');
+  for (const c of [nameInput, current, next, confirm]) if (locked || !on) c.disabled = true;
+  const form = h('form', { class: 'stack', 'aria-label': 'Change the password' },
+    field('User name', nameInput, 'Letters, digits and . _ @ - only. ' + (user ? 'Now ' + sourceText(user) + '.' : '')),
+    field('Current password', current, 'Required to change anything here, even for an administrator.'),
+    field('New password', next, 'Stored as an argon2id hash in the instance settings (console.password_hash); never shown again. Not the default.'),
+    field('Confirm', confirm),
+    err,
+    h('div', { class: 'row' },
+      h('span', { class: 'muted small' }, 'Every other sign-in session ends; this one continues with a fresh token.'),
+      h('span', { class: 'grow' }), submit));
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (next.value !== confirm.value) {
+      replace(err, notice('err', 'The new password and its confirmation differ.'));
+      confirm.focus();
+      return;
+    }
+    if (next.value.length < 8) {
+      replace(err, notice('err', 'The new password needs at least 8 characters.'));
+      next.focus();
+      return;
+    }
+    submit.disabled = true;
+    replace(err);
+    const body = { current_password: current.value, new_password: next.value };
+    const name = nameInput.value.trim();
+    if (name && name !== ((user && user.value) || 'rustybin')) body.username = name;
+    const r = await send({ method: 'PUT', url: SERVER + '/_rustybin/password', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), admin: true, session: false });
+    submit.disabled = false;
+    if (r.error || !r.ok) {
+      const j = r.json || {};
+      replace(err, notice('err', r.error || j.error || ('The change failed (' + r.status + ').'), j.problems ? ' ' + j.problems.join('; ') : ''));
+      if (r.status === 403) { current.value = ''; current.focus(); }
+      return;
+    }
+    if (r.json && r.json.token) auth.setToken(r.json.token, !!localStorage.getItem('rustybin.console.rememberedToken'));
+    current.value = ''; next.value = ''; confirm.value = '';
+    toast('Password changed' + (r.json && r.json.signed_out > 1 ? ', ' + (r.json.signed_out - 1) + ' other session(s) ended' : ''));
+    onChanged(r.json);
+  });
+  return card('Change the password', { hint: 'the current password is required' }, form);
+}
+
+function sessionsCard(reloadRef) {
+  const el = h('div', null, spinner('Loading sessions'));
+  async function load() {
+    try {
+      const d = await getJson('/_rustybin/sessions', { admin: true, session: false });
+      const rows = (d.sessions || []).map((s) => h('tr', { class: s.id === d.current ? 'current' : '' },
+        h('td', null, h('span', { class: 'mono' }, s.user), s.id === d.current ? h('span', null, ' ', badge('this session', 'info')) : null),
+        h('td', { class: 'mono small' }, s.ip || ''),
+        h('td', { class: 'small', title: s.issued_at }, fmtTime(s.issued_at)),
+        h('td', { class: 'small', title: s.last_used }, fmtTime(s.last_used)),
+        h('td', { class: 'small', title: s.expires_at }, fmtTime(s.expires_at)),
+        h('td', null, h('button', { class: 'btn sm ghost', type: 'button', 'aria-label': 'End session ' + s.id, onclick: async () => {
+          const r = await send({ method: 'DELETE', url: SERVER + '/_rustybin/sessions/' + encodeURIComponent(s.id), admin: true, session: false });
+          if (r.ok) { toast(s.id === d.current ? 'This session ended' : 'Session ended'); load(); } else toast('Could not end the session (' + r.status + ')', 'err');
+        } }, 'End'))));
+      const everywhere = h('button', { class: 'btn sm danger', type: 'button', id: 'sign-out-everywhere', onclick: async () => {
+        if (!window.confirm('Sign out everywhere? Every sign-in token issued so far stops working, this one included.')) return;
+        const r = await send({ method: 'DELETE', url: SERVER + '/_rustybin/sessions', admin: true, session: false });
+        if (!r.ok) toast('Could not sign out everywhere (' + r.status + ')', 'err');
+        // The server refuses this token from now on; the next call brings the sign-in screen.
+        else auth.signOut();
+      } }, icon('lock'), 'Sign out everywhere');
+      replace(el,
+        h('div', { class: 'row', style: { marginBottom: '10px' } },
+          h('span', { class: 'muted small grow' }, d.count + ' session(s) since the last restart or sign-out-everywhere (generation ' + d.generation + '; at most ' + d.capacity + ' are listed).'),
+          h('button', { class: 'btn sm ghost', type: 'button', onclick: load }, icon('refresh'), 'Refresh'),
+          everywhere),
+        rows.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'table', id: 'sessions-table' },
+          h('thead', null, h('tr', null, h('th', null, 'User'), h('th', null, 'Address'), h('th', null, 'Signed in'), h('th', null, 'Last used'), h('th', null, 'Expires'), h('th', null, ''))),
+          h('tbody', null, rows))) : notice('', 'No sign-in session is listed.'));
+    } catch (e) {
+      replace(el, loadError(e));
+    }
+  }
+  load();
+  reloadRef.sessions = load;
+  return card('Sessions', { hint: 'sign-in tokens issued by this instance' }, el);
+}
+
+function signinPanel(doc, reload, error) {
+  const el = h('div', { class: 'stack' });
+  const ref = {};
+  const onChanged = async () => {
+    // The hash is now stored and the default-password flag is gone: refresh
+    // the settings document, the status (banner, chip) and the sessions.
+    try { reload(await getJson('/_rustybin/settings', { admin: true, session: false })); } catch { /* keep the old one */ }
+    document.dispatchEvent(new CustomEvent('rustybin-status'));
+    if (ref.sessions) ref.sessions();
+    rerender();
+  };
+  function rerender() {
+    clear(el);
+    el.appendChild(statusCard(doc, settings.instance.status));
+    if (doc) el.appendChild(passwordCard(doc, settings.instance.status, onChanged));
+    else el.appendChild(card('Change the password', {}, loadError(error)));
+    if (auth.passwordMode()) el.appendChild(sessionsCard(ref));
+  }
+  const reloadDoc = reload;
+  reload = (d) => { if (d) doc = d; reloadDoc(d); };
+  rerender();
   return el;
 }
 
@@ -174,7 +333,7 @@ export default {
         b.tabIndex = tid === id ? 0 : -1;
       }
       if (location.hash !== '#/manage/' + id) history.replaceState(null, '', '#/manage/' + id);
-      const render = id === 'network' ? networkPanel : generalPanel;
+      const render = id === 'network' ? networkPanel : id === 'signin' ? signinPanel : generalPanel;
       replace(panel, render(doc, (d) => { if (d) { doc = d; renderStatus(); } }, error));
     }
 
@@ -197,7 +356,7 @@ export default {
 
     root.appendChild(h('div', { class: 'view-head' },
       h('div', { class: 'grow' }, h('h1', null, 'Management'),
-        h('p', null, 'Configure this instance: what the console shows, where it may connect, and what this browser remembers. Instance settings override their environment variables and persist with RUSTYBIN_STATE_DIR.')),
+        h('p', null, 'Configure this instance: what the console shows, who may sign in, where it may connect, and what this browser remembers. Instance settings override their environment variables and persist with RUSTYBIN_STATE_DIR.')),
       status));
     root.appendChild(h('div', { class: 'rail-layout' }, rail, panel));
     replace(panel, spinner('Loading settings'));

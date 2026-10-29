@@ -7,6 +7,9 @@
 //! - [`catalog`] is the single source of truth for routes (landing page,
 //!   exports, README); [`openapi`] merges per-module OpenAPI fragments.
 
+// `Config::public_view` is one large `json!` literal.
+#![recursion_limit = "256"]
+
 pub mod a2a;
 pub mod admin;
 pub mod ai;
@@ -44,6 +47,7 @@ pub mod keys;
 pub mod landing;
 pub mod limits;
 pub mod logging;
+pub mod login;
 pub mod mcp;
 pub mod metrics;
 pub mod mocks;
@@ -129,6 +133,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     inspector::router,
     control::router,
     control_oauth::router,
+    login::router,
     settings::router,
     egress::router,
     harness::router,

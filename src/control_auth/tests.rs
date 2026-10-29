@@ -50,6 +50,8 @@ const CONTROL_ROUTES: &[&str] = &[
 
 #[test]
 fn modes_parse() {
+    assert_eq!(ControlAuth::parse("password"), Some(ControlAuth::Password));
+    assert_eq!(ControlAuth::default(), ControlAuth::Password);
     assert_eq!(ControlAuth::parse("JWT"), Some(ControlAuth::Jwt));
     assert_eq!(ControlAuth::parse("token"), Some(ControlAuth::Token));
     assert_eq!(ControlAuth::parse("open"), Some(ControlAuth::Open));
@@ -512,7 +514,8 @@ async fn hosted_mode_preset() {
         ("RUSTYBIN_LOG_FORMAT", "yaml"),
     ]));
     assert_eq!(w.len(), 3, "{w:?}");
+    // Without any setting: the password sign-in.
     let (c, _) = Config::from_lookup(lookup(&[]));
-    assert_eq!(c.control_auth, ControlAuth::Open);
+    assert_eq!(c.control_auth, ControlAuth::Password);
     assert_eq!(c.log_format, crate::logging::LogFormat::Text);
 }

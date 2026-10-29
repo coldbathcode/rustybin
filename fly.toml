@@ -33,6 +33,9 @@ primary_region = "iad"   # change to your nearest region (e.g. lhr, fra, sjc)
   # Non-root image: ports above 1024.
   RUSTYBIN_HTTP_PORT = "8080"
   RUSTYBIN_HTTPS_PORT = "8443"
+  # The console signs in with rustybin / rustybin until the password is set:
+  # `fly secrets set RUSTYBIN_CONSOLE_PASSWORD=...` (a public instance,
+  # RUSTYBIN_PUBLIC_MODE=true, refuses to start with the default).
 
 # ── Web surface: HTTP + HTTPS (TLS terminated at the edge) ──────────────
 [[services]]

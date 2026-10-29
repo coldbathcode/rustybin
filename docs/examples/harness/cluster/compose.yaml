@@ -21,6 +21,9 @@ x-node: &node
   image: ${RUSTYBIN_IMAGE:-rustybin:harness}
   environment: &node-env
     RUSTYBIN_LOG_LEVEL: ${RUSTYBIN_LOG_LEVEL:-info}
+    # The demo reads the cluster's runs and report without credentials; a
+    # real deployment keeps the default (the password sign-in) or jwt.
+    RUSTYBIN_CONTROL_AUTH: open
     RUSTYBIN_HTTPS_PORT: "0"
     RUSTYBIN_GRPC_PORT: "0"
     RUSTYBIN_HARNESS: "on"

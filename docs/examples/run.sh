@@ -18,7 +18,9 @@
 #                       from a registry file in the temporary directory; +7 HTTP
 #                       of a fifth, normal instance with RUSTYBIN_REQUIRE_KEY; +8 HTTP
 #                       of a sixth, public instance with self-service mocks; +9 HTTP
-#                       of a seventh instance in harness mode, loop-through)
+#                       of a seventh instance in harness mode, loop-through; +10 HTTP
+#                       of an eighth instance with the default control auth, the
+#                       password sign-in)
 #   REQUIRE_ALL_TOOLS=1 fail instead of skipping when grpcurl / websocat / jq are missing (CI)
 set -euo pipefail
 
@@ -34,6 +36,7 @@ SHARED_PORT=$((PORT + 6))
 KEYED_PORT=$((PORT + 7))
 SS_PORT=$((PORT + 8))
 HARNESS_PORT=$((PORT + 9))
+PASSWORD_PORT=$((PORT + 10))
 ADMIN_TOKEN="docs-admin-token"
 SECURED_AUDIENCE="docs-secured"
 SHARED_AUDIENCE="docs-shared"
@@ -56,10 +59,11 @@ TMP="$(mktemp -d)"
 # Run a renamed copy: an unrelated `pkill rustybin` cannot stop it mid-run.
 cp "$RUSTYBIN_BIN" "$TMP/rustybin-docs-examples"
 # The settings below are the ones the documentation assumes (see
-# docs/src/examples.md): an admin token, mTLS header mode, demo TLS files in a
-# temporary directory, a fixed instance id, and OpenAPI mocks from
-# docs/examples/mocks (a rustybin.yaml with an environment variable, and a
-# directory of specs).
+# docs/src/examples.md): an open control plane (the default is the password
+# sign-in, exercised by the eighth instance), an admin token, mTLS header
+# mode, demo TLS files in a temporary directory, a fixed instance id, and
+# OpenAPI mocks from docs/examples/mocks (a rustybin.yaml with an environment
+# variable, and a directory of specs).
 (cd "$TMP" && exec env \
   RUSTYBIN_HTTP_PORT="$PORT" \
   RUSTYBIN_HTTPS_PORT="$HTTPS_PORT" \
@@ -67,6 +71,7 @@ cp "$RUSTYBIN_BIN" "$TMP/rustybin-docs-examples"
   RUSTYBIN_HOST=127.0.0.1 \
   RUSTYBIN_LOG_LEVEL=warn \
   RUSTYBIN_INSTANCE_ID=docs-examples \
+  RUSTYBIN_CONTROL_AUTH=open \
   RUSTYBIN_ADMIN_TOKEN="$ADMIN_TOKEN" \
   RUSTYBIN_MTLS_IN_HEADER=X-Client-Cert \
   RUSTYBIN_TLS_CERT="$TMP/server.crt" \
@@ -87,6 +92,7 @@ mkdir -p "$TMP/plan"
   RUSTYBIN_HOST=127.0.0.1 \
   RUSTYBIN_LOG_LEVEL=warn \
   RUSTYBIN_INSTANCE_ID=docs-plan \
+  RUSTYBIN_CONTROL_AUTH=open \
   RUSTYBIN_ADMIN_TOKEN="$ADMIN_TOKEN" \
   RUSTYBIN_TLS_CERT="$TMP/plan/server.crt" \
   RUSTYBIN_TLS_KEY="$TMP/plan/server.key" \
@@ -154,6 +160,7 @@ mkdir -p "$TMP/keyed"
   RUSTYBIN_HOST=127.0.0.1 \
   RUSTYBIN_LOG_LEVEL=warn \
   RUSTYBIN_INSTANCE_ID=docs-keyed \
+  RUSTYBIN_CONTROL_AUTH=open \
   RUSTYBIN_TLS_CERT="$TMP/keyed/server.crt" \
   RUSTYBIN_TLS_KEY="$TMP/keyed/server.key" \
   RUSTYBIN_REQUIRE_KEY=true \
@@ -161,8 +168,10 @@ mkdir -p "$TMP/keyed"
   "$TMP/rustybin-docs-examples") &
 KEYED_SERVER=$!
 # A sixth, public instance with self-service mocks (docs/src/mocks/self-service.md):
-# the mocks domain mocks.example, 10 minute periods (Extend is open at once),
-# one anonymous visit per session and day, leads written to a file.
+# an open control plane (visitors reach it without credentials; public mode
+# guards global changes with the admin token), the mocks domain mocks.example,
+# 10 minute periods (Extend is open at once), one anonymous visit per session
+# and day, leads written to a file.
 mkdir -p "$TMP/ss"
 (cd "$TMP/ss" && exec env \
   RUSTYBIN_HTTP_PORT="$SS_PORT" \
@@ -171,6 +180,7 @@ mkdir -p "$TMP/ss"
   RUSTYBIN_HOST=127.0.0.1 \
   RUSTYBIN_LOG_LEVEL=warn \
   RUSTYBIN_INSTANCE_ID=docs-self-service \
+  RUSTYBIN_CONTROL_AUTH=open \
   RUSTYBIN_ADMIN_TOKEN="$ADMIN_TOKEN" \
   RUSTYBIN_TLS_CERT="$TMP/ss/server.crt" \
   RUSTYBIN_TLS_KEY="$TMP/ss/server.key" \
@@ -195,6 +205,7 @@ mkdir -p "$TMP/harness"
   RUSTYBIN_HOST=127.0.0.1 \
   RUSTYBIN_LOG_LEVEL=warn \
   RUSTYBIN_INSTANCE_ID=docs-harness \
+  RUSTYBIN_CONTROL_AUTH=open \
   RUSTYBIN_ADMIN_TOKEN="$ADMIN_TOKEN" \
   RUSTYBIN_TLS_CERT="$TMP/harness/server.crt" \
   RUSTYBIN_TLS_KEY="$TMP/harness/server.key" \
@@ -205,7 +216,23 @@ mkdir -p "$TMP/harness"
   RUSTYBIN_HARNESS_THREADS=1 \
   "$TMP/rustybin-docs-examples") &
 HARNESS_SERVER=$!
-ALL_SERVERS=("$SERVER" "$PLAN_SERVER" "$SECURED_SERVER" "$SHARED_SERVER" "$KEYED_SERVER" "$SS_SERVER" "$HARNESS_SERVER")
+# An eighth instance as `docker run` starts it: nothing set, so the control
+# plane and the console sign in with rustybin / rustybin
+# (docs/src/concepts/control-plane-security.md). The examples change the
+# password and sign out, so it has its own state in memory.
+mkdir -p "$TMP/password"
+(cd "$TMP/password" && exec env \
+  RUSTYBIN_HTTP_PORT="$PASSWORD_PORT" \
+  RUSTYBIN_HTTPS_PORT=0 \
+  RUSTYBIN_GRPC_PORT=0 \
+  RUSTYBIN_HOST=127.0.0.1 \
+  RUSTYBIN_LOG_LEVEL=warn \
+  RUSTYBIN_INSTANCE_ID=docs-password \
+  RUSTYBIN_TLS_CERT="$TMP/password/server.crt" \
+  RUSTYBIN_TLS_KEY="$TMP/password/server.key" \
+  "$TMP/rustybin-docs-examples") &
+PASSWORD_SERVER=$!
+ALL_SERVERS=("$SERVER" "$PLAN_SERVER" "$SECURED_SERVER" "$SHARED_SERVER" "$KEYED_SERVER" "$SS_SERVER" "$HARNESS_SERVER" "$PASSWORD_SERVER")
 trap 'kill "${ALL_SERVERS[@]}" 2>/dev/null || true; wait "${ALL_SERVERS[@]}" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 
 BASE="http://127.0.0.1:$PORT"
@@ -215,7 +242,8 @@ SHARED_BASE="http://127.0.0.1:$SHARED_PORT"
 KEYED_BASE="http://127.0.0.1:$KEYED_PORT"
 SS_BASE="http://127.0.0.1:$SS_PORT"
 HARNESS_BASE="http://127.0.0.1:$HARNESS_PORT"
-for url in "$BASE" "$PLAN_BASE" "$SECURED_BASE" "$SHARED_BASE" "$KEYED_BASE" "$SS_BASE" "$HARNESS_BASE"; do
+PASSWORD_BASE="http://127.0.0.1:$PASSWORD_PORT"
+for url in "$BASE" "$PLAN_BASE" "$SECURED_BASE" "$SHARED_BASE" "$KEYED_BASE" "$SS_BASE" "$HARNESS_BASE" "$PASSWORD_BASE"; do
   for _ in $(seq 1 100); do
     curl -fs -o /dev/null "$url/" && break
     sleep 0.1
@@ -283,6 +311,7 @@ if [[ ${#hurl_files[@]} -gt 0 ]]; then
     --variable "revoked_key=$REVOKED_KEY" \
     --variable "key_inspector_token=$KEY_INSPECTOR_TOKEN" \
     --variable "harness_url=$HARNESS_BASE" \
+    --variable "password_url=$PASSWORD_BASE" \
     "${hurl_files[@]}" || status=1
 fi
 

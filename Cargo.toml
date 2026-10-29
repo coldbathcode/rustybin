@@ -82,6 +82,8 @@ libc = "0.2"
 # Settings store (docs/plans/next/step-01-foundations.md): secrets at rest.
 chacha20poly1305 = "0.10"
 zeroize = "1"
+# Console sign-in (docs/plans/next/step-02-console-sign-in.md): argon2id password hashes.
+argon2 = "0.5"
 
 [build-dependencies]
 tonic-build = "0.12"

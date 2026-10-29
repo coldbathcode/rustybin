@@ -50,8 +50,9 @@ curl -s http://localhost:8080/ai/openai/v1/chat/completions \
 curl -si http://localhost:8080/echo -H 'X-Rustybin-Fail: 503'
 ```
 
-Open **<http://localhost:8080/ui>** for the web console, `/` for every endpoint with
-a runnable example, and `/docs` for the OpenAPI reference. See the
+Open **<http://localhost:8080/ui>** for the web console (sign in with
+`rustybin` / `rustybin`, then change it under Management, Sign-in), `/` for every
+endpoint with a runnable example, and `/docs` for the OpenAPI reference. See the
 [quick start](docs/src/quick-start.md) for Docker Compose and Fly.io.
 
 ## Highlights
@@ -125,9 +126,10 @@ forwarded, with gateway headers highlighted), Mock APIs (upload a spec, edit
 responses, toggle mocks and mocked security), Request bins, API explorer, AI
 playground, MCP inspector, A2A client, Chaos and health (with a small load
 generator) and Token lab. It is embedded in the binary and works offline. Set a
-gateway base URL in its settings to send every request through your gateway. With a
-protected control plane it signs in with a token from the URL fragment
-(`/ui/#token=...`) or a sign-in screen.
+gateway base URL in its settings to send every request through your gateway. It
+signs in with the console's user name and password (`rustybin` / `rustybin` until
+changed; `RUSTYBIN_CONTROL_AUTH=open` turns the sign-in off), or with a token from
+the URL fragment (`/ui/#token=...`) on platform-managed instances.
 
 ## Configuration
 
@@ -151,7 +153,8 @@ to the default. `GET /_rustybin/config` shows the effective configuration. Detai
 | `RUSTYBIN_MTLS_IN_HEADER` | unset | Header in which a gateway forwards the client certificate for `/auth/mtls` |
 | `RUSTYBIN_PUBLIC_MODE` | `false` | Hardening for shared instances: lower caps, session-scoped inspector, global mutations need the admin token |
 | `RUSTYBIN_ADMIN_TOKEN` | unset | Required (Bearer or `X-Rustybin-Admin-Token`) for health toggles, global flaky reset and clearing all captured requests |
-| `RUSTYBIN_CONTROL_AUTH` | `open` | Protect `/_rustybin/*` (except `/_rustybin/ready`): `token` (admin token) or `jwt` (admin token or Ed25519 JWT with scope `inspector`, `console` or `admin`) |
+| `RUSTYBIN_CONTROL_AUTH` | `password` | `/_rustybin/*` (except `/_rustybin/ready` and the sign-in) needs a token from `POST /_rustybin/login` with the console's user name and password, the admin token or a control JWT; `open` (no credentials, the default before 0.2), `token` (admin token) or `jwt` (admin token or Ed25519 JWT with scope `inspector`, `console`, `harness` or `admin`) |
+| `RUSTYBIN_CONSOLE_USER` / `_PASSWORD` / `_PASSWORD_HASH` | `rustybin` / `rustybin` / unset | The sign-in credentials; the hash (argon2id PHC) wins over the plain password; a password changed in the console is stored as a hash and wins over both |
 | `RUSTYBIN_CONTROL_OAUTH` | `true` | With `token` / `jwt` control auth: agents sign in to `/_rustybin/mcp` through the browser (RFC 9728 metadata, built-in authorization server at `/_rustybin/oauth`, consent in the console) |
 | `RUSTYBIN_CONTROL_OAUTH_ISSUER` | unset | Name an external authorization server instead (its tokens must be control JWTs) |
 | `RUSTYBIN_CONTROL_OAUTH_KEY` | derived | Secret (32+ characters) signing OAuth client ids and tokens; unset: derived from the admin token, else random per process |
@@ -591,6 +594,12 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET | `/_rustybin/oauth/authorize` | Management MCP sign-in: authorization endpoint (redirects to the console's consent page) |
 | GET POST | `/_rustybin/oauth/requests/{id}` | Management MCP sign-in: a pending request, approved or denied by the console |
 | POST | `/_rustybin/oauth/token` | Management MCP sign-in: token endpoint (authorization code with PKCE, refresh token) |
+| POST | `/_rustybin/login` | Console sign-in: a user name and password for a control token (password mode) |
+| POST | `/_rustybin/logout` | Console sign-out: revoke the presented sign-in token |
+| GET | `/_rustybin/session` | Who the presented credential is: user, scopes, expiry, how it was obtained |
+| GET DELETE | `/_rustybin/sessions` | Sign-in sessions (admin): list them, or DELETE to sign out everywhere |
+| DELETE | `/_rustybin/sessions/{id}` | End one sign-in session (admin) |
+| PUT | `/_rustybin/password` | Change the console user name and password (admin, current password required) |
 | GET DELETE | `/_rustybin/requests` | List captured requests (newest first); DELETE clears them |
 | GET | `/_rustybin/requests/stream` | Live feed of captured requests (SSE) |
 | GET | `/_rustybin/requests/{id}` | One captured request by id |

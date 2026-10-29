@@ -1,7 +1,11 @@
 //! Control-plane authentication (`RUSTYBIN_CONTROL_AUTH`).
 //!
 //! Modes:
-//! - `open` (default): the control plane is reachable without credentials
+//! - `password` (default): the console signs in with a user name and
+//!   password (`crate::login`, `rustybin` / `rustybin` out of the box) for a
+//!   control token; the admin token and Ed25519 control JWTs are accepted
+//!   as in `jwt` mode. `POST /_rustybin/login` is the one open route.
+//! - `open`: the control plane is reachable without credentials
 //!   (individual mutations still follow [`crate::admin::require_admin`]).
 //! - `token`: every `/_rustybin/*` route except `/_rustybin/ready` needs the
 //!   admin token (`Authorization: Bearer` or `X-Rustybin-Admin-Token`).
@@ -58,10 +62,13 @@ const ED25519_SPKI_PREFIX: [u8; 12] = [
 /// `RUSTYBIN_CONTROL_AUTH`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ControlAuth {
-    #[default]
     Open,
     Token,
     Jwt,
+    /// The console's user name and password (`crate::login`), plus the
+    /// admin token and control JWTs. The default since 0.2.
+    #[default]
+    Password,
 }
 
 impl ControlAuth {
@@ -70,6 +77,7 @@ impl ControlAuth {
             "open" | "off" | "none" => Some(Self::Open),
             "token" | "admin" => Some(Self::Token),
             "jwt" => Some(Self::Jwt),
+            "password" => Some(Self::Password),
             _ => None,
         }
     }
@@ -79,8 +87,12 @@ impl ControlAuth {
             Self::Open => "open",
             Self::Token => "token",
             Self::Jwt => "jwt",
+            Self::Password => "password",
         }
     }
+
+    /// Every mode's name, for messages.
+    pub const NAMES: &'static str = "password, open, token or jwt";
 }
 
 /// What an authenticated caller may do on the control plane.
@@ -214,7 +226,10 @@ fn is_inspector_path(path: &str) -> bool {
 
 /// True for the paths [`enforce`] protects when control auth is on.
 pub fn is_protected_path(path: &str) -> bool {
-    under(path, CONTROL_PREFIX) && path != READY_PATH && !crate::control_oauth::is_public_path(path)
+    under(path, CONTROL_PREFIX)
+        && path != READY_PATH
+        && !crate::control_oauth::is_public_path(path)
+        && !crate::login::is_public_path(path)
 }
 
 /// The token a request presents: `X-Rustybin-Admin-Token`, else
@@ -282,6 +297,9 @@ pub enum JwtError {
     Signature,
     Algorithm,
     MissingClaim,
+    /// A sign-in token that was signed out (its id revoked, or issued
+    /// before "sign out everywhere").
+    Revoked,
 }
 
 impl JwtError {
@@ -295,6 +313,7 @@ impl JwtError {
             Self::Signature => "invalid_signature",
             Self::Algorithm => "invalid_algorithm",
             Self::MissingClaim => "missing_claim",
+            Self::Revoked => "revoked",
         }
     }
 }
@@ -305,10 +324,17 @@ pub fn verify_jwt(token: &str, config: &Config) -> Result<Grant, JwtError> {
 }
 
 /// Verify a control-plane JWT and return its grant and claims (shared mode
-/// reads the `rb_key` claim, see `crate::keys`).
+/// reads the `rb_key` claim, see `crate::keys`). In `password` mode a
+/// sign-in token (HS256, `crate::login`) is verified here too, so every
+/// caller of this function accepts it.
 pub fn verify_jwt_claims(token: &str, config: &Config) -> Result<(Grant, Value), JwtError> {
-    if config.control_auth != ControlAuth::Jwt {
-        return Err(JwtError::NotAccepted);
+    match config.control_auth {
+        ControlAuth::Password if crate::login::is_console_token(token) => {
+            let claims = crate::login::verify(token, config)?;
+            return Ok((Grant::from_scope_claim(claims.get("scope")), claims));
+        }
+        ControlAuth::Jwt | ControlAuth::Password => {}
+        ControlAuth::Open | ControlAuth::Token => return Err(JwtError::NotAccepted),
     }
     let Some(key) = config.control_jwt_key.as_ref() else {
         return Err(JwtError::NotAccepted);
@@ -394,6 +420,7 @@ pub fn authorize(
 ) -> Result<Grant, Response> {
     if presented_token(headers).is_none() {
         let hint = match config.control_auth {
+            ControlAuth::Password => "control plane authentication required: sign in with POST /_rustybin/login (user name and password) and send the token as Authorization: Bearer, or send the admin token or a control JWT",
             ControlAuth::Jwt => "control plane authentication required: send Authorization: Bearer <admin token or control JWT>",
             _ => "control plane authentication required: send Authorization: Bearer <admin token> or X-Rustybin-Admin-Token",
         };
@@ -431,8 +458,9 @@ pub fn authorize(
     }
 }
 
-/// Middleware: protects `/_rustybin/*` (except `/_rustybin/ready`) when the
-/// mode is `token` or `jwt`. A no-op in `open` mode.
+/// Middleware: protects `/_rustybin/*` (except `/_rustybin/ready` and the
+/// sign-in routes) when the mode is `password`, `token` or `jwt`. A no-op
+/// in `open` mode.
 pub async fn enforce(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let config = &state.config;
     if config.control_auth == ControlAuth::Open || !is_protected_path(req.uri().path()) {

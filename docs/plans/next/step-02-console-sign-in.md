@@ -1,6 +1,6 @@
 # Step 02: Console sign-in with username and password
 
-Master plan: [master-plan.md](master-plan.md). Status: **not started**. Needs: 01. About 1.5 days.
+Master plan: [master-plan.md](master-plan.md). Status: **done 2026-10-29**. Needs: 01. About 1.5 days.
 
 ## Goal
 
@@ -99,4 +99,66 @@ pushed.
 
 ## Build notes
 
-(filled in when built)
+Built 2026-10-29 in one session. Where the build differs from the design above, and why:
+
+- **One module, `src/login.rs`.** The credentials, the settings specs, the token mint and
+  verification, the revocation state and the seven routes live together; `control_auth.rs`
+  gained the `Password` variant (the `Default`), the open sign-in path and one line in
+  `verify_jwt_claims` that hands HS256 tokens to `login::verify` in password mode. That one
+  line is what makes every existing caller (the enforce layer, `admin_check`, the key layer's
+  redaction, the settings audit principal, the management MCP's grant) accept a sign-in token
+  without changes.
+- **The runtime state lives in `Config`.** `Config.console_tokens: Arc<login::Tokens>` holds
+  the generation, the revoked ids, the listed sessions and the failed attempts. It is not a
+  setting; it is there because every credential check in the code base takes `&Config`
+  (`admin_check` alone has 34 call sites), so a revoked token is refused on the data plane's
+  admin guard too, not only on `/_rustybin/*`. Tests swap in a `Tokens::with_clock(ManualClock)`.
+- **The signing key is the OAuth key's `console` subkey**, not the `jwt` one: the same
+  instance key (`RUSTYBIN_CONTROL_OAUTH_KEY`, else derived from the admin token, else random),
+  a separate HMAC label. A sign-in token is told apart from an OAuth access token by its
+  payload (`rb_use: "console"`, read before verifying), so `control_oauth::authorize_manage`
+  leaves it to control auth on `/_rustybin/mcp`. The audience is `RUSTYBIN_CONTROL_JWT_AUDIENCE`
+  (the instance id by default), so with nothing set a restart signs everyone out; documented.
+- **Precedence of the password**: the stored hash (unless locked), else
+  `RUSTYBIN_CONSOLE_PASSWORD_HASH`, else `RUSTYBIN_CONSOLE_PASSWORD`, else `rustybin`. The
+  hash secret validates as an argon2 PHC string, which needed a one-line addition to the
+  settings store: `Spec.validate` now runs for secrets too. The user name is `console.user`
+  (group `signin`); `default_password` is true when no hash exists and the plain password is
+  absent or literally `rustybin`.
+- **A password change ends every other session.** Instead of leaving older tokens alive,
+  `PUT /_rustybin/password` rotates the generation and mints a fresh token for the caller
+  when it signed in with one (the admin token gets none). The new password must be 8 to 256
+  characters and not the default. `DELETE /_rustybin/settings/console.password_hash` with the
+  admin token is the documented recovery of a forgotten password.
+- **Shared mode keeps `open`** as its default control auth (the key layer authenticates
+  the control plane and the console signs in for a key with `#token=`); the sign-in routes
+  answer 404 there. Hosted mode keeps `jwt`. **Self-service needs `open` on purpose** now,
+  since visitors reach `/_rustybin/mocks/visit*` without credentials: the config warning says
+  so, and the hosted demo's documentation and scripts set it.
+- **The default changed what the checks and CI assume.** The example runner, the console
+  check and the compose cluster set `RUSTYBIN_CONTROL_AUTH=open` on the instances that read
+  the control plane without a token, and each gained a new instance with nothing set
+  (`password_url`, `RUSTYBIN_PASSWORD_URL`). The Docker smoke tests in both workflows now
+  sign in with `rustybin` / `rustybin` and assert the 401 before it and the startup warning.
+- **The sessions list is a convenience, not the truth.** It holds the last 256 issued
+  tokens; revocation by id and the generation are what the verification checks. `GET
+  /_rustybin/sessions` says `current` so the console marks the caller's own row. The
+  management routes use their own admin guard (`credentials_grant` with the admin scope),
+  not `admin::require_admin`, whose open-mode leniency does not apply to them.
+- **Console**: the sign-in screen's password form with Remember me (`localStorage`, dropped
+  when the token expires or on sign out), the token form folded under "Use a token instead",
+  the banner under the top bar, the "signed in as" chip with the expiry, and the Sign-in tab
+  (status, change the password, sessions with End and Sign out everywhere). The tab renders
+  in every mode so the Management check finds a control per registered setting (`console.user`
+  on the user name field, `console.password_hash` on the new password field).
+- **Bounds**: 4096 revoked ids, 256 listed sessions, 1024 client addresses in the attempt
+  table (5 failures per minute, then 60 s doubling to 600 s), 12 h tokens.
+- **Left out**: nothing from the design. The CLI sign-in (`rustybin login <url>`) is step 10's.
+  `lib.rs` sets `recursion_limit = "256"`: `Config::public_view` outgrew the `json!` macro.
+
+Checks run: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (948 tests,
+with `password_sign_in_end_to_end` in `tests/integration.rs`), `docs/examples/run.sh` (every
+example, the new `concepts/login.hurl` on the eighth instance), the console check
+`conformance/ui/run.sh` (the new `password` section: the screen, the banner, the change, sign
+out everywhere, Remember me, the pasted token; and the Sign-in tab on the open instance),
+`mdbook build docs`, `check_includes.py`, `check-no-dashes.sh`.

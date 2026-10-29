@@ -283,6 +283,11 @@ pub fn groups() -> Vec<Group> {
             description: "What the console shows to everyone who opens it.",
         },
         Group {
+            id: "signin",
+            title: "Sign-in",
+            description: "Who may open the console and the control plane (RUSTYBIN_CONTROL_AUTH=password).",
+        },
+        Group {
             id: "egress",
             title: "Outbound connections",
             description: "Where this instance may send requests of its own (AI providers, webhooks, registries, git remotes).",
@@ -326,6 +331,7 @@ fn console_specs() -> Vec<Spec> {
 /// Every registered setting, in group order.
 pub fn specs() -> Vec<Spec> {
     let mut all = console_specs();
+    all.extend(crate::login::specs());
     all.extend(crate::egress::specs());
     all.extend(crate::mocks::leads::specs());
     all
@@ -872,6 +878,11 @@ impl Settings {
                         problems.push(format!("{key}: larger than {MAX_SECRET_BYTES} bytes"));
                     } else if plain.chars().any(|c| c.is_control()) {
                         problems.push(format!("{key}: contains control characters"));
+                    } else if let Some(Err(e)) = spec
+                        .validate
+                        .map(|check| check(&Value::String(plain.clone())))
+                    {
+                        problems.push(format!("{key}: {e}"));
                     } else {
                         match self.secrets.seal(plain.as_bytes()) {
                             Ok(sealed) => {
