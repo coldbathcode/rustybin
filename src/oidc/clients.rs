@@ -320,10 +320,14 @@ pub fn redirect_location(redirect_uri: &str, params: &[(&str, &str)]) -> Option<
 
 // ── Demo users ──────────────────────────────────────────────────────
 
-/// Demo end users for the password grant and the login form.
+/// End users for the password grant and the login form: the demo users below, or the users of
+/// `RUSTYBIN_OIDC_USERS_FILE` (`super::users`), which replace them.
 pub struct DemoUser {
     pub username: &'static str,
+    /// The demo users' plain password; empty for configured users.
     pub password: &'static str,
+    /// A configured user's password hash (`super::users`); `None` for the demo users.
+    pub password_hash: Option<&'static super::users::PasswordHash>,
     pub name: &'static str,
     pub email: &'static str,
     pub groups: &'static [&'static str],
@@ -333,6 +337,7 @@ pub const USERS: &[DemoUser] = &[
     DemoUser {
         username: "demo",
         password: "demo",
+        password_hash: None,
         name: "Demo User",
         email: "demo@rustybin.local",
         groups: &["users"],
@@ -340,6 +345,7 @@ pub const USERS: &[DemoUser] = &[
     DemoUser {
         username: "alice",
         password: "alice",
+        password_hash: None,
         name: "Alice Admin",
         email: "alice@rustybin.local",
         groups: &["users", "admins"],
@@ -347,20 +353,38 @@ pub const USERS: &[DemoUser] = &[
     DemoUser {
         username: "bob",
         password: "bob",
+        password_hash: None,
         name: "Bob Builder",
         email: "bob@rustybin.local",
         groups: &["users"],
     },
 ];
 
-pub fn user_by_name(username: &str) -> Option<&'static DemoUser> {
-    USERS.iter().find(|u| u.username == username)
+impl DemoUser {
+    /// Whether `password` is this user's (constant time; a configured user's hash, else the demo
+    /// password). An empty password never matches.
+    pub fn check_password(&self, password: &str) -> bool {
+        if password.is_empty() {
+            return false;
+        }
+        match self.password_hash {
+            Some(hash) => hash.verify(password),
+            None => constant_time_eq(self.password.as_bytes(), password.as_bytes()),
+        }
+    }
 }
 
-/// The demo user with these credentials (password compared in constant time).
+/// The user signing in with this name: from the users file when one is installed, else a demo user.
+pub fn user_by_name(username: &str) -> Option<&'static DemoUser> {
+    super::users::active()
+        .iter()
+        .find(|u| u.username == username)
+}
+
+/// The user with these credentials (password compared in constant time).
 pub fn authenticate_user(username: &str, password: &str) -> Option<&'static DemoUser> {
     let user = user_by_name(username)?;
-    constant_time_eq(user.password.as_bytes(), password.as_bytes()).then_some(user)
+    user.check_password(password).then_some(user)
 }
 
 #[cfg(test)]

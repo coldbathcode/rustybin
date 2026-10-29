@@ -121,6 +121,14 @@ pub async fn run(config: Config) -> Result<(), Error> {
 /// `RUSTYBIN_HARNESS_EXIT`: 0 when the thresholds pass, 1 when they fail,
 /// 2 on an error).
 pub async fn run_with_exit(config: Config) -> Result<u8, Error> {
+    if let Some(path) = &config.oidc_users_file {
+        let n = crate::oidc::users::install_file(path)
+            .map_err(|e| format!("RUSTYBIN_OIDC_USERS_FILE: {e}"))?;
+        tracing::info!(
+            "OIDC provider: {n} configured users from {} (demo users off)",
+            path.display()
+        );
+    }
     let certs = Arc::new(crate::cert_state::CertState::for_config(&config));
     let jwt = Arc::new(crate::jwt_state::JwtState::generate());
     let state = AppState::from_parts(config, jwt, certs);

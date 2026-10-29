@@ -4,6 +4,10 @@
 
 The build of [Rustybin 0.2](../plans/next/master-plan.md), step by step.
 
+- **Your own OIDC users.** `RUSTYBIN_OIDC_USERS_FILE` replaces the built-in provider's demo users
+  with users of your own (PBKDF2-HMAC-SHA256 password hashes from the new
+  `rustybin oidc-hash-password`), so the provider can guard something real; the login page stops
+  listing the demo passwords. An invalid file stops the server.
 - **Foundations** (step 01). One state directory, `RUSTYBIN_STATE_DIR`: settings,
   the secrets key, and the defaults of the mocks and harness state directories.
   Instance settings at `GET`, `PATCH /_rustybin/settings` and `DELETE

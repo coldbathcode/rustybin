@@ -98,6 +98,9 @@ pub struct Config {
     pub require_key: bool,
     /// Key registry file (`RUSTYBIN_KEYS_FILE`), reloaded when it changes.
     pub keys_file: Option<PathBuf>,
+    /// Users of the built-in OIDC provider (`RUSTYBIN_OIDC_USERS_FILE`): they replace the demo
+    /// users. Read once at start; an unreadable or invalid file stops the server (`oidc::users`).
+    pub oidc_users_file: Option<PathBuf>,
     /// Key registry URL (`RUSTYBIN_KEYS_URL`), polled.
     pub keys_url: Option<String>,
     /// Bearer token sent to the registry URL (`RUSTYBIN_KEYS_TOKEN`). Never exposed.
@@ -739,6 +742,7 @@ impl Config {
             shared_mode,
             require_key,
             keys_file,
+            oidc_users_file: get("RUSTYBIN_OIDC_USERS_FILE").map(PathBuf::from),
             keys_url,
             keys_token: get("RUSTYBIN_KEYS_TOKEN"),
             keys_poll_secs: parse_or(
@@ -819,6 +823,7 @@ impl Config {
             shared_mode: false,
             require_key: false,
             keys_file: None,
+            oidc_users_file: None,
             keys_url: None,
             keys_token: None,
             keys_poll_secs: DEFAULT_KEYS_POLL_SECS,

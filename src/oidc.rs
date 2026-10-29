@@ -18,6 +18,7 @@
 
 pub mod clients;
 pub(crate) mod store;
+pub mod users;
 
 use axum::{
     body::Bytes,
@@ -1137,12 +1138,18 @@ fn login_page(req: &AuthzRequest, error: Option<&str>, username: &str) -> Respon
              <button type=\"submit\" name=\"action\" value=\"approve\">Authorize</button>\
              <button type=\"submit\" name=\"action\" value=\"deny\">Deny</button>\
              </form>\
-             <p class=\"meta\">Demo users: demo / demo, alice / alice, bob / bob.</p>\
+             {demo_hint}\
              </body></html>",
             client = e(&req.client.client_id),
             name = e(&req.client.name),
             scope = e(&req.scope),
             username = e(username),
+            // Configured users (RUSTYBIN_OIDC_USERS_FILE) replace the demo users: no hint then.
+            demo_hint = if users::demo_active() {
+                "<p class=\"meta\">Demo users: demo / demo, alice / alice, bob / bob.</p>"
+            } else {
+                ""
+            },
         ),
     )
 }

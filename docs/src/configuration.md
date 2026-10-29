@@ -79,6 +79,14 @@ does not require one; when one is presented it must chain to the demo CA.
 | `RUSTYBIN_CORS_ORIGINS` | `*` | Allowed CORS origins, comma separated. `off` or an empty value removes the CORS layer entirely, so a gateway's own CORS plugin can be demonstrated. |
 | `RUSTYBIN_INSPECTOR_CAPACITY` | `500` | Requests kept by the [request inspector](concepts/inspector.md) ring buffer (1 to 10000). |
 
+## OIDC provider
+
+The built-in provider ([OIDC reference](reference/oidc.md)).
+
+| Variable | Default | Description |
+|---|---|---|
+| `RUSTYBIN_OIDC_USERS_FILE` | unset | Users file (JSON) of the built-in OIDC provider: its users replace the demo users, which can no longer sign in ([Your own users](reference/oidc.md#your-own-users)). Passwords are PBKDF2 hashes from `rustybin oidc-hash-password`. Read at start; an invalid file stops the server. |
+
 ## Control plane and console
 
 See [Control-plane security, metrics and operations](concepts/control-plane-security.md).

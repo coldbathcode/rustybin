@@ -48,6 +48,34 @@ registered clients must use one of their registered redirect URIs exactly.
 | `alice` | `alice` | Alice Admin | alice@rustybin.local | users, admins |
 | `bob` | `bob` | Bob Builder | bob@rustybin.local | users |
 
+### Your own users
+
+The demo users are for demos: anyone who reads this page can sign in as them. To put the
+provider in front of something real (a staging portal, a team's tools), give it a users file
+with `RUSTYBIN_OIDC_USERS_FILE`. Its users replace the demo users, which then cannot sign in,
+and the login page no longer lists them.
+
+Hash each password with `rustybin oidc-hash-password` (it reads the password from stdin, at least
+12 characters, and prints a PBKDF2-HMAC-SHA256 hash with 600,000 iterations and a random salt):
+
+```bash
+printf '%s\n' 'a long password' | rustybin oidc-hash-password
+```
+
+```json
+{"users": [
+  {"username": "oli", "password_hash": "pbkdf2-sha256$600000$<salt>$<hash>",
+   "email": "oli@example.com", "name": "Oli", "groups": ["users", "admins"]}
+]}
+```
+
+`username` (1 to 64 of `A-Z a-z 0-9 . _ - @`), `password_hash` and `email` are required; `name`
+defaults to the username and `groups` to `["users"]`. The file is read once at start; a file that
+cannot be read or does not validate (no users, a duplicate username, a hash under 100,000
+iterations) stops the server rather than falling back to the demo users. The demo clients stay:
+`rustybin-public` signs your users in with the authorization code flow, and the password grant
+needs the confidential client.
+
 ## Tokens
 
 Access tokens are RS256 JWTs (`typ: at+jwt`) valid for one hour with `iss`, `sub`,
