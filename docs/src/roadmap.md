@@ -6,7 +6,8 @@ the pages for the features that exist today describe current behaviour.
 ## Next
 
 **Rustybin 0.2, the AI-assisted mocking service** (`docs/plans/next/master-plan.md`, planned
-2026-10-29, nothing built yet): the console locked with a username and password out of the
+2026-10-29; step 01, the foundations, landed the same day: the settings store with secrets at
+rest, the egress policy and the console's Management view): the console locked with a username and password out of the
 box; bring your own AI key (Anthropic, OpenAI, Gemini or any OpenAI-compatible endpoint) and an
 AI-first console that writes mock specs from a description, fills in missing example payloads
 and edits specs on request; an MCP inspector for any server with every auth mode, a relay and

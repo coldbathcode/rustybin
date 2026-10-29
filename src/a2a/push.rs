@@ -10,6 +10,11 @@
 //! - `RUSTYBIN_A2A_PUSH_ALLOW_ALL=true` accepts any http(s) URL, including
 //!   localhost and private addresses, but never in public mode.
 //! - Everything else is rejected.
+//!
+//! Delivery goes through the egress policy (`crate::egress`,
+//! `Purpose::A2aPush`): the same list is the purpose's rule, the host is
+//! resolved and pinned per delivery, and the always-forbidden addresses
+//! (link-local, cloud metadata) are refused even with `ALLOW_ALL`.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -19,6 +24,7 @@ use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 
 use super::model::PushConfig;
+use crate::egress::{Egress, Purpose};
 
 /// Maximum concurrent outbound deliveries (extra notifications are dropped).
 const MAX_INFLIGHT: usize = 32;
@@ -56,25 +62,16 @@ fn sink_id_from_path(path: &str) -> Option<String> {
 }
 
 impl PushPolicy {
-    pub fn from_env(public_mode: bool) -> Self {
-        let allowlist = std::env::var("RUSTYBIN_A2A_PUSH_ALLOWLIST")
-            .unwrap_or_default()
-            .split(',')
-            .map(|s| s.trim().to_ascii_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect();
-        let allow_all = std::env::var("RUSTYBIN_A2A_PUSH_ALLOW_ALL")
-            .map(|v| {
-                matches!(
-                    v.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            })
-            .unwrap_or(false);
+    /// From `RUSTYBIN_A2A_PUSH_ALLOWLIST` and `RUSTYBIN_A2A_PUSH_ALLOW_ALL`.
+    pub fn from_config(config: &crate::config::Config) -> Self {
         Self {
-            allowlist,
-            allow_all,
-            public_mode,
+            allowlist: config
+                .a2a_push_allowlist
+                .iter()
+                .map(|s| s.to_ascii_lowercase())
+                .collect(),
+            allow_all: config.a2a_push_allow_all,
+            public_mode: config.public_mode,
         }
     }
 
@@ -207,46 +204,23 @@ impl WebhookSink {
 // ── Delivery ────────────────────────────────────────────────────────
 
 /// rustls client configuration (aws-lc-rs provider, Mozilla roots).
-/// HTTPS client configuration (public web roots, explicit crypto provider);
-/// also used by the key registry client (`crate::keys`).
-pub(crate) fn tls_config() -> Result<rustls::ClientConfig, rustls::Error> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    Ok(rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()?
-    .with_root_certificates(roots)
-    .with_no_client_auth())
-}
+/// HTTPS client configuration (public web roots, explicit crypto provider),
+/// kept here for the modules that build their own clients.
+pub(crate) use crate::egress::tls_config;
 
 pub struct PushService {
     pub policy: PushPolicy,
     pub sink: Arc<WebhookSink>,
-    client: Option<reqwest::Client>,
+    egress: Arc<Egress>,
     permits: Arc<Semaphore>,
 }
 
 impl PushService {
-    pub fn new(policy: PushPolicy, sink: Arc<WebhookSink>) -> Self {
-        // TLS with an explicit provider: the process may have several rustls
-        // providers compiled in, so never rely on a process-wide default.
-        let mut builder = reqwest::Client::builder();
-        match tls_config() {
-            Ok(tls) => builder = builder.use_preconfigured_tls(tls),
-            Err(e) => tracing::warn!("A2A push: https webhooks unavailable ({e})"),
-        }
-        let client = builder
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(DELIVERY_TIMEOUT)
-            .user_agent(concat!("rustybin-a2a/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|e| tracing::warn!("A2A push client unavailable: {e}"))
-            .ok();
+    pub fn new(policy: PushPolicy, sink: Arc<WebhookSink>, egress: Arc<Egress>) -> Self {
         Self {
             policy,
             sink,
-            client,
+            egress,
             permits: Arc::new(Semaphore::new(MAX_INFLIGHT)),
         }
     }
@@ -276,17 +250,31 @@ impl PushService {
                 .record(id, Value::Object(h), payload, "in-process push");
             return;
         }
-        let Some(client) = self.client.clone() else {
-            return;
-        };
         let Ok(permit) = self.permits.clone().try_acquire_owned() else {
             tracing::warn!(task_id = %cfg.task_id, "A2A push dropped: too many deliveries in flight");
             return;
         };
         let url = cfg.url.clone();
         let task_id = cfg.task_id.clone();
+        let egress = self.egress.clone();
         tokio::spawn(async move {
             let _permit = permit;
+            // Resolved and pinned per delivery: the policy may have changed,
+            // and a name must not be re-resolved by the connector later.
+            let pinned = match egress.resolve(&url, Purpose::A2aPush).await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(%task_id, "A2A push not sent: {e}");
+                    return;
+                }
+            };
+            let client = match egress.client(&pinned, DELIVERY_TIMEOUT) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(%task_id, "A2A push client unavailable: {e}");
+                    return;
+                }
+            };
             let mut req = client.post(&url).body(payload.to_string());
             for (k, v) in headers {
                 req = req.header(k, v);
@@ -377,8 +365,26 @@ mod tests {
         let svc = PushService::new(
             policy(),
             Arc::new(WebhookSink::new(1, 1, Duration::from_secs(1))),
+            Egress::for_tests(),
         );
-        assert!(svc.client.is_some());
+        let pinned = crate::egress::Pinned {
+            url: "https://hooks.example.com/a2a".into(),
+            target: crate::egress::parse_target_url("https://hooks.example.com/a2a")
+                .expect("target"),
+            addrs: vec!["192.0.2.1:443".parse().expect("addr")],
+        };
+        assert!(svc.egress.client(&pinned, DELIVERY_TIMEOUT).is_ok());
+    }
+
+    #[test]
+    fn policy_from_config() {
+        let mut config = crate::config::Config::for_tests();
+        config.a2a_push_allowlist = vec!["Hooks.Example.com".into()];
+        config.a2a_push_allow_all = true;
+        let p = PushPolicy::from_config(&config);
+        assert_eq!(p.allowlist, vec!["hooks.example.com"]);
+        assert!(p.allow_all);
+        assert!(!p.public_mode);
     }
 
     #[test]

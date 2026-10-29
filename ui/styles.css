@@ -611,3 +611,22 @@ dialog.small-dialog { width: min(520px, calc(100vw - 24px)); }
 .rule-preview { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--border); }
 .op-hits { color: var(--text-2); }
 .data-col > summary { gap: 8px; }
+
+/* Management: a rail of tabs down the left (horizontal on phones) */
+.rail-layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 18px; align-items: start; }
+.rail { display: flex; flex-direction: column; gap: 2px; position: sticky; top: 0; }
+.rail button { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: 0; background: none; border-radius: var(--radius-sm); color: var(--text-2); font: 550 14px var(--font); cursor: pointer; text-align: left; }
+.rail button svg { width: 18px; height: 18px; flex: none; }
+.rail button:hover { background: var(--surface-3); color: var(--text); }
+.rail button[aria-selected="true"] { background: var(--accent-soft); color: var(--accent); }
+.rail-panel { min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+.section-title { font-size: 13px; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: .04em; margin: 14px 0 8px; }
+.inline-icon { display: inline-flex; align-items: center; gap: 4px; }
+.inline-icon svg { width: 14px; height: 14px; flex: none; }
+.secret-status { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.secret-status .badge svg { width: 12px; height: 12px; }
+@media (max-width: 860px) {
+  .rail-layout { grid-template-columns: minmax(0, 1fr); }
+  .rail { flex-direction: row; overflow-x: auto; position: static; }
+  .rail button { white-space: nowrap; }
+}

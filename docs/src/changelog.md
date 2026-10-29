@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+The build of [Rustybin 0.2](../plans/next/master-plan.md), step by step.
+
+- **Foundations** (step 01). One state directory, `RUSTYBIN_STATE_DIR`: settings,
+  the secrets key, and the defaults of the mocks and harness state directories.
+  Instance settings at `GET`, `PATCH /_rustybin/settings` and `DELETE
+  /_rustybin/settings/{key}` (admin): dotted keys with a schema, seeded by their
+  environment variables and overridden by what is saved; `RUSTYBIN_SETTINGS_LOCK`
+  makes the environment authoritative. Secrets sealed at rest with
+  ChaCha20-Poly1305 (`RUSTYBIN_SECRETS_KEY` or a generated `secrets.key`), returned
+  only as `{set, hint}`, audited without values. One egress policy for every
+  outbound call (`src/egress.rs`): `RUSTYBIN_EGRESS_ALLOW` and
+  `RUSTYBIN_EGRESS_ALLOW_LOOPBACK` plus a rule per feature, pinned addresses,
+  always-refused ranges, `GET /_rustybin/egress` with the last 100 decisions; A2A
+  push notifications, the leads webhook and the key registry URL now resolve
+  through it (their variables and semantics are unchanged, except that
+  `RUSTYBIN_A2A_PUSH_ALLOW_ALL` no longer reaches link-local or cloud metadata
+  addresses). The console title and back link are the settings `console.title` and
+  `console.backlink`; the leads webhook token is the secret `leads.webhook_token`.
+  The console's settings dialog is replaced by the **Management** view (the gear
+  opens it): General (console settings, this browser, the agent panel) and Network
+  (the policy, each feature's rule, the decisions, the leads token), with forms
+  generated from the settings schema.
+
 ## 0.1.0 (2026-10-29): the AI and agent gateway upgrade
 
 A broad rework of Rustybin, from an httpbin-style echo service into an upstream for

@@ -1,6 +1,6 @@
 # Step 01: Foundations: settings store, secrets, egress policy, Management area
 
-Master plan: [master-plan.md](master-plan.md). Status: **not started**. Needs: nothing. About 2 days.
+Master plan: [master-plan.md](master-plan.md). Status: **done 2026-10-29**. Needs: nothing. About 2 days.
 
 ## Goal
 
@@ -139,4 +139,57 @@ pass; committed and pushed.
 
 ## Build notes
 
-(filled in when built)
+Built 2026-10-29 in one session. Where the build differs from the design above, and why:
+
+- **Specs carry a seed function, not a variable name.** `Spec.env` names the variable for the
+  API and the console, and `Spec.seed: fn(&Config) -> Option<Value>` reads the already-parsed
+  configuration field, so a setting is validated once (in `config.rs`) and tests build a store
+  from a `Config` without touching the process environment. A `Spec.validate` hook adds a check
+  beyond the kind (the egress allowlist grammar).
+- **Secrets this step registers: one.** `leads.webhook_token` (seeded by
+  `RUSTYBIN_LEADS_WEBHOOK_TOKEN`) is the first production secret, so the sealing, the hint, the
+  Replace and Clear controls and the browser check have something real to exercise. The leads
+  delivery reads it from the store at post time. The AI key and the git token come with their
+  steps. The hint is given only for secrets of eight characters or more.
+- **A rotated secrets key.** Rather than a stored key fingerprint, every stored secret is opened
+  once at startup; the ones that fail are listed in `unreadable_secrets`, logged once, and the
+  environment seed is used meanwhile. Setting the secret again clears the flag.
+- **Console title and back link are settings.** `console.title` and `console.backlink` (seeded by
+  `RUSTYBIN_CONSOLE_TITLE` and `RUSTYBIN_CONSOLE_BACKLINK`) are read by the console's `<meta>`
+  tags and `/_rustybin/status` from the store, so the General tab's "Console" card changes
+  what everyone sees. Everything else in General (session, gateway URL, admin token, theme) is
+  browser-side as before, in a "This browser" card, with the agent panel below.
+- **The rail has two tabs.** General and Network. The later tabs (Sign-in, AI, Portal, Agents,
+  Source control, Export) are not rendered as empty placeholders; `TABS` in `ui/views/manage.js`
+  is the array they append to, and `settingsForm(doc, group)` renders a group's card.
+- **Egress: `resolve` then `client`.** `Egress::resolve(url, purpose)` parses, checks the merged
+  list (the global `egress.allow` plus the purpose's `Rule`), resolves and pins; `Egress::client
+  (&pinned, timeout)` builds a reqwest client whose connector resolves the host to the pinned
+  addresses only, with no redirects and the public TLS roots (`egress::tls_config`, which
+  `a2a::push::tls_config` re-exports for the modules that build their own clients: the harness
+  join, the mocks CLI, `mcp-stdio`). Callers resolve per delivery or poll, so a list change
+  applies at once and a name is never re-resolved by the connector. A `Rule` has `any` (the
+  A2A `ALLOW_ALL`, never in public mode) and `loopback` (the three legacy purposes keep reaching
+  loopback when their own list names it); the new purposes follow `egress.allow_loopback`.
+- **`Purpose::Verify` was dropped.** The harness keeps its own allowlist and verification
+  (`safety::pin` is a one-line wrapper over `egress::pin_with` naming
+  `RUSTYBIN_HARNESS_TARGETS`), so no purpose is needed for it. `safety.rs` keeps the kill switch,
+  the lease and the join-URL check, and re-exports the moved items.
+- **A2A push behaviour changed in one way.** `RUSTYBIN_A2A_PUSH_ALLOW_ALL` no longer reaches
+  link-local or cloud metadata addresses (the policy's always-refused list applies). The
+  allowlist variables moved into `Config` (`a2a_push_allowlist`, `a2a_push_allow_all`) and
+  `PushPolicy::from_config` replaces `from_env`.
+- **`admin_check` answers 403 to a valid control JWT without the admin scope** (401 before).
+  The Management view calls admin-only routes, and a 401 on a control URL signs the console out;
+  an authenticated caller that is not allowed is a 403. One control-auth test changed with it.
+- **Egress decisions keep the origin only** (`scheme://host:port`), never the path or query:
+  a webhook or registry URL may carry a token.
+- **Bounds**: 256 keys, 64 KiB per value, 64 secrets, 4 KiB per secret, 100 decisions.
+- **Left out**: nothing from the design. The CLI and MCP notes stand for steps 10 and 11.
+
+Checks run: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (935 tests),
+`docs/examples/run.sh` (the settings, control and console examples), the console check
+`conformance/ui/run.sh` (a new Management step: every registered setting has a control, the
+secret shows "ends in" and never its value, the allowlist is validated and shown in the policy
+card, the console title reaches the header after a reload), `mdbook build docs`,
+`check_includes.py`, `check-no-dashes.sh`.

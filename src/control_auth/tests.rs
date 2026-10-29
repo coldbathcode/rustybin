@@ -414,10 +414,12 @@ async fn jwt_mode_without_key_accepts_only_the_admin_token() {
 async fn admin_scope_jwt_passes_require_admin_on_the_data_plane() {
     let state = test_state_with(jwt_config());
     let app = test_app_with(state.clone());
+    // A valid token without the scope is authenticated, not allowed: 403,
+    // never a 401 that would sign the console out.
     let console = control_jwt(Some("console"));
     assert_eq!(
         status_of(&app, "POST", "/health/unhealthy", Some(&console)).await,
-        StatusCode::UNAUTHORIZED
+        StatusCode::FORBIDDEN
     );
     assert!(state.health.is_healthy());
     let admin = control_jwt(Some("admin"));

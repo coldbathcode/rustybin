@@ -79,6 +79,9 @@ hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1", "
 tokio-rustls = "0.26"
 hdrhistogram = { version = "7.5", default-features = false }
 libc = "0.2"
+# Settings store (docs/plans/next/step-01-foundations.md): secrets at rest.
+chacha20poly1305 = "0.10"
+zeroize = "1"
 
 [build-dependencies]
 tonic-build = "0.12"

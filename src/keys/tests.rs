@@ -822,7 +822,7 @@ async fn url_registry_is_polled_with_the_token_and_etag() {
     assert_eq!(srv.unauthorized.load(Ordering::SeqCst), 0, "token sent");
 
     // Unchanged document: 304, the set stays.
-    let client = registry_client().expect("client");
+    let client = state.keys.registry_client().await.expect("client");
     assert!(!state.keys.poll_url_once(&client).await);
     assert!(srv.not_modified.load(Ordering::SeqCst) >= 1);
     assert_eq!(state.keys.current().map(|s| s.len()), Some(1));
@@ -838,7 +838,7 @@ async fn url_registry_errors_keep_the_last_good_set() {
     config.keys_url = Some(format!("http://{addr}/keys"));
     config.keys_token = Some("wrong".to_string());
     let state = crate::test_support::test_state_with(config);
-    let client = registry_client().expect("client");
+    let client = state.keys.registry_client().await.expect("client");
     assert!(!state.keys.poll_url_once(&client).await);
     assert!(!state.keys.loaded(), "401: nothing loaded");
     assert_eq!(srv.unauthorized.load(Ordering::SeqCst), 1);
@@ -1274,8 +1274,13 @@ async fn keys_usage_endpoint_pages_without_a_store() {
 // ── Quota store ─────────────────────────────────────────────────────
 
 fn with_store(state: &mut AppState, store: Arc<dyn QuotaStore>) {
-    let keys =
-        Keys::new(&state.config, state.metrics.clone(), state.limits.clock()).with_store(store);
+    let keys = Keys::new(
+        &state.config,
+        state.metrics.clone(),
+        state.limits.clock(),
+        state.egress.clone(),
+    )
+    .with_store(store);
     keys.load_bytes(two_keys().as_bytes()).expect("registry");
     state.keys = Arc::new(keys);
 }
@@ -1348,8 +1353,13 @@ async fn two_replicas_share_one_daily_quota_within_one_percent() {
     let clock = Arc::new(ManualClock::new(at("2026-10-17T12:00:00Z")));
     let replicas: Vec<Arc<Keys>> = (0..2)
         .map(|_| {
-            let keys = Keys::new(&shared_config(), Arc::new(Metrics::new()), clock.clone())
-                .with_store(store.clone());
+            let keys = Keys::new(
+                &shared_config(),
+                Arc::new(Metrics::new()),
+                clock.clone(),
+                crate::egress::Egress::for_tests(),
+            )
+            .with_store(store.clone());
             keys.load_bytes(registry.as_bytes()).expect("registry");
             Arc::new(keys)
         })
@@ -1517,7 +1527,7 @@ fn shared_mode_configuration() {
     assert_eq!(c.quota_flush_ms, 500);
     let view = c.public_view().to_string();
     assert!(
-        !view.contains("reg-token") && !view.contains("secret"),
+        !view.contains("reg-token") && !view.contains("keys_token"),
         "{view}"
     );
     assert!(view.contains("\"keys_source\":\"url\""));

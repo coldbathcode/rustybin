@@ -161,6 +161,28 @@ RUSTYBIN_CONSOLE_BACKLINK=https://portal.example.com/instances/acme
 RUSTYBIN_USAGE_FILE=/app/certs/usage.json       # on the writable volume
 ```
 
+## Settings and secrets at rest
+
+The instance settings (`/_rustybin/settings`, the console's Management view) hold
+values that override environment variables and, for a few keys, secrets. With
+`RUSTYBIN_STATE_DIR` they persist in `<dir>/settings.json` (mode `0600`, written
+atomically); secrets are sealed with ChaCha20-Poly1305 under the key in
+`RUSTYBIN_SECRETS_KEY` or `<dir>/secrets.key` (generated once, mode `0600`), so the
+file never holds a secret in the clear. The API returns a secret as `set` plus a
+four-character hint, never as its value; changes are audited on the
+`rustybin::settings` target with the key and the principal (the `sub` of a control
+JWT, the admin token, or `open`), never the value. `RUSTYBIN_SETTINGS_LOCK=true`
+makes the environment authoritative for instances a platform or a configuration
+repository manages. Reads and writes need the admin token or the `admin` scope:
+
+```hurl
+{{#include ../../examples/concepts/settings.hurl:admin}}
+```
+
+Everything the instance sends of its own goes through the [egress
+policy](../configuration.md#outbound-connections): an allowlist, pinned addresses,
+always-refused ranges and an audited decision per call.
+
 ## Readiness
 
 `GET /_rustybin/ready` answers `200 {"status": "ready"}` whenever the process serves
@@ -268,14 +290,15 @@ carries), so log lines join with gateway logs on the request id:
 ## Containers
 
 The Docker image runs as an unprivileged user (uid and gid `10001`) and works with a
-read-only root filesystem. Rustybin writes only two things: the demo PKI next to
-`RUSTYBIN_TLS_CERT` (default `/app/certs`) and the optional `RUSTYBIN_USAGE_FILE`.
-Put both on a writable volume:
+read-only root filesystem. Rustybin writes only three things: the demo PKI next to
+`RUSTYBIN_TLS_CERT` (default `/app/certs`), the optional `RUSTYBIN_USAGE_FILE`, and
+the optional `RUSTYBIN_STATE_DIR` (settings, secrets, saved mocks and scenarios).
+Put them on a writable volume:
 
 ```bash
 docker run -d --read-only --cap-drop ALL --security-opt no-new-privileges \
-  -v rustybin-certs:/app/certs \
-  -e RUSTYBIN_USAGE_FILE=/app/certs/usage.json \
+  -v rustybin-certs:/app/certs -v rustybin-state:/app/state \
+  -e RUSTYBIN_USAGE_FILE=/app/certs/usage.json -e RUSTYBIN_STATE_DIR=/app/state \
   -p 8080:80 -p 8443:443 -p 50051:50051 rustybin
 ```
 

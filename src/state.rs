@@ -13,6 +13,7 @@ use std::sync::{Arc, OnceLock};
 
 use crate::cert_state::CertState;
 use crate::config::Config;
+use crate::egress::Egress;
 use crate::health::HealthState;
 use crate::identity::IdentityState;
 use crate::inspector::Inspector;
@@ -21,11 +22,19 @@ use crate::keys::Keys;
 use crate::limits::{Clock, Limiter, SystemClock};
 use crate::metrics::Metrics;
 use crate::mocks::store::MockStore;
+use crate::settings::Settings;
 
 #[derive(Clone)]
 pub struct AppState {
     /// Effective configuration.
     pub config: Arc<Config>,
+    /// The instance settings store (`/_rustybin/settings`): persisted
+    /// values and sealed secrets, env-seeded, read by the console, the
+    /// egress policy and every feature with a registered key.
+    pub settings: Arc<Settings>,
+    /// The outbound connection policy every feature that reaches out
+    /// resolves through (`/_rustybin/egress`).
+    pub egress: Arc<Egress>,
     /// HS256 secret and RS256 key pair (JWT + OIDC modules).
     pub jwt: Arc<JwtState>,
     /// Demo PKI (mTLS module, HTTPS listener).
@@ -105,11 +114,18 @@ impl AppState {
             config.shared_mode,
         );
         let metrics = Arc::new(Metrics::new());
+        let settings = Arc::new(Settings::new(&config));
+        let egress = Arc::new(Egress::new(&config, settings.clone()));
         let limits = Arc::new(
             Limiter::with_clock(config.limits.clone(), clock.clone()).with_metrics(metrics.clone()),
         );
-        let keys = Arc::new(Keys::new(&config, metrics.clone(), clock.clone()));
-        let mocks = crate::mocks::new_store_with(&config, clock, metrics.clone());
+        let keys = Arc::new(Keys::new(
+            &config,
+            metrics.clone(),
+            clock.clone(),
+            egress.clone(),
+        ));
+        let mocks = crate::mocks::new_store_with(&config, clock, metrics.clone(), egress.clone());
         let health = Arc::new(HealthState::new());
         let harness = crate::harness::Harness::new(&config, Some(metrics.clone()));
         if let Some(h) = &harness {
@@ -123,6 +139,8 @@ impl AppState {
             keys,
             limits,
             config: Arc::new(config),
+            settings,
+            egress,
             jwt,
             certs,
             identity: Arc::new(IdentityState::new()),
@@ -139,6 +157,18 @@ impl AppState {
 impl FromRef<AppState> for Arc<Config> {
     fn from_ref(state: &AppState) -> Self {
         state.config.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<Settings> {
+    fn from_ref(state: &AppState) -> Self {
+        state.settings.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<Egress> {
+    fn from_ref(state: &AppState) -> Self {
+        state.egress.clone()
     }
 }
 

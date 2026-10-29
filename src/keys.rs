@@ -162,6 +162,8 @@ pub struct Keys {
     /// The last registry check failed (warn on transitions only).
     failing: AtomicBool,
     store_up: AtomicBool,
+    /// The registry URL is resolved through the policy (`Purpose::KeyRegistry`).
+    egress: Arc<crate::egress::Egress>,
 }
 
 impl std::fmt::Debug for Keys {
@@ -183,7 +185,12 @@ fn source_kind(s: &KeySource) -> &'static str {
 impl Keys {
     /// Build the key state from the configuration. A registry file is read
     /// at once; a URL is fetched by [`Keys::registry_loop`].
-    pub fn new(config: &Config, metrics: Arc<Metrics>, clock: Arc<dyn Clock>) -> Self {
+    pub fn new(
+        config: &Config,
+        metrics: Arc<Metrics>,
+        clock: Arc<dyn Clock>,
+        egress: Arc<crate::egress::Egress>,
+    ) -> Self {
         let mode = if config.shared_mode {
             KeyMode::Shared
         } else if config.require_key {
@@ -224,6 +231,7 @@ impl Keys {
             etag: Mutex::new(None),
             failing: AtomicBool::new(false),
             store_up: AtomicBool::new(false),
+            egress,
         };
         if keys.enabled() {
             keys.metrics.set_keys_active(0);
@@ -477,20 +485,20 @@ impl Keys {
                 }
             },
             Some(KeySource::Url { .. }) => {
-                let client = match registry_client() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::warn!("key registry client unavailable: {e}");
-                        return;
-                    }
-                };
                 let mut delay = Duration::ZERO;
                 loop {
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {}
                         _ = &mut shutdown => return,
                     }
-                    self.poll_url_once(&client).await;
+                    // Resolved and pinned for every poll: the policy may
+                    // change, and the name is never re-resolved mid-fetch.
+                    match self.registry_client().await {
+                        Ok(client) => {
+                            self.poll_url_once(&client).await;
+                        }
+                        Err(e) => self.mark_failed(&e),
+                    }
                     // Retry sooner while nothing was ever loaded.
                     delay = if self.loaded() {
                         self.poll
@@ -611,18 +619,19 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn registry_client() -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder();
-    match crate::a2a::push::tls_config() {
-        Ok(tls) => builder = builder.use_preconfigured_tls(tls),
-        Err(e) => tracing::warn!("key registry: https unavailable ({e})"),
+impl Keys {
+    /// The client for the registry URL, pinned by the egress policy.
+    pub async fn registry_client(&self) -> Result<reqwest::Client, String> {
+        let Some(KeySource::Url { url, .. }) = &self.source else {
+            return Err("no registry URL".into());
+        };
+        let pinned = self
+            .egress
+            .resolve(url, crate::egress::Purpose::KeyRegistry)
+            .await
+            .map_err(|e| format!("registry URL refused: {e}"))?;
+        self.egress.client(&pinned, FETCH_TIMEOUT)
     }
-    builder
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(FETCH_TIMEOUT)
-        .user_agent(concat!("rustybin/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| e.to_string())
 }
 
 // ── Presented keys and redaction ────────────────────────────────────

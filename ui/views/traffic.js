@@ -128,7 +128,7 @@ export default {
         listEl.appendChild(all.length
           ? empty('No request matches the filters', 'Clear the filters to see everything.', 'traffic')
           : empty('Waiting for requests', ts.status === 'needs-session'
-            ? 'Public mode: set a session in the console settings and send requests with the X-Rustybin-Session header.'
+            ? 'Public mode: set a session under Management, General, and send requests with the X-Rustybin-Session header.'
             : `Send any request to ${SERVER} (directly or through your gateway) and it shows up here instantly.`, 'inbox'));
       }
       for (const e of shown) {
@@ -309,7 +309,7 @@ export default {
       } else {
         const r = await send({ method: 'DELETE', url: SERVER + '/_rustybin/requests', session: false, admin: true });
         if (r.ok) { traffic.clearLocal(); toast(`Cleared ${r.json ? r.json.cleared : ''} captured requests`); }
-        else if (r.status === 401 || r.status === 403) toast('Clearing every request needs the admin token (console settings), or narrow the feed to your session.', 'err');
+        else if (r.status === 401 || r.status === 403) toast('Clearing every request needs the admin token (Management, General), or narrow the feed to your session.', 'err');
         else toast(r.error || `Clear failed: ${r.status}`, 'err');
       }
       frozen = state.paused ? [] : null;

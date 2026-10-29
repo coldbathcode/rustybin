@@ -72,10 +72,12 @@ pub fn sample_settings() -> MockSettings {
 
 /// A store for `config`, with the sample when `RUSTYBIN_MOCKS_SAMPLE` is on.
 pub fn new_store(config: &Config) -> MockStore {
+    let settings = std::sync::Arc::new(crate::settings::Settings::new(config));
     new_store_with(
         config,
         std::sync::Arc::new(crate::limits::SystemClock::new()),
         std::sync::Arc::new(crate::metrics::Metrics::new()),
+        std::sync::Arc::new(crate::egress::Egress::new(config, settings)),
     )
 }
 
@@ -85,11 +87,12 @@ pub fn new_store_with(
     config: &Config,
     clock: std::sync::Arc<dyn crate::limits::Clock>,
     metrics: std::sync::Arc<crate::metrics::Metrics>,
+    egress: std::sync::Arc<crate::egress::Egress>,
 ) -> MockStore {
     let mut store = MockStore::new(config);
     let ss = &config.self_service;
     if ss.enabled {
-        let leads = std::sync::Arc::new(leads::Leads::new(ss, metrics.clone()));
+        let leads = std::sync::Arc::new(leads::Leads::new(ss, metrics.clone(), egress));
         let mut visits = visits::Visits::new(ss.clone(), clock, leads);
         if let Some(dir) = &config.mocks_state_dir {
             visits = visits.with_persistence(std::path::PathBuf::from(dir));

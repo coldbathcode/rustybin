@@ -74,7 +74,7 @@ export default {
     async function setHealth(action) {
       const r = await send({ method: 'POST', url: SERVER + '/health/' + action, admin: true, timeout: 10000 });
       if (r.ok) { toast(`Health: ${r.json && r.json.status}`); replace(healthMsg); }
-      else if (r.status === 401 || r.status === 403) replace(healthMsg, notice('err', (r.json && r.json.error) || 'Admin token required', ' Set it in the console settings.'));
+      else if (r.status === 401 || r.status === 403) replace(healthMsg, notice('err', (r.json && r.json.error) || 'Admin token required', ' Set it under Management, General.'));
       else replace(healthMsg, notice('err', r.error || `answered ${r.status}`));
       refreshHealth();
     }

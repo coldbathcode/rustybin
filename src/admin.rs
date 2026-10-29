@@ -38,15 +38,26 @@ pub fn require_admin(headers: &HeaderMap, config: &Config) -> Result<(), Respons
 /// [`require_admin`] as plain data: the status and message of the refusal.
 pub fn admin_check(headers: &HeaderMap, config: &Config) -> Result<(), (StatusCode, &'static str)> {
     let token = presented_token(headers);
+    let mut valid_jwt = false;
     if let Some(t) = token {
-        if crate::control_auth::verify_jwt(t, config).is_ok_and(|g| g.admin) {
-            return Ok(());
+        if let Ok(grant) = crate::control_auth::verify_jwt(t, config) {
+            if grant.admin {
+                return Ok(());
+            }
+            valid_jwt = true;
         }
     }
     match config.admin_token.as_deref() {
         Some(expected) => {
             if token.is_some_and(|t| constant_time_eq(t, expected)) {
                 Ok(())
+            } else if valid_jwt {
+                // Signed in with a control token that lacks the admin scope:
+                // authenticated, not allowed (a 401 would sign the console out).
+                Err((
+                    StatusCode::FORBIDDEN,
+                    "this operation needs the admin token or a control token with the admin scope",
+                ))
             } else {
                 Err((
                     StatusCode::UNAUTHORIZED,

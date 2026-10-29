@@ -35,9 +35,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::catalog::{self, category, AuthDef, BodyDef, Endpoint, Example, Protocol, RouteCheck};
-use crate::config::Config;
 use crate::state::AppState;
-use std::sync::Arc;
 
 include!(concat!(env!("OUT_DIR"), "/ui_assets.rs"));
 
@@ -174,11 +172,24 @@ fn missing_console() -> Response {
         .into_response()
 }
 
+/// The console title: the `console.title` setting (stored, else
+/// `RUSTYBIN_CONSOLE_TITLE`).
+pub fn console_title(state: &AppState) -> Option<String> {
+    state.settings.string("console.title")
+}
+
+/// The console back link: the `console.backlink` setting (stored, else
+/// `RUSTYBIN_CONSOLE_BACKLINK`).
+pub fn console_backlink(state: &AppState) -> Option<String> {
+    state.settings.string("console.backlink")
+}
+
 /// `<meta>` elements describing the instance to the console before it can
 /// call the (possibly authenticated) control plane: control auth mode,
-/// console title and back link (`RUSTYBIN_CONSOLE_TITLE`,
+/// console title and back link (the `console.title` and `console.backlink`
+/// settings, seeded by `RUSTYBIN_CONSOLE_TITLE` and
 /// `RUSTYBIN_CONSOLE_BACKLINK`). Values are HTML-escaped.
-pub fn console_meta(config: &Config) -> String {
+pub fn console_meta(state: &AppState) -> String {
     let mut out = String::new();
     let mut meta = |name: &str, value: &str| {
         out.push_str(&format!(
@@ -186,19 +197,19 @@ pub fn console_meta(config: &Config) -> String {
             crate::landing::html_escape(value)
         ));
     };
-    meta("control-auth", config.control_auth.as_str());
-    if let Some(title) = &config.console_title {
-        meta("console-title", title);
+    meta("control-auth", state.config.control_auth.as_str());
+    if let Some(title) = console_title(state) {
+        meta("console-title", &title);
     }
-    if let Some(link) = &config.console_backlink {
-        meta("console-backlink", link);
+    if let Some(link) = console_backlink(state) {
+        meta("console-backlink", &link);
     }
     out
 }
 
 /// `index.html` for a SPA route `depth` segments below `/ui/`: relative asset
 /// URLs are re-anchored with a `<base>` element; [`console_meta`] is added.
-fn serve_index(headers: &HeaderMap, depth: usize, config: &Config) -> Response {
+fn serve_index(headers: &HeaderMap, depth: usize, state: &AppState) -> Response {
     let Some(index) = assets().get("index.html") else {
         return missing_console();
     };
@@ -207,7 +218,7 @@ fn serve_index(headers: &HeaderMap, depth: usize, config: &Config) -> Response {
     } else {
         format!("<base href=\"{}\">", "../".repeat(depth - 1))
     };
-    let head = format!("<head>{base}{}", console_meta(config));
+    let head = format!("<head>{base}{}", console_meta(state));
     let html = String::from_utf8_lossy(index.bytes).replacen("<head>", &head, 1);
     let etag = etag_of(html.as_bytes());
     serve_bytes(headers, html.into_bytes(), index.content_type, &etag)
@@ -226,12 +237,12 @@ async fn ui_root(RawQuery(query): RawQuery) -> Response {
     resp
 }
 
-async fn ui_index(State(config): State<Arc<Config>>, headers: HeaderMap) -> Response {
-    serve_index(&headers, 0, &config)
+async fn ui_index(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    serve_index(&headers, 0, &state)
 }
 
 async fn ui_path(
-    State(config): State<Arc<Config>>,
+    State(state): State<AppState>,
     Path(path): Path<String>,
     headers: HeaderMap,
 ) -> Response {
@@ -247,7 +258,7 @@ async fn ui_path(
             .into_response();
     }
     let depth = path.trim_end_matches('/').split('/').count();
-    serve_index(&headers, depth, &config)
+    serve_index(&headers, depth, &state)
 }
 
 // ── /_rustybin/catalog ──────────────────────────────────────────────
@@ -354,8 +365,8 @@ fn key_status(state: &AppState, key: &crate::keys::KeyContext) -> Response {
         "control_auth": state.config.control_auth.as_str(),
         "hosted_mode": state.config.hosted_mode,
         "console": {
-            "title": state.config.console_title,
-            "backlink": state.config.console_backlink,
+            "title": console_title(state),
+            "backlink": console_backlink(state),
         },
         "key": { "id": &*key.key.id },
         "harness": { "enabled": false },
@@ -392,8 +403,13 @@ async fn status_handler(State(state): State<AppState>, extensions: Extensions) -
         "hosted_mode": state.config.hosted_mode,
         "git_sha": crate::control::git_sha(),
         "console": {
-            "title": state.config.console_title,
-            "backlink": state.config.console_backlink,
+            "title": console_title(&state),
+            "backlink": console_backlink(&state),
+        },
+        "settings": {
+            "persisted": state.settings.persisted(),
+            "locked": state.settings.locked(),
+            "state_dir_configured": state.config.state_dir.is_some(),
         },
         "identity_requests": state.identity.request_count.load(Ordering::Relaxed),
         "inspector": {
@@ -541,6 +557,7 @@ pub fn openapi_paths() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use crate::test_support::{body_json, body_string, get_request, test_app};
     use axum::body::Body;
     use axum::http::Request;

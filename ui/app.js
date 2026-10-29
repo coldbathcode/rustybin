@@ -1,13 +1,13 @@
-// Console shell: navigation, hash router, theme, settings dialog and the
-// global live traffic feed. Views live in views/*.js and export
-// `{ id, title, icon, mount(el) -> cleanup }`.
-import { h, icon, replace, clear, notice, toast, field, input, select, fmtDuration } from './lib/dom.js';
+// Console shell: navigation, hash router, theme and the global live
+// traffic feed. Views live in views/*.js and export
+// `{ id, title, icon, mount(el) -> cleanup }`. The gear in the top bar opens
+// the Management view (instance settings and this browser's).
+import { h, icon, replace, clear, notice, toast, input, field, fmtDuration } from './lib/dom.js';
 import * as settings from './lib/settings.js';
 import * as traffic from './lib/traffic.js';
 import * as auth from './lib/auth.js';
 import * as visit from './lib/visit.js';
 import { SERVER, getJson, send, trimBase } from './lib/http.js';
-import { agentPanel } from './lib/agent.js';
 
 const VIEWS = [
   { section: 'Instance' },
@@ -16,6 +16,7 @@ const VIEWS = [
   { id: 'mocks', title: 'Mock APIs', icon: 'mock', load: () => import('./views/mocks.js') },
   { id: 'bins', title: 'Request bins', icon: 'bin', load: () => import('./views/bins.js') },
   { id: 'explorer', title: 'API explorer', icon: 'explorer', load: () => import('./views/explorer.js') },
+  { id: 'manage', title: 'Management', icon: 'settings', load: () => import('./views/manage.js') },
   { section: 'AI and agents' },
   { id: 'ai', title: 'AI playground', icon: 'ai', load: () => import('./views/ai.js') },
   { id: 'mcp', title: 'MCP inspector', icon: 'mcp', load: () => import('./views/mcp.js') },
@@ -34,7 +35,6 @@ const viewEl = document.getElementById('view');
 const nav = document.getElementById('sidebar');
 const meta = document.getElementById('topbar-meta');
 const actions = document.getElementById('topbar-actions');
-const dialog = document.getElementById('settings-dialog');
 let cleanup = null;
 let currentId = null;
 let navToken = 0;
@@ -204,55 +204,7 @@ function renderActions() {
 }
 
 function openSettings() {
-  const session = input({ value: settings.get('session'), placeholder: 'e.g. demo-acme', 'aria-describedby': 'session-hint' });
-  const gateway = input({ value: settings.get('gatewayUrl'), placeholder: 'https://gateway.example.com/rustybin', type: 'url' });
-  const admin = input({ value: settings.get('adminToken'), placeholder: 'only when RUSTYBIN_ADMIN_TOKEN is set', type: 'password' });
-  const theme = select([['system', 'Follow the system'], ['light', 'Light'], ['dark', 'Dark']], settings.get('theme'));
-  const err = h('div');
-  const exp = auth.expiresAt();
-  const signedIn = auth.required() && auth.getToken()
-    ? h('div', { class: 'notice' }, icon('shield'), h('div', { class: 'grow' },
-      'Signed in to the control plane (RUSTYBIN_CONTROL_AUTH=' + auth.mode + ')',
-      auth.scopes() ? ', scope ' + auth.scopes().join(' ') : '',
-      exp ? ', expires ' + new Date(exp).toLocaleTimeString() : '', '.'),
-    h('button', { class: 'btn sm', type: 'button', id: 'sign-out', onclick: () => { dialog.close(); auth.signOut(); } }, 'Sign out'))
-    : null;
-  const form = h('form', { method: 'dialog', class: 'stack', style: { padding: '18px', width: 'min(560px, 92vw)' } },
-    h('h2', { id: 'settings-title' }, 'Console settings'),
-    signedIn,
-    field('Session (X-Rustybin-Session)', session, 'Tags the requests this console sends, scopes per-client state (flaky counters, bins, tasks). Required to see traffic in public mode. Letters, digits and . _ : - only.'),
-    field('Gateway base URL', gateway, 'Views offer "via gateway" to send their requests through this URL instead of directly to Rustybin. Cross-origin calls need CORS on the gateway.'),
-    field('Admin token', admin, (settings.instance.adminTokenConfigured ? 'This instance requires it for health toggles and clearing all captured requests.' : 'Not required by this instance.') + ' Kept in this tab only.'),
-    field('Theme', theme),
-    h('details', { class: 'disclosure', id: 'agent-panel' },
-      h('summary', null, 'Connect an AI agent (MCP)'),
-      h('div', { style: { paddingTop: '8px' } }, agentPanel())),
-    err,
-    h('div', { class: 'row' }, h('span', { class: 'grow' }),
-      h('button', { class: 'btn', type: 'button', onclick: () => dialog.close() }, 'Cancel'),
-      h('button', { class: 'btn primary', type: 'submit' }, 'Save')));
-  form.addEventListener('submit', (e) => {
-    const sv = session.value.trim();
-    if (sv && !/^[A-Za-z0-9._:-]{1,128}$/.test(sv)) {
-      e.preventDefault();
-      replace(err, notice('err', 'The session may only contain letters, digits and . _ : - (at most 128 characters).'));
-      return;
-    }
-    const gv = trimBase(gateway.value);
-    if (gv && !/^https?:\/\/[^\s]+$/.test(gv)) {
-      e.preventDefault();
-      replace(err, notice('err', 'The gateway URL must start with http:// or https://'));
-      return;
-    }
-    settings.set('session', sv);
-    settings.set('gatewayUrl', gv);
-    settings.set('adminToken', admin.value.trim());
-    settings.set('theme', theme.value);
-    toast('Settings saved');
-  });
-  replace(dialog, form);
-  dialog.showModal();
-  session.focus();
+  location.hash = '#/manage/general';
 }
 
 // ── OAuth callback (authorization code flow of the token lab) ──────

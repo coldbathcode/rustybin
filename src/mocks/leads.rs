@@ -19,7 +19,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
 use crate::config::SelfServiceConfig;
+use crate::egress::{Egress, Purpose};
 use crate::metrics::Metrics;
+use crate::settings::{Kind, Spec};
 
 /// Leads waiting for the webhook.
 pub const MAX_QUEUE: usize = 1_000;
@@ -53,23 +55,44 @@ struct Pending {
 
 pub struct Leads {
     webhook: Option<String>,
-    token: Option<String>,
     file: Option<PathBuf>,
     queue: Mutex<VecDeque<Pending>>,
     notify: Notify,
     metrics: Option<Arc<Metrics>>,
+    /// The webhook is resolved through the policy (`Purpose::Leads`) and
+    /// the bearer token read from the settings store (`leads.webhook_token`).
+    egress: Option<Arc<Egress>>,
+}
+
+/// The settings of the leads webhook (`leads.webhook_token`).
+pub fn specs() -> Vec<Spec> {
+    vec![Spec::new(
+        "leads.webhook_token",
+        "leads",
+        "Webhook bearer token",
+        "Sent as Authorization: Bearer to RUSTYBIN_LEADS_WEBHOOK_URL with every captured lead.",
+        Kind::Text { max_len: 4096 },
+        serde_json::Value::Null,
+    )
+    .secret()
+    .env("RUSTYBIN_LEADS_WEBHOOK_TOKEN", |c| {
+        c.self_service
+            .leads_webhook_token
+            .clone()
+            .map(serde_json::Value::String)
+    })]
 }
 
 impl Leads {
-    pub fn new(cfg: &SelfServiceConfig, metrics: Arc<Metrics>) -> Self {
+    pub fn new(cfg: &SelfServiceConfig, metrics: Arc<Metrics>, egress: Arc<Egress>) -> Self {
         let on = cfg.enabled && cfg.leads_enabled();
         Self {
             webhook: cfg.leads_webhook_url.clone().filter(|_| on),
-            token: cfg.leads_webhook_token.clone(),
             file: cfg.leads_file.clone().filter(|_| on),
             queue: Mutex::new(VecDeque::new()),
             notify: Notify::new(),
             metrics: Some(metrics),
+            egress: Some(egress),
         }
     }
 
@@ -77,12 +100,29 @@ impl Leads {
     pub fn disabled() -> Self {
         Self {
             webhook: None,
-            token: None,
             file: None,
             queue: Mutex::new(VecDeque::new()),
             notify: Notify::new(),
             metrics: None,
+            egress: None,
         }
+    }
+
+    fn token(&self) -> Option<zeroize::Zeroizing<String>> {
+        self.egress
+            .as_ref()
+            .and_then(|e| e.settings().secret("leads.webhook_token"))
+    }
+
+    /// Resolve the webhook under the policy and build the pinned client for
+    /// this round of deliveries.
+    async fn client(&self, url: &str) -> Result<reqwest::Client, String> {
+        let egress = self.egress.as_ref().ok_or("no egress policy")?;
+        let pinned = egress
+            .resolve(url, Purpose::Leads)
+            .await
+            .map_err(|e| e.to_string())?;
+        egress.client(&pinned, POST_TIMEOUT)
     }
 
     fn lock(&self) -> MutexGuard<'_, VecDeque<Pending>> {
@@ -170,8 +210,8 @@ impl Leads {
             .post(url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body);
-        if let Some(t) = &self.token {
-            req = req.bearer_auth(t);
+        if let Some(t) = self.token() {
+            req = req.bearer_auth(&*t);
         }
         match req.send().await {
             Ok(r) if r.status().is_success() => Ok(()),
@@ -193,22 +233,30 @@ impl Leads {
         let Some(url) = self.webhook.clone() else {
             return;
         };
-        let client = match client() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("lead delivery disabled: {e}");
-                return;
-            }
-        };
         tokio::pin!(shutdown);
         loop {
-            for mut p in self.due() {
-                p.attempts += 1;
-                match self.post(&client, &url, &p.lead).await {
-                    Ok(()) => self.count("delivered"),
+            let due = self.due();
+            if !due.is_empty() {
+                // The webhook is checked against the policy and pinned for
+                // every round, so an allowlist change applies at once.
+                match self.client(&url).await {
+                    Ok(client) => {
+                        for mut p in due {
+                            p.attempts += 1;
+                            match self.post(&client, &url, &p.lead).await {
+                                Ok(()) => self.count("delivered"),
+                                Err(e) => {
+                                    tracing::warn!("lead delivery failed ({e}), will retry");
+                                    self.requeue(p);
+                                }
+                            }
+                        }
+                    }
                     Err(e) => {
-                        tracing::warn!("lead delivery failed ({e}), will retry");
-                        self.requeue(p);
+                        tracing::warn!("lead delivery refused ({e}), will retry");
+                        for p in due {
+                            self.requeue(p);
+                        }
                     }
                 }
             }
@@ -225,20 +273,6 @@ impl Leads {
             }
         }
     }
-}
-
-fn client() -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder();
-    match crate::a2a::push::tls_config() {
-        Ok(tls) => builder = builder.use_preconfigured_tls(tls),
-        Err(e) => tracing::warn!("lead webhook: https unavailable ({e})"),
-    }
-    builder
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(POST_TIMEOUT)
-        .user_agent(concat!("rustybin/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -268,6 +302,17 @@ mod tests {
             privacy_url: Some("https://example.com/privacy".into()),
             ..SelfServiceConfig::default()
         }
+    }
+
+    /// The policy an instance with this self-service configuration has:
+    /// the webhook's host is its own rule (loopback included).
+    fn egress(ss: &SelfServiceConfig) -> Arc<Egress> {
+        let mut config = crate::config::Config::for_tests();
+        config.self_service = ss.clone();
+        Arc::new(Egress::new(
+            &config,
+            Arc::new(crate::settings::Settings::new(&config)),
+        ))
     }
 
     #[tokio::test]
@@ -300,10 +345,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let file = tmp.path().join("leads.jsonl");
         let metrics = Arc::new(Metrics::new());
-        let leads = Arc::new(Leads::new(
-            &cfg(Some(format!("http://{addr}/hook")), Some(file.clone())),
-            metrics.clone(),
-        ));
+        let ss = cfg(Some(format!("http://{addr}/hook")), Some(file.clone()));
+        let leads = Arc::new(Leads::new(&ss, metrics.clone(), egress(&ss)));
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(leads.clone().run(async move {
             let _ = stop_rx.await;
@@ -331,11 +374,12 @@ mod tests {
     async fn failures_are_retried_and_the_queue_is_bounded() {
         let metrics = Arc::new(Metrics::new());
         // Nothing listens on port 1.
-        let leads = Arc::new(Leads::new(
-            &cfg(Some("http://127.0.0.1:1/hook".into()), None),
-            metrics.clone(),
-        ));
-        let client = client().expect("client");
+        let ss = cfg(Some("http://127.0.0.1:1/hook".into()), None);
+        let leads = Arc::new(Leads::new(&ss, metrics.clone(), egress(&ss)));
+        let client = leads
+            .client("http://127.0.0.1:1/hook")
+            .await
+            .expect("client");
         leads.submit(lead("bob@example.org"));
         for p in leads.due() {
             assert!(leads
@@ -354,7 +398,7 @@ mod tests {
         assert!(text.contains("rustybin_mock_leads_total{result=\"retried\"} 1"));
         assert!(text.contains("rustybin_mock_leads_total{result=\"dropped\"} 6"));
         // Without capture configured nothing is kept.
-        let off = Leads::new(&SelfServiceConfig::default(), metrics);
+        let off = Leads::new(&SelfServiceConfig::default(), metrics, Egress::for_tests());
         off.submit(lead("carol@example.org"));
         assert_eq!(off.pending(), 0);
     }

@@ -131,6 +131,29 @@ pub struct Config {
     /// Self-service mocks for visitors of a public instance
     /// (`RUSTYBIN_MOCKS_SELF_SERVICE` and friends).
     pub self_service: SelfServiceConfig,
+    /// One directory for everything the instance persists
+    /// (`RUSTYBIN_STATE_DIR`): `settings.json`, `secrets.key`, and the
+    /// default of `mocks_state_dir` (`<dir>/mocks`) and the harness state
+    /// directory (`<dir>/harness`). Unset: memory only.
+    pub state_dir: Option<PathBuf>,
+    /// `RUSTYBIN_SETTINGS_LOCK`: the environment is authoritative for the
+    /// lockable settings; stored values are ignored and writes answer 409.
+    pub settings_lock: bool,
+    /// `RUSTYBIN_SECRETS_KEY`: the 32-byte key (base64) that seals stored
+    /// secrets. Unset: `<state>/secrets.key`, generated once. Never exposed.
+    pub secrets_key: Option<[u8; 32]>,
+    /// `RUSTYBIN_EGRESS_ALLOW`: hosts, `*.domain`, IPs and CIDRs (with an
+    /// optional port) every outbound feature may reach, on top of the
+    /// per-feature defaults (see `crate::egress`).
+    pub egress_allow: Vec<String>,
+    /// `RUSTYBIN_EGRESS_ALLOW_LOOPBACK`: let outbound calls reach loopback
+    /// addresses (local demos).
+    pub egress_allow_loopback: bool,
+    /// `RUSTYBIN_A2A_PUSH_ALLOWLIST`: `host` or `host:port` entries push
+    /// notification URLs may point to (the built-in sink is always allowed).
+    pub a2a_push_allowlist: Vec<String>,
+    /// `RUSTYBIN_A2A_PUSH_ALLOW_ALL`: any http(s) push URL, never in public mode.
+    pub a2a_push_allow_all: bool,
     /// Harness mode (`RUSTYBIN_HARNESS` and friends): Rustybin as a load
     /// client, see `docs/plans/harness.md`.
     pub harness: HarnessConfig,
@@ -658,7 +681,31 @@ impl Config {
             shared_mode || control_auth == ControlAuth::Open,
             &mut warnings,
         );
-        let harness = parse_harness(&get, hosted_mode, &mut warnings);
+        let mut harness = parse_harness(&get, hosted_mode, &mut warnings);
+        let state_dir = get("RUSTYBIN_STATE_DIR").map(PathBuf::from);
+        let mut mocks_state_dir = get("RUSTYBIN_MOCKS_STATE_DIR");
+        if let Some(dir) = &state_dir {
+            if mocks_state_dir.is_none() {
+                mocks_state_dir = Some(dir.join("mocks").to_string_lossy().into_owned());
+            }
+            if harness.state_dir.is_none() {
+                harness.state_dir = Some(dir.join("harness"));
+            }
+        }
+        let secrets_key = get("RUSTYBIN_SECRETS_KEY").and_then(|raw| {
+            match crate::settings::decode_key(&raw) {
+                Ok(k) => Some(k),
+                Err(e) => {
+                    warnings.push(format!(
+                        "invalid RUSTYBIN_SECRETS_KEY ({e}): using the state directory's key or a process-lifetime key"
+                    ));
+                    None
+                }
+            }
+        });
+        let a2a_push_allowlist = list("RUSTYBIN_A2A_PUSH_ALLOWLIST", &get);
+        let a2a_push_allow_all =
+            parse_bool_or(&get, "RUSTYBIN_A2A_PUSH_ALLOW_ALL", false, &mut warnings);
 
         let config = Self {
             http_port: parse_or(&get, "RUSTYBIN_HTTP_PORT", 80, &mut warnings),
@@ -715,9 +762,21 @@ impl Config {
             config_file: get("RUSTYBIN_CONFIG_FILE"),
             mocks_dir: get("RUSTYBIN_MOCKS_DIR"),
             mocks_sample,
-            mocks_state_dir: get("RUSTYBIN_MOCKS_STATE_DIR"),
+            mocks_state_dir,
             mocks_host: get("RUSTYBIN_MOCKS_HOST").and_then(|h| normalise_domain(&h)),
             self_service,
+            state_dir,
+            settings_lock: parse_bool_or(&get, "RUSTYBIN_SETTINGS_LOCK", false, &mut warnings),
+            secrets_key,
+            egress_allow: list("RUSTYBIN_EGRESS_ALLOW", &get),
+            egress_allow_loopback: parse_bool_or(
+                &get,
+                "RUSTYBIN_EGRESS_ALLOW_LOOPBACK",
+                false,
+                &mut warnings,
+            ),
+            a2a_push_allowlist,
+            a2a_push_allow_all,
             harness,
         };
         (config, warnings)
@@ -774,6 +833,13 @@ impl Config {
             mocks_state_dir: None,
             mocks_host: None,
             self_service: SelfServiceConfig::default(),
+            state_dir: None,
+            settings_lock: false,
+            secrets_key: None,
+            egress_allow: Vec::new(),
+            egress_allow_loopback: false,
+            a2a_push_allowlist: Vec::new(),
+            a2a_push_allow_all: false,
             harness: HarnessConfig::default(),
         }
     }
@@ -789,6 +855,13 @@ impl Config {
 
     /// The effective configuration without secrets, for `/_rustybin/config`.
     pub fn public_view(&self) -> serde_json::Value {
+        let secrets_key_source = if self.secrets_key.is_some() {
+            "env"
+        } else if self.state_dir.is_some() {
+            "file"
+        } else {
+            "process"
+        };
         let mut view = serde_json::json!({
             "http_port": self.http_port,
             "https_port": self.https_port,
@@ -839,6 +912,22 @@ impl Config {
             "mocks_host": self.mocks_host,
         });
         if let serde_json::Value::Object(m) = &mut view {
+            m.insert(
+                "state_dir_configured".into(),
+                self.state_dir.is_some().into(),
+            );
+            m.insert("settings_lock".into(), self.settings_lock.into());
+            m.insert("secrets_key_source".into(), secrets_key_source.into());
+            m.insert("egress_allow".into(), serde_json::json!(self.egress_allow));
+            m.insert(
+                "egress_allow_loopback".into(),
+                self.egress_allow_loopback.into(),
+            );
+            m.insert(
+                "a2a_push_allowlist".into(),
+                serde_json::json!(self.a2a_push_allowlist),
+            );
+            m.insert("a2a_push_allow_all".into(), self.a2a_push_allow_all.into());
             let ss = &self.self_service;
             m.insert("mocks_self_service".into(), ss.enabled.into());
             m.insert("mocks_self_service_host".into(), serde_json::json!(ss.host));
@@ -1336,6 +1425,22 @@ where
             }
         },
     }
+}
+
+/// A comma-separated list (trimmed, empty items dropped, at most 200).
+fn list<G>(key: &str, get: &G) -> Vec<String>
+where
+    G: Fn(&str) -> Option<String>,
+{
+    get(key)
+        .map(|raw| {
+            raw.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .take(200)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn parse_bool_or<G>(get: &G, key: &str, default: bool, warnings: &mut Vec<String>) -> bool

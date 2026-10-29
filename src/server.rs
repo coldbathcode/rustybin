@@ -213,6 +213,26 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
         config.grpc_on_http,
     );
 
+    match &config.state_dir {
+        Some(dir) => tracing::info!(
+            "state directory {}: settings.json, secrets.key ({}), mocks/, harness/{}",
+            dir.display(),
+            if config.secrets_key.is_some() {
+                "key from RUSTYBIN_SECRETS_KEY"
+            } else {
+                "generated once"
+            },
+            if config.settings_lock {
+                "; RUSTYBIN_SETTINGS_LOCK: the environment is authoritative"
+            } else {
+                ""
+            },
+        ),
+        None => tracing::info!(
+            "no RUSTYBIN_STATE_DIR: settings and secrets are kept in memory until restart"
+        ),
+    }
+
     // Mocks from RUSTYBIN_CONFIG_FILE / RUSTYBIN_MOCKS_DIR load before any
     // request is served: the socket is bound (a busy port still fails fast)
     // but nothing answers until they are in place, so no early 404s.

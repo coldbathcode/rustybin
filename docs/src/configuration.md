@@ -11,6 +11,12 @@ below). Booleans accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `off`
 `GET /_rustybin/config` returns the effective configuration without secrets (the
 admin token is only reported as `admin_token_configured`).
 
+A few values are also **instance settings** (`GET /_rustybin/settings`, the console's
+Management view): a setting saved on the instance wins over its environment
+variable, which wins over the default. See [State directory, settings and
+secrets](#state-directory-settings-and-secrets) for the rule, the lock and the
+secrets.
+
 This list is checked against `src/config.rs` and every `std::env::var` call in
 `src/` (the MCP, mock LLM and A2A modules read a few variables of their own).
 
@@ -86,8 +92,94 @@ See [Control-plane security, metrics and operations](concepts/control-plane-secu
 | `RUSTYBIN_CONTROL_OAUTH_ISSUER` | unset | An external authorization server (absolute `http(s)` URL) named in the metadata instead of the built-in one, which then answers `404`. Its tokens must be control JWTs (`RUSTYBIN_CONTROL_JWT_PUBLIC_KEY`, `RUSTYBIN_CONTROL_JWT_AUDIENCE`). Invalid: warning, built-in server. |
 | `RUSTYBIN_CONTROL_OAUTH_KEY` | derived | Secret (32 characters or more) signing the built-in server's client registrations and tokens. Unset: derived from `RUSTYBIN_ADMIN_TOKEN`, else random per process (agents sign in again after a restart). Set the same value on every replica. Rotating it signs every agent out. Never returned by any endpoint. |
 | `RUSTYBIN_HOSTED_MODE` | `false` | Preset for platforms running one instance per customer: control auth `jwt` and JSON logs, unless `RUSTYBIN_CONTROL_AUTH` / `RUSTYBIN_LOG_FORMAT` say otherwise. |
-| `RUSTYBIN_CONSOLE_TITLE` | unset | Shown in the console header and tab title (control characters removed, at most 80 characters). |
-| `RUSTYBIN_CONSOLE_BACKLINK` | unset | `http://` or `https://` URL shown as a "Back to ..." link in the console header and sign-in screen; anything else is ignored with a warning. |
+| `RUSTYBIN_CONSOLE_TITLE` | unset | Shown in the console header and tab title (control characters removed, at most 80 characters). Seeds the `console.title` setting. |
+| `RUSTYBIN_CONSOLE_BACKLINK` | unset | `http://` or `https://` URL shown as a "Back to ..." link in the console header and sign-in screen; anything else is ignored with a warning. Seeds the `console.backlink` setting. |
+
+## State directory, settings and secrets
+
+One directory holds everything an instance persists. Without it everything lives in
+memory, as before, and the settings API says `"persisted": false`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RUSTYBIN_STATE_DIR` | unset | Created (mode `0700`) when missing. Holds `settings.json` (the instance settings, mode `0600`), `secrets.key` (the key that seals stored secrets, generated once), and the defaults of `RUSTYBIN_MOCKS_STATE_DIR` (`<dir>/mocks`) and `RUSTYBIN_HARNESS_STATE_DIR` (`<dir>/harness`), which still override it when set. The startup log names the directory and what lives in it. |
+| `RUSTYBIN_SETTINGS_LOCK` | `false` | The environment is authoritative: stored values of the lockable settings are ignored, and writes to them answer `409`. For instances managed by a platform or from a configuration repository. |
+| `RUSTYBIN_SECRETS_KEY` | unset | The 32-byte key (base64, URL-safe base64 or hex) that seals stored secrets with ChaCha20-Poly1305. Unset: `<state>/secrets.key`, or a process-lifetime key without a state directory. Changing it makes the stored secrets unreadable: the instance logs it once, the API reports them `unreadable`, the console asks for them again, and the environment seed is used meanwhile. Never exposed. |
+
+**Settings** are dotted keys owned by features (`console.title`, `egress.allow`,
+`leads.webhook_token`), each with a schema, a default, and usually an environment
+variable that seeds it. Resolution, for every key: the value saved through the API,
+the console, the CLI or the management MCP wins; else the environment variable;
+else the default. `GET /_rustybin/settings` lists every registered key with its
+value, its `source` (`stored`, `env`, `default`), whether the lock holds it and its
+schema; `PATCH` changes values and secrets; `DELETE /_rustybin/settings/{key}`
+forgets a stored value. All three need the admin token (or a control token with the
+`admin` scope). Every change is logged on the `rustybin::settings` target with the
+key, the source and the principal, never the value.
+
+```hurl
+{{#include ../examples/concepts/settings.hurl:get}}
+```
+
+```hurl
+{{#include ../examples/concepts/settings.hurl:patch}}
+```
+
+Values are validated against each setting's schema; unknown keys and bad values
+answer `400` with one problem per key:
+
+```hurl
+{{#include ../examples/concepts/settings.hurl:invalid}}
+```
+
+```hurl
+{{#include ../examples/concepts/settings.hurl:delete}}
+```
+
+**Secrets** (a setting marked `secret`) are sealed at rest, compared in constant
+time where they are checked, returned by the API only as `{ "set": true, "hint":
+"k3Qx" }` (the last four characters, and only for secrets of eight characters or
+more), never written to a configuration export in the clear, and never settable
+through the management MCP. The settings of this release: `console.title`,
+`console.backlink`, `egress.allow`, `egress.allow_loopback` and the secret
+`leads.webhook_token`; later features register their own (the AI provider key, the
+git token, the portal).
+
+## Outbound connections
+
+Every request the instance sends of its own (a webhook, a key registry, an AI
+provider, an MCP server, a registry, a git remote) goes through one policy
+(`src/egress.rs`): the destination is parsed, checked against the allowlists,
+resolved once and pinned (the connection goes to those addresses only, so a name
+cannot change meaning between the check and the connect), and the decision is
+logged on the `rustybin::egress` target and kept for `GET /_rustybin/egress` (the
+last 100, newest first, shown in the console's Management, Network tab).
+
+| Variable | Default | Description |
+|---|---|---|
+| `RUSTYBIN_EGRESS_ALLOW` | unset | Host names, `*.domain` wildcards, IP addresses and CIDRs, each with an optional `:port`, comma separated: what every outbound feature may reach, on top of each feature's own rule. Seeds the `egress.allow` setting. |
+| `RUSTYBIN_EGRESS_ALLOW_LOOPBACK` | `false` | Let outbound calls reach `127.0.0.1`, `::1` and `localhost` (a mock MCP server or a webhook on the same machine). Seeds the `egress.allow_loopback` setting. |
+
+Always refused, whatever the lists say: link-local and cloud metadata addresses,
+the unspecified, multicast and broadcast addresses, this instance's own control
+plane (`/_rustybin`, `/ui`), and loopback unless allowed. Every feature resolves
+under a **purpose** with its own rule, on only when the feature is configured:
+
+| Purpose | Its own rule |
+|---|---|
+| `a2a_push` | `RUSTYBIN_A2A_PUSH_ALLOWLIST`; `RUSTYBIN_A2A_PUSH_ALLOW_ALL` lets it reach any host outside public mode (link-local and metadata addresses stay refused). Loopback allowed when listed. |
+| `leads` | The host and port of `RUSTYBIN_LEADS_WEBHOOK_URL`. Loopback allowed. |
+| `key_registry` | The host and port of `RUSTYBIN_KEYS_URL`. Loopback allowed. |
+| `registry` | `registry.modelcontextprotocol.io` (the MCP registry). |
+| `assist`, `git` | The AI provider's host once a key is set, the git remote's host once configured (later releases). |
+| `mcp_relay` | No default: name the MCP servers the inspector may relay to in `RUSTYBIN_EGRESS_ALLOW`. |
+
+```hurl
+{{#include ../examples/concepts/settings.hurl:egress}}
+```
+
+The harness keeps its own, stricter list (`RUSTYBIN_HARNESS_TARGETS`) and its target
+verification: load never goes anywhere the egress policy alone would allow.
 
 ## OpenAPI mocks
 
@@ -98,7 +190,7 @@ See [Configuration as code](mocks/config.md).
 | `RUSTYBIN_CONFIG_FILE` | `./rustybin.yaml` if it exists | A `rustybin.yaml` declaring [OpenAPI mocks](mocks/index.md), loaded at startup and reloaded by `SIGHUP` or `POST /_rustybin/mocks/reload`. The command-line option `--config <file>` takes precedence. Problems are logged and listed in `GET /_rustybin/mocks` (`load_errors`); they never stop the server. |
 | `RUSTYBIN_MOCKS_DIR` | unset | A directory whose `*.yaml`, `*.yml` and `*.json` OpenAPI files (up to 200) each become a mock named after the file, with default settings. |
 | `RUSTYBIN_MOCKS_SAMPLE` | `true` (`false` in public mode) | Create the built-in `petstore` mock. |
-| `RUSTYBIN_MOCKS_STATE_DIR` | unset | Save mocks created or edited through the API or console in this directory (one JSON file each, written on every change) and load them at startup. File-defined mocks are not saved. See [Configuration as code](mocks/config.md#keeping-console-changes). |
+| `RUSTYBIN_MOCKS_STATE_DIR` | `<RUSTYBIN_STATE_DIR>/mocks`, else unset | Save mocks created or edited through the API or console in this directory (one JSON file each, written on every change) and load them at startup. File-defined mocks are not saved. See [Configuration as code](mocks/config.md#keeping-console-changes). |
 | `RUSTYBIN_MOCKS_HOST` | unset | Domain for host-based mock URLs, e.g. `mock.example.com`: a request to `petstore.mock.example.com/v1/pets` is served by the mock `petstore`. Needs wildcard DNS (and a wildcard certificate for HTTPS). See [Configuration as code](mocks/config.md#host-based-urls). |
 
 ## Self-service mocks
@@ -120,7 +212,7 @@ token. See [Self-service mocks](mocks/self-service.md).
 | `RUSTYBIN_MOCKS_ANON_VISITS_PER_DAY` | `3` | Anonymous visits per session and UTC day; after that the email step comes first (`0`: always). |
 | `RUSTYBIN_MOCKS_BLOCKED_NAMES` | unset | Comma separated globs of names visitors may not use (`*paypal*,login*`). |
 | `RUSTYBIN_LEADS_WEBHOOK_URL` | unset | Where captured email addresses are posted as JSON (retried for an hour). |
-| `RUSTYBIN_LEADS_WEBHOOK_TOKEN` | unset | Sent as `Authorization: Bearer` to the webhook. Never exposed. |
+| `RUSTYBIN_LEADS_WEBHOOK_TOKEN` | unset | Sent as `Authorization: Bearer` to the webhook. Seeds the secret setting `leads.webhook_token` (changeable in the console's Management, Network tab). Never exposed. |
 | `RUSTYBIN_LEADS_FILE` | unset | A file the leads are appended to, one JSON object per line. |
 | `RUSTYBIN_PRIVACY_URL` | unset | The privacy notice the email form links to. Email capture is off without it. |
 | `RUSTYBIN_LEADS_CONSENT` | `checkbox` | `checkbox`: a separate, unticked marketing checkbox. `notice`: no checkbox. |
@@ -164,7 +256,7 @@ registry format, quotas, scoping and the control plane.
 | `RUSTYBIN_SHARED_MODE` | `false` | One instance for many API keys: every data-plane request needs a key (`X-Rustybin-Key`, else `?rb_key=`), each key has its own limits and daily quotas, inspector and usage are scoped by key, the rest of the control plane needs the admin token. Implies `RUSTYBIN_PUBLIC_MODE`, `RUSTYBIN_LIMIT_SCOPE=session` and `RUSTYBIN_LIMIT_PERIOD=day`. |
 | `RUSTYBIN_REQUIRE_KEY` | `false` | On a normal instance: the data plane needs a valid key from the registry; no per-key limits, control-plane auth unchanged. |
 | `RUSTYBIN_KEYS_FILE` | unset | Key registry file (JSON), read at startup and reloaded when it changes (checked every 5 s). Wins over `RUSTYBIN_KEYS_URL`. |
-| `RUSTYBIN_KEYS_URL` | unset | Key registry URL (`http://` or `https://`), fetched at startup and every `RUSTYBIN_KEYS_POLL_SECS` with `If-None-Match`. Errors keep the last good registry. |
+| `RUSTYBIN_KEYS_URL` | unset | Key registry URL (`http://` or `https://`), fetched at startup and every `RUSTYBIN_KEYS_POLL_SECS` with `If-None-Match`, through the [egress policy](#outbound-connections) (its host is allowed). Errors keep the last good registry. |
 | `RUSTYBIN_KEYS_TOKEN` | unset | Sent to `RUSTYBIN_KEYS_URL` as `Authorization: Bearer <token>`. Never returned by any endpoint. |
 | `RUSTYBIN_KEYS_POLL_SECS` | `30` | Registry URL poll interval in seconds (every 5 s at most while nothing was loaded yet). |
 | `RUSTYBIN_KEYS_MAX` | `200000` | Most keys accepted in a registry; a larger registry is refused with a warning (the last good one stays). |
@@ -198,8 +290,8 @@ See [Faults, latency, credentials, inspection](ai/gateway-features.md#credential
 
 | Variable | Default | Description |
 |---|---|---|
-| `RUSTYBIN_A2A_PUSH_ALLOWLIST` | unset | Comma-separated `host` or `host:port` entries that push notification URLs may point to. The built-in sink `/a2a/webhook-sink/{id}` on this server is always allowed. |
-| `RUSTYBIN_A2A_PUSH_ALLOW_ALL` | `false` | Allow push notifications to any http(s) URL, including loopback and private addresses. Ignored in public mode. |
+| `RUSTYBIN_A2A_PUSH_ALLOWLIST` | unset | Comma-separated `host` or `host:port` entries that push notification URLs may point to. The built-in sink `/a2a/webhook-sink/{id}` on this server is always allowed. Deliveries go through the [egress policy](#outbound-connections). |
+| `RUSTYBIN_A2A_PUSH_ALLOW_ALL` | `false` | Allow push notifications to any http(s) URL, including loopback and private addresses (link-local and cloud metadata addresses stay refused). Ignored in public mode. |
 
 ## Harness mode
 
@@ -223,7 +315,7 @@ control plane is protected, and follows the admin token on an open one.
 | `RUSTYBIN_HARNESS_THREADS` | half the cores (`both`), all but one (client only) | Worker threads of the engine runtime; the scheduler has its own thread. |
 | `RUSTYBIN_HARNESS_DATA_PLANE` | `on` | `off` on a client-only node serves only `/`, `/_rustybin/*`, `/ui` and the verification path. |
 | `RUSTYBIN_HARNESS_REPORT_DIR` | unset | Every final report is also written here as `<run_id>.json`. |
-| `RUSTYBIN_HARNESS_STATE_DIR` | unset | Saved scenarios are also written here (`scenarios/<name>.json`) and loaded at startup; without it they live in memory. |
+| `RUSTYBIN_HARNESS_STATE_DIR` | `<RUSTYBIN_STATE_DIR>/harness`, else unset | Saved scenarios are also written here (`scenarios/<name>.json`) and loaded at startup; without it they live in memory. |
 | `RUSTYBIN_HARNESS_SCALE_HOOK` | unset | Where the leader of a cluster POSTs a run's `scale_request` when `scale.client_nodes` is `auto` and its client nodes are not enough (`http` or `https`; the host must be allowed by `RUSTYBIN_HARNESS_TARGETS`). Set it on every node that may lead. See below for the signature. |
 | `RUSTYBIN_HARNESS_SCENARIO` | unset | Headless mode: the scenario file to run at startup. |
 | `RUSTYBIN_HARNESS_START` | `manual` | `immediately` starts the scenario once the node is up; `on-quorum` on a coordinator waits until the nodes the scenario asks for (`scale.client_nodes`, `scale.server_nodes`) have joined its cluster (on a single node it is the same as `immediately`). |

@@ -26,6 +26,7 @@ pub mod control_auth;
 pub mod control_oauth;
 pub mod cookies;
 pub mod echo;
+pub mod egress;
 pub mod fault;
 pub mod flaky;
 pub mod graphql;
@@ -55,6 +56,7 @@ pub mod request_bin;
 pub mod response_shaping;
 pub mod server;
 pub mod session;
+pub mod settings;
 pub mod soap;
 pub mod sse;
 pub mod state;
@@ -127,6 +129,8 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     inspector::router,
     control::router,
     control_oauth::router,
+    settings::router,
+    egress::router,
     harness::router,
     metrics::router,
     limits::router,

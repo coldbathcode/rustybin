@@ -31,7 +31,7 @@ screen. The console keeps it for the browser tab only, strips it from the addres
 bar, sends it as `Authorization: Bearer` (the live traffic feed included), and
 shows the sign-in screen again when the token is refused or its `exp` passes. A
 valid token with a narrow scope (`inspector`) signs in too, and the views it may not
-read say so. **Console settings, Sign out** forgets it. Details:
+read say so. **Management, General, Sign out** forgets it. Details:
 [Control-plane security](concepts/control-plane-security.md#the-console-with-a-token).
 
 `RUSTYBIN_CONSOLE_TITLE` (up to 80 characters) is shown as a badge in the header and
@@ -39,7 +39,13 @@ in the browser tab title; `RUSTYBIN_CONSOLE_BACKLINK` (an `http://` or `https://
 URL, anything else is ignored with a warning) adds a "Back to ..." link to the
 header and to the sign-in screen, for example back to the portal that launched the
 console. Both reach the page as HTML-escaped `<meta>` elements, so they are visible
-before sign-in.
+before sign-in. Both are [instance settings](configuration.md#state-directory-settings-and-secrets)
+(`console.title`, `console.backlink`): a value saved under Management, General wins
+over the variable, and `/_rustybin/status` reports the effective title:
+
+```hurl
+{{#include ../examples/concepts/settings.hurl:title}}
+```
 
 ## Views
 
@@ -52,6 +58,7 @@ The views, in sidebar order (`Alt+1` to `Alt+9` switch to the first nine):
 | **Mock APIs** | [OpenAPI mocks](mocks/index.md): create one from a spec, switch mocks on and off, edit responses, rules and security, try operations and watch their traffic (see [below](#mock-apis)) |
 | **Request bins** | Create a [request bin](reference/request-bin.md) with a configured response, send a test request, watch captures arrive live |
 | **API explorer** | The route catalogue with search and category filters, and a "Try it" request builder prefilled from each endpoint's examples |
+| **Management** | The instance's settings and this browser's, in tabs (see [below](#management)): General (the console title and back link, the session, gateway URL, admin token and theme of this browser, the "Connect an AI agent" panel) and Network (what the instance may connect to, each feature's rule, the last decisions, the leads webhook token). The gear in the top bar opens it |
 | **AI playground** | Chat with the [mock LLM](ai/index.md) in OpenAI chat, OpenAI Responses, Anthropic, Gemini, Ollama (streaming) and Bedrock (non-streaming) wire formats, with modes, fault and latency injection, tool calling with a tool result round trip, the raw wire frames, and the [AI request record](ai/gateway-features.md#request-inspection) of each call |
 | **MCP inspector** | An MCP client for 2026-07-28 (stateless) and 2025-11-25 (session): list and call tools with forms generated from their schemas, follow progress, read resources, get prompts, answer elicitation and sampling, a JSON-RPC message log, and the OAuth discovery steps of `/mcp/protected` |
 | **A2A client** | Agent directory and cards, blocking or streaming sends over JSON-RPC in v1.0 or v0.3 (the HTTP+JSON binding is not used), a task timeline with artifacts, input-required and auth-required continuation, cancel, and the push notification sink |
@@ -142,16 +149,35 @@ get **New mock** without an admin token:
 - The list splits **Your mocks** from the instance's mocks, which stay
   read-only; the detail view of your own mock has every editor except Rename.
 
-## Settings
+## Management
 
-The settings dialog (gear icon) stores, in the browser (the admin token in this tab
-only, like the sign-in token; the others across visits):
+The Management view (the gear in the top bar, or `#/manage`) has a rail of tabs down
+the left; later releases add Sign-in, AI, Portal, Agents, Source control and Export.
+
+**Instance settings** come from `GET /_rustybin/settings` and save with one `PATCH`
+per card (the admin token, or a control token with the `admin` scope). Every form is
+generated from the settings' schema: under each field the console says where the
+value comes from (saved in this instance, from the environment with the variable's
+name, or the default); a setting held by `RUSTYBIN_SETTINGS_LOCK` is read-only with
+the reason; a secret shows "Set, ends in k3Qx" with Replace and Clear and never its
+value. The badges in the header say whether changes persist (`RUSTYBIN_STATE_DIR`)
+or last until restart, whether the lock is on, and whether a stored secret became
+unreadable after the secrets key changed. See [State directory, settings and
+secrets](configuration.md#state-directory-settings-and-secrets).
+
+| Tab | Cards |
+|---|---|
+| General | **Console**: the title and back link everyone sees. **This browser**: the settings below, kept in the browser. **Connect an AI agent (MCP)**: the command and JSON for `claude mcp add` and other clients, with the sign-in status and Sign out when the control plane is protected. |
+| Network | **Outbound connections**: the allowlist and the loopback switch (`egress.allow`, `egress.allow_loopback`). **Policy as the instance sees it**: the merged list, the always-refused addresses, each feature's own rule, and the last 100 decisions with a refresh. **Leads webhook**: the bearer token (a secret). See [Outbound connections](configuration.md#outbound-connections). |
+
+**This browser** keeps, in the browser (the admin token in this tab only, like the
+sign-in token; the others across visits):
 
 | Setting | Effect |
 |---|---|
 | Session | The `X-Rustybin-Session` the console sends: it tags the console's traffic and scopes per-client state (flaky counters, bins, A2A tasks). In [public mode](concepts/sessions.md#public-mode) a random session is generated on first load, because the live traffic view needs one there. |
 | Gateway base URL | Views offer to send their requests through this URL instead of directly to Rustybin (the gateway must allow CORS for the console's origin) |
-| Admin token | Sent for admin-guarded actions (health toggles, clearing all captured requests) when the instance has `RUSTYBIN_ADMIN_TOKEN`. Without it, the sign-in token is sent instead (useful with the admin token or a JWT with the `admin` scope). |
+| Admin token | Sent for admin-guarded actions (instance settings, health toggles, clearing all captured requests) when the instance has `RUSTYBIN_ADMIN_TOKEN`. Without it, the sign-in token is sent instead (useful with the admin token or a JWT with the `admin` scope). |
 | Theme | Follow the system, light or dark |
 
 ## Control-plane endpoints used by the console
@@ -160,6 +186,8 @@ only, like the sign-in token; the others across visits):
 |---|---|
 | `GET /_rustybin/status` | Name, version, commit, instance id, hostname, uptime and start time, health, public mode, `admin_token_configured`, `control_auth`, `hosted_mode`, console title and back link, `/identity` request count, inspector counters (stored, capacity, total captured) and ports |
 | `GET /_rustybin/catalog` | The route catalogue as JSON: categories with counts, and every endpoint with methods, category, summary, description and runnable examples |
+| `GET`, `PATCH /_rustybin/settings`, `DELETE /_rustybin/settings/{key}` | The instance settings of the Management view (admin): every registered key with its value, source, lock state and schema; secrets as `{set, hint}` |
+| `GET /_rustybin/egress` | The outbound connection policy (admin): the allowlist, each feature's rule and the last decisions |
 
 ```hurl
 {{#include ../examples/exports/console.hurl:status}}

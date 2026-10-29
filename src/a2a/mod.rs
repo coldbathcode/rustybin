@@ -68,7 +68,12 @@ pub struct A2a {
 }
 
 impl A2a {
-    pub fn new(config: Arc<Config>, jwt: Arc<JwtState>, policy: PushPolicy) -> Self {
+    pub fn new(
+        config: Arc<Config>,
+        jwt: Arc<JwtState>,
+        policy: PushPolicy,
+        egress: Arc<crate::egress::Egress>,
+    ) -> Self {
         let public = config.public_mode;
         let sink = Arc::new(WebhookSink::new(
             if public { 100 } else { 500 },
@@ -77,7 +82,7 @@ impl A2a {
         ));
         let svc = Arc::new(Service::new(
             Limits::for_mode(public),
-            PushService::new(policy, sink),
+            PushService::new(policy, sink, egress),
         ));
         Self { config, jwt, svc }
     }
@@ -504,7 +509,8 @@ pub fn router(state: &AppState) -> Router<AppState> {
     let a2a = Arc::new(A2a::new(
         state.config.clone(),
         state.jwt.clone(),
-        PushPolicy::from_env(state.config.public_mode),
+        PushPolicy::from_config(&state.config),
+        state.egress.clone(),
     ));
     router_with(a2a)
 }

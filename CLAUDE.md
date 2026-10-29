@@ -2,11 +2,12 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Next: Rustybin 0.2, the AI-assisted mocking service (planned, not started)
+## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: step 01 done)
 
 [docs/plans/next/master-plan.md](docs/plans/next/master-plan.md) (planned 2026-10-29) is the plan for the next
-build: twelve steps, one file each (`docs/plans/next/step-NN-*.md`): foundations (a persisted settings store with
-secrets at rest, one egress policy, a Management area), the console locked with a username and password (default
+build: twelve steps, one file each (`docs/plans/next/step-NN-*.md`): foundations (step 01, done 2026-10-29: the
+settings store `src/settings.rs`, the egress policy `src/egress.rs`, the console's Management view
+`ui/views/manage.js`; see the step file's build notes), the console locked with a username and password (default
 `rustybin` / `rustybin`, the one change of default), AI assist with the user's own key (Anthropic, OpenAI, Gemini,
 OpenAI-compatible, or the built-in mock LLM for tests) and an AI-first console shell, AI-built mocks (specs from a
 prompt to the chosen OpenAPI version, example payloads with an alert when a spec has none, AI edits through a
@@ -15,7 +16,10 @@ browsing, a dev portal, AI agents management, the whole instance as `rustybin.ya
 `rustybin` CLI for remote instances, management MCP parity, and the 0.2.0 release. The master plan's section 4 is
 the build marker and section 5 the session protocol: build a step whole, update its status and build notes, update
 the master table, commit as oliwynn with the step number in the message, push to main. Steps go only when the
-user says go.
+user says go. Rules the foundations set: a feature that reaches out resolves through `egress::Egress` under its
+`Purpose` (never its own `reqwest::Client`); a feature's configurable value is a `settings::Spec` (seeded by its
+variable, stored override, `secret()` for credentials, never returned as a value); the console's instance
+settings are forms from the settings schema (`ui/lib/settingsform.js`), one card per group on a Management tab.
 
 ## Load test mode (harness): built
 
@@ -126,21 +130,34 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
 - `src/openapi.rs`: hand-written paths plus `MODULE_PATHS` / `MODULE_COMPONENTS` merge lists; methods are
   aligned with the catalogue (routes registered with `any()` are documented as get/post/put/patch/delete).
 - `src/inspector.rs`: bounded ring buffer + broadcast feed of captured requests, `/_rustybin/requests*`.
+- `src/settings.rs`: the instance settings store (`RUSTYBIN_STATE_DIR/settings.json`, `RUSTYBIN_SETTINGS_LOCK`,
+  secrets sealed with ChaCha20-Poly1305 under `RUSTYBIN_SECRETS_KEY` or `<state>/secrets.key`): `Spec` tables per
+  feature joined by `settings::specs()`, env seed / stored / default resolution with `Source`, `secret()` for the
+  feature that uses one, `{set, hint}` in the API, audit lines without values; `/_rustybin/settings` (GET, PATCH,
+  DELETE `/{key}`, admin). `AppState.settings`.
+- `src/egress.rs`: the outbound policy (`RUSTYBIN_EGRESS_ALLOW`, `RUSTYBIN_EGRESS_ALLOW_LOOPBACK`, the settings
+  `egress.*`): the `Allowlist` grammar (shared with the harness, which re-exports it from `safety.rs`), forbidden
+  addresses, `parse_url`, `pin_with`, a `Rule` per `Purpose` (A2A push, leads, key registry, registry, and the
+  later assist, MCP relay, git), `resolve` then `client` (pinned addresses, no redirects), a bounded decision ring,
+  `/_rustybin/egress` (admin). `AppState.egress`; A2A push, leads and the key registry resolve through it.
 - `src/control.rs`: `/_rustybin/config`, `/_rustybin/version`, `/_rustybin/ready` (readiness, never authenticated),
   `git_sha()` / `build_info()` (build.rs sets `RUSTYBIN_GIT_SHA`), `is_control_path()` (`/_rustybin/*`, `/ui/*`).
 - `src/control_oauth.rs`: OAuth sign-in to the management MCP server (`RUSTYBIN_CONTROL_OAUTH*`), see above.
 - `src/control_auth.rs`: `RUSTYBIN_CONTROL_AUTH` (`open` / `token` / `jwt`), Ed25519 JWT verification with scopes
   (`inspector`, `console`, `admin`), the `enforce` middleware (protects `/_rustybin/*` except `/_rustybin/ready` and
   the OAuth sign-in endpoints `/_rustybin/oauth/{register,authorize,token}`; `/ui/*` static files stay open). Tests sign tokens with the keys in `tests/common/control_jwt_keys.rs`
-  (`test_support::control_jwt`).
+  (`test_support::control_jwt`). `admin::admin_check` answers 403 (not 401) to a valid control JWT without the
+  admin scope, so the console is not signed out by an admin-only call.
 - `src/metrics.rs`: `Metrics` (in `AppState`), the `track` middleware (route label = `MatchedPath` template),
   `/_rustybin/metrics`. Every label is bounded; WebSocket handlers hold a guard from `metrics::open_ws`.
 - `src/logging.rs`: `RUSTYBIN_LOG_FORMAT` (`text` / `json`), `logging::subscriber(config, writer, ansi)`.
 - `src/ui.rs` + `ui/`: the web console under `/ui` (vanilla ES modules and CSS, no Node build step;
   `build.rs` embeds every file under `ui/`), plus `/_rustybin/catalog` and `/_rustybin/status`. `index.html` gets
-  `<meta name="rustybin-*">` tags (control auth mode, console title, back link); `ui/lib/auth.js` handles the
-  control token (`#token=` fragment, sessionStorage, sign-in screen) and `http.js` sends it as a bearer on
-  `/_rustybin/*` calls. Browser check: `conformance/ui/run.sh` (Playwright; open mode plus a jwt-mode instance).
+  `<meta name="rustybin-*">` tags (control auth mode, console title and back link from the `console.*` settings);
+  `ui/lib/auth.js` handles the control token (`#token=` fragment, sessionStorage, sign-in screen) and `http.js`
+  sends it as a bearer on `/_rustybin/*` calls. `ui/views/manage.js` is the Management view (the gear opens it;
+  `TABS` is the rail later steps extend; `ui/lib/settingsform.js` renders a settings group from the schema).
+  Browser check: `conformance/ui/run.sh` (Playwright; open mode plus a jwt-mode instance).
 - `src/keys.rs` + `src/keys/`: API keys. `RUSTYBIN_SHARED_MODE` (keys on every data-plane route, per-key limits
   and daily quotas, inspector and usage scoped by key id, the key layer authenticates the control plane) and
   `RUSTYBIN_REQUIRE_KEY`. `registry.rs` (JSON registry, SHA-256 lookup), `ledger.rs` (bounded per-key daily

@@ -157,7 +157,7 @@ def run_theme(browser, theme):
         page.wait_for_selector("text=Requests captured")
         page.wait_for_selector("text=What Rustybin sees of this browser")
         page.wait_for_selector(".url-row code")
-        expect(page.locator(".nav-link")).to_have_count(10)
+        expect(page.locator(".nav-link")).to_have_count(11)
         # No plan configured (RUSTYBIN_PLAN=none): no "Plan and usage" card.
         expect(page.locator("text=Plan and usage")).to_have_count(0)
         shot(page, theme, "01-overview")
@@ -508,14 +508,15 @@ def run_theme(browser, theme):
     step("token lab", tokens)
 
     def settings_and_theme():
-        page.get_by_role("button", name="Console settings").click()
+        # The gear opens Management, General: this browser's settings live there.
+        page.get_by_role("button", name="Console settings", exact=True).click()
+        page.wait_for_function("location.hash === '#/manage/general'")
         page.get_by_label("Session (X-Rustybin-Session)").fill("e2e-session")
-        page.get_by_role("button", name="Save").click()
-        page.wait_for_selector("text=e2e-session")
+        page.get_by_role("button", name="Save browser settings").click()
+        page.wait_for_selector("#topbar-actions >> text=e2e-session")
         # The admin token stays in this tab, never in localStorage.
-        page.get_by_role("button", name="Console settings").click()
         page.get_by_label("Admin token").fill("e2e-admin-secret")
-        page.get_by_role("button", name="Save").click()
+        page.get_by_role("button", name="Save browser settings").click()
         page.wait_for_function("(sessionStorage.getItem('rustybin.console.v1.secrets') || '').includes('e2e-admin-secret')")
         assert "e2e-admin-secret" not in (page.evaluate("localStorage.getItem('rustybin.console.v1')") or ""), "admin token on disk"
         # One saved by an older console moves out of localStorage on load.
@@ -529,20 +530,84 @@ def run_theme(browser, theme):
         page.wait_for_selector("#view h1")
         assert "e2e-old-secret" not in (page.evaluate("localStorage.getItem('rustybin.console.v1')") or ""), "old admin token kept on disk"
         assert "e2e-old-secret" in (page.evaluate("sessionStorage.getItem('rustybin.console.v1.secrets')") or ""), "old admin token lost"
-        page.get_by_role("button", name="Console settings").click()
+        page.get_by_role("button", name="Console settings", exact=True).click()
         page.get_by_label("Admin token").fill("")
-        page.get_by_role("button", name="Save").click()
+        page.get_by_role("button", name="Save browser settings").click()
         page.keyboard.press("Alt+1")
         page.wait_for_function("location.hash === '#/overview'")
 
-    step("settings dialog + keyboard nav", settings_and_theme)
+    step("management: browser settings + keyboard nav", settings_and_theme)
+
+    def management():
+        # Every registered instance setting has a control (its key as aria-label).
+        page.goto(BASE + "/ui/#/manage/general")
+        page.wait_for_selector("form[aria-label='Settings: console']")
+        with urllib.request.urlopen(BASE + "/_rustybin/settings", timeout=10) as r:
+            doc = json.load(r)
+        assert doc["persisted"] is False and doc["locked"] is False, doc
+        page.get_by_role("tab", name="Network").click()
+        page.wait_for_selector("form[aria-label='Settings: egress']")
+        page.wait_for_selector("form[aria-label='Settings: leads']")
+        page.get_by_role("tab", name="General").click()
+        page.wait_for_selector("form[aria-label='Settings: console']")
+        for s in doc["settings"]:
+            if s["group"] == "console":
+                expect(page.locator(f"[aria-label='{s['key']}']")).to_have_count(1)
+        page.get_by_role("tab", name="Network").click()
+        for s in doc["settings"]:
+            if s["group"] in ("egress", "leads"):
+                expect(page.locator(f"[aria-label='{s['key']}']")).to_have_count(1)
+        # The policy card: the global list, each feature, no decisions yet.
+        page.wait_for_selector("text=Allowed by feature")
+        page.wait_for_selector("text=A2A push notifications")
+        # A secret: set it, see "ends in", never the value; then clear it.
+        page.get_by_role("button", name="leads.webhook_token replace").click()
+        page.locator("[aria-label='leads.webhook_token']").fill("e2e-hook-secret-k3Qx")
+        page.get_by_role("button", name="Save leads webhook settings").click()
+        page.wait_for_selector("text=ends in k3Qx")
+        assert "e2e-hook-secret" not in page.locator("form[aria-label='Settings: leads']").inner_text()
+        with urllib.request.urlopen(BASE + "/_rustybin/settings", timeout=10) as r:
+            body = r.read().decode()
+        assert "e2e-hook-secret" not in body and '"hint":"k3Qx"' in body.replace(" ", ""), body
+        shot(page, theme, "15-management-network")
+        page.get_by_role("button", name="leads.webhook_token clear").click()
+        page.get_by_role("button", name="Save leads webhook settings").click()
+        page.wait_for_selector("form[aria-label='Settings: leads'] >> text=Not set")
+        # The outbound allowlist: saved, validated, shown in the policy card.
+        page.locator("[aria-label='egress.allow']").fill("not a host!")
+        page.get_by_role("button", name="Save outbound settings").click()
+        page.wait_for_selector("form[aria-label='Settings: egress'] .notice.err")
+        page.locator("[aria-label='egress.allow']").fill("*.example.com\n10.0.0.0/8")
+        page.get_by_role("button", name="Save outbound settings").click()
+        page.wait_for_selector("text=Saved egress.allow")
+        page.wait_for_selector("dd:has-text('*.example.com, 10.0.0.0/8')")
+        # The console title: saved on the instance, shown after a reload.
+        page.get_by_role("tab", name="General").click()
+        page.locator("[aria-label='console.title']").fill("E2E pod")
+        page.get_by_role("button", name="Save console settings").click()
+        page.wait_for_selector("text=Saved console.title")
+        page.wait_for_selector("text=Saved in this instance (overrides RUSTYBIN_CONSOLE_TITLE)")
+        page.reload()
+        page.wait_for_selector("#topbar-meta .console-title")
+        expect(page.locator("#topbar-meta .console-title")).to_have_text("E2E pod")
+        shot(page, theme, "15-management")
+        page.locator("[aria-label='console.title']").fill("")
+        page.get_by_role("button", name="Save console settings").click()
+        page.wait_for_selector("text=Saved console.title")
+        page.get_by_role("tab", name="Network").click()
+        page.locator("[aria-label='egress.allow']").fill("")
+        page.get_by_role("button", name="Save outbound settings").click()
+        page.wait_for_selector("text=Saved egress.allow")
+        assert_icons_sized(page, "the management view")
+
+    step("management: instance settings, a secret, the egress policy", management)
 
     def via_gateway():
         # A second origin for the same server stands in for a gateway with CORS.
         alt = BASE.replace("127.0.0.1", "localhost") if "127.0.0.1" in BASE else BASE.replace("localhost", "127.0.0.1")
-        page.get_by_role("button", name="Console settings").click()
+        page.get_by_role("button", name="Console settings", exact=True).click()
         page.get_by_label("Gateway base URL").fill(alt)
-        page.get_by_role("button", name="Save").click()
+        page.get_by_role("button", name="Save browser settings").click()
         goto_view(page, "explorer")
         page.get_by_label("Search endpoints").fill("/anything")
         page.locator(".list-item", has_text="/anything").first.click()
@@ -550,16 +615,20 @@ def run_theme(browser, theme):
         page.get_by_role("button", name="Send", exact=True).click()
         page.locator(".card .badge.ok").first.wait_for()
         # Unreachable gateway: a helpful message instead of a spinner.
-        page.get_by_role("button", name="Console settings").click()
+        page.get_by_role("button", name="Console settings", exact=True).click()
         page.get_by_label("Gateway base URL").fill("http://127.0.0.1:9")
-        page.get_by_role("button", name="Save").click()
+        page.get_by_role("button", name="Save browser settings").click()
+        goto_view(page, "explorer")
+        page.get_by_label("Search endpoints").fill("/anything")
+        page.locator(".list-item", has_text="/anything").first.click()
+        page.locator(".seg button", has_text="Via gateway").first.click()
         page.get_by_role("button", name="Send", exact=True).click()
         page.wait_for_selector("text=Copy as curl")
         page.wait_for_selector("text=CORS")
         shot(page, theme, "14-gateway-error")
-        page.get_by_role("button", name="Console settings").click()
+        page.get_by_role("button", name="Console settings", exact=True).click()
         page.get_by_label("Gateway base URL").fill("")
-        page.get_by_role("button", name="Save").click()
+        page.get_by_role("button", name="Save browser settings").click()
 
     step("send via gateway (CORS) + unreachable gateway", via_gateway)
 
@@ -689,7 +758,7 @@ def run_jwt(browser):
     def agent_panel_with_token():
         token = page.evaluate("sessionStorage.getItem('rustybin.console.controlToken')")
         assert token, "not signed in"
-        page.get_by_role("button", name="Console settings").click()
+        page.get_by_role("button", name="Console settings", exact=True).click()
         panel = page.locator("#agent-panel")
         panel.locator("summary", has_text="Connect an AI agent").click()
         url = jwt_base + "/_rustybin/mcp"
@@ -820,7 +889,7 @@ def run_jwt(browser):
         shot(page, "jwt", "22-expired")
         page.goto(jwt_base + "/ui/#/overview&token=" + control_jwt("console"))
         page.wait_for_selector("text=Requests captured")
-        page.get_by_role("button", name="Console settings").click()
+        page.get_by_role("button", name="Console settings", exact=True).click()
         page.locator("#sign-out").click()
         page.wait_for_selector("#signin")
         expect(page.locator("#signin")).to_contain_text("You signed out")

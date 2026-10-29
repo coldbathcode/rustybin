@@ -110,7 +110,7 @@ function mountList(root) {
       noticeEl.appendChild(notice('', readOnly));
     }
     if (!readOnly && settings.instance.adminTokenConfigured && !settings.get('adminToken')) {
-      noticeEl.appendChild(notice('warn', 'This instance has an admin token: set it in the console settings to create and change mocks.'));
+      noticeEl.appendChild(notice('warn', 'This instance has an admin token: set it under Management, General, to create and change mocks.'));
     }
     if ((data.load_errors || []).length) {
       noticeEl.appendChild(notice('err', h('strong', null, 'Some mocks from the config file or directory could not be loaded:'),

@@ -786,6 +786,7 @@ mod tests {
             PushService::new(
                 PushPolicy::default(),
                 Arc::new(WebhookSink::new(10, 10, Duration::from_secs(60))),
+                crate::egress::Egress::for_tests(),
             ),
         ))
     }
