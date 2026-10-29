@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased: the AI and agent gateway upgrade
+## 0.1.0 (2026-10-29): the AI and agent gateway upgrade
 
 A broad rework of Rustybin, from an httpbin-style echo service into an upstream for
 API, AI and agent gateway demos.
