@@ -850,7 +850,8 @@ impl Assist {
             system: "You are a connectivity check.".to_string(),
             user: "Reply with the single word OK.".to_string(),
             schema: None,
-            max_output_tokens: 16,
+            // Room for a reasoning model to think and still answer.
+            max_output_tokens: 256,
             mock_answer: Some(json!("OK")),
         };
         let mut events = client.complete(&self.egress, &req).await.map_err(|p| {

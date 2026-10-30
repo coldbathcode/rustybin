@@ -7,7 +7,13 @@
   context but not `ui-portal/`, so the portal SPA was embedded empty (a `cargo build`
   from a checkout was fine). The Dockerfile copies `ui-portal/` now, and the image smoke
   tests of CI and the publish workflow start the container with `RUSTYBIN_PORTAL=on` and
-  require `/portal/` to answer the page. No other change.
+  require `/portal/` to answer the page.
+- **Fix: OpenAI's reasoning models answered empty or cut off.** GPT-5 and the o-series
+  spend output tokens thinking before they write, and the key test gave them 16; the
+  describe task could end mid-JSON and report a schema problem. Requests to those models
+  now carry `reasoning_effort: low`, a stream that ends with `finish_reason: length` is
+  reported as "the model hit its output token limit" instead of a truncated answer, and
+  the key test allows 256 output tokens.
 
 ## 0.2.0 (2026-10-30): the AI-assisted mocking service
 

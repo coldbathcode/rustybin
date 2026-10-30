@@ -28,6 +28,12 @@ pub fn body(req: &Request, compatible: bool) -> Value {
         body["max_tokens"] = json!(req.max_output_tokens);
     } else {
         body["max_completion_tokens"] = json!(req.max_output_tokens);
+        if is_reasoning_model(&req.model) {
+            // Reasoning models spend output tokens thinking before they write;
+            // the tasks here are structured jobs, so keep the thinking short or
+            // a small budget (the key test's) comes back empty.
+            body["reasoning_effort"] = json!("low");
+        }
     }
     if let Some(schema) = &req.schema {
         if compatible {
@@ -81,6 +87,20 @@ pub async fn complete(
     Ok(Box::pin(stream))
 }
 
+/// OpenAI's reasoning models (`gpt-5*`, `o1*`, `o3*`, `o4*`): they take
+/// `reasoning_effort` and count their thinking against the output budget.
+pub fn is_reasoning_model(model: &str) -> bool {
+    let m = model.trim().to_ascii_lowercase();
+    m.starts_with("gpt-5") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4")
+}
+
+/// The message when a stream ends with `finish_reason: length`: the answer is
+/// cut (or, with a reasoning model, never started), so it is an error, not a
+/// shorter answer.
+pub const RAN_OUT: &str = "the model hit its output token limit before finishing the answer \
+(a reasoning model spends part of the budget thinking): raise RUSTYBIN_ASSIST_MAX_OUTPUT_TOKENS, \
+pick a smaller job, or a model that does not reason";
+
 /// The events of one chunk.
 pub fn events(v: &Value) -> Vec<Event> {
     let mut out = Vec::new();
@@ -95,6 +115,12 @@ pub fn events(v: &Value) -> Vec<Event> {
         if !text.is_empty() {
             out.push(Event::Delta(text.to_string()));
         }
+    }
+    if v.pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        == Some("length")
+    {
+        out.push(Event::Error(RAN_OUT.to_string()));
     }
     if let Some(usage) = v.get("usage").filter(|u| u.is_object()) {
         out.push(Event::Usage {

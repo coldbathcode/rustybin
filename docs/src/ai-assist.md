@@ -145,7 +145,10 @@ the instance (later releases) need admin, like `test` and `usage`.
   model, the system prompt, the user prompt and the schema.
 - **Caps**: `RUSTYBIN_ASSIST_MAX_CALLS_PER_MINUTE` (20) per caller (the control
   principal, plus the client address on an open control plane) answers `429` with
-  `Retry-After`; `RUSTYBIN_ASSIST_MAX_OUTPUT_TOKENS` (8192) bounds every answer.
+  `Retry-After`; `RUSTYBIN_ASSIST_MAX_OUTPUT_TOKENS` (8192) bounds every answer. A
+  reasoning model (OpenAI's GPT-5 and o-series) spends part of that budget thinking:
+  Rustybin asks it for low reasoning effort, and an answer the budget cuts off is
+  reported as "the model hit its output token limit" rather than used.
 - **Usage**: `GET /_rustybin/assist/usage` (admin) counts calls, errors, tokens and the
   estimated cost since start, in total, per provider and model (at most 64 series)
   and per task; the metrics `rustybin_assist_calls_total{provider,model,task,outcome}`

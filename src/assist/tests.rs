@@ -173,6 +173,32 @@ fn provider_bodies_and_events() {
         openai::events(&json!({"error": {"message": "bad key"}})),
         vec![Event::Error("bad key".into())]
     );
+    // A stream cut by the output budget is an error, not a shorter answer.
+    assert_eq!(
+        openai::events(&json!({"choices": [{"delta": {}, "finish_reason": "length"}]})),
+        vec![Event::Error(openai::RAN_OUT.into())]
+    );
+    assert_eq!(
+        openai::events(&json!({"choices": [{"delta": {"content": "}"}, "finish_reason": "stop"}]})),
+        vec![Event::Delta("}".into())]
+    );
+    // Reasoning models get a short reasoning_effort on OpenAI, never on a compatible endpoint.
+    assert!(openai::is_reasoning_model("gpt-5-mini"));
+    assert!(openai::is_reasoning_model("o3"));
+    assert!(!openai::is_reasoning_model("gpt-4o"));
+    let reasoning = Request {
+        model: "gpt-5".into(),
+        system: "s".into(),
+        user: "hello".into(),
+        schema: None,
+        max_output_tokens: 100,
+        mock_answer: None,
+    };
+    assert_eq!(openai::body(&reasoning, false)["reasoning_effort"], "low");
+    assert!(openai::body(&reasoning, true)
+        .get("reasoning_effort")
+        .is_none());
+    assert!(openai::body(&req, false).get("reasoning_effort").is_none());
     // Gemini: responseSchema without the keywords it rejects, key never in the URL.
     let b = gemini::body(&req);
     assert_eq!(
