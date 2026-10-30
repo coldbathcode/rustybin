@@ -15,13 +15,17 @@ export const SERVER = (() => {
 
 export const SESSION_HEADER = 'X-Rustybin-Session';
 
-/** True for URLs of this server's mock management API (`/_rustybin/mocks*`). */
+/**
+ * True for URLs of this server's mock management API (`/_rustybin/mocks*`)
+ * and the portal's control routes (`/_rustybin/portal*`, where visitors
+ * publish their own mocks): the visitor's manage tokens go there.
+ */
 export function isMocksUrl(u) {
   try {
     const url = new URL(u, location.href);
     const base = new URL(SERVER + '/');
-    const prefix = base.pathname.replace(/\/$/, '') + '/_rustybin/mocks';
-    return url.origin === base.origin && (url.pathname === prefix || url.pathname.startsWith(prefix + '/'));
+    const root = base.pathname.replace(/\/$/, '');
+    return url.origin === base.origin && ['/_rustybin/mocks', '/_rustybin/portal'].some((p) => url.pathname === root + p || url.pathname.startsWith(root + p + '/'));
   } catch {
     return false;
   }

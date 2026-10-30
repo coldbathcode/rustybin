@@ -2,7 +2,7 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 to 06 done)
+## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 to 07 done)
 
 [docs/plans/next/master-plan.md](docs/plans/next/master-plan.md) (planned 2026-10-29) is the plan for the next
 build: twelve steps, one file each (`docs/plans/next/step-NN-*.md`): foundations (step 01, done 2026-10-29: the
@@ -17,7 +17,8 @@ the console's assist bar, drawer and `ui/lib/assist.js`), AI-built mocks (step 0
 prompt to the chosen OpenAPI version, example payloads with an alert when a spec has none, AI edits through a
 diff), an MCP inspector for any server with every auth mode and a relay (step 05, done 2026-10-30:
 `src/mcp/inspector/`, `ui/lib/mcpclient.js`, `ui/lib/mcpauth.js`, `ui/views/mcp.js`, see below), a mock MCP registry and registry
-browsing (step 06, done 2026-10-30: `src/mcp/registry/`, `ui/views/registry.js`, see below), a dev portal, AI agents management, the whole instance as `rustybin.yaml` with git source control, a
+browsing (step 06, done 2026-10-30: `src/mcp/registry/`, `ui/views/registry.js`, see below), a dev portal (step 07, done
+2026-10-30: `src/portal/`, `ui-portal/`, see below), AI agents management, the whole instance as `rustybin.yaml` with git source control, a
 `rustybin` CLI for remote instances, management MCP parity, and the 0.2.0 release. The master plan's section 4 is
 the build marker and section 5 the session protocol: build a step whole, update its status and build notes, update
 the master table, commit as oliwynn with the step number in the message, push to main. Steps go only when the
@@ -179,7 +180,7 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   `/_rustybin/metrics`. Every label is bounded; WebSocket handlers hold a guard from `metrics::open_ws`.
 - `src/logging.rs`: `RUSTYBIN_LOG_FORMAT` (`text` / `json`), `logging::subscriber(config, writer, ansi)`.
 - `src/ui.rs` + `ui/`: the web console under `/ui` (vanilla ES modules and CSS, no Node build step;
-  `build.rs` embeds every file under `ui/`), plus `/_rustybin/catalog` and `/_rustybin/status`. `index.html` gets
+  `build.rs` embeds every file under `ui/`, and `ui-portal/` for the dev portal), plus `/_rustybin/catalog` and `/_rustybin/status`. `index.html` gets
   `<meta name="rustybin-*">` tags (control auth mode, console title and back link from the `console.*` settings);
   `ui/lib/auth.js` handles the control token (`#token=` fragment, sessionStorage, sign-in screen) and `http.js`
   sends it as a bearer on `/_rustybin/*` calls. `ui/views/manage.js` is the Management view (the gear opens it;
@@ -268,6 +269,16 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   `cluster_tests.rs`, `failover_tests.rs` (with `test_net.rs`: partitions that refuse or drop calls); the
   node routes (`harness::is_node_path`: join, heartbeat, vote, announcement) authenticate with the join
   token or node credential and skip the control-plane auth, key layer and plan limits.
+- `src/portal/`: the dev portal (`/portal`, `RUSTYBIN_PORTAL*`, the `portal.*` settings). `mod.rs` (`ItemId`:
+  `mock:<name>`, `mcp:<server>`, `llm`, `a2a:<agent>`, `tools`, `registry`; `Published` with the mock's owner,
+  `Meta` and `clean_meta`, `FileItem` for `portal.items` of `rustybin.yaml` kept on the `MockStore`, `Portal` in
+  `AppState.portal`: items, insights, the catalogue cache, `<state>/portal.json`), `items.rs` (candidates, published
+  entries, `hidden_reason`, the catalogue each kind's page reads), `insights.rs` (bounded counters), `api.rs` (the
+  SPA from `ui-portal/`, `/portal/api/catalog`, `/events`, collections, `/portal/reference/{id}`, the control routes
+  `/_rustybin/portal*`; `portal.auth` checked in `gate`). The portal SPA imports the console's `dom.js`, `format.js`,
+  `markdown.js` and stylesheet from `../ui/`; never its auth or http code. `/portal/*` is a control path (no
+  capture, no faults) and exempt from the key layer. The console side is `ui/lib/portal.js` (publish dialog) and
+  the Portal tab of `ui/views/manage.js`.
 - `src/fault.rs`: `X-Rustybin-Delay` / `X-Rustybin-Fail` middleware.
 - `src/admin.rs`: `require_admin(&headers, &config)` guard for instance-global mutations.
 - `src/session.rs`: `session_key(&headers, client_ip)`, `client_ip(...)`, extractors `Session`, `ClientIp`, `PeerAddr`.

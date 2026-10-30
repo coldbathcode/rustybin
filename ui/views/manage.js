@@ -1,6 +1,8 @@
 // Management: the instance's settings and this browser's, in tabs down the
-// left (General, Sign-in, Network; later steps add AI, Portal, Agents,
-// Source control, Export). Instance settings come from GET /_rustybin/settings
+// left (General, Sign-in, AI, Network, Portal; later steps add Agents,
+// Source control, Export). Portal publishes items to the dev portal at
+// /portal (GET /_rustybin/portal, PUT and DELETE /_rustybin/portal/items/{id})
+// and shows its insights. Instance settings come from GET /_rustybin/settings
 // and save with PATCH (admin); the browser's (session, gateway URL, admin
 // token, theme) stay in this browser as before. Sign-in changes the console
 // user name and password (PUT /_rustybin/password, the current password
@@ -13,6 +15,7 @@ import * as auth from '../lib/auth.js';
 import * as assist from '../lib/assist.js';
 import { agentPanel } from '../lib/agent.js';
 import { settingsForm } from '../lib/settingsform.js';
+import * as portal from '../lib/portal.js';
 
 // The rail. Later steps append entries here; each renders its own panel.
 export const TABS = [
@@ -20,6 +23,7 @@ export const TABS = [
   { id: 'signin', title: 'Sign-in', icon: 'lock', hint: 'The console user name and password, active sessions' },
   { id: 'ai', title: 'AI', icon: 'ai', hint: 'Your model provider and key for the AI features' },
   { id: 'network', title: 'Network', icon: 'globe', hint: 'Outbound connections and recent decisions' },
+  { id: 'portal', title: 'Portal', icon: 'explorer', hint: 'The dev portal: branding, access, published items, insights' },
 ];
 
 function loadError(e) {
@@ -412,6 +416,119 @@ function networkPanel(doc, reload, error) {
   return el;
 }
 
+// ── Portal ──
+
+const KIND_TITLES = { api: 'Mock APIs', mcp: 'MCP servers', llm: 'Mock LLM', agent: 'A2A agents', tools: 'HTTP tools', registry: 'MCP registry' };
+
+function portalPanel(doc, reload, error) {
+  const el = h('div', { class: 'stack' });
+  const statusEl = h('div', null, spinner('Reading the portal'));
+  const itemsEl = h('div');
+  const insightsEl = h('div');
+  const selected = new Set();
+  let st = null;
+
+  function statusCard() {
+    const url = portal.portalUrl();
+    const mode = st.mode === 'auto' ? 'auto (on once an item is published)' : st.mode;
+    replace(statusEl,
+      st.enabled
+        ? notice('ok', icon('check'), h('div', { class: 'grow' }, h('strong', null, 'The portal is on: '), st.counts.shown + ' of ' + st.counts.published + ' published items are shown. ', h('a', { href: url, target: '_blank', rel: 'noopener', id: 'portal-preview' }, icon('external'), ' Preview the portal')))
+        : notice('warn', h('div', { class: 'grow' }, h('strong', null, 'The portal is off: '), st.mode === 'off' ? 'portal.enabled is off.' : 'nothing is published yet. Publish an item below.')),
+      kvgrid([
+        ['URL', h('span', { class: 'mono' }, url)],
+        ['Mode', mode],
+        ['Who may read it', st.auth === 'open' ? 'anyone who reaches it' : st.auth === 'password' ? 'signed-in users (the console sign-in or any control credential)' : 'holders of an API key'],
+        ['Base URL for testers', st.base_url ? h('span', { class: 'mono' }, st.base_url) : 'the URL the portal is opened with'],
+        ['Visitors may publish', st.visitors ? 'yes (self-service visitors, their own mocks)' : 'no'],
+        ['Saved', st.persisted ? 'in the state directory (portal.json)' : 'in memory: publishing is lost on a restart (set RUSTYBIN_STATE_DIR)'],
+      ]));
+  }
+
+  async function bulk(publish) {
+    const ids = Array.from(selected);
+    const failed = [];
+    for (const id of ids) {
+      const r = publish ? await portal.publish(id, {}) : await portal.unpublish(id);
+      if (!r.ok && !(r.status === 404 && !publish)) failed.push(id + ': ' + ((r.json && r.json.error) || r.status));
+    }
+    selected.clear();
+    if (failed.length) toast(failed.join('; '), 'err');
+    else toast((publish ? 'Published ' : 'Unpublished ') + ids.length + ' item' + (ids.length === 1 ? '' : 's'));
+    load();
+  }
+
+  function itemsCard() {
+    const items = st.items || [];
+    const bar = h('div', { class: 'row', style: { gap: '6px', flexWrap: 'wrap' } });
+    const renderBar = () => replace(bar, h('span', { class: 'muted small grow' }, selected.size ? selected.size + ' selected' : 'Select items to publish several at once.'),
+      h('button', { class: 'btn sm', type: 'button', id: 'portal-bulk-publish', disabled: !selected.size, onclick: () => bulk(true) }, 'Publish selected'),
+      h('button', { class: 'btn sm ghost', type: 'button', disabled: !selected.size, onclick: () => bulk(false) }, 'Unpublish selected'));
+    renderBar();
+    const groups = [];
+    for (const kind of Object.keys(KIND_TITLES)) {
+      const list = items.filter((i) => i.kind === kind);
+      if (!list.length) continue;
+      groups.push(h('h3', { class: 'section-title' }, KIND_TITLES[kind]));
+      groups.push(h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
+        h('thead', null, h('tr', null, h('th', { style: { width: '28px' } }, ''), h('th', null, 'Item'), h('th', null, 'Portal'), h('th', null, 'Views (7 days)'), h('th', null, ''))),
+        h('tbody', null, ...list.map((it) => {
+          const p = it.published;
+          const cb = h('input', { type: 'checkbox', 'aria-label': 'Select ' + it.id, checked: selected.has(it.id), disabled: !!(p && p.source === 'file') });
+          cb.addEventListener('change', () => { if (cb.checked) selected.add(it.id); else selected.delete(it.id); renderBar(); });
+          const state = !p ? badge('not published', '')
+            : it.hidden ? h('span', null, badge('hidden', 'warn'), h('div', { class: 'tiny muted' }, it.hidden))
+              : badge(p.source === 'file' ? 'published (file)' : 'published', 'ok');
+          const edit = h('button', { class: 'btn sm', type: 'button', 'data-portal-item': it.id }, p ? 'Edit' : 'Publish');
+          edit.addEventListener('click', () => portal.openPublishDialog(it, { onDone: () => load() }));
+          return h('tr', { 'data-item': it.id },
+            h('td', null, cb),
+            h('td', null, h('div', null, (p && p.title) || it.title), h('div', { class: 'tiny muted mono' }, it.id + (it.kind === 'api' && it.state !== 'live' ? ' (' + it.state + ')' : '')),
+              p && p.visitor ? badge('visitor', 'outline') : null),
+            h('td', null, state),
+            h('td', { class: 'mono small' }, it.insights ? String(it.insights.views_7d) : ''),
+            h('td', { class: 'right' }, edit));
+        })))));
+    }
+    replace(itemsEl, card('Items', { hint: st.counts.published + ' published, at most ' + st.counts.max }, h('div', { class: 'stack-sm' }, bar, ...groups)));
+  }
+
+  function insightsCard() {
+    const rows = (st.items || []).filter((i) => i.published && i.insights);
+    if (!rows.length) { replace(insightsEl, card('Insights', {}, h('p', { class: 'muted small', style: { margin: 0 } }, 'Nothing published yet.'))); return; }
+    replace(insightsEl, card('Insights', { hint: 'counts only, no visitor identifiers' }, h('div', { class: 'table-wrap' }, h('table', { class: 'table', id: 'portal-insights' },
+      h('thead', null, h('tr', null, h('th', null, 'Item'), h('th', null, '7 days'), h('th', null, '30 days'), h('th', null, 'Downloads'), h('th', null, 'Try it'))),
+      h('tbody', null, ...rows.map((i) => h('tr', null,
+        h('td', null, (i.published && i.published.title) || i.title),
+        h('td', { class: 'mono small' }, String(i.insights.views_7d)),
+        h('td', { class: 'mono small' }, String(i.insights.views_30d)),
+        h('td', { class: 'mono small', title: Object.entries(i.insights.downloads || {}).map(([k, v]) => k + ' ' + v).join(', ') }, String(i.insights.downloads_total)),
+        h('td', { class: 'mono small' }, String(i.insights.tries)))))))));
+  }
+
+  async function load() {
+    try {
+      st = await portal.load();
+      statusCard();
+      itemsCard();
+      insightsCard();
+    } catch (e) {
+      replace(statusEl, loadError(e));
+    }
+  }
+
+  el.appendChild(card('Dev portal', { hint: 'what testers see at /portal', actions: h('button', { class: 'btn sm ghost', type: 'button', onclick: () => load() }, icon('refresh'), 'Refresh') }, statusEl));
+  if (doc) {
+    const form = settingsForm(doc, 'portal', { saveLabel: 'Save portal settings', onSaved: (d) => { reload(d); load(); } });
+    el.appendChild(card('Branding and access', { hint: 'title, introduction, colour, who may read it' }, form.el));
+  } else {
+    el.appendChild(card('Branding and access', {}, loadError(error)));
+  }
+  el.append(itemsEl, insightsEl);
+  load();
+  return el;
+}
+
 // ── The view ──
 
 export default {
@@ -442,7 +559,7 @@ export default {
         b.tabIndex = tid === id ? 0 : -1;
       }
       if (location.hash !== '#/manage/' + id) history.replaceState(null, '', '#/manage/' + id);
-      const render = id === 'network' ? networkPanel : id === 'signin' ? signinPanel : id === 'ai' ? aiPanel : generalPanel;
+      const render = id === 'network' ? networkPanel : id === 'signin' ? signinPanel : id === 'ai' ? aiPanel : id === 'portal' ? portalPanel : generalPanel;
       replace(panel, render(doc, (d) => { if (d) { doc = d; renderStatus(); } }, error));
     }
 

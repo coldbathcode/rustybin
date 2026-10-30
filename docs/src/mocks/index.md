@@ -18,6 +18,8 @@ that you cannot reach from a demo laptop.
 - Every deployed mock is also an MCP server at `/mock/<name>/_rustybin/mcp`, one tool
   per operation, answered by the same mock. See [An MCP server for every
   mock](mcp.md).
+- Publish a mock to the [dev portal](../portal.md) at `/portal`: testers read its
+  reference, try it, download collections and copy its MCP snippets without the console.
 - Each mock has a draft and a live revision: edits are checked (a valid request and
   response per operation) before they are deployed, and a deploy can be rolled back.
 - Mocks are created in the [web console](../console.md#mock-apis), through the

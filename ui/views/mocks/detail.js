@@ -14,6 +14,7 @@ import { checksFailed, wireDrop } from './wizard.js';
 import { coverageBanner, openEditDialog, openExamplesDialog } from './ai.js';
 import * as assist from '../../lib/assist.js';
 import * as settings from '../../lib/settings.js';
+import * as portal from '../../lib/portal.js';
 
 const enc = encodeURIComponent;
 const TABS = [['operations', 'Operations'], ['try', 'Try it'], ['data', 'Data'], ['security', 'Security'], ['mcp', 'MCP server'], ['settings', 'Settings'], ['traffic', 'Traffic'], ['report', 'Deploy report']];
@@ -27,6 +28,8 @@ export function mountDetail(root, name, sub) {
   let opId = null;
   let editor = null;
   let pollTimer = null;
+  // This mock's dev portal entry (GET /_rustybin/portal), when it can be read.
+  let portalItem = null;
   // Decided per mock once it is loaded (a visitor may change their own).
   let readOnly = readOnlyReason();
   const headEl = h('div', { class: 'view-head mock-head' }, spinner('Loading the mock'));
@@ -72,6 +75,7 @@ export function mountDetail(root, name, sub) {
     renderHead();
     renderBanner();
     if (first) {
+      loadPortal();
       buildTabs();
       // Apply cards of the assistant land here with a request.
       const edit = settings.recall('mocks.edit', null);
@@ -117,14 +121,42 @@ export function mountDetail(root, name, sub) {
         h('a', { class: 'small back-link', href: '#/mocks' }, icon('back'), 'All mocks'),
         h('div', { class: 'row' }, h('h1', { class: 'mono' }, d.name), statePill(d),
           d.has_draft_changes && !unloaded ? badge(h('span', null, h('span', { class: 'dot warn' }), ' draft changes'), 'warn') : null,
-          d.origin !== 'api' ? badge(d.origin === 'sample' ? 'built-in sample' : 'from file', 'outline') : null),
+          d.origin !== 'api' ? badge(d.origin === 'sample' ? 'built-in sample' : 'from file', 'outline') : null,
+          portalItem && portalItem.published ? h('a', { class: 'badge ok', id: 'portal-badge', href: portal.portalUrl() + '#/i/' + enc(portalItem.id), target: '_blank', rel: 'noopener', title: portalItem.hidden ? 'Published, hidden: ' + portalItem.hidden : 'Open it on the dev portal' }, icon('globe'), portalItem.hidden ? ' on the portal (hidden)' : ' on the portal') : null),
         h('p', { style: { margin: 0 } }, h('strong', null, d.spec.title), ' v', d.spec.version, h('span', { class: 'muted' }, ` | ${plural(d.operations.length, 'operation')} | security ${securityLabel(d.security)} | ${plural(d.requests_last_hour || 0, 'call')} in the last hour, ${d.requests_total} in total, last ${relTime(d.last_hit)}`)),
         h('div', { class: 'row nowrap url-bar' }, h('code', { class: 'grow break' }, d.url), copyButton(d.url, { label: 'Copy URL', toast: 'Mock URL copied' })),
         d.host_url ? h('div', { class: 'row nowrap url-bar' }, h('span', { class: 'tiny muted' }, 'Host'), h('code', { class: 'grow break' }, d.host_url), copyButton(d.host_url, { label: 'Copy', title: 'Copy the host-based URL', toast: 'Host URL copied' })) : null),
       h('div', { class: 'row mock-actions' },
         h('span', { class: 'row nowrap', style: { gap: '8px' } }, switchCtl.el, switchText),
         readOnly ? null : editAiButton(),
+        readOnly || !portalItem ? null : portalButton(),
         readOnly ? null : deployBtn, menu));
+  }
+
+  // ── Dev portal ──
+  async function loadPortal() {
+    try {
+      const st = await portal.load();
+      if (!alive) return;
+      portalItem = (st.items || []).find((i) => i.id === 'mock:' + name) || null;
+    } catch {
+      portalItem = null;
+    }
+    if (detail) renderHead();
+  }
+
+  function portalButton() {
+    const published = !!(portalItem && portalItem.published);
+    const b = h('button', { class: 'btn', type: 'button', id: 'publish-portal', title: published ? 'Edit this mock\'s dev portal entry' : 'Publish this mock to the dev portal at /portal' }, icon('globe'), published ? 'Portal entry' : 'Publish to portal');
+    b.addEventListener('click', () => portal.openPublishDialog(portalItem, {
+      aiInputs: () => ({
+        title: detail.spec.title,
+        description: detail.spec.description || undefined,
+        operations: (detail.operations || []).slice(0, 60).map((o) => ({ method: o.method, path: o.path, summary: o.summary || undefined, tags: o.tags || [] })),
+      }),
+      onDone: () => loadPortal(),
+    }));
+    return b;
   }
 
   function editAiButton() {

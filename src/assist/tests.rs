@@ -332,7 +332,7 @@ fn actions_and_json_answers() {
     );
     let long = "x".repeat(task::MAX_TEXT_CHARS + 1);
     assert!((task::find("free_answer").expect("t").prompt)(&json!({"question": long})).is_err());
-    assert_eq!(tasks::suggest::static_for("mocks").len(), 3);
+    assert_eq!(tasks::suggest::static_for("mocks").len(), 4);
     assert_eq!(tasks::suggest::static_for("unknown").len(), 3);
 }
 

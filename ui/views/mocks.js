@@ -9,12 +9,15 @@ import { openWizard, sampleSpecText, wireDrop } from './mocks/wizard.js';
 import { mountDetail } from './mocks/detail.js';
 import { visitBar } from './mocks/visit.js';
 import { agentPanel } from '../lib/agent.js';
+import * as portal from '../lib/portal.js';
 
 const FILTERS = [['all', 'All'], ['on', 'On'], ['off', 'Off'], ['secured', 'Secured'], ['draft', 'Draft changes']];
 
 function mountList(root) {
   let alive = true;
   let data = null;
+  // Names of the mocks published on the dev portal.
+  let published = new Set();
   let timer = null;
   const st = settings.recall('mocks.list', { q: '', filter: 'all' });
   settings.remember('mocks.list', st);
@@ -90,6 +93,14 @@ function mountList(root) {
       return;
     }
     data = r.json;
+    // Which mocks are on the dev portal (best effort: the list works without it).
+    try {
+      const st = await portal.load();
+      published = new Set((st.items || []).filter((i) => i.kind === 'api' && i.published).map((i) => i.id.slice('mock:'.length)));
+    } catch {
+      published = new Set();
+    }
+    if (!alive) return;
     // An apply card of the assistant: open the wizard's Describe tab and run it.
     onDescribe();
     const ss = data.self_service || {};
@@ -254,7 +265,8 @@ function mountList(root) {
           m.has_draft_changes && !m.load_error ? h('span', { class: 'dot warn', title: 'Draft changes not deployed', 'aria-label': 'draft changes' }) : null,
           m.load_error ? badge(h('span', { title: m.load_error }, icon('alert'), ' load error'), 'err') : null,
           m.origin === 'sample' ? badge('sample', 'outline') : m.origin === 'file' ? badge('file', 'outline') : null,
-          m.owner_fingerprint ? badge(h('span', { title: 'Visitor mock (owner ' + m.owner_fingerprint + ')' }, 'visitor'), 'outline') : null),
+          m.owner_fingerprint ? badge(h('span', { title: 'Visitor mock (owner ' + m.owner_fingerprint + ')' }, 'visitor'), 'outline') : null,
+          published.has(m.name) ? h('span', { class: 'badge ok', title: 'Published on the dev portal' }, icon('globe'), ' portal') : null),
         h('div', { class: 'row nowrap', style: { gap: '4px' } }, h('code', { class: 'tiny muted ellipsis' }, m.url), copyButton(m.url, { icon: true, title: 'Copy the URL of ' + m.name, toast: 'Mock URL copied' })),
         m.host_url ? h('div', { class: 'row nowrap', style: { gap: '4px' } }, h('code', { class: 'tiny muted ellipsis', title: 'Host-based URL' }, m.host_url), copyButton(m.host_url, { icon: true, title: 'Copy the host URL of ' + m.name, toast: 'Host URL copied' })) : null),
       h('div', { class: 'mr-title' }, h('div', { class: 'ellipsis' }, m.title), h('div', { class: 'tiny muted' }, 'v' + m.version + ' | ' + m.operations + (m.operations === 1 ? ' operation' : ' operations') + (m.mode === 'stateful' ? ' | stateful, ' + plural(m.state_items || 0, 'item') + ' stored' : ''))),

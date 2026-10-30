@@ -152,9 +152,11 @@ time where they are checked, returned by the API only as `{ "set": true, "hint":
 "k3Qx" }` (the last four characters, and only for secrets of eight characters or
 more), never written to a configuration export in the clear, and never settable
 through the management MCP. The settings of this release: `console.title`,
-`console.backlink`, `egress.allow`, `egress.allow_loopback`, `registry.scenario`,
-`registry.saved` and the secret `leads.webhook_token`; later features register their own (the AI provider key, the
-git token, the portal).
+`console.backlink`, the sign-in's `console.user` and secret `console.password_hash`,
+the `assist.*` settings of [AI assist](ai-assist.md) (the provider keys are secrets),
+`egress.allow`, `egress.allow_loopback`, `registry.scenario`, `registry.saved`, the
+`portal.*` settings of the [dev portal](#dev-portal) and the secret
+`leads.webhook_token`; later features register their own (the git token).
 
 ## Outbound connections
 
@@ -290,6 +292,24 @@ Read when the server starts.
 | `RUSTYBIN_MCP_CLOCK_TICK_SECS` | `5` | Update interval of the subscribable `rustybin://clock` resource (1 to 3600). |
 | `RUSTYBIN_REGISTRY_SCENARIO` | `normal` | The [mock MCP registry](mcp/registry.md#scenarios)'s scenario: `normal`, `empty`, `large`, `flaky`, `slow`, `stale`, `invalid` or `auth_fail` (an invalid value warns and is ignored). Seeds the `registry.scenario` setting. |
 | `RUSTYBIN_REGISTRY_SAVED` | unset | Comma-separated registry base URLs the console offers under Browse a registry; their hosts are allowed for browsing. Seeds the `registry.saved` setting. |
+
+## Dev portal
+
+The [dev portal](portal.md) at `/portal`. Each variable seeds a setting of the
+`portal` group (Management, Portal); a value saved there wins unless
+`RUSTYBIN_SETTINGS_LOCK` is on. The branding settings (`portal.title`, `portal.intro`,
+`portal.accent`, `portal.contact`) have no variable.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RUSTYBIN_PORTAL` | `auto` | `auto`: `/portal` is on once an item is published; `on`; `off` (`/portal` answers `404`). Seeds `portal.enabled`; an invalid value warns. |
+| `RUSTYBIN_PORTAL_AUTH` | `open` | Who may read the portal's data: `open`, `password` (the console sign-in or any control-plane credential), `key` (an API key of the key registry). Seeds `portal.auth`; an invalid value warns. |
+| `RUSTYBIN_PORTAL_BASE_URL` | unset | The URL testers call when a gateway sits in front of the instance (`https://gateway.example.com/rustybin`): snippets, collections and Try it use it. Unset: the URL the portal was opened with. Seeds `portal.base_url`. |
+| `RUSTYBIN_PORTAL_VISITORS` | `false` | On a self-service instance, visitors may publish their own mocks. Seeds `portal.visitors`. |
+
+Published items and the counters are saved in `<RUSTYBIN_STATE_DIR>/portal.json`
+(mode 0600; in memory without a state directory). The `portal.items` section of
+`rustybin.yaml` publishes items as code.
 
 ## Mock LLM
 

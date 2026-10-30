@@ -73,7 +73,7 @@ pub fn content_type_for(path: &str) -> &'static str {
     }
 }
 
-fn etag_of(bytes: &[u8]) -> String {
+pub(crate) fn etag_of(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let hex: String = digest.iter().take(12).map(|b| format!("{b:02x}")).collect();
     format!("\"{hex}\"")
@@ -116,7 +116,7 @@ fn not_modified(headers: &HeaderMap, etag: &str) -> bool {
         })
 }
 
-fn serve_bytes(
+pub(crate) fn serve_bytes(
     headers: &HeaderMap,
     bytes: Vec<u8>,
     content_type: &'static str,
@@ -307,7 +307,7 @@ fn example_json(ex: &Example) -> Value {
     })
 }
 
-fn endpoint_json(ep: &Endpoint) -> Value {
+pub(crate) fn endpoint_json(ep: &Endpoint) -> Value {
     json!({
         "path": ep.path,
         "methods": ep.methods,

@@ -68,6 +68,9 @@ pub struct AppState {
     /// switch, shared by the control API, the MCP tools, headless mode and
     /// (phase 2) the correlation layer. `None` when harness mode is off.
     pub harness: Option<Arc<crate::harness::Harness>>,
+    /// The dev portal (`/portal`, `/_rustybin/portal*`): published items,
+    /// insights and the catalogue cache.
+    pub portal: Arc<crate::portal::Portal>,
 }
 
 impl AppState {
@@ -138,6 +141,7 @@ impl AppState {
         ));
         let mocks = crate::mocks::new_store_with(&config, clock, metrics.clone(), egress.clone());
         let health = Arc::new(HealthState::new());
+        let portal = Arc::new(crate::portal::Portal::new(&settings));
         let harness = crate::harness::Harness::new(&config, Some(metrics.clone()));
         if let Some(h) = &harness {
             h.attach(crate::harness::Resources {
@@ -162,6 +166,7 @@ impl AppState {
             mocks,
             router: Arc::new(OnceLock::new()),
             harness,
+            portal,
         }
     }
 }

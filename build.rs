@@ -3,7 +3,7 @@
 //   the encoded file descriptor set used by gRPC server reflection;
 // - records the compiler version for `/identity` (RUSTYBIN_RUSTC_VERSION);
 // - records the commit for `/_rustybin/version` (RUSTYBIN_GIT_SHA);
-// - embeds the web console (`ui/`).
+// - embeds the web console (`ui/`) and the dev portal (`ui-portal/`).
 //
 // We point tonic-build at a vendored `protoc` binary so the build needs no
 // system protobuf compiler - important for the slim Docker image and clean
@@ -37,7 +37,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rustc-env=RUSTYBIN_GIT_SHA={sha}");
     }
 
-    embed_ui(&out_dir)?;
+    embed_dir(&out_dir, "ui", "ui_assets.rs", "UI_ASSETS", "console")?;
+    embed_dir(
+        &out_dir,
+        "ui-portal",
+        "portal_assets.rs",
+        "PORTAL_ASSETS",
+        "dev portal",
+    )?;
 
     println!("cargo:rerun-if-changed=proto/echo.proto");
     println!("cargo:rerun-if-changed=build.rs");
@@ -95,9 +102,16 @@ fn git_sha() -> Option<String> {
     sha.bytes().all(|b| b.is_ascii_hexdigit()).then_some(sha)
 }
 
-/// Generate `$OUT_DIR/ui_assets.rs`: a table of every file under `ui/`
-/// (relative path, bytes) embedded with `include_bytes!`, served by `src/ui.rs`.
-fn embed_ui(out_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+/// Generate `$OUT_DIR/{file}`: a table `static_name` of every file under
+/// `dir` (relative path, bytes) embedded with `include_bytes!`, served by
+/// `src/ui.rs` (the console) and `src/portal/api.rs` (the portal).
+fn embed_dir(
+    out_dir: &std::path::Path,
+    dir: &str,
+    file: &str,
+    static_name: &str,
+    what: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         for entry in std::fs::read_dir(dir)? {
             let path = entry?.path();
@@ -116,15 +130,15 @@ fn embed_ui(out_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>>
         }
         Ok(())
     }
-    let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?).join("ui");
+    let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?).join(dir);
     let mut files = Vec::new();
     if root.is_dir() {
         walk(&root, &mut files)?;
     }
     files.sort();
-    let mut code = String::from(
-        "/// Embedded console files: (path relative to `ui/`, contents).\n\
-         pub static UI_ASSETS: &[(&str, &[u8])] = &[\n",
+    let mut code = format!(
+        "/// Embedded {what} files: (path relative to `{dir}/`, contents).\n\
+         pub static {static_name}: &[(&str, &[u8])] = &[\n"
     );
     for file in &files {
         let rel = file
@@ -137,7 +151,7 @@ fn embed_ui(out_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>>
         ));
     }
     code.push_str("];\n");
-    std::fs::write(out_dir.join("ui_assets.rs"), code)?;
-    println!("cargo:rerun-if-changed=ui");
+    std::fs::write(out_dir.join(file), code)?;
+    println!("cargo:rerun-if-changed={dir}");
     Ok(())
 }

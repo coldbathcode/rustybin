@@ -779,13 +779,18 @@ fn key_error(lookup: &Lookup) -> Response {
     }
 }
 
-/// Routes that never need a key: `/`, `/ui/*` and the readiness probe.
+/// Routes that never need a key: `/`, `/ui/*`, `/portal/*` (the portal
+/// checks `portal.auth` itself) and the readiness probe.
 pub fn is_exempt(method: &Method, path: &str) -> bool {
+    let under = |prefix: &str| {
+        path == prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+    };
     path == "/"
-        || path == crate::control::UI_PREFIX
-        || path
-            .strip_prefix(crate::control::UI_PREFIX)
-            .is_some_and(|rest| rest.starts_with('/'))
+        || under(crate::control::UI_PREFIX)
+        || under(crate::portal::PREFIX)
         || (path == crate::control_auth::READY_PATH
             && (method == Method::GET || method == Method::HEAD))
         // OAuth discovery for the management MCP server: public metadata an

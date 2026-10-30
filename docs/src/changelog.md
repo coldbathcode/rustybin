@@ -138,6 +138,30 @@ The build of [Rustybin 0.2](../plans/next/master-plan.md), step by step.
   remote and its auth to the inspector), the assist task `server_json` ("Write a
   server.json for my mock") and the explain kind `server_entry`. Settings can now be a
   choice (a select in the console). New book page [MCP registry](mcp/registry.md).
+- **Dev portal: publish and consume** (step 07). A read-only portal at `/portal` (a
+  second SPA embedded like the console, `ui-portal/`) that shows only what was
+  published: mock APIs (base URL, authentication with the demo credentials, every
+  operation with Try it and curl, the full API reference, downloads in seven formats,
+  the mock's MCP server), the mock MCP servers (tools, schemas, `claude mcp add` and
+  `mcpServers` snippets), the mock LLM (every provider with a sample and Try it), A2A
+  agents, the HTTP tools and the mock MCP registry, with search and a "new this week"
+  strip. Publish with `PUT /_rustybin/portal/items/{id}` (`mock:<name>`,
+  `mcp:<server>`, `llm`, `a2a:<agent>`, `tools`, `registry`; title, Markdown summary,
+  tags, contact, order, credentials), `DELETE` to unpublish, `GET /_rustybin/portal`
+  for every item and why a published one is hidden, or the new `portal.items` section
+  of `rustybin.yaml`. The portal reads `GET /portal/api/catalog` (published items only,
+  ETag). Settings `portal.enabled` (`RUSTYBIN_PORTAL`: `auto`, on once something is
+  published), `portal.auth` (`RUSTYBIN_PORTAL_AUTH`: `open`, `password`, `key`),
+  `portal.base_url` (`RUSTYBIN_PORTAL_BASE_URL`, a gateway URL for snippets and Try
+  it), the branding (`portal.title`, `portal.intro` in Markdown, `portal.accent`,
+  `portal.contact`) and `portal.visitors` (`RUSTYBIN_PORTAL_VISITORS`: visitors publish
+  their own mocks). Insights: views per day for 30 days, downloads by format and Try it
+  calls per item, no visitor identifiers (`GET /_rustybin/portal/insights`); items and
+  counts persist in `<state>/portal.json`. Console: **Management, Portal** (status,
+  branding, items with bulk publish, insights, Preview), **Publish to portal** on a
+  mock's page with **Write with AI** (the assist task `summarise_for_portal`), portal
+  badges. Settings may be Markdown (a textarea). `/portal/*` is not captured, ignores
+  fault headers and is exempt from the key layer. New book page [Dev portal](portal.md).
 
 ## 0.1.0 (2026-10-29): the AI and agent gateway upgrade
 

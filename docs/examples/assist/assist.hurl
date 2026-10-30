@@ -17,7 +17,7 @@ jsonpath "$.providers[1].models[0].price_per_million.input" == 1.25
 jsonpath "$.tasks[*].name" contains "free_answer"
 jsonpath "$.tasks[*].name" contains "explain"
 jsonpath "$.tasks[*].name" contains "suggest"
-jsonpath "$.suggestions.mocks" count == 3
+jsonpath "$.suggestions.mocks" count == 4
 jsonpath "$.caps.calls_per_minute" == 20
 jsonpath "$.privacy" contains "never leave"
 # ANCHOR_END: status
@@ -86,7 +86,7 @@ Content-Type: application/json
 { "task": "suggest", "inputs": { "view": "mocks" }, "stream": false }
 HTTP 200
 [Asserts]
-jsonpath "$.json.suggestions" count == 3
+jsonpath "$.json.suggestions" count == 4
 jsonpath "$.json.suggestions[0].label" exists
 jsonpath "$.json.suggestions[0].prompt" exists
 jsonpath "$.usage.cached" == false

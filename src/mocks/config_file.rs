@@ -18,7 +18,9 @@
 //!
 //! A `registry:` section lists extra entries of the mock MCP registry
 //! (`registry.servers`: `server.json` documents, validated on load; see
-//! `crate::mcp::registry`).
+//! `crate::mcp::registry`). A `portal:` section publishes items on the dev
+//! portal (`portal.items`: `{id, title, summary, tags, ...}`; see
+//! `crate::portal`).
 //!
 //! `${VAR}` and `${VAR:-default}` are expanded from the environment when a
 //! file is loaded from disk (never for documents sent to the API).
@@ -55,6 +57,8 @@ pub struct MocksFile {
     pub mocks: Vec<MockDoc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry: Option<RegistrySection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portal: Option<crate::portal::FileSection>,
 }
 
 /// The `registry:` section: entries of the mock MCP registry.
@@ -159,9 +163,24 @@ pub fn parse_lenient(text: &str) -> Result<(MocksFile, Vec<Failed>), String> {
             }
         },
     };
+    let portal = match top.remove("portal") {
+        None | Some(Value::Null) => None,
+        Some(v) => match serde_json::from_value::<crate::portal::FileSection>(v) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                failed.push(Failed {
+                    name: None,
+                    error: format!("portal: {e} (ignored)"),
+                });
+                None
+            }
+        },
+    };
     failed.extend(top.keys().map(|k| Failed {
         name: None,
-        error: format!("unknown field {k:?} ignored (expected `version`, `mocks` and `registry`)"),
+        error: format!(
+            "unknown field {k:?} ignored (expected `version`, `mocks`, `registry` and `portal`)"
+        ),
     }));
     let mut mocks = Vec::new();
     for (i, entry) in entries.into_iter().enumerate() {
@@ -185,6 +204,7 @@ pub fn parse_lenient(text: &str) -> Result<(MocksFile, Vec<Failed>), String> {
             version,
             mocks,
             registry,
+            portal,
         },
         failed,
     ))
@@ -201,6 +221,8 @@ pub struct Loaded {
     pub failed: Vec<(String, String)>,
     /// The valid `registry.servers` (invalid ones are in `problems`).
     pub registry: Vec<Value>,
+    /// The valid `portal.items` (invalid ones are in `problems`).
+    pub portal: Vec<crate::portal::FileItem>,
 }
 
 /// Expand `${VAR}` and `${VAR:-default}`; unknown variables without a
@@ -319,6 +341,13 @@ where
     out.registry = registry;
     out.problems.extend(
         registry_problems
+            .into_iter()
+            .map(|p| format!("{}: {p}", path.display())),
+    );
+    let (portal, portal_problems) = crate::portal::file_items(file.portal.take());
+    out.portal = portal;
+    out.problems.extend(
+        portal_problems
             .into_iter()
             .map(|p| format!("{}: {p}", path.display())),
     );
@@ -513,10 +542,31 @@ pub fn json_schema() -> Value {
             "items": { "$ref": crate::mcp::registry::validate::SCHEMA_URL }
         }
     }));
+    let mut portal_item = object(json!({
+        "id": { "type": "string", "description": "mock:<name>, mcp:<server>, llm, a2a:<agent>, tools or registry" },
+        "title": { "type": "string", "maxLength": crate::portal::MAX_TITLE },
+        "summary": { "type": "string", "maxLength": crate::portal::MAX_SUMMARY, "description": "Markdown" },
+        "tags": { "type": "array", "items": { "type": "string", "maxLength": crate::portal::MAX_TAG }, "maxItems": crate::portal::MAX_TAGS },
+        "contact": { "type": "string", "maxLength": crate::portal::MAX_CONTACT },
+        "order": { "type": "integer", "minimum": -1000, "maximum": 1000 },
+        "credentials": { "type": "boolean", "default": true, "description": "Show a mock's demo credentials" }
+    }));
+    if let Value::Object(m) = &mut portal_item {
+        m.insert("required".into(), json!(["id"]));
+    }
+    let portal = object(json!({
+        "items": {
+            "type": "array",
+            "maxItems": crate::portal::MAX_ITEMS,
+            "description": "Items published on the dev portal at /portal",
+            "items": portal_item
+        }
+    }));
     let mut root = object(json!({
         "version": { "const": 1 },
         "mocks": { "type": "array", "items": mock },
-        "registry": registry
+        "registry": registry,
+        "portal": portal
     }));
     if let Value::Object(m) = &mut root {
         m.insert(

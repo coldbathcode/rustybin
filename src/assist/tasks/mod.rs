@@ -1,7 +1,8 @@
 //! The tasks: one file each. Step 03 brought `free_answer`, `explain` and
 //! `suggest`; step 04 the mock-building tasks (`spec_from_description`,
 //! `examples_for_operations`, `edit_spec`, `request_examples`); step 05
-//! adds the MCP ones, step 06 `server_json`.
+//! adds the MCP ones, step 06 `server_json`, step 07
+//! `summarise_for_portal`.
 
 pub mod edit_spec;
 pub mod examples_for_operations;
@@ -12,6 +13,7 @@ pub mod sampling;
 pub mod server_json;
 pub mod spec_from_description;
 pub mod suggest;
+pub mod summarise_for_portal;
 pub mod tool_arguments;
 
 use serde_json::Value;
@@ -32,6 +34,7 @@ pub static ALL: &[Task] = &[
     tool_arguments::TASK,
     sampling::TASK,
     server_json::TASK,
+    summarise_for_portal::TASK,
 ];
 
 /// The limits a task compiles a document under (an instance mock's).

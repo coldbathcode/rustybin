@@ -4,6 +4,7 @@
 //! [`Config::load`] and logged once tracing is initialised) and the default
 //! is used instead.
 
+use serde_json::Value;
 use std::env;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
@@ -196,6 +197,18 @@ pub struct Config {
     /// `RUSTYBIN_REGISTRY_SAVED`: registry base URLs the console offers to
     /// browse (seeds `registry.saved`; their hosts are allowed for browsing).
     pub registry_saved: Vec<String>,
+    /// `RUSTYBIN_PORTAL`: `auto` (on once an item is published), `on` or
+    /// `off`. Seeds the `portal.enabled` setting; invalid values warn.
+    pub portal: Option<String>,
+    /// `RUSTYBIN_PORTAL_AUTH`: who may read the portal (`open`, `password`,
+    /// `key`). Seeds `portal.auth`; invalid values warn.
+    pub portal_auth: Option<String>,
+    /// `RUSTYBIN_PORTAL_BASE_URL`: the URL the portal's snippets and Try it
+    /// use (a gateway in front of this instance). Seeds `portal.base_url`.
+    pub portal_base_url: Option<String>,
+    /// `RUSTYBIN_PORTAL_VISITORS`: visitors of a self-service instance may
+    /// publish their own mocks. Seeds `portal.visitors`.
+    pub portal_visitors: bool,
     /// `RUSTYBIN_A2A_PUSH_ALLOWLIST`: `host` or `host:port` entries push
     /// notification URLs may point to (the built-in sink is always allowed).
     pub a2a_push_allowlist: Vec<String>,
@@ -943,6 +956,34 @@ impl Config {
                 None => None,
             },
             registry_saved: list("RUSTYBIN_REGISTRY_SAVED", &get),
+            portal: choice(
+                &get,
+                "RUSTYBIN_PORTAL",
+                crate::portal::ENABLED_OPTIONS,
+                "auto",
+                &mut warnings,
+            ),
+            portal_auth: choice(
+                &get,
+                "RUSTYBIN_PORTAL_AUTH",
+                crate::portal::AUTH_OPTIONS,
+                "open",
+                &mut warnings,
+            ),
+            portal_base_url: match get("RUSTYBIN_PORTAL_BASE_URL") {
+                Some(v) if v.trim().is_empty() => None,
+                Some(v) => match crate::settings::Kind::Url.validate(&Value::String(v.clone())) {
+                    Ok(Value::String(url)) => Some(url.trim_end_matches('/').to_string()),
+                    _ => {
+                        warnings.push(format!(
+                            "RUSTYBIN_PORTAL_BASE_URL={v:?} is not an http(s) URL; ignored"
+                        ));
+                        None
+                    }
+                },
+                None => None,
+            },
+            portal_visitors: parse_bool_or(&get, "RUSTYBIN_PORTAL_VISITORS", false, &mut warnings),
             a2a_push_allowlist,
             a2a_push_allow_all,
             harness,
@@ -1024,6 +1065,10 @@ impl Config {
             egress_allow_loopback: false,
             registry_scenario: None,
             registry_saved: Vec::new(),
+            portal: None,
+            portal_auth: None,
+            portal_base_url: None,
+            portal_visitors: false,
             a2a_push_allowlist: Vec::new(),
             a2a_push_allow_all: false,
             harness: HarnessConfig::default(),
@@ -1641,6 +1686,30 @@ where
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// One of a fixed set of values (trimmed, lower case); anything else warns
+/// and gives `None` (the setting's default, `default` in the warning).
+fn choice<G>(
+    get: &G,
+    key: &str,
+    options: &[&str],
+    default: &str,
+    warnings: &mut Vec<String>,
+) -> Option<String>
+where
+    G: Fn(&str) -> Option<String>,
+{
+    let raw = get(key)?;
+    let v = raw.trim().to_ascii_lowercase();
+    if options.contains(&v.as_str()) {
+        return Some(v);
+    }
+    warnings.push(format!(
+        "invalid {key} {raw:?} (expected one of {}), using {default}",
+        options.join(", ")
+    ));
+    None
 }
 
 fn parse_bool_or<G>(get: &G, key: &str, default: bool, warnings: &mut Vec<String>) -> bool

@@ -65,6 +65,7 @@
 # Using Rustybin
 
 - [Web console](console.md)
+- [Dev portal](portal.md)
 - [Bring your own AI](ai-assist.md)
 - [Configure Rustybin from an AI agent](agent-mcp.md)
 - [Gateway recipes](gateway-recipes.md)

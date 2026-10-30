@@ -19,8 +19,9 @@ pub const CONTROL_PREFIX: &str = "/_rustybin";
 /// Prefix of the web console.
 pub const UI_PREFIX: &str = "/ui";
 
-/// True for `/_rustybin`, `/_rustybin/*`, `/ui` and `/ui/*`. These paths are
-/// never captured by the inspector and ignore fault-injection headers.
+/// True for `/_rustybin`, `/_rustybin/*`, `/ui`, `/ui/*`, `/portal` and
+/// `/portal/*`. These paths are never captured by the inspector and ignore
+/// fault-injection headers.
 pub fn is_control_path(path: &str) -> bool {
     fn under(path: &str, prefix: &str) -> bool {
         path == prefix
@@ -28,7 +29,7 @@ pub fn is_control_path(path: &str) -> bool {
                 .strip_prefix(prefix)
                 .is_some_and(|rest| rest.starts_with('/'))
     }
-    under(path, CONTROL_PREFIX) || under(path, UI_PREFIX)
+    under(path, CONTROL_PREFIX) || under(path, UI_PREFIX) || under(path, crate::portal::PREFIX)
 }
 
 async fn config_handler(State(config): State<Arc<Config>>) -> impl IntoResponse {

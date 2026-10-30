@@ -68,6 +68,7 @@ pub const STATIC: &[(&str, &[(&str, &str)])] = &[
         ("Describe an API to mock", "Describe an API in plain words and turn it into an OpenAPI mock."),
         ("Generate examples for the petstore mock", "Generate realistic example payloads for the petstore mock's operations."),
         ("Secure a mock with JWT", "How do I put JWT security on a mock and which token does the gateway need?"),
+        ("Write the portal summary for this mock", "Write the dev portal title, summary and tags for the petstore mock, for the testers who will call it."),
     ]),
     ("bins", &[
         ("Catch a webhook", "How do I create a bin that answers 202 and shows me the webhook body?"),

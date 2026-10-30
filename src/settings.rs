@@ -74,6 +74,10 @@ pub enum Kind {
     Text {
         max_len: usize,
     },
+    /// Markdown: like `Text` but newlines are kept (CRLF becomes LF).
+    Markdown {
+        max_len: usize,
+    },
     /// An absolute `http://` or `https://` URL.
     Url,
     Bool,
@@ -97,6 +101,9 @@ impl Kind {
     pub fn schema(&self) -> Value {
         match self {
             Kind::Text { max_len } => json!({ "type": "string", "maxLength": max_len }),
+            Kind::Markdown { max_len } => {
+                json!({ "type": "string", "format": "markdown", "maxLength": max_len })
+            }
             Kind::Url => json!({ "type": "string", "format": "uri", "maxLength": 2048 }),
             Kind::Bool => json!({ "type": "boolean" }),
             Kind::Integer { min, max } => {
@@ -117,6 +124,21 @@ impl Kind {
             Kind::Text { max_len } => {
                 let s = value.as_str().ok_or("expected a string")?;
                 let clean: String = s.chars().filter(|c| !c.is_control()).collect();
+                let clean = clean.trim();
+                if clean.chars().count() > *max_len {
+                    return Err(format!("longer than {max_len} characters"));
+                }
+                Ok(Value::String(clean.to_string()))
+            }
+            Kind::Markdown { max_len } => {
+                let s = value
+                    .as_str()
+                    .ok_or("expected a string")?
+                    .replace("\r\n", "\n");
+                let clean: String = s
+                    .chars()
+                    .filter(|c| *c == '\n' || !c.is_control())
+                    .collect();
                 let clean = clean.trim();
                 if clean.chars().count() > *max_len {
                     return Err(format!("longer than {max_len} characters"));
@@ -316,6 +338,11 @@ pub fn groups() -> Vec<Group> {
             description: "The mock MCP registry at /mcp-registry (its scenario) and the real registries the console browses.",
         },
         Group {
+            id: "portal",
+            title: "Dev portal",
+            description: "The read-only portal at /portal where testers find what was published: its branding, who may read it and the URL its snippets use.",
+        },
+        Group {
             id: "leads",
             title: "Leads webhook",
             description: "The webhook that receives the email leads of self-service mocks.",
@@ -358,6 +385,7 @@ pub fn specs() -> Vec<Spec> {
     all.extend(crate::assist::specs());
     all.extend(crate::egress::specs());
     all.extend(crate::mcp::registry::specs());
+    all.extend(crate::portal::specs());
     all.extend(crate::mocks::leads::specs());
     all
 }

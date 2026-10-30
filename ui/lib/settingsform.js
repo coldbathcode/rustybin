@@ -48,6 +48,10 @@ function valueControl(setting) {
   } else if (type === 'integer' || type === 'number') {
     ctl = input(Object.assign({ type: 'number', class: 'input mono', value: initial === null || initial === undefined ? '' : String(initial), min: schema.minimum, max: schema.maximum, step: type === 'integer' ? '1' : 'any' }, props));
     read = () => (ctl.value === '' ? null : Number(ctl.value));
+  } else if (schema.format === 'markdown') {
+    ctl = textarea(Object.assign({ rows: 5, maxlength: schema.maxLength, placeholder: 'Markdown: paragraphs, # headings, - lists, **bold**, `code`, [links](https://...)' }, props));
+    ctl.value = initial === null || initial === undefined ? '' : String(initial);
+    read = () => (ctl.value.trim() === '' ? null : ctl.value.trim());
   } else if (type === 'array') {
     ctl = textarea(Object.assign({ rows: 3, placeholder: 'one per line, or comma separated' }, props));
     ctl.value = Array.isArray(initial) ? initial.join('\n') : '';

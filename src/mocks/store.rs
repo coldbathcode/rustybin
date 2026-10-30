@@ -275,6 +275,9 @@ pub struct MockStore {
     /// documents, at most `mcp::registry::MAX_USER_ENTRIES`) and when they
     /// were loaded: the mock MCP registry lists them.
     file_registry: Arc<RwLock<(Vec<Value>, DateTime<Utc>)>>,
+    /// The `portal.items` of `rustybin.yaml` (validated) and when they were
+    /// loaded: published on the dev portal.
+    file_portal: Arc<RwLock<(Vec<crate::portal::FileItem>, DateTime<Utc>)>>,
 }
 
 impl MockStore {
@@ -291,7 +294,25 @@ impl MockStore {
             persist_dir: None,
             visits: None,
             file_registry: Arc::new(RwLock::new((Vec::new(), Utc::now()))),
+            file_portal: Arc::new(RwLock::new((Vec::new(), Utc::now()))),
         }
+    }
+
+    /// Replace the portal items of the config file (the load time is kept
+    /// when they did not change).
+    pub fn set_file_portal(&self, items: Vec<crate::portal::FileItem>) {
+        let mut slot = self.file_portal.write().unwrap_or_else(|p| p.into_inner());
+        if slot.0 != items {
+            *slot = (items, Utc::now());
+        }
+    }
+
+    /// The portal items of the config file and when they were loaded.
+    pub fn file_portal(&self) -> (Vec<crate::portal::FileItem>, DateTime<Utc>) {
+        self.file_portal
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Replace the registry entries of the config file.

@@ -88,6 +88,10 @@ endpoint with a runnable example, and `/docs` for the OpenAPI reference. See the
   OAuth2 with scopes via the built-in IdP, mTLS) and every call is captured. The
   same mocks are configurable as code in `rustybin.yaml` and with
   `rustybin mock ...` ([OpenAPI mocks](docs/src/mocks/index.md)).
+- **Dev portal** at `/portal`: testers find what you published (mock APIs with Try it,
+  downloads and their MCP servers, the mock MCP servers, the LLM, agents, tools) without
+  the console or its password; open, behind the console sign-in or an API key, with
+  view and download counts ([dev portal](docs/src/portal.md)).
 - Echo, any status code, delays, caching with ETags, compression, ranges, redirects,
   cookies, images.
 - Real credential checks: Basic, API keys, JWT (HS256 and RS256), HMAC signatures,
@@ -619,6 +623,9 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | DELETE | `/_rustybin/registry/servers/{serverName}` | Mock MCP registry: remove a published entry (all versions, or ?version=); admin |
 | POST | `/_rustybin/registry/validate` | Validate a server.json document against the vendored schema and the registry's semantic checks |
 | GET | `/_rustybin/registry/browse` | Browse an MCP registry (url, search, cursor, limit, version) through the egress policy; entries with their remotes |
+| GET | `/_rustybin/portal` | Dev portal: settings, every publishable item and its state |
+| PUT DELETE | `/_rustybin/portal/items/{id}` | Publish an item to the dev portal (with its metadata), or unpublish it |
+| GET | `/_rustybin/portal/insights` | Dev portal insights: views per day, downloads by format, Try it calls |
 | GET | `/.well-known/oauth-protected-resource/_rustybin/mcp` | Management MCP: protected resource metadata (RFC 9728) |
 | GET | `/.well-known/oauth-authorization-server/_rustybin/oauth` | Management MCP sign-in: authorization server metadata (RFC 8414) |
 | GET | `/.well-known/openid-configuration/_rustybin/oauth` | Management MCP sign-in: the same metadata at the OpenID Connect discovery path |
@@ -656,6 +663,13 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | Methods | Path | Description |
 |---|---|---|
 | GET | `/` | This landing page (always 200, safe for liveness checks) |
+| GET | `/portal` | Dev portal (redirects to /portal/) |
+| GET | `/portal/` | Dev portal entry page |
+| GET | `/portal/{*path}` | Dev portal assets; extension-less paths fall back to index.html |
+| GET | `/portal/api/catalog` | Dev portal catalogue: the published items with what their pages show |
+| POST | `/portal/api/events` | Count a portal view or Try it call (no identifiers stored) |
+| GET | `/portal/api/items/{id}/collections/{format}` | A published mock as a collection (Postman, Hurl, curl, .http, k6, Bruno, Insomnia) |
+| GET | `/portal/reference/{id}` | A published mock's spec in the API reference viewer |
 | GET | `/ui` | Web console (redirects to /ui/) |
 | GET | `/ui/` | Web console entry page |
 | GET | `/ui/{*path}` | Console assets; extension-less paths fall back to index.html |

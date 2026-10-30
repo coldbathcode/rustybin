@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="same-origin">
+<title>API portal</title>
+<link rel="icon" href="../ui/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../ui/styles.css">
+<link rel="stylesheet" href="portal.css">
+<script type="module" src="portal.js"></script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="portal" id="portal">
+  <header class="portal-top">
+    <a class="brand" href="#/" id="brand" aria-label="Portal home">
+      <img class="brand-mark" src="../ui/favicon.svg" alt="">
+      <span id="brand-title">API portal</span>
+    </a>
+    <form class="portal-search" role="search" id="search-form">
+      <input id="search" type="search" class="input" placeholder="Search APIs, servers, agents, tools" aria-label="Search the portal" autocomplete="off">
+    </form>
+    <div id="top-actions" class="row nowrap"></div>
+  </header>
+  <main class="portal-main" id="main" tabindex="-1">
+    <div id="view">
+      <noscript><p>The portal needs JavaScript. Every API it lists also works with curl.</p></noscript>
+    </div>
+  </main>
+  <footer class="portal-foot" id="foot"></footer>
+</div>
+</body>
+</html>

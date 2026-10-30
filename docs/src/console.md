@@ -78,7 +78,7 @@ The views, in sidebar order (`Alt+1` to `Alt+9` switch to the first nine):
 | **Mock APIs** | [OpenAPI mocks](mocks/index.md): create one from a spec or [describe it to the AI](mocks/ai.md), switch mocks on and off, edit responses, generate missing examples, edit the spec with an instruction, rules and security, try operations and watch their traffic (see [below](#mock-apis)) |
 | **Request bins** | Create a [request bin](reference/request-bin.md) with a configured response, send a test request, watch captures arrive live |
 | **API explorer** | The route catalogue with search and category filters, and a "Try it" request builder prefilled from each endpoint's examples |
-| **Management** | The instance's settings and this browser's, in tabs (see [below](#management)): General (the console title and back link, the session, gateway URL, admin token and theme of this browser, the "Connect an AI agent" panel), Sign-in (the console user name and password, the sessions) and Network (what the instance may connect to, each feature's rule, the last decisions, the leads webhook token). The gear in the top bar opens it |
+| **Management** | The instance's settings and this browser's, in tabs (see [below](#management)): General (the console title and back link, the session, gateway URL, admin token and theme of this browser, the "Connect an AI agent" panel), Sign-in (the console user name and password, the sessions), AI, Network (what the instance may connect to, each feature's rule, the last decisions, the leads webhook token) and Portal (the [dev portal](portal.md): branding, access, published items, insights). The gear in the top bar opens it |
 | **AI playground** | Chat with the [mock LLM](ai/index.md) in OpenAI chat, OpenAI Responses, Anthropic, Gemini, Ollama (streaming) and Bedrock (non-streaming) wire formats, with modes, fault and latency injection, tool calling with a tool result round trip, the raw wire frames, and the [AI request record](ai/gateway-features.md#request-inspection) of each call |
 | **MCP inspector** | An [MCP client for any server](mcp/inspector.md): this instance's servers (`/mcp` and its variants, the management server, every mock's server), saved connections or any URL; every transport (2026-07-28, the 2025 sessions, legacy HTTP+SSE) and auth mode (bearer, API key, basic, headers, OAuth 2.1 discovery with PKCE or client credentials); from the browser or through the instance's relay; tools with generated forms, progress, cancel and elicitation, resources, prompts, sampling; a timeline with exports (`claude mcp add`, Hurl, curl, Python); **Checks**, a test suite with a JSON or JUnit report |
 | **MCP registry** | The [mock MCP registry](mcp/registry.md) at `/mcp-registry`: the URL and a sync snippet to point a gateway at, the scenario picker, the entries with their source and validity, a publish form that validates as you type, **Write a server.json for my mock** (AI); and **Browse a registry**: the public registry, this instance's or any URL, with **Validate**, **Explain** and **Open in inspector** per remote |
@@ -107,6 +107,10 @@ The **Mock APIs** view (`/ui/#/mocks`) manages the instance's
   generated data, your own responses, or "Remember changes", the
   [stateful mode](mocks/responses.md#stateful-mode)), whether the mock is secured and how
   requests are validated, then creates and deploys it.
+- **Publish to portal** (header): publish the mock to the [dev portal](portal.md)
+  with a title, a Markdown summary, tags, a contact and whether its demo credentials
+  show; **Write with AI** writes them from the spec. A published mock carries an "on
+  the portal" badge here and in the list.
 - **Header menu**: Rename, Duplicate (a copy under a new name, deployed when the
   source is, with empty traffic), Export YAML, Download spec (as uploaded),
   Download collection (Postman, Hurl, curl, `.http`, k6, Bruno or Insomnia, with an optional base URL
@@ -174,7 +178,7 @@ get **New mock** without an admin token:
 ## Management
 
 The Management view (the gear in the top bar, or `#/manage`) has a rail of tabs down
-the left; later releases add AI, Portal, Agents, Source control and Export.
+the left; later releases add Agents, Source control and Export.
 
 **Instance settings** come from `GET /_rustybin/settings` and save with one `PATCH`
 per card (the admin token, or a control token with the `admin` scope). Every form is
@@ -193,6 +197,7 @@ secrets](configuration.md#state-directory-settings-and-secrets).
 | Sign-in | **Sign-in**: the control-auth mode, the user name and where it comes from, whether the password is the default, a stored hash or the environment's, who is signed in. **Change the password**: the user name and a new password, the current password required (`PUT /_rustybin/password`); every other session ends and this one continues with a fresh token. **Sessions** (password mode): the sign-in tokens issued since the last restart with their address and times, End for each, and **Sign out everywhere**. See [User name and password](concepts/control-plane-security.md#user-name-and-password). |
 | AI | **AI assist**: on or why not, **Test the key**, **Use the built-in mock LLM**, the caps, the curated models of every provider with tier and price and **Use** / **Fast** buttons. **Provider and keys**: the `assist.*` settings (provider, model, fast model, compatible base URL, one secret key per provider). **Usage since start** and the privacy note. See [Bring your own AI](ai-assist.md). |
 | Network | **Outbound connections**: the allowlist and the loopback switch (`egress.allow`, `egress.allow_loopback`). **Policy as the instance sees it**: the merged list, the always-refused addresses, each feature's own rule, and the last 100 decisions with a refresh. **Leads webhook**: the bearer token (a secret). See [Outbound connections](configuration.md#outbound-connections). |
+| Portal | **Dev portal**: on or off and why, its URL with **Preview the portal**, who may read it, the base URL testers use, whether changes persist. **Branding and access**: the `portal.*` settings. **Items**: every publishable item by kind (mock APIs, MCP servers, the mock LLM, agents, the HTTP tools, the registry) with its state, why a published item is hidden, its views this week, **Publish** / **Edit** (the metadata dialog) and checkboxes to publish or unpublish several. **Insights**: views over 7 and 30 days, downloads, Try it calls. See [Dev portal](portal.md). |
 
 **This browser** keeps, in the browser (the admin token in this tab only, like the
 sign-in token; the others across visits):
@@ -215,6 +220,7 @@ sign-in token; the others across visits):
 | `GET /_rustybin/catalog` | The route catalogue as JSON: categories with counts, and every endpoint with methods, category, summary, description and runnable examples |
 | `GET`, `PATCH /_rustybin/settings`, `DELETE /_rustybin/settings/{key}` | The instance settings of the Management view (admin): every registered key with its value, source, lock state and schema; secrets as `{set, hint}` |
 | `GET /_rustybin/egress` | The outbound connection policy (admin): the allowlist, each feature's rule and the last decisions |
+| `GET /_rustybin/portal`, `PUT`, `DELETE /_rustybin/portal/items/{id}`, `GET /_rustybin/portal/insights` | Management, Portal and Publish to portal: the items, publishing, the counters |
 
 ```hurl
 {{#include ../examples/exports/console.hurl:status}}

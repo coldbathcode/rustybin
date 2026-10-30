@@ -827,6 +827,67 @@ def run_theme(browser, theme):
 
     step("management: instance settings, a secret, the egress policy", management)
 
+    def dev_portal():
+        # Publish the sample mock from its page, the summary written by the mock AI provider.
+        page.goto(BASE + "/ui/#/mocks/petstore")
+        page.locator("#publish-portal").click()
+        page.locator("#portal-write-ai").click()
+        page.wait_for_selector("dialog >> text=Check it, then publish")
+        assert page.locator("#portal-summary").input_value().strip(), "the AI wrote no summary"
+        page.locator("#portal-publish").click()
+        page.wait_for_selector("#portal-badge")
+        # Management, Portal: a control per setting, publish an MCP server, the preview link.
+        page.goto(BASE + "/ui/#/manage/portal")
+        page.wait_for_selector("form[aria-label='Settings: portal']")
+        with urllib.request.urlopen(BASE + "/_rustybin/settings", timeout=10) as r:
+            doc = json.load(r)
+        for s in doc["settings"]:
+            if s["group"] == "portal":
+                expect(page.locator(f"[aria-label='{s['key']}']")).to_have_count(1)
+        page.wait_for_selector("tr[data-item='mcp:main']")
+        if page.locator("tr[data-item='mcp:main'] >> text=not published").count():
+            page.locator("[data-portal-item='mcp:main']").click()
+            page.locator("#portal-publish").click()
+        page.wait_for_selector("tr[data-item='mcp:main'] >> text=published")
+        page.wait_for_selector("#portal-preview")
+        shot(page, theme, "16-management-portal")
+        assert_icons_sized(page, "the portal tab")
+        # The portal in a second context, without any console credential.
+        ctx2 = browser.new_context(viewport={"width": 1280, "height": 860}, color_scheme=theme, accept_downloads=True)
+        try:
+            p2 = ctx2.new_page()
+            p2.set_default_timeout(TIMEOUT)
+            p2.on("console", on_console)
+            p2.on("pageerror", lambda e: console_errors.append(f"[{theme}] portal uncaught: {e}"))
+            p2.goto(BASE + "/portal/")
+            p2.wait_for_selector(".item-card[data-item='mock:petstore']")
+            p2.wait_for_selector(".item-card[data-item='mcp:main']")
+            shot(p2, theme, "17-portal-home")
+            assert_icons_sized(p2, "the portal home")
+            p2.locator(".item-card[data-item='mock:petstore']").click()
+            p2.wait_for_selector("details.op")
+            first = p2.locator("details.op").first
+            first.locator("summary").click()
+            first.locator(".try button[type=submit]").click()
+            first.locator(".try-result .badge.ok").wait_for()
+            with p2.expect_download() as dl:
+                p2.locator("button[data-format='hurl']").click()
+            assert dl.value.suggested_filename == "petstore.hurl", dl.value.suggested_filename
+            shot(p2, theme, "17-portal-api")
+            p2.goto(BASE + "/portal/#/i/" + urllib.parse.quote("mcp:main", safe=""))
+            p2.wait_for_selector("text=claude mcp add --transport http rustybin-main")
+            assert p2.locator("table.table tbody tr").count() > 3
+            shot(p2, theme, "17-portal-mcp")
+            assert_icons_sized(p2, "the portal MCP page")
+        finally:
+            ctx2.close()
+        with urllib.request.urlopen(BASE + "/_rustybin/portal/insights", timeout=10) as r:
+            ins = json.load(r)
+        pets = next(i for i in ins["items"] if i["id"] == "mock:petstore")
+        assert pets["views_7d"] >= 1 and pets["tries"] >= 1 and pets["downloads"].get("hurl", 0) >= 1, pets
+
+    step("dev portal: publish, read, try, download", dev_portal)
+
     def via_gateway():
         # A second origin for the same server stands in for a gateway with CORS.
         alt = BASE.replace("127.0.0.1", "localhost") if "127.0.0.1" in BASE else BASE.replace("localhost", "127.0.0.1")

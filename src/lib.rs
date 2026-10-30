@@ -55,6 +55,7 @@ pub mod mocks;
 pub mod oidc;
 pub mod openapi;
 pub mod orchestration;
+pub mod portal;
 pub mod random;
 pub mod redirects;
 pub mod request_bin;
@@ -115,6 +116,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     mcp::manage::router,
     mcp::inspector::router,
     mcp::registry::router,
+    portal::router,
     ai::router,
     a2a::router,
     graphql::router,
