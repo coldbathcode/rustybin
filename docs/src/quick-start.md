@@ -69,6 +69,36 @@ curl -s http://localhost:8080/_rustybin/status -H "Authorization: Bearer $TOKEN"
 plane (everything your gateway calls) never needs credentials. Details:
 [Control-plane security](concepts/control-plane-security.md).
 
+## Five commands
+
+The same binary is the [command line](cli-guide.md). From nothing to a mock written
+by your AI, published for testers and exported as code:
+
+```bash
+# 1. Sign in (rustybin / rustybin); the token lands in a profile.
+rustybin login --url http://localhost:8080
+
+# 2. Your own AI key (Anthropic here; openai, gemini or compatible work the same).
+rustybin settings set assist.provider anthropic
+rustybin settings set-secret assist.anthropic_key --stdin < key.txt
+
+# 3. Describe the API; the spec is checked and deployed as the mock "orders".
+rustybin mocks describe "an orders API with customers, orders and refunds" > orders.json
+rustybin mocks create orders --spec orders.json
+
+# 4. Publish it: testers open http://localhost:8080/portal, no password needed.
+rustybin portal publish mock:orders --title "Orders"
+
+# 5. The whole instance as code (secrets as references), ready for git.
+rustybin config export > rustybin.yaml
+```
+
+The console does the same: **Management, AI** for the key, the mock wizard's
+**Describe it** tab, **Publish to portal** on the mock, **Management, Export**; and
+an agent does it through the [management MCP server](agent-mcp.md) with the
+`build_instance` prompt. Without a key, step 3 is `rustybin mocks create orders
+--spec your-spec.yaml` (or the built-in `petstore`), and everything else is the same.
+
 ## Docker Compose
 
 `docker-compose.yml` builds the image, publishes ports 80, 443 and 50051 and keeps

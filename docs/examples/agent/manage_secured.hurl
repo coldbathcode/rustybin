@@ -24,10 +24,10 @@ Mcp-Method: tools/list
 {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}}}}
 HTTP 200
 [Asserts]
-jsonpath "$.result.tools[*].name" includes "list_mocks"
-jsonpath "$.result.tools[*].name" includes "try_request"
-jsonpath "$.result.tools[*].name" not includes "create_mock"
-jsonpath "$.result.tools[*].name" not includes "apply_config"
+jsonpath "$.result.tools[*].name" contains "list_mocks"
+jsonpath "$.result.tools[*].name" contains "try_request"
+jsonpath "$.result.tools[*].name" not contains "create_mock"
+jsonpath "$.result.tools[*].name" not contains "apply_config"
 
 # A tool the scope does not allow answers a tool error, never a protocol error.
 POST {{secured_url}}/_rustybin/mcp
@@ -57,5 +57,5 @@ HTTP 200
 [Asserts]
 jsonpath "$.result.structuredContent.caller.admin" == true
 jsonpath "$.result.structuredContent.control_auth" == "jwt"
-jsonpath "$.result.structuredContent.caller.rights" includes "admin"
+jsonpath "$.result.structuredContent.caller.rights" contains "admin"
 # ANCHOR_END: secured_admin

@@ -7,7 +7,7 @@ GET {{secured_url}}/_rustybin/config/schema
 Authorization: Bearer {{admin_token}}
 HTTP 200
 [Asserts]
-jsonpath "$.properties.version.enum" includes 2
+jsonpath "$.properties.version.enum" contains 2
 jsonpath "$.properties.secrets.description" contains "never values"
 # ANCHOR_END: schema
 
@@ -42,9 +42,9 @@ Content-Type: application/json
 HTTP 200
 [Asserts]
 jsonpath "$.dry_run" == true
-jsonpath "$.summary" includes "health.initial: changed from \"healthy\" to \"unhealthy\""
-jsonpath "$.summary" includes "settings.agents.default_ceiling: added (read-only)"
-jsonpath "$.results.settings.set" includes "agents.default_ceiling"
+jsonpath "$.summary" contains "health.initial: changed from \"healthy\" to \"unhealthy\""
+jsonpath "$.summary" contains "settings.agents.default_ceiling: added (read-only)"
+jsonpath "$.results.settings.set" contains "agents.default_ceiling"
 
 GET {{secured_url}}/health
 HTTP 200
@@ -62,7 +62,7 @@ HTTP 200
 [Asserts]
 jsonpath "$.ok" == true
 jsonpath "$.results.health.initial" == "unhealthy"
-jsonpath "$.results.settings.changed" includes "agents.default_ceiling"
+jsonpath "$.results.settings.changed" contains "agents.default_ceiling"
 
 GET {{secured_url}}/health
 HTTP 503
@@ -79,7 +79,7 @@ Content-Type: application/json
 HTTP 200
 [Asserts]
 jsonpath "$.ok" == true
-jsonpath "$.results.settings.unset" includes "agents.default_ceiling"
+jsonpath "$.results.settings.unset" contains "agents.default_ceiling"
 
 GET {{secured_url}}/health
 HTTP 200

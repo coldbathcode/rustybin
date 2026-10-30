@@ -74,7 +74,7 @@ jsonpath "$.allow_loopback" == false
 jsonpath "$.purposes[2].purpose" == "registry"
 jsonpath "$.purposes[2].allow[0]" == "registry.modelcontextprotocol.io"
 jsonpath "$.purposes[1].allow" count == 0
-jsonpath "$.always_refused" includes "link-local addresses"
+jsonpath "$.always_refused" contains "link-local addresses"
 # ANCHOR_END: egress
 
 # ANCHOR: delete
@@ -82,7 +82,7 @@ DELETE {{base_url}}/_rustybin/settings/console.title
 X-Rustybin-Admin-Token: {{admin_token}}
 HTTP 200
 [Asserts]
-jsonpath "$.changed" includes "console.title"
+jsonpath "$.changed" contains "console.title"
 jsonpath "$.settings[?(@.key == 'console.title')].source" == "default"
 # ANCHOR_END: delete
 

@@ -169,3 +169,16 @@ question and proposes two actions, `explain` summarises the subject and flags he
 that look gateway-added, `suggest` returns the static list. It is how the console
 check, the documentation examples and the tests exercise every AI path without a key
 or the network, and how a demo shows the shell before a key is at hand.
+
+## On every surface
+
+The same job from the API, the console, the command line, an agent and the configuration document.
+
+| Surface | Where |
+|---|---|
+| API | `GET /_rustybin/assist`, `POST /_rustybin/assist/run`, `POST /_rustybin/assist/test`, `GET /_rustybin/assist/usage` |
+| Console | The assist bar (`Ctrl+K`), the sparkles in every view, **Management, AI** |
+| CLI | `rustybin ai status | models | usage | test | run`, `rustybin settings set assist.provider ...`, `rustybin settings set-secret assist.anthropic_key` ([reference](cli.md#ai)) |
+| Management MCP | `assist_status`, `assist_usage`, `test_assist`, `run_assist_task` (the read tasks); keys are never tool inputs ([agent page](agent-mcp.md)) |
+| `rustybin.yaml` | `settings: assist.provider, assist.model, assist.fast_model, assist.base_url`; the keys under `secrets:` as `${VAR}` or `secret:stored` references, never values |
+| Environment | `RUSTYBIN_ASSIST_PROVIDER`, `_MODEL`, `_FAST_MODEL`, `_BASE_URL`, `_ANTHROPIC_KEY`, `_OPENAI_KEY`, `_GEMINI_KEY`, `_COMPATIBLE_KEY`, `_MAX_CALLS_PER_MINUTE`, `_MAX_OUTPUT_TOKENS`, `_VISITORS` ([configuration](configuration.md#ai-assist)) |

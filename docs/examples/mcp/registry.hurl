@@ -95,6 +95,51 @@ jsonpath "$._meta['io.modelcontextprotocol.registry/official'].status" == "depre
 jsonpath "$._meta['io.modelcontextprotocol.registry/official'].statusMessage" == "Use 2.0.0"
 # ANCHOR_END: deprecate
 
+# ANCHOR: server_status
+PATCH {{base_url}}/mcp-registry/v0.1/servers/io.example%2Fweather/status
+Authorization: Bearer {{token}}
+Content-Type: application/json
+{"status": "active"}
+HTTP 200
+[Asserts]
+jsonpath "$.servers" count == 1
+jsonpath "$.servers[0]._meta['io.modelcontextprotocol.registry/official'].status" == "active"
+# ANCHOR_END: server_status
+
+# ANCHOR: validate_public
+POST {{base_url}}/mcp-registry/v0.1/validate
+Content-Type: application/json
+{"name": "io.example/x", "description": "One letter is too short a server name", "version": "1.0.0"}
+HTTP 200
+[Asserts]
+jsonpath "$.valid" == false
+jsonpath "$.issues[*].reference" contains "invalid-server-name"
+# ANCHOR_END: validate_public
+
+# ANCHOR: health
+GET {{base_url}}/mcp-registry/v0.1/health
+HTTP 200
+[Asserts]
+jsonpath "$.status" == "ok"
+
+GET {{base_url}}/mcp-registry/v0.1/ping
+HTTP 200
+[Asserts]
+jsonpath "$.pong" == true
+
+GET {{base_url}}/mcp-registry/v0.1/version
+HTTP 200
+[Asserts]
+jsonpath "$.version" startsWith "rustybin-"
+# ANCHOR_END: health
+
+# ANCHOR: v0_alias
+GET {{base_url}}/mcp-registry/v0/servers?version=latest&limit=1
+HTTP 200
+[Asserts]
+jsonpath "$.servers" count == 1
+# ANCHOR_END: v0_alias
+
 # ANCHOR: validate
 POST {{base_url}}/_rustybin/registry/validate
 Content-Type: application/json

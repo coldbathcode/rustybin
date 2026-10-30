@@ -278,6 +278,17 @@ agent's handshake-era sessions without revoking it.
 {{#include ../examples/agent/manage_agents.hurl:agents_restore}}
 ```
 
+```hurl
+{{#include ../examples/agent/manage_agents.hurl:agents_end_sessions}}
+```
+
+The live feed is Server-Sent Events, one `call` event per tool call (the agent, the
+tool, the outcome and the latency) and an `agent` event on revoke and restore:
+
+```bash
+{{#include ../examples/concepts/live_feeds.sh:agents_feed}}
+```
+
 | Route | |
 |---|---|
 | `GET /_rustybin/agents` | The agents and the policy (default ceiling, rules) |
@@ -754,3 +765,16 @@ so [plan limits](concepts/plans-and-limits.md) apply as for the REST routes.
 - OAuth sign-in for self-service visitors and shared-mode key holders (they send their
   manage token or API key as a header), and client ID metadata documents (the server
   would have to fetch a URL).
+
+## On every surface
+
+The same job from the API, the console, the command line, an agent and the configuration document.
+
+| Surface | Where |
+|---|---|
+| API | `POST /_rustybin/mcp` (the server), `GET /_rustybin/agents`, `GET /_rustybin/agents/events`, `GET`, `PATCH /_rustybin/agents/{id}`, `POST /_rustybin/agents/{id}/revoke | restore`, `DELETE /_rustybin/agents/{id}/sessions`, the OAuth routes under `/_rustybin/oauth` |
+| Console | The **AI agents** view (the list, rights, revoke, the live feed, **Connect an agent** with the `claude mcp add` command), `#/authorize/<id>` for the agent sign-in |
+| CLI | `rustybin agents list | get | rights | revoke | restore | end-sessions | tail`, `rustybin mcp-stdio` ([reference](cli.md#agents)) |
+| Management MCP | `list_agents`, `get_agent`, `set_agent_rights`, `revoke_agent` (never oneself), `restore_agent`, `end_agent_sessions`; the prompt `onboard_agent` |
+| `rustybin.yaml` | `agents:` (`default_ceiling`, `rules` by client name and credential kind) ([the whole instance as code](configuration-as-code.md)) |
+| Environment | `RUSTYBIN_AGENTS_DEFAULT_CEILING`, `RUSTYBIN_CONTROL_OAUTH`, `RUSTYBIN_CONTROL_OAUTH_ISSUER`, `RUSTYBIN_CONTROL_OAUTH_KEY` ([configuration](configuration.md#control-plane-and-console)) |

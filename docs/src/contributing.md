@@ -99,7 +99,8 @@ versions in `conformance/requirements.txt`:
 | MCP | `PYTHON=... conformance/mcp/run.sh [--inspector]` | the Python MCP SDK, optionally the MCP Inspector CLI (Node) |
 | A2A | `PYTHON=... conformance/a2a/run.sh` | `a2a-sdk` |
 | OAuth / OIDC | `PYTHON=... conformance/oauth/run.sh` | `httpx` |
-| Web console | `PYTHON=... conformance/ui/run.sh` | Playwright (Chromium) |
+| Web console | `PYTHON=... conformance/ui/run.sh` | Playwright (Chromium): every view in light and dark mode, the sign-in flows, visitors, the harness builder, the 0.2 views (assist bar, AI mocks, inspector, registry, portal, agents, Management with export and source control) |
+| Harness cluster | `conformance/harness/run.sh` | Docker Compose: the compose cluster with the leader killed mid-run |
 
 ## Continuous integration
 

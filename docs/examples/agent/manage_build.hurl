@@ -157,7 +157,7 @@ HTTP 200
 jsonpath "$.result.isError" == false
 jsonpath "$.result.structuredContent.version" == 2
 jsonpath "$.result.structuredContent.yaml" contains "docs-parcels"
-jsonpath "$.result.structuredContent.sections" includes "portal"
+jsonpath "$.result.structuredContent.sections" contains "portal"
 jsonpath "$.result.content[0].text" contains "never values"
 # ANCHOR_END: build_export
 

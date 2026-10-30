@@ -114,6 +114,22 @@ a sync learns about deletions):
 {{#include ../../examples/mcp/registry.hurl:deprecate}}
 ```
 
+```hurl
+{{#include ../../examples/mcp/registry.hurl:server_status}}
+```
+
+```hurl
+{{#include ../../examples/mcp/registry.hurl:validate_public}}
+```
+
+```hurl
+{{#include ../../examples/mcp/registry.hurl:health}}
+```
+
+```hurl
+{{#include ../../examples/mcp/registry.hurl:v0_alias}}
+```
+
 In public mode (`RUSTYBIN_PUBLIC_MODE`) publishing and status changes also need the
 admin token as `X-Rustybin-Admin-Token`.
 
@@ -196,6 +212,15 @@ the loopback switch.
   the remote declares (through the relay; a remote on this instance opens as one of
   its servers).
 
-Later steps add the CLI (`rustybin registry list | get | publish | validate | scenario |
-browse`) and the management MCP tools (`list_registry_servers`, `set_registry_scenario`,
-`browse_registry`, `validate_server_json`).
+## On every surface
+
+The same job from the API, the console, the command line, an agent and the configuration document.
+
+| Surface | Where |
+|---|---|
+| API | The registry itself under `/mcp-registry/v0.1` (and `/v0`); `GET /_rustybin/registry`, `DELETE /_rustybin/registry/servers/{serverName}`, `POST /_rustybin/registry/validate`, `GET /_rustybin/registry/browse` |
+| Console | The **MCP registry** view: Mock registry (the scenario, the entries, Publish a server.json) and Browse a registry (Open in inspector) |
+| CLI | `rustybin registry status | publish <file> | delete <name> | validate <file> | browse [--registry U] [--search S]`, `rustybin settings set registry.scenario flaky` ([reference](../cli.md#registry)) |
+| Management MCP | `list_registry_servers`, `set_registry_scenario`, `browse_registry` (under `untrusted_*`), `validate_server_json`, `unpublish_registry_server` ([agent page](../agent-mcp.md)) |
+| `rustybin.yaml` | `registry.servers` (file entries, validated on load), `settings: registry.scenario, registry.saved` ([configuration as code](../mocks/config.md)) |
+| Environment | `RUSTYBIN_REGISTRY_SCENARIO`, `RUSTYBIN_REGISTRY_SAVED`, `RUSTYBIN_EGRESS_ALLOW` for registries beyond the public one ([configuration](../configuration.md#mcp-server)) |

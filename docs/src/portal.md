@@ -161,6 +161,10 @@ calls are reported to `/portal/api/events`:
 ```
 
 ```hurl
+{{#include ../examples/portal/portal.hurl:reference}}
+```
+
+```hurl
 {{#include ../examples/portal/portal.hurl:event}}
 ```
 
@@ -183,3 +187,16 @@ exempt from the key layer (the portal checks `portal.auth` itself).
 ```hurl
 {{#include ../examples/portal/portal.hurl:items}}
 ```
+
+## On every surface
+
+The same job from the API, the console, the command line, an agent and the configuration document.
+
+| Surface | Where |
+|---|---|
+| API | `GET /_rustybin/portal`, `PUT`, `DELETE /_rustybin/portal/items/{id}`, `GET /_rustybin/portal/insights`; what testers read: `/portal`, `/portal/api/catalog`, `/portal/api/items/{id}/collections/{format}`, `/portal/reference/{id}` |
+| Console | **Management, Portal** (status, branding, items, insights, Preview), **Publish to portal** on a mock's page |
+| CLI | `rustybin portal status | publish <id> | unpublish <id> | insights | branding | open` ([reference](cli.md#portal)) |
+| Management MCP | `list_portal_items`, `publish_portal_item`, `unpublish_portal_item`, `set_portal_branding`, `get_portal_insights`; the prompt `publish_portal`; the resource `rustybin://portal/catalog` ([agent page](agent-mcp.md)) |
+| `rustybin.yaml` | `portal.items` (the published items with their metadata), `settings: portal.*` ([the whole instance as code](configuration-as-code.md)) |
+| Environment | `RUSTYBIN_PORTAL`, `RUSTYBIN_PORTAL_AUTH`, `RUSTYBIN_PORTAL_BASE_URL`, `RUSTYBIN_PORTAL_VISITORS` ([configuration](configuration.md#dev-portal)) |

@@ -118,6 +118,10 @@ the console shows who is signed in.
 ```
 
 ```hurl
+{{#include ../../examples/concepts/login.hurl:end_session}}
+```
+
+```hurl
 {{#include ../../examples/concepts/login.hurl:logout}}
 ```
 

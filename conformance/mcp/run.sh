@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build Rustybin, start it on ports 18400-18402 (open control plane) and on
+# Build Rustybin, start it on ports 18400-18402 (RUSTYBIN_CONTROL_AUTH=open: the
+# anonymous checks read the control plane without a token) and on
 # 18403-18405 (RUSTYBIN_CONTROL_AUTH=token, for OAuth sign-in to the management
 # server), run the MCP conformance scripts with the official Python MCP SDK
 # against the mock server (/mcp), an OpenAPI mock's server
@@ -25,7 +26,7 @@ cp "$ROOT/target/debug/rustybin" "$BIN"
 
 (cd "$TMP" && exec env RUSTYBIN_HTTP_PORT=18400 RUSTYBIN_HTTPS_PORT=18401 RUSTYBIN_GRPC_PORT=18402 \
   RUSTYBIN_HOST=127.0.0.1 RUSTYBIN_LOG_LEVEL=warn RUSTYBIN_MCP_CLOCK_TICK_SECS=1 \
-  RUSTYBIN_ADMIN_TOKEN="$MANAGE_ADMIN_TOKEN" RUSTYBIN_ASSIST_PROVIDER=mock \
+  RUSTYBIN_CONTROL_AUTH=open RUSTYBIN_ADMIN_TOKEN="$MANAGE_ADMIN_TOKEN" RUSTYBIN_ASSIST_PROVIDER=mock \
   "$BIN") &
 SERVER=$!
 mkdir -p "$TMP/oauth"

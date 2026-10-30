@@ -190,3 +190,16 @@ browser never sees them again. Saving and deleting need the admin token; at most
 The relay, the fetch helper and check runs are read-only control-plane calls: an admin
 or a console-scope token may use them, and a console token may end its own relay
 sessions. Saving or deleting connections and deleting runs need admin.
+
+## On every surface
+
+The same job from the API, the console, the command line, an agent and the configuration document.
+
+| Surface | Where |
+|---|---|
+| API | `GET /_rustybin/mcp-servers`, `POST /_rustybin/mcp-relay` and `DELETE /_rustybin/mcp-relay/{session}`, `POST /_rustybin/mcp-relay/fetch`, `POST`, `GET /_rustybin/mcp-checks` and `/{id}`, `GET`, `PUT`, `DELETE /_rustybin/mcp-connections/{id}` |
+| Console | The **MCP inspector** view (servers, connections, the protocol tabs, the timeline, checks); a mock's **MCP** tab opens it on the mock's server |
+| CLI | `rustybin mcp servers | tools <target> | call <target> <method> | check <target> [--junit] | runs | run <id> | connections | save-connection | fetch | end-relay` ([reference](../cli.md#mcp)) |
+| Management MCP | `list_mcp_servers`, `mcp_call` (answers under `untrusted_result`), `run_mcp_checks`, `list_mcp_check_runs`, `list_mcp_connections`; the prompt `test_mcp_server` ([agent page](../agent-mcp.md)) |
+| `rustybin.yaml` | Nothing: saved connections hold credentials and stay in `<state>/mcp-inspector.json`; the servers a document creates (mocks with MCP on) appear in the server list |
+| Environment | `RUSTYBIN_EGRESS_ALLOW` and `RUSTYBIN_EGRESS_ALLOW_LOOPBACK` for the relay's destinations, `RUSTYBIN_STATE_DIR` for saved connections and runs ([configuration](../configuration.md#outbound-connections)) |

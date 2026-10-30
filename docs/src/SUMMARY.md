@@ -19,6 +19,44 @@
 - [Plans and limits](concepts/plans-and-limits.md)
 - [Shared mode and API keys](concepts/shared-mode.md)
 
+# Using Rustybin
+
+- [Web console](console.md)
+- [Bring your own AI](ai-assist.md)
+- [Build mocks with AI](mocks/ai.md)
+- [Dev portal](portal.md)
+- [The whole instance as code](configuration-as-code.md)
+- [Source control](source-control.md)
+- [The command line](cli-guide.md)
+  - [CLI reference](cli.md)
+- [Configure Rustybin from an AI agent](agent-mcp.md)
+- [MCP inspector](mcp/inspector.md)
+- [MCP registry](mcp/registry.md)
+- [Load testing through a gateway](harness.md)
+- [Gateway recipes](gateway-recipes.md)
+- [Collection exports and OpenAPI](exports.md)
+
+# Mock APIs (OpenAPI)
+
+- [OpenAPI mocks](mocks/index.md)
+  - [Responses, rules and validation](mocks/responses.md)
+  - [Mocked security](mocks/security.md)
+  - [An MCP server for every mock](mocks/mcp.md)
+  - [Configuration as code](mocks/config.md)
+  - [CLI](mocks/cli.md)
+  - [Self-service mocks](mocks/self-service.md)
+
+# AI and agents
+
+- [Mock LLM](ai/index.md)
+  - [Providers and paths](ai/providers.md)
+  - [Behaviour: modes, rules, tools, structured output](ai/behaviour.md)
+  - [Faults, latency, credentials, inspection](ai/gateway-features.md)
+  - [Embeddings and rerank](ai/embeddings.md)
+  - [Guardrails and content safety](ai/guardrails.md)
+- [MCP server](mcp/index.md)
+- [A2A agents](a2a/index.md)
+
 # HTTP reference
 
 - [Echo, status codes and response shaping](reference/http-basics.md)
@@ -37,44 +75,6 @@
 - [Reliability: flaky, health, chaos](reference/reliability.md)
 - [Orchestration pipeline](reference/orchestration.md)
 - [Identity and load balancing](reference/identity.md)
-
-# Mock APIs (OpenAPI)
-
-- [OpenAPI mocks](mocks/index.md)
-  - [Responses, rules and validation](mocks/responses.md)
-  - [Build mocks with AI](mocks/ai.md)
-  - [Mocked security](mocks/security.md)
-  - [An MCP server for every mock](mocks/mcp.md)
-  - [Configuration as code](mocks/config.md)
-  - [CLI](mocks/cli.md)
-  - [Self-service mocks](mocks/self-service.md)
-
-# AI and agents
-
-- [Mock LLM](ai/index.md)
-  - [Providers and paths](ai/providers.md)
-  - [Behaviour: modes, rules, tools, structured output](ai/behaviour.md)
-  - [Faults, latency, credentials, inspection](ai/gateway-features.md)
-  - [Embeddings and rerank](ai/embeddings.md)
-  - [Guardrails and content safety](ai/guardrails.md)
-- [MCP server](mcp/index.md)
-  - [MCP inspector](mcp/inspector.md)
-  - [MCP registry](mcp/registry.md)
-- [A2A agents](a2a/index.md)
-
-# Using Rustybin
-
-- [Web console](console.md)
-- [Dev portal](portal.md)
-- [Bring your own AI](ai-assist.md)
-- [Configure Rustybin from an AI agent](agent-mcp.md)
-- [The whole instance as code](configuration-as-code.md)
-- [Source control](source-control.md)
-- [The command line](cli-guide.md)
-  - [CLI reference](cli.md)
-- [Gateway recipes](gateway-recipes.md)
-- [Load testing through a gateway](harness.md)
-- [Collection exports and OpenAPI](exports.md)
 
 # Project
 

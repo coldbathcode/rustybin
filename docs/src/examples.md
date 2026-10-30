@@ -57,12 +57,18 @@ and `coordinator`, loop-through, 127.0.0.1 allowed, one engine thread), so the l
 examples send their requests to that instance itself, and a last one on port 18810
 (`password_url`) starts with nothing set, so it asks for `rustybin` / `rustybin`
 (the [sign-in](concepts/control-plane-security.md#user-name-and-password) examples).
+Two shell examples start instances of their own: `config/source-control.sh` runs three
+against a bare git repository in a temporary directory (one that commits and pushes,
+one that starts from the repository, one connected through the settings), and
+`cli/cli.sh` signs in to an instance of its own with the default password and drives the
+command line against it.
 The main instance uses these settings, which some examples rely on:
 
 | Setting | Value | Why |
 |---|---|---|
 | `RUSTYBIN_CONTROL_AUTH` | `open` | the examples read the control plane without a token (the default, the password sign-in, is the last instance's) |
 | `RUSTYBIN_ADMIN_TOKEN` | `docs-admin-token` (Hurl variable `admin_token`) | to show admin-guarded mutations |
+| `RUSTYBIN_ASSIST_PROVIDER` | `mock` | the [AI assist](ai-assist.md#the-mock-provider) examples run against the built-in provider: deterministic answers, no key, no network |
 | `RUSTYBIN_MTLS_IN_HEADER` | `X-Client-Cert` | to show mTLS header mode |
 | `RUSTYBIN_INSTANCE_ID` | `docs-examples` | stable identity in assertions |
 | `RUSTYBIN_CONFIG_FILE` / `RUSTYBIN_MOCKS_DIR` | `mocks/rustybin.yaml` / `mocks/specs-dir` (with `INVENTORY_API_KEY=docs-inventory-key`) | the [OpenAPI mocks loaded from files](mocks/config.md) |

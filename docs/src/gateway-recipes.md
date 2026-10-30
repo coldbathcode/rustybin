@@ -165,3 +165,16 @@ curl http://127.0.0.1:9180/apisix/admin/routes/rustybin -X PUT \
 
 Tyk, KrakenD and other gateways follow the same patterns; no snippets are given for
 them here.
+
+## On every surface
+
+The same job from the API, the console, the command line, an agent and the configuration document.
+
+| Surface | Where |
+|---|---|
+| API | What the gateway forwarded: `GET /_rustybin/requests` and `/stream`; a request through the gateway: any route, `X-Rustybin-Delay` and `X-Rustybin-Fail` for the failure cases |
+| Console | **Live traffic** with gateway headers highlighted and compare mode; the **Gateway base URL** of **Management, General** sends every view through the gateway |
+| CLI | `rustybin requests tail`, `rustybin requests list --path-prefix /mock/`, `rustybin mocks traffic <name>` ([reference](cli.md#requests)) |
+| Management MCP | `try_request` (through the gateway with a base URL), `wait_for_requests`, `list_requests`, `get_request`; the prompt `debug_gateway_call` ([agent page](agent-mcp.md)) |
+| `rustybin.yaml` | The mocks, security and health the recipes rely on ([the whole instance as code](configuration-as-code.md)) |
+| Environment | `RUSTYBIN_TRUST_FORWARD` (the real client behind the gateway), `RUSTYBIN_MTLS_IN_HEADER`, `RUSTYBIN_AI_REQUIRE_AUTH` ([configuration](configuration.md#proxies-and-tls)) |

@@ -99,6 +99,44 @@ jsonpath "$.current" exists
 jsonpath "$.sessions[0].ip" == "127.0.0.1"
 # ANCHOR_END: sessions
 
+# ANCHOR: end_session
+# A second sign-in (another browser, say) is a second session. Its own
+# session list names it as the current one; end it by that id.
+POST {{password_url}}/_rustybin/login
+Content-Type: application/json
+{ "username": "rustybin", "password": "rustybin" }
+HTTP 200
+[Captures]
+other_token: jsonpath "$.token"
+
+GET {{password_url}}/_rustybin/sessions
+Authorization: Bearer {{other_token}}
+HTTP 200
+[Captures]
+other_id: jsonpath "$.current"
+[Asserts]
+jsonpath "$.count" == 2
+
+DELETE {{password_url}}/_rustybin/sessions/{{other_id}}
+Authorization: Bearer {{token}}
+HTTP 200
+[Asserts]
+jsonpath "$.ended" == true
+jsonpath "$.id" == "{{other_id}}"
+
+GET {{password_url}}/_rustybin/status
+Authorization: Bearer {{other_token}}
+HTTP 401
+[Asserts]
+jsonpath "$.reason" == "revoked"
+
+GET {{password_url}}/_rustybin/sessions
+Authorization: Bearer {{token}}
+HTTP 200
+[Asserts]
+jsonpath "$.count" == 1
+# ANCHOR_END: end_session
+
 # ANCHOR: change_password
 PUT {{password_url}}/_rustybin/password
 Authorization: Bearer {{token}}

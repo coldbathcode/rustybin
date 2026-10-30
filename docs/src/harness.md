@@ -488,3 +488,16 @@ limiters with known flaws), and the cluster and failover with several nodes in o
 process. `docs/examples/run.sh` runs this page's examples against a loop-through node;
 `conformance/harness/run.sh` runs the compose cluster and the failover; `cargo run
 --release --example harness_spike -- --sweep` is the engine benchmark.
+
+## On every surface
+
+The same job from the API, the console, the command line, an agent and the configuration document.
+
+| Surface | Where |
+|---|---|
+| API | `GET /_rustybin/harness`, `/schema`, `/scenarios`, `POST /_rustybin/harness/validate | preview | runs`, `GET`, `PATCH /_rustybin/harness/runs/{run}`, `/stop`, `/events`, `/report`, the cluster routes under `/_rustybin/harness/clusters` |
+| Console | The **Harness** view (shown when harness mode is on): the builder generated from the schema, runs, live tuning, reports |
+| CLI | `rustybin harness validate | run | report` offline, the same with `--remote` and `status | scenarios | runs | show | tune | stop | events | clusters ...` against an instance ([reference](cli.md#harness)) |
+| Management MCP | `harness_status`, `list_scenarios`, `get_scenario`, `save_scenario`, `list_patterns`, `validate_scenario`, `preview_scenario`, `create_run`, `start_run`, `update_run`, `list_runs`, `get_run`, `stop_run`, `get_run_report`, `create_cluster` and the cluster tools; the prompt `load_test_gateway`; the resource `rustybin://harness.schema.json` ([agent page](agent-mcp.md#harness)) |
+| `rustybin.yaml` | `harness:` (the saved scenarios) ([the whole instance as code](configuration-as-code.md)) |
+| Environment | `RUSTYBIN_HARNESS`, `_ROLES`, `_TARGETS`, `_MAX_RATE`, `_MAX_INFLIGHT`, `_MAX_DURATION`, `_VERIFY_TARGETS`, `_SCENARIO`, `_START`, `_REPORT`, `_EXIT` and the cluster variables ([configuration](configuration.md#harness-mode)) |

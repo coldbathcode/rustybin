@@ -2,10 +2,10 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 to 11 done)
+## Rustybin 0.2, the AI-assisted mocking service (built, released 2026-10-30)
 
-[docs/plans/next/master-plan.md](docs/plans/next/master-plan.md) (planned 2026-10-29) is the plan for the next
-build: twelve steps, one file each (`docs/plans/next/step-NN-*.md`): foundations (step 01, done 2026-10-29: the
+[docs/plans/next/master-plan.md](docs/plans/next/master-plan.md) (planned 2026-10-29, every step done, `v0.2.0`
+tagged 2026-10-30) is the plan of the 0.2 build: twelve steps, one file each (`docs/plans/next/step-NN-*.md`): foundations (step 01, done 2026-10-29: the
 settings store `src/settings.rs`, the egress policy `src/egress.rs`, the console's Management view
 `ui/views/manage.js`; see the step file's build notes), the console locked with a username and password (step 02,
 done 2026-10-29: `src/login.rs`, the one change of default; test and example instances that read the control plane
@@ -22,10 +22,15 @@ browsing (step 06, done 2026-10-30: `src/mcp/registry/`, `ui/views/registry.js`,
 `src/mcp/manage/agents/`, `ui/views/agents.js`, see below), the whole instance as `rustybin.yaml` with git source
 control (step 09, done 2026-10-30: `src/configdoc/`, `src/sourcecontrol/`, see below), a `rustybin` CLI for remote
 instances (step 10, done 2026-10-30: `src/cli/`, see below), management MCP parity (step 11, done 2026-10-30:
-every control route has a tool, see below), and the 0.2.0 release. The master plan's section 4 is
-the build marker and section 5 the session protocol: build a step whole, update its status and build notes, update
-the master table, commit as oliwynn with the step number in the message, push to main. Steps go only when the
-user says go. Rules the foundations set: a feature that reaches out resolves through `egress::Egress` under its
+every control route has a tool, see below), and the 0.2.0 release (step 12, done 2026-10-30: the book
+reordered around the jobs with an "On every surface" table on every Using Rustybin page, every 0.2 route with a
+tested example, the SDK and console conformance green, the changelog, the tag and the signed image). The next plan
+goes in a new folder under `docs/plans/` with the same shape (a master plan whose section 4 is the build marker,
+one file per step, a step built whole and pushed as it lands, only when the user says go). **The five-surface
+rule**: a capability lands on the API (catalogue and OpenAPI), the console, the management MCP, the CLI and
+`rustybin.yaml` in the same step, and three parity tests keep it so (`the_command_tree_is_consistent_with_the_catalogue`,
+`every_control_route_has_a_management_tool`, the harness schema parity); a user-facing page of the book gets its
+"On every surface" table and a Hurl example per route. Rules the foundations set: a feature that reaches out resolves through `egress::Egress` under its
 `Purpose` (never its own `reqwest::Client`); a feature's configurable value is a `settings::Spec` (seeded by its
 variable, stored override, `secret()` for credentials, never returned as a value); the console's instance
 settings are forms from the settings schema (`ui/lib/settingsform.js`), one card per group on a Management tab.

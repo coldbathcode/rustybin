@@ -42,7 +42,7 @@ Mcp-Name: get_visit
 HTTP 200
 [Asserts]
 jsonpath "$.result.isError" == false
-jsonpath "$.result.structuredContent.mocks" includes "{{agent_mock}}"
+jsonpath "$.result.structuredContent.mocks" contains "{{agent_mock}}"
 jsonpath "$.result.structuredContent.next_extension" == "free"
 
 # Without the token the mock does not exist for the caller.

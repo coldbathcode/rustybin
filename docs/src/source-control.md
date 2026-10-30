@@ -43,9 +43,19 @@ GitHub or GitLab). The private half never leaves the instance; `{"replace": true
 generates a new one. The remote's host key is accepted on first use into
 `<state>/repo.known_hosts`.
 
+```bash
+{{#include ../examples/config/source-control.sh:deploy_key}}
+```
+
 **Connect** (`POST /_rustybin/git/init`) clones the branch into the working copy, or
 initialises an empty working copy when the remote has no such branch yet (the first
-push creates it). An existing working copy is pointed at the remote.
+push creates it). An existing working copy is pointed at the remote. With
+`RUSTYBIN_CONFIG_GIT` set the instance connects at startup; otherwise set `git.remote`
+and connect when ready:
+
+```bash
+{{#include ../examples/config/source-control.sh:connect}}
+```
 
 Every operation is admin-only, audited (`rustybin::git` log lines, the timeline in the
 status), serialised by one lock, and runs git with a timeout, `GIT_TERMINAL_PROMPT=0`
@@ -99,6 +109,14 @@ the instance's configuration is committed on top of the remote and pushed; `mess
 names the commit) and `repository` replaces this instance with the repository's (the
 remote branch is taken and applied with prune). The console shows both buttons under
 the error.
+
+```bash
+{{#include ../examples/config/source-control.sh:diverged}}
+```
+
+```bash
+{{#include ../examples/config/source-control.sh:resolve}}
+```
 
 ## History
 
@@ -154,6 +172,18 @@ The whole flow against a bare repository in a temporary directory:
 ## Not in this version
 
 Merges and conflict resolution inside the instance (resolve with either side, or in a
-pull request), branches per environment, signed commits, webhooks that trigger a pull
-(set `git.auto: pull` instead), and the `rustybin config` and `rustybin git` commands
-of the CLI (the next step of the plan).
+pull request), branches per environment, signed commits, and webhooks that trigger a
+pull (set `git.auto: pull` instead).
+
+## On every surface
+
+The same job from the API, the console, the command line, an agent and the configuration document.
+
+| Surface | Where |
+|---|---|
+| API | `GET /_rustybin/git`, `POST /_rustybin/git/init | commit | push | pull | resolve`, `GET`, `POST /_rustybin/git/key`, `GET /_rustybin/git/history` |
+| Console | **Management, Source control**: the repository form, status, connect, commit and push, pull, resolve, the deploy key, history |
+| CLI | `rustybin git status | init | commit | push | pull | resolve | key | history` ([reference](cli.md#git)) |
+| Management MCP | `git_status`, `git_init`, `git_commit`, `git_push`, `git_pull`, `git_resolve`, `git_deploy_key`; the prompt `backup_to_git` ([agent page](agent-mcp.md)) |
+| `rustybin.yaml` | Never: the `git.*` settings (the remote, the token) are not exported, so a document in a repository cannot point the instance elsewhere |
+| Environment | `RUSTYBIN_CONFIG_GIT`, `_REF`, `_PATH`, `_AUTH`, `_TOKEN`, `_AUTO`, `_REQUIRED` ([configuration](configuration.md#source-control)) |

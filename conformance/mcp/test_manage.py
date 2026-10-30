@@ -45,6 +45,9 @@ paths:
               example: {id: 1, total: 9.5}
 """
 
+# The same API without the example: what "generate examples" is for.
+BARE = ORDERS.replace("              example: {id: 1, total: 9.5}\n", "")
+
 
 def client(headers: dict | None = None, mode: str = "auto", **kw) -> Client:
     http = create_mcp_http_client(headers=headers or {})
@@ -165,11 +168,25 @@ async def build_instance() -> None:
 
         section("build_instance: coverage and examples")
         r = await c.call_tool("check_mock", {"name": "conf-parcels"})
-        check(not r.is_error and "coverage" in r.structured_content, "check_mock carries the coverage")
-        r = await c.call_tool("generate_examples", {"name": "conf-parcels", "source": "generated", "apply": True})
-        check(r.is_error and "confirm" in text_of(r), "storing examples is confirmed")
+        cov = (r.structured_content or {}).get("coverage") or {}
+        check(not r.is_error and "without" in cov and cov["without"] == [], "check_mock carries the coverage (a described spec has examples everywhere)")
         r = await c.call_tool("generate_examples", {"name": "conf-parcels", "source": "generated", "apply": True, "confirm": True})
+        check(r.is_error and "every operation has examples" in text_of(r), "nothing to generate on a covered mock")
+        # A mock without examples: the stored examples come from the generator (no key needed).
+        r = await c.call_tool("create_mock", {"spec": BARE, "name": "conf-bare"})
+        check(not r.is_error, f"create_mock conf-bare: {text_of(r)[:80]!r}")
+        r = await c.call_tool("check_mock", {"name": "conf-bare"})
+        cov = (r.structured_content or {}).get("coverage") or {}
+        check([o["id"] for o in cov.get("without") or []] == ["getOrder"], "the bare mock lacks an example")
+        r = await c.call_tool("generate_examples", {"name": "conf-bare", "source": "generated", "apply": True})
+        check(r.is_error and "confirm" in text_of(r), "storing examples is confirmed")
+        r = await c.call_tool("generate_examples", {"name": "conf-bare", "source": "generated", "apply": True, "confirm": True})
         check(not r.is_error and r.structured_content["applied"] is True, f"examples stored: {text_of(r)[:80]!r}")
+        r = await c.call_tool("check_mock", {"name": "conf-bare"})
+        cov = (r.structured_content or {}).get("coverage") or {}
+        check(cov.get("without") == [], "the bare mock is covered now")
+        r = await c.call_tool("delete_mock", {"name": "conf-bare", "confirm": True})
+        check(not r.is_error, "conf-bare deleted")
         r = await c.call_tool("edit_spec_with_ai", {"name": "conf-parcels", "instruction": "add a DELETE /shipments/{id} operation"})
         check(not r.is_error and r.structured_content["applied"] is False, "an edit is previewed, not saved")
         r = await c.call_tool("deploy_mock", {"name": "conf-parcels"})

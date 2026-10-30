@@ -1,12 +1,20 @@
 # Rustybin
 
-**A single-binary upstream for API gateway, AI gateway and agent gateway demos.**
+**A single-binary mocking and testing service for API gateway, AI gateway and agent
+gateway demos.**
 
-Put Rustybin behind any gateway and you get something realistic to route to: a mock
-LLM that speaks seven providers' native APIs, an MCP server, A2A agents, an OAuth /
-OIDC provider, real auth checks, every common protocol, and failure modes you can
-trigger on demand. Everything is deterministic, every bit of state is bounded, and a
-web console shows exactly what the gateway forwarded.
+**Describe** the API you need and your own AI writes the mock, fills in the example
+payloads and edits it on request. **Explore** it in a dev portal, an MCP inspector for
+any server and a live view of what the gateway forwarded. **Manage** it from the web
+console, the `rustybin` command line, an AI agent over MCP or a `rustybin.yaml` in
+git. **Lock** it on day one with a user name and password, sealed secrets and one
+outbound allowlist.
+
+Behind any gateway it is the upstream: a mock LLM that speaks seven providers' native
+APIs, an MCP server, A2A agents, an OAuth / OIDC provider, real auth checks, every
+common protocol, failure modes you can trigger on demand, and a load client that
+measures the gateway from both sides. Everything is deterministic and every bit of
+state is bounded.
 
 Documentation: **<https://docs.rustybin.dev/>** (built from [`docs/`](docs/src/introduction.md);
 every request example in it is tested in CI).
@@ -52,10 +60,55 @@ curl -si http://localhost:8080/echo -H 'X-Rustybin-Fail: 503'
 
 Open **<http://localhost:8080/ui>** for the web console (sign in with
 `rustybin` / `rustybin`, then change it under Management, Sign-in), `/` for every
-endpoint with a runnable example, and `/docs` for the OpenAPI reference. See the
-[quick start](docs/src/quick-start.md) for Docker Compose and Fly.io.
+endpoint with a runnable example, and `/docs` for the OpenAPI reference.
+
+From a description to a published, exported mock in five commands (the same binary
+is the command line):
+
+```bash
+rustybin login --url http://localhost:8080                      # rustybin / rustybin
+rustybin settings set assist.provider anthropic && rustybin settings set-secret assist.anthropic_key --stdin < key.txt
+rustybin mocks describe "an orders API with customers, orders and refunds" > orders.json && rustybin mocks create orders --spec orders.json
+rustybin portal publish mock:orders --title "Orders"             # http://localhost:8080/portal
+rustybin config export > rustybin.yaml                          # the whole instance, secrets as references
+```
+
+See the [quick start](docs/src/quick-start.md) for Docker Compose, Fly.io and the
+same five steps in the console.
 
 ## Highlights
+
+**Describe, explore, manage, lock**
+
+- **Build mocks with AI**: a spec from a description (OpenAPI 3.1, 3.0 or Swagger 2.0),
+  example payloads for every operation that lacks one (with an alert when a spec has
+  none), edits by instruction shown as a diff, nothing applied without a click
+  ([build mocks with AI](docs/src/mocks/ai.md)).
+- **Bring your own AI**: Anthropic, OpenAI, Gemini or any OpenAI-compatible endpoint
+  with your key, from the environment or the settings; an assist bar in every console
+  view with tokens and cost per answer; a built-in mock provider for demos without a
+  key ([bring your own AI](docs/src/ai-assist.md)).
+- **Dev portal** at `/portal`: testers find what you published (mock APIs with Try it,
+  downloads and their MCP servers, the mock MCP servers, the LLM, agents, tools) without
+  the console or its password; open, behind the console sign-in or an API key, with
+  view and download counts ([dev portal](docs/src/portal.md)).
+- **MCP inspector and registry**: any MCP server over every transport and auth mode
+  (bearer, API key, basic, headers, OAuth 2.1 with the discovery walk), a relay for
+  servers the browser cannot reach, fourteen checks as JSON or JUnit; a mock MCP
+  registry in the registry API's shape with failure scenarios, and browsing of real
+  ones ([inspector](docs/src/mcp/inspector.md), [registry](docs/src/mcp/registry.md)).
+- **Five surfaces**: every capability is on the API, in the console, in the `rustybin`
+  CLI, as a management MCP tool and in `rustybin.yaml`; parity tests keep it so
+  ([command line](docs/src/cli-guide.md), [agent](docs/src/agent-mcp.md),
+  [configuration as code](docs/src/configuration-as-code.md)).
+- **Source control**: commit and push the instance to a git repository with a token or
+  a deploy key, pull and apply, resolve a diverged branch, start from the repository
+  ([source control](docs/src/source-control.md)).
+- **Locked by default**: the console and the control plane sign in with a user name and
+  password (`rustybin` / `rustybin` until changed; `RUSTYBIN_CONTROL_AUTH=open` for a
+  laptop), secrets sealed at rest, one outbound allowlist with pinned addresses and an
+  audit, agents with ceilings and revocation
+  ([control-plane security](docs/src/concepts/control-plane-security.md)).
 
 **AI and agents**
 
@@ -125,17 +178,19 @@ endpoint with a runnable example, and `/docs` for the OpenAPI reference. See the
 
 ## Web console
 
-`/ui` is a browser console for presenting: Overview, Live traffic (what the gateway
-forwarded, with gateway headers highlighted), Mock APIs (upload a spec, edit
-responses, toggle mocks and mocked security), Request bins, API explorer, AI
-playground, MCP inspector, A2A client, Chaos and health (with a small load
-generator) and Token lab. It is embedded in the binary and works offline. Set a
-gateway base URL in its settings to send every request through your gateway. It
-signs in with the console's user name and password (`rustybin` / `rustybin` until
-changed; `RUSTYBIN_CONTROL_AUTH=open` turns the sign-in off), or with a token from
-the URL fragment (`/ui/#token=...`) on platform-managed instances. With your own AI
-key (Anthropic, OpenAI, Gemini or any OpenAI-compatible endpoint) an assist bar
-answers questions about the instance and proposes actions you apply with a click.
+`/ui` is a browser console for presenting and for managing: Overview, Live traffic
+(what the gateway forwarded, with gateway headers highlighted), Mock APIs (describe
+or upload a spec, edit responses, toggle mocks and mocked security), Request bins,
+API explorer, AI playground, MCP inspector, MCP registry, A2A client, AI agents,
+Harness, Chaos and health (with a small load generator), Token lab, and a
+Management area (sign-in, AI, network, portal, export, source control). It is
+embedded in the binary and works offline. Set a gateway base URL in its settings to
+send every request through your gateway. It signs in with the console's user name
+and password (`rustybin` / `rustybin` until changed; `RUSTYBIN_CONTROL_AUTH=open`
+turns the sign-in off), or with a token from the URL fragment (`/ui/#token=...`) on
+platform-managed instances. With your own AI key (Anthropic, OpenAI, Gemini or any
+OpenAI-compatible endpoint) an assist bar answers questions about the instance and
+proposes actions you apply with a click.
 
 ## Command line
 
@@ -171,6 +226,14 @@ to the default. `GET /_rustybin/config` shows the effective configuration. Detai
 | `RUSTYBIN_CONTROL_AUTH` | `password` | `/_rustybin/*` (except `/_rustybin/ready` and the sign-in) needs a token from `POST /_rustybin/login` with the console's user name and password, the admin token or a control JWT; `open` (no credentials, the default before 0.2), `token` (admin token) or `jwt` (admin token or Ed25519 JWT with scope `inspector`, `console`, `harness` or `admin`) |
 | `RUSTYBIN_CONSOLE_USER` / `_PASSWORD` / `_PASSWORD_HASH` | `rustybin` / `rustybin` / unset | The sign-in credentials; the hash (argon2id PHC) wins over the plain password; a password changed in the console is stored as a hash and wins over both |
 | `RUSTYBIN_ASSIST_PROVIDER` / `_MODEL` / `_FAST_MODEL` / `_BASE_URL` / `_*_KEY` | unset | [Your own AI](docs/src/ai-assist.md) behind the console's assist bar: `anthropic`, `openai`, `gemini`, `compatible` (any OpenAI-compatible endpoint) or `mock`; the keys are sealed secrets that never leave the instance |
+| `RUSTYBIN_STATE_DIR` | unset | One directory for everything the instance keeps: settings, the secrets key, mocks, harness scenarios, the git working copy, the portal and agents ([settings and secrets](docs/src/configuration.md#state-directory-settings-and-secrets)) |
+| `RUSTYBIN_SETTINGS_LOCK` / `RUSTYBIN_SECRETS_KEY` | `false` / generated | The environment is authoritative for settings (the console read-only for them); the 32-byte base64 key that seals secrets at rest |
+| `RUSTYBIN_EGRESS_ALLOW` / `_ALLOW_LOOPBACK` | unset / `false` | The outbound allowlist (hosts, `*.domain`, IPs, CIDRs, ports) every feature that reaches out obeys, on top of each feature's own rule; loopback for local demos ([outbound connections](docs/src/configuration.md#outbound-connections)) |
+| `RUSTYBIN_PORTAL` / `_AUTH` / `_BASE_URL` / `_VISITORS` | `auto` / `open` / unset / `false` | The [dev portal](docs/src/portal.md): on, off or on once something is published; open, behind the sign-in or an API key; the gateway URL testers use |
+| `RUSTYBIN_REGISTRY_SCENARIO` / `_SAVED` | `normal` / unset | The [mock MCP registry](docs/src/mcp/registry.md)'s failure scenario and the real registries the console browses |
+| `RUSTYBIN_AGENTS_DEFAULT_CEILING` | `full` | The most an [AI agent](docs/src/agent-mcp.md#managing-agents) on the management MCP server may do without its own rights |
+| `RUSTYBIN_CONFIG_GIT` / `_REF` / `_PATH` / `_AUTH` / `_TOKEN` / `_AUTO` / `_REQUIRED` | unset | [Source control](docs/src/source-control.md): the remote the instance clones at startup and pushes to, its branch and directory, token or deploy key, automatic push or pull |
+| `RUSTYBIN_OIDC_USERS_FILE` | unset | Your own users for the built-in OIDC provider instead of the demo ones (`rustybin oidc-hash-password`) |
 | `RUSTYBIN_CONTROL_OAUTH` | `true` | With `token` / `jwt` control auth: agents sign in to `/_rustybin/mcp` through the browser (RFC 9728 metadata, built-in authorization server at `/_rustybin/oauth`, consent in the console) |
 | `RUSTYBIN_CONTROL_OAUTH_ISSUER` | unset | Name an external authorization server instead (its tokens must be control JWTs) |
 | `RUSTYBIN_CONTROL_OAUTH_KEY` | derived | Secret (32+ characters) signing OAuth client ids and tokens; unset: derived from the admin token, else random per process |
@@ -214,8 +277,9 @@ to the default. `GET /_rustybin/config` shows the effective configuration. Detai
 ```bash
 cargo build && cargo test
 cargo clippy --all-targets -- -D warnings
-docs/examples/run.sh          # every documentation example (Hurl) against a fresh server
+docs/examples/run.sh          # every documentation example (Hurl) against fresh servers
 conformance/harness/run.sh    # the compose harness cluster: the leader killed mid-run, the report asserted
+PYTHON=venv/bin/python conformance/mcp/run.sh   # the SDK suites: ai, mcp, a2a, oauth; conformance/ui/run.sh drives the console
 mdbook build docs             # the documentation site
 ```
 

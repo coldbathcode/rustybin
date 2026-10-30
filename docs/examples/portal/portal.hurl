@@ -90,6 +90,15 @@ header "Content-Disposition" contains "inventory.hurl"
 body contains "/mock/inventory"
 # ANCHOR_END: download
 
+# ANCHOR: reference
+GET {{base_url}}/portal/reference/mock:inventory
+HTTP 200
+[Asserts]
+header "Content-Type" startsWith "text/html"
+body contains "api-reference"
+body contains "mock/inventory/_rustybin/openapi.json"
+# ANCHOR_END: reference
+
 # ANCHOR: event
 POST {{base_url}}/portal/api/events
 Content-Type: application/json

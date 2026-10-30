@@ -129,3 +129,16 @@ or instruction, the spec (or the operations and schemas that need examples) and 
 style; the "What was sent" record of the console and the `sent` field of the JSON
 answers show it exactly, and the [redact pass](../ai-assist.md#privacy-and-costs)
 refuses inputs that hold a stored secret or the admin token.
+
+## On every surface
+
+The same job from the API, the console, the command line, an agent and the configuration document.
+
+| Surface | Where |
+|---|---|
+| API | `POST /_rustybin/mocks/ai/spec`, `POST /_rustybin/mocks/{name}/ai/examples`, `POST /_rustybin/mocks/{name}/ai/edit`, `GET /_rustybin/mocks/{name}/coverage` |
+| Console | The wizard's **Describe it** tab, the coverage banner with **Generate with AI** and **Use generated values**, **Edit with AI** on a mock, the assist bar's `create_mock`, `generate_examples` and `edit_spec` cards |
+| CLI | `rustybin mocks describe`, `rustybin mocks examples <name> [--apply]`, `rustybin mocks edit <name> "..." [--apply]`, `rustybin mocks coverage <name>` ([reference](../cli.md#mocks)) |
+| Management MCP | `generate_spec` (with `create`), `generate_examples` (with `apply`), `edit_spec_with_ai` (with `apply`), `check_mock` and `get_mock` with the coverage; the prompt `mock_an_api` ([agent page](../agent-mcp.md)) |
+| `rustybin.yaml` | Stored examples travel with the mock: `mocks.<name>.operations.<id>.examples.<status>` ([configuration as code](config.md)) |
+| Environment | The provider and key of [Bring your own AI](../ai-assist.md); `RUSTYBIN_ASSIST_VISITORS` lets self-service visitors use them ([configuration](../configuration.md#ai-assist)) |

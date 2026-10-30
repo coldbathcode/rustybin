@@ -90,3 +90,16 @@ to it); the agent sign-in is a browser flow; the harness cluster's node-to-node 
 are the nodes' business; a request bin's capture URLs are for the thing under test.
 Everything else on the control plane has a verb, and a test keeps it so: a route that
 lands without a command fails the build.
+
+## On every surface
+
+The same job from the API, the console, the command line, an agent and the configuration document.
+
+| Surface | Where |
+|---|---|
+| API | Every command calls the control plane: the **Calls** column of the [reference](cli.md) names the routes |
+| Console | The same sign-in (`rustybin login` takes the console's user name and password) and the same sessions (**Management, Sign-in** lists the CLI's token and can end it) |
+| CLI | This page |
+| Management MCP | `rustybin mcp-stdio --url <url> --profile <p>` bridges a local agent to a remote instance's management server with the profile's token; the resource `rustybin://cli.md` is this reference ([agent page](agent-mcp.md)) |
+| `rustybin.yaml` | `rustybin config export > rustybin.yaml`, `rustybin config apply rustybin.yaml --dry-run` ([the whole instance as code](configuration-as-code.md)) |
+| Environment | `RUSTYBIN_URL`, `RUSTYBIN_TOKEN`, `RUSTYBIN_PROFILE`, `RUSTYBIN_MOCK_TOKEN`, `RUSTYBIN_CONFIG_HOME` (where `profiles.json` lives) |

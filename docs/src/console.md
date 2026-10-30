@@ -237,3 +237,16 @@ sign-in token; the others across visits):
 
 `conformance/ui/run.sh` drives every view in a real Chromium (Playwright), in light
 and dark mode, and fails on any browser console error.
+
+## On every surface
+
+The same job from the API, the console, the command line, an agent and the configuration document.
+
+| Surface | Where |
+|---|---|
+| API | The control plane the console calls, listed above; `POST /_rustybin/login` for a token, `GET /_rustybin/status` for what the overview shows |
+| Console | `/ui`: every view, the gear for **Management** |
+| CLI | `rustybin login`, `status`, `whoami`, `sessions list | end | end-all`, `password` ([reference](cli.md)) |
+| Management MCP | `get_instance`, `list_sessions`, `end_session`, `get_settings` ([agent page](agent-mcp.md)) |
+| `rustybin.yaml` | `instance:` (the console title and user), `settings: console.*` ([the whole instance as code](configuration-as-code.md)) |
+| Environment | `RUSTYBIN_CONTROL_AUTH`, `RUSTYBIN_CONSOLE_USER`, `RUSTYBIN_CONSOLE_PASSWORD`, `RUSTYBIN_CONSOLE_PASSWORD_HASH`, `RUSTYBIN_CONSOLE_TITLE`, `RUSTYBIN_CONSOLE_BACKLINK` ([configuration](configuration.md#control-plane-and-console)) |

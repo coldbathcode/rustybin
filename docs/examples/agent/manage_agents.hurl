@@ -49,9 +49,9 @@ Mcp-Method: tools/list
 {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}, "io.modelcontextprotocol/clientInfo": {"name": "docs-agent", "version": "1.0.0"}}}}
 HTTP 200
 [Asserts]
-jsonpath "$.result.tools[*].name" includes "list_mocks"
-jsonpath "$.result.tools[*].name" not includes "create_mock"
-jsonpath "$.result.tools[*].name" not includes "try_request"
+jsonpath "$.result.tools[*].name" contains "list_mocks"
+jsonpath "$.result.tools[*].name" not contains "create_mock"
+jsonpath "$.result.tools[*].name" not contains "try_request"
 # ANCHOR_END: agents_rights
 
 # ANCHOR: agents_revoke
@@ -91,3 +91,14 @@ HTTP 200
 [Asserts]
 jsonpath "$.rights.source" == "default"
 # ANCHOR_END: agents_restore
+
+# ANCHOR: agents_end_sessions
+# End the agent's sessions without revoking it (a stateless 2026-07-28 client
+# holds none, so nothing is ended here; a 2025 session client would reconnect).
+DELETE {{secured_url}}/_rustybin/agents/{{agent_id}}/sessions
+Authorization: Bearer {{admin_token}}
+HTTP 200
+[Asserts]
+jsonpath "$.id" == "{{agent_id}}"
+jsonpath "$.sessions_ended" isInteger
+# ANCHOR_END: agents_end_sessions

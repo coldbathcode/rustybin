@@ -62,3 +62,16 @@ endpoint with a runnable example.
 
 The examples in this documentation (`docs/examples/`) are a more thorough,
 assertion-checked alternative to the generated Hurl export.
+
+## On every surface
+
+The same job from the API, the console, the command line, an agent and the configuration document.
+
+| Surface | Where |
+|---|---|
+| API | `GET /export/{format}` for the catalogue, `GET /_rustybin/mocks/{name}/collections/{format}` and `/_rustybin/mocks/{name}/export` for a mock, `/openapi.json`, `/openapi.yaml`, `/docs` |
+| Console | **API explorer** downloads, a mock's **Download** menu, the portal's download buttons |
+| CLI | `rustybin mocks collection <name> <format> [--base-url U]`, `rustybin mocks export [name]`, `rustybin instance catalog` ([reference](cli.md#mocks)) |
+| Management MCP | `export_collection`, `find_endpoints`, `get_mock_spec`; the resource `rustybin://catalogue` ([agent page](agent-mcp.md)) |
+| `rustybin.yaml` | `rustybin config export` is the export of the whole instance ([the whole instance as code](configuration-as-code.md)) |
+| Environment | None |

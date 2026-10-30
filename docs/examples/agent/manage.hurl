@@ -28,11 +28,11 @@ Mcp-Method: tools/list
 {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}}}}
 HTTP 200
 [Asserts]
-jsonpath "$.result.tools[*].name" includes "get_instance"
-jsonpath "$.result.tools[*].name" includes "create_mock"
-jsonpath "$.result.tools[*].name" includes "try_request"
-jsonpath "$.result.tools[*].name" includes "wait_for_requests"
-jsonpath "$.result.tools[*].name" includes "apply_config"
+jsonpath "$.result.tools[*].name" contains "get_instance"
+jsonpath "$.result.tools[*].name" contains "create_mock"
+jsonpath "$.result.tools[*].name" contains "try_request"
+jsonpath "$.result.tools[*].name" contains "wait_for_requests"
+jsonpath "$.result.tools[*].name" contains "apply_config"
 jsonpath "$.result.tools[?(@.name == 'delete_mock')].annotations.destructiveHint" == true
 jsonpath "$.result.tools[?(@.name == 'get_mock')].annotations.readOnlyHint" == true
 # ANCHOR_END: tools_list

@@ -145,3 +145,16 @@ config file, which wins for the sections it carries.
 [Source control](source-control.md) connects an instance to a git repository: commit
 and push the export, pull and apply the repository's version, and start from the
 repository with `RUSTYBIN_CONFIG_GIT`.
+
+## On every surface
+
+The same job from the API, the console, the command line, an agent and the configuration document.
+
+| Surface | Where |
+|---|---|
+| API | `GET /_rustybin/config/export`, `POST /_rustybin/config/apply` (`dry_run`, `prune`), `GET /_rustybin/config/schema` |
+| Console | **Management, Export**: the document, copy, download, the bundle, the diff, apply with a dry run |
+| CLI | `rustybin config export | apply | diff | schema | check` ([reference](cli.md#config)) |
+| Management MCP | `export_config`, `diff_config`, `apply_config`; the resource `rustybin://config.schema.json`; the prompt `build_instance` ends with an export ([agent page](agent-mcp.md)) |
+| `rustybin.yaml` | This page: the document is the surface |
+| Environment | `RUSTYBIN_CONFIG_FILE` (loaded at startup and on reload), `RUSTYBIN_STATE_DIR` (where applied state persists), `RUSTYBIN_SETTINGS_LOCK` ([configuration](configuration.md#state-directory-settings-and-secrets)) |

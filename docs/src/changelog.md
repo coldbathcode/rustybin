@@ -1,8 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-10-30): the AI-assisted mocking service
 
-The build of [Rustybin 0.2](../plans/next/master-plan.md), step by step.
+Rustybin becomes a mocking and testing service a team runs: set up by describing what
+you need, explored by the people who test against it, managed from the console, a CLI,
+an AI agent or a `rustybin.yaml` in git, and locked with a password on day one. Built
+in twelve steps ([the plan](../plans/next/master-plan.md)), each listed below.
+
+**Changed default: the console and the control plane now ask for a user name and
+password.** `RUSTYBIN_CONTROL_AUTH` is `password` when unset: `rustybin` / `rustybin`
+until changed (`RUSTYBIN_CONSOLE_PASSWORD`, or Management, Sign-in). Instances that
+relied on an open control plane set `RUSTYBIN_CONTROL_AUTH=open`; `token` and `jwt`
+are unchanged; a public instance refuses to start with the default password. Every
+other change is additive: a 0.1 `rustybin.yaml` still loads, every 0.1 route and
+variable keeps its meaning.
 
 - **Your own OIDC users.** `RUSTYBIN_OIDC_USERS_FILE` replaces the built-in provider's demo users
   with users of your own (PBKDF2-HMAC-SHA256 password hashes from the new
@@ -211,6 +222,20 @@ The build of [Rustybin 0.2](../plans/next/master-plan.md), step by step.
   push with **Write the commit message**, pull with the diff, resolve, the deploy key,
   history, the operations). The mock MCP registry's published entries are now part of
   `AppState` (exported and pruned with the document).
+- **The `rustybin` command line for remote instances** (step 10). `rustybin login --url
+  <url>` signs in with the console password (or keeps a token with `--token`) into a
+  profile (`profiles.json` under `RUSTYBIN_CONFIG_HOME`, else `~/.config/rustybin`, mode
+  `0600`; `RUSTYBIN_URL` and `RUSTYBIN_TOKEN` override, `--profile` picks one), then
+  nouns and verbs mirror the control API: `status`, `whoami`, `logout`, `instance`,
+  `settings`, `sessions`, `password`, `mocks` (every mock verb, the AI ones included),
+  `visits`, `visit`, `requests`, `bins`, `agents`, `ai`, `mcp` (servers, saved
+  connections, checks with `--junit`, calls through the relay), `registry`, `portal`,
+  `config`, `git`, `harness` (the remote verbs; `validate`, `run` and `report` stay
+  offline unless `--remote`), `keys`, `egress`, `profiles`, `completion`. Tables for
+  people, `--json` for scripts, `--yes` for destructive verbs, `--max` and `--timeout`
+  on the tails; exit codes 0, 1 (refused or failed), 2 (usage), 3 (network or
+  credentials). A parity test fails when a control route lands without a command; the
+  reference `docs/src/cli.md` is generated from the command tree.
 - **Management MCP parity and the build-an-instance prompts** (step 11). Every
   control route now has a management tool (or a resource, or a written reason), kept so
   by a parity test over the catalogue: settings (`get_settings`, `update_settings`,
@@ -241,20 +266,23 @@ The build of [Rustybin 0.2](../plans/next/master-plan.md), step by step.
   of `rustybin login`. The REST handlers of the AI mock routes, the portal, the registry
   and the inspector share their logic with the tools (one code path each). The MCP
   conformance suite walks `build_instance` with the Python SDK.
-- **The `rustybin` command line for remote instances** (step 10). `rustybin login --url
-  <url>` signs in with the console password (or keeps a token with `--token`) into a
-  profile (`profiles.json` under `RUSTYBIN_CONFIG_HOME`, else `~/.config/rustybin`, mode
-  `0600`; `RUSTYBIN_URL` and `RUSTYBIN_TOKEN` override, `--profile` picks one), then
-  nouns and verbs mirror the control API: `status`, `whoami`, `logout`, `instance`,
-  `settings`, `sessions`, `password`, `mocks` (every mock verb, the AI ones included),
-  `visits`, `visit`, `requests`, `bins`, `agents`, `ai`, `mcp` (servers, saved
-  connections, checks with `--junit`, calls through the relay), `registry`, `portal`,
-  `config`, `git`, `harness` (the remote verbs; `validate`, `run` and `report` stay
-  offline unless `--remote`), `keys`, `egress`, `profiles`, `completion`. Tables for
-  people, `--json` for scripts, `--yes` for destructive verbs, `--max` and `--timeout`
-  on the tails; exit codes 0, 1 (refused or failed), 2 (usage), 3 (network or
-  credentials). A parity test fails when a control route lands without a command; the
-  reference `docs/src/cli.md` is generated from the command tree.
+- **Docs sweep, conformance, release 0.2.0** (step 12). The book is reordered around
+  the jobs (Using Rustybin: the console, your own AI, AI-built mocks, the portal, the
+  instance as code, source control, the CLI, agents, the MCP inspector and registry,
+  load testing, recipes, exports), and every one of those pages ends with an "On every
+  surface" table: the same job from the API, the console, the CLI, the management MCP
+  and `rustybin.yaml`, with its environment variables. The introduction, the README
+  and the quick start tell the 0.2 story (describe, explore, manage, lock) and show the
+  sign-in, the AI key, a described mock, the portal and the export in five commands.
+  Every 0.2 route has a tested example (new: ending one sign-in session and an agent's
+  sessions, the agents feed, the deploy key, connecting a repository through the
+  settings and resolving a diverged branch, the registry's health, version, public
+  validate, server-level status and `/v0` alias, the portal's API reference page).
+  The MCP conformance runner opens the control plane of its first instance again
+  (`RUSTYBIN_CONTROL_AUTH=open`, red in CI since the sign-in became the default) and
+  generates examples on a mock that lacks them (a described spec has them everywhere).
+  The console check covers every 0.2 view. `cargo` version 0.2.0, the tag `v0.2.0`,
+  the signed multi-arch image `ghcr.io/coldbathcode/rustybin:0.2.0`.
 
 ## 0.1.0 (2026-10-29): the AI and agent gateway upgrade
 
