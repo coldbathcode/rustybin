@@ -282,7 +282,11 @@ variable keeps its meaning.
   (`RUSTYBIN_CONTROL_AUTH=open`, red in CI since the sign-in became the default) and
   generates examples on a mock that lacks them (a described spec has them everywhere).
   The console check covers every 0.2 view. `cargo` version 0.2.0, the tag `v0.2.0`,
-  the signed multi-arch image `ghcr.io/coldbathcode/rustybin:0.2.0`.
+  the signed multi-arch image `ghcr.io/coldbathcode/rustybin:0.2.0`, digest
+  `sha256:002c7f164c78c06153b90dd5d8cb75b85ac8a72bb6696e038474a43fee42740e` (verify
+  it with the cosign command of the [quick start](quick-start.md#docker); the
+  [release](https://github.com/coldbathcode/rustybin/releases/tag/v0.2.0) carries
+  the same values for a platform's image verification).
 
 ## 0.1.0 (2026-10-29): the AI and agent gateway upgrade
 
