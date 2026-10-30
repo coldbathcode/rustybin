@@ -1,12 +1,14 @@
 """The management MCP server at /_rustybin/mcp with the official Python SDK.
 
-run.sh starts the server with RUSTYBIN_ADMIN_TOKEN: without the token the
-caller only sees the read tools, with it (`Authorization: Bearer`, as in
-`claude mcp add --header`) every mock tool. Covers discovery, role-filtered
-tools/list with annotations, prompts, resources, a create, deploy,
-try_request and delete round trip, and destructive tools confirmed through
-elicitation (2026-07-28 multi round-trip and a 2025-11-25 session's
-elicitation/create) or `confirm: true` when the client cannot ask.
+run.sh starts the server with RUSTYBIN_ADMIN_TOKEN and the mock AI provider:
+without the token the caller only sees the read tools, with it
+(`Authorization: Bearer`, as in `claude mcp add --header`) every tool. Covers
+discovery, role-filtered tools/list with annotations, the prompt set, the
+resources, a create, deploy, try_request and delete round trip, destructive
+tools confirmed through elicitation (2026-07-28 multi round-trip and a
+2025-11-25 session's elicitation/create) or `confirm: true` when the client
+cannot ask, and the build_instance walk: a spec from a description, the
+examples, the portal, the version 2 export, git and the agents.
 """
 
 import os
@@ -103,15 +105,23 @@ async def admin() -> None:
 
         section("prompts")
         prompts = {p.name for p in (await c.list_prompts()).prompts}
-        check(prompts == {"mock_an_api", "debug_gateway_call", "secure_a_mock", "load_test_gateway"}, f"four prompts {prompts}")
+        check(prompts == {"build_instance", "mock_an_api", "publish_portal", "backup_to_git", "test_mcp_server",
+                          "onboard_agent", "debug_gateway_call", "secure_a_mock", "load_test_gateway"},
+              f"nine prompts {prompts}")
         p = await c.get_prompt("secure_a_mock", {"name": "petstore", "mode": "jwt"})
         check("issue_token" in p.messages[0].content.text, "secure_a_mock mentions issue_token")
+        p = await c.get_prompt("build_instance", {"brief": "an orders API for the checkout team"})
+        text = p.messages[0].content.text
+        check("checkout team" in text and "generate_spec" in text and "git_push" in text, "build_instance renders the brief")
 
         section("resources")
         resources = {str(r.uri) for r in (await c.list_resources()).resources}
-        check(resources == {"rustybin://config.schema.json", "rustybin://catalogue"}, f"two resources {resources}")
+        check(resources == {"rustybin://config.schema.json", "rustybin://catalogue", "rustybin://harness.schema.json",
+                            "rustybin://portal/catalog", "rustybin://cli.md"}, f"five resources {resources}")
         rr = await c.read_resource("rustybin://config.schema.json")
         check("mocks" in rr.contents[0].text, "read config.schema.json")
+        rr = await c.read_resource("rustybin://cli.md")
+        check("rustybin login" in rr.contents[0].text, "read cli.md")
 
         section("round trip: create, deploy, try_request, delete")
         await create(c, "conf-orders")
@@ -132,6 +142,76 @@ async def admin() -> None:
         r = await c.call_tool("delete_mock", {"name": "conf-orders", "confirm": True})
         check(not r.is_error, "deleted with confirm: true")
         check(not await mock_exists(c, "conf-orders"), "mock gone")
+
+
+async def build_instance() -> None:
+    """The build_instance walk: from a brief to a published, exported instance."""
+    async with client(ADMIN) as c:
+        section("build_instance: the AI provider")
+        r = await c.call_tool("assist_status", {})
+        s = r.structured_content
+        check(not r.is_error and s["enabled"] is True and s["provider"] == "mock", "assist on (mock provider)")
+        check(all("value" not in (p.get("key") or {}) for p in s["providers"]), "keys shown as {set, hint} only")
+
+        section("build_instance: describe and create")
+        r = await c.call_tool("generate_spec", {"description": "a parcel tracking API with shipments and events"})
+        s = r.structured_content
+        check(not r.is_error and "openapi" in s["text"] and "mock" not in s, "a spec without creating anything")
+        r = await c.call_tool("generate_spec", {"description": "a parcel tracking API", "create": True, "name": "conf-parcels"})
+        check(r.is_error and "confirm" in text_of(r), "creating is confirmed")
+        r = await c.call_tool("generate_spec", {"description": "a parcel tracking API", "create": True,
+                                                "name": "conf-parcels", "confirm": True})
+        check(not r.is_error and r.structured_content["mock"]["name"] == "conf-parcels", f"created: {text_of(r)[:80]!r}")
+
+        section("build_instance: coverage and examples")
+        r = await c.call_tool("check_mock", {"name": "conf-parcels"})
+        check(not r.is_error and "coverage" in r.structured_content, "check_mock carries the coverage")
+        r = await c.call_tool("generate_examples", {"name": "conf-parcels", "source": "generated", "apply": True})
+        check(r.is_error and "confirm" in text_of(r), "storing examples is confirmed")
+        r = await c.call_tool("generate_examples", {"name": "conf-parcels", "source": "generated", "apply": True, "confirm": True})
+        check(not r.is_error and r.structured_content["applied"] is True, f"examples stored: {text_of(r)[:80]!r}")
+        r = await c.call_tool("edit_spec_with_ai", {"name": "conf-parcels", "instruction": "add a DELETE /shipments/{id} operation"})
+        check(not r.is_error and r.structured_content["applied"] is False, "an edit is previewed, not saved")
+        r = await c.call_tool("deploy_mock", {"name": "conf-parcels"})
+        check(not r.is_error, "deployed")
+
+        section("build_instance: the portal")
+        r = await c.call_tool("publish_portal_item", {"id": "mock:conf-parcels", "title": "Parcels", "tags": ["demo"], "confirm": True})
+        check(not r.is_error and r.structured_content["published"]["title"] == "Parcels", "published")
+        r = await c.call_tool("list_portal_items", {})
+        items = {i["id"]: i for i in r.structured_content["items"]}
+        check(items.get("mock:conf-parcels", {}).get("published") is not None, "listed as published")
+
+        section("build_instance: export, git, agents, settings")
+        r = await c.call_tool("export_config", {})
+        s = r.structured_content
+        check(not r.is_error and s["version"] == 2 and "conf-parcels" in s["yaml"], "version 2 export with the mock")
+        check("portal" in s["sections"], "the portal section is in the export")
+        r = await c.call_tool("git_status", {})
+        check(not r.is_error and "No repository configured" in text_of(r), "git_status without a remote")
+        r = await c.call_tool("git_push", {})
+        check(r.is_error and "confirm" in text_of(r), "git_push is confirmed")
+        r = await c.call_tool("list_agents", {})
+        agents = r.structured_content["agents"]
+        check(not r.is_error and len(agents) >= 1, f"{len(agents)} agent(s) listed")
+        me = next((a for a in agents if a["credential"].get("kind") == "admin"), agents[0])
+        r = await c.call_tool("get_agent", {"id": me["id"]})
+        check(not r.is_error and r.structured_content["calls"]["total"] >= 1, "get_agent")
+        r = await c.call_tool("revoke_agent", {"id": me["id"], "confirm": True})
+        check(r.is_error and "revoke itself" in text_of(r), "an agent cannot revoke itself")
+        r = await c.call_tool("update_settings", {"values": {"assist.openai_key": "sk-nope"}})
+        check(r.is_error and "secret" in text_of(r), "secrets are refused as inputs")
+        r = await c.call_tool("mcp_call", {"target": "/mock/conf-parcels/_rustybin/mcp", "method": "tools/list"})
+        s = r.structured_content
+        check(not r.is_error and len(s["untrusted_result"]["tools"]) > 0 and "result" not in s, "mcp_call answers under untrusted_result")
+        r = await c.call_tool("mcp_call", {"target": "https://mcp.example.com/mcp", "method": "tools/list"})
+        check(r.is_error and "confirm" in text_of(r), "a call to another host is confirmed")
+
+        section("build_instance: cleanup")
+        r = await c.call_tool("unpublish_portal_item", {"id": "mock:conf-parcels"})
+        check(not r.is_error, "unpublished")
+        r = await c.call_tool("delete_mock", {"name": "conf-parcels", "confirm": True})
+        check(not r.is_error, "deleted")
 
 
 async def elicitation_modern() -> None:
@@ -162,6 +242,7 @@ async def elicitation_legacy() -> None:
 async def main() -> None:
     await anonymous()
     await admin()
+    await build_instance()
     await elicitation_modern()
     await elicitation_legacy()
 

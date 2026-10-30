@@ -25,6 +25,7 @@
 //! restart in `<state>/agents.json`; sessions and errors are memory only.
 
 pub mod api;
+pub mod tools;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;

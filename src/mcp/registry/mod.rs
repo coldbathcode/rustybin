@@ -277,6 +277,18 @@ impl Registry {
         before - published.len()
     }
 
+    /// Drop a published entry (every version, or one); the number removed.
+    pub fn delete_published(&self, name: &str, version: Option<&str>) -> usize {
+        let mut published = self.published();
+        let before = published.len();
+        published.retain(|e| !(e.name() == name && version.is_none_or(|v| e.version() == v)));
+        let removed = before - published.len();
+        if removed > 0 {
+            tracing::info!(target: "rustybin::registry", name = %name, removed, "published entries deleted");
+        }
+        removed
+    }
+
     fn mint(&self) -> (String, i64) {
         let now = Utc::now().timestamp();
         let expires = now + TOKEN_TTL_SECS;
@@ -1035,16 +1047,13 @@ async fn alias(api: Router, mut req: Request) -> Result<Response, std::convert::
 
 // ── Control plane ───────────────────────────────────────────────────
 
-async fn status(
-    State(state): State<AppState>,
-    Extension(reg): Extension<Arc<Registry>>,
-    headers: HeaderMap,
-    extensions: Extensions,
-    uri: Uri,
-) -> Response {
-    let base = base_url(&state, &headers, &extensions, &uri);
-    let all = all_entries(&state, &reg, &base);
+/// The control view of the mock registry (`GET /_rustybin/registry`; also
+/// the management tool `list_registry_servers`): every entry under the
+/// current scenario with its validation, the counts, the scenarios and a
+/// gateway's sync configuration.
+pub fn status_json(state: &AppState, reg: &Registry, base: &str) -> Value {
     let scenario = Scenario::current(&state.settings);
+    let all = all_entries(state, reg, base);
     let mut counts = json!({ "generated": 0, "file": 0, "published": 0, "scenario": 0 });
     let mut shown = Vec::new();
     for e in &all {
@@ -1071,7 +1080,7 @@ async fn status(
     }
     let registry_url = format!("{base}{ROOT_PATH}");
     let (_, scenario_source) = state.settings.get("registry.scenario");
-    Json(json!({
+    json!({
         "path": ROOT_PATH,
         "api": API_PREFIX,
         "aliases": [ALIAS_PREFIX],
@@ -1099,8 +1108,18 @@ async fn status(
                 "auth": { "type": "none" },
             }]
         },
-    }))
-    .into_response()
+    })
+}
+
+async fn status(
+    State(state): State<AppState>,
+    Extension(reg): Extension<Arc<Registry>>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    uri: Uri,
+) -> Response {
+    let base = base_url(&state, &headers, &extensions, &uri);
+    Json(status_json(&state, &reg, &base)).into_response()
 }
 
 #[derive(Deserialize, Default)]
@@ -1118,14 +1137,7 @@ async fn delete_server(
     if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
         return resp;
     }
-    let removed = {
-        let mut published = reg.published();
-        let before = published.len();
-        published.retain(|e| {
-            !(e.name() == name && q.version.as_deref().is_none_or(|v| e.version() == v))
-        });
-        before - published.len()
-    };
+    let removed = reg.delete_published(&name, q.version.as_deref());
     if removed == 0 {
         return (
             StatusCode::NOT_FOUND,
@@ -1133,7 +1145,6 @@ async fn delete_server(
         )
             .into_response();
     }
-    tracing::info!(target: "rustybin::registry", name = %name, removed, "published entries deleted");
     Json(json!({ "deleted": name, "versions": removed })).into_response()
 }
 

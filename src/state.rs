@@ -82,6 +82,9 @@ pub struct AppState {
     /// copy, operations and timeline; shared by `/_rustybin/git*`, startup
     /// from `RUSTYBIN_CONFIG_GIT` and the automatic push and pull task.
     pub git: Arc<crate::sourcecontrol::SourceControl>,
+    /// The MCP inspector's relay sessions, saved connections and check
+    /// runs: shared by `/_rustybin/mcp-*` and the management MCP tools.
+    pub mcp_inspector: Arc<crate::mcp::inspector::Inspector>,
 }
 
 impl AppState {
@@ -172,6 +175,7 @@ impl AppState {
             settings.clone(),
             egress.clone(),
         ));
+        let mcp_inspector = Arc::new(crate::mcp::inspector::Inspector::new(settings.clone()));
         Self {
             keys,
             limits,
@@ -192,6 +196,7 @@ impl AppState {
             agents,
             registry: Arc::new(crate::mcp::registry::Registry::default()),
             git,
+            mcp_inspector,
         }
     }
 }

@@ -101,7 +101,7 @@ The marker a new session looks for is the first row that is not done.
 | [08](step-08-agents.md) | AI agents: who talks to the instance over MCP | 01, 02 | 2 | done 2026-10-30 |
 | [09](step-09-config-and-source-control.md) | The whole instance as YAML, and git | 01, 07, 08 | 3 | done 2026-10-30 |
 | [10](step-10-cli.md) | The `rustybin` CLI for remote instances | 02 to 09 | 2.5 | done 2026-10-30 |
-| [11](step-11-management-mcp.md) | Management MCP parity and the build-an-instance prompts | 02 to 10 | 2 | not started |
+| [11](step-11-management-mcp.md) | Management MCP parity and the build-an-instance prompts | 02 to 10 | 2 | done 2026-10-30 |
 | [12](step-12-release.md) | Docs sweep, conformance, release 0.2.0 | all | 1.5 | not started |
 
 About 27 days of build sessions. Steps 05 and 06 can run before 04 if the MCP work is wanted

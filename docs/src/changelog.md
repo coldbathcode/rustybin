@@ -211,6 +211,36 @@ The build of [Rustybin 0.2](../plans/next/master-plan.md), step by step.
   push with **Write the commit message**, pull with the diff, resolve, the deploy key,
   history, the operations). The mock MCP registry's published entries are now part of
   `AppState` (exported and pruned with the document).
+- **Management MCP parity and the build-an-instance prompts** (step 11). Every
+  control route now has a management tool (or a resource, or a written reason), kept so
+  by a parity test over the catalogue: settings (`get_settings`, `update_settings`,
+  never secrets), the outbound policy (`check_egress` with a dry check of a URL), AI
+  assist (`assist_status`, `assist_usage`, `test_assist`, `run_assist_task` for the
+  read tasks) and the AI-built mocks (`generate_spec` with `create`,
+  `generate_examples` with `apply`, `edit_spec_with_ai` with `apply`, each confirmed
+  when it writes; `get_mock` and `check_mock` carry the coverage), the MCP inspector
+  (`list_mcp_servers`, `mcp_call` to any server with the handshake its transport
+  needs, `run_mcp_checks`, the saved runs and connections), the mock registry
+  (`list_registry_servers`, `set_registry_scenario`, `browse_registry`,
+  `validate_server_json`, `unpublish_registry_server`), the dev portal
+  (`list_portal_items`, `publish_portal_item` confirmed on an open portal,
+  `unpublish_portal_item`, `set_portal_branding`, `get_portal_insights`),
+  configuration as code at version 2 (`export_config`, `diff_config`, `apply_config`)
+  and git (`git_status`, `git_init`, `git_commit`, `git_push` confirmed, `git_pull`,
+  `git_resolve`, `git_deploy_key`), agents (`list_agents`, `get_agent`,
+  `set_agent_rights`, `revoke_agent` confirmed and never oneself, `restore_agent`,
+  `end_agent_sessions`), sign-in sessions (`list_sessions`, `end_session`) and
+  `reload_mocks`. Calls to another host, a browsed registry and the answers of MCP
+  servers are `untrusted_*` content; secrets are never tool inputs and never returned.
+  Five new prompts walk the common jobs: `build_instance` (from a brief to a published,
+  exported instance), `publish_portal`, `backup_to_git`, `test_mcp_server` and
+  `onboard_agent`; `mock_an_api` gains the describe path. New resources
+  `rustybin://harness.schema.json`, `rustybin://portal/catalog` and `rustybin://cli.md`;
+  the server instructions are rewritten around the jobs. `rustybin mcp-stdio` takes
+  `--url` and `--profile`, so a local agent manages a remote instance with the sign-in
+  of `rustybin login`. The REST handlers of the AI mock routes, the portal, the registry
+  and the inspector share their logic with the tools (one code path each). The MCP
+  conformance suite walks `build_instance` with the Python SDK.
 - **The `rustybin` command line for remote instances** (step 10). `rustybin login --url
   <url>` signs in with the console password (or keeps a token with `--token`) into a
   profile (`profiles.json` under `RUSTYBIN_CONFIG_HOME`, else `~/.config/rustybin`, mode

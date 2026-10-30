@@ -6,6 +6,8 @@
 //!
 //! ```text
 //! rustybin mcp-stdio --server https://host/_rustybin/mcp --token <token>
+//! rustybin mcp-stdio --profile mocks.example.com      # a profile of `rustybin login`
+//! rustybin mcp-stdio --url https://host               # the profile's token for that URL
 //! ```
 
 use std::process::ExitCode;
@@ -18,10 +20,15 @@ rustybin mcp-stdio: bridge a stdio MCP client to a Rustybin management server
 
 USAGE:
     rustybin mcp-stdio --server <url> [--token <token>] [--header 'Name: value']...
+    rustybin mcp-stdio [--url <base-url>] [--profile <name>] [--header 'Name: value']...
 
     --server   The MCP endpoint, e.g. https://host/_rustybin/mcp (or $RUSTYBIN_MCP_URL;
                a bare base URL gets /_rustybin/mcp appended)
     --token    Sent as Authorization: Bearer <token> (or $RUSTYBIN_TOKEN / $RUSTYBIN_ADMIN_TOKEN)
+    --url      The instance's base URL, as `rustybin login --url` keeps it: the token of
+               the profile for that URL is used when no --token is given
+    --profile  A profile of `rustybin login` (or $RUSTYBIN_PROFILE, else the default
+               profile): its URL and token
     --header   An extra request header, repeatable (e.g. 'X-Rustybin-Mock-Token: rbm_...')
 
 Messages are read from stdin (one JSON-RPC message per line) and answers written
@@ -38,8 +45,66 @@ struct Args {
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
+    parse_with(args, &crate::cli::Env::from_process())
+}
+
+/// The profile's URL and token for `--url` and `--profile` (the CLI's
+/// `profiles.json`): a named profile, else the profile kept for the URL,
+/// else the default profile.
+fn from_profiles(
+    env: &crate::cli::Env,
+    url: Option<&str>,
+    profile: Option<&str>,
+) -> Result<(String, Option<String>), String> {
+    use crate::cli::profiles;
+    let fail = |e: crate::cli::Fail| match e {
+        crate::cli::Fail::Usage(m)
+        | crate::cli::Fail::Failed(m)
+        | crate::cli::Fail::Auth(m)
+        | crate::cli::Fail::Network(m) => m,
+    };
+    let all = match profiles::path(env) {
+        Some(p) => profiles::load(&p).map_err(fail)?,
+        None if profile.is_some() => {
+            return Err(
+                "no home directory: profiles are unavailable, use --server and --token".into(),
+            )
+        }
+        None => profiles::Profiles::default(),
+    };
+    let name = profile.map(str::to_string).or_else(|| {
+        std::env::var("RUSTYBIN_PROFILE")
+            .ok()
+            .filter(|p| !p.is_empty())
+    });
+    let wanted_url = url.map(profiles::normalise);
+    let found =
+        match (&name, &wanted_url) {
+            (Some(n), _) => Some(all.profiles.get(n).ok_or_else(|| {
+                format!("no profile {n:?} (rustybin login --url ... --profile {n})")
+            })?),
+            (None, Some(u)) => all.profiles.values().find(|p| &p.url == u).or_else(|| {
+                all.default
+                    .as_ref()
+                    .and_then(|d| all.profiles.get(d))
+                    .filter(|p| &p.url == u)
+            }),
+            (None, None) => all.default.as_ref().and_then(|d| all.profiles.get(d)),
+        };
+    let url = wanted_url
+        .or_else(|| found.map(|p| p.url.clone()))
+        .ok_or_else(|| {
+            "no URL: give --server or --url, or sign in with rustybin login".to_string()
+        })?;
+    let token = found.filter(|p| p.url == url).and_then(|p| p.token.clone());
+    Ok((url, token))
+}
+
+fn parse_with(args: &[String], env: &crate::cli::Env) -> Result<Args, String> {
     let mut server: Option<String> = None;
     let mut token: Option<String> = None;
+    let mut url: Option<String> = None;
+    let mut profile: Option<String> = None;
     let mut headers = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -53,6 +118,8 @@ fn parse(args: &[String]) -> Result<Args, String> {
         match a {
             "--server" | "-s" => server = Some(value(&mut i)?),
             "--token" | "-t" => token = Some(value(&mut i)?),
+            "--url" => url = Some(value(&mut i)?),
+            "--profile" => profile = Some(value(&mut i)?),
             "--header" | "-H" => {
                 let raw = value(&mut i)?;
                 let (n, v) = raw
@@ -67,8 +134,18 @@ fn parse(args: &[String]) -> Result<Args, String> {
     }
     let server = server
         .or_else(|| std::env::var("RUSTYBIN_MCP_URL").ok())
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| format!("--server is required\n\n{USAGE}"))?;
+        .filter(|s| !s.trim().is_empty());
+    let mut profile_token = None;
+    let server = match server {
+        Some(s) => s,
+        None if url.is_some() || profile.is_some() || env.url.is_none() => {
+            let (u, t) = from_profiles(env, url.as_deref(), profile.as_deref())
+                .map_err(|e| format!("{e}\n\n{USAGE}"))?;
+            profile_token = t;
+            u
+        }
+        None => env.url.clone().unwrap_or_default(),
+    };
     let server = server.trim().trim_end_matches('/').to_string();
     let server = if server.ends_with(super::MANAGE_PATH) || server.ends_with("/mcp") {
         server
@@ -78,7 +155,8 @@ fn parse(args: &[String]) -> Result<Args, String> {
     let token = token
         .or_else(|| std::env::var("RUSTYBIN_TOKEN").ok())
         .or_else(|| std::env::var("RUSTYBIN_ADMIN_TOKEN").ok())
-        .filter(|t| !t.trim().is_empty());
+        .filter(|t| !t.trim().is_empty())
+        .or(profile_token);
     Ok(Args {
         server,
         token,
@@ -271,6 +349,65 @@ mod tests {
             vec![("X-Rustybin-Mock-Token".into(), "rbm_x".into())]
         );
         assert!(parse(&["--nope".into()]).is_err());
+    }
+
+    #[test]
+    fn resolves_url_and_profile_through_the_profiles_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(crate::cli::profiles::FILE);
+        let mut profiles = crate::cli::profiles::Profiles::default();
+        profiles.profiles.insert(
+            "mocks.example.com".into(),
+            crate::cli::profiles::Profile {
+                url: "https://mocks.example.com".into(),
+                token: Some("tok-mocks".into()),
+                ..Default::default()
+            },
+        );
+        profiles.profiles.insert(
+            "other".into(),
+            crate::cli::profiles::Profile {
+                url: "https://other.example".into(),
+                token: Some("tok-other".into()),
+                ..Default::default()
+            },
+        );
+        profiles.default = Some("other".into());
+        crate::cli::profiles::save(&path, &profiles).expect("save");
+        let env = crate::cli::Env {
+            config_home: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        // A named profile: its URL and token.
+        let a = parse_with(&["--profile".into(), "mocks.example.com".into()], &env).expect("args");
+        assert_eq!(a.server, "https://mocks.example.com/_rustybin/mcp");
+        assert_eq!(a.token.as_deref(), Some("tok-mocks"));
+        // A URL: the token of the profile kept for it.
+        let a =
+            parse_with(&["--url".into(), "https://mocks.example.com/".into()], &env).expect("args");
+        assert_eq!(a.server, "https://mocks.example.com/_rustybin/mcp");
+        assert_eq!(a.token.as_deref(), Some("tok-mocks"));
+        // A URL without a profile: no token.
+        let a = parse_with(&["--url".into(), "https://new.example".into()], &env).expect("args");
+        assert_eq!(a.server, "https://new.example/_rustybin/mcp");
+        assert!(a.token.is_none());
+        // Nothing: the default profile.
+        let a = parse_with(&[], &env).expect("args");
+        assert_eq!(a.server, "https://other.example/_rustybin/mcp");
+        assert_eq!(a.token.as_deref(), Some("tok-other"));
+        // --token wins over the profile's.
+        let a = parse_with(
+            &[
+                "--profile".into(),
+                "other".into(),
+                "--token".into(),
+                "mine".into(),
+            ],
+            &env,
+        )
+        .expect("args");
+        assert_eq!(a.token.as_deref(), Some("mine"));
+        assert!(parse_with(&["--profile".into(), "nope".into()], &env).is_err());
     }
 
     #[test]

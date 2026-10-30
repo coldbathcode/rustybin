@@ -2,7 +2,7 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 to 10 done)
+## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 to 11 done)
 
 [docs/plans/next/master-plan.md](docs/plans/next/master-plan.md) (planned 2026-10-29) is the plan for the next
 build: twelve steps, one file each (`docs/plans/next/step-NN-*.md`): foundations (step 01, done 2026-10-29: the
@@ -21,7 +21,8 @@ browsing (step 06, done 2026-10-30: `src/mcp/registry/`, `ui/views/registry.js`,
 2026-10-30: `src/portal/`, `ui-portal/`, see below), AI agents management (step 08, done 2026-10-30:
 `src/mcp/manage/agents/`, `ui/views/agents.js`, see below), the whole instance as `rustybin.yaml` with git source
 control (step 09, done 2026-10-30: `src/configdoc/`, `src/sourcecontrol/`, see below), a `rustybin` CLI for remote
-instances (step 10, done 2026-10-30: `src/cli/`, see below), management MCP parity, and the 0.2.0 release. The master plan's section 4 is
+instances (step 10, done 2026-10-30: `src/cli/`, see below), management MCP parity (step 11, done 2026-10-30:
+every control route has a tool, see below), and the 0.2.0 release. The master plan's section 4 is
 the build marker and section 5 the session protocol: build a step whole, update its status and build notes, update
 the master table, commit as oliwynn with the step number in the message, push to main. Steps go only when the
 user says go. Rules the foundations set: a feature that reaches out resolves through `egress::Egress` under its
@@ -94,7 +95,22 @@ here; one that changes how requests are built (new parameter styles, body media 
 ## Management MCP server (built)
 
 [docs/plans/management-mcp.md](docs/plans/management-mcp.md) is built (phases 0 to 5, 2026-10-20; its section 13
-lists where the build differs; user docs in `docs/src/agent-mcp.md`). `/_rustybin/mcp` lets an agent configure the
+lists where the build differs; user docs in `docs/src/agent-mcp.md`). Step 11 of the 0.2 plan (2026-10-30) made
+it complete: every route under `/_rustybin/` and `/bin` maps to a tool, a resource or a written reason in the
+`COVERAGE` table of `src/mcp/manage/tests.rs`, and `every_control_route_has_a_management_tool` fails on a new
+route without one. A new control route therefore needs a tool (one module per feature: `settings.rs`,
+`assist.rs`, `inspect.rs`, `registry.rs`, `portal.rs`, `config.rs`, `agents/tools.rs`, plus `instance.rs`,
+`mocks.rs`, `traffic.rs`, `testing.rs`, `visits.rs`, `harness.rs`) that calls the same function as the REST
+handler (never a control route in process: `testing::in_process` refuses control paths; split the handler's
+logic out instead, as `mocks::ai::*_work`, `portal::api::publish_item` and `inspector::build_run_spec` were),
+a `ToolDef` with its `Right`, and a dispatch arm. Destructive and outward-facing tools carry `confirm`
+(`every_tool_is_fully_defined` checks it) and ask only when the call is of that kind; secrets are never tool
+inputs (keys ending in `_key` or `_token` are refused by the same test). Third-party content (captured
+traffic, answers of other MCP servers, browsed registries) goes under `untrusted_*`. Prompts are the jobs
+(`prompts.rs`: `build_instance`, `mock_an_api`, `publish_portal`, `backup_to_git`, `test_mcp_server`,
+`onboard_agent`, `debug_gateway_call`, `load_test_gateway`, `secure_a_mock`); resources are the config schema,
+the catalogue, the harness schema, the portal catalogue and the CLI reference. `rustybin mcp-stdio` takes
+`--url` and `--profile` (the CLI's profiles). `/_rustybin/mcp` lets an agent configure the
 instance (`claude mcp add --transport http rustybin https://<host>/_rustybin/mcp --header "Authorization: Bearer
 <token>"`). It is a second profile family on the mock MCP server's protocol and transport code (`src/mcp/manage/`),
 separate from the mock server at `/mcp`. Its tools call `src/mocks/service.rs`, the layer the REST handlers use, so

@@ -50,44 +50,7 @@ fn principal(headers: &HeaderMap, extensions: &Extensions, state: &AppState) -> 
 }
 
 async fn status_handler(State(state): State<AppState>) -> Response {
-    let assist = &state.assist;
-    assist.sync_egress();
-    let status = assist.status();
-    let providers: Vec<Value> = Kind::ALL
-        .iter()
-        .map(|k| {
-            json!({
-                "id": k.as_str(),
-                "title": k.title(),
-                "key_setting": k.key_setting(),
-                "key": k.key_setting().map(|s| state.settings.secret_state(s)),
-                "base_url": if *k == Kind::Compatible { status.base_url.clone() } else { k.default_base_url().map(str::to_string) },
-                "default_model": models::default_model(*k),
-                "default_fast_model": models::default_fast_model(*k),
-                "models": models::for_provider(*k).iter().map(|m| m.describe()).collect::<Vec<_>>(),
-            })
-        })
-        .collect();
-    Json(json!({
-        "enabled": status.enabled,
-        "reason": status.reason,
-        "provider": status.kind.map(|k| k.as_str()),
-        "model": (!status.model.is_empty()).then_some(&status.model),
-        "fast_model": (!status.fast_model.is_empty()).then_some(&status.fast_model),
-        "base_url": status.base_url,
-        "key_set": status.key_set,
-        "public_mode": assist.public_mode(),
-        "caps": {
-            "calls_per_minute": assist.calls_per_minute(),
-            "max_output_tokens": assist.max_output_tokens(),
-        },
-        "providers": providers,
-        "tasks": task::all().iter().map(task::Task::describe).collect::<Vec<_>>(),
-        "suggestions": tasks::suggest::static_table(),
-        "usage": assist.usage()["total"],
-        "privacy": PRIVACY,
-    }))
-    .into_response()
+    Json(status_json(&state)).into_response()
 }
 
 async fn test_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -135,6 +98,74 @@ struct RunBody {
     model: Option<String>,
     #[serde(default)]
     stream: Option<bool>,
+}
+
+/// A refusal as `(status, message, reason)`; the tools reuse it.
+pub fn refusal_parts(r: &Refusal) -> (StatusCode, String, &'static str) {
+    match r {
+        Refusal::Disabled(m) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            m.clone(),
+            "assist_disabled",
+        ),
+        Refusal::RateLimited(wait) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("too many AI calls: try again in {wait} s"),
+            "rate_limited",
+        ),
+        Refusal::Invalid(m) => (StatusCode::BAD_REQUEST, m.clone(), "invalid_inputs"),
+        Refusal::Secret(name) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("the inputs contain the value of {name}: nothing was sent"),
+            "secret_in_inputs",
+        ),
+    }
+}
+
+/// The principal of an assist call for the caps (also the tools').
+pub fn principal_of(headers: &HeaderMap, extensions: &Extensions, state: &AppState) -> String {
+    principal(headers, extensions, state)
+}
+
+/// The status document of `GET /_rustybin/assist`.
+pub fn status_json(state: &AppState) -> Value {
+    let assist = &state.assist;
+    assist.sync_egress();
+    let status = assist.status();
+    let providers: Vec<Value> = Kind::ALL
+        .iter()
+        .map(|k| {
+            json!({
+                "id": k.as_str(),
+                "title": k.title(),
+                "key_setting": k.key_setting(),
+                "key": k.key_setting().map(|s| state.settings.secret_state(s)),
+                "base_url": if *k == Kind::Compatible { status.base_url.clone() } else { k.default_base_url().map(str::to_string) },
+                "default_model": models::default_model(*k),
+                "default_fast_model": models::default_fast_model(*k),
+                "models": models::for_provider(*k).iter().map(|m| m.describe()).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    json!({
+        "enabled": status.enabled,
+        "reason": status.reason,
+        "provider": status.kind.map(|k| k.as_str()),
+        "model": (!status.model.is_empty()).then_some(&status.model),
+        "fast_model": (!status.fast_model.is_empty()).then_some(&status.fast_model),
+        "base_url": status.base_url,
+        "key_set": status.key_set,
+        "public_mode": assist.public_mode(),
+        "caps": {
+            "calls_per_minute": assist.calls_per_minute(),
+            "max_output_tokens": assist.max_output_tokens(),
+        },
+        "providers": providers,
+        "tasks": task::all().iter().map(task::Task::describe).collect::<Vec<_>>(),
+        "suggestions": tasks::suggest::static_table(),
+        "usage": assist.usage()["total"],
+        "privacy": PRIVACY,
+    })
 }
 
 fn refusal(r: Refusal) -> Response {
@@ -240,7 +271,16 @@ async fn run_handler(
         h.insert("x-accel-buffering", HeaderValue::from_static("no"));
         return resp;
     }
-    // Collect into one answer.
+    match collect(task, stream).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(e)).into_response(),
+    }
+}
+
+/// Collect a run into one answer (`{task, text, json, actions, usage,
+/// sent}`), or the provider's failure. Shared by the non-streaming route
+/// and the management tool `run_assist_task`.
+pub async fn collect(task: &task::Task, stream: super::OutStream) -> Result<Value, Value> {
     let mut text = String::new();
     let mut json = None;
     let mut actions = Vec::new();
@@ -262,20 +302,16 @@ async fn run_handler(
     }
     let (clean_text, _) = task::extract_actions(&text);
     if let Some((message, status)) = failure {
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({
-                "error": message,
-                "reason": "provider_error",
-                "provider_status": status,
-                "task": task.name,
-                "sent": sent,
-                "usage": usage,
-            })),
-        )
-            .into_response();
+        return Err(json!({
+            "error": message,
+            "reason": "provider_error",
+            "provider_status": status,
+            "task": task.name,
+            "sent": sent,
+            "usage": usage,
+        }));
     }
-    Json(json!({
+    Ok(json!({
         "task": task.name,
         "text": if task.schema.is_some() { Value::Null } else { json!(clean_text) },
         "json": json,
@@ -283,7 +319,6 @@ async fn run_handler(
         "usage": usage,
         "sent": sent,
     }))
-    .into_response()
 }
 
 pub fn router(_state: &AppState) -> Router<AppState> {

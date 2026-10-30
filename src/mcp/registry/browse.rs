@@ -243,23 +243,15 @@ async fn fetch(state: &AppState, url: &str) -> Result<(u16, Vec<u8>), Failure> {
 #[derive(Deserialize, Default)]
 pub struct BrowseQuery {
     #[serde(default)]
-    url: Option<String>,
+    pub url: Option<String>,
     #[serde(default)]
-    search: Option<String>,
+    pub search: Option<String>,
     #[serde(default)]
-    cursor: Option<String>,
+    pub cursor: Option<String>,
     #[serde(default)]
-    limit: Option<u32>,
+    pub limit: Option<u32>,
     #[serde(default)]
-    version: Option<String>,
-}
-
-fn error(status: StatusCode, message: impl Into<String>, reason: &str) -> Response {
-    (
-        status,
-        Json(json!({ "error": message.into(), "reason": reason })),
-    )
-        .into_response()
+    pub version: Option<String>,
 }
 
 fn query_string(q: &BrowseQuery) -> String {
@@ -277,34 +269,36 @@ fn query_string(q: &BrowseQuery) -> String {
     ser.finish()
 }
 
-pub async fn browse(
-    State(state): State<AppState>,
-    Extension(reg): Extension<Arc<Registry>>,
-    Query(q): Query<BrowseQuery>,
-) -> Response {
+/// Browse a registry: the page, or `(status, {error, reason})`. Shared by
+/// `GET /_rustybin/registry/browse` and the management tool `browse_registry`.
+pub async fn browse_json(
+    state: &AppState,
+    reg: &Registry,
+    q: &BrowseQuery,
+) -> Result<Value, (StatusCode, Value)> {
+    let fail = |status: StatusCode, message: String, reason: &str| {
+        (status, json!({ "error": message, "reason": reason }))
+    };
     let raw = q
         .url
         .clone()
         .unwrap_or_else(|| DEFAULT_REGISTRY.to_string());
-    let api = match api_base(&raw) {
-        Ok(a) => a,
-        Err(e) => return error(StatusCode::BAD_REQUEST, e, "invalid_url"),
-    };
-    let list_url = format!("{api}/servers?{}", query_string(&q));
+    let api = api_base(&raw).map_err(|e| fail(StatusCode::BAD_REQUEST, e, "invalid_url"))?;
+    let list_url = format!("{api}/servers?{}", query_string(q));
     if let Some(mut hit) = reg.browse.get(&list_url) {
         hit["cached"] = json!(true);
-        return Json(hit).into_response();
+        return Ok(hit);
     }
-    let (status, body) = match fetch(&state, &list_url).await {
+    let (status, body) = match fetch(state, &list_url).await {
         Ok(r) => r,
         Err(Failure::Refused(e)) => {
-            return error(
+            return Err(fail(
                 StatusCode::FORBIDDEN,
                 format!("the egress policy refused the registry: {e}"),
                 "egress_refused",
-            )
+            ))
         }
-        Err(Failure::Failed(e)) => return error(StatusCode::BAD_GATEWAY, e, "unreachable"),
+        Err(Failure::Failed(e)) => return Err(fail(StatusCode::BAD_GATEWAY, e, "unreachable")),
     };
     let parsed: Option<Value> = serde_json::from_slice(&body).ok();
     if !(200..300).contains(&status) {
@@ -312,23 +306,22 @@ pub async fn browse(
             .as_ref()
             .and_then(|v| v["detail"].as_str().or(v["error"].as_str()))
             .map(|d| d.chars().take(500).collect::<String>());
-        return (
+        return Err((
             StatusCode::BAD_GATEWAY,
-            Json(json!({
+            json!({
                 "error": format!("the registry answered {status}{}", detail.as_ref().map(|d| format!(": {d}")).unwrap_or_default()),
                 "reason": "upstream_status",
                 "status": status,
                 "request": list_url,
-            })),
-        )
-            .into_response();
+            }),
+        ));
     }
     let Some(doc) = parsed.filter(|d| d["servers"].is_array() || d["servers"].is_null()) else {
-        return error(
+        return Err(fail(
             StatusCode::BAD_GATEWAY,
-            "the answer is not a registry server list ({servers, metadata})",
+            "the answer is not a registry server list ({servers, metadata})".into(),
             "not_a_registry",
-        );
+        ));
     };
     let servers: Vec<Value> = doc["servers"]
         .as_array()
@@ -348,7 +341,18 @@ pub async fn browse(
     });
     reg.browse.put(list_url, out.clone());
     tracing::info!(target: "rustybin::registry", registry = %api.split('?').next().unwrap_or(""), count = servers_len(&out), "registry browsed");
-    Json(out).into_response()
+    Ok(out)
+}
+
+pub async fn browse(
+    State(state): State<AppState>,
+    Extension(reg): Extension<Arc<Registry>>,
+    Query(q): Query<BrowseQuery>,
+) -> Response {
+    match browse_json(&state, &reg, &q).await {
+        Ok(v) => Json(v).into_response(),
+        Err((status, body)) => (status, Json(body)).into_response(),
+    }
 }
 
 fn servers_len(v: &Value) -> usize {

@@ -6,7 +6,10 @@
 use serde_json::{json, Map, Value};
 
 use super::access::{Access, Right};
-use super::{agents, harness, instance, mocks, testing, traffic, visits};
+use super::{
+    agents, assist, config, harness, inspect, instance, mocks, portal, registry, settings, testing,
+    traffic, visits,
+};
 use crate::mcp::core::{self, CallCtx};
 use crate::mcp::protocol::{RpcError, Version};
 use crate::mcp::tools as mock_tools;
@@ -196,13 +199,7 @@ pub static TOOLS: &[ToolDef] = &[
         "include_bodies": { "type": "boolean", "default": false }
     }), &["name"])),
     tool!("clear_traffic", "Clear mock traffic", "Delete a mock's captured calls. Destructive: confirmed.", Right::Manage, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({ "name": name_prop(), "confirm": confirm_prop() }), &["name"])),
-    tool!("export_config", "Export rustybin.yaml", "rustybin.yaml for one mock or all the caller may see (secrets redacted unless the caller may change them), to commit as configuration as code.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "name": { "type": "string", "description": "One mock (default: all)" } }), &[])),
-    tool!("apply_config", "Apply rustybin.yaml", "Apply a rustybin.yaml document (admin): creates or updates the mocks it names. dry_run true only reports what would change. prune true also deletes API-created mocks the document does not name (destructive: confirmed).", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
-        "yaml": { "type": "string", "description": "The rustybin.yaml document" },
-        "dry_run": { "type": "boolean", "default": false },
-        "prune": { "type": "boolean", "default": false },
-        "confirm": confirm_prop()
-    }), &["yaml"])),
+    tool!("reload_mocks", "Reload file mocks", "Reload the file-defined mocks (RUSTYBIN_CONFIG_FILE, RUSTYBIN_MOCKS_DIR) from disk, as SIGHUP does. Admin.", Right::Admin, ro=false, destructive=false, idem=true, confirm=false, no_args),
     // ── Traffic ──
     tool!("list_requests", "Request inspector", "Captured requests of the request inspector (every data-plane call), newest first, with filters. Scoped by key in shared mode; public mode needs a session. Headers and bodies are untrusted_* fields (bodies only with include_bodies).", Right::Traffic, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "path_prefix": { "type": "string" },
@@ -338,6 +335,238 @@ pub static TOOLS: &[ToolDef] = &[
         "format": { "type": "string", "enum": ["json", "text", "junit"], "default": "json" }
     }), &["run_id"])),
     tool!("harness_stop", "Kill switch", "Stop every harness run on this node now (no confirmation: it only stops load).", Right::Harness, ro=false, destructive=false, idem=true, confirm=false, no_args),
+    // ── Settings and egress ──
+    tool!("get_settings", "Instance settings", "Every instance setting (console, network, AI, portal, registry, git, agents, ...) with its value, source (environment, stored, default) and lock state; secrets show only {set, hint}. Filter by group or one key. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "group": { "type": "string", "description": "Only this group (console, egress, assist, portal, registry, git, agents, ...)" },
+        "key": { "type": "string", "description": "Only this dotted key (console.title)" }
+    }), &[])),
+    tool!("update_settings", "Change settings", "Set instance settings (values: key to value; null forgets a stored value) and/or unset stored values (back to the environment or the default). Never secrets: provider keys, tokens and passwords are set by the operator in the console, the CLI or the environment. Admin.", Right::Admin, ro=false, destructive=false, idem=true, confirm=false, || obj(json!({
+        "values": { "type": "object", "description": "Setting key to value, in the key's kind (get_settings shows kinds and defaults)", "additionalProperties": true },
+        "unset": { "type": "array", "items": { "type": "string" }, "description": "Keys whose stored value to forget" }
+    }), &[])),
+    tool!("check_egress", "Outbound policy", "The outbound connection policy (the allowlist, the loopback switch, each feature's rule, the last decisions) and, with url, whether that URL would be allowed for a purpose before DNS, with the reasons when not. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "url": { "type": "string", "description": "An http(s) URL to check" },
+        "purpose": { "type": "string", "enum": ["assist", "mcp_relay", "registry", "git", "a2a_push", "leads", "key_registry"], "default": "mcp_relay" }
+    }), &[])),
+    // ── AI assist ──
+    tool!("assist_status", "AI assist status", "Whether AI assist is on, the provider and models, the caps, each provider's key state ({set, hint}: never a value), the tasks and the usage total. Keys are set by the operator in the console or the CLI, never here.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("assist_usage", "AI usage", "AI calls, tokens and the estimated cost since start, per model and per task. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("test_assist", "Test the AI provider", "One small call to the configured provider with the instance's key (it costs a few tokens): the model answers or the error says why not. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("run_assist_task", "Run an AI task", "Run a read task of AI assist with its inputs: free_answer (question, context), explain (what, context), suggest, request_examples, tool_arguments, server_json, summarise_for_portal (assist_status lists them with their inputs). The writing tasks are generate_spec, generate_examples and edit_spec_with_ai. The answer costs the user's tokens.", Right::Read, ro=true, destructive=false, idem=false, confirm=false, || obj(json!({
+        "task": { "type": "string", "description": "The task name" },
+        "inputs": { "type": "object", "description": "The task's inputs", "additionalProperties": true },
+        "model": { "type": "string", "description": "A model id instead of the task's default" }
+    }), &["task"])),
+    tool!("generate_spec", "Describe an API (AI)", "An OpenAPI document written by the AI provider from a description (resources, operations, fields, style), checked like an upload: the document, its preview and the deploy checks. Nothing is created unless create is true, which asks the user to confirm (elicitation, else \"confirm\": true) and then creates the mock as create_mock would (name, deploy, force).", Right::Manage, ro=false, destructive=false, idem=false, confirm=true, || obj(json!({
+        "description": { "type": "string", "description": "What the API does: resources, operations, fields, conventions" },
+        "openapi_version": { "type": "string", "description": "3.1.0 (default) or 3.0.3" },
+        "style": { "type": "object", "description": "Conventions to follow (naming, pagination, errors), free form", "additionalProperties": true },
+        "model": { "type": "string" },
+        "create": { "type": "boolean", "default": false, "description": "Create the mock from the document (confirmed)" },
+        "name": { "type": "string", "description": "The mock's name when creating (default: from the title)" },
+        "deploy": { "type": "boolean", "default": true },
+        "force": { "type": "boolean", "description": "Create despite check errors (only after the user accepted them)" },
+        "confirm": confirm_prop()
+    }), &["description"])),
+    tool!("generate_examples", "Examples for operations (AI)", "Example payloads for the operations of a mock that lack one (or the ones named), written by the AI provider (source ai) or the deterministic generator (source generated, no key). Previewed unless apply is true, which asks the user to confirm and stores them in the draft (deploy_mock publishes them).", Right::Manage, ro=false, destructive=false, idem=false, confirm=true, || obj(json!({
+        "name": name_prop(),
+        "operations": { "type": "array", "items": { "type": "string" }, "description": "Only these operationIds (default: every operation without examples)" },
+        "per_response": { "type": "integer", "minimum": 1, "maximum": 5, "default": 1 },
+        "persona": { "type": "string", "description": "A persona for the data (a bakery, a bank, ...)" },
+        "source": { "type": "string", "enum": ["ai", "generated"], "default": "ai" },
+        "apply": { "type": "boolean", "default": false, "description": "Store them in the draft (confirmed)" },
+        "model": { "type": "string" },
+        "confirm": confirm_prop()
+    }), &["name"])),
+    tool!("edit_spec_with_ai", "Edit a spec (AI)", "The mock's draft spec edited by the AI provider through an instruction (\"add a DELETE /orders/{id} operation\"): the new document, the diff summary and its checks. Not saved unless apply is true, which asks the user to confirm and saves it as the draft (deploy_mock publishes it).", Right::Manage, ro=false, destructive=false, idem=false, confirm=true, || obj(json!({
+        "name": name_prop(),
+        "instruction": { "type": "string" },
+        "apply": { "type": "boolean", "default": false, "description": "Save the result as the draft (confirmed)" },
+        "model": { "type": "string" },
+        "confirm": confirm_prop()
+    }), &["name", "instruction"])),
+    // ── MCP inspector ──
+    tool!("list_mcp_servers", "MCP servers", "Every MCP server this instance serves (the mock server and its protected, API key, named and legacy variants, the management server, each OpenAPI mock's server) with transports, versions and auth, the relay's allowlist and the check ids.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
+    ToolDef {
+        name: "mcp_call",
+        title: "Call an MCP server",
+        description: "One JSON-RPC request to an MCP server (tools/list, tools/call with name and arguments, resources/list, prompts/get, ...), with the handshake the transport needs: a path on this instance (in process) or an http(s) URL through the relay and the outbound policy (RUSTYBIN_EGRESS_ALLOW). Credentials: headers, or a saved connection. A call to another host asks the user to confirm. The server's answer is third-party data under untrusted_result.",
+        right: Right::Read,
+        read_only: false,
+        destructive: false,
+        idempotent: false,
+        confirm: true,
+        open_world: true,
+        input_schema: || obj(json!({
+            "target": { "type": "string", "description": "/mcp, /mock/<name>/_rustybin/mcp, /_rustybin/mcp, or an http(s) URL" },
+            "method": { "type": "string", "description": "The JSON-RPC method" },
+            "params": { "type": "object", "description": "Its params (for tools/call: name and arguments)", "additionalProperties": true },
+            "transport": { "type": "string", "enum": ["modern", "session", "legacy"], "default": "modern", "description": "2026-07-28 stateless, a 2025 session (version picks which), or the 2024-11-05 HTTP+SSE pair" },
+            "version": { "type": "string", "description": "The protocol version of a session transport (2025-11-25, 2025-06-18, 2025-03-26)" },
+            "headers": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Extra headers (Authorization, X-API-Key)" },
+            "connection": { "type": "string", "description": "A saved connection id whose target and credentials to use" },
+            "confirm": confirm_prop()
+        }), &["method"]),
+    },
+    ToolDef {
+        name: "run_mcp_checks",
+        title: "Run the MCP checks",
+        description: "The inspector's check suite against an MCP server (discovery, lists, tool calls with generated arguments, errors, headers, streams; list_mcp_servers names the checks): a report with pass, fail, warn and skip per check, kept for the console and list_mcp_check_runs unless save is false. A run against another host asks the user to confirm. include_destructive calls destructive tools too (only with the user's agreement).",
+        right: Right::Read,
+        read_only: false,
+        destructive: false,
+        idempotent: false,
+        confirm: true,
+        open_world: true,
+        input_schema: || obj(json!({
+            "target": { "type": "string" },
+            "transport": { "type": "string", "enum": ["modern", "session", "legacy"] },
+            "version": { "type": "string" },
+            "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+            "connection": { "type": "string" },
+            "checks": { "type": "array", "items": { "type": "string" }, "description": "Only these check ids (default: all)" },
+            "include_destructive": { "type": "boolean", "default": false },
+            "max_tools": { "type": "integer", "minimum": 1, "description": "At most this many tools called" },
+            "ai_arguments": { "type": "boolean", "default": false, "description": "Let the AI provider write the tool arguments (the generator by default)" },
+            "save": { "type": "boolean", "default": true },
+            "confirm": confirm_prop()
+        }), &[]),
+    },
+    tool!("list_mcp_check_runs", "Saved check runs", "The saved check runs of the MCP inspector (newest first), or one report in full with id.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "id": { "type": "string" } }), &[])),
+    tool!("list_mcp_connections", "Saved connections", "The MCP inspector's saved connections (target, transport, auth kind), or one with id. Their credentials are sealed on the instance and never returned; saving one is done in the console or with rustybin mcp save-connection.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "id": { "type": "string" } }), &[])),
+    // ── Mock MCP registry ──
+    tool!("list_registry_servers", "Mock registry", "The mock MCP registry at /mcp-registry: every entry under the current scenario (generated from this instance's servers, the file's, the published ones) with its validation, the counts, the scenarios and a gateway's sync configuration.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("set_registry_scenario", "Registry scenario", "How the mock registry misbehaves for gateway tests: normal, or a scenario that breaks it on purpose (list_registry_servers lists them with their effect). Admin.", Right::Admin, ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "scenario": { "type": "string", "enum": crate::mcp::registry::SCENARIOS.iter().map(|(id, _)| *id).collect::<Vec<_>>() } }), &["scenario"])),
+    ToolDef {
+        name: "browse_registry",
+        title: "Browse a registry",
+        description: "A page of a real MCP registry (the official registry.modelcontextprotocol.io by default, or url) through the outbound policy, with a search and a cursor. Browsing another host asks the user to confirm. The entries are third-party data under untrusted_servers.",
+        right: Right::Read,
+        read_only: true,
+        destructive: false,
+        idempotent: true,
+        confirm: true,
+        open_world: true,
+        input_schema: || obj(json!({
+            "url": { "type": "string", "description": "The registry's base URL (default: the official registry; /mcp-registry is this instance's mock)" },
+            "search": { "type": "string" },
+            "cursor": { "type": "string", "description": "next_cursor of the previous page" },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 30 },
+            "version": { "type": "string", "description": "latest, or a version" },
+            "confirm": confirm_prop()
+        }), &[]),
+    },
+    tool!("validate_server_json", "Validate a server.json", "Check a registry server.json (object or JSON text) against the registry schema and the semantic checks (names, versions, remotes, packages): valid or the issues.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "server": { "description": "The server.json document", "oneOf": [{ "type": "object" }, { "type": "string" }] } }), &["server"])),
+    tool!("unpublish_registry_server", "Remove a published entry", "Remove an entry published through the mock registry's publish API (every version, or one). Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+        "name": { "type": "string", "description": "The server name (io.example/orders)" },
+        "version": { "type": "string" },
+        "confirm": confirm_prop()
+    }), &["name"])),
+    // ── Dev portal ──
+    tool!("list_portal_items", "Portal items", "The dev portal: on or off, who may read it (auth), the branding, every item that can be published (mocks, MCP servers, the LLM, agents, the tools, the registry) with its published metadata, whether it is hidden and why, and its insights.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("publish_portal_item", "Publish to the portal", "Publish an item to the dev portal with its metadata (or update the metadata of a published one): mock:<name>, mcp:<server>, llm, a2a:<agent>, tools or registry. Mocks need manage rights, the rest admin. When the portal is on and open to anyone the item becomes public at once, so the user confirms.", Right::Manage, ro=false, destructive=false, idem=true, confirm=true, || obj(json!({
+        "id": { "type": "string", "description": "mock:<name>, mcp:<server>, llm, a2a:<agent>, tools or registry" },
+        "title": { "type": "string" },
+        "summary": { "type": "string", "description": "A paragraph in Markdown" },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "contact": { "type": "string" },
+        "order": { "type": "integer", "description": "Lower comes first" },
+        "credentials": { "type": "boolean", "description": "Show a mock's demo credentials (default true)" },
+        "confirm": confirm_prop()
+    }), &["id"])),
+    tool!("unpublish_portal_item", "Unpublish from the portal", "Remove an item from the dev portal (its metadata goes with it).", Right::Manage, ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "id": { "type": "string" } }), &["id"])),
+    tool!("set_portal_branding", "Portal settings", "Change the portal.* settings: enabled, title, intro, contact, auth (open, password, key), base_url (a gateway URL in the snippets), visitors. Keys with or without the portal. prefix. Admin.", Right::Admin, ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "settings": { "type": "object", "description": "The portal settings to change (get_settings with group portal lists them)", "additionalProperties": true } }), &["settings"])),
+    tool!("get_portal_insights", "Portal insights", "Views, downloads and Try it calls per published item over the last days (counts only).", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
+    // ── Configuration as code and git ──
+    tool!("export_config", "Export rustybin.yaml", "The instance as rustybin.yaml: version 2 (the whole instance: instance, settings, secrets as references, mocks, registry, portal, harness, agents, health) for an admin, else the mocks the caller may see (version 1); or one mock with name. Secrets are references (${VAR} or secret:stored), never values. To commit as configuration as code.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "name": { "type": "string", "description": "One mock (default: the whole instance)" },
+        "secrets": { "type": "string", "enum": ["refs", "omit"], "default": "refs" },
+        "format": { "type": "string", "enum": ["yaml", "json"], "default": "yaml" }
+    }), &[])),
+    tool!("diff_config", "Diff rustybin.yaml", "What applying a rustybin.yaml document (version 1 or 2) would change on this instance, section by section: a dry run that changes nothing. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "document": { "description": "The document: YAML or JSON text, or the object", "oneOf": [{ "type": "string" }, { "type": "object" }] },
+        "prune": { "type": "boolean", "default": false, "description": "Count what pruning would remove" }
+    }), &["document"])),
+    tool!("apply_config", "Apply rustybin.yaml", "Apply a rustybin.yaml document (version 1 or 2) through every section's service: settings, secret references, mocks, registry, portal, harness, agents, health. dry_run true only reports the changes. prune true makes a present section the whole truth (what it does not name is removed; destructive: confirmed). Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+        "document": { "description": "The document: YAML or JSON text, or the object", "oneOf": [{ "type": "string" }, { "type": "object" }] },
+        "dry_run": { "type": "boolean", "default": false },
+        "prune": { "type": "boolean", "default": false },
+        "confirm": confirm_prop()
+    }), &["document"])),
+    tool!("git_status", "Git status", "Source control: the repository (remote, branch, auth, deploy key), the working copy, the drift between it and the instance, ahead and behind (with fetch), the timeline of operations and the last commits. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "fetch": { "type": "boolean", "default": false, "description": "Ask the remote for ahead and behind" } }), &[])),
+    tool!("git_init", "Connect the repository", "Clone the configured remote (git.remote, git.branch settings) into the working copy, or start an empty one for a new repository. Admin.", Right::Admin, ro=false, destructive=false, idem=true, confirm=false, no_args),
+    tool!("git_commit", "Commit the configuration", "Export the instance into the working copy and commit with a message (nothing to commit is a fine answer). Admin.", Right::Admin, ro=false, destructive=false, idem=false, confirm=false, || obj(json!({ "message": { "type": "string" } }), &["message"])),
+    ToolDef {
+        name: "git_push",
+        title: "Push to the remote",
+        description: "Push the branch to the remote: the instance's configuration leaves this host (secrets as references, never values), so the user confirms (elicitation, else \"confirm\": true). A diverged branch is reported, never merged: git_resolve. Admin.",
+        right: Right::Admin,
+        read_only: false,
+        destructive: false,
+        idempotent: true,
+        confirm: true,
+        open_world: true,
+        input_schema: || obj(json!({ "confirm": confirm_prop() }), &[]),
+    },
+    ToolDef {
+        name: "git_pull",
+        title: "Pull from the remote",
+        description: "Fetch and fast-forward the working copy; with apply true the repository's document is applied to this instance (the user confirms, unless dry_run shows the diff only); prune makes the document the whole truth. Admin.",
+        right: Right::Admin,
+        read_only: false,
+        destructive: false,
+        idempotent: true,
+        confirm: true,
+        open_world: true,
+        input_schema: || obj(json!({
+            "apply": { "type": "boolean", "default": false },
+            "dry_run": { "type": "boolean", "default": false },
+            "prune": { "type": "boolean", "default": false },
+            "confirm": confirm_prop()
+        }), &[]),
+    },
+    ToolDef {
+        name: "git_resolve",
+        title: "Resolve a diverged branch",
+        description: "After a diverged branch: with instance, this instance's configuration replaces the remote branch (a force push); with repository, the repository's document is applied here and the local commits are dropped. Destructive: confirmed. Admin.",
+        right: Right::Admin,
+        read_only: false,
+        destructive: true,
+        idempotent: false,
+        confirm: true,
+        open_world: true,
+        input_schema: || obj(json!({
+            "with": { "type": "string", "enum": ["instance", "repository"] },
+            "message": { "type": "string", "description": "The commit message when the instance wins" },
+            "confirm": confirm_prop()
+        }), &["with"]),
+    },
+    tool!("git_deploy_key", "Deploy key", "The deploy key's public half for ssh remotes (register it on the repository with write access); generate true makes one, replace true (confirmed) replaces an existing key. Admin.", Right::Admin, ro=false, destructive=false, idem=true, confirm=true, || obj(json!({
+        "generate": { "type": "boolean", "default": false },
+        "replace": { "type": "boolean", "default": false },
+        "confirm": confirm_prop()
+    }), &[])),
+    // ── Agents ──
+    tool!("list_agents", "AI agents", "Every agent that called this management server (its credential and client name, first and last seen, calls, sessions, status, rights) and the policy (default ceiling, the rules of rustybin.yaml). Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("get_agent", "One agent", "One agent in full: calls per tool with their outcomes, last errors, sessions, the tools its rights allow and where the rights come from, recent activity. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "id": { "type": "string", "description": "The agent id (list_agents)" } }), &["id"])),
+    tool!("set_agent_rights", "Set an agent's rights", "Limit an agent: a ceiling (read-only, traffic, manage, full), tools allowed, tools denied, a note; reset true clears its own rights (back to the rules and the default). An agent never gets more than its credential allows. Admin.", Right::Admin, ro=false, destructive=false, idem=true, confirm=false, || obj(json!({
+        "id": { "type": "string" },
+        "ceiling": { "type": "string", "enum": ["read-only", "traffic", "manage", "full"] },
+        "allow": { "type": "array", "items": { "type": "string" }, "description": "Only these tools" },
+        "deny": { "type": "array", "items": { "type": "string" }, "description": "Never these tools" },
+        "note": { "type": "string", "description": "A note for the operator (null clears it)" },
+        "reset": { "type": "boolean", "default": false }
+    }), &["id"])),
+    tool!("revoke_agent", "Revoke an agent", "Refuse the agent's calls, end its sessions and revoke its tokens (console sign-in tokens, OAuth tokens and refresh tokens it used). An agent cannot revoke itself. Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({ "id": { "type": "string" }, "confirm": confirm_prop() }), &["id"])),
+    tool!("restore_agent", "Restore an agent", "Undo a revocation. Admin.", Right::Admin, ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "id": { "type": "string" } }), &["id"])),
+    tool!("end_agent_sessions", "End an agent's sessions", "Close the agent's handshake-era MCP sessions without revoking it. Admin.", Right::Admin, ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "id": { "type": "string" } }), &["id"])),
+    // ── Sign-in sessions ──
+    tool!("list_sessions", "Sign-in sessions", "The console's sign-in sessions since the last restart (user, issued, expiry, last seen), when the password sign-in is on. The password itself is changed only in the console, with rustybin password change, or through the environment. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("end_session", "End a sign-in session", "End one console sign-in session by id, or with all true sign out everywhere (every token issued so far is refused, the user's own console included; destructive: confirmed). Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+        "id": { "type": "string" },
+        "all": { "type": "boolean", "default": false },
+        "confirm": confirm_prop()
+    }), &[])),
 ];
 
 /// The tools the caller may use.
@@ -670,8 +899,7 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         "clear_mock_data" => mocks::clear_mock_data(ctx, access, &args, params).await,
         "get_mock_traffic" => mocks::get_mock_traffic(ctx, access, &args),
         "clear_traffic" => mocks::clear_traffic(ctx, access, &args, params).await,
-        "export_config" => mocks::export_config(ctx, access, &args),
-        "apply_config" => mocks::apply_config(ctx, access, &args, params).await,
+        "reload_mocks" => instance::reload_mocks(ctx, access),
         // Traffic
         "list_requests" => traffic::list_requests(ctx, access, &args),
         "get_request" => traffic::get_request(ctx, access, &args),
@@ -710,6 +938,59 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         "save_scenario" => harness::save_scenario(ctx, &args),
         "update_run" => harness::update_run(ctx, &args, params).await,
         "start_run" => harness::start_run(ctx, &args, params).await,
+        // Settings and egress
+        "get_settings" => settings::get_settings(ctx, access, &args),
+        "update_settings" => settings::update_settings(ctx, access, &args),
+        "check_egress" => settings::check_egress(ctx, access, &args),
+        // AI assist
+        "assist_status" => assist::assist_status(ctx, access, &args),
+        "assist_usage" => assist::assist_usage(ctx, access, &args),
+        "test_assist" => assist::test_assist(ctx, access, &args).await,
+        "run_assist_task" => assist::run_assist_task(ctx, access, &args).await,
+        "generate_spec" => assist::generate_spec(ctx, access, &args, params).await,
+        "generate_examples" => assist::generate_examples(ctx, access, &args, params).await,
+        "edit_spec_with_ai" => assist::edit_spec_with_ai(ctx, access, &args, params).await,
+        // MCP inspector
+        "list_mcp_servers" => inspect::list_mcp_servers(ctx, access, &args),
+        "mcp_call" => inspect::mcp_call(ctx, access, &args, params).await,
+        "run_mcp_checks" => inspect::run_mcp_checks(ctx, access, &args, params).await,
+        "list_mcp_check_runs" => inspect::list_mcp_check_runs(ctx, access, &args),
+        "list_mcp_connections" => inspect::list_mcp_connections(ctx, access, &args),
+        // Mock MCP registry
+        "list_registry_servers" => registry::list_registry_servers(ctx, access, &args),
+        "set_registry_scenario" => registry::set_registry_scenario(ctx, access, &args),
+        "browse_registry" => registry::browse_registry(ctx, access, &args, params).await,
+        "validate_server_json" => registry::validate_server_json(ctx, access, &args),
+        "unpublish_registry_server" => {
+            registry::unpublish_registry_server(ctx, access, &args, params).await
+        }
+        // Dev portal
+        "list_portal_items" => portal::list_portal_items(ctx, access, &args),
+        "publish_portal_item" => portal::publish_portal_item(ctx, access, &args, params).await,
+        "unpublish_portal_item" => portal::unpublish_portal_item(ctx, access, &args),
+        "set_portal_branding" => portal::set_portal_branding(ctx, access, &args),
+        "get_portal_insights" => portal::get_portal_insights(ctx, access, &args),
+        // Configuration as code and git
+        "export_config" => config::export_config(ctx, access, &args),
+        "diff_config" => config::diff_config(ctx, access, &args),
+        "apply_config" => config::apply_config(ctx, access, &args, params).await,
+        "git_status" => config::git_status(ctx, access, &args).await,
+        "git_init" => config::git_init(ctx, access, &args).await,
+        "git_commit" => config::git_commit(ctx, access, &args).await,
+        "git_push" => config::git_push(ctx, access, &args, params).await,
+        "git_pull" => config::git_pull(ctx, access, &args, params).await,
+        "git_resolve" => config::git_resolve(ctx, access, &args, params).await,
+        "git_deploy_key" => config::git_deploy_key(ctx, access, &args, params).await,
+        // Agents
+        "list_agents" => agents::tools::list_agents(ctx, access, &args),
+        "get_agent" => agents::tools::get_agent(ctx, access, &args),
+        "set_agent_rights" => agents::tools::set_agent_rights(ctx, access, &args),
+        "revoke_agent" => agents::tools::revoke_agent(ctx, access, &agent.id, &args, params).await,
+        "restore_agent" => agents::tools::restore_agent(ctx, access, &args),
+        "end_agent_sessions" => agents::tools::end_agent_sessions(ctx, access, &args),
+        // Sign-in sessions
+        "list_sessions" => instance::list_sessions(ctx, access),
+        "end_session" => instance::end_session(ctx, access, &args, params).await,
         _ => return Err(RpcError::invalid_params(format!("Unknown tool: {name}"))),
     };
     let outcome = if result.get("isError").and_then(Value::as_bool) == Some(true) {

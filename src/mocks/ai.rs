@@ -63,7 +63,7 @@ fn parse_body<T: serde::de::DeserializeOwned>(body: &Bytes) -> Result<T, Service
 
 /// May the caller use the instance's AI on mocks? The operator always; a
 /// self-service visitor with `RUSTYBIN_ASSIST_VISITORS`.
-fn ai_allowed(s: &Svc) -> SvcResult<()> {
+pub fn ai_allowed(s: &Svc) -> SvcResult<()> {
     if s.caller.admin {
         return Ok(());
     }
@@ -87,7 +87,7 @@ fn wants_stream(headers: &HeaderMap, body_flag: Option<bool>) -> bool {
     })
 }
 
-fn principal(headers: &HeaderMap, extensions: &Extensions, state: &AppState) -> String {
+pub fn principal(headers: &HeaderMap, extensions: &Extensions, state: &AppState) -> String {
     let who = crate::settings::principal(headers, &state.config);
     if who == "open" {
         let ip = crate::session::client_ip(headers, extensions, &state.config)
@@ -110,24 +110,6 @@ fn refusal_json(r: &Refusal) -> Value {
         Refusal::Secret(name) => {
             json!({ "error": format!("the inputs contain the value of {name}: nothing was sent"), "reason": "secret_in_inputs" })
         }
-    }
-}
-
-fn refusal(r: Refusal) -> ServiceError {
-    match r {
-        Refusal::Disabled(m) => ServiceError::with_body(
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({ "error": m, "reason": "assist_disabled" }),
-        ),
-        Refusal::RateLimited(wait) => ServiceError::with_body(
-            StatusCode::TOO_MANY_REQUESTS,
-            json!({ "error": format!("too many AI calls: try again in {wait} s"), "reason": "rate_limited", "retry_after": wait }),
-        ),
-        Refusal::Invalid(m) => ServiceError::bad_request(m),
-        Refusal::Secret(name) => ServiceError::with_body(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            json!({ "error": format!("the inputs contain the value of {name}: nothing was sent"), "reason": "secret_in_inputs" }),
-        ),
     }
 }
 
@@ -200,6 +182,75 @@ fn failure(c: &Collected, task: &str) -> Value {
     })
 }
 
+/// Progress frames of a run, for the SSE answer (the tools drop them).
+pub type Progress = tokio::sync::mpsc::UnboundedSender<Bytes>;
+
+/// The status a failed work's `reason` maps to.
+fn status_of(reason: Option<&str>) -> StatusCode {
+    match reason {
+        Some("assist_disabled") => StatusCode::SERVICE_UNAVAILABLE,
+        Some("rate_limited") => StatusCode::TOO_MANY_REQUESTS,
+        Some("secret_in_inputs") => StatusCode::UNPROCESSABLE_ENTITY,
+        Some("generator")
+        | Some("invalid_settings")
+        | Some("invalid_inputs")
+        | Some("invalid_spec") => StatusCode::BAD_REQUEST,
+        Some("not_found") => StatusCode::NOT_FOUND,
+        Some("forbidden") => StatusCode::FORBIDDEN,
+        Some("nothing_to_do") => StatusCode::CONFLICT,
+        _ => StatusCode::BAD_GATEWAY,
+    }
+}
+
+/// Answer a work: the SSE stream (progress, then `result` or `error`, then
+/// `done`) or one JSON document.
+async fn finish(
+    streaming: bool,
+    rx: tokio::sync::mpsc::UnboundedReceiver<Bytes>,
+    work: impl std::future::Future<Output = Result<Value, Value>> + Send + 'static,
+) -> Result<Response, ServiceError> {
+    if streaming {
+        let out = async_stream::stream! {
+            let mut rx = rx;
+            let result = work.await;
+            while let Ok(b) = rx.try_recv() {
+                yield Ok::<_, Infallible>(b);
+            }
+            match result {
+                Ok(v) => yield Ok(frame("result", &v)),
+                Err(e) => yield Ok(frame("error", &e)),
+            }
+            yield Ok(frame("done", &json!({})));
+        };
+        return Ok(sse(Body::from_stream(out)));
+    }
+    drop(rx);
+    match work.await {
+        Ok(v) => Ok(Json(v).into_response()),
+        Err(e) => Ok((status_of(e["reason"].as_str()), Json(e)).into_response()),
+    }
+}
+
+/// A `ServiceError` as a failed work's document.
+fn service_json(e: &ServiceError) -> Value {
+    let mut body = e.body.clone();
+    if !body.is_object() {
+        body = json!({ "error": e.message() });
+    }
+    if body.get("reason").is_none() {
+        let reason = match e.status {
+            StatusCode::FORBIDDEN => "forbidden",
+            StatusCode::NOT_FOUND => "not_found",
+            StatusCode::SERVICE_UNAVAILABLE => "assist_disabled",
+            StatusCode::TOO_MANY_REQUESTS => "rate_limited",
+            StatusCode::UNPROCESSABLE_ENTITY => "secret_in_inputs",
+            _ => "invalid_inputs",
+        };
+        body["reason"] = json!(reason);
+    }
+    body
+}
+
 // ── POST /_rustybin/mocks/ai/spec ───────────────────────────────────
 
 #[derive(Deserialize, Default)]
@@ -217,16 +268,17 @@ pub struct SpecBody {
     pub stream: Option<bool>,
 }
 
-pub async fn spec(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-    uri: Uri,
-    body: Bytes,
-) -> Result<Response, ServiceError> {
-    let s = svc(&state, &headers, &extensions, &uri);
-    ai_allowed(&s)?;
-    let req: SpecBody = parse_body(&body)?;
+/// Generate a spec from a description, then preview it: `{spec, text,
+/// preview, usage, sent}`, or the failure document (`reason`). Shared by the
+/// route and the management tool `generate_spec`.
+pub async fn spec_work(
+    state: AppState,
+    s: Svc,
+    req: SpecBody,
+    principal: String,
+    tx: Progress,
+) -> Result<Value, Value> {
+    ai_allowed(&s).map_err(|e| service_json(&e))?;
     let taken: Vec<String> = state.mocks.list().iter().map(|m| m.name.clone()).collect();
     let mut inputs = json!({
         "description": req.description,
@@ -237,62 +289,51 @@ pub async fn spec(
         inputs["style"] = style;
     }
     let task = task::find("spec_from_description")
-        .ok_or_else(|| ServiceError::new(StatusCode::INTERNAL_SERVER_ERROR, "no task"))?;
+        .ok_or_else(|| json!({ "error": "no task", "reason": "internal" }))?;
     let stream = Arc::clone(&state.assist)
         .run(RunParams {
             task,
             inputs,
             model: req.model,
-            principal: principal(&headers, &extensions, &state),
+            principal,
         })
-        .map_err(refusal)?;
-    let streaming = wants_stream(&headers, req.stream);
-    let s2 = s;
-    let work = async move {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
-        let collected = run_collect(stream, |b| {
-            let _ = tx.send(b);
-        })
-        .await;
-        let result = match &collected.json {
-            Some(doc) => {
-                let _ = tx.send(frame(
-                    "progress",
-                    &json!({ "message": "checking the document" }),
-                ));
-                let text = serde_json::to_string_pretty(doc).unwrap_or_default();
-                match s2.preview(&text) {
-                    Ok(preview) => Ok(
-                        json!({ "spec": doc, "text": text, "preview": preview, "usage": collected.usage, "sent": collected.sent }),
-                    ),
-                    Err(e) => Err(
-                        json!({ "error": e.message(), "reason": "invalid_spec", "usage": collected.usage, "sent": collected.sent }),
-                    ),
-                }
-            }
-            None => Err(failure(&collected, "spec_from_description")),
-        };
-        (rx, result)
+        .map_err(|r| refusal_json(&r))?;
+    let collected = run_collect(stream, |b| {
+        let _ = tx.send(b);
+    })
+    .await;
+    let Some(doc) = &collected.json else {
+        return Err(failure(&collected, "spec_from_description"));
     };
-    if streaming {
-        let out = async_stream::stream! {
-            let (mut rx, result) = work.await;
-            while let Ok(b) = rx.try_recv() {
-                yield Ok::<_, Infallible>(b);
-            }
-            match result {
-                Ok(v) => yield Ok(frame("result", &v)),
-                Err(e) => yield Ok(frame("error", &e)),
-            }
-            yield Ok(frame("done", &json!({})));
-        };
-        return Ok(sse(Body::from_stream(out)));
+    let _ = tx.send(frame(
+        "progress",
+        &json!({ "message": "checking the document" }),
+    ));
+    let text = serde_json::to_string_pretty(doc).unwrap_or_default();
+    match s.preview(&text) {
+        Ok(preview) => Ok(
+            json!({ "spec": doc, "text": text, "preview": preview, "usage": collected.usage, "sent": collected.sent }),
+        ),
+        Err(e) => Err(
+            json!({ "error": e.message(), "reason": "invalid_spec", "usage": collected.usage, "sent": collected.sent }),
+        ),
     }
-    let (_, result) = work.await;
-    match result {
-        Ok(v) => Ok(Json(v).into_response()),
-        Err(e) => Ok((StatusCode::BAD_GATEWAY, Json(e)).into_response()),
-    }
+}
+
+pub async fn spec(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    uri: Uri,
+    body: Bytes,
+) -> Result<Response, ServiceError> {
+    let s = svc(&state, &headers, &extensions, &uri);
+    ai_allowed(&s)?;
+    let req: SpecBody = parse_body(&body)?;
+    let streaming = wants_stream(&headers, req.stream);
+    let who = principal(&headers, &extensions, &state);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+    finish(streaming, rx, spec_work(state.clone(), s, req, who, tx)).await
 }
 
 // ── POST /_rustybin/mocks/{name}/ai/examples ────────────────────────
@@ -360,33 +401,34 @@ fn merge_examples(
     stored
 }
 
-pub async fn examples(
-    State(state): State<AppState>,
-    Path(MockPath { name }): Path<MockPath>,
-    headers: HeaderMap,
-    extensions: Extensions,
-    uri: Uri,
-    body: Bytes,
-) -> Result<Response, ServiceError> {
-    let s = svc(&state, &headers, &extensions, &uri);
-    let snap = s.manageable(&name)?;
-    let req: ExamplesBody = parse_body(&body)?;
+/// Examples for the operations of a mock that lack one (or the ones
+/// named), from the AI or the generator, previewed or stored in the draft
+/// (`apply`). `s` passed the manage guard for `name`. Shared by the route
+/// and the management tool `generate_examples`.
+pub async fn examples_work(
+    state: AppState,
+    s: Svc,
+    name: String,
+    req: ExamplesBody,
+    principal: String,
+    tx: Progress,
+) -> Result<Value, Value> {
+    let snap = s.manageable(&name).map_err(|e| service_json(&e))?;
     let generated = req.source.as_deref() == Some("generated");
     if !generated {
-        ai_allowed(&s)?;
+        ai_allowed(&s).map_err(|e| service_json(&e))?;
         // No provider: say so before any work.
         state
             .assist
             .client()
-            .map_err(|m| refusal(Refusal::Disabled(m)))?;
+            .map_err(|m| refusal_json(&Refusal::Disabled(m)))?;
     }
     let doc: Value = serde_json::from_str(&snap.draft.source)
         .or_else(|_| serde_yaml::from_str(&snap.draft.source))
-        .map_err(|e| ServiceError::bad_request(format!("the draft's spec cannot be read: {e}")))?;
+        .map_err(|e| json!({ "error": format!("the draft's spec cannot be read: {e}"), "reason": "invalid_spec" }))?;
     let per_response = req.per_response.unwrap_or(1);
     let persona = req.persona.clone();
     let apply = req.apply.unwrap_or(false);
-    let streaming = wants_stream(&headers, req.stream);
     let source = if generated {
         ExampleSource::Generated
     } else {
@@ -405,10 +447,9 @@ pub async fn examples(
             .collect(),
     };
     if wanted.is_empty() {
-        return Err(ServiceError::with_body(
-            StatusCode::CONFLICT,
+        return Err(
             json!({ "error": "every operation has examples for its success responses", "reason": "nothing_to_do", "coverage": super::service::coverage_summary(compiled) }),
-        ));
+        );
     }
     let batches: Vec<Vec<String>> = wanted
         .chunks(examples_for_operations::BATCH)
@@ -416,138 +457,99 @@ pub async fn examples(
         .collect();
     let total = batches.len();
     let task = task::find("examples_for_operations")
-        .ok_or_else(|| ServiceError::new(StatusCode::INTERNAL_SERVER_ERROR, "no task"))?;
-    let who = principal(&headers, &extensions, &state);
-    let model = req.model.clone();
+        .ok_or_else(|| json!({ "error": "no task", "reason": "internal" }))?;
     let assist = Arc::clone(&state.assist);
-    let state2 = state.clone();
-    let name2 = name.clone();
-    let work = async move {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
-        let mut all: Map<String, Value> = Map::new();
-        let mut usage = Value::Null;
-        let mut failed: Option<Value> = None;
-        for (i, batch) in batches.iter().enumerate() {
-            let _ = tx.send(frame("progress", &json!({ "message": format!("operations {} to {} of {} (batch {} of {total})", i * examples_for_operations::BATCH + 1, i * examples_for_operations::BATCH + batch.len(), wanted.len(), i + 1), "batch": i + 1, "batches": total })));
-            let inputs = json!({ "spec": doc, "operations": batch, "per_response": per_response, "persona": persona });
-            let answer = if generated {
-                examples_for_operations::generate(&inputs)
-                    .map_err(|e| json!({ "error": e, "reason": "generator" }))
-            } else {
-                match assist.run(RunParams {
+    let mut all: Map<String, Value> = Map::new();
+    let mut usage = Value::Null;
+    for (i, batch) in batches.iter().enumerate() {
+        let _ = tx.send(frame("progress", &json!({ "message": format!("operations {} to {} of {} (batch {} of {total})", i * examples_for_operations::BATCH + 1, i * examples_for_operations::BATCH + batch.len(), wanted.len(), i + 1), "batch": i + 1, "batches": total })));
+        let inputs = json!({ "spec": doc, "operations": batch, "per_response": per_response, "persona": persona });
+        let answer = if generated {
+            examples_for_operations::generate(&inputs)
+                .map_err(|e| json!({ "error": e, "reason": "generator" }))?
+        } else {
+            let stream = assist
+                .run(RunParams {
                     task,
                     inputs,
-                    model: model.clone(),
-                    principal: who.clone(),
-                }) {
-                    Err(r) => Err(refusal_json(&r)),
-                    Ok(stream) => {
-                        let c = run_collect(stream, |b| {
-                            let _ = tx.send(b);
-                        })
-                        .await;
-                        usage = c.usage.clone();
-                        match &c.json {
-                            Some(v) => Ok(v.clone()),
-                            None => Err(failure(&c, "examples_for_operations")),
-                        }
-                    }
-                }
-            };
-            match answer {
-                Ok(v) => {
-                    if let Some(m) = v.get("examples").and_then(Value::as_object) {
-                        for (k, val) in m {
-                            all.insert(k.clone(), val.clone());
-                        }
-                    }
-                }
-                Err(e) => {
-                    failed = Some(e);
-                    break;
-                }
+                    model: req.model.clone(),
+                    principal: principal.clone(),
+                })
+                .map_err(|r| refusal_json(&r))?;
+            let c = run_collect(stream, |b| {
+                let _ = tx.send(b);
+            })
+            .await;
+            usage = c.usage.clone();
+            match &c.json {
+                Some(v) => v.clone(),
+                None => return Err(failure(&c, "examples_for_operations")),
+            }
+        };
+        if let Some(m) = answer.get("examples").and_then(Value::as_object) {
+            for (k, val) in m {
+                all.insert(k.clone(), val.clone());
             }
         }
-        if let Some(e) = failed {
-            return (rx, Err(e));
-        }
-        let mut result =
-            json!({ "examples": all, "source": source.as_str(), "applied": false, "usage": usage });
-        if apply {
-            let _ = tx.send(frame(
-                "progress",
-                &json!({ "message": "saving the examples in the draft" }),
-            ));
-            // The caller passed the manage guard above; the store update
-            // reuses the draft's settings with the examples merged in.
-            let draft = match state2.mocks.get(&name2) {
-                Some(snap) => snap.draft,
-                None => {
-                    return (
-                        rx,
-                        Err(json!({ "error": "the mock is gone", "reason": "not_found" })),
-                    )
-                }
-            };
-            let mut operations = draft.settings.operations.clone();
-            let stored = merge_examples(&mut operations, &all, source);
-            match state2.mocks.recompile(&draft, None, {
+    }
+    let mut result =
+        json!({ "examples": all, "source": source.as_str(), "applied": false, "usage": usage });
+    if apply {
+        let _ = tx.send(frame(
+            "progress",
+            &json!({ "message": "saving the examples in the draft" }),
+        ));
+        // The caller passed the manage guard above; the store update
+        // reuses the draft's settings with the examples merged in.
+        let draft = match state.mocks.get(&name) {
+            Some(snap) => snap.draft,
+            None => return Err(json!({ "error": "the mock is gone", "reason": "not_found" })),
+        };
+        let mut operations = draft.settings.operations.clone();
+        let stored = merge_examples(&mut operations, &all, source);
+        let compiled = state
+            .mocks
+            .recompile(&draft, None, {
                 let mut settings = draft.settings.clone();
                 settings.operations = operations;
                 settings
-            }) {
-                Ok(compiled) => match state2.mocks.set_draft(&name2, Some(compiled), None) {
-                    Ok(snap) => {
-                        result["applied"] = json!(true);
-                        result["stored"] = json!(stored);
-                        result["coverage"] = super::service::coverage_summary(&snap.draft);
-                        result["draft_revision"] = json!(snap.draft.revision);
-                    }
-                    Err(e) => {
-                        return (
-                            rx,
-                            Err(
-                                json!({ "error": ServiceError::from(e).message(), "reason": "store" }),
-                            ),
-                        )
-                    }
-                },
-                Err(e) => return (rx, Err(json!({ "error": e, "reason": "invalid_settings" }))),
-            }
-        }
-        (rx, Ok(result))
-    };
-    if streaming {
-        let out = async_stream::stream! {
-            let (mut rx, result) = work.await;
-            while let Ok(b) = rx.try_recv() {
-                yield Ok::<_, Infallible>(b);
-            }
-            match result {
-                Ok(v) => yield Ok(frame("result", &v)),
-                Err(e) => yield Ok(frame("error", &e)),
-            }
-            yield Ok(frame("done", &json!({})));
-        };
-        return Ok(sse(Body::from_stream(out)));
+            })
+            .map_err(|e| json!({ "error": e, "reason": "invalid_settings" }))?;
+        let snap = state
+            .mocks
+            .set_draft(&name, Some(compiled), None)
+            .map_err(|e| json!({ "error": ServiceError::from(e).message(), "reason": "store" }))?;
+        result["applied"] = json!(true);
+        result["stored"] = json!(stored);
+        result["coverage"] = super::service::coverage_summary(&snap.draft);
+        result["draft_revision"] = json!(snap.draft.revision);
     }
-    let (_, result) = work.await;
-    match result {
-        Ok(v) => Ok(Json(v).into_response()),
-        Err(e) => {
-            let status = match e["reason"].as_str() {
-                Some("assist_disabled") => StatusCode::SERVICE_UNAVAILABLE,
-                Some("rate_limited") => StatusCode::TOO_MANY_REQUESTS,
-                Some("secret_in_inputs") => StatusCode::UNPROCESSABLE_ENTITY,
-                Some("generator") | Some("invalid_settings") | Some("invalid_inputs") => {
-                    StatusCode::BAD_REQUEST
-                }
-                Some("not_found") => StatusCode::NOT_FOUND,
-                _ => StatusCode::BAD_GATEWAY,
-            };
-            Ok((status, Json(e)).into_response())
-        }
+    Ok(result)
+}
+
+pub async fn examples(
+    State(state): State<AppState>,
+    Path(MockPath { name }): Path<MockPath>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    uri: Uri,
+    body: Bytes,
+) -> Result<Response, ServiceError> {
+    let s = svc(&state, &headers, &extensions, &uri);
+    s.manageable(&name)?;
+    let req: ExamplesBody = parse_body(&body)?;
+    if req.source.as_deref() != Some("generated") {
+        ai_allowed(&s)?;
     }
+    let streaming = wants_stream(&headers, req.stream);
+    let who = principal(&headers, &extensions, &state);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+    finish(
+        streaming,
+        rx,
+        examples_work(state.clone(), s, name, req, who, tx),
+    )
+    .await
 }
 
 // ── POST /_rustybin/mocks/{name}/ai/edit ────────────────────────────
@@ -565,77 +567,67 @@ pub struct EditBody {
     pub stream: Option<bool>,
 }
 
-pub async fn edit(
-    State(state): State<AppState>,
-    Path(MockPath { name }): Path<MockPath>,
-    headers: HeaderMap,
-    extensions: Extensions,
-    uri: Uri,
-    body: Bytes,
-) -> Result<Response, ServiceError> {
-    let s = svc(&state, &headers, &extensions, &uri);
-    let snap = s.manageable(&name)?;
-    ai_allowed(&s)?;
-    let req: EditBody = parse_body(&body)?;
+/// Edit a mock's draft spec through an instruction: the new document, the
+/// diff summary and its preview; `apply` saves it as the draft. Shared by
+/// the route and the management tool `edit_spec_with_ai`.
+pub async fn edit_work(
+    state: AppState,
+    s: Svc,
+    name: String,
+    req: EditBody,
+    principal: String,
+    tx: Progress,
+) -> Result<Value, Value> {
+    let snap = s.manageable(&name).map_err(|e| service_json(&e))?;
+    ai_allowed(&s).map_err(|e| service_json(&e))?;
     let before: Value = serde_json::from_str(&snap.draft.source)
         .or_else(|_| serde_yaml::from_str(&snap.draft.source))
-        .map_err(|e| ServiceError::bad_request(format!("the draft's spec cannot be read: {e}")))?;
+        .map_err(|e| json!({ "error": format!("the draft's spec cannot be read: {e}"), "reason": "invalid_spec" }))?;
     let inputs = json!({ "spec": before, "instruction": req.instruction });
     let task = task::find("edit_spec")
-        .ok_or_else(|| ServiceError::new(StatusCode::INTERNAL_SERVER_ERROR, "no task"))?;
+        .ok_or_else(|| json!({ "error": "no task", "reason": "internal" }))?;
     let stream = Arc::clone(&state.assist)
         .run(RunParams {
             task,
             inputs,
             model: req.model,
-            principal: principal(&headers, &extensions, &state),
+            principal,
         })
-        .map_err(refusal)?;
-    let streaming = wants_stream(&headers, req.stream);
+        .map_err(|r| refusal_json(&r))?;
     let apply = req.apply.unwrap_or(false);
     let instruction = req.instruction.clone();
     let before_text = snap.draft.source.to_string();
-    let s2 = s;
-    let work = async move {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
-        let collected = run_collect(stream, |b| {
-            let _ = tx.send(b);
-        })
-        .await;
-        let Some(after) = collected.json.clone() else {
-            return (rx, Err(failure(&collected, "edit_spec")));
-        };
-        let _ = tx.send(frame(
-            "progress",
-            &json!({ "message": "checking the new document" }),
-        ));
-        let text = serde_json::to_string_pretty(&after).unwrap_or_default();
-        let preview = match s2.preview(&text) {
-            Ok(p) => p,
-            Err(e) => {
-                return (
-                    rx,
-                    Err(
-                        json!({ "error": e.message(), "reason": "invalid_spec", "usage": collected.usage, "sent": collected.sent }),
-                    ),
-                )
-            }
-        };
-        let summary = edit_spec::diff(&before, &after).describe();
-        let mut result = json!({
-            "spec": after,
-            "text": text,
-            "before_text": before_text,
-            "diff": summary,
-            "preview": preview,
-            "instruction": instruction,
-            "applied": false,
-            "usage": collected.usage,
-            "sent": collected.sent,
-        });
-        if apply {
-            let _ = tx.send(frame("progress", &json!({ "message": "saving the draft" })));
-            match s2.update(
+    let collected = run_collect(stream, |b| {
+        let _ = tx.send(b);
+    })
+    .await;
+    let Some(after) = collected.json.clone() else {
+        return Err(failure(&collected, "edit_spec"));
+    };
+    let _ = tx.send(frame(
+        "progress",
+        &json!({ "message": "checking the new document" }),
+    ));
+    let text = serde_json::to_string_pretty(&after).unwrap_or_default();
+    let preview = s.preview(&text).map_err(|e| {
+        json!({ "error": e.message(), "reason": "invalid_spec", "usage": collected.usage, "sent": collected.sent })
+    })?;
+    let summary = edit_spec::diff(&before, &after).describe();
+    let mut result = json!({
+        "spec": after,
+        "text": text,
+        "before_text": before_text,
+        "diff": summary,
+        "preview": preview,
+        "instruction": instruction,
+        "applied": false,
+        "usage": collected.usage,
+        "sent": collected.sent,
+    });
+    if apply {
+        let _ = tx.send(frame("progress", &json!({ "message": "saving the draft" })));
+        let detail = s
+            .update(
                 &name,
                 PatchBody {
                     name: None,
@@ -648,35 +640,35 @@ pub async fn edit(
                     deploy: None,
                     force: None,
                 },
-            ) {
-                Ok(detail) => {
-                    result["applied"] = json!(true);
-                    result["detail"] = detail;
-                }
-                Err(e) => return (rx, Err(json!({ "error": e.message(), "reason": "store" }))),
-            }
-        }
-        (rx, Ok(result))
-    };
-    if streaming {
-        let out = async_stream::stream! {
-            let (mut rx, result) = work.await;
-            while let Ok(b) = rx.try_recv() {
-                yield Ok::<_, Infallible>(b);
-            }
-            match result {
-                Ok(v) => yield Ok(frame("result", &v)),
-                Err(e) => yield Ok(frame("error", &e)),
-            }
-            yield Ok(frame("done", &json!({})));
-        };
-        return Ok(sse(Body::from_stream(out)));
+            )
+            .map_err(|e| json!({ "error": e.message(), "reason": "store" }))?;
+        result["applied"] = json!(true);
+        result["detail"] = detail;
     }
-    let (_, result) = work.await;
-    match result {
-        Ok(v) => Ok(Json(v).into_response()),
-        Err(e) => Ok((StatusCode::BAD_GATEWAY, Json(e)).into_response()),
-    }
+    Ok(result)
+}
+
+pub async fn edit(
+    State(state): State<AppState>,
+    Path(MockPath { name }): Path<MockPath>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    uri: Uri,
+    body: Bytes,
+) -> Result<Response, ServiceError> {
+    let s = svc(&state, &headers, &extensions, &uri);
+    s.manageable(&name)?;
+    ai_allowed(&s)?;
+    let req: EditBody = parse_body(&body)?;
+    let streaming = wants_stream(&headers, req.stream);
+    let who = principal(&headers, &extensions, &state);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+    finish(
+        streaming,
+        rx,
+        edit_work(state.clone(), s, name, req, who, tx),
+    )
+    .await
 }
 
 // ── GET /_rustybin/mocks/{name}/coverage ────────────────────────────

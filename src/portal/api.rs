@@ -103,19 +103,10 @@ fn gate(
 }
 
 fn ctx(state: &AppState, headers: &HeaderMap, extensions: &Extensions, uri: &Uri) -> Ctx {
-    let links = Links::from_request(headers, extensions, uri, &state.config);
-    match super::base_url_setting(&state.settings) {
-        Some(base) => Ctx {
-            base,
-            gateway: true,
-            links,
-        },
-        None => Ctx {
-            base: links.base_url().to_string(),
-            gateway: false,
-            links,
-        },
-    }
+    ctx_for(
+        state,
+        Links::from_request(headers, extensions, uri, &state.config),
+    )
 }
 
 /// The published, shown entry for `key`.
@@ -522,21 +513,19 @@ fn settings_view(state: &AppState) -> Value {
     })
 }
 
-async fn control_view(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-) -> Response {
-    state.portal.sweep(&state);
-    let caller = crate::mocks::selfservice::caller(&state, &headers, &extensions);
-    let entries = items::entries(&state);
+/// The console's view of the portal for a caller: settings, every item the
+/// caller may publish with its published state and insights, and the
+/// published items whose mock is gone (so they can be removed). Also the
+/// management tool `list_portal_items`.
+pub fn control_json(state: &AppState, caller: &crate::mocks::selfservice::Caller) -> Value {
+    state.portal.sweep(state);
+    let entries = items::entries(state);
     let insights = state.portal.insights();
-    let candidates = items::candidates(&state, |s| caller.can_read(s));
+    let candidates = items::candidates(state, |s| caller.can_read(s));
     let mut list: Vec<Value> = candidates
         .iter()
-        .map(|c| item_view(&state, c, entries.iter().find(|e| e.key == c.id), &insights))
+        .map(|c| item_view(state, c, entries.iter().find(|e| e.key == c.id), &insights))
         .collect();
-    // Published items whose mock is gone (shown so they can be removed).
     for e in &entries {
         if candidates.iter().any(|c| c.id == e.key) {
             continue;
@@ -557,17 +546,26 @@ async fn control_view(
             state: "missing".into(),
             owner: e.published.owner.clone(),
         };
-        list.push(item_view(&state, &c, Some(e), &insights));
+        list.push(item_view(state, &c, Some(e), &insights));
     }
     let published = list.iter().filter(|i| !i["published"].is_null()).count();
     let shown = list
         .iter()
         .filter(|i| !i["published"].is_null() && i["hidden"].is_null())
         .count();
-    let mut body = settings_view(&state);
+    let mut body = settings_view(state);
     body["items"] = json!(list);
     body["counts"] = json!({ "published": published, "shown": shown, "max": super::MAX_ITEMS });
-    Json(body).into_response()
+    body
+}
+
+async fn control_view(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+) -> Response {
+    let caller = crate::mocks::selfservice::caller(&state, &headers, &extensions);
+    Json(control_json(&state, &caller)).into_response()
 }
 
 /// May the caller publish `id`? Manage rights on a mock (a visitor's own
@@ -576,11 +574,9 @@ async fn control_view(
 fn authorize_item(
     state: &AppState,
     id: &ItemId,
-    headers: &HeaderMap,
-    extensions: &Extensions,
-    uri: &Uri,
+    svc: &Svc,
+    principal: &str,
 ) -> Result<(Option<Owner>, String), ServiceError> {
-    let svc = Svc::from_request(state, headers, extensions, uri);
     let admin = |svc: &Svc| -> Result<(), ServiceError> {
         svc.require_admin()?;
         if !svc.caller.admin {
@@ -590,7 +586,6 @@ fn authorize_item(
         }
         Ok(())
     };
-    let principal = crate::settings::principal(headers, &state.config);
     match id {
         ItemId::Mock(name) if state.mocks.get(name).is_some() => {
             let snap = svc.manageable(name)?;
@@ -603,11 +598,11 @@ fn authorize_item(
                 let by = snap.owner.fingerprint();
                 return Ok((Some(snap.owner), by));
             }
-            Ok((Some(snap.owner), principal))
+            Ok((Some(snap.owner), principal.to_string()))
         }
         _ => {
-            admin(&svc)?;
-            Ok((None, principal))
+            admin(svc)?;
+            Ok((None, principal.to_string()))
         }
     }
 }
@@ -623,36 +618,32 @@ fn conflict_file(key: &str) -> ServiceError {
     )
 }
 
-async fn publish(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    extensions: Extensions,
-    uri: Uri,
-    body: Bytes,
-) -> Result<Response, ServiceError> {
-    let id = ItemId::parse(&id).map_err(ServiceError::bad_request)?;
+/// Publish `id` with its metadata as `svc`'s caller (`principal` is the
+/// audit name of a non-visitor): the item's view and whether it was new.
+/// Shared by `PUT /_rustybin/portal/items/{id}` and the management tool
+/// `publish_portal_item`.
+pub fn publish_item(
+    state: &AppState,
+    svc: &Svc,
+    principal: &str,
+    raw_id: &str,
+    meta: Meta,
+) -> Result<(Value, bool), ServiceError> {
+    let id = ItemId::parse(raw_id).map_err(ServiceError::bad_request)?;
     let key = id.as_string();
     if let ItemId::Mock(name) = &id {
         if state.mocks.get(name).is_none() {
             // Admin first (an unknown name says nothing to others), then 404.
-            let svc = Svc::from_request(&state, &headers, &extensions, &uri);
             if !svc.caller.admin {
                 svc.manageable(name)?;
             }
             return Err(ServiceError::not_found(format!("mock {name:?} not found")));
         }
     }
-    let (owner, by) = authorize_item(&state, &id, &headers, &extensions, &uri)?;
-    if file_defined(&state, &key) {
+    let (owner, by) = authorize_item(state, &id, svc, principal)?;
+    if file_defined(state, &key) {
         return Err(conflict_file(&key));
     }
-    let meta: Meta = if body.iter().all(u8::is_ascii_whitespace) {
-        Meta::default()
-    } else {
-        serde_json::from_slice(&body)
-            .map_err(|e| ServiceError::bad_request(format!("invalid request: {e}")))?
-    };
     let meta = super::clean_meta(&meta).map_err(ServiceError::bad_request)?;
     let (_, created) = state
         .portal
@@ -665,10 +656,54 @@ async fn publish(
             PublishError::Io(e) => ServiceError::new(StatusCode::INTERNAL_SERVER_ERROR, e),
         })?;
     tracing::info!(target: "rustybin::portal", item = %key, by = %by, created, "item published");
-    let entries = items::entries(&state);
+    let entries = items::entries(state);
     let entry = entries.iter().find(|e| e.key == key);
-    let cand = items::candidate(&state, &id).ok_or_else(|| ServiceError::not_found("gone"))?;
-    let view = item_view(&state, &cand, entry, &state.portal.insights());
+    let cand = items::candidate(state, &id).ok_or_else(|| ServiceError::not_found("gone"))?;
+    let view = item_view(state, &cand, entry, &state.portal.insights());
+    Ok((view, created))
+}
+
+/// Remove `id` from the portal as `svc`'s caller.
+pub fn unpublish_item(
+    state: &AppState,
+    svc: &Svc,
+    principal: &str,
+    raw_id: &str,
+) -> Result<Value, ServiceError> {
+    let id = ItemId::parse(raw_id).map_err(ServiceError::bad_request)?;
+    let key = id.as_string();
+    let (_, by) = authorize_item(state, &id, svc, principal)?;
+    if file_defined(state, &key) {
+        return Err(conflict_file(&key));
+    }
+    let removed = state
+        .portal
+        .unpublish(&key)
+        .map_err(|e| ServiceError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if !removed {
+        return Err(ServiceError::not_found(format!("{key} is not published")));
+    }
+    tracing::info!(target: "rustybin::portal", item = %key, by = %by, "item unpublished");
+    Ok(json!({ "id": key, "published": false }))
+}
+
+async fn publish(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    uri: Uri,
+    body: Bytes,
+) -> Result<Response, ServiceError> {
+    let svc = Svc::from_request(&state, &headers, &extensions, &uri);
+    let principal = crate::settings::principal(&headers, &state.config);
+    let meta: Meta = if body.iter().all(u8::is_ascii_whitespace) {
+        Meta::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| ServiceError::bad_request(format!("invalid request: {e}")))?
+    };
+    let (view, created) = publish_item(&state, &svc, &principal, &id, meta)?;
     let status = if created {
         StatusCode::CREATED
     } else {
@@ -684,32 +719,16 @@ async fn unpublish(
     extensions: Extensions,
     uri: Uri,
 ) -> Result<Response, ServiceError> {
-    let id = ItemId::parse(&id).map_err(ServiceError::bad_request)?;
-    let key = id.as_string();
-    let (_, by) = authorize_item(&state, &id, &headers, &extensions, &uri)?;
-    if file_defined(&state, &key) {
-        return Err(conflict_file(&key));
-    }
-    let removed = state
-        .portal
-        .unpublish(&key)
-        .map_err(|e| ServiceError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    if !removed {
-        return Err(ServiceError::not_found(format!("{key} is not published")));
-    }
-    tracing::info!(target: "rustybin::portal", item = %key, by = %by, "item unpublished");
-    Ok(Json(json!({ "id": key, "published": false })).into_response())
+    let svc = Svc::from_request(&state, &headers, &extensions, &uri);
+    let principal = crate::settings::principal(&headers, &state.config);
+    Ok(Json(unpublish_item(&state, &svc, &principal, &id)?).into_response())
 }
 
-async fn insights_view(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-) -> Response {
-    let caller = crate::mocks::selfservice::caller(&state, &headers, &extensions);
+/// The insights of the published items the caller may see (counts only).
+pub fn insights_json(state: &AppState, caller: &crate::mocks::selfservice::Caller) -> Value {
     let today = Utc::now().date_naive();
     let insights = state.portal.insights();
-    let list: Vec<Value> = items::entries(&state)
+    let list: Vec<Value> = items::entries(state)
         .iter()
         .filter(|e| {
             e.published
@@ -718,7 +737,7 @@ async fn insights_view(
                 .is_none_or(|o| !o.is_visitor() || caller.admin || caller.owns(o))
         })
         .map(|e| {
-            let title = items::candidate(&state, &e.id)
+            let title = items::candidate(state, &e.id)
                 .map(|c| e.published.title.clone().unwrap_or(c.title))
                 .unwrap_or_else(|| e.key.clone());
             let mut v = insights.item_json(&e.key, today);
@@ -727,13 +746,39 @@ async fn insights_view(
             v
         })
         .collect();
-    Json(json!({
+    json!({
         "items": list,
         "days": super::insights::DAYS,
         "persisted": state.portal.persisted(),
         "note": "Counts only: no visitor identifiers are stored.",
-    }))
-    .into_response()
+    })
+}
+
+async fn insights_view(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+) -> Response {
+    let caller = crate::mocks::selfservice::caller(&state, &headers, &extensions);
+    Json(insights_json(&state, &caller)).into_response()
+}
+
+/// The catalogue context for a request's links (the portal's base URL
+/// setting, else the request's origin). Also the management resource
+/// `rustybin://portal/catalog`.
+pub fn ctx_for(state: &AppState, links: Links) -> Ctx {
+    match super::base_url_setting(&state.settings) {
+        Some(base) => Ctx {
+            base,
+            gateway: true,
+            links,
+        },
+        None => Ctx {
+            base: links.base_url().to_string(),
+            gateway: false,
+            links,
+        },
+    }
 }
 
 // ── Router, catalogue, OpenAPI ──────────────────────────────────────

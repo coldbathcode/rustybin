@@ -357,3 +357,96 @@ pub async fn reset_flaky(ctx: &CallCtx, access: &Access, args: &Value) -> Value 
         Err(e) => e,
     }
 }
+
+/// `list_sessions` (admin): the console's sign-in sessions since the last
+/// restart (the password sign-in must be on).
+pub fn list_sessions(ctx: &CallCtx, _access: &Access) -> Value {
+    let config = &ctx.app.config;
+    if !crate::login::enabled(config) {
+        return err(format!(
+            "the console sign-in is off (control auth {}): there are no sign-in sessions",
+            config.control_auth.as_str()
+        ));
+    }
+    let sessions = config.console_tokens.sessions();
+    let summary = format!(
+        "{} sign-in session(s) (generation {}, at most {} listed)",
+        sessions.len(),
+        config.console_tokens.generation(),
+        crate::login::MAX_SESSIONS
+    );
+    ok(
+        ctx,
+        summary,
+        json!({
+            "generation": config.console_tokens.generation(),
+            "count": sessions.len(),
+            "capacity": crate::login::MAX_SESSIONS,
+            "sessions": sessions,
+        }),
+    )
+}
+
+/// `end_session` (admin): end one sign-in session by id, or every one
+/// (`all`, confirmed: it signs everyone out, the caller's own console too).
+pub async fn end_session(ctx: &CallCtx, _access: &Access, args: &Value, params: &Value) -> Value {
+    let config = &ctx.app.config;
+    if !crate::login::enabled(config) {
+        return err(format!(
+            "the console sign-in is off (control auth {}): there are no sign-in sessions",
+            config.control_auth.as_str()
+        ));
+    }
+    let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
+    if all {
+        let action = "sign out everywhere: every console sign-in token issued so far is refused, the user's own console included";
+        if let super::tools::Confirm::Answer(v) =
+            super::tools::confirm(ctx, "end_session", args, params, action).await
+        {
+            return v;
+        }
+        let n = config.console_tokens.rotate();
+        return ok(
+            ctx,
+            format!(
+                "Signed out everywhere: {n} session(s) ended (generation {})",
+                config.console_tokens.generation()
+            ),
+            json!({ "ended": n, "generation": config.console_tokens.generation(), "note": "every sign-in token issued before now is refused" }),
+        );
+    }
+    let Some(id) = arg_str(args, "id").filter(|i| !i.is_empty()) else {
+        return err("give the session id (list_sessions), or all true");
+    };
+    let ended = config.console_tokens.end(id);
+    if !ended {
+        return err(format!("no session {id:?} (list_sessions shows them)"));
+    }
+    ok(
+        ctx,
+        format!("Ended session {id}"),
+        json!({ "ended": true, "id": id }),
+    )
+}
+
+/// `reload_mocks` (admin): reload the file-defined mocks
+/// (`RUSTYBIN_CONFIG_FILE`, `RUSTYBIN_MOCKS_DIR`).
+pub fn reload_mocks(ctx: &CallCtx, access: &Access) -> Value {
+    match access.svc(&ctx.app).reload() {
+        Ok(r) => {
+            let problems = r["problems"].as_array().map(Vec::len).unwrap_or(0);
+            ok(
+                ctx,
+                format!(
+                    "Reloaded the file-defined mocks: {} created, {} updated, {} deleted, {} unchanged; {problems} problem(s)",
+                    r["report"]["created"].as_array().map(Vec::len).unwrap_or(0),
+                    r["report"]["updated"].as_array().map(Vec::len).unwrap_or(0),
+                    r["report"]["deleted"].as_array().map(Vec::len).unwrap_or(0),
+                    r["report"]["unchanged"].as_array().map(Vec::len).unwrap_or(0)
+                ),
+                r,
+            )
+        }
+        Err(e) => super::tools::service_error(&e),
+    }
+}

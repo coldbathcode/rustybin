@@ -12,7 +12,6 @@ use crate::mcp::core::CallCtx;
 use crate::mocks::capture::MockCapture;
 use crate::mocks::model::OperationSettings;
 use crate::mocks::service::{CreateBody, PatchBody, RuleTestBody, SampleQuery, Svc, ValidateBody};
-use crate::state::AppState;
 
 fn svc(ctx: &CallCtx, access: &Access) -> Svc {
     access.svc(&ctx.app)
@@ -806,100 +805,6 @@ pub async fn clear_traffic(ctx: &CallCtx, access: &Access, args: &Value, params:
         Ok(r) => ok(
             ctx,
             format!("Cleared the captured traffic of mock {name:?}"),
-            r,
-        ),
-        Err(e) => service_error(&e),
-    }
-}
-
-/// `export_config`.
-pub fn export_config(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
-    let s = svc(ctx, access);
-    match arg_str(args, "name").filter(|n| !n.is_empty()) {
-        Some(name) => match s.export_one(name) {
-            Ok(text) => ok(
-                ctx,
-                format!(
-                    "rustybin.yaml for mock {name:?} ({} bytes){}",
-                    text.len(),
-                    secrets_note(&s, &ctx.app, Some(name))
-                ),
-                json!({ "file_name": format!("{name}.rustybin.yaml"), "yaml": text }),
-            ),
-            Err(e) => service_error(&e),
-        },
-        None => {
-            let text = s.export_all();
-            ok(
-                ctx,
-                format!(
-                    "rustybin.yaml for every mock the caller may see ({} bytes){}",
-                    text.len(),
-                    secrets_note(&s, &ctx.app, None)
-                ),
-                json!({ "file_name": "rustybin.yaml", "yaml": text }),
-            )
-        }
-    }
-}
-
-fn secrets_note(s: &Svc, _state: &AppState, name: Option<&str>) -> &'static str {
-    let reveal = match name {
-        Some(n) => s
-            .readable(n)
-            .map(|snap| s.caller.reveals(&snap))
-            .unwrap_or(false),
-        None => s.caller.admin,
-    };
-    if reveal {
-        ""
-    } else {
-        "; security secrets are redacted (placeholders) because the caller may not change these mocks"
-    }
-}
-
-/// `apply_config` (admin; `prune` confirmed).
-pub async fn apply_config(ctx: &CallCtx, access: &Access, args: &Value, params: &Value) -> Value {
-    let yaml = match need_str(args, "yaml") {
-        Ok(y) => y,
-        Err(e) => return e,
-    };
-    let dry_run = arg_bool(args, "dry_run").unwrap_or(false);
-    let prune = arg_bool(args, "prune").unwrap_or(false);
-    let s = svc(ctx, access);
-    if dry_run {
-        return match s.apply_dry_run(yaml, prune) {
-            Ok(r) => ok(
-                ctx,
-                format!(
-                    "Dry run: would create {}, update {} and delete {} mock(s); {} error(s) in the document",
-                    r["would_create"].as_array().map(|a| a.len()).unwrap_or(0),
-                    r["would_update"].as_array().map(|a| a.len()).unwrap_or(0),
-                    r["would_delete"].as_array().map(|a| a.len()).unwrap_or(0),
-                    r["errors"].as_array().map(|a| a.len()).unwrap_or(0)
-                ),
-                r,
-            ),
-            Err(e) => service_error(&e),
-        };
-    }
-    if prune {
-        let action =
-            "apply the document and delete every API-created mock it does not name (prune)";
-        if let Confirm::Answer(v) = confirm(ctx, "apply_config", args, params, action).await {
-            return v;
-        }
-    }
-    match s.apply(yaml, prune) {
-        Ok(r) => ok(
-            ctx,
-            format!(
-                "Applied: created {}, updated {}, deleted {} mock(s); {} error(s)",
-                r["created"].as_array().map(|a| a.len()).unwrap_or(0),
-                r["updated"].as_array().map(|a| a.len()).unwrap_or(0),
-                r["deleted"].as_array().map(|a| a.len()).unwrap_or(0),
-                r["errors"].as_array().map(|a| a.len()).unwrap_or(0)
-            ),
             r,
         ),
         Err(e) => service_error(&e),

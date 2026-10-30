@@ -48,6 +48,15 @@ pub struct Inspector {
     pub store: store::Store,
 }
 
+impl Inspector {
+    pub fn new(settings: std::sync::Arc<crate::settings::Settings>) -> Self {
+        Self {
+            relay: relay::Relay::default(),
+            store: store::Store::new(settings),
+        }
+    }
+}
+
 /// POST routes the console scope may call (they change nothing on the
 /// instance; outbound calls follow the egress policy).
 pub fn is_console_post(path: &str) -> bool {
@@ -139,15 +148,12 @@ pub fn server_list(
     list
 }
 
-async fn servers(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-) -> Response {
-    let caller = crate::mocks::selfservice::caller(&state, &headers, &extensions);
-    let list = server_list(&state, |s| caller.can_read(s));
+/// The answer of `GET /_rustybin/mcp-servers` for a caller (also the
+/// management tool `list_mcp_servers`).
+pub fn servers_json(state: &AppState, caller: &crate::mocks::selfservice::Caller) -> Value {
+    let list = server_list(state, |s| caller.can_read(s));
     let (allow, _) = state.egress.allowlist();
-    Json(json!({
+    json!({
         "servers": list,
         "relay": {
             "allow": allow.describe(),
@@ -156,8 +162,16 @@ async fn servers(
             "hint": "Servers on this instance are relayed in process. Other hosts need RUSTYBIN_EGRESS_ALLOW (Management, Network); loopback needs the loopback switch.",
         },
         "checks": checks::CHECKS.iter().map(|(id, title)| json!({ "id": id, "title": title })).collect::<Vec<_>>(),
-    }))
-    .into_response()
+    })
+}
+
+async fn servers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+) -> Response {
+    let caller = crate::mocks::selfservice::caller(&state, &headers, &extensions);
+    Json(servers_json(&state, &caller)).into_response()
 }
 
 // ── POST /_rustybin/mcp-checks and the saved runs ───────────────────
@@ -207,6 +221,75 @@ fn junit_response(report: &Value) -> Response {
     resp
 }
 
+/// A check run's specification from a request body: the saved connection's
+/// target and credentials, the body's headers on top, the transport and the
+/// checks to run. Shared by `POST /_rustybin/mcp-checks` and the management
+/// tool `run_mcp_checks`.
+pub fn build_run_spec(
+    inspector: &Inspector,
+    req: ChecksBody,
+    principal: String,
+) -> Result<checks::RunSpec, (StatusCode, String, &'static str)> {
+    let (conn_target, conn_transport, conn_version, mut auth, query) = match &req.connection {
+        Some(id) => match inspector.store.resolve(id) {
+            Some((c, secrets)) => {
+                let (h, q) = store::build_auth(&c.auth, &secrets);
+                (Some(c.target), Some(c.transport), c.version, h, q)
+            }
+            None => {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    format!("no saved connection {id:?}"),
+                    "unknown_connection",
+                ))
+            }
+        },
+        None => (None, None, None, Vec::new(), Vec::new()),
+    };
+    let raw_target = if req.target.is_empty() {
+        conn_target.unwrap_or_default()
+    } else {
+        req.target.clone()
+    };
+    let target = match Target::parse(&raw_target, false) {
+        Ok(t) => t.with_query(&query),
+        Err(e) => return Err((StatusCode::BAD_REQUEST, e, "invalid_target")),
+    };
+    let transport = match Transport::parse(
+        req.transport.as_deref().or(conn_transport.as_deref()),
+        req.version.as_deref().or(conn_version.as_deref()),
+    ) {
+        Ok(t) => t,
+        Err(e) => return Err((StatusCode::BAD_REQUEST, e, "invalid_transport")),
+    };
+    match relay::header_list(&req.headers) {
+        Ok(h) => {
+            for (k, v) in h {
+                auth.retain(|(ak, _)| !ak.eq_ignore_ascii_case(&k));
+                auth.push((k, v));
+            }
+        }
+        Err(e) => return Err((StatusCode::BAD_REQUEST, e, "invalid_headers")),
+    }
+    let only = match checks::parse_only(&req.checks) {
+        Ok(o) => o,
+        Err(e) => return Err((StatusCode::BAD_REQUEST, e, "invalid_checks")),
+    };
+    Ok(checks::RunSpec {
+        target,
+        transport,
+        auth,
+        only,
+        include_destructive: req.include_destructive.unwrap_or(false),
+        max_tools: req
+            .max_tools
+            .unwrap_or(checks::DEFAULT_MAX_TOOLS)
+            .clamp(1, checks::MAX_TOOLS),
+        ai_arguments: req.ai_arguments.unwrap_or(false),
+        principal,
+    })
+}
+
 async fn run_checks(
     State(state): State<AppState>,
     Extension(inspector): Extension<Arc<Inspector>>,
@@ -225,51 +308,6 @@ async fn run_checks(
         Ok(b) => b,
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("expected {{target, transport?, version?, headers?, connection?, checks?, include_destructive?, max_tools?, ai_arguments?, save?, format?}}: {e}"), "invalid_body"),
     };
-    let (conn_target, conn_transport, conn_version, mut auth, query) = match &req.connection {
-        Some(id) => match inspector.store.resolve(id) {
-            Some((c, secrets)) => {
-                let (h, q) = store::build_auth(&c.auth, &secrets);
-                (Some(c.target), Some(c.transport), c.version, h, q)
-            }
-            None => {
-                return error(
-                    StatusCode::NOT_FOUND,
-                    format!("no saved connection {id:?}"),
-                    "unknown_connection",
-                )
-            }
-        },
-        None => (None, None, None, Vec::new(), Vec::new()),
-    };
-    let raw_target = if req.target.is_empty() {
-        conn_target.unwrap_or_default()
-    } else {
-        req.target.clone()
-    };
-    let target = match Target::parse(&raw_target, false) {
-        Ok(t) => t.with_query(&query),
-        Err(e) => return error(StatusCode::BAD_REQUEST, e, "invalid_target"),
-    };
-    let transport = match Transport::parse(
-        req.transport.as_deref().or(conn_transport.as_deref()),
-        req.version.as_deref().or(conn_version.as_deref()),
-    ) {
-        Ok(t) => t,
-        Err(e) => return error(StatusCode::BAD_REQUEST, e, "invalid_transport"),
-    };
-    match relay::header_list(&req.headers) {
-        Ok(h) => {
-            for (k, v) in h {
-                auth.retain(|(ak, _)| !ak.eq_ignore_ascii_case(&k));
-                auth.push((k, v));
-            }
-        }
-        Err(e) => return error(StatusCode::BAD_REQUEST, e, "invalid_headers"),
-    }
-    let only = match checks::parse_only(&req.checks) {
-        Ok(o) => o,
-        Err(e) => return error(StatusCode::BAD_REQUEST, e, "invalid_checks"),
-    };
     let principal = {
         let who = crate::settings::principal(&headers, &state.config);
         if who == "open" {
@@ -283,30 +321,41 @@ async fn run_checks(
             who
         }
     };
-    let spec = checks::RunSpec {
-        target,
-        transport,
-        auth,
-        only,
-        include_destructive: req.include_destructive.unwrap_or(false),
-        max_tools: req
-            .max_tools
-            .unwrap_or(checks::DEFAULT_MAX_TOOLS)
-            .clamp(1, checks::MAX_TOOLS),
-        ai_arguments: req.ai_arguments.unwrap_or(false),
-        principal,
+    let (save, format) = (req.save.unwrap_or(true), req.format.clone());
+    let spec = match build_run_spec(&inspector, req, principal) {
+        Ok(s) => s,
+        Err((status, message, reason)) => return error(status, message, reason),
     };
-    let report = checks::run(&state, spec).await;
-    tracing::info!(target: "rustybin::mcp_inspector", target = %raw_target.split('?').next().unwrap_or(""), ok = %report["ok"], "mcp checks run");
-    if req.save.unwrap_or(true) {
+    let report = run_and_save(&state, &inspector, spec, save).await;
+    if wants_junit(&headers, format.as_deref()) {
+        return junit_response(&report);
+    }
+    Json(report).into_response()
+}
+
+/// Run the checks, log the run and keep its report (unless `save` is
+/// false). Shared with the management tool `run_mcp_checks`.
+pub async fn run_and_save(
+    state: &AppState,
+    inspector: &Inspector,
+    spec: checks::RunSpec,
+    save: bool,
+) -> Value {
+    let target = spec
+        .target
+        .as_str()
+        .split('?')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let report = checks::run(state, spec).await;
+    tracing::info!(target: "rustybin::mcp_inspector", target = %target, ok = %report["ok"], "mcp checks run");
+    if save {
         if let Err(e) = inspector.store.save_run(&report) {
             tracing::warn!(target: "rustybin::mcp_inspector", "check run not saved: {e}");
         }
     }
-    if wants_junit(&headers, req.format.as_deref()) {
-        return junit_response(&report);
-    }
-    Json(report).into_response()
+    report
 }
 
 async fn list_runs(Extension(inspector): Extension<Arc<Inspector>>) -> Response {
@@ -461,10 +510,7 @@ async fn delete_connection(
 // ── Router, catalogue, OpenAPI ──────────────────────────────────────
 
 pub fn router(state: &AppState) -> Router<AppState> {
-    let inspector = Arc::new(Inspector {
-        relay: relay::Relay::default(),
-        store: store::Store::new(state.settings.clone()),
-    });
+    let inspector = state.mcp_inspector.clone();
     Router::new()
         .route(SERVERS_PATH, get(servers))
         .route(RELAY_PATH, post(relay::relay))

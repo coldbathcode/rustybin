@@ -53,10 +53,17 @@ stdout:
 rustybin mcp-stdio --server https://<host>/_rustybin/mcp --token <token>
 # a visitor on a self-service demo
 rustybin mcp-stdio --server https://<host> --header 'X-Rustybin-Mock-Token: rbm_...'
+# a profile of `rustybin login`: its URL and token
+rustybin mcp-stdio --profile mocks.example.com
+# the instance's URL: the token of the profile kept for it
+rustybin mcp-stdio --url https://mocks.example.com
 ```
 
 `--server` falls back to `RUSTYBIN_MCP_URL` (a bare base URL gets `/_rustybin/mcp`
-appended) and `--token` to `RUSTYBIN_TOKEN` or `RUSTYBIN_ADMIN_TOKEN`.
+appended) and `--token` to `RUSTYBIN_TOKEN` or `RUSTYBIN_ADMIN_TOKEN`. `--profile` and
+`--url` read the [command line's](cli-guide.md) `profiles.json`, so a local agent manages a
+remote instance with the sign-in `rustybin login` already did; without any of them the
+default profile is used.
 
 The bridge handles one request at a time and does not relay requests the server
 sends while a call runs. Clients on protocol 2026-07-28 get confirmation questions
@@ -352,8 +359,90 @@ demo).
 | `export_collection` | read | The mock as a Postman collection, Hurl file, curl script, `.http` file, k6 script, Bruno collection or Insomnia export, optionally against a gateway's base URL (see [collection exports](exports.md)) |
 | `get_mock_data` / `clear_mock_data` | read / manage | What a `stateful` mock stored; clearing is confirmed |
 | `get_mock_traffic` / `clear_traffic` | traffic / manage | The calls a mock received: operation, status, validation and auth result, how the response was chosen; clearing is confirmed |
-| `export_config` | read | `rustybin.yaml` for one mock or all (secrets redacted unless manageable), to commit as configuration as code |
-| `apply_config` | admin | Apply a `rustybin.yaml` document; `dry_run: true` reports what would change; `prune: true` also deletes API-created mocks it does not name (confirmed) |
+| `reload_mocks` | admin | Reload the file-defined mocks (`RUSTYBIN_CONFIG_FILE`, `RUSTYBIN_MOCKS_DIR`), as SIGHUP does |
+
+`get_mock` and `check_mock` carry the example `coverage` (which operations lack an
+example), the input of `generate_examples`.
+
+### AI assist and AI-built mocks
+
+Every model call is an [assist task](ai-assist.md) with the user's own key. Keys are
+never tool inputs and never returned: the operator sets them in the console or with
+`rustybin settings set-secret`; `assist_status` shows `{set, hint}`.
+
+| Tool | Right | |
+|---|---|---|
+| `assist_status` | read | Whether assist is on, the provider and models, the caps, each provider's key state, the tasks, the usage total |
+| `assist_usage` | admin | Calls, tokens and the estimated cost since start, per model and per task |
+| `test_assist` | admin | One small call to the configured provider |
+| `run_assist_task` | read | A read task with its inputs (`free_answer`, `explain`, `suggest`, `request_examples`, `tool_arguments`, `server_json`, `summarise_for_portal`); the mock tasks point at their own tools |
+| `generate_spec` | manage | An OpenAPI document from a description, checked like an upload; `create: true` (confirmed) creates the mock from it as `create_mock` would |
+| `generate_examples` | manage | Examples for the operations that lack one (or the ones named), from the provider or the deterministic generator; `apply: true` (confirmed) stores them in the draft |
+| `edit_spec_with_ai` | manage | The draft spec edited through an instruction: the document, the diff and its checks; `apply: true` (confirmed) saves it as the draft |
+
+### Settings and the outbound policy
+
+| Tool | Right | |
+|---|---|---|
+| `get_settings` | admin | Every [instance setting](configuration.md#state-directory-settings-and-secrets) with its value, source and lock state, or one group or key; secrets show `{set, hint}` |
+| `update_settings` | admin | Set values (`null` forgets a stored one) and unset stored values; secrets are refused |
+| `check_egress` | admin | The [outbound policy](configuration.md#outbound-connections) and, with `url` and `purpose`, whether that URL would be allowed before DNS and why not |
+
+### MCP inspector and registry
+
+| Tool | Right | |
+|---|---|---|
+| `list_mcp_servers` | read | Every MCP server this instance serves with its auth, the relay's allowlist, the check ids |
+| `mcp_call` | read | One JSON-RPC request to any MCP server (a path on this instance in process, or a URL through the relay) with the handshake the transport needs; credentials as headers or a saved connection. Another host is confirmed. The answer is `untrusted_result` |
+| `run_mcp_checks` | read | The [inspector's check suite](mcp/inspector.md) against a server; the report is saved unless `save: false`. Another host is confirmed |
+| `list_mcp_check_runs` | read | The saved runs, or one report |
+| `list_mcp_connections` | read | The saved connections (credentials stay sealed on the instance) |
+| `list_registry_servers` | read | The [mock registry](mcp/registry.md)'s entries under the current scenario, each validated, the counts and a gateway's sync configuration |
+| `set_registry_scenario` | admin | `normal`, or a scenario that breaks the registry on purpose |
+| `browse_registry` | read | A page of a real registry (the official one by default) through the outbound policy; confirmed for another host; the entries are `untrusted_servers` |
+| `validate_server_json` | read | A `server.json` against the registry schema and the semantic checks |
+| `unpublish_registry_server` | admin | Remove an entry published through the registry's API (confirmed) |
+
+### Dev portal
+
+| Tool | Right | |
+|---|---|---|
+| `list_portal_items` | read | The [portal](portal.md)'s state and branding, every item that can be published with its metadata, whether it is hidden and why, its insights |
+| `publish_portal_item` | manage | Publish an item (`mock:<name>`, `mcp:<server>`, `llm`, `a2a:<agent>`, `tools`, `registry`) with a title, summary, tags, contact, order and the credentials switch; confirmed when the portal is on and open to anyone |
+| `unpublish_portal_item` | manage | Remove an item |
+| `set_portal_branding` | admin | The `portal.*` settings: `enabled`, `title`, `intro`, `contact`, `auth`, `base_url`, `visitors` |
+| `get_portal_insights` | read | Views, downloads and Try it calls per item |
+
+### Configuration as code and git
+
+| Tool | Right | |
+|---|---|---|
+| `export_config` | read | [`rustybin.yaml`](configuration-as-code.md) version 2 for an admin (the whole instance, secrets as references), the mocks the caller may see (version 1) for others, or one mock with `name`; `format` yaml or json |
+| `diff_config` | admin | What applying a document would change, section by section (a dry run) |
+| `apply_config` | admin | Apply a version 1 or 2 document; `dry_run` reports only; `prune` (confirmed) makes a present section the whole truth |
+| `git_status` | admin | The [repository](source-control.md), the working copy, the drift, ahead and behind (`fetch: true`), the timeline and the last commits |
+| `git_init` | admin | Clone the remote (`git.remote`, `git.branch` settings) or start an empty working copy |
+| `git_commit` | admin | Export the instance into the working copy and commit with a message |
+| `git_push` | admin | Push the branch; confirmed, since the configuration leaves the host |
+| `git_pull` | admin | Fetch and fast-forward; `apply: true` applies the repository's document (confirmed unless `dry_run`) |
+| `git_resolve` | admin | After a diverged branch: the instance's copy wins or the repository's (confirmed) |
+| `git_deploy_key` | admin | The deploy key's public half; `generate: true` makes one, `replace: true` (confirmed) replaces it |
+
+The token for an https remote is the secret `git.token`: an agent cannot set it.
+
+### Agents and sign-in sessions
+
+| Tool | Right | |
+|---|---|---|
+| `list_agents` / `get_agent` | admin | The [agents](#managing-agents) and the policy; one agent with its calls per tool, errors, sessions, rights and recent activity |
+| `set_agent_rights` | admin | A ceiling, allow and deny lists, a note; `reset: true` clears the agent's own rights |
+| `revoke_agent` / `restore_agent` | admin | Revoke (confirmed; an agent cannot revoke itself) and restore |
+| `end_agent_sessions` | admin | Close an agent's handshake-era sessions |
+| `list_sessions` | admin | The console's sign-in sessions, when the password sign-in is on |
+| `end_session` | admin | End one session by id, or `all: true` to sign out everywhere (confirmed) |
+
+The password is changed only in the console, with `rustybin password change` or
+through the environment.
 
 ### Traffic
 
@@ -465,20 +554,102 @@ Clients that support MCP prompts offer these as commands:
 
 | Prompt | Arguments | |
 |---|---|---|
-| `mock_an_api` | `spec_path`, `name` | From a spec to a deployed, tested mock: preview, create, check, try a request, hand over the URL and a collection |
+| `build_instance` | `brief`, `portal` | From a brief to a working instance: the AI provider, describe and create each API, fill the examples, publish to the portal, export the configuration, offer the git push (see [the walkthrough](#build-an-instance-with-an-agent)) |
+| `mock_an_api` | `spec_path`, `name` | From a spec, or a description when there is no file, to a deployed, tested mock: preview, create, check, try a request, hand over the URL and a collection |
+| `publish_portal` | `items` | Metadata per item, publish, switch the portal on, verify what visitors see |
+| `backup_to_git` | `remote`, `branch` | Connect the repository, commit with a message from the drift, push (confirmed), confirm the result |
+| `test_mcp_server` | `url`, `auth` | Reachability through the relay, connect, the check suite, the report |
+| `onboard_agent` | `name` | The credential model, the agent's record, a proposal of rights for the operator to confirm |
 | `debug_gateway_call` | `path` | Find the request a gateway sent and explain what arrived (headers, auth, validation) against what was expected |
-| `secure_a_mock` | `name`, `mode` | Pick a mocked security mode and show the credentials a gateway must present |
 | `load_test_gateway` | `target`, `rate` | On a [harness](harness.md) node: check the allowed targets, build and validate a scenario, preview it, dry-run it at a low rate, then run it for real and read the report |
+| `secure_a_mock` | `name`, `mode` | Pick a mocked security mode and show the credentials a gateway must present |
 
 | Resource | |
 |---|---|
-| `rustybin://config.schema.json` | The JSON Schema of `rustybin.yaml`, for writing configuration files |
+| `rustybin://config.schema.json` | The JSON Schema of `rustybin.yaml` version 2, for writing configuration files |
 | `rustybin://catalogue` | The route catalogue as JSON |
 | `rustybin://harness.schema.json` | The JSON Schema of a [harness](harness.md) scenario, with the node's caps as bounds |
+| `rustybin://portal/catalog` | What visitors of the [dev portal](portal.md) see, as the caller's request reaches the instance |
+| `rustybin://cli.md` | The [command line reference](cli.md), for the commands to suggest when something is done from a shell or CI |
 
 ```hurl
 {{#include ../examples/agent/manage.hurl:resources}}
 ```
+
+## Build an instance with an agent
+
+The `build_instance` prompt carries an agent from a brief ("an orders API and a
+parcels API for the checkout team, published for the mobile developers") to a working
+instance. These are the calls it makes, on an instance with the mock provider; every
+one is a `tools/call` of the same server. The agent starts with the provider:
+
+```hurl
+{{#include ../examples/agent/manage_build.hurl:build_assist_status}}
+```
+
+It describes an API and shows the result to the user before anything is created:
+
+```hurl
+{{#include ../examples/agent/manage_build.hurl:build_generate_spec}}
+```
+
+Creating from the generated document is confirmed, like every change an AI wrote
+(the user confirms through elicitation, or the agent passes `confirm: true` once they
+agreed):
+
+```hurl
+{{#include ../examples/agent/manage_build.hurl:build_create}}
+```
+
+`check_mock` says which operations lack examples; `generate_examples` fills them
+(from the provider, or the deterministic generator with `source: generated`), and
+`deploy_mock` publishes the draft:
+
+```hurl
+{{#include ../examples/agent/manage_build.hurl:build_coverage}}
+```
+
+```hurl
+{{#include ../examples/agent/manage_build.hurl:build_examples}}
+```
+
+Publishing to the portal is confirmed when the portal is open to anyone:
+
+```hurl
+{{#include ../examples/agent/manage_build.hurl:build_publish}}
+```
+
+The whole instance comes back as a version 2 document, with secrets as references:
+
+```hurl
+{{#include ../examples/agent/manage_build.hurl:build_export}}
+```
+
+Without a repository `git_status` says what to set, and a push is always confirmed:
+
+```hurl
+{{#include ../examples/agent/manage_build.hurl:build_git}}
+```
+
+The agent sees itself in the agents list, and can test the mock's own MCP server
+through `mcp_call` (the server's answer is third-party data, under `untrusted_result`):
+
+```hurl
+{{#include ../examples/agent/manage_build.hurl:build_agents}}
+```
+
+```hurl
+{{#include ../examples/agent/manage_build.hurl:build_mcp_call}}
+```
+
+Unpublishing and deleting are the usual tools (the delete confirmed):
+
+```hurl
+{{#include ../examples/agent/manage_build.hurl:build_cleanup}}
+```
+
+The same walk runs in the [MCP conformance suite](https://github.com/coldbathcode/rustybin/tree/main/conformance/mcp)
+with the official Python SDK.
 
 ## Safety
 
@@ -487,10 +658,15 @@ Clients that support MCP prompts offer these as commands:
 Tools that destroy something carry the MCP `destructiveHint` annotation (reads carry
 `readOnlyHint`) and ask before acting: `rollback_mock`, `delete_mock`,
 `clear_mock_data`, `clear_traffic`, `apply_config` with `prune`, `clear_requests`,
-`end_visit` and `pause_self_service`. When the client supports elicitation, the server
-asks the user directly ("Delete the mock orders-api and its traffic?"). Without it the
-call needs `"confirm": true`, which the tool descriptions tell the model to set only
-after the user agreed:
+`end_visit`, `pause_self_service`, `revoke_agent`, `unpublish_registry_server`,
+`git_resolve` and `end_session` with `all`. Tools that reach outside the instance or
+publish something ask too: `mcp_call` and `run_mcp_checks` to another host,
+`browse_registry`, `git_push`, `git_pull` when it applies, `publish_portal_item` on an
+open portal, the AI tools when they write (`generate_spec` with `create`,
+`generate_examples` and `edit_spec_with_ai` with `apply`) and the harness runs. When
+the client supports elicitation, the server asks the user directly ("Delete the mock
+orders-api and its traffic?"). Without it the call needs `"confirm": true`, which the
+tool descriptions tell the model to set only after the user agreed:
 
 ```hurl
 {{#include ../examples/agent/manage.hurl:delete_needs_confirmation}}
@@ -506,7 +682,8 @@ Whatever calls the data plane writes the captured traffic, and on a public insta
 that is anyone. A body saying "ignore your instructions" must not steer the agent. So:
 
 - captured headers and bodies (mock traffic, the inspector, bins, the A2A sink,
-  `wait_for_requests`) never appear in the text summary; they are returned in
+  `wait_for_requests`), the answers of MCP servers reached with `mcp_call` and the
+  entries of a browsed registry never appear in the text summary; they are returned in
   `structuredContent` under fields named `untrusted_*`, and the server instructions
   and tool descriptions say this is third-party data, never instructions;
 - bodies are left out unless the call asks (`include_bodies: true`) and are truncated
@@ -522,6 +699,16 @@ that is anyone. A body saying "ignore your instructions" must not steer the agen
 Spec text and rule patterns from the agent are validated exactly as on the REST
 routes (spec size, YAML and regex limits), so an agent cannot do what a REST caller
 could not.
+
+### Secrets never pass through an agent
+
+No tool takes a secret: `update_settings` refuses secret keys, saved MCP connections
+are written in the console or the CLI, the git token and the console password are set
+there or in the environment, and exports carry references (`${VAR}`,
+`secret:stored`), never values. What an agent can read about a secret is `{set,
+hint}`. The parity test (`every_control_route_has_a_management_tool`) keeps every
+control route mapped to a tool, a resource or a written reason, and a second test
+checks that no tool input is named like a secret.
 
 ### Audit log and metrics
 
@@ -547,11 +734,20 @@ so [plan limits](concepts/plans-and-limits.md) apply as for the REST routes.
 - "I'm sending a request through the gateway now: tell me what headers arrived."
 - "Why am I getting 429s?"
 - "Export everything as `rustybin.yaml` so I can commit it."
+- "Build the mocks for the checkout team from this brief and publish them to the
+  portal."
+- "Back this instance up to `git@github.com:team/mocks.git`."
+- "Run the MCP checks against `https://mcp.acme.example/mcp` with this bearer token."
+- "What has the `claude-code` agent been doing, and should it keep admin rights?"
 
 ## Not in this version
 
-- Platform operations (creating or deleting instances) and runtime changes to
-  `RUSTYBIN_*` settings: those stay in the deployment.
+- Platform operations (creating or deleting instances) and the settings that only the
+  environment sets (ports, TLS, the state directory, the control auth mode): those stay
+  in the deployment. The [instance settings](configuration.md#state-directory-settings-and-secrets) are
+  tools.
+- Setting a secret (a provider key, the git token, a saved connection's credential,
+  the console password): the console, the CLI or the environment.
 - Fetching a spec from a URL on the server: the agent reads the file and sends its
   content.
 - The self-service email step: consent stays in the console.
