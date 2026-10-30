@@ -1,6 +1,6 @@
 [package]
 name = "rustybin"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.88"
 description = "HTTP stub service for API and AI gateway demos"

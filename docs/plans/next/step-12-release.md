@@ -97,6 +97,13 @@ Built 2026-10-30 in one session. Where the build differs from the design above, 
   cosign values (issuer, identity regexp) a platform verifies with. The digest is recorded in
   the changelog after the publish run, in a commit after the tag (the tag's run is what
   produces it).
+- **Found by testing the published image** (after the release): `/portal` answered "portal
+  assets are not embedded in this build" because the Dockerfile never copied `ui-portal/`
+  into the build context (step 07 added the directory and `build.rs` embeds it, but the
+  Dockerfile lists what it copies). Fixed in 0.2.1 the same day, with `RUSTYBIN_PORTAL=on`
+  and a `/portal/` check in both image smoke tests so an embedded surface cannot go missing
+  again. Lesson for the next plan: a new embedded directory is a Dockerfile change and a
+  smoke test line in the same step.
 - **Checks run**: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (1090
   lib tests plus the integration tests), `python3 docs/tools/check_includes.py` (559 includes,
   0 problems), `mdbook build docs`, `scripts/check-no-dashes.sh`, `docs/examples/run.sh` (60

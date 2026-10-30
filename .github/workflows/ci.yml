@@ -109,7 +109,7 @@ jobs:
           # Hardened: non-root, read-only root filesystem, no capabilities;
           # only /app/certs (demo PKI, usage file) is writable.
           docker run -d --name rb --read-only --cap-drop ALL --security-opt no-new-privileges \
-            -v rb-certs:/app/certs -e RUSTYBIN_USAGE_FILE=/app/certs/usage.json -p 8080:80 rustybin:ci
+            -v rb-certs:/app/certs -e RUSTYBIN_USAGE_FILE=/app/certs/usage.json -e RUSTYBIN_PORTAL=on -p 8080:80 rustybin:ci
           for i in $(seq 1 60); do curl -fs http://localhost:8080/_rustybin/ready >/dev/null && break; sleep 1; done
           curl -fsS http://localhost:8080/health
           test "$(docker exec rb id -u)" = 10001
@@ -119,8 +119,9 @@ jobs:
           TOKEN="$(curl -fsS -X POST http://localhost:8080/_rustybin/login -H 'Content-Type: application/json' \
             -d '{"username":"rustybin","password":"rustybin"}' | jq -r .token)"
           curl -fsS -H "Authorization: Bearer $TOKEN" http://localhost:8080/_rustybin/version | grep -q "${GITHUB_SHA:0:12}"
-          # The console must be embedded in the image.
+          # The console and the dev portal must be embedded in the image.
           curl -fsS http://localhost:8080/ui/ | grep -q '<html'
+          curl -fsS http://localhost:8080/portal/ | grep -q '<html'
           curl -fsS -H "Authorization: Bearer $TOKEN" http://localhost:8080/_rustybin/catalog >/dev/null
           docker logs rb 2>&1 | grep -q "default password"
           docker logs rb

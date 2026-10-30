@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 (2026-10-30): the dev portal in the container image
+
+- **Fix: the published 0.2.0 image served no dev portal.** `/portal` answered "portal
+  assets are not embedded in this build": the Dockerfile copied `ui/` into the build
+  context but not `ui-portal/`, so the portal SPA was embedded empty (a `cargo build`
+  from a checkout was fine). The Dockerfile copies `ui-portal/` now, and the image smoke
+  tests of CI and the publish workflow start the container with `RUSTYBIN_PORTAL=on` and
+  require `/portal/` to answer the page. No other change.
+
 ## 0.2.0 (2026-10-30): the AI-assisted mocking service
 
 Rustybin becomes a mocking and testing service a team runs: set up by describing what

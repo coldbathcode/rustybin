@@ -17,14 +17,17 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs && touch src/lib.rs && \
     rm -rf src
 
 # Build the real binary (lib + bin); build.rs embeds the web console from ui/
+# and the dev portal from ui-portal/ (both must be in the build context, or the
+# binary serves an empty console or a portal that says it is not embedded).
 COPY ui/ ui/
+COPY ui-portal/ ui-portal/
 COPY src/ src/
 # Commit reported by /_rustybin/version and the metrics (the build context has
 # no .git): docker build --build-arg RUSTYBIN_GIT_SHA=<commit> . Declared here,
 # after the dependency layer, so a new commit does not invalidate that cache.
 ARG RUSTYBIN_GIT_SHA=""
 # Touch build.rs too: COPY keeps old mtimes, so without it Cargo would not
-# rerun the build script and the console (ui/) would be embedded empty.
+# rerun the build script and the console (ui/) and portal (ui-portal/) would be embedded empty.
 RUN touch src/main.rs src/lib.rs build.rs && \
     RUSTYBIN_GIT_SHA="$RUSTYBIN_GIT_SHA" cargo build --release --locked --features "$CARGO_FEATURES"
 
