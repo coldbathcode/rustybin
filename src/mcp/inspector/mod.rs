@@ -95,11 +95,12 @@ fn mock_auth(settings: &crate::mocks::model::SecuritySettings, declares: bool) -
     }
 }
 
-async fn servers(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    extensions: Extensions,
-) -> Response {
+/// Every MCP server this instance serves, the mocks' servers filtered by
+/// `can_read` (the inspector: the caller's; the registry: the instance's).
+pub fn server_list(
+    state: &AppState,
+    can_read: impl Fn(&crate::mocks::store::Snapshot) -> bool,
+) -> Vec<Value> {
     let mut list = vec![
         json!({ "id": "mcp", "path": "/mcp", "kind": "mock-mcp", "title": "Mock MCP server (open)", "transports": ["modern", "session"], "versions": versions(), "auth": { "kind": "none" }, "state": "serving" }),
         json!({ "id": "mcp-protected", "path": "/mcp/protected", "kind": "mock-mcp", "title": "Mock MCP server behind OAuth 2.1", "transports": ["modern", "session"], "versions": versions(), "auth": { "kind": "oauth", "hint": "discovery from the 401 (RFC 9728), the built-in identity provider" }, "state": "serving" }),
@@ -116,9 +117,8 @@ async fn servers(
         }
     };
     list.push(json!({ "id": "manage", "path": crate::mcp::manage::MANAGE_PATH, "kind": "manage", "title": "Management MCP server (configures this instance)", "transports": ["modern", "session"], "versions": versions(), "auth": manage_auth, "state": "serving" }));
-    let caller = crate::mocks::selfservice::caller(&state, &headers, &extensions);
     for s in state.mocks.list() {
-        if !caller.can_read(&s) {
+        if !can_read(&s) {
             continue;
         }
         let c = s.live.as_ref().unwrap_or(&s.draft);
@@ -136,6 +136,16 @@ async fn servers(
             "tools": c.mcp_tools().tools.len(),
         }));
     }
+    list
+}
+
+async fn servers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+) -> Response {
+    let caller = crate::mocks::selfservice::caller(&state, &headers, &extensions);
+    let list = server_list(&state, |s| caller.can_read(s));
     let (allow, _) = state.egress.allowlist();
     Json(json!({
         "servers": list,

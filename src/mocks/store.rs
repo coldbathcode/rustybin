@@ -271,6 +271,10 @@ pub struct MockStore {
     persist_dir: Option<Arc<PathBuf>>,
     /// Self-service visits (`RUSTYBIN_MOCKS_SELF_SERVICE`).
     visits: Option<Arc<Visits>>,
+    /// The `registry.servers` of `rustybin.yaml` (validated `server.json`
+    /// documents, at most `mcp::registry::MAX_USER_ENTRIES`) and when they
+    /// were loaded: the mock MCP registry lists them.
+    file_registry: Arc<RwLock<(Vec<Value>, DateTime<Utc>)>>,
 }
 
 impl MockStore {
@@ -286,7 +290,24 @@ impl MockStore {
             limits,
             persist_dir: None,
             visits: None,
+            file_registry: Arc::new(RwLock::new((Vec::new(), Utc::now()))),
         }
+    }
+
+    /// Replace the registry entries of the config file.
+    pub fn set_file_registry(&self, servers: Vec<Value>) {
+        *self
+            .file_registry
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = (servers, Utc::now());
+    }
+
+    /// The registry entries of the config file and when they were loaded.
+    pub fn file_registry(&self) -> (Vec<Value>, DateTime<Utc>) {
+        self.file_registry
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Turn on self-service: visit-owned mocks live as long as their visit.

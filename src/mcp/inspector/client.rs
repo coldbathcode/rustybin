@@ -198,7 +198,7 @@ pub async fn send(
     }
 }
 
-async fn send_local(
+pub(crate) async fn send_local(
     state: &AppState,
     path: &str,
     method: &str,

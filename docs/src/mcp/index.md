@@ -18,6 +18,7 @@ Inspector CLI) in `conformance/mcp/`.
 | `GET /mcp/sse` + `POST /mcp/messages?sessionId=` | Legacy HTTP+SSE transport (2024-11-05) |
 | `GET /.well-known/oauth-protected-resource` and `.../oauth-protected-resource/mcp/protected` | RFC 9728 metadata of `/mcp/protected` |
 | `POST, GET, DELETE /mock/{name}/_rustybin/mcp` | The MCP server of an [OpenAPI mock](../mocks/mcp.md): the customer's own operations as tools instead of fake data |
+| `GET /mcp-registry/v0.1/servers` and the rest of the registry API | A [mock MCP registry](registry.md) listing every server above, with scenarios that break a registry sync on purpose |
 
 Every Streamable HTTP response carries `X-Rustybin-Mcp-Server`,
 `X-Rustybin-Mcp-Session` (`stateless` for 2026-07-28 requests),

@@ -404,6 +404,8 @@ function networkPanel(doc, reload, error) {
     el.appendChild(card('Policy as the instance sees it', { hint: 'the merged list, each feature, the last 100 decisions' }, policyEl));
     const leads = settingsForm(doc, 'leads', { saveLabel: 'Save leads webhook settings', onSaved: reload });
     el.appendChild(card('Leads webhook', { hint: 'self-service mocks' }, leads.el));
+    const registry = settingsForm(doc, 'registry', { saveLabel: 'Save registry settings', onSaved: reload });
+    el.appendChild(card('MCP registry', { hint: 'the mock registry\'s scenario, registries to browse', actions: h('a', { class: 'btn sm', href: '#/registry' }, 'Open the registry view') }, registry.el));
   } else {
     el.appendChild(card('Outbound connections', {}, loadError(error)));
   }

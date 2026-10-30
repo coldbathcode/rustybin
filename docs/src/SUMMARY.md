@@ -59,6 +59,7 @@
   - [Guardrails and content safety](ai/guardrails.md)
 - [MCP server](mcp/index.md)
   - [MCP inspector](mcp/inspector.md)
+  - [MCP registry](mcp/registry.md)
 - [A2A agents](a2a/index.md)
 
 # Using Rustybin

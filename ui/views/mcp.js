@@ -796,6 +796,23 @@ export default {
     }
 
     function route(r) {
+      // From the registry view: url/<auth kind>/<header name or ->/<modern|legacy>/<url>.
+      const u = /^url\/([a-z_]+)\/([^/]*)\/(modern|legacy)\/(.+)$/.exec(r || '');
+      if (u) {
+        st.source = 'url';
+        st.url = u[4];
+        urlIn.value = st.url;
+        sourceSeg.set('url');
+        // Registry remotes are rarely CORS-enabled: the relay connects.
+        st.mode = 'relay';
+        modeSeg.set('relay');
+        st.auth.kind = MODES.some(([k]) => k === u[1]) ? u[1] : 'none';
+        if (st.auth.kind === 'api_key') { st.auth.name = decodeURIComponent(u[2]) === '-' ? 'X-API-Key' : decodeURIComponent(u[2]); st.auth.location = 'header'; }
+        st.version = u[3] === 'legacy' ? '2024-11-05' : MODERN;
+        versionSel.value = st.version;
+        renderLeft();
+        return;
+      }
       const m = /^server\/(.+)$/.exec(r || '');
       if (m) {
         const path = decodeURIComponent(m[1]);

@@ -1,6 +1,6 @@
 # Master plan: Rustybin 0.2, the AI-assisted mocking service
 
-Planned 2026-10-29. Status: **in progress: steps 01 to 04 done**. The build marker is the status table in
+Planned 2026-10-29. Status: **in progress: steps 01 to 06 done**. The build marker is the status table in
 section 4; every step has its own file in this folder and this file is the one to read first in
 every session.
 
@@ -96,7 +96,7 @@ The marker a new session looks for is the first row that is not done.
 | [03](step-03-ai-assist.md) | AI assist: providers, keys, the assist bar | 01, 02 | 2.5 | done 2026-10-29 |
 | [04](step-04-ai-mocks.md) | AI mocks: specs from a prompt, examples, AI edit | 03 | 3 | done 2026-10-29 |
 | [05](step-05-mcp-inspector.md) | MCP inspector for any server, every auth mode, test runs | 01, 03 | 3 | done 2026-10-30 |
-| [06](step-06-mcp-registry.md) | MCP registry: a mock registry and inspecting real ones | 05 | 1.5 | not started |
+| [06](step-06-mcp-registry.md) | MCP registry: a mock registry and inspecting real ones | 05 | 1.5 | done 2026-10-30 |
 | [07](step-07-dev-portal.md) | Dev portal: publish and consume | 01, 02 | 3 | not started |
 | [08](step-08-agents.md) | AI agents: who talks to the instance over MCP | 01, 02 | 2 | not started |
 | [09](step-09-config-and-source-control.md) | The whole instance as YAML, and git | 01, 07, 08 | 3 | not started |

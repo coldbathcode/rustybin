@@ -14,8 +14,8 @@ pub const MAX_TEXT_CHARS: usize = 8_000;
 pub const MAX_CONTEXT_BYTES: usize = 32 * 1024;
 /// The views the console has (for `open_view` and the suggestions).
 pub const VIEWS: &[&str] = &[
-    "overview", "traffic", "mocks", "bins", "explorer", "manage", "ai", "mcp", "a2a", "chaos",
-    "harness", "tokens",
+    "overview", "traffic", "mocks", "bins", "explorer", "manage", "ai", "mcp", "registry", "a2a",
+    "chaos", "harness", "tokens",
 ];
 
 /// A task's post-check: `(inputs, answer) -> transformed answer | repair message`.

@@ -42,6 +42,9 @@ function valueControl(setting) {
   if (type === 'boolean') {
     ctl = select([['false', 'Off'], ['true', 'On']], initial ? 'true' : 'false', props);
     read = () => ctl.value === 'true';
+  } else if (Array.isArray(schema.enum)) {
+    ctl = select(schema.enum.map((v) => [v, v]), initial === null || initial === undefined ? setting.default : initial, props);
+    read = () => ctl.value;
   } else if (type === 'integer' || type === 'number') {
     ctl = input(Object.assign({ type: 'number', class: 'input mono', value: initial === null || initial === undefined ? '' : String(initial), min: schema.minimum, max: schema.maximum, step: type === 'integer' ? '1' : 'any' }, props));
     read = () => (ctl.value === '' ? null : Number(ctl.value));

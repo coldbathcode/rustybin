@@ -213,6 +213,7 @@ fn is_read_only_post(path: &str) -> bool {
     if path == "/_rustybin/mocks/import"
         || path == crate::assist::RUN_PATH
         || crate::mcp::inspector::is_console_post(path)
+        || crate::mcp::registry::is_console_post(path)
     {
         return true;
     }

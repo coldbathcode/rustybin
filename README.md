@@ -416,6 +416,19 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 
 | Methods | Path | Description |
 |---|---|---|
+| GET | `/mcp-registry` | Mock MCP registry: what it is and where its API lives |
+| GET | `/mcp-registry/v0.1/servers` | Mock MCP registry: list servers (one record per version; cursor, limit, search, updated_since, version, include_deleted) |
+| GET | `/mcp-registry/v0.1/servers/{serverName}/versions` | Mock MCP registry: every version of a server (the name URL-encoded) |
+| GET | `/mcp-registry/v0.1/servers/{serverName}/versions/{version}` | Mock MCP registry: one version of a server (latest for the latest) |
+| PATCH | `/mcp-registry/v0.1/servers/{serverName}/versions/{version}/status` | Mock MCP registry: change the status of a published version (active, deprecated, deleted; registry token) |
+| PATCH | `/mcp-registry/v0.1/servers/{serverName}/status` | Mock MCP registry: change the status of every published version of a server (registry token) |
+| POST | `/mcp-registry/v0.1/publish` | Mock MCP registry: publish a server.json (Authorization: Bearer <token from auth/*>) |
+| POST | `/mcp-registry/v0.1/validate` | Mock MCP registry: validate a server.json against the vendored schema ({valid, issues}) |
+| POST | `/mcp-registry/v0.1/auth/{method}` | Mock MCP registry: token exchange stubs (github-at, github-oidc, oidc, dns, http, none) that always succeed, or fail in the auth_fail scenario |
+| GET | `/mcp-registry/v0.1/health` | Mock MCP registry: health |
+| GET | `/mcp-registry/v0.1/ping` | Mock MCP registry: ping |
+| GET | `/mcp-registry/v0.1/version` | Mock MCP registry: version |
+| ANY | `/mcp-registry/v0/{*path}` | Mock MCP registry: the same API under /v0 |
 | POST GET DELETE | `/mcp` | MCP Streamable HTTP server (2026-07-28 stateless + 2025-xx sessions) |
 | POST GET DELETE | `/mcp/protected` | MCP server behind OAuth 2.1 bearer auth (MCP authorization spec) |
 | POST GET DELETE | `/mcp/apikey` | MCP server requiring an X-API-Key header |
@@ -602,6 +615,10 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET DELETE | `/_rustybin/mcp-checks/{id}` | MCP inspector: one saved check run (format=junit for JUnit) |
 | GET | `/_rustybin/mcp-connections` | MCP inspector: saved connections (credentials as {set, hint}) |
 | GET PUT DELETE | `/_rustybin/mcp-connections/{id}` | MCP inspector: one saved connection; PUT and DELETE need admin |
+| GET | `/_rustybin/registry` | Mock MCP registry: entries with their source and validity, the scenario, the sync snippet |
+| DELETE | `/_rustybin/registry/servers/{serverName}` | Mock MCP registry: remove a published entry (all versions, or ?version=); admin |
+| POST | `/_rustybin/registry/validate` | Validate a server.json document against the vendored schema and the registry's semantic checks |
+| GET | `/_rustybin/registry/browse` | Browse an MCP registry (url, search, cursor, limit, version) through the egress policy; entries with their remotes |
 | GET | `/.well-known/oauth-protected-resource/_rustybin/mcp` | Management MCP: protected resource metadata (RFC 9728) |
 | GET | `/.well-known/oauth-authorization-server/_rustybin/oauth` | Management MCP sign-in: authorization server metadata (RFC 8414) |
 | GET | `/.well-known/openid-configuration/_rustybin/oauth` | Management MCP sign-in: the same metadata at the OpenID Connect discovery path |

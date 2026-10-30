@@ -152,8 +152,8 @@ time where they are checked, returned by the API only as `{ "set": true, "hint":
 "k3Qx" }` (the last four characters, and only for secrets of eight characters or
 more), never written to a configuration export in the clear, and never settable
 through the management MCP. The settings of this release: `console.title`,
-`console.backlink`, `egress.allow`, `egress.allow_loopback` and the secret
-`leads.webhook_token`; later features register their own (the AI provider key, the
+`console.backlink`, `egress.allow`, `egress.allow_loopback`, `registry.scenario`,
+`registry.saved` and the secret `leads.webhook_token`; later features register their own (the AI provider key, the
 git token, the portal).
 
 ## Outbound connections
@@ -181,7 +181,7 @@ under a **purpose** with its own rule, on only when the feature is configured:
 | `a2a_push` | `RUSTYBIN_A2A_PUSH_ALLOWLIST`; `RUSTYBIN_A2A_PUSH_ALLOW_ALL` lets it reach any host outside public mode (link-local and metadata addresses stay refused). Loopback allowed when listed. |
 | `leads` | The host and port of `RUSTYBIN_LEADS_WEBHOOK_URL`. Loopback allowed. |
 | `key_registry` | The host and port of `RUSTYBIN_KEYS_URL`. Loopback allowed. |
-| `registry` | `registry.modelcontextprotocol.io` (the MCP registry). |
+| `registry` | `registry.modelcontextprotocol.io` (the MCP registry) and the hosts of the saved registries (`registry.saved`), for [browsing a registry](mcp/registry.md#browsing-a-real-registry). |
 | `assist` | The [AI assist](ai-assist.md) provider's host once its key is set (`api.anthropic.com`, `api.openai.com`, `generativelanguage.googleapis.com`, the compatible base URL's host). |
 | `git` | The git remote's host once configured (a later release). |
 | `mcp_relay` | No default: name the MCP servers the [inspector](mcp/inspector.md) may relay to and run checks against in `RUSTYBIN_EGRESS_ALLOW`. This instance's own MCP servers are relayed in process and need no entry. |
@@ -288,6 +288,8 @@ Read when the server starts.
 | `RUSTYBIN_MCP_ACCEPTED_AUDIENCES` | `rustybin` | Token audiences `/mcp/protected` accepts besides its own resource URL. The default is the identity provider's default audience, so a plain `client_credentials` token works. `none` accepts only tokens issued for the resource (strict RFC 8707). |
 | `RUSTYBIN_MCP_RESOURCE_URL` | derived | Override the resource identifier of `/mcp/protected` (by default `<scheme>://<host>/mcp/protected` from the request). Set it to the gateway's public URL when the gateway does not forward `Host`. |
 | `RUSTYBIN_MCP_CLOCK_TICK_SECS` | `5` | Update interval of the subscribable `rustybin://clock` resource (1 to 3600). |
+| `RUSTYBIN_REGISTRY_SCENARIO` | `normal` | The [mock MCP registry](mcp/registry.md#scenarios)'s scenario: `normal`, `empty`, `large`, `flaky`, `slow`, `stale`, `invalid` or `auth_fail` (an invalid value warns and is ignored). Seeds the `registry.scenario` setting. |
+| `RUSTYBIN_REGISTRY_SAVED` | unset | Comma-separated registry base URLs the console offers under Browse a registry; their hosts are allowed for browsing. Seeds the `registry.saved` setting. |
 
 ## Mock LLM
 

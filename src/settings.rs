@@ -86,6 +86,10 @@ pub enum Kind {
         max_items: usize,
         max_len: usize,
     },
+    /// One of a fixed set of strings (a select in the console).
+    Choice {
+        options: &'static [&'static str],
+    },
 }
 
 impl Kind {
@@ -103,6 +107,7 @@ impl Kind {
                 "items": { "type": "string", "maxLength": max_len },
                 "maxItems": max_items
             }),
+            Kind::Choice { options } => json!({ "type": "string", "enum": options }),
         }
     }
 
@@ -179,6 +184,14 @@ impl Kind {
                     return Err(format!("{long:?} is longer than {max_len} characters"));
                 }
                 Ok(Value::Array(items.into_iter().map(Value::String).collect()))
+            }
+            Kind::Choice { options } => {
+                let s = value.as_str().ok_or("expected a string")?.trim();
+                if options.contains(&s) {
+                    Ok(Value::String(s.to_string()))
+                } else {
+                    Err(format!("expected one of {}", options.join(", ")))
+                }
             }
         }
     }
@@ -298,6 +311,11 @@ pub fn groups() -> Vec<Group> {
             description: "Where this instance may send requests of its own (AI providers, webhooks, registries, git remotes).",
         },
         Group {
+            id: "registry",
+            title: "MCP registry",
+            description: "The mock MCP registry at /mcp-registry (its scenario) and the real registries the console browses.",
+        },
+        Group {
             id: "leads",
             title: "Leads webhook",
             description: "The webhook that receives the email leads of self-service mocks.",
@@ -339,6 +357,7 @@ pub fn specs() -> Vec<Spec> {
     all.extend(crate::login::specs());
     all.extend(crate::assist::specs());
     all.extend(crate::egress::specs());
+    all.extend(crate::mcp::registry::specs());
     all.extend(crate::mocks::leads::specs());
     all
 }

@@ -161,7 +161,7 @@ def run_theme(browser, theme):
         page.wait_for_selector("text=Requests captured")
         page.wait_for_selector("text=What Rustybin sees of this browser")
         page.wait_for_selector(".url-row code")
-        expect(page.locator(".nav-link")).to_have_count(11)
+        expect(page.locator(".nav-link")).to_have_count(12)
         # No plan configured (RUSTYBIN_PLAN=none): no "Plan and usage" card.
         expect(page.locator("text=Plan and usage")).to_have_count(0)
         # AI assist with the mock provider: the Ask card offers suggestions.
@@ -592,6 +592,53 @@ def run_theme(browser, theme):
 
     step("mcp inspector", mcp)
 
+    def registry():
+        goto_view(page, "registry")
+        page.locator("#registry-entries tr[data-name='io.rustybin/mock-petstore']").wait_for()
+        expect(page.locator("#registry-base")).to_contain_text("/mcp-registry")
+        # The publish form validates as you type, then publishes with an auth stub.
+        doc = page.locator("#registry-publish-doc")
+        doc.fill('{"name": "bad"}')
+        expect(page.locator("#registry-publish-issues")).to_contain_text("description")
+        name = f"io.example/e2e-{theme}"
+        doc.fill(json.dumps({
+            "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+            "name": name, "description": "Published by the console check", "version": "1.0.0",
+            "remotes": [{"type": "streamable-http", "url": "https://mcp.example.com/mcp"}],
+        }))
+        expect(page.locator("#registry-publish-issues")).to_contain_text("Valid against")
+        page.select_option("#registry-publish-auth", "dns")
+        page.locator("#registry-publish").click()
+        page.locator(f"#registry-entries tr[data-name='{name}']").wait_for()
+        with urllib.request.urlopen(BASE + "/mcp-registry/v0.1/servers/" + urllib.parse.quote(name, safe="") + "/versions/latest", timeout=10) as r:
+            assert json.load(r)["server"]["name"] == name
+        # AI: a server.json for the petstore mock (the built-in mock provider).
+        page.locator("#registry-write-server-json").click()
+        expect(doc).to_have_value(re.compile("mock-petstore"))
+        expect(page.locator("#registry-publish-issues")).to_contain_text("Valid against")
+        # The scenario picker breaks the registry on purpose.
+        page.select_option("#registry-scenario", "empty")
+        page.wait_for_selector("text=The empty scenario hides every entry.")
+        page.select_option("#registry-scenario", "normal")
+        page.locator("#registry-entries").wait_for()
+        shot(page, theme, "08b-registry-mock")
+        # Browse this instance's registry, validate an entry, open it in the inspector.
+        page.locator("#registry-tab-browse").click()
+        page.select_option("#registry-browse-registry", "/mcp-registry")
+        page.locator("#registry-browse-search").fill("mock-pet")
+        page.locator("#registry-browse-go").click()
+        entry = page.locator(".registry-entry", has_text="io.rustybin/mock-petstore")
+        entry.wait_for()
+        entry.locator("[data-action=validate]").click()
+        expect(entry).to_contain_text("Valid against")
+        shot(page, theme, "08c-registry-browse")
+        entry.locator("[data-action=inspect]").first.click()
+        expect(page.locator("#mcp-server")).to_have_value("/mock/petstore/_rustybin/mcp")
+        page.locator("#mcp-connect").click()
+        page.locator("#mcp-status .badge.ok", has_text="connected").wait_for()
+
+    step("mcp registry", registry)
+
     def a2a():
         goto_view(page, "a2a")
         page.locator(".list-item", has_text="Travel Planner").first.click()
@@ -733,7 +780,7 @@ def run_theme(browser, theme):
         shot(page, theme, "15-management-ai")
         page.get_by_role("tab", name="Network").click()
         for s in doc["settings"]:
-            if s["group"] in ("egress", "leads"):
+            if s["group"] in ("egress", "leads", "registry"):
                 expect(page.locator(f"[aria-label='{s['key']}']")).to_have_count(1)
         # The policy card: the global list, each feature, no decisions yet.
         page.wait_for_selector("text=Allowed by feature")

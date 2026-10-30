@@ -15,6 +15,11 @@
 //!             respond: { status: 404 }
 //! ```
 //!
+//!
+//! A `registry:` section lists extra entries of the mock MCP registry
+//! (`registry.servers`: `server.json` documents, validated on load; see
+//! `crate::mcp::registry`).
+//!
 //! `${VAR}` and `${VAR:-default}` are expanded from the environment when a
 //! file is loaded from disk (never for documents sent to the API).
 
@@ -48,6 +53,17 @@ pub struct MocksFile {
     pub version: u32,
     #[serde(default)]
     pub mocks: Vec<MockDoc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry: Option<RegistrySection>,
+}
+
+/// The `registry:` section: entries of the mock MCP registry.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistrySection {
+    /// `server.json` documents.
+    #[serde(default)]
+    pub servers: Vec<Value>,
 }
 
 /// One mock in the file.
@@ -129,13 +145,24 @@ pub fn parse_lenient(text: &str) -> Result<(MocksFile, Vec<Failed>), String> {
         Some(Value::Array(a)) => a,
         Some(_) => return Err("invalid mocks document: `mocks` must be a list".into()),
     };
-    let mut failed: Vec<Failed> = top
-        .keys()
-        .map(|k| Failed {
-            name: None,
-            error: format!("unknown field {k:?} ignored (expected `version` and `mocks`)"),
-        })
-        .collect();
+    let mut failed: Vec<Failed> = Vec::new();
+    let registry = match top.remove("registry") {
+        None | Some(Value::Null) => None,
+        Some(v) => match serde_json::from_value::<RegistrySection>(v) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                failed.push(Failed {
+                    name: None,
+                    error: format!("registry: {e} (ignored)"),
+                });
+                None
+            }
+        },
+    };
+    failed.extend(top.keys().map(|k| Failed {
+        name: None,
+        error: format!("unknown field {k:?} ignored (expected `version`, `mocks` and `registry`)"),
+    }));
     let mut mocks = Vec::new();
     for (i, entry) in entries.into_iter().enumerate() {
         let name = entry
@@ -153,7 +180,14 @@ pub fn parse_lenient(text: &str) -> Result<(MocksFile, Vec<Failed>), String> {
             }),
         }
     }
-    Ok((MocksFile { version, mocks }, failed))
+    Ok((
+        MocksFile {
+            version,
+            mocks,
+            registry,
+        },
+        failed,
+    ))
 }
 
 /// Mocks read from disk.
@@ -165,6 +199,8 @@ pub struct Loaded {
     /// Named entries that could not be read: a reload keeps their mocks
     /// instead of deleting them.
     pub failed: Vec<(String, String)>,
+    /// The valid `registry.servers` (invalid ones are in `problems`).
+    pub registry: Vec<Value>,
 }
 
 /// Expand `${VAR}` and `${VAR:-default}`; unknown variables without a
@@ -276,7 +312,16 @@ where
             .collect(),
         ..Loaded::default()
     };
-    let (file, skipped) = parse_lenient(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let (mut file, skipped) =
+        parse_lenient(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let (registry, registry_problems) =
+        crate::mcp::registry::file_entries(file.registry.take().map(|r| r.servers));
+    out.registry = registry;
+    out.problems.extend(
+        registry_problems
+            .into_iter()
+            .map(|p| format!("{}: {p}", path.display())),
+    );
     for f in skipped {
         out.problems
             .push(format!("{}: {}", path.display(), f.error));
@@ -460,9 +505,18 @@ pub fn json_schema() -> Value {
     if let Value::Object(m) = &mut mock {
         m.insert("required".into(), json!(["name"]));
     }
+    let registry = object(json!({
+        "servers": {
+            "type": "array",
+            "maxItems": crate::mcp::registry::MAX_USER_ENTRIES,
+            "description": "Entries of the mock MCP registry at /mcp-registry",
+            "items": { "$ref": crate::mcp::registry::validate::SCHEMA_URL }
+        }
+    }));
     let mut root = object(json!({
         "version": { "const": 1 },
-        "mocks": { "type": "array", "items": mock }
+        "mocks": { "type": "array", "items": mock },
+        "registry": registry
     }));
     if let Value::Object(m) = &mut root {
         m.insert(

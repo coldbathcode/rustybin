@@ -94,6 +94,11 @@ pub const STATIC: &[(&str, &[(&str, &str)])] = &[
         ("Generate arguments", "Generate valid arguments for the selected MCP tool."),
         ("Which auth does it use?", "Which authentication does this MCP server expect and how do I test it?"),
     ]),
+    ("registry", &[
+        ("Explain this server entry", "Explain the selected MCP registry entry: what the server does and how a client connects."),
+        ("Write a server.json for my mock", "Write a server.json entry for one of my mock APIs so I can publish it to a registry."),
+        ("Test a gateway's registry sync", "How do I use the mock registry scenarios to test a gateway that syncs MCP servers from a registry?"),
+    ]),
     ("a2a", &[
         ("Explain the agent card", "Explain the selected agent card and what the agent can do."),
         ("Send a multi-turn task", "Walk me through a multi-turn A2A task with this agent."),

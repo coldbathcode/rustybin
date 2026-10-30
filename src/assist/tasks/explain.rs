@@ -1,5 +1,5 @@
-//! `explain`: a captured request, an MCP tool, a spec operation or any
-//! text, explained as a summary, details, gateway notes and next steps.
+//! `explain`: a captured request, an MCP tool, a spec operation, an MCP
+//! registry entry or any text, explained as a summary, details, gateway notes and next steps.
 
 use serde_json::{json, Value};
 
@@ -10,7 +10,7 @@ use crate::assist::task::{context_field, text_field, Task};
 pub const TASK: Task = Task {
     name: "explain",
     title: "Explain",
-    description: "Explain a captured request, an MCP tool, a spec operation or a piece of text",
+    description: "Explain a captured request, an MCP tool, a spec operation, an MCP registry entry or a piece of text",
     writes: false,
     tier: Tier::Fast,
     system: SYSTEM,
@@ -23,11 +23,12 @@ pub const TASK: Task = Task {
 
 const SYSTEM: &str = "You explain one thing the user selected in the Rustybin console: a request \
 a gateway forwarded (its method, path, headers and body), an MCP tool, an operation of an \
-OpenAPI spec, or a piece of text. Say what it is and what it does, point out anything a gateway \
+OpenAPI spec, an entry of an MCP registry (a server.json: its name, remotes, packages and the \
+headers a client must send), or a piece of text. Say what it is and what it does, point out anything a gateway \
 added or changed (authentication, correlation and rate-limit headers, rewritten paths), and \
 suggest the next steps a tester would take. Be concrete and short.";
 
-pub const KINDS: &[&str] = &["request", "tool", "operation", "text"];
+pub const KINDS: &[&str] = &["request", "tool", "operation", "server_entry", "text"];
 
 pub fn schema() -> Value {
     json!({
@@ -79,6 +80,14 @@ fn mock(inputs: &Value) -> Value {
                 .unwrap_or("selected")
         ),
         ("operation", _, _) => "An operation of the mock's OpenAPI spec (mock explanation).".into(),
+        ("server_entry", _, _) => format!(
+            "The MCP registry entry {} (mock explanation).",
+            subject
+                .get("name")
+                .or_else(|| subject.pointer("/server/name"))
+                .and_then(Value::as_str)
+                .unwrap_or("selected")
+        ),
         _ => "The selected text, explained by the built-in provider (mock explanation).".into(),
     };
     let mut gateway_notes = Vec::new();

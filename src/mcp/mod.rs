@@ -25,6 +25,7 @@ pub mod manage;
 pub mod openapi;
 pub mod prompts;
 pub mod protocol;
+pub mod registry;
 pub mod resources;
 pub mod sessions;
 pub mod tools;

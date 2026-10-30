@@ -160,6 +160,7 @@ fn file_definitions(store: &MockStore, config: &Config) -> (config_file::Loaded,
                 all.defs.extend(l.defs);
                 all.failed.extend(l.failed);
                 all.problems.extend(l.problems);
+                all.registry = l.registry;
             }
             Err(e) => {
                 all.problems.push(e);
@@ -181,7 +182,11 @@ pub fn reload_files(store: &MockStore, config: &Config) -> (ApplyReport, Vec<Str
         defs,
         mut problems,
         mut failed,
+        registry,
     } = loaded;
+    if complete {
+        store.set_file_registry(registry);
+    }
     if !complete {
         problems.push(
             "the mocks file or directory could not be read: file mocks were kept as they are"

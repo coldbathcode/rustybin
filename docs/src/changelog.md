@@ -115,6 +115,29 @@ The build of [Rustybin 0.2](../plans/next/master-plan.md), step by step.
   assist tasks: `tool_arguments` (Generate arguments, validated against the schema) and
   `sampling` (answer a server's `sampling/createMessage` with your provider). New book
   page [MCP inspector](mcp/inspector.md).
+- **MCP registry: a mock registry and inspecting real ones** (step 06). A mock MCP
+  registry at `/mcp-registry` in the registry API's `/v0.1` shape (`/v0` answers the
+  same): `GET /v0.1/servers` with `cursor`, `limit`, `search`, `updated_since`,
+  `version` and `include_deleted`, `GET .../servers/{serverName}/versions[/{version}]`,
+  `POST /v0.1/publish` with a token from the `auth/*` stubs (`github-at`,
+  `github-oidc`, `oidc`, `dns`, `http`, `none`), the status `PATCH` routes,
+  `POST /v0.1/validate`, `health`, `ping`, `version`. It lists every MCP server of the
+  instance (`io.rustybin/mcp` and its variants, `io.rustybin/manage`,
+  `io.rustybin/mock-<name>` per serving mock, remotes under the request's origin), the
+  new `registry.servers` section of `rustybin.yaml` and published entries (at most 256
+  together). `server.json` documents are validated against the vendored 2025-12-11
+  schema plus the registry's semantic checks. The setting `registry.scenario`
+  (`RUSTYBIN_REGISTRY_SCENARIO`) breaks it on purpose: `empty`, `large` (2000
+  synthetic entries), `flaky` (every third list `503`), `slow` (2 s), `stale`,
+  `invalid`, `auth_fail`. Control plane: `GET /_rustybin/registry`, `DELETE
+  /_rustybin/registry/servers/{serverName}` (admin), `POST /_rustybin/registry/validate`
+  and `GET /_rustybin/registry/browse`, which fetches a real registry under the egress
+  purpose `registry` (`registry.modelcontextprotocol.io` and the saved registries,
+  `registry.saved` / `RUSTYBIN_REGISTRY_SAVED`), cached for a minute. The console's new
+  **MCP registry** view (Mock registry, Browse a registry; Open in inspector hands a
+  remote and its auth to the inspector), the assist task `server_json` ("Write a
+  server.json for my mock") and the explain kind `server_entry`. Settings can now be a
+  choice (a select in the console). New book page [MCP registry](mcp/registry.md).
 
 ## 0.1.0 (2026-10-29): the AI and agent gateway upgrade
 

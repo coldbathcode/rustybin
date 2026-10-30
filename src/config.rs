@@ -189,6 +189,13 @@ pub struct Config {
     /// `RUSTYBIN_EGRESS_ALLOW_LOOPBACK`: let outbound calls reach loopback
     /// addresses (local demos).
     pub egress_allow_loopback: bool,
+    /// `RUSTYBIN_REGISTRY_SCENARIO`: the mock MCP registry's scenario
+    /// (`normal`, `empty`, `large`, ...; see `crate::mcp::registry`). Seeds
+    /// the `registry.scenario` setting; invalid values warn and are ignored.
+    pub registry_scenario: Option<String>,
+    /// `RUSTYBIN_REGISTRY_SAVED`: registry base URLs the console offers to
+    /// browse (seeds `registry.saved`; their hosts are allowed for browsing).
+    pub registry_saved: Vec<String>,
     /// `RUSTYBIN_A2A_PUSH_ALLOWLIST`: `host` or `host:port` entries push
     /// notification URLs may point to (the built-in sink is always allowed).
     pub a2a_push_allowlist: Vec<String>,
@@ -918,6 +925,24 @@ impl Config {
                 false,
                 &mut warnings,
             ),
+            registry_scenario: match get("RUSTYBIN_REGISTRY_SCENARIO") {
+                Some(v)
+                    if crate::mcp::registry::SCENARIOS
+                        .iter()
+                        .any(|(id, _)| *id == v.trim()) =>
+                {
+                    Some(v.trim().to_string())
+                }
+                Some(v) => {
+                    warnings.push(format!(
+                        "RUSTYBIN_REGISTRY_SCENARIO={v:?} is not a scenario ({}); using normal",
+                        crate::mcp::registry::scenario_ids().join(", ")
+                    ));
+                    None
+                }
+                None => None,
+            },
+            registry_saved: list("RUSTYBIN_REGISTRY_SAVED", &get),
             a2a_push_allowlist,
             a2a_push_allow_all,
             harness,
@@ -997,6 +1022,8 @@ impl Config {
             secrets_key: None,
             egress_allow: Vec::new(),
             egress_allow_loopback: false,
+            registry_scenario: None,
+            registry_saved: Vec::new(),
             a2a_push_allowlist: Vec::new(),
             a2a_push_allow_all: false,
             harness: HarnessConfig::default(),

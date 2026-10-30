@@ -22,6 +22,7 @@ const VIEWS = [
   { section: 'AI and agents' },
   { id: 'ai', title: 'AI playground', icon: 'ai', load: () => import('./views/ai.js') },
   { id: 'mcp', title: 'MCP inspector', icon: 'mcp', ai: true, load: () => import('./views/mcp.js') },
+  { id: 'registry', title: 'MCP registry', icon: 'data', ai: true, load: () => import('./views/registry.js') },
   { id: 'a2a', title: 'A2A client', icon: 'a2a', load: () => import('./views/a2a.js') },
   { section: 'Resilience and security' },
   { id: 'chaos', title: 'Chaos and health', icon: 'chaos', load: () => import('./views/chaos.js') },

@@ -1,7 +1,7 @@
 //! The tasks: one file each. Step 03 brought `free_answer`, `explain` and
 //! `suggest`; step 04 the mock-building tasks (`spec_from_description`,
 //! `examples_for_operations`, `edit_spec`, `request_examples`); step 05
-//! adds the MCP ones.
+//! adds the MCP ones, step 06 `server_json`.
 
 pub mod edit_spec;
 pub mod examples_for_operations;
@@ -9,6 +9,7 @@ pub mod explain;
 pub mod free_answer;
 pub mod request_examples;
 pub mod sampling;
+pub mod server_json;
 pub mod spec_from_description;
 pub mod suggest;
 pub mod tool_arguments;
@@ -30,6 +31,7 @@ pub static ALL: &[Task] = &[
     request_examples::TASK,
     tool_arguments::TASK,
     sampling::TASK,
+    server_json::TASK,
 ];
 
 /// The limits a task compiles a document under (an instance mock's).

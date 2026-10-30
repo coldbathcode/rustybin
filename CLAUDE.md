@@ -2,7 +2,7 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 to 05 done)
+## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 to 06 done)
 
 [docs/plans/next/master-plan.md](docs/plans/next/master-plan.md) (planned 2026-10-29) is the plan for the next
 build: twelve steps, one file each (`docs/plans/next/step-NN-*.md`): foundations (step 01, done 2026-10-29: the
@@ -17,7 +17,7 @@ the console's assist bar, drawer and `ui/lib/assist.js`), AI-built mocks (step 0
 prompt to the chosen OpenAPI version, example payloads with an alert when a spec has none, AI edits through a
 diff), an MCP inspector for any server with every auth mode and a relay (step 05, done 2026-10-30:
 `src/mcp/inspector/`, `ui/lib/mcpclient.js`, `ui/lib/mcpauth.js`, `ui/views/mcp.js`, see below), a mock MCP registry and registry
-browsing, a dev portal, AI agents management, the whole instance as `rustybin.yaml` with git source control, a
+browsing (step 06, done 2026-10-30: `src/mcp/registry/`, `ui/views/registry.js`, see below), a dev portal, AI agents management, the whole instance as `rustybin.yaml` with git source control, a
 `rustybin` CLI for remote instances, management MCP parity, and the 0.2.0 release. The master plan's section 4 is
 the build marker and section 5 the session protocol: build a step whole, update its status and build notes, update
 the master table, commit as oliwynn with the step number in the message, push to main. Steps go only when the
@@ -226,7 +226,13 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   legacy), `Conn`; `relay.rs`: `POST /_rustybin/mcp-relay` (SSE back, bounded sessions) and `/fetch` for
   OAuth discovery documents; `checks.rs`: `CHECKS` and `run` behind `POST /_rustybin/mcp-checks` (JSON or
   JUnit); `store.rs`: saved connections and runs in `<state>/mcp-inspector.json`, credentials sealed with
-  `Settings::seal`). The console side is `ui/lib/mcpclient.js` (`McpClient`, browser or relay, exports),
+  `Settings::seal`). `src/mcp/registry/`: the mock MCP registry at `/mcp-registry` in the registry API's
+  `/v0.1` shape (`/v0` nested as an alias): `mod.rs` (routes, the `Registry` state with published entries
+  and tokens, `Scenario` from the `registry.scenario` setting, the control routes `/_rustybin/registry*`),
+  `entries.rs` (generated entries from `inspector::server_list`, scenarios, `page` with the cursor),
+  `validate.rs` (the vendored `schema/server.schema.json` 2025-12-11 plus semantic checks),
+  `browse.rs` (`GET /_rustybin/registry/browse` under `Purpose::Registry`, cached). File entries are the
+  `registry.servers` of `rustybin.yaml`, kept on the `MockStore`. The console side is `ui/lib/mcpclient.js` (`McpClient`, browser or relay, exports),
   `ui/lib/mcpauth.js` (auth modes, the OAuth walk) and `ui/views/mcp.js`. A new check is a `CHECKS` entry
   plus its judgement in `run`, documented in `docs/src/mcp/inspector.md`.
 - `src/harness/`: load test mode (`RUSTYBIN_HARNESS`), see above. `mod.rs` (roles, `check_startup`, the `Harness`
