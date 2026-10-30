@@ -35,6 +35,14 @@ rule**: a capability lands on the API (catalogue and OpenAPI), the console, the 
 variable, stored override, `secret()` for credentials, never returned as a value); the console's instance
 settings are forms from the settings schema (`ui/lib/settingsform.js`), one card per group on a Management tab.
 
+## Rustybin 0.2.2, the hardening release (planned 2026-10-30, not started)
+
+[docs/plans/hardening/master-plan.md](docs/plans/hardening/master-plan.md) is the plan from a full code review of
+`1328b07`: ten steps, one file each, findings with file, severity and fix; section 4 is the build marker. Step 01
+finishes the uncommitted assist model catalogue. Every finding starts as a failing regression test; a "verify first"
+finding is closed in the build notes if its test passes on today's code; every other finding, whatever its severity,
+is fixed in 0.2.2 (none deferred), and the release step waits until none is open.
+
 ## The whole instance as code, and source control (built)
 
 Step 09 of the 0.2 plan (user docs `docs/src/configuration-as-code.md`, `docs/src/source-control.md`). `rustybin.yaml`

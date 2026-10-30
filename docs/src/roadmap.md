@@ -5,8 +5,12 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-Nothing is planned. [Rustybin 0.2](changelog.md#020-2026-10-30-the-ai-assisted-mocking-service)
-shipped on 2026-10-30 with every step of its plan built.
+**Rustybin 0.2.2, the hardening release** (planned 2026-10-30, not started): no new features. It
+fixes what a code review of 0.2.1 found for public instances: memory and CPU budgets for hostile
+specs and queries, MCP saved credentials bound to their target, the console's control token sent
+only where the console chose, sign-outs that survive a restart, outbound pinning and the git
+transport, an untrusted configuration repository, inert request bins, and the harness's run and
+cluster checks. The plan is `docs/plans/hardening/master-plan.md` in the repository.
 
 ## Recently built
 
