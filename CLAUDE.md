@@ -2,7 +2,7 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 to 09 done)
+## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 to 10 done)
 
 [docs/plans/next/master-plan.md](docs/plans/next/master-plan.md) (planned 2026-10-29) is the plan for the next
 build: twelve steps, one file each (`docs/plans/next/step-NN-*.md`): foundations (step 01, done 2026-10-29: the
@@ -21,7 +21,7 @@ browsing (step 06, done 2026-10-30: `src/mcp/registry/`, `ui/views/registry.js`,
 2026-10-30: `src/portal/`, `ui-portal/`, see below), AI agents management (step 08, done 2026-10-30:
 `src/mcp/manage/agents/`, `ui/views/agents.js`, see below), the whole instance as `rustybin.yaml` with git source
 control (step 09, done 2026-10-30: `src/configdoc/`, `src/sourcecontrol/`, see below), a `rustybin` CLI for remote
-instances, management MCP parity, and the 0.2.0 release. The master plan's section 4 is
+instances (step 10, done 2026-10-30: `src/cli/`, see below), management MCP parity, and the 0.2.0 release. The master plan's section 4 is
 the build marker and section 5 the session protocol: build a step whole, update its status and build notes, update
 the master table, commit as oliwynn with the step number in the message, push to main. Steps go only when the
 user says go. Rules the foundations set: a feature that reaches out resolves through `egress::Egress` under its
@@ -47,6 +47,19 @@ token through `GIT_ASKPASS` or a deploy key through `GIT_SSH_COMMAND`, the remot
 `/_rustybin/git*`, startup from the repository (`SourceControl::startup` in `server.rs`) and the automatic mode
 task; never a merge. Console: Management, Export (`ui/views/manage/export.js`) and Source control
 (`ui/views/manage/git.js`).
+
+## The command line for remote instances (built)
+
+Step 10 of the 0.2 plan (user docs `docs/src/cli-guide.md`, the generated `docs/src/cli.md`). `src/cli/`:
+`commands.rs` is the command tree, one static table `COMMANDS` (noun, verb, usage, summary, flags, the routes it
+calls, destructive, example) and one `dispatch` match; `mod.rs` the parser, help, completion, the rendering for
+people and `execute` (tests pass a canned stdin and a buffer); `client.rs` the control-API client (bearer,
+session and manage-token headers, SSE for the tails); `profiles.rs` `profiles.json` (0600). `main.rs` routes every
+noun here; `mock`, `mcp-stdio` and the offline harness verbs keep their modules. A new control route needs a
+command (or an `UNCOVERED` entry with a reason) or `the_command_tree_is_consistent_with_the_catalogue` fails;
+every command's example runs against a live instance in `every_command_runs_against_an_instance`; the reference
+page is regenerated with `RUSTYBIN_UPDATE_CLI_DOCS=1 cargo test cli_docs`. A command flag never reuses a global
+flag's name (`--url`, `--token`, `--profile`, `--session`, `--mock-token`, `--json`, `--yes`, `--quiet`).
 
 ## Load test mode (harness): built
 

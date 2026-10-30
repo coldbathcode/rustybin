@@ -7,7 +7,9 @@ rustybin: HTTP stub service for API and AI gateway demos
 
 USAGE:
     rustybin [--config rustybin.yaml]          run the server
-    rustybin mock <command> ...                 OpenAPI mocks (rustybin mock --help)
+    rustybin <noun> <verb> ...                  manage a running instance (rustybin help)
+    rustybin login --url <url>                  sign in to an instance (then every noun works)
+    rustybin mock <command> ...                 OpenAPI mocks offline (rustybin mock --help)
     rustybin mcp-stdio --server <url> ...       stdio bridge to a management MCP server (--help)
     rustybin harness <command> ...              load through a gateway (rustybin harness --help)
     rustybin oidc-hash-password < password      a password hash for RUSTYBIN_OIDC_USERS_FILE
@@ -37,8 +39,28 @@ async fn main() -> ExitCode {
         }
         Some("mock") => return rustybin::mocks::cli::run(&args[1..]).await,
         Some("mcp-stdio") => return rustybin::mcp::manage::stdio::run(&args[1..]).await,
-        Some("harness") => return rustybin::harness::cli::run(&args[1..]).await,
+        // validate, run and report work from this process unless --remote
+        // sends them to an instance; every other harness verb is remote.
+        Some("harness")
+            if !args.iter().any(|a| a == "--remote")
+                && matches!(
+                    args.get(1).map(String::as_str),
+                    None | Some("validate")
+                        | Some("run")
+                        | Some("report")
+                        | Some("--help")
+                        | Some("-h")
+                ) =>
+        {
+            return rustybin::harness::cli::run(&args[1..]).await
+        }
         Some("oidc-hash-password") => return rustybin::oidc::users::hash_password_cli(),
+        Some(noun)
+            if rustybin::cli::NOUNS.iter().any(|(n, _)| *n == noun)
+                || matches!(noun, "help" | "completion") =>
+        {
+            return rustybin::cli::run(&args).await
+        }
         Some("--config") => match args.get(1) {
             Some(path) if args.len() == 2 => config_file = Some(path.clone()),
             _ => {

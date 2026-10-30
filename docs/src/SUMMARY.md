@@ -70,6 +70,8 @@
 - [Configure Rustybin from an AI agent](agent-mcp.md)
 - [The whole instance as code](configuration-as-code.md)
 - [Source control](source-control.md)
+- [The command line](cli-guide.md)
+  - [CLI reference](cli.md)
 - [Gateway recipes](gateway-recipes.md)
 - [Load testing through a gateway](harness.md)
 - [Collection exports and OpenAPI](exports.md)

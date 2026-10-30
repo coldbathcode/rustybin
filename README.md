@@ -137,6 +137,15 @@ the URL fragment (`/ui/#token=...`) on platform-managed instances. With your own
 key (Anthropic, OpenAI, Gemini or any OpenAI-compatible endpoint) an assist bar
 answers questions about the instance and proposes actions you apply with a click.
 
+## Command line
+
+The same binary manages a running instance: `rustybin login --url https://host`
+signs in with the console password and keeps the token in a profile, then
+`rustybin mocks list`, `rustybin config export`, `rustybin git push`,
+`rustybin requests tail`, `rustybin harness run smoke.yaml --remote --wait` and every
+other noun of the control plane work against it (`rustybin help`, `--json` for scripts).
+See [the command line](docs/src/cli-guide.md) and the [reference](docs/src/cli.md).
+
 ## Configuration
 
 All settings are environment variables; invalid values log a warning and fall back

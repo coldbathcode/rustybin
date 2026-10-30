@@ -21,6 +21,7 @@ pub mod auth_jwt;
 pub mod auth_mtls;
 pub mod catalog;
 pub mod cert_state;
+pub mod cli;
 pub mod collections;
 pub mod compression;
 pub mod config;

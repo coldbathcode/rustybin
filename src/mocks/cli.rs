@@ -438,7 +438,7 @@ impl Remote {
 }
 
 /// Read a config file and inline its spec files.
-fn inline_file(path: &Path) -> Result<Value, String> {
+pub fn inline_file(path: &Path) -> Result<Value, String> {
     let raw = read(&path.display().to_string())?;
     let (text, missing) = config_file::expand_env(&raw, |k| std::env::var(k).ok());
     for m in missing {

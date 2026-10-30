@@ -1,6 +1,10 @@
 # CLI
 
 The `rustybin` binary doubles as a command-line tool for mocks: `rustybin mock ...`.
+These are the offline commands (and the first remote ones); since 0.2 the same
+binary manages a whole instance with `rustybin <noun> <verb>` after `rustybin login`:
+see [The command line](../cli-guide.md) and the [CLI reference](../cli.md), where
+`rustybin mocks ...` (plural) holds every mock verb of the control API.
 `validate`, `init`, `sample` and `check-config` work offline on local files; the
 other commands call the control API of a running instance. `rustybin mock --help`
 prints the summary.

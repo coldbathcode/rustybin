@@ -211,6 +211,20 @@ The build of [Rustybin 0.2](../plans/next/master-plan.md), step by step.
   push with **Write the commit message**, pull with the diff, resolve, the deploy key,
   history, the operations). The mock MCP registry's published entries are now part of
   `AppState` (exported and pruned with the document).
+- **The `rustybin` command line for remote instances** (step 10). `rustybin login --url
+  <url>` signs in with the console password (or keeps a token with `--token`) into a
+  profile (`profiles.json` under `RUSTYBIN_CONFIG_HOME`, else `~/.config/rustybin`, mode
+  `0600`; `RUSTYBIN_URL` and `RUSTYBIN_TOKEN` override, `--profile` picks one), then
+  nouns and verbs mirror the control API: `status`, `whoami`, `logout`, `instance`,
+  `settings`, `sessions`, `password`, `mocks` (every mock verb, the AI ones included),
+  `visits`, `visit`, `requests`, `bins`, `agents`, `ai`, `mcp` (servers, saved
+  connections, checks with `--junit`, calls through the relay), `registry`, `portal`,
+  `config`, `git`, `harness` (the remote verbs; `validate`, `run` and `report` stay
+  offline unless `--remote`), `keys`, `egress`, `profiles`, `completion`. Tables for
+  people, `--json` for scripts, `--yes` for destructive verbs, `--max` and `--timeout`
+  on the tails; exit codes 0, 1 (refused or failed), 2 (usage), 3 (network or
+  credentials). A parity test fails when a control route lands without a command; the
+  reference `docs/src/cli.md` is generated from the command tree.
 
 ## 0.1.0 (2026-10-29): the AI and agent gateway upgrade
 
