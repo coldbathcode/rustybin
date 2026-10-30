@@ -327,6 +327,26 @@ impl JwtError {
     }
 }
 
+/// The payload of a JWT, read without verifying it: only for a token a
+/// verification already accepted (naming the caller, never deciding).
+pub fn unverified_claims(token: &str) -> Option<Value> {
+    use base64::Engine;
+    if token.len() > MAX_TOKEN_LEN {
+        return None;
+    }
+    let mut parts = token.split('.');
+    let (Some(_), Some(payload), Some(_), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .filter(Value::is_object)
+}
+
 /// Verify a control-plane JWT and return its grant.
 pub fn verify_jwt(token: &str, config: &Config) -> Result<Grant, JwtError> {
     verify_jwt_claims(token, config).map(|(grant, _)| grant)
@@ -369,6 +389,15 @@ pub fn verify_jwt_claims(token: &str, config: &Config) -> Result<(Grant, Value),
                 _ => JwtError::Malformed,
             }
         })?;
+    // A token id revoked with its agent (Management, AI agents).
+    if data
+        .claims
+        .get("jti")
+        .and_then(Value::as_str)
+        .is_some_and(|j| config.console_tokens.is_revoked(j))
+    {
+        return Err(JwtError::Revoked);
+    }
     Ok((
         Grant::from_scope_claim(data.claims.get("scope")),
         data.claims,

@@ -162,6 +162,28 @@ The build of [Rustybin 0.2](../plans/next/master-plan.md), step by step.
   mock's page with **Write with AI** (the assist task `summarise_for_portal`), portal
   badges. Settings may be Markdown (a textarea). `/portal/*` is not captured, ignores
   fault headers and is exempt from the key layer. New book page [Dev portal](portal.md).
+- **AI agents: who talks to the instance over MCP** (step 08). Every client of the
+  management MCP server is an agent, named by its credential (admin token, console
+  sign-in, control JWT, OAuth client, API key, visit, or none) and its `clientInfo`
+  name: two clients on one token are two agents. `GET /_rustybin/agents` lists them
+  (first and last seen, calls today and in total, sessions, status, rights), `GET
+  /_rustybin/agents/{id}` adds calls per tool with their outcomes, the last 20 errors
+  and the sessions, `GET /_rustybin/agents/events` streams calls (SSE). Rights below
+  what the credential allows: a ceiling (`read-only`, `traffic`, `manage`, `full`) and
+  tool allow and deny lists, per agent (`PATCH /_rustybin/agents/{id}`), from the new
+  `agents:` section of `rustybin.yaml` (`default_ceiling` and `rules` matching the
+  client name and credential kind) or the default (`agents.default_ceiling`,
+  `RUSTYBIN_AGENTS_DEFAULT_CEILING`, `full`); a tool outside them is not listed and
+  answers a tool error. `POST /_rustybin/agents/{id}/revoke` refuses the agent's calls,
+  ends its sessions (`403` from then on) and revokes its console and OAuth tokens and
+  an OAuth client's refresh tokens; `/restore` undoes it; `DELETE .../sessions` ends
+  sessions only. The admin token is never revoked per agent. Control JWTs with a
+  revoked `jti` are refused too. Rights, notes, revocations and totals persist in
+  `<state>/agents.json`. Audit lines of the management server carry the agent id.
+  Console: the **AI agents** view (the list, a detail panel with the rights form, tool
+  chips, Revoke, Restore, End sessions, **Explain what this agent did**, the live feed,
+  the defaults and rules) now holds **Connect an agent**, moved from Management,
+  General. The stdio bridge registers as transport `stdio`.
 
 ## 0.1.0 (2026-10-29): the AI and agent gateway upgrade
 

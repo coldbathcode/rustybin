@@ -27,6 +27,10 @@ USAGE:
 Messages are read from stdin (one JSON-RPC message per line) and answers written
 to stdout, one per line.";
 
+/// The bridge's `User-Agent` prefix: the agents registry names its
+/// transport `stdio` by it.
+pub const USER_AGENT_PREFIX: &str = "rustybin-mcp-stdio/";
+
 struct Args {
     server: String,
     token: Option<String>,

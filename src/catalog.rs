@@ -321,6 +321,7 @@ impl Endpoint {
 const SOURCES: &[fn() -> Vec<Endpoint>] = &[
     crate::landing::catalog,
     crate::mcp::manage::catalog,
+    crate::mcp::manage::agents::api::catalog,
     crate::mcp::inspector::catalog,
     crate::mcp::registry::catalog,
     crate::portal::catalog,

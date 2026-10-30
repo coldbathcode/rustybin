@@ -82,10 +82,78 @@ pub struct Access {
     pub admin_credential: Option<axum::http::HeaderValue>,
     /// `X-Rustybin-Session` of the request, if any.
     pub session_header: Option<String>,
+    /// What the caller authenticates with (who the agent is, with the
+    /// client's name) and the presented token's id and expiry.
+    pub credential: super::agents::Credential,
+    pub token: Option<(String, i64)>,
+    /// `User-Agent` says the stdio bridge (`rustybin mcp-stdio`).
+    pub stdio: bool,
     /// Public mode without keys: the instance.
     pub public_mode: bool,
     pub self_service: bool,
     pub shared_mode: bool,
+}
+
+/// The credential a request presents, as the agents registry names it
+/// (verified upstream: control auth inserted the grant, the key layer the
+/// key, the visit lookup the visit), and the token's id and expiry.
+fn credential_of(
+    state: &AppState,
+    headers: &HeaderMap,
+    extensions: &Extensions,
+    grant: Option<Grant>,
+    key_id: &Option<String>,
+    caller: &Caller,
+) -> (super::agents::Credential, Option<(String, i64)>) {
+    use super::agents::{clean, Credential};
+    if let Some(id) = key_id {
+        return (Credential::Key { id: id.clone() }, None);
+    }
+    if let Some(h) = caller.visit() {
+        return (
+            Credential::Visit {
+                fingerprint: crate::mocks::visits::Owner::Visit(h.to_string()).fingerprint(),
+            },
+            None,
+        );
+    }
+    let presented = crate::control_auth::presented_token(headers);
+    if let (Some(t), Some(admin)) = (presented, state.config.admin_token.as_deref()) {
+        if crate::control_auth::constant_time_eq(t, admin) {
+            return (Credential::Admin, None);
+        }
+    }
+    let claims = presented
+        .filter(|_| grant.is_some())
+        .and_then(crate::control_auth::unverified_claims);
+    if let Some(c) = claims {
+        let s = |k: &str| c.get(k).and_then(Value::as_str).map(|v| clean(v, 128));
+        let token = s("jti")
+            .filter(|j| !j.is_empty())
+            .zip(c.get("exp").and_then(Value::as_i64));
+        let sub = s("sub").unwrap_or_default();
+        let credential = if extensions.get::<crate::control_oauth::ViaOAuth>().is_some() {
+            Credential::Oauth { sub }
+        } else if c.get("rb_use").and_then(Value::as_str) == Some("console") {
+            Credential::Console {
+                user: sub.strip_prefix("user:").unwrap_or(&sub).to_string(),
+            }
+        } else {
+            Credential::Jwt {
+                sub,
+                scopes: grant
+                    .map(|g| g.scopes().iter().map(|s| s.to_string()).collect())
+                    .unwrap_or_default(),
+            }
+        };
+        return (credential, token);
+    }
+    (
+        Credential::Open {
+            session: crate::mocks::visits::session_label(&caller.session),
+        },
+        None,
+    )
 }
 
 impl Access {
@@ -120,7 +188,16 @@ impl Access {
             })
             .flatten()
             .and_then(|t| axum::http::HeaderValue::from_str(t).ok());
+        let (credential, token) =
+            credential_of(state, headers, extensions, grant, &key_id, &caller);
+        let stdio = headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ua| ua.starts_with(super::stdio::USER_AGENT_PREFIX));
         Self {
+            credential,
+            token,
+            stdio,
             caller,
             admin_credential,
             grant,

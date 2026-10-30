@@ -1,5 +1,6 @@
 //! `explain`: a captured request, an MCP tool, a spec operation, an MCP
-//! registry entry or any text, explained as a summary, details, gateway notes and next steps.
+//! registry entry, an AI agent's activity on the management server or any
+//! text, explained as a summary, details, gateway notes and next steps.
 
 use serde_json::{json, Value};
 
@@ -10,7 +11,7 @@ use crate::assist::task::{context_field, text_field, Task};
 pub const TASK: Task = Task {
     name: "explain",
     title: "Explain",
-    description: "Explain a captured request, an MCP tool, a spec operation, an MCP registry entry or a piece of text",
+    description: "Explain a captured request, an MCP tool, a spec operation, an MCP registry entry, what an AI agent did or a piece of text",
     writes: false,
     tier: Tier::Fast,
     system: SYSTEM,
@@ -24,11 +25,20 @@ pub const TASK: Task = Task {
 const SYSTEM: &str = "You explain one thing the user selected in the Rustybin console: a request \
 a gateway forwarded (its method, path, headers and body), an MCP tool, an operation of an \
 OpenAPI spec, an entry of an MCP registry (a server.json: its name, remotes, packages and the \
-headers a client must send), or a piece of text. Say what it is and what it does, point out anything a gateway \
-added or changed (authentication, correlation and rate-limit headers, rewritten paths), and \
+headers a client must send), the activity of an AI agent on this instance's management MCP server \
+(its calls per tool with their outcomes, its last errors and the rights the operator gave it: say \
+what it worked on, what failed and why, and whether its rights fit what it does), or a piece of \
+text. Say what it is and what it does, point out anything a gateway added or changed (authentication, correlation and rate-limit headers, rewritten paths), and \
 suggest the next steps a tester would take. Be concrete and short.";
 
-pub const KINDS: &[&str] = &["request", "tool", "operation", "server_entry", "text"];
+pub const KINDS: &[&str] = &[
+    "request",
+    "tool",
+    "operation",
+    "server_entry",
+    "agent",
+    "text",
+];
 
 pub fn schema() -> Value {
     json!({
@@ -88,6 +98,24 @@ fn mock(inputs: &Value) -> Value {
                 .and_then(Value::as_str)
                 .unwrap_or("selected")
         ),
+        ("agent", _, _) => {
+            let calls = subject
+                .pointer("/calls/total")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let tools = subject
+                .get("tools")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            format!(
+                "The agent {} made {calls} calls over {tools} tools (mock explanation).",
+                subject
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("selected")
+            )
+        }
         _ => "The selected text, explained by the built-in provider (mock explanation).".into(),
     };
     let mut gateway_notes = Vec::new();

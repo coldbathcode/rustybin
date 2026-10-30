@@ -469,6 +469,8 @@ hr.sep { border: 0; border-top: 1px solid var(--border); margin: 6px 0; }
 .artifact img { max-width: 220px; border-radius: 4px; border: 1px solid var(--border); display: block; margin-top: 6px; }
 .kbd { font: 600 11px var(--mono); border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; color: var(--text-2); }
 .pill-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.linkish { border: 0; background: none; padding: 0; color: inherit; font: inherit; cursor: pointer; text-align: left; }
+.linkish:hover strong, .linkish:focus-visible strong { text-decoration: underline; }
 .token-box { font: 12px/1.5 var(--mono); word-break: break-all; padding: 10px 12px; background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .token-box .t-h { color: var(--err); } .token-box .t-p { color: var(--violet); } .token-box .t-s { color: var(--info); }
 .countdown { font: 700 20px var(--mono); }

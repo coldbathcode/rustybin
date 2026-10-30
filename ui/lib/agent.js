@@ -81,5 +81,5 @@ export function agentPanel(opts = {}) {
 
 /** A one-line notice pointing at the panel (used where space is short). */
 export function agentHint() {
-  return notice('info', icon('terminal'), h('span', null, 'An AI agent can manage these mocks through ', h('code', null, MCP_PATH), ': open the console settings for the connection command.'));
+  return notice('info', icon('terminal'), h('span', null, 'An AI agent can manage these mocks through ', h('code', null, MCP_PATH), ': open AI agents for the connection command.'));
 }

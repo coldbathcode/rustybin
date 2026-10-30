@@ -742,3 +742,75 @@ fn scope_parsing() {
     assert!(!is_consent_path("/_rustybin/oauth/requests/"));
     assert!(!is_consent_path("/_rustybin/oauth/requests/a/b"));
 }
+
+#[tokio::test]
+async fn a_revoked_agent_loses_its_tokens_until_restored() {
+    let app = app(token_config());
+    let (client_id, tokens) = sign_in(&app, ADMIN, None).await;
+    let access = tokens["access_token"].as_str().expect("access").to_string();
+    let refresh = tokens["refresh_token"]
+        .as_str()
+        .expect("refresh")
+        .to_string();
+    assert!(!tool_names(&app, &access).await.is_empty());
+    let admin = format!("Bearer {ADMIN}");
+    let list = body_json(
+        send(
+            &app,
+            "GET",
+            "/_rustybin/agents",
+            &[("authorization", &admin)],
+            None,
+        )
+        .await,
+    )
+    .await;
+    let agent = list["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|a| a["credential"]["kind"] == "oauth")
+        .expect("the OAuth agent");
+    assert!(agent["credential"]["sub"]
+        .as_str()
+        .expect("sub")
+        .starts_with("client:"));
+    let id = agent["id"].as_str().expect("id").to_string();
+    let resp = send(
+        &app,
+        "POST",
+        &format!("/_rustybin/agents/{id}/revoke"),
+        &[("authorization", &admin)],
+        None,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The access token and the refresh token are refused.
+    let resp = mcp(&app, Some(&access), "tools/list", json!({})).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let mut f = form_urlencoded::Serializer::new(String::new());
+    f.append_pair("grant_type", "refresh_token")
+        .append_pair("client_id", &client_id)
+        .append_pair("refresh_token", &refresh);
+    let resp = send(
+        &app,
+        "POST",
+        TOKEN_PATH,
+        &[],
+        Some(("application/x-www-form-urlencoded", f.finish())),
+    )
+    .await;
+    assert_eq!(body_json(resp).await["error"], "invalid_grant");
+
+    let resp = send(
+        &app,
+        "POST",
+        &format!("/_rustybin/agents/{id}/restore"),
+        &[("authorization", &admin)],
+        None,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(!tool_names(&app, &access).await.is_empty());
+}

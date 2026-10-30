@@ -161,7 +161,7 @@ def run_theme(browser, theme):
         page.wait_for_selector("text=Requests captured")
         page.wait_for_selector("text=What Rustybin sees of this browser")
         page.wait_for_selector(".url-row code")
-        expect(page.locator(".nav-link")).to_have_count(12)
+        expect(page.locator(".nav-link")).to_have_count(13)
         # No plan configured (RUSTYBIN_PLAN=none): no "Plan and usage" card.
         expect(page.locator("text=Plan and usage")).to_have_count(0)
         # AI assist with the mock provider: the Ask card offers suggestions.
@@ -827,6 +827,62 @@ def run_theme(browser, theme):
 
     step("management: instance settings, a secret, the egress policy", management)
 
+    def ai_agents():
+        # An agent calls the management server with its clientInfo; the view lists it.
+        name = f"e2e-agent-{theme}"
+        def agent_call(tool):
+            body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": {}, "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {},
+                "io.modelcontextprotocol/clientInfo": {"name": name, "version": "1.2"}}}})
+            req = urllib.request.Request(BASE + "/_rustybin/mcp", method="POST", data=body.encode(), headers={
+                "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+                "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": tool})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return json.load(r)["result"]
+        assert not agent_call("get_instance").get("isError")
+        goto_view(page, "agents")
+        row = page.locator("#agents-table tr", has_text=name)
+        row.wait_for()
+        expect(page.locator("text=rights and revocations here are advisory")).to_have_count(1)
+        row.get_by_role("button", name="Open the agent " + name).click()
+        page.wait_for_selector("form[aria-label='Rights of " + name + "']")
+        expect(page.locator("#agent-tool-calls")).to_contain_text("get_instance")
+        # The defaults card: a control per setting of the group.
+        page.wait_for_selector("form[aria-label='Settings: agents']")
+        with urllib.request.urlopen(BASE + "/_rustybin/settings", timeout=10) as r:
+            doc = json.load(r)
+        for s in doc["settings"]:
+            if s["group"] == "agents":
+                expect(page.locator(f"[aria-label='{s['key']}']")).to_have_count(1)
+        # A ceiling: read-only refuses a change.
+        page.select_option("#agent-ceiling", "read-only")
+        page.locator("#agent-tools [data-tool='find_endpoints']").click()
+        page.locator("#agent-tools [data-tool='find_endpoints']").click()
+        page.locator("#agent-save-rights").click()
+        page.wait_for_selector("text=Rights saved for " + name)
+        assert agent_call("set_health").get("isError"), "read-only agent changed the health toggle"
+        assert agent_call("find_endpoints").get("isError"), "a denied tool answered"
+        shot(page, theme, "18-ai-agents")
+        assert_icons_sized(page, "the AI agents view")
+        # The live feed shows a call as it happens.
+        page.locator("#agents-live").click()
+        page.wait_for_selector("text=Waiting for calls.")
+        agent_call("get_instance")
+        page.wait_for_selector("#agents-feed >> text=get_instance")
+        page.locator("#agents-live").click()
+        # Revoke, then restore.
+        page.once("dialog", lambda d: d.accept())
+        page.locator("#agent-revoke").click()
+        page.wait_for_selector("#agent-restore")
+        assert "revoked" in json.dumps(agent_call("get_instance")), "a revoked agent answered"
+        page.locator("#agent-restore").click()
+        page.wait_for_selector("#agent-revoke")
+        page.locator("#agent-reset-rights").click()
+        page.wait_for_selector("text=Back to the rules")
+        assert not agent_call("get_instance").get("isError")
+
+    step("ai agents: list, rights, live feed, revoke and restore", ai_agents)
+
     def dev_portal():
         # Publish the sample mock from its page, the summary written by the mock AI provider.
         page.goto(BASE + "/ui/#/mocks/petstore")
@@ -1044,9 +1100,8 @@ def run_jwt(browser):
     def agent_panel_with_token():
         token = page.evaluate("sessionStorage.getItem('rustybin.console.controlToken')")
         assert token, "not signed in"
-        page.get_by_role("button", name="Console settings", exact=True).click()
-        panel = page.locator("#agent-panel")
-        panel.locator("summary", has_text="Connect an AI agent").click()
+        goto_view(page, "agents")
+        panel = page.locator("#agent-connect")
         url = jwt_base + "/_rustybin/mcp"
         command = f"claude mcp add --transport http rustybin '{url}' --header 'Authorization: Bearer {token}'"
         masked = command.replace(token, token[:4] + "..." + token[-2:])
@@ -1067,7 +1122,6 @@ def run_jwt(browser):
         page.wait_for_function("navigator.clipboard.readText().then((t) => t.length > 0)")
         copied = page.evaluate("navigator.clipboard.readText()")
         assert copied == command, copied
-        page.keyboard.press("Escape")
 
     step("jwt: agent panel masks the control token", agent_panel_with_token)
 

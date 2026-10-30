@@ -15,6 +15,7 @@
 //! truncated, never in the text summary.
 
 pub mod access;
+pub mod agents;
 pub mod harness;
 pub mod instance;
 pub mod mocks;
@@ -29,7 +30,7 @@ pub mod visits;
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Extension, Router};
 use serde_json::{json, Value};
@@ -109,6 +110,20 @@ async fn handler(
     Extension(sh): Extension<Arc<Shared>>,
     req: Request,
 ) -> Response {
+    // The sessions of a revoked agent are refused outright.
+    let session = req
+        .headers()
+        .get(super::protocol::HEADER_SESSION_ID)
+        .and_then(|v| v.to_str().ok());
+    if session.is_some_and(|s| app.agents.session_revoked(s)) {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            axum::Json(
+                json!({ "error": "this agent was revoked by the operator of this instance" }),
+            ),
+        )
+            .into_response();
+    }
     let access = Arc::new(Access::from_request(
         &app,
         req.headers(),

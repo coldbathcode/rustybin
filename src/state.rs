@@ -71,6 +71,9 @@ pub struct AppState {
     /// The dev portal (`/portal`, `/_rustybin/portal*`): published items,
     /// insights and the catalogue cache.
     pub portal: Arc<crate::portal::Portal>,
+    /// AI agents on the management MCP server (`/_rustybin/agents*`): who
+    /// called, what they did, their rights and revocations.
+    pub agents: Arc<crate::mcp::manage::agents::Agents>,
 }
 
 impl AppState {
@@ -139,9 +142,15 @@ impl AppState {
             clock.clone(),
             egress.clone(),
         ));
-        let mocks = crate::mocks::new_store_with(&config, clock, metrics.clone(), egress.clone());
+        let mocks =
+            crate::mocks::new_store_with(&config, clock.clone(), metrics.clone(), egress.clone());
         let health = Arc::new(HealthState::new());
         let portal = Arc::new(crate::portal::Portal::new(&settings));
+        let agents = Arc::new(crate::mcp::manage::agents::Agents::new(
+            &settings,
+            &config.console_tokens,
+            clock.clone(),
+        ));
         let harness = crate::harness::Harness::new(&config, Some(metrics.clone()));
         if let Some(h) = &harness {
             h.attach(crate::harness::Resources {
@@ -167,6 +176,7 @@ impl AppState {
             router: Arc::new(OnceLock::new()),
             harness,
             portal,
+            agents,
         }
     }
 }

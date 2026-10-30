@@ -611,6 +611,12 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | Methods | Path | Description |
 |---|---|---|
 | POST GET DELETE | `/_rustybin/mcp` | Management MCP server: configure this Rustybin from an AI agent |
+| GET | `/_rustybin/agents` | AI agents on the management MCP server (admin) |
+| GET | `/_rustybin/agents/events` | Live feed of agent calls (admin) (SSE) |
+| GET PATCH | `/_rustybin/agents/{id}` | One AI agent: its calls per tool, last errors, sessions and rights (admin) |
+| POST | `/_rustybin/agents/{id}/revoke` | Revoke an AI agent: refuse its calls, end its sessions, revoke its tokens (admin) |
+| POST | `/_rustybin/agents/{id}/restore` | Restore a revoked AI agent (admin) |
+| DELETE | `/_rustybin/agents/{id}/sessions` | End an AI agent's MCP sessions (admin) |
 | GET | `/_rustybin/mcp-servers` | MCP inspector: every MCP server this instance serves, and the relay's policy |
 | POST | `/_rustybin/mcp-relay` | MCP inspector: forward one JSON-RPC message to an MCP server, the answer as SSE |
 | POST | `/_rustybin/mcp-relay/fetch` | MCP inspector: fetch one OAuth discovery or token document through the instance |

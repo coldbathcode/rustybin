@@ -6,7 +6,7 @@
 use serde_json::{json, Map, Value};
 
 use super::access::{Access, Right};
-use super::{harness, instance, mocks, testing, traffic, visits};
+use super::{agents, harness, instance, mocks, testing, traffic, visits};
 use crate::mcp::core::{self, CallCtx};
 use crate::mcp::protocol::{RpcError, Version};
 use crate::mcp::tools as mock_tools;
@@ -379,7 +379,13 @@ fn access_of(ctx: &CallCtx) -> Result<&Access, RpcError> {
 /// `tools/list`, filtered by the caller's rights.
 pub fn list_result(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
     let access = access_of(ctx)?;
-    let all = list(access);
+    let agent = agents::observe_call(ctx, access, params);
+    ctx.app.agents.record_list(&agent.id);
+    // A revoked agent sees nothing; a limited one only what its rights allow.
+    let all: Vec<&ToolDef> = list(access)
+        .into_iter()
+        .filter(|t| !agent.revoked && agent.rights.allows(t))
+        .collect();
     let (page, next) = core::paginate(&all, params, ctx.page_size, "tools")?;
     let mut r = Map::new();
     r.insert(
@@ -602,14 +608,34 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         Some(_) => return Err(RpcError::invalid_params("arguments must be an object")),
     };
     let metrics = ctx.app.metrics.clone();
-    if !access.allows(def.right) {
-        metrics.count_manage_call(def.name, "denied");
-        audit(def, access, &args, "denied");
-        return Ok(err(format!(
+    let agent = agents::observe_call(ctx, access, params);
+    let refusal = if agent.revoked {
+        Some(format!(
+            "{}: this agent was revoked by the operator of this instance",
+            def.name
+        ))
+    } else if !access.allows(def.right) {
+        Some(format!(
             "{}: not allowed. {}",
             def.name,
             access.denial(def.right)
-        )));
+        ))
+    } else if !agent.rights.allows(def) {
+        Some(format!(
+            "{}: not allowed. {}",
+            def.name,
+            agent.rights.denial(def)
+        ))
+    } else {
+        None
+    };
+    if let Some(message) = refusal {
+        metrics.count_manage_call(def.name, "denied");
+        audit(def, access, &agent.id, &args, "denied");
+        ctx.app
+            .agents
+            .record_call(&agent.id, def.name, "denied", None);
+        return Ok(err(message));
     }
     ctx.log("debug", json!({ "event": "tools/call", "tool": name }))
         .await;
@@ -695,14 +721,25 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
     };
     metrics.count_manage_call(def.name, if outcome == "asked" { "ok" } else { outcome });
     if !def.read_only {
-        audit(def, access, &args, outcome);
+        audit(def, access, &agent.id, &args, outcome);
     }
+    let message = (outcome == "error").then(|| {
+        result["content"]
+            .as_array()
+            .and_then(|c| c.first())
+            .and_then(|c| c["text"].as_str())
+            .unwrap_or("error")
+            .to_string()
+    });
+    ctx.app
+        .agents
+        .record_call(&agent.id, def.name, outcome, message.as_deref());
     Ok(result)
 }
 
 /// One JSON log line per change: tool, target, caller kind and fingerprint,
 /// outcome; never arguments that may hold secrets or spec bodies.
-fn audit(def: &ToolDef, access: &Access, args: &Value, outcome: &str) {
+fn audit(def: &ToolDef, access: &Access, agent: &str, args: &Value, outcome: &str) {
     let target = arg_str(args, "name")
         .or_else(|| arg_str(args, "id"))
         .or_else(|| arg_str(args, "mock"))
@@ -713,6 +750,7 @@ fn audit(def: &ToolDef, access: &Access, args: &Value, outcome: &str) {
         tool = def.name,
         target = target,
         caller = %access.principal(),
+        agent,
         outcome,
         "management MCP call"
     );

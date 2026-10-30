@@ -94,6 +94,25 @@ response fields are described in [Responses, rules and validation](responses.md)
 the security fields in [Mocked security](security.md), the `mcp` fields in
 [An MCP server for every mock](mcp.md).
 
+Beside `mocks`, the file may hold `registry.servers` (entries of the
+[mock MCP registry](../mcp/registry.md)), `portal.items` (items on the
+[dev portal](../portal.md)) and `agents` (the rights of AI agents on the management MCP
+server):
+
+```yaml
+agents:
+  default_ceiling: manage        # read-only | traffic | manage | full (default full)
+  rules:                         # the first rule that matches applies
+    - match: { name: "claude-*", credential: oauth }   # name: clientInfo, * wildcard
+      ceiling: read-only
+      allow: []                  # management tool names: only these
+      deny: [delete_mock]        # never these
+      note: Team assistants
+```
+
+See [Managing agents](../agent-mcp.md#managing-agents). An invalid rule is skipped with
+a warning; the others apply.
+
 ### Editor completion
 
 `GET /_rustybin/mocks/config.schema.json` is the JSON Schema of the file. With the

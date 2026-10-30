@@ -162,6 +162,7 @@ fn file_definitions(store: &MockStore, config: &Config) -> (config_file::Loaded,
                 all.problems.extend(l.problems);
                 all.registry = l.registry;
                 all.portal = l.portal;
+                all.agents = l.agents;
             }
             Err(e) => {
                 all.problems.push(e);
@@ -185,10 +186,12 @@ pub fn reload_files(store: &MockStore, config: &Config) -> (ApplyReport, Vec<Str
         mut failed,
         registry,
         portal,
+        agents,
     } = loaded;
     if complete {
         store.set_file_registry(registry);
         store.set_file_portal(portal);
+        store.set_file_agents(agents);
     }
     if !complete {
         problems.push(

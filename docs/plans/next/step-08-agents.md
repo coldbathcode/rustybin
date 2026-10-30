@@ -1,6 +1,6 @@
 # Step 08: AI agents: who talks to the instance over MCP
 
-Master plan: [master-plan.md](master-plan.md). Needs: 01, 02. Status: **not started**. About 2 days.
+Master plan: [master-plan.md](master-plan.md). Needs: 01, 02. Status: **done 2026-10-30**. About 2 days.
 
 ## Goal
 
@@ -107,4 +107,62 @@ and session ending, on all surfaces; all checks pass; committed and pushed.
 
 ## Build notes
 
-(filled in when built)
+Built 2026-10-30 (`src/mcp/manage/agents/` with `api.rs` and `tests.rs`, `ui/views/agents.js`,
+`docs/examples/agent/manage_agents.hurl`, the "Managing agents" section of
+`docs/src/agent-mcp.md`). Where the build differs from the design above, and why:
+
+- **The record is attributed where the client is known, not in `Access`.** `Access` is built
+  from the HTTP request before the body or the session is read, so it carries the credential
+  (`Credential`: `admin`, `console {user}`, `jwt {sub, scopes}`, `oauth {sub}`, `key {id}`,
+  `visit {fingerprint}`, `open {session}`; named from what control auth, the key layer or the
+  visit lookup already verified) and the presented token's `jti` and expiry. `tools/list` and
+  `tools/call` then call `agents::observe_call` with the session's `clientInfo` or `_meta`'s,
+  and apply the agent's rights after the credential's (`Effective::allows`). A revoked agent
+  lists no tools. The id is the first 8 bytes of SHA-256 over the credential's fingerprint and
+  the client name, in hex.
+- **Ceilings** map onto the tool table: `read-only` is a read-only tool whose right is not
+  `traffic`; `traffic` every read-only tool; `manage` every tool whose right is not `admin`,
+  `operator` or `harness`; `full` all. Rights merge field by field: the agent's override, else
+  the first matching rule, else the default ceiling (stored or env setting, else the file's
+  `default_ceiling`, else `full`).
+- **Persistence is `<state>/agents.json`, not the settings store.** The settings store is a
+  schema of named keys with env seeds; per-agent records are dynamic and bounded on their own
+  (like the portal and the inspector store). Rights, notes, revocations, call totals and the
+  daily count are kept (counts flushed at most every 30 seconds); sessions, errors and token
+  ids are memory only. A revoked OAuth client is refused again at load.
+- **Revocation** uses step 02's denylist for the token ids the agent presented (console
+  tokens, OAuth access tokens, platform control JWTs, which now check the denylist too) and a
+  new bounded subject denylist in `login::Tokens` (1024, kept across "sign out everywhere") for
+  an OAuth client's `sub`, which also stops its refresh tokens. Restore takes both back
+  (`Tokens::unrevoke`, `restore_subject`). Sessions end by cancelling them; a session of a
+  revoked agent answers `403` (a bounded session index, 4096), and a revoked token answers
+  `401` before that. The API answers a `note` for the credentials it cannot revoke (the admin
+  token, keys, visits, an open control plane).
+- **Bounds**: 512 agents (least recently seen first, agents with rights, a note or a
+  revocation last), 20 errors (300 characters), 32 sessions and 16 token ids per agent, 64
+  rules, 128 tools per list, 16 feed listeners.
+- **The stdio bridge** is recognised by its `User-Agent` (`rustybin-mcp-stdio/`), so its
+  transport shows `stdio`; it remains a client of the HTTP server.
+- **AI**: "Explain what this agent did" is a new `agent` kind of the `explain` task (the
+  drawer already renders its answer), not a separate task.
+- **Console**: the detail is a panel under the list (`#/agents/<id>`), not a drawer (the
+  drawer belongs to AI assist). Tool chips cycle default, allow, deny. Connect an agent moved
+  from Management, General (now a link) to this view; the Mock APIs view keeps its compact
+  panel. The `agents` settings group renders in the view's Defaults and rules card.
+- **`tools/list`** keeps its 60 s cache hint; a client that caches it still gets the tool
+  error from `tools/call` after a change. No `list_changed` notification is sent.
+- **Left out**: nothing from the design.
+
+CLI and MCP notes for later steps: step 10's `rustybin agents list | get <id> | rights <id>
+[--ceiling --allow --deny --note --reset] | revoke <id> | restore <id> | sessions end <id>`
+call the six routes. Step 11's `list_agents`, `get_agent`, `set_agent_rights` and
+`revoke_agent` (admin, confirmed; refuse when the id is the caller's own agent, which
+`observe_call` gives) wrap `Agents::list`, `get`, `set_rights`, `revoke` and `restore`. Step 09
+exports the `agents:` section (`FileSection`) and the `agents.default_ceiling` setting.
+
+Checks run: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (21 new
+tests in `agents/tests.rs`, one in `control_oauth/tests.rs`), `docs/examples/run.sh`
+(`agent/manage_agents.hurl` on the secured instance), the console check
+`conformance/ui/run.sh` (the new "ai agents" step: list, rights, live feed, revoke and
+restore; the jwt agent panel now on this view), `mdbook build docs`, `check_includes.py`,
+`check-no-dashes.sh`.

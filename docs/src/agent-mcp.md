@@ -37,8 +37,8 @@ Other clients take the usual `mcpServers` JSON:
 }
 ```
 
-The [web console](console.md) fills both in for you: "Connect an AI agent" under
-Management, General and in the Mock APIs view shows the command with this instance's
+The [web console](console.md) fills both in for you: "Connect an agent" in the AI
+agents view and "Connect an AI agent" in the Mock APIs view show the command with this instance's
 URL and the credential the console already holds (the token of your password
 sign-in, a control token, the admin token or a visit's manage token). The token stays
 masked until you ask to see it; the copy buttons copy the real value. A script gets
@@ -200,6 +200,93 @@ instance:
 ```hurl
 {{#include ../examples/agent/manage_secured.hurl:secured_admin}}
 ```
+
+## Managing agents
+
+Every client that calls the server is an **agent**: its credential plus the name it
+gives in `clientInfo` (sent with `initialize`, or in `_meta` of a 2026-07-28 call).
+Two clients on the same token are two agents; a client that sends no name is
+`unknown`. The console's **AI agents** view (under AI and agents) lists them with
+their credential, first and last seen, calls today and in total, open sessions and
+status (`active`, `idle`, `revoked`), and opens one to show its calls per tool with
+their outcomes (ok, error, denied, asked to confirm), its last errors and its
+sessions. The live feed shows calls as they happen. The same data is at
+`GET /_rustybin/agents` (admin):
+
+```hurl
+{{#include ../examples/agent/manage_agents.hurl:agents_call}}
+```
+
+```hurl
+{{#include ../examples/agent/manage_agents.hurl:agents_list}}
+```
+
+**Rights.** An agent never gets more than its credential allows; the operator can
+give it less. A **ceiling** caps its tools: `read-only` (read tools, no captured
+traffic), `traffic` (every read tool), `manage` (reads and mock changes; nothing
+instance-wide, no visit operator tools, no harness) or `full` (whatever the
+credential allows). An **allow** list narrows it to the tools named; a **deny** list
+removes tools. A tool outside its rights is not in its `tools/list`, and calling it
+anyway answers a tool error that says the operator limited the agent. Rights come
+from, field by field: the agent's own (set in the console or with `PATCH
+/_rustybin/agents/{id}`), else the first matching rule of
+[`rustybin.yaml`](mocks/config.md)'s `agents:` section, else the default ceiling
+(the `agents.default_ceiling` setting, `RUSTYBIN_AGENTS_DEFAULT_CEILING`, `full` by
+default).
+
+```hurl
+{{#include ../examples/agent/manage_agents.hurl:agents_rights}}
+```
+
+```yaml
+agents:
+  default_ceiling: traffic
+  rules:
+    - match: { name: "claude-*", credential: oauth }
+      ceiling: manage
+      deny: [delete_mock, apply_config]
+      note: Team assistants sign in with OAuth
+    - match: { credential: admin }
+      ceiling: full
+```
+
+`match.name` is the client's name, case insensitive, with `*` as a wildcard;
+`match.credential` is `admin`, `console`, `jwt`, `oauth`, `key`, `visit` or `open`.
+A saved or environment default ceiling wins over the file's `default_ceiling`.
+
+**Revoke** refuses every call of the agent (a tool error saying it was revoked), ends
+its sessions (their next request answers `403`), and revokes its tokens for their
+remaining life: the console sign-in tokens and OAuth access tokens it used, and an
+OAuth client's refresh tokens. **Restore** undoes all of it. The admin token cannot be
+revoked per agent (rotate `RUSTYBIN_ADMIN_TOKEN`; the agent's calls are refused
+meanwhile); API keys are revoked in the key registry. If you gave an agent your own
+console token, revoking it signs your console out too. **End sessions** closes the
+agent's handshake-era sessions without revoking it.
+
+```hurl
+{{#include ../examples/agent/manage_agents.hurl:agents_revoke}}
+```
+
+```hurl
+{{#include ../examples/agent/manage_agents.hurl:agents_restore}}
+```
+
+| Route | |
+|---|---|
+| `GET /_rustybin/agents` | The agents and the policy (default ceiling, rules) |
+| `GET /_rustybin/agents/events` | Server-Sent Events: a `call` per tool call, an `agent` event on revoke and restore (at most 16 listeners) |
+| `GET /_rustybin/agents/{id}` | One agent: calls per tool, last errors, sessions, the tools and whether its rights allow each |
+| `PATCH /_rustybin/agents/{id}` | `{"rights": {"ceiling", "allow", "deny"} \| null, "note": "..." \| null}` |
+| `POST /_rustybin/agents/{id}/revoke`, `/restore` | Revoke or restore |
+| `DELETE /_rustybin/agents/{id}/sessions` | End its sessions |
+
+All need admin rights. The registry keeps at most 512 agents (the least recently seen
+goes first, agents with rights, a note or a revocation last), 20 errors, 32 sessions
+and 16 token ids per agent. With `RUSTYBIN_STATE_DIR`, rights, notes, revocations and
+the call totals are kept in `<state>/agents.json`; sessions and errors are not. On an
+open control plane anyone may connect under any name, so rights there are advisory:
+turn on the console sign-in to control agents for real. **Explain what this agent
+did** (with an AI key) summarises an agent's calls, errors and rights.
 
 ## Talking to the server
 
@@ -440,7 +527,9 @@ could not.
 
 Every call that changes something, and every refused call, is logged as one line
 (target `rustybin::manage`) with the tool, its target, the caller (`admin`,
-`key:<id>`, `visit:<fingerprint>` or `session:<label>`) and the outcome. Arguments are
+`key:<id>`, `visit:<fingerprint>` or `session:<label>`), the agent's id and the
+outcome. New agents, rights changes, revocations and restores are logged under
+`rustybin::agents`. Arguments are
 never logged, since they may hold secrets or spec bodies.
 
 `/_rustybin/metrics` counts calls in `rustybin_manage_mcp_calls_total{tool, outcome}`
@@ -467,5 +556,5 @@ so [plan limits](concepts/plans-and-limits.md) apply as for the REST routes.
   content.
 - The self-service email step: consent stays in the console.
 - OAuth sign-in for self-service visitors and shared-mode key holders (they send their
-  manage token or API key as a header), revoking a single signed-in agent, and client
-  ID metadata documents (the server would have to fetch a URL).
+  manage token or API key as a header), and client ID metadata documents (the server
+  would have to fetch a URL).

@@ -194,6 +194,11 @@ pub struct Config {
     /// (`normal`, `empty`, `large`, ...; see `crate::mcp::registry`). Seeds
     /// the `registry.scenario` setting; invalid values warn and are ignored.
     pub registry_scenario: Option<String>,
+    /// `RUSTYBIN_AGENTS_DEFAULT_CEILING`: the most an AI agent on the
+    /// management MCP server may do by default (`read-only`, `traffic`,
+    /// `manage`, `full`; seeds `agents.default_ceiling`, see
+    /// `crate::mcp::manage::agents`). Invalid values warn and are ignored.
+    pub agents_default_ceiling: Option<String>,
     /// `RUSTYBIN_REGISTRY_SAVED`: registry base URLs the console offers to
     /// browse (seeds `registry.saved`; their hosts are allowed for browsing).
     pub registry_saved: Vec<String>,
@@ -938,6 +943,19 @@ impl Config {
                 false,
                 &mut warnings,
             ),
+            agents_default_ceiling: match get("RUSTYBIN_AGENTS_DEFAULT_CEILING") {
+                Some(v) if crate::mcp::manage::agents::Ceiling::parse(&v).is_some() => {
+                    Some(v.trim().to_string())
+                }
+                Some(v) => {
+                    warnings.push(format!(
+                        "RUSTYBIN_AGENTS_DEFAULT_CEILING={v:?} is not one of {}; using full",
+                        crate::mcp::manage::agents::CEILINGS.join(", ")
+                    ));
+                    None
+                }
+                None => None,
+            },
             registry_scenario: match get("RUSTYBIN_REGISTRY_SCENARIO") {
                 Some(v)
                     if crate::mcp::registry::SCENARIOS
@@ -1064,6 +1082,7 @@ impl Config {
             egress_allow: Vec::new(),
             egress_allow_loopback: false,
             registry_scenario: None,
+            agents_default_ceiling: None,
             registry_saved: Vec::new(),
             portal: None,
             portal_auth: None,

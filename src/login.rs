@@ -68,6 +68,9 @@ pub const HASH_KEY: &str = "console.password_hash";
 pub const TOKEN_TTL_SECS: i64 = 12 * 3600;
 /// Bounds.
 pub const MAX_REVOKED: usize = 4096;
+/// Revoked token subjects (an AI agent's OAuth client, see
+/// `crate::mcp::manage::agents`).
+pub const MAX_REVOKED_SUBJECTS: usize = 1024;
 pub const MAX_SESSIONS: usize = 256;
 pub const MAX_ATTEMPT_ADDRESSES: usize = 1024;
 /// Failed attempts per address and window before the address waits.
@@ -309,6 +312,10 @@ pub struct Tokens {
     clock: Arc<dyn Clock>,
     generation: AtomicU64,
     revoked: Mutex<BTreeMap<String, i64>>,
+    /// Subjects whose tokens are refused (until the time given): an OAuth
+    /// client revoked from Management, AI agents. Kept across "sign out
+    /// everywhere".
+    revoked_subjects: Mutex<BTreeMap<String, i64>>,
     issued: Mutex<VecDeque<Issued>>,
     attempts: Mutex<HashMap<IpAddr, Attempt>>,
 }
@@ -345,6 +352,7 @@ impl Tokens {
             clock,
             generation: AtomicU64::new(1),
             revoked: Mutex::new(BTreeMap::new()),
+            revoked_subjects: Mutex::new(BTreeMap::new()),
             issued: Mutex::new(VecDeque::new()),
             attempts: Mutex::new(HashMap::new()),
         }
@@ -410,6 +418,40 @@ impl Tokens {
     pub fn is_revoked(&self, jti: &str) -> bool {
         let now = self.now();
         lock(&self.revoked).get(jti).is_some_and(|exp| *exp > now)
+    }
+
+    /// Take back a revocation (an agent restored by the operator).
+    pub fn unrevoke(&self, jti: &str) -> bool {
+        lock(&self.revoked).remove(jti).is_some()
+    }
+
+    /// Refuse every token of `sub` until `until`.
+    pub fn revoke_subject(&self, sub: &str, until: i64) {
+        let now = self.now();
+        let mut subjects = lock(&self.revoked_subjects);
+        subjects.retain(|_, exp| *exp > now);
+        subjects.insert(sub.to_string(), until);
+        while subjects.len() > MAX_REVOKED_SUBJECTS {
+            let Some(first) = subjects
+                .iter()
+                .min_by_key(|(_, exp)| **exp)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            subjects.remove(&first);
+        }
+    }
+
+    pub fn restore_subject(&self, sub: &str) -> bool {
+        lock(&self.revoked_subjects).remove(sub).is_some()
+    }
+
+    pub fn is_subject_revoked(&self, sub: &str) -> bool {
+        let now = self.now();
+        lock(&self.revoked_subjects)
+            .get(sub)
+            .is_some_and(|exp| *exp > now)
     }
 
     /// Note a use of a listed session.

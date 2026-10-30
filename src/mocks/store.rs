@@ -278,6 +278,9 @@ pub struct MockStore {
     /// The `portal.items` of `rustybin.yaml` (validated) and when they were
     /// loaded: published on the dev portal.
     file_portal: Arc<RwLock<(Vec<crate::portal::FileItem>, DateTime<Utc>)>>,
+    /// The `agents:` section of `rustybin.yaml` (validated): the default
+    /// ceiling and the rules of the management MCP server's agents.
+    file_agents: Arc<RwLock<crate::mcp::manage::agents::FilePolicy>>,
 }
 
 impl MockStore {
@@ -295,6 +298,7 @@ impl MockStore {
             visits: None,
             file_registry: Arc::new(RwLock::new((Vec::new(), Utc::now()))),
             file_portal: Arc::new(RwLock::new((Vec::new(), Utc::now()))),
+            file_agents: Arc::new(RwLock::new(Default::default())),
         }
     }
 
@@ -310,6 +314,19 @@ impl MockStore {
     /// The portal items of the config file and when they were loaded.
     pub fn file_portal(&self) -> (Vec<crate::portal::FileItem>, DateTime<Utc>) {
         self.file_portal
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Replace the agents policy of the config file.
+    pub fn set_file_agents(&self, policy: crate::mcp::manage::agents::FilePolicy) {
+        *self.file_agents.write().unwrap_or_else(|p| p.into_inner()) = policy;
+    }
+
+    /// The agents policy of the config file.
+    pub fn file_agents(&self) -> crate::mcp::manage::agents::FilePolicy {
+        self.file_agents
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .clone()

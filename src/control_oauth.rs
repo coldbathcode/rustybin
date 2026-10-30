@@ -373,6 +373,15 @@ fn verify(token: &str, audience: &str, use_: &str, config: &Config) -> Result<Va
     if data.claims.get("rb_use").and_then(Value::as_str) != Some(use_) {
         return Err("wrong_token_type");
     }
+    // An agent revoked by the operator (Management, AI agents): its access
+    // tokens and its refresh tokens.
+    let tokens = &config.console_tokens;
+    let str_claim = |k: &str| data.claims.get(k).and_then(Value::as_str);
+    if str_claim("jti").is_some_and(|j| tokens.is_revoked(j))
+        || str_claim("sub").is_some_and(|s| tokens.is_subject_revoked(s))
+    {
+        return Err("revoked");
+    }
     Ok(data.claims)
 }
 

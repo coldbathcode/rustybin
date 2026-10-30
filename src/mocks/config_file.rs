@@ -20,7 +20,9 @@
 //! (`registry.servers`: `server.json` documents, validated on load; see
 //! `crate::mcp::registry`). A `portal:` section publishes items on the dev
 //! portal (`portal.items`: `{id, title, summary, tags, ...}`; see
-//! `crate::portal`).
+//! `crate::portal`). An `agents:` section sets the rights of AI agents on
+//! the management MCP server (`default_ceiling` and `rules`; see
+//! `crate::mcp::manage::agents`).
 //!
 //! `${VAR}` and `${VAR:-default}` are expanded from the environment when a
 //! file is loaded from disk (never for documents sent to the API).
@@ -59,6 +61,8 @@ pub struct MocksFile {
     pub registry: Option<RegistrySection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub portal: Option<crate::portal::FileSection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<crate::mcp::manage::agents::FileSection>,
 }
 
 /// The `registry:` section: entries of the mock MCP registry.
@@ -176,10 +180,23 @@ pub fn parse_lenient(text: &str) -> Result<(MocksFile, Vec<Failed>), String> {
             }
         },
     };
+    let agents = match top.remove("agents") {
+        None | Some(Value::Null) => None,
+        Some(v) => match serde_json::from_value::<crate::mcp::manage::agents::FileSection>(v) {
+            Ok(a) => Some(a),
+            Err(e) => {
+                failed.push(Failed {
+                    name: None,
+                    error: format!("agents: {e} (ignored)"),
+                });
+                None
+            }
+        },
+    };
     failed.extend(top.keys().map(|k| Failed {
         name: None,
         error: format!(
-            "unknown field {k:?} ignored (expected `version`, `mocks`, `registry` and `portal`)"
+            "unknown field {k:?} ignored (expected `version`, `mocks`, `registry`, `portal` and `agents`)"
         ),
     }));
     let mut mocks = Vec::new();
@@ -205,6 +222,7 @@ pub fn parse_lenient(text: &str) -> Result<(MocksFile, Vec<Failed>), String> {
             mocks,
             registry,
             portal,
+            agents,
         },
         failed,
     ))
@@ -223,6 +241,8 @@ pub struct Loaded {
     pub registry: Vec<Value>,
     /// The valid `portal.items` (invalid ones are in `problems`).
     pub portal: Vec<crate::portal::FileItem>,
+    /// The usable `agents:` section (invalid rules are in `problems`).
+    pub agents: crate::mcp::manage::agents::FilePolicy,
 }
 
 /// Expand `${VAR}` and `${VAR:-default}`; unknown variables without a
@@ -348,6 +368,13 @@ where
     out.portal = portal;
     out.problems.extend(
         portal_problems
+            .into_iter()
+            .map(|p| format!("{}: {p}", path.display())),
+    );
+    let (agents, agents_problems) = crate::mcp::manage::agents::file_policy(file.agents.take());
+    out.agents = agents;
+    out.problems.extend(
+        agents_problems
             .into_iter()
             .map(|p| format!("{}: {p}", path.display())),
     );
@@ -562,11 +589,32 @@ pub fn json_schema() -> Value {
             "items": portal_item
         }
     }));
+    let tools = json!({ "type": "array", "items": { "type": "string" }, "maxItems": crate::mcp::manage::agents::MAX_TOOL_LIST, "description": "Management MCP tool names" });
+    let ceiling = json!({ "type": "string", "enum": crate::mcp::manage::agents::CEILINGS });
+    let agents = object(json!({
+        "default_ceiling": ceiling,
+        "rules": {
+            "type": "array",
+            "maxItems": crate::mcp::manage::agents::MAX_RULES,
+            "description": "Rights of AI agents on the management MCP server; the first matching rule applies, an agent's own rights (console, API) win field by field",
+            "items": object(json!({
+                "match": object(json!({
+                    "name": { "type": "string", "description": "The client's name (clientInfo), * as a wildcard, case insensitive" },
+                    "credential": { "type": "string", "enum": crate::mcp::manage::agents::CREDENTIAL_KINDS }
+                })),
+                "ceiling": ceiling,
+                "allow": tools,
+                "deny": tools,
+                "note": { "type": "string", "maxLength": crate::mcp::manage::agents::MAX_NOTE }
+            }))
+        }
+    }));
     let mut root = object(json!({
         "version": { "const": 1 },
         "mocks": { "type": "array", "items": mock },
         "registry": registry,
-        "portal": portal
+        "portal": portal,
+        "agents": agents
     }));
     if let Value::Object(m) = &mut root {
         m.insert(

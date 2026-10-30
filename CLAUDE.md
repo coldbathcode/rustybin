@@ -2,7 +2,7 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 to 07 done)
+## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 to 08 done)
 
 [docs/plans/next/master-plan.md](docs/plans/next/master-plan.md) (planned 2026-10-29) is the plan for the next
 build: twelve steps, one file each (`docs/plans/next/step-NN-*.md`): foundations (step 01, done 2026-10-29: the
@@ -18,7 +18,8 @@ prompt to the chosen OpenAPI version, example payloads with an alert when a spec
 diff), an MCP inspector for any server with every auth mode and a relay (step 05, done 2026-10-30:
 `src/mcp/inspector/`, `ui/lib/mcpclient.js`, `ui/lib/mcpauth.js`, `ui/views/mcp.js`, see below), a mock MCP registry and registry
 browsing (step 06, done 2026-10-30: `src/mcp/registry/`, `ui/views/registry.js`, see below), a dev portal (step 07, done
-2026-10-30: `src/portal/`, `ui-portal/`, see below), AI agents management, the whole instance as `rustybin.yaml` with git source control, a
+2026-10-30: `src/portal/`, `ui-portal/`, see below), AI agents management (step 08, done 2026-10-30:
+`src/mcp/manage/agents/`, `ui/views/agents.js`, see below), the whole instance as `rustybin.yaml` with git source control, a
 `rustybin` CLI for remote instances, management MCP parity, and the 0.2.0 release. The master plan's section 4 is
 the build marker and section 5 the session protocol: build a step whole, update its status and build notes, update
 the master table, commit as oliwynn with the step number in the message, push to main. Steps go only when the
@@ -69,6 +70,13 @@ tool and the role-filtered `tools/list`, annotations plus confirmation (elicitat
 destructive tools, captured or mocked content only under `untrusted_*` fields (truncated, never in the text
 summary), audit lines without arguments. In-process requests from tools (`try_request` and friends) carry only
 the caller's API key, never their control credentials (captures would expose them).
+
+AI agents (step 08 of the 0.2 plan, `src/mcp/manage/agents/`): every `tools/list` and `tools/call` is attributed to
+an agent (the caller's `Credential` from `Access` plus the client's `clientInfo` name) in `AppState.agents`, whose
+rights (a ceiling, tool allow and deny lists: the agent's own, a rule of `rustybin.yaml`'s `agents:` section, the
+`agents.default_ceiling` setting) apply after the credential's; revocation refuses calls, ends sessions and puts the
+agent's token ids and OAuth subject in `login::Tokens`. `/_rustybin/agents*` (admin), console view `ui/views/agents.js`.
+A new tool needs nothing here: ceilings follow its `Right` and `read_only`.
 
 OAuth sign-in to `/_rustybin/mcp` ([docs/plans/control-oauth.md](docs/plans/control-oauth.md), 2026-10-21):
 `src/control_oauth.rs` is a small authorization server for the control plane (metadata, stateless client

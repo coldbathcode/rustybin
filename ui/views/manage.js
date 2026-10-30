@@ -13,7 +13,6 @@ import { SERVER, getJson, send, trimBase } from '../lib/http.js';
 import * as settings from '../lib/settings.js';
 import * as auth from '../lib/auth.js';
 import * as assist from '../lib/assist.js';
-import { agentPanel } from '../lib/agent.js';
 import { settingsForm } from '../lib/settingsform.js';
 import * as portal from '../lib/portal.js';
 
@@ -88,9 +87,8 @@ function generalPanel(doc, reload, error) {
     el.appendChild(card('Console', { hint: 'shown to everyone who opens it' }, loadError(error)));
   }
   el.appendChild(browserCard());
-  el.appendChild(card(null, {}, h('details', { class: 'disclosure', id: 'agent-panel' },
-    h('summary', null, 'Connect an AI agent (MCP)'),
-    h('div', { style: { paddingTop: '8px' } }, agentPanel()))));
+  el.appendChild(card(null, {}, h('p', { class: 'small', style: { margin: 0 }, id: 'agent-panel' }, icon('terminal'), ' Connect an AI agent (MCP), see what agents did and limit or revoke them in ',
+    h('a', { href: '#/agents' }, 'AI agents'), '.')));
   return el;
 }
 

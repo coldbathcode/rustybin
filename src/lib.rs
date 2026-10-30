@@ -114,6 +114,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     auth_mtls::router,
     mcp::router,
     mcp::manage::router,
+    mcp::manage::agents::api::router,
     mcp::inspector::router,
     mcp::registry::router,
     portal::router,
