@@ -1,9 +1,11 @@
 # Configuration
 
 Rustybin is configured through environment variables; the only command-line
-option of the server is `--config <file>`, the `rustybin.yaml` declaring
-[OpenAPI mocks](mocks/config.md). Invalid values never
-stop the server: they are logged as warnings and the default is used. Values are
+option that changes server configuration is `--config <file>`, an
+[instance configuration document](configuration-as-code.md) (also accepting the
+[version 1 mocks format](mocks/config.md)). Most invalid environment values log a
+warning and fall back to the default. Required configuration files and features
+such as a required git source can still prevent startup. Values are
 trimmed, and an empty value counts as unset (except for `RUSTYBIN_CORS_ORIGINS`, see
 below). Booleans accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `off`
 (case-insensitive).
@@ -177,7 +179,7 @@ through the management MCP. The settings of this release: `console.title`,
 the `assist.*` settings of [AI assist](ai-assist.md) (the provider keys are secrets),
 `egress.allow`, `egress.allow_loopback`, `registry.scenario`, `registry.saved`, the
 `portal.*` settings of the [dev portal](#dev-portal) and the secret
-`leads.webhook_token`; later features register their own (the git token).
+`leads.webhook_token`; source control also registers `git.*` settings, including the secret `git.token`.
 
 ## Outbound connections
 
@@ -206,7 +208,7 @@ under a **purpose** with its own rule, on only when the feature is configured:
 | `key_registry` | The host and port of `RUSTYBIN_KEYS_URL`. Loopback allowed. |
 | `registry` | `registry.modelcontextprotocol.io` (the MCP registry) and the hosts of the saved registries (`registry.saved`), for [browsing a registry](mcp/registry.md#browsing-a-real-registry). |
 | `assist` | The [AI assist](ai-assist.md) provider's host once its key is set (`api.anthropic.com`, `api.openai.com`, `generativelanguage.googleapis.com`, the compatible base URL's host). |
-| `git` | The git remote's host once configured (a later release). |
+| `git` | The git remote's host once configured; see [source control](source-control.md). |
 | `mcp_relay` | No default: name the MCP servers the [inspector](mcp/inspector.md) may relay to and run checks against in `RUSTYBIN_EGRESS_ALLOW`. This instance's own MCP servers are relayed in process and need no entry. |
 
 ```hurl

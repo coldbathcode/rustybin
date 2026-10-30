@@ -18,7 +18,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test                                   # unit tests + tests/integration.rs, a few seconds
 RUSTYBIN_UPDATE_README=1 cargo test readme_endpoints   # regenerate the README endpoint tables
 docs/examples/run.sh                         # the documentation examples (needs hurl 8)
+python3 docs/tools/check_includes.py         # all example includes and anchors
 mdbook build docs                            # the documentation site (needs mdbook)
+python3 docs/tools/check_links.py            # local links, fragments and assets
 ```
 
 The MSRV is Rust 1.88 (`rust-version` in `Cargo.toml`, the Dockerfile builder
@@ -110,3 +112,16 @@ documentation example against a fresh server) and the SDK conformance job.
 `.github/workflows/docs.yml` builds the mdBook site and publishes it to GitHub Pages
 (<https://docs.rustybin.dev/>) on every push to `main`; the repository's
 Pages source must be set to "GitHub Actions".
+
+## Documentation design
+
+The site uses mdBook with `docs/theme/rustybin.css` and
+`docs/theme/rustybin.js`, with no remote fonts or runtime dependencies. Edit
+Markdown in `docs/src`, keep task links in `tasks.md` and navigation in
+`SUMMARY.md`, then build and run both documentation checkers above.
+
+Preview with `mdbook serve docs --open`. Check a narrow screen, light and dark
+themes, search, code copying and the **On this page** links. The outline,
+breadcrumbs and named previous/next links are progressive enhancements; the
+Markdown, built-in sidebar and search remain managed by mdBook. CI builds with
+mdBook 0.4.52; the custom theme also supports 0.5.

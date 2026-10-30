@@ -1,17 +1,40 @@
 # Quick start
 
-All examples on this page assume Rustybin answers on `http://localhost:8080`.
+Get a local instance running, send a request, then sign in to manage it. Docker
+and Cargo below use **`http://localhost:8080`**. The Compose file uses port `80`.
+No AI provider key is needed for the built-in mocks.
+
+## Choose a setup
+
+| Use | You need | Start here |
+|---|---|---|
+| A local container | Docker | [Docker](#docker) |
+| The repository's multi-instance setup | Docker Compose and a checkout | [Docker Compose](#docker-compose) |
+| A native server and CLI | Rust 1.88+ and a checkout | [Cargo](#cargo) |
+| A hosted demo | Fly CLI and an account | [Fly.io](#flyio) |
 
 ## Docker
 
-There is no published image: build it from the repository (the build compiles a
-release binary, which takes a few minutes the first time).
-
-The published image needs no build:
+Start the published image:
 
 ```bash
-docker run -d --name rustybin -p 8080:80 -p 8443:443 -p 50051:50051 ghcr.io/coldbathcode/rustybin:latest
+docker run -d --name rustybin \
+  -p 8080:80 -p 8443:443 -p 50051:50051 \
+  ghcr.io/coldbathcode/rustybin:latest
 ```
+
+Check that it is ready:
+
+```bash
+curl -i http://localhost:8080/_rustybin/ready
+```
+
+Expect **`200 OK`**. Then [send your first requests](#first-requests) or open the
+[console](http://localhost:8080/ui). If it does not answer, run
+`docker logs rustybin` and see [connection troubleshooting](troubleshooting.md#i-cannot-connect-to-the-instance).
+
+<details>
+<summary>Image tags, signature verification and building from source</summary>
 
 `latest` and `edge` follow the main branch, a release `vX.Y.Z` also publishes `X.Y.Z`, `X.Y`
 and `X`, and every build publishes `sha-<commit>`; the image is multi-arch (amd64 and
@@ -32,17 +55,113 @@ docker build -t rustybin .
 docker run -d --name rustybin -p 8080:80 -p 8443:443 -p 50051:50051 rustybin
 ```
 
+</details>
+
 The container listens on 80 (HTTP), 443 (HTTPS) and 50051 (gRPC) and runs as an
 unprivileged user (uid 10001). On first start it generates a demo PKI in `/app/certs`
 (a CA, the HTTPS server certificate and a client certificate for mTLS demos); mount
 a volume on `/app/certs` to keep it across restarts (a bind-mounted host directory
 must be writable by uid 10001). The image also runs with `--read-only` when
 `/app/certs` is a volume, see [Containers](concepts/control-plane-security.md#containers).
-Settings are environment variables, see [Configuration](configuration.md):
+To keep settings, secrets and created mocks across restarts, also set
+`RUSTYBIN_STATE_DIR` and mount a state volume; see
+[persistence](troubleshooting.md#my-changes-disappeared-after-a-restart).
+
+Settings are environment variables, see [Configuration](configuration.md). For
+example, on an alternative port if the first container is still running:
 
 ```bash
-docker run -d -p 8080:80 -e RUSTYBIN_INSTANCE_ID=demo-1 -e RUSTYBIN_ADMIN_TOKEN=change-me rustybin
+docker run -d -p 8081:80 -e RUSTYBIN_INSTANCE_ID=demo-1 \
+  -e RUSTYBIN_ADMIN_TOKEN=change-me ghcr.io/coldbathcode/rustybin:latest
 ```
+
+## First requests
+
+These use the built-in services on a default instance. No console token or real
+LLM key is needed. The fault example deliberately returns `503`.
+
+### See what arrived
+
+Send a custom header and query parameter:
+
+```bash
+curl -s 'http://localhost:8080/anything/hello?demo=1' -H 'X-Demo: rustybin'
+```
+
+Expect a JSON echo with `path` set to `/anything/hello` and your `x-demo` header.
+
+### Call the mock LLM
+
+Send an OpenAI-format chat request. Any model name works:
+
+```bash
+curl -s http://localhost:8080/ai/openai/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}'
+```
+
+Expect `choices[0].message.content` to start with `Hello! I'm Rustybin`.
+This is a simulated response, with no upstream AI call.
+
+### Try a mock API
+
+The Petstore sample is already deployed:
+
+```bash
+curl -s http://localhost:8080/mock/petstore/v1/pets/42
+```
+
+Expect a pet with `id` equal to `42`. To create your own, open **Mock APIs** in the
+console or follow [OpenAPI mocks](mocks/index.md#quick-start).
+
+<details>
+<summary>Try MCP, A2A, fault injection and OAuth</summary>
+
+```bash
+# MCP: start a session (2025-06-18 handshake)
+curl -si http://localhost:8080/mcp -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
+
+# A2A: the default agent card
+curl -s http://localhost:8080/.well-known/agent-card.json
+
+# Chaos on any route
+curl -si http://localhost:8080/echo -H 'X-Rustybin-Fail: 503'
+
+# An access token from the built-in identity provider
+curl -s http://localhost:8080/oauth/token \
+  -d grant_type=client_credentials -d client_id=rustybin -d client_secret=secret
+```
+
+</details>
+
+<details>
+<summary>The same requests as a tested Hurl file</summary>
+
+```hurl
+{{#include ../examples/quickstart/quickstart.hurl:ready}}
+
+{{#include ../examples/quickstart/quickstart.hurl:echo}}
+
+{{#include ../examples/quickstart/quickstart.hurl:chat}}
+
+{{#include ../examples/quickstart/quickstart.hurl:mock}}
+
+{{#include ../examples/quickstart/quickstart.hurl:mcp}}
+
+{{#include ../examples/quickstart/quickstart.hurl:a2a}}
+
+{{#include ../examples/quickstart/quickstart.hurl:fault}}
+
+{{#include ../examples/quickstart/quickstart.hurl:token}}
+```
+
+</details>
+
+Then open `http://localhost:8080/` for the endpoint list with runnable examples,
+`/docs` for the interactive API reference and `/ui` for the
+[web console](console.md).
 
 ## First sign-in
 
@@ -53,11 +172,12 @@ instance warns in its log and the console shows a banner until you change it und
 a hash, and every other session ends). Or set it before the first start:
 
 ```bash
-docker run -d -p 8080:80 -e RUSTYBIN_CONSOLE_PASSWORD=change-me rustybin
+docker run -d -p 8081:80 -e RUSTYBIN_CONSOLE_PASSWORD=change-me \
+  ghcr.io/coldbathcode/rustybin:latest
 ```
 
-Scripts sign in the same way and get a token that opens everything, the
-[management MCP server](agent-mcp.md) included:
+Scripts (with curl and jq installed) sign in the same way and get a token that
+opens everything, the [management MCP server](agent-mcp.md) included:
 
 ```bash
 TOKEN=$(curl -s http://localhost:8080/_rustybin/login -H 'Content-Type: application/json' \
@@ -65,14 +185,24 @@ TOKEN=$(curl -s http://localhost:8080/_rustybin/login -H 'Content-Type: applicat
 curl -s http://localhost:8080/_rustybin/status -H "Authorization: Bearer $TOKEN"
 ```
 
-`RUSTYBIN_CONTROL_AUTH=open` turns the sign-in off for a laptop or a lab; the data
-plane (everything your gateway calls) never needs credentials. Details:
+`RUSTYBIN_CONTROL_AUTH=open` turns the control-plane sign-in off for a laptop or
+lab. Ordinary echo, mock LLM and protocol routes work without console sign-in;
+authentication demo routes, secured mocks and required API keys have their own
+credential checks. Details:
 [Control-plane security](concepts/control-plane-security.md).
 
-## Five commands
+<span id="five-commands"></span>
 
-The same binary is the [command line](cli-guide.md). From nothing to a mock written
-by your AI, published for testers and exported as code:
+## Build and publish a mock
+
+These five steps are optional. They use a **local `rustybin` binary on your PATH**
+(see [Cargo](#cargo)), a running instance and an Anthropic key in `key.txt`. For a
+Docker-only setup, run CLI commands as `docker exec -it rustybin rustybin ...`;
+inside the container the login URL is `http://localhost:80`, and file paths refer
+to files inside the container. The console steps below need no local CLI.
+
+The same binary is the [command line](cli-guide.md). Build a mock with your own AI,
+publish it for testers and export it as code:
 
 ```bash
 # 1. Sign in (rustybin / rustybin); the token lands in a profile.
@@ -96,14 +226,16 @@ rustybin config export > rustybin.yaml
 The console does the same: **Management, AI** for the key, the mock wizard's
 **Describe it** tab, **Publish to portal** on the mock, **Management, Export**; and
 an agent does it through the [management MCP server](agent-mcp.md) with the
-`build_instance` prompt. Without a key, step 3 is `rustybin mocks create orders
---spec your-spec.yaml` (or the built-in `petstore`), and everything else is the same.
+`build_instance` prompt. Without an AI key, skip step 2 and replace step 3 with
+`rustybin mocks create orders --spec your-spec.yaml`. To explore without any spec,
+use the built-in Petstore mock and publish it with
+`rustybin portal publish mock:petstore --title "Petstore"`.
 
 ## Docker Compose
 
 `docker-compose.yml` builds the image, publishes ports 80, 443 and 50051 and keeps
 the demo PKI in the named volume `rustybin-certs` so it survives restarts (download
-the CA with `curl -o ca.crt http://localhost/auth/mtls/get-ca-cert`):
+the CA with `curl -s http://localhost/auth/mtls/get-ca-cert | jq -r .ca_cert_pem > ca.crt`):
 
 ```bash
 docker compose up -d
@@ -116,10 +248,19 @@ balancing demos (see [Identity and load balancing](reference/identity.md)).
 
 ## Cargo
 
-Rust 1.88 or newer. The default ports (80 and 443) need root, so pick high ports:
+From a repository checkout with Rust 1.88 or newer, choose high ports for a
+normal user account:
 
 ```bash
 RUSTYBIN_HTTP_PORT=8080 RUSTYBIN_HTTPS_PORT=8443 cargo run --release
+```
+
+The build also produces the CLI. To use the `rustybin` commands in these docs
+from this checkout, add it to your current shell's PATH:
+
+```bash
+export PATH="$PWD/target/release:$PATH"
+rustybin --version
 ```
 
 `cargo run` writes the demo PKI to `certs/` in the working directory (the default
@@ -163,58 +304,3 @@ Things to know about the provided configuration:
 - gRPC on port 50051 is plaintext h2c: `grpcurl -plaintext <app>.fly.dev:50051 list`.
 - For a shared, internet-facing instance set `RUSTYBIN_PUBLIC_MODE=true` (see
   [Sessions, public mode and the admin token](concepts/sessions.md)).
-
-## First requests
-
-```bash
-# Echo: see exactly what arrived (method, path, query, headers, body)
-curl -s 'http://localhost:8080/anything/hello?demo=1' -H 'X-Demo: rustybin'
-
-# Mock LLM, OpenAI wire format
-curl -s http://localhost:8080/ai/openai/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}'
-
-# An OpenAPI mock: the built-in Petstore sample (upload your own spec in /ui/#/mocks)
-curl -s http://localhost:8080/mock/petstore/v1/pets/42
-
-# MCP: start a session (2025-06-18 handshake)
-curl -si http://localhost:8080/mcp -H 'Content-Type: application/json' \
-  -H 'Accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
-
-# A2A: the default agent card
-curl -s http://localhost:8080/.well-known/agent-card.json
-
-# Chaos on any route
-curl -si http://localhost:8080/echo -H 'X-Rustybin-Fail: 503'
-
-# An access token from the built-in identity provider
-curl -s http://localhost:8080/oauth/token \
-  -d grant_type=client_credentials -d client_id=rustybin -d client_secret=secret
-```
-
-<details>
-<summary>The same requests as a tested Hurl file</summary>
-
-```hurl
-{{#include ../examples/quickstart/quickstart.hurl:echo}}
-
-{{#include ../examples/quickstart/quickstart.hurl:chat}}
-
-{{#include ../examples/quickstart/quickstart.hurl:mock}}
-
-{{#include ../examples/quickstart/quickstart.hurl:mcp}}
-
-{{#include ../examples/quickstart/quickstart.hurl:a2a}}
-
-{{#include ../examples/quickstart/quickstart.hurl:fault}}
-
-{{#include ../examples/quickstart/quickstart.hurl:token}}
-```
-
-</details>
-
-Then open `http://localhost:8080/` for the endpoint list with runnable examples,
-`/docs` for the interactive API reference and `/ui` for the
-[web console](console.md).

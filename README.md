@@ -19,6 +19,9 @@ state is bounded.
 Documentation: **<https://docs.rustybin.dev/>** (built from [`docs/`](docs/src/introduction.md);
 every request example in it is tested in CI).
 
+[Quick start](docs/src/quick-start.md) · [Find a task](docs/src/tasks.md) ·
+[Troubleshooting](docs/src/troubleshooting.md) · [CLI reference](docs/src/cli.md)
+
 ## Why
 
 Gateway demos need an upstream that is predictable, observable and able to fail on

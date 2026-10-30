@@ -77,8 +77,8 @@ portal:
     - id: llm
 ```
 
-The branding and access settings below go into the file with the rest of the
-instance's settings in a later release.
+The branding and access settings below are included under `settings` in the
+[version 2 instance document](configuration-as-code.md), alongside published items.
 
 ### Turn it on, brand it, lock it
 

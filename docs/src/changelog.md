@@ -20,7 +20,7 @@
 Rustybin becomes a mocking and testing service a team runs: set up by describing what
 you need, explored by the people who test against it, managed from the console, a CLI,
 an AI agent or a `rustybin.yaml` in git, and locked with a password on day one. Built
-in twelve steps ([the plan](../plans/next/master-plan.md)), each listed below.
+in twelve steps ([the plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/next/master-plan.md)), each listed below.
 
 **Changed default: the console and the control plane now ask for a user name and
 password.** `RUSTYBIN_CONTROL_AUTH` is `password` when unset: `rustybin` / `rustybin`

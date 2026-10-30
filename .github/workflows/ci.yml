@@ -168,6 +168,8 @@ jobs:
         run: python3 docs/tools/check_includes.py
       - name: Build the book
         run: mdbook build docs
+      - name: Check documentation links
+        run: python3 docs/tools/check_links.py
       - name: Run every documentation example against a fresh server
         run: REQUIRE_ALL_TOOLS=1 docs/examples/run.sh
 

@@ -1,5 +1,10 @@
 # The first requests of the quick start (docs/src/quick-start.md and README.md)
 
+# ANCHOR: ready
+GET {{base_url}}/_rustybin/ready
+HTTP 200
+# ANCHOR_END: ready
+
 # ANCHOR: echo
 GET {{base_url}}/anything/hello?demo=1
 X-Demo: rustybin

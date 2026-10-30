@@ -57,7 +57,7 @@ same lock in `jwt` mode, as a hosted platform runs it:
 
 ## User name and password
 
-In `password` mode the console's sign-in screen, the `rustybin` CLI (a later release)
+In `password` mode the console's sign-in screen, the [`rustybin` CLI](../cli-guide.md)
 and any script sign in with `POST /_rustybin/login` and get a **control token**: an
 HS256 JWT signed with the instance key (the one the [OAuth sign-in](#agents-sign-in-with-oauth)
 uses), scope `admin`, valid for 12 hours, carrying a session id and the token
@@ -406,10 +406,15 @@ Put them on a writable volume:
 
 ```bash
 docker run -d --read-only --cap-drop ALL --security-opt no-new-privileges \
-  -v rustybin-certs:/app/certs -v rustybin-state:/app/state \
-  -e RUSTYBIN_USAGE_FILE=/app/certs/usage.json -e RUSTYBIN_STATE_DIR=/app/state \
-  -p 8080:80 -p 8443:443 -p 50051:50051 rustybin
+  -v rustybin-data:/app/certs \
+  -e RUSTYBIN_USAGE_FILE=/app/certs/usage.json -e RUSTYBIN_STATE_DIR=/app/certs/state \
+  -p 8080:80 -p 8443:443 -p 50051:50051 ghcr.io/coldbathcode/rustybin:latest
 ```
+
+The named volume inherits the image's ownership at `/app/certs` (uid `10001`).
+Keeping state in its `state/` subdirectory avoids an unwritable, root-owned
+volume at a new mount path. A bind mount or separate state volume needs ownership
+prepared for uid `10001`.
 
 Without a writable `/app/certs` the demo certificates live in memory and change at
 every restart (client certificates issued earlier stop verifying). Docker lets an

@@ -128,7 +128,7 @@ Otherwise one JSON document comes back:
 ```
 
 With control-plane auth, read tasks are open to the `console` scope; tasks that change
-the instance (later releases) need admin, like `test` and `usage`.
+the instance need admin, like `test` and `usage`.
 
 ## Privacy and costs
 

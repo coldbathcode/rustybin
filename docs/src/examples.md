@@ -1,6 +1,6 @@
 # How the examples work
 
-Every request shown in this documentation is a tested example. The examples live
+The reference examples are executable tests. The examples live
 as [Hurl](https://hurl.dev) files under `docs/examples/` (plus a few shell scripts
 for gRPC, WebSocket and TLS client certificates, which Hurl cannot drive), and the
 pages include them directly, so what you read is what CI runs.
@@ -32,7 +32,27 @@ variables for the target: `$BASE` (for example `http://localhost:8080`), `$HTTP`
 (`localhost:50051`). The [mock CLI](mocks/cli.md) examples call the `rustybin`
 binary (`$RUSTYBIN_BIN` when run by `run.sh`).
 
+## Run one example against your instance
+
+From a repository checkout, install Hurl 8+ and save a block as a `.hurl` file,
+or use the checked-in example directly:
+
+```bash
+hurl --test --variable base_url=http://localhost:8080 \
+  docs/examples/http/echo.hurl
+```
+
+This echo example works on a default instance. Control-plane examples require
+sign-in unless the instance uses `RUSTYBIN_CONTROL_AUTH=open`; the full runner
+below supplies its own setup and credentials. Follow a file's earlier requests
+when later entries use captured variables.
+
 ## Running them
+
+Run the suite from a repository checkout with **Bash 4+**, Hurl 8+, curl and
+OpenSSL 3. On macOS the system Bash is too old; use a current Bash (for example,
+`brew install bash hurl openssl`) and invoke `/opt/homebrew/bin/bash docs/examples/run.sh`
+on Apple Silicon, or `/usr/local/bin/bash docs/examples/run.sh` on Intel.
 
 ```bash
 docs/examples/run.sh                       # every example
@@ -78,10 +98,3 @@ Requirements: `hurl` and `curl`; `grpcurl`, `websocat` and `jq` for the shell
 examples (skipped with a notice when missing, or a failure with
 `REQUIRE_ALL_TOOLS=1`, which CI sets), and `openssl` 3 for the signing key. Set
 `RUSTYBIN_DOCS_PORT` to move the ports (18800 to 18810).
-
-To run a single Hurl file against your own instance:
-
-```bash
-hurl --test --variable base_url=http://localhost:8080 \
-  --variable admin_token=change-me docs/examples/http/echo.hurl
-```

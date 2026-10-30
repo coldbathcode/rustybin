@@ -1,6 +1,6 @@
 [book]
 title = "Rustybin"
-description = "A stub service for API and AI gateway demos"
+description = "Run, build and test mock APIs, AI providers and agents with Rustybin."
 authors = ["Rustybin contributors"]
 language = "en"
 src = "src"
@@ -10,6 +10,11 @@ build-dir = "book"
 create-missing = false
 
 [output.html]
+additional-css = ["theme/rustybin.css"]
+additional-js = ["theme/rustybin.js"]
+default-theme = "light"
+preferred-dark-theme = "navy"
+no-section-label = true
 # Served from https://docs.rustybin.dev/ (GitHub Pages with a custom domain).
 site-url = "/"
 git-repository-url = "https://github.com/coldbathcode/rustybin"
@@ -17,3 +22,7 @@ edit-url-template = "https://github.com/coldbathcode/rustybin/edit/main/docs/{pa
 
 [output.html.search]
 enable = true
+
+[output.html.fold]
+enable = true
+level = 0

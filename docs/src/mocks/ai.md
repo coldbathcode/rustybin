@@ -115,9 +115,9 @@ something.
 
 The task `request_examples` writes parameter sets and request bodies an operation
 accepts, validated against its parameter and body schemas, for "Generate arguments"
-on an MCP tool and sample requests. This release ships the task (through
-`POST /_rustybin/assist/run` with `spec` and `operation`); the MCP inspector's button
-comes with the inspector.
+on an MCP tool and sample requests. Call it through
+`POST /_rustybin/assist/run` with `spec` and `operation`, or use **Generate arguments**
+in the MCP inspector when an AI provider is configured.
 
 ## Who may, and what is sent
 

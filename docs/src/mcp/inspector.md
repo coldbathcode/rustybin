@@ -42,7 +42,9 @@ straight here with its server selected (`#/mcp/server/<path>`).
 | `2025-11-25`, `2025-06-18`, `2025-03-26` | Streamable HTTP with sessions: `initialize`, `Mcp-Session-Id`, `DELETE` to end |
 | `2024-11-05` | Legacy HTTP+SSE: the `endpoint` event, then POSTs to the message URL |
 
-stdio servers are for the CLI (a later release).
+The inspector connects to HTTP servers. For a local agent that only speaks stdio,
+use the [`rustybin mcp-stdio` bridge](../agent-mcp.md) to reach the management
+server. The bridge does not launch or inspect arbitrary stdio servers.
 
 ## Auth modes
 

@@ -216,6 +216,30 @@ sending the document.
 {{#include ../../examples/mocks/config.hurl:apply_file_path}}
 ```
 
+## Keeping console changes
+
+Set `RUSTYBIN_STATE_DIR` to a writable persistent directory to save settings,
+secrets and mocks. Mock persistence defaults to `<state>/mocks`; alternatively set
+`RUSTYBIN_MOCKS_STATE_DIR` to persist mocks on their own. API and console changes
+are saved as JSON files and loaded at startup. File-defined mocks stay managed by
+their source files.
+
+Without a state directory, API-created mocks are in memory. Use
+[export and apply](#export-and-apply) for a portable backup or an
+[instance document](../configuration-as-code.md) for the whole setup.
+
+## Host-based URLs
+
+Set `RUSTYBIN_MOCKS_HOST=mock.example.com` to also serve a named mock on
+`<name>.mock.example.com`. For example, the Petstore sample can answer at
+`http://petstore.mock.example.com/v1/pets/42`. The spec's server prefix still
+applies. This requires wildcard DNS pointing to the instance or gateway, and a
+matching wildcard certificate when using HTTPS.
+
+Path-based URLs such as `/mock/petstore/v1/pets/42` remain available. Visitor mocks
+can use a separate domain with `RUSTYBIN_MOCKS_SELF_SERVICE_HOST`; see
+[self-service mocks](self-service.md).
+
 ## Docker
 
 The image's working directory is `/app` and it runs as uid 10001, so the simplest

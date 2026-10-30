@@ -26,9 +26,11 @@ that you cannot reach from a demo laptop.
   control API, from a `rustybin.yaml` file or a directory of specs at startup
   ([Configuration as code](config.md)), or with the [`rustybin mock` CLI](cli.md).
 
-Mocks live in memory. Mocks declared in files are recreated at every start; mocks
-created in the console or through the API are lost on restart unless you export
-them to a `rustybin.yaml` ([Export and apply](config.md#export-and-apply)).
+Mocks created in the console or through the API are saved when
+`RUSTYBIN_STATE_DIR` (or `RUSTYBIN_MOCKS_STATE_DIR`) points to a writable directory.
+Without it, they live in memory and are lost on restart. Mocks declared in files
+are recreated at startup. Use [export and apply](config.md#export-and-apply) for a
+portable `rustybin.yaml`; see [persistence](../troubleshooting.md#my-changes-disappeared-after-a-restart).
 
 ## Quick start
 
@@ -48,7 +50,9 @@ them to a `rustybin.yaml` ([Export and apply](config.md#export-and-apply)).
 
 `POST /_rustybin/mocks` takes the spec (a JSON object, or the document text) and
 optional settings, runs the deploy checks and makes the mock live (`201`). The
-admin token is needed when the instance has one (the example server does):
+example runner uses an open control plane and an admin token. On a default
+instance, use a token from [sign-in](../quick-start.md#first-sign-in), which also
+satisfies the admin guard:
 
 ```hurl
 {{#include ../../examples/mocks/mocks.hurl:create}}
