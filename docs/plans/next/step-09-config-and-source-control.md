@@ -1,6 +1,6 @@
 # Step 09: The whole instance as YAML, and git
 
-Master plan: [master-plan.md](master-plan.md). Needs: 01, 07, 08. Status: **not started**. About 3 days.
+Master plan: [master-plan.md](master-plan.md). Needs: 01, 07, 08. Status: **done 2026-10-30**. About 3 days.
 
 ## Goal
 
@@ -135,4 +135,87 @@ through a git repository from the console and at startup; all checks pass; commi
 
 ## Build notes
 
-(filled in when built)
+Built 2026-10-30. What differs from the plan and why:
+
+- **One model, not two.** There is no separate `configdoc` document type: `MocksFile`
+  (`src/mocks/config_file.rs`) is the version 2 document, grown by the sections
+  `instance`, `settings`, `secrets`, `harness` and `health`, with `mocks` now an
+  `Option` (an absent section is left alone, a present one is the truth when pruning).
+  `parse` and `parse_lenient` accept versions 1 and 2, so a version 1 file "upgrades"
+  by being a version 2 document with the mocks sections only; `rustybin mock push`,
+  `check-config` and `POST /_rustybin/mocks/apply` take both (the mocks route applies
+  the `mocks` section only). `src/configdoc/` holds the operations: `export`, `diff`,
+  `apply`, `apply_extra` (what a file load applies beyond the mocks, registry, portal
+  and agents sections, which `mocks::reload_files` already owned), the bundle
+  (`write_dir`, a hand-rolled ustar plus gzip in `tar_gz`, no new dependency) and the
+  routes in `api.rs`. The JSON Schema stays `config_file::json_schema()` (version 2;
+  the MCP resource and `GET /_rustybin/config/schema` serve it).
+- **`portal` carries `items` only.** The portal's title, intro, accent and auth are
+  settings and live under `settings` like every other setting; duplicating them in a
+  `portal` section would have given two places for one value.
+- **Secrets.** `secrets` values are `Option<String>`: `${VAR}` resolves from the
+  instance's environment on apply (files are expanded before parsing, as before),
+  `secret:stored` keeps the instance's own, `null` unsets, and an empty resolution is
+  kept and reported rather than clearing a stored secret by accident. Export writes
+  `${VAR}` for an environment-seeded secret (the variable's name) and `secret:stored`
+  for a stored one. The mocks' demo credentials are part of the mocks and exported
+  unless `secrets=omit`. The `git` settings group is never exported nor pruned: a
+  pulled document must not repoint or drop the instance's own repository.
+- **Which store each section goes to, in API mode.** Mocks: `Origin::Api` (persisted
+  in the mocks state directory, pruning API mocks), the same for a pull and for
+  `RUSTYBIN_CONFIG_GIT` at startup, so the repository is the truth and a console mock
+  not committed goes at startup. Portal items: `Portal::publish` (persisted in
+  `portal.json`; items a `RUSTYBIN_CONFIG_FILE` defines are kept as the file's). Registry
+  entries and agent rules: the "file copy" on the `MockStore` (the only slot the
+  registry and the agents policy read), persisted in `<state>/config.json` and loaded
+  at startup before the config file; published registry entries the document names
+  move into that copy and the rest go when pruning. For that the registry's state
+  moved from a module-local `Extension` into `AppState.registry`. Saved scenarios:
+  `Harness.saved` (a problem when harness mode is off). Health: the toggle.
+- **Diff.** `configdoc::diff` is a section-aware list of `Change {section, key,
+  action, detail}` (lines such as `mocks.orders: spec changed (2 operation(s) added),
+  disabled, responses changed`), capped at 500, computed against the current export
+  before anything is applied and answered by every apply (a dry run is the diff plus
+  each section's would-do). Specs are compared as parsed documents, so an export
+  re-applied is "no change".
+- **Source control** is `src/sourcecontrol/` (`mod.rs`, `api.rs`), the state in
+  `AppState.git` (the startup task and the automatic mode need it outside the router).
+  The working copy is made with `git init -b <branch>`, `remote add`, `fetch` and a
+  checkout of the remote branch (one path for an empty and a non-empty remote, no
+  clone special cases). Every command runs with `GIT_TERMINAL_PROMPT=0`,
+  `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, `HOME=<state>`,
+  `credential.helper=` and `core.hooksPath=/dev/null`, a 60 s timeout and the token
+  scrubbed from any output. A token goes through `GIT_ASKPASS` (a script in
+  `<state>/repo.askpass` reading two environment variables of the child), a deploy key
+  through `GIT_SSH_COMMAND` with `IdentitiesOnly`, `BatchMode` and
+  `StrictHostKeyChecking=accept-new` into `<state>/repo.known_hosts`. The egress check
+  builds the `Purpose::Git` rule from the remote's host and port and resolves it with
+  `egress::pin_with` (ssh remotes have no URL the policy's `resolve` would take); a
+  local remote needs the loopback allowance. Added settings beyond the plan:
+  `git.username` (the user name sent with a token) and `git.pull_every` (the plan's
+  `pull_every: 5m` as its own setting next to `git.auto: pull`). A pull's dry run reads
+  the document and its spec files from `origin/<branch>` with `git show` into a
+  temporary directory, so the working copy never moves on a dry run. `push_on_change`
+  is a 30 s poll comparing the export with the working copy (no change bus exists;
+  the first commit's message lists the drift, truncated to 200 characters). The
+  conflict resolution is `POST /_rustybin/git/resolve {with: instance | repository}`
+  rather than options on pull.
+- **Left out.** The mocks-only `GET /_rustybin/mocks/export` still writes version 1
+  (unchanged for the CLI and the MCP tool until step 10 and 11 grow them). The
+  harness section is inline only (no `file:` references). No merge, no branches per
+  environment, no webhook-triggered pull (documented under "Not in this version").
+- **Checks.** 1069 lib tests (25 new: the document round trip of every section, the
+  version 1 upgrade, the diff, secret references, the bundle and its tar, the routes
+  with dry run and prune, startup from a version 2 file, the applied sections across
+  a restart, remotes and the policy, init, commit, push, pull and apply across two
+  instances, a diverged branch resolved both ways, the deploy key, the automatic
+  modes, startup from `RUSTYBIN_CONFIG_GIT`, the routes; the git tests skip with a
+  notice without `git`), the docs examples (`docs/examples/config/config.hurl` on the
+  secured instance, `source-control.sh` with a bare repository and two instances), the
+  browser check (Export with a dry run and an apply, the Source control form).
+- **For step 10:** `rustybin config export | apply | diff | schema` over
+  `/_rustybin/config/*` (`diff` is an apply with `dry_run`), `rustybin git status |
+  init | commit | push | pull | resolve | key | history` over `/_rustybin/git/*`. **For
+  step 11:** `export_config` and `apply_config` grow to version 2 (`dry_run`, `prune`),
+  `git_status`, `git_commit`, `git_push` (confirmed), `git_pull` (confirmed when
+  applying), `diff_config`.

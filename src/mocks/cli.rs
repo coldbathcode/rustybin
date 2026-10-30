@@ -446,7 +446,7 @@ fn inline_file(path: &Path) -> Result<Value, String> {
     }
     let mut file: MocksFile = config_file::parse(&text)?;
     let base = path.parent().unwrap_or(Path::new("."));
-    for doc in &mut file.mocks {
+    for doc in file.mocks.iter_mut().flatten() {
         if let Some(spec) = doc.spec.take() {
             let p = Path::new(&spec);
             let full = if p.is_absolute() {

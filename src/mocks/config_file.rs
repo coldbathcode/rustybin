@@ -24,6 +24,14 @@
 //! the management MCP server (`default_ceiling` and `rules`; see
 //! `crate::mcp::manage::agents`).
 //!
+//! Version 2 (`docs/plans/next/step-09-config-and-source-control.md`) adds
+//! the whole instance: `instance:` (the title and console user), `settings:`
+//! (non-secret settings by dotted key), `secrets:` (references, never
+//! values), `harness:` (saved scenarios) and `health:` (the initial
+//! state); see `crate::configdoc`, which exports, diffs and applies such
+//! documents. Version 1 files still load (they are version 2 documents with
+//! the mocks sections only).
+//!
 //! `${VAR}` and `${VAR:-default}` are expanded from the environment when a
 //! file is loaded from disk (never for documents sent to the API).
 
@@ -49,20 +57,84 @@ fn default_version() -> u32 {
     1
 }
 
-/// The whole file.
+/// The versions a document may declare.
+pub const VERSIONS: [u32; 2] = [1, 2];
+
+/// The version exports write.
+pub const CURRENT_VERSION: u32 = 2;
+
+/// The sections of a document, in file order.
+pub const SECTIONS: &[&str] = &[
+    "instance", "settings", "secrets", "mocks", "registry", "portal", "harness", "agents", "health",
+];
+
+/// The whole file: a version 2 document (a version 1 file is one with the
+/// mocks sections only). A section that is absent is left alone by an
+/// apply; one that is present (even empty) is the whole truth for its
+/// part of the instance when pruning.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MocksFile {
     #[serde(default = "default_version")]
     pub version: u32,
-    #[serde(default)]
-    pub mocks: Vec<MockDoc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<crate::configdoc::InstanceSection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<BTreeMap<String, Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<BTreeMap<String, Option<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mocks: Option<Vec<MockDoc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry: Option<RegistrySection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub portal: Option<crate::portal::FileSection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<crate::configdoc::HarnessSection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents: Option<crate::mcp::manage::agents::FileSection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<crate::configdoc::HealthSection>,
+}
+
+impl MocksFile {
+    /// The mock entries (none when the section is absent).
+    pub fn mocks(&self) -> &[MockDoc] {
+        self.mocks.as_deref().unwrap_or(&[])
+    }
+
+    /// The names of the sections the document carries.
+    pub fn sections(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.instance.is_some() {
+            out.push("instance");
+        }
+        if self.settings.is_some() {
+            out.push("settings");
+        }
+        if self.secrets.is_some() {
+            out.push("secrets");
+        }
+        if self.mocks.is_some() {
+            out.push("mocks");
+        }
+        if self.registry.is_some() {
+            out.push("registry");
+        }
+        if self.portal.is_some() {
+            out.push("portal");
+        }
+        if self.harness.is_some() {
+            out.push("harness");
+        }
+        if self.agents.is_some() {
+            out.push("agents");
+        }
+        if self.health.is_some() {
+            out.push("health");
+        }
+        out
+    }
 }
 
 /// The `registry:` section: entries of the mock MCP registry.
@@ -111,13 +183,16 @@ impl MockDoc {
     }
 }
 
-/// Parse a config document (YAML or JSON).
+/// Parse a config document (YAML or JSON), version 1 or 2.
 pub fn parse(text: &str) -> Result<MocksFile, String> {
     let value = parse_document(text)?;
     let file: MocksFile =
         serde_json::from_value(value).map_err(|e| format!("invalid mocks document: {e}"))?;
-    if file.version != 1 {
-        return Err(format!("unsupported version {} (expected 1)", file.version));
+    if !VERSIONS.contains(&file.version) {
+        return Err(format!(
+            "unsupported version {} (expected 1 or 2)",
+            file.version
+        ));
     }
     Ok(file)
 }
@@ -130,9 +205,10 @@ pub struct Failed {
     pub error: String,
 }
 
-/// [`parse`] for files on disk: a bad entry is skipped (and returned) instead
-/// of failing the whole document. Errors that leave nothing to read (not
-/// YAML or JSON, wrong version, `mocks` not a list) still fail.
+/// [`parse`] for files on disk: a bad entry or section is skipped (and
+/// returned) instead of failing the whole document. Errors that leave
+/// nothing to read (not YAML or JSON, wrong version, `mocks` not a list)
+/// still fail.
 pub fn parse_lenient(text: &str) -> Result<(MocksFile, Vec<Failed>), String> {
     let value = parse_document(text)?;
     let Value::Object(mut top) = value else {
@@ -143,86 +219,83 @@ pub fn parse_lenient(text: &str) -> Result<(MocksFile, Vec<Failed>), String> {
         Some(v) => v
             .as_u64()
             .and_then(|v| u32::try_from(v).ok())
-            .ok_or_else(|| format!("invalid version {v} (expected 1)"))?,
+            .ok_or_else(|| format!("invalid version {v} (expected 1 or 2)"))?,
     };
-    if version != 1 {
-        return Err(format!("unsupported version {version} (expected 1)"));
+    if !VERSIONS.contains(&version) {
+        return Err(format!("unsupported version {version} (expected 1 or 2)"));
     }
     let entries = match top.remove("mocks") {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(a)) => a,
+        None | Some(Value::Null) => None,
+        Some(Value::Array(a)) => Some(a),
         Some(_) => return Err("invalid mocks document: `mocks` must be a list".into()),
     };
     let mut failed: Vec<Failed> = Vec::new();
-    let registry = match top.remove("registry") {
-        None | Some(Value::Null) => None,
-        Some(v) => match serde_json::from_value::<RegistrySection>(v) {
-            Ok(r) => Some(r),
-            Err(e) => {
-                failed.push(Failed {
-                    name: None,
-                    error: format!("registry: {e} (ignored)"),
-                });
-                None
-            }
-        },
-    };
-    let portal = match top.remove("portal") {
-        None | Some(Value::Null) => None,
-        Some(v) => match serde_json::from_value::<crate::portal::FileSection>(v) {
-            Ok(p) => Some(p),
-            Err(e) => {
-                failed.push(Failed {
-                    name: None,
-                    error: format!("portal: {e} (ignored)"),
-                });
-                None
-            }
-        },
-    };
-    let agents = match top.remove("agents") {
-        None | Some(Value::Null) => None,
-        Some(v) => match serde_json::from_value::<crate::mcp::manage::agents::FileSection>(v) {
-            Ok(a) => Some(a),
-            Err(e) => {
-                failed.push(Failed {
-                    name: None,
-                    error: format!("agents: {e} (ignored)"),
-                });
-                None
-            }
-        },
-    };
+    fn section<T: serde::de::DeserializeOwned>(
+        top: &mut serde_json::Map<String, Value>,
+        key: &str,
+        failed: &mut Vec<Failed>,
+    ) -> Option<T> {
+        match top.remove(key) {
+            None | Some(Value::Null) => None,
+            Some(v) => match serde_json::from_value::<T>(v) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    failed.push(Failed {
+                        name: None,
+                        error: format!("{key}: {e} (ignored)"),
+                    });
+                    None
+                }
+            },
+        }
+    }
+    let instance = section(&mut top, "instance", &mut failed);
+    let settings = section(&mut top, "settings", &mut failed);
+    let secrets = section(&mut top, "secrets", &mut failed);
+    let registry = section(&mut top, "registry", &mut failed);
+    let portal = section(&mut top, "portal", &mut failed);
+    let harness = section(&mut top, "harness", &mut failed);
+    let agents = section(&mut top, "agents", &mut failed);
+    let health = section(&mut top, "health", &mut failed);
     failed.extend(top.keys().map(|k| Failed {
         name: None,
         error: format!(
-            "unknown field {k:?} ignored (expected `version`, `mocks`, `registry`, `portal` and `agents`)"
+            "unknown field {k:?} ignored (expected `version` and the sections {})",
+            SECTIONS.join(", ")
         ),
     }));
-    let mut mocks = Vec::new();
-    for (i, entry) in entries.into_iter().enumerate() {
-        let name = entry
-            .get("name")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        match serde_json::from_value::<MockDoc>(entry) {
-            Ok(doc) => mocks.push(doc),
-            Err(e) => failed.push(Failed {
-                error: match &name {
-                    Some(n) => format!("mock {n}: {e}"),
-                    None => format!("mocks[{i}]: {e}"),
-                },
-                name,
-            }),
+    let mocks = entries.map(|entries| {
+        let mut mocks = Vec::new();
+        for (i, entry) in entries.into_iter().enumerate() {
+            let name = entry
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            match serde_json::from_value::<MockDoc>(entry) {
+                Ok(doc) => mocks.push(doc),
+                Err(e) => failed.push(Failed {
+                    error: match &name {
+                        Some(n) => format!("mock {n}: {e}"),
+                        None => format!("mocks[{i}]: {e}"),
+                    },
+                    name,
+                }),
+            }
         }
-    }
+        mocks
+    });
     Ok((
         MocksFile {
             version,
+            instance,
+            settings,
+            secrets,
             mocks,
             registry,
             portal,
+            harness,
             agents,
+            health,
         },
         failed,
     ))
@@ -243,6 +316,13 @@ pub struct Loaded {
     pub portal: Vec<crate::portal::FileItem>,
     /// The usable `agents:` section (invalid rules are in `problems`).
     pub agents: crate::mcp::manage::agents::FilePolicy,
+    /// The sections beyond the mocks, registry, portal and agents (the
+    /// instance, settings, secrets, saved scenarios and health of a version
+    /// 2 document), applied by `crate::configdoc::apply_extra`.
+    pub extra: crate::configdoc::Extra,
+    /// The sections the file carries (an absent `mocks` is an empty one for
+    /// a file: the file is the truth for its mocks).
+    pub sections: Vec<&'static str>,
 }
 
 /// Expand `${VAR}` and `${VAR:-default}`; unknown variables without a
@@ -319,13 +399,13 @@ fn spec_text(doc: &MockDoc, base: Option<&Path>, max_spec: u64) -> Result<String
 
 /// Turn documents into definitions; entries that fail are returned as errors.
 pub fn definitions(
-    file: MocksFile,
+    mocks: Vec<MockDoc>,
     base: Option<&Path>,
     max_spec: u64,
 ) -> (Vec<Definition>, Vec<Value>) {
     let mut defs = Vec::new();
     let mut errors = Vec::new();
-    for doc in file.mocks {
+    for doc in mocks {
         match spec_text(&doc, base, max_spec) {
             Ok(source) => defs.push(Definition {
                 settings: doc.settings(),
@@ -356,6 +436,8 @@ where
     };
     let (mut file, skipped) =
         parse_lenient(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    out.sections = file.sections();
+    out.extra = crate::configdoc::Extra::take(&mut file);
     let (registry, registry_problems) =
         crate::mcp::registry::file_entries(file.registry.take().map(|r| r.servers));
     out.registry = registry;
@@ -389,7 +471,7 @@ where
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let (defs, errors) = definitions(file, Some(&base), max_spec);
+    let (defs, errors) = definitions(file.mocks.unwrap_or_default(), Some(&base), max_spec);
     out.defs = defs;
     for e in errors {
         let name = e["name"].as_str().unwrap_or("?").to_string();
@@ -610,18 +692,27 @@ pub fn json_schema() -> Value {
         }
     }));
     let mut root = object(json!({
-        "version": { "const": 1 },
+        "version": { "type": "integer", "enum": VERSIONS, "description": "1: the mocks sections only; 2: the whole instance" },
+        "instance": crate::configdoc::instance_schema(),
+        "settings": crate::configdoc::settings_schema(),
+        "secrets": crate::configdoc::secrets_schema(),
         "mocks": { "type": "array", "items": mock },
         "registry": registry,
         "portal": portal,
-        "agents": agents
+        "harness": crate::configdoc::harness_schema(),
+        "agents": agents,
+        "health": crate::configdoc::health_schema()
     }));
     if let Value::Object(m) = &mut root {
         m.insert(
             "$schema".into(),
             json!("https://json-schema.org/draft/2020-12/schema"),
         );
-        m.insert("title".into(), json!("Rustybin mocks file (rustybin.yaml)"));
+        m.insert(
+            "title".into(),
+            json!("Rustybin configuration file (rustybin.yaml)"),
+        );
+        m.insert("description".into(), json!("The whole instance as one document (version 2): the instance, its settings and secret references, mocks, registry entries, portal items, saved scenarios, agent rules and health. A version 1 file holds the mocks sections only."));
     }
     root
 }
@@ -669,14 +760,15 @@ mod tests {
 
         // API documents cannot reference files.
         let file = parse("mocks: [{name: a, spec: /etc/passwd}]").expect("parse");
-        let (defs, errors) = definitions(file, None, 1 << 20);
+        let (defs, errors) = definitions(file.mocks.unwrap_or_default(), None, 1 << 20);
         assert!(defs.is_empty());
         assert!(errors[0]["error"]
             .as_str()
             .expect("e")
             .contains("only read from local files"));
 
-        assert!(parse("version: 2").is_err());
+        assert!(parse("version: 3").is_err());
+        assert!(parse("version: 2").expect("v2").mocks.is_none());
         assert!(parse("mocks: [{name: a, nope: 1}]").is_err());
 
         let loaded = load_dir(dir.path(), 1 << 20).expect("dir");
@@ -698,8 +790,8 @@ mod tests {
             "version: 1\nextra: true\nmocks:\n  - name: good\n    spec_inline: {}\n  - name: typo\n    enabeld: false\n  - spec: x.yaml\n    nope: 1\n",
         )
         .expect("parse");
-        assert_eq!(file.mocks.len(), 1);
-        assert_eq!(file.mocks[0].name, "good");
+        assert_eq!(file.mocks().len(), 1);
+        assert_eq!(file.mocks()[0].name, "good");
         assert_eq!(failed.len(), 3, "{failed:?}");
         assert!(failed[0].error.contains("extra"));
         assert_eq!(failed[1].name.as_deref(), Some("typo"));
@@ -707,13 +799,23 @@ mod tests {
         assert_eq!(failed[2].name, None);
         assert!(failed[2].error.starts_with("mocks[2]"), "{failed:?}");
 
-        assert!(parse_lenient("version: 2").is_err());
+        assert!(parse_lenient("version: 3").is_err());
         assert!(parse_lenient("mocks: {a: 1}").is_err());
         assert!(parse_lenient("- just\n- a list").is_err());
         assert!(parse_lenient("version: 1")
             .expect("empty")
             .0
-            .mocks
+            .mocks()
             .is_empty());
+        // Version 2 sections parse one by one; a broken one is reported.
+        let (file, failed) = parse_lenient(
+            "version: 2\nsettings: {console.title: Demo}\nhealth: {initial: healthy}\nharness: 5\n",
+        )
+        .expect("v2");
+        assert_eq!(file.version, 2);
+        assert_eq!(file.settings.as_ref().map(|s| s.len()), Some(1));
+        assert!(file.harness.is_none());
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].error.starts_with("harness:"), "{failed:?}");
     }
 }

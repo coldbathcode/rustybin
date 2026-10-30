@@ -4,6 +4,13 @@ Mocks can be declared in a `rustybin.yaml` file next to your specs, committed wi
 your demo or test setup, loaded at startup, reloaded without a restart, and
 exported from mocks you built in the console.
 
+This page is the `mocks` section of the file, as a version 1 document holds it. A
+version 2 document holds the whole instance (its settings, secret references,
+registry entries, portal items, saved scenarios, agent rules and health) with the
+same `mocks` entries: see [The whole instance as code](../configuration-as-code.md)
+for the export, the dry run, the bundle and [Source control](../source-control.md)
+for keeping it in a git repository. Everything below still applies.
+
 ## Loading mocks at startup
 
 | Source | How |

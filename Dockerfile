@@ -30,8 +30,10 @@ RUN touch src/main.rs src/lib.rs build.rs && \
 
 FROM debian:bookworm-slim AS runtime
 
+# git and ssh-keygen: source control (docs/src/source-control.md) runs the git
+# binary in <state>/repo and generates its deploy key with ssh-keygen.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates && \
+    apt-get install -y --no-install-recommends ca-certificates git openssh-client && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

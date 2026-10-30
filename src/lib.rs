@@ -24,6 +24,7 @@ pub mod cert_state;
 pub mod collections;
 pub mod compression;
 pub mod config;
+pub mod configdoc;
 pub mod content_negotiation;
 pub mod control;
 pub mod control_auth;
@@ -64,6 +65,7 @@ pub mod server;
 pub mod session;
 pub mod settings;
 pub mod soap;
+pub mod sourcecontrol;
 pub mod sse;
 pub mod state;
 pub mod status;
@@ -115,6 +117,8 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     mcp::router,
     mcp::manage::router,
     mcp::manage::agents::api::router,
+    configdoc::api::router,
+    sourcecontrol::api::router,
     mcp::inspector::router,
     mcp::registry::router,
     portal::router,

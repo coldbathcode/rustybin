@@ -2,7 +2,7 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 to 08 done)
+## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 to 09 done)
 
 [docs/plans/next/master-plan.md](docs/plans/next/master-plan.md) (planned 2026-10-29) is the plan for the next
 build: twelve steps, one file each (`docs/plans/next/step-NN-*.md`): foundations (step 01, done 2026-10-29: the
@@ -19,14 +19,34 @@ diff), an MCP inspector for any server with every auth mode and a relay (step 05
 `src/mcp/inspector/`, `ui/lib/mcpclient.js`, `ui/lib/mcpauth.js`, `ui/views/mcp.js`, see below), a mock MCP registry and registry
 browsing (step 06, done 2026-10-30: `src/mcp/registry/`, `ui/views/registry.js`, see below), a dev portal (step 07, done
 2026-10-30: `src/portal/`, `ui-portal/`, see below), AI agents management (step 08, done 2026-10-30:
-`src/mcp/manage/agents/`, `ui/views/agents.js`, see below), the whole instance as `rustybin.yaml` with git source control, a
-`rustybin` CLI for remote instances, management MCP parity, and the 0.2.0 release. The master plan's section 4 is
+`src/mcp/manage/agents/`, `ui/views/agents.js`, see below), the whole instance as `rustybin.yaml` with git source
+control (step 09, done 2026-10-30: `src/configdoc/`, `src/sourcecontrol/`, see below), a `rustybin` CLI for remote
+instances, management MCP parity, and the 0.2.0 release. The master plan's section 4 is
 the build marker and section 5 the session protocol: build a step whole, update its status and build notes, update
 the master table, commit as oliwynn with the step number in the message, push to main. Steps go only when the
 user says go. Rules the foundations set: a feature that reaches out resolves through `egress::Egress` under its
 `Purpose` (never its own `reqwest::Client`); a feature's configurable value is a `settings::Spec` (seeded by its
 variable, stored override, `secret()` for credentials, never returned as a value); the console's instance
 settings are forms from the settings schema (`ui/lib/settingsform.js`), one card per group on a Management tab.
+
+## The whole instance as code, and source control (built)
+
+Step 09 of the 0.2 plan (user docs `docs/src/configuration-as-code.md`, `docs/src/source-control.md`). `rustybin.yaml`
+version 2 is `MocksFile` (`src/mocks/config_file.rs`) grown by `instance`, `settings`, `secrets` (references only),
+`harness` and `health`; `mocks` is an `Option` (an absent section is left alone, a present one is the truth when
+pruning). `src/configdoc/` owns `export` (secrets as `${VAR}` or `secret:stored`, never values; the `git` settings
+group is never exported nor pruned), `diff` (a section-aware list of changes, answered by every apply), `apply`
+(each section through its own service: the settings store, `MockStore::apply` with `Origin::Api`, the registry's
+file copy on the `MockStore` plus `AppState.registry` for published entries, `Portal::publish`, `Harness.saved`,
+the agents policy, the health toggle; the registry and agents sections persist in `<state>/config.json`),
+`apply_extra` (what a `RUSTYBIN_CONFIG_FILE` load applies beyond the mocks sections, from `mocks::reload_files`),
+the bundle (`write_dir`, `tar_gz`), and the routes `/_rustybin/config/{export,apply,schema}`. A new feature with
+instance state gets a section (or a setting) here, so a document stays the whole instance. `src/sourcecontrol/`
+(`AppState.git`): the `git` binary in `<state>/repo`, the `git.*` settings seeded by `RUSTYBIN_CONFIG_GIT*`, a
+token through `GIT_ASKPASS` or a deploy key through `GIT_SSH_COMMAND`, the remote's host under `Purpose::Git`,
+`/_rustybin/git*`, startup from the repository (`SourceControl::startup` in `server.rs`) and the automatic mode
+task; never a merge. Console: Management, Export (`ui/views/manage/export.js`) and Source control
+(`ui/views/manage/git.js`).
 
 ## Load test mode (harness): built
 

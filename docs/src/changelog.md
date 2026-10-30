@@ -184,6 +184,33 @@ The build of [Rustybin 0.2](../plans/next/master-plan.md), step by step.
   chips, Revoke, Restore, End sessions, **Explain what this agent did**, the live feed,
   the defaults and rules) now holds **Connect an agent**, moved from Management,
   General. The stdio bridge registers as transport `stdio`.
+- **The whole instance as code, and source control** (step 09). `rustybin.yaml`
+  version 2 holds the whole instance: `instance` (the console title and user),
+  `settings` (stored, non-secret settings by key), `secrets` (references only:
+  `${VAR}` from the environment, `secret:stored` for what the instance holds), the
+  `mocks`, `registry`, `portal` and `agents` sections as before, `harness` (saved
+  scenarios) and `health`; version 1 files still load. `GET /_rustybin/config/export`
+  (YAML, JSON, or a `.tar.gz` bundle with the specs as files), `POST
+  /_rustybin/config/apply` `{document, prune, dry_run}` answering the diff (`mocks.orders:
+  spec changed (2 operation(s) added)`), each section's result and the problems, `GET
+  /_rustybin/config/schema`. An absent section is left alone; with `prune` a present
+  section is the whole truth. `RUSTYBIN_CONFIG_FILE` loads every section at startup
+  and on reload. Source control (`src/sourcecontrol.rs`, the `git.*` settings seeded by
+  `RUSTYBIN_CONFIG_GIT*`): a working copy in `<state>/repo` driven by the `git` binary
+  (now in the container image, with `openssh-client`), a token through `GIT_ASKPASS`
+  or a generated ed25519 deploy key, the remote's host under the egress purpose `git`;
+  `GET /_rustybin/git` (status, ahead and behind, the drift a commit would record, the
+  timeline), `POST /_rustybin/git/init`, `/commit`, `/push`, `/pull` (fast-forward,
+  then apply with a dry run), `/resolve` (a diverged branch: the instance's copy or the
+  repository's, never a merge), `GET`, `POST /_rustybin/git/key`, `GET
+  /_rustybin/git/history`; `RUSTYBIN_CONFIG_GIT` clones and applies before serving
+  (`_REQUIRED` makes a failure fatal); `git.auto` pushes every change or pulls at an
+  interval. Console: **Management, Export** (the document, copy, download, bundle, the
+  diff since the last export, apply with a dry run and an explicit prune) and
+  **Management, Source control** (the repository form, status, connect, commit and
+  push with **Write the commit message**, pull with the diff, resolve, the deploy key,
+  history, the operations). The mock MCP registry's published entries are now part of
+  `AppState` (exported and pruned with the document).
 
 ## 0.1.0 (2026-10-29): the AI and agent gateway upgrade
 

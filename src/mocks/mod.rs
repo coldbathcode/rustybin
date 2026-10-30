@@ -163,6 +163,8 @@ fn file_definitions(store: &MockStore, config: &Config) -> (config_file::Loaded,
                 all.registry = l.registry;
                 all.portal = l.portal;
                 all.agents = l.agents;
+                all.extra = l.extra;
+                all.sections = l.sections;
             }
             Err(e) => {
                 all.problems.push(e);
@@ -178,7 +180,9 @@ fn file_definitions(store: &MockStore, config: &Config) -> (config_file::Loaded,
 /// good revision (or, when new, is created switched off) and shows the
 /// error; when the file cannot be read at all nothing is deleted. Problems
 /// are logged and kept for the console.
-pub fn reload_files(store: &MockStore, config: &Config) -> (ApplyReport, Vec<String>) {
+pub fn reload_files(state: &AppState) -> (ApplyReport, Vec<String>) {
+    let store = &state.mocks;
+    let config = &state.config;
     let (loaded, complete) = file_definitions(store, config);
     let config_file::Loaded {
         defs,
@@ -187,12 +191,21 @@ pub fn reload_files(store: &MockStore, config: &Config) -> (ApplyReport, Vec<Str
         registry,
         portal,
         agents,
+        extra,
+        sections,
     } = loaded;
     if complete {
         store.set_file_registry(registry);
         store.set_file_portal(portal);
         store.set_file_agents(agents);
     }
+    // A version 2 file's other sections (the instance, settings, secret
+    // references, saved scenarios, health) go through the configuration
+    // document's services, never pruning.
+    if complete {
+        problems.extend(crate::configdoc::apply_extra(state, extra, "config-file"));
+    }
+    let _ = sections;
     if !complete {
         problems.push(
             "the mocks file or directory could not be read: file mocks were kept as they are"
@@ -224,11 +237,14 @@ pub fn reload_files(store: &MockStore, config: &Config) -> (ApplyReport, Vec<Str
 
 /// Load file-defined mocks at startup (a no-op without files configured).
 pub fn load_startup(state: &AppState) {
+    // The registry and agents sections applied through the API last time
+    // (`<state>/config.json`); a config file wins for the sections it has.
+    crate::configdoc::load_applied(state);
     let config = &state.config;
     if config.config_file.is_none() && config.mocks_dir.is_none() {
         return;
     }
-    let (report, _) = reload_files(&state.mocks, config);
+    let (report, _) = reload_files(state);
     if !report.created.is_empty() {
         tracing::info!("mocks loaded: {}", report.created.join(", "));
     }

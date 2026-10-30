@@ -1089,11 +1089,14 @@ impl Svc {
     pub fn apply(&self, text: &str, prune: bool) -> SvcResult<Value> {
         self.require_admin()?;
         let file = config_file::parse(text).map_err(ServiceError::bad_request)?;
-        for doc in &file.mocks {
+        for doc in file.mocks() {
             check_name(&doc.name)?;
         }
-        let (defs, mut errors) =
-            config_file::definitions(file, None, self.store().limits().max_spec_bytes as u64);
+        let (defs, mut errors) = config_file::definitions(
+            file.mocks.unwrap_or_default(),
+            None,
+            self.store().limits().max_spec_bytes as u64,
+        );
         let prune = prune.then_some(Origin::Api);
         let mut report = self.store().apply(defs, Origin::Api, prune);
         errors.append(&mut report.errors);
@@ -1106,12 +1109,15 @@ impl Svc {
     pub fn apply_dry_run(&self, text: &str, prune: bool) -> SvcResult<Value> {
         self.require_admin()?;
         let file = config_file::parse(text).map_err(ServiceError::bad_request)?;
-        for doc in &file.mocks {
+        for doc in file.mocks() {
             check_name(&doc.name)?;
         }
-        let names: Vec<String> = file.mocks.iter().map(|d| d.name.clone()).collect();
-        let (defs, errors) =
-            config_file::definitions(file, None, self.store().limits().max_spec_bytes as u64);
+        let names: Vec<String> = file.mocks().iter().map(|d| d.name.clone()).collect();
+        let (defs, errors) = config_file::definitions(
+            file.mocks.unwrap_or_default(),
+            None,
+            self.store().limits().max_spec_bytes as u64,
+        );
         let defined: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         let mut create = Vec::new();
         let mut update = Vec::new();
@@ -1144,7 +1150,7 @@ impl Svc {
     /// `POST /_rustybin/mocks/reload` (admin): reload file-defined mocks.
     pub fn reload(&self) -> SvcResult<Value> {
         self.require_admin()?;
-        let (report, problems) = super::reload_files(self.store(), self.config());
+        let (report, problems) = super::reload_files(&self.state);
         Ok(json!({ "report": report, "problems": problems }))
     }
 

@@ -261,6 +261,22 @@ impl Registry {
         self.published.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// The `server.json` documents published through the API (the
+    /// configuration export).
+    pub fn published_servers(&self) -> Vec<Value> {
+        self.published().iter().map(|e| e.server.clone()).collect()
+    }
+
+    /// Drop the published entries `keep` refuses (name, version); the
+    /// number removed. The configuration document's apply uses it: entries
+    /// it carries move into the file copy, the rest go when pruning.
+    pub fn retain_published(&self, keep: impl Fn(&str, &str) -> bool) -> usize {
+        let mut published = self.published();
+        let before = published.len();
+        published.retain(|e| keep(e.name(), e.version()));
+        before - published.len()
+    }
+
     fn mint(&self) -> (String, i64) {
         let now = Utc::now().timestamp();
         let expires = now + TOKEN_TTL_SECS;
@@ -1176,7 +1192,7 @@ fn api_routes() -> Router<AppState> {
 }
 
 pub fn router(state: &AppState) -> Router<AppState> {
-    let reg = Arc::new(Registry::default());
+    let reg = state.registry.clone();
     let api: Router = api_routes()
         .layer(Extension(reg.clone()))
         .with_state(state.clone());

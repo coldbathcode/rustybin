@@ -158,6 +158,25 @@ pub struct Config {
     pub quota_upgrade_url: Option<String>,
     /// `rustybin.yaml` declaring mocks (`RUSTYBIN_CONFIG_FILE` or `--config`).
     pub config_file: Option<String>,
+    /// `RUSTYBIN_CONFIG_GIT`: the configuration repository cloned and
+    /// applied at startup (seeds `git.remote`; see `crate::sourcecontrol`).
+    pub config_git: Option<String>,
+    /// `RUSTYBIN_CONFIG_GIT_REF`: its branch (seeds `git.branch`).
+    pub config_git_ref: Option<String>,
+    /// `RUSTYBIN_CONFIG_GIT_PATH`: the directory in the repository (seeds
+    /// `git.path`).
+    pub config_git_path: Option<String>,
+    /// `RUSTYBIN_CONFIG_GIT_AUTH`: `token` or `deploy_key` (seeds `git.auth`).
+    pub config_git_auth: Option<String>,
+    /// `RUSTYBIN_CONFIG_GIT_AUTO`: `off`, `push_on_change` or `pull` (seeds
+    /// `git.auto`).
+    pub config_git_auto: Option<String>,
+    /// `RUSTYBIN_CONFIG_GIT_TOKEN`: the token of an https remote (seeds the
+    /// secret `git.token`). Never exposed.
+    pub config_git_token: Option<String>,
+    /// `RUSTYBIN_CONFIG_GIT_REQUIRED`: a clone or apply failure at startup
+    /// is fatal (default: a warning, the instance starts without it).
+    pub config_git_required: bool,
     /// Directory whose OpenAPI files become mocks (`RUSTYBIN_MOCKS_DIR`).
     pub mocks_dir: Option<String>,
     /// Create the built-in `petstore` mock (`RUSTYBIN_MOCKS_SAMPLE`, default
@@ -928,6 +947,40 @@ impl Config {
             .max(10),
             quota_upgrade_url,
             config_file: get("RUSTYBIN_CONFIG_FILE"),
+            config_git: get("RUSTYBIN_CONFIG_GIT").filter(|v| !v.trim().is_empty()),
+            config_git_ref: get("RUSTYBIN_CONFIG_GIT_REF"),
+            config_git_path: get("RUSTYBIN_CONFIG_GIT_PATH"),
+            config_git_auth: match get("RUSTYBIN_CONFIG_GIT_AUTH") {
+                Some(v) if crate::sourcecontrol::AUTH_OPTIONS.contains(&v.trim()) => {
+                    Some(v.trim().to_string())
+                }
+                Some(v) => {
+                    warnings.push(format!(
+                        "RUSTYBIN_CONFIG_GIT_AUTH={v:?} is not token or deploy_key; using token"
+                    ));
+                    None
+                }
+                None => None,
+            },
+            config_git_auto: match get("RUSTYBIN_CONFIG_GIT_AUTO") {
+                Some(v) if crate::sourcecontrol::AUTO_OPTIONS.contains(&v.trim()) => {
+                    Some(v.trim().to_string())
+                }
+                Some(v) => {
+                    warnings.push(format!(
+                        "RUSTYBIN_CONFIG_GIT_AUTO={v:?} is not off, push_on_change or pull; using off"
+                    ));
+                    None
+                }
+                None => None,
+            },
+            config_git_token: get("RUSTYBIN_CONFIG_GIT_TOKEN").filter(|v| !v.trim().is_empty()),
+            config_git_required: parse_bool_or(
+                &get,
+                "RUSTYBIN_CONFIG_GIT_REQUIRED",
+                false,
+                &mut warnings,
+            ),
             mocks_dir: get("RUSTYBIN_MOCKS_DIR"),
             mocks_sample,
             mocks_state_dir,
@@ -1071,6 +1124,13 @@ impl Config {
             quota_flush_ms: DEFAULT_QUOTA_FLUSH_MS,
             quota_upgrade_url: None,
             config_file: None,
+            config_git: None,
+            config_git_ref: None,
+            config_git_path: None,
+            config_git_auth: None,
+            config_git_auto: None,
+            config_git_token: None,
+            config_git_required: false,
             mocks_dir: None,
             mocks_sample: true,
             mocks_state_dir: None,

@@ -66,7 +66,7 @@ jsonpath "$.problems" isEmpty
 GET {{base_url}}/_rustybin/mocks/config.schema.json
 HTTP 200
 [Asserts]
-jsonpath "$.title" == "Rustybin mocks file (rustybin.yaml)"
+jsonpath "$.title" == "Rustybin configuration file (rustybin.yaml)"
 jsonpath "$.properties.mocks.items.required" contains "name"
 # ANCHOR_END: schema
 

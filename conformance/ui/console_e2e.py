@@ -827,6 +827,48 @@ def run_theme(browser, theme):
 
     step("management: instance settings, a secret, the egress policy", management)
 
+    def export_and_source_control():
+        # Export: the instance as rustybin.yaml; apply a document with a dry run first.
+        page.goto(BASE + "/ui/#/manage/export")
+        page.wait_for_selector("#config-yaml")
+        page.wait_for_function("document.querySelector('#config-yaml').value.includes('version: 2')")
+        page.fill("#config-document", "version: 2\nhealth: {initial: unhealthy}\n")
+        page.locator("#config-dry-run").click()
+        page.wait_for_selector("#config-changes >> text=health.initial")
+        assert http("GET", "/health") == 200, "a dry run changed the health toggle"
+        page.wait_for_selector("#config-apply:enabled")
+        page.locator("#config-apply").click()
+        page.wait_for_selector("#config-result >> text=Applied.")
+        deadline = time.time() + 5
+        while http("GET", "/health") != 503 and time.time() < deadline:
+            time.sleep(0.1)
+        assert http("GET", "/health") == 503, "the applied document did not switch the health toggle"
+        page.fill("#config-document", "version: 2\nhealth: {initial: healthy}\n")
+        page.locator("#config-dry-run").click()
+        page.wait_for_selector("#config-apply:enabled")
+        page.locator("#config-apply").click()
+        deadline = time.time() + 5
+        while http("GET", "/health") != 200 and time.time() < deadline:
+            time.sleep(0.1)
+        assert http("GET", "/health") == 200
+        shot(page, theme, "19-config-export")
+        # Source control: the form has a control per git.* setting; without a
+        # state directory the status says so and Connect is disabled.
+        page.get_by_role("tab", name="Source control").click()
+        page.wait_for_selector("form[aria-label='Settings: git']")
+        with urllib.request.urlopen(BASE + "/_rustybin/settings", timeout=10) as r:
+            doc = json.load(r)
+        for s in doc["settings"]:
+            if s["group"] == "git":
+                expect(page.locator(f"[aria-label='{s['key']}']")).to_have_count(1)
+        page.wait_for_selector("#git-status >> text=No state directory")
+        expect(page.locator("#git-init")).to_be_disabled()
+        expect(page.locator("#git-key-generate")).to_be_disabled()
+        shot(page, theme, "20-source-control")
+        assert_icons_sized(page, "management, source control")
+
+    step("management: export, apply a document, the source control form", export_and_source_control)
+
     def ai_agents():
         # An agent calls the management server with its clientInfo; the view lists it.
         name = f"e2e-agent-{theme}"

@@ -118,6 +118,26 @@ memory, as before, and the settings API says `"persisted": false`.
 | `RUSTYBIN_SETTINGS_LOCK` | `false` | The environment is authoritative: stored values of the lockable settings are ignored, and writes to them answer `409`. For instances managed by a platform or from a configuration repository. |
 | `RUSTYBIN_SECRETS_KEY` | unset | The 32-byte key (base64, URL-safe base64 or hex) that seals stored secrets with ChaCha20-Poly1305. Unset: `<state>/secrets.key`, or a process-lifetime key without a state directory. Changing it makes the stored secrets unreadable: the instance logs it once, the API reports them `unreadable`, the console asks for them again, and the environment seed is used meanwhile. Never exposed. |
 
+The state directory also holds `config.json` (the registry and agents sections last
+applied through the API or a repository), `repo/` (the [source control](source-control.md)
+working copy), `repo.key` (the deploy key) and `agents.json`, `portal.json`,
+`mcp-inspector.json`.
+
+## Source control
+
+See [Source control](source-control.md). These seed the `git.*` settings; `git.remote`
+and the rest can also be set under **Management, Source control**.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RUSTYBIN_CONFIG_GIT` | unset | The configuration repository: `https://host/org/repo.git`, `ssh://git@host/org/repo.git`, `git@host:org/repo.git` or a local path (`file://`, with the loopback allowance). At startup the instance clones its branch and applies the document (with prune) before serving. Seeds `git.remote`. |
+| `RUSTYBIN_CONFIG_GIT_REF` | `main` | The branch (seeds `git.branch`). |
+| `RUSTYBIN_CONFIG_GIT_PATH` | `rustybin` | The directory in the repository holding `rustybin.yaml` and `specs/`; empty for the root (seeds `git.path`). |
+| `RUSTYBIN_CONFIG_GIT_AUTH` | `token` | `token` (https) or `deploy_key` (ssh; the key is `<state>/repo.key`). Seeds `git.auth`. |
+| `RUSTYBIN_CONFIG_GIT_TOKEN` | unset | The token of an https remote (seeds the secret `git.token`). Handed to git through `GIT_ASKPASS`; never exposed. |
+| `RUSTYBIN_CONFIG_GIT_AUTO` | `off` | `push_on_change` (commit and push every change, checked every 30 s) or `pull` (pull and apply with prune every `git.pull_every`, 5 minutes by default). Seeds `git.auto`. |
+| `RUSTYBIN_CONFIG_GIT_REQUIRED` | `false` | A clone or apply failure at startup stops the instance. By default it warns and starts without the repository's configuration. |
+
 **Settings** are dotted keys owned by features (`console.title`, `egress.allow`,
 `leads.webhook_token`), each with a schema, a default, and usually an environment
 variable that seeds it. Resolution, for every key: the value saved through the API,
@@ -202,7 +222,7 @@ See [Configuration as code](mocks/config.md).
 
 | Variable | Default | Description |
 |---|---|---|
-| `RUSTYBIN_CONFIG_FILE` | `./rustybin.yaml` if it exists | A `rustybin.yaml` declaring [OpenAPI mocks](mocks/index.md), loaded at startup and reloaded by `SIGHUP` or `POST /_rustybin/mocks/reload`. The command-line option `--config <file>` takes precedence. Problems are logged and listed in `GET /_rustybin/mocks` (`load_errors`); they never stop the server. |
+| `RUSTYBIN_CONFIG_FILE` | `./rustybin.yaml` if it exists | A `rustybin.yaml` declaring [OpenAPI mocks](mocks/index.md) (version 1) or [the whole instance](configuration-as-code.md) (version 2: settings, secret references, registry entries, portal items, saved scenarios, agent rules, health), loaded at startup and reloaded by `SIGHUP` or `POST /_rustybin/mocks/reload`. The command-line option `--config <file>` takes precedence. Problems are logged and listed in `GET /_rustybin/mocks` (`load_errors`); they never stop the server. |
 | `RUSTYBIN_MOCKS_DIR` | unset | A directory whose `*.yaml`, `*.yml` and `*.json` OpenAPI files (up to 200) each become a mock named after the file, with default settings. |
 | `RUSTYBIN_MOCKS_SAMPLE` | `true` (`false` in public mode) | Create the built-in `petstore` mock. |
 | `RUSTYBIN_MOCKS_STATE_DIR` | `<RUSTYBIN_STATE_DIR>/mocks`, else unset | Save mocks created or edited through the API or console in this directory (one JSON file each, written on every change) and load them at startup. File-defined mocks are not saved. See [Configuration as code](mocks/config.md#keeping-console-changes). |

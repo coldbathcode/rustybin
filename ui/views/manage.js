@@ -1,6 +1,8 @@
 // Management: the instance's settings and this browser's, in tabs down the
-// left (General, Sign-in, AI, Network, Portal; later steps add Agents,
-// Source control, Export). Portal publishes items to the dev portal at
+// left (General, Sign-in, AI, Network, Portal, Export, Source control).
+// Export and Source control live in ./manage/export.js and ./manage/git.js
+// (the whole instance as rustybin.yaml, and its git repository). Portal
+// publishes items to the dev portal at
 // /portal (GET /_rustybin/portal, PUT and DELETE /_rustybin/portal/items/{id})
 // and shows its insights. Instance settings come from GET /_rustybin/settings
 // and save with PATCH (admin); the browser's (session, gateway URL, admin
@@ -15,6 +17,8 @@ import * as auth from '../lib/auth.js';
 import * as assist from '../lib/assist.js';
 import { settingsForm } from '../lib/settingsform.js';
 import * as portal from '../lib/portal.js';
+import { exportPanel } from './manage/export.js';
+import { gitPanel } from './manage/git.js';
 
 // The rail. Later steps append entries here; each renders its own panel.
 export const TABS = [
@@ -23,6 +27,8 @@ export const TABS = [
   { id: 'ai', title: 'AI', icon: 'ai', hint: 'Your model provider and key for the AI features' },
   { id: 'network', title: 'Network', icon: 'globe', hint: 'Outbound connections and recent decisions' },
   { id: 'portal', title: 'Portal', icon: 'explorer', hint: 'The dev portal: branding, access, published items, insights' },
+  { id: 'export', title: 'Export', icon: 'file', hint: 'The whole instance as rustybin.yaml: export, diff, apply a document' },
+  { id: 'git', title: 'Source control', icon: 'history', hint: 'Commit the configuration to a git repository, pull and apply it' },
 ];
 
 function loadError(e) {
@@ -557,7 +563,7 @@ export default {
         b.tabIndex = tid === id ? 0 : -1;
       }
       if (location.hash !== '#/manage/' + id) history.replaceState(null, '', '#/manage/' + id);
-      const render = id === 'network' ? networkPanel : id === 'signin' ? signinPanel : id === 'ai' ? aiPanel : id === 'portal' ? portalPanel : generalPanel;
+      const render = id === 'network' ? networkPanel : id === 'signin' ? signinPanel : id === 'ai' ? aiPanel : id === 'portal' ? portalPanel : id === 'export' ? exportPanel : id === 'git' ? gitPanel : generalPanel;
       replace(panel, render(doc, (d) => { if (d) { doc = d; renderStatus(); } }, error));
     }
 
@@ -580,7 +586,7 @@ export default {
 
     root.appendChild(h('div', { class: 'view-head' },
       h('div', { class: 'grow' }, h('h1', null, 'Management'),
-        h('p', null, 'Configure this instance: what the console shows, who may sign in, where it may connect, and what this browser remembers. Instance settings override their environment variables and persist with RUSTYBIN_STATE_DIR.')),
+        h('p', null, 'Configure this instance: what the console shows, who may sign in, where it may connect, what this browser remembers, and the whole instance as rustybin.yaml in a git repository. Instance settings override their environment variables and persist with RUSTYBIN_STATE_DIR.')),
       status));
     root.appendChild(h('div', { class: 'rail-layout' }, rail, panel));
     replace(panel, spinner('Loading settings'));

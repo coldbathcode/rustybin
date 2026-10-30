@@ -617,6 +617,17 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | POST | `/_rustybin/agents/{id}/revoke` | Revoke an AI agent: refuse its calls, end its sessions, revoke its tokens (admin) |
 | POST | `/_rustybin/agents/{id}/restore` | Restore a revoked AI agent (admin) |
 | DELETE | `/_rustybin/agents/{id}/sessions` | End an AI agent's MCP sessions (admin) |
+| GET | `/_rustybin/config/export` | The whole instance as rustybin.yaml (admin) |
+| POST | `/_rustybin/config/apply` | Apply a rustybin.yaml document (admin) |
+| GET | `/_rustybin/config/schema` | JSON Schema of rustybin.yaml (version 2) |
+| GET | `/_rustybin/git` | Source control status (admin) |
+| POST | `/_rustybin/git/init` | Connect the repository (admin) |
+| POST | `/_rustybin/git/commit` | Commit the instance's configuration (admin) |
+| POST | `/_rustybin/git/push` | Push (admin) |
+| POST | `/_rustybin/git/pull` | Pull and apply (admin) |
+| POST | `/_rustybin/git/resolve` | Resolve a diverged branch (admin) |
+| GET POST | `/_rustybin/git/key` | The deploy key (admin) |
+| GET | `/_rustybin/git/history` | Commit history (admin) |
 | GET | `/_rustybin/mcp-servers` | MCP inspector: every MCP server this instance serves, and the relay's policy |
 | POST | `/_rustybin/mcp-relay` | MCP inspector: forward one JSON-RPC message to an MCP server, the answer as SSE |
 | POST | `/_rustybin/mcp-relay/fetch` | MCP inspector: fetch one OAuth discovery or token document through the instance |

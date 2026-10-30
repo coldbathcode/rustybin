@@ -348,6 +348,11 @@ pub fn groups() -> Vec<Group> {
             description: "The read-only portal at /portal where testers find what was published: its branding, who may read it and the URL its snippets use.",
         },
         Group {
+            id: "git",
+            title: "Source control",
+            description: "The git repository this instance commits its configuration to and pulls it from (Management, Source control).",
+        },
+        Group {
             id: "leads",
             title: "Leads webhook",
             description: "The webhook that receives the email leads of self-service mocks.",
@@ -393,6 +398,7 @@ pub fn specs() -> Vec<Spec> {
     all.extend(crate::mcp::manage::agents::specs());
     all.extend(crate::portal::specs());
     all.extend(crate::mocks::leads::specs());
+    all.extend(crate::sourcecontrol::specs());
     all
 }
 

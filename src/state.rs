@@ -74,6 +74,14 @@ pub struct AppState {
     /// AI agents on the management MCP server (`/_rustybin/agents*`): who
     /// called, what they did, their rights and revocations.
     pub agents: Arc<crate::mcp::manage::agents::Agents>,
+    /// The mock MCP registry's published entries and tokens: shared by its
+    /// routes and the configuration document (step 09 exports and applies
+    /// the published entries).
+    pub registry: Arc<crate::mcp::registry::Registry>,
+    /// Source control (step 09): the configuration repository's working
+    /// copy, operations and timeline; shared by `/_rustybin/git*`, startup
+    /// from `RUSTYBIN_CONFIG_GIT` and the automatic push and pull task.
+    pub git: Arc<crate::sourcecontrol::SourceControl>,
 }
 
 impl AppState {
@@ -159,6 +167,11 @@ impl AppState {
                 health: health.clone(),
             });
         }
+        let git = Arc::new(crate::sourcecontrol::SourceControl::new(
+            &config,
+            settings.clone(),
+            egress.clone(),
+        ));
         Self {
             keys,
             limits,
@@ -177,6 +190,8 @@ impl AppState {
             harness,
             portal,
             agents,
+            registry: Arc::new(crate::mcp::registry::Registry::default()),
+            git,
         }
     }
 }

@@ -18,6 +18,8 @@ const MODULE_PATHS: &[fn() -> Value] = &[
     crate::inspector::openapi_paths,
     crate::mcp::manage::openapi_paths,
     crate::mcp::manage::agents::api::openapi_paths,
+    crate::configdoc::api::openapi_paths,
+    crate::sourcecontrol::api::openapi_paths,
     crate::mcp::inspector::openapi_paths,
     crate::mcp::registry::openapi_paths,
     crate::portal::openapi_paths,

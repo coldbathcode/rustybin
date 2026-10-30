@@ -249,6 +249,9 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
     // request is served: the socket is bound (a busy port still fails fast)
     // but nothing answers until they are in place, so no early 404s.
     crate::mocks::load_startup(&state);
+    // RUSTYBIN_CONFIG_GIT: clone the configuration repository and apply it
+    // before serving (fatal only with RUSTYBIN_CONFIG_GIT_REQUIRED=true).
+    state.git.startup(&state).await?;
 
     let http_task = {
         // Tag requests with the listener so handlers report scheme and port.
@@ -293,7 +296,7 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
                             break;
                         }
                         let (report, problems) =
-                            crate::mocks::reload_files(&mocks_state.mocks, &mocks_state.config);
+                            crate::mocks::reload_files(&mocks_state);
                         tracing::info!(
                             "mocks reloaded: {} created, {} updated, {} deleted, {} problem(s)",
                             report.created.len(),
@@ -306,6 +309,27 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
             }
         });
         optional_tasks.push(("mocks reload", task));
+    }
+
+    // Source control's automatic mode (git.auto): every 30 s, push the
+    // instance's changes or pull the repository at its interval.
+    {
+        let git_state = state.clone();
+        let rx = shutdown.subscribe();
+        let task = tokio::spawn(async move {
+            let stop = wait_for(rx);
+            tokio::pin!(stop);
+            let mut tick = tokio::time::interval(crate::sourcecontrol::AUTO_TICK);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tick.tick().await;
+            loop {
+                tokio::select! {
+                    _ = &mut stop => break,
+                    _ = tick.tick() => git_state.git.auto_tick(&git_state).await,
+                }
+            }
+        });
+        optional_tasks.push(("git auto", task));
     }
 
     // Plan usage persistence (RUSTYBIN_USAGE_FILE); returns at once when off.

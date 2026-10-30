@@ -15,7 +15,7 @@ fn resources() -> Vec<Value> {
             "uri": SCHEMA_URI,
             "name": "config.schema.json",
             "title": "rustybin.yaml JSON Schema",
-            "description": "The schema of rustybin.yaml and of the settings arguments of create_mock, update_mock and set_operation (responses, security, operations).",
+            "description": "The schema of rustybin.yaml (version 2: the whole instance; the mocks sections are the settings arguments of create_mock, update_mock and set_operation: responses, security, operations). Also GET /_rustybin/config/schema.",
             "mimeType": "application/schema+json",
         }),
         json!({
