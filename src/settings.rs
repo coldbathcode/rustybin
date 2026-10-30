@@ -432,7 +432,7 @@ fn load_or_create_key(path: &Path) -> Result<[u8; 32], String> {
 
 /// Create the parent directory (mode 0700) and write the file atomically
 /// (mode 0600): a temporary file next to it, renamed into place.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         create_private_dir(dir)?;
     }
@@ -721,6 +721,27 @@ impl Settings {
 
     pub fn key_source(&self) -> KeySource {
         self.secrets.source()
+    }
+
+    /// Seal a secret with the store's key, for features that keep secrets of
+    /// their own outside the settings table (the MCP inspector's saved
+    /// connections).
+    pub fn seal(&self, plain: &[u8]) -> Result<Sealed, String> {
+        self.secrets.seal(plain)
+    }
+
+    /// Open a secret sealed with [`Settings::seal`].
+    pub fn open(&self, sealed: &Sealed) -> Result<Zeroizing<Vec<u8>>, String> {
+        self.secrets.open(sealed)
+    }
+
+    /// The state directory's file `name` when one is set (features keeping
+    /// their own documents next to `settings.json`).
+    pub fn state_file(&self, name: &str) -> Option<PathBuf> {
+        self.path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|d| d.join(name))
     }
 
     fn stored_wins(&self, spec: &Spec) -> bool {

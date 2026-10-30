@@ -184,7 +184,7 @@ under a **purpose** with its own rule, on only when the feature is configured:
 | `registry` | `registry.modelcontextprotocol.io` (the MCP registry). |
 | `assist` | The [AI assist](ai-assist.md) provider's host once its key is set (`api.anthropic.com`, `api.openai.com`, `generativelanguage.googleapis.com`, the compatible base URL's host). |
 | `git` | The git remote's host once configured (a later release). |
-| `mcp_relay` | No default: name the MCP servers the inspector may relay to in `RUSTYBIN_EGRESS_ALLOW`. |
+| `mcp_relay` | No default: name the MCP servers the [inspector](mcp/inspector.md) may relay to and run checks against in `RUSTYBIN_EGRESS_ALLOW`. This instance's own MCP servers are relayed in process and need no entry. |
 
 ```hurl
 {{#include ../examples/concepts/settings.hurl:egress}}

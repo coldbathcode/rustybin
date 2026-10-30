@@ -20,6 +20,7 @@
 pub mod auth;
 pub mod core;
 pub mod data;
+pub mod inspector;
 pub mod manage;
 pub mod openapi;
 pub mod prompts;

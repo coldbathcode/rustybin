@@ -711,7 +711,10 @@ async fn routes_without_and_with_a_provider() {
         .as_array()
         .is_some_and(|m| !m.is_empty()));
     assert_eq!(v["providers"][0]["key"]["set"], false);
-    assert_eq!(v["tasks"].as_array().map(Vec::len), Some(7));
+    assert_eq!(
+        v["tasks"].as_array().map(Vec::len),
+        Some(crate::assist::task::all().len())
+    );
     assert!(v["suggestions"]["overview"]
         .as_array()
         .is_some_and(|s| s.len() == 3));

@@ -93,6 +93,28 @@ The build of [Rustybin 0.2](../plans/next/master-plan.md), step by step.
   with a streamed diff and Apply as draft, stored examples in the operation editor,
   and the apply cards `create_mock`, `edit_spec`, `generate_examples` from the assist
   bar. New book page [Build mocks with AI](mocks/ai.md).
+- **MCP inspector for any server, every auth mode, test runs** (step 05). The console's
+  MCP view is rebuilt in three columns (the server and connection, the protocol tabs,
+  the timeline with exports) and connects to any MCP server: this instance's servers
+  from the new `GET /_rustybin/mcp-servers` (`/mcp` and its variants, the management
+  server, every mock's server; a mock's MCP tab opens the inspector on it), saved
+  connections, or any URL; over 2026-07-28, the 2025 session versions and legacy
+  HTTP+SSE; with no auth, a bearer, an API key (header or query), basic, custom headers,
+  or OAuth 2.1 (the discovery walk as a timeline of documents, dynamic registration,
+  PKCE in a popup for any issuer, client credentials, refresh). The relay, `POST
+  /_rustybin/mcp-relay` (SSE back, at most 64 sessions idle 10 minutes, `DELETE
+  /_rustybin/mcp-relay/{session}`), makes the calls when the browser cannot: this
+  instance's servers in process, other hosts under the egress purpose `mcp_relay`
+  (`RUSTYBIN_EGRESS_ALLOW`), and `POST /_rustybin/mcp-relay/fetch` fetches discovery
+  documents. **Checks**: `POST /_rustybin/mcp-checks` runs fourteen checks (connect,
+  version, auth refusal, tool schemas, every tool called with generated or AI arguments,
+  unknown tool and method, bad arguments, resources, prompts, ping, routing headers, the
+  server stream, the session lifecycle) with latency, as JSON or JUnit; runs are saved
+  (at most 50). Saved connections (`/_rustybin/mcp-connections/{id}`, admin, at most 50)
+  keep their credentials sealed with the settings key and used only by the relay. Two
+  assist tasks: `tool_arguments` (Generate arguments, validated against the schema) and
+  `sampling` (answer a server's `sampling/createMessage` with your provider). New book
+  page [MCP inspector](mcp/inspector.md).
 
 ## 0.1.0 (2026-10-29): the AI and agent gateway upgrade
 

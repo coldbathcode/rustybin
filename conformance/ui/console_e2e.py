@@ -523,8 +523,11 @@ def run_theme(browser, theme):
 
     def mcp():
         goto_view(page, "mcp")
-        page.get_by_role("button", name="Connect", exact=True).click()
-        page.wait_for_selector("text=connected")
+        page.locator("#mcp-server option[value='/mcp']").wait_for(state="attached")
+        page.select_option("#mcp-server", "/mcp")
+        page.select_option("#mcp-version", "2026-07-28")
+        page.locator("#mcp-connect").click()
+        page.locator("#mcp-status .badge.ok", has_text="connected").wait_for()
         page.get_by_role("button", name="slow_task").click()
         page.get_by_label("duration_ms").fill("1500")
         page.get_by_label("steps").fill("3")
@@ -532,6 +535,11 @@ def run_theme(browser, theme):
         page.wait_for_selector("text=step 1/3", timeout=TIMEOUT)
         page.wait_for_selector("text=done in")
         page.locator("text=done in").scroll_into_view_if_needed()
+        # The timeline holds the messages, the export the session as Hurl.
+        page.locator("#mcp-log .log-row", has_text="tools/call").first.wait_for()
+        page.select_option("#mcp-export-format", "hurl")
+        expect(page.locator(".mcp-right pre.code").first).to_contain_text("POST " + BASE + "/mcp")
+        assert_icons_sized(page, "the MCP inspector")
         shot(page, theme, "07-mcp")
         # 2026-07-28 multi round-trip: elicitation answered in the console.
         page.get_by_role("button", name="elicit_confirmation").click()
@@ -543,19 +551,44 @@ def run_theme(browser, theme):
         page.get_by_role("tab", name="Resources").click()
         page.locator(".list-item", has_text="rustybin://docs/readme").click()
         page.wait_for_selector("text=Rustybin MCP")
+        # Through the relay: the instance makes the calls.
+        page.locator(".seg button", has_text="Relay").click()
+        page.locator("#mcp-connect").click()
+        expect(page.locator("#mcp-status")).to_contain_text("through the relay")
+        page.locator("#mcp-log .log-row", has_text="(relay)").first.wait_for()
+        # Checks: the suite run by the instance, a report with JUnit.
+        page.get_by_role("tab", name="Checks").click()
+        page.locator("#mcp-run-checks").click()
+        page.locator("#mcp-checks-table").wait_for(timeout=60000)
+        expect(page.locator("#mcp-checks-report .badge", has_text="passed").first).to_be_visible()
+        with page.expect_download() as dl:
+            page.locator("#mcp-checks-junit").click()
+        assert dl.value.suggested_filename == "mcp-checks.xml", dl.value.suggested_filename
+        shot(page, theme, "07b-mcp-checks")
+        page.locator(".seg button", has_text="Browser").click()
         # Session era.
-        page.locator(".seg button", has_text="2025-11-25").click()
-        page.get_by_role("button", name="Connect", exact=True).click()
+        page.select_option("#mcp-version", "2025-11-25")
+        page.locator("#mcp-connect").click()
         page.wait_for_selector("[title='Mcp-Session-Id']")
-        # OAuth discovery for the protected variant.
-        page.locator("select[aria-label='MCP endpoint']").select_option("/mcp/protected")
-        page.locator(".seg button", has_text="2026-07-28").click()
-        page.get_by_role("button", name="Get a token").click()
-        page.get_by_role("button", name="Connect now").click()
-        page.wait_for_selector("text=Rustybin MCP")
+        # OAuth discovery for the protected variant (client credentials).
+        page.select_option("#mcp-server", "/mcp/protected")
+        page.select_option("#mcp-version", "2026-07-28")
+        expect(page.locator("#mcp-auth-kind")).to_have_value("oauth")
+        page.select_option("#mcp-oauth-grant", "client_credentials")
+        page.locator("#mcp-oauth-start").click()
+        page.locator("#mcp-oauth-connect").click()
+        page.locator("#mcp-status .badge.ok", has_text="connected").wait_for()
+        expect(page.locator("#mcp-oauth-steps .step")).to_have_count(6)
         page.get_by_role("tab", name="Tools").click()
         page.get_by_role("button", name="cancel_order").wait_for()
         shot(page, theme, "08-mcp-oauth")
+        # A mock's MCP panel opens the inspector on that mock's server.
+        page.evaluate("location.hash = '#/mocks/petstore/mcp'")
+        page.locator("#mock-mcp-inspect").click()
+        expect(page.locator("#mcp-server")).to_have_value("/mock/petstore/_rustybin/mcp")
+        page.locator("#mcp-connect").click()
+        page.locator("#mcp-status .badge.ok", has_text="connected").wait_for()
+        page.get_by_role("button", name="getPetById").wait_for()
 
     step("mcp inspector", mcp)
 
@@ -1025,6 +1058,24 @@ def run_jwt(browser):
         expect(page.locator("#view .notice")).to_contain_text("Start the sign-in again")
 
     step("jwt: agent sign-in to a website warns, console token caps, deny", agent_sign_in_web_redirect_denied)
+
+    def inspector_management_server():
+        token = control_jwt("console")
+        page.goto(jwt_base + "/ui/#/mcp&token=" + token)
+        page.locator("#mcp-server option[value='/_rustybin/mcp']").wait_for(state="attached")
+        page.select_option("#mcp-server", "/_rustybin/mcp")
+        expect(page.locator("#mcp-auth-kind")).to_have_value("bearer")
+        page.locator("#mcp-connect").click()
+        page.locator("#mcp-status .badge.ok", has_text="connected").wait_for()
+        page.get_by_role("button", name="list_mocks").wait_for()
+        expect(page.get_by_role("button", name="create_mock", exact=True)).to_have_count(0)
+        # The bearer stays masked in the export on screen.
+        page.select_option("#mcp-export-format", "claude")
+        expect(page.locator(".mcp-right pre.code").first).to_contain_text("claude mcp add")
+        assert token not in page.locator(".mcp-right").inner_text(), "control token shown in the export"
+        shot(page, "jwt", "24-inspector-manage")
+
+    step("jwt: inspector connects to the management server with the console token", inspector_management_server)
 
     def expiry_and_sign_out():
         page.goto(jwt_base + "/ui/#/overview&token=" + control_jwt("console", ttl=3))

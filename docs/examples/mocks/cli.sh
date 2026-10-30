@@ -20,7 +20,9 @@ rustybin mock validate inventory.yaml
 # ANCHOR_END: validate
 )
 expect "$out" 'Inventory 2.0.0 (OpenAPI 3.1.0)'
-expect "$out" '0 error(s), 0 warning(s)'
+# The spec has an example for one operation of three: the coverage warning.
+expect "$out" 'examples: 1 of 3 operation(s)'
+expect "$out" '0 error(s), 1 warning(s)'
 
 out=$(
 # ANCHOR: init
@@ -44,7 +46,7 @@ out=$(
 INVENTORY_API_KEY=k1 rustybin mock check-config rustybin.yaml
 # ANCHOR_END: check_config
 )
-expect "$out" 'inventory: Inventory (3 operations): 0 error(s), 0 warning(s)'
+expect "$out" 'inventory: Inventory (3 operations): 0 error(s), 1 warning(s)'
 
 rustybin mock init inventory.yaml --name docs-cli --generated > rustybin.yaml
 # Start clean when an earlier run stopped half way.

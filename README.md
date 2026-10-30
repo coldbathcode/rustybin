@@ -594,6 +594,14 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | Methods | Path | Description |
 |---|---|---|
 | POST GET DELETE | `/_rustybin/mcp` | Management MCP server: configure this Rustybin from an AI agent |
+| GET | `/_rustybin/mcp-servers` | MCP inspector: every MCP server this instance serves, and the relay's policy |
+| POST | `/_rustybin/mcp-relay` | MCP inspector: forward one JSON-RPC message to an MCP server, the answer as SSE |
+| POST | `/_rustybin/mcp-relay/fetch` | MCP inspector: fetch one OAuth discovery or token document through the instance |
+| DELETE | `/_rustybin/mcp-relay/{session}` | MCP inspector: end a relay session |
+| GET POST | `/_rustybin/mcp-checks` | MCP inspector: run the check suite against an MCP server (JSON or JUnit), or list saved runs |
+| GET DELETE | `/_rustybin/mcp-checks/{id}` | MCP inspector: one saved check run (format=junit for JUnit) |
+| GET | `/_rustybin/mcp-connections` | MCP inspector: saved connections (credentials as {set, hint}) |
+| GET PUT DELETE | `/_rustybin/mcp-connections/{id}` | MCP inspector: one saved connection; PUT and DELETE need admin |
 | GET | `/.well-known/oauth-protected-resource/_rustybin/mcp` | Management MCP: protected resource metadata (RFC 9728) |
 | GET | `/.well-known/oauth-authorization-server/_rustybin/oauth` | Management MCP sign-in: authorization server metadata (RFC 8414) |
 | GET | `/.well-known/openid-configuration/_rustybin/oauth` | Management MCP sign-in: the same metadata at the OpenID Connect discovery path |

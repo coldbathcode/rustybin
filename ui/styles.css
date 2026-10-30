@@ -444,6 +444,14 @@ hr.sep { border: 0; border-top: 1px solid var(--border); margin: 6px 0; }
 .log-row:hover { background: var(--surface-2); }
 .log-row .dir-out { color: var(--info); font-weight: 700; } .log-row .dir-in { color: var(--ok); font-weight: 700; } .log-row .dir-note { color: var(--violet); font-weight: 700; }
 .log-row pre { margin: 6px 0 0; grid-column: 1 / -1; }
+.log-detail { grid-column: 1 / -1; cursor: auto; }
+/* MCP inspector: connection, protocol, timeline. */
+.mcp-layout { display: grid; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr) minmax(300px, 400px); gap: 16px; align-items: start; }
+.mcp-left, .mcp-right { min-width: 0; }
+.mcp-right { position: sticky; top: 72px; }
+.mcp-right .log { max-height: 56vh; }
+@media (max-width: 1400px) { .mcp-layout { grid-template-columns: minmax(260px, 320px) minmax(0, 1fr); } .mcp-right { grid-column: 1 / -1; position: static; } }
+@media (max-width: 900px) { .mcp-layout { grid-template-columns: minmax(0, 1fr); } }
 
 .progress { height: 8px; background: var(--surface-3); border-radius: 999px; overflow: hidden; }
 .progress > div { height: 100%; background: var(--accent); width: 0; transition: width .2s ease; }

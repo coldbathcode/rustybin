@@ -28,8 +28,13 @@ Inventory 2.0.0 (OpenAPI 3.1.0)
   GET     /health                                  health                   ok
   GET     /items                                   listItems                ok
   GET     /items/{sku}                             getItem                  ok
-0 error(s), 0 warning(s)
+Warning: 2 of 3 operation(s) have no example for a success response: the mock answers with data generated from the schema (generate examples with AI or the generator, or add them to the spec)
+examples: 1 of 3 operation(s) have one for their success responses (without: listItems, getItem)
+0 error(s), 1 warning(s)
 ```
+
+The warning is the example coverage: operations without an example for a success
+response answer with generated data ([Build mocks with AI](ai.md) fills them in).
 
 A spec with problems (an example that breaks its schema, an undeclared path
 parameter, an operation without responses):
@@ -127,7 +132,7 @@ not load or its checks report errors. The file defaults to `./rustybin.yaml`.
 ```
 
 ```text
-inventory: Inventory (3 operations): 0 error(s), 0 warning(s)
+inventory: Inventory (3 operations): 0 error(s), 1 warning(s)
 ```
 
 ## Remote commands

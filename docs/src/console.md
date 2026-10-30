@@ -80,7 +80,7 @@ The views, in sidebar order (`Alt+1` to `Alt+9` switch to the first nine):
 | **API explorer** | The route catalogue with search and category filters, and a "Try it" request builder prefilled from each endpoint's examples |
 | **Management** | The instance's settings and this browser's, in tabs (see [below](#management)): General (the console title and back link, the session, gateway URL, admin token and theme of this browser, the "Connect an AI agent" panel), Sign-in (the console user name and password, the sessions) and Network (what the instance may connect to, each feature's rule, the last decisions, the leads webhook token). The gear in the top bar opens it |
 | **AI playground** | Chat with the [mock LLM](ai/index.md) in OpenAI chat, OpenAI Responses, Anthropic, Gemini, Ollama (streaming) and Bedrock (non-streaming) wire formats, with modes, fault and latency injection, tool calling with a tool result round trip, the raw wire frames, and the [AI request record](ai/gateway-features.md#request-inspection) of each call |
-| **MCP inspector** | An MCP client for 2026-07-28 (stateless) and 2025-11-25 (session): list and call tools with forms generated from their schemas, follow progress, read resources, get prompts, answer elicitation and sampling, a JSON-RPC message log, and the OAuth discovery steps of `/mcp/protected` |
+| **MCP inspector** | An [MCP client for any server](mcp/inspector.md): this instance's servers (`/mcp` and its variants, the management server, every mock's server), saved connections or any URL; every transport (2026-07-28, the 2025 sessions, legacy HTTP+SSE) and auth mode (bearer, API key, basic, headers, OAuth 2.1 discovery with PKCE or client credentials); from the browser or through the instance's relay; tools with generated forms, progress, cancel and elicitation, resources, prompts, sampling; a timeline with exports (`claude mcp add`, Hurl, curl, Python); **Checks**, a test suite with a JSON or JUnit report |
 | **A2A client** | Agent directory and cards, blocking or streaming sends over JSON-RPC in v1.0 or v0.3 (the HTTP+JSON binding is not used), a task timeline with artifacts, input-required and auth-required continuation, cancel, and the push notification sink |
 | **Chaos and health** | The health toggle, flaky endpoints with live counters, a fault injection header builder, and a load generator (at most 500 requests and 50 in flight) with a status histogram and latency percentiles, for rate limiting, retry and circuit breaker demos |
 | **Harness** (harness mode only) | The node's roles, caps and allowed targets, a scenario builder generated from `GET /_rustybin/harness/schema` with a YAML view and the built-in scenarios, validation, a live run view (counts, latency, a per-second chart, stop), the kill switch, and the final report with its classes (upstream, gateway, transport, lost), the gateway overhead and legs, what the gateway changed, thresholds, breakdowns and samples. Shown only when `RUSTYBIN_HARNESS=on` |
@@ -132,7 +132,8 @@ The **Mock APIs** view (`/ui/#/mocks`) manages the instance's
 - **Data** (stateful mocks only): the items the mock stored, per collection, with
   Refresh and Reset.
 - **MCP server**: the mock's [MCP server](mocks/mcp.md): its URL, the
-  `claude mcp add` command and `mcpServers` JSON, and which operations are tools.
+  `claude mcp add` command and `mcpServers` JSON, which operations are tools, and
+  **Open in the inspector**.
 - **Traffic**: the mock's captured calls, live, with the matched operation and its
   path parameters, status, validation and authentication result; calls from the
   mock's MCP server carry an **MCP** badge and the tool name.

@@ -179,6 +179,10 @@ impl Grant {
             return self.harness || (is_safe(method) && self.console);
         }
         if !is_safe(method) {
+            // The MCP inspector's relay sessions: the console ends its own.
+            if method == Method::DELETE && crate::mcp::inspector::is_relay_session_path(path) {
+                return self.console;
+            }
             return self.console && method == Method::POST && is_read_only_post(path);
         }
         self.console || (self.inspector && is_inspector_path(path))
@@ -206,7 +210,10 @@ fn under(path: &str, prefix: &str) -> bool {
 /// `/_rustybin/mocks/{name}/operations/{op}/rules/test` and
 /// `/_rustybin/assist/run` (read tasks; the handler checks the task).
 fn is_read_only_post(path: &str) -> bool {
-    if path == "/_rustybin/mocks/import" || path == crate::assist::RUN_PATH {
+    if path == "/_rustybin/mocks/import"
+        || path == crate::assist::RUN_PATH
+        || crate::mcp::inspector::is_console_post(path)
+    {
         return true;
     }
     let Some(rest) = path.strip_prefix("/_rustybin/mocks/") else {

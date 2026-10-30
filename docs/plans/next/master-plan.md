@@ -95,7 +95,7 @@ The marker a new session looks for is the first row that is not done.
 | [02](step-02-console-sign-in.md) | Console sign-in with username and password | 01 | 1.5 | done 2026-10-29 |
 | [03](step-03-ai-assist.md) | AI assist: providers, keys, the assist bar | 01, 02 | 2.5 | done 2026-10-29 |
 | [04](step-04-ai-mocks.md) | AI mocks: specs from a prompt, examples, AI edit | 03 | 3 | done 2026-10-29 |
-| [05](step-05-mcp-inspector.md) | MCP inspector for any server, every auth mode, test runs | 01, 03 | 3 | not started |
+| [05](step-05-mcp-inspector.md) | MCP inspector for any server, every auth mode, test runs | 01, 03 | 3 | done 2026-10-30 |
 | [06](step-06-mcp-registry.md) | MCP registry: a mock registry and inspecting real ones | 05 | 1.5 | not started |
 | [07](step-07-dev-portal.md) | Dev portal: publish and consume | 01, 02 | 3 | not started |
 | [08](step-08-agents.md) | AI agents: who talks to the instance over MCP | 01, 02 | 2 | not started |

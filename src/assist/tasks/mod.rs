@@ -8,8 +8,10 @@ pub mod examples_for_operations;
 pub mod explain;
 pub mod free_answer;
 pub mod request_examples;
+pub mod sampling;
 pub mod spec_from_description;
 pub mod suggest;
+pub mod tool_arguments;
 
 use serde_json::Value;
 
@@ -26,6 +28,8 @@ pub static ALL: &[Task] = &[
     examples_for_operations::TASK,
     edit_spec::TASK,
     request_examples::TASK,
+    tool_arguments::TASK,
+    sampling::TASK,
 ];
 
 /// The limits a task compiles a document under (an instance mock's).

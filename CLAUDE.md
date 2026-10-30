@@ -2,7 +2,7 @@
 
 HTTP stub service for API and AI gateway demos (Rust, axum 0.8, tokio). Crate is lib + bin.
 
-## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 to 04 done)
+## Next: Rustybin 0.2, the AI-assisted mocking service (in progress: steps 01 to 05 done)
 
 [docs/plans/next/master-plan.md](docs/plans/next/master-plan.md) (planned 2026-10-29) is the plan for the next
 build: twelve steps, one file each (`docs/plans/next/step-NN-*.md`): foundations (step 01, done 2026-10-29: the
@@ -15,7 +15,8 @@ the console's assist bar, drawer and `ui/lib/assist.js`), AI-built mocks (step 0
 `src/assist/tasks/`, the routes in `src/mocks/ai.rs`, stored examples and coverage in the mocks model and checks,
 `ui/views/mocks/ai.js`; specs from a
 prompt to the chosen OpenAPI version, example payloads with an alert when a spec has none, AI edits through a
-diff), an MCP inspector for any server with every auth mode and a relay, a mock MCP registry and registry
+diff), an MCP inspector for any server with every auth mode and a relay (step 05, done 2026-10-30:
+`src/mcp/inspector/`, `ui/lib/mcpclient.js`, `ui/lib/mcpauth.js`, `ui/views/mcp.js`, see below), a mock MCP registry and registry
 browsing, a dev portal, AI agents management, the whole instance as `rustybin.yaml` with git source control, a
 `rustybin` CLI for remote instances, management MCP parity, and the 0.2.0 release. The master plan's section 4 is
 the build marker and section 5 the session protocol: build a step whole, update its status and build notes, update
@@ -219,7 +220,15 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
 - `src/mcp/`: the mock MCP server at `/mcp` (protocol, transports, sessions, fake tools), `src/mcp/openapi.rs` (the
   MCP server of each OpenAPI mock) and `src/mcp/manage/`, the
   management MCP server at `/_rustybin/mcp` (`tools.rs` registry, `access.rs` rights, `stdio.rs` for
-  `rustybin mcp-stdio`).
+  `rustybin mcp-stdio`). `src/mcp/inspector/`: the MCP inspector's server side (`mod.rs`: `GET
+  /_rustybin/mcp-servers`, the routes, `is_console_post`; `client.rs`: `Target` (this instance in process
+  through `state.router`, else the egress client under `Purpose::McpRelay`), `Transport` (modern, session,
+  legacy), `Conn`; `relay.rs`: `POST /_rustybin/mcp-relay` (SSE back, bounded sessions) and `/fetch` for
+  OAuth discovery documents; `checks.rs`: `CHECKS` and `run` behind `POST /_rustybin/mcp-checks` (JSON or
+  JUnit); `store.rs`: saved connections and runs in `<state>/mcp-inspector.json`, credentials sealed with
+  `Settings::seal`). The console side is `ui/lib/mcpclient.js` (`McpClient`, browser or relay, exports),
+  `ui/lib/mcpauth.js` (auth modes, the OAuth walk) and `ui/views/mcp.js`. A new check is a `CHECKS` entry
+  plus its judgement in `run`, documented in `docs/src/mcp/inspector.md`.
 - `src/harness/`: load test mode (`RUSTYBIN_HARNESS`), see above. `mod.rs` (roles, `check_startup`, the `Harness`
   state in `AppState.harness` with bounded runs, target verification, router, catalogue, OpenAPI, headless mode),
   `safety.rs`, `scenario.rs` (model, `Caps`, validation, JSON Schema, preview), `pattern.rs` (every run pattern

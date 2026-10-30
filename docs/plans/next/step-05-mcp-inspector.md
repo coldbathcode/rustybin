@@ -1,6 +1,6 @@
 # Step 05: MCP inspector for any server, every auth mode, test runs
 
-Master plan: [master-plan.md](master-plan.md). Needs: 01, 03. Status: **not started**. About 3 days.
+Master plan: [master-plan.md](master-plan.md). Needs: 01, 03. Status: **done 2026-10-30**. About 3 days.
 
 ## Goal
 
@@ -119,4 +119,48 @@ checks pass; committed and pushed.
 
 ## Build notes
 
-(filled in when built)
+Built 2026-10-30. Where the build differs from the design above, and why:
+
+- **One check suite, on the server.** There is no `ui/lib/mcpchecks.js`: the console's Checks
+  tab calls `POST /_rustybin/mcp-checks`, the same suite the CLI (step 10) and the management
+  MCP (step 11) will call, so the three can never disagree. Checks run without a browser
+  connection first. Fourteen checks (`checks::CHECKS`); `isError` from a tool is a warning, not
+  a failure (the open `/mcp` has tools that fail on purpose), and `ok` means nothing failed.
+- **The relay lives in `src/mcp/inspector/relay.rs`**, beside the client, checks and store,
+  not `src/mcp/relay.rs`. Targets on this instance (`/mcp*`, `/_rustybin/mcp`,
+  `/mock/<name>/_rustybin/mcp`) are served in process through `state.router`, so they need
+  neither the loopback switch nor an allowlist entry; every other host goes through
+  `Purpose::McpRelay`. The relay does not proxy a session's server-to-client GET stream
+  (server requests that arrive inside a POST's SSE answer are relayed and answered); the
+  `server_stream` check covers the GET stream server side. A fetch helper, `POST
+  /_rustybin/mcp-relay/fetch`, gets OAuth discovery documents and tokens when CORS blocks the
+  browser (same egress rules; this instance's `/.well-known/`, `/oauth/` and
+  `/_rustybin/oauth/` in process).
+- **Saved connections are not in the settings table.** The settings store has a fixed schema
+  of keys, so connections and runs live in `<state>/mcp-inspector.json` (at most 50 each, a
+  run at most 256 KiB), their credentials sealed with the settings secrets key
+  (`Settings::seal` / `open`) and shown as `{set, hint}`. A connection with credentials is
+  always used through the relay, which adds them on the instance. Without a state directory
+  they are kept in memory.
+- **Planted faults.** `/mcp/variants` does not exist; the faulty-server test stands up a
+  small MCP server on its own listener (a tool whose `inputSchema` is not an object, an unknown
+  tool that succeeds, arguments never validated, `ping` missing, routing headers ignored),
+  runs the checks against it through the relay under the egress policy, and asserts each fault
+  is found; without the policy the run stops at `connect`.
+- **Two assist tasks**: `tool_arguments` (Generate arguments and the checks' AI arguments,
+  validated against the tool's `inputSchema` by its `post` check) and `sampling` (the reply to
+  a server's `sampling/createMessage`, offered in the console, never sent without the user).
+- **Exports mask credentials on screen**; Copy gives the real command, matching the agent
+  panel's behaviour. The timeline's header view masks `Authorization`, cookies and API key
+  headers.
+- **Access.** The relay, fetch and check runs are read-only POSTs for control auth
+  (`control_auth::is_read_only_post`), so a console-scope token may use them; a console token
+  may also DELETE its relay sessions. Saving and deleting connections and deleting runs need
+  admin.
+
+CLI and MCP notes for later steps: step 10's `rustybin mcp connect | tools | call | checks
+--junit` calls `/_rustybin/mcp-servers`, `/_rustybin/mcp-relay` and `/_rustybin/mcp-checks`
+on the remote instance (stdio targets run locally through `client::Conn` once it grows a stdio
+transport). Step 11's `list_mcp_servers`, `mcp_call` and `run_mcp_checks` wrap the same
+handlers (`checks::run`, the relay's `Conn`), with confirmation when the target is outside the
+instance.
