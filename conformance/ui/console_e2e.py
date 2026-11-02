@@ -321,6 +321,24 @@ def run_theme(browser, theme):
         page.get_by_role("tab", name="Data").click()
         page.locator(".data-col", has_text="Bella").wait_for()
         shot(page, theme, "20-mock-data")
+        # Someone else edits the copy while its settings are open: the
+        # console's save is refused and says what changed; Cancel keeps it.
+        page.get_by_role("tab", name="Settings").click()
+        page.get_by_label("Response mode").select_option("generated")
+        req = urllib.request.Request(
+            BASE + f"/_rustybin/mocks/{copy}", method="PATCH",
+            data=json.dumps({"mcp": {"enabled": False}, "deploy": False}).encode(),
+            headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10).read()
+        messages = []
+        page.once("dialog", lambda d: (messages.append(d.message), d.dismiss()))
+        page.get_by_role("button", name="Save to draft").click()
+        deadline = time.time() + 5
+        while not messages and time.time() < deadline:
+            page.wait_for_timeout(100)
+        assert messages and "changed since you loaded it" in messages[0] and "mcp" in messages[0], messages
+        with urllib.request.urlopen(BASE + f"/_rustybin/mocks/{copy}", timeout=10) as r:
+            assert json.load(r)["settings"]["responses"]["mode"] == "stateful", "the stale save went through"
         # Wizard: paste a spec, review, create and deploy.
         name = f"orders-{theme}"
         goto_view(page, "mocks")

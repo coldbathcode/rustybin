@@ -268,6 +268,37 @@ GET {{base_url}}/mock/docs-orders/api/orders/7
 HTTP 200
 # ANCHOR_END: rollback
 
+# ANCHOR: conflict
+# Read the mock: its ETag is the draft revision.
+GET {{base_url}}/_rustybin/mocks/docs-orders
+Authorization: Bearer {{admin_token}}
+HTTP 200
+[Captures]
+revision: jsonpath "$.draft_revision"
+[Asserts]
+header "ETag" exists
+
+# An edit from that revision passes.
+PATCH {{base_url}}/_rustybin/mocks/docs-orders
+Authorization: Bearer {{admin_token}}
+If-Match: "{{revision}}"
+Content-Type: application/json
+{"responses": {"mode": "generated"}}
+HTTP 200
+
+# A second edit from the same revision is refused: someone changed the mock.
+PUT {{base_url}}/_rustybin/mocks/docs-orders/operations/listOrders
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{"delay_ms": 100, "expected_revision": {{revision}}}
+HTTP 409
+[Asserts]
+jsonpath "$.error" == "rustybin_stale_revision"
+jsonpath "$.expected_revision" == {{revision}}
+jsonpath "$.current_revision" > {{revision}}
+jsonpath "$.changed" contains "responses"
+# ANCHOR_END: conflict
+
 # ANCHOR: switch
 POST {{base_url}}/_rustybin/mocks/docs-orders/disable
 Authorization: Bearer {{admin_token}}

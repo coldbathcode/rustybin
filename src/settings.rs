@@ -341,6 +341,11 @@ pub fn groups() -> Vec<Group> {
             description: "The model each AI job runs on. Empty: the job's tier default (the fast model or the model). Load the provider's list to pick from what your key can call.",
         },
         Group {
+            id: "mocks",
+            title: "Mock edits",
+            description: "How edits of a mock guard against overwriting someone else's change.",
+        },
+        Group {
             id: "proxy",
             title: "Behind a proxy",
             description: "Which proxy header names the client, with RUSTYBIN_TRUST_FORWARD on (the per-address limits and sessions use it).",
@@ -417,6 +422,7 @@ pub fn specs() -> Vec<Spec> {
     all.extend(crate::mcp::manage::agents::specs());
     all.extend(crate::portal::specs());
     all.extend(crate::mocks::leads::specs());
+    all.extend(crate::mocks::specs());
     all.extend(crate::sourcecontrol::specs());
     all
 }

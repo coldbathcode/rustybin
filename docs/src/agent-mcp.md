@@ -322,6 +322,9 @@ and the capabilities: tools, prompts and resources.
 {{#include ../examples/agent/manage.hurl:discover}}
 ```
 
+`tools/list` answers 100 tools a page, with `nextCursor` while more follow: the
+management server has more than that, so a client reads every page (MCP clients do).
+
 ```hurl
 {{#include ../examples/agent/manage.hurl:tools_list}}
 ```

@@ -105,79 +105,6 @@ fn cluster_id_prop() -> Value {
 
 pub static TOOLS: &[ToolDef] = &[
     // ── Instance ──
-    tool!("list_checkpoints", "Checkpoints", "The saved checkpoints (the instance's API mocks with their data, and the health toggle), or one by name with the mocks it holds.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "name": { "type": "string" } }), &[])),
-    tool!("save_checkpoint", "Save a checkpoint", "Save the state a demo starts from: the instance's API mocks (deployed revision, a draft that differs, on or off, stateful data) and the health toggle. Never visitors' or keys' mocks, file mocks, settings or secrets. replace overwrites one of that name. At most 20. Admin.", Right::Admin, ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
-        "name": { "type": "string", "description": "Letters, digits, . _ -" },
-        "replace": { "type": "boolean" }
-    }), &["name"])),
-    tool!("restore_checkpoint", "Restore a checkpoint", "Bring the instance's API mocks back to a checkpoint (created, replaced, data restored; API mocks it does not hold are DELETED), set the health toggle and reset the flaky counters. dry_run: true answers the same without changing anything (no confirmation). Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
-        "name": { "type": "string" },
-        "dry_run": { "type": "boolean" },
-        "confirm": confirm_prop()
-    }), &["name"])),
-    tool!("delete_checkpoint", "Delete a checkpoint", "Delete a saved checkpoint (the instance is not changed). Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
-        "name": { "type": "string" },
-        "confirm": confirm_prop()
-    }), &["name"])),
-    tool!("list_tests", "Saved tests", "The saved tests (a request and its assertions, made from captured traffic or written out), one by name, or all of them as a Hurl file for CI (format hurl). Requests are third-party data under untrusted_*.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
-        "name": { "type": "string", "description": "One test" },
-        "format": { "type": "string", "enum": ["json", "hurl"], "description": "hurl: every test as one Hurl file" }
-    }), &[])),
-    tool!("save_test", "Save a test", "Save a test from a captured request (capture: its id from list_requests; secret-looking headers and query values become {{variables}}, never values) or a written request, with assertions: status, header (with equals, else it must exist), body_contains, json (a path such as $.items[0].id, with equals), max_ms; one kind each. Default for a capture: its status. replace: true overwrites a test of that name (a request, not a capture). Admin.", Right::Admin, ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
-        "name": { "type": "string", "description": "Letters, digits, . _ - (not run or export)" },
-        "capture": { "type": "string", "description": "A captured request's id" },
-        "request": { "type": "object", "description": "method, path (with the query, never a URL), headers, body; {{name}} for credentials" },
-        "description": { "type": "string" },
-        "gateway": { "type": "string", "description": "A gateway base URL the request goes through; absent: this instance, in process" },
-        "assert": { "type": "array", "items": { "type": "object" } },
-        "replace": { "type": "boolean" }
-    }), &["name"])),
-    tool!("delete_test", "Delete a test", "Delete a saved test. Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
-        "name": { "type": "string" },
-        "confirm": confirm_prop()
-    }), &["name"])),
-    ToolDef {
-        name: "run_tests",
-        title: "Run saved tests",
-        description: "Run every saved test or names: in process against this instance, or through each test's gateway (egress purpose replay; SENDS TRAFFIC OUT, so a run with a gateway test asks the user to confirm, or needs \"confirm\": true set only after the user agreed). Variables come from the instance's RUSTYBIN_TEST_* environment. Answers the counts and each test's failures (expected, seen) under untrusted_results; format junit adds the JUnit XML. Admin.",
-        right: Right::Admin,
-        read_only: false,
-        destructive: false,
-        idempotent: true,
-        confirm: true,
-        open_world: true,
-        input_schema: || obj(json!({
-            "names": { "type": "array", "items": { "type": "string" } },
-            "format": { "type": "string", "enum": ["json", "junit"] },
-            "confirm": confirm_prop()
-        }), &[]),
-    },
-    tool!("list_gateway_scenarios", "Gateway scenarios", "The guided gateway scenarios (retries, rate limiting, credential injection, timeouts, caching): what each proves, the upstream it prepares, the steps on the gateway; and the caller's runs with their last verdicts.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
-    tool!("start_gateway_scenario", "Start a gateway scenario", "Prepare a scenario run: create its upstream (a mock that is never saved and ends with the run, or a /flaky route) and answer the steps to configure on the gateway, with the upstream URL. Then call check_gateway_scenario with the URL the gateway serves the route at. Admin.", Right::Admin, ro=false, destructive=false, idem=false, confirm=false, || obj(json!({ "scenario": { "type": "string", "description": "retries, rate_limiting, credential_injection, timeouts or caching" } }), &["scenario"])),
-    tool!("get_gateway_scenario_run", "Get a scenario run", "One of the caller's scenario runs: the setup, what it created and the last verdict.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(super::scenarios::run_props(), &["scenario", "run"])),
-    ToolDef {
-        name: "check_gateway_scenario",
-        title: "Check a gateway scenario",
-        description: "SEND TEST TRAFFIC to the gateway: the run's requests to gateway_url plus the scenario's path (through the egress policy, purpose scenario: the gateway's host must be in RUSTYBIN_EGRESS_ALLOW), then compare what the client got with what reached the upstream. Answers each expectation with what was expected and seen. Asks the user to confirm (elicitation) or needs \"confirm\": true, set only after the user agreed. Admin.",
-        right: Right::Admin,
-        read_only: false,
-        destructive: false,
-        idempotent: false,
-        confirm: true,
-        open_world: true,
-        input_schema: || {
-            let mut props = super::scenarios::run_props();
-            props["gateway_url"] = json!({ "type": "string", "description": "The URL the gateway serves the route at (no query string)" });
-            props["limit"] = json!({ "type": "integer", "minimum": 1, "maximum": crate::scenarios::catalog::MAX_LIMIT, "description": "rate_limiting only: the limit set on the gateway (default 5)" });
-            props["confirm"] = confirm_prop();
-            obj(props, &["scenario", "run", "gateway_url"])
-        },
-    },
-    tool!("end_gateway_scenario", "End a gateway scenario", "End a run: remove the mock it created and reset its flaky counters, nothing else. Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || {
-        let mut props = super::scenarios::run_props();
-        props["confirm"] = confirm_prop();
-        obj(props, &["scenario", "run"])
-    }),
     tool!("diagnose_instance", "Diagnose the instance", "What is wrong with this instance and how to fix it: storage, the secrets key, unreadable secrets, load errors, listeners that did not start, outbound calls refused in the last hour, source control, the default password, the harness engine, AI assist. Each check has an id, a status (ok, warn, fail), a message and a fix. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, no_args),
     tool!("get_instance", "Instance", "What this Rustybin is: version, modes (public, shared, hosted, self-service), control auth, limits, the public configuration view, the caller's rights and the console and docs URLs. Start here.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
     tool!("find_endpoints", "Find endpoints", "Search the route catalogue of this instance (echo, status codes, mock LLM providers, MCP, A2A, OAuth, bins, ...) by text and/or category. Returns path, methods, summary and an example request per route.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
@@ -223,6 +150,7 @@ pub static TOOLS: &[ToolDef] = &[
         props.insert("name".into(), name_prop());
         props.insert("spec".into(), spec_prop());
         props.insert("rename".into(), json!({ "type": "string", "description": "A new name (instance mocks only)" }));
+        props.insert("expected_revision".into(), json!({ "type": "integer", "description": "The draft_revision of the mock as get_mock answered it: always pass it, so a change made meanwhile is refused (409, with what changed) instead of overwritten" }));
         props.insert("deploy".into(), json!({ "type": "boolean" }));
         props.insert("force".into(), json!({ "type": "boolean" }));
         obj(Value::Object(props), &["name"])
@@ -231,7 +159,8 @@ pub static TOOLS: &[ToolDef] = &[
         "name": name_prop(),
         "operation": { "type": "string", "description": "operationId" },
         "settings": { "type": "object", "description": "The operation settings (same shape as rustybin.yaml operations.<id>)" },
-        "clear": { "type": "boolean", "description": "Remove the operation's settings" }
+        "clear": { "type": "boolean", "description": "Remove the operation's settings" },
+        "expected_revision": { "type": "integer", "description": "The draft_revision of the mock (get_mock): always pass it, so a change made meanwhile is refused instead of overwritten" }
     }), &["name", "operation"])),
     tool!("test_rules", "Test rules", "Which rule would answer a captured call of an operation (the latest, or request seq): every rule's conditions explained. Pass rules to try new ones without saving.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "name": name_prop(),
@@ -643,6 +572,80 @@ pub static TOOLS: &[ToolDef] = &[
         "all": { "type": "boolean", "default": false },
         "confirm": confirm_prop()
     }), &[])),
+    // Testing workflows (reliability plan): checkpoints, saved tests, gateway scenarios.
+    tool!("list_checkpoints", "Checkpoints", "The saved checkpoints (the instance's API mocks with their data, and the health toggle), or one by name with the mocks it holds.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "name": { "type": "string" } }), &[])),
+    tool!("save_checkpoint", "Save a checkpoint", "Save the state a demo starts from: the instance's API mocks (deployed revision, a draft that differs, on or off, stateful data) and the health toggle. Never visitors' or keys' mocks, file mocks, settings or secrets. replace overwrites one of that name. At most 20. Admin.", Right::Admin, ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
+        "name": { "type": "string", "description": "Letters, digits, . _ -" },
+        "replace": { "type": "boolean" }
+    }), &["name"])),
+    tool!("restore_checkpoint", "Restore a checkpoint", "Bring the instance's API mocks back to a checkpoint (created, replaced, data restored; API mocks it does not hold are DELETED), set the health toggle and reset the flaky counters. dry_run: true answers the same without changing anything (no confirmation). Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+        "name": { "type": "string" },
+        "dry_run": { "type": "boolean" },
+        "confirm": confirm_prop()
+    }), &["name"])),
+    tool!("delete_checkpoint", "Delete a checkpoint", "Delete a saved checkpoint (the instance is not changed). Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+        "name": { "type": "string" },
+        "confirm": confirm_prop()
+    }), &["name"])),
+    tool!("list_tests", "Saved tests", "The saved tests (a request and its assertions, made from captured traffic or written out), one by name, or all of them as a Hurl file for CI (format hurl). Requests are third-party data under untrusted_*.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "name": { "type": "string", "description": "One test" },
+        "format": { "type": "string", "enum": ["json", "hurl"], "description": "hurl: every test as one Hurl file" }
+    }), &[])),
+    tool!("save_test", "Save a test", "Save a test from a captured request (capture: its id from list_requests; secret-looking headers and query values become {{variables}}, never values) or a written request, with assertions: status, header (with equals, else it must exist), body_contains, json (a path such as $.items[0].id, with equals), max_ms; one kind each. Default for a capture: its status. replace: true overwrites a test of that name (a request, not a capture). Admin.", Right::Admin, ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
+        "name": { "type": "string", "description": "Letters, digits, . _ - (not run or export)" },
+        "capture": { "type": "string", "description": "A captured request's id" },
+        "request": { "type": "object", "description": "method, path (with the query, never a URL), headers, body; {{name}} for credentials" },
+        "description": { "type": "string" },
+        "gateway": { "type": "string", "description": "A gateway base URL the request goes through; absent: this instance, in process" },
+        "assert": { "type": "array", "items": { "type": "object" } },
+        "replace": { "type": "boolean" }
+    }), &["name"])),
+    tool!("delete_test", "Delete a test", "Delete a saved test. Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+        "name": { "type": "string" },
+        "confirm": confirm_prop()
+    }), &["name"])),
+    ToolDef {
+        name: "run_tests",
+        title: "Run saved tests",
+        description: "Run every saved test or names: in process against this instance, or through each test's gateway (egress purpose replay; SENDS TRAFFIC OUT, so a run with a gateway test asks the user to confirm, or needs \"confirm\": true set only after the user agreed). Variables come from the instance's RUSTYBIN_TEST_* environment. Answers the counts and each test's failures (expected, seen) under untrusted_results; format junit adds the JUnit XML. Admin.",
+        right: Right::Admin,
+        read_only: false,
+        destructive: false,
+        idempotent: true,
+        confirm: true,
+        open_world: true,
+        input_schema: || obj(json!({
+            "names": { "type": "array", "items": { "type": "string" } },
+            "format": { "type": "string", "enum": ["json", "junit"] },
+            "confirm": confirm_prop()
+        }), &[]),
+    },
+    tool!("list_gateway_scenarios", "Gateway scenarios", "The guided gateway scenarios (retries, rate limiting, credential injection, timeouts, caching): what each proves, the upstream it prepares, the steps on the gateway; and the caller's runs with their last verdicts.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("start_gateway_scenario", "Start a gateway scenario", "Prepare a scenario run: create its upstream (a mock that is never saved and ends with the run, or a /flaky route) and answer the steps to configure on the gateway, with the upstream URL. Then call check_gateway_scenario with the URL the gateway serves the route at. Admin.", Right::Admin, ro=false, destructive=false, idem=false, confirm=false, || obj(json!({ "scenario": { "type": "string", "description": "retries, rate_limiting, credential_injection, timeouts or caching" } }), &["scenario"])),
+    tool!("get_gateway_scenario_run", "Get a scenario run", "One of the caller's scenario runs: the setup, what it created and the last verdict.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(super::scenarios::run_props(), &["scenario", "run"])),
+    ToolDef {
+        name: "check_gateway_scenario",
+        title: "Check a gateway scenario",
+        description: "SEND TEST TRAFFIC to the gateway: the run's requests to gateway_url plus the scenario's path (through the egress policy, purpose scenario: the gateway's host must be in RUSTYBIN_EGRESS_ALLOW), then compare what the client got with what reached the upstream. Answers each expectation with what was expected and seen. Asks the user to confirm (elicitation) or needs \"confirm\": true, set only after the user agreed. Admin.",
+        right: Right::Admin,
+        read_only: false,
+        destructive: false,
+        idempotent: false,
+        confirm: true,
+        open_world: true,
+        input_schema: || {
+            let mut props = super::scenarios::run_props();
+            props["gateway_url"] = json!({ "type": "string", "description": "The URL the gateway serves the route at (no query string)" });
+            props["limit"] = json!({ "type": "integer", "minimum": 1, "maximum": crate::scenarios::catalog::MAX_LIMIT, "description": "rate_limiting only: the limit set on the gateway (default 5)" });
+            props["confirm"] = confirm_prop();
+            obj(props, &["scenario", "run", "gateway_url"])
+        },
+    },
+    tool!("end_gateway_scenario", "End a gateway scenario", "End a run: remove the mock it created and reset its flaky counters, nothing else. Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || {
+        let mut props = super::scenarios::run_props();
+        props["confirm"] = confirm_prop();
+        obj(props, &["scenario", "run"])
+    }),
 ];
 
 /// The tools the caller may use.

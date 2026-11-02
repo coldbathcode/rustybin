@@ -125,6 +125,12 @@ pub enum StoreError {
     OwnerCap(String),
     /// Deploy refused: the checks found errors.
     ChecksFailed(Box<Report>),
+    /// The edit was made from another draft revision than the current one.
+    Stale {
+        name: String,
+        expected: u64,
+        current: u64,
+    },
 }
 
 impl StoreError {
@@ -135,6 +141,13 @@ impl StoreError {
             Self::ChecksFailed(r) => format!(
                 "the deploy checks found {} error(s): fix them or deploy with force",
                 r.errors
+            ),
+            Self::Stale {
+                name,
+                expected,
+                current,
+            } => format!(
+                "mock {name:?} changed since revision {expected}: its draft is revision {current} (reload, then edit again)"
             ),
         }
     }
@@ -286,6 +299,9 @@ pub struct MockStore {
     /// One save at a time: each writes the mock as it is now, so the last
     /// write is the latest state whatever order the mutations finish in.
     persist_lock: Arc<std::sync::Mutex<()>>,
+    /// Serialises the read, recompile and write of an edit (`set_operation`,
+    /// the service's update), so two edits never interleave and lose one.
+    edit_lock: Arc<std::sync::Mutex<()>>,
     /// Recent compiles per visitor (rate limit), bounded by `MAX_RECOMPILE_KEYS`.
     recompiles: Arc<std::sync::Mutex<std::collections::HashMap<String, VecDeque<Instant>>>>,
 }
@@ -317,6 +333,7 @@ impl MockStore {
             file_agents: Arc::new(RwLock::new(Default::default())),
             compiles: Arc::new(tokio::sync::Semaphore::new(COMPILE_PERMITS)),
             persist_lock: Arc::new(std::sync::Mutex::new(())),
+            edit_lock: Arc::new(std::sync::Mutex::new(())),
             recompiles: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
@@ -440,6 +457,12 @@ impl MockStore {
             Some(s) => super::persist::save(dir, &s),
             None => super::persist::remove(dir, name),
         }
+    }
+
+    /// Held for the read, recompile and write of one edit (blocking: call it
+    /// on the blocking pool, as every edit is).
+    pub fn edit_lock(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.edit_lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Write the saved copy of `name` as it is now (after a restore).
@@ -830,7 +853,19 @@ impl MockStore {
         compiled: Option<Compiled>,
         rename: Option<&str>,
     ) -> Result<Snapshot, StoreError> {
-        let r = self.set_draft_inner(name, compiled, rename);
+        self.set_draft_if(name, compiled, rename, None)
+    }
+
+    /// [`Self::set_draft`], refused with [`StoreError::Stale`] unless the
+    /// draft is still revision `base` (checked under the write lock).
+    pub fn set_draft_if(
+        &self,
+        name: &str,
+        compiled: Option<Compiled>,
+        rename: Option<&str>,
+        base: Option<u64>,
+    ) -> Result<Snapshot, StoreError> {
+        let r = self.set_draft_inner(name, compiled, rename, base);
         if let Ok(s) = &r {
             if s.name != name {
                 self.persist_now(name);
@@ -844,8 +879,18 @@ impl MockStore {
         name: &str,
         compiled: Option<Compiled>,
         rename: Option<&str>,
+        base: Option<u64>,
     ) -> Result<Snapshot, StoreError> {
         let mut map = self.write();
+        if let (Some(b), Some(e)) = (base, map.get(name)) {
+            if e.draft.revision != b {
+                return Err(StoreError::Stale {
+                    name: name.to_string(),
+                    expected: b,
+                    current: e.draft.revision,
+                });
+            }
+        }
         if let Some(new_name) = rename.filter(|n| *n != name) {
             if !valid_name(new_name) {
                 return Err(StoreError::Invalid(format!("invalid name {new_name:?}")));
@@ -881,29 +926,48 @@ impl MockStore {
     }
 
     /// Recompile the draft with one operation's settings replaced.
+    /// Set one operation's settings. With `expected`, refused unless the
+    /// draft is that revision; without, an edit that raced another is made
+    /// again on top of it (never lost).
     pub fn set_operation(
         &self,
         name: &str,
         op: &str,
         settings: Option<OperationSettings>,
+        expected: Option<u64>,
     ) -> Result<Snapshot, StoreError> {
-        let draft = self.draft(name)?;
-        if draft.spec.operation(op).is_none() {
-            return Err(StoreError::NotFound(format!("{name}/{op}")));
-        }
-        let mut new_settings = draft.settings.clone();
-        match settings {
-            Some(s) if !s.is_empty() => {
-                new_settings.operations.insert(op.to_string(), s);
+        let _edit = self.edit_lock();
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let draft = self.draft(name)?;
+            if let Some(e) = expected.filter(|e| *e != draft.revision) {
+                return Err(StoreError::Stale {
+                    name: name.to_string(),
+                    expected: e,
+                    current: draft.revision,
+                });
             }
-            _ => {
-                new_settings.operations.remove(op);
+            if draft.spec.operation(op).is_none() {
+                return Err(StoreError::NotFound(format!("{name}/{op}")));
+            }
+            let mut new_settings = draft.settings.clone();
+            match &settings {
+                Some(s) if !s.is_empty() => {
+                    new_settings.operations.insert(op.to_string(), s.clone());
+                }
+                _ => {
+                    new_settings.operations.remove(op);
+                }
+            }
+            let compiled = self
+                .recompile(&draft, None, new_settings)
+                .map_err(StoreError::Invalid)?;
+            match self.set_draft_if(name, Some(compiled), None, Some(draft.revision)) {
+                Err(StoreError::Stale { .. }) if expected.is_none() && attempt < 3 => continue,
+                r => return r,
             }
         }
-        let compiled = self
-            .recompile(&draft, None, new_settings)
-            .map_err(StoreError::Invalid)?;
-        self.set_draft(name, Some(compiled), None)
     }
 
     /// Make the draft live.
@@ -1043,7 +1107,7 @@ impl MockStore {
     ) -> Result<Snapshot, StoreError> {
         let snap = self.create_inner(name, live, origin, owner, enabled, true, true)?;
         match draft {
-            Some(d) => self.set_draft_inner(name, Some(d), None),
+            Some(d) => self.set_draft_inner(name, Some(d), None, None),
             None => Ok(snap),
         }
     }

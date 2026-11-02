@@ -93,6 +93,8 @@ function generalPanel(doc, reload, error) {
   if (doc) {
     const form = settingsForm(doc, 'console', { saveLabel: 'Save console settings', onSaved: reload });
     el.appendChild(card('Console', { hint: 'shown to everyone who opens it' }, form.el));
+    const mocks = settingsForm(doc, 'mocks', { saveLabel: 'Save mock settings', onSaved: reload });
+    el.appendChild(card('Mock edits', { hint: 'conflict protection' }, mocks.el));
   } else {
     el.appendChild(card('Console', { hint: 'shown to everyone who opens it' }, loadError(error)));
   }

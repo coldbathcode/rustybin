@@ -139,6 +139,17 @@ impl From<StoreError> for ServiceError {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 json!({ "error": message, "report": report }),
             ),
+            StoreError::Stale {
+                expected, current, ..
+            } => Self::with_body(
+                StatusCode::CONFLICT,
+                json!({
+                    "error": "rustybin_stale_revision",
+                    "message": message,
+                    "expected_revision": expected,
+                    "current_revision": current,
+                }),
+            ),
         }
     }
 }
@@ -223,6 +234,8 @@ pub struct CreateBody {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PatchBody {
+    /// The draft revision the edit was made from (else `If-Match`).
+    pub expected_revision: Option<u64>,
     pub name: Option<String>,
     pub spec: Option<Value>,
     pub strip_server_prefix: Option<bool>,
@@ -431,6 +444,12 @@ fn draft_changes(s: &Snapshot) -> Vec<String> {
     if live.revision == draft.revision {
         return Vec::new();
     }
+    changes_between(live, draft)
+}
+
+/// What differs between two revisions: the spec, the parts of the settings,
+/// the operations.
+pub fn changes_between(live: &Compiled, draft: &Compiled) -> Vec<String> {
     let mut out = Vec::new();
     if live.source != draft.source {
         out.push("spec".to_string());
@@ -604,6 +623,7 @@ fn operation_detail(c: &Compiled, op_id: &str, root: &str, reveal: bool) -> Opti
         }
     }
     Some(json!({
+        "draft_revision": c.revision,
         "operation": op_json,
         "settings": c.settings.operations.get(op_id).cloned().unwrap_or_default(),
         "default_status": op.default_status(),
@@ -1031,10 +1051,82 @@ impl Svc {
 
     /// `PATCH /_rustybin/mocks/{name}`: change the draft (spec, settings,
     /// name), optionally deploying it.
+    /// The setting `mocks.require_revision`: edits must name the revision
+    /// they were made from.
+    fn check_revision_given(&self, expected: Option<u64>) -> SvcResult<()> {
+        if expected.is_none() && self.state.settings.bool("mocks.require_revision") {
+            return Err(ServiceError::with_body(
+                StatusCode::PRECONDITION_REQUIRED,
+                json!({
+                    "error": "rustybin_revision_required",
+                    "message": "this instance requires the revision an edit was made from: send If-Match or expected_revision (the draft_revision of the mock)",
+                }),
+            ));
+        }
+        Ok(())
+    }
+
+    /// A stale edit's refusal, with what changed since the revision it was
+    /// made from (when that revision is still in the history).
+    fn stale(&self, e: StoreError) -> ServiceError {
+        let StoreError::Stale { name, expected, .. } = &e else {
+            return e.into();
+        };
+        let since = self.store().get(name).map(|s| {
+            let old = s
+                .history
+                .iter()
+                .chain(s.live.iter())
+                .find(|c| c.revision == *expected)
+                .cloned();
+            match old {
+                Some(o) => json!(changes_between(&o, &s.draft)),
+                None => json!(format!("revision {expected} is no longer in the history")),
+            }
+        });
+        let mut err: ServiceError = e.into();
+        if let (Some(v), Value::Object(m)) = (since, &mut err.body) {
+            m.insert("changed".into(), v);
+        }
+        err
+    }
+
     pub fn update(&self, name: &str, req: PatchBody) -> SvcResult<Value> {
+        self.check_revision_given(req.expected_revision)?;
+        let edit = self.store().edit_lock();
+        let mut attempt = 0;
+        let mut snap = loop {
+            attempt += 1;
+            match self.update_once(name, &req)? {
+                Ok(snap) => break snap,
+                Err(e) if req.expected_revision.is_none() && attempt < 3 => {
+                    tracing::debug!(mock = name, "{}: made again", e.message());
+                }
+                Err(e) => return Err(self.stale(e)),
+            }
+        };
+        drop(edit);
+        if req.deploy == Some(true) {
+            snap = self
+                .store()
+                .deploy(&snap.name, req.force.unwrap_or(false))?;
+        }
+        Ok(self.detail_of(&snap, self.caller.reveals(&snap)))
+    }
+
+    /// One attempt of [`Self::update`]: `Ok(Err(stale))` when the draft is
+    /// not the revision the edit was made from (named, or read here).
+    fn update_once(&self, name: &str, req: &PatchBody) -> SvcResult<Result<Snapshot, StoreError>> {
         let current = self.manageable(name)?;
         let c = &self.caller;
         let draft = current.draft.clone();
+        if let Some(e) = req.expected_revision.filter(|e| *e != draft.revision) {
+            return Ok(Err(StoreError::Stale {
+                name: name.to_string(),
+                expected: e,
+                current: draft.revision,
+            }));
+        }
         if let Some(n) = req.name.as_deref().filter(|n| *n != name) {
             if current.owner.is_visitor() && !c.admin {
                 return Err(ServiceError::bad_request(
@@ -1058,17 +1150,17 @@ impl Svc {
             if let Some(v) = req.strip_server_prefix {
                 settings.strip_server_prefix = v;
             }
-            if let Some(v) = req.responses {
-                settings.responses = v;
+            if let Some(v) = &req.responses {
+                settings.responses = v.clone();
             }
-            if let Some(v) = req.security {
-                settings.security = v;
+            if let Some(v) = &req.security {
+                settings.security = v.clone();
             }
-            if let Some(v) = req.operations {
-                settings.operations = v;
+            if let Some(v) = &req.operations {
+                settings.operations = v.clone();
             }
-            if let Some(v) = req.mcp {
-                settings.mcp = v;
+            if let Some(v) = &req.mcp {
+                settings.mcp = v.clone();
             }
             Some(
                 self.store()
@@ -1078,15 +1170,14 @@ impl Svc {
         } else {
             None
         };
-        let mut snap = self
+        match self
             .store()
-            .set_draft(name, compiled, req.name.as_deref())?;
-        if req.deploy == Some(true) {
-            snap = self
-                .store()
-                .deploy(&snap.name, req.force.unwrap_or(false))?;
+            .set_draft_if(name, compiled, req.name.as_deref(), Some(draft.revision))
+        {
+            Ok(s) => Ok(Ok(s)),
+            Err(e @ StoreError::Stale { .. }) => Ok(Err(e)),
+            Err(e) => Err(e.into()),
         }
-        Ok(self.detail_of(&snap, c.reveals(&snap)))
     }
 
     /// `DELETE /_rustybin/mocks/{name}`.
@@ -1259,9 +1350,14 @@ impl Svc {
         name: &str,
         op: &str,
         settings: Option<OperationSettings>,
+        expected: Option<u64>,
     ) -> SvcResult<Value> {
         self.manageable(name)?;
-        let snap = self.store().set_operation(name, op, settings)?;
+        self.check_revision_given(expected)?;
+        let snap = self
+            .store()
+            .set_operation(name, op, settings, expected)
+            .map_err(|e| self.stale(e))?;
         let root = self.links.mock_base(&snap.owner, &snap.name);
         operation_detail(&snap.draft, op, &root, self.caller.reveals(&snap))
             .ok_or_else(|| op_not_found(name, op))

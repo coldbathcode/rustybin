@@ -861,7 +861,7 @@ pub async fn get_one(
     uri: Uri,
 ) -> Result<Response, ServiceError> {
     let s = svc(&state, &headers, &extensions, &uri);
-    Ok(Json(s.get(&name)?).into_response())
+    Ok(with_etag(s.get(&name)?))
 }
 
 pub async fn patch(
@@ -875,9 +875,46 @@ pub async fn patch(
     let s = svc(&state, &headers, &extensions, &uri);
     // Access first, then the body, as before.
     s.manageable(&name)?;
-    let req: PatchBody = parse_body(&body)?;
+    let mut req: PatchBody = parse_body(&body)?;
+    req.expected_revision = expected_revision(&headers, req.expected_revision)?;
     let v = s.compiling(move |s| s.update(&name, req)).await?;
-    Ok(Json(v).into_response())
+    Ok(with_etag(v))
+}
+
+/// The revision an edit was made from: `If-Match` (`"12"`, `W/"12"` or
+/// `12`) or `expected_revision`; both must agree.
+pub fn expected_revision(
+    headers: &HeaderMap,
+    body: Option<u64>,
+) -> Result<Option<u64>, ServiceError> {
+    let Some(raw) = headers.get(axum::http::header::IF_MATCH) else {
+        return Ok(body);
+    };
+    let text = raw.to_str().unwrap_or("").trim();
+    let tag = text.trim_start_matches("W/").trim_matches('"');
+    let rev: u64 = tag.parse().map_err(|_| {
+        ServiceError::bad_request(format!(
+            "If-Match {text:?}: the mock's draft_revision (its ETag)"
+        ))
+    })?;
+    match body {
+        Some(b) if b != rev => Err(ServiceError::bad_request(format!(
+            "If-Match says revision {rev}, expected_revision {b}"
+        ))),
+        _ => Ok(Some(rev)),
+    }
+}
+
+/// An answer with the mock's draft revision as its `ETag`.
+fn with_etag(v: Value) -> Response {
+    let rev = v["draft_revision"].as_u64();
+    let mut resp = Json(v).into_response();
+    if let Some(r) = rev {
+        if let Ok(h) = axum::http::HeaderValue::from_str(&format!("\"{r}\"")) {
+            resp.headers_mut().insert(axum::http::header::ETAG, h);
+        }
+    }
+    resp
 }
 
 pub async fn delete(
@@ -1044,7 +1081,7 @@ pub async fn get_operation(
     uri: Uri,
 ) -> Result<Response, ServiceError> {
     let s = svc(&state, &headers, &extensions, &uri);
-    Ok(Json(s.operation(&name, &op)?).into_response())
+    Ok(with_etag(s.operation(&name, &op)?))
 }
 
 pub async fn put_operation(
@@ -1057,12 +1094,25 @@ pub async fn put_operation(
 ) -> Result<Response, ServiceError> {
     let s = svc(&state, &headers, &extensions, &uri);
     s.manageable(&name)?;
-    let settings: Option<OperationSettings> = serde_json::from_slice(&body)
+    // The operation's settings, plus `expected_revision` (taken out first).
+    let mut raw: Value = serde_json::from_slice(&body)
+        .map_err(|e| ServiceError::bad_request(format!("invalid operation settings: {e}")))?;
+    let in_body = match raw
+        .as_object_mut()
+        .and_then(|m| m.remove("expected_revision"))
+    {
+        None => None,
+        Some(v) => Some(v.as_u64().ok_or_else(|| {
+            ServiceError::bad_request("expected_revision: the mock's draft_revision (a number)")
+        })?),
+    };
+    let expected = expected_revision(&headers, in_body)?;
+    let settings: Option<OperationSettings> = serde_json::from_value(raw)
         .map_err(|e| ServiceError::bad_request(format!("invalid operation settings: {e}")))?;
     let v = s
-        .compiling(move |s| s.set_operation(&name, &op, settings))
+        .compiling(move |s| s.set_operation(&name, &op, settings, expected))
         .await?;
-    Ok(Json(v).into_response())
+    Ok(with_etag(v))
 }
 
 pub async fn sample(

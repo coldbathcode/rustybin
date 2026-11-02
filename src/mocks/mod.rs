@@ -250,6 +250,18 @@ pub fn load_startup(state: &AppState) {
     }
 }
 
+/// The mocks' instance settings.
+pub fn specs() -> Vec<crate::settings::Spec> {
+    vec![crate::settings::Spec::new(
+        "mocks.require_revision",
+        "mocks",
+        "Require the revision on edits",
+        "Every edit of a mock (PATCH /_rustybin/mocks/{name}, PUT .../operations/{op}) must name the draft revision it was made from (If-Match or expected_revision), so no edit silently overwrites another. The console, the CLI and agents always send it; this makes it mandatory for every other caller too.",
+        crate::settings::Kind::Bool,
+        serde_json::Value::Bool(false),
+    )]
+}
+
 pub fn router(_state: &AppState) -> Router<AppState> {
     use handlers as h;
     use selfservice as ss;
@@ -946,3 +958,6 @@ pub fn openapi_paths() -> Value {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod revision_tests;

@@ -626,22 +626,32 @@ pub async fn edit_work(
     });
     if apply {
         let _ = tx.send(frame("progress", &json!({ "message": "saving the draft" })));
+        let body = PatchBody {
+            // The draft the model edited: a change made meanwhile is never
+            // overwritten (409, with what changed).
+            expected_revision: Some(snap.draft.revision),
+            name: None,
+            spec: Some(json!(text)),
+            strip_server_prefix: None,
+            responses: None,
+            security: None,
+            operations: None,
+            mcp: None,
+            deploy: None,
+            force: None,
+        };
+        let target = name.clone();
         let detail = s
-            .update(
-                &name,
-                PatchBody {
-                    name: None,
-                    spec: Some(json!(text)),
-                    strip_server_prefix: None,
-                    responses: None,
-                    security: None,
-                    operations: None,
-                    mcp: None,
-                    deploy: None,
-                    force: None,
-                },
-            )
-            .map_err(|e| json!({ "error": e.message(), "reason": "store" }))?;
+            .compiling(move |s| s.update(&target, body))
+            .await
+            .map_err(|e| {
+                let mut v = json!({ "error": e.message(), "reason": "store" });
+                if e.code() == Some("rustybin_stale_revision") {
+                    v["reason"] = json!("stale_revision");
+                    v["detail"] = e.body.clone();
+                }
+                v
+            })?;
         result["applied"] = json!(true);
         result["detail"] = detail;
     }

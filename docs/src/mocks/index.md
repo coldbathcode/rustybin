@@ -214,6 +214,34 @@ come from the details' `revisions` list). The draft follows the rollback.
 {{#include ../../examples/mocks/mocks.hurl:rollback}}
 ```
 
+### Two people editing one mock
+
+Every mock answer carries its `draft_revision`, and `GET /_rustybin/mocks/{name}`
+(and the operation's `GET`) sends it as the `ETag`. An edit that names the revision
+it was made from, as `If-Match: "12"` or `"expected_revision": 12` in the body, is
+refused with `409` when the draft has moved on since. The answer names the current
+revision and what changed (the spec, the responses, an operation), and nothing is
+saved: read the mock again, then edit.
+
+```hurl
+{{#include ../../examples/mocks/mocks.hurl:conflict}}
+```
+
+The console, the CLI (`--expect-revision`, else the revision it reads just before
+the edit) and the management tools (`expected_revision` on `update_mock` and
+`set_operation`) always send one. A plain API call without one is accepted, and
+an edit that raced another without naming a revision is made again on top of it
+rather than lost. The setting `mocks.require_revision` (Management, General) makes the
+revision mandatory for every caller: an edit without one answers `428`.
+
+| Surface | Where |
+|---|---|
+| API | `If-Match` or `expected_revision` on `PATCH /_rustybin/mocks/{name}` and `PUT /_rustybin/mocks/{name}/operations/{op}`; the `ETag` on the mock and its operations |
+| Console | Sent with every edit; a `409` says what changed and offers to reload |
+| CLI | `rustybin mocks update` and `mocks set-operation` with `--expect-revision N` (default: read just before) |
+| Management MCP | `expected_revision` on `update_mock` and `set_operation` |
+| `rustybin.yaml` | `settings: { mocks.require_revision: true }` |
+
 ## On and off
 
 `POST .../disable` switches a mock off without losing its configuration or

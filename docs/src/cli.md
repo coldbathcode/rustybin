@@ -172,7 +172,7 @@ OpenAPI mocks on the instance (rustybin mock ... works offline)
 | `rustybin mocks get <name>` | One mock: settings, operations, the deploy report. | `GET /_rustybin/mocks/{name}` |
 | `rustybin mocks create <name> --spec FILE` | Create a mock from an OpenAPI file (YAML or JSON). Flags: `--spec` value, `--mode` value, `--disabled`, `--no-deploy`, `--strip-server-prefix`. | `POST /_rustybin/mocks` |
 | `rustybin mocks import --spec FILE` | Preview a spec: title, operations, the checks, the suggested name. Flags: `--spec` value. | `POST /_rustybin/mocks/import` |
-| `rustybin mocks update <name> [--spec FILE] [--mode M] [--settings JSON]` | Change a mock's spec or settings (the draft, deployed unless --no-deploy). Flags: `--spec` value, `--mode` value, `--settings` value, `--no-deploy`, `--force`. | `PATCH /_rustybin/mocks/{name}` |
+| `rustybin mocks update <name> [--spec FILE] [--mode M] [--settings JSON]` | Change a mock's spec or settings (the draft, deployed unless --no-deploy). Flags: `--spec` value, `--mode` value, `--settings` value, `--no-deploy`, `--force`, `--expect-revision` value. | `PATCH /_rustybin/mocks/{name}` |
 | `rustybin mocks deploy <name> [--force]` | Deploy the draft. Flags: `--force`. | `POST /_rustybin/mocks/{name}/deploy` |
 | `rustybin mocks rollback <name> [--revision N]` | Go back to the previous (or a given) revision. Flags: `--revision` value. | `POST /_rustybin/mocks/{name}/rollback` |
 | `rustybin mocks enable <name>` | Switch a mock on. | `POST /_rustybin/mocks/{name}/enable` |
@@ -189,7 +189,7 @@ OpenAPI mocks on the instance (rustybin mock ... works offline)
 | `rustybin mocks sample <name> <operationId>` | A valid response for an operation. Flags: `--status` value, `--seed` value, `--mode` value, `--example` value. | `GET /_rustybin/mocks/{name}/operations/{op}/sample` |
 | `rustybin mocks validate <name> <operationId> --body FILE` | Validate a request or response body against the spec. Flags: `--body` value, `--kind` value, `--status` value. | `POST /_rustybin/mocks/{name}/operations/{op}/validate` |
 | `rustybin mocks operation <name> <operationId>` | One operation's settings and statistics. | `GET /_rustybin/mocks/{name}/operations/{op}` |
-| `rustybin mocks set-operation <name> <operationId> --settings JSON` | Set an operation's settings (respond, rules, mode, delay_ms, public). Flags: `--settings` value. | `PUT /_rustybin/mocks/{name}/operations/{op}` |
+| `rustybin mocks set-operation <name> <operationId> --settings JSON` | Set an operation's settings (respond, rules, mode, delay_ms, public). Flags: `--settings` value, `--expect-revision` value. | `PUT /_rustybin/mocks/{name}/operations/{op}` |
 | `rustybin mocks test-rules <name> <operationId> [--rules FILE] [--request N]` | Try an operation's rules (or given ones) on a captured request. Flags: `--rules` value, `--request` value. | `POST /_rustybin/mocks/{name}/operations/{op}/rules/test` |
 | `rustybin mocks traffic <name> [--limit N]` | The mock's captured requests. Flags: `--limit` value. | `GET /_rustybin/mocks/{name}/requests` |
 | `rustybin mocks traffic-get <name> <n>` | One captured request of the mock. | `GET /_rustybin/mocks/{name}/requests/{n}` |

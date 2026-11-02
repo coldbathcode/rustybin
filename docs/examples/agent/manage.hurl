@@ -32,9 +32,24 @@ jsonpath "$.result.tools[*].name" contains "get_instance"
 jsonpath "$.result.tools[*].name" contains "create_mock"
 jsonpath "$.result.tools[*].name" contains "try_request"
 jsonpath "$.result.tools[*].name" contains "wait_for_requests"
-jsonpath "$.result.tools[*].name" contains "apply_config"
 jsonpath "$.result.tools[?(@.name == 'delete_mock')].annotations.destructiveHint" == true
 jsonpath "$.result.tools[?(@.name == 'get_mock')].annotations.readOnlyHint" == true
+jsonpath "$.result.nextCursor" exists
+[Captures]
+cursor: jsonpath "$.result.nextCursor"
+
+# The rest of the tools: the next page, from the cursor.
+POST {{base_url}}/_rustybin/mcp
+Authorization: Bearer {{admin_token}}
+Accept: application/json, text/event-stream
+Content-Type: application/json
+MCP-Protocol-Version: 2026-07-28
+Mcp-Method: tools/list
+{"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {"cursor": "{{cursor}}", "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}}}}
+HTTP 200
+[Asserts]
+jsonpath "$.result.tools[*].name" contains "run_tests"
+jsonpath "$.result.tools[*].name" contains "restore_checkpoint"
 # ANCHOR_END: tools_list
 
 # ANCHOR: get_instance

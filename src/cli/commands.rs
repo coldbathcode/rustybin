@@ -191,7 +191,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("mocks", "get", "<name>", "One mock: settings, operations, the deploy report.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}")], false, "mocks get petstore"),
     cmd!("mocks", "create", "<name> --spec FILE", "Create a mock from an OpenAPI file (YAML or JSON).", &[Flag::value("--spec", "The OpenAPI document"), Flag::value("--mode", "examples, generated, static or stateful"), Flag::switch("--disabled", "Create it switched off"), Flag::switch("--no-deploy", "Keep it as a draft"), Flag::switch("--strip-server-prefix", "Serve the paths without the spec's server prefix")], [("POST", "/_rustybin/mocks")], false, "mocks create orders --spec orders.yaml --mode generated"),
     cmd!("mocks", "import", "--spec FILE", "Preview a spec: title, operations, the checks, the suggested name.", &[Flag::value("--spec", "The OpenAPI document")], [("POST", "/_rustybin/mocks/import")], false, "mocks import --spec orders.yaml"),
-    cmd!("mocks", "update", "<name> [--spec FILE] [--mode M] [--settings JSON]", "Change a mock's spec or settings (the draft, deployed unless --no-deploy).", &[Flag::value("--spec", "A new OpenAPI document"), Flag::value("--mode", "examples, generated, static or stateful"), Flag::value("--settings", "Settings as JSON or a file: responses, security, operations, mcp, strip_server_prefix"), Flag::switch("--no-deploy", "Change the draft only"), Flag::switch("--force", "Deploy even when the checks report errors")], [("PATCH", "/_rustybin/mocks/{name}")], false, "mocks update orders --mode stateful"),
+    cmd!("mocks", "update", "<name> [--spec FILE] [--mode M] [--settings JSON]", "Change a mock's spec or settings (the draft, deployed unless --no-deploy).", &[Flag::value("--spec", "A new OpenAPI document"), Flag::value("--mode", "examples, generated, static or stateful"), Flag::value("--settings", "Settings as JSON or a file: responses, security, operations, mcp, strip_server_prefix"), Flag::switch("--no-deploy", "Change the draft only"), Flag::switch("--force", "Deploy even when the checks report errors"), Flag::value("--expect-revision", "Refuse (409) unless the draft is still this revision (default: the one read just before)")], [("PATCH", "/_rustybin/mocks/{name}")], false, "mocks update orders --mode stateful"),
     cmd!("mocks", "deploy", "<name> [--force]", "Deploy the draft.", &[Flag::switch("--force", "Deploy despite check errors")], [("POST", "/_rustybin/mocks/{name}/deploy")], false, "mocks deploy orders"),
     cmd!("mocks", "rollback", "<name> [--revision N]", "Go back to the previous (or a given) revision.", &[Flag::value("--revision", "The revision to restore")], [("POST", "/_rustybin/mocks/{name}/rollback")], false, "mocks rollback orders"),
     cmd!("mocks", "enable", "<name>", "Switch a mock on.", NO_FLAGS, [("POST", "/_rustybin/mocks/{name}/enable")], false, "mocks enable orders"),
@@ -208,7 +208,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("mocks", "sample", "<name> <operationId>", "A valid response for an operation.", &[Flag::value("--status", "The response status"), Flag::value("--seed", "The generator seed"), Flag::value("--mode", "examples or generated"), Flag::value("--example", "A named example")], [("GET", "/_rustybin/mocks/{name}/operations/{op}/sample")], false, "mocks sample orders listOrders --status 200"),
     cmd!("mocks", "validate", "<name> <operationId> --body FILE", "Validate a request or response body against the spec.", &[Flag::value("--body", "The body: a file or inline JSON"), Flag::value("--kind", "request or response (default)"), Flag::value("--status", "The response status the body is for")], [("POST", "/_rustybin/mocks/{name}/operations/{op}/validate")], false, "mocks validate orders createOrder --body order.json --kind request"),
     cmd!("mocks", "operation", "<name> <operationId>", "One operation's settings and statistics.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}/operations/{op}")], false, "mocks operation orders listOrders"),
-    cmd!("mocks", "set-operation", "<name> <operationId> --settings JSON", "Set an operation's settings (respond, rules, mode, delay_ms, public).", &[Flag::value("--settings", "The settings as JSON or a file")], [("PUT", "/_rustybin/mocks/{name}/operations/{op}")], false, "mocks set-operation orders listOrders --settings '{\"delay_ms\": 200}'"),
+    cmd!("mocks", "set-operation", "<name> <operationId> --settings JSON", "Set an operation's settings (respond, rules, mode, delay_ms, public).", &[Flag::value("--settings", "The settings as JSON or a file"), Flag::value("--expect-revision", "Refuse (409) unless the draft is still this revision (default: the one read just before)")], [("PUT", "/_rustybin/mocks/{name}/operations/{op}")], false, "mocks set-operation orders listOrders --settings '{\"delay_ms\": 200}'"),
     cmd!("mocks", "test-rules", "<name> <operationId> [--rules FILE] [--request N]", "Try an operation's rules (or given ones) on a captured request.", &[Flag::value("--rules", "Rules as JSON or a file (default: the draft's)"), Flag::value("--request", "The captured request number (default: the latest)")], [("POST", "/_rustybin/mocks/{name}/operations/{op}/rules/test")], false, "mocks test-rules orders getOrder"),
     cmd!("mocks", "traffic", "<name> [--limit N]", "The mock's captured requests.", &[Flag::value("--limit", "At most this many")], [("GET", "/_rustybin/mocks/{name}/requests")], false, "mocks traffic orders --limit 20"),
     cmd!("mocks", "traffic-get", "<name> <n>", "One captured request of the mock.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}/requests/{n}")], false, "mocks traffic-get orders 7"),
@@ -969,6 +969,21 @@ async fn password(ctx: &mut Ctx) -> Result<()> {
 
 // ── Mocks ───────────────────────────────────────────────────────────
 
+/// The draft revision an edit is made from: `--expect-revision`, else the
+/// mock's draft revision read now (an instance with `mocks.require_revision`
+/// accepts no edit without one).
+async fn expected_revision(ctx: &mut Ctx, base: &str) -> Result<u64> {
+    if let Some(r) = ctx.args.value("--expect-revision") {
+        return r.parse().map_err(|_| {
+            Fail::Usage("--expect-revision needs a number (the mock's draft_revision)".into())
+        });
+    }
+    let v = ctx.client()?.get(base, &[]).await?.value();
+    v["draft_revision"]
+        .as_u64()
+        .ok_or_else(|| Fail::Failed("the mock's draft_revision could not be read".into()))
+}
+
 fn mock_settings_body(ctx: &Ctx) -> Result<Map<String, Value>> {
     let mut m = Map::new();
     if let Some(mode) = ctx.args.value("--mode") {
@@ -1066,6 +1081,10 @@ async fn mocks(ctx: &mut Ctx, verb: &str) -> Result<()> {
                     "nothing to change: --spec, --mode or --settings".into(),
                 ));
             }
+            body.insert(
+                "expected_revision".into(),
+                json!(expected_revision(ctx, &base).await?),
+            );
             let reply = ctx
                 .client()?
                 .patch(&base, Body::Json(Value::Object(body)))
@@ -1200,9 +1219,18 @@ async fn mocks(ctx: &mut Ctx, verb: &str) -> Result<()> {
         "set-operation" => {
             need_name(ctx)?;
             let op = ctx.args.arg(1, "an operationId")?.to_string();
-            let settings = ctx
+            let mut settings = ctx
                 .json_flag("--settings")?
                 .ok_or_else(|| Fail::Usage("--settings JSON is required".into()))?;
+            let rev = expected_revision(ctx, &base).await?;
+            match &mut settings {
+                Value::Object(m) => {
+                    m.insert("expected_revision".into(), json!(rev));
+                }
+                // null clears the operation's settings.
+                Value::Null => settings = json!({ "expected_revision": rev }),
+                _ => return Err(Fail::Usage("--settings must be a JSON object".into())),
+            }
             let reply = ctx
                 .client()?
                 .put(

@@ -284,6 +284,7 @@ pub async fn update_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value 
         },
     };
     let body = PatchBody {
+        expected_revision: arg_u64(args, "expected_revision"),
         name: arg_str(args, "rename").map(str::to_string),
         spec,
         strip_server_prefix: arg_bool(args, "strip_server_prefix"),
@@ -354,8 +355,9 @@ pub async fn set_operation(ctx: &CallCtx, access: &Access, args: &Value) -> Valu
         }
     };
     let (n, o) = (name.to_string(), op.to_string());
+    let expected = arg_u64(args, "expected_revision");
     match svc(ctx, access)
-        .compiling(move |s| s.set_operation(&n, &o, settings))
+        .compiling(move |s| s.set_operation(&n, &o, settings, expected))
         .await
     {
         Ok(d) => ok(
