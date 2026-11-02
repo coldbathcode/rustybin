@@ -49,6 +49,13 @@ Every capability is on the API, the console, the CLI, the management MCP and
   more: clients follow `nextCursor` (MCP clients do). New tools come after the existing ones.
 - The `rustybin.yaml` export has a `tests:` section (empty when there are none).
 
+`cargo` version 0.3.0, the tag `v0.3.0`, the signed multi-arch image
+`ghcr.io/coldbathcode/rustybin:0.3.0`, digest
+`sha256:471f176542e10e4012b7f05f972985704f22e927bef287ceec97136bb2c5ac6f` (verify it with the
+cosign command of the [quick start](quick-start.md#docker); the
+[release](https://github.com/coldbathcode/rustybin/releases/tag/v0.3.0) carries the same
+values).
+
 ## 0.2.2 (2026-11-02): the hardening release
 
 No new features. A full code review of 0.2.1 found what a public instance exposes; every
