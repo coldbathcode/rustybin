@@ -1,0 +1,18 @@
+# Step 02: Credentials and third-party content where they belong
+
+| # | Severity | Finding | Anchor | Fix |
+|---|---|---|---|---|
+| 1 | high | Saved tests run in process without the inspector's redaction tag: a filled `{{TOKEN}}` (from the run or `RUSTYBIN_TEST_*`) is captured in clear and readable with the `inspector` scope | `src/replay/run.rs` (`direct`), `src/inspector.rs:496` | tag the request with `InspectorOrigin` |
+| 2 | high | A saved MCP connection's query-string API key is in `mcp_call`'s `target`, in stored check reports (unsealed in `mcp-inspector.json`) and in `list_mcp_check_runs` (read right) | `src/mcp/manage/inspect.rs:81`, `:188`, `src/mcp/inspector/checks.rs:1115`, `store.rs:476` | the target without its query in every output and report; the query only to the connection |
+| 3 | medium | A run's report echoes up to 200 characters of what was seen: a failing assertion against `/echo/{{SECRET}}` returns the variable's value (an admin agent can read `RUSTYBIN_TEST_*`) | `src/replay/run.rs` (`judge`, `cut`) | replace filled values with `{{NAME}}` in `seen` and errors |
+| 4 | medium | "Credentials are never saved" holds only for captured headers and query values: captured bodies, and literal `Authorization` in written tests (API, MCP, `rustybin.yaml`, git) are kept and exported | `src/replay/mod.rs:168`, `:459` | refuse a literal value for a secret-looking header or query name; mask secret-looking body fields of captures |
+| 5 | medium | Saved tests' read routes and `list_tests` are console scope: every test's headers and bodies, across keys in shared mode | `src/replay/mod.rs:608`, `:638`, `:746` | admin only (decision in the master plan) |
+| 6 | medium | `list_mcp_check_runs` returns stored third-party report content in plain fields | `src/mcp/manage/inspect.rs:334` | `untrusted_report`, as `run_mcp_checks` |
+| 7 | medium | Traffic tools put captured path, query and method in the text summary and plain fields | `src/mcp/manage/traffic.rs:125`, `:228`, `:299`, `:368`, `mocks.rs` (`capture_row`) | counts and statuses in the summary, the rest under `untrusted_*` |
+| 8 | medium (verify first) | `diagnose_instance` puts load errors and git details (file and remote text) in its summary | `src/mcp/manage/instance.rs:438`, `src/diagnostics.rs:120`, `:195` | ids and statuses in the summary, those messages under `untrusted_*` |
+| 9 | medium | The management tool `get_scenario` returns saved harness scenarios unredacted (the REST route redacts) | `src/mcp/manage/harness.rs:173` | `redact_scenario` on the object and the YAML |
+| 10 | medium | A gateway scenario's scratch mock (with the credential-injection key) goes into exports and git, and a later save persists it without its expiry | `src/configdoc/mod.rs:286`, `src/mocks/store.rs:649` | skip mocks with an expiry in exports and persistence |
+| 11 | medium | The A2A webhook sink is one global namespace with guessable ids, and keeps `authorization` and push token headers | `src/a2a/push.rs:122`, `src/a2a/mod.rs:458` | scope to the session or a server-made id; drop credential headers; smaller caps |
+| 12 | low | Harness report and scenario redaction misses query values, bodies and header names such as `x-key` | `src/harness/report.rs:1285` | redact sensitive query names; widen the header test |
+| 13 | low | `rustybin tests run --var NAME=value` puts test credentials in argv | `src/cli/commands.rs` (`tests_run`) | `NAME=-` or `NAME=@file`, as `mcp save-connection --secret` |
+| 14 | low | `request_from_capture` misses percent-encoded secret query names, and saves a binary capture with no body and no warning | `src/replay/mod.rs:473` | decode before `looks_secret`; refuse or warn on `body_base64` |
