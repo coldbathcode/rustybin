@@ -92,7 +92,8 @@ to done with the date, and push only when the user says go.
 
 ## 8. Queued follow-up: instance reliability and testing workflows
 
-Added 2026-10-30 from a further code and feature review. **Status: queued, not started.**
+Added 2026-10-30 from a further code and feature review. **Status: planned 2026-11-02 as
+[docs/plans/reliability](../reliability/master-plan.md), building.**
 Resolve the existing ten steps in section 4, including the 0.2.2 release, before starting this
 appendix. Their order, scope and release gates stay as written. These additions are a subsequent
 milestone, with its release version and estimates to be decided after the hardening work.

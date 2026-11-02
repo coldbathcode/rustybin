@@ -1381,6 +1381,9 @@ fn apply_mocks(
 ) -> Option<Value> {
     let mocks = mocks?;
     let mut docs = Vec::new();
+    // Every valid name the document carries, loaded or not: a mock it names
+    // is never pruned because its new definition could not be loaded.
+    let mut named: Vec<String> = Vec::new();
     for doc in mocks {
         if let Err(e) = crate::mocks::service::check_name(&doc.name) {
             problems.push(format!(
@@ -1390,6 +1393,7 @@ fn apply_mocks(
             ));
             continue;
         }
+        named.push(doc.name.clone());
         let mut doc = doc;
         if let (Some(path), Some(base)) = (doc.spec.clone(), opts.base.as_deref()) {
             match contained_path(base, &path) {
@@ -1402,7 +1406,7 @@ fn apply_mocks(
         }
         docs.push(doc);
     }
-    let names: Vec<String> = docs.iter().map(|d| d.name.clone()).collect();
+    let names = named;
     let (defs, errors) = config_file::definitions(
         docs,
         opts.base.as_deref(),
@@ -1439,9 +1443,17 @@ fn apply_mocks(
             "would_create": create, "would_update": update, "would_delete": delete,
         }));
     }
-    let report = state
-        .mocks
-        .apply(defs, Origin::Api, opts.prune.then_some(Origin::Api));
+    // Named but not loaded: kept as they are, never pruned (the same rule the
+    // dry run above used, so preview and execution agree).
+    let keep: Vec<String> = names
+        .iter()
+        .filter(|n| !defs.iter().any(|d| &d.name == *n))
+        .cloned()
+        .collect();
+    let report =
+        state
+            .mocks
+            .apply_keeping(defs, Origin::Api, opts.prune.then_some(Origin::Api), &keep);
     for e in &report.errors {
         problems.push(format!(
             "mocks.{}: {}",

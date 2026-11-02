@@ -60,7 +60,9 @@ Two rules make a document safe to apply:
   saved scenarios and stored settings or secrets that the section does not name are
   removed. Without `prune`, applying only adds and updates. The `git.*` settings are
   never exported nor pruned: where an instance keeps its configuration is the
-  deployment's business.
+  deployment's business. A mock the document names but cannot load (a spec that cannot
+  be read, does not parse or does not compile) is a problem in the answer and is kept
+  as it is: it is never pruned, and the dry run's `would_delete` says the same.
 
 Mocks applied through the API or a repository are `origin: api` (saved in the mocks
 state directory, as console changes are); the ones a `RUSTYBIN_CONFIG_FILE` declares

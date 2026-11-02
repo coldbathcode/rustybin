@@ -852,3 +852,106 @@ fn the_yaml_of_an_export_is_pinned() {
     let pinned = std::fs::read_to_string(&path).expect("tests/snapshots/export.yaml");
     assert_eq!(text, pinned, "the YAML output changed");
 }
+
+/// A document that names an existing mock it cannot load never deletes it:
+/// not when pruning, not in the dry run, not on disk.
+#[test]
+fn a_failed_definition_is_never_pruned() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let mut c = Config::for_tests();
+    c.mocks_state_dir = Some(dir.path().display().to_string());
+    let state = test_state_with(c);
+    let report = state.mocks.apply(
+        vec![Definition {
+            name: "orders".into(),
+            source: SPEC.into(),
+            settings: Default::default(),
+            enabled: true,
+        }],
+        Origin::Api,
+        None,
+    );
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert!(dir.path().join("orders.json").exists());
+    // `orders` with a spec that cannot be read here (a file path, no base),
+    // and `broken` whose inline spec does not parse.
+    let doc = || {
+        crate::mocks::config_file::parse(
+            "version: 2\nmocks:\n  - name: orders\n    spec: missing.yaml\n  - name: broken\n    spec_inline: \"{not json\"\n",
+        )
+        .expect("parse")
+    };
+    let mut opts = ApplyOptions {
+        prune: true,
+        dry_run: true,
+        principal: "test".into(),
+        base: None,
+        untrusted: false,
+    };
+    let preview = apply(&state, doc(), &opts);
+    assert_eq!(
+        preview["results"]["mocks"]["would_delete"],
+        json!([]),
+        "{preview}"
+    );
+    opts.dry_run = false;
+    let applied = apply(&state, doc(), &opts);
+    assert_eq!(
+        applied["results"]["mocks"]["deleted"],
+        json!([]),
+        "{applied}"
+    );
+    assert!(
+        applied["problems"].to_string().contains("mocks.orders"),
+        "{applied}"
+    );
+    assert!(state.mocks.get("orders").is_some(), "the mock survives");
+    assert!(
+        dir.path().join("orders.json").exists(),
+        "and its saved copy"
+    );
+    // The REST apply of the mocks API follows the same rule.
+    let svc_report = crate::mocks::store::MockStore::apply_keeping(
+        &state.mocks,
+        Vec::new(),
+        Origin::Api,
+        Some(Origin::Api),
+        &["orders".to_string()],
+    );
+    assert!(svc_report.deleted.is_empty());
+    assert!(state.mocks.get("orders").is_some());
+}
+
+/// The saved state after a burst of concurrent changes is the last one
+/// acknowledged, across a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_changes_persist_the_last_acknowledged_state() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let mut c = Config::for_tests();
+    c.mocks_state_dir = Some(dir.path().display().to_string());
+    let state = test_state_with(c.clone());
+    state.mocks.apply(
+        vec![Definition {
+            name: "orders".into(),
+            source: SPEC.into(),
+            settings: Default::default(),
+            enabled: true,
+        }],
+        Origin::Api,
+        None,
+    );
+    let mut tasks = Vec::new();
+    for i in 0..250 {
+        let s = state.clone();
+        tasks.push(tokio::task::spawn_blocking(move || {
+            s.mocks.set_enabled("orders", i % 2 == 0).is_ok()
+        }));
+    }
+    for t in tasks {
+        assert!(t.await.expect("join"));
+    }
+    let last = state.mocks.get("orders").expect("mock").enabled;
+    let again = test_state_with(c);
+    let reloaded = again.mocks.get("orders").expect("reloaded");
+    assert_eq!(reloaded.enabled, last, "the saved copy is the last state");
+}

@@ -1149,13 +1149,19 @@ impl Svc {
         for doc in file.mocks() {
             check_name(&doc.name)?;
         }
+        let named: Vec<String> = file.mocks().iter().map(|d| d.name.clone()).collect();
         let (defs, mut errors) = config_file::definitions(
             file.mocks.unwrap_or_default(),
             None,
             self.store().limits().max_spec_bytes as u64,
         );
+        // A mock the document names but cannot load is never pruned.
+        let keep: Vec<String> = named
+            .into_iter()
+            .filter(|n| !defs.iter().any(|d| &d.name == n))
+            .collect();
         let prune = prune.then_some(Origin::Api);
-        let mut report = self.store().apply(defs, Origin::Api, prune);
+        let mut report = self.store().apply_keeping(defs, Origin::Api, prune, &keep);
         errors.append(&mut report.errors);
         report.errors = errors;
         Ok(serde_json::to_value(&report).unwrap_or(Value::Null))
