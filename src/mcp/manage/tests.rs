@@ -1721,6 +1721,7 @@ const COVERAGE: &[(&str, Cover)] = &[
     ("/_rustybin/requests/{id}", Tool("get_request")),
     ("/_rustybin/requests/stream", Tool("wait_for_requests")),
     ("/_rustybin/settings", Tool("get_settings")),
+    ("/_rustybin/diagnostics", Tool("diagnose_instance")),
     ("/_rustybin/settings/{key}", Tool("update_settings")),
     ("/_rustybin/status", Tool("get_instance")),
     ("/_rustybin/usage", Tool("get_usage")),

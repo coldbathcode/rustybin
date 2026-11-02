@@ -79,6 +79,7 @@ pub const NOUNS: &[(&str, &str)] = &[
     ("logout", "Revoke the profile's token and forget it"),
     ("whoami", "Who the current credential is"),
     ("status", "The instance's status"),
+    ("doctor", "What is wrong with the instance, and the fix"),
     (
         "instance",
         "Version, readiness, the running configuration, the catalogue, metrics, usage",
@@ -150,6 +151,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("logout", "", "", "Revoke the profile's token on the instance and forget it.", NO_FLAGS, [("POST", "/_rustybin/logout")], false, "logout"),
     cmd!("whoami", "", "", "The credential the calls carry: user, scopes, expiry.", NO_FLAGS, [("GET", "/_rustybin/session")], false, "whoami"),
     cmd!("status", "", "", "Name, version, modes, health, the features that are on.", NO_FLAGS, [("GET", "/_rustybin/status")], false, "status"),
+    cmd!("doctor", "", "", "What is wrong with the instance and how to fix it; exits 1 when a check fails.", NO_FLAGS, [("GET", "/_rustybin/diagnostics")], false, "doctor"),
     // ── Instance ──
     cmd!("instance", "version", "", "Version and build.", NO_FLAGS, [("GET", "/_rustybin/version")], false, "instance version"),
     cmd!("instance", "ready", "", "Readiness (never authenticated).", NO_FLAGS, [("GET", "/_rustybin/ready")], false, "instance ready"),
@@ -475,6 +477,38 @@ fn emit_reply(ctx: &mut Ctx, reply: &Reply) {
     }
 }
 
+/// `rustybin doctor`: the diagnostics as a table (or JSON), exit 1 on a
+/// failed check.
+async fn doctor(ctx: &mut Ctx) -> Result<()> {
+    let v = ctx
+        .client()?
+        .get("/_rustybin/diagnostics", &[])
+        .await?
+        .value();
+    if ctx.json {
+        ctx.emit(&v);
+    } else {
+        let rows: Vec<Value> = v["checks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|c| {
+                json!({
+                    "status": c["status"],
+                    "check": c["id"],
+                    "message": c["message"],
+                    "fix": c["fix"],
+                })
+            })
+            .collect();
+        ctx.emit(&json!({ "status": v["status"], "checks": rows }));
+    }
+    if v["status"] == "fail" {
+        return Err(Fail::Failed("a check failed (see above)".into()));
+    }
+    Ok(())
+}
+
 async fn get(ctx: &mut Ctx, path: &str, query: &[(&str, String)]) -> Result<()> {
     let reply = ctx.client()?.get(path, query).await?;
     emit_reply(ctx, &reply);
@@ -520,6 +554,7 @@ pub async fn dispatch(ctx: &mut Ctx) -> Result<()> {
         "logout" => logout(ctx).await,
         "whoami" => get(ctx, "/_rustybin/session", &[]).await,
         "status" => get(ctx, "/_rustybin/status", &[]).await,
+        "doctor" => doctor(ctx).await,
         "instance" => instance(ctx, cmd.verb).await,
         "profiles" => profiles_cmd(ctx, cmd.verb),
         "settings" => settings(ctx, cmd.verb).await,

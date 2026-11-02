@@ -3,6 +3,55 @@
 Start with the symptom below. Commands assume the [quick-start](quick-start.md)
 instance at `http://localhost:8080`. For a different host or port, replace the URL.
 
+## Ask the instance first
+
+`GET /_rustybin/diagnostics` (admin) runs every check Rustybin knows and answers
+each with a status (`ok`, `warn`, `fail`), what it saw and the fix. It never
+returns a credential. It is not readiness (`/_rustybin/ready`, for the platform)
+and not the demo toggle (`/health`).
+
+```hurl
+{{#include ../examples/config/diagnostics.hurl:diagnostics}}
+```
+
+From the command line, `rustybin doctor` prints the same checks as a table and
+exits `1` when one fails, so a deploy script can stop on it:
+
+```bash
+rustybin doctor --profile prod
+```
+
+| Check | What it looks at |
+|---|---|
+| `state_dir` | the state directory is set and writable (a probe file); set but unwritable is `fail`, none at all is `warn` (nothing survives a restart) |
+| `secrets_key` | where the secrets key comes from; a key held only by the process is `warn` |
+| `secrets_unreadable` | stored secrets sealed under another key |
+| `settings_file` | the settings document loaded at startup; when it did not, the instance started empty |
+| `mock_load_errors` | mock files, the config file and saved mocks that did not load |
+| `config_file` | `RUSTYBIN_CONFIG_FILE` can be read |
+| `listeners` | HTTPS and gRPC started (HTTP always has: a bind failure stops the process) |
+| `egress_refusals` | outbound calls the egress policy refused in the last hour, by purpose |
+| `source_control` | the last git operation |
+| `default_password` | the console still accepts the default password |
+| `harness` | load test mode with an engine problem |
+| `assist` | AI assist configured but not usable |
+
+The route is admin only; a console token without the admin scope gets `403`:
+
+```hurl
+{{#include ../examples/config/diagnostics.hurl:admin_only}}
+```
+
+### On every surface
+
+| Surface | Where |
+|---|---|
+| API | `GET /_rustybin/diagnostics` (admin) |
+| Console | **Management, Diagnostics**: one row per check with its fix, **Run again** |
+| CLI | `rustybin doctor` (`--json` for the report; exit `1` on a `fail`) ([reference](cli.md#doctor)) |
+| Management MCP | `diagnose_instance` (read only, admin) ([agent page](agent-mcp.md)) |
+| `rustybin.yaml` | Nothing to configure: the checks read the instance's state |
+
 ## I cannot connect to the instance
 
 Check the HTTP listener first:

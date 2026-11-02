@@ -1102,6 +1102,11 @@ impl Harness {
         Ok(run)
     }
 
+    /// Why the load engine is not running, when it is not.
+    pub fn engine_problem(&self) -> Option<&str> {
+        self.engine_error.as_deref()
+    }
+
     /// Whether a run start is being prepared (tests).
     #[cfg(test)]
     pub fn preparing(&self) -> bool {

@@ -30,3 +30,22 @@ Each check has an id, a status (`ok`, `warn`, `fail`), a message and a fix, neve
 API (catalogue, OpenAPI), console (Management, Diagnostics, with a fix per row), management MCP
 (`diagnose_instance`, read), CLI (`rustybin doctor`: a table, exit 1 on any `fail`, `--json`),
 `rustybin.yaml`: nothing to configure (the checks read state; the catalogue parity entry says so).
+
+## Build notes (2026-11-02)
+
+- `src/diagnostics.rs`: `report(state)` runs the twelve checks in a fixed order and answers
+  the worst status; the handler runs it on the blocking pool (the state directory probe
+  writes a file). `Diagnostics` in `AppState.diagnostics` keeps the startup notes (at most
+  32): `server.rs` records HTTPS, gRPC on HTTP and gRPC listeners that did not start or
+  stopped. HTTP needs no check: its bind failure stops the process.
+- New accessors read the state the checks need: `Settings::load_error` (the settings
+  document that did not load, so the store started empty), `Settings::unreadable_secrets`,
+  `SourceControl::last_op`, `Harness::engine_problem`.
+- Surfaces: the route (admin, catalogue, OpenAPI), `diagnose_instance` (read only,
+  `Right::Admin`), `rustybin doctor` (a table; `--json`; exit 1 on a `fail`; a noun of its
+  own), the Diagnostics tab under Management (one row per check with its fix, Run again),
+  `rustybin.yaml` nothing (the checks read state). Docs: the troubleshooting page starts
+  with it, with its "On every surface" table and `docs/examples/config/diagnostics.hurl`.
+- Tests: an unwritable state directory fails, startup notes and load errors are reported,
+  an unloadable settings document fails, the route is admin only; the console conformance
+  matches the tab's rows to the API's report.

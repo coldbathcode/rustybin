@@ -31,6 +31,7 @@ pub mod control;
 pub mod control_auth;
 pub mod control_oauth;
 pub mod cookies;
+pub mod diagnostics;
 pub mod echo;
 pub mod egress;
 pub mod fault;
@@ -147,6 +148,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     login::router,
     assist::router,
     settings::router,
+    diagnostics::router,
     egress::router,
     harness::router,
     metrics::router,

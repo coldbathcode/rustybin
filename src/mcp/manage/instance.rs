@@ -432,3 +432,37 @@ pub fn reload_mocks(ctx: &CallCtx, access: &Access) -> Value {
         Err(e) => super::tools::service_error(&e),
     }
 }
+
+/// `diagnose_instance` (admin): the instance's checks, worst first in the
+/// summary.
+pub async fn diagnose_instance(ctx: &CallCtx) -> Value {
+    let state = ctx.app.clone();
+    let v = match tokio::task::spawn_blocking(move || crate::diagnostics::report(&state)).await {
+        Ok(v) => v,
+        Err(_) => return err("the diagnostics did not finish"),
+    };
+    let problems: Vec<String> = v["checks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["status"] != "ok")
+        .map(|c| {
+            format!(
+                "{} {}: {}",
+                c["status"].as_str().unwrap_or("?"),
+                c["id"].as_str().unwrap_or("?"),
+                c["message"].as_str().unwrap_or("")
+            )
+        })
+        .collect();
+    let summary = if problems.is_empty() {
+        "Every check is ok".to_string()
+    } else {
+        format!(
+            "{}: {}",
+            v["status"].as_str().unwrap_or("?"),
+            problems.join("; ")
+        )
+    };
+    ok(ctx, summary, v)
+}

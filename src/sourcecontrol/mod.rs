@@ -562,6 +562,11 @@ impl SourceControl {
         found
     }
 
+    /// The most recent operation, when there was one.
+    pub fn last_op(&self) -> Option<Op> {
+        self.timeline().into_iter().next()
+    }
+
     fn timeline(&self) -> Vec<Op> {
         self.timeline
             .lock()

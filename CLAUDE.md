@@ -222,6 +222,9 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   `/_rustybin/egress` (admin). `AppState.egress`; A2A push, leads and the key registry resolve through it.
 - `src/control.rs`: `/_rustybin/config`, `/_rustybin/version`, `/_rustybin/ready` (readiness, never authenticated),
   `git_sha()` / `build_info()` (build.rs sets `RUSTYBIN_GIT_SHA`), `is_control_path()` (`/_rustybin/*`, `/ui/*`).
+- `src/diagnostics.rs`: `GET /_rustybin/diagnostics` (admin; `rustybin doctor`, `diagnose_instance`, Management,
+  Diagnostics): checks with a status, what was seen and the fix, never a credential; startup problems go in
+  `AppState.diagnostics.note`. A new failure an operator can fix belongs here as a check.
 - `src/control_oauth.rs`: OAuth sign-in to the management MCP server (`RUSTYBIN_CONTROL_OAUTH*`), see above.
 - `src/login.rs`: the console sign-in (`RUSTYBIN_CONTROL_AUTH=password`, the default): `RUSTYBIN_CONSOLE_USER`,
   `RUSTYBIN_CONSOLE_PASSWORD` or `_PASSWORD_HASH` (argon2id), the settings `console.user` and the secret

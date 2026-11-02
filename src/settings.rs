@@ -682,6 +682,9 @@ pub struct Settings {
     secrets: Secrets,
     locked: bool,
     unreadable: RwLock<BTreeSet<String>>,
+    /// Why the settings document could not be loaded at startup (the store
+    /// started empty), for the diagnostics.
+    load_error: Option<String>,
     /// The trusted proxy header in the configuration, kept in step with
     /// `proxy.client_ip_header`.
     forward_header: Arc<crate::session::TrustedHeader>,
@@ -727,10 +730,12 @@ impl Settings {
             }
         }
         let secrets = Secrets::from_config(config);
+        let mut load_error = None;
         let doc = match path.as_deref().map(load_doc) {
             Some(Ok(doc)) => doc,
             Some(Err(e)) => {
                 tracing::warn!("{e}: starting with empty settings");
+                load_error = Some(e);
                 Doc::default()
             }
             None => Doc::default(),
@@ -744,6 +749,7 @@ impl Settings {
             secrets,
             locked: config.settings_lock,
             unreadable: RwLock::new(BTreeSet::new()),
+            load_error,
             forward_header: config.forward_header.clone(),
             keep_password_hash: config.public_mode
                 && config.console_password.is_none()
@@ -817,6 +823,21 @@ impl Settings {
     }
 
     /// Changes are written to disk (a state directory is set).
+    /// The stored secrets sealed under another key.
+    /// Why the settings document did not load at startup, if it did not.
+    pub fn load_error(&self) -> Option<&str> {
+        self.load_error.as_deref()
+    }
+
+    pub fn unreadable_secrets(&self) -> Vec<String> {
+        self.unreadable
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+
     pub fn persisted(&self) -> bool {
         self.path.is_some()
     }

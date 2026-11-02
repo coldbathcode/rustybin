@@ -881,8 +881,22 @@ def run_theme(browser, theme):
         expect(page.locator("#git-key-generate")).to_be_disabled()
         shot(page, theme, "20-source-control")
         assert_icons_sized(page, "management, source control")
+        # Diagnostics: one row per check of the API's report, each with its
+        # status; without a state directory that check warns with its fix.
+        page.get_by_role("tab", name="Diagnostics").click()
+        page.wait_for_selector("#diagnostics-checks")
+        with urllib.request.urlopen(BASE + "/_rustybin/diagnostics", timeout=10) as r:
+            report = json.load(r)
+        expect(page.locator("#diagnostics-checks tbody tr")).to_have_count(len(report["checks"]))
+        row = page.locator("tr[data-check='state_dir']")
+        expect(row).to_contain_text("warn")
+        expect(row).to_contain_text("Fix:")
+        page.click("#diagnostics-run")
+        page.wait_for_selector("#diagnostics-checks")
+        shot(page, theme, "20b-diagnostics")
+        assert_icons_sized(page, "management, diagnostics")
 
-    step("management: export, apply a document, the source control form", export_and_source_control)
+    step("management: export, apply a document, the source control form, diagnostics", export_and_source_control)
 
     def ai_agents():
         # An agent calls the management server with its clientInfo; the view lists it.

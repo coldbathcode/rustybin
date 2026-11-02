@@ -188,7 +188,10 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
                 });
                 optional_tasks.push(("gRPC on HTTP health", task));
             }
-            Err(e) => tracing::warn!("gRPC on the HTTP listeners not enabled: {e}"),
+            Err(e) => {
+                tracing::warn!("gRPC on the HTTP listeners not enabled: {e}");
+                state.diagnostics.note("grpc_on_http", e.to_string());
+            }
         }
     }
 
@@ -399,6 +402,7 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
         }
         Err(e) => {
             tracing::warn!("HTTPS listener not started: {e}");
+            state.diagnostics.note("https", e.to_string());
             None
         }
     };
@@ -411,8 +415,10 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
             let grpc_state = state.clone();
             let rx = shutdown.subscribe();
             let task = tokio::spawn(async move {
+                let notes = grpc_state.diagnostics.clone();
                 if let Err(e) = crate::grpc::serve(listener, grpc_state, wait_for(rx)).await {
                     tracing::warn!("gRPC listener stopped: {e} (HTTP keeps serving)");
+                    notes.note("grpc", format!("stopped: {e}"));
                 }
             });
             optional_tasks.push(("gRPC", task));
@@ -420,6 +426,9 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
         }
         Err(e) => {
             tracing::warn!("gRPC listener not started on {grpc_bind}: {e}");
+            state
+                .diagnostics
+                .note("grpc", format!("not started on {grpc_bind}: {e}"));
             None
         }
     };

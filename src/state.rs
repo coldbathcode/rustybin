@@ -89,6 +89,8 @@ pub struct AppState {
     /// tool `reset_flaky` (which resets them directly, never through a
     /// captured request carrying the caller's credential).
     pub flaky: Arc<crate::flaky::FlakyState>,
+    /// What went wrong while starting (listeners), for the diagnostics.
+    pub diagnostics: Arc<crate::diagnostics::Diagnostics>,
 }
 
 impl AppState {
@@ -203,6 +205,7 @@ impl AppState {
             git,
             mcp_inspector,
             flaky,
+            diagnostics: Arc::new(crate::diagnostics::Diagnostics::default()),
         }
     }
 }

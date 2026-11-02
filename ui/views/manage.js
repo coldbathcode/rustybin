@@ -1,5 +1,5 @@
 // Management: the instance's settings and this browser's, in tabs down the
-// left (General, Sign-in, AI, Network, Portal, Export, Source control).
+// left (General, Sign-in, AI, Network, Portal, Export, Source control, Diagnostics).
 // Export and Source control live in ./manage/export.js and ./manage/git.js
 // (the whole instance as rustybin.yaml, and its git repository). Portal
 // publishes items to the dev portal at
@@ -29,6 +29,7 @@ export const TABS = [
   { id: 'portal', title: 'Portal', icon: 'explorer', hint: 'The dev portal: branding, access, published items, insights' },
   { id: 'export', title: 'Export', icon: 'file', hint: 'The whole instance as rustybin.yaml: export, diff, apply a document' },
   { id: 'git', title: 'Source control', icon: 'history', hint: 'Commit the configuration to a git repository, pull and apply it' },
+  { id: 'diagnostics', title: 'Diagnostics', icon: 'shield', hint: 'What is wrong with this instance and how to fix it' },
 ];
 
 function loadError(e) {
@@ -497,6 +498,38 @@ function networkPanel(doc, reload, error) {
   return el;
 }
 
+// ── Diagnostics ──
+
+// GET /_rustybin/diagnostics (admin): every check with its status, what was
+// seen and the fix. Not readiness, not the demo /health toggle.
+function diagnosticsPanel() {
+  const el = h('div', { class: 'stack' });
+  const body = h('div', { id: 'diagnostics' }, spinner('Running the checks'));
+  const kind = { ok: 'ok', warn: 'warn', fail: 'err' };
+  async function load() {
+    replace(body, spinner('Running the checks'));
+    try {
+      const r = await getJson('/_rustybin/diagnostics', { admin: true, session: false });
+      const rows = (r.checks || []).map((c) => h('tr', { 'data-check': c.id },
+        h('td', null, badge(c.status, kind[c.status] || 'outline')),
+        h('td', { class: 'mono small' }, c.id),
+        h('td', { class: 'small' }, c.message, c.fix ? h('div', { class: 'muted small' }, 'Fix: ', c.fix) : null)));
+      replace(body,
+        r.status === 'ok' ? notice('ok', icon('check'), ' Every check is ok.')
+          : notice(r.status === 'fail' ? 'err' : 'warn', r.status === 'fail' ? 'A check failed: see the fix on its row.' : 'Some checks want attention.'),
+        h('div', { class: 'table-wrap' }, h('table', { class: 'table', id: 'diagnostics-checks' },
+          h('thead', null, h('tr', null, h('th', null, 'Status'), h('th', null, 'Check'), h('th', null, 'What was seen'))),
+          h('tbody', null, rows))),
+        h('p', { class: 'muted small' }, 'Checked ' + fmtTime(r.checked_at) + '. The same checks: rustybin doctor, the diagnose_instance tool, GET /_rustybin/diagnostics.'));
+    } catch (e) {
+      replace(body, loadError(e));
+    }
+  }
+  el.appendChild(card('Diagnostics', { hint: 'GET /_rustybin/diagnostics', actions: h('button', { class: 'btn sm', type: 'button', id: 'diagnostics-run', onclick: load }, icon('refresh'), 'Run again') }, body));
+  load();
+  return el;
+}
+
 // ── Portal ──
 
 const KIND_TITLES = { api: 'Mock APIs', mcp: 'MCP servers', llm: 'Mock LLM', agent: 'A2A agents', tools: 'HTTP tools', registry: 'MCP registry' };
@@ -640,7 +673,7 @@ export default {
         b.tabIndex = tid === id ? 0 : -1;
       }
       if (location.hash !== '#/manage/' + id) history.replaceState(null, '', '#/manage/' + id);
-      const render = id === 'network' ? networkPanel : id === 'signin' ? signinPanel : id === 'ai' ? aiPanel : id === 'portal' ? portalPanel : id === 'export' ? exportPanel : id === 'git' ? gitPanel : generalPanel;
+      const render = id === 'diagnostics' ? diagnosticsPanel : id === 'network' ? networkPanel : id === 'signin' ? signinPanel : id === 'ai' ? aiPanel : id === 'portal' ? portalPanel : id === 'export' ? exportPanel : id === 'git' ? gitPanel : generalPanel;
       replace(panel, render(doc, (d) => { if (d) { doc = d; renderStatus(); } }, error));
     }
 

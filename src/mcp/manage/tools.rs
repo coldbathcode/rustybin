@@ -105,6 +105,7 @@ fn cluster_id_prop() -> Value {
 
 pub static TOOLS: &[ToolDef] = &[
     // ── Instance ──
+    tool!("diagnose_instance", "Diagnose the instance", "What is wrong with this instance and how to fix it: storage, the secrets key, unreadable secrets, load errors, listeners that did not start, outbound calls refused in the last hour, source control, the default password, the harness engine, AI assist. Each check has an id, a status (ok, warn, fail), a message and a fix. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, no_args),
     tool!("get_instance", "Instance", "What this Rustybin is: version, modes (public, shared, hosted, self-service), control auth, limits, the public configuration view, the caller's rights and the console and docs URLs. Start here.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
     tool!("find_endpoints", "Find endpoints", "Search the route catalogue of this instance (echo, status codes, mock LLM providers, MCP, A2A, OAuth, bins, ...) by text and/or category. Returns path, methods, summary and an example request per route.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "query": { "type": "string", "description": "Words to look for in paths, summaries and descriptions (e.g. \"anthropic streaming\")" },
@@ -873,6 +874,7 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
     let result = match def.name {
         // Instance
         "get_instance" => instance::get_instance(ctx, access),
+        "diagnose_instance" => instance::diagnose_instance(ctx).await,
         "find_endpoints" => instance::find_endpoints(ctx, &args),
         "get_health" => instance::get_health(ctx),
         "set_health" => instance::set_health(ctx, &args),

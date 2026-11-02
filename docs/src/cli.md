@@ -64,6 +64,18 @@ The instance's status
 rustybin status
 ```
 
+## doctor
+
+What is wrong with the instance, and the fix
+
+| Command | What it does | Calls |
+|---|---|---|
+| `rustybin doctor` | What is wrong with the instance and how to fix it; exits 1 when a check fails. | `GET /_rustybin/diagnostics` |
+
+```bash
+rustybin doctor
+```
+
 ## instance
 
 Version, readiness, the running configuration, the catalogue, metrics, usage
