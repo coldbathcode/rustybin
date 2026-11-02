@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Every tool on one page**: `?page_size=200` on the management MCP URL (it was
+  accepted before) now also works with OAuth sign-in, whose resource check ignores the
+  query. The new [Connect your coding agent](coding-agents.md) page uses it for the
+  clients that read only the first `tools/list` page (Cursor, Gemini CLI, Zed).
+- `rustybin mock push | list | ...` sends `RUSTYBIN_TOKEN` and `RUSTYBIN_ADMIN_TOKEN`
+  to a `--server` only when it is `RUSTYBIN_SERVER` or loopback, follows no redirects
+  and warns on plain http, as the other commands do since 0.3.1.
+- `POST /_rustybin/mocks/apply` compiles on the compile pool.
+- The `rustybin.yaml` schema allows response statuses from 200, as the validation does.
+- Release binaries for Linux and macOS on every GitHub release; the
+  [CLI guide](cli-guide.md#install) says how to install. The docs site has its
+  favicon, and page-view analytics when the site is configured for them.
+
 ## 0.3.1 (2026-11-02): the 0.3 review
 
 A full review of 0.3.0 by eight reviewers, 89 findings, all fixed in eight steps

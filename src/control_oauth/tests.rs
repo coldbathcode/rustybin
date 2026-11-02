@@ -980,3 +980,47 @@ fn a_client_keeps_a_few_pending_sign_ins() {
         .contains(&format!("a-{}", MAX_PENDING_PER_CLIENT + 3)));
     assert!(st.pending.contains("b-0"));
 }
+
+/// A client configured with `/_rustybin/mcp?page_size=200` (every tool on one
+/// page) names that URL as its resource: the query is not part of it, and a
+/// different path still is another resource.
+#[tokio::test]
+async fn a_query_on_the_mcp_url_names_the_same_resource() {
+    let app = app(token_config());
+    let (status, reg) = register(&app, &[REDIRECT]).await;
+    assert_eq!(status, StatusCode::CREATED, "{reg}");
+    let client_id = reg["client_id"].as_str().expect("client_id").to_string();
+    let with = |resource: &str| {
+        let mut q = form_urlencoded::Serializer::new(String::new());
+        q.append_pair("response_type", "code")
+            .append_pair("client_id", &client_id)
+            .append_pair("redirect_uri", REDIRECT)
+            .append_pair("code_challenge", CHALLENGE)
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("state", "st-1")
+            .append_pair("resource", resource);
+        format!("{AUTHORIZE_PATH}?{}", q.finish())
+    };
+    let ok = send(
+        &app,
+        "GET",
+        &with(&format!("{BASE}{MANAGE_PATH}?page_size=200")),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::FOUND);
+    assert!(location(&ok).starts_with(CONSENT_PAGE), "{}", location(&ok));
+    let other = send(
+        &app,
+        "GET",
+        &with(&format!("{BASE}/_rustybin/other?page_size=200")),
+        &[],
+        None,
+    )
+    .await;
+    assert!(
+        !location(&other).starts_with(CONSENT_PAGE),
+        "another path was accepted"
+    );
+}

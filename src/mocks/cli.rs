@@ -377,10 +377,11 @@ struct Remote {
 
 impl Remote {
     fn new(args: &Args) -> Result<Self, String> {
-        let server = args
-            .value("--server")
-            .map(str::to_string)
-            .or_else(|| std::env::var("RUSTYBIN_SERVER").ok())
+        let flag_server = args.value("--server").map(str::to_string);
+        let env_server = std::env::var("RUSTYBIN_SERVER").ok();
+        let server = flag_server
+            .clone()
+            .or_else(|| env_server.clone())
             .unwrap_or_else(|| {
                 let port = std::env::var("RUSTYBIN_HTTP_PORT")
                     .ok()
@@ -388,13 +389,34 @@ impl Remote {
                     .unwrap_or(80);
                 format!("http://localhost:{port}")
             });
+        let server = server.trim_end_matches('/').to_string();
+        // As for the other commands: a token from the environment never goes
+        // to another instance a `--server` names, only to RUSTYBIN_SERVER's
+        // or one on this machine.
+        let env_ok = flag_server.is_none()
+            || env_server.as_deref().map(|s| s.trim_end_matches('/')) == Some(server.as_str())
+            || crate::cli::profiles::is_loopback_url(&server);
         let token = args
             .value("--token")
             .map(str::to_string)
-            .or_else(|| std::env::var("RUSTYBIN_TOKEN").ok())
-            .or_else(|| std::env::var("RUSTYBIN_ADMIN_TOKEN").ok())
+            .or_else(|| {
+                env_ok
+                    .then(|| {
+                        std::env::var("RUSTYBIN_TOKEN")
+                            .ok()
+                            .or_else(|| std::env::var("RUSTYBIN_ADMIN_TOKEN").ok())
+                    })
+                    .flatten()
+            })
             .filter(|t| !t.is_empty());
+        if token.is_some()
+            && server.starts_with("http://")
+            && !crate::cli::profiles::is_loopback_url(&server)
+        {
+            eprintln!("warning: sending a token over plain http to {server}: use https");
+        }
         let mut builder = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(30))
             .user_agent(concat!("rustybin-cli/", env!("CARGO_PKG_VERSION")));
         if let Ok(tls) = crate::a2a::push::tls_config() {
@@ -402,7 +424,7 @@ impl Remote {
         }
         Ok(Self {
             client: builder.build().map_err(|e| e.to_string())?,
-            server: server.trim_end_matches('/').to_string(),
+            server,
             token,
             raw: args.has("--json"),
         })

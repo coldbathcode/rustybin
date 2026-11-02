@@ -597,7 +597,7 @@ pub fn json_schema() -> Value {
         "matches": { "type": "string", "maxLength": 256 }
     }));
     let respond = object(json!({
-        "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "status": { "type": "integer", "minimum": 200, "maximum": 599 },
         "example": { "type": "string", "description": "Name of a spec example" },
         "body": { "description": "Literal body: JSON values are serialised, strings sent as is" },
         "headers": { "type": "object", "additionalProperties": { "type": "string" } }

@@ -250,6 +250,16 @@ fn resource_url(base: &str) -> String {
     format!("{base}{MANAGE_PATH}")
 }
 
+/// A client's `resource` parameter as the URL it names: the MCP URL a client
+/// was configured with may carry a query (`?page_size=200`), which is not
+/// part of the resource. Tokens are always bound to the URL without it.
+fn requested_resource(r: &str) -> &str {
+    r.split(['?', '#'])
+        .next()
+        .unwrap_or(r)
+        .trim_end_matches('/')
+}
+
 fn metadata_url(base: &str) -> String {
     format!("{base}{PRM_PATH}")
 }
@@ -1054,7 +1064,7 @@ async fn authorize_handler(State(app): State<AppState>, st: St, req: Request) ->
     };
     let resource = resource_url(&base);
     if let Some(r) = q.get("resource") {
-        if r.trim_end_matches('/') != resource {
+        if requested_resource(r) != resource {
             return fail(
                 "invalid_target",
                 "resource must be this instance's /_rustybin/mcp URL",
@@ -1315,7 +1325,7 @@ async fn token_handler(State(app): State<AppState>, st: St, req: Request) -> Res
                 );
             }
             if f.get("resource")
-                .is_some_and(|r| r.trim_end_matches('/') != entry.resource)
+                .is_some_and(|r| requested_resource(r) != entry.resource)
             {
                 return bad(
                     "invalid_target",

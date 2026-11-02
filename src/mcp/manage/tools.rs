@@ -608,7 +608,7 @@ pub static TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "run_tests",
         title: "Run saved tests",
-        description: "Run every saved test or names: in process against this instance, or through each test's gateway (egress purpose replay; SENDS TRAFFIC OUT, so a run with a gateway test asks the user to confirm, or needs \"confirm\": true set only after the user agreed). Variables come from the instance's RUSTYBIN_TEST_* environment. Answers the counts and each test's failures (expected, seen) under untrusted_results; format junit adds the JUnit XML. Admin.",
+        description: "Run every saved test or names: in process against this instance, or through each test's gateway (egress purpose replay; SENDS TRAFFIC OUT). A run with a gateway test, or with a test that sends a method other than GET, HEAD or OPTIONS (it may change state), asks the user to confirm, or needs \"confirm\": true set only after the user agreed. One run at a time: another run in progress is an error. Variables come from the instance's RUSTYBIN_TEST_* environment. Answers the counts and each test's failures (expected, seen) under untrusted_results; format junit adds the JUnit XML. Admin.",
         right: Right::Admin,
         read_only: false,
         destructive: false,

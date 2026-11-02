@@ -175,7 +175,7 @@ the project's entry wins). Cursor expands `${env:NAME}` in `url` and `headers`:
 {
   "mcpServers": {
     "rustybin": {
-      "url": "https://<host>/_rustybin/mcp",
+      "url": "https://<host>/_rustybin/mcp?page_size=200",
       "headers": { "Authorization": "Bearer ${env:RUSTYBIN_TOKEN}" }
     }
   }
@@ -189,9 +189,9 @@ MCPs**; in the command line agent, `agent mcp login rustybin`. Cursor registers
 `http://localhost:8787/callback` and `cursor://anysphere.cursor-mcp/oauth/callback`,
 both accepted. **Check:** **Customize, MCPs** shows the server and its tools; the
 Output panel's "MCP Logs" shows errors; `agent mcp list-tools rustybin` from the
-command line. **Tools:** Cursor reads only the first page of `tools/list`, so
-narrow the agent first (see [Tool limits](#tool-limits)); a tool's name in the chat
-panel's tool list turns it off. **stdio:** `"command": "rustybin", "args":
+command line. **Tools:** Cursor reads only the first page of `tools/list`, hence
+`?page_size=200` on the URL: every tool on one page (see [Tool limits](#tool-limits));
+a tool's name in the chat panel's tool list turns it off. **stdio:** `"command": "rustybin", "args":
 ["mcp-stdio", "--profile", "<name>"]`.
 
 ### OpenCode
@@ -314,21 +314,21 @@ expanded in any value:
 {
   "mcpServers": {
     "rustybin": {
-      "httpUrl": "https://<host>/_rustybin/mcp",
+      "httpUrl": "https://<host>/_rustybin/mcp?page_size=200",
       "headers": { "Authorization": "Bearer ${RUSTYBIN_TOKEN}" }
     }
   }
 }
 ```
 
-`gemini mcp add --transport http --scope user rustybin https://<host>/_rustybin/mcp
+`gemini mcp add --transport http --scope user rustybin 'https://<host>/_rustybin/mcp?page_size=200'
 --header "Authorization: Bearer $RUSTYBIN_TOKEN"` does the same, with the token
 itself in the file.
 
 **OAuth:** leave the header out; Gemini CLI starts the sign-in on the `401`, or run
 `/mcp auth rustybin`. It needs a browser on the same machine. **Check:** `/mcp` in a
 session, or `gemini mcp list`. **Tools:** Gemini CLI reads only the first page of
-`tools/list`, so narrow the agent first (see [Tool limits](#tool-limits));
+`tools/list`, hence `?page_size=200` on the URL (see [Tool limits](#tool-limits));
 `includeTools` and `excludeTools` filter what it read. **Prompts:**
 `/build_instance`, with `--brief="..."` or the arguments in order. **stdio:**
 `"command": "rustybin", "args": ["mcp-stdio", "--profile", "<name>"]`.
@@ -345,7 +345,7 @@ your user settings, never in a project you commit.
 {
   "context_servers": {
     "rustybin": {
-      "url": "https://<host>/_rustybin/mcp",
+      "url": "https://<host>/_rustybin/mcp?page_size=200",
       "headers": { "Authorization": "Bearer <token>" }
     }
   }
@@ -354,7 +354,7 @@ your user settings, never in a project you commit.
 
 **OAuth:** leave `headers` out and Zed asks you to authenticate. **Check:** the
 server's dot turns green in **Settings, AI, MCP Servers**. **Tools:** Zed reads only
-the first page of `tools/list`, so narrow the agent first (see [Tool
+the first page of `tools/list`, hence `?page_size=200` on the URL (see [Tool
 limits](#tool-limits)); an agent profile can turn single tools off. **stdio:**
 `"command": "rustybin", "args": ["mcp-stdio", "--profile", "<name>"]`.
 
@@ -451,9 +451,16 @@ with `nextCursor` for the rest. Clients differ in how many tools they take:
 
 A client that reads only the first page misses the last tools of the list: for an
 admin, everything from `end_agent_sessions` on: sign-in sessions, checkpoints,
-saved tests and gateway scenarios. Narrow the agent on the instance until its tools
-fit in one page, then reconnect the client. Turning tools off in the client does not
-help there: the client never saw the second page. Either of these fits:
+saved tests and gateway scenarios. Turning tools off in the client does not help
+there: the client never saw the second page. **Add `?page_size=200` to the MCP URL**
+(`https://<host>/_rustybin/mcp?page_size=200`, at most 1000): the server then sends
+every tool on one page. OAuth sign-in works with that URL too (the query is not part
+of the resource a token is for). The snippets above for Cursor, Gemini CLI and Zed
+already carry it; it does no harm on the other clients.
+
+To keep a client's list short instead (a smaller context, or a client with a
+per-request limit), narrow the agent on the instance, then reconnect the client.
+Either of these fits in the default page of 100:
 
 - the `manage` ceiling (68 tools), for building mocks;
 - full rights without the 19 harness tools (97 tools), on an instance where you do
@@ -553,8 +560,9 @@ revoked, or its session was ended, in the AI agents view. **Restore** it there (
 
 **Tools are missing that the agent's rights allow.** The client took fewer tools
 than the server offers (see [Tool limits](#tool-limits)), or it read only the first
-page of `tools/list`. Narrow the agent on the instance (a ceiling of `manage` or
-below fits in one page) or turn tools off in the client. After a rights change,
+page of `tools/list`. Add `?page_size=200` to the MCP URL, narrow the agent on the
+instance (a ceiling of `manage` or below fits in one page), or turn tools off in the
+client. After a rights change,
 reconnect the client so it lists the tools again.
 
 **OAuth opens the wrong page, or the browser shows an error.** The sign-in is

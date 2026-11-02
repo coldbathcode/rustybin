@@ -1067,8 +1067,12 @@ pub async fn apply(
     let s = svc(&state, &headers, &extensions, &uri);
     s.require_admin()?;
     let text = std::str::from_utf8(&body)
-        .map_err(|_| ServiceError::bad_request("the document is not UTF-8 text"))?;
-    Ok(Json(s.apply(text, q.prune.unwrap_or(false))?).into_response())
+        .map_err(|_| ServiceError::bad_request("the document is not UTF-8 text"))?
+        .to_string();
+    let prune = q.prune.unwrap_or(false);
+    // Every spec of the document compiles: on the pool, never a worker.
+    let v = s.compiling(move |s| s.apply(&text, prune)).await?;
+    Ok(Json(v).into_response())
 }
 
 pub async fn reload(

@@ -320,7 +320,9 @@ and the capabilities: tools, prompts and resources.
 ```
 
 `tools/list` answers 100 tools a page, with `nextCursor` while more follow: the
-management server has more than that, so a client reads every page (MCP clients do).
+management server has more than that, so a client reads every page. Some clients
+read only the first (see [Tool limits](coding-agents.md#tool-limits)): for them,
+`?page_size=200` on the MCP URL (at most 1000) sends every tool on one page.
 
 ```hurl
 {{#include ../examples/agent/manage.hurl:tools_list}}
