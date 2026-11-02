@@ -58,7 +58,7 @@ working tree. The marker a new session looks for is the first row that is not do
 | [07](step-07-config-and-source-control.md) | Config as code: the repository is not trusted | high | 06 | 1.5 | done 2026-11-02 |
 | [08](step-08-public-data-plane.md) | Public instances: bins, sessions, visits, the demo IdP | high | 05 | 1.5 | done 2026-11-02 |
 | [09](step-09-harness.md) | Harness: one run at a time, cluster leadership, panics | high | | 1.5 | done 2026-11-02 |
-| [10](step-10-dependencies-and-release.md) | Dependencies, docs, release 0.2.2 | medium | all | 1.5 | built 2026-11-02; tag pending |
+| [10](step-10-dependencies-and-release.md) | Dependencies, docs, release 0.2.2 | medium | all | 1.5 | done 2026-11-02 (`v0.2.2`, image `sha256:1fe578b7...`) |
 
 About 14 days of build sessions. Steps 02 to 06 and 09 are independent of each other.
 

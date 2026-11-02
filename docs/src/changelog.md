@@ -74,6 +74,13 @@ cannot do now.
   replaced by its maintained fork (`serde_norway`, the output pinned byte for byte);
   `rustls-pemfile` dropped; `tonic` 0.13 and `axum-server` 0.8, so one `axum`.
 
+`cargo` version 0.2.2, the tag `v0.2.2`, the signed multi-arch image
+`ghcr.io/coldbathcode/rustybin:0.2.2`, digest
+`sha256:1fe578b7f45b34f61e9e4bd3944abe7b399001a42ac6f5ae5f0cd1681dddc9ad` (verify it with the
+cosign command of the [quick start](quick-start.md#docker); the
+[release](https://github.com/coldbathcode/rustybin/releases/tag/v0.2.2) carries the same
+values).
+
 ## 0.2.1 (2026-10-30): the dev portal in the container image
 
 - **Fix: the published 0.2.0 image served no dev portal.** `/portal` answered "portal

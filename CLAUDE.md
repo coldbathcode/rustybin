@@ -35,11 +35,11 @@ rule**: a capability lands on the API (catalogue and OpenAPI), the console, the 
 variable, stored override, `secret()` for credentials, never returned as a value); the console's instance
 settings are forms from the settings schema (`ui/lib/settingsform.js`), one card per group on a Management tab.
 
-## Rustybin 0.2.2, the hardening release (built 2026-11-02, tag pending)
+## Rustybin 0.2.2, the hardening release (built and released 2026-11-02)
 
 [docs/plans/hardening/master-plan.md](docs/plans/hardening/master-plan.md) is the plan from a full code review of
 `1328b07`: ten steps, one file each, all built on 2026-11-02 (each step file has build notes; section 4 is the
-build marker; the `v0.2.2` tag and the signed image follow the 0.2.0 recipe). Rules it left: a request path that
+build marker; `v0.2.2` tagged, the signed image's digest is in the changelog). Rules it left: a request path that
 parses or compiles a spec goes through `mocks::service::Svc::compiling` (blocking pool, 4 permits); the console's
 `send` adds the control token only with `control: true`; a saved MCP connection is used through
 `inspector::store::use_connection`; agent revocations and overrides follow `credential.fingerprint()`; a document
