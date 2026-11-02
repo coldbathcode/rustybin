@@ -1284,3 +1284,87 @@ async fn the_shaped_endpoint_follows_the_run_profile() {
     server.shutdown();
     let _ = server.wait().await;
 }
+
+/// One run at a time holds under parallel starts: the slot is taken before
+/// the first await.
+#[tokio::test]
+async fn parallel_starts_make_one_run() {
+    let mut config = harness_config(&[Role::Client, Role::Server], &["127.0.0.1"]);
+    config.harness.verify_targets = true;
+    let (server, app, state) = running(config).await;
+    let url = format!("http://{}", server.http_addr);
+    let starts = (0..10).map(|_| {
+        let app = app.clone();
+        let body = smoke(&url, 20, "2s");
+        async move {
+            send(&app, Method::POST, "/_rustybin/harness/runs", Some(body))
+                .await
+                .0
+        }
+    });
+    let statuses = futures_util::future::join_all(starts).await;
+    let accepted = statuses
+        .iter()
+        .filter(|s| **s == StatusCode::ACCEPTED)
+        .count();
+    let refused = statuses
+        .iter()
+        .filter(|s| **s == StatusCode::CONFLICT)
+        .count();
+    assert_eq!((accepted, refused), (1, 9), "{statuses:?}");
+    let h = state.harness.as_ref().expect("harness");
+    assert!(!h.preparing());
+    h.stop_all();
+    server.shutdown();
+    let _ = server.wait().await;
+}
+
+/// The kill switch pressed while a run is verifying its target: the run
+/// does not start once the verification ends.
+#[tokio::test]
+async fn kill_during_verification_prevents_the_start() {
+    let mut config = harness_config(&[Role::Client], &["127.0.0.1"]);
+    config.harness.verify_targets = true;
+    let (server, app, state) = running(config).await;
+    let h = state.harness.clone().expect("harness");
+    let token = h.verification_token.clone();
+    const WELL_KNOWN: &str = "/.well-known/rustybin-harness";
+    let slow = axum::Router::new().route(
+        WELL_KNOWN,
+        axum::routing::get(move || {
+            let token = token.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                token
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, slow).await;
+    });
+    let target = format!("http://{addr}");
+    let start = {
+        let app = app.clone();
+        tokio::spawn(async move {
+            send(
+                &app,
+                Method::POST,
+                "/_rustybin/harness/runs",
+                Some(smoke(&target, 5, "1s")),
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    h.stop_all();
+    let (status, v) = start.await.expect("join");
+    assert_eq!(status, StatusCode::CONFLICT, "{v}");
+    assert!(v.to_string().contains("kill switch"), "{v}");
+    assert!(h.active_run().is_none());
+    server.shutdown();
+    let _ = server.wait().await;
+}

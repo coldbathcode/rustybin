@@ -456,6 +456,14 @@ that cannot hear a majority stops renewing leases (the minority side of a partit
 sending), and one that hears a newer term steps down. A crashed leader that restarts is a
 new node: start it as a standby pointing at any eligible member to rejoin.
 
+A member follows an `elected` announcement only from a node the snapshot lists as
+eligible, at a term at most 16 ahead of the one it knows, and from the control URL that
+node joined with (checked like a join URL); anything else is refused, so a member's
+node credential cannot crown its holder. **The join token is a cluster credential**: a
+holder can join as an eligible node (with a control URL) and so receive the snapshot,
+secrets included, and stand in elections. Treat it like the admin token: give it only
+to the nodes you run, and rotate it (a new cluster) if it leaks.
+
 The compose cluster has three eligible nodes (the leader, the standby and `client-1`).
 `conformance/harness/run.sh` starts it, kills the leader ten seconds into the run and
 asserts the report the standby produces: the standby leads the new term, both clients finished
@@ -474,8 +482,12 @@ checked by name and by every resolved address, with link-local, cloud metadata, 
 and the node's own control plane always refused; pinned connections, so a DNS change
 during a run cannot redirect it; optional target verification through
 `/.well-known/rustybin-harness`; caps per node on rate, requests in flight and duration;
-one run at a time; a lease that stops a cluster's clients when the leader is gone; a kill
-switch; the `harness` control scope; and a fatal refusal to start in public mode or with
+one run at a time (a start being prepared holds the slot, so parallel starts get `409`, and
+a kill pressed while a run is still resolving or verifying its targets keeps it from
+starting); a node never sends above its rate cap, whatever the live multipliers and its
+share say (a re-split share is checked with the multipliers in force, and the scheduler
+clamps too); answers with absurd `Server-Timing` or `Retry-After` values cannot stall a
+run; a lease that stops a cluster's clients when the leader is gone; a kill switch; the `harness` control scope; and a fatal refusal to start in public mode or with
 self-service mocks. In a cluster, each node applies its own caps and allowlist to every
 assignment it receives.
 

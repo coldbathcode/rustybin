@@ -315,6 +315,9 @@ pub struct Harness {
     engine_error: Option<String>,
     pub kill: Arc<KillSwitch>,
     runs: Mutex<Vec<Arc<Run>>>,
+    /// A run is being prepared (resolving, fetching tokens, verifying): the
+    /// slot is taken before the first await, so parallel starts get 409.
+    starting: std::sync::atomic::AtomicBool,
     /// Served at [`WELL_KNOWN_PATH`]; targets must echo it when
     /// `verify_targets` is on. Random per process.
     pub verification_token: String,
@@ -436,6 +439,29 @@ fn random_hex(bytes: usize) -> String {
         .collect()
 }
 
+/// The node's one start being prepared, released when dropped (on every
+/// error path and once the run is in the list).
+struct StartSlot<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl<'a> StartSlot<'a> {
+    fn take(flag: &'a std::sync::atomic::AtomicBool) -> Option<Self> {
+        flag.compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .ok()
+        .map(|_| Self(flag))
+    }
+}
+
+impl Drop for StartSlot<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 impl Harness {
     /// The node's harness, `None` when harness mode is off.
     pub fn new(
@@ -505,6 +531,7 @@ impl Harness {
             engine_error,
             kill: KillSwitch::new(),
             runs: Mutex::new(Vec::new()),
+            starting: std::sync::atomic::AtomicBool::new(false),
             verification_token: random_hex(16),
             correlator: Correlator::new(),
             metrics,
@@ -884,6 +911,20 @@ impl Harness {
                 problems: Vec::new(),
             });
         }
+        // Take the slot before the first await: a start being prepared
+        // counts as the node's one run.
+        let _slot = StartSlot::take(&self.starting).ok_or_else(|| {
+            RunError::new(
+                409,
+                "another run is being prepared on this node; one run at a time",
+            )
+        })?;
+        if self.active_run().is_some() {
+            return Err(RunError::new(
+                409,
+                "a run started meanwhile; one run at a time",
+            ));
+        }
         // scale.connections_per_client: the keep-alive pool per target is
         // this node's virtual clients times it (at most the in-flight cap).
         let pool = scenario
@@ -1003,6 +1044,13 @@ impl Harness {
         } else {
             None
         };
+        // The kill switch may have been pressed while the run was prepared.
+        if self.kill.is_set() {
+            return Err(RunError::new(
+                409,
+                "the kill switch was set while the run was being prepared: not started",
+            ));
+        }
         let run = Run::new(RunParams {
             id: id.clone(),
             node_id: self.node_id.clone(),
@@ -1052,6 +1100,12 @@ impl Harness {
         );
         engine::start(run.clone(), engine.handle()).map_err(|e| RunError::new(500, e))?;
         Ok(run)
+    }
+
+    /// Whether a run start is being prepared (tests).
+    #[cfg(test)]
+    pub fn preparing(&self) -> bool {
+        self.starting.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// `GET <target>/.well-known/rustybin-harness` must answer this node's

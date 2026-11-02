@@ -191,6 +191,33 @@ impl Class {
     }
 }
 
+/// One path segment, percent-encoded (letters, digits and `-_~` stay; a dot
+/// is encoded too, so `..` cannot climb).
+fn encode_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'~') {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Longest `Retry-After` a retried request waits.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(3600);
+
+/// Seconds as a `Duration` from any float an answer or a computation gives:
+/// NaN and negatives are zero, infinities and huge values a day (never the
+/// panic of `Duration::from_secs_f64`).
+fn secs(x: f64) -> Duration {
+    if x.is_nan() || x <= 0.0 {
+        return Duration::ZERO;
+    }
+    Duration::try_from_secs_f64(x.min(86_400.0)).unwrap_or(Duration::from_secs(86_400))
+}
+
 /// Histogram values as (seconds, count) pairs, for the metrics.
 fn pairs(h: &Histogram<u64>) -> Vec<(f64, u64)> {
     h.iter_recorded()
@@ -1921,7 +1948,14 @@ impl Run {
             ip: &ip,
             follow: follow.unwrap_or(""),
         };
-        let mut path = self.expand(&tpl.path, &x);
+        // In the path the follow id (from the target's answer) is one
+        // percent-encoded segment: it cannot add segments of its own.
+        let follow_segment = encode_segment(follow.unwrap_or(""));
+        let x_path = Expansion {
+            follow: &follow_segment,
+            ..x
+        };
+        let mut path = self.expand(&tpl.path, &x_path);
         if let Some((k, v)) = identity.and_then(|r| r.query.as_ref()) {
             path.push(if path.contains('?') { '&' } else { '?' });
             path.push_str(&format!("{}={}", query_encode(k), query_encode(v)));
@@ -2349,7 +2383,7 @@ impl Run {
         // one latency after the window ends, so the median latency is taken
         // off the elapsed time (plan section 10).
         let planned = self.scenario.duration().as_secs_f64();
-        let tail = Duration::from_secs_f64(latency.p50_ms / 1000.0);
+        let tail = secs(latency.p50_ms / 1000.0);
         let window = elapsed.saturating_sub(tail).as_secs_f64().max(1e-9);
         let achieved_rate = totals.counts.completed as f64 / window;
         let requested_rate = if planned > 0.0 {
@@ -2856,7 +2890,27 @@ struct TestReq {
 }
 
 /// Send one request and record its outcome. The caller counted it in flight.
+/// One request, guarded: a panic anywhere in it (an answer the code did
+/// not expect) still gives back its in-flight slot, so a run whose target
+/// answers oddly keeps sending instead of filling `inflight_cap` with
+/// requests that never finished.
 async fn send_one(run: Arc<Run>, job: Job) {
+    use futures_util::FutureExt;
+    let guard = run.clone();
+    let outcome = std::panic::AssertUnwindSafe(send_one_inner(run, job))
+        .catch_unwind()
+        .await;
+    if outcome.is_err() {
+        let _ = guard
+            .inflight
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            });
+        tracing::warn!(target: "rustybin::harness", run = %guard.id, "a request panicked: its in-flight slot is released");
+    }
+}
+
+async fn send_one_inner(run: Arc<Run>, job: Job) {
     let Job {
         layer: layer_idx,
         target: target_idx,
@@ -3139,7 +3193,7 @@ async fn send_one(run: Arc<Run>, job: Job) {
         (Some(_), None) => Class::Gateway,
     };
     let upstream = match (&tag, upstream_ms) {
-        (Some(_), Some(ms)) if ms >= 0.0 => Some(Duration::from_secs_f64(ms / 1000.0)),
+        (Some(_), Some(ms)) if ms >= 0.0 => Some(secs(ms / 1000.0)),
         _ => None,
     };
     // A streamed answer's length is the stream's, not the gateway's
@@ -3164,7 +3218,7 @@ async fn send_one(run: Arc<Run>, job: Job) {
             let wait = if b.honour_retry_after {
                 observed
                     .retry_after_secs
-                    .map_or(b.retry_delay, Duration::from_secs_f64)
+                    .map_or(b.retry_delay, |s| secs(s).min(MAX_RETRY_AFTER))
             } else {
                 b.retry_delay
             };
@@ -3619,7 +3673,7 @@ struct LayerSched {
 impl LayerSched {
     /// A layer whose pattern starts at run time `starts_at` (seconds).
     fn new(idx: usize, layer: &Layer, starts_at: f64) -> Self {
-        let starts_at = Duration::from_secs_f64(starts_at.max(0.0));
+        let starts_at = secs(starts_at.max(0.0));
         Self {
             idx,
             finished: false,
@@ -3731,21 +3785,24 @@ pub fn drive(run: Arc<Run>, handle: Handle) {
                             Level::Run(r) => r,
                         };
                         let rate = if whole { rate } else { rate * share };
+                        // Never past the node's cap, whatever the live
+                        // multipliers and the share say.
+                        let rate = rate.min(run.caps.max_rate as f64);
                         let edge = view.next_boundary(layer.idx, t);
                         let step = (edge - t).clamp(1e-6, RATE_STEP);
                         if rate <= 0.0 {
                             // Nothing to send: on to the next edge or step.
-                            layer.next_at += Duration::from_secs_f64(step);
+                            layer.next_at += secs(step);
                             continue;
                         }
                         let to_next = (1.0 - layer.credit).max(0.0) / rate;
                         if to_next > step {
                             // The rate may change before then: bank the step.
                             layer.credit += rate * step;
-                            layer.next_at += Duration::from_secs_f64(step);
+                            layer.next_at += secs(step);
                             continue;
                         }
-                        let due = layer.next_at + Duration::from_secs_f64(to_next);
+                        let due = layer.next_at + secs(to_next);
                         if due > now {
                             // Sleep until it is due (the cursor stays).
                             wake = Some(due);
@@ -4045,5 +4102,17 @@ mod tests {
         if cfg!(unix) {
             assert!(raise_descriptor_limit().is_some_and(|n| n > 0));
         }
+    }
+
+    #[test]
+    fn durations_from_any_float_never_panic() {
+        assert_eq!(secs(f64::NAN), Duration::ZERO);
+        assert_eq!(secs(-1.0), Duration::ZERO);
+        assert_eq!(secs(f64::INFINITY), Duration::from_secs(86_400));
+        assert_eq!(secs(1e300), Duration::from_secs(86_400));
+        assert_eq!(secs(1e20), Duration::from_secs(86_400));
+        assert_eq!(secs(1.5), Duration::from_millis(1500));
+        // A follow id is one segment: no dots, no slashes.
+        assert_eq!(encode_segment("../_rustybin"), "%2E%2E%2F_rustybin");
     }
 }

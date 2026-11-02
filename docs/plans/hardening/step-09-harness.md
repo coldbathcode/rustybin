@@ -29,3 +29,32 @@ live multiplier is refused; the test proxy answering `Server-Timing: rb;dur=1e30
 ## Done when
 
 The tests pass and the conformance cluster run (`conformance/harness/run.sh`) is green.
+
+## Build notes (2026-11-02)
+
+- Every finding is fixed; none was closed as not reproducible. Section 6's decision:
+  the join token is documented as a cluster credential (no approval step).
+- `start_local_run` takes a `StartSlot` (an atomic flag, released on drop) right after
+  the cheap checks and before the first await, checks the active run again, and checks
+  the kill switch once more just before the run is listed and started.
+- `Membership::elected` refuses a leader that is not in `snapshot.eligible` (403), a
+  term more than `MAX_TERM_JUMP` (16) ahead (409), and a control URL other than the
+  one the snapshot's succession records; the API handler runs `check_join_url` on the
+  announced URL first. The candidate's term is `saturating_add(1)`, peer answers are
+  read through `read_bounded` (8 MiB), lease, heartbeat and election timeout are
+  clamped to 10 minutes.
+- A re-split share is checked with `controls().check(..)` as well as
+  `validate_scaled`; the scheduler clamps each layer's rate to the node's
+  `max_rate`.
+- `engine::secs` turns any float into a `Duration` (NaN and negatives 0, at most a
+  day); every `from_secs_f64` in the engine goes through it, and `Retry-After` waits
+  at most an hour. `send_one` wraps the request in `catch_unwind` and gives back its
+  in-flight slot (saturating) if it panicked. The plan's proxy test is covered by the
+  unit test of `secs` (the proxy cannot send a tag without the run key), plus the
+  guard.
+- `egress::normalise_path` (lowercase, `%5f %2e %2f %5c` and backslashes decoded, dot
+  segments resolved) backs `is_control_prefix`; `{{follow}}` goes into a path as one
+  percent-encoded segment (dots encoded too).
+- `OAuthPool` remembers a failed token request for 2 s per client.
+- `conformance/harness/run.sh` passed (leader killed at 10 s, the standby led term 2
+  after 1.8 s, nothing lost).

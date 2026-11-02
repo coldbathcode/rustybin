@@ -1748,4 +1748,25 @@ mod tests {
         assert!(!change(r#"{"pause": true}"#).may_raise_load());
         assert!(serde_json::from_str::<Change>(r#"{"chaos": {}}"#).is_err());
     }
+
+    /// A re-split share is checked with the live multipliers in force: a
+    /// multiplier of 2 that fit at share 0.5 does not at share 1.
+    #[test]
+    fn a_re_split_share_counts_the_live_multiplier() {
+        let s = scenario(
+            "  - name: a\n    source: { request: { path: / } }\n    pattern: { type: constant, rate: 100, for: 10s }\n",
+        );
+        let caps = Caps {
+            max_rate: 150,
+            ..Caps::default()
+        };
+        let c = Controls::for_scenario(&s)
+            .apply(&s, &change(r#"{"rate_multiplier": 2}"#), 0.5)
+            .expect("fits at half the rate");
+        assert!(c.check(&s, &caps, 0.5).is_empty());
+        assert!(
+            !c.check(&s, &caps, 1.0).is_empty(),
+            "200/s is over the 150/s cap"
+        );
+    }
 }

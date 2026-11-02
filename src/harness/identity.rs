@@ -148,7 +148,14 @@ pub struct OAuthPool {
     scope: Option<String>,
     audience: Option<String>,
     tokens: Vec<tokio::sync::Mutex<Option<(String, Instant)>>>,
+    /// The last failure of each client's token request and when it may be
+    /// tried again: a failing token endpoint is asked once per backoff, not
+    /// once per request.
+    failures: Vec<std::sync::Mutex<Option<(String, Instant)>>>,
 }
+
+/// How long a failed token request is remembered.
+pub const TOKEN_FAILURE_BACKOFF: Duration = Duration::from_secs(2);
 
 impl OAuthPool {
     pub fn new(
@@ -161,12 +168,17 @@ impl OAuthPool {
             .iter()
             .map(|_| tokio::sync::Mutex::new(None))
             .collect();
+        let failures = clients
+            .iter()
+            .map(|_| std::sync::Mutex::new(None))
+            .collect();
         Self {
             endpoint,
             clients,
             scope,
             audience,
             tokens,
+            failures,
         }
     }
 
@@ -184,7 +196,24 @@ impl OAuthPool {
                 return Ok(t.clone());
             }
         }
-        let (token, lifetime) = self.fetch(k).await?;
+        if let Some(failure) = self.failures.get(k) {
+            let last = failure.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some((why, until)) = last {
+                if Instant::now() < until {
+                    return Err(why);
+                }
+            }
+        }
+        let (token, lifetime) = match self.fetch(k).await {
+            Ok(t) => t,
+            Err(why) => {
+                if let Some(failure) = self.failures.get(k) {
+                    *failure.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some((why.clone(), Instant::now() + TOKEN_FAILURE_BACKOFF));
+                }
+                return Err(why);
+            }
+        };
         let renew = RENEW_BEFORE.min(lifetime / 10);
         *slot = Some((
             token.clone(),

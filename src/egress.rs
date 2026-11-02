@@ -550,9 +550,35 @@ pub fn parse_url(url: &str, allow_query: bool) -> Result<ParsedTarget, String> {
 }
 
 /// A path at or under the control plane, however it is written.
+/// A path as a server would route it: lowercased, `%5f`, `%2e`, `%2f` and
+/// backslashes decoded, `.` and `..` segments resolved (so `/api/../_rustybin`
+/// is `/_rustybin`).
+pub fn normalise_path(path: &str) -> String {
+    let lower = path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .replace("%5f", "_")
+        .replace("%2e", ".")
+        .replace("%2f", "/")
+        .replace("%5c", "/")
+        .replace('\\', "/");
+    let mut out: Vec<&str> = Vec::new();
+    for seg in lower.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            s => out.push(s),
+        }
+    }
+    format!("/{}", out.join("/"))
+}
+
 pub fn is_control_prefix(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    let decoded = lower.replace("%5f", "_");
+    let decoded = normalise_path(path);
     crate::control::is_control_path(&decoded)
         || decoded.starts_with("/_rustybin")
         || decoded == "/ui"
@@ -1508,5 +1534,21 @@ mod tests {
         assert_eq!(list.host_match("a.example.com", 443), Some(true));
         assert_eq!(list.host_match("api.example.org", 443), Some(false));
         assert_eq!(list.host_match("example.com", 443), None);
+    }
+
+    #[test]
+    fn dot_segments_cannot_reach_the_control_plane() {
+        for p in [
+            "/api/../_rustybin/x",
+            "/a/./b/../../_rustybin",
+            "/%2e%2e/_rustybin",
+            "/x/..%2f_rustybin",
+            "/UI/../ui/",
+            "/a\\..\\_rustybin",
+        ] {
+            assert!(is_control_prefix(p), "{p}");
+        }
+        assert!(!is_control_prefix("/api/_rustybinish"));
+        assert_eq!(normalise_path("/a/b/../c?x=/_rustybin"), "/a/c");
     }
 }

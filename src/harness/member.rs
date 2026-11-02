@@ -160,6 +160,29 @@ pub fn cluster_url_of(control_url: &str, cluster: &str) -> String {
 /// One cluster protocol call over HTTP: JSON in and out, a bearer token
 /// (the join token or the node credential). `from` is the calling node's
 /// port (test partitions).
+/// Most bytes a node reads from another node's answer.
+pub const MAX_PEER_ANSWER: usize = 8 * 1024 * 1024;
+/// Most a leader may set a lease or heartbeat period to.
+pub const MAX_LEASE_MS: u64 = 10 * 60 * 1000;
+/// How far ahead of the known term an announcement may be.
+pub const MAX_TERM_JUMP: u64 = 16;
+
+async fn read_bounded(resp: reqwest::Response) -> Result<Vec<u8>, LinkError> {
+    use futures_util::StreamExt;
+    let mut out = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| LinkError::Other(format!("the answer broke off: {e}")))?;
+        if out.len() + chunk.len() > MAX_PEER_ANSWER {
+            return Err(LinkError::Other(format!(
+                "the answer is larger than {MAX_PEER_ANSWER} bytes"
+            )));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
 pub(super) async fn post_json<T: serde::de::DeserializeOwned>(
     client: &reqwest::Client,
     from: Option<u16>,
@@ -190,10 +213,7 @@ pub(super) async fn post_json<T: serde::de::DeserializeOwned>(
         .await
         .map_err(|e| LinkError::Other(format!("cannot reach {url}: {e}")))?;
     let status = resp.status();
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| LinkError::Other(format!("the answer broke off: {e}")))?;
+    let bytes = read_bounded(resp).await?;
     if status.is_success() {
         return serde_json::from_slice(&bytes)
             .map_err(|e| LinkError::Other(format!("the answer does not parse: {e}")));
@@ -400,6 +420,12 @@ impl Membership {
     }
 
     /// The leader this node follows.
+    /// This node's credential in the cluster (tests).
+    #[cfg(test)]
+    pub fn credential_for_tests(&self) -> Option<String> {
+        lock(&self.state).credential.clone()
+    }
+
     pub fn leader(&self) -> Leader {
         lock(&self.state).leader.clone()
     }
@@ -597,7 +623,8 @@ impl Membership {
                 st.lease = Duration::from_millis(resp.lease_ms);
                 st.heartbeat_every = Duration::from_millis(resp.heartbeat_ms.max(50));
                 if resp.election_timeout_ms > 0 {
-                    st.election_timeout = Duration::from_millis(resp.election_timeout_ms);
+                    st.election_timeout =
+                        Duration::from_millis(resp.election_timeout_ms.min(MAX_LEASE_MS));
                 }
                 st.leader = resp.leader;
                 st.verification_token = Some(resp.verification_token);
@@ -774,10 +801,10 @@ impl Membership {
         }
         st.version = resp.version;
         st.leader = resp.leader;
-        st.lease = Duration::from_millis(resp.lease_ms.max(1));
-        st.heartbeat_every = Duration::from_millis(resp.heartbeat_ms.max(50));
+        st.lease = Duration::from_millis(resp.lease_ms.clamp(1, MAX_LEASE_MS));
+        st.heartbeat_every = Duration::from_millis(resp.heartbeat_ms.clamp(50, MAX_LEASE_MS));
         if resp.election_timeout_ms > 0 {
-            st.election_timeout = Duration::from_millis(resp.election_timeout_ms);
+            st.election_timeout = Duration::from_millis(resp.election_timeout_ms.min(MAX_LEASE_MS));
         }
         if let Some(snap) = resp.snapshot {
             if st.snapshot.as_ref().is_none_or(|s| {
@@ -913,8 +940,15 @@ impl Membership {
         }
         // A new share is checked against this node's caps like the first.
         for (run, share) in reshare {
+            // With the live multipliers in force: a share that doubles
+            // under a multiplier of 2 must still fit the caps.
             let problems = if share.valid() {
-                run.scenario.validate_scaled(&h.caps(), share.fraction())
+                let mut p = run.scenario.validate_scaled(&h.caps(), share.fraction());
+                p.extend(
+                    run.controls()
+                        .check(&run.scenario, &h.caps(), share.fraction()),
+                );
+                p
             } else {
                 vec!["the share is not valid".into()]
             };
@@ -1150,6 +1184,35 @@ impl Membership {
                 ));
             };
             check_credential(state, &self.cluster_id, &req.leader.node_id, credential)?;
+            // Only a node that may lead, at a plausible term, from where
+            // it joined: a member with a node credential cannot crown itself.
+            let snap = st.snapshot.as_ref();
+            if !snap.is_some_and(|s| s.eligible.contains(&req.leader.node_id)) {
+                return Err(NodeError::new(
+                    403,
+                    "the announced leader is not an eligible node of this cluster",
+                ));
+            }
+            if req.leader.term > st.leader.term.saturating_add(MAX_TERM_JUMP) {
+                return Err(NodeError::new(
+                    409,
+                    "the announced term is too far ahead of this cluster's",
+                ));
+            }
+            let known_url = snap.and_then(|s| {
+                s.succession
+                    .iter()
+                    .find(|c| c.node_id == req.leader.node_id)
+                    .map(|c| c.control_url.clone())
+            });
+            if let (Some(announced), Some(known)) = (&req.leader.control_url, &known_url) {
+                if announced != known {
+                    return Err(NodeError::new(
+                        403,
+                        "the announced control URL is not the one that node joined with",
+                    ));
+                }
+            }
             req.leader.term > st.leader.term
         };
         if newer {
@@ -1237,7 +1300,7 @@ impl Membership {
                 .term
                 .max(st.voted.as_ref().map_or(0, |(t, _)| *t))
                 .max(snap.version.term)
-                + 1;
+                .saturating_add(1);
             st.voted = Some((term, self.node_id.clone()));
             let e = st.election_timeout;
             // The next try, if this one fails: after everyone else's turn,

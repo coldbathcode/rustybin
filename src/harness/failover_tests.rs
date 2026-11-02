@@ -578,3 +578,59 @@ async fn live_changes_reach_every_node_and_survive_a_failover() {
         n.stop().await;
     }
 }
+
+/// An `elected` announcement is followed only from an eligible node, at a
+/// plausible term, from the URL it joined with.
+#[tokio::test]
+async fn a_forged_election_announcement_is_refused() {
+    let id = "fo-forged";
+    let (l, url) = lead(coordinator(), "f9-leader", id).await;
+    let c = node_named(client_config(1000), "f9-c").await;
+    let s = node_named(
+        eligible(harness_config(&[Role::Server], &[]), LeaderPolicy::Auto),
+        "f9-s",
+    )
+    .await;
+    for n in [&c, &s] {
+        join(n, &url).await;
+    }
+    wait_for_alive(&l, id, 1, 1).await;
+    let until = Instant::now() + Duration::from_secs(6);
+    while Instant::now() < until && succession(&s, id).await.is_empty() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let term = harness(&s).membership().expect("member").leader().term;
+    let announce = |cred: String, node: &str, term: u64, control: String| {
+        let base = s.base();
+        let body = json!({ "leader": { "node_id": node, "term": term, "control_url": control } });
+        async move {
+            let resp = reqwest::Client::new()
+                .post(format!(
+                    "{base}/_rustybin/harness/clusters/{id}/election/elected"
+                ))
+                .bearer_auth(cred)
+                .json(&body)
+                .send()
+                .await
+                .expect("sent");
+            resp.status().as_u16()
+        }
+    };
+    // A client node (not eligible) with its own valid credential.
+    let c_cred = harness(&c)
+        .membership()
+        .and_then(|m| m.credential_for_tests())
+        .expect("credential");
+    assert_eq!(announce(c_cred, "f9-c", term + 1, c.base()).await, 403);
+    // An eligible node, with a term far ahead (u64::MAX once wrapped).
+    let s_cred = harness(&s)
+        .membership()
+        .and_then(|m| m.credential_for_tests())
+        .expect("credential");
+    assert_eq!(announce(s_cred, "f9-s", u64::MAX, s.base()).await, 409);
+    // The leader is unchanged.
+    assert_eq!(
+        harness(&s).membership().expect("member").leader().node_id,
+        "f9-leader"
+    );
+}

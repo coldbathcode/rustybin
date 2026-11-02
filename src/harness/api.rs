@@ -1042,6 +1042,13 @@ pub async fn node_elected(
         }
         return Json(json!({ "accepted": false, "term": c.term })).into_response();
     }
+    // The announced control URL is where this node will send its calls:
+    // checked like a join URL.
+    if let Some(url) = &req.leader.control_url {
+        if let Err(e) = super::safety::check_join_url(url).await {
+            return node_error(NodeError::new(400, e));
+        }
+    }
     match h.membership().filter(|m| m.cluster_id == id) {
         Some(m) => match m.elected(credential, &req) {
             Ok(followed) => Json(json!({ "accepted": followed })).into_response(),
