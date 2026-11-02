@@ -737,6 +737,8 @@ impl SourceControl {
             format!("user.email={email}"),
             "credential.helper=".to_string(),
             "core.hooksPath=/dev/null".to_string(),
+            // A checkout writes links as plain files holding the target path.
+            "core.symlinks=false".to_string(),
             // No transport unless allowed below (never ext::, fd::, git://).
             "protocol.allow=never".to_string(),
         ];
@@ -1217,7 +1219,7 @@ impl SourceControl {
         self.need_init(&repo)?;
         let dir = self.document_dir(&repo);
         let export = configdoc::export(state, SecretsMode::Refs, true);
-        configdoc::write_dir(&export, &dir)
+        configdoc::write_dir_within(&export, &dir, &repo)
             .map_err(|e| GitError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         let pathspec = self.path().unwrap_or_else(|| ".".into());
         self.must(&env, &repo, &["add", "-A", "--", &pathspec])
@@ -1461,6 +1463,7 @@ impl SourceControl {
             dry_run,
             principal: format!("git:{by}"),
             base: Some(dir.clone()),
+            untrusted: true,
         };
         let mut report = configdoc::apply(state, file, &opts);
         if !problems.is_empty() {
@@ -1901,13 +1904,13 @@ pub fn read_document(
         ));
     }
     let raw = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let (text, missing) = config_file::expand_env(&raw, |k| std::env::var(k).ok());
-    let mut problems: Vec<String> = missing
-        .into_iter()
-        .map(|v| format!("{}: environment variable {v} is not set", DOCUMENT_NAME))
-        .collect();
+    // Never expanded as text: a writer of the repository does not read the
+    // process environment (a mock example of ${RUSTYBIN_SECRETS_KEY} stays
+    // that text). Secret references resolve in `apply_secrets`, each to the
+    // variable of its own secret only.
+    let mut problems: Vec<String> = Vec::new();
     let (file, skipped) =
-        config_file::parse_lenient(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        config_file::parse_lenient(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
     problems.extend(
         skipped
             .into_iter()

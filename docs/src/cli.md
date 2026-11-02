@@ -378,7 +378,7 @@ The MCP inspector: servers, saved connections, checks, calls through the relay
 rustybin mcp servers
 rustybin mcp connections
 rustybin mcp connection acme
-rustybin mcp save-connection acme --target https://mcp.acme.example/mcp --auth '{"kind": "bearer"}' --secret bearer=TOKEN
+rustybin mcp save-connection acme --target https://mcp.acme.example/mcp --auth '{"kind": "bearer"}' --secret bearer=- < token.txt
 rustybin mcp delete-connection acme --yes
 rustybin mcp check http://localhost:8080/mcp --junit mcp.xml
 rustybin mcp runs

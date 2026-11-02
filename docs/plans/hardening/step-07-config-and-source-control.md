@@ -29,3 +29,37 @@ export with a harness OAuth secret shows a reference.
 ## Done when
 
 The tests pass and `docs/src/source-control.md` states what a repository writer can and cannot do.
+
+## Build notes (2026-11-02)
+
+- Every finding is fixed; none was closed as not reproducible. Section 6's decision:
+  literal secret values in a pulled document are refused.
+- `configdoc::write_dir_within(export, dir, root)` refuses a symbolic link at the
+  directory, `specs/`, each spec file and the document, and checks both directories
+  resolve under the working copy; stale specs are removed by `file_type` (a link is
+  removed as a link). git runs with `core.symlinks=false`.
+- Beyond the plan: a pulled document's `spec:` path could name any readable file
+  (`../../settings.json`, `/etc/hosts`). `contained_path` now requires a relative
+  path to a plain file inside the working copy (configdoc's `base` is only ever a
+  working copy).
+- `read_document` no longer expands the text. `ApplyOptions.untrusted` (the git
+  apply) lets a secret read only `${VAR}` naming its own `Spec.env`; anything else is
+  a problem. Diffs show references or "a value". The drift loop ends: the same
+  reference is no change.
+- Pruning skips the `signin` group's secrets; `Settings` refuses to clear
+  `console.password_hash` (update or unset) on a public instance without a password
+  from the environment.
+- Harness: the export uses `report::redact_scenario_with(.., "secret:stored")`, the
+  apply fills the markers from the saved scenario of the same name (`fill_stored`,
+  refused when none holds them), the scenario GET answers the redacted scenario, and
+  `SavedScenarios` seals each file with the instance's secrets key when it survives a
+  restart (files written by `write_private`, 0600).
+- Mock persistence: `MockStore::persist_now(name)` writes the store's current state
+  under a persistence lock (or removes the file when the mock is gone), so the last
+  write is the latest state; files go through `write_private` (unique temporary
+  name, fsync, 0600). `write_private` itself now uses a random temporary suffix.
+- Portal: `flush_soon` checks and claims the flush under one lock, and `save` is
+  ordered by `save_lock`.
+- CLI: `git key` is destructive (asks, or `--yes`); `mcp save-connection --secret`
+  takes `name=-` (stdin or a prompt) or `name=@file` and refuses a value on the
+  command line.

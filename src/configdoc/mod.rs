@@ -310,7 +310,12 @@ pub fn export(state: &AppState, secrets: SecretsMode, bundle: bool) -> Export {
                 .into_iter()
                 .map(|s| ScenarioDoc {
                     name: s.name,
-                    scenario: serde_json::to_value(&s.scenario).unwrap_or(Value::Null),
+                    // API keys and OAuth client secrets as references: the
+                    // apply takes them back from the saved scenario.
+                    scenario: crate::harness::report::redact_scenario_with(
+                        &serde_json::to_value(&s.scenario).unwrap_or(Value::Null),
+                        SECRET_STORED,
+                    ),
                 })
                 .collect(),
         }),
@@ -487,10 +492,44 @@ pub fn agents_section(policy: &agents::FilePolicy) -> agents::FileSection {
 /// files of mocks that are gone are removed; nothing else in the directory
 /// is touched.
 pub fn write_dir(export: &Export, dir: &Path) -> Result<(), String> {
+    write_dir_within(export, dir, dir)
+}
+
+/// [`write_dir`] into `dir`, which must stay inside `root` (a working copy
+/// whose content a repository writer controls). A symbolic link anywhere it
+/// writes or deletes (the directory, `specs/`, a file) is refused, so a
+/// pushed `specs -> ../..` or a linked `rustybin.yaml` never reaches files
+/// outside the working copy.
+pub fn write_dir_within(export: &Export, dir: &Path, root: &Path) -> Result<(), String> {
     let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+    let refuse_link = |p: &Path| -> Result<(), String> {
+        match std::fs::symlink_metadata(p) {
+            Ok(m) if m.file_type().is_symlink() => Err(format!(
+                "{} is a symbolic link: refused (the working copy must hold plain files)",
+                p.display()
+            )),
+            _ => Ok(()),
+        }
+    };
+    refuse_link(dir)?;
     std::fs::create_dir_all(dir).map_err(|e| err(dir, e))?;
     let specs = dir.join(SPECS_DIR);
-    std::fs::create_dir_all(&specs).map_err(|e| err(&specs, e))?;
+    refuse_link(&specs)?;
+    if !specs.exists() {
+        std::fs::create_dir(&specs).map_err(|e| err(&specs, e))?;
+    }
+    // Whatever the path components, the directories resolve inside the root.
+    let root_real = std::fs::canonicalize(root).map_err(|e| err(root, e))?;
+    for d in [dir, specs.as_path()] {
+        let real = std::fs::canonicalize(d).map_err(|e| err(d, e))?;
+        if !real.starts_with(&root_real) {
+            return Err(format!(
+                "{} resolves outside {}: refused",
+                d.display(),
+                root.display()
+            ));
+        }
+    }
     let keep: BTreeSet<&str> = export
         .specs
         .iter()
@@ -500,16 +539,22 @@ pub fn write_dir(export: &Export, dir: &Path) -> Result<(), String> {
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
-            if path.is_file() && !keep.contains(name.as_str()) {
+            // `file_type` does not follow links: a link is removed as a link.
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if (kind.is_file() || kind.is_symlink()) && !keep.contains(name.as_str()) {
                 std::fs::remove_file(&path).map_err(|e| err(&path, e))?;
             }
         }
     }
     for spec in &export.specs {
         let path = dir.join(&spec.path);
+        refuse_link(&path)?;
         std::fs::write(&path, spec.text.as_bytes()).map_err(|e| err(&path, e))?;
     }
     let doc = dir.join(DOCUMENT_NAME);
+    refuse_link(&doc)?;
     std::fs::write(&doc, export.yaml().as_bytes()).map_err(|e| err(&doc, e))
 }
 
@@ -626,6 +671,83 @@ fn short(v: &Value) -> String {
     }
 }
 
+/// A `spec:` file of a document read from a working copy: a relative path
+/// to a plain file that stays inside `base` (no absolute path, no `..`, no
+/// symbolic link), so the repository cannot read the host's files.
+fn contained_path(base: &Path, path: &str) -> Result<PathBuf, String> {
+    let p = Path::new(path);
+    if p.is_absolute()
+        || p.components().any(|c| {
+            !matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(format!(
+            "spec {path}: a path inside the repository (relative, without ..)"
+        ));
+    }
+    let full = base.join(p);
+    match std::fs::symlink_metadata(&full) {
+        Ok(m) if m.file_type().is_symlink() => {
+            return Err(format!("spec {path}: a symbolic link, refused"))
+        }
+        Ok(m) if !m.is_file() => return Err(format!("spec {path}: not a file")),
+        Ok(_) => {}
+        Err(e) => return Err(format!("spec {path}: {e}")),
+    }
+    let (Ok(real), Ok(root)) = (std::fs::canonicalize(&full), std::fs::canonicalize(base)) else {
+        return Err(format!("spec {path}: cannot be resolved"));
+    };
+    if !real.starts_with(&root) {
+        return Err(format!("spec {path}: outside the repository, refused"));
+    }
+    Ok(real)
+}
+
+/// Replace every `secret:stored` in `value` with what `saved` holds at the
+/// same place; `Err(path)` when it holds nothing there.
+fn fill_stored(value: &mut Value, saved: Option<&Value>, path: &str) -> Result<(), String> {
+    match value {
+        Value::String(s) if s == SECRET_STORED => match saved {
+            Some(v) if !v.is_null() && v.as_str() != Some(SECRET_STORED) => {
+                *value = v.clone();
+                Ok(())
+            }
+            _ => Err(if path.is_empty() {
+                "a value".into()
+            } else {
+                path.to_string()
+            }),
+        },
+        Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                fill_stored(v, saved.and_then(|s| s.get(k)), &format!("{path}.{k}"))?;
+            }
+            Ok(())
+        }
+        Value::Array(items) => {
+            for (i, v) in items.iter_mut().enumerate() {
+                fill_stored(v, saved.and_then(|s| s.get(i)), &format!("{path}[{i}]"))?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `${NAME}` alone: the variable it names.
+pub fn reference_name(raw: &str) -> Option<&str> {
+    let name = raw.trim().strip_prefix("${")?.strip_suffix('}')?;
+    (!name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        .then_some(name)
+}
+
+fn is_reference(raw: &str) -> bool {
+    reference_name(raw).is_some()
+}
+
 /// What `after` changes against `before` (an export of the instance), for
 /// the sections `after` carries. `base` resolves `spec:` file paths.
 pub fn diff(before: &MocksFile, after: &MocksFile, base: Option<&Path>) -> Vec<Change> {
@@ -657,8 +779,12 @@ pub fn diff(before: &MocksFile, after: &MocksFile, base: Option<&Path>) -> Vec<C
     if let Some(a) = &after.secrets {
         let empty = BTreeMap::new();
         let b = before.secrets.as_ref().unwrap_or(&empty);
-        map_changes(&mut out, "secrets", b, a, |v| {
-            v.clone().unwrap_or_else(|| "null".into())
+        // References only: a value (from a document that carries one) is
+        // never printed.
+        map_changes(&mut out, "secrets", b, a, |v| match v.as_deref() {
+            None => "null".into(),
+            Some(r) if r == SECRET_STORED || is_reference(r) => r.to_string(),
+            Some(_) => "a value".into(),
         });
     }
     if let Some(a) = &after.mocks {
@@ -829,12 +955,7 @@ fn spec_value(doc: &MockDoc, base: Option<&Path>) -> Result<Value, String> {
             let Some(base) = base else {
                 return Err(format!("spec {path} is a file: not readable here"));
             };
-            let p = Path::new(path);
-            let full = if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                base.join(p)
-            };
+            let full = contained_path(base, path)?;
             let text = std::fs::read_to_string(&full).map_err(|e| format!("spec {path}: {e}"))?;
             crate::mocks::spec::parse_document(&text)
         }
@@ -955,6 +1076,11 @@ pub struct ApplyOptions {
     pub principal: String,
     /// Where `spec:` file paths resolve (a working copy, a file's directory).
     pub base: Option<PathBuf>,
+    /// A document from the configuration repository: its writer is not
+    /// trusted with the process environment, so a secret takes only
+    /// `${VAR}` for the variable that seeds that very secret (its `Spec.env`),
+    /// `secret:stored` or `null`, never a literal value.
+    pub untrusted: bool,
 }
 
 /// Apply a document through every section's service. The answer carries
@@ -1046,6 +1172,7 @@ pub fn apply_extra(state: &AppState, extra: Extra, principal: &str) -> Vec<Strin
         dry_run: false,
         principal: principal.to_string(),
         base: None,
+        untrusted: false,
     };
     let mut problems = Vec::new();
     apply_settings(state, &file, &opts, &mut problems);
@@ -1167,6 +1294,26 @@ fn apply_secrets(
             Some("") => problems.push(format!(
                 "secrets.{k}: empty (an unset variable?): kept as it is"
             )),
+            Some(raw) if opts.untrusted => {
+                let spec_env = state.settings.spec(k).and_then(|s| s.env);
+                match reference_name(raw) {
+                    Some(name) if Some(name) == spec_env => match std::env::var(name) {
+                        Ok(v) if !v.trim().is_empty() => {
+                            set.insert(k.clone(), Some(v));
+                        }
+                        _ => problems.push(format!(
+                            "secrets.{k}: {name} not set in the environment: kept as it is"
+                        )),
+                    },
+                    Some(name) => problems.push(format!(
+                        "secrets.{k}: a document from the repository may only read {} (not {name}): kept as it is",
+                        spec_env.unwrap_or("its own variable")
+                    )),
+                    None => problems.push(format!(
+                        "secrets.{k}: a document from the repository carries references (${{VAR}} or secret:stored), never a value: kept as it is"
+                    )),
+                }
+            }
             Some(raw) => {
                 let (value, missing) = config_file::expand_env(raw, |n| std::env::var(n).ok());
                 if !missing.is_empty() {
@@ -1187,9 +1334,12 @@ fn apply_secrets(
     let mut unset = Vec::new();
     if opts.prune {
         for spec in state.settings.specs() {
+            // The sign-in's secrets are never pruned: a document without the
+            // password hash would bring back the default password.
             if !spec.secret
                 || section.contains_key(spec.key)
                 || SKIPPED_GROUPS.contains(&spec.group)
+                || spec.group == "signin"
             {
                 continue;
             }
@@ -1239,6 +1389,16 @@ fn apply_mocks(
                 crate::mocks::service::ServiceError::from(e).message()
             ));
             continue;
+        }
+        let mut doc = doc;
+        if let (Some(path), Some(base)) = (doc.spec.clone(), opts.base.as_deref()) {
+            match contained_path(base, &path) {
+                Ok(full) => doc.spec = Some(full.display().to_string()),
+                Err(e) => {
+                    problems.push(format!("mocks.{}: {e} (skipped)", doc.name));
+                    continue;
+                }
+            }
         }
         docs.push(doc);
     }
@@ -1459,7 +1619,20 @@ fn apply_harness(
             ));
             continue;
         }
-        let scenario = match crate::harness::scenario::Scenario::from_value(&doc.scenario) {
+        // `secret:stored` takes the value of the saved scenario of that name.
+        let saved = h
+            .saved
+            .get(&doc.name)
+            .and_then(|s| serde_json::to_value(&s.scenario).ok());
+        let mut value = doc.scenario.clone();
+        if let Err(path) = fill_stored(&mut value, saved.as_ref(), "") {
+            problems.push(format!(
+                "harness.scenarios.{}: {path} is secret:stored, and no saved scenario of that name holds it (skipped)",
+                doc.name
+            ));
+            continue;
+        }
+        let scenario = match crate::harness::scenario::Scenario::from_value(&value) {
             Ok(s) => s,
             Err(e) => {
                 problems.push(format!("harness.scenarios.{}: {e} (skipped)", doc.name));

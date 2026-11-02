@@ -283,6 +283,9 @@ pub struct MockStore {
     file_agents: Arc<RwLock<crate::mcp::manage::agents::FilePolicy>>,
     /// Compiles that may run at once off the async runtime (`Svc::compiling`).
     compiles: Arc<tokio::sync::Semaphore>,
+    /// One save at a time: each writes the mock as it is now, so the last
+    /// write is the latest state whatever order the mutations finish in.
+    persist_lock: Arc<std::sync::Mutex<()>>,
     /// Recent compiles per visitor (rate limit), bounded by `MAX_RECOMPILE_KEYS`.
     recompiles: Arc<std::sync::Mutex<std::collections::HashMap<String, VecDeque<Instant>>>>,
 }
@@ -313,6 +316,7 @@ impl MockStore {
             file_portal: Arc::new(RwLock::new((Vec::new(), Utc::now()))),
             file_agents: Arc::new(RwLock::new(Default::default())),
             compiles: Arc::new(tokio::sync::Semaphore::new(COMPILE_PERMITS)),
+            persist_lock: Arc::new(std::sync::Mutex::new(())),
             recompiles: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
@@ -417,10 +421,25 @@ impl MockStore {
 
     /// Save the mock a mutation returned (persistence on).
     fn saved(&self, r: Result<Snapshot, StoreError>) -> Result<Snapshot, StoreError> {
-        if let (Ok(s), Some(dir)) = (&r, &self.persist_dir) {
-            super::persist::save(dir, s);
+        if let Ok(s) = &r {
+            self.persist_now(&s.name);
         }
         r
+    }
+
+    /// Write the saved copy of `name` as the store holds it now (or remove
+    /// it when the mock is gone). Called after the mutation's lock is
+    /// released; the persistence lock orders the writes, and each one reads
+    /// the current state, so a slow earlier save never overwrites a later one
+    /// nor brings a deleted mock back.
+    fn persist_now(&self, name: &str) {
+        let Some(dir) = &self.persist_dir else { return };
+        let _order = self.persist_lock.lock().unwrap_or_else(|p| p.into_inner());
+        let current = self.read().get(name).map(|e| snapshot(name, e));
+        match current {
+            Some(s) => super::persist::save(dir, &s),
+            None => super::persist::remove(dir, name),
+        }
     }
 
     pub fn limits(&self) -> MockLimits {
@@ -619,10 +638,8 @@ impl MockStore {
                 .collect();
             (changed, out)
         };
-        if let Some(dir) = &self.persist_dir {
-            for s in &changed {
-                super::persist::save(dir, s);
-            }
+        for s in &changed {
+            self.persist_now(&s.name);
         }
         Some(out)
     }
@@ -779,9 +796,9 @@ impl MockStore {
         rename: Option<&str>,
     ) -> Result<Snapshot, StoreError> {
         let r = self.set_draft_inner(name, compiled, rename);
-        if let (Ok(s), Some(dir)) = (&r, &self.persist_dir) {
+        if let Ok(s) = &r {
             if s.name != name {
-                super::persist::remove(dir, name);
+                self.persist_now(name);
             }
         }
         self.saved(r)
@@ -967,8 +984,8 @@ impl MockStore {
 
     pub fn delete(&self, name: &str) -> bool {
         let removed = self.delete_quietly(name);
-        if let (true, Some(dir)) = (removed, &self.persist_dir) {
-            super::persist::remove(dir, name);
+        if removed {
+            self.persist_now(name);
         }
         removed
     }

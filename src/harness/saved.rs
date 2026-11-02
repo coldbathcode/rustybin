@@ -30,6 +30,38 @@ pub struct Saved {
 pub struct SavedScenarios {
     dir: Option<PathBuf>,
     items: Mutex<BTreeMap<String, Saved>>,
+    /// Seals each file (its API keys and OAuth client secrets) with the
+    /// instance's secrets key; `None` without a key that survives a restart.
+    sealer: Option<crate::settings::Secrets>,
+}
+
+/// A saved scenario as written: the scenario sealed when a key is at hand.
+#[derive(Serialize, Deserialize)]
+struct OnDisk {
+    name: String,
+    saved_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scenario: Option<Scenario>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sealed: Option<crate::settings::Sealed>,
+}
+
+/// A saved scenario from its file: opened when sealed.
+fn open_saved(d: OnDisk, sealer: Option<&crate::settings::Secrets>) -> Result<Saved, String> {
+    let scenario = match (d.scenario, d.sealed) {
+        (Some(s), _) => s,
+        (None, Some(sealed)) => {
+            let sealer = sealer.ok_or("sealed, and no secrets key to open it")?;
+            let plain = sealer.open(&sealed)?;
+            serde_json::from_slice(&plain).map_err(|e| e.to_string())?
+        }
+        (None, None) => return Err("no scenario".into()),
+    };
+    Ok(Saved {
+        name: d.name,
+        saved_at: d.saved_at,
+        scenario,
+    })
 }
 
 /// A name a saved scenario may have (it is also its file name).
@@ -40,6 +72,11 @@ pub fn valid_name(name: &str) -> bool {
 impl SavedScenarios {
     /// The store, loaded from `<dir>/scenarios` when a state directory is set.
     pub fn new(state_dir: Option<&Path>) -> Self {
+        Self::with_sealer(state_dir, None)
+    }
+
+    /// The store with the files sealed under `sealer`.
+    pub fn with_sealer(state_dir: Option<&Path>, sealer: Option<crate::settings::Secrets>) -> Self {
         let dir = state_dir.map(|d| d.join("scenarios"));
         let mut items = BTreeMap::new();
         if let Some(dir) = &dir {
@@ -52,8 +89,9 @@ impl SavedScenarios {
                     let loaded = std::fs::read(&path)
                         .map_err(|e| e.to_string())
                         .and_then(|b| {
-                            serde_json::from_slice::<Saved>(&b).map_err(|e| e.to_string())
-                        });
+                            serde_json::from_slice::<OnDisk>(&b).map_err(|e| e.to_string())
+                        })
+                        .and_then(|d| open_saved(d, sealer.as_ref()));
                     match loaded {
                         Ok(s) if valid_name(&s.name) && items.len() < MAX_SAVED => {
                             items.insert(s.name.clone(), s);
@@ -79,6 +117,7 @@ impl SavedScenarios {
         Self {
             dir,
             items: Mutex::new(items),
+            sealer,
         }
     }
 
@@ -118,9 +157,28 @@ impl SavedScenarios {
         if let Some(dir) = &self.dir {
             let write = || -> std::io::Result<()> {
                 std::fs::create_dir_all(dir)?;
-                let tmp = dir.join(format!(".{name}.json.tmp"));
-                std::fs::write(&tmp, serde_json::to_vec_pretty(&saved).unwrap_or_default())?;
-                std::fs::rename(&tmp, dir.join(format!("{name}.json")))
+                let disk = match &self.sealer {
+                    Some(s) => OnDisk {
+                        name: saved.name.clone(),
+                        saved_at: saved.saved_at.clone(),
+                        scenario: None,
+                        sealed: Some(
+                            s.seal(&serde_json::to_vec(&saved.scenario).unwrap_or_default())
+                                .map_err(std::io::Error::other)?,
+                        ),
+                    },
+                    None => OnDisk {
+                        name: saved.name.clone(),
+                        saved_at: saved.saved_at.clone(),
+                        scenario: Some(saved.scenario.clone()),
+                        sealed: None,
+                    },
+                };
+                crate::settings::write_private(
+                    &dir.join(format!("{name}.json")),
+                    &serde_json::to_vec_pretty(&disk).unwrap_or_default(),
+                )
+                .map_err(std::io::Error::other)
             };
             if let Err(e) = write() {
                 tracing::warn!(

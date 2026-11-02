@@ -445,10 +445,15 @@ impl Harness {
         if !config.harness.enabled {
             return None;
         }
-        Some(Self::from_harness_config(
+        // Saved scenarios are sealed with the instance's key when it
+        // survives a restart (they hold API keys and OAuth client secrets).
+        let secrets = crate::settings::Secrets::from_config(config);
+        let sealer = (secrets.source() != crate::settings::KeySource::Process).then_some(secrets);
+        Some(Self::build(
             &config.harness,
             &config.instance_id,
             metrics,
+            sealer,
         ))
     }
 
@@ -457,6 +462,15 @@ impl Harness {
         hc: &HarnessConfig,
         instance_id: &str,
         metrics: Option<Arc<crate::metrics::Metrics>>,
+    ) -> Arc<Self> {
+        Self::build(hc, instance_id, metrics, None)
+    }
+
+    fn build(
+        hc: &HarnessConfig,
+        instance_id: &str,
+        metrics: Option<Arc<crate::metrics::Metrics>>,
+        sealer: Option<crate::settings::Secrets>,
     ) -> Arc<Self> {
         let (allowlist, allowlist_warnings) = Allowlist::parse(&hc.targets);
         for w in &allowlist_warnings {
@@ -499,7 +513,7 @@ impl Harness {
             membership: Mutex::new(None),
             bound: OnceLock::new(),
             control: OnceLock::new(),
-            saved: saved::SavedScenarios::new(hc.state_dir.as_deref()),
+            saved: saved::SavedScenarios::with_sealer(hc.state_dir.as_deref(), sealer),
             resources: OnceLock::new(),
         })
     }

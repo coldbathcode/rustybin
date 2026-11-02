@@ -119,6 +119,7 @@ async fn apply(
         dry_run: body.dry_run,
         principal: crate::settings::principal(&headers, &state.config),
         base: None,
+        untrusted: false,
     };
     Json(super::apply(&state, file, &opts)).into_response()
 }

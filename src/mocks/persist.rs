@@ -94,12 +94,10 @@ pub fn save(dir: &Path, snap: &Snapshot) {
             return;
         }
     };
+    // A unique temporary file, synced, renamed into place, mode 0600 (a
+    // saved mock may hold demo credentials).
     let target = file_for(dir, &snap.name);
-    let tmp = dir.join(format!(".{}.json.tmp", snap.name));
-    let result = std::fs::create_dir_all(dir)
-        .and_then(|_| std::fs::write(&tmp, &text))
-        .and_then(|_| std::fs::rename(&tmp, &target));
-    if let Err(e) = result {
+    if let Err(e) = crate::settings::write_private(&target, &text) {
         tracing::warn!("mock {:?} not saved to {}: {e}", snap.name, dir.display());
     }
 }

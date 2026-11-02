@@ -248,7 +248,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("mcp", "servers", "", "This instance's MCP servers.", NO_FLAGS, [("GET", "/_rustybin/mcp-servers")], false, "mcp servers"),
     cmd!("mcp", "connections", "", "The saved connections.", NO_FLAGS, [("GET", "/_rustybin/mcp-connections")], false, "mcp connections"),
     cmd!("mcp", "connection", "<id>", "One saved connection.", NO_FLAGS, [("GET", "/_rustybin/mcp-connections/{id}")], false, "mcp connection acme"),
-    cmd!("mcp", "save-connection", "<id> --target URL", "Save a connection (its secrets sealed on the instance).", &[Flag::value("--target", "The MCP endpoint"), Flag::value("--name", "A display name"), Flag::value("--transport", "modern, session or legacy"), Flag::value("--mode", "browser or relay"), Flag::value("--auth", "The auth spec as JSON ({\"kind\": \"bearer\"})"), Flag::value("--secret", "name=value, repeatable (bearer, api_key, password, header:<name>)")], [("PUT", "/_rustybin/mcp-connections/{id}")], false, "mcp save-connection acme --target https://mcp.acme.example/mcp --auth '{\"kind\": \"bearer\"}' --secret bearer=TOKEN"),
+    cmd!("mcp", "save-connection", "<id> --target URL", "Save a connection (its secrets sealed on the instance).", &[Flag::value("--target", "The MCP endpoint"), Flag::value("--name", "A display name"), Flag::value("--transport", "modern, session or legacy"), Flag::value("--mode", "browser or relay"), Flag::value("--auth", "The auth spec as JSON ({\"kind\": \"bearer\"})"), Flag::value("--secret", "name=- (stdin) or name=@file, repeatable (bearer, api_key, password, header:<name>)")], [("PUT", "/_rustybin/mcp-connections/{id}")], false, "mcp save-connection acme --target https://mcp.acme.example/mcp --auth '{\"kind\": \"bearer\"}' --secret bearer=- < token.txt"),
     cmd!("mcp", "delete-connection", "<id>", "Forget a saved connection.", NO_FLAGS, [("DELETE", "/_rustybin/mcp-connections/{id}")], true, "mcp delete-connection acme --yes"),
     cmd!("mcp", "check", "<target>", "Run the checks against a server (--junit writes a report).", &[Flag::value("--transport", "modern, session or legacy"), Flag::value("--version", "The protocol version to speak"), Flag::value("--header", "An extra header 'Name: value', repeatable"), Flag::value("--connection", "A saved connection to take the credentials from"), Flag::value("--checks", "Only these checks, comma separated"), Flag::value("--junit", "Write a JUnit report to this file")], [("POST", "/_rustybin/mcp-checks")], false, "mcp check http://localhost:8080/mcp --junit mcp.xml"),
     cmd!("mcp", "runs", "", "The saved check runs.", NO_FLAGS, [("GET", "/_rustybin/mcp-checks")], false, "mcp runs"),
@@ -284,7 +284,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("git", "push", "", "Push the branch.", NO_FLAGS, [("POST", "/_rustybin/git/push")], false, "git push"),
     cmd!("git", "pull", "[--apply] [--dry-run] [--prune]", "Fetch and fast-forward; --apply applies the repository's document.", &[Flag::switch("--apply", "Apply the document"), Flag::switch("--dry-run", "Show the diff, apply nothing"), Flag::switch("--prune", "The document is the whole truth")], [("POST", "/_rustybin/git/pull")], false, "git pull --apply --dry-run"),
     cmd!("git", "resolve", "--with instance|repository", "After a diverged branch: the instance's copy wins, or the repository's.", &[Flag::value("--with", "instance or repository"), Flag::value("--message", "The commit message when the instance wins")], [("POST", "/_rustybin/git/resolve")], true, "git resolve --with repository --yes"),
-    cmd!("git", "key", "[--generate] [--replace]", "The deploy key's public half; --generate makes one.", &[Flag::switch("--generate", "Generate the key"), Flag::switch("--replace", "Replace an existing key")], [("GET", "/_rustybin/git/key"), ("POST", "/_rustybin/git/key")], false, "git key --generate"),
+    cmd!("git", "key", "[--generate] [--replace]", "The deploy key's public half; --generate makes one.", &[Flag::switch("--generate", "Generate the key"), Flag::switch("--replace", "Replace an existing key")], [("GET", "/_rustybin/git/key"), ("POST", "/_rustybin/git/key")], true, "git key --generate"),
     cmd!("git", "history", "", "The last commits of the working copy.", NO_FLAGS, [("GET", "/_rustybin/git/history")], false, "git history"),
     // ── Harness ──
     cmd!("harness", "status", "", "Harness mode: roles, caps, runs, the kill switch.", NO_FLAGS, [("GET", "/_rustybin/harness")], false, "harness status"),
@@ -1608,12 +1608,26 @@ async fn mcp(ctx: &mut Ctx, verb: &str) -> Result<()> {
                 .args
                 .value("--target")
                 .ok_or_else(|| Fail::Usage("--target URL is required".into()))?;
+            // A secret never on the command line (shell history, the process
+            // list): `name=-` reads the next line of stdin (or prompts),
+            // `name=@path` reads a file.
             let mut secrets = Map::new();
-            for s in ctx.args.values("--secret") {
-                let (k, v) = s
-                    .split_once('=')
-                    .ok_or_else(|| Fail::Usage(format!("--secret {s:?}: expected name=value")))?;
-                secrets.insert(k.to_string(), json!(v));
+            for (line, s) in ctx.args.values("--secret").into_iter().enumerate() {
+                let (k, v) = s.split_once('=').ok_or_else(|| {
+                    Fail::Usage(format!("--secret {s:?}: expected name=- or name=@file"))
+                })?;
+                let value = match v {
+                    "-" => ctx.secret(k, true, line)?,
+                    file if file.starts_with('@') => std::fs::read_to_string(&file[1..])
+                        .map(|t| t.trim_end_matches(['\r', '\n']).to_string())
+                        .map_err(|e| Fail::Usage(format!("--secret {k}: {}: {e}", &file[1..])))?,
+                    _ => {
+                        return Err(Fail::Usage(format!(
+                            "--secret {k}=...: give name=- (stdin or a prompt) or name=@file, never the value on the command line"
+                        )))
+                    }
+                };
+                secrets.insert(k.to_string(), json!(value));
             }
             let body = json!({
                 "name": ctx.args.value("--name").unwrap_or(&first),

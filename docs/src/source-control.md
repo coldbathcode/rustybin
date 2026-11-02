@@ -26,6 +26,32 @@ transport (`protocol.allow=never` plus https, ssh or file), and runs with a clea
 environment (`PATH` and its own variables, never the instance's secrets). Transport
 helpers (`name::address` remotes) are refused.
 
+## What a repository writer can do
+
+Anyone who can push to the repository controls what the document describes: the
+mocks, the settings it names, the registry and portal entries, the harness
+scenarios, the agents' rules and the health toggle, on the next pull with apply.
+Nothing more:
+
+- **Not the host's files.** A symbolic link in the working copy (`specs/`, the
+  document, a spec) is refused when committing, git checks links out as plain files
+  (`core.symlinks=false`), and a mock's `spec:` file must be a relative path inside
+  the repository (no `..`, no absolute path, no link).
+- **Not the process environment.** A pulled document is never expanded as text: a
+  `${NAME}` in a mock example stays that text. Under `secrets:` a reference reads only
+  the variable that seeds that very secret (`assist.openai_key: ${RUSTYBIN_ASSIST_OPENAI_KEY}`);
+  a literal value, or another variable, is refused with a problem. (A file given to
+  `RUSTYBIN_CONFIG_FILE` is the operator's own and is still expanded as before.)
+- **Not secret values in answers.** A diff names a secret's reference or says "a
+  value", never the value, and the same reference on both sides is no change.
+- **Not the sign-in.** Pruning never removes the console's password hash or user
+  name, so a document without them cannot bring back the default password; a public
+  instance refuses to clear the hash at all.
+- **Not the harness's credentials.** Saved scenarios are exported with their API keys
+  and OAuth client secrets as `secret:stored`, filled back from the saved scenario of
+  the same name when applied; the files under the harness state directory are sealed
+  with the secrets key.
+
 ## Connect a repository
 
 The `git.*` settings (**Management, Source control**, or `PATCH /_rustybin/settings`;

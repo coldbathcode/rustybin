@@ -149,6 +149,7 @@ fn export_then_apply_on_a_second_instance_gives_the_same_export() {
             dry_run: false,
             principal: "test".into(),
             base: None,
+            untrusted: false,
         },
     );
     assert_eq!(report["problems"], json!([]), "{report}");
@@ -190,6 +191,7 @@ fn a_version_1_file_is_a_version_2_document_with_mocks_only() {
             dry_run: false,
             principal: "t".into(),
             base: None,
+            untrusted: false,
         },
     );
     assert_eq!(report["results"]["mocks"]["created"], json!(["orders"]));
@@ -247,6 +249,7 @@ fn secret_references_resolve_from_the_environment_or_are_kept() {
         dry_run: false,
         principal: "t".into(),
         base: None,
+        untrusted: false,
     };
     let report = apply(&state, file, &opts);
     let problems = report["problems"].as_array().expect("problems").clone();
@@ -544,6 +547,7 @@ fn the_applied_registry_and_agents_survive_a_restart() {
             dry_run: false,
             principal: "t".into(),
             base: None,
+            untrusted: false,
         },
     );
     assert_eq!(report["problems"], json!([]), "{report}");
@@ -581,4 +585,227 @@ async fn the_mocks_apply_route_still_takes_a_version_2_document() {
         state.health.is_healthy(),
         "the mocks route applies the mocks only"
     );
+}
+
+fn untrusted(prune: bool, base: Option<&Path>) -> ApplyOptions {
+    ApplyOptions {
+        prune,
+        dry_run: false,
+        principal: "git:test".into(),
+        base: base.map(Path::to_path_buf),
+        untrusted: true,
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_specs_directory_or_document_is_refused() {
+    let root = tempfile::tempdir().expect("tmp");
+    let repo = root.path().join("repo");
+    let outside = root.path().join("outside");
+    std::fs::create_dir_all(&repo).expect("repo");
+    std::fs::create_dir_all(&outside).expect("outside");
+    std::fs::write(outside.join("settings.json"), "{}").expect("file");
+    std::os::unix::fs::symlink(&outside, repo.join("specs")).expect("link");
+    let state = state_with_everything();
+    let export = super::export(&state, SecretsMode::Refs, true);
+    let e = write_dir_within(&export, &repo, &repo).expect_err("refused");
+    assert!(e.contains("symbolic link"), "{e}");
+    assert!(
+        outside.join("settings.json").exists(),
+        "nothing outside was touched"
+    );
+    // A linked document.
+    std::fs::remove_file(repo.join("specs")).expect("unlink");
+    std::os::unix::fs::symlink(outside.join("settings.json"), repo.join(DOCUMENT_NAME))
+        .expect("link");
+    let e = write_dir_within(&export, &repo, &repo).expect_err("refused");
+    assert!(e.contains("symbolic link"), "{e}");
+    assert_eq!(
+        std::fs::read_to_string(outside.join("settings.json")).expect("read"),
+        "{}"
+    );
+}
+
+#[test]
+fn a_pulled_document_does_not_read_the_environment_or_the_host() {
+    std::env::set_var("RUSTYBIN_TEST_PULLED_SECRET", "env-value-123456");
+    let dir = tempfile::tempdir().expect("tmp");
+    std::fs::write(
+        dir.path().join(DOCUMENT_NAME),
+        "version: 2\nmocks:\n  - name: leak\n    spec_inline: |\n      openapi: 3.0.3\n      info: {title: \"${RUSTYBIN_TEST_PULLED_SECRET}\", version: \"1\"}\n      paths: {}\n",
+    )
+    .expect("doc");
+    let (file, _) =
+        crate::sourcecontrol::read_document(&dir.path().join(DOCUMENT_NAME)).expect("read");
+    let text = serde_json::to_string(&file.mocks).expect("json");
+    assert!(text.contains("${RUSTYBIN_TEST_PULLED_SECRET}"), "{text}");
+    assert!(!text.contains("env-value-123456"));
+    // Secrets: only the variable of the secret itself; never a value.
+    let state = test_state_with(Config::for_tests());
+    let mut secrets = BTreeMap::new();
+    secrets.insert(
+        "leads.webhook_token".to_string(),
+        Some("${RUSTYBIN_TEST_PULLED_SECRET}".to_string()),
+    );
+    secrets.insert(
+        "assist.openai_key".to_string(),
+        Some("sk-a-literal-value".to_string()),
+    );
+    let doc = MocksFile {
+        version: 2,
+        secrets: Some(secrets),
+        ..Default::default()
+    };
+    let report = apply(&state, doc, &untrusted(false, None));
+    let problems = report["problems"].to_string();
+    assert!(
+        problems.contains("may only read RUSTYBIN_LEADS_WEBHOOK_TOKEN"),
+        "{problems}"
+    );
+    assert!(problems.contains("never a value"), "{problems}");
+    assert_eq!(
+        state.settings.secret_state("leads.webhook_token")["set"],
+        false
+    );
+    assert_eq!(
+        state.settings.secret_state("assist.openai_key")["set"],
+        false
+    );
+    // A spec file outside the working copy is refused.
+    let mut mocks = Vec::new();
+    mocks.push(
+        serde_json::from_value::<MockDoc>(json!({ "name": "host", "spec": "../../etc/passwd" }))
+            .expect("doc"),
+    );
+    mocks.push(
+        serde_json::from_value::<MockDoc>(json!({ "name": "abs", "spec": "/etc/hosts" }))
+            .expect("doc"),
+    );
+    let doc = MocksFile {
+        version: 2,
+        mocks: Some(mocks),
+        ..Default::default()
+    };
+    let report = apply(&state, doc, &untrusted(false, Some(dir.path())));
+    let problems = report["problems"].to_string();
+    assert!(
+        problems.contains("mocks.host: spec ../../etc/passwd"),
+        "{problems}"
+    );
+    assert!(
+        problems.contains("mocks.abs: spec /etc/hosts"),
+        "{problems}"
+    );
+    assert!(state.mocks.get("host").is_none() && state.mocks.get("abs").is_none());
+    std::env::remove_var("RUSTYBIN_TEST_PULLED_SECRET");
+}
+
+#[test]
+fn a_secret_diff_shows_references_never_values() {
+    let mut before = BTreeMap::new();
+    before.insert(
+        "assist.openai_key".to_string(),
+        Some("${RUSTYBIN_ASSIST_OPENAI_KEY}".to_string()),
+    );
+    let after = before.clone();
+    let b = MocksFile {
+        version: 2,
+        secrets: Some(before.clone()),
+        ..Default::default()
+    };
+    let a = MocksFile {
+        version: 2,
+        secrets: Some(after),
+        ..Default::default()
+    };
+    assert!(
+        diff(&b, &a, None).is_empty(),
+        "the same reference is no change"
+    );
+    let mut literal = before;
+    literal.insert(
+        "assist.openai_key".to_string(),
+        Some("sk-secret-value-123".to_string()),
+    );
+    let a = MocksFile {
+        version: 2,
+        secrets: Some(literal),
+        ..Default::default()
+    };
+    let changes = serde_json::to_string(&diff(&b, &a, None)).expect("json");
+    assert!(!changes.contains("sk-secret-value-123"), "{changes}");
+    assert!(changes.contains("a value"), "{changes}");
+}
+
+#[test]
+fn pruning_secrets_never_removes_the_password_hash() {
+    let state = test_state_with(Config::for_tests());
+    let hash = crate::login::hash_password("a-new-password-1").expect("hash");
+    let mut s = BTreeMap::new();
+    s.insert(crate::login::HASH_KEY.to_string(), Some(hash));
+    state
+        .settings
+        .update(BTreeMap::new(), s, "test")
+        .expect("set");
+    let doc = MocksFile {
+        version: 2,
+        secrets: Some(BTreeMap::new()),
+        ..Default::default()
+    };
+    let report = apply(&state, doc, &untrusted(true, None));
+    assert_eq!(report["results"]["secrets"]["unset"], json!([]), "{report}");
+    assert_eq!(
+        state.settings.secret_state(crate::login::HASH_KEY)["set"],
+        true
+    );
+}
+
+#[test]
+fn a_public_instance_refuses_to_clear_the_password_hash() {
+    let mut c = Config::for_tests();
+    c.public_mode = true;
+    let state = test_state_with(c);
+    let hash = crate::login::hash_password("a-new-password-1").expect("hash");
+    let mut s = BTreeMap::new();
+    s.insert(crate::login::HASH_KEY.to_string(), Some(hash));
+    state
+        .settings
+        .update(BTreeMap::new(), s, "test")
+        .expect("set");
+    assert!(state
+        .settings
+        .unset(crate::login::HASH_KEY, "test")
+        .is_err());
+    let mut clear = BTreeMap::new();
+    clear.insert(crate::login::HASH_KEY.to_string(), None);
+    assert!(state
+        .settings
+        .update(BTreeMap::new(), clear, "test")
+        .is_err());
+    assert_eq!(
+        state.settings.secret_state(crate::login::HASH_KEY)["set"],
+        true
+    );
+}
+
+#[test]
+fn harness_secrets_export_as_references_and_apply_back() {
+    let scenario = json!({
+        "name": "s",
+        "identities": { "api_keys": { "values": ["key-aaaa", "key-bbbb"] },
+                        "oauth": { "client_id": "c", "client_secret": "shh-very-secret" } },
+        "request": { "headers": { "Authorization": "Bearer tok", "X-Plain": "ok" } }
+    });
+    let exported = crate::harness::report::redact_scenario_with(&scenario, SECRET_STORED);
+    let text = exported.to_string();
+    for secret in ["key-aaaa", "shh-very-secret", "Bearer tok"] {
+        assert!(!text.contains(secret), "{text}");
+    }
+    assert!(text.contains("\"X-Plain\":\"ok\""));
+    let mut back = exported.clone();
+    fill_stored(&mut back, Some(&scenario), "").expect("filled from the saved one");
+    assert_eq!(back, scenario);
+    let mut orphan = exported;
+    assert!(fill_stored(&mut orphan, None, "").is_err());
 }

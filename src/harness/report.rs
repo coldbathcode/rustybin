@@ -1296,36 +1296,42 @@ pub fn sensitive_header(name: &str) -> bool {
 /// The scenario as stored in a report: credential-looking header values,
 /// listed API keys and OAuth client secrets replaced by `[redacted]`.
 pub fn redact_scenario(scenario: &Value) -> Value {
-    fn walk(v: &mut Value) {
+    redact_scenario_with(scenario, "[redacted]")
+}
+
+/// [`redact_scenario`] with another marker (`secret:stored` in a
+/// configuration export, which the apply fills back from the saved scenario).
+pub fn redact_scenario_with(scenario: &Value, marker: &str) -> Value {
+    fn walk(v: &mut Value, marker: &str) {
         match v {
             Value::Object(map) => {
                 if let Some(Value::Object(headers)) = map.get_mut("headers") {
                     for (name, value) in headers.iter_mut() {
                         if sensitive_header(name) {
-                            *value = Value::String("[redacted]".into());
+                            *value = Value::String(marker.into());
                         }
                     }
                 }
                 if let Some(Value::Object(keys)) = map.get_mut("api_keys") {
                     if let Some(Value::Array(values)) = keys.get_mut("values") {
                         for value in values.iter_mut() {
-                            *value = Value::String("[redacted]".into());
+                            *value = Value::String(marker.into());
                         }
                     }
                 }
                 if let Some(secret) = map.get_mut("client_secret") {
-                    *secret = Value::String("[redacted]".into());
+                    *secret = Value::String(marker.into());
                 }
                 for value in map.values_mut() {
-                    walk(value);
+                    walk(value, marker);
                 }
             }
-            Value::Array(items) => items.iter_mut().for_each(walk),
+            Value::Array(items) => items.iter_mut().for_each(|i| walk(i, marker)),
             _ => {}
         }
     }
     let mut out = scenario.clone();
-    walk(&mut out);
+    walk(&mut out, marker);
     out
 }
 

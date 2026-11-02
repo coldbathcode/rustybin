@@ -151,6 +151,7 @@ pub fn diff_config(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
         dry_run: true,
         principal: access.principal(),
         base: None,
+        untrusted: false,
     };
     let r = configdoc::apply(&ctx.app, file, &opts);
     let summary = apply_summary(&r, "Diff (nothing changed)");
@@ -181,6 +182,7 @@ pub async fn apply_config(ctx: &CallCtx, access: &Access, args: &Value, params: 
         dry_run,
         principal: access.principal(),
         base: None,
+        untrusted: false,
     };
     let r = configdoc::apply(&ctx.app, file, &opts);
     let verb = if dry_run {

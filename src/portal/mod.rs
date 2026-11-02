@@ -535,6 +535,8 @@ pub struct Portal {
     insights: Mutex<insights::Insights>,
     path: Option<PathBuf>,
     last_flush: Mutex<Option<Instant>>,
+    /// One write of `portal.json` at a time.
+    save_lock: Mutex<()>,
     /// Bumped on every publish and unpublish (part of the cache key).
     generation: AtomicU64,
     cache: Mutex<VecDeque<Arc<Cached>>>,
@@ -584,6 +586,7 @@ impl Portal {
             insights: Mutex::new(insights),
             path,
             last_flush: Mutex::new(None),
+            save_lock: Mutex::new(()),
             generation: AtomicU64::new(1),
             cache: Mutex::new(VecDeque::new()),
         }
@@ -596,6 +599,7 @@ impl Portal {
             insights: Mutex::new(insights::Insights::default()),
             path: None,
             last_flush: Mutex::new(None),
+            save_lock: Mutex::new(()),
             generation: AtomicU64::new(1),
             cache: Mutex::new(VecDeque::new()),
         }
@@ -739,11 +743,15 @@ impl Portal {
         if self.path.is_none() {
             return;
         }
-        let due = self
-            .last_flush
-            .lock()
-            .map(|t| t.is_none_or(|t| t.elapsed() >= FLUSH_EVERY))
-            .unwrap_or(false);
+        // The check and the claim under one lock: concurrent events never
+        // start two saves (the save itself is then ordered by `save_lock`).
+        let due = match self.last_flush.lock() {
+            Ok(mut t) if t.is_none_or(|t| t.elapsed() >= FLUSH_EVERY) => {
+                *t = Some(Instant::now());
+                true
+            }
+            _ => false,
+        };
         if due {
             if let Err(e) = self.save() {
                 tracing::warn!("portal: {e}");
@@ -762,6 +770,7 @@ impl Portal {
             insights: self.insights(),
         };
         let bytes = serde_json::to_vec_pretty(&doc).map_err(|e| e.to_string())?;
+        let _order = self.save_lock.lock().unwrap_or_else(|e| e.into_inner());
         crate::settings::write_private(path, &bytes)?;
         if let Ok(mut t) = self.last_flush.lock() {
             *t = Some(Instant::now());

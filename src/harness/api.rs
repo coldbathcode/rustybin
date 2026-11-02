@@ -169,14 +169,20 @@ pub async fn get_scenario(
     let Some((_, text)) = builtin_scenarios().iter().find(|(n, _)| *n == name) else {
         let saved = state.harness.as_ref().and_then(|h| h.saved.get(&name));
         return match saved {
-            Some(s) => match q.format.as_deref() {
-                Some("yaml") | Some("yml") => (
-                    [(header::CONTENT_TYPE, "application/yaml; charset=utf-8")],
-                    serde_yaml::to_string(&s.scenario).unwrap_or_default(),
-                )
-                    .into_response(),
-                _ => Json(serde_json::to_value(&s.scenario).unwrap_or(Value::Null)).into_response(),
-            },
+            // Its API keys and OAuth client secrets are never answered.
+            Some(s) => {
+                let shown = super::report::redact_scenario(
+                    &serde_json::to_value(&s.scenario).unwrap_or(Value::Null),
+                );
+                match q.format.as_deref() {
+                    Some("yaml") | Some("yml") => (
+                        [(header::CONTENT_TYPE, "application/yaml; charset=utf-8")],
+                        serde_yaml::to_string(&shown).unwrap_or_default(),
+                    )
+                        .into_response(),
+                    _ => Json(shown).into_response(),
+                }
+            }
             None => error(
                 StatusCode::NOT_FOUND,
                 format!("no built-in or saved scenario {name:?}"),

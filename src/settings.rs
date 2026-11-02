@@ -514,7 +514,8 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         create_private_dir(dir)?;
     }
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    // A name of its own per write: two writers never share a temporary file.
+    let tmp = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4().simple()));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -684,7 +685,14 @@ pub struct Settings {
     /// The trusted proxy header in the configuration, kept in step with
     /// `proxy.client_ip_header`.
     forward_header: Arc<crate::session::TrustedHeader>,
+    /// A public instance without a password from the environment: clearing
+    /// the stored hash would bring back the default password, so it is
+    /// refused (a new password replaces it instead).
+    keep_password_hash: bool,
 }
+
+/// What a public instance answers to clearing the console password hash.
+const KEEP_HASH: &str = "console.password_hash: a public instance would fall back to the default password: set a new password instead";
 
 fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
@@ -737,6 +745,9 @@ impl Settings {
             locked: config.settings_lock,
             unreadable: RwLock::new(BTreeSet::new()),
             forward_header: config.forward_header.clone(),
+            keep_password_hash: config.public_mode
+                && config.console_password.is_none()
+                && config.console_password_hash.is_none(),
         };
         store.check_secrets();
         store.sync();
@@ -993,6 +1004,11 @@ impl Settings {
                 locked.push(key.clone());
                 continue;
             }
+            let clears = value.as_deref().is_none_or(|v| v.trim().is_empty());
+            if clears && self.keep_password_hash && key == crate::login::HASH_KEY {
+                problems.push(KEEP_HASH.to_string());
+                continue;
+            }
             match value {
                 None => {
                     new_secrets.insert(key, None);
@@ -1092,6 +1108,9 @@ impl Settings {
     /// Forget the stored value of a key (back to the seed or the default).
     /// `Ok(false)` when nothing was stored.
     pub fn unset(&self, key: &str, principal: &str) -> Result<bool, UpdateError> {
+        if self.keep_password_hash && key == crate::login::HASH_KEY {
+            return Err(UpdateError::Invalid(vec![KEEP_HASH.to_string()]));
+        }
         let Some(spec) = self.spec(key) else {
             return Err(UpdateError::Invalid(vec![format!(
                 "{key}: unknown setting"
