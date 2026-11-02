@@ -337,14 +337,18 @@ AI assist: status, models, usage, test, run a task
 | Command | What it does | Calls |
 |---|---|---|
 | `rustybin ai status` | Whether AI assist is on, the provider, the caps. | `GET /_rustybin/assist` |
-| `rustybin ai models` | The curated models of every provider. | `GET /_rustybin/assist` |
+| `rustybin ai models [--load]` | The configured provider's models with tier, context, price, whether each reasons and the jobs it runs; --load asks the provider for its list with the stored key first (admin). Flags: `--load`. | `GET /_rustybin/assist/models`, `POST /_rustybin/assist/models` |
+| `rustybin ai jobs` | Which model each AI job (task) runs on, and whether a setting chose it. | `GET /_rustybin/assist/models` |
+| `rustybin ai use <model> [--job TASK] [--fast]` | Choose a model: the model for the capable jobs, with --fast the fast model, with --job the model of one job (empty with --job clears the choice). Flags: `--job` value, `--fast`. | `PATCH /_rustybin/settings` |
 | `rustybin ai usage` | Calls and tokens since start. | `GET /_rustybin/assist/usage` |
 | `rustybin ai test` | Call the provider once with the configured key. | `POST /_rustybin/assist/test` |
 | `rustybin ai run <task> [--input JSON] [--model M]` | Run an assist task (free_answer, explain, suggest, ...) and print its answer. Flags: `--input` value, `--model` value. | `POST /_rustybin/assist/run` |
 
 ```bash
 rustybin ai status
-rustybin ai models
+rustybin ai models --load
+rustybin ai jobs
+rustybin ai use gpt-5-mini --job explain
 rustybin ai usage
 rustybin ai test
 rustybin ai run free_answer --input '{"question": "what does /delay do?"}'

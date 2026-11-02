@@ -350,6 +350,8 @@ pub static TOOLS: &[ToolDef] = &[
     }), &[])),
     // ── AI assist ──
     tool!("assist_status", "AI assist status", "Whether AI assist is on, the provider and models, the caps, each provider's key state ({set, hint}: never a value), the tasks and the usage total. Keys are set by the operator in the console or the CLI, never here.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("list_assist_models", "AI models", "The configured AI provider's models, as last loaded from the provider merged with the curated table: id, tier (fast or capable), context window, list price per million tokens when known, whether the model reasons before answering, whether the provider listed it, and the jobs (tasks) each runs; plus every job with its model and whether a setting chose it. Choosing is update_settings on assist.model, assist.fast_model or assist.job.<task>.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("load_assist_models", "Load the AI provider's models", "Ask the configured provider for its model list with the instance's stored key (one outbound call, no tokens spent) and keep it, then answer as list_assist_models does. Admin; asks the user to confirm.", Right::Admin, ro=false, destructive=false, idem=true, confirm=true, || obj(json!({ "confirm": confirm_prop() }), &[])),
     tool!("assist_usage", "AI usage", "AI calls, tokens and the estimated cost since start, per model and per task. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, no_args),
     tool!("test_assist", "Test the AI provider", "One small call to the configured provider with the instance's key (it costs a few tokens): the model answers or the error says why not. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, no_args),
     tool!("run_assist_task", "Run an AI task", "Run a read task of AI assist with its inputs: free_answer (question, context), explain (what, context), suggest, request_examples, tool_arguments, server_json, summarise_for_portal (assist_status lists them with their inputs). The writing tasks are generate_spec, generate_examples and edit_spec_with_ai. The answer costs the user's tokens.", Right::Read, ro=true, destructive=false, idem=false, confirm=false, || obj(json!({
@@ -944,6 +946,8 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         "check_egress" => settings::check_egress(ctx, access, &args),
         // AI assist
         "assist_status" => assist::assist_status(ctx, access, &args),
+        "list_assist_models" => assist::list_assist_models(ctx, access, &args),
+        "load_assist_models" => assist::load_assist_models(ctx, access, &args, params).await,
         "assist_usage" => assist::assist_usage(ctx, access, &args),
         "test_assist" => assist::test_assist(ctx, access, &args).await,
         "run_assist_task" => assist::run_assist_task(ctx, access, &args).await,

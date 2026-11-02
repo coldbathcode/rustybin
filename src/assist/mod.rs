@@ -17,10 +17,12 @@
 //!   usage per provider and model in memory (bounded) and in the metrics.
 //!
 //! Routes: `GET /_rustybin/assist`, `POST /_rustybin/assist/test`,
-//! `POST /_rustybin/assist/run` (SSE or JSON), `GET /_rustybin/assist/usage`.
+//! `POST /_rustybin/assist/run` (SSE or JSON), `GET /_rustybin/assist/usage`,
+//! `GET` and `POST /_rustybin/assist/models` (the provider's list, `catalog`).
 
 pub mod anthropic;
 pub mod api;
+pub mod catalog;
 pub mod gemini;
 pub mod mock;
 pub mod models;
@@ -39,7 +41,9 @@ use futures_util::{Stream, StreamExt};
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
-pub use api::{catalog, openapi_paths, router, RUN_PATH, STATUS_PATH, TEST_PATH, USAGE_PATH};
+pub use api::{
+    catalog, openapi_paths, router, MODELS_PATH, RUN_PATH, STATUS_PATH, TEST_PATH, USAGE_PATH,
+};
 use models::Tier;
 use provider::{Client, Event, Kind, Request};
 use task::Task;
@@ -63,33 +67,95 @@ pub const MAX_CACHE: usize = 64;
 pub const CACHE_TTL: Duration = Duration::from_secs(3600);
 /// Repairs of a structured answer that failed validation.
 pub const MAX_REPAIRS: u32 = 2;
+/// How long a loaded model list is served (it is loaded again after).
+pub const LOADED_TTL: Duration = Duration::from_secs(12 * 3600);
+/// A load this recent is answered as is (no second outbound call).
+pub const LOAD_DEBOUNCE: Duration = Duration::from_secs(5);
 const WINDOW: Duration = Duration::from_secs(60);
 
 // ── Settings ────────────────────────────────────────────────────────
 
-fn valid_provider(v: &Value) -> Result<(), String> {
-    match v.as_str() {
-        Some(s) if Kind::parse(s).is_some() => Ok(()),
-        Some(_) => Err("expected anthropic, openai, gemini, compatible or mock".to_string()),
-        None => Ok(()),
+/// The providers, as the `assist.provider` setting offers them (a select in
+/// the console).
+pub const PROVIDER_OPTIONS: &[&str] = &["anthropic", "openai", "gemini", "compatible", "mock"];
+
+/// The jobs a model can be chosen for: every task, with the key of its
+/// setting and its title. `jobs_match_the_tasks` keeps this in step with
+/// `task::all()`.
+pub const JOBS: &[(&str, &str, &str)] = &[
+    (
+        "spec_from_description",
+        "assist.job.spec_from_description",
+        "Describe an API",
+    ),
+    (
+        "examples_for_operations",
+        "assist.job.examples_for_operations",
+        "Generate examples",
+    ),
+    ("edit_spec", "assist.job.edit_spec", "Edit with AI"),
+    (
+        "request_examples",
+        "assist.job.request_examples",
+        "Generate requests",
+    ),
+    ("free_answer", "assist.job.free_answer", "Ask Rustybin"),
+    ("explain", "assist.job.explain", "Explain"),
+    ("suggest", "assist.job.suggest", "Suggestions"),
+    (
+        "tool_arguments",
+        "assist.job.tool_arguments",
+        "Generate arguments",
+    ),
+    (
+        "sampling",
+        "assist.job.sampling",
+        "Answer a sampling request",
+    ),
+    (
+        "server_json",
+        "assist.job.server_json",
+        "Write a server.json",
+    ),
+    (
+        "summarise_for_portal",
+        "assist.job.summarise_for_portal",
+        "Write the portal summary",
+    ),
+];
+
+/// `claude`, `google`, `openai-compatible` and the other aliases `Kind::parse`
+/// accepts are stored as the provider's name.
+fn normalise_provider(v: &Value) -> Value {
+    match v.as_str().and_then(Kind::parse) {
+        Some(k) => Value::String(k.as_str().to_string()),
+        None => v.clone(),
     }
+}
+
+/// The setting key of a job's model, when the task is a job.
+pub fn job_key(task: &str) -> Option<&'static str> {
+    JOBS.iter().find(|(t, _, _)| *t == task).map(|(_, k, _)| *k)
 }
 
 /// The settings of AI assist.
 pub fn specs() -> Vec<Spec> {
-    vec![
+    let mut specs = vec![
         Spec::new(
             "assist.provider",
             "assist",
             "Provider",
-            "anthropic (Messages API), openai (Chat Completions), gemini (generateContent), compatible (any OpenAI-compatible endpoint, see the base URL) or mock (the built-in answers, for demos and tests). Empty: AI assist is off.",
-            SettingKind::Text { max_len: 32 },
+            "anthropic (Messages API), openai (Chat Completions), gemini (generateContent), compatible (any OpenAI-compatible endpoint, see the base URL) or mock (the built-in answers, for demos and tests). Cleared: AI assist is off.",
+            SettingKind::Choice { options: PROVIDER_OPTIONS },
             Value::Null,
         )
+        .normalize(normalise_provider)
         .env("RUSTYBIN_ASSIST_PROVIDER", |c| {
-            c.assist_provider.clone().map(Value::String)
-        })
-        .check(valid_provider),
+            c.assist_provider
+                .as_deref()
+                .and_then(Kind::parse)
+                .map(|k| Value::String(k.as_str().to_string()))
+        }),
         Spec::new(
             "assist.model",
             "assist",
@@ -171,7 +237,18 @@ pub fn specs() -> Vec<Spec> {
             c.assist_compatible_key.clone().map(Value::String)
         })
         .secret(),
-    ]
+    ];
+    for (_, key, title) in JOBS {
+        specs.push(Spec::new(
+            key,
+            "assist_jobs",
+            title,
+            "The model this job runs on, by id (see the provider's models above). Empty: the tier default. A model the provider does not offer is ignored.",
+            SettingKind::Text { max_len: 128 },
+            Value::Null,
+        ));
+    }
+    specs
 }
 
 // ── State ───────────────────────────────────────────────────────────
@@ -187,6 +264,60 @@ pub struct Status {
     pub enabled: bool,
     /// Why it is off, when it is.
     pub reason: Option<String>,
+    /// The model of every job: `(task, model, chosen)`, chosen when a
+    /// `assist.job.*` setting names it rather than the tier default.
+    pub jobs: Vec<(&'static str, String, bool)>,
+    /// Job settings that name a model the provider does not offer (a model of
+    /// another provider, after a switch): `(task, model)`. The job runs on its
+    /// tier default instead.
+    pub ignored: Vec<(&'static str, String)>,
+}
+
+impl Status {
+    /// The model a task runs on: its job setting, else its tier's default.
+    pub fn model_for(&self, task: &Task) -> String {
+        self.jobs
+            .iter()
+            .find(|(t, _, _)| *t == task.name)
+            .map(|(_, m, _)| m.clone())
+            .unwrap_or_else(|| match task.tier {
+                Tier::Fast => self.fast_model.clone(),
+                Tier::Capable => self.model.clone(),
+            })
+    }
+
+    /// The jobs for the API: task, title, tier, model and where it comes from.
+    pub fn jobs_json(&self) -> Vec<Value> {
+        JOBS.iter()
+            .map(|(task, key, title)| {
+                let (model, chosen) = self
+                    .jobs
+                    .iter()
+                    .find(|(t, _, _)| t == task)
+                    .map(|(_, m, c)| (m.clone(), *c))
+                    .unwrap_or_default();
+                let tier = task::all()
+                    .iter()
+                    .find(|t| t.name == *task)
+                    .map(|t| t.tier.as_str())
+                    .unwrap_or("capable");
+                let ignored = self
+                    .ignored
+                    .iter()
+                    .find(|(t, _)| t == task)
+                    .map(|(_, m)| m.clone());
+                json!({
+                    "task": task,
+                    "setting": key,
+                    "title": title,
+                    "tier": tier,
+                    "model": model,
+                    "source": if chosen { "setting" } else { "default" },
+                    "ignored": ignored,
+                })
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -237,7 +368,35 @@ pub struct Assist {
     overrides: Mutex<HashMap<Kind, String>>,
     /// A scripted provider in place of the mock (tests).
     scripted: Mutex<Option<provider::Script>>,
+    /// The provider's model list, as last loaded (at most `catalog::MAX_MODELS`).
+    loaded: Mutex<Option<catalog::Loaded>>,
+    /// One model list load at a time.
+    load_gate: tokio::sync::Mutex<()>,
     started: String,
+}
+
+/// Why the model list could not be loaded.
+#[derive(Debug)]
+pub enum LoadError {
+    /// No provider, or it is not configured (503 `assist_disabled`).
+    Disabled(String),
+    /// The provider or the outbound policy refused (502 `provider_error`).
+    Provider(String),
+}
+
+impl LoadError {
+    pub fn message(&self) -> &str {
+        match self {
+            LoadError::Disabled(m) | LoadError::Provider(m) => m,
+        }
+    }
+
+    pub fn reason(&self) -> &'static str {
+        match self {
+            LoadError::Disabled(_) => "assist_disabled",
+            LoadError::Provider(_) => "provider_error",
+        }
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -266,6 +425,8 @@ impl Assist {
             cache: Mutex::new(HashMap::new()),
             overrides: Mutex::new(HashMap::new()),
             scripted: Mutex::new(None),
+            loaded: Mutex::new(None),
+            load_gate: tokio::sync::Mutex::new(()),
             started: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         };
         assist.sync_egress();
@@ -340,6 +501,30 @@ impl Assist {
             Some(k) if !key_set => Some(format!("Add the {} key", k.as_str())),
             Some(_) => None,
         };
+        let mut ignored = Vec::new();
+        let jobs = JOBS
+            .iter()
+            .map(|(task, key, _)| {
+                let chosen = self.settings.string(key).filter(|m| !m.trim().is_empty());
+                let tier = task::all()
+                    .iter()
+                    .find(|t| t.name == *task)
+                    .map(|t| t.tier)
+                    .unwrap_or(Tier::Capable);
+                let fallback = match tier {
+                    Tier::Fast => fast_model.clone(),
+                    Tier::Capable => model.clone(),
+                };
+                match chosen {
+                    Some(m) if self.offers(kind, &m) => (*task, m, true),
+                    Some(m) => {
+                        ignored.push((*task, m));
+                        (*task, fallback, false)
+                    }
+                    None => (*task, fallback, false),
+                }
+            })
+            .collect();
         Status {
             kind,
             model,
@@ -348,7 +533,135 @@ impl Assist {
             key_set,
             enabled: reason.is_none(),
             reason,
+            jobs,
+            ignored,
         }
+    }
+
+    /// What identifies the list a provider gives: its kind, base URL and key
+    /// (hashed). A list loaded under another one is not served.
+    fn fingerprint(&self, kind: Kind) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let key = self.key(kind);
+        let key_hash = Sha256::digest(key.as_ref().map(|k| k.as_bytes()).unwrap_or_default());
+        let mut h = Sha256::new();
+        h.update(kind.as_str().as_bytes());
+        h.update([0]);
+        h.update(self.base_url(kind).unwrap_or_default().as_bytes());
+        h.update([0]);
+        h.update(key_hash);
+        h.finalize().into()
+    }
+
+    /// The list loaded for the provider as it is configured now, when it is
+    /// younger than `max_age`.
+    fn with_loaded<R>(
+        &self,
+        kind: Kind,
+        max_age: Duration,
+        f: impl FnOnce(Option<&catalog::Loaded>) -> R,
+    ) -> R {
+        let fingerprint = self.fingerprint(kind);
+        let now = self.clock.mono();
+        let guard = lock(&self.loaded);
+        let current = guard.as_ref().filter(|l| {
+            l.kind == kind && l.fingerprint == fingerprint && now.saturating_sub(l.mono) < max_age
+        });
+        f(current)
+    }
+
+    /// Whether the provider offers a model: its curated table or the list
+    /// loaded from it. Without a loaded list a compatible endpoint (no
+    /// curated table) and the mock (answers any id) take any id.
+    fn offers(&self, kind: Option<Kind>, id: &str) -> bool {
+        let Some(kind) = kind else { return true };
+        if kind == Kind::Mock || models::for_provider(kind).iter().any(|m| m.id == id) {
+            return true;
+        }
+        self.with_loaded(kind, LOADED_TTL, |l| match l {
+            Some(l) => l.entries.iter().any(|e| e.id == id),
+            None => kind == Kind::Compatible,
+        })
+    }
+
+    /// Ask the provider for its models with the stored key and keep the list
+    /// (`POST /_rustybin/assist/models`); answers the merged list. One load
+    /// at a time; a load under `LOAD_DEBOUNCE` old is answered as is.
+    pub async fn load_models(&self) -> Result<Value, LoadError> {
+        self.sync_egress();
+        let status = self.status();
+        let kind = status.kind.ok_or_else(|| {
+            LoadError::Disabled("No AI provider is set: pick one under Management, AI".to_string())
+        })?;
+        if let Some(reason) = &status.reason {
+            if kind != Kind::Compatible || status.base_url.is_none() {
+                return Err(LoadError::Disabled(reason.clone()));
+            }
+        }
+        let _gate = self.load_gate.lock().await;
+        if self.with_loaded(kind, LOAD_DEBOUNCE, |l| l.is_some()) {
+            return Ok(self.models_json());
+        }
+        let fingerprint = self.fingerprint(kind);
+        let base = self.base_url(kind).unwrap_or_default();
+        let key = self.key(kind);
+        let mut loaded =
+            catalog::fetch(&self.egress, kind, &base, key.as_ref().map(|k| k.as_str()))
+                .await
+                .map_err(|p| LoadError::Provider(p.message))?;
+        loaded.fingerprint = fingerprint;
+        loaded.mono = self.clock.mono();
+        tracing::info!(target: "rustybin::assist", provider = kind.as_str(), listed = loaded.listed, kept = loaded.entries.len(), "model list loaded");
+        *lock(&self.loaded) = Some(loaded);
+        Ok(self.models_json())
+    }
+
+    /// The models of the configured provider for the API: the loaded list
+    /// merged with the curated table, each with the jobs it is chosen for.
+    pub fn models_json(&self) -> Value {
+        let status = self.status();
+        let Some(kind) = status.kind else {
+            return json!({
+                "provider": Value::Null,
+                "enabled": false,
+                "reason": status.reason,
+                "loaded": Value::Null,
+                "models": [],
+                "jobs": status.jobs_json(),
+            });
+        };
+        let loaded = self.with_loaded(kind, LOADED_TTL, |l| l.cloned());
+        let mut models = catalog::merged(kind, loaded.as_ref());
+        for m in &mut models {
+            let id = m["id"].as_str().unwrap_or_default().to_string();
+            let jobs: Vec<&str> = status
+                .jobs
+                .iter()
+                .filter(|(_, model, _)| *model == id)
+                .map(|(t, _, _)| *t)
+                .collect();
+            let mut default_for = Vec::new();
+            if status.model == id {
+                default_for.push("model");
+            }
+            if status.fast_model == id {
+                default_for.push("fast_model");
+            }
+            m["jobs"] = json!(jobs);
+            m["default_for"] = json!(default_for);
+        }
+        json!({
+            "provider": kind.as_str(),
+            "enabled": status.enabled,
+            "reason": status.reason,
+            "loaded": loaded.as_ref().map(|l| json!({
+                "at": l.at,
+                "listed": l.listed,
+                "kept": l.entries.len(),
+            })),
+            "models": models,
+            "jobs": status.jobs_json(),
+        })
     }
 
     /// Allow the hosts of every provider that has a key (and the compatible
@@ -664,10 +977,7 @@ impl Assist {
         let model = params
             .model
             .filter(|m| !m.trim().is_empty() && m.len() <= 128)
-            .unwrap_or_else(|| match task.tier {
-                Tier::Fast => status.fast_model.clone(),
-                Tier::Capable => status.model.clone(),
-            });
+            .unwrap_or_else(|| status.model_for(task));
         if model.is_empty() {
             return Err(Refusal::Disabled("no model is set".to_string()));
         }

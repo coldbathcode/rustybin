@@ -777,7 +777,22 @@ def run_theme(browser, theme):
         expect(page.locator("text=AI assist is on")).to_have_count(1)
         page.locator("#assist-test").click()
         page.wait_for_selector("text=The provider answered in")
+        # Models and jobs: a control per job, the provider's list loaded, a
+        # job model saved and shown in the jobs table, then cleared.
+        page.wait_for_selector("form[aria-label='Settings: assist_jobs']")
+        for s in doc["settings"]:
+            if s["group"] == "assist_jobs":
+                expect(page.locator(f"[aria-label='{s['key']}']")).to_have_count(1)
+        page.locator("#assist-load-models").click()
+        page.wait_for_selector("#assist-catalog >> text=Loaded from mock")
+        page.wait_for_selector("#assist-provider-models >> text=rustybin-mock")
+        page.locator("[aria-label='assist.job.explain']").fill("mock-fast-9")
+        page.get_by_role("button", name="Save job models").click()
+        page.wait_for_selector("#assist-jobs >> text=mock-fast-9")
         shot(page, theme, "15-management-ai")
+        page.locator("[aria-label='assist.job.explain']").fill("")
+        page.get_by_role("button", name="Save job models").click()
+        expect(page.locator("#assist-jobs >> text=mock-fast-9")).to_have_count(0)
         page.get_by_role("tab", name="Network").click()
         for s in doc["settings"]:
             if s["group"] in ("egress", "leads", "registry"):

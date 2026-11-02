@@ -352,6 +352,72 @@ pub async fn post_sse(
     Ok(Box::pin(stream))
 }
 
+/// `GET` a JSON document from a provider through the outbound policy (the
+/// model lists): the same resolution, pinning, timeout and caps as a
+/// completion, the provider's error text on a non-2xx answer.
+pub async fn get_json(
+    egress: &Egress,
+    url: &str,
+    headers: Vec<(&'static str, String)>,
+) -> Result<Value, Problem> {
+    let pinned = egress
+        .resolve(url, Purpose::Assist)
+        .await
+        .map_err(|e| Problem::new(0, format!("outbound call refused: {e}")))?;
+    let client = egress
+        .client(&pinned, TIMEOUT)
+        .map_err(|e| Problem::new(0, format!("client: {e}")))?;
+    let mut request = client.get(&pinned.url).header("accept", "application/json");
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    let resp = request
+        .send()
+        .await
+        .map_err(|e| Problem::new(0, describe_reqwest(&e)))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let bytes = read_capped(resp, MAX_ERROR_BYTES).await;
+        let text = String::from_utf8_lossy(&bytes);
+        return Err(Problem::new(
+            status.as_u16(),
+            provider_error(&text, status.as_u16()),
+        ));
+    }
+    let bytes = read_limited(resp, MAX_RESPONSE_BYTES)
+        .await
+        .map_err(|e| Problem::new(status.as_u16(), e))?;
+    serde_json::from_slice(&bytes).map_err(|e| {
+        Problem::new(
+            status.as_u16(),
+            format!("the provider's answer is not JSON: {e}"),
+        )
+    })
+}
+
+/// The whole body, or why not: larger than `cap`, or the transport failed
+/// part way (never a truncated document read as "not JSON").
+async fn read_limited(resp: reqwest::Response, cap: usize) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            format!(
+                "the provider's answer was cut off: {}",
+                describe_reqwest(&e)
+            )
+        })?;
+        if out.len() + chunk.len() > cap {
+            return Err(format!(
+                "the provider's answer is larger than {} MiB",
+                cap / (1024 * 1024)
+            ));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
 async fn read_capped(resp: reqwest::Response, cap: usize) -> Vec<u8> {
     let mut out = Vec::new();
     let mut stream = resp.bytes_stream();

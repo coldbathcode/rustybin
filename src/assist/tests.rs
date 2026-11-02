@@ -1064,14 +1064,55 @@ async fn stand_in(kind: Kind) -> (std::net::SocketAddr, Arc<Mutex<Vec<Value>>>) 
             ([("content-type", "text/event-stream")], body).into_response()
         }
     };
+    // The model lists, in each provider's shape (the key checked as above).
+    let list = move |headers: axum::http::HeaderMap| async move {
+        let auth_ok = match kind {
+            Kind::Anthropic => {
+                headers.get("x-api-key").and_then(|v| v.to_str().ok()) == Some("ant-key-1234567")
+            }
+            Kind::OpenAi | Kind::Compatible => {
+                headers.get("authorization").and_then(|v| v.to_str().ok())
+                    == Some("Bearer oai-key-1234567")
+            }
+            Kind::Gemini => {
+                headers.get("x-goog-api-key").and_then(|v| v.to_str().ok())
+                    == Some("gem-key-1234567")
+            }
+            Kind::Mock => true,
+        };
+        if !auth_ok {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [("content-type", "application/json")],
+                json!({"error": {"message": "invalid key"}}).to_string(),
+            )
+                .into_response();
+        }
+        let body = match kind {
+            Kind::Anthropic => {
+                json!({"data": [{"id": "claude-sonnet-5-5", "display_name": "Claude Sonnet 5.5", "created_at": "2026-04-01T00:00:00Z"}, {"id": "claude-haiku-5-5", "display_name": "Claude Haiku 5.5"}], "has_more": false})
+            }
+            Kind::Gemini => {
+                json!({"models": [{"name": "models/gemini-2.5-pro", "displayName": "Gemini 2.5 Pro", "inputTokenLimit": 1048576, "outputTokenLimit": 65536, "supportedGenerationMethods": ["generateContent"]}, {"name": "models/embedding-001", "supportedGenerationMethods": ["embedContent"]}]})
+            }
+            _ => {
+                json!({"object": "list", "data": [{"id": "gpt-5", "created": 1754000000}, {"id": "gpt-4.1", "created": 1744000000}, {"id": "local-model"}]})
+            }
+        };
+        ([("content-type", "application/json")], body.to_string()).into_response()
+    };
     // The paths as constants: the catalogue test scans route literals.
     const MESSAGES: &str = "/v1/messages";
     const CHAT: &str = "/v1/chat/completions";
     const GENERATE: &str = "/v1beta/models/{model}";
+    const MODELS_V1: &str = "/v1/models";
+    const MODELS_GEMINI: &str = "/v1beta/models";
     let app = Router::new()
         .route(MESSAGES, post(handler.clone()))
         .route(CHAT, post(handler.clone()))
-        .route(GENERATE, post(handler));
+        .route(GENERATE, post(handler))
+        .route(MODELS_V1, axum::routing::get(list))
+        .route(MODELS_GEMINI, axum::routing::get(list));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -1217,4 +1258,558 @@ async fn egress_refuses_an_unlisted_host() {
     let outs = collect(run_task(&state, "explain", json!({"subject": "x"})).expect("runs")).await;
     let err = error_of(&outs).expect("error");
     assert!(err.contains("refused"), "{err}");
+}
+
+#[test]
+fn jobs_match_the_tasks() {
+    let tasks: std::collections::BTreeSet<&str> =
+        crate::assist::task::all().iter().map(|t| t.name).collect();
+    let jobs: std::collections::BTreeSet<&str> =
+        crate::assist::JOBS.iter().map(|(t, _, _)| *t).collect();
+    assert_eq!(
+        tasks, jobs,
+        "every task is a job with a model setting, and only tasks are"
+    );
+    for (task, key, title) in crate::assist::JOBS {
+        assert_eq!(*key, format!("assist.job.{task}"));
+        let t = crate::assist::task::all()
+            .iter()
+            .find(|t| t.name == *task)
+            .expect("task");
+        assert_eq!(t.title, *title, "the job title is the task's");
+        assert_eq!(crate::assist::job_key(task), Some(*key));
+    }
+    assert_eq!(crate::assist::job_key("nope"), None);
+    // Every job has a setting in the schema, in its own group.
+    let specs = crate::assist::specs();
+    for (_, key, _) in crate::assist::JOBS {
+        let spec = specs.iter().find(|s| s.key == *key).expect("spec");
+        assert_eq!(spec.group, "assist_jobs");
+    }
+    let provider = specs
+        .iter()
+        .find(|s| s.key == "assist.provider")
+        .expect("provider");
+    assert!(matches!(
+        provider.kind,
+        crate::settings::Kind::Choice { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_job_setting_picks_the_model_and_the_models_route_lists_it() {
+    let state = state_with_mock();
+    // Defaults: every job runs on the mock model.
+    let st = state.assist.status();
+    assert!(st
+        .jobs
+        .iter()
+        .all(|(_, m, chosen)| m == "rustybin-mock" && !chosen));
+    state
+        .settings
+        .update(
+            BTreeMap::from([("assist.job.explain".to_string(), json!("mock-fast-9"))]),
+            BTreeMap::new(),
+            "test",
+        )
+        .expect("set");
+    let st = state.assist.status();
+    let explain = st
+        .jobs
+        .iter()
+        .find(|(t, _, _)| *t == "explain")
+        .expect("explain");
+    assert_eq!((explain.1.as_str(), explain.2), ("mock-fast-9", true));
+    let explain_task = crate::assist::task::all()
+        .iter()
+        .find(|t| t.name == "explain")
+        .expect("t");
+    assert_eq!(st.model_for(explain_task), "mock-fast-9");
+    let suggest_task = crate::assist::task::all()
+        .iter()
+        .find(|t| t.name == "suggest")
+        .expect("t");
+    assert_eq!(st.model_for(suggest_task), "rustybin-mock");
+    // The run carries the job's model (what was sent says so); the mock answers anyway.
+    let outs = collect(
+        run_task(
+            &state,
+            "explain",
+            json!({"kind": "request", "subject": {"method": "GET", "path": "/echo"}}),
+        )
+        .expect("run"),
+    )
+    .await;
+    let sent = outs
+        .iter()
+        .find_map(|o| {
+            if let Out::Sent(v) = o {
+                Some(v.clone())
+            } else {
+                None
+            }
+        })
+        .expect("sent");
+    assert_eq!(sent["model"], "mock-fast-9");
+    assert!(json_of(&outs).is_some());
+    // An explicit model still wins.
+    let outs = collect(
+        state
+            .assist
+            .run(RunParams {
+                task: task::find("explain").expect("task"),
+                inputs: json!({"kind": "request", "subject": {"method": "GET", "path": "/echo"}}),
+                model: Some("pinned-1".into()),
+                principal: "test".into(),
+            })
+            .expect("run"),
+    )
+    .await;
+    let sent = outs
+        .iter()
+        .find_map(|o| {
+            if let Out::Sent(v) = o {
+                Some(v.clone())
+            } else {
+                None
+            }
+        })
+        .expect("sent");
+    assert_eq!(sent["model"], "pinned-1");
+
+    // The routes: GET lists the curated mock model with its jobs; POST loads
+    // the mock's "list" and marks it listed.
+    let app = test_app_with(state.clone());
+    let resp = app
+        .clone()
+        .oneshot(bearer_request("GET", MODELS_PATH, None))
+        .await
+        .expect("r");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp).await;
+    assert_eq!(v["provider"], "mock");
+    assert!(v["loaded"].is_null());
+    let mock = &v["models"][0];
+    assert_eq!(mock["id"], "rustybin-mock");
+    assert_eq!(mock["curated"], true);
+    assert_eq!(mock["price_per_million"]["input"], 0.0);
+    assert!(mock["jobs"]
+        .as_array()
+        .is_some_and(|j| j.len() == crate::assist::JOBS.len() - 1));
+    assert_eq!(mock["default_for"], json!(["model", "fast_model"]));
+    let explain = v["jobs"]
+        .as_array()
+        .expect("jobs")
+        .iter()
+        .find(|j| j["task"] == "explain")
+        .expect("job");
+    assert_eq!(explain["model"], "mock-fast-9");
+    assert_eq!(explain["source"], "setting");
+    assert_eq!(explain["tier"], "fast");
+    assert_eq!(explain["setting"], "assist.job.explain");
+    let resp = app
+        .clone()
+        .oneshot(bearer_request("POST", MODELS_PATH, None))
+        .await
+        .expect("r");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp).await;
+    assert_eq!(v["loaded"]["kept"], 1);
+    assert_eq!(v["models"][0]["listed"], true);
+    assert_eq!(v["models"][0]["name"], "Built-in mock LLM");
+    // The status carries the jobs and the load.
+    let resp = app
+        .clone()
+        .oneshot(bearer_request("GET", STATUS_PATH, None))
+        .await
+        .expect("r");
+    let v = body_json(resp).await;
+    assert_eq!(v["models_loaded"]["kept"], 1);
+    assert!(v["jobs"]
+        .as_array()
+        .is_some_and(|j| j.len() == crate::assist::JOBS.len()));
+
+    // Without a provider: 503 on POST, an empty list on GET.
+    let off = test_app_with(test_state_with(Config::for_tests()));
+    let resp = off
+        .clone()
+        .oneshot(bearer_request("POST", MODELS_PATH, None))
+        .await
+        .expect("r");
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body_json(resp).await["reason"], "assist_disabled");
+    let resp = off
+        .oneshot(bearer_request("GET", MODELS_PATH, None))
+        .await
+        .expect("r");
+    let v = body_json(resp).await;
+    assert!(v["provider"].is_null());
+    assert_eq!(v["models"], json!([]));
+}
+
+async fn load_against_stand_in(
+    kind: Kind,
+    provider: &str,
+    key_field: fn(&mut Config, String),
+) -> Value {
+    let (addr, _seen) = stand_in(kind).await;
+    let mut c = Config::for_tests();
+    c.assist_provider = Some(provider.into());
+    c.egress_allow_loopback = true;
+    let key = match kind {
+        Kind::Anthropic => "ant-key-1234567",
+        Kind::Gemini => "gem-key-1234567",
+        _ => "oai-key-1234567",
+    };
+    key_field(&mut c, key.to_string());
+    if kind == Kind::Compatible {
+        c.assist_base_url = Some(format!("http://{addr}/v1"));
+        c.assist_model = Some("local-model".into());
+    }
+    let state = test_state_with(c);
+    if kind != Kind::Compatible {
+        let base = if kind == Kind::OpenAi {
+            format!("http://{addr}/v1")
+        } else {
+            format!("http://{addr}")
+        };
+        state.assist.override_endpoint(kind, &base);
+    }
+    state.assist.load_models().await.expect("load")
+}
+
+#[tokio::test]
+async fn model_lists_load_from_every_provider_shape() {
+    let v =
+        load_against_stand_in(Kind::OpenAi, "openai", |c, k| c.assist_openai_key = Some(k)).await;
+    assert_eq!(v["loaded"]["listed"], 3);
+    let ids: Vec<&str> = v["models"]
+        .as_array()
+        .expect("m")
+        .iter()
+        .map(|m| m["id"].as_str().unwrap_or(""))
+        .collect();
+    assert!(ids.contains(&"gpt-5") && ids.contains(&"gpt-4.1") && ids.contains(&"gpt-5-mini"));
+    let gpt5 = v["models"]
+        .as_array()
+        .expect("m")
+        .iter()
+        .find(|m| m["id"] == "gpt-5")
+        .expect("gpt-5");
+    assert_eq!(
+        (
+            gpt5["listed"].as_bool(),
+            gpt5["curated"].as_bool(),
+            gpt5["reasoning"].as_bool()
+        ),
+        (Some(true), Some(true), Some(true))
+    );
+    assert_eq!(gpt5["created"], "2025-07-31");
+    let mini = v["models"]
+        .as_array()
+        .expect("m")
+        .iter()
+        .find(|m| m["id"] == "gpt-5-mini")
+        .expect("mini");
+    assert_eq!(mini["listed"], false);
+    assert_eq!(mini["default_for"], json!(["fast_model"]));
+
+    let v = load_against_stand_in(Kind::Anthropic, "anthropic", |c, k| {
+        c.assist_anthropic_key = Some(k)
+    })
+    .await;
+    let sonnet = v["models"]
+        .as_array()
+        .expect("m")
+        .iter()
+        .find(|m| m["id"] == "claude-sonnet-5-5")
+        .expect("sonnet");
+    assert_eq!(sonnet["name"], "Claude Sonnet 5.5");
+    assert_eq!(sonnet["listed"], true);
+    assert!(sonnet["jobs"].as_array().is_some_and(|j| !j.is_empty()));
+
+    let v =
+        load_against_stand_in(Kind::Gemini, "gemini", |c, k| c.assist_gemini_key = Some(k)).await;
+    assert_eq!(v["loaded"]["kept"], 1, "embedding models are not listed");
+    let pro = v["models"]
+        .as_array()
+        .expect("m")
+        .iter()
+        .find(|m| m["id"] == "gemini-2.5-pro")
+        .expect("pro");
+    assert_eq!(pro["context"], 1_048_576);
+    assert_eq!(pro["output_limit"], 65_536);
+    assert_eq!(pro["reasoning"], true);
+
+    let v = load_against_stand_in(Kind::Compatible, "compatible", |c, k| {
+        c.assist_compatible_key = Some(k)
+    })
+    .await;
+    let local = v["models"]
+        .as_array()
+        .expect("m")
+        .iter()
+        .find(|m| m["id"] == "local-model")
+        .expect("local");
+    assert_eq!(local["curated"], false);
+    assert_eq!(local["default_for"], json!(["model", "fast_model"]));
+
+    // A wrong key is the provider's error, not a list.
+    let (addr, _) = stand_in(Kind::OpenAi).await;
+    let mut c = Config::for_tests();
+    c.assist_provider = Some("openai".into());
+    c.egress_allow_loopback = true;
+    c.assist_openai_key = Some("oai-wrong-1234567".into());
+    let state = test_state_with(c);
+    state
+        .assist
+        .override_endpoint(Kind::OpenAi, &format!("http://{addr}/v1"));
+    let e = state.assist.load_models().await.expect_err("refused");
+    assert!(e.message().contains("invalid key"), "{e:?}");
+    assert!(state.assist.models_json()["loaded"].is_null());
+}
+
+/// A provider's model list at `/v1/models` that counts its calls; `body`
+/// is what it answers, after `delay`.
+async fn list_server(
+    body: String,
+    delay: Duration,
+) -> (std::net::SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = calls.clone();
+    let body = Arc::new(body);
+    const LIST: &str = "/v1/models";
+    let app = Router::new().route(
+        LIST,
+        axum::routing::get(move || {
+            let calls = counted.clone();
+            let body = body.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(delay).await;
+                ([("content-type", "application/json")], (*body).clone()).into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (addr, calls)
+}
+
+fn openai_list_config(loopback: bool) -> Config {
+    let mut c = Config::for_tests();
+    c.assist_provider = Some("openai".into());
+    c.assist_openai_key = Some("oai-key-1234567".into());
+    c.egress_allow_loopback = loopback;
+    c
+}
+
+const OPENAI_LIST: &str = r#"{"data": [{"id": "gpt-5"}, {"id": "gpt-4.1"}]}"#;
+
+#[tokio::test]
+async fn a_failed_load_is_a_typed_error() {
+    // A keyless compatible endpoint that is down: the provider's failure
+    // (502), not "assist disabled".
+    let mut c = Config::for_tests();
+    c.assist_provider = Some("compatible".into());
+    c.assist_base_url = Some("http://127.0.0.1:1/v1".into());
+    c.assist_model = Some("local".into());
+    c.egress_allow_loopback = true;
+    let app = test_app_with(test_state_with(c));
+    let resp = app
+        .oneshot(bearer_request("POST", MODELS_PATH, None))
+        .await
+        .expect("r");
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(body_json(resp).await["reason"], "provider_error");
+
+    // The outbound policy refuses a loopback address: 502 with the reason.
+    let (addr, calls) = list_server(OPENAI_LIST.into(), Duration::ZERO).await;
+    let state = test_state_with(openai_list_config(false));
+    state
+        .assist
+        .override_endpoint(Kind::OpenAi, &format!("http://{addr}/v1"));
+    let app = test_app_with(state);
+    let resp = app
+        .oneshot(bearer_request("POST", MODELS_PATH, None))
+        .await
+        .expect("r");
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    let v = body_json(resp).await;
+    assert_eq!(v["reason"], "provider_error");
+    assert!(
+        v["error"].as_str().is_some_and(|e| e.contains("refused")),
+        "{v}"
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // A list larger than the cap says so (not "not JSON").
+    let big = format!(
+        r#"{{"data": [{{"id": "{}"}}]}}"#,
+        "x".repeat(super::provider::MAX_RESPONSE_BYTES + 10)
+    );
+    let (addr, _) = list_server(big, Duration::ZERO).await;
+    let state = test_state_with(openai_list_config(true));
+    state
+        .assist
+        .override_endpoint(Kind::OpenAi, &format!("http://{addr}/v1"));
+    let e = state.assist.load_models().await.expect_err("too large");
+    assert!(matches!(e, LoadError::Provider(_)));
+    assert!(e.message().contains("larger than 2 MiB"), "{e:?}");
+}
+
+#[tokio::test]
+async fn concurrent_loads_call_the_provider_once() {
+    let (addr, calls) = list_server(OPENAI_LIST.into(), Duration::from_millis(200)).await;
+    let state = test_state_with(openai_list_config(true));
+    state
+        .assist
+        .override_endpoint(Kind::OpenAi, &format!("http://{addr}/v1"));
+    let (a, b) = tokio::join!(state.assist.load_models(), state.assist.load_models());
+    assert!(a.is_ok() && b.is_ok());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // Right after: the same list, no second call.
+    state.assist.load_models().await.expect("load");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_loaded_list_is_served_only_for_the_key_and_url_it_came_from() {
+    let clock = Arc::new(ManualClock::new(chrono::Utc::now()));
+    let state =
+        crate::state::AppState::for_tests_with_clock(openai_list_config(true), clock.clone());
+    let (addr, calls) = list_server(OPENAI_LIST.into(), Duration::ZERO).await;
+    state
+        .assist
+        .override_endpoint(Kind::OpenAi, &format!("http://{addr}/v1"));
+    state.assist.load_models().await.expect("load");
+    assert_eq!(state.assist.models_json()["loaded"]["kept"], 2);
+    // Another key: the old list (maybe another organisation's models) is gone.
+    state
+        .settings
+        .update(
+            BTreeMap::new(),
+            BTreeMap::from([(
+                "assist.openai_key".to_string(),
+                Some("oai-other-7654321".to_string()),
+            )]),
+            "test",
+        )
+        .expect("key");
+    assert!(state.assist.models_json()["loaded"].is_null());
+    // Loaded again under the new key, then too old.
+    state.assist.load_models().await.expect("load");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(!state.assist.models_json()["loaded"].is_null());
+    clock.advance(LOADED_TTL + Duration::from_secs(1));
+    assert!(state.assist.models_json()["loaded"].is_null());
+    // Another base URL hides it too.
+    state.assist.load_models().await.expect("load");
+    state
+        .assist
+        .override_endpoint(Kind::OpenAi, "http://127.0.0.1:1/v1");
+    assert!(state.assist.models_json()["loaded"].is_null());
+}
+
+#[tokio::test]
+async fn a_job_model_of_another_provider_is_ignored_and_flagged() {
+    let mut c = openai_list_config(true);
+    c.assist_anthropic_key = Some("ant-key-1234567".into());
+    let state = test_state_with(c);
+    let set = |values: Vec<(&str, Value)>| {
+        state
+            .settings
+            .update(
+                values
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v))
+                    .collect(),
+                BTreeMap::new(),
+                "test",
+            )
+            .expect("set");
+    };
+    let explain = |st: &Status| {
+        st.jobs
+            .iter()
+            .find(|(t, _, _)| *t == "explain")
+            .map(|(_, m, c)| (m.clone(), *c))
+            .expect("explain")
+    };
+    set(vec![("assist.job.explain", json!("gpt-5-mini"))]);
+    assert_eq!(
+        explain(&state.assist.status()),
+        ("gpt-5-mini".to_string(), true)
+    );
+    // Switched to Anthropic: the OpenAI model is not sent there.
+    set(vec![("assist.provider", json!("anthropic"))]);
+    let st = state.assist.status();
+    let (model, chosen) = explain(&st);
+    assert!(!chosen);
+    assert_eq!(model, st.fast_model);
+    assert!(model.starts_with("claude"), "{model}");
+    let job = st
+        .jobs_json()
+        .into_iter()
+        .find(|j| j["task"] == "explain")
+        .expect("job");
+    assert_eq!(job["ignored"], "gpt-5-mini");
+    assert_eq!(job["source"], "default");
+
+    // A model only the provider's loaded list holds counts once loaded.
+    set(vec![
+        ("assist.provider", json!("openai")),
+        ("assist.job.explain", json!("gpt-4.1")),
+    ]);
+    assert!(
+        !explain(&state.assist.status()).1,
+        "not curated, not loaded"
+    );
+    let (addr, _) = list_server(OPENAI_LIST.into(), Duration::ZERO).await;
+    state
+        .assist
+        .override_endpoint(Kind::OpenAi, &format!("http://{addr}/v1"));
+    state.assist.load_models().await.expect("load");
+    assert_eq!(
+        explain(&state.assist.status()),
+        ("gpt-4.1".to_string(), true)
+    );
+}
+
+#[test]
+fn the_provider_aliases_are_stored_as_the_provider() {
+    let state = test_state_with(Config::for_tests());
+    for (alias, name) in [
+        ("claude", "anthropic"),
+        ("google", "gemini"),
+        ("openai-compatible", "compatible"),
+        (" OpenAI ", "openai"),
+    ] {
+        state
+            .settings
+            .update(
+                BTreeMap::from([("assist.provider".to_string(), json!(alias))]),
+                BTreeMap::new(),
+                "test",
+            )
+            .unwrap_or_else(|e| panic!("{alias}: {e:?}"));
+        assert_eq!(
+            state.settings.string("assist.provider").as_deref(),
+            Some(name)
+        );
+    }
+    assert!(state
+        .settings
+        .update(
+            BTreeMap::from([("assist.provider".to_string(), json!("nope"))]),
+            BTreeMap::new(),
+            "test",
+        )
+        .is_err());
 }

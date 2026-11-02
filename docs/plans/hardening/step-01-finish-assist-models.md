@@ -36,3 +36,24 @@ change hides the old list).
 
 CI is green on the change, the console shows and edits the job models, and the docs page has its
 table and tested example.
+
+## Build notes (2026-11-02)
+
+- Every finding is fixed; none was closed as not reproducible.
+- Provider aliases (master plan section 6): accepted again. A setting can carry a
+  `normalize` function (`settings::Spec::normalize`), applied before validation, so
+  `claude`, `google` and `openai-compatible` are stored as `anthropic`, `gemini` and
+  `compatible` from the API, the console, `rustybin.yaml` and the CLI alike.
+- A job model is checked against the provider's curated table and its loaded list.
+  The mock takes any id (it answers every model), and so does a compatible endpoint
+  until its list is loaded (it has no curated table). An ignored choice shows in
+  `Status.ignored`, in each job's `ignored` field and as a warning in the console.
+- The loaded list's fingerprint is SHA-256 over the provider, the base URL and the
+  key's SHA-256; the TTL is 12 hours (`assist::LOADED_TTL`) on the state's clock.
+  Single flight is a `tokio::sync::Mutex` around the load plus a 5 second debounce
+  (`LOAD_DEBOUNCE`): concurrent loads make one outbound call.
+- `provider::get_json` reads through `read_limited`, which says "larger than 2 MiB"
+  or "cut off: <transport error>" instead of truncating.
+- Console: the "Models and jobs" card on Management, AI (`#assist-catalog`,
+  `#assist-provider-models`, `#assist-jobs`, the `assist_jobs` settings form); the
+  conformance run loads the list, saves a job model and clears it.

@@ -57,6 +57,44 @@ The provider's host is allowed under the [outbound policy](configuration.md#outb
 60 second timeout, a 2 MiB response cap, pinned addresses and no redirects. In public
 mode no feature may reach any host, so only the mock provider works there.
 
+## Models and jobs
+
+Every task is a **job** that runs on a model: the capable jobs (describe an API,
+generate examples, edit with AI, free answers) on `assist.model`, the fast ones
+(explain, suggestions, request examples, tool arguments, sampling, server.json,
+the portal summary) on `assist.fast_model`, unless its own setting
+`assist.job.<task>` names another model. `GET /_rustybin/assist/models` answers the
+configured provider's models, each with its tier, context window, output limit,
+list price, whether it reasons before answering, whether it is curated and whether
+the provider listed it, and the jobs it runs; plus every job with its model and
+where the model comes from (`setting` or `default`).
+
+`POST /_rustybin/assist/models` (admin) asks the provider for its list with the
+stored key (OpenAI and compatible endpoints `GET /models`, Anthropic `GET
+/v1/models`, Gemini `GET /v1beta/models`, generateContent models only; the mock
+lists its own model), through the outbound policy, and keeps at most 500 entries.
+The list is served for the provider, base URL and key it was loaded with, for 12
+hours; a change of key or URL hides it until it is loaded again. A load within five
+seconds of the last one answers that one (no second call). A provider that refuses
+answers `502` (`provider_error`); no provider or no key answers `503`
+(`assist_disabled`).
+
+A job setting that names a model the provider does not offer (a model of another
+provider after a switch, or an id that is neither curated nor in the loaded list) is
+**ignored**: the job runs on its tier default and the job's `ignored` field names
+the model, so a Claude model is never sent to OpenAI. A compatible endpoint has no
+curated table, so before its list is loaded it takes any id. `assist.provider`
+accepts the aliases `claude`, `google` and `openai-compatible` and stores the
+provider's name.
+
+```hurl
+{{#include ../examples/assist/assist.hurl:models}}
+```
+
+In the console, **Management, AI, Models and jobs** has the load button, the
+provider's models with **Use** and **Fast**, the jobs table (an ignored choice is
+flagged) and a field per job.
+
 ## The console
 
 - **The assist bar** (top bar, `Ctrl+K` / `Cmd+K`): "Ask Rustybin". Focusing it shows
@@ -179,9 +217,9 @@ The same job from the API, the console, the command line, an agent and the confi
 
 | Surface | Where |
 |---|---|
-| API | `GET /_rustybin/assist`, `POST /_rustybin/assist/run`, `POST /_rustybin/assist/test`, `GET /_rustybin/assist/usage` |
-| Console | The assist bar (`Ctrl+K`), the sparkles in every view, **Management, AI** |
-| CLI | `rustybin ai status | models | usage | test | run`, `rustybin settings set assist.provider ...`, `rustybin settings set-secret assist.anthropic_key` ([reference](cli.md#ai)) |
-| Management MCP | `assist_status`, `assist_usage`, `test_assist`, `run_assist_task` (the read tasks); keys are never tool inputs ([agent page](agent-mcp.md)) |
-| `rustybin.yaml` | `settings: assist.provider, assist.model, assist.fast_model, assist.base_url`; the keys under `secrets:` as `${VAR}` or `secret:stored` references, never values |
+| API | `GET /_rustybin/assist`, `POST /_rustybin/assist/run`, `POST /_rustybin/assist/test`, `GET /_rustybin/assist/usage`, `GET` and `POST /_rustybin/assist/models` |
+| Console | The assist bar (`Ctrl+K`), the sparkles in every view, **Management, AI** (the provider, keys, models and jobs) |
+| CLI | `rustybin ai status | models [--load] | jobs | use | usage | test | run`, `rustybin settings set assist.provider ...`, `rustybin settings set-secret assist.anthropic_key` ([reference](cli.md#ai)) |
+| Management MCP | `assist_status`, `list_assist_models`, `load_assist_models` (confirmed), `assist_usage`, `test_assist`, `run_assist_task` (the read tasks); choosing a model is `update_settings`; keys are never tool inputs ([agent page](agent-mcp.md)) |
+| `rustybin.yaml` | `settings: assist.provider, assist.model, assist.fast_model, assist.base_url, assist.job.<task>`; the keys under `secrets:` as `${VAR}` or `secret:stored` references, never values |
 | Environment | `RUSTYBIN_ASSIST_PROVIDER`, `_MODEL`, `_FAST_MODEL`, `_BASE_URL`, `_ANTHROPIC_KEY`, `_OPENAI_KEY`, `_GEMINI_KEY`, `_COMPATIBLE_KEY`, `_MAX_CALLS_PER_MINUTE`, `_MAX_OUTPUT_TOKENS`, `_VISITORS` ([configuration](configuration.md#ai-assist)) |

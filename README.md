@@ -736,6 +736,7 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | POST | `/_rustybin/assist/test` | AI assist: one short call to the configured provider (admin) |
 | POST | `/_rustybin/assist/run` | AI assist: run a task (free_answer, explain, suggest) as SSE or one JSON answer |
 | GET | `/_rustybin/assist/usage` | AI assist: calls, tokens, estimated cost per provider, model and task (admin) |
+| GET POST | `/_rustybin/assist/models` | AI assist: the provider's models with tier, context, price and the jobs each runs; POST loads the list from the provider with the stored key (admin) |
 | GET DELETE | `/_rustybin/requests` | List captured requests (newest first); DELETE clears them |
 | GET | `/_rustybin/requests/stream` | Live feed of captured requests (SSE) |
 | GET | `/_rustybin/requests/{id}` | One captured request by id |

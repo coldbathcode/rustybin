@@ -1608,6 +1608,7 @@ const COVERAGE: &[(&str, Cover)] = &[
     ("/_rustybin/agents/{id}/sessions", Tool("end_agent_sessions")),
     ("/_rustybin/assist", Tool("assist_status")),
     ("/_rustybin/assist/usage", Tool("assist_usage")),
+    ("/_rustybin/assist/models", Tool("list_assist_models")),
     ("/_rustybin/assist/test", Tool("test_assist")),
     ("/_rustybin/assist/run", Tool("run_assist_task")),
     ("/_rustybin/catalog", Tool("find_endpoints")),
@@ -3030,4 +3031,26 @@ async fn the_new_tools_follow_the_control_scopes() {
     )
     .await;
     assert!(!is_error(&r), "{r}");
+}
+
+#[tokio::test]
+async fn load_assist_models_asks_for_confirmation_then_loads() {
+    let app = app_with(ai_config());
+    let r = tool(&app, &[], "list_assist_models", json!({})).await;
+    assert!(!is_error(&r), "{r}");
+    assert!(r["structuredContent"]["loaded"].is_null());
+    // Without confirmation nothing is loaded.
+    let r = tool(&app, &[], "load_assist_models", json!({})).await;
+    assert!(text_of(&r).contains("confirm"), "{r}");
+    let r = tool(&app, &[], "list_assist_models", json!({})).await;
+    assert!(r["structuredContent"]["loaded"].is_null());
+    let r = tool(&app, &[], "load_assist_models", json!({ "confirm": true })).await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["loaded"]["kept"], 1);
+    assert_eq!(r["structuredContent"]["models"][0]["listed"], true);
+    // No provider: the typed refusal.
+    let app = app_with(open_config());
+    let r = tool(&app, &[], "load_assist_models", json!({ "confirm": true })).await;
+    assert!(is_error(&r));
+    assert_eq!(r["structuredContent"]["reason"], "assist_disabled", "{r}");
 }

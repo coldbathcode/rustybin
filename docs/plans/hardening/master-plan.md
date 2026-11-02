@@ -49,7 +49,7 @@ working tree. The marker a new session looks for is the first row that is not do
 
 | Step | Title | Worst | Needs | Days | Status |
 |---|---|---|---|---|---|
-| [01](step-01-finish-assist-models.md) | Finish the assist model catalogue | high | | 1 | |
+| [01](step-01-finish-assist-models.md) | Finish the assist model catalogue | high | | 1 | done 2026-11-02 |
 | [02](step-02-hostile-input.md) | Hostile specs and queries: memory and CPU budgets | critical | | 2 | |
 | [03](step-03-mcp-credentials-and-agents.md) | MCP: saved credentials, self-calls, agent identity, untrusted content | high | | 1.5 | |
 | [04](step-04-console-token-scoping.md) | Console: the control token only where the console chose to send it | high | | 1.5 | |
@@ -77,8 +77,8 @@ to done with the date, and push only when the user says go.
   nodes.
 - **The demo IdP on public instances** (step 08): limiting the demo clients' redirect URIs on a
   public instance changes how gateway demos that redirect to arbitrary hosts behave.
-- **Provider aliases** (step 01): accept `claude`, `google` and `openai-compatible` again in
-  `assist.provider`, or document the break in the changelog.
+- **Provider aliases** (step 01): decided 2026-11-02, accepted again (normalised to the
+  provider's name before the choice check).
 - **Secrets from git** (step 07): refuse literal secret values in a pulled document, or accept them.
 
 ## 7. Risks

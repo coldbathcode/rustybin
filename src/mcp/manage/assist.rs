@@ -57,6 +57,74 @@ pub fn assist_usage(ctx: &CallCtx, _access: &Access, _args: &Value) -> Value {
     )
 }
 
+/// `list_assist_models`: the provider's models (as loaded, merged with the
+/// curated table) and the jobs.
+pub fn list_assist_models(ctx: &CallCtx, _access: &Access, _args: &Value) -> Value {
+    let v = ctx.app.assist.models_json();
+    let n = v["models"].as_array().map(Vec::len).unwrap_or(0);
+    let summary = match v["provider"].as_str() {
+        Some(p) => format!(
+            "{n} model(s) of {p}{}; {} job(s)",
+            if v["loaded"].is_null() {
+                " (curated; load_assist_models asks the provider)"
+            } else {
+                " (loaded from the provider)"
+            },
+            v["jobs"].as_array().map(Vec::len).unwrap_or(0)
+        ),
+        None => "No AI provider is set".to_string(),
+    };
+    ok(ctx, summary, v)
+}
+
+/// `load_assist_models` (admin, confirmed): ask the provider for its list.
+pub async fn load_assist_models(
+    ctx: &CallCtx,
+    _access: &Access,
+    args: &Value,
+    params: &Value,
+) -> Value {
+    let provider = ctx
+        .app
+        .assist
+        .status()
+        .kind
+        .map(|k| k.as_str().to_string())
+        .unwrap_or_else(|| "the AI provider".to_string());
+    let action = format!("ask {provider} for its model list with the instance's stored key");
+    if let Confirm::Answer(v) = confirm(ctx, "load_assist_models", args, params, &action).await {
+        return v;
+    }
+    match ctx.app.assist.load_models().await {
+        Ok(v) => {
+            let loaded = &v["loaded"];
+            ok(
+                ctx,
+                format!(
+                    "Loaded {} model(s) from {} ({} listed)",
+                    loaded["kept"].as_u64().unwrap_or(0),
+                    v["provider"].as_str().unwrap_or("?"),
+                    loaded["listed"].as_u64().unwrap_or(0)
+                ),
+                v,
+            )
+        }
+        Err(e) => {
+            let status = ctx.app.assist.status();
+            let mut v = err(format!(
+                "the model list could not be loaded: {}",
+                e.message()
+            ));
+            v["structuredContent"] = json!({
+                "error": e.message(),
+                "reason": e.reason(),
+                "provider": status.kind.map(|k| k.as_str()),
+            });
+            v
+        }
+    }
+}
+
 /// `test_assist` (admin): one small call to the configured provider.
 pub async fn test_assist(ctx: &CallCtx, _access: &Access, _args: &Value) -> Value {
     match ctx.app.assist.test().await {

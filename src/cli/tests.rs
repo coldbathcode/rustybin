@@ -307,8 +307,13 @@ struct Instance {
 }
 
 async fn instance() -> Instance {
+    instance_with(|_| {}).await
+}
+
+async fn instance_with(f: impl FnOnce(&mut Config)) -> Instance {
     let home = tempfile::tempdir().expect("tempdir");
     let mut config = Config::for_tests();
+    f(&mut config);
     config.tls_cert = home.path().join("server.crt").display().to_string();
     config.tls_key = home.path().join("server.key").display().to_string();
     config.control_auth = ControlAuth::Password;
@@ -658,5 +663,44 @@ async fn every_command_runs_against_an_instance() {
         .run(None, &["profiles", "remove", "kept", "--yes"])
         .await;
     assert_eq!(code, 0);
+    inst.server.shutdown();
+}
+
+#[tokio::test]
+async fn ai_use_sets_the_model_the_fast_model_or_a_job() {
+    let inst = instance_with(|c| c.assist_provider = Some("mock".into())).await;
+    inst.login().await;
+    let job = |v: &Value, task: &str| {
+        v["jobs"]
+            .as_array()
+            .and_then(|a| a.iter().find(|j| j["task"] == task))
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let v = inst
+        .json(&["ai", "use", "mock-fast-9", "--job", "explain"])
+        .await;
+    assert_eq!(job(&v, "explain")["model"], "mock-fast-9");
+    assert_eq!(job(&v, "explain")["source"], "setting");
+    let v = inst.json(&["ai", "use", "mock-small", "--fast"]).await;
+    assert_eq!(
+        job(&v, "suggest")["model"],
+        "mock-small",
+        "suggest is a fast job"
+    );
+    assert_eq!(job(&v, "explain")["model"], "mock-fast-9");
+    let v = inst.json(&["ai", "use", "mock-big"]).await;
+    assert_eq!(job(&v, "spec_from_description")["model"], "mock-big");
+    // Both: a usage error, and nothing changes.
+    let (code, _, message) = inst
+        .run_full(None, &["ai", "use", "x", "--job", "explain", "--fast"])
+        .await;
+    assert_eq!(code, 2, "{message}");
+    assert!(message.contains("--fast"), "{message}");
+    let v = inst.json(&["ai", "jobs"]).await;
+    assert_eq!(job(&v, "explain")["model"], "mock-fast-9");
+    // An empty model with --job clears the choice.
+    let v = inst.json(&["ai", "use", "", "--job", "explain"]).await;
+    assert_eq!(job(&v, "explain")["source"], "default");
     inst.server.shutdown();
 }

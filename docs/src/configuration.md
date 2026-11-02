@@ -350,13 +350,14 @@ value saved under Management, AI overrides.
 
 | Variable | Default | Description |
 |---|---|---|
-| `RUSTYBIN_ASSIST_PROVIDER` | unset | `anthropic`, `openai`, `gemini`, `compatible` (any OpenAI-compatible Chat Completions endpoint) or `mock` (the built-in deterministic provider). Unset: AI assist is off and every entry point in the console invites you to set it up. Invalid: warning, off. |
+| `RUSTYBIN_ASSIST_PROVIDER` | unset | `anthropic`, `openai`, `gemini`, `compatible` (any OpenAI-compatible Chat Completions endpoint) or `mock` (the built-in deterministic provider); the aliases `claude`, `google` and `openai-compatible` are stored as the provider's name. Unset: AI assist is off and every entry point in the console invites you to set it up. Invalid: warning, off. |
 | `RUSTYBIN_ASSIST_MODEL` | provider's default | The model for specs, edits and free answers (the compatible endpoint needs one). Free text; the curated table in the console lists current ids. |
 | `RUSTYBIN_ASSIST_FAST_MODEL` | provider's fast default | The model for cheap tasks (suggestions, explanations). |
 | `RUSTYBIN_ASSIST_BASE_URL` | unset | The compatible endpoint's base URL, without `/chat/completions` (for example `http://localhost:11434/v1`; loopback needs `RUSTYBIN_EGRESS_ALLOW_LOOPBACK`). Invalid: warning, ignored. |
 | `RUSTYBIN_ASSIST_ANTHROPIC_KEY`, `RUSTYBIN_ASSIST_OPENAI_KEY`, `RUSTYBIN_ASSIST_GEMINI_KEY`, `RUSTYBIN_ASSIST_COMPATIBLE_KEY` | unset | The provider keys (secrets `assist.*_key`: sealed at rest, returned as `{set, hint}`, never in prompts, exports or captures). Not to be confused with `RUSTYBIN_AI_API_KEY`, the key the mock LLM *accepts*. |
 | `RUSTYBIN_ASSIST_MAX_CALLS_PER_MINUTE` | `20` | AI calls per minute per caller (the control principal, plus the client address on an open control plane); more answer `429` with `Retry-After`. 1 to 1000. |
 | `RUSTYBIN_ASSIST_MAX_OUTPUT_TOKENS` | `8192` | The output cap of every answer. 256 to 128000. |
+| (setting only) `assist.job.<task>` | unset | The model one job runs on, one setting per task (`assist.job.explain`, `assist.job.spec_from_description`, ...; group "AI models per job"). Unset: the job's tier default. A model the provider does not offer is ignored (see [Models and jobs](ai-assist.md#models-and-jobs)). |
 | `RUSTYBIN_ASSIST_VISITORS` | `false` | On a [self-service](mocks/self-service.md) instance, let visitors use the instance's AI key on their own mocks (describe, generate examples, edit). Off: visitors get `403` from the AI routes; the deterministic generator stays available to them. |
 
 ## A2A agents

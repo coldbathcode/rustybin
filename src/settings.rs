@@ -244,6 +244,8 @@ pub struct Spec {
     pub lockable: bool,
     /// An extra check on a validated value (the egress allowlist grammar).
     pub validate: Option<Check>,
+    /// Rewrites a value before it is validated (aliases to the canonical name).
+    pub normalize: Option<fn(&Value) -> Value>,
 }
 
 impl Spec {
@@ -268,6 +270,7 @@ impl Spec {
             seed: None,
             lockable: true,
             validate: None,
+            normalize: None,
         }
     }
 
@@ -284,6 +287,11 @@ impl Spec {
 
     pub const fn check(mut self, f: Check) -> Self {
         self.validate = Some(f);
+        self
+    }
+
+    pub const fn normalize(mut self, f: fn(&Value) -> Value) -> Self {
+        self.normalize = Some(f);
         self
     }
 
@@ -326,6 +334,11 @@ pub fn groups() -> Vec<Group> {
             id: "assist",
             title: "AI assist",
             description: "Your own model provider and key for the console's AI features. Nothing calls a model until a key is set; keys never leave the instance.",
+        },
+        Group {
+            id: "assist_jobs",
+            title: "AI models per job",
+            description: "The model each AI job runs on. Empty: the job's tier default (the fast model or the model). Load the provider's list to pick from what your key can call.",
         },
         Group {
             id: "egress",
@@ -921,6 +934,10 @@ impl Settings {
                 new_values.insert(key, None);
                 continue;
             }
+            let value = match spec.normalize {
+                Some(f) => f(&value),
+                None => value,
+            };
             match spec.kind.validate(&value) {
                 Ok(v) => {
                     if let Some(check) = spec.validate {

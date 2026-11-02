@@ -238,7 +238,9 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("agents", "tail", "", "Follow the agents' calls as they happen.", TAIL_FLAGS, [("GET", "/_rustybin/agents/events")], false, "agents tail --max 10"),
     // ── AI ──
     cmd!("ai", "status", "", "Whether AI assist is on, the provider, the caps.", NO_FLAGS, [("GET", "/_rustybin/assist")], false, "ai status"),
-    cmd!("ai", "models", "", "The curated models of every provider.", NO_FLAGS, [("GET", "/_rustybin/assist")], false, "ai models"),
+    cmd!("ai", "models", "[--load]", "The configured provider's models with tier, context, price, whether each reasons and the jobs it runs; --load asks the provider for its list with the stored key first (admin).", &[Flag::switch("--load", "Load the list from the provider with the stored key (admin)")], [("GET", "/_rustybin/assist/models"), ("POST", "/_rustybin/assist/models")], false, "ai models --load"),
+    cmd!("ai", "jobs", "", "Which model each AI job (task) runs on, and whether a setting chose it.", NO_FLAGS, [("GET", "/_rustybin/assist/models")], false, "ai jobs"),
+    cmd!("ai", "use", "<model> [--job TASK] [--fast]", "Choose a model: the model for the capable jobs, with --fast the fast model, with --job the model of one job (empty with --job clears the choice).", &[Flag::value("--job", "The job (task name) to run on this model"), Flag::switch("--fast", "Make it the fast model")], [("PATCH", "/_rustybin/settings")], false, "ai use gpt-5-mini --job explain"),
     cmd!("ai", "usage", "", "Calls and tokens since start.", NO_FLAGS, [("GET", "/_rustybin/assist/usage")], false, "ai usage"),
     cmd!("ai", "test", "", "Call the provider once with the configured key.", NO_FLAGS, [("POST", "/_rustybin/assist/test")], false, "ai test"),
     cmd!("ai", "run", "<task> [--input JSON] [--model M]", "Run an assist task (free_answer, explain, suggest, ...) and print its answer.", &[Flag::value("--input", "The task's inputs as JSON or a file"), Flag::value("--model", "A model id instead of the task's default")], [("POST", "/_rustybin/assist/run")], false, "ai run free_answer --input '{\"question\": \"what does /delay do?\"}'"),
@@ -1423,9 +1425,74 @@ async fn ai(ctx: &mut Ctx, verb: &str) -> Result<()> {
     match verb {
         "status" => get(ctx, "/_rustybin/assist", &[]).await,
         "models" => {
-            let v = ctx.client()?.get("/_rustybin/assist", &[]).await?.value();
-            let models = v.get("models").cloned().unwrap_or(Value::Null);
-            ctx.emit(&json!({ "models": models }));
+            let v = if ctx.args.has("--load") {
+                ctx.client()?
+                    .post("/_rustybin/assist/models", Body::Json(json!({})))
+                    .await?
+                    .value()
+            } else {
+                ctx.client()?
+                    .get("/_rustybin/assist/models", &[])
+                    .await?
+                    .value()
+            };
+            if ctx.json {
+                ctx.emit(&v);
+            } else {
+                ctx.emit(&json!({
+                    "provider": v["provider"],
+                    "loaded": v["loaded"],
+                    "models": v["models"].as_array().map(|a| a.iter().map(|m| json!({
+                        "id": m["id"],
+                        "tier": m["tier"],
+                        "context": m["context"],
+                        "price_per_million": m["price_per_million"],
+                        "reasoning": m["reasoning"],
+                        "listed": m["listed"],
+                        "jobs": m["jobs"],
+                        "default_for": m["default_for"],
+                    })).collect::<Vec<_>>()),
+                }));
+            }
+            Ok(())
+        }
+        "jobs" => {
+            let v = ctx
+                .client()?
+                .get("/_rustybin/assist/models", &[])
+                .await?
+                .value();
+            ctx.emit(&json!({ "provider": v["provider"], "jobs": v["jobs"] }));
+            Ok(())
+        }
+        "use" => {
+            let model = ctx.args.arg(0, "a model id")?.to_string();
+            if ctx.args.has("--fast") && ctx.args.value("--job").is_some() {
+                return Err(Fail::Usage(
+                    "--fast and --job do not go together: a job names its own model".to_string(),
+                ));
+            }
+            let key = match ctx.args.value("--job") {
+                Some(job) => format!("assist.job.{job}"),
+                None if ctx.args.has("--fast") => "assist.fast_model".to_string(),
+                None => "assist.model".to_string(),
+            };
+            let value = if model.trim().is_empty() {
+                Value::Null
+            } else {
+                json!(model)
+            };
+            let body = json!({ "values": { key: value } });
+            ctx.client()?
+                .patch("/_rustybin/settings", Body::Json(body))
+                .await?
+                .value();
+            let v = ctx
+                .client()?
+                .get("/_rustybin/assist/models", &[])
+                .await?
+                .value();
+            ctx.emit(&json!({ "provider": v["provider"], "jobs": v["jobs"] }));
             Ok(())
         }
         "usage" => get(ctx, "/_rustybin/assist/usage", &[]).await,

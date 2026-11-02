@@ -384,6 +384,8 @@ never tool inputs and never returned: the operator sets them in the console or w
 | Tool | Right | |
 |---|---|---|
 | `assist_status` | read | Whether assist is on, the provider and models, the caps, each provider's key state, the tasks, the usage total |
+| `list_assist_models` | read | The configured provider's models (as last loaded, merged with the curated table) and the model of every job; choose with `update_settings` on `assist.model`, `assist.fast_model` or `assist.job.<task>` |
+| `load_assist_models` | admin | Ask the provider for its model list with the stored key (confirmed; one outbound call, no tokens) |
 | `assist_usage` | admin | Calls, tokens and the estimated cost since start, per model and per task |
 | `test_assist` | admin | One small call to the configured provider |
 | `run_assist_task` | read | A read task with its inputs (`free_answer`, `explain`, `suggest`, `request_examples`, `tool_arguments`, `server_json`, `summarise_for_portal`); the mock tasks point at their own tools |

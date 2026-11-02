@@ -163,6 +163,45 @@ body contains "rustybin_assist_calls_total{provider=\"mock\",model=\"rustybin-mo
 body contains "rustybin_assist_tokens_total{provider=\"mock\",model=\"rustybin-mock\",direction=\"output\"}"
 # ANCHOR_END: usage
 
+# ANCHOR: models
+GET {{base_url}}/_rustybin/assist/models
+HTTP 200
+[Asserts]
+jsonpath "$.provider" == "mock"
+jsonpath "$.loaded" == null
+jsonpath "$.models[0].id" == "rustybin-mock"
+jsonpath "$.models[0].curated" == true
+jsonpath "$.models[0].default_for" count == 2
+jsonpath "$.jobs[*].task" contains "explain"
+jsonpath "$.jobs[?(@.task == 'explain')].tier" == "fast"
+jsonpath "$.jobs[?(@.task == 'explain')].source" == "default"
+
+# Load the provider's list with the stored key (admin): the mock lists its own model.
+POST {{base_url}}/_rustybin/assist/models
+X-Rustybin-Admin-Token: {{admin_token}}
+HTTP 200
+[Asserts]
+jsonpath "$.loaded.kept" == 1
+jsonpath "$.models[0].listed" == true
+
+# One job on its own model; an alias of a provider name is stored as the name.
+PATCH {{base_url}}/_rustybin/settings
+X-Rustybin-Admin-Token: {{admin_token}}
+Content-Type: application/json
+{ "values": { "assist.job.explain": "mock-fast-9" } }
+HTTP 200
+
+GET {{base_url}}/_rustybin/assist/models
+HTTP 200
+[Asserts]
+jsonpath "$.jobs[?(@.task == 'explain')].model" == "mock-fast-9"
+jsonpath "$.jobs[?(@.task == 'explain')].source" == "setting"
+
+DELETE {{base_url}}/_rustybin/settings/assist.job.explain
+X-Rustybin-Admin-Token: {{admin_token}}
+HTTP 200
+# ANCHOR_END: models
+
 # ANCHOR: settings
 PATCH {{base_url}}/_rustybin/settings
 X-Rustybin-Admin-Token: {{admin_token}}

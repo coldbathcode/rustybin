@@ -22,6 +22,7 @@ pub const STATUS_PATH: &str = "/_rustybin/assist";
 pub const TEST_PATH: &str = "/_rustybin/assist/test";
 pub const RUN_PATH: &str = "/_rustybin/assist/run";
 pub const USAGE_PATH: &str = "/_rustybin/assist/usage";
+pub const MODELS_PATH: &str = "/_rustybin/assist/models";
 
 /// Largest `run` body.
 const MAX_BODY: usize = 256 * 1024;
@@ -77,6 +78,30 @@ async fn test_handler(State(state): State<AppState>, headers: HeaderMap) -> Resp
                 })),
             )
                 .into_response()
+        }
+    }
+}
+
+/// `GET /_rustybin/assist/models`: the configured provider's models (the
+/// list last loaded merged with the curated table) and the jobs.
+async fn models_handler(State(state): State<AppState>) -> Response {
+    Json(state.assist.models_json()).into_response()
+}
+
+/// `POST /_rustybin/assist/models`: ask the provider for its list with the
+/// stored key, keep it, answer the merged list (admin).
+async fn load_models_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
+        return resp;
+    }
+    match state.assist.load_models().await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => {
+            let code = match e {
+                super::LoadError::Disabled(_) => StatusCode::SERVICE_UNAVAILABLE,
+                super::LoadError::Provider(_) => StatusCode::BAD_GATEWAY,
+            };
+            error(code, e.message(), e.reason())
         }
     }
 }
@@ -161,6 +186,8 @@ pub fn status_json(state: &AppState) -> Value {
             "max_output_tokens": assist.max_output_tokens(),
         },
         "providers": providers,
+        "jobs": status.jobs_json(),
+        "models_loaded": assist.models_json()["loaded"].clone(),
         "tasks": task::all().iter().map(task::Task::describe).collect::<Vec<_>>(),
         "suggestions": tasks::suggest::static_table(),
         "usage": assist.usage()["total"],
@@ -327,6 +354,7 @@ pub fn router(_state: &AppState) -> Router<AppState> {
         .route(TEST_PATH, post(test_handler))
         .route(RUN_PATH, post(run_handler))
         .route(USAGE_PATH, get(usage_handler))
+        .route(MODELS_PATH, get(models_handler).post(load_models_handler))
 }
 
 pub fn catalog() -> Vec<Endpoint> {
@@ -369,6 +397,14 @@ pub fn catalog() -> Vec<Endpoint> {
             "AI assist: calls, tokens, estimated cost per provider, model and task (admin)",
         )
         .example(Example::get("AI assist usage", USAGE_PATH)),
+        Endpoint::new(
+            MODELS_PATH,
+            &["GET", "POST"],
+            category::CONTROL,
+            "AI assist: the provider's models with tier, context, price and the jobs each runs; POST loads the list from the provider with the stored key (admin)",
+        )
+        .example(Example::get("AI assist models", MODELS_PATH))
+        .example(Example::post("Load the provider's models", MODELS_PATH).expect_status(503)),
     ]
 }
 
@@ -422,6 +458,26 @@ pub fn openapi_paths() -> Value {
                     "422": { "description": "The inputs contain a stored secret or the admin token" },
                     "429": { "description": "The caller's calls per minute (Retry-After)" },
                     "502": { "description": "The provider failed (JSON mode)" },
+                    "503": { "description": "No provider or key is set" }
+                }
+            }
+        },
+        MODELS_PATH: {
+            "get": {
+                "tags": ["Control Plane"],
+                "summary": "AI assist models",
+                "description": "The configured provider's models: the list last loaded from the provider (POST) merged with the curated table. Each model: id, name, tier (fast or capable), context window, output limit, list price per million tokens when known, note, whether it reasons before answering, whether it is curated and whether the provider listed it, the jobs it is chosen for and whether it is the model or the fast model. Plus the jobs: every task with its model and whether a setting chose it.",
+                "operationId": "getAssistModels",
+                "responses": { "200": { "description": "The models and the jobs", "content": { "application/json": { "schema": { "type": "object" } } } } }
+            },
+            "post": {
+                "tags": ["Control Plane"],
+                "summary": "Load the provider's models",
+                "description": "Asks the configured provider for its model list with the stored key (OpenAI and compatible endpoints: GET /models; Anthropic: GET /v1/models; Gemini: GET /v1beta/models, generateContent models only; the mock: its own), through the outbound policy, keeps at most 500 entries, and answers as GET does. Admin.",
+                "operationId": "loadAssistModels",
+                "responses": {
+                    "200": { "description": "The models and the jobs" },
+                    "502": { "description": "The provider refused or failed" },
                     "503": { "description": "No provider or key is set" }
                 }
             }

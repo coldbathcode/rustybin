@@ -311,6 +311,75 @@ function aiPanel(doc, reload, error) {
     loadUsage();
   }
 
+  // The configured provider's models (GET /_rustybin/assist/models: the list
+  // last loaded from the provider merged with the curated table) and the job
+  // each runs; Load asks the provider with the stored key (POST, admin).
+  const catalogEl = h('div', { id: 'assist-catalog' }, spinner('Reading the models'));
+
+  function jobsTable(jobs) {
+    return h('div', { class: 'table-wrap' }, h('table', { class: 'table', id: 'assist-jobs' },
+      h('thead', null, h('tr', null, h('th', null, 'Job'), h('th', null, 'Tier'), h('th', null, 'Model'), h('th', null, 'From'))),
+      h('tbody', null, (jobs || []).map((j) => h('tr', null,
+        h('td', null, j.title, h('div', { class: 'muted small mono' }, j.task)),
+        h('td', null, badge(j.tier, j.tier === 'fast' ? 'ok' : 'violet')),
+        h('td', { class: 'mono small' }, j.model || '(none)'),
+        h('td', { class: 'small' }, j.ignored
+          ? h('span', { class: 'inline-icon' }, badge('ignored', 'warn'), ' ', h('code', null, j.ignored), ' is not a model of this provider: the job runs on its tier default')
+          : (j.source === 'setting' ? 'assist.job setting' : 'tier default')))))));
+  }
+
+  function catalogTable(c) {
+    const rows = (c.models || []).map((m) => h('tr', { class: (m.default_for || []).length ? 'current' : '' },
+      h('td', { class: 'mono small' }, m.id, m.name ? h('div', { class: 'muted small' }, m.name) : null),
+      h('td', null, badge(m.tier, m.tier === 'fast' ? 'ok' : 'violet'), m.reasoning ? h('span', null, ' ', badge('reasons', 'info')) : null),
+      h('td', { class: 'small' }, m.context ? String(m.context) : ''),
+      h('td', { class: 'small' }, priceText(m)),
+      h('td', { class: 'small' }, m.listed ? (m.curated ? 'listed, curated' : 'listed') : h('span', { class: 'muted' }, 'curated, not listed')),
+      h('td', { class: 'small' }, [...(m.default_for || []).map((d) => d === 'model' ? 'model' : 'fast model'), ...(m.jobs || [])].join(', ')),
+      h('td', null, h('div', { class: 'row nowrap', style: { gap: '4px' } },
+        h('button', { class: 'btn sm ghost', type: 'button', 'aria-label': 'Use ' + m.id + ' as the model', onclick: () => pick({ 'assist.model': m.id }) }, 'Use'),
+        h('button', { class: 'btn sm ghost', type: 'button', 'aria-label': 'Use ' + m.id + ' as the fast model', onclick: () => pick({ 'assist.fast_model': m.id }) }, 'Fast')))));
+    return h('div', { class: 'table-wrap' }, h('table', { class: 'table', id: 'assist-provider-models' },
+      h('thead', null, h('tr', null, h('th', null, 'Model'), h('th', null, 'Tier'), h('th', null, 'Context'), h('th', null, 'Price'), h('th', null, 'Source'), h('th', null, 'Runs'), h('th', null, ''))),
+      h('tbody', null, rows)));
+  }
+
+  function renderCatalog(c) {
+    const loadBtn = h('button', { class: 'btn sm', type: 'button', id: 'assist-load-models', disabled: !c.provider }, icon('refresh'), 'Load the provider\'s models');
+    const out = h('div');
+    loadBtn.addEventListener('click', async () => {
+      loadBtn.disabled = true;
+      replace(out, spinner('Asking ' + c.provider + ' for its models'));
+      const r = await send({ method: 'POST', url: SERVER + '/_rustybin/assist/models', admin: true, session: false, timeout: 70000 });
+      loadBtn.disabled = false;
+      const j = r.json || {};
+      if (r.error || !r.ok) { replace(out, notice('err', r.error || j.error || ('Loading failed (' + r.status + ')'))); return; }
+      clear(out);
+      renderCatalog(j);
+    });
+    const ignored = (c.jobs || []).filter((j) => j.ignored);
+    replace(catalogEl,
+      c.provider
+        ? h('div', { class: 'row', style: { flexWrap: 'wrap', gap: '8px' } }, loadBtn,
+          h('span', { class: 'muted small' }, c.loaded
+            ? 'Loaded from ' + c.provider + ' ' + fmtTime(c.loaded.at) + ': ' + c.loaded.kept + ' model(s)' + (c.loaded.listed > c.loaded.kept ? ' of ' + c.loaded.listed : '') + '.'
+            : 'The curated models of ' + c.provider + '. Load the list to see every model your key can call.'))
+        : notice('', 'Pick a provider first: the models and jobs follow it.'),
+      out,
+      ignored.length ? notice('warn', ignored.length + ' job setting(s) name a model ' + c.provider + ' does not offer; those jobs run on their tier default until you change them.') : null,
+      c.provider ? catalogTable(c) : null,
+      h('h3', { class: 'section-title', style: { marginTop: '14px' } }, 'Jobs'),
+      jobsTable(c.jobs));
+  }
+
+  async function loadCatalog() {
+    try {
+      renderCatalog(await getJson('/_rustybin/assist/models', { session: false }));
+    } catch (e) {
+      replace(catalogEl, loadError(e));
+    }
+  }
+
   async function loadUsage() {
     try {
       const u = (await getJson('/_rustybin/assist/usage', { admin: true, session: false })).total || {};
@@ -340,6 +409,7 @@ function aiPanel(doc, reload, error) {
         h('h3', { class: 'section-title', style: { marginTop: '14px' } }, 'Curated models'),
         modelsTable());
       loadUsage();
+      loadCatalog();
     } catch (e) {
       replace(statusEl, loadError(e));
     }
@@ -349,6 +419,11 @@ function aiPanel(doc, reload, error) {
     const form = settingsForm(doc, 'assist', { saveLabel: 'Save AI settings', onSaved: (d) => { reload(d); document.dispatchEvent(new CustomEvent('rustybin-assist')); load(); } });
     el.appendChild(card('AI assist', { hint: 'the provider, the models, the test' }, statusEl));
     el.appendChild(card('Provider and keys', { hint: 'keys are sealed on the instance and never shown again' }, form.el));
+    const jobsForm = settingsForm(doc, 'assist_jobs', { saveLabel: 'Save job models', onSaved: (d) => { reload(d); document.dispatchEvent(new CustomEvent('rustybin-assist')); load(); } });
+    el.appendChild(card('Models and jobs', { hint: 'GET and POST /_rustybin/assist/models' }, catalogEl,
+      h('h3', { class: 'section-title', style: { marginTop: '14px' } }, 'Choose a model per job'),
+      h('p', { class: 'muted small', style: { margin: '0 0 8px' } }, 'Empty: the job runs on its tier default (the fast model or the model). A model the provider does not offer is ignored.'),
+      jobsForm.el));
     el.appendChild(card('Usage since start', { hint: 'GET /_rustybin/assist/usage' }, usageEl));
     el.appendChild(card('Privacy', {}, h('p', { class: 'small', style: { margin: 0 } }, (st && st.privacy) || 'Prompts carry only what the task names and go to the configured provider through the outbound policy. Keys never leave the instance. Inputs that contain a stored secret or the admin token are refused. Every answer shows exactly what was sent.')));
     load();
