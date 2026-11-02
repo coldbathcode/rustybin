@@ -101,6 +101,11 @@ impl PushPolicy {
         };
         if authority == own_authority.to_ascii_lowercase() {
             if let Some(id) = sink_id_from_path(parsed.path()) {
+                if self.public_mode && id.len() < MIN_PUBLIC_SINK_ID {
+                    return Err(format!(
+                        "on a public instance a sink id is at least {MIN_PUBLIC_SINK_ID} characters: anyone who knows it reads the sink"
+                    ));
+                }
                 return Ok(Target::Sink(id));
             }
         }
@@ -136,6 +141,37 @@ pub struct WebhookSink {
 
 /// Largest stored notification body (bytes of JSON text).
 const MAX_STORED_BODY: usize = 64 * 1024;
+/// Shortest sink id on a public instance: the id is all that keeps other
+/// visitors from reading a sink, so it must not be guessable (`demo`).
+pub const MIN_PUBLIC_SINK_ID: usize = 16;
+
+/// Credential headers of a stored notification: kept as a hint (the last
+/// four characters), never the value, since anyone with the id reads it.
+fn redact_credentials(headers: Value) -> Value {
+    let Value::Object(mut map) = headers else {
+        return headers;
+    };
+    for (k, v) in map.iter_mut() {
+        if crate::keys::looks_secret(k) {
+            if let Value::String(s) = v {
+                let tail: String = s
+                    .chars()
+                    .rev()
+                    .take(4)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                *v = Value::String(if s.chars().count() > 8 {
+                    format!("[redacted, ends {tail}]")
+                } else {
+                    "[redacted]".into()
+                });
+            }
+        }
+    }
+    Value::Object(map)
+}
 
 impl WebhookSink {
     pub fn new(max_sinks: usize, max_items: usize, ttl: Duration) -> Self {
@@ -161,7 +197,7 @@ impl WebhookSink {
         let item = json!({
             "receivedAt": super::model::now_ts(),
             "source": source,
-            "headers": headers,
+            "headers": redact_credentials(headers),
             "body": body,
         });
         let mut map = self.lock();

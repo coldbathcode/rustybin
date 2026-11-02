@@ -127,9 +127,11 @@ fn request_row(e: &CapturedRequest, include_bodies: bool, budget: &mut Budget) -
         "id": e.id,
         "request_id": e.request_id,
         "timestamp": e.timestamp,
-        "method": e.method,
-        "path": e.path,
-        "query": e.query,
+        // The path, query and a non-standard method are the client's: under
+        // untrusted_* only, never in a summary.
+        "method": super::tools::shown_method(&e.method),
+        "untrusted_method": e.method,
+        "untrusted_path": e.path,
         "status": e.status,
         "latency_ms": e.latency_ms,
         "session": e.session,
@@ -225,8 +227,8 @@ pub fn get_request(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
             ok(
                 ctx,
                 format!(
-                    "{} {} answered {} at {} ({} ms); content under untrusted_* fields",
-                    e.method, e.path, e.status, e.timestamp, e.latency_ms as u64
+                    "A {} request answered {} at {} ({} ms); its path, headers and body are under untrusted_* fields",
+                    super::tools::shown_method(&e.method), e.status, e.timestamp, e.latency_ms as u64
                 ),
                 row,
             )
@@ -294,13 +296,12 @@ pub async fn wait_for_requests(ctx: &CallCtx, access: &Access, args: &Value) -> 
             )
         } else {
             format!(
-                "{} call(s) of mock {mock:?} arrived: {}. Content is under untrusted_* fields.",
+                "{} call(s) of mock {mock:?} arrived: {}. Paths and content are under untrusted_* fields.",
                 rows.len(),
                 rows.iter()
                     .map(|r| format!(
-                        "{} {} -> {} ({})",
+                        "{} -> {} ({})",
                         r["method"].as_str().unwrap_or(""),
-                        r["path"].as_str().unwrap_or(""),
                         r["status"],
                         r["outcome"].as_str().unwrap_or("")
                     ))
@@ -362,15 +363,10 @@ pub async fn wait_for_requests(ctx: &CallCtx, access: &Access, args: &Value) -> 
         )
     } else {
         format!(
-            "{} request(s) arrived: {}. Content is under untrusted_* fields.",
+            "{} request(s) arrived: {}. Paths and content are under untrusted_* fields.",
             rows.len(),
             rows.iter()
-                .map(|r| format!(
-                    "{} {} -> {}",
-                    r["method"].as_str().unwrap_or(""),
-                    r["path"].as_str().unwrap_or(""),
-                    r["status"]
-                ))
+                .map(|r| format!("{} -> {}", r["method"].as_str().unwrap_or(""), r["status"]))
                 .collect::<Vec<_>>()
                 .join("; ")
         )
@@ -496,14 +492,19 @@ pub async fn get_bin(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
                 .map(|hs| {
                     hs.iter()
                         .filter_map(|h| {
-                            Some((h["name"].as_str()?.to_string(), h["value"].as_str()?.to_string()))
+                            Some((
+                                h["name"].as_str()?.to_string(),
+                                h["value"].as_str()?.to_string(),
+                            ))
                         })
                         .collect()
                 })
                 .unwrap_or_default();
             let mut row = json!({
-                "seq": r["seq"], "timestamp": r["timestamp"], "method": r["method"], "path": r["path"],
-                "query": r["query"], "content_type": r["content_type"], "body_bytes": r["body_size"],
+                "seq": r["seq"], "timestamp": r["timestamp"],
+                "method": super::tools::shown_method(r["method"].as_str().unwrap_or("")),
+                "untrusted_method": r["method"], "untrusted_path": r["path"],
+                "content_type": r["content_type"], "body_bytes": r["body_size"],
                 "client_ip": r["client_ip"],
                 "untrusted_headers": untrusted_headers(&headers),
                 "untrusted_query": r["query"],
@@ -512,7 +513,8 @@ pub async fn get_bin(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
                 if let Some(b) = r["body"].as_str().or(r["body_base64"].as_str()) {
                     if let Some((cut, truncated)) = budget.body(b) {
                         row["untrusted_body"] = json!(cut);
-                        row["body_truncated"] = json!(truncated || r["body_truncated"].as_bool().unwrap_or(false));
+                        row["body_truncated"] =
+                            json!(truncated || r["body_truncated"].as_bool().unwrap_or(false));
                         row["body_base64"] = json!(r["body"].is_null());
                     }
                 }

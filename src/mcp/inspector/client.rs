@@ -111,6 +111,13 @@ impl Target {
         }
     }
 
+    /// The target as answers, summaries, logs and saved reports show it:
+    /// without its query string, which may hold a saved connection's API key.
+    pub fn shown(&self) -> &str {
+        let s = self.as_str();
+        s.split_once('?').map_or(s, |(base, _)| base)
+    }
+
     /// Resolve a URL the server handed back (the legacy `endpoint` event,
     /// a metadata document's link) against this target.
     pub fn join(&self, reference: &str) -> Result<Target, String> {
@@ -464,7 +471,7 @@ impl Legacy {
         if !target.same_origin(&endpoint) {
             return Err(format!(
                 "the server's endpoint event names another origin than {}: refused (credentials stay with the target)",
-                target.as_str()
+                target.shown()
             ));
         }
         let (tx, rx) = mpsc::channel(LEGACY_BUFFER);

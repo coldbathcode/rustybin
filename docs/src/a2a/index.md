@@ -147,7 +147,10 @@ when the config is created:
 The built-in sink records what arrives: `GET /a2a/webhook-sink/{id}` lists the
 notifications (headers and body), `DELETE` clears them, and anyone can `POST` to it
 (ids are 1 to 64 characters of `A-Z a-z 0-9 . _ -`). It is bounded (500 sinks, 100 in
-public mode, 50 notifications each, one hour).
+public mode, 50 notifications each, 10 in public mode, one hour). Anyone who knows a sink's id
+reads it, so a notification's credential headers (`Authorization`, the notification token) are
+kept as a hint (`[redacted, ends abcd]`), and on a public instance a sink id is at least 16
+characters.
 
 ```hurl
 {{#include ../../examples/a2a/agents.hurl:push}}

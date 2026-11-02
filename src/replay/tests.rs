@@ -469,3 +469,127 @@ fn a_document_carries_the_tests_and_prunes_only_what_it_does_not_name() {
         Some("/status/201".into())
     );
 }
+
+#[tokio::test]
+async fn a_run_never_shows_or_captures_a_filled_secret() {
+    let state = test_state_with(Config::for_tests());
+    let _app = test_app_with(state.clone());
+    let test = SavedTest {
+        name: "echoes".into(),
+        description: None,
+        request: TestRequest {
+            method: "POST".into(),
+            path: "/anything".into(),
+            headers: [("x-api-key".to_string(), "{{API_KEY}}".to_string())].into(),
+            body: Some("token is {{API_KEY}}".into()),
+        },
+        gateway: None,
+        assert: vec![Assertion {
+            body_contains: Some("never there".into()),
+            ..Assertion::default()
+        }],
+    };
+    state.saved_tests.put(test, false).expect("put");
+    let r = run::run(
+        &state,
+        "scrub-session",
+        run::RunBody {
+            names: vec![],
+            variables: [("API_KEY".to_string(), "sk-live-secret-42".to_string())].into(),
+        },
+    )
+    .await
+    .expect("run");
+    let text = serde_json::to_string(&r).expect("json");
+    assert!(!text.contains("sk-live-secret-42"), "{text}");
+    assert!(text.contains("{{API_KEY}}"), "{text}");
+    // The in-process request's capture is redacted too.
+    let caps = state.inspector.for_session("scrub-session", 5);
+    assert!(!caps.is_empty());
+    for c in caps {
+        let key = c
+            .headers
+            .iter()
+            .find(|h| h.name == "x-api-key")
+            .map(|h| h.value.clone());
+        assert_eq!(key.as_deref(), Some("[redacted]"));
+    }
+}
+
+#[test]
+fn a_literal_credential_is_never_saved() {
+    let store = Tests::new(None);
+    let mut t = SavedTest {
+        name: "literal".into(),
+        description: None,
+        request: TestRequest {
+            method: "GET".into(),
+            path: "/echo".into(),
+            headers: [("authorization".to_string(), "Bearer abc123".to_string())].into(),
+            body: None,
+        },
+        gateway: None,
+        assert: vec![],
+    };
+    assert!(store.put(t.clone(), false).is_err());
+    t.request
+        .headers
+        .insert("authorization".into(), "Bearer {{TOKEN}}".into());
+    assert!(store.put(t.clone(), false).is_ok());
+    t.name = "query".into();
+    t.request.headers.clear();
+    t.request.path = "/echo?api_key=abc".into();
+    assert!(store.put(t.clone(), false).is_err());
+    t.request.path = "/echo?api_key={{API_KEY}}".into();
+    assert!(store.put(t, false).is_ok());
+}
+
+#[tokio::test]
+async fn captured_bodies_and_encoded_names_lose_their_secrets() {
+    let (state, app) = with_orders(Config::for_tests()).await;
+    let req = Request::post("/anything/login?to%6Ben=tok-9")
+        .header("x-rustybin-session", "bodies")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"user":"ana","password":"hunter2","nested":{"client_secret":"cs-1"}}"#,
+        ))
+        .expect("req");
+    app.clone().oneshot(req).await.expect("resp");
+    let id = last_capture(&state, "bodies");
+    let (s, v) = call(
+        &app,
+        "POST",
+        LIST_PATH,
+        "bodies",
+        Some(json!({ "name": "login", "capture": id })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let text = v.to_string();
+    for secret in ["hunter2", "cs-1", "tok-9"] {
+        assert!(!text.contains(secret), "{secret} in {text}");
+    }
+    assert!(
+        v["request"]["body"]
+            .as_str()
+            .unwrap_or("")
+            .contains("{{PASSWORD}}"),
+        "{v}"
+    );
+}
+
+#[tokio::test]
+async fn saved_tests_are_read_by_an_admin_only() {
+    let mut c = Config::for_tests();
+    c.admin_token = Some("admin-secret".into());
+    let state = test_state_with(c);
+    let app = test_app_with(state.clone());
+    for uri in [LIST_PATH, EXPORT_PATH, "/_rustybin/tests/x"] {
+        let resp = app
+            .clone()
+            .oneshot(Request::get(uri).body(Body::empty()).expect("req"))
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{uri}");
+    }
+}

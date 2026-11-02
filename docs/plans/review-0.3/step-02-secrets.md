@@ -16,3 +16,39 @@
 | 12 | low | Harness report and scenario redaction misses query values, bodies and header names such as `x-key` | `src/harness/report.rs:1285` | redact sensitive query names; widen the header test |
 | 13 | low | `rustybin tests run --var NAME=value` puts test credentials in argv | `src/cli/commands.rs` (`tests_run`) | `NAME=-` or `NAME=@file`, as `mcp save-connection --secret` |
 | 14 | low | `request_from_capture` misses percent-encoded secret query names, and saves a binary capture with no body and no warning | `src/replay/mod.rs:473` | decode before `looks_secret`; refuse or warn on `body_base64` |
+
+## Build notes (2026-11-02)
+
+1. A saved test's in-process request carries the `InspectorOrigin` marker, so its capture
+   redacts every secret-looking header and query value
+   (`a_run_never_shows_or_captures_a_filled_secret`).
+2. `inspector::client::Target::shown` is the target without its query string; every answer,
+   summary, error and saved check report uses it, and a stored run's target is stripped when read
+   (a run saved before 0.3.1 may hold a key) (`a_query_string_key_never_shows_in_a_report`).
+3. A run's report replaces every filled variable value with `{{NAME}}` in what was seen,
+   expected and the error.
+4. A secret-looking header or query value of a saved test must reference a variable (a literal is
+   refused); a captured JSON or form body has its secret-looking fields turned into variables
+   (`a_literal_credential_is_never_saved`, `captured_bodies_and_encoded_names_lose_their_secrets`).
+5. `GET /_rustybin/tests`, `/{name}`, `/export` and `list_tests` are admin
+   (`saved_tests_are_read_by_an_admin_only`); the console's Saved tests view sends the admin
+   credential; the docs example of the export signs in.
+6. `list_mcp_check_runs {id}` answers the saved report under `untrusted_report`, as
+   `run_mcp_checks` does.
+7. Traffic rows (inspector, mock traffic, bins) give the path and query as `untrusted_path` and
+   `untrusted_query`, a non-standard method as `OTHER` with `untrusted_method`, a mock's
+   validation messages as `untrusted_validation`; summaries name methods and statuses only.
+8. `diagnose_instance` moves the message of `mock_load_errors` and `source_control` under
+   `untrusted_message`, and its summary names checks only. Verified first: both messages carry
+   file and remote text.
+9. `get_scenario` returns a saved scenario through `redact_scenario`, as the REST route.
+10. Done with step 06 (the store's persistence).
+11. A sink notification's credential headers are kept as a hint (`[redacted, ends abcd]`); on a
+    public instance a sink id is at least 16 characters (for reads, writes and push targets);
+    public sinks keep 10 notifications each.
+12. `sensitive_header` also uses `keys::looks_secret`; a shown scenario redacts sensitive query
+    values in its paths (a configuration export keeps them: the apply fills `secret:stored` back
+    only as a whole value) (`shown_scenarios_hide_query_secrets_and_more_header_names`).
+13. `rustybin tests run --var NAME=-` reads stdin (or prompts), `NAME=@file` a file; a literal
+    value is refused for a secret-looking name.
+14. Captured query names are decoded before the secret check; a binary capture is refused.

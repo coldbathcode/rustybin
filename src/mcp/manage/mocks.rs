@@ -721,16 +721,18 @@ pub fn capture_row(c: &MockCapture, include_bodies: bool, budget: &mut Budget) -
     let mut row = json!({
         "seq": c.seq,
         "timestamp": c.timestamp,
-        "method": c.method,
-        "path": c.path,
-        "query": c.query,
+        // The path, query, a non-standard method and the validation messages
+        // (they quote the request) are the client's: under untrusted_* only.
+        "method": super::tools::shown_method(&c.method),
+        "untrusted_method": c.method,
+        "untrusted_path": c.path,
         "status": c.status,
         "outcome": c.outcome,
         "operation": c.operation,
         "source": c.source,
         "auth": c.auth,
         "validation_issues": c.validation.len(),
-        "validation": c.validation,
+        "untrusted_validation": c.validation,
         "duration_ms": c.duration_ms,
         "body_bytes": c.body_size,
         "client_ip": c.client_ip,

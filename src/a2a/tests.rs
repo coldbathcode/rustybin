@@ -1253,8 +1253,15 @@ async fn push_config_crud_ssrf_and_delivery() {
         .cloned()
         .unwrap_or_default();
     assert!(notes.len() > 3);
-    assert_eq!(notes[0]["headers"]["authorization"], "Bearer s3cret");
-    assert_eq!(notes[0]["headers"]["x-a2a-notification-token"], "tok");
+    // Credentials are kept as a hint only (anyone with the id reads a sink).
+    assert_eq!(
+        notes[0]["headers"]["authorization"],
+        "[redacted, ends cret]"
+    );
+    assert_eq!(
+        notes[0]["headers"]["x-a2a-notification-token"],
+        "[redacted]"
+    );
     assert_eq!(notes[0]["headers"]["content-type"], "application/a2a+json");
     assert!(notes
         .iter()
@@ -1328,7 +1335,10 @@ async fn push_config_crud_ssrf_and_delivery() {
         .cloned()
         .unwrap_or_default();
     assert!(!notes.is_empty());
-    assert_eq!(notes[0]["headers"]["authorization"], "Basic dXNlcjpwdw==");
+    assert_eq!(
+        notes[0]["headers"]["authorization"],
+        "[redacted, ends dw==]"
+    );
     assert_eq!(
         notes.last().map(|n| n["body"]["kind"].clone()),
         Some(json!("task"))
@@ -1378,7 +1388,7 @@ async fn webhook_sink_endpoints() {
     assert_eq!(r["notifications"][0]["body"]["a"], 1);
     assert_eq!(
         r["notifications"][0]["headers"]["authorization"],
-        "Bearer x"
+        "[redacted]"
     );
     let r = call(&app, "DELETE", "/a2a/webhook-sink/s1", &[], None)
         .await

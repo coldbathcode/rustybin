@@ -246,7 +246,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("tests", "save", "<name> --capture ID [--gateway U] [--description D]", "Save a captured request as a test (its status asserted; credentials become {{variables}}).", &[Flag::value("--capture", "The captured request's id (rustybin requests list)"), Flag::value("--gateway", "Send it through this gateway base URL"), Flag::value("--description", "What it checks")], [("POST", "/_rustybin/tests")], false, "tests save order-1 --capture 0123456789abcdef"),
     cmd!("tests", "put", "<name> --file F", "Save or replace a test from a file (JSON or YAML: request, gateway, assert).", &[Flag::value("--file", "The test: a file, - for stdin, or inline JSON")], [("PUT", "/_rustybin/tests/{name}")], false, r#"tests put order-1 --file '{"request":{"path":"/status/200"},"assert":[{"status":200}]}'"#),
     cmd!("tests", "delete", "<name>", "Delete a saved test.", NO_FLAGS, [("DELETE", "/_rustybin/tests/{name}")], true, "tests delete order-1 --yes"),
-    cmd!("tests", "run", "[--names a,b] [--var NAME=value]... [--junit]", "Run saved tests (all by default); exits 1 when one fails. --junit prints JUnit XML for CI.", &[Flag::value("--names", "Only these tests, comma separated"), Flag::value("--var", "A {{variable}} value, NAME=value (repeat it)"), Flag::switch("--junit", "Print the JUnit XML report")], [("POST", "/_rustybin/tests/run")], false, "tests run --junit"),
+    cmd!("tests", "run", "[--names a,b] [--var NAME=value]... [--junit]", "Run saved tests (all by default); exits 1 when one fails. --junit prints JUnit XML for CI.", &[Flag::value("--names", "Only these tests, comma separated"), Flag::value("--var", "A {{variable}}: NAME=value, or NAME=- (stdin) or NAME=@file for a credential (repeat it)"), Flag::switch("--junit", "Print the JUnit XML report")], [("POST", "/_rustybin/tests/run")], false, "tests run --junit"),
     cmd!("tests", "export", "", "Every saved test as one Hurl file (hurl --test --variable base_url=...).", NO_FLAGS, [("GET", "/_rustybin/tests/export")], false, "tests export"),
     cmd!("scenario", "list", "", "The gateway scenarios (retries, rate limiting, credential injection, timeouts, caching) and your runs.", NO_FLAGS, [("GET", "/_rustybin/scenarios")], false, "scenario list"),
     cmd!("scenario", "start", "<scenario>", "Prepare a run: its upstream and the steps to configure on the gateway.", NO_FLAGS, [("POST", "/_rustybin/scenarios/{id}/runs")], false, "scenario start caching"),
@@ -1528,12 +1528,33 @@ async fn tests_run(ctx: &mut Ctx) -> Result<()> {
     if let Some(names) = list_flag(&ctx.args, "--names") {
         body["names"] = json!(names);
     }
+    // A credential never on the command line: `NAME=-` reads stdin (or
+    // prompts), `NAME=@file` a file; a literal value is refused for a
+    // secret-looking name.
     let mut vars = Map::new();
-    for v in ctx.args.values("--var") {
+    let given: Vec<String> = ctx
+        .args
+        .values("--var")
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    for (line, v) in given.iter().enumerate() {
         let (k, val) = v
             .split_once('=')
-            .ok_or_else(|| Fail::Usage(format!("--var {v}: NAME=value")))?;
-        vars.insert(k.to_string(), json!(val));
+            .ok_or_else(|| Fail::Usage(format!("--var {v}: NAME=value, NAME=- or NAME=@file")))?;
+        let value = match val {
+            "-" => ctx.secret(k, true, line)?,
+            file if file.starts_with('@') => std::fs::read_to_string(&file[1..])
+                .map(|t| t.trim_end_matches(['\r', '\n']).to_string())
+                .map_err(|e| Fail::Usage(format!("--var {k}: {}: {e}", &file[1..])))?,
+            _ if crate::keys::looks_secret(k) => {
+                return Err(Fail::Usage(format!(
+                    "--var {k}=...: {k} looks like a credential: give {k}=- (stdin or a prompt) or {k}=@file, never the value on the command line"
+                )));
+            }
+            literal => literal.to_string(),
+        };
+        vars.insert(k.to_string(), json!(value));
     }
     if !vars.is_empty() {
         body["variables"] = Value::Object(vars);

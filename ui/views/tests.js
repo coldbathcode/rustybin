@@ -52,7 +52,7 @@ export default {
     async function load() {
       let d;
       try {
-        d = await getJson(BASE);
+        d = await getJson(BASE, { admin: true, session: false });
       } catch (e) {
         replace(listEl, notice('err', 'The tests could not be loaded: ' + e.message));
         return;

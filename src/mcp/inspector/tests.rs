@@ -945,3 +945,34 @@ async fn a_legacy_endpoint_on_another_origin_is_refused() {
     let why = h.transport_error.unwrap_or_default();
     assert!(why.contains("another origin"), "{why}");
 }
+
+#[tokio::test]
+async fn a_query_string_key_never_shows_in_a_report() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let mut c = Config::for_tests();
+    c.state_dir = Some(dir.path().to_path_buf());
+    let app = test_app_with(test_state_with(c));
+    let put = json!({ "name": "Query key", "target": "/mcp/apikey", "auth": { "kind": "api_key", "name": "api_key", "location": "query" }, "secrets": { "api_key": "qs-secret-7777" } });
+    let resp = app
+        .clone()
+        .oneshot(json_request("PUT", "/_rustybin/mcp-connections/qkey", &put))
+        .await
+        .expect("r");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let (_, r) = checks_call(
+        &app,
+        json!({ "connection": "qkey", "checks": ["connect"], "save": true }),
+    )
+    .await;
+    assert!(!r.to_string().contains("qs-secret-7777"), "{r}");
+    let list = body_json(
+        app.clone()
+            .oneshot(Request::get(CHECKS_PATH).body(Body::empty()).expect("req"))
+            .await
+            .expect("r"),
+    )
+    .await;
+    assert!(!list.to_string().contains("qs-secret-7777"), "{list}");
+    let file = std::fs::read_to_string(dir.path().join(store::FILE)).expect("file");
+    assert!(!file.contains("qs-secret-7777"));
+}

@@ -171,19 +171,26 @@ pub fn get_scenario(ctx: &CallCtx, args: &Value) -> Value {
         .find(|(n, _)| *n == name)
     else {
         return match ctx.app.harness.as_ref().and_then(|h| h.saved.get(name)) {
-            Some(s) => ok(
-                ctx,
-                format!(
-                    "Saved scenario {name}: {}",
-                    s.scenario.description.clone().unwrap_or_default()
-                ),
-                json!({
-                    "name": name,
-                    "saved_at": s.saved_at,
-                    "scenario": s.scenario,
-                    "yaml": serde_yaml::to_string(&s.scenario).unwrap_or_default(),
-                }),
-            ),
+            // As the REST route: its API keys and OAuth client secrets are
+            // never answered.
+            Some(s) => {
+                let shown = crate::harness::report::redact_scenario(
+                    &serde_json::to_value(&s.scenario).unwrap_or(Value::Null),
+                );
+                ok(
+                    ctx,
+                    format!(
+                        "Saved scenario {name}: {}",
+                        s.scenario.description.clone().unwrap_or_default()
+                    ),
+                    json!({
+                        "name": name,
+                        "saved_at": s.saved_at,
+                        "yaml": serde_yaml::to_string(&shown).unwrap_or_default(),
+                        "scenario": shown,
+                    }),
+                )
+            }
             None => err(format!("no built-in or saved scenario {name:?}")),
         };
     };

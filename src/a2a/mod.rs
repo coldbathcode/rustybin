@@ -77,7 +77,7 @@ impl A2a {
         let public = config.public_mode;
         let sink = Arc::new(WebhookSink::new(
             if public { 100 } else { 500 },
-            50,
+            if public { 10 } else { 50 },
             Duration::from_secs(60 * 60),
         ));
         let svc = Arc::new(Service::new(
@@ -447,6 +447,26 @@ async fn rest_agent(
 
 // ── Webhook sink ────────────────────────────────────────────────────
 
+/// A sink id this instance accepts: on a public one, at least
+/// [`push::MIN_PUBLIC_SINK_ID`] characters.
+#[allow(clippy::result_large_err)]
+fn sink_id_ok(a2a: &A2a, id: &str) -> Result<(), Response> {
+    if !push::valid_sink_id(id) {
+        return Err(sink_bad_id());
+    }
+    if a2a.config.public_mode && id.len() < push::MIN_PUBLIC_SINK_ID {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!(
+                "on a public instance a sink id is at least {} characters: anyone who knows it reads the sink",
+                push::MIN_PUBLIC_SINK_ID
+            ) })),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
 fn sink_bad_id() -> Response {
     (
         StatusCode::BAD_REQUEST,
@@ -461,8 +481,8 @@ async fn sink_post(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !push::valid_sink_id(&id) {
-        return sink_bad_id();
+    if let Err(r) = sink_id_ok(&a2a, &id) {
+        return r;
     }
     let keep = [
         "content-type",
@@ -488,16 +508,16 @@ async fn sink_post(
 }
 
 async fn sink_get(Extension(a2a): Extension<Arc<A2a>>, Path(id): Path<String>) -> Response {
-    if !push::valid_sink_id(&id) {
-        return sink_bad_id();
+    if let Err(r) = sink_id_ok(&a2a, &id) {
+        return r;
     }
     let items = a2a.svc.push.sink.list(&id);
     Json(json!({ "id": id, "count": items.len(), "notifications": items })).into_response()
 }
 
 async fn sink_delete(Extension(a2a): Extension<Arc<A2a>>, Path(id): Path<String>) -> Response {
-    if !push::valid_sink_id(&id) {
-        return sink_bad_id();
+    if let Err(r) = sink_id_ok(&a2a, &id) {
+        return r;
     }
     let existed = a2a.svc.push.sink.clear(&id);
     Json(json!({ "id": id, "deleted": existed })).into_response()

@@ -1112,7 +1112,7 @@ fn report(
         "id": format!("run-{}", uuid::Uuid::new_v4().simple()),
         "started_at": started_at,
         "duration_ms": started.elapsed().as_millis() as u64,
-        "target": spec.target.as_str(),
+        "target": spec.target.shown(),
         "relayed": matches!(spec.target, Target::Remote(_)),
         "transport": spec.transport.label(),
         "version": spec.transport.version(),

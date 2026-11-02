@@ -250,6 +250,11 @@ async fn direct(state: &AppState, p: Prepared, session: &str) -> Result<Answer, 
         .map_err(|e| format!("invalid request: {e}"))?;
     req.extensions_mut()
         .insert(ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 0))));
+    // Its credentials were filled from the run's variables: the capture
+    // redacts every secret-looking header and query value, as it does for
+    // the MCP inspector's own requests.
+    req.extensions_mut()
+        .insert(crate::mcp::inspector::client::InspectorOrigin);
     let started = Instant::now();
     let resp = match tokio::time::timeout(REQUEST_TIMEOUT, router.oneshot(req)).await {
         Ok(Ok(r)) => r,
@@ -428,6 +433,27 @@ fn judge(a: &Assertion, ans: &Answer) -> Option<Failure> {
     None
 }
 
+/// Replace every filled variable value in a result with `{{NAME}}`.
+fn scrub(result: &mut TestResult, filled: &[(String, String)]) {
+    if filled.is_empty() {
+        return;
+    }
+    let clean = |text: &mut String| {
+        for (name, value) in filled {
+            if text.contains(value.as_str()) {
+                *text = text.replace(value.as_str(), &format!("{{{{{name}}}}}"));
+            }
+        }
+    };
+    for f in &mut result.failures {
+        clean(&mut f.seen);
+        clean(&mut f.expected);
+    }
+    if let Some(e) = &mut result.error {
+        clean(e);
+    }
+}
+
 // ── A run ───────────────────────────────────────────────────────────
 
 /// Run the tests `body` names (every one by default).
@@ -517,6 +543,15 @@ pub async fn run(
                 result.passed = result.failures.is_empty();
             }
         }
+        // What the run saw may echo a filled variable (a request to /echo):
+        // a report never carries a variable's value, only its name.
+        let filled: Vec<(String, String)> = t
+            .variables()
+            .into_iter()
+            .filter_map(|n| lookup(&n).map(|v| (n, v)))
+            .filter(|(_, v)| !v.is_empty())
+            .collect();
+        scrub(&mut result, &filled);
         results.push(result);
     }
     let failed = results

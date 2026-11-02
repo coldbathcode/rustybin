@@ -71,6 +71,7 @@ xpath "count(//failure)" == 0
 
 # ANCHOR: export
 GET {{base_url}}/_rustybin/tests/export
+Authorization: Bearer {{admin_token}}
 HTTP 200
 [Asserts]
 body contains "POST "

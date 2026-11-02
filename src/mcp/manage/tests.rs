@@ -740,7 +740,10 @@ async fn wait_for_requests_sees_a_request_sent_meanwhile() {
     assert!(!is_error(&r), "{r}");
     let r = waiter.await.expect("join");
     assert_eq!(r["structuredContent"]["count"], 1, "{r}");
-    assert_eq!(r["structuredContent"]["requests"][0]["path"], "/pets");
+    assert_eq!(
+        r["structuredContent"]["requests"][0]["untrusted_path"],
+        "/pets"
+    );
 }
 
 #[tokio::test]
@@ -2266,7 +2269,7 @@ async fn mcp_inspector_tools() {
     );
     let r = tool(&app, &[], "list_mcp_check_runs", json!({ "id": id })).await;
     assert!(
-        !is_error(&r) && r["structuredContent"]["checks"].is_array(),
+        !is_error(&r) && r["structuredContent"]["untrusted_report"]["checks"].is_array(),
         "{r}"
     );
     let r = tool(

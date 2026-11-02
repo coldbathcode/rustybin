@@ -43,7 +43,7 @@ Order is by risk to a public instance. The marker a session looks for is the fir
 | Step | Title | Worst | Findings | Status |
 |---|---|---|---|---|
 | [01](step-01-hostile-input.md) | Hostile input: schema budgets, streams, connections | critical | 14 | done 2026-11-02 |
-| [02](step-02-secrets.md) | Credentials and third-party content where they belong | high | 14 | |
+| [02](step-02-secrets.md) | Credentials and third-party content where they belong | high | 14 | done 2026-11-02 |
 | [03](step-03-console.md) | Console: the token, stale edits, popups, sign-out | high | 8 | done 2026-11-02 |
 | [04](step-04-control-plane.md) | Control plane: CORS, sign-in, keys, agents | high | 13 | |
 | [05](step-05-config-and-prune.md) | Config and git: prune scope, untrusted documents | medium | 11 | |

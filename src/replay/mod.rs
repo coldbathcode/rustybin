@@ -198,6 +198,26 @@ impl SavedTest {
         {
             return Err("gateway: no spaces or control characters".into());
         }
+        // Credentials are never saved: a secret-looking header or query
+        // value must reference a variable (`Bearer {{TOKEN}}`), never be one.
+        for (k, v) in &r.headers {
+            if crate::keys::looks_secret(k) && run::variables_in(v).is_empty() {
+                return Err(format!(
+                    "request.headers.{k}: a credential is never saved: use a variable, such as {{{{{}}}}}",
+                    variable_name(k)
+                ));
+            }
+        }
+        if let Some((_, query)) = r.path.split_once('?') {
+            for (k, v) in form_urlencoded::parse(query.as_bytes()) {
+                if crate::keys::looks_secret(&k) && run::variables_in(&v).is_empty() {
+                    return Err(format!(
+                        "request.path: the query value of {k} is a credential, never saved: use a variable, such as {{{{{}}}}}",
+                        variable_name(&k)
+                    ));
+                }
+            }
+        }
         let path_only = r.path.split('?').next().unwrap_or("");
         if crate::control::is_control_path(path_only) {
             return Err(
@@ -480,13 +500,25 @@ pub fn request_from_capture(
             c.body.as_deref().map(str::len).unwrap_or(0)
         ));
     }
+    if c.body_base64.is_some() {
+        return Err(
+            "the captured body is binary: save a test with the request written out instead".into(),
+        );
+    }
     let mut vars = Vec::new();
     let mut path = c.path.clone();
     if let Some(q) = c.query.as_deref().filter(|q| !q.is_empty()) {
+        // Names are decoded before the check (`to%6Ben` is `token`).
+        let decoded = |k: &str| {
+            form_urlencoded::parse(format!("{k}=").as_bytes())
+                .next()
+                .map(|(k, _)| k.into_owned())
+                .unwrap_or_else(|| k.to_string())
+        };
         let parts: Vec<String> = q
             .split('&')
             .map(|pair| match pair.split_once('=') {
-                Some((k, _)) if crate::keys::looks_secret(k) => {
+                Some((k, _)) if crate::keys::looks_secret(&decoded(k)) => {
                     let v = variable_name(k);
                     if !vars.contains(&v) {
                         vars.push(v.clone());
@@ -520,10 +552,68 @@ pub fn request_from_capture(
             method: c.method.clone(),
             path,
             headers,
-            body: c.body.clone().filter(|b| !b.is_empty()),
+            body: c
+                .body
+                .clone()
+                .filter(|b| !b.is_empty())
+                .map(|b| mask_body_secrets(&b, &mut vars)),
         },
         vars,
     ))
+}
+
+/// A captured body with the values of secret-looking JSON fields (at any
+/// depth) and form fields replaced by variables.
+fn mask_body_secrets(body: &str, vars: &mut Vec<String>) -> String {
+    let mut note = |k: &str| {
+        let v = variable_name(k);
+        if !vars.contains(&v) {
+            vars.push(v.clone());
+        }
+        format!("{{{{{v}}}}}")
+    };
+    if let Ok(mut doc) = serde_json::from_str::<Value>(body) {
+        fn walk(v: &mut Value, note: &mut dyn FnMut(&str) -> String) {
+            match v {
+                Value::Object(m) => {
+                    for (k, val) in m.iter_mut() {
+                        if crate::keys::looks_secret(k) && (val.is_string() || val.is_number()) {
+                            *val = Value::String(note(k));
+                        } else {
+                            walk(val, note);
+                        }
+                    }
+                }
+                Value::Array(a) => a.iter_mut().for_each(|x| walk(x, note)),
+                _ => {}
+            }
+        }
+        walk(&mut doc, &mut note);
+        return serde_json::to_string(&doc).unwrap_or_else(|_| body.to_string());
+    }
+    // A form body: `a=1&password=x` keeps `a`, the password becomes a
+    // variable (written unencoded, so it stays a `{{NAME}}` reference).
+    if body.contains('=') && !body.contains(['\n', ' ']) {
+        let pairs: Vec<(String, String)> = form_urlencoded::parse(body.as_bytes())
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        if pairs.iter().any(|(k, _)| crate::keys::looks_secret(k)) {
+            let parts: Vec<String> = pairs
+                .iter()
+                .map(|(k, v)| {
+                    let key: String = form_urlencoded::byte_serialize(k.as_bytes()).collect();
+                    if crate::keys::looks_secret(k) {
+                        format!("{key}={}", note(k))
+                    } else {
+                        let val: String = form_urlencoded::byte_serialize(v.as_bytes()).collect();
+                        format!("{key}={val}")
+                    }
+                })
+                .collect();
+            return parts.join("&");
+        }
+    }
+    body.to_string()
 }
 
 /// May this caller turn the capture into a test? The inspector's own rule:
@@ -620,11 +710,16 @@ fn refuse(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({ "error": message.into() }))).into_response()
 }
 
-async fn list_handler(State(state): State<AppState>) -> Json<Value> {
+/// Every read is admin: a test may hold a captured request's body.
+async fn list_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
+        return r;
+    }
     Json(json!({
         "tests": state.saved_tests.views(),
         "max_tests": MAX_TESTS,
     }))
+    .into_response()
 }
 
 async fn save_handler(
@@ -650,7 +745,14 @@ async fn save_handler(
     }
 }
 
-async fn get_handler(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+async fn get_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
+        return r;
+    }
     match state.saved_tests.view_of(&name) {
         Some(v) => Json(v).into_response(),
         None => refuse(StatusCode::NOT_FOUND, format!("no test named {name:?}")),
@@ -758,7 +860,10 @@ async fn run_handler(
     }
 }
 
-async fn export_handler(State(state): State<AppState>) -> Response {
+async fn export_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
+        return r;
+    }
     (
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
         hurl::export(&state.saved_tests.list()),

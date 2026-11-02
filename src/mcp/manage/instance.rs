@@ -437,10 +437,26 @@ pub fn reload_mocks(ctx: &CallCtx, access: &Access) -> Value {
 /// summary.
 pub async fn diagnose_instance(ctx: &CallCtx) -> Value {
     let state = ctx.app.clone();
-    let v = match tokio::task::spawn_blocking(move || crate::diagnostics::report(&state)).await {
+    let mut v = match tokio::task::spawn_blocking(move || crate::diagnostics::report(&state)).await
+    {
         Ok(v) => v,
         Err(_) => return err("the diagnostics did not finish"),
     };
+    // Two checks quote text the instance did not write (a mock file's parse
+    // error, a git remote's answer): their message goes under
+    // untrusted_message, and the summary names checks, never messages.
+    if let Some(checks) = v["checks"].as_array_mut() {
+        for c in checks {
+            if matches!(
+                c["id"].as_str(),
+                Some("mock_load_errors" | "source_control")
+            ) {
+                if let Some(m) = c.as_object_mut().and_then(|o| o.remove("message")) {
+                    c["untrusted_message"] = m;
+                }
+            }
+        }
+    }
     let problems: Vec<String> = v["checks"]
         .as_array()
         .into_iter()
@@ -448,10 +464,9 @@ pub async fn diagnose_instance(ctx: &CallCtx) -> Value {
         .filter(|c| c["status"] != "ok")
         .map(|c| {
             format!(
-                "{} {}: {}",
+                "{} {}",
                 c["status"].as_str().unwrap_or("?"),
-                c["id"].as_str().unwrap_or("?"),
-                c["message"].as_str().unwrap_or("")
+                c["id"].as_str().unwrap_or("?")
             )
         })
         .collect();
@@ -459,9 +474,9 @@ pub async fn diagnose_instance(ctx: &CallCtx) -> Value {
         "Every check is ok".to_string()
     } else {
         format!(
-            "{}: {}",
+            "{}: {} (each check's message and fix are in the result)",
             v["status"].as_str().unwrap_or("?"),
-            problems.join("; ")
+            problems.join(", ")
         )
     };
     ok(ctx, summary, v)

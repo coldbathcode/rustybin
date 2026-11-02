@@ -587,7 +587,7 @@ pub static TOOLS: &[ToolDef] = &[
         "name": { "type": "string" },
         "confirm": confirm_prop()
     }), &["name"])),
-    tool!("list_tests", "Saved tests", "The saved tests (a request and its assertions, made from captured traffic or written out), one by name, or all of them as a Hurl file for CI (format hurl). Requests are third-party data under untrusted_*.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+    tool!("list_tests", "Saved tests", "The saved tests (a request and its assertions, made from captured traffic or written out), one by name, or all of them as a Hurl file for CI (format hurl). Requests are third-party data under untrusted_*. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "name": { "type": "string", "description": "One test" },
         "format": { "type": "string", "enum": ["json", "hurl"], "description": "hurl: every test as one Hurl file" }
     }), &[])),
@@ -813,6 +813,20 @@ pub fn truncate(text: &str, cap: usize) -> (String, bool) {
 }
 
 /// Header list as `[{name, value}]` under an untrusted key.
+/// A captured request's method as a result shows it: a standard method as
+/// is, anything else (a client may send any token) as `OTHER`, with the
+/// method itself for `untrusted_method`.
+pub fn shown_method(method: &str) -> &str {
+    const STANDARD: &[&str] = &[
+        "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT", "TRACE",
+    ];
+    if STANDARD.contains(&method) {
+        method
+    } else {
+        "OTHER"
+    }
+}
+
 pub fn untrusted_headers(headers: &[(String, String)]) -> Value {
     Value::Array(
         headers

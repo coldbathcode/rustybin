@@ -1291,6 +1291,22 @@ pub fn sensitive_header(name: &str) -> bool {
         || n.contains("cookie")
         || n.contains("secret")
         || n.contains("password")
+        || crate::keys::looks_secret(&n)
+}
+
+/// A path with the values of sensitive-looking query parameters replaced.
+fn redact_path_query(path: &str, marker: &str) -> String {
+    let Some((base, query)) = path.split_once('?') else {
+        return path.to_string();
+    };
+    let parts: Vec<String> = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((k, _)) if sensitive_header(k) => format!("{k}={marker}"),
+            _ => pair.to_string(),
+        })
+        .collect();
+    format!("{base}?{}", parts.join("&"))
 }
 
 /// The scenario as stored in a report: credential-looking header values,
@@ -1322,6 +1338,15 @@ pub fn redact_scenario_with(scenario: &Value, marker: &str) -> Value {
                 if let Some(secret) = map.get_mut("client_secret") {
                     *secret = Value::String(marker.into());
                 }
+                // A query value in a path is redacted where the scenario is
+                // shown (reports, the API, the tools); a configuration export
+                // (marker `secret:stored`) keeps it, since the apply could not
+                // fill a marker inside a string back in.
+                if marker == "[redacted]" {
+                    if let Some(Value::String(p)) = map.get_mut("path") {
+                        *p = redact_path_query(p, marker);
+                    }
+                }
                 for value in map.values_mut() {
                     walk(value, marker);
                 }
@@ -1339,6 +1364,25 @@ pub fn redact_scenario_with(scenario: &Value, marker: &str) -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn shown_scenarios_hide_query_secrets_and_more_header_names() {
+        let sc = json!({ "layers": [{ "source": { "request": {
+            "path": "/orders?api_key=abc123&page=2",
+            "headers": { "x-auth-user": "ana", "x-key": "k1", "accept": "application/json" }
+        } } }] });
+        let shown = redact_scenario(&sc).to_string();
+        for secret in ["abc123", "\"ana\"", "k1"] {
+            assert!(!shown.contains(secret), "{secret} in {shown}");
+        }
+        assert!(
+            shown.contains("page=2") && shown.contains("application/json"),
+            "{shown}"
+        );
+        // A configuration export keeps the path (the apply could not fill it back).
+        let exported = redact_scenario_with(&sc, "secret:stored").to_string();
+        assert!(exported.contains("api_key=abc123"), "{exported}");
+    }
 
     fn report(state: &str, thresholds: Vec<ThresholdResult>) -> Report {
         let passed = thresholds.iter().all(|t| t.pass) && state == "finished";

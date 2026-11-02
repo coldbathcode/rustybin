@@ -25,7 +25,16 @@ assertion.
 secret (`Authorization`, `Cookie`, anything with `key`, `token`, `secret`,
 `password`, `auth` or `sig` in it) becomes a variable named after it:
 `X-Api-Key: secret` is saved as `X-Api-Key: {{X_API_KEY}}`, `?token=abc` as
-`?token={{TOKEN}}`. The answer lists them as `introduced_variables`.
+`?token={{TOKEN}}`; so does a secret-looking field of a captured JSON or form body
+(`"password": "{{PASSWORD}}"`). The answer lists them as `introduced_variables`. A
+written test is held to the same rule: a secret-looking header or query value must
+reference a variable (`Authorization: Bearer {{TOKEN}}`), and a literal one is refused.
+A run's report never shows a filled variable's value, even when the answer echoes it,
+and the inspector captures the in-process requests of a run redacted. A binary capture
+cannot be saved as a test.
+
+Saved tests, their export and `list_tests` are admin only: a test may hold a captured
+request.
 
 On a public instance a capture can be saved only with its own session
 (`X-Rustybin-Session`), as the inspector shows it; in shared mode only with its
@@ -108,6 +117,6 @@ exits `1` when a test fails.
 |---|---|
 | API | `GET`, `POST /_rustybin/tests`, `GET`, `PUT`, `DELETE /_rustybin/tests/{name}`, `POST /_rustybin/tests/run` (`?format=junit`), `GET /_rustybin/tests/export` |
 | Console | **Live traffic**: **Save as test** on an entry; **Saved tests**: the list, **Run all** with variables, a test's run, the failures, **Export as Hurl**, delete |
-| CLI | `rustybin tests list | show | save | put | delete | run | export` (`run --junit`, `--var NAME=value`) ([reference](cli.md#tests)) |
+| CLI | `rustybin tests list | show | save | put | delete | run | export` (`run --junit`, `--var NAME=value`, `--var NAME=-` or `NAME=@file` for a credential) ([reference](cli.md#tests)) |
 | Management MCP | `list_tests` (one, all, or `format: hurl`), `save_test`, `delete_test` (confirmed), `run_tests` (confirmed when a test goes through a gateway; variables only from `RUSTYBIN_TEST_*`) ([agent page](agent-mcp.md)) |
 | `rustybin.yaml` | `tests:`, a list of tests as above ([instance as code](configuration-as-code.md)) |

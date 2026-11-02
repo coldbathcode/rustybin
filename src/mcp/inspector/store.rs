@@ -503,7 +503,7 @@ impl Store {
             .rev()
             .map(|r| {
                 json!({
-                    "id": r["id"], "started_at": r["started_at"], "target": r["target"],
+                    "id": r["id"], "started_at": r["started_at"], "target": shown_target(&r["target"]),
                     "transport": r["transport"], "summary": r["summary"], "duration_ms": r["duration_ms"],
                 })
             })
@@ -512,7 +512,9 @@ impl Store {
 
     pub fn run(&self, id: &str) -> Option<Value> {
         let doc = self.doc.read().unwrap_or_else(|e| e.into_inner());
-        doc.runs.iter().find(|r| r["id"] == id).cloned()
+        let mut r = doc.runs.iter().find(|r| r["id"] == id).cloned()?;
+        r["target"] = shown_target(&r["target"]);
+        Some(r)
     }
 
     pub fn delete_run(&self, id: &str) -> Result<bool, String> {
@@ -526,5 +528,14 @@ impl Store {
         self.persist(&next)?;
         *doc = next;
         Ok(true)
+    }
+}
+
+/// A saved run's target without its query string (a run saved before 0.3.1
+/// may hold a connection's query-string key there).
+fn shown_target(t: &Value) -> Value {
+    match t.as_str() {
+        Some(s) => json!(s.split_once('?').map_or(s, |(base, _)| base)),
+        None => t.clone(),
     }
 }
