@@ -219,7 +219,8 @@ retry: 20
 retry-interval: 100
 HTTP 200
 [Asserts]
-jsonpath "$.notifications[0].headers['x-a2a-notification-token']" == "docs-token"
+# Credential headers are kept as a hint, never the value.
+jsonpath "$.notifications[0].headers['x-a2a-notification-token']" == "[redacted, ends oken]"
 jsonpath "$.notifications[*].body.statusUpdate.status.state" contains "TASK_STATE_COMPLETED"
 
 DELETE {{base_url}}/a2a/webhook-sink/docs-sink

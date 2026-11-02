@@ -243,7 +243,7 @@ fn build_paths() -> Value {
                             "properties": {
                                 "status": { "type": "string", "example": "healthy" },
                                 "service": { "type": "string", "example": "rustybin" },
-                                "version": { "type": "string", "example": "0.3.0" },
+                                "version": { "type": "string", "example": "0.3.1" },
                                 "instance_id": { "type": "string", "format": "uuid" }
                             }
                         }))

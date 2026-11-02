@@ -2162,8 +2162,10 @@ def run_password(browser):
         page.wait_for_selector("form[aria-label='Settings: console']")
         expect(page.locator("#signin")).to_have_count(0)
         expect(page.locator("#signed-in")).to_contain_text("rustybin")
-        # Leave the instance with the default password for the next run.
-        req = urllib.request.Request(base + "/_rustybin/settings/console.password_hash", headers={"Authorization": "Bearer " + token}, method="DELETE")
+        # Leave the instance with the default password for the next run: a
+        # sign-in token resets it only with the current password.
+        body = json.dumps({"secrets": {"console.password_hash": None}, "current_password": new_password}).encode()
+        req = urllib.request.Request(base + "/_rustybin/settings", data=body, headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"}, method="PATCH")
         with urllib.request.urlopen(req, timeout=10) as r:
             assert r.status == 200
 

@@ -1,5 +1,103 @@
 # Changelog
 
+## 0.3.1 (2026-11-02): the 0.3 review
+
+A full review of 0.3.0 by eight reviewers, 89 findings, all fixed in eight steps
+([the plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/review-0.3/master-plan.md));
+the [threat model](concepts/public-instances.md) says what each kind of caller can do now.
+
+**Behaviour changes** (what an operator or a script may notice):
+
+- **Sign in again after the upgrade.** The console and OAuth signing key is a random
+  per-instance key in `<state>/control-oauth.key` (per process without a state
+  directory) unless `RUSTYBIN_CONTROL_OAUTH_KEY` is set; it is never derived from the
+  admin token. Sign-in and OAuth tokens issued before the upgrade stop working once
+  (agents too). Replicas that shared sessions through a shared admin token set
+  `RUSTYBIN_CONTROL_OAUTH_KEY` or share the state directory. An admin token shorter than
+  24 characters warns at startup.
+- **Control-plane CORS.** `/_rustybin/*` (the sign-in and OAuth endpoints included)
+  answers cross-origin only to origins named in `RUSTYBIN_CORS_ORIGINS`; `*` covers the
+  data plane only. A browser app on another origin that calls the control API lists its
+  origin.
+- **The sign-in changes only with the password.** In password mode `console.user` and
+  `console.password_hash` change only with the current password (`PUT
+  /_rustybin/password`, or `current_password` in `PATCH /_rustybin/settings`) or the
+  admin token itself; the management MCP and `rustybin.yaml` no longer change them, and
+  every change signs every session out.
+- **Saved tests are admin-only to read** (`GET /_rustybin/tests*`, `list_tests`), a
+  secret-looking header or query value must be a `{{variable}}` (a literal is refused),
+  captured JSON and form bodies lose their secret fields to variables, and a binary
+  capture cannot be saved. One run at a time (`409`); `run_tests` asks before replaying
+  a `POST`, `PUT`, `PATCH` or `DELETE`. A save or delete the file refuses answers `500`
+  and changes nothing.
+- **A prune deletes only the instance's own mocks**: never a visitor's, an API key's or
+  a running gateway scenario's, and never a mock its document names but could not read
+  (a pulled entry with a typo included). The harness and registry sections prune only
+  what the document does not name at all.
+- **A document from git cannot repoint outbound requests**: `egress.allow`,
+  `egress.allow_loopback`, `assist.provider`, `assist.base_url` and
+  `proxy.client_ip_header` with a different value are reported and kept, a test cannot
+  name a new gateway, and `secret:stored` in a harness scenario fills a saved value only
+  for the same targets. A pull's preview and apply read the same commit.
+- **Compiles count for every caller without admin rights** (30 a minute per visit, key
+  or address, whatever the session header), duplicates, AI previews and generated
+  examples included; config applies run on the compile pool (`503` with `Retry-After`
+  when it stays busy).
+- **Deploys can name their revision**: `POST /_rustybin/mocks/{name}/deploy` takes
+  `If-Match` or `expected_revision` (`409` when the draft moved on;
+  `deploy_mock.expected_revision`, `rustybin mocks deploy --expect-revision`), and
+  `PATCH` with `deploy: true` publishes exactly the revision it wrote. Revision numbers
+  start from the clock, so they keep growing across restarts (they are large numbers).
+- **Agents see less third-party text in summaries**: traffic rows carry
+  `untrusted_path`, `untrusted_query`, `untrusted_method` and `untrusted_validation`,
+  `diagnose_instance` moves quoted messages to `untrusted_message`, and
+  `list_mcp_check_runs` answers `untrusted_report`. MCP inspector targets never show
+  their query string.
+- **Without admin rights the MCP relay, check runs and `mcp_call` send only read-only
+  methods** to servers on other hosts (no `tools/call`). The inspector runs at most two
+  check suites and 16 relay calls at once (`503`).
+- **Agents cannot lift their own limits** (rights, restore, end sessions of their own
+  credential); `update_settings` asks to confirm changes to `egress.*`, `agents.*`,
+  `console.*` and `git.*`; AI assist caps of token callers follow the credential, not
+  `X-Rustybin-Session`.
+- **Statuses are 200 to 599**: a requested (`Prefer: code=`, `X-Rustybin-Mock-Status`) or
+  configured mock status outside that range is refused.
+- **Public mode**: `Set-Cookie` through `/response-headers` and a cookie `_domain` are
+  refused (`400`); at most 20 bins per address; public A2A sink ids are at least 16
+  characters and keep 10 notifications; dynamic client registrations, registry token
+  mints and portal catalogue renders are rate limited (`429` or `503` with
+  `Retry-After`); a full token denylist refuses new revocations (`503`) rather than
+  forgetting old ones.
+- **The CLI** follows no redirects, sends `RUSTYBIN_TOKEN` and `RUSTYBIN_ADMIN_TOKEN` to
+  `--url` only when it is `RUSTYBIN_URL` or loopback, warns on plain http to another
+  host, and reads a secret test variable with `--var NAME=-` (stdin) or `NAME=@file`.
+- **Gateway scenario run ids are 96 bits**, a check cannot be skewed by forged sessions,
+  and the credential-injection key is shown to admin callers only (`key_hidden`).
+
+**Hardening** (no change for a well-behaved caller):
+
+- Listeners: a request head must arrive within 30 seconds, at most 16,384 connections at
+  once; WebSocket sends and gRPC streams are bounded in time.
+- Budgets: schema generation (`minLength`, exclusive bounds, unique items), `$ref`
+  inlining (20,000 nodes), `allOf` walks, the regex cache (128 patterns, 256 KiB), rerank
+  queries, completion stream pacing, A2A message and task bytes, captures (16 KiB of
+  headers, 4 KiB a field, a 64 MiB ring).
+- Locks and files: checkpoint restores one at a time under the edit lock, each mock
+  swapped in whole; mock, visit and saved-test files written off the async workers with
+  the latest change winning; `apply_keeping` one locked edit per mock; session saves
+  under one writer lock.
+- Git: blobs are sized before they are read; an ssh user name cannot be an option.
+- Harness: a member cannot depose the leader, a kill during preparation prevents the
+  start, node calls never reach forbidden addresses, run ids are safe file names, one
+  in-flight slot per request.
+- `168.63.129.16` is never an egress target; logs escape control characters in user
+  names and targets; in-process tool requests carry the caller's address, not
+  `127.0.0.1`; cookie arguments of a mock's MCP tools are percent-encoded.
+- Console: the console token never fills the MCP inspector's auth form, edits and
+  deploys name the revision they were made from, OAuth popups have no opener, sign-out
+  clears the tab's data, consent redirects refuse script schemes.
+- The image workflow keeps `latest` on main's newest build.
+
 ## 0.3.0 (2026-11-02): reliability and testing workflows
 
 The correctness work the hardening review queued, then the workflows that turn an

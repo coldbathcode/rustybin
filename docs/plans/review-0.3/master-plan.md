@@ -50,7 +50,7 @@ Order is by risk to a public instance. The marker a session looks for is the fir
 | [06](step-06-mocks-and-workflows.md) | Mocks, checkpoints and tests: pools, locks, persistence | medium | 13 | done 2026-11-02 |
 | [07](step-07-harness.md) | Harness: leadership, the kill switch, node calls | medium | 8 | done 2026-11-02 |
 | [08](step-08-public-demos.md) | Public demo modules: per-client caps and leftovers | medium | 8 | done 2026-11-02 |
-| [09](step-09-release.md) | Docs and release 0.3.1 | | | |
+| [09](step-09-release.md) | Docs and release 0.3.1 | | | done 2026-11-02 |
 
 ## 5. How a session works
 
