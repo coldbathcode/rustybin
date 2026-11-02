@@ -42,6 +42,7 @@
 # Test a gateway
 
 - [Gateway recipes](gateway-recipes.md)
+- [Gateway scenarios](gateway-scenarios.md)
 - [Request inspector](concepts/inspector.md)
 - [Sessions and public mode](concepts/sessions.md)
 - [Fault injection](concepts/fault-injection.md)

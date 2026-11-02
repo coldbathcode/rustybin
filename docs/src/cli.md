@@ -318,6 +318,26 @@ rustybin bins get 0123456789abcdef01234567 1
 rustybin bins tail 0123456789abcdef01234567 --max 3
 ```
 
+## scenario
+
+Guided gateway scenarios: prepare the upstream, check through the gateway, clean up
+
+| Command | What it does | Calls |
+|---|---|---|
+| `rustybin scenario list` | The gateway scenarios (retries, rate limiting, credential injection, timeouts, caching) and your runs. | `GET /_rustybin/scenarios` |
+| `rustybin scenario start <scenario>` | Prepare a run: its upstream and the steps to configure on the gateway. | `POST /_rustybin/scenarios/{id}/runs` |
+| `rustybin scenario show <scenario> <run>` | A run: the setup, what it created, the last verdict. | `GET /_rustybin/scenarios/{id}/runs/{run}` |
+| `rustybin scenario check <scenario> <run> --gateway U [--limit N]` | Send the run's test requests through the gateway and compare what the client got with what reached the upstream; exits 1 when an expectation fails. Flags: `--gateway` value, `--limit` value. | `POST /_rustybin/scenarios/{id}/runs/{run}/check` |
+| `rustybin scenario end <scenario> <run>` | End a run: remove the mock and counters it created, nothing else. | `DELETE /_rustybin/scenarios/{id}/runs/{run}` |
+
+```bash
+rustybin scenario list
+rustybin scenario start caching
+rustybin scenario show caching 1a2b3c4d
+rustybin scenario check caching 1a2b3c4d --gateway http://localhost:8000/catalog-api
+rustybin scenario end caching 1a2b3c4d --yes
+```
+
 ## agents
 
 AI agents on the management MCP server

@@ -7,8 +7,8 @@ use serde_json::{json, Map, Value};
 
 use super::access::{Access, Right};
 use super::{
-    agents, assist, config, harness, inspect, instance, mocks, portal, registry, settings, testing,
-    traffic, visits,
+    agents, assist, config, harness, inspect, instance, mocks, portal, registry, scenarios,
+    settings, testing, traffic, visits,
 };
 use crate::mcp::core::{self, CallCtx};
 use crate::mcp::protocol::{RpcError, Version};
@@ -105,6 +105,32 @@ fn cluster_id_prop() -> Value {
 
 pub static TOOLS: &[ToolDef] = &[
     // ── Instance ──
+    tool!("list_gateway_scenarios", "Gateway scenarios", "The guided gateway scenarios (retries, rate limiting, credential injection, timeouts, caching): what each proves, the upstream it prepares, the steps on the gateway; and the caller's runs with their last verdicts.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("start_gateway_scenario", "Start a gateway scenario", "Prepare a scenario run: create its upstream (a mock that is never saved and ends with the run, or a /flaky route) and answer the steps to configure on the gateway, with the upstream URL. Then call check_gateway_scenario with the URL the gateway serves the route at. Admin.", Right::Admin, ro=false, destructive=false, idem=false, confirm=false, || obj(json!({ "scenario": { "type": "string", "description": "retries, rate_limiting, credential_injection, timeouts or caching" } }), &["scenario"])),
+    tool!("get_gateway_scenario_run", "Get a scenario run", "One of the caller's scenario runs: the setup, what it created and the last verdict.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(super::scenarios::run_props(), &["scenario", "run"])),
+    ToolDef {
+        name: "check_gateway_scenario",
+        title: "Check a gateway scenario",
+        description: "SEND TEST TRAFFIC to the gateway: the run's requests to gateway_url plus the scenario's path (through the egress policy, purpose scenario: the gateway's host must be in RUSTYBIN_EGRESS_ALLOW), then compare what the client got with what reached the upstream. Answers each expectation with what was expected and seen. Asks the user to confirm (elicitation) or needs \"confirm\": true, set only after the user agreed. Admin.",
+        right: Right::Admin,
+        read_only: false,
+        destructive: false,
+        idempotent: false,
+        confirm: true,
+        open_world: true,
+        input_schema: || {
+            let mut props = super::scenarios::run_props();
+            props["gateway_url"] = json!({ "type": "string", "description": "The URL the gateway serves the route at (no query string)" });
+            props["limit"] = json!({ "type": "integer", "minimum": 1, "maximum": crate::scenarios::catalog::MAX_LIMIT, "description": "rate_limiting only: the limit set on the gateway (default 5)" });
+            props["confirm"] = confirm_prop();
+            obj(props, &["scenario", "run", "gateway_url"])
+        },
+    },
+    tool!("end_gateway_scenario", "End a gateway scenario", "End a run: remove the mock it created and reset its flaky counters, nothing else. Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || {
+        let mut props = super::scenarios::run_props();
+        props["confirm"] = confirm_prop();
+        obj(props, &["scenario", "run"])
+    }),
     tool!("diagnose_instance", "Diagnose the instance", "What is wrong with this instance and how to fix it: storage, the secrets key, unreadable secrets, load errors, listeners that did not start, outbound calls refused in the last hour, source control, the default password, the harness engine, AI assist. Each check has an id, a status (ok, warn, fail), a message and a fix. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, no_args),
     tool!("get_instance", "Instance", "What this Rustybin is: version, modes (public, shared, hosted, self-service), control auth, limits, the public configuration view, the caller's rights and the console and docs URLs. Start here.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
     tool!("find_endpoints", "Find endpoints", "Search the route catalogue of this instance (echo, status codes, mock LLM providers, MCP, A2A, OAuth, bins, ...) by text and/or category. Returns path, methods, summary and an example request per route.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
@@ -875,6 +901,12 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         // Instance
         "get_instance" => instance::get_instance(ctx, access),
         "diagnose_instance" => instance::diagnose_instance(ctx).await,
+        // Gateway scenarios
+        "list_gateway_scenarios" => scenarios::list_gateway_scenarios(ctx),
+        "start_gateway_scenario" => scenarios::start_gateway_scenario(ctx, access, &args).await,
+        "get_gateway_scenario_run" => scenarios::get_gateway_scenario_run(ctx, &args),
+        "check_gateway_scenario" => scenarios::check_gateway_scenario(ctx, &args, params).await,
+        "end_gateway_scenario" => scenarios::end_gateway_scenario(ctx, &args, params).await,
         "find_endpoints" => instance::find_endpoints(ctx, &args),
         "get_health" => instance::get_health(ctx),
         "set_health" => instance::set_health(ctx, &args),

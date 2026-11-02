@@ -26,6 +26,7 @@ pub mod portal;
 pub mod prompts;
 pub mod registry;
 pub mod resources;
+pub mod scenarios;
 pub mod settings;
 pub mod stdio;
 pub mod testing;

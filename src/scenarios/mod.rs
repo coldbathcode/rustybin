@@ -1,0 +1,656 @@
+//! Guided gateway scenarios: pick an outcome (retries, rate limiting,
+//! credential injection, timeouts, caching), and a run prepares the upstream
+//! the test needs (a mock, or a `/flaky` route), says how to point the
+//! gateway at it, sends test traffic through the gateway and compares what
+//! the client got with what reached the upstream (the inspector's captures,
+//! tied to each request by its `X-Rustybin-Session`). Ending a run removes
+//! what it created and nothing else.
+//!
+//! Runs are bounded ([`MAX_RUNS`], [`RUN_TTL`]) and belong to the session
+//! that started them (`X-Rustybin-Session`, else the client address).
+//! Test traffic goes through the egress policy under `Purpose::Scenario`.
+
+pub mod catalog;
+#[cfg(test)]
+mod tests;
+
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
+
+use axum::extract::{Path, State};
+use axum::http::{Extensions, HeaderMap, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use bytes::Bytes;
+use rand::RngCore;
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use crate::catalog::{category, Endpoint, Example};
+use crate::egress::Purpose;
+use crate::mocks::service::Svc;
+use crate::session::Session;
+use crate::state::AppState;
+pub use catalog::{Scenario, Sent, Upstream, SCENARIOS};
+
+/// Most runs at once, every caller together.
+pub const MAX_RUNS: usize = 32;
+/// A run (and the mock it created) ends after this.
+pub const RUN_TTL: Duration = Duration::from_secs(3600);
+/// Most checks of one run.
+pub const MAX_CHECKS: u32 = 100;
+/// The longest a check request waits for the gateway.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// The most of an answer's body read (and dropped).
+const MAX_BODY: usize = 64 * 1024;
+/// The header that ties an upstream request to the check request.
+pub const SESSION_HEADER: &str = "x-rustybin-session";
+
+pub const LIST_PATH: &str = "/_rustybin/scenarios";
+const RUNS_PATH: &str = "/_rustybin/scenarios/{id}/runs";
+const RUN_PATH: &str = "/_rustybin/scenarios/{id}/runs/{run}";
+const CHECK_PATH: &str = "/_rustybin/scenarios/{id}/runs/{run}/check";
+
+struct Run {
+    id: String,
+    scenario: &'static Scenario,
+    owner: String,
+    created_at: String,
+    expires_at: String,
+    expires: Instant,
+    mock: Option<String>,
+    upstream: String,
+    key: Option<String>,
+    checks: u32,
+    checking: bool,
+    last: Option<Value>,
+}
+
+impl Run {
+    fn view(&self) -> Value {
+        let mut resources = Vec::new();
+        if let Some(m) = &self.mock {
+            resources.push(json!({ "kind": "mock", "name": m }));
+        }
+        if let Upstream::Flaky(p) = self.scenario.upstream {
+            resources.push(json!({ "kind": "flaky_counters", "route": p, "sessions": format!("{}*", self.session_prefix()) }));
+        }
+        json!({
+            "id": self.id,
+            "scenario": self.scenario.id,
+            "title": self.scenario.title,
+            "proves": self.scenario.proves,
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+            "upstream": self.upstream,
+            "request_path": self.scenario.request_path,
+            "setup": self.scenario.setup_for(&self.upstream, self.key.as_deref()),
+            "resources": resources,
+            "checks": self.checks,
+            "checking": self.checking,
+            "last_check": self.last,
+        })
+    }
+
+    fn session_prefix(&self) -> String {
+        format!("scn-{}-", self.id)
+    }
+}
+
+/// A refusal: status and message.
+#[derive(Debug)]
+pub struct Refused(pub StatusCode, pub String);
+
+impl Refused {
+    fn new(status: StatusCode, message: impl Into<String>) -> Self {
+        Self(status, message.into())
+    }
+}
+
+impl IntoResponse for Refused {
+    fn into_response(self) -> Response {
+        (self.0, Json(json!({ "error": self.1 }))).into_response()
+    }
+}
+
+/// The runs of an instance (`AppState.scenarios`).
+#[derive(Default)]
+pub struct Scenarios {
+    runs: Mutex<Vec<Run>>,
+}
+
+impl Scenarios {
+    /// The runs, the expired ones dropped (their mocks expire on their own).
+    fn runs(&self) -> MutexGuard<'_, Vec<Run>> {
+        let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        runs.retain(|r| r.expires > now || r.checking);
+        runs
+    }
+
+    pub fn len(&self) -> usize {
+        self.runs().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+fn not_found(scenario: &str, run: &str) -> Refused {
+    Refused::new(
+        StatusCode::NOT_FOUND,
+        format!("no run {run:?} of scenario {scenario:?} in this session"),
+    )
+}
+
+fn random_hex(bytes: usize) -> String {
+    let mut b = vec![0u8; bytes];
+    rand::thread_rng().fill_bytes(&mut b);
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// The catalogue and the caller's runs.
+pub fn list(state: &AppState, owner: &str) -> Value {
+    let runs: Vec<Value> = state
+        .scenarios
+        .runs()
+        .iter()
+        .filter(|r| r.owner == owner)
+        .map(Run::view)
+        .collect();
+    json!({
+        "scenarios": SCENARIOS.iter().map(Scenario::view).collect::<Vec<_>>(),
+        "runs": runs,
+        "max_runs": MAX_RUNS,
+    })
+}
+
+/// One of the caller's runs.
+pub fn get_run(state: &AppState, owner: &str, scenario: &str, run: &str) -> Result<Value, Refused> {
+    state
+        .scenarios
+        .runs()
+        .iter()
+        .find(|r| r.id == run && r.scenario.id == scenario && r.owner == owner)
+        .map(Run::view)
+        .ok_or_else(|| not_found(scenario, run))
+}
+
+/// Prepare a run: the upstream mock (admin, through `svc`), the setup.
+pub async fn start(
+    state: &AppState,
+    svc: Svc,
+    owner: &str,
+    scenario: &str,
+) -> Result<Value, Refused> {
+    let Some(sc) = catalog::find(scenario) else {
+        return Err(Refused::new(
+            StatusCode::NOT_FOUND,
+            format!(
+                "no scenario {scenario:?}: one of {}",
+                SCENARIOS
+                    .iter()
+                    .map(|s| s.id)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+    };
+    svc.require_admin()
+        .map_err(|e| Refused(e.status, e.message()))?;
+    let full = || {
+        Refused::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("at most {MAX_RUNS} scenario runs at once: end one first"),
+        )
+    };
+    if state.scenarios.len() >= MAX_RUNS {
+        return Err(full());
+    }
+    let id = random_hex(4);
+    let key = (sc.id == "credential_injection").then(|| format!("scn-{}", random_hex(12)));
+    let base = svc.links.base_url().to_string();
+    let (mock, upstream) = match sc.upstream {
+        Upstream::Flaky(path) => (None, format!("{base}{path}")),
+        Upstream::Mock => {
+            let name = format!("scn-{id}");
+            let Some((text, settings)) = sc.mock(key.as_deref().unwrap_or("")) else {
+                return Err(Refused::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "the scenario has no upstream",
+                ));
+            };
+            let n = name.clone();
+            let url = svc
+                .compiling(move |s| s.create_scratch(&n, &text, settings, RUN_TTL))
+                .await
+                .map_err(|e| Refused(e.status, e.message()))?;
+            (Some(name), url)
+        }
+    };
+    let now = chrono::Utc::now();
+    let run = Run {
+        id: id.clone(),
+        scenario: sc,
+        owner: owner.to_string(),
+        created_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        expires_at: (now + chrono::TimeDelta::from_std(RUN_TTL).unwrap_or_default())
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        expires: Instant::now() + RUN_TTL,
+        mock,
+        upstream,
+        key,
+        checks: 0,
+        checking: false,
+        last: None,
+    };
+    let view = run.view();
+    {
+        let mut runs = state.scenarios.runs();
+        if runs.len() < MAX_RUNS {
+            runs.push(run);
+            tracing::info!(scenario = sc.id, run = %id, "gateway scenario started");
+            return Ok(view);
+        }
+    }
+    // Filled up meanwhile: take the mock back.
+    if let Some(m) = &run.mock {
+        state.mocks.delete(m);
+    }
+    Err(full())
+}
+
+/// What a check takes.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckBody {
+    /// The URL the gateway serves the route at.
+    pub gateway_url: String,
+    /// `rate_limiting`: the limit set on the gateway.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// Clears a run's `checking` flag however the check ends (a dropped
+/// request included).
+struct Checking {
+    scenarios: Arc<Scenarios>,
+    run: String,
+}
+
+impl Drop for Checking {
+    fn drop(&mut self) {
+        if let Some(r) = self.scenarios.runs().iter_mut().find(|r| r.id == self.run) {
+            r.checking = false;
+        }
+    }
+}
+
+/// Send the test traffic through the gateway and judge it.
+pub async fn check(
+    state: &AppState,
+    owner: &str,
+    scenario: &str,
+    run: &str,
+    body: CheckBody,
+) -> Result<Value, Refused> {
+    let bad = |m: String| Refused::new(StatusCode::BAD_REQUEST, m);
+    let gateway = body.gateway_url.trim().trim_end_matches('/').to_string();
+    crate::egress::parse_url(&gateway, false).map_err(|e| bad(format!("gateway_url: {e}")))?;
+    let (sc, k, upstream) = {
+        let mut runs = state.scenarios.runs();
+        let r = runs
+            .iter_mut()
+            .find(|r| r.id == run && r.scenario.id == scenario && r.owner == owner)
+            .ok_or_else(|| not_found(scenario, run))?;
+        if r.checking {
+            return Err(Refused::new(
+                StatusCode::CONFLICT,
+                "a check of this run is running",
+            ));
+        }
+        if r.checks >= MAX_CHECKS {
+            return Err(Refused::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                format!("at most {MAX_CHECKS} checks per run: start a new run"),
+            ));
+        }
+        r.checking = true;
+        r.checks += 1;
+        (r.scenario, r.checks, r.upstream.clone())
+    };
+    let _checking = Checking {
+        scenarios: state.scenarios.clone(),
+        run: run.to_string(),
+    };
+    let limit = match (sc.id, body.limit) {
+        ("rate_limiting", None) => catalog::DEFAULT_LIMIT,
+        ("rate_limiting", Some(l)) if (1..=catalog::MAX_LIMIT).contains(&l) => l,
+        ("rate_limiting", Some(_)) => {
+            return Err(bad(format!("limit: 1 to {}", catalog::MAX_LIMIT)));
+        }
+        (_, Some(_)) => return Err(bad("limit applies to rate_limiting only".into())),
+        (_, None) => 0,
+    };
+    let target = format!("{gateway}{}", sc.request_path);
+    let pinned = state
+        .egress
+        .resolve(&target, Purpose::Scenario)
+        .await
+        .map_err(|e| Refused::new(StatusCode::FORBIDDEN, e.0))?;
+    let client = state
+        .egress
+        .client(&pinned, REQUEST_TIMEOUT)
+        .map_err(|e| Refused::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let prefix = format!("scn-{run}-{k}-");
+    let mut sent = Vec::new();
+    for n in 0..sc.requests(limit) {
+        let session = format!("{prefix}{n}");
+        let t = Instant::now();
+        let r = client
+            .get(&target)
+            .header(SESSION_HEADER, &session)
+            .send()
+            .await;
+        let mut s = Sent {
+            n,
+            ..Sent::default()
+        };
+        match r {
+            Ok(mut resp) => {
+                s.status = resp.status().as_u16();
+                let mut read = 0usize;
+                while let Ok(Some(chunk)) = resp.chunk().await {
+                    read += chunk.len();
+                    if read > MAX_BODY {
+                        break;
+                    }
+                }
+            }
+            Err(e) => s.error = Some(without_url(&e)),
+        }
+        s.ms = t.elapsed().as_millis() as u64;
+        sent.push(s);
+    }
+    // Upstream captures land as the upstream finishes: wait for them to
+    // settle (the slow upstream of `timeouts` is not waited for).
+    let observe = |sent: &mut Vec<Sent>| {
+        for s in sent.iter_mut() {
+            let mut caps = state.inspector.for_session(&format!("{prefix}{}", s.n), 50);
+            caps.sort_by_key(|c| c.seq);
+            s.upstream = caps.iter().map(|c| c.status).collect();
+        }
+        sent.iter().map(|s| s.upstream.len()).sum::<usize>()
+    };
+    let mut seen = observe(&mut sent);
+    if sc.id != "timeouts" {
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let now = observe(&mut sent);
+            if now == seen && now > 0 {
+                break;
+            }
+            seen = now;
+        }
+    }
+    let expectations = sc.evaluate(&sent, limit);
+    let passed = !expectations.is_empty() && expectations.iter().all(|e| e.ok);
+    let mut hints = Vec::new();
+    if let Some(e) = sent.iter().find_map(|s| s.error.as_ref()) {
+        hints.push(format!("The gateway did not answer: {e}"));
+    } else if seen == 0 && sc.id != "timeouts" {
+        hints.push(format!(
+            "Nothing reached the upstream: point the route at {upstream} and let it forward the X-Rustybin-Session header."
+        ));
+    }
+    if state.inspector.capacity() == 0 {
+        hints.push("The inspector keeps no captures on this instance (RUSTYBIN_INSPECTOR_CAPACITY=0): what reached the upstream cannot be seen.".into());
+    }
+    let verdict = json!({
+        "run": run,
+        "scenario": sc.id,
+        "check": k,
+        "gateway_url": gateway,
+        "checked_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "passed": passed,
+        "expectations": expectations,
+        "requests": sent,
+        "hints": hints,
+    });
+    if let Some(r) = state.scenarios.runs().iter_mut().find(|r| r.id == run) {
+        r.last = Some(verdict.clone());
+    }
+    tracing::info!(scenario = sc.id, run, passed, "gateway scenario checked");
+    Ok(verdict)
+}
+
+/// A transport error without the URL (the caller gave it; the text stays short).
+fn without_url(e: &reqwest::Error) -> String {
+    let kind = if e.is_timeout() {
+        "timed out"
+    } else if e.is_connect() {
+        "could not connect"
+    } else {
+        "the request failed"
+    };
+    let mut src: Option<&dyn std::error::Error> = std::error::Error::source(e);
+    let mut last = None;
+    while let Some(s) = src {
+        last = Some(s.to_string());
+        src = s.source();
+    }
+    match last {
+        Some(detail) => format!("{kind} ({detail})"),
+        None => kind.to_string(),
+    }
+}
+
+/// End a run: remove its mock and reset its flaky counters.
+pub fn end(state: &AppState, owner: &str, scenario: &str, run: &str) -> Result<Value, Refused> {
+    let r = {
+        let mut runs = state.scenarios.runs();
+        let i = runs
+            .iter()
+            .position(|r| r.id == run && r.scenario.id == scenario && r.owner == owner)
+            .ok_or_else(|| not_found(scenario, run))?;
+        if runs[i].checking {
+            return Err(Refused::new(
+                StatusCode::CONFLICT,
+                "a check of this run is running",
+            ));
+        }
+        runs.remove(i)
+    };
+    let mut removed = Vec::new();
+    if let Some(m) = &r.mock {
+        if state.mocks.delete(m) {
+            removed.push(json!({ "kind": "mock", "name": m }));
+        }
+    }
+    if let Upstream::Flaky(p) = r.scenario.upstream {
+        let n = state.flaky.reset_prefix(&r.session_prefix());
+        removed.push(json!({ "kind": "flaky_counters", "route": p, "count": n }));
+    }
+    tracing::info!(scenario = r.scenario.id, run, "gateway scenario ended");
+    Ok(json!({ "ended": run, "scenario": r.scenario.id, "removed": removed }))
+}
+
+// ── Routes ──────────────────────────────────────────────────────────
+
+async fn list_handler(State(state): State<AppState>, Session(owner): Session) -> Json<Value> {
+    Json(list(&state, &owner))
+}
+
+async fn start_handler(
+    State(state): State<AppState>,
+    Session(owner): Session,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    uri: Uri,
+) -> Response {
+    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
+        return r;
+    }
+    let svc = Svc::from_request(&state, &headers, &extensions, &uri);
+    match start(&state, svc, &owner, &id).await {
+        Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn get_handler(
+    State(state): State<AppState>,
+    Session(owner): Session,
+    Path((id, run)): Path<(String, String)>,
+) -> Response {
+    match get_run(&state, &owner, &id, &run) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn check_handler(
+    State(state): State<AppState>,
+    Session(owner): Session,
+    Path((id, run)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
+        return r;
+    }
+    let body: CheckBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => {
+            return Refused::new(StatusCode::BAD_REQUEST, format!("invalid body: {e}"))
+                .into_response()
+        }
+    };
+    match check(&state, &owner, &id, &run, body).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn end_handler(
+    State(state): State<AppState>,
+    Session(owner): Session,
+    Path((id, run)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
+        return r;
+    }
+    match end(&state, &owner, &id, &run) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+pub fn router(_state: &AppState) -> Router<AppState> {
+    Router::new()
+        .route(LIST_PATH, get(list_handler))
+        .route(RUNS_PATH, post(start_handler))
+        .route(RUN_PATH, get(get_handler).delete(end_handler))
+        .route(CHECK_PATH, post(check_handler))
+}
+
+pub fn catalog() -> Vec<Endpoint> {
+    vec![
+        Endpoint::new(
+            LIST_PATH,
+            &["GET"],
+            category::CONTROL,
+            "Gateway scenarios (retries, rate limiting, credential injection, timeouts, caching) and the caller's runs",
+        )
+        .example(Example::get("Scenarios", LIST_PATH)),
+        Endpoint::new(
+            RUNS_PATH,
+            &["POST"],
+            category::CONTROL,
+            "Start a scenario run: prepare its upstream and get the gateway setup (admin)",
+        )
+        .example(
+            Example::post("Start a caching run", "/_rustybin/scenarios/caching/runs")
+                .expect_status(201),
+        ),
+        Endpoint::new(
+            RUN_PATH,
+            &["GET", "DELETE"],
+            category::CONTROL,
+            "A scenario run with its setup and last verdict; DELETE ends it and removes what it created (admin)",
+        )
+        .example(
+            Example::get("A run", "/_rustybin/scenarios/caching/runs/0000")
+                .skip_check("needs a run id"),
+        ),
+        Endpoint::new(
+            CHECK_PATH,
+            &["POST"],
+            category::CONTROL,
+            "Send the run's test traffic through the gateway and compare what the client got with what reached the upstream (admin; egress purpose scenario)",
+        )
+        .example(
+            Example::post(
+                "Check through the gateway",
+                "/_rustybin/scenarios/caching/runs/0000/check",
+            )
+            .json(r#"{"gateway_url":"https://gateway.example.com/catalog-api"}"#)
+            .skip_check("needs a run and a gateway"),
+        ),
+    ]
+}
+
+pub fn openapi_paths() -> Value {
+    let id = json!({ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "enum": SCENARIOS.iter().map(|s| s.id).collect::<Vec<_>>() } });
+    let run =
+        json!({ "name": "run", "in": "path", "required": true, "schema": { "type": "string" } });
+    let obj = json!({ "application/json": { "schema": { "type": "object" } } });
+    json!({
+        LIST_PATH: { "get": {
+            "tags": ["Control Plane"], "summary": "Gateway scenarios and the caller's runs",
+            "operationId": "listGatewayScenarios",
+            "responses": { "200": { "description": "The catalogue and the runs", "content": obj } }
+        } },
+        RUNS_PATH: { "post": {
+            "tags": ["Control Plane"], "summary": "Start a scenario run (admin)",
+            "description": "Creates the run's upstream (a mock that is never saved and ends with the run, or a /flaky route) and answers the gateway setup. At most 32 runs; a run lasts an hour.",
+            "operationId": "startGatewayScenario",
+            "parameters": [id],
+            "responses": { "201": { "description": "The run", "content": obj }, "404": { "description": "No such scenario" }, "429": { "description": "Too many runs" } }
+        } },
+        RUN_PATH: {
+            "get": {
+                "tags": ["Control Plane"], "summary": "A scenario run",
+                "operationId": "getGatewayScenarioRun",
+                "parameters": [id, run],
+                "responses": { "200": { "description": "The run with its setup and last verdict", "content": obj }, "404": { "description": "No such run in this session" } }
+            },
+            "delete": {
+                "tags": ["Control Plane"], "summary": "End a scenario run (admin)",
+                "description": "Removes the run's mock and resets its flaky counters; nothing else.",
+                "operationId": "endGatewayScenarioRun",
+                "parameters": [id, run],
+                "responses": { "200": { "description": "What was removed", "content": obj }, "404": { "description": "No such run in this session" }, "409": { "description": "A check is running" } }
+            }
+        },
+        CHECK_PATH: { "post": {
+            "tags": ["Control Plane"], "summary": "Check a scenario through the gateway (admin)",
+            "description": "Sends the run's requests to gateway_url plus the scenario's path (through the egress policy, purpose scenario), then compares the answers with the upstream requests they caused.",
+            "operationId": "checkGatewayScenario",
+            "parameters": [id, run],
+            "requestBody": { "required": true, "content": { "application/json": { "schema": {
+                "type": "object", "required": ["gateway_url"], "additionalProperties": false,
+                "properties": {
+                    "gateway_url": { "type": "string", "description": "The URL the gateway serves the route at" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": catalog::MAX_LIMIT, "description": "rate_limiting: the limit set on the gateway" }
+                }
+            } } } },
+            "responses": { "200": { "description": "The verdict", "content": obj }, "400": { "description": "Invalid body" }, "403": { "description": "The egress policy refused the gateway URL" }, "404": { "description": "No such run in this session" }, "409": { "description": "A check is running" } }
+        } }
+    })
+}

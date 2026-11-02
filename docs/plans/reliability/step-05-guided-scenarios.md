@@ -31,3 +31,30 @@ up), management MCP (`list_gateway_scenarios`, `start_gateway_scenario`, `check_
 Each scenario against a loop-through "gateway" (the instance itself) and against a stand-in proxy
 that behaves (passes) and one that does not (fails with the right expectation named); cleanup
 removes the created mock and nothing else; another session cannot see or end the run.
+
+## Build notes (2026-11-02)
+
+- `src/scenarios/catalog.rs` holds the five scenarios with their steps, request counts, upstream
+  mocks and judgement; `src/scenarios/mod.rs` the runs and the routes. The plan's `{id}/runs`
+  paths are kept (`/_rustybin/scenarios/{id}/runs/{run}` and `/check`), plus `GET` of a run
+  (`rustybin scenario show`, `get_gateway_scenario_run`).
+- What reached the upstream comes from the inspector, not from new state: every check request
+  carries its own `X-Rustybin-Session` (`scn-<run>-<check>-<n>`), so the captures of that
+  session are the upstream attempts it caused. The setup asks the gateway to forward that
+  header; a check that sees nothing upstream says so in a hint. The `retries` upstream is
+  `/flaky/recover/1`, whose per-session counter makes each request's first attempt fail.
+- The upstream mocks are `MockStore::create_scratch`: instance-owned, deployed, never saved
+  (a restart cannot orphan them), expiring with the run. Ending a run deletes the mock and
+  resets the run's flaky counters (`FlakyState::reset_prefix`); captures stay.
+- Runs belong to the session key (REST: the `Session` extractor; MCP: the same key from the
+  request's headers and address). Starting, checking and ending are admin; reading is the
+  console scope. A dropped check request clears the run's `checking` flag (a drop guard).
+- The check answers statuses and timings only, never the gateway's headers or bodies, so the
+  MCP result has no third-party content to put under `untrusted_*`.
+- The timeouts upstream waits 3 s (600 ms under `cfg(test)`, so the tests stay fast).
+- Tests: a stand-in gateway that retries, limits, adds a header, times out and caches passes
+  every scenario; a pass-through proxy and the instance itself (no gateway) fail each with the
+  right expectation named; ending removes the mock and the run's counters and nothing else (the
+  sample and another session's counters stay; no saved copy); another session cannot see or
+  end a run; admin and egress refusals; the run cap. The management tools now pass 100, the
+  `tools/list` page size: the tests' `tool_names` follows the cursor.

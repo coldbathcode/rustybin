@@ -161,7 +161,7 @@ def run_theme(browser, theme):
         page.wait_for_selector("text=Requests captured")
         page.wait_for_selector("text=What Rustybin sees of this browser")
         page.wait_for_selector(".url-row code")
-        expect(page.locator(".nav-link")).to_have_count(13)
+        expect(page.locator(".nav-link")).to_have_count(14)
         # No plan configured (RUSTYBIN_PLAN=none): no "Plan and usage" card.
         expect(page.locator("text=Plan and usage")).to_have_count(0)
         # AI assist with the mock provider: the Ask card offers suggestions.
@@ -1014,6 +1014,35 @@ def run_theme(browser, theme):
         assert pets["views_7d"] >= 1 and pets["tries"] >= 1 and pets["downloads"].get("hurl", 0) >= 1, pets
 
     step("dev portal: publish, read, try, download", dev_portal)
+
+    def gateway_scenarios():
+        # Prepare a caching run: the upstream mock exists and the steps show;
+        # a check through a gateway the egress policy does not allow is
+        # refused with the reason; Clean up removes the mock.
+        page.goto(BASE + "/ui/#/scenarios")
+        page.wait_for_selector("[data-scenario='caching']")
+        expect(page.locator("#scenario-catalog [data-scenario]")).to_have_count(5)
+        page.click("#scenario-start-caching")
+        run = page.locator("[data-run]").first
+        run.wait_for()
+        run_id = run.get_attribute("data-run")
+        mock = "scn-" + run_id
+        with urllib.request.urlopen(BASE + "/_rustybin/mocks", timeout=10) as r:
+            assert any(m["name"] == mock for m in json.load(r)["mocks"]), mock
+        expect(run.locator("ol li")).to_have_count(3)
+        expect(run).to_contain_text("/mock/" + mock)
+        page.fill("#gateway-" + run_id, "http://127.0.0.1:9/gateway")
+        page.click("#check-" + run_id)
+        expect(run.locator(".notice.err")).to_contain_text("scenario")
+        shot(page, theme, "16b-gateway-scenarios")
+        assert_icons_sized(page, "gateway scenarios")
+        page.once("dialog", lambda d: d.accept())
+        page.click("#end-" + run_id)
+        expect(page.locator(f"[data-run='{run_id}']")).to_have_count(0)
+        with urllib.request.urlopen(BASE + "/_rustybin/mocks", timeout=10) as r:
+            assert not any(m["name"] == mock for m in json.load(r)["mocks"]), mock
+
+    step("gateway scenarios: prepare, a refused check, clean up", gateway_scenarios)
 
     def via_gateway():
         # A second origin for the same server stands in for a gateway with CORS.

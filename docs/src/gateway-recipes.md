@@ -3,7 +3,9 @@
 Rustybin is designed to sit behind any API gateway, AI gateway, service mesh or
 load balancer. This page lists, per capability, what to configure in the gateway and
 what to look at in Rustybin to prove it worked. The first part is gateway-agnostic;
-a few vendor snippets follow at the end.
+a few vendor snippets follow at the end. For retries, rate limiting, credential
+injection, timeouts and caching, a [gateway scenario](gateway-scenarios.md) prepares
+the upstream and checks the result for you.
 
 General setup, whatever the gateway:
 

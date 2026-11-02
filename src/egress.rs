@@ -695,10 +695,12 @@ pub enum Purpose {
     Leads,
     /// The API key registry URL (`RUSTYBIN_KEYS_URL`).
     KeyRegistry,
+    /// Test traffic of a gateway scenario, sent to the gateway's URL.
+    Scenario,
 }
 
 impl Purpose {
-    pub const ALL: [Purpose; 7] = [
+    pub const ALL: [Purpose; 8] = [
         Purpose::Assist,
         Purpose::McpRelay,
         Purpose::Registry,
@@ -706,6 +708,7 @@ impl Purpose {
         Purpose::A2aPush,
         Purpose::Leads,
         Purpose::KeyRegistry,
+        Purpose::Scenario,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -717,6 +720,7 @@ impl Purpose {
             Purpose::A2aPush => "a2a_push",
             Purpose::Leads => "leads",
             Purpose::KeyRegistry => "key_registry",
+            Purpose::Scenario => "scenario",
         }
     }
 
@@ -730,6 +734,7 @@ impl Purpose {
             Purpose::A2aPush => "A2A push notifications",
             Purpose::Leads => "Leads webhook",
             Purpose::KeyRegistry => "API key registry",
+            Purpose::Scenario => "Gateway scenarios",
         }
     }
 
@@ -743,6 +748,7 @@ impl Purpose {
             Purpose::A2aPush => "RUSTYBIN_A2A_PUSH_ALLOWLIST, RUSTYBIN_A2A_PUSH_ALLOW_ALL",
             Purpose::Leads => "the host of RUSTYBIN_LEADS_WEBHOOK_URL",
             Purpose::KeyRegistry => "the host of RUSTYBIN_KEYS_URL",
+            Purpose::Scenario => "RUSTYBIN_EGRESS_ALLOW only (the gateway's host; no default)",
         }
     }
 }

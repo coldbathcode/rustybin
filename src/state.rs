@@ -91,6 +91,8 @@ pub struct AppState {
     pub flaky: Arc<crate::flaky::FlakyState>,
     /// What went wrong while starting (listeners), for the diagnostics.
     pub diagnostics: Arc<crate::diagnostics::Diagnostics>,
+    /// Gateway scenario runs (`crate::scenarios`), bounded.
+    pub scenarios: Arc<crate::scenarios::Scenarios>,
 }
 
 impl AppState {
@@ -206,6 +208,7 @@ impl AppState {
             mcp_inspector,
             flaky,
             diagnostics: Arc::new(crate::diagnostics::Diagnostics::default()),
+            scenarios: Arc::new(crate::scenarios::Scenarios::default()),
         }
     }
 }

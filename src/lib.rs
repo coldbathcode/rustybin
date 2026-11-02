@@ -63,6 +63,7 @@ pub mod random;
 pub mod redirects;
 pub mod request_bin;
 pub mod response_shaping;
+pub mod scenarios;
 pub mod server;
 pub mod session;
 pub mod settings;
@@ -149,6 +150,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     assist::router,
     settings::router,
     diagnostics::router,
+    scenarios::router,
     egress::router,
     harness::router,
     metrics::router,

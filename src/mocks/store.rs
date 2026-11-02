@@ -597,6 +597,36 @@ impl MockStore {
         self.saved(r)
     }
 
+    /// A mock that lives at most `ttl` and is never saved (a gateway
+    /// scenario's upstream, `crate::scenarios`): instance-owned, deployed and
+    /// enabled, refused on check errors. It ends with its run, not with a
+    /// restart's saved copy.
+    pub fn create_scratch(
+        &self,
+        name: &str,
+        compiled: Compiled,
+        ttl: Duration,
+    ) -> Result<Snapshot, StoreError> {
+        let snap = self.create_inner(
+            name,
+            compiled,
+            Origin::Api,
+            Owner::Instance,
+            true,
+            true,
+            false,
+        )?;
+        let at = Instant::now() + ttl;
+        let wall = Utc::now() + chrono::TimeDelta::from_std(ttl).unwrap_or_default();
+        if let Some(e) = self.write().get_mut(name) {
+            e.expires = Some(match e.expires {
+                Some((i, w)) if i < at => (i, w),
+                _ => (at, wall),
+            });
+        }
+        Ok(snap)
+    }
+
     /// Mocks of `owner`, by name.
     pub fn owned_names(&self, owner: &Owner) -> Vec<String> {
         self.read()

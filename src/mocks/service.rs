@@ -992,6 +992,28 @@ impl Svc {
         }
     }
 
+    /// A gateway scenario's upstream (admin): `text` compiled with
+    /// `settings`, never saved, gone after `ttl`. Answers its base URL.
+    pub fn create_scratch(
+        &self,
+        name: &str,
+        text: &str,
+        settings: MockSettings,
+        ttl: std::time::Duration,
+    ) -> SvcResult<String> {
+        self.require_admin()?;
+        check_name(name)?;
+        let compiled = self
+            .store()
+            .compile_for(text, settings, false)
+            .map_err(ServiceError::bad_request)?;
+        if !compiled.report.ok {
+            return Err(StoreError::ChecksFailed(Box::new(compiled.report.clone())).into());
+        }
+        let snap = self.store().create_scratch(name, compiled, ttl)?;
+        Ok(self.links.mock_base(&snap.owner, name))
+    }
+
     /// `GET /_rustybin/mocks/{name}`.
     pub fn get(&self, name: &str) -> SvcResult<Value> {
         let s = self.readable(name)?;

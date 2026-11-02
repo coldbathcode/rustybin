@@ -99,6 +99,10 @@ pub const NOUNS: &[(&str, &str)] = &[
     ("visit", "Your own self-service visit, as a visitor"),
     ("requests", "The request inspector"),
     ("bins", "Request bins"),
+    (
+        "scenario",
+        "Guided gateway scenarios: prepare the upstream, check through the gateway, clean up",
+    ),
     ("agents", "AI agents on the management MCP server"),
     ("ai", "AI assist: status, models, usage, test, run a task"),
     (
@@ -224,6 +228,11 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("requests", "get", "<id>", "One captured request.", NO_FLAGS, [("GET", "/_rustybin/requests/{id}")], false, "requests get 42"),
     cmd!("requests", "tail", "", "Follow the requests as they arrive.", TAIL_FLAGS, [("GET", "/_rustybin/requests/stream")], false, "requests tail --max 5"),
     cmd!("requests", "clear", "", "Forget the captured requests.", NO_FLAGS, [("DELETE", "/_rustybin/requests")], true, "requests clear --yes"),
+    cmd!("scenario", "list", "", "The gateway scenarios (retries, rate limiting, credential injection, timeouts, caching) and your runs.", NO_FLAGS, [("GET", "/_rustybin/scenarios")], false, "scenario list"),
+    cmd!("scenario", "start", "<scenario>", "Prepare a run: its upstream and the steps to configure on the gateway.", NO_FLAGS, [("POST", "/_rustybin/scenarios/{id}/runs")], false, "scenario start caching"),
+    cmd!("scenario", "show", "<scenario> <run>", "A run: the setup, what it created, the last verdict.", NO_FLAGS, [("GET", "/_rustybin/scenarios/{id}/runs/{run}")], false, "scenario show caching 1a2b3c4d"),
+    cmd!("scenario", "check", "<scenario> <run> --gateway U [--limit N]", "Send the run's test requests through the gateway and compare what the client got with what reached the upstream; exits 1 when an expectation fails.", &[Flag::value("--gateway", "The URL the gateway serves the route at"), Flag::value("--limit", "rate_limiting: the limit set on the gateway")], [("POST", "/_rustybin/scenarios/{id}/runs/{run}/check")], false, "scenario check caching 1a2b3c4d --gateway http://localhost:8000/catalog-api"),
+    cmd!("scenario", "end", "<scenario> <run>", "End a run: remove the mock and counters it created, nothing else.", NO_FLAGS, [("DELETE", "/_rustybin/scenarios/{id}/runs/{run}")], true, "scenario end caching 1a2b3c4d --yes"),
     cmd!("bins", "list", "", "Your request bins.", NO_FLAGS, [("GET", "/bin")], false, "bins list"),
     cmd!("bins", "create", "[--status N] [--body B] [--delay-ms N]", "A new bin, with the answer it gives.", &[Flag::value("--status", "The status the bin answers"), Flag::value("--body", "The body it answers: a file or inline JSON"), Flag::value("--delay-ms", "A delay before the answer")], [("POST", "/bin")], false, "bins create --status 202"),
     cmd!("bins", "delete", "<id>", "Delete a bin.", NO_FLAGS, [("DELETE", "/bin/{id}")], true, "bins delete 0123456789abcdef01234567 --yes"),
@@ -566,6 +575,7 @@ pub async fn dispatch(ctx: &mut Ctx) -> Result<()> {
         "requests" => requests(ctx, cmd.verb).await,
         "bins" => bins(ctx, cmd.verb).await,
         "agents" => agents(ctx, cmd.verb).await,
+        "scenario" => scenario(ctx, cmd.verb).await,
         "ai" => ai(ctx, cmd.verb).await,
         "mcp" => mcp(ctx, cmd.verb).await,
         "registry" => registry(ctx, cmd.verb).await,
@@ -1378,6 +1388,109 @@ async fn bins(ctx: &mut Ctx, verb: &str) -> Result<()> {
             tail(ctx, &format!("/bin/{}/requests/stream", enc(&id))).await
         }
         _ => Err(Fail::Usage(format!("bins {verb}: not implemented"))),
+    }
+}
+
+// ── Gateway scenarios ───────────────────────────────────────────────
+
+async fn scenario(ctx: &mut Ctx, verb: &str) -> Result<()> {
+    if verb == "list" {
+        let v = ctx
+            .client()?
+            .get("/_rustybin/scenarios", &[])
+            .await?
+            .value();
+        if ctx.json {
+            ctx.emit(&v);
+        } else {
+            let pick = |items: &Value, keys: &[&str]| -> Value {
+                Value::Array(
+                    items
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|i| {
+                            Value::Object(
+                                keys.iter()
+                                    .map(|k| (k.to_string(), i[*k].clone()))
+                                    .collect(),
+                            )
+                        })
+                        .collect(),
+                )
+            };
+            ctx.emit(&json!({
+                "scenarios": pick(&v["scenarios"], &["id", "title", "proves"]),
+                "runs": pick(&v["runs"], &["scenario", "id", "upstream", "expires_at", "checks"]),
+            }));
+        }
+        return Ok(());
+    }
+    let id = ctx.args.arg(0, "a scenario id")?.to_string();
+    let runs = format!("/_rustybin/scenarios/{}/runs", enc(&id));
+    if verb == "start" {
+        let v = ctx
+            .client()?
+            .post(&runs, Body::Json(json!({})))
+            .await?
+            .value();
+        if ctx.json {
+            ctx.emit(&v);
+        } else {
+            ctx.emit(&json!({ "run": v["id"], "upstream": v["upstream"], "setup": v["setup"] }));
+        }
+        return Ok(());
+    }
+    let run = ctx.args.arg(1, "a run id")?.to_string();
+    let path = format!("{runs}/{}", enc(&run));
+    match verb {
+        "show" => get(ctx, &path, &[]).await,
+        "end" => delete(ctx, &path, &[]).await,
+        "check" => {
+            let gateway = ctx
+                .args
+                .value("--gateway")
+                .ok_or_else(|| {
+                    Fail::Usage("--gateway: the URL the gateway serves the route at".into())
+                })?
+                .to_string();
+            let mut body = json!({ "gateway_url": gateway });
+            if let Some(l) = ctx.args.value("--limit") {
+                body["limit"] = json!(l
+                    .parse::<u32>()
+                    .map_err(|_| Fail::Usage("--limit needs a number".into()))?);
+            }
+            let v = ctx
+                .client()?
+                .post(&format!("{path}/check"), Body::Json(body))
+                .await?
+                .value();
+            if ctx.json {
+                ctx.emit(&v);
+            } else {
+                let rows: Vec<Value> = v["expectations"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|e| {
+                        json!({
+                            "ok": e["ok"],
+                            "expectation": e["name"],
+                            "expected": e["expected"],
+                            "seen": e["seen"],
+                        })
+                    })
+                    .collect();
+                ctx.emit(
+                    &json!({ "passed": v["passed"], "expectations": rows, "hints": v["hints"] }),
+                );
+            }
+            if v["passed"] != true {
+                return Err(Fail::Failed("an expectation failed (see above)".into()));
+            }
+            Ok(())
+        }
+        _ => Err(Fail::Usage(format!("scenario {verb}: not implemented"))),
     }
 }
 

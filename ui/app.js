@@ -27,6 +27,7 @@ const VIEWS = [
   { id: 'a2a', title: 'A2A client', icon: 'a2a', load: () => import('./views/a2a.js') },
   { section: 'Resilience and security' },
   { id: 'chaos', title: 'Chaos and health', icon: 'chaos', load: () => import('./views/chaos.js') },
+  { id: 'scenarios', title: 'Gateway scenarios', icon: 'check', load: () => import('./views/scenarios.js') },
   // Shown once /_rustybin/status says harness mode is on (RUSTYBIN_HARNESS=on).
   { id: 'harness', title: 'Harness', icon: 'send', hidden: true, feature: 'harness', ai: true, load: () => import('./views/harness.js') },
   { id: 'tokens', title: 'Token lab', icon: 'token', load: () => import('./views/tokens.js') },

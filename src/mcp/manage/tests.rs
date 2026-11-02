@@ -112,15 +112,25 @@ fn is_error(result: &Value) -> bool {
     result["isError"].as_bool() == Some(true)
 }
 
+/// Every page of `tools/list`.
 async fn tool_names(app: &Router, headers: &[(&str, &str)]) -> Vec<String> {
-    let (status, j) = rpc(app, headers, "tools/list", json!({})).await;
-    assert_eq!(status, StatusCode::OK, "{j}");
-    j["result"]["tools"]
-        .as_array()
-        .expect("tools")
-        .iter()
-        .filter_map(|t| t["name"].as_str().map(str::to_string))
-        .collect()
+    let mut names = Vec::new();
+    let mut params = json!({});
+    loop {
+        let (status, j) = rpc(app, headers, "tools/list", params).await;
+        assert_eq!(status, StatusCode::OK, "{j}");
+        names.extend(
+            j["result"]["tools"]
+                .as_array()
+                .expect("tools")
+                .iter()
+                .filter_map(|t| t["name"].as_str().map(str::to_string)),
+        );
+        match j["result"]["nextCursor"].as_str() {
+            Some(c) => params = json!({ "cursor": c }),
+            None => return names,
+        }
+    }
 }
 
 #[tokio::test]
@@ -1722,6 +1732,10 @@ const COVERAGE: &[(&str, Cover)] = &[
     ("/_rustybin/requests/stream", Tool("wait_for_requests")),
     ("/_rustybin/settings", Tool("get_settings")),
     ("/_rustybin/diagnostics", Tool("diagnose_instance")),
+    ("/_rustybin/scenarios", Tool("list_gateway_scenarios")),
+    ("/_rustybin/scenarios/{id}/runs", Tool("start_gateway_scenario")),
+    ("/_rustybin/scenarios/{id}/runs/{run}", Tool("get_gateway_scenario_run")),
+    ("/_rustybin/scenarios/{id}/runs/{run}/check", Tool("check_gateway_scenario")),
     ("/_rustybin/settings/{key}", Tool("update_settings")),
     ("/_rustybin/status", Tool("get_instance")),
     ("/_rustybin/usage", Tool("get_usage")),

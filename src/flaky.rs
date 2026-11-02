@@ -130,6 +130,15 @@ impl FlakyState {
         out
     }
 
+    /// Remove the counters of every session starting with `prefix` (a gateway
+    /// scenario's sessions); returns how many were removed.
+    pub fn reset_prefix(&self, prefix: &str) -> usize {
+        let mut map = self.lock();
+        let before = map.len();
+        map.retain(|(s, _), _| !s.starts_with(prefix));
+        before - map.len()
+    }
+
     /// Remove one session's counters; returns how many were removed.
     pub fn reset_session(&self, session: &str) -> usize {
         let mut map = self.lock();

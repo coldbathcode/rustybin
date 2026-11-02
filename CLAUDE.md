@@ -225,6 +225,13 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
 - `src/diagnostics.rs`: `GET /_rustybin/diagnostics` (admin; `rustybin doctor`, `diagnose_instance`, Management,
   Diagnostics): checks with a status, what was seen and the fix, never a credential; startup problems go in
   `AppState.diagnostics.note`. A new failure an operator can fix belongs here as a check.
+- `src/scenarios/`: guided gateway scenarios (`/_rustybin/scenarios*`, `rustybin scenario`, the
+  `*_gateway_scenario` tools, the console's Gateway scenarios view). `catalog.rs` is the one table (what each
+  proves, the upstream, the steps, the requests, `evaluate`); `mod.rs` the runs (`AppState.scenarios`, 32, an hour,
+  owned by the session key), `start` (a `MockStore::create_scratch` mock, never saved, or a `/flaky` route),
+  `check` (egress `Purpose::Scenario`, one `X-Rustybin-Session` per request, the inspector's captures for what
+  reached the upstream) and `end` (only what the run created). A new scenario is a table row plus its `mock` and
+  `evaluate` arms.
 - `src/control_oauth.rs`: OAuth sign-in to the management MCP server (`RUSTYBIN_CONTROL_OAUTH*`), see above.
 - `src/login.rs`: the console sign-in (`RUSTYBIN_CONTROL_AUTH=password`, the default): `RUSTYBIN_CONSOLE_USER`,
   `RUSTYBIN_CONSOLE_PASSWORD` or `_PASSWORD_HASH` (argon2id), the settings `console.user` and the secret

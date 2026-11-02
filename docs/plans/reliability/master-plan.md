@@ -46,7 +46,7 @@ The marker a session looks for is the first row that is not done.
 | [02](step-02-validated-previews.md) | One validated plan for preview and apply | 01 | done 2026-11-02 |
 | [03](step-03-intact-git-reads.md) | Git documents read whole | | done 2026-11-02 |
 | [04](step-04-diagnostics.md) | Instance diagnostics: `rustybin doctor` and a health panel | | done 2026-11-02 |
-| [05](step-05-guided-scenarios.md) | Guided gateway scenarios | 04 | |
+| [05](step-05-guided-scenarios.md) | Guided gateway scenarios | 04 | done 2026-11-02 |
 | [06](step-06-capture-replay.md) | Capture, replay and assert | | |
 | [07](step-07-checkpoints.md) | Checkpoints and reset | 02 | |
 | [08](step-08-edit-conflicts.md) | Conflict protection for edits | | |
