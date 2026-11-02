@@ -19,6 +19,13 @@ at an interval.
   URL, for tests and demos) needs `RUSTYBIN_EGRESS_ALLOW_LOOPBACK=true` or the
   `egress.allow_loopback` setting.
 
+git is held to what the policy checked: it connects to the addresses the policy
+pinned (curl's resolve list for https, ssh's `HostName` for ssh, the host key still
+checked under the remote's name), follows no redirect, may use only the remote's
+transport (`protocol.allow=never` plus https, ssh or file), and runs with a cleared
+environment (`PATH` and its own variables, never the instance's secrets). Transport
+helpers (`name::address` remotes) are refused.
+
 ## Connect a repository
 
 The `git.*` settings (**Management, Source control**, or `PATCH /_rustybin/settings`;
@@ -30,7 +37,7 @@ seeded by the `RUSTYBIN_CONFIG_GIT*` variables):
 | `git.branch` | `RUSTYBIN_CONFIG_GIT_REF` | `main` | The branch the instance commits to and pulls from. |
 | `git.path` | `RUSTYBIN_CONFIG_GIT_PATH` | `rustybin` | The directory in the repository that holds `rustybin.yaml` and `specs/` (empty for the root). |
 | `git.auth` | `RUSTYBIN_CONFIG_GIT_AUTH` | `token` | `token` for an https remote, `deploy_key` for an ssh remote. |
-| `git.token` (secret) | `RUSTYBIN_CONFIG_GIT_TOKEN` | unset | A personal access or deploy token. The instance hands it to git through `GIT_ASKPASS`, never on a command line or in a URL, and never shows it again. |
+| `git.token` (secret) | `RUSTYBIN_CONFIG_GIT_TOKEN` | unset | A personal access or deploy token. The instance hands it to git through `GIT_ASKPASS`, which answers the remote's own host only, never on a command line or in a URL, and never shows it again. |
 | `git.username` | | `x-access-token` | The user name sent with the token (GitHub accepts any; GitLab deploy tokens have their own; Bitbucket wants the account). |
 | `git.author` | | `Rustybin <rustybin@example.invalid>` | `Name <email>` of the commits. |
 | `git.auto` | `RUSTYBIN_CONFIG_GIT_AUTO` | `off` | `push_on_change` or `pull`, see [Automatic mode](#automatic-mode). |

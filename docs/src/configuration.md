@@ -197,9 +197,16 @@ last 100, newest first, shown in the console's Management, Network tab).
 | `RUSTYBIN_EGRESS_ALLOW` | unset | Host names, `*.domain` wildcards, IP addresses and CIDRs, each with an optional `:port`, comma separated: what every outbound feature may reach, on top of each feature's own rule. Seeds the `egress.allow` setting. |
 | `RUSTYBIN_EGRESS_ALLOW_LOOPBACK` | `false` | Let outbound calls reach `127.0.0.1`, `::1` and `localhost` (a mock MCP server or a webhook on the same machine). Seeds the `egress.allow_loopback` setting. |
 
-Always refused, whatever the lists say: link-local and cloud metadata addresses,
-the unspecified, multicast and broadcast addresses, this instance's own control
-plane (`/_rustybin`, `/ui`), and loopback unless allowed. Every feature resolves
+Always refused, whatever the lists say: link-local and cloud metadata addresses
+(`169.254.169.254`, `100.100.100.200`, `192.0.0.192`, `fd00:ec2::254`), the
+unspecified, multicast and broadcast addresses, the same addresses carried inside
+IPv6 (NAT64 `64:ff9b::/96`, 6to4 `2002::/16`, IPv4-compatible), this instance's own
+control plane (`/_rustybin`, `/ui`), and loopback unless allowed. A `*.domain` entry
+does not reach private addresses (RFC 1918, `100.64.0.0/10`, `fc00::/7`) unless a
+network entry covers them too. Outbound traffic never uses a system proxy
+(`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` are ignored): a proxy would resolve the name
+itself, and every connection goes to the addresses the policy checked, whatever form
+the URL gives the name (a trailing dot included). Every feature resolves
 under a **purpose** with its own rule, on only when the feature is configured:
 
 | Purpose | Its own rule |

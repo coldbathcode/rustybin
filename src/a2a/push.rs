@@ -279,11 +279,19 @@ impl PushService {
             for (k, v) in headers {
                 req = req.header(k, v);
             }
+            // The origin only: a push URL may carry a token in its query.
+            let origin = crate::egress::url_origin(&url);
             match req.send().await {
                 Ok(resp) => {
-                    tracing::debug!(%task_id, %url, status = %resp.status(), "A2A push delivered")
+                    tracing::debug!(%task_id, %origin, status = %resp.status(), "A2A push delivered")
                 }
-                Err(e) => tracing::warn!(%task_id, %url, "A2A push failed: {e}"),
+                Err(e) => {
+                    let mut why = e.to_string();
+                    if let Some(i) = why.find(" for url") {
+                        why.truncate(i);
+                    }
+                    tracing::warn!(%task_id, %origin, "A2A push failed: {why}")
+                }
             }
         });
     }

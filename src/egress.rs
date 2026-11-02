@@ -145,20 +145,34 @@ impl Allowlist {
 
     /// Does an entry name this host (a DNS name, lower case) on this port?
     pub fn allows_host(&self, host: &str, port: u16) -> bool {
+        self.host_match(host, port).is_some()
+    }
+
+    /// How a name entry allows `host`: `Some(false)` by its exact name,
+    /// `Some(true)` only by a wildcard, `None` not at all.
+    pub fn host_match(&self, host: &str, port: u16) -> Option<bool> {
         let host = host.trim_end_matches('.').to_ascii_lowercase();
+        let exact = self.entries.iter().any(|e| {
+            matches!(e, Entry::Host { name, wildcard: false, port: p } if port_ok(*p, port) && host == *name)
+        });
+        if exact {
+            return Some(false);
+        }
+        self.matches_wildcard(&host, port).then_some(true)
+    }
+
+    fn matches_wildcard(&self, host: &str, port: u16) -> bool {
         self.entries.iter().any(|e| match e {
             Entry::Host {
                 name,
                 wildcard,
                 port: p,
             } => {
-                port_ok(*p, port)
-                    && if *wildcard {
-                        host.strip_suffix(name.as_str())
-                            .is_some_and(|rest| rest.ends_with('.') && rest.len() > 1)
-                    } else {
-                        host == *name
-                    }
+                *wildcard
+                    && port_ok(*p, port)
+                    && host
+                        .strip_suffix(name.as_str())
+                        .is_some_and(|rest| rest.ends_with('.') && rest.len() > 1)
             }
             Entry::Net { .. } => false,
         })
@@ -216,11 +230,72 @@ pub fn in_net(ip: IpAddr, net: IpAddr, prefix: u8) -> bool {
 
 fn canonical(ip: IpAddr) -> IpAddr {
     match ip {
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped().or_else(|| embedded_ipv4(v6)) {
             Some(v4) => IpAddr::V4(v4),
             None => ip,
         },
         v4 => v4,
+    }
+}
+
+/// The IPv4 address an IPv6 address carries to its destination: NAT64
+/// (`64:ff9b::/96`), 6to4 (`2002::/16`) and the deprecated IPv4-compatible
+/// form (`::a.b.c.d`, not `::` or `::1`). Checked as that IPv4 address, so
+/// `64:ff9b::a9fe:a9fe` is the metadata address.
+fn embedded_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
+    let s = v6.segments();
+    let low = Ipv4Addr::new(
+        (s[6] >> 8) as u8,
+        (s[6] & 0xff) as u8,
+        (s[7] >> 8) as u8,
+        (s[7] & 0xff) as u8,
+    );
+    if s[0] == 0x64 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0] {
+        return Some(low);
+    }
+    if s[0] == 0x2002 {
+        return Some(Ipv4Addr::new(
+            (s[1] >> 8) as u8,
+            (s[1] & 0xff) as u8,
+            (s[2] >> 8) as u8,
+            (s[2] & 0xff) as u8,
+        ));
+    }
+    if s[..6] == [0, 0, 0, 0, 0, 0] && low.octets()[0] != 0 {
+        return Some(low);
+    }
+    None
+}
+
+/// The resolver of an egress client: the pinned name gets the pinned
+/// addresses, any other name is refused, so no connection can re-resolve
+/// through the system's DNS.
+struct PinnedResolver {
+    host: String,
+    addrs: Vec<SocketAddr>,
+}
+
+impl reqwest::dns::Resolve for PinnedResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let asked = name.as_str().trim_end_matches('.').to_ascii_lowercase();
+        let answer: Result<reqwest::dns::Addrs, Box<dyn std::error::Error + Send + Sync>> =
+            if asked == self.host {
+                Ok(Box::new(self.addrs.clone().into_iter()))
+            } else {
+                Err(format!("{asked} is not the pinned destination of this request").into())
+            };
+        Box::pin(std::future::ready(answer))
+    }
+}
+
+/// A private (RFC 1918, shared address space, unique local) address: a
+/// wildcard name entry does not reach these unless a network entry does.
+fn private_address(ip: IpAddr) -> bool {
+    match canonical(ip) {
+        IpAddr::V4(v4) => {
+            v4.is_private() || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
+        }
+        IpAddr::V6(v6) => (v6.segments()[0] & 0xfe00) == 0xfc00,
     }
 }
 
@@ -355,7 +430,10 @@ pub fn forbidden_address(ip: IpAddr) -> Option<&'static str> {
                 Some("the broadcast address")
             } else if v4.is_multicast() {
                 Some("a multicast address")
-            } else if v4 == Ipv4Addr::new(169, 254, 169, 254) {
+            } else if v4 == Ipv4Addr::new(169, 254, 169, 254)
+                || v4 == Ipv4Addr::new(100, 100, 100, 200)
+                || v4 == Ipv4Addr::new(192, 0, 0, 192)
+            {
                 Some("the cloud metadata address")
             } else if v4.is_link_local() {
                 Some("a link-local address")
@@ -503,7 +581,8 @@ pub async fn pin_with(
     let addrs: Vec<IpAddr> = match target.ip {
         Some(ip) => vec![ip],
         None => {
-            let name_allowed = unrestricted || allowlist.allows_host(&target.host, target.port);
+            let by_name = allowlist.host_match(&target.host, target.port);
+            let name_allowed = unrestricted || by_name.is_some();
             if !name_allowed && !allowlist.has_networks() {
                 return Err(format!("{}:{} is not in {var}", target.host, target.port));
             }
@@ -524,6 +603,19 @@ pub async fn pin_with(
             };
             if resolved.is_empty() {
                 return Err(format!("{} resolves to no address", target.host));
+            }
+            // A wildcard entry names a public domain: a name under it that
+            // resolves to a private address needs a network entry too.
+            if by_name == Some(true) && !unrestricted {
+                if let Some(ip) = resolved
+                    .iter()
+                    .find(|ip| private_address(**ip) && !allowlist.allows_ip(**ip, target.port))
+                {
+                    return Err(format!(
+                        "{} resolves to the private address {ip}, which a wildcard entry does not reach (add a network entry to {var})",
+                        target.host
+                    ));
+                }
             }
             if !name_allowed
                 && !resolved
@@ -847,7 +939,8 @@ impl Egress {
         })
     }
 
-    /// A client for one resolved destination: pinned addresses, no redirects
+    /// A client for one resolved destination: pinned addresses (a resolver
+    /// that knows the pinned name only), no system proxy, no redirects
     /// (a redirect could leave the allowed host), the TLS roots, timeouts.
     pub fn client(&self, pinned: &Pinned, timeout: Duration) -> Result<reqwest::Client, String> {
         let mut builder = reqwest::Client::builder()
@@ -859,9 +952,15 @@ impl Egress {
             Ok(tls) => builder = builder.use_preconfigured_tls(tls),
             Err(e) => tracing::warn!("egress: https unavailable ({e})"),
         }
-        if pinned.target.ip.is_none() {
-            builder = builder.resolve_to_addrs(&pinned.target.host, &pinned.addrs);
-        }
+        // Never a system proxy (it would resolve the name itself), and no
+        // name the policy did not pin: the resolver answers the pinned host
+        // only, whatever form the URL gives it (a trailing dot included).
+        builder = builder
+            .no_proxy()
+            .dns_resolver(std::sync::Arc::new(PinnedResolver {
+                host: pinned.target.host.clone(),
+                addrs: pinned.addrs.clone(),
+            }));
         builder.build().map_err(|e| e.to_string())
     }
 
@@ -957,7 +1056,8 @@ impl Egress {
     }
 }
 
-fn url_origin(url: &str) -> String {
+/// The scheme, host and port of a URL (for logs: never its path or query).
+pub fn url_origin(url: &str) -> String {
     reqwest::Url::parse(url.trim())
         .ok()
         .and_then(|u| {
@@ -1334,5 +1434,79 @@ mod tests {
             v["purposes"].as_array().expect("purposes").len(),
             Purpose::ALL.len()
         );
+    }
+
+    /// The "verify first" finding: a name with a trailing dot must connect to
+    /// the pinned address, never re-resolve through the system's DNS, and a
+    /// client answers no name but the pinned one.
+    #[tokio::test]
+    async fn a_trailing_dot_still_connects_to_the_pinned_address() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        const ROOT: &str = "/";
+        tokio::spawn(async move {
+            let app = axum::Router::new().route(ROOT, axum::routing::get(|| async { "pinned" }));
+            let _ = axum::serve(listener, app).await;
+        });
+        let e = policy(&["rebind.invalid"], true, false);
+        let target =
+            parse_url(&format!("http://rebind.invalid.:{}/", addr.port()), true).expect("parse");
+        assert_eq!(target.host, "rebind.invalid");
+        let pinned = Pinned {
+            url: format!("http://rebind.invalid.:{}/", addr.port()),
+            target,
+            addrs: vec![addr],
+        };
+        let client = e.client(&pinned, Duration::from_secs(5)).expect("client");
+        let body = client
+            .get(&pinned.url)
+            .send()
+            .await
+            .expect("sent to the pinned address")
+            .text()
+            .await
+            .expect("body");
+        assert_eq!(body, "pinned");
+        // Another name through the same client: refused by the resolver.
+        let err = client
+            .get(format!("http://elsewhere.invalid:{}/", addr.port()))
+            .send()
+            .await
+            .expect_err("not pinned");
+        assert!(
+            err.is_connect() || err.to_string().contains("error"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn addresses_embedding_a_forbidden_ipv4_are_forbidden() {
+        for (ip, why) in [
+            ("64:ff9b::a9fe:a9fe", "metadata"),
+            ("2002:a9fe:a9fe::1", "metadata"),
+            ("::a9fe:a9fe", "metadata"),
+            ("100.100.100.200", "metadata"),
+            ("192.0.0.192", "metadata"),
+            ("64:ff9b::a9fe:1", "link-local"),
+            ("2002:e000:1::", "multicast"),
+        ] {
+            let ip: IpAddr = ip.parse().expect("ip");
+            let got = forbidden_address(ip).unwrap_or("allowed");
+            assert!(got.contains(why), "{ip}: {got}");
+        }
+        assert!(canonical("64:ff9b::7f00:1".parse().expect("ip")).is_loopback());
+        assert!(canonical("::1".parse().expect("ip")).is_loopback());
+        assert_eq!(forbidden_address("2001:db8::1".parse().expect("ip")), None);
+        assert!(private_address("10.1.2.3".parse().expect("ip")));
+        assert!(private_address("100.64.0.1".parse().expect("ip")));
+        assert!(private_address("fd12::1".parse().expect("ip")));
+        assert!(private_address("64:ff9b::c0a8:101".parse().expect("ip")));
+        assert!(!private_address("93.184.216.34".parse().expect("ip")));
+        let (list, _) = Allowlist::parse(&["*.example.com".into(), "api.example.org".into()]);
+        assert_eq!(list.host_match("a.example.com", 443), Some(true));
+        assert_eq!(list.host_match("api.example.org", 443), Some(false));
+        assert_eq!(list.host_match("example.com", 443), None);
     }
 }

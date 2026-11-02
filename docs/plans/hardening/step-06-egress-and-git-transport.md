@@ -26,3 +26,30 @@ the child environment holds no `RUSTYBIN_*` variable but the ones it needs.
 ## Done when
 
 The tests pass and `docs/src/configuration.md` notes that outbound traffic never uses a system proxy.
+
+## Build notes (2026-11-02)
+
+- Every finding is fixed. The "verify first" finding was real: its test (a name with
+  a trailing dot, which `parse_url` strips while the request keeps it) fails on the
+  old client (the override lookup was exact, so the connect resolved through the
+  system) and passes now.
+- The egress client takes a `PinnedResolver` (`dns_resolver`): the pinned name,
+  trailing dot or not, gets the pinned addresses and every other name is refused,
+  which closes the class rather than rebuilding URLs. It also sets `no_proxy()`. The
+  proxy finding has no runtime test: setting `HTTP_PROXY` in a parallel test run
+  would change other tests' clients (the CLI's), so it is covered by construction.
+- `canonical` maps NAT64, 6to4 and IPv4-compatible addresses to their IPv4 address,
+  so the forbidden and loopback checks and the CIDR matches see the real
+  destination; `100.100.100.200` and `192.0.0.192` are metadata addresses; a name
+  allowed only by a wildcard may not resolve to a private address
+  (`private_address`: RFC 1918, `100.64.0.0/10`, `fc00::/7`) unless a network entry
+  covers it (`Allowlist::host_match` tells exact from wildcard).
+- A2A push logs `egress::url_origin` and the error without its URL.
+- git: `permit` stores the pinned addresses; `git_env` adds
+  `http.curloptResolve=<host>:<port>:<addrs>` (https) or `-o HostName=<ip> -o
+  HostKeyAlias=<host>` (ssh), `http.followRedirects=false`, `protocol.allow=never`
+  with the remote's own protocol allowed only when its addresses were pinned (local
+  remotes: `file`), and the status route pins before it fetches. The askpass script
+  answers only prompts naming `RUSTYBIN_GIT_HOST`. `git` runs with `env_clear()` plus
+  `PATH`, `TMPDIR`, `SYSTEMROOT` and its own variables. `name::address` remotes are
+  refused.

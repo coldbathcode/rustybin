@@ -658,3 +658,72 @@ async fn the_routes_answer_and_say_what_is_missing() {
     );
     assert_eq!(body["timeline"][0]["by"], json!("open"));
 }
+
+#[test]
+fn helper_remotes_are_refused() {
+    assert!(parse_remote("ext::sh").is_err());
+    assert!(parse_remote("fd::17").is_err());
+    assert!(parse_remote("git@example.com:org/repo.git").is_ok());
+}
+
+/// git runs with a cleared environment: the instance's secrets never reach
+/// it, only PATH and the variables a command needs.
+#[tokio::test]
+async fn git_sees_no_instance_variables() {
+    if !git_installed() {
+        return;
+    }
+    let root = tempfile::tempdir().expect("tmp");
+    let remote = bare_repo(root.path());
+    let state = instance(root.path(), "env", &remote);
+    // A variable of this process (as RUSTYBIN_SECRETS_KEY would be).
+    std::env::set_var("RUSTYBIN_TEST_ENV_LEAK", "leaked-value");
+    let parsed = parse_remote(&remote).expect("remote");
+    let env = state.git.git_env(&parsed).expect("env");
+    assert!(env.config.iter().any(|c| c == "protocol.allow=never"));
+    assert!(env.config.iter().any(|c| c == "protocol.file.allow=always"));
+    let out = state
+        .git
+        .git(&env, root.path(), &["-c", "alias.dump=!env", "dump"])
+        .await;
+    std::env::remove_var("RUSTYBIN_TEST_ENV_LEAK");
+    assert!(out.ok, "{}", out.stderr);
+    assert!(!out.stdout.contains("leaked-value"), "{}", out.stdout);
+    assert!(out.stdout.contains("PATH="));
+    assert!(out.stdout.contains("GIT_TERMINAL_PROMPT=0"));
+}
+
+/// The askpass script answers the remote's own prompts only.
+#[test]
+fn askpass_answers_only_the_remote_host() {
+    let root = tempfile::tempdir().expect("tmp");
+    let state = instance(
+        root.path(),
+        "askpass",
+        "https://git.example.com/org/repo.git",
+    );
+    let script = state.git.askpass_script().expect("script");
+    let run = |prompt: &str| {
+        std::process::Command::new("sh")
+            .arg(&script)
+            .arg(prompt)
+            .env("RUSTYBIN_GIT_HOST", "git.example.com")
+            .env("RUSTYBIN_GIT_USERNAME", "x-access-token")
+            .env("RUSTYBIN_GIT_PASSWORD", "tok-123456789")
+            .output()
+            .expect("sh")
+    };
+    let ok = run("Password for 'https://x-access-token@git.example.com': ");
+    assert!(ok.status.success());
+    assert_eq!(String::from_utf8_lossy(&ok.stdout).trim(), "tok-123456789");
+    let user = run("Username for 'https://git.example.com': ");
+    assert_eq!(
+        String::from_utf8_lossy(&user.stdout).trim(),
+        "x-access-token"
+    );
+    let evil = run("Password for 'https://x-access-token@evil.example': ");
+    assert!(!evil.status.success());
+    assert!(evil.stdout.is_empty());
+    let sneaky = run("Password for 'https://git.example.com.evil.example': ");
+    assert!(!sneaky.status.success());
+}

@@ -374,6 +374,9 @@ pub fn parse_remote(raw: &str) -> Result<Remote, String> {
     if s.contains("://") {
         return Err("the remote: https://, ssh://, file:// or git@host:path".into());
     }
+    if s.contains("::") {
+        return Err("the remote: a transport helper (name::address) is not accepted".into());
+    }
     // scp style: [user@]host:path, the host before the first colon.
     let (head, path) = s
         .split_once(':')
@@ -389,6 +392,26 @@ pub fn parse_remote(raw: &str) -> Result<Remote, String> {
         host: Some(host),
         port: 22,
     })
+}
+
+/// Variables of the instance's environment a git command keeps (with
+/// `GitEnv.vars`, everything else is cleared).
+pub const GIT_ENV_PASSTHROUGH: &[&str] = &["PATH", "TMPDIR", "SYSTEMROOT"];
+
+/// The host the askpass script answers for: `host`, or `host:port` when the
+/// port is not 443 (as git writes it in its prompt).
+fn askpass_host(remote: &Remote) -> String {
+    let host = remote.host.clone().unwrap_or_default();
+    let host = if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    if remote.port == 443 {
+        host
+    } else {
+        format!("{host}:{}", remote.port)
+    }
 }
 
 fn check_host(host: &str) -> Result<(), String> {
@@ -484,6 +507,9 @@ pub struct SourceControl {
     /// The working copy's document could not be read on the last auto
     /// tick: logged once.
     auto_warned: Mutex<Option<String>>,
+    /// The remote's host, port and the addresses the policy pinned for it
+    /// (set by `permit`): network git commands go there only.
+    pinned: Mutex<Option<(String, u16, Vec<std::net::SocketAddr>)>>,
 }
 
 impl SourceControl {
@@ -494,6 +520,7 @@ impl SourceControl {
             state_dir: config.state_dir.clone(),
             instance_id: config.instance_id.clone(),
             lock: tokio::sync::Mutex::new(()),
+            pinned: Mutex::new(None),
             timeline: Mutex::new(VecDeque::new()),
             last_pull: Mutex::new(None),
             git_version: OnceLock::new(),
@@ -652,6 +679,10 @@ impl SourceControl {
                         ));
                     }
                 }
+                // git connects to these addresses only (curl's resolve list,
+                // ssh's HostName): it never resolves the name itself.
+                *self.pinned.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some((host, remote.port, addrs));
                 Ok(())
             }
         }
@@ -706,7 +737,17 @@ impl SourceControl {
             format!("user.email={email}"),
             "credential.helper=".to_string(),
             "core.hooksPath=/dev/null".to_string(),
+            // No transport unless allowed below (never ext::, fd::, git://).
+            "protocol.allow=never".to_string(),
         ];
+        // The addresses `permit` pinned for this remote, when it did.
+        let pinned = self
+            .pinned
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .filter(|(h, p, _)| Some(h) == remote.host.as_ref() && *p == remote.port)
+            .map(|(_, _, addrs)| addrs);
         match (remote.kind, self.auth().as_str()) {
             (RemoteKind::Https, "deploy_key") => {
                 return Err(GitError::conflict(
@@ -729,8 +770,27 @@ impl SourceControl {
                             .unwrap_or_else(|| "x-access-token".into()),
                     ));
                     vars.push(("RUSTYBIN_GIT_PASSWORD".into(), token.to_string()));
+                    // The askpass script answers the remote's own prompts only.
+                    vars.push(("RUSTYBIN_GIT_HOST".into(), askpass_host(remote)));
                 }
-                config.push("http.followRedirects=initial".to_string());
+                config.push("http.followRedirects=false".to_string());
+                if let (Some(addrs), Some(host)) = (&pinned, &remote.host) {
+                    if host.parse::<IpAddr>().is_err() {
+                        let list: Vec<String> = addrs
+                            .iter()
+                            .map(|a| match a.ip() {
+                                IpAddr::V6(v6) => format!("[{v6}]"),
+                                v4 => v4.to_string(),
+                            })
+                            .collect();
+                        config.push(format!(
+                            "http.curloptResolve={host}:{}:{}",
+                            remote.port,
+                            list.join(",")
+                        ));
+                    }
+                    config.push("protocol.https.allow=always".to_string());
+                }
             }
             (RemoteKind::Ssh, _) => {
                 let key = self.state_file(KEY_FILE).unwrap_or_default();
@@ -740,16 +800,36 @@ impl SourceControl {
                     ));
                 }
                 let known = self.state_file(KNOWN_HOSTS_FILE).unwrap_or_default();
+                // ssh connects to the pinned address; the host key is still
+                // checked under the remote's name.
+                let pin = match (&pinned, &remote.host) {
+                    (Some(addrs), Some(host)) => addrs
+                        .first()
+                        .map(|a| {
+                            format!(
+                                " -o HostName={} -o HostKeyAlias={}",
+                                shell_quote(&a.ip().to_string()),
+                                shell_quote(host)
+                            )
+                        })
+                        .unwrap_or_default(),
+                    _ => String::new(),
+                };
                 vars.push((
                     "GIT_SSH_COMMAND".into(),
                     format!(
-                        "ssh -i {} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={}",
+                        "ssh -i {} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={}{pin}",
                         shell_quote(&key.display().to_string()),
                         shell_quote(&known.display().to_string())
                     ),
                 ));
+                if pinned.is_some() {
+                    config.push("protocol.ssh.allow=always".to_string());
+                }
             }
-            (RemoteKind::Local, _) => {}
+            (RemoteKind::Local, _) => {
+                config.push("protocol.file.allow=always".to_string());
+            }
         }
         Ok(GitEnv { vars, config })
     }
@@ -759,7 +839,9 @@ impl SourceControl {
         let path = self
             .state_file(ASKPASS_FILE)
             .ok_or_else(|| GitError::conflict("RUSTYBIN_STATE_DIR is required"))?;
-        let script = "#!/bin/sh\ncase \"$1\" in\n  Username*) printf '%s\\n' \"$RUSTYBIN_GIT_USERNAME\" ;;\n  *) printf '%s\\n' \"$RUSTYBIN_GIT_PASSWORD\" ;;\nesac\n";
+        // git's prompts name the URL ("Password for 'https://user@host': "):
+        // only the configured remote's get an answer.
+        let script = "#!/bin/sh\ncase \"$1\" in\n  *\"://$RUSTYBIN_GIT_HOST'\"*|*\"@$RUSTYBIN_GIT_HOST'\"*) ;;\n  *) exit 1 ;;\nesac\ncase \"$1\" in\n  Username*) printf '%s\\n' \"$RUSTYBIN_GIT_USERNAME\" ;;\n  *) printf '%s\\n' \"$RUSTYBIN_GIT_PASSWORD\" ;;\nesac\n";
         let current = std::fs::read_to_string(&path).ok();
         if current.as_deref() != Some(script) {
             crate::settings::write_private(&path, script.as_bytes())
@@ -781,6 +863,14 @@ impl SourceControl {
             cmd.arg("-c").arg(c);
         }
         cmd.args(args).current_dir(cwd).kill_on_drop(true);
+        // Only what git needs: never the instance's own environment (its
+        // secrets key, provider keys, tokens).
+        cmd.env_clear();
+        for k in GIT_ENV_PASSTHROUGH {
+            if let Some(v) = std::env::var_os(k) {
+                cmd.env(k, v);
+            }
+        }
         for (k, v) in &env.vars {
             cmd.env(k, v);
         }
@@ -938,6 +1028,15 @@ impl SourceControl {
         };
         if !self.initialised(&repo) {
             return body;
+        }
+        // A fetch reaches the network: through the policy first (it pins
+        // the addresses git may use).
+        let mut fetch = fetch;
+        if fetch {
+            if let Err(e) = self.permit(&remote).await {
+                body["fetch_error"] = json!(e);
+                fetch = false;
+            }
         }
         let Ok(env) = self.git_env(&remote) else {
             return body;
