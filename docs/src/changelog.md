@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.3.0 (2026-11-02): reliability and testing workflows
+
+The correctness work the hardening review queued, then the workflows that turn an
+instance into a test bench for a gateway, in ten steps
+([the plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/reliability/master-plan.md)).
+Every capability is on the API, the console, the CLI, the management MCP and
+`rustybin.yaml` (or says why not).
+
+**New**
+
+- **[Diagnostics](troubleshooting.md#ask-the-instance-first)**: `GET /_rustybin/diagnostics`,
+  `rustybin doctor` (exit `1` on a failed check), `diagnose_instance`, Management,
+  Diagnostics. Each check (the state directory, the secrets key, unreadable secrets, the
+  settings document, load errors, the config file, listeners, outbound refusals, source
+  control, the default password, the harness engine, AI assist) says what it saw and the fix.
+- **[Gateway scenarios](gateway-scenarios.md)**: retries, rate limiting, credential
+  injection, timeouts and caching. A run prepares the upstream, gives the steps for the
+  gateway, sends test traffic through it (egress purpose `scenario`) and compares what the
+  client got with what reached the upstream; ending it removes only what it created.
+- **[Saved tests](saved-tests.md)**: a captured request (**Save as test** in Live traffic)
+  or a written one with assertions (status, a header, the body, a JSON value, the time),
+  run in process or through a gateway (egress purpose `replay`), as JSON or JUnit, and
+  exported as Hurl for CI. Credentials become `{{variables}}`, never values. In
+  `rustybin.yaml` as `tests:`.
+- **[Checkpoints](checkpoints.md)**: save the instance's API mocks (with their data) and
+  the health toggle, restore them before a run (with a dry run), never touching visitors'
+  mocks, settings or secrets.
+- **[Edit conflicts](mocks/index.md#two-people-editing-one-mock)**: a mock edit may name the
+  draft revision it was made from (`If-Match` or `expected_revision`, the `ETag` of the mock);
+  a stale one answers `409` with what changed. The console, the CLI and agents always send
+  one; `mocks.require_revision` makes it mandatory (`428`).
+- The AI job fields offer the provider's models to pick from.
+
+**Behaviour changes** (what an operator or a script may notice):
+
+- **An apply never deletes what its document names but cannot load.** A mock whose spec
+  fails to read, parse or compile is a problem and keeps its last good revision, in the
+  apply and in its dry run alike (it was pruned before).
+- **A dry run validates like the apply**: settings, secrets, mocks (compiled), portal
+  items and harness scenarios a dry run accepts are the ones the apply accepts.
+- **Git documents and specs are read whole**: a spec over 8 KiB pulled from a repository
+  was cut before; specs now go up to the instance's spec limit, and a larger one fails the
+  pull with a message.
+- **Concurrent edits of one mock are no longer lost**: an edit without a revision that
+  raced another is made again on top of it.
+- **`tools/list` of the management server pages at 100 tools**, and the server now has
+  more: clients follow `nextCursor` (MCP clients do). New tools come after the existing ones.
+- The `rustybin.yaml` export has a `tests:` section (empty when there are none).
+
 ## 0.2.2 (2026-11-02): the hardening release
 
 No new features. A full code review of 0.2.1 found what a public instance exposes; every

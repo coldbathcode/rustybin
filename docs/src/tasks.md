@@ -57,6 +57,11 @@ covers it. If you have not started an instance yet, begin with the
 | Test OAuth, JWT, API keys or mTLS | [OAuth / OIDC](reference/oidc.md), [authentication](reference/auth.md) |
 | Send gRPC, WebSocket or SSE traffic | [gRPC](reference/grpc.md), [WebSocket](reference/websocket.md), [SSE](reference/sse.md) |
 | Run load through a gateway | [Load testing](harness.md) |
+| Prove a gateway retries, rate limits, injects a credential, times out or caches | [Gateway scenarios](gateway-scenarios.md) |
+| Turn a captured request into a test that runs in CI | [Saved tests](saved-tests.md) |
+| Reset a demo to where it started | [Checkpoints](checkpoints.md) |
+| Find out what is wrong with an instance | [Diagnostics](troubleshooting.md#ask-the-instance-first) |
+| Stop two people overwriting each other's mock edits | [Two people editing one mock](mocks/index.md#two-people-editing-one-mock) |
 
 ## Operate and automate
 

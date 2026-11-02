@@ -47,13 +47,13 @@ from git is applied with `ApplyOptions.untrusted`; every egress client resolves 
 YAML output is pinned by `tests/snapshots/export.yaml`. Section 8 of the master plan queues the next milestone
 (instance reliability and testing workflows).
 
-## Rustybin 0.3, reliability and testing workflows (in progress)
+## Rustybin 0.3, reliability and testing workflows (built 2026-11-02, tag pending)
 
 [docs/plans/reliability/master-plan.md](docs/plans/reliability/master-plan.md) (planned 2026-11-02 from section 8 of
 the hardening plan; ten steps, one file each with build notes; section 4 is the build marker; one release, 0.3.0, at
-the end, tagged only when the user says so). Built so far: safe pruning, validated previews, git reads whole,
+the end, tagged only when the user says so; `0.3.0` in Cargo.toml and the changelog). Built: safe pruning, validated previews, git reads whole,
 diagnostics (`src/diagnostics.rs`), gateway scenarios (`src/scenarios/`), saved tests (`src/replay/`), checkpoints
-(`src/checkpoints.rs`), edit conflicts. Rules it left: a document's section never prunes what it names but could not
+(`src/checkpoints.rs`), edit conflicts, AI job pickers, the docs. Rules it left: a document's section never prunes what it names but could not
 load; a preview validates exactly like the apply; a mock edit names the draft revision it was made from (`If-Match`
 or `expected_revision`, `StoreError::Stale` checked under the store's write lock, `MockStore::edit_lock` around the
 read, recompile and write); a new management tool goes at the end of `TOOLS` (`tools/list` pages at 100 and every

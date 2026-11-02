@@ -5,14 +5,16 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-**Instance reliability and testing workflows** (queued after 0.2.2, not started): safe pruning
-when a document cannot load, previews that validate like an apply, intact git document reads,
-then instance diagnostics (`rustybin doctor`), guided gateway scenarios, capture and replay with
-assertions, checkpoints and reset, and conflict protection for edits. Section 8 of
-`docs/plans/hardening/master-plan.md` in the repository.
+Nothing is queued: candidates are under consideration below.
 
 ## Recently built
 
+- [Rustybin 0.3, reliability and testing workflows](changelog.md#030-2026-11-02-reliability-and-testing-workflows)
+  (2026-11-02): applies that never prune what they cannot load, previews that validate
+  like an apply, git documents read whole; then [diagnostics](troubleshooting.md#ask-the-instance-first),
+  [gateway scenarios](gateway-scenarios.md), [saved tests](saved-tests.md) that run in CI,
+  [checkpoints](checkpoints.md) and [conflict protection](mocks/index.md#two-people-editing-one-mock)
+  for mock edits.
 - [Rustybin 0.2.2, the hardening release](changelog.md#022-2026-11-02-the-hardening-release)
   (2026-11-02): no new features; what a full code review found for public instances, fixed
   in ten steps, and the [threat model](concepts/public-instances.md) it now meets.
@@ -38,7 +40,12 @@ assertions, checkpoints and reset, and conflict protection for edits. Section 8 
 
 ## Under consideration
 
-From the build notes of the 0.2 steps and the harness plan, in no order:
+From the build notes of the 0.2 and 0.3 steps and the harness plan, in no order:
+
+- **Testing workflows**: saved tests on a schedule with a report history; more gateway
+  scenarios (circuit breakers, CORS, request size limits, header transformation);
+  checkpoints kept in the git repository next to `rustybin.yaml`; a compare view in the
+  console for an edit refused as stale (today it names what changed and offers a reload).
 
 - **AI mocks**: a per-operation "Generate examples" with a persona picker in the
   operation editor (today the dialog is scoped to the operation without its own
