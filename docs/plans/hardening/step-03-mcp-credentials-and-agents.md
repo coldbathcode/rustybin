@@ -30,3 +30,33 @@ is returned only under `untrusted_entries`, truncated.
 
 The tests pass, `docs/src/mcp/inspector.md` and `docs/src/agent-mcp.md` describe the target rule and
 the identity rule.
+
+## Build notes (2026-11-02)
+
+- Every finding is fixed; none was closed as not reproducible.
+- One rule, `store::use_connection(id, target, admin)`, for the management tools, the
+  relay and the checks: another target with `connection` is `400`
+  `connection_target_mismatch` (`store::same_target`: the same path on this instance,
+  query aside, or the same origin), and a connection holding secrets needs admin
+  (`403` `connection_needs_admin`; on REST, `admin::admin_check` of the request).
+- `client::local_allowed` no longer accepts `/_rustybin/mcp`; the console still lists
+  the management server and connects to it in browser mode. With it gone no local
+  target is a control path, so saved credentials never reach one.
+- Agents: `Effective.also` carries the overrides of the other records of the same
+  `credential.fingerprint()`, and a sibling's revocation refuses the call. Rules of
+  `rustybin.yaml` still match by name (the operator writes them per client), so
+  only per-agent overrides and revocations follow the credential. The existing
+  tests that asserted "another client on the same token is not limited" now assert
+  the opposite.
+- `list_registry_servers`: `untrusted_entries` (each cut at 4 KiB through
+  `tools::Budget`, 64 KiB per result), `cursor` and `limit` (16, at most 50),
+  `total`, `next_cursor`; validations cached by digest (`validate_cached`, 1024).
+- `mcp_call`: `untrusted_error`, `untrusted_headers`, a cut `untrusted_body`, and the
+  JSON-RPC code in the summary only when it is a number. `run_mcp_checks` answers the
+  report under `untrusted_report` (cut) beside `id`, `ok`, `counts`. The REST check
+  route still answers the full report to the console.
+- `Access.admin_credential` and `in_process(as_admin)` are gone: `reset_flaky` resets
+  `AppState.flaky` (the `/flaky/*` counters, now shared) directly.
+- Captures: `client::InspectorOrigin` marks the inspector's in-process requests; the
+  inspector capture redacts every header and query value whose name
+  `keys::looks_secret`.

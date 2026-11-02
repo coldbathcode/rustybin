@@ -100,6 +100,47 @@ impl AuthSpec {
 /// Name and value pairs (headers or query parameters).
 pub type Pairs = Vec<(String, String)>;
 
+/// A saved connection ready to use: its credentials as headers and query.
+pub struct Resolved {
+    pub conn: Connection,
+    pub headers: Pairs,
+    pub query: Pairs,
+}
+
+/// Why a saved connection may not be used for a call.
+#[derive(Debug)]
+pub struct ConnRefusal {
+    pub status: u16,
+    pub message: String,
+    pub reason: &'static str,
+}
+
+impl ConnRefusal {
+    fn new(status: u16, message: String, reason: &'static str) -> Self {
+        Self {
+            status,
+            message,
+            reason,
+        }
+    }
+}
+
+/// Whether `requested` is the saved `target`: the same path on this
+/// instance (query aside), or the same origin (scheme, host, port).
+pub fn same_target(requested: &str, saved: &str) -> bool {
+    use super::client::Target;
+    match (Target::parse(requested, false), Target::parse(saved, false)) {
+        (Ok(Target::Local(a)), Ok(Target::Local(b))) => a.split('?').next() == b.split('?').next(),
+        (Ok(Target::Remote(a)), Ok(Target::Remote(b))) => {
+            match (reqwest::Url::parse(&a), reqwest::Url::parse(&b)) {
+                (Ok(a), Ok(b)) => a.origin() == b.origin(),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
 /// The headers and query parameters a connection sends.
 pub fn build_auth(
     spec: &AuthSpec,
@@ -273,6 +314,53 @@ impl Store {
             })
             .collect();
         Some((s.conn.clone(), secrets))
+    }
+
+    /// A saved connection's target, transport and credentials for a call to
+    /// `requested` (empty: its own target). The rule every path follows (the
+    /// management tools, the relay, the checks): a connection's credentials go
+    /// only to its own target, so another origin (or another path on this
+    /// instance) is refused, and using a connection that holds secrets needs
+    /// admin rights.
+    pub fn use_connection(
+        &self,
+        id: &str,
+        requested: &str,
+        admin: bool,
+    ) -> Result<Resolved, ConnRefusal> {
+        let Some((conn, secrets)) = self.resolve(id) else {
+            return Err(ConnRefusal::new(
+                404,
+                format!("no saved connection {id:?}"),
+                "unknown_connection",
+            ));
+        };
+        if !secrets.is_empty() && !admin {
+            return Err(ConnRefusal::new(
+                403,
+                format!(
+                    "the saved connection {id:?} holds credentials: using it needs admin rights"
+                ),
+                "connection_needs_admin",
+            ));
+        }
+        let requested = requested.trim();
+        if !requested.is_empty() && !same_target(requested, &conn.target) {
+            return Err(ConnRefusal::new(
+                400,
+                format!(
+                    "the saved connection {id:?} is for {}: its credentials go only there (leave the target out, or connect without the saved connection)",
+                    conn.target
+                ),
+                "connection_target_mismatch",
+            ));
+        }
+        let (headers, query) = build_auth(&conn.auth, &secrets);
+        Ok(Resolved {
+            conn,
+            headers,
+            query,
+        })
     }
 
     /// Create or replace a connection. `secrets`: a value replaces, `null`

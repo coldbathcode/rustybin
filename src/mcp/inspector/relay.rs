@@ -246,18 +246,20 @@ pub fn header_list(v: &Value) -> Result<Vec<(String, String)>, String> {
 pub fn connection_auth(
     inspector: &Inspector,
     id: Option<&str>,
+    target: &str,
+    admin: bool,
 ) -> Result<(super::store::Pairs, super::store::Pairs), Box<Response>> {
     let Some(id) = id else {
         return Ok((Vec::new(), Vec::new()));
     };
-    let Some((conn, secrets)) = inspector.store.resolve(id) else {
-        return Err(Box::new(error(
-            StatusCode::NOT_FOUND,
-            format!("no saved connection {id:?}"),
-            "unknown_connection",
-        )));
-    };
-    Ok(super::store::build_auth(&conn.auth, &secrets))
+    match inspector.store.use_connection(id, target, admin) {
+        Ok(r) => Ok((r.headers, r.query)),
+        Err(e) => Err(Box::new(error(
+            StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_REQUEST),
+            e.message,
+            e.reason,
+        ))),
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -284,6 +286,7 @@ pub struct RelayBody {
 pub async fn relay(
     State(state): State<AppState>,
     Extension(inspector): Extension<Arc<Inspector>>,
+    request_headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     if body.len() > 1024 * 1024 {
@@ -331,10 +334,12 @@ pub async fn relay(
                 Ok(t) => t,
                 Err(e) => return error(StatusCode::BAD_REQUEST, e, "invalid_target"),
             };
-            let (h, q) = match connection_auth(&inspector, req.connection.as_deref()) {
-                Ok(a) => a,
-                Err(resp) => return *resp,
-            };
+            let admin = crate::admin::admin_check(&request_headers, &state.config).is_ok();
+            let (h, q) =
+                match connection_auth(&inspector, req.connection.as_deref(), &req.target, admin) {
+                    Ok(a) => a,
+                    Err(resp) => return *resp,
+                };
             (base.with_query(&q), h)
         }
     };

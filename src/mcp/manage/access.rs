@@ -75,11 +75,6 @@ pub struct Access {
     pub links: Links,
     /// Credentials to forward into in-process requests.
     pub forward: Vec<(HeaderName, axum::http::HeaderValue)>,
-    /// For admin callers: a credential the data plane's admin guard accepts
-    /// (the instance's admin token, else the caller's own token), sent as
-    /// `X-Rustybin-Admin-Token` (redacted in captures) only by tools that
-    /// call an admin-guarded data-plane route.
-    pub admin_credential: Option<axum::http::HeaderValue>,
     /// `X-Rustybin-Session` of the request, if any.
     pub session_header: Option<String>,
     /// What the caller authenticates with (who the agent is, with the
@@ -177,17 +172,6 @@ impl Access {
                 headers.get(&name).map(|v| (name, v.clone()))
             })
             .collect();
-        let admin_credential = caller
-            .admin
-            .then(|| {
-                state
-                    .config
-                    .admin_token
-                    .as_deref()
-                    .or_else(|| crate::control_auth::presented_token(headers))
-            })
-            .flatten()
-            .and_then(|t| axum::http::HeaderValue::from_str(t).ok());
         let (credential, token) =
             credential_of(state, headers, extensions, grant, &key_id, &caller);
         let stdio = headers
@@ -199,7 +183,6 @@ impl Access {
             token,
             stdio,
             caller,
-            admin_credential,
             grant,
             key_id,
             key,

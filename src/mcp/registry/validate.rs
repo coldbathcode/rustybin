@@ -169,6 +169,31 @@ fn semantic(doc: &Value, out: &mut Vec<Value>) {
 }
 
 /// Validate one document: `{valid, issues}` (valid when no issue is an error).
+/// Validations kept by [`validate_cached`].
+const CACHE: usize = 1024;
+
+/// [`validate`], remembered by the document's digest (the control view and
+/// its management tool validate every entry on every call; published
+/// entries are up to 64 KiB each).
+pub fn validate_cached(doc: &Value) -> Value {
+    use sha2::{Digest, Sha256};
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static MEMO: OnceLock<Mutex<HashMap<[u8; 32], Value>>> = OnceLock::new();
+    let key: [u8; 32] = Sha256::digest(doc.to_string().as_bytes()).into();
+    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(v) = memo.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return v.clone();
+    }
+    let v = validate(doc);
+    let mut map = memo.lock().unwrap_or_else(|e| e.into_inner());
+    if map.len() >= CACHE {
+        map.clear();
+    }
+    map.insert(key, v.clone());
+    v
+}
+
 pub fn validate(doc: &Value) -> Value {
     let mut issues = Vec::new();
     if !doc.is_object() {

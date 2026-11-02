@@ -1,11 +1,9 @@
 //! Instance tools: what this Rustybin is, the route catalogue, the health
 //! toggle, plan usage, key usage and the flaky counters.
 
-use axum::http::Method;
 use serde_json::{json, Value};
 
 use super::access::Access;
-use super::testing::in_process;
 use super::tools::{arg_str, arg_usize, err, ok};
 use crate::catalog::{self, BodyDef};
 use crate::mcp::core::CallCtx;
@@ -306,56 +304,40 @@ pub async fn get_key_usage(ctx: &CallCtx, _access: &Access, args: &Value) -> Val
     }
 }
 
-/// `reset_flaky`: through the data-plane route, as the caller.
+/// `reset_flaky`: the caller's own counters (its test session, or the one
+/// given), or everyone's with admin rights; the counters are reset
+/// directly, as `POST /flaky/reset` does.
 pub async fn reset_flaky(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     let scope = arg_str(args, "scope").unwrap_or("session");
     if !matches!(scope, "session" | "all") {
         return err("scope must be session or all");
     }
-    if scope == "all" && !access.is_admin() {
-        return err(format!(
-            "resetting everyone's counters needs admin rights: {}",
-            access.denial(super::access::Right::Admin)
-        ));
-    }
-    let session = arg_str(args, "session");
-    let path = format!("/flaky/reset?scope={scope}");
-    match in_process(
-        ctx,
-        access,
-        Method::POST,
-        &path,
-        Vec::new(),
-        None,
-        session,
-        scope == "all",
-    )
-    .await
-    {
-        Ok(a) if a.status == 200 => {
-            let body = a.json().unwrap_or(Value::Null);
-            ok(
-                ctx,
-                format!(
-                    "Reset {} flaky counter(s) ({} scope{})",
-                    body["counters_removed"],
-                    scope,
-                    if scope == "session" {
-                        format!(", session {}", a.session)
-                    } else {
-                        String::new()
-                    }
-                ),
-                body,
-            )
+    if scope == "all" {
+        if !access.is_admin() {
+            return err(format!(
+                "resetting everyone's counters needs admin rights: {}",
+                access.denial(super::access::Right::Admin)
+            ));
         }
-        Ok(a) => err(format!(
-            "the reset answered {}: {}",
-            a.status,
-            super::testing::short(&a.body)
-        )),
-        Err(e) => e,
+        let removed = ctx.app.flaky.reset_all();
+        return ok(
+            ctx,
+            format!("Reset {removed} flaky counter(s) (all scope)"),
+            json!({ "status": "reset", "scope": "all", "counters_removed": removed }),
+        );
     }
+    let session = arg_str(args, "session")
+        .map(str::to_string)
+        .unwrap_or_else(|| access.test_session());
+    if !crate::session::is_valid_session(&session) {
+        return err("invalid session value (1 to 128 characters of A-Z a-z 0-9 . _ : -)");
+    }
+    let removed = ctx.app.flaky.reset_session(&session);
+    ok(
+        ctx,
+        format!("Reset {removed} flaky counter(s) (session scope, session {session})"),
+        json!({ "status": "reset", "scope": "session", "session": session, "counters_removed": removed }),
+    )
 }
 
 /// `list_sessions` (admin): the console's sign-in sessions since the last

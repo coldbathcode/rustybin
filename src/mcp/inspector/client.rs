@@ -42,6 +42,11 @@ pub const LEGACY_VERSION: &str = "2024-11-05";
 
 pub type BodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, String>> + Send>>;
 
+/// Marks an in-process request the MCP inspector sent: the inspector
+/// capture redacts its credential headers and query parameters.
+#[derive(Clone, Copy, Debug)]
+pub struct InspectorOrigin;
+
 /// Where an MCP server is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
@@ -56,7 +61,9 @@ pub enum Target {
 /// the identity provider.
 pub fn local_allowed(path: &str, for_fetch: bool) -> bool {
     let p = path.split('?').next().unwrap_or("");
-    if p == "/mcp" || p.starts_with("/mcp/") || p == crate::mcp::manage::MANAGE_PATH {
+    // Never the management server: a tool calling it in process would be a
+    // second agent without the first one's ceiling (`/_rustybin/mcp`).
+    if p == "/mcp" || p.starts_with("/mcp/") {
         return true;
     }
     if let Some(rest) = p.strip_prefix("/mock/") {
@@ -82,7 +89,7 @@ impl Target {
             }
             if !local_allowed(raw, for_fetch) {
                 return Err(format!(
-                    "{raw:?} is not an MCP server of this instance (the inspector reaches /mcp*, /_rustybin/mcp and /mock/<name>/_rustybin/mcp{})",
+                    "{raw:?} is not an MCP server of this instance (the inspector reaches /mcp* and /mock/<name>/_rustybin/mcp{}; the management server only from the browser)",
                     if for_fetch { ", and the OAuth documents" } else { "" }
                 ));
             }
@@ -124,6 +131,21 @@ impl Target {
                 let joined = base.join(reference).map_err(|e| e.to_string())?;
                 Target::parse(joined.as_str(), true)
             }
+        }
+    }
+
+    /// Whether `other` is on this target's origin (both on this instance, or
+    /// the same scheme, host and port).
+    pub fn same_origin(&self, other: &Target) -> bool {
+        match (self, other) {
+            (Target::Local(_), Target::Local(_)) => true,
+            (Target::Remote(a), Target::Remote(b)) => {
+                match (reqwest::Url::parse(a), reqwest::Url::parse(b)) {
+                    (Ok(a), Ok(b)) => a.origin() == b.origin(),
+                    _ => false,
+                }
+            }
+            _ => false,
         }
     }
 
@@ -227,6 +249,9 @@ pub(crate) async fn send_local(
         .map_err(|e| format!("invalid request: {e}"))?;
     req.extensions_mut()
         .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+    // Captures of this request redact its credentials (saved connections
+    // and the console's auth fields are secrets of the operator).
+    req.extensions_mut().insert(InspectorOrigin);
     let resp = match tokio::time::timeout(timeout, router.oneshot(req)).await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => return Err(format!("the request failed: {e}")),
@@ -434,6 +459,14 @@ impl Legacy {
         .await
         .map_err(|_| "no endpoint event within 10 s".to_string())??;
         let endpoint = target.join(&endpoint)?;
+        // The credentials go with every POST: the endpoint must be on the
+        // stream's own origin, never a host the server picks.
+        if !target.same_origin(&endpoint) {
+            return Err(format!(
+                "the server's endpoint event names another origin than {}: refused (credentials stay with the target)",
+                target.as_str()
+            ));
+        }
         let (tx, rx) = mpsc::channel(LEGACY_BUFFER);
         let task = tokio::spawn(async move {
             while let Some(ev) = events.next().await {

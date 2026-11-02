@@ -801,3 +801,147 @@ async fn the_console_scope_may_relay_and_run_checks_but_not_save_connections() {
         StatusCode::FORBIDDEN
     );
 }
+
+/// A saved connection's credentials go only to its own target, and only
+/// for an admin; the management server is never an inspector target; the
+/// inspector's in-process requests are captured without their credentials.
+#[tokio::test]
+async fn saved_credentials_stay_with_their_target() {
+    let mut c = Config::for_tests();
+    c.control_auth = crate::control_auth::ControlAuth::Jwt;
+    c.control_jwt_key = crate::control_auth::parse_public_key(control_keys::CONTROL_JWT_PUBLIC_PEM);
+    c.admin_token = Some("admin-secret".into());
+    let app = test_app_with(test_state_with(c));
+    let send = |token: &'static str, method: &'static str, uri: &'static str, body: Value| {
+        let app = app.clone();
+        async move {
+            let token = if token == "admin" {
+                "admin-secret".to_string()
+            } else {
+                control_jwt(Some("console"))
+            };
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::from(body.to_string()))
+                        .expect("req"),
+                )
+                .await
+                .expect("r");
+            let status = resp.status();
+            let bytes = body_bytes(resp).await;
+            (status, String::from_utf8_lossy(&bytes).to_string())
+        }
+    };
+    let put = json!({ "name": "API key demo", "target": "/mcp/apikey", "auth": { "kind": "api_key", "name": "X-API-Key" }, "secrets": { "api_key": "demo-key-12345678" } });
+    let (s, _) = send(
+        "admin",
+        "PUT",
+        "/_rustybin/mcp-connections/apikey-demo",
+        put,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Another target with the connection: refused, relay and checks.
+    let (s, body) = send("admin", "POST", RELAY_PATH, json!({ "target": "/mcp", "connection": "apikey-demo", "headers": modern_headers("server/discover"), "message": modern_discover(1) })).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("connection_target_mismatch"), "{body}");
+    let (s, body) = send("admin", "POST", CHECKS_PATH, json!({ "target": "/mcp", "connection": "apikey-demo", "checks": ["connect"], "save": false })).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("connection_target_mismatch"), "{body}");
+    // A console-scope caller may not use a connection that holds secrets.
+    let (s, body) = send("console", "POST", RELAY_PATH, json!({ "target": "/mcp/apikey", "connection": "apikey-demo", "headers": modern_headers("server/discover"), "message": modern_discover(1) })).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("connection_needs_admin"), "{body}");
+    let (s, body) = send(
+        "console",
+        "POST",
+        CHECKS_PATH,
+        json!({ "connection": "apikey-demo", "checks": ["connect"], "save": false }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+    // The admin, to its own target: sent, and captured without the key.
+    let (s, body) = send("admin", "POST", RELAY_PATH, json!({ "target": "/mcp/apikey", "connection": "apikey-demo", "headers": modern_headers("server/discover"), "message": modern_discover(1) })).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let (_, captured) = send("admin", "GET", "/_rustybin/requests?limit=50", json!({})).await;
+    assert!(captured.contains("/mcp/apikey"), "{captured}");
+    assert!(
+        !captured.contains("demo-key-1234"),
+        "the saved key was captured: {captured}"
+    );
+
+    // The management server is not an inspector target.
+    let (s, body) = send("admin", "POST", RELAY_PATH, json!({ "target": "/_rustybin/mcp", "headers": modern_headers("server/discover"), "message": modern_discover(1) })).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("invalid_target"), "{body}");
+    let (s, _) = send(
+        "admin",
+        "POST",
+        CHECKS_PATH,
+        json!({ "target": "/_rustybin/mcp", "checks": ["connect"], "save": false }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(client::Target::parse("/_rustybin/mcp", false).is_err());
+    assert!(client::Target::parse("/_rustybin/mcp", true).is_err());
+}
+
+#[test]
+fn same_target_compares_paths_and_origins() {
+    assert!(store::same_target("/mcp/apikey", "/mcp/apikey?x=1"));
+    assert!(!store::same_target("/mcp", "/mcp/apikey"));
+    assert!(store::same_target(
+        "https://a.example/mcp",
+        "https://a.example:443/other"
+    ));
+    assert!(!store::same_target(
+        "https://b.example/mcp",
+        "https://a.example/mcp"
+    ));
+    assert!(!store::same_target(
+        "http://a.example/mcp",
+        "https://a.example/mcp"
+    ));
+    assert!(!store::same_target("/mcp", "https://a.example/mcp"));
+}
+
+/// A legacy server whose endpoint event names another host: the inspector
+/// does not follow it with the credentials.
+#[tokio::test]
+async fn a_legacy_endpoint_on_another_origin_is_refused() {
+    const SSE: &str = "/sse";
+    let upstream = Router::new().route(
+        SSE,
+        axum::routing::get(|| async {
+            (
+                [("content-type", "text/event-stream")],
+                "event: endpoint\ndata: http://elsewhere.example/messages\n\n",
+            )
+                .into_response()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, upstream).await;
+    });
+    let state = test_state_with(relay_config(true));
+    let target = client::Target::parse(&format!("http://{addr}{SSE}"), false).expect("target");
+    let mut conn = client::Conn::new(
+        state,
+        target,
+        client::Transport::parse(Some("legacy"), None).expect("legacy"),
+        vec![("authorization".into(), "Bearer saved-secret".into())],
+    );
+    let h = conn.connect().await;
+    let why = h.transport_error.unwrap_or_default();
+    assert!(why.contains("another origin"), "{why}");
+}

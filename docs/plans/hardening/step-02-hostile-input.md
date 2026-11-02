@@ -60,9 +60,10 @@ responsive while ten hostile compiles run.
   and samples (REST handlers and the five MCP tools) on the blocking pool behind
   `COMPILE_PERMITS` (4); a permit not free within 5 s is `503` with `Retry-After: 2`;
   a visitor gets 30 compiles a minute (`429`, `Retry-After: 60`), tracked for at
-  most 4096 visitors. Config applies, file loads and the AI routes' checks still
-  compile in their own tasks: they are admin or startup work, and the parse caps
-  above bound them.
+  most 4096 visitors. Config applies and file loads still compile in their
+  own tasks (admin or startup work); the AI routes' checks too (admin, or visitors
+  only with `RUSTYBIN_ASSIST_VISITORS`, under the assist calls-per-minute cap); the
+  parse caps above bound all of them.
 - Regexes: the shared cache is an LRU of 512 that compiles outside its lock, and
   every `Compiled` pins up to 64 of its spec's patterns (`PinnedPatterns`, 64 KiB
   compiled size each; larger ones use the cache), released when the revision drops.

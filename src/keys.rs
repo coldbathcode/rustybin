@@ -728,6 +728,48 @@ pub fn is_credential_header(name: &str) -> bool {
         || name.eq_ignore_ascii_case(crate::mocks::visits::TOKEN_HEADER)
 }
 
+/// Does a header or query parameter name look like it carries a secret
+/// (`Authorization`, `X-API-Key`, `api_key`, `access_token`, ...)? Captures
+/// of requests the MCP inspector sent redact these.
+pub fn looks_secret(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    matches!(
+        n.as_str(),
+        "authorization" | "proxy-authorization" | "cookie"
+    ) || [
+        "key",
+        "token",
+        "secret",
+        "password",
+        "auth",
+        "signature",
+        "sig",
+    ]
+    .iter()
+    .any(|w| n.contains(w))
+}
+
+/// A query string with every value whose name [`looks_secret`] redacted
+/// (`None`: nothing to redact).
+pub fn redact_secret_query(query: &str) -> Option<String> {
+    let mut changed = false;
+    let parts: Vec<String> = query
+        .split('&')
+        .map(|part| {
+            let name = part.split_once('=').map_or(part, |(n, _)| n);
+            let decoded = form_urlencoded::parse(part.as_bytes()).next();
+            match decoded {
+                Some((k, _)) if looks_secret(&k) => {
+                    changed = true;
+                    format!("{name}=[redacted]")
+                }
+                _ => part.to_string(),
+            }
+        })
+        .collect();
+    changed.then(|| parts.join("&"))
+}
+
 /// A header value as captured: `X-Rustybin-Key` is redacted to its tail,
 /// the admin token and visit manage token headers entirely (they are
 /// Rustybin credentials, never something a gateway test needs to read), and

@@ -98,13 +98,24 @@ jsonpath "$.secrets.api_key.set" == true
 jsonpath "$.secrets.api_key.hint" == "1234"
 body not contains "demo-key-1234"
 
-# A check run names the connection: the relay adds the sealed key.
+# A check run names the connection: the relay adds the sealed key. Using a
+# connection that holds credentials needs admin rights.
 POST {{base_url}}/_rustybin/mcp-checks
+Authorization: Bearer {{admin_token}}
 Content-Type: application/json
 {"target": "/mcp/apikey", "connection": "apikey-server", "checks": ["connect", "tools_list", "auth_refusal"], "save": false}
 HTTP 200
 [Asserts]
 jsonpath "$.ok" == true
+
+# Its credentials go only to its own target.
+POST {{base_url}}/_rustybin/mcp-checks
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{"target": "/mcp", "connection": "apikey-server", "checks": ["connect"], "save": false}
+HTTP 400
+[Asserts]
+jsonpath "$.reason" == "connection_target_mismatch"
 
 DELETE {{base_url}}/_rustybin/mcp-connections/apikey-server
 Authorization: Bearer {{admin_token}}

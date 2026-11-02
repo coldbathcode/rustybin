@@ -257,10 +257,18 @@ pub struct Effective {
     pub source: &'static str,
     /// The index of the matching rule, when one matched.
     pub rule: Option<usize>,
+    /// The operator's overrides of the other agents of the same credential
+    /// (other client names): each must allow a tool too, so a new client
+    /// name never starts over with fewer limits.
+    pub also: Vec<Effective>,
 }
 
 impl Effective {
     pub fn allows(&self, def: &ToolDef) -> bool {
+        self.allows_own(def) && self.also.iter().all(|e| e.allows_own(def))
+    }
+
+    fn allows_own(&self, def: &ToolDef) -> bool {
         self.ceiling.allows(def)
             && (self.allow.is_empty() || self.allow.iter().any(|t| t == def.name))
             && !self.deny.iter().any(|t| t == def.name)
@@ -268,6 +276,14 @@ impl Effective {
 
     /// Why the operator's rights refuse `def` (for the tool error).
     pub fn denial(&self, def: &ToolDef) -> String {
+        if self.allows_own(def) {
+            if let Some(other) = self.also.iter().find(|e| !e.allows_own(def)) {
+                return format!(
+                    "{} (a limit set on another client name of the same credential)",
+                    other.denial(def)
+                );
+            }
+        }
         if self.deny.iter().any(|t| t == def.name) {
             return format!("the operator denied {} to this agent", def.name);
         }
@@ -538,6 +554,7 @@ impl Policy {
                 .or_else(|| rule.and_then(|r| r.note.clone())),
             source,
             rule: matched.map(|(i, _)| i),
+            also: Vec::new(),
         }
     }
 
@@ -952,6 +969,22 @@ impl Agents {
                 rights: policy.effective(rec),
             }
         };
+        // Revocation and the operator's limits follow the credential, not the
+        // client name it sends: the other agents of the same credential count.
+        let mut snapshot = snapshot;
+        let fingerprint = seen.credential.fingerprint();
+        for other in inner
+            .records
+            .values()
+            .filter(|r| r.id != id && r.credential.fingerprint() == fingerprint)
+        {
+            if other.revoked.is_some() {
+                snapshot.revoked = true;
+            }
+            if other.rights.as_ref().is_some_and(|o| !o.is_empty()) {
+                snapshot.rights.also.push(policy.effective(other));
+            }
+        }
         if let Some(sid) = index_session {
             if !inner.sessions.contains_key(&sid) {
                 inner.session_order.push_back(sid.clone());
@@ -1259,6 +1292,7 @@ impl Policy {
             note: None,
             source: "default",
             rule: None,
+            also: Vec::new(),
         }
     }
 }
@@ -1291,17 +1325,17 @@ fn evict(records: &mut HashMap<String, Record>) {
 fn credential_note(c: &Credential) -> Option<&'static str> {
     match c {
         Credential::Admin => Some(
-            "The admin token cannot be revoked per agent: rotate RUSTYBIN_ADMIN_TOKEN. This agent's calls are refused meanwhile.",
+            "The admin token cannot be revoked per agent: rotate RUSTYBIN_ADMIN_TOKEN. Meanwhile every agent that uses the admin token is refused on the management server, whatever client name it sends.",
         ),
         Credential::Console { .. } => Some(
-            "The console sign-in tokens this agent used are revoked: if it used your own console token, your console is signed out too.",
+            "The console sign-in tokens this agent used are revoked, and every agent of this console user is refused on the management server until you restore it: if it used your own console token, your console is signed out too.",
         ),
         Credential::Key { .. } => Some(
-            "API keys are revoked in the key registry; this agent's calls on the management server are refused meanwhile.",
+            "API keys are revoked in the key registry; meanwhile every agent that uses this key is refused on the management server, whatever client name it sends.",
         ),
-        Credential::Visit { .. } => Some("The visit continues; this agent's calls on the management server are refused."),
+        Credential::Visit { .. } => Some("The visit continues; every agent of this visit is refused on the management server, whatever client name it sends."),
         Credential::Open { .. } => Some(
-            "The control plane is open: anyone may connect again under another client name. Turn on the console sign-in to control agents for real.",
+            "The control plane is open: an agent is known only by its session label (X-Rustybin-Session or its address), which it can change. Turn on the console sign-in to control agents for real.",
         ),
         Credential::Jwt { .. } | Credential::Oauth { .. } => None,
     }

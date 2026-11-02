@@ -494,14 +494,31 @@ pub async fn capture(State(state): State<AppState>, req: Request, next: Next) ->
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     let control_auth = crate::keys::authorization_is_control(&parts.headers, &state.config);
+    // The MCP inspector's own in-process requests carry the operator's
+    // saved credentials: every secret-looking header and query value goes.
+    let from_inspector = parts
+        .extensions
+        .get::<crate::mcp::inspector::client::InspectorOrigin>()
+        .is_some();
     let headers = parts
         .headers
         .iter()
         .map(|(k, v)| CapturedHeader {
             name: k.as_str().to_string(),
-            value: crate::keys::redact_header(k.as_str(), v.as_bytes(), control_auth),
+            value: if from_inspector && crate::keys::looks_secret(k.as_str()) {
+                "[redacted]".to_string()
+            } else {
+                crate::keys::redact_header(k.as_str(), v.as_bytes(), control_auth)
+            },
         })
         .collect();
+    let redacted_query = parts.uri.query().and_then(|q| {
+        if from_inspector {
+            crate::keys::redact_secret_query(q).map(|r| crate::keys::redact_query(&r).unwrap_or(r))
+        } else {
+            crate::keys::redact_query(q)
+        }
+    });
     let body_size = bytes.len();
     let kept = &bytes[..body_size.min(MAX_CAPTURED_BODY)];
     let (body_text, body_base64) = if kept.is_empty() {
@@ -521,12 +538,18 @@ pub async fn capture(State(state): State<AppState>, req: Request, next: Next) ->
         request_id,
         timestamp,
         method: parts.method.to_string(),
-        uri: crate::keys::redact_uri(&parts.uri),
+        uri: {
+            let text = parts.uri.to_string();
+            match (&redacted_query, text.find('?')) {
+                (Some(q), Some(pos)) => format!("{}?{q}", &text[..pos]),
+                _ => text,
+            }
+        },
         path: parts.uri.path().to_string(),
         query: parts
             .uri
             .query()
-            .map(|q| crate::keys::redact_query(q).unwrap_or_else(|| q.to_string())),
+            .map(|q| redacted_query.clone().unwrap_or_else(|| q.to_string())),
         version: format!("{:?}", parts.version),
         headers,
         client_ip,

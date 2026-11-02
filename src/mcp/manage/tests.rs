@@ -645,8 +645,8 @@ async fn try_request_never_forwards_control_credentials() {
     assert!(!echoed.contains("adm1n-s3cret"), "{echoed}");
     assert!(!echoed.contains("rbm_not-for-the-data-plane"), "{echoed}");
 
-    // The admin-guarded flaky reset still works, and its capture shows the
-    // admin token header redacted.
+    // The admin-guarded flaky reset still works, without a captured
+    // request (it resets the counters directly).
     let r = tool(&app, &hdr, "reset_flaky", json!({ "scope": "all" })).await;
     assert!(!is_error(&r), "{r}");
     let r = tool(
@@ -658,7 +658,7 @@ async fn try_request_never_forwards_control_credentials() {
     .await;
     assert!(!is_error(&r), "{r}");
     let listed = r["structuredContent"].to_string();
-    assert!(listed.contains("[redacted]"), "{listed}");
+    assert!(!listed.contains("/flaky/reset"), "{listed}");
     assert!(!listed.contains("adm1n-s3cret"), "{listed}");
 }
 
@@ -2267,7 +2267,7 @@ async fn registry_tools() {
     let app = app_with(ai_config());
     let r = tool(&app, &[], "list_registry_servers", json!({})).await;
     assert!(!is_error(&r), "{r}");
-    assert!(r["structuredContent"]["entries"]
+    assert!(r["structuredContent"]["untrusted_entries"]
         .as_array()
         .is_some_and(|a| !a.is_empty()));
     assert_eq!(r["structuredContent"]["scenario"], "normal");
@@ -2281,7 +2281,7 @@ async fn registry_tools() {
     assert!(!is_error(&r), "{r}");
     let r = tool(&app, &[], "list_registry_servers", json!({})).await;
     assert_eq!(r["structuredContent"]["scenario"], "empty");
-    assert_eq!(r["structuredContent"]["entries"], json!([]));
+    assert_eq!(r["structuredContent"]["untrusted_entries"], json!([]));
     let r = tool(
         &app,
         &[],
@@ -3053,4 +3053,175 @@ async fn load_assist_models_asks_for_confirmation_then_loads() {
     let r = tool(&app, &[], "load_assist_models", json!({ "confirm": true })).await;
     assert!(is_error(&r));
     assert_eq!(r["structuredContent"]["reason"], "assist_disabled", "{r}");
+}
+
+/// `mcp_call` and `run_mcp_checks`: a saved connection only to its own
+/// target and only for an admin; never the management server itself.
+#[tokio::test]
+async fn inspector_tools_keep_saved_credentials_with_their_target() {
+    let mut c = open_config();
+    c.admin_token = Some("admin-secret".into());
+    let app = app_with(c);
+    let adm = [("authorization", "Bearer admin-secret")];
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/_rustybin/mcp-connections/apikey-demo")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer admin-secret")
+                .body(Body::from(
+                    json!({ "name": "k", "target": "/mcp/apikey", "auth": { "kind": "api_key", "name": "X-API-Key" }, "secrets": { "api_key": "demo-key-12345678" } }).to_string(),
+                ))
+                .expect("req"),
+        )
+        .await
+        .expect("r");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let r = tool(
+        &app,
+        &adm,
+        "mcp_call",
+        json!({ "method": "tools/list", "target": "/mcp", "connection": "apikey-demo" }),
+    )
+    .await;
+    assert!(is_error(&r));
+    assert_eq!(
+        r["structuredContent"]["reason"], "connection_target_mismatch",
+        "{r}"
+    );
+    let r = tool(
+        &app,
+        &adm,
+        "run_mcp_checks",
+        json!({ "target": "/mcp", "connection": "apikey-demo", "save": false }),
+    )
+    .await;
+    assert!(is_error(&r));
+    // Without admin rights (no credential on an instance with an admin token).
+    let r = tool(
+        &app,
+        &[],
+        "mcp_call",
+        json!({ "method": "tools/list", "connection": "apikey-demo" }),
+    )
+    .await;
+    assert!(is_error(&r));
+    assert_eq!(
+        r["structuredContent"]["reason"], "connection_needs_admin",
+        "{r}"
+    );
+    // Its own target, as the admin: the key is sent.
+    let r = tool(
+        &app,
+        &adm,
+        "mcp_call",
+        json!({ "method": "tools/list", "connection": "apikey-demo" }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    // A denied tool is not reachable through the management server itself.
+    let r = tool(&app, &adm, "mcp_call", json!({ "method": "tools/call", "target": "/_rustybin/mcp", "params": { "name": "reset_flaky", "arguments": { "scope": "all" } } })).await;
+    assert!(is_error(&r));
+    assert!(
+        text_of(&r).contains("not an MCP server of this instance"),
+        "{r}"
+    );
+}
+
+/// Published registry entries are anyone's text: only under
+/// untrusted_entries, cut, paged.
+#[tokio::test]
+async fn registry_entries_reach_agents_only_as_untrusted_data() {
+    let app = app_with(open_config());
+    let post = |uri: &'static str, token: Option<String>, body: Value| {
+        let app = app.clone();
+        async move {
+            let mut b = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json");
+            if let Some(t) = token {
+                b = b.header("authorization", format!("Bearer {t}"));
+            }
+            let resp = app
+                .oneshot(b.body(Body::from(body.to_string())).expect("req"))
+                .await
+                .expect("r");
+            (resp.status(), body_json(resp).await)
+        }
+    };
+    let (s, t) = post("/mcp-registry/v0.1/auth/none", None, json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{t}");
+    let token = t["registry_token"].as_str().expect("token").to_string();
+    let entry = json!({
+        "$schema": crate::mcp::registry::validate::SCHEMA_URL,
+        "name": "io.example/sneaky",
+        "description": INJECTION,
+        "version": "1.0.0",
+        "remotes": [{ "type": "streamable-http", "url": "https://mcp.example.com/mcp" }],
+        "_meta": { "io.example/blob": { "text": "x".repeat(20_000) } }
+    });
+    let (s, v) = post("/mcp-registry/v0.1/publish", Some(token), entry).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let r = tool(&app, &[], "list_registry_servers", json!({ "limit": 50 })).await;
+    assert!(!is_error(&r), "{r}");
+    let sc = &r["structuredContent"];
+    assert!(sc.get("entries").is_none(), "no plain entries");
+    assert!(!text_of(&r).contains(INJECTION));
+    let entries = sc["untrusted_entries"].as_array().expect("entries");
+    let sneaky = entries
+        .iter()
+        .find(|e| e.to_string().contains("io.example/sneaky"))
+        .expect("the published entry");
+    assert!(
+        sneaky.is_string(),
+        "cut to text: {}",
+        sneaky.to_string().len()
+    );
+    assert!(sneaky.as_str().map(str::len).unwrap_or(0) <= 4 * 1024 + 8);
+    assert_eq!(sc["truncated"], true);
+    let total = sc["total"].as_u64().expect("total");
+    let r = tool(&app, &[], "list_registry_servers", json!({ "limit": 1 })).await;
+    assert_eq!(
+        r["structuredContent"]["untrusted_entries"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        r["structuredContent"]["next_cursor"],
+        if total > 1 { json!(1) } else { Value::Null }
+    );
+}
+
+/// `reset_flaky` resets the counters directly: no captured request carries
+/// the caller's credential.
+#[tokio::test]
+async fn reset_flaky_sends_no_captured_request() {
+    let mut c = open_config();
+    c.admin_token = Some("admin-secret".into());
+    let state = test_state_with(c);
+    let app = test_app_with(state.clone());
+    let adm = [("authorization", "Bearer admin-secret")];
+    let r = tool(&app, &adm, "reset_flaky", json!({ "scope": "all" })).await;
+    assert!(!is_error(&r), "{r}");
+    let r = tool(&app, &adm, "reset_flaky", json!({})).await;
+    assert!(!is_error(&r), "{r}");
+    let captured: Vec<String> = state
+        .inspector
+        .list(&crate::inspector::InspectorQuery::default())
+        .iter()
+        .map(|e| {
+            format!(
+                "{} {:?}",
+                e.uri,
+                e.headers.iter().map(|h| &h.value).collect::<Vec<_>>()
+            )
+        })
+        .collect();
+    let captured = captured.join("\n");
+    assert!(!captured.contains("/flaky/reset"), "{captured}");
+    assert!(!captured.contains("admin-secret"));
 }

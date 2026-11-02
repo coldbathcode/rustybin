@@ -183,6 +183,19 @@ header values) are sealed with the [settings](../configuration.md) secrets key i
 holds credentials is used through the relay, which adds them on the instance, so the
 browser never sees them again. Saving and deleting need the admin token; at most 50.
 
+**The target rule.** A saved connection's credentials go only to its own target. With
+`connection`, a `target` that names another origin (scheme, host and port), or another
+path on this instance, is refused with `400` (`connection_target_mismatch`) by the
+relay, the check runs and the management tools alike; leave the target out to use the
+connection's. Using a connection that holds credentials needs admin rights (`403`,
+`connection_needs_admin`): a console-scope token or a read-only agent may use
+connections without secrets only. A legacy server's `endpoint` event must stay on the
+stream's origin, so the credentials never follow it to another host. The management
+server (`/_rustybin/mcp`) is never an inspector target: the console connects to it
+from the browser with its own token, and an agent cannot call it through `mcp_call`
+to slip past its own limits. Captures of the inspector's in-process requests redact
+every header and query value that looks like a credential.
+
 ```hurl
 {{#include ../../examples/mcp/inspector.hurl:connections}}
 ```
@@ -191,7 +204,8 @@ browser never sees them again. Saving and deleting need the admin token; at most
 
 The relay, the fetch helper and check runs are read-only control-plane calls: an admin
 or a console-scope token may use them, and a console token may end its own relay
-sessions. Saving or deleting connections and deleting runs need admin.
+sessions. Saving or deleting connections, deleting runs and using a saved connection
+that holds credentials need admin.
 
 ## On every surface
 

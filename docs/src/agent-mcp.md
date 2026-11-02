@@ -213,7 +213,13 @@ instance:
 Every client that calls the server is an **agent**: its credential plus the name it
 gives in `clientInfo` (sent with `initialize`, or in `_meta` of a 2026-07-28 call).
 Two clients on the same token are two agents; a client that sends no name is
-`unknown`. The console's **AI agents** view (under AI and agents) lists them with
+`unknown`. **The identity rule:** the name only tells agents apart in the list. A
+revocation, and the rights you set on an agent, follow its credential: every agent of
+the same credential (the same admin token, API key, visit, console user, JWT subject
+or OAuth client) is refused while one is revoked, and must also pass the limits set on
+the others, so a new client name never starts over. Rules of `rustybin.yaml` still
+match by name. On an open control plane an agent is known only by its session label,
+which it can change: turn the sign-in on to control agents for real. The console's **AI agents** view (under AI and agents) lists them with
 their credential, first and last seen, calls today and in total, open sessions and
 status (`active`, `idle`, `revoked`), and opens one to show its calls per tool with
 their outcomes (ok, error, denied, asked to confirm), its last errors and its
@@ -265,8 +271,8 @@ A saved or environment default ceiling wins over the file's `default_ceiling`.
 its sessions (their next request answers `403`), and revokes its tokens for their
 remaining life: the console sign-in tokens and OAuth access tokens it used, and an
 OAuth client's refresh tokens. **Restore** undoes all of it. The admin token cannot be
-revoked per agent (rotate `RUSTYBIN_ADMIN_TOKEN`; the agent's calls are refused
-meanwhile); API keys are revoked in the key registry. If you gave an agent your own
+revoked per agent (rotate `RUSTYBIN_ADMIN_TOKEN`; meanwhile every agent on the admin
+token is refused, whatever name it sends); API keys are revoked in the key registry. If you gave an agent your own
 console token, revoking it signs your console out too. **End sessions** closes the
 agent's handshake-era sessions without revoking it.
 
@@ -410,7 +416,7 @@ never tool inputs and never returned: the operator sets them in the console or w
 | `run_mcp_checks` | read | The [inspector's check suite](mcp/inspector.md) against a server; the report is saved unless `save: false`. Another host is confirmed |
 | `list_mcp_check_runs` | read | The saved runs, or one report |
 | `list_mcp_connections` | read | The saved connections (credentials stay sealed on the instance) |
-| `list_registry_servers` | read | The [mock registry](mcp/registry.md)'s entries under the current scenario, each validated, the counts and a gateway's sync configuration |
+| `list_registry_servers` | read | The [mock registry](mcp/registry.md)'s counts, scenario and a gateway's sync configuration, and a page of its entries (`cursor`, `limit`) under `untrusted_entries`, each validated and cut at 4 KiB (anyone may publish) |
 | `set_registry_scenario` | admin | `normal`, or a scenario that breaks the registry on purpose |
 | `browse_registry` | read | A page of a real registry (the official one by default) through the outbound policy; confirmed for another host; the entries are `untrusted_servers` |
 | `validate_server_json` | read | A `server.json` against the registry schema and the semantic checks |

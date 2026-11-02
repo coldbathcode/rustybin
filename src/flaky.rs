@@ -55,6 +55,16 @@ pub struct FlakyState {
 }
 
 impl FlakyState {
+    /// The counters of an instance (fewer in public mode).
+    pub fn for_config(config: &Config) -> Self {
+        let capacity = if config.public_mode {
+            MAX_COUNTERS_PUBLIC
+        } else {
+            MAX_COUNTERS
+        };
+        Self::new(capacity, COUNTER_TTL)
+    }
+
     pub fn new(capacity: usize, ttl: Duration) -> Self {
         Self {
             counters: Mutex::new(HashMap::new()),
@@ -412,12 +422,7 @@ async fn flaky_status_handler(
 // ── Router ──────────────────────────────────────────────────────────
 
 pub fn router(state: &AppState) -> Router<AppState> {
-    let capacity = if state.config.public_mode {
-        MAX_COUNTERS_PUBLIC
-    } else {
-        MAX_COUNTERS
-    };
-    routes(Arc::new(FlakyState::new(capacity, COUNTER_TTL)))
+    routes(state.flaky.clone())
 }
 
 fn routes(flaky_state: Arc<FlakyState>) -> Router<AppState> {

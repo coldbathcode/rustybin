@@ -1063,7 +1063,7 @@ pub fn status_json(state: &AppState, reg: &Registry, base: &str) -> Value {
         if e.source == Source::Scenario && scenario == Scenario::Large {
             continue;
         }
-        let check = validate::validate(&e.server);
+        let check = validate::validate_cached(&e.server);
         shown.push(json!({
             "name": e.name(),
             "version": e.version(),

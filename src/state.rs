@@ -85,6 +85,10 @@ pub struct AppState {
     /// The MCP inspector's relay sessions, saved connections and check
     /// runs: shared by `/_rustybin/mcp-*` and the management MCP tools.
     pub mcp_inspector: Arc<crate::mcp::inspector::Inspector>,
+    /// The `/flaky/*` counters: shared by its routes and the management
+    /// tool `reset_flaky` (which resets them directly, never through a
+    /// captured request carrying the caller's credential).
+    pub flaky: Arc<crate::flaky::FlakyState>,
 }
 
 impl AppState {
@@ -176,6 +180,7 @@ impl AppState {
             egress.clone(),
         ));
         let mcp_inspector = Arc::new(crate::mcp::inspector::Inspector::new(settings.clone()));
+        let flaky = Arc::new(crate::flaky::FlakyState::for_config(&config));
         Self {
             keys,
             limits,
@@ -197,6 +202,7 @@ impl AppState {
             registry: Arc::new(crate::mcp::registry::Registry::default()),
             git,
             mcp_inspector,
+            flaky,
         }
     }
 }

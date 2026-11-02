@@ -229,18 +229,22 @@ pub fn build_run_spec(
     inspector: &Inspector,
     req: ChecksBody,
     principal: String,
+    admin: bool,
 ) -> Result<checks::RunSpec, (StatusCode, String, &'static str)> {
     let (conn_target, conn_transport, conn_version, mut auth, query) = match &req.connection {
-        Some(id) => match inspector.store.resolve(id) {
-            Some((c, secrets)) => {
-                let (h, q) = store::build_auth(&c.auth, &secrets);
-                (Some(c.target), Some(c.transport), c.version, h, q)
-            }
-            None => {
+        Some(id) => match inspector.store.use_connection(id, &req.target, admin) {
+            Ok(r) => (
+                Some(r.conn.target),
+                Some(r.conn.transport),
+                r.conn.version,
+                r.headers,
+                r.query,
+            ),
+            Err(e) => {
                 return Err((
-                    StatusCode::NOT_FOUND,
-                    format!("no saved connection {id:?}"),
-                    "unknown_connection",
+                    StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_REQUEST),
+                    e.message,
+                    e.reason,
                 ))
             }
         },
@@ -322,7 +326,8 @@ async fn run_checks(
         }
     };
     let (save, format) = (req.save.unwrap_or(true), req.format.clone());
-    let spec = match build_run_spec(&inspector, req, principal) {
+    let admin = crate::admin::admin_check(&headers, &state.config).is_ok();
+    let spec = match build_run_spec(&inspector, req, principal, admin) {
         Ok(s) => s,
         Err((status, message, reason)) => return error(status, message, reason),
     };

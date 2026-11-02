@@ -588,8 +588,9 @@ async fn a_ceiling_hides_tools_and_refuses_calls() {
             .contains("read-only"),
         "{r}"
     );
-    // Another client on the same token is not limited.
-    assert!(names(&app, &auth, "claude-code")
+    // The limit follows the credential: another client name on the same
+    // token is limited too.
+    assert!(!names(&app, &auth, "claude-code")
         .await
         .contains(&"create_mock".to_string()));
 
@@ -812,7 +813,9 @@ async fn a_revoked_admin_agent_is_refused_at_every_call() {
         .as_str()
         .expect("t")
         .contains("revoked"));
-    assert!(!names(&app, &auth, "other").await.is_empty());
+    // The revocation follows the credential: another client name on the
+    // admin token is refused too.
+    assert!(names(&app, &auth, "other").await.is_empty());
 }
 
 #[tokio::test]
@@ -934,4 +937,59 @@ fn the_config_file_section_loads_with_its_problems() {
     let policy = Policy::of(&state);
     assert_eq!(policy.default_ceiling, Ceiling::Traffic);
     assert_eq!(policy.default_source, "stored");
+}
+
+/// Revocation and the operator's limits follow the credential: the same
+/// token under a new client name does not start over.
+#[tokio::test]
+async fn a_new_client_name_does_not_escape_a_revocation_or_a_limit() {
+    let app = test_app_with(test_state_with(admin_config()));
+    let auth = bearer();
+    // A limit on one name applies to another name of the same credential.
+    assert!(names(&app, &auth, "limited")
+        .await
+        .contains(&"create_mock".to_string()));
+    let (_, list) = control(&app, "GET", "/_rustybin/agents", None).await;
+    let id = find_agent(&list, "limited")["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+    let (status, v) = control(
+        &app,
+        "PATCH",
+        &format!("/_rustybin/agents/{id}"),
+        Some(json!({ "rights": { "ceiling": "read-only", "deny": ["find_endpoints"] } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let other = names(&app, &auth, "limited-2").await;
+    assert!(!other.contains(&"create_mock".to_string()), "{other:?}");
+    assert!(!other.contains(&"find_endpoints".to_string()));
+    let r = call(&app, &auth, "limited-2", "find_endpoints").await;
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(r.to_string().contains("another client name"), "{r}");
+
+    // A revocation holds whatever name the agent sends next.
+    let (status, _) = control(
+        &app,
+        "POST",
+        &format!("/_rustybin/agents/{id}/revoke"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let r = call(&app, &auth, "a-brand-new-name", "get_instance").await;
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(names(&app, &auth, "yet-another").await.is_empty());
+    // Restored: every name works again.
+    let (status, _) = control(
+        &app,
+        "POST",
+        &format!("/_rustybin/agents/{id}/restore"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let r = call(&app, &auth, "a-brand-new-name", "get_instance").await;
+    assert_ne!(r["isError"], true, "{r}");
 }
