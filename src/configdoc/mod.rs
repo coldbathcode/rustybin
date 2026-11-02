@@ -52,6 +52,18 @@ const TITLE_KEY: &str = "console.title";
 /// own configuration is the deployment's business, and a pull must not
 /// repoint or drop it.
 pub const SKIPPED_GROUPS: [&str; 1] = ["git"];
+/// Settings a document from the repository never changes: where the
+/// instance may send requests (and the stored AI key with them) and which
+/// header it trusts for client addresses. An operator sets them through the
+/// API, the console or the environment; a pull that carries a different
+/// value is reported and kept as it is, and a prune leaves them alone.
+pub const REPOSITORY_REFUSED: [&str; 5] = [
+    "egress.allow",
+    "egress.allow_loopback",
+    "assist.provider",
+    "assist.base_url",
+    "proxy.client_ip_header",
+];
 const USER_KEY: &str = crate::login::USER_KEY;
 const HEALTH_STATES: [&str; 2] = ["healthy", "unhealthy"];
 
@@ -332,6 +344,7 @@ pub fn export(state: &AppState, secrets: SecretsMode, bundle: bool) -> Export {
                 "unhealthy".into()
             },
         }),
+        unparsed_mocks: Vec::new(),
     };
     Export { file, specs }
 }
@@ -742,6 +755,32 @@ fn fill_stored(value: &mut Value, saved: Option<&Value>, path: &str) -> Result<(
     }
 }
 
+/// The hosts (scheme, host and port, plus a `host` override) a scenario's
+/// load goes to, the shorthand `target` folded in.
+fn target_hosts(s: &crate::harness::scenario::Scenario) -> BTreeSet<String> {
+    let host_of = |u: &str| match reqwest::Url::parse(u) {
+        Ok(url) => format!(
+            "{}://{}:{}",
+            url.scheme(),
+            url.host_str().unwrap_or_default().to_ascii_lowercase(),
+            url.port_or_known_default().unwrap_or_default()
+        ),
+        Err(_) => u.to_string(),
+    };
+    s.target
+        .iter()
+        .map(|u| host_of(u))
+        .chain(s.targets.iter().map(|t| {
+            let mut h = host_of(&t.url);
+            if let Some(o) = &t.host {
+                h.push_str(" host=");
+                h.push_str(&o.to_ascii_lowercase());
+            }
+            h
+        }))
+        .collect()
+}
+
 /// `${NAME}` alone: the variable it names.
 pub fn reference_name(raw: &str) -> Option<&str> {
     let name = raw.trim().strip_prefix("${")?.strip_suffix('}')?;
@@ -1099,6 +1138,31 @@ pub struct ApplyOptions {
     pub untrusted: bool,
 }
 
+/// [`apply`] on the blocking pool behind the compile permits (a document
+/// compiles every spec it carries, so it never runs on an async worker).
+/// `Err` when the permits stay taken for `COMPILE_WAIT`.
+pub async fn apply_on_pool(
+    state: &AppState,
+    file: MocksFile,
+    opts: ApplyOptions,
+) -> Result<Value, String> {
+    let permits = state.mocks.compile_permits();
+    let permit = tokio::time::timeout(crate::mocks::store::COMPILE_WAIT, permits.acquire_owned())
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .ok_or_else(|| {
+            "the instance is busy compiling other specs: try again in a moment".to_string()
+        })?;
+    let state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        apply(&state, file, &opts)
+    })
+    .await
+    .map_err(|_| "the apply did not finish".to_string())
+}
+
 /// Apply a document through every section's service. The answer carries
 /// the diff computed before anything changed (`changes`), each section's
 /// result and the problems (an entry that could not be applied never stops
@@ -1127,7 +1191,10 @@ pub fn apply(state: &AppState, file: MocksFile, opts: &ApplyOptions) -> Value {
         apply_settings(state, &file, opts, &mut problems),
     );
     put("secrets", apply_secrets(state, &file, opts, &mut problems));
-    put("mocks", apply_mocks(state, file.mocks, opts, &mut problems));
+    put(
+        "mocks",
+        apply_mocks(state, file.mocks, &file.unparsed_mocks, opts, &mut problems),
+    );
     put(
         "registry",
         apply_registry(state, file.registry, opts, &mut problems),
@@ -1224,6 +1291,13 @@ fn apply_settings(
             Some(spec) if spec.secret => problems.push(format!(
                 "settings.{k}: a secret: put a reference under secrets (skipped)"
             )),
+            Some(_) if opts.untrusted && REPOSITORY_REFUSED.contains(&k.as_str()) => {
+                if state.settings.get(k).0 != *v {
+                    problems.push(format!(
+                        "settings.{k}: a document from the repository cannot change it (set it through the API, the console or the environment): kept as it is"
+                    ));
+                }
+            }
             Some(_) => {
                 values.insert(k.clone(), v.clone());
             }
@@ -1232,7 +1306,10 @@ fn apply_settings(
     let mut unset = Vec::new();
     if opts.prune && file.settings.is_some() {
         for spec in state.settings.specs() {
-            if spec.secret || values.contains_key(spec.key) || SKIPPED_GROUPS.contains(&spec.group)
+            if spec.secret
+                || values.contains_key(spec.key)
+                || SKIPPED_GROUPS.contains(&spec.group)
+                || (opts.untrusted && REPOSITORY_REFUSED.contains(&spec.key))
             {
                 continue;
             }
@@ -1403,14 +1480,20 @@ fn apply_secrets(
 fn apply_mocks(
     state: &AppState,
     mocks: Option<Vec<MockDoc>>,
+    unparsed: &[String],
     opts: &ApplyOptions,
     problems: &mut Vec<String>,
 ) -> Option<Value> {
     let mocks = mocks?;
     let mut docs = Vec::new();
-    // Every valid name the document carries, loaded or not: a mock it names
-    // is never pruned because its new definition could not be loaded.
-    let mut named: Vec<String> = Vec::new();
+    // Every valid name the document carries, loaded or not (an entry that did
+    // not even parse included): a mock it names is never pruned because its
+    // new definition could not be loaded.
+    let mut named: Vec<String> = unparsed
+        .iter()
+        .filter(|n| crate::mocks::service::check_name(n).is_ok())
+        .cloned()
+        .collect();
     for doc in mocks {
         if let Err(e) = crate::mocks::service::check_name(&doc.name) {
             problems.push(format!(
@@ -1513,6 +1596,9 @@ fn apply_registry(
     problems: &mut Vec<String>,
 ) -> Option<Value> {
     let section = section?;
+    // Every entry the document names, valid or not: a published server the
+    // document names but could not take is kept, never pruned.
+    let named: BTreeSet<String> = section.servers.iter().map(server_key).collect();
     let (valid, section_problems) = crate::mcp::registry::file_entries(Some(section.servers));
     problems.extend(section_problems);
     let keys: BTreeSet<String> = valid.iter().map(server_key).collect();
@@ -1522,7 +1608,10 @@ fn apply_registry(
         .filter(|s| keys.contains(&server_key(s)))
         .count();
     let pruned = if opts.prune {
-        published.len() - moved
+        published
+            .iter()
+            .filter(|s| !named.contains(&server_key(s)))
+            .count()
     } else {
         0
     };
@@ -1533,9 +1622,10 @@ fn apply_registry(
     }
     state.mocks.set_file_registry(valid);
     let prune = opts.prune;
-    let removed = state
-        .registry
-        .retain_published(|n, v| !prune && !keys.contains(&format!("{n}@{v}")));
+    let removed = state.registry.retain_published(|n, v| {
+        let key = format!("{n}@{v}");
+        !keys.contains(&key) && (!prune || named.contains(&key))
+    });
     Some(
         json!({ "entries": keys.len(), "published_moved": moved, "published_removed": removed.saturating_sub(moved) }),
     )
@@ -1674,6 +1764,9 @@ fn apply_harness(
         return Some(json!({ "skipped": section.scenarios.len() }));
     };
     let caps = h.caps();
+    // The prune set is every name the document carries, valid or not: a
+    // scenario that fails validation is reported and kept.
+    let named: BTreeSet<String> = section.scenarios.iter().map(|d| d.name.clone()).collect();
     let mut valid = Vec::new();
     for doc in section.scenarios {
         if !crate::harness::saved::valid_name(&doc.name) {
@@ -1684,10 +1777,10 @@ fn apply_harness(
             continue;
         }
         // `secret:stored` takes the value of the saved scenario of that name.
-        let saved = h
-            .saved
-            .get(&doc.name)
-            .and_then(|s| serde_json::to_value(&s.scenario).ok());
+        let saved_scenario = h.saved.get(&doc.name).map(|s| s.scenario);
+        let saved = saved_scenario
+            .as_ref()
+            .and_then(|s| serde_json::to_value(s).ok());
         let mut value = doc.scenario.clone();
         if let Err(path) = fill_stored(&mut value, saved.as_ref(), "") {
             problems.push(format!(
@@ -1703,6 +1796,19 @@ fn apply_harness(
                 continue;
             }
         };
+        // A stored secret goes only where it went before: the same target
+        // hosts as the saved scenario it came from.
+        if value != doc.scenario
+            && saved_scenario
+                .as_ref()
+                .is_none_or(|old| target_hosts(old) != target_hosts(&scenario))
+        {
+            problems.push(format!(
+                "harness.scenarios.{}: secret:stored keeps a saved value only for the same targets, and these differ (skipped)",
+                doc.name
+            ));
+            continue;
+        }
         let errors = scenario.validate(&caps);
         if !errors.is_empty() {
             problems.push(format!(
@@ -1720,7 +1826,7 @@ fn apply_harness(
             .list()
             .into_iter()
             .map(|s| s.name)
-            .filter(|n| !names.contains(n))
+            .filter(|n| !named.contains(n))
             .collect()
     } else {
         Vec::new()
@@ -1764,6 +1870,19 @@ fn apply_tests(
     let named: BTreeSet<String> = section.iter().map(|t| t.name.clone()).collect();
     let mut valid = Vec::new();
     for t in section {
+        // A test from the repository goes to this instance, or through the
+        // gateway its saved copy already names: a pulled document never
+        // points requests (and the run's variables) at a new host.
+        if opts.untrusted
+            && t.gateway.is_some()
+            && store.get(&t.name).and_then(|old| old.gateway) != t.gateway
+        {
+            problems.push(format!(
+                "tests.{}: a document from the repository cannot point a test at a new gateway (save it through the API, the console or the CLI): skipped",
+                t.name
+            ));
+            continue;
+        }
         match t.validate() {
             Ok(()) => valid.push(t),
             Err(e) => problems.push(format!("tests.{}: {e} (skipped)", t.name)),

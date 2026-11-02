@@ -1085,7 +1085,7 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         "get_portal_insights" => portal::get_portal_insights(ctx, access, &args),
         // Configuration as code and git
         "export_config" => config::export_config(ctx, access, &args),
-        "diff_config" => config::diff_config(ctx, access, &args),
+        "diff_config" => config::diff_config(ctx, access, &args).await,
         "apply_config" => config::apply_config(ctx, access, &args, params).await,
         "git_status" => config::git_status(ctx, access, &args).await,
         "git_init" => config::git_init(ctx, access, &args).await,

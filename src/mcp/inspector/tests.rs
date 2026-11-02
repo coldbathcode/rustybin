@@ -975,7 +975,9 @@ async fn a_query_string_key_never_shows_in_a_report() {
     assert!(!list.to_string().contains("qs-secret-7777"), "{list}");
     let file = std::fs::read_to_string(dir.path().join(store::FILE)).expect("file");
     assert!(!file.contains("qs-secret-7777"));
+}
 
+#[tokio::test]
 async fn the_console_scope_sends_only_list_methods_to_another_host() {
     let mut c = Config::for_tests();
     c.control_auth = crate::control_auth::ControlAuth::Jwt;

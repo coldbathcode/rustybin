@@ -920,6 +920,21 @@ fn a_failed_definition_is_never_pruned() {
     );
     assert!(svc_report.deleted.is_empty());
     assert!(state.mocks.get("orders").is_some());
+    // A document from git whose `orders` entry does not even deserialize
+    // (a typo in a field name) still names it: never pruned.
+    let (lenient, failed) = crate::mocks::config_file::parse_lenient(
+        "version: 2\nmocks:\n  - name: orders\n    enabeld: false\n",
+    )
+    .expect("lenient");
+    assert_eq!(failed.len(), 1);
+    opts.untrusted = true;
+    let applied = apply(&state, lenient, &opts);
+    assert_eq!(
+        applied["results"]["mocks"]["deleted"],
+        json!([]),
+        "{applied}"
+    );
+    assert!(state.mocks.get("orders").is_some(), "still there");
 }
 
 /// The saved state after a burst of concurrent changes is the last one
@@ -1002,4 +1017,59 @@ fn a_preview_refuses_what_the_apply_refuses() {
         preview["problems"].to_string().contains("locked"),
         "{preview}"
     );
+}
+
+/// A document from the repository never repoints where the instance sends
+/// requests: the egress and assist settings, a test's gateway and a
+/// scenario's stored secret for new targets are refused, and reported.
+#[test]
+fn an_untrusted_document_cannot_repoint_outbound_requests() {
+    let state = crate::test_support::test_state();
+    let doc = crate::mocks::config_file::parse(
+        "version: 2\nsettings:\n  egress.allow: [attacker.example]\n  assist.base_url: https://attacker.example/v1\n  console.title: From git\ntests:\n  - name: leak\n    gateway: https://attacker.example\n    request: {method: GET, path: /get}\n    assert: [{status: 200}]\n",
+    )
+    .expect("parse");
+    let opts = ApplyOptions {
+        prune: true,
+        dry_run: false,
+        principal: "git:test".into(),
+        base: None,
+        untrusted: true,
+    };
+    let r = apply(&state, doc, &opts);
+    let problems = r["problems"].to_string();
+    assert!(problems.contains("settings.egress.allow"), "{r}");
+    assert!(problems.contains("settings.assist.base_url"), "{r}");
+    assert!(problems.contains("tests.leak"), "{r}");
+    assert_eq!(state.settings.get("console.title").0, json!("From git"));
+    assert_ne!(
+        state.settings.get("egress.allow").0,
+        json!(["attacker.example"])
+    );
+    assert!(state.saved_tests.get("leak").is_none());
+
+    // The same document from a trusted caller (the admin API) applies.
+    let trusted = ApplyOptions {
+        untrusted: false,
+        ..opts
+    };
+    let doc =
+        crate::mocks::config_file::parse("version: 2\nsettings:\n  egress.allow: [gw.example]\n")
+            .expect("parse");
+    let r = apply(&state, doc, &trusted);
+    assert_eq!(r["problems"], json!([]), "{r}");
+    assert_eq!(state.settings.get("egress.allow").0, json!(["gw.example"]));
+    // A pull that carries the value the instance already has is quiet.
+    let doc =
+        crate::mocks::config_file::parse("version: 2\nsettings:\n  egress.allow: [gw.example]\n")
+            .expect("parse");
+    let r = apply(
+        &state,
+        doc,
+        &ApplyOptions {
+            untrusted: true,
+            ..trusted
+        },
+    );
+    assert_eq!(r["problems"], json!([]), "{r}");
 }

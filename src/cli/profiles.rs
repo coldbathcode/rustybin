@@ -127,14 +127,26 @@ pub fn resolve(env: &Env, args: &Args) -> Result<Resolved> {
     }
     // --url without --profile: the environment, then the profile only when
     // it is for that URL.
+    let from_flag = flag_url.is_some();
     let url = flag_url
         .or_else(|| env.url.as_deref().map(normalise))
         .or_else(|| profile.as_ref().map(|(_, p)| p.url.clone()))
         .unwrap_or_else(|| format!("http://localhost:{}", env.http_port.unwrap_or(80)));
     let profile_for_url = profile.filter(|(_, p)| p.url == url);
+    // RUSTYBIN_TOKEN (or RUSTYBIN_ADMIN_TOKEN) never goes to another
+    // instance a `--url` names (a shell exporting a local admin token would
+    // hand it out): only to RUSTYBIN_URL's instance or one on this machine.
+    let env_token = env.token.clone().filter(|_| {
+        !from_flag
+            || env.url.as_deref().map(normalise).as_deref() == Some(url.as_str())
+            || is_loopback_url(&url)
+    });
     let token = flag_token
-        .or_else(|| env.token.clone())
+        .or(env_token)
         .or_else(|| profile_for_url.as_ref().and_then(|(_, p)| p.token.clone()));
+    if token.is_some() && url.starts_with("http://") && !is_loopback_url(&url) {
+        eprintln!("warning: sending a token over plain http to {url}: use https");
+    }
     Ok(Resolved {
         url,
         token,
@@ -150,4 +162,20 @@ pub fn normalise(url: &str) -> String {
     } else {
         format!("http://{u}")
     }
+}
+
+/// Is `url`'s host this machine (localhost, a loopback address)?
+pub fn is_loopback_url(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| {
+            u.host_str()
+                .map(|h| h.trim_matches(['[', ']']).to_ascii_lowercase())
+        })
+        .is_some_and(|h| {
+            h == "localhost"
+                || h.ends_with(".localhost")
+                || h.parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        })
 }

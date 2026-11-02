@@ -147,6 +147,23 @@ fn profiles_resolve_in_order_and_are_private() {
             .as_deref(),
         Some("t-env")
     );
+    // An environment token never goes to another instance a --url names
+    // (it does go to a local one).
+    let away = Args::parse(
+        &["--url".to_string(), "https://elsewhere.example".into()],
+        &[],
+    )
+    .expect("args");
+    assert_eq!(profiles::resolve(&env3, &away).expect("away").token, None);
+    let local =
+        Args::parse(&["--url".to_string(), "http://127.0.0.1:9".into()], &[]).expect("args");
+    assert_eq!(
+        profiles::resolve(&env3, &local)
+            .expect("local")
+            .token
+            .as_deref(),
+        Some("t-env")
+    );
     // Flags win over everything; an unknown profile is an error.
     let flagged = Args::parse(
         &[

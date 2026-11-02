@@ -334,6 +334,12 @@ pub fn parse_remote(raw: &str) -> Result<Remote, String> {
         if parsed.password().is_some() {
             return Err("the remote must not carry a password".into());
         }
+        // ssh takes the user name as an argument: `-oProxyCommand=...` would
+        // be an option (only git 2.14.1 and later refuse it themselves).
+        let user = parsed.username().to_ascii_lowercase();
+        if user.starts_with('-') || user.starts_with("%2d") {
+            return Err("the remote: a user name must not start with -".into());
+        }
         let host = parsed
             .host_str()
             .ok_or("the remote has no host")?
@@ -876,19 +882,61 @@ impl SourceControl {
         object: &str,
         max: usize,
     ) -> Result<Vec<u8>, String> {
-        let mut cmd = self.command(env, cwd, &["show", object]);
-        match tokio::time::timeout(GIT_TIMEOUT, cmd.output()).await {
+        // The size first (`git cat-file -s`), then the bytes read through a
+        // cap: a repository's huge blob is never buffered whole.
+        let mut size = self.command(env, cwd, &["cat-file", "-s", object]);
+        match tokio::time::timeout(GIT_TIMEOUT, size.output()).await {
             Ok(Ok(out)) if out.status.success() => {
-                if out.stdout.len() > max {
-                    Err(format!(
-                        "{object} is larger than {max} bytes: not read (the supported size)"
-                    ))
-                } else {
-                    Ok(out.stdout)
+                let n: u64 = String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("{object}: git did not give its size"))?;
+                if n > max as u64 {
+                    return Err(format!(
+                        "{object} is {n} bytes: larger than {max} bytes, not read (the supported size)"
+                    ));
                 }
             }
-            Ok(Ok(_)) => Err(format!("{object} is not in the repository")),
-            Ok(Err(e)) => Err(format!("git could not be started: {e}")),
+            Ok(Ok(_)) => return Err(format!("{object} is not in the repository")),
+            Ok(Err(e)) => return Err(format!("git could not be started: {e}")),
+            Err(_) => {
+                return Err(format!(
+                    "git cat-file did not finish within {} s",
+                    GIT_TIMEOUT.as_secs()
+                ))
+            }
+        }
+        let mut cmd = self.command(env, cwd, &["show", object]);
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let read = async {
+            use tokio::io::AsyncReadExt;
+            let mut child = cmd
+                .spawn()
+                .map_err(|e| format!("git could not be started: {e}"))?;
+            let mut out = Vec::new();
+            if let Some(stdout) = child.stdout.take() {
+                stdout
+                    .take(max as u64 + 1)
+                    .read_to_end(&mut out)
+                    .await
+                    .map_err(|e| format!("git show: {e}"))?;
+            }
+            if out.len() > max {
+                let _ = child.kill().await;
+                return Err(format!(
+                    "{object} is larger than {max} bytes: not read (the supported size)"
+                ));
+            }
+            let status = child.wait().await.map_err(|e| format!("git show: {e}"))?;
+            if !status.success() {
+                return Err(format!("{object} is not in the repository"));
+            }
+            Ok(out)
+        };
+        match tokio::time::timeout(GIT_TIMEOUT, read).await {
+            Ok(r) => r,
             Err(_) => Err(format!(
                 "git show did not finish within {} s",
                 GIT_TIMEOUT.as_secs()
@@ -1442,18 +1490,17 @@ impl SourceControl {
             "up to date".to_string()
         };
         if apply {
-            // A dry run diffs the remote's document without moving the
-            // working copy: read it from the remote branch.
+            // The preview and the apply read the same committed tree: the one
+            // HEAD is (or, for a dry run that would fast-forward, would be).
+            // Never the working copy's files, which a failed step may have
+            // left different from any commit.
+            let read_ref = if dry_run && (head.is_none() || behind > 0) {
+                upstream.as_str()
+            } else {
+                "HEAD"
+            };
             let report = self
-                .apply_working_copy(
-                    state,
-                    &env,
-                    &repo,
-                    if dry_run { Some(&upstream) } else { None },
-                    dry_run,
-                    prune,
-                    by,
-                )
+                .apply_working_copy(state, &env, &repo, read_ref, dry_run, prune, by)
                 .await?;
             detail = format!(
                 "{detail}; {} {} change(s){}",
@@ -1470,29 +1517,22 @@ impl SourceControl {
         Ok(body)
     }
 
-    /// Apply the document of the working copy (or, for a dry run, of
-    /// `origin/<branch>` extracted into a temporary directory).
+    /// Apply the document of the commit `from_ref` names (`HEAD`, or for a
+    /// dry run `origin/<branch>`), extracted into a temporary directory with
+    /// the spec files it references.
     #[allow(clippy::too_many_arguments)]
     async fn apply_working_copy(
         &self,
         state: &AppState,
         env: &GitEnv,
         repo: &Path,
-        from_ref: Option<&str>,
+        from_ref: &str,
         dry_run: bool,
         prune: bool,
         by: &str,
     ) -> GitResult<Value> {
-        let _temp;
-        let dir = match from_ref {
-            Some(r) => {
-                let temp = TempDir::new(self.state_dir.as_deref().unwrap_or(Path::new(".")))?;
-                let dir = self.extract(env, repo, r, &temp.path).await?;
-                _temp = temp;
-                dir
-            }
-            None => self.document_dir(repo),
-        };
+        let temp = TempDir::new(self.state_dir.as_deref().unwrap_or(Path::new(".")))?;
+        let dir = self.extract(env, repo, from_ref, &temp.path).await?;
         let doc_path = dir.join(DOCUMENT_NAME);
         if !doc_path.exists() {
             return Err(GitError::conflict(format!(
@@ -1509,7 +1549,9 @@ impl SourceControl {
             base: Some(dir.clone()),
             untrusted: true,
         };
-        let mut report = configdoc::apply(state, file, &opts);
+        let mut report = configdoc::apply_on_pool(state, file, opts)
+            .await
+            .map_err(|e| GitError::new(StatusCode::SERVICE_UNAVAILABLE, e))?;
         if !problems.is_empty() {
             if let Some(list) = report["problems"].as_array_mut() {
                 for p in problems {
@@ -1657,7 +1699,7 @@ impl SourceControl {
         } else {
             let _guard = self.lock.try_lock().map_err(|_| busy())?;
             let report = self
-                .apply_working_copy(state, &env, &repo, None, false, true, by)
+                .apply_working_copy(state, &env, &repo, "HEAD", false, true, by)
                 .await?;
             Ok(json!({
                 "resolved": "repository",

@@ -99,6 +99,10 @@ pub struct MocksFile {
     pub agents: Option<crate::mcp::manage::agents::FileSection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<crate::configdoc::HealthSection>,
+    /// The names of `mocks` entries that did not parse ([`parse_lenient`]):
+    /// a prune keeps those mocks (never part of the document's text).
+    #[serde(skip)]
+    pub unparsed_mocks: Vec<String>,
 }
 
 impl MocksFile {
@@ -292,6 +296,7 @@ pub fn parse_lenient(text: &str) -> Result<(MocksFile, Vec<Failed>), String> {
         }
         mocks
     });
+    let unparsed_mocks = failed.iter().filter_map(|f| f.name.clone()).collect();
     Ok((
         MocksFile {
             version,
@@ -305,6 +310,7 @@ pub fn parse_lenient(text: &str) -> Result<(MocksFile, Vec<Failed>), String> {
             tests,
             agents,
             health,
+            unparsed_mocks,
         },
         failed,
     ))
@@ -808,6 +814,8 @@ mod tests {
         assert!(failed[1].error.contains("enabeld"), "{failed:?}");
         assert_eq!(failed[2].name, None);
         assert!(failed[2].error.starts_with("mocks[2]"), "{failed:?}");
+        // A named entry that did not parse is kept, so a prune leaves it alone.
+        assert_eq!(file.unparsed_mocks, vec!["typo".to_string()]);
 
         assert!(parse_lenient("version: 3").is_err());
         assert!(parse_lenient("mocks: {a: 1}").is_err());

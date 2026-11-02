@@ -121,7 +121,15 @@ async fn apply(
         base: None,
         untrusted: false,
     };
-    Json(super::apply(&state, file, &opts)).into_response()
+    match super::apply_on_pool(&state, file, opts).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => {
+            let mut r = error(StatusCode::SERVICE_UNAVAILABLE, e);
+            r.headers_mut()
+                .insert(header::RETRY_AFTER, header::HeaderValue::from_static("2"));
+            r
+        }
+    }
 }
 
 async fn schema() -> Response {

@@ -799,3 +799,14 @@ async fn large_specs_survive_a_pull() {
         .expect_err("too large");
     assert!(e.contains("larger than 1024 bytes"), "{e}");
 }
+
+#[test]
+fn a_remote_user_name_cannot_be_an_ssh_option() {
+    for bad in [
+        "ssh://-oProxyCommand=touch%20x@example.com/repo.git",
+        "ssh://%2DoProxyCommand=x@example.com/repo.git",
+    ] {
+        assert!(parse_remote(bad).is_err(), "{bad}");
+    }
+    assert!(parse_remote("ssh://git@example.com/repo.git").is_ok());
+}

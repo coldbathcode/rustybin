@@ -141,7 +141,7 @@ fn apply_summary(r: &Value, verb: &str) -> String {
 }
 
 /// `diff_config` (admin): what applying a document would change (a dry run).
-pub fn diff_config(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
+pub async fn diff_config(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     let file = match document_arg(args) {
         Ok(f) => f,
         Err(e) => return e,
@@ -153,7 +153,10 @@ pub fn diff_config(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
         base: None,
         untrusted: false,
     };
-    let r = configdoc::apply(&ctx.app, file, &opts);
+    let r = match configdoc::apply_on_pool(&ctx.app, file, opts).await {
+        Ok(r) => r,
+        Err(e) => return err(e),
+    };
     let summary = apply_summary(&r, "Diff (nothing changed)");
     ok(ctx, summary, r)
 }
@@ -184,7 +187,10 @@ pub async fn apply_config(ctx: &CallCtx, access: &Access, args: &Value, params: 
         base: None,
         untrusted: false,
     };
-    let r = configdoc::apply(&ctx.app, file, &opts);
+    let r = match configdoc::apply_on_pool(&ctx.app, file, opts).await {
+        Ok(r) => r,
+        Err(e) => return err(e),
+    };
     let verb = if dry_run {
         "Dry run (nothing changed)"
     } else if r["ok"].as_bool() == Some(true) {

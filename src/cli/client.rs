@@ -90,7 +90,10 @@ pub struct Client {
 
 impl Client {
     pub fn new(base: &str, token: Option<String>) -> Result<Self> {
+        // No redirects: a 307 would re-post a sign-in's password, and the
+        // session and manage-token headers, to wherever it points.
         let mut builder = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(120))
             .connect_timeout(Duration::from_secs(10))
             .user_agent(concat!("rustybin-cli/", env!("CARGO_PKG_VERSION")));
