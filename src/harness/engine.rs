@@ -2901,11 +2901,19 @@ async fn send_one(run: Arc<Run>, job: Job) {
         .catch_unwind()
         .await;
     if outcome.is_err() {
-        let _ = guard
-            .inflight
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                Some(v.saturating_sub(1))
-            });
+        // Never below zero (the slot may have been given back already).
+        let mut current = guard.inflight.load(Ordering::Relaxed);
+        while current > 0 {
+            match guard.inflight.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(seen) => current = seen,
+            }
+        }
         tracing::warn!(target: "rustybin::harness", run = %guard.id, "a request panicked: its in-flight slot is released");
     }
 }
