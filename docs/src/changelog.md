@@ -1,5 +1,79 @@
 # Changelog
 
+## 0.2.2 (2026-11-02): the hardening release
+
+No new features. A full code review of 0.2.1 found what a public instance exposes; every
+finding is fixed, in ten steps ([the plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/hardening/master-plan.md)).
+The [threat model](concepts/public-instances.md) says what each kind of caller can and
+cannot do now.
+
+**Behaviour changes** (what an operator or a script may notice):
+
+- **The console sends its control token only on its own control calls.** It is opt-in
+  per call, never inferred from a URL: a URL from an MCP server, a discovery document or
+  an AI answer does not receive it. An AI `run_request` action is refused for
+  `/_rustybin`, `/ui` and `/portal`.
+- **A saved MCP connection's credentials go only to its own target**, and using a
+  connection that holds credentials needs admin rights (`400`
+  `connection_target_mismatch`, `403` `connection_needs_admin`). The inspector, the relay
+  and the checks no longer target the management server (`/_rustybin/mcp`); the console
+  still connects to it from the browser.
+- **An AI agent's revocation and the operator's limits follow its credential**, not the
+  client name it sends: another name on the same token is refused or limited too.
+  `list_registry_servers` answers its entries under `untrusted_entries`, paged.
+- **Sign-outs survive a restart.** With a state directory the token generation and every
+  revocation live in `<state>/sessions.json`; without one a restart signs every token
+  out. A sign out everywhere or a password change also ends the management server's
+  OAuth tokens.
+- **The proxy header trusted for the client address is a setting**,
+  `proxy.client_ip_header` (`RUSTYBIN_TRUST_FORWARD_HEADER`): name your proxy's header;
+  `any` keeps the old order. An `ip:` value of `X-Rustybin-Session` is ignored. A control
+  JWT without the admin scope is never admin, also without an admin token.
+- **Request bins answer inert content**: HTML, scripts and SVG as `text/plain`, no
+  cookies or security headers of their own, a sandbox CSP and `nosniff`.
+- **A document pulled from git is not expanded from the environment.** A secret takes
+  only `${VAR}` naming its own variable, `secret:stored` or `null` (a literal value is
+  refused); a mock's `spec:` file must be inside the repository; diffs never show secret
+  values; pruning never removes the console's password hash. `RUSTYBIN_CONFIG_FILE`
+  keeps expanding as before.
+- **Saved harness scenarios** export their API keys and OAuth client secrets as
+  `secret:stored`, answer them redacted, and are sealed at rest.
+- **The demo identity provider on a public instance** sends demo clients on only to
+  loopback or its own host (a page with the link otherwise), limits failed sign-ins per
+  address, and exchanges only its own RS256 tokens (the HS256 sample is refused).
+- **Outbound connections never use a system proxy** (`HTTP_PROXY` and friends are
+  ignored), and a `*.domain` allowlist entry no longer reaches private addresses
+  without a network entry.
+- **New limits**: spec compiles four at a time (`503` when busy, 30 a minute for a
+  visitor), generated values at 1 MiB, path templates at 32 parameters, server URLs at
+  2 KiB, gRPC messages and client streams at `RUSTYBIN_BODY_LIMIT`, sign-in hashes four
+  at a time, OAuth sign-in requests 10 a minute per address. `ai` is a reserved mock
+  name. `mcp save-connection --secret` takes `name=-` or `name=@file`, never a value.
+- **`assist.provider`** accepts `claude`, `google` and `openai-compatible` again.
+
+**Fixes and additions by step:**
+
+- **AI model catalogue** (step 01): `GET`, `POST /_rustybin/assist/models` and a model
+  per AI job (`assist.job.<task>`) on every surface, with a Models and jobs card in the
+  console.
+- **Hostile specs and queries** (step 02): no single request can abort the process or
+  hold a worker (see the limits above); the regex cache is an LRU with each revision's
+  patterns pinned.
+- **MCP** (step 03), **the console** (step 04), **sign-in** (step 05): as above; the API
+  reference pages pin their script with Subresource Integrity and run sandboxed.
+- **Egress and git** (step 06): every client resolves the pinned name only, so a name
+  in another form cannot re-resolve (a DNS rebinding path the review confirmed); NAT64,
+  6to4 and IPv4-compatible addresses are checked as their IPv4 destination; git is
+  pinned, follows no redirect, runs with a cleared environment.
+- **Configuration and persistence** (step 07): symbolic links in the working copy are
+  refused; mock saves are ordered and written privately.
+- **Public data plane** (step 08) and **the harness** (step 09): one run at a time under
+  parallel starts and a kill during verification, elections only from eligible nodes,
+  rate caps that hold under live multipliers, no engine panic on absurd answers.
+- **Dependencies** (step 10): `tokio`, `anyhow` and `rand` patched; `serde_yaml`
+  replaced by its maintained fork (`serde_norway`, the output pinned byte for byte);
+  `rustls-pemfile` dropped; `tonic` 0.13 and `axum-server` 0.8, so one `axum`.
+
 ## 0.2.1 (2026-10-30): the dev portal in the container image
 
 - **Fix: the published 0.2.0 image served no dev portal.** `/portal` answered "portal

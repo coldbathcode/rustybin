@@ -35,13 +35,17 @@ rule**: a capability lands on the API (catalogue and OpenAPI), the console, the 
 variable, stored override, `secret()` for credentials, never returned as a value); the console's instance
 settings are forms from the settings schema (`ui/lib/settingsform.js`), one card per group on a Management tab.
 
-## Rustybin 0.2.2, the hardening release (planned 2026-10-30, not started)
+## Rustybin 0.2.2, the hardening release (built 2026-11-02, tag pending)
 
 [docs/plans/hardening/master-plan.md](docs/plans/hardening/master-plan.md) is the plan from a full code review of
-`1328b07`: ten steps, one file each, findings with file, severity and fix; section 4 is the build marker. Step 01
-finishes the uncommitted assist model catalogue. Every finding starts as a failing regression test; a "verify first"
-finding is closed in the build notes if its test passes on today's code; every other finding, whatever its severity,
-is fixed in 0.2.2 (none deferred), and the release step waits until none is open.
+`1328b07`: ten steps, one file each, all built on 2026-11-02 (each step file has build notes; section 4 is the
+build marker; the `v0.2.2` tag and the signed image follow the 0.2.0 recipe). Rules it left: a request path that
+parses or compiles a spec goes through `mocks::service::Svc::compiling` (blocking pool, 4 permits); the console's
+`send` adds the control token only with `control: true`; a saved MCP connection is used through
+`inspector::store::use_connection`; agent revocations and overrides follow `credential.fingerprint()`; a document
+from git is applied with `ApplyOptions.untrusted`; every egress client resolves through the pinned resolver; the
+YAML output is pinned by `tests/snapshots/export.yaml`. Section 8 of the master plan queues the next milestone
+(instance reliability and testing workflows).
 
 ## The whole instance as code, and source control (built)
 

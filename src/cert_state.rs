@@ -189,7 +189,8 @@ fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
 
 /// DER of the first certificate in a PEM string.
 pub fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
-    rustls_pemfile::certs(&mut pem.as_bytes())
+    use rustls::pki_types::pem::PemObject;
+    CertificateDer::pem_slice_iter(pem.as_bytes())
         .next()?
         .ok()
         .map(|c| c.as_ref().to_vec())

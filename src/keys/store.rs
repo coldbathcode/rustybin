@@ -341,8 +341,9 @@ pub mod postgres {
                     path.display()
                 )
             })?;
-            for cert in rustls_pemfile::certs(&mut pem.as_slice()) {
-                let cert = cert.map_err(|e| format!("RUSTYBIN_QUOTA_STORE_CA: {e}"))?;
+            use rustls::pki_types::pem::PemObject;
+            for cert in rustls::pki_types::CertificateDer::pem_slice_iter(&pem) {
+                let cert = cert.map_err(|e| format!("RUSTYBIN_QUOTA_STORE_CA: {e:?}"))?;
                 roots
                     .add(cert)
                     .map_err(|e| format!("RUSTYBIN_QUOTA_STORE_CA: {e}"))?;

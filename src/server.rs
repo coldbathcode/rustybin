@@ -527,13 +527,15 @@ fn start_https(
     let (cert_pem, key_pem) = state
         .certs
         .server_tls_material(&config.tls_cert, &config.tls_key)?;
-    let certs: Vec<_> =
-        rustls_pemfile::certs(&mut cert_pem.as_slice()).collect::<Result<Vec<_>, _>>()?;
+    use rustls::pki_types::pem::PemObject;
+    let certs: Vec<_> = rustls::pki_types::CertificateDer::pem_slice_iter(&cert_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("TLS cert file: {e:?}"))?;
     if certs.is_empty() {
         return Err("no certificate found in TLS cert file".into());
     }
-    let key = rustls_pemfile::private_key(&mut key_pem.as_slice())?
-        .ok_or("no private key found in TLS key file")?;
+    let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(&key_pem)
+        .map_err(|_| "no private key found in TLS key file")?;
 
     // Optional client certificate verification against the demo CA.
     let mut server_config = rustls::ServerConfig::builder()
@@ -564,9 +566,10 @@ fn start_https(
         shutdown_handle.graceful_shutdown(Some(SHUTDOWN_GRACE));
     });
 
+    let server = axum_server::from_tcp(listener)?;
     let task = tokio::spawn(async move {
         tracing::info!("HTTPS listening on {addr} (optional client cert verification enabled)");
-        let result = axum_server::from_tcp(listener)
+        let result = server
             .acceptor(acceptor)
             .handle(handle)
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())

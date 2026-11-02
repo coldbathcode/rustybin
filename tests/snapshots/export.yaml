@@ -1,0 +1,89 @@
+# Rustybin configuration (rustybin.yaml, version 2): the whole instance.
+# Apply with POST /_rustybin/config/apply (dry_run first), or load it at startup
+# with RUSTYBIN_CONFIG_FILE. Secrets are references, never values: a $VAR-style
+# reference reads the variable when the file is loaded, secret:stored keeps what
+# the instance holds.
+version: 2
+instance:
+  title: 'Snapshot: "quotes", colons: and # hashes'
+  console:
+    user: payments
+settings:
+  agents.default_ceiling: manage
+secrets:
+  leads.webhook_token: secret:stored
+mocks:
+- name: orders
+  spec: specs/orders.json
+  enabled: true
+  responses:
+    mode: examples
+    seed: 1
+    delay_ms: 0
+    validate_requests: warn
+    disabled_status: 503
+  security:
+    enabled: false
+    mode: spec
+    api_key:
+      header: x-api-key
+      keys:
+      - demo-key
+    basic:
+      users:
+        demo: demo
+    bearer:
+      tokens:
+      - demo-token
+    jwt: {}
+registry:
+  servers:
+  - $schema: https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json
+    name: io.example/orders
+    description: Orders over MCP
+    version: 1.0.0
+    remotes:
+    - type: streamable-http
+      url: https://mcp.example.com/orders
+portal:
+  items:
+  - id: mock:orders
+    title: Orders API
+    tags:
+    - payments
+agents:
+  default_ceiling: traffic
+  rules:
+  - match:
+      name: ci-*
+    ceiling: read-only
+health:
+  initial: unhealthy
+---
+multiline: |
+  line one
+  line two
+number: 1.5
+integer: 42
+negative: -7
+flag: true
+nothing: null
+on: yes
+'1234': numeric key
+list:
+- a
+- 'b: c'
+- '- d'
+- ''
+- ' leading space'
+empty_list: []
+empty_map: {}
+nested:
+  deep:
+    deeper:
+    - 1
+    - x: y
+unicode: café →
+date_like: 2026-11-02
+version_like: '1.0'
+octal_like: '0755'

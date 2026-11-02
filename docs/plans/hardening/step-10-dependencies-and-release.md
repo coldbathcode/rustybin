@@ -32,3 +32,27 @@ entry that tells operators what changed in behaviour.
 
 `cargo audit` reports only the documented `rsa` ignore, `cargo tree -d` shows one axum, every step
 above is done, and the release is tagged.
+
+## Build notes (2026-11-02)
+
+- `cargo audit` reports only RUSTSEC-2023-0071 (`rsa`), still ignored in CI with its
+  review date; `rsa` only generates the demo IdP's signing keys (`jwt_state.rs`), it
+  never decrypts. `cargo tree -d` shows one `axum` (0.8).
+- `rand` 0.8.6, `tokio` 1.54.1 and `anyhow` 1.0.104 are the patched releases (no code
+  change: `rand` 0.8.6 fixes the advisory without the 0.9 renames, and `rsa` 0.9 still
+  needs the 0.8 `rand_core`).
+- `serde_yaml` is `serde_norway` 0.9.42 under the same name (`package =` in
+  `Cargo.toml`, no call site changed); `the_yaml_of_an_export_is_pinned` and
+  `tests/snapshots/export.yaml` pin the output, which did not change.
+- `rustls-pemfile` is gone: `rustls::pki_types::pem::PemObject` parses the TLS
+  material, the quota store CA and the integration tests' roots, and `axum-server` 0.8
+  no longer pulls it (its `from_tcp` returns a `Result` now).
+- `tonic` 0.13 (and its health, reflection, types and web crates): the body type is
+  `tonic::body::Body`. MSRV 1.88 builds (checked with the 1.88 toolchain).
+- Checks before the release commit: fmt, clippy, the full suite, the docs examples,
+  `conformance/ui`, `conformance/mcp` (27), `conformance/oauth`, `conformance/ai` (19),
+  `conformance/a2a` (256), `conformance/harness` (in step 09), `mdbook build`.
+- Release docs: the 0.2.2 changelog entry with its behaviour changes, the threat model
+  page `docs/src/concepts/public-instances.md`, the roadmap (the queued follow-up is
+  next). Version 0.2.2. The tag, the signed image and the digest commit follow the
+  0.2.0 recipe once the tag is pushed.

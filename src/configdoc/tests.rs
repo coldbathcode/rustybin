@@ -809,3 +809,46 @@ fn harness_secrets_export_as_references_and_apply_back() {
     let mut orphan = exported;
     assert!(fill_stored(&mut orphan, None, "").is_err());
 }
+
+/// The YAML a document renders to is pinned byte for byte: a change of
+/// YAML library must not churn exports and the diffs of git-backed
+/// instances (`tests/snapshots/export.yaml`; regenerate with
+/// `RUSTYBIN_UPDATE_SNAPSHOTS=1` only on purpose).
+#[test]
+fn the_yaml_of_an_export_is_pinned() {
+    let state = state_with_everything();
+    let mut file = super::export(&state, SecretsMode::Refs, true).file;
+    // The parts that change per run (times, generated ids) are fixed.
+    if let Some(instance) = file.instance.as_mut() {
+        instance.title = Some("Snapshot: \"quotes\", colons: and # hashes".into());
+    }
+    let mut text = to_yaml(&file);
+    // Plus the shapes a spec and a scenario take (multiline text, numbers,
+    // booleans, nulls, keys that need quoting, empty collections).
+    let extra = json!({
+        "multiline": "line one\nline two\n",
+        "number": 1.5,
+        "integer": 42,
+        "negative": -7,
+        "flag": true,
+        "nothing": null,
+        "on": "yes",
+        "1234": "numeric key",
+        "list": ["a", "b: c", "- d", "", " leading space"],
+        "empty_list": [],
+        "empty_map": {},
+        "nested": { "deep": { "deeper": [1, { "x": "y" }] } },
+        "unicode": "caf\u{e9} \u{2192}",
+        "date_like": "2026-11-02",
+        "version_like": "1.0",
+        "octal_like": "0755",
+    });
+    text.push_str("---\n");
+    text.push_str(&serde_yaml::to_string(&extra).expect("yaml"));
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots/export.yaml");
+    if std::env::var("RUSTYBIN_UPDATE_SNAPSHOTS").is_ok() {
+        std::fs::write(&path, &text).expect("write snapshot");
+    }
+    let pinned = std::fs::read_to_string(&path).expect("tests/snapshots/export.yaml");
+    assert_eq!(text, pinned, "the YAML output changed");
+}

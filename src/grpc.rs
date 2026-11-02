@@ -268,7 +268,7 @@ impl EchoService for EchoSvc {
 }
 
 /// Keep the gRPC health service in sync with the HTTP `/health` toggle.
-async fn follow_health(state: AppState, mut reporter: tonic_health::server::HealthReporter) {
+async fn follow_health(state: AppState, reporter: tonic_health::server::HealthReporter) {
     let mut rx = state.health.subscribe();
     loop {
         let status = if *rx.borrow_and_update() {
@@ -360,7 +360,7 @@ where
     let result = Server::builder()
         .accept_http1(true)
         .layer(tower::util::MapRequestLayer::new(
-            move |req: axum::http::Request<tonic::body::BoxBody>| {
+            move |req: axum::http::Request<tonic::body::Body>| {
                 metrics.count_protocol(crate::metrics::Protocol::Grpc);
                 req
             },
@@ -415,14 +415,13 @@ impl GrpcOnHttp {
                 metrics.count_protocol(crate::metrics::Protocol::Grpc);
                 let svc = grpc.clone();
                 async move {
-                    let req = req.map(tonic::body::boxed);
+                    let req = req.map(tonic::body::Body::new);
                     let resp = match tower::ServiceExt::oneshot(svc, req).await {
                         Ok(resp) => resp.map(axum::body::Body::new),
                         Err(e) => {
                             tracing::warn!("gRPC on the HTTP listener failed: {e}");
                             tonic::Status::internal("gRPC dispatch failed")
-                                .into_http()
-                                .map(axum::body::Body::new)
+                                .into_http::<axum::body::Body>()
                         }
                     };
                     Ok::<_, std::convert::Infallible>(resp)

@@ -283,7 +283,10 @@ async fn echo_reports_listener_scheme_and_port() {
     assert_eq!(http_json["port"], server.http_addr.port());
 
     let mut roots = rustls::RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut ca_pem.as_bytes()) {
+    for cert in {
+        use rustls::pki_types::pem::PemObject;
+        rustls::pki_types::CertificateDer::pem_slice_iter(ca_pem.as_bytes())
+    } {
         roots.add(cert.expect("ca cert")).expect("add root");
     }
     let tls = rustls::ClientConfig::builder()
@@ -469,7 +472,10 @@ async fn grpc_on_the_https_listener() {
     let https = server.https_addr.expect("HTTPS should start");
 
     let mut roots = rustls::RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut ca_pem.as_bytes()) {
+    for cert in {
+        use rustls::pki_types::pem::PemObject;
+        rustls::pki_types::CertificateDer::pem_slice_iter(ca_pem.as_bytes())
+    } {
         roots.add(cert.expect("ca cert")).expect("add root");
     }
     let mut tls = rustls::ClientConfig::builder()

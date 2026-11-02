@@ -1,6 +1,6 @@
 [package]
 name = "rustybin"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 rust-version = "1.88"
 description = "HTTP stub service for API and AI gateway demos"
@@ -23,7 +23,7 @@ quota-postgres = ["dep:tokio-postgres", "dep:tokio-postgres-rustls"]
 
 [dependencies]
 axum = { version = "0.8", features = ["ws", "macros", "http2"] }
-axum-server = { version = "0.7.2", features = ["tls-rustls"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -44,7 +44,6 @@ jsonwebtoken = "9"
 rand = "0.8"
 rcgen = "0.13"
 rustls = "0.23"
-rustls-pemfile = "2"
 form_urlencoded = "1"
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
 rsa = "0.9"
@@ -52,16 +51,16 @@ x509-parser = "0.16"
 async-stream = "0.3"
 gethostname = "1"
 async-graphql = "=7.0.17"
-serde_yaml = "0.9"
+serde_yaml = { package = "serde_norway", version = "0.9.42" }
 hmac = "0.12"
 sha2 = "0.10"
 sha1 = "0.10"
 async-graphql-axum = "=7.0.17"
-tonic = "0.12"
-tonic-health = "0.12"
-tonic-reflection = "0.12"
-tonic-types = "0.12"
-tonic-web = "0.12"
+tonic = "0.13"
+tonic-health = "0.13"
+tonic-reflection = "0.13"
+tonic-types = "0.13"
+tonic-web = "0.13"
 prost = "0.13"
 flate2 = "1"
 brotli = "8"
@@ -86,7 +85,7 @@ zeroize = "1"
 argon2 = "0.5"
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-build = "0.13"
 protoc-bin-vendored = "3"
 
 [dev-dependencies]
