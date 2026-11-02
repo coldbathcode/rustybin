@@ -1,0 +1,75 @@
+name: Release binaries
+
+# Build the `rustybin` binary (the server and its command line) for Linux and
+# macOS and attach it to the GitHub release, with a SHA-256 file per archive:
+#   rustybin-<tag>-<target>.tar.gz and rustybin-<tag>-<target>.tar.gz.sha256
+# Runs when a release is published; run it by hand for an existing tag
+# (upload false builds and keeps the archives as workflow artifacts only).
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build (vX.Y.Z)"
+        required: true
+      upload:
+        description: "Attach the archives to the release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04 links against glibc 2.35, so the binary runs on older
+          # distributions than the newest runner would allow.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-14, target: x86_64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          name="rustybin-${TAG}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/rustybin" "dist/$name/"
+          cp LICENSE* README.md "dist/$name/" 2>/dev/null || true
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          echo "ARCHIVE=dist/$name.tar.gz" >> "$GITHUB_ENV"
+      - name: Check the binary runs
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: target/${{ matrix.target }}/release/rustybin --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustybin-${{ matrix.target }}
+          path: dist/*.tar.gz*
+      - name: Attach to the release
+        if: github.event_name == 'release' || inputs.upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" --clobber

@@ -34,6 +34,13 @@ jobs:
       - run: mdbook build docs
       - name: Check documentation links
         run: python3 docs/tools/check_links.py
+      # Page views with Cloudflare Web Analytics (no cookies): set the
+      # repository variable DOCS_ANALYTICS_TOKEN to the site token.
+      - name: Add the analytics beacon
+        if: vars.DOCS_ANALYTICS_TOKEN != ''
+        env:
+          DOCS_ANALYTICS_TOKEN: ${{ vars.DOCS_ANALYTICS_TOKEN }}
+        run: python3 docs/tools/add_analytics.py docs/book "$DOCS_ANALYTICS_TOKEN"
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

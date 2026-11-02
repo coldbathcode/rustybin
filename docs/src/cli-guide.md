@@ -7,6 +7,54 @@ is how to use them. The offline commands for specs and load tests
 (`rustybin mock ...`, `rustybin harness validate | run | report`) are on their own
 pages ([mocks CLI](mocks/cli.md), [load testing](harness.md)).
 
+## Install
+
+The command line is the `rustybin` binary itself: the same file runs a server
+(`rustybin` with no command) and talks to one (`rustybin <noun> <verb>`). Install it
+on the machine you run commands from; the instance it manages can be anywhere.
+
+**A release binary** (Linux x86_64 and arm64, macOS on Apple silicon and Intel). Each
+[GitHub release](https://github.com/coldbathcode/rustybin/releases) carries
+`rustybin-<version>-<target>.tar.gz` and its `.sha256`:
+
+```bash
+VERSION=v0.3.1
+TARGET=aarch64-apple-darwin   # or x86_64-apple-darwin, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
+curl -fsSLO "https://github.com/coldbathcode/rustybin/releases/download/$VERSION/rustybin-$VERSION-$TARGET.tar.gz"
+curl -fsSLO "https://github.com/coldbathcode/rustybin/releases/download/$VERSION/rustybin-$VERSION-$TARGET.tar.gz.sha256"
+shasum -a 256 -c "rustybin-$VERSION-$TARGET.tar.gz.sha256"
+tar -xzf "rustybin-$VERSION-$TARGET.tar.gz"
+sudo install "rustybin-$VERSION-$TARGET/rustybin" /usr/local/bin/   # or any directory on your PATH
+rustybin --version
+```
+
+On macOS, an archive downloaded with a browser (not `curl`) is quarantined: run
+`xattr -d com.apple.quarantine /usr/local/bin/rustybin` once. The Linux binaries need
+glibc 2.35 or later (Ubuntu 22.04, Debian 12, RHEL 9 and newer); elsewhere use the image
+or build from source. On Windows, use WSL or the image.
+
+**From source** with Rust 1.88 or later (no other tool is needed: `protoc` is vendored):
+
+```bash
+cargo install --locked --git https://github.com/coldbathcode/rustybin --tag v0.3.1
+```
+
+**The container image**, with nothing installed: the image's entry point is the binary,
+so a command is the image's arguments. Keep the profiles on the host with a volume:
+
+```bash
+alias rustybin='docker run --rm -it -v "$HOME/.config/rustybin:/config" -e RUSTYBIN_CONFIG_HOME=/config ghcr.io/coldbathcode/rustybin:latest'
+rustybin login --url https://mocks.example.com
+```
+
+From inside that container, `localhost` is the container itself: an instance on your
+machine is `http://host.docker.internal:8080` (Docker Desktop) or needs `--network
+host` (Linux). Inside a running instance's container the binary is already there:
+`docker exec <container> rustybin status` talks to that instance (see the default URL
+below).
+
+Then turn on [completion](#completion) for your shell and [sign in](#sign-in-and-profiles).
+
 ## Sign in and profiles
 
 ```bash

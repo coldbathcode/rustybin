@@ -201,7 +201,8 @@ Docker-only setup, run CLI commands as `docker exec -it rustybin rustybin ...`;
 inside the container the login URL is `http://localhost:80`, and file paths refer
 to files inside the container. The console steps below need no local CLI.
 
-The same binary is the [command line](cli-guide.md). Build a mock with your own AI,
+The same binary is the [command line](cli-guide.md) ([install it](cli-guide.md#install)
+on the machine you run commands from). Build a mock with your own AI,
 publish it for testers and export it as code:
 
 ```bash
