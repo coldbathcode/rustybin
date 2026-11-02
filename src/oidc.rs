@@ -105,6 +105,9 @@ struct OidcState {
     hashing: Arc<tokio::sync::Semaphore>,
     /// Failed sign-ins per client address in the current minute.
     failures: std::sync::Mutex<HashMap<IpAddr, (u32, std::time::Instant)>>,
+    /// Dynamic client registrations per client address in the current
+    /// minute, so one address cannot flood the client store.
+    registrations: PerMinute,
     /// The instance's configuration (the client address behind a proxy).
     config: Option<Arc<crate::config::Config>>,
 }
@@ -115,6 +118,52 @@ pub const HASH_PERMITS: usize = 4;
 pub const FAILURES_PER_MINUTE: u32 = 10;
 /// Addresses the failure count tracks.
 const MAX_FAILURE_ADDRESSES: usize = 4096;
+
+/// Dynamic client registrations one address may make per minute.
+pub fn registrations_per_minute(public_mode: bool) -> u32 {
+    if public_mode {
+        10
+    } else {
+        100
+    }
+}
+
+/// A count of events per client address in a one-minute window, over at
+/// most [`MAX_FAILURE_ADDRESSES`] addresses (past that, new addresses are
+/// refused until the window ends: the store it protects stays bounded).
+struct PerMinute {
+    limit: u32,
+    seen: std::sync::Mutex<HashMap<IpAddr, (u32, std::time::Instant)>>,
+}
+
+impl PerMinute {
+    fn new(limit: u32) -> Self {
+        Self {
+            limit,
+            seen: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Count one event for `ip`; false when it is over the limit.
+    fn allow(&self, ip: IpAddr) -> bool {
+        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        if !seen.contains_key(&ip) && seen.len() >= MAX_FAILURE_ADDRESSES {
+            seen.retain(|_, (_, at)| at.elapsed().as_secs() < 60);
+            if seen.len() >= MAX_FAILURE_ADDRESSES {
+                return false;
+            }
+        }
+        let entry = seen.entry(ip).or_insert((0, std::time::Instant::now()));
+        if entry.1.elapsed().as_secs() >= 60 {
+            *entry = (0, std::time::Instant::now());
+        }
+        if entry.0 >= self.limit {
+            return false;
+        }
+        entry.0 += 1;
+        true
+    }
+}
 
 /// Why a password check did not run.
 enum CheckRefused {
@@ -141,6 +190,7 @@ impl OidcState {
             public_mode,
             hashing: Arc::new(tokio::sync::Semaphore::new(HASH_PERMITS)),
             failures: std::sync::Mutex::new(HashMap::new()),
+            registrations: PerMinute::new(registrations_per_minute(public_mode)),
             config: None,
         }
     }
@@ -1663,7 +1713,15 @@ async fn revoke(
                 let until = exp
                     .saturating_add(60)
                     .min(now.saturating_add(ACCESS_TOKEN_TTL + 120));
-                oidc.revoked.insert_until(jti.to_string(), (), until);
+                // A full denylist refuses: evicting an older revocation
+                // would make that token valid again.
+                if !oidc.revoked.try_insert_until(jti.to_string(), (), until) {
+                    return Err(OAuthError::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "temporarily_unavailable",
+                        "the revocation list is full: try again later",
+                    ));
+                }
             }
         }
         Ok(())
@@ -1678,8 +1736,22 @@ async fn revoke(
 async fn register(
     Extension(oidc): Extension<Arc<OidcState>>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     body: Bytes,
 ) -> Response {
+    if let Some(ip) = oidc.client_ip(&headers, &extensions) {
+        if !oidc.registrations.allow(ip) {
+            let mut resp = OAuthError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "slow_down",
+                "too many client registrations from this address: wait a minute",
+            )
+            .into_response();
+            resp.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+            return resp;
+        }
+    }
     let is_json = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())

@@ -300,6 +300,9 @@ fn cli_docs() {
 
 // ── Against an instance ─────────────────────────────────────────────
 
+/// The longest one command line may take against the test instance.
+const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 struct Instance {
     server: crate::server::RunningServer,
     url: String,
@@ -342,13 +345,34 @@ impl Instance {
     }
 
     /// Run a command line: (exit code, output, the failure's message).
+    ///
+    /// A command that does not finish in [`COMMAND_TIMEOUT`] fails the test
+    /// with its command line instead of hanging the suite. A watchdog
+    /// thread covers a command that blocks the test's runtime thread (where
+    /// the timer cannot fire): it names the command and ends the process.
     async fn run_full(&self, stdin: Option<&str>, args: &[&str]) -> (u8, String, String) {
+        let line = args.join(" ");
+        let (done, watch) = std::sync::mpsc::channel::<()>();
+        let watched = line.clone();
+        std::thread::spawn(move || {
+            if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                watch.recv_timeout(COMMAND_TIMEOUT * 3)
+            {
+                eprintln!("rustybin {watched}: blocked for {COMMAND_TIMEOUT:?} x 3, ending the test process");
+                std::process::exit(101);
+            }
+        });
         let buf = Buf::default();
         let mut out: Out = Box::new(buf.clone());
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        let (code, message) = match execute_inner(&args, &self.env(stdin), &mut out).await {
-            Ok(()) => (0, String::new()),
-            Err(f) => (f.code(), f.message().to_string()),
+        let env = self.env(stdin);
+        let result =
+            tokio::time::timeout(COMMAND_TIMEOUT, execute_inner(&args, &env, &mut out)).await;
+        let _ = done.send(());
+        let (code, message) = match result {
+            Err(_) => panic!("rustybin {line}: did not finish in {COMMAND_TIMEOUT:?}"),
+            Ok(Ok(())) => (0, String::new()),
+            Ok(Err(f)) => (f.code(), f.message().to_string()),
         };
         (code, buf.text(), message)
     }

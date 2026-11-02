@@ -1,7 +1,8 @@
 //! A small bounded key/value store with per-entry expiry, used for
 //! authorization codes, refresh tokens, registered clients and the token
 //! denylist. Expired entries are purged on every write; when the store is
-//! full the entry closest to expiry is evicted.
+//! full the entry closest to expiry is evicted ([`BoundedStore::insert`]) or
+//! the new one refused ([`BoundedStore::try_insert_until`], the denylist).
 
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
@@ -84,6 +85,34 @@ impl<V: Clone> BoundedStore<V> {
         );
     }
 
+    /// Insert with an explicit expiry, refusing (false) rather than evicting
+    /// a live entry when the store is full. For the revocation denylist: an
+    /// evicted revocation would make a revoked token valid again.
+    pub fn try_insert_until(&self, key: String, value: V, expires_at: i64) -> bool {
+        let now = now();
+        let mut map = self.lock();
+        map.retain(|_, e| e.expires_at > now);
+        if expires_at <= now {
+            map.remove(&key);
+            return true;
+        }
+        if map.len() >= self.capacity && !map.contains_key(&key) {
+            return false;
+        }
+        let seq = self
+            .next_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        map.insert(
+            key,
+            Entry {
+                value,
+                expires_at,
+                seq,
+            },
+        );
+        true
+    }
+
     /// The live value for `key`.
     pub fn get(&self, key: &str) -> Option<V> {
         let now = now();
@@ -146,5 +175,17 @@ mod tests {
         store.insert("y".into(), 6);
         assert!(store.len() <= 2);
         assert!(store.contains("y"));
+    }
+
+    #[test]
+    fn try_insert_refuses_when_full() {
+        let store = BoundedStore::new(2, 60);
+        assert!(store.try_insert_until("a".into(), 1, now() + 60));
+        assert!(store.try_insert_until("b".into(), 2, now() + 60));
+        assert!(!store.try_insert_until("c".into(), 3, now() + 60));
+        assert!(store.contains("a") && store.contains("b") && !store.contains("c"));
+        // The same key is an update, not a new entry.
+        assert!(store.try_insert_until("a".into(), 4, now() + 60));
+        assert_eq!(store.get("a"), Some(4));
     }
 }

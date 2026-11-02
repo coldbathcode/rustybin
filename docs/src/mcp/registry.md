@@ -85,7 +85,10 @@ registry:
 A publish needs `Authorization: Bearer <registry token>`. The `auth/*` stubs take
 the bodies the registry defines (`github-at`: `{github_token}`; `github-oidc` and
 `oidc`: `{oidc_token}`; `dns` and `http`: `{domain, timestamp, signed_timestamp}`;
-`none`: `{}`) and always succeed: nothing is verified. Tokens last five minutes.
+`none`: `{}`) and succeed: nothing is verified. Tokens last five minutes. One client
+address may mint 60 tokens a minute (10 in public mode), so a flood cannot push out
+the token someone else is publishing with; past that it gets `429` with
+`Retry-After: 60`.
 
 ```hurl
 {{#include ../../examples/mcp/registry.hurl:token}}

@@ -69,10 +69,12 @@ To capture a `DELETE`, send it to a sub path: `DELETE /bin/{id}` deletes the bin
 
 | | Normal | Public mode |
 |---|---|---|
-| Bins | 200 | 100 (10 per session) |
+| Bins | 200 | 100 (10 per session, 20 per client address) |
 | Requests kept per bin | 100 | 50 |
 | Stored bytes per bin | 1 MiB | 256 KiB |
 | Lifetime | 24 hours | 1 hour |
 | Captured body | 64 KiB | 64 KiB |
 
-The oldest requests are evicted first when a bin is full.
+The oldest requests are evicted first when a bin is full. In public mode a session past its
+bins, or a client address past its bins whatever session header it sends, gets `429` until
+one of its bins is deleted or expires.

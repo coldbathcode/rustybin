@@ -38,7 +38,7 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{header, Extensions, HeaderMap, StatusCode, Uri};
+use axum::http::{header, Extensions, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Extension, Json, Router};
@@ -64,6 +64,18 @@ pub const MAX_USER_ENTRIES: usize = 256;
 /// Registry tokens kept, and their lifetime.
 pub const MAX_TOKENS: usize = 256;
 pub const TOKEN_TTL_SECS: i64 = 300;
+/// Client addresses the mint rate tracks at once.
+const MAX_MINT_ADDRESSES: usize = 4096;
+
+/// Registry tokens one client address may mint per minute (the auth stubs
+/// are open, so a flood from one address would push out an admin's token).
+pub fn mints_per_minute(public_mode: bool) -> u32 {
+    if public_mode {
+        10
+    } else {
+        60
+    }
+}
 /// The wait of the `slow` scenario.
 pub const SLOW_DELAY: Duration = Duration::from_secs(2);
 /// The token exchange methods (`POST /v0.1/auth/{method}`).
@@ -240,6 +252,8 @@ pub struct Registry {
     published: Mutex<Vec<Entry>>,
     /// Token -> expiry (unix seconds).
     tokens: Mutex<HashMap<String, i64>>,
+    /// Mints per client address in the current minute.
+    mints: Mutex<HashMap<std::net::IpAddr, (u32, std::time::Instant)>>,
     lists: AtomicU64,
     pub browse: browse::Cache,
 }
@@ -250,6 +264,7 @@ impl Default for Registry {
             started: Utc::now(),
             published: Mutex::new(Vec::new()),
             tokens: Mutex::new(HashMap::new()),
+            mints: Mutex::new(HashMap::new()),
             lists: AtomicU64::new(0),
             browse: browse::Cache::default(),
         }
@@ -287,6 +302,27 @@ impl Registry {
             tracing::info!(target: "rustybin::registry", name = %name, removed, "published entries deleted");
         }
         removed
+    }
+
+    /// Count one mint for `ip`; false when the address is over `limit` this
+    /// minute (or the tracker is full of other addresses).
+    fn mint_allowed(&self, ip: std::net::IpAddr, limit: u32) -> bool {
+        let mut mints = self.mints.lock().unwrap_or_else(|e| e.into_inner());
+        if !mints.contains_key(&ip) && mints.len() >= MAX_MINT_ADDRESSES {
+            mints.retain(|_, (_, at)| at.elapsed().as_secs() < 60);
+            if mints.len() >= MAX_MINT_ADDRESSES {
+                return false;
+            }
+        }
+        let entry = mints.entry(ip).or_insert((0, std::time::Instant::now()));
+        if entry.1.elapsed().as_secs() >= 60 {
+            *entry = (0, std::time::Instant::now());
+        }
+        if entry.0 >= limit {
+            return false;
+        }
+        entry.0 += 1;
+        true
     }
 
     fn mint(&self) -> (String, i64) {
@@ -676,6 +712,8 @@ async fn auth_exchange(
     State(state): State<AppState>,
     Extension(reg): Extension<Arc<Registry>>,
     Path(method): Path<String>,
+    headers: HeaderMap,
+    extensions: Extensions,
     body: Bytes,
 ) -> Response {
     if let Some(r) = prelude(&state, &reg, false).await {
@@ -737,6 +775,18 @@ async fn auth_exchange(
             format!("authentication failed: {what} (the auth_fail scenario)"),
             None,
         );
+    }
+    if let Some(ip) = crate::session::client_ip(&headers, &extensions, &state.config) {
+        if !reg.mint_allowed(ip, mints_per_minute(state.config.public_mode)) {
+            let mut resp = problem(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many registry tokens from this address: wait a minute",
+                None,
+            );
+            resp.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+            return resp;
+        }
     }
     let (token, expires_at) = reg.mint();
     tracing::info!(target: "rustybin::registry", method = %method, "registry token issued");

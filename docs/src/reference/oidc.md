@@ -188,8 +188,10 @@ insufficient_scope` otherwise).
 {{#include ../../examples/oidc/discovery_and_grants.hurl:introspect}}
 ```
 
-`/oauth/revoke` always answers `200` for a well-formed request; a client can only
-revoke its own tokens. Revoked access tokens are rejected by introspection,
+`/oauth/revoke` answers `200` for a well-formed request; a client can only
+revoke its own tokens. The list of revoked tokens is bounded (10,000, 2,000 in
+public mode) and a full list never forgets a revocation to make room: it answers
+`503 temporarily_unavailable` to the new one instead, so retry later. Revoked access tokens are rejected by introspection,
 UserInfo and token exchange (but not by `/auth/jwt`, which checks only the
 signature and claims, like a gateway validating JWTs locally would).
 
@@ -205,7 +207,9 @@ signature and claims, like a gateway validating JWTs locally would).
 `client_secret_post` or `none` for a public client, and `scope`). It returns
 `201` with a `dyn-...` client id (and a secret for confidential clients).
 Registrations are kept for 24 hours in a bounded registry (1000 clients, 200 in
-public mode). MCP clients use this to onboard themselves.
+public mode). One client address may register 100 clients a minute (10 in public
+mode); past that it gets `429 slow_down` with `Retry-After: 60`. MCP clients use
+this to onboard themselves.
 
 ```hurl
 {{#include ../../examples/oidc/authorization_code.hurl:register}}

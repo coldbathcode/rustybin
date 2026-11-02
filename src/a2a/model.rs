@@ -416,6 +416,101 @@ pub struct PushConfig {
     pub sink_id: Option<String>,
 }
 
+// ── Sizes ───────────────────────────────────────────────────────────
+
+/// Approximate bytes of a JSON value: string and key lengths plus a few bytes
+/// per node. Walks the value without serialising it.
+pub fn value_bytes(v: &Value) -> usize {
+    match v {
+        Value::Null | Value::Bool(_) | Value::Number(_) => 8,
+        Value::String(s) => s.len() + 2,
+        Value::Array(items) => 2 + items.iter().map(|i| value_bytes(i) + 1).sum::<usize>(),
+        Value::Object(o) => {
+            2 + o
+                .iter()
+                .map(|(k, v)| k.len() + 4 + value_bytes(v))
+                .sum::<usize>()
+        }
+    }
+}
+
+fn meta_bytes(m: &Meta) -> usize {
+    m.as_ref().map_or(0, |o| {
+        o.iter()
+            .map(|(k, v)| k.len() + 4 + value_bytes(v))
+            .sum::<usize>()
+    })
+}
+
+fn opt_bytes(s: &Option<String>) -> usize {
+    s.as_ref().map_or(0, String::len)
+}
+
+fn list_bytes(l: &[String]) -> usize {
+    l.iter().map(|s| s.len() + 3).sum()
+}
+
+impl Part {
+    /// Approximate stored bytes (the byte caps of the task store).
+    pub fn approx_bytes(&self) -> usize {
+        let content = match &self.content {
+            PartContent::Text(s) | PartContent::Raw(s) | PartContent::Url(s) => s.len(),
+            PartContent::Data(v) => value_bytes(v),
+        };
+        16 + content
+            + meta_bytes(&self.metadata)
+            + opt_bytes(&self.filename)
+            + opt_bytes(&self.media_type)
+    }
+}
+
+impl Message {
+    pub fn approx_bytes(&self) -> usize {
+        64 + self.message_id.len()
+            + opt_bytes(&self.context_id)
+            + opt_bytes(&self.task_id)
+            + self.parts.iter().map(Part::approx_bytes).sum::<usize>()
+            + meta_bytes(&self.metadata)
+            + list_bytes(&self.extensions)
+            + list_bytes(&self.reference_task_ids)
+    }
+}
+
+impl Artifact {
+    pub fn approx_bytes(&self) -> usize {
+        32 + self.artifact_id.len()
+            + opt_bytes(&self.name)
+            + opt_bytes(&self.description)
+            + self.parts.iter().map(Part::approx_bytes).sum::<usize>()
+            + meta_bytes(&self.metadata)
+            + list_bytes(&self.extensions)
+    }
+}
+
+impl Task {
+    pub fn approx_bytes(&self) -> usize {
+        64 + self.id.len()
+            + self.context_id.len()
+            + self.status.timestamp.len()
+            + self
+                .status
+                .message
+                .as_ref()
+                .map_or(0, Message::approx_bytes)
+            + self
+                .artifacts
+                .iter()
+                .map(Artifact::approx_bytes)
+                .sum::<usize>()
+            + self
+                .history
+                .iter()
+                .map(Message::approx_bytes)
+                .sum::<usize>()
+            + meta_bytes(&self.metadata)
+    }
+}
+
 /// A fresh random identifier.
 pub fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()

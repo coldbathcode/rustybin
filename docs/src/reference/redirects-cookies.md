@@ -43,7 +43,9 @@ Attributes for `/cookies/set` are query parameters starting with `_`: `_path`
 `None`; `None` forces `Secure`, as browsers require) and `_maxage` (seconds). For
 `/cookies/delete`, `_path` and `_domain` must match how the cookie was set. Names
 must be RFC 6265 tokens (else `400`), values are percent-encoded where needed so they
-can never inject attributes, and at most 20 cookies are handled per request.
+can never inject attributes, and at most 20 cookies are handled per request. A public
+instance refuses `_domain` on both routes (`400`): its cookies stay host-only, so a
+link cannot plant one on a parent domain shared with other sites.
 
 ```hurl
 {{#include ../../examples/http/redirects.hurl:cookies_set}}

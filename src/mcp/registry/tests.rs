@@ -811,6 +811,45 @@ fn the_mint_is_bounded() {
 }
 
 #[tokio::test]
+async fn the_open_mint_is_rate_limited_per_address() {
+    // One address cannot mint MAX_TOKENS tokens and push out the token an
+    // admin is publishing with.
+    let (app, _) = app();
+    let admin = token(&app, "none", json!({})).await;
+    let mut refused = None;
+    for i in 1..=MAX_TOKENS + 1 {
+        let (s, v) = send(
+            &app,
+            "POST",
+            &format!("{API_PREFIX}/auth/none"),
+            None,
+            &json!({}),
+        )
+        .await;
+        if s != StatusCode::OK {
+            refused = Some((i, s, v));
+            break;
+        }
+    }
+    let (i, s, v) = refused.expect("the mint is refused before MAX_TOKENS");
+    // The admin's mint counted: the loop's mint number `limit` is refused.
+    assert_eq!(i as u32, mints_per_minute(false));
+    assert!((mints_per_minute(false) as usize) < MAX_TOKENS);
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS, "{v}");
+    // The first token is still valid (a publish gets past the token check
+    // to validation).
+    let (s, v) = send(
+        &app,
+        "POST",
+        &format!("{API_PREFIX}/publish"),
+        Some(&admin),
+        &json!({}),
+    )
+    .await;
+    assert_ne!(s, StatusCode::UNAUTHORIZED, "{v}");
+}
+
+#[tokio::test]
 async fn the_server_json_task_writes_a_valid_entry() {
     use crate::assist::tasks::{explain, server_json};
     let (app, _) = app();

@@ -13,7 +13,7 @@
 //!   they are never captured themselves.
 //!
 //! Everything is bounded (see [`BinLimits`]): number of bins, bins per
-//! session in public mode, a TTL, a ring of requests per bin and a byte
+//! session and per client address in public mode, a TTL, a ring of requests per bin and a byte
 //! budget per bin.
 //!
 //! The UI can share the store: build one [`RequestBins`] and mount it with
@@ -59,6 +59,9 @@ pub struct BinLimits {
     pub max_bins: usize,
     /// Bins one session (X-Rustybin-Session, else client IP) may own.
     pub max_bins_per_session: usize,
+    /// Bins created from one client address, whatever the sessions (so
+    /// rotating `X-Rustybin-Session` cannot fill the store).
+    pub max_bins_per_address: usize,
     /// Lifetime of a bin in seconds.
     pub ttl_secs: u64,
     /// Requests kept per bin (ring buffer, oldest evicted).
@@ -77,6 +80,7 @@ impl BinLimits {
             Self {
                 max_bins: 100,
                 max_bins_per_session: 10,
+                max_bins_per_address: 20,
                 ttl_secs: 3600,
                 max_requests: 50,
                 max_bytes_per_bin: 256 * 1024,
@@ -87,6 +91,7 @@ impl BinLimits {
             Self {
                 max_bins: 200,
                 max_bins_per_session: 200,
+                max_bins_per_address: 200,
                 ttl_secs: 24 * 3600,
                 max_requests: 100,
                 max_bytes_per_bin: 1024 * 1024,
@@ -188,11 +193,15 @@ pub enum CreateError {
     StoreFull,
     /// This session owns too many bins.
     SessionLimit,
+    /// Too many live bins were created from this client address.
+    AddressLimit,
 }
 
 struct Bin {
     id: String,
     owner: String,
+    /// The creating client's address, when known.
+    address: Option<String>,
     created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
     deadline: Instant,
@@ -253,10 +262,30 @@ impl RequestBins {
 
     /// Create a bin owned by `owner` (a session key).
     pub fn create(&self, owner: &str, response: BinResponse) -> Result<BinSummary, CreateError> {
+        self.create_from(owner, None, response)
+    }
+
+    /// Create a bin owned by `owner` (a session key) for a client at
+    /// `address`, which counts against [`BinLimits::max_bins_per_address`].
+    pub fn create_from(
+        &self,
+        owner: &str,
+        address: Option<&str>,
+        response: BinResponse,
+    ) -> Result<BinSummary, CreateError> {
         let mut bins = self.lock();
         let owned = bins.values().filter(|b| b.owner == owner).count();
         if owned >= self.limits.max_bins_per_session {
             return Err(CreateError::SessionLimit);
+        }
+        if let Some(address) = address {
+            let from_address = bins
+                .values()
+                .filter(|b| b.address.as_deref() == Some(address))
+                .count();
+            if from_address >= self.limits.max_bins_per_address {
+                return Err(CreateError::AddressLimit);
+            }
         }
         while bins.len() >= self.limits.max_bins {
             if !self.evict_when_full {
@@ -282,6 +311,7 @@ impl RequestBins {
         let bin = Bin {
             id: id.clone(),
             owner: owner.to_string(),
+            address: address.map(str::to_string),
             created_at,
             expires_at,
             deadline: Instant::now() + ttl,
@@ -530,12 +560,20 @@ async fn create_handler(
         Ok(r) => r,
         Err(msg) => return json_error(StatusCode::BAD_REQUEST, &msg),
     };
-    let summary = match store.create(&owner, response) {
+    let address =
+        crate::session::client_ip(&headers, &extensions, &config).map(|ip| ip.to_string());
+    let summary = match store.create_from(&owner, address.as_deref(), response) {
         Ok(s) => s,
         Err(CreateError::SessionLimit) => {
             return json_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "this session owns too many bins: delete one (DELETE /bin/{id}) or wait for it to expire",
+            )
+        }
+        Err(CreateError::AddressLimit) => {
+            return json_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many bins were created from this address: delete one (DELETE /bin/{id}) or wait for it to expire",
             )
         }
         Err(CreateError::StoreFull) => {
@@ -1408,6 +1446,40 @@ mod tests {
         let list = body_json(app.oneshot(get_request("/bin")).await.expect("resp")).await;
         assert_eq!(list["count"], 10);
         assert_eq!(list["limits"]["ttl_secs"], 3600);
+    }
+
+    #[tokio::test]
+    async fn public_mode_limits_bins_per_address() {
+        // Rotating X-Rustybin-Session from one address does not fill the
+        // store: the address has its own cap.
+        let mut config = Config::for_tests();
+        config.public_mode = true;
+        let app = module_app_with_config(config, router);
+        let per_address = BinLimits::for_config(&{
+            let mut c = Config::for_tests();
+            c.public_mode = true;
+            c
+        })
+        .max_bins_per_address;
+        let mut created = 0;
+        let mut refused = None;
+        for i in 0..100 {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/bin")
+                .header("x-rustybin-session", format!("rotating-{i}"))
+                .body(Body::empty())
+                .expect("request");
+            let resp = app.clone().oneshot(req).await.expect("response");
+            if resp.status() == StatusCode::CREATED {
+                created += 1;
+            } else {
+                refused = Some(resp.status());
+                break;
+            }
+        }
+        assert_eq!(created, per_address);
+        assert_eq!(refused, Some(StatusCode::TOO_MANY_REQUESTS));
     }
 
     #[tokio::test]

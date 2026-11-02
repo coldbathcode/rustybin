@@ -3,13 +3,15 @@
 //! - Names must be RFC 6265 tokens (else 400). Values are percent-encoded
 //!   where they contain characters outside `cookie-octet` (space, `"`, `,`,
 //!   `;`, `\`, controls, non-ASCII), so a value can never inject attributes.
-//! - `Path=/` is the default; `_path`, `_domain` are validated.
+//! - `Path=/` is the default; `_path`, `_domain` are validated. A public
+//!   instance refuses `_domain`: its cookies stay host-only, so a link cannot
+//!   plant one on a parent domain shared with other sites.
 //! - `SameSite=None` forces `Secure` (browsers reject it otherwise).
 //! - `/cookies/delete` expires cookies with the same `Path` (and `Domain`)
 //!   they were set with (`_path` / `_domain`, default `/`).
 
 use axum::{
-    extract::Path,
+    extract::{Path, State},
     http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::get,
@@ -17,8 +19,10 @@ use axum::{
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::catalog::{category, Endpoint, Example};
+use crate::config::Config;
 use crate::content_negotiation::{negotiate, negotiate_with_status};
 use crate::state::AppState;
 use crate::types::ErrorResponse;
@@ -55,6 +59,14 @@ fn bad_request(headers: &HeaderMap, details: String) -> Response {
     )
 }
 
+/// The refusal of `_domain` on a public instance.
+fn no_domain(headers: &HeaderMap) -> Response {
+    bad_request(
+        headers,
+        "_domain cannot be set on a public instance (cookies stay host-only)".into(),
+    )
+}
+
 fn redirect_with(cookies: Vec<String>) -> Response {
     let mut resp = StatusCode::FOUND.into_response();
     resp.headers_mut()
@@ -75,12 +87,17 @@ fn query_pairs(uri: &Uri) -> Vec<(String, String)> {
 
 // ── /cookies/set ─────────────────────────────────────────────────────
 
-async fn cookies_set_handler(uri: Uri, headers: HeaderMap) -> Response {
+async fn cookies_set_handler(
+    State(config): State<Arc<Config>>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
     let mut attrs = CookieAttrs::default();
     let mut pairs: Vec<(String, String)> = Vec::new();
     for (key, value) in query_pairs(&uri) {
         match key.as_str() {
             "_path" => attrs.path = Some(value),
+            "_domain" if config.public_mode => return no_domain(&headers),
             "_domain" => attrs.domain = Some(value),
             "_secure" => attrs.secure = is_true(&value),
             "_httponly" => attrs.httponly = is_true(&value),
@@ -129,7 +146,11 @@ async fn cookies_set_single_handler(
 
 // ── /cookies/delete ──────────────────────────────────────────────────
 
-async fn cookies_delete_handler(uri: Uri, headers: HeaderMap) -> Response {
+async fn cookies_delete_handler(
+    State(config): State<Arc<Config>>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
     let mut attrs = CookieAttrs {
         max_age: Some(0),
         ..CookieAttrs::default()
@@ -138,6 +159,7 @@ async fn cookies_delete_handler(uri: Uri, headers: HeaderMap) -> Response {
     for (key, value) in query_pairs(&uri) {
         match key.as_str() {
             "_path" => attrs.path = Some(value),
+            "_domain" if config.public_mode => return no_domain(&headers),
             "_domain" => attrs.domain = Some(value),
             k if k.starts_with('_') => {}
             _ => names.push(key),
@@ -466,5 +488,27 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(resp.headers()["content-type"], "application/xml");
+    }
+
+    #[tokio::test]
+    async fn public_mode_refuses_a_cookie_domain() {
+        let mut config = crate::config::Config::for_tests();
+        config.public_mode = true;
+        let app = crate::test_support::module_app_with_config(config, router);
+        for uri in [
+            "/cookies/set?planted=1&_domain=example.com",
+            "/cookies/delete?planted&_domain=example.com",
+        ] {
+            let resp = app.clone().oneshot(get_request(uri)).await.expect("resp");
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+            assert!(resp.headers().get("set-cookie").is_none(), "{uri}");
+        }
+        // Host-only cookies still work on a public instance.
+        let resp = app
+            .oneshot(get_request("/cookies/set?ok=1"))
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        assert_eq!(resp.headers()["set-cookie"], "ok=1; Path=/");
     }
 }

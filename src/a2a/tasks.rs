@@ -1,7 +1,8 @@
 //! Task store and the binding independent operations (send, get, list,
 //! cancel, subscribe, push config CRUD).
 //!
-//! The store is bounded (global cap, per-session cap, idle TTL) and every
+//! The store is bounded (global cap, per-session cap, idle TTL, bytes per
+//! message, per task and in total) and every
 //! task is scoped to the session that created it (`session::session_key`)
 //! and to its agent, so clients never see each other's tasks.
 
@@ -22,6 +23,10 @@ use super::wire::{self, PushInput, SendRequest, TaskView};
 
 /// History entries kept per task.
 const MAX_HISTORY: usize = 100;
+/// Bytes kept per task ([`Task::approx_bytes`]): past it the oldest history
+/// entries go (the newest message always stays). Messages are capped at
+/// [`wire::MAX_MESSAGE_BYTES`] when parsed.
+pub const MAX_TASK_BYTES: usize = 1024 * 1024;
 /// Artifacts kept per task and parts per artifact.
 const MAX_ARTIFACTS: usize = 32;
 const MAX_ARTIFACT_PARTS: usize = 256;
@@ -38,6 +43,8 @@ pub struct Entry {
     pub tx: broadcast::Sender<StreamEvent>,
     pub push: Vec<PushConfig>,
     pub running: bool,
+    /// The task's [`Task::approx_bytes`] after its last change.
+    pub bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -46,6 +53,8 @@ pub struct Limits {
     pub max_tasks_per_session: usize,
     pub ttl: Duration,
     pub max_running: usize,
+    /// Bytes of all stored tasks: past it the least recently touched go.
+    pub max_total_bytes: usize,
 }
 
 impl Limits {
@@ -56,6 +65,7 @@ impl Limits {
                 max_tasks_per_session: 50,
                 ttl: Duration::from_secs(15 * 60),
                 max_running: 100,
+                max_total_bytes: 64 * 1024 * 1024,
             }
         } else {
             Limits {
@@ -63,6 +73,7 @@ impl Limits {
                 max_tasks_per_session: 1000,
                 ttl: Duration::from_secs(60 * 60),
                 max_running: 500,
+                max_total_bytes: 256 * 1024 * 1024,
             }
         }
     }
@@ -142,6 +153,21 @@ fn push_history(task: &mut Task, m: Message) {
         let extra = task.history.len() - MAX_HISTORY;
         task.history.drain(..extra);
     }
+    trim(task);
+}
+
+/// Drop the oldest history entries while the task is over
+/// [`MAX_TASK_BYTES`], keeping the newest one.
+fn trim(task: &mut Task) {
+    let mut bytes = task.approx_bytes();
+    let mut drop = 0;
+    while bytes > MAX_TASK_BYTES && drop + 1 < task.history.len() {
+        bytes = bytes.saturating_sub(task.history[drop].approx_bytes());
+        drop += 1;
+    }
+    if drop > 0 {
+        task.history.drain(..drop);
+    }
 }
 
 /// Apply an update event to a task (status replaces, artifacts append or
@@ -175,6 +201,7 @@ fn apply(task: &mut Task, ev: &StreamEvent) {
         StreamEvent::Task(t) => *task = t.clone(),
         StreamEvent::Message(_) => {}
     }
+    trim(task);
 }
 
 impl Service {
@@ -196,7 +223,15 @@ impl Service {
         self.lock().len()
     }
 
-    fn evict(&self, map: &mut HashMap<String, Entry>, owner: &str) {
+    /// Approximate bytes of the stored tasks (for tests and diagnostics).
+    pub fn stored_bytes(&self) -> usize {
+        self.lock().values().map(|e| e.bytes).sum()
+    }
+
+    /// Make room for a new task of `incoming` bytes: expired tasks, the
+    /// owner's oldest past its cap, then the oldest overall past the count
+    /// and byte caps.
+    fn evict(&self, map: &mut HashMap<String, Entry>, owner: &str, incoming: usize) {
         let ttl = self.limits.ttl;
         map.retain(|_, e| e.touched.elapsed() < ttl);
         while map.values().filter(|e| e.owner == owner).count() >= self.limits.max_tasks_per_session
@@ -211,15 +246,35 @@ impl Service {
                 None => break,
             };
         }
-        while map.len() >= self.limits.max_tasks {
+        let mut total: usize = map.values().map(|e| e.bytes).sum();
+        while map.len() >= self.limits.max_tasks
+            || (!map.is_empty() && total.saturating_add(incoming) > self.limits.max_total_bytes)
+        {
             let oldest = map
                 .iter()
                 .min_by_key(|(_, e)| e.touched)
                 .map(|(k, _)| k.clone());
-            match oldest {
-                Some(k) => map.remove(&k),
+            match oldest.and_then(|k| map.remove(&k)) {
+                Some(e) => total = total.saturating_sub(e.bytes),
                 None => break,
             };
+        }
+    }
+
+    /// After a task grew: drop the least recently touched other tasks while
+    /// the store is over its byte cap.
+    fn shed(&self, map: &mut HashMap<String, Entry>, keep: &str) {
+        let mut total: usize = map.values().map(|e| e.bytes).sum();
+        while total > self.limits.max_total_bytes {
+            let oldest = map
+                .iter()
+                .filter(|(k, _)| k.as_str() != keep)
+                .min_by_key(|(_, e)| e.touched)
+                .map(|(k, _)| k.clone());
+            match oldest.and_then(|k| map.remove(&k)) {
+                Some(e) => total = total.saturating_sub(e.bytes),
+                None => break,
+            }
         }
     }
 
@@ -365,7 +420,8 @@ impl Service {
                     history: vec![message],
                     metadata: None,
                 };
-                self.evict(&mut map, caller.owner);
+                let bytes = task.approx_bytes();
+                self.evict(&mut map, caller.owner, bytes);
                 let (tx, rx) = broadcast::channel(CHANNEL_CAPACITY);
                 map.insert(
                     task_id.clone(),
@@ -377,6 +433,7 @@ impl Service {
                         tx,
                         push: push.into_iter().collect(),
                         running: true,
+                        bytes,
                     },
                 );
                 drop(map);
@@ -425,11 +482,13 @@ impl Service {
         message.context_id = Some(entry.task.context_id.clone());
         let previous = entry.task.clone();
         push_history(&mut entry.task, message.clone());
+        entry.bytes = entry.task.approx_bytes();
         entry.touched = Instant::now();
         let rx = entry.tx.subscribe();
         let snapshot = entry.task.clone();
         if entry.running {
             // A runner is already producing updates: just record the input.
+            self.shed(&mut map, task_id);
             return Ok(Started::Task { snapshot, rx });
         }
         if self.running.load(Ordering::SeqCst) >= self.limits.max_running {
@@ -461,6 +520,7 @@ impl Service {
             }],
         };
         entry.running = true;
+        self.shed(&mut map, task_id);
         drop(map);
         self.spawn_runner(task_id.to_string(), steps);
         Ok(Started::Task { snapshot, rx })
@@ -522,9 +582,12 @@ impl Service {
                 return false;
             }
             apply(&mut e.task, &ev);
+            e.bytes = e.task.approx_bytes();
             e.touched = Instant::now();
             let _ = e.tx.send(ev.clone());
-            (e.push.clone(), e.task.clone())
+            let out = (e.push.clone(), e.task.clone());
+            self.shed(&mut map, task_id);
+            out
         };
         for cfg in &configs {
             let payload = match cfg.version {
@@ -817,6 +880,7 @@ mod tests {
             max_tasks_per_session: 3,
             ttl: Duration::from_secs(60),
             max_running: 100,
+            max_total_bytes: 64 * 1024 * 1024,
         });
         let auth = AuthOutcome::Missing;
         for i in 0..6 {
@@ -855,6 +919,80 @@ mod tests {
             s.get(&other_agent, &snapshot.id).map_err(|e| e.kind),
             Err(Kind::TaskNotFound)
         );
+    }
+
+    #[test]
+    fn a_message_over_the_byte_cap_is_refused() {
+        let big = "x".repeat(wire::MAX_MESSAGE_BYTES + 1);
+        let Err(err) = wire::parse_send(
+            &serde_json::json!({"message": {"role": "ROLE_USER", "parts": [{"text": big}]}}),
+            Wire::V1,
+        ) else {
+            panic!("a message over the cap is refused");
+        };
+        assert!(err.contains("too large"), "{err}");
+        // Many parts that are small one by one count together.
+        let part = "y".repeat(wire::MAX_MESSAGE_BYTES / 10);
+        let parts: Vec<Value> = (0..20).map(|_| serde_json::json!({"text": part})).collect();
+        assert!(wire::parse_send(
+            &serde_json::json!({"message": {"role": "ROLE_USER", "parts": parts}}),
+            Wire::V1,
+        )
+        .is_err());
+        // Data parts and metadata count too.
+        let data = serde_json::json!({"k": "z".repeat(wire::MAX_MESSAGE_BYTES)});
+        assert!(wire::parse_send(
+            &serde_json::json!({"message": {"role": "ROLE_USER", "parts": [{"data": data}]}}),
+            Wire::V1,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_task_history_is_bounded_in_bytes() {
+        let chunk = "h".repeat(wire::MAX_MESSAGE_BYTES - 1024);
+        let mut task = Task {
+            id: new_id(),
+            context_id: new_id(),
+            status: TaskStatus::new(TaskState::Working, None),
+            artifacts: Vec::new(),
+            history: Vec::new(),
+            metadata: None,
+        };
+        for _ in 0..40 {
+            push_history(
+                &mut task,
+                Message::agent(vec![Part::text(chunk.clone())], "c", None),
+            );
+        }
+        assert!(
+            task.approx_bytes() <= MAX_TASK_BYTES,
+            "{} bytes kept",
+            task.approx_bytes()
+        );
+        assert!(!task.history.is_empty(), "the newest message stays");
+    }
+
+    #[tokio::test]
+    async fn the_store_is_bounded_in_bytes_in_total() {
+        let mut limits = Limits::for_mode(true);
+        limits.max_total_bytes = 2 * 1024 * 1024;
+        let s = svc(limits);
+        let auth = AuthOutcome::Missing;
+        let text = "e".repeat(wire::MAX_MESSAGE_BYTES - 1024);
+        for i in 0..40 {
+            // Many sessions, so the per-session cap does not do the work.
+            let owner = format!("s{i}");
+            let c = caller(&owner, "echo", &auth);
+            assert!(matches!(s.send(&c, req(&text)), Ok(Started::Task { .. })));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            s.stored_bytes() <= 2 * 1024 * 1024 + MAX_TASK_BYTES,
+            "{} bytes stored",
+            s.stored_bytes()
+        );
+        assert!(s.task_count() >= 1);
     }
 
     #[test]

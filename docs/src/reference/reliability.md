@@ -18,7 +18,10 @@ Counters are kept **per session and per route** (`after:3`, `pattern:SSF`, ...):
 session is `X-Rustybin-Session` or, without it, the client IP (see
 [Sessions](../concepts/sessions.md)). Two clients never share a counter, so several
 people can run the same demo at once. Counters are bounded (10000, 2000 in public
-mode) and forgotten after an hour of inactivity.
+mode) and forgotten after an hour of inactivity. One client address holds at most
+200 counters in public mode, whatever sessions it uses: past that it loses its own
+oldest, and a full store takes from the address holding the most, so rotating
+session headers cannot reset other people's counters.
 
 Failures are `503` with `Retry-After: 1` and a JSON body. Every response carries
 `X-Rustybin-Flaky: true` and `X-Rustybin-Request-Number` (the counter value), and

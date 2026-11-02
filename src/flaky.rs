@@ -4,7 +4,11 @@
 //! session is [`crate::session::session_key`] (`X-Rustybin-Session`, else the
 //! client IP) and the route is the endpoint plus its parameter (`after:3`,
 //! `pattern:SSF`, ...). Two clients (or two different `n`) never share a
-//! counter. The map is bounded (capacity cap, idle TTL, oldest evicted).
+//! counter. The map is bounded (capacity cap, idle TTL) and fair to client
+//! addresses: an address past its own cap (public mode) loses its own oldest
+//! counter, and a full map evicts from the address holding the most, so
+//! rotating `X-Rustybin-Session` from one address cannot evict other clients'
+//! counters.
 //!
 //! `POST /flaky/reset` resets the caller's own counters (open);
 //! `POST /flaky/reset?scope=all` resets everyone's and is admin-guarded.
@@ -25,7 +29,7 @@ use std::time::{Duration, Instant};
 use crate::catalog::{category, Endpoint, Example};
 use crate::config::Config;
 use crate::content_negotiation::{negotiate, negotiate_with_status};
-use crate::session::Session;
+use crate::session::{ClientIp, Session};
 use crate::state::AppState;
 use crate::types::ErrorResponse;
 
@@ -33,6 +37,9 @@ use crate::types::ErrorResponse;
 pub const MAX_COUNTERS: usize = 10_000;
 /// Maximum (session, route) counters kept (public mode).
 pub const MAX_COUNTERS_PUBLIC: usize = 2_000;
+/// Counters one client address may hold (public mode), whatever its
+/// sessions.
+pub const MAX_COUNTERS_PER_ADDRESS_PUBLIC: usize = 200;
 /// Counters idle for longer than this are dropped.
 pub const COUNTER_TTL: Duration = Duration::from_secs(3600);
 /// Maximum pattern length.
@@ -45,32 +52,43 @@ pub const MAX_THRESHOLD: u64 = 1_000_000;
 struct Counter {
     count: u64,
     last_used: Instant,
+    /// The client address that created it, when known.
+    address: Option<String>,
 }
 
 /// Bounded per-(session, route) request counters.
 pub struct FlakyState {
     counters: Mutex<HashMap<(String, String), Counter>>,
     capacity: usize,
+    /// Counters one client address may hold.
+    per_address: usize,
     ttl: Duration,
 }
 
 impl FlakyState {
     /// The counters of an instance (fewer in public mode).
     pub fn for_config(config: &Config) -> Self {
-        let capacity = if config.public_mode {
-            MAX_COUNTERS_PUBLIC
+        if config.public_mode {
+            Self::new(MAX_COUNTERS_PUBLIC, COUNTER_TTL)
+                .with_per_address(MAX_COUNTERS_PER_ADDRESS_PUBLIC)
         } else {
-            MAX_COUNTERS
-        };
-        Self::new(capacity, COUNTER_TTL)
+            Self::new(MAX_COUNTERS, COUNTER_TTL)
+        }
     }
 
     pub fn new(capacity: usize, ttl: Duration) -> Self {
         Self {
             counters: Mutex::new(HashMap::new()),
             capacity: capacity.max(1),
+            per_address: capacity.max(1),
             ttl,
         }
+    }
+
+    /// Cap the counters one client address may hold.
+    pub fn with_per_address(mut self, per_address: usize) -> Self {
+        self.per_address = per_address.max(1);
+        self
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<(String, String), Counter>> {
@@ -83,6 +101,12 @@ impl FlakyState {
 
     /// Increment and return the 1-based request number for (session, route).
     pub fn next(&self, session: &str, route: &str) -> u64 {
+        self.next_from(None, session, route)
+    }
+
+    /// [`Self::next`] for a client at `address`, which counts against the
+    /// per-address cap and the fair eviction.
+    pub fn next_from(&self, address: Option<&str>, session: &str, route: &str) -> u64 {
         let now = Instant::now();
         let mut map = self.lock();
         let key = (session.to_string(), route.to_string());
@@ -94,16 +118,31 @@ impl FlakyState {
             }
             map.remove(&key);
         }
+        let ttl = self.ttl;
+        if let Some(address) = address {
+            let held = map
+                .values()
+                .filter(|c| c.address.as_deref() == Some(address))
+                .count();
+            if held >= self.per_address {
+                map.retain(|_, c| now.duration_since(c.last_used) <= ttl);
+                Self::evict_oldest_of(&mut map, Some(address));
+            }
+        }
         if map.len() >= self.capacity {
-            let ttl = self.ttl;
             map.retain(|_, c| now.duration_since(c.last_used) <= ttl);
             if map.len() >= self.capacity {
-                if let Some(oldest) = map
-                    .iter()
-                    .min_by_key(|(_, c)| c.last_used)
-                    .map(|(k, _)| k.clone())
-                {
-                    map.remove(&oldest);
+                // The address holding the most counters gives one up.
+                let mut held: HashMap<Option<&str>, usize> = HashMap::new();
+                for c in map.values() {
+                    *held.entry(c.address.as_deref()).or_default() += 1;
+                }
+                let heaviest = held
+                    .into_iter()
+                    .max_by_key(|(_, n)| *n)
+                    .map(|(a, _)| a.map(str::to_string));
+                if let Some(heaviest) = heaviest {
+                    Self::evict_oldest_of(&mut map, heaviest.as_deref());
                 }
             }
         }
@@ -112,9 +151,22 @@ impl FlakyState {
             Counter {
                 count: 1,
                 last_used: now,
+                address: address.map(str::to_string),
             },
         );
         1
+    }
+
+    /// Remove the least recently used counter created from `address`.
+    fn evict_oldest_of(map: &mut HashMap<(String, String), Counter>, address: Option<&str>) {
+        if let Some(oldest) = map
+            .iter()
+            .filter(|(_, c)| c.address.as_deref() == address)
+            .min_by_key(|(_, c)| c.last_used)
+            .map(|(k, _)| k.clone())
+        {
+            map.remove(&oldest);
+        }
     }
 
     /// Counters of one session: (route, count), sorted by route.
@@ -272,9 +324,14 @@ fn parse_threshold(raw: &str) -> Result<u64, String> {
 
 // ── Handlers ────────────────────────────────────────────────────────
 
+fn address(ip: Option<std::net::IpAddr>) -> Option<String> {
+    ip.map(|ip| ip.to_string())
+}
+
 async fn flaky_rate_handler(
     Path(raw): Path<String>,
     Session(session): Session,
+    ClientIp(ip): ClientIp,
     Extension(state): Extension<Arc<FlakyState>>,
     headers: HeaderMap,
 ) -> Response {
@@ -282,7 +339,7 @@ async fn flaky_rate_handler(
         return bad_request(&headers, "fail_rate must be an integer 0-100".to_string());
     };
     let route = format!("rate:{fail_rate}");
-    let count = state.next(&session, &route);
+    let count = state.next_from(address(ip).as_deref(), &session, &route);
     // Unbiased roll in 0..100.
     let ok = rand::thread_rng().gen_range(0..100u8) >= fail_rate;
     let message = if ok {
@@ -298,6 +355,7 @@ async fn flaky_rate_handler(
 async fn flaky_pattern_handler(
     Path(pattern): Path<String>,
     Session(session): Session,
+    ClientIp(ip): ClientIp,
     Extension(state): Extension<Arc<FlakyState>>,
     headers: HeaderMap,
 ) -> Response {
@@ -312,7 +370,7 @@ async fn flaky_pattern_handler(
         );
     }
     let route = format!("pattern:{upper}");
-    let count = state.next(&session, &route);
+    let count = state.next_from(address(ip).as_deref(), &session, &route);
     let pos = (count - 1) % upper.len() as u64;
     let ok = upper.as_bytes().get(pos as usize) != Some(&b'F');
     let mut outcome =
@@ -326,6 +384,7 @@ async fn flaky_pattern_handler(
 async fn flaky_after_handler(
     Path(raw): Path<String>,
     Session(session): Session,
+    ClientIp(ip): ClientIp,
     Extension(state): Extension<Arc<FlakyState>>,
     headers: HeaderMap,
 ) -> Response {
@@ -334,7 +393,7 @@ async fn flaky_after_handler(
         Err(e) => return bad_request(&headers, e),
     };
     let route = format!("after:{n}");
-    let count = state.next(&session, &route);
+    let count = state.next_from(address(ip).as_deref(), &session, &route);
     let ok = count <= n;
     let message = if ok {
         format!("success {count} of {n}, failing afterwards")
@@ -349,6 +408,7 @@ async fn flaky_after_handler(
 async fn flaky_recover_handler(
     Path(raw): Path<String>,
     Session(session): Session,
+    ClientIp(ip): ClientIp,
     Extension(state): Extension<Arc<FlakyState>>,
     headers: HeaderMap,
 ) -> Response {
@@ -357,7 +417,7 @@ async fn flaky_recover_handler(
         Err(e) => return bad_request(&headers, e),
     };
     let route = format!("recover:{n}");
-    let count = state.next(&session, &route);
+    let count = state.next_from(address(ip).as_deref(), &session, &route);
     let ok = count > n;
     let message = if ok {
         format!("recovered after {n} failures")
@@ -660,6 +720,31 @@ mod tests {
             json["counters"],
             serde_json::json!([{ "route": "after:5", "count": 2 }])
         );
+    }
+
+    #[test]
+    fn rotating_sessions_from_one_address_keeps_other_clients_counters() {
+        let state = FlakyState::new(MAX_COUNTERS_PUBLIC, COUNTER_TTL)
+            .with_per_address(MAX_COUNTERS_PER_ADDRESS_PUBLIC);
+        assert_eq!(state.next_from(Some("192.0.2.1"), "victim", "after:3"), 1);
+        for i in 0..(MAX_COUNTERS_PUBLIC * 3) {
+            state.next_from(Some("198.51.100.7"), &format!("rot-{i}"), "after:3");
+        }
+        assert!(state.len() <= MAX_COUNTERS_PUBLIC);
+        // The victim's counter survived and keeps counting.
+        assert_eq!(state.next_from(Some("192.0.2.1"), "victim", "after:3"), 2);
+        // The flooder holds at most its own cap.
+        assert!(state.len() <= MAX_COUNTERS_PER_ADDRESS_PUBLIC + 1);
+
+        // Without a per-address cap, a full map evicts from the heaviest
+        // address, not the oldest counter overall.
+        let state = FlakyState::new(10, COUNTER_TTL);
+        state.next_from(Some("192.0.2.1"), "victim", "r");
+        for i in 0..50 {
+            state.next_from(Some("198.51.100.7"), &format!("rot-{i}"), "r");
+        }
+        assert_eq!(state.len(), 10);
+        assert_eq!(state.next_from(Some("192.0.2.1"), "victim", "r"), 2);
     }
 
     #[test]

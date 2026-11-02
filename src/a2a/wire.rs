@@ -309,6 +309,10 @@ pub fn push_config(c: &PushConfig, w: Wire) -> Value {
 pub const MAX_PARTS: usize = 100;
 /// Maximum length of client supplied identifiers (contextId, ids).
 pub const MAX_ID_LEN: usize = 128;
+/// Maximum size of one client message (parts, metadata and ids, as
+/// [`Message::approx_bytes`] counts them): the task store keeps messages in
+/// histories, so its byte caps start here.
+pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
 
 /// First present key among camelCase / snake_case spellings.
 pub fn get<'a>(obj: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a Value> {
@@ -554,7 +558,7 @@ pub fn parse_message(v: &Value, w: Wire) -> Result<Message, String> {
             }
         }
     }
-    Ok(Message {
+    let message = Message {
         message_id,
         context_id,
         task_id,
@@ -563,7 +567,14 @@ pub fn parse_message(v: &Value, w: Wire) -> Result<Message, String> {
         metadata: get_meta(o)?,
         extensions: get_string_list(o, &["extensions"])?,
         reference_task_ids: get_string_list(o, &["referenceTaskIds", "reference_task_ids"])?,
-    })
+    };
+    if message.approx_bytes() > MAX_MESSAGE_BYTES {
+        return Err(format!(
+            "message is too large: at most {} KiB of parts and metadata are accepted",
+            MAX_MESSAGE_BYTES / 1024
+        ));
+    }
+    Ok(message)
 }
 
 /// Push configuration as supplied by a client (before validation).

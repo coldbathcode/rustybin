@@ -169,7 +169,11 @@ const FORBIDDEN_RESPONSE_HEADERS: &[&str] = &[
     "http2-settings",
 ];
 
-async fn response_headers_handler(uri: Uri, headers: HeaderMap) -> Response {
+async fn response_headers_handler(
+    State(config): State<Arc<Config>>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
     let params: Vec<(String, String)> =
         form_urlencoded::parse(uri.query().unwrap_or("").as_bytes())
             .into_owned()
@@ -197,6 +201,16 @@ async fn response_headers_handler(uri: Uri, headers: HeaderMap) -> Response {
                      (forbidden: {})",
                     FORBIDDEN_RESPONSE_HEADERS.join(", ")
                 ),
+            );
+        }
+        // A public instance shares its origin with every visitor (and the
+        // console): no cookie planted on it from a link.
+        if config.public_mode && lower == "set-cookie" {
+            return error(
+                &headers,
+                StatusCode::BAD_REQUEST,
+                "forbidden_header",
+                "Set-Cookie cannot be set on a public instance".to_string(),
             );
         }
         let (Ok(name), Ok(val)) = (
@@ -695,5 +709,36 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn public_mode_sets_no_cookies_from_response_headers() {
+        let mut config = Config::for_tests();
+        config.public_mode = true;
+        let app = crate::test_support::module_app_with_config(config, router);
+        for uri in [
+            "/response-headers?Set-Cookie=planted%3D1%3B%20Domain%3Dexample.com",
+            "/response-headers?set-cookie=planted%3D1",
+            "/response-headers?X-Ok=1&SET-COOKIE=planted%3D1",
+        ] {
+            let resp = app.clone().oneshot(get_request(uri)).await.expect("resp");
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+            assert!(resp.headers().get("set-cookie").is_none(), "{uri}");
+            let json = body_json(resp).await;
+            assert_eq!(json["error"], "forbidden_header");
+        }
+        // Other headers still work, and normal mode still sets cookies.
+        let resp = app
+            .clone()
+            .oneshot(get_request("/response-headers?X-Ok=1"))
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = test_app()
+            .oneshot(get_request("/response-headers?Set-Cookie=a%3Db"))
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["set-cookie"], "a=b");
     }
 }

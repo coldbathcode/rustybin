@@ -93,7 +93,11 @@ canceled; canceling a finished task is `TaskNotCancelableError`, an unknown task
 Tasks are scoped to the session that created them ([`X-Rustybin-Session`, else the
 client IP](../concepts/sessions.md)) and to their agent, so clients never see each
 other's tasks. The store is bounded (5000 tasks, 1000 per session, idle TTL one hour;
-2000, 50 and 15 minutes in public mode).
+2000, 50 and 15 minutes in public mode) and so are its bytes: a message over 256 KiB
+(parts, metadata and ids together) is refused as invalid params, a task keeps 1 MiB
+(its oldest history entries go first, the newest message always stays), and all
+tasks together keep 256 MiB (64 MiB in public mode), dropping the least recently
+used tasks past that.
 
 ```hurl
 {{#include ../../examples/a2a/agents.hurl:multi_turn}}

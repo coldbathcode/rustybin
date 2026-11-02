@@ -1142,3 +1142,88 @@ async fn failed_sign_ins_are_limited_per_address() {
         Ok(Some(_))
     ));
 }
+
+#[tokio::test]
+async fn a_full_denylist_refuses_new_revocations_rather_than_evicting() {
+    // Flooding the revocation store must not make a revoked token valid
+    // again: a full denylist refuses the new revocation (503) instead.
+    let state = crate::test_support::test_state();
+    let mut oidc = OidcState::new(
+        state.jwt.clone(),
+        OriginPolicy::from_config(&state.config),
+        true,
+    );
+    oidc.revoked = BoundedStore::new(2, ACCESS_TOKEN_TTL + 120);
+    let oidc = Arc::new(oidc);
+    let mint = |jti: &str| {
+        let now = chrono::Utc::now().timestamp();
+        let claims = json!({
+            "sub": "demo", "client_id": "rustybin", "jti": jti,
+            "iat": now, "exp": now + 300,
+        });
+        state
+            .jwt
+            .sign_rs256(claims.as_object().expect("claims"), "at+jwt")
+            .expect("token")
+    };
+    let revoke_one = |token: String| {
+        let oidc = oidc.clone();
+        async move {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/x-www-form-urlencoded"),
+            );
+            headers.insert(
+                header::AUTHORIZATION,
+                HeaderValue::from_str(&basic("rustybin", "secret")).expect("header"),
+            );
+            revoke(
+                Extension(oidc),
+                headers,
+                Bytes::from(form(&[("token", &token)])),
+            )
+            .await
+        }
+    };
+    let first = mint("victim");
+    assert_eq!(revoke_one(first.clone()).await.status(), StatusCode::OK);
+    assert_eq!(revoke_one(mint("flood-1")).await.status(), StatusCode::OK);
+    let refused = revoke_one(mint("flood-2")).await;
+    assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = body_json(refused).await;
+    assert_eq!(body["error"], "temporarily_unavailable");
+    assert!(oidc.verify(&first).is_err(), "the first revocation holds");
+    assert!(oidc.verify(&mint("flood-2")).is_ok());
+}
+
+#[tokio::test]
+async fn dynamic_registration_is_rate_limited_per_address() {
+    let mut config = crate::config::Config::for_tests();
+    config.public_mode = true;
+    let app = crate::test_support::module_app_with_config(config, router);
+    let register = || {
+        app.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/oauth/register")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"redirect_uris": [CB], "token_endpoint_auth_method": "none"})
+                        .to_string(),
+                ))
+                .expect("request"),
+        )
+    };
+    for _ in 0..registrations_per_minute(true) {
+        assert_eq!(
+            register().await.expect("resp").status(),
+            StatusCode::CREATED
+        );
+    }
+    let resp = register().await.expect("resp");
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(resp.headers().contains_key(header::RETRY_AFTER));
+    let body = body_json(resp).await;
+    assert_eq!(body["error"], "slow_down");
+}

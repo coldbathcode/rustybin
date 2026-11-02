@@ -129,6 +129,10 @@ response:
 {{#include ../../examples/http/shaping.hurl:response_headers_forbidden}}
 ```
 
+A public instance also refuses `Set-Cookie` here (`400 forbidden_header`): its
+origin is shared by every visitor, so a link must not plant cookies on it. Use
+`/cookies/set` for host-only demo cookies.
+
 ## Caching
 
 `GET /cache/{ttl}` returns `Cache-Control: public, max-age=<ttl>`, a strong `ETag`
