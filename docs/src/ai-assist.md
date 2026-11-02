@@ -93,7 +93,10 @@ provider's name.
 
 In the console, **Management, AI, Models and jobs** has the load button, the
 provider's models with **Use** and **Fast**, the jobs table (an ignored choice is
-flagged) and a field per job.
+flagged) and a field per job that offers the provider's models to pick from (the
+curated ones, and every model of the loaded list once it is loaded) and still takes
+any id. To refresh the list, load it again: a loaded list lasts 12 hours, and a new
+key or base URL hides it until it is loaded with them.
 
 ## The console
 

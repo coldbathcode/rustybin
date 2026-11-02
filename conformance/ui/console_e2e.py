@@ -804,6 +804,10 @@ def run_theme(browser, theme):
         page.locator("#assist-load-models").click()
         page.wait_for_selector("#assist-catalog >> text=Loaded from mock")
         page.wait_for_selector("#assist-provider-models >> text=rustybin-mock")
+        # Every job field offers the provider's models to pick from.
+        expect(page.locator("[aria-label='assist.job.explain']")).to_have_attribute("list", "assist-model-options")
+        assert page.locator("#assist-model-options option").count() >= 1
+        expect(page.locator("#assist-model-options option[value='rustybin-mock']")).to_have_count(1)
         page.locator("[aria-label='assist.job.explain']").fill("mock-fast-9")
         page.get_by_role("button", name="Save job models").click()
         page.wait_for_selector("#assist-jobs >> text=mock-fast-9")

@@ -50,7 +50,7 @@ The marker a session looks for is the first row that is not done.
 | [06](step-06-capture-replay.md) | Capture, replay and assert | | done 2026-11-02 |
 | [07](step-07-checkpoints.md) | Checkpoints and reset | 02 | done 2026-11-02 |
 | [08](step-08-edit-conflicts.md) | Conflict protection for edits | | done 2026-11-02 |
-| [09](step-09-ai-models-follow-through.md) | AI model selection follow-through | | |
+| [09](step-09-ai-models-follow-through.md) | AI model selection follow-through | | done 2026-11-02 |
 | [10](step-10-release.md) | Docs and release | all | |
 
 ## 5. How a session works
