@@ -29,6 +29,13 @@ permissions:
   # Keyless signing: the OIDC token names this workflow in the certificate.
   id-token: write
 
+# One build per ref: a newer push to main supersedes the build of an older
+# one, so `latest` and `edge` never end on an older commit. Tag builds each
+# have their own ref and always finish.
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+
 env:
   IMAGE: ghcr.io/${{ github.repository }}
 
