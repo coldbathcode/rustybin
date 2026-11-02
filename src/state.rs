@@ -95,6 +95,8 @@ pub struct AppState {
     pub scenarios: Arc<crate::scenarios::Scenarios>,
     /// Saved tests (`crate::replay`), `<state>/tests.json`.
     pub saved_tests: Arc<crate::replay::Tests>,
+    /// Checkpoints (`crate::checkpoints`), `<state>/checkpoints/`.
+    pub checkpoints: Arc<crate::checkpoints::Checkpoints>,
 }
 
 impl AppState {
@@ -188,6 +190,9 @@ impl AppState {
         let mcp_inspector = Arc::new(crate::mcp::inspector::Inspector::new(settings.clone()));
         let flaky = Arc::new(crate::flaky::FlakyState::for_config(&config));
         let saved_tests = Arc::new(crate::replay::Tests::new(config.state_dir.as_deref()));
+        let checkpoints = Arc::new(crate::checkpoints::Checkpoints::new(
+            config.state_dir.as_deref(),
+        ));
         Self {
             keys,
             limits,
@@ -213,6 +218,7 @@ impl AppState {
             diagnostics: Arc::new(crate::diagnostics::Diagnostics::default()),
             scenarios: Arc::new(crate::scenarios::Scenarios::default()),
             saved_tests,
+            checkpoints,
         }
     }
 }

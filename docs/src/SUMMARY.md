@@ -54,6 +54,7 @@
 - [Configuration](configuration.md)
 - [Instance as code](configuration-as-code.md)
 - [Source control](source-control.md)
+- [Checkpoints](checkpoints.md)
 - [Security and operations](concepts/control-plane-security.md)
 - [Public instances: the threat model](concepts/public-instances.md)
 - [Request ids, CORS and control plane](concepts/control-plane.md)

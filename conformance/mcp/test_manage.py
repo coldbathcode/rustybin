@@ -19,7 +19,7 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
 
-from common import BASE, check, run, section, text_of
+from common import all_tools, BASE, check, run, section, text_of
 
 PATH = "/_rustybin/mcp"
 TOKEN = os.environ.get("MANAGE_ADMIN_TOKEN", "conformance-admin")
@@ -76,7 +76,7 @@ async def create(c: Client, name: str) -> None:
 async def anonymous() -> None:
     section("no token: read tools only")
     async with client() as c:
-        tools = {t.name for t in (await c.list_tools()).tools}
+        tools = {t.name for t in await all_tools(c)}
         check("get_instance" in tools and "list_mocks" in tools, "read tools listed")
         check("create_mock" not in tools and "delete_mock" not in tools, "mock changes hidden")
         r = await c.call_tool("get_instance", {})
@@ -93,7 +93,7 @@ async def admin() -> None:
         check("untrusted_*" in (c.instructions or ""), "instructions warn about untrusted_* content")
 
         section("tools/list")
-        tools = {t.name: t for t in (await c.list_tools()).tools}
+        tools = {t.name: t for t in await all_tools(c)}
         for name in ["get_instance", "find_endpoints", "create_mock", "deploy_mock", "delete_mock",
                      "try_request", "issue_token", "wait_for_requests", "apply_config", "export_config"]:
             check(name in tools, f"{name} listed")

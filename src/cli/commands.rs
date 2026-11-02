@@ -100,6 +100,10 @@ pub const NOUNS: &[(&str, &str)] = &[
     ("requests", "The request inspector"),
     ("bins", "Request bins"),
     (
+        "checkpoint",
+        "Checkpoints: the instance's API mocks and health, saved and restored",
+    ),
+    (
         "tests",
         "Saved tests: captured requests with assertions, run here, through a gateway or in CI",
     ),
@@ -232,6 +236,11 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("requests", "get", "<id>", "One captured request.", NO_FLAGS, [("GET", "/_rustybin/requests/{id}")], false, "requests get 42"),
     cmd!("requests", "tail", "", "Follow the requests as they arrive.", TAIL_FLAGS, [("GET", "/_rustybin/requests/stream")], false, "requests tail --max 5"),
     cmd!("requests", "clear", "", "Forget the captured requests.", NO_FLAGS, [("DELETE", "/_rustybin/requests")], true, "requests clear --yes"),
+    cmd!("checkpoint", "list", "", "The checkpoints and the mocks each holds.", NO_FLAGS, [("GET", "/_rustybin/checkpoints")], false, "checkpoint list"),
+    cmd!("checkpoint", "show", "<name>", "One checkpoint.", NO_FLAGS, [("GET", "/_rustybin/checkpoints/{name}")], false, "checkpoint show demo-start"),
+    cmd!("checkpoint", "save", "<name> [--replace]", "Save the instance's API mocks (with their data) and the health toggle.", &[Flag::switch("--replace", "Overwrite a checkpoint of that name")], [("POST", "/_rustybin/checkpoints")], false, "checkpoint save demo-start"),
+    cmd!("checkpoint", "restore", "<name> [--dry-run]", "Bring the API mocks, their data and health back (other API mocks are deleted, flaky counters reset); --dry-run says what would change.", &[Flag::switch("--dry-run", "Only say what a restore would change")], [("POST", "/_rustybin/checkpoints/{name}/restore")], true, "checkpoint restore demo-start --yes"),
+    cmd!("checkpoint", "delete", "<name>", "Delete a checkpoint (the instance is not changed).", NO_FLAGS, [("DELETE", "/_rustybin/checkpoints/{name}")], true, "checkpoint delete demo-start --yes"),
     cmd!("tests", "list", "", "The saved tests and the variables each uses.", NO_FLAGS, [("GET", "/_rustybin/tests")], false, "tests list"),
     cmd!("tests", "show", "<name>", "One saved test.", NO_FLAGS, [("GET", "/_rustybin/tests/{name}")], false, "tests show order-1"),
     cmd!("tests", "save", "<name> --capture ID [--gateway U] [--description D]", "Save a captured request as a test (its status asserted; credentials become {{variables}}).", &[Flag::value("--capture", "The captured request's id (rustybin requests list)"), Flag::value("--gateway", "Send it through this gateway base URL"), Flag::value("--description", "What it checks")], [("POST", "/_rustybin/tests")], false, "tests save order-1 --capture 0123456789abcdef"),
@@ -588,6 +597,7 @@ pub async fn dispatch(ctx: &mut Ctx) -> Result<()> {
         "agents" => agents(ctx, cmd.verb).await,
         "scenario" => scenario(ctx, cmd.verb).await,
         "tests" => tests(ctx, cmd.verb).await,
+        "checkpoint" => checkpoint(ctx, cmd.verb).await,
         "ai" => ai(ctx, cmd.verb).await,
         "mcp" => mcp(ctx, cmd.verb).await,
         "registry" => registry(ctx, cmd.verb).await,
@@ -1400,6 +1410,39 @@ async fn bins(ctx: &mut Ctx, verb: &str) -> Result<()> {
             tail(ctx, &format!("/bin/{}/requests/stream", enc(&id))).await
         }
         _ => Err(Fail::Usage(format!("bins {verb}: not implemented"))),
+    }
+}
+
+// ── Checkpoints ─────────────────────────────────────────────────────
+
+async fn checkpoint(ctx: &mut Ctx, verb: &str) -> Result<()> {
+    if verb == "list" {
+        return get(ctx, "/_rustybin/checkpoints", &[]).await;
+    }
+    let name = ctx.args.arg(0, "a checkpoint name")?.to_string();
+    let path = format!("/_rustybin/checkpoints/{}", enc(&name));
+    match verb {
+        "show" => get(ctx, &path, &[]).await,
+        "delete" => delete(ctx, &path, &[]).await,
+        "save" => {
+            let body = json!({ "name": name, "replace": ctx.args.has("--replace") });
+            post(ctx, "/_rustybin/checkpoints", Body::Json(body)).await
+        }
+        "restore" => {
+            let query: Vec<(&str, String)> = if ctx.args.has("--dry-run") {
+                vec![("dry_run", "true".to_string())]
+            } else {
+                Vec::new()
+            };
+            let reply = ctx
+                .client()?
+                .send(Method::POST, &format!("{path}/restore"), &query, Body::None)
+                .await?
+                .ok()?;
+            emit_reply(ctx, &reply);
+            Ok(())
+        }
+        _ => Err(Fail::Usage(format!("checkpoint {verb}: not implemented"))),
     }
 }
 

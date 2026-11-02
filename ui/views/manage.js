@@ -1,5 +1,6 @@
 // Management: the instance's settings and this browser's, in tabs down the
-// left (General, Sign-in, AI, Network, Portal, Export, Source control, Diagnostics).
+// left (General, Sign-in, AI, Network, Portal, Export, Source control,
+// Checkpoints, Diagnostics).
 // Export and Source control live in ./manage/export.js and ./manage/git.js
 // (the whole instance as rustybin.yaml, and its git repository). Portal
 // publishes items to the dev portal at
@@ -19,6 +20,7 @@ import { settingsForm } from '../lib/settingsform.js';
 import * as portal from '../lib/portal.js';
 import { exportPanel } from './manage/export.js';
 import { gitPanel } from './manage/git.js';
+import { checkpointsPanel } from './manage/checkpoints.js';
 
 // The rail. Later steps append entries here; each renders its own panel.
 export const TABS = [
@@ -29,6 +31,7 @@ export const TABS = [
   { id: 'portal', title: 'Portal', icon: 'explorer', hint: 'The dev portal: branding, access, published items, insights' },
   { id: 'export', title: 'Export', icon: 'file', hint: 'The whole instance as rustybin.yaml: export, diff, apply a document' },
   { id: 'git', title: 'Source control', icon: 'history', hint: 'Commit the configuration to a git repository, pull and apply it' },
+  { id: 'checkpoints', title: 'Checkpoints', icon: 'history', hint: 'Save the mocks and health a demo starts from, restore them before a run' },
   { id: 'diagnostics', title: 'Diagnostics', icon: 'shield', hint: 'What is wrong with this instance and how to fix it' },
 ];
 
@@ -673,7 +676,7 @@ export default {
         b.tabIndex = tid === id ? 0 : -1;
       }
       if (location.hash !== '#/manage/' + id) history.replaceState(null, '', '#/manage/' + id);
-      const render = id === 'diagnostics' ? diagnosticsPanel : id === 'network' ? networkPanel : id === 'signin' ? signinPanel : id === 'ai' ? aiPanel : id === 'portal' ? portalPanel : id === 'export' ? exportPanel : id === 'git' ? gitPanel : generalPanel;
+      const render = id === 'checkpoints' ? checkpointsPanel : id === 'diagnostics' ? diagnosticsPanel : id === 'network' ? networkPanel : id === 'signin' ? signinPanel : id === 'ai' ? aiPanel : id === 'portal' ? portalPanel : id === 'export' ? exportPanel : id === 'git' ? gitPanel : generalPanel;
       replace(panel, render(doc, (d) => { if (d) { doc = d; renderStatus(); } }, error));
     }
 

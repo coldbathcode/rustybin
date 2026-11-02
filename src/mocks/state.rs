@@ -36,6 +36,13 @@ struct Inner {
     next_seq: u64,
 }
 
+/// A mock's stateful data as a checkpoint keeps it: collections by key, each
+/// with its items (id, value) oldest first.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StateCopy {
+    pub collections: Vec<(String, Vec<(String, Value)>)>,
+}
+
 /// The state of one mock. Cheap to clone; shared by all its revisions.
 #[derive(Clone)]
 pub struct MockState {
@@ -176,6 +183,40 @@ impl MockState {
 
     pub fn clear(&self) {
         *self.lock() = Inner::default();
+    }
+
+    /// Every collection (an emptied one too) with its items, oldest first:
+    /// what a checkpoint keeps.
+    pub fn copy(&self) -> StateCopy {
+        let inner = self.lock();
+        StateCopy {
+            collections: inner
+                .collections
+                .iter()
+                .map(|(k, c)| {
+                    let mut items: Vec<(&String, &(u64, Value))> = c.items.iter().collect();
+                    items.sort_by_key(|(_, (seq, _))| *seq);
+                    (
+                        k.clone(),
+                        items
+                            .into_iter()
+                            .map(|(id, (_, v))| (id.clone(), v.clone()))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Replace the state with a copy (within this mock's budget).
+    pub fn restore(&self, copy: &StateCopy) {
+        self.clear();
+        for (key, items) in &copy.collections {
+            self.open(&mut self.lock(), key);
+            for (id, v) in items {
+                let _ = self.put(key, id, v.clone());
+            }
+        }
     }
 
     /// Every collection with its items (bounded by the budget).

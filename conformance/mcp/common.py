@@ -28,6 +28,17 @@ def text_of(result) -> str:
     return "\n".join(getattr(c, "text", "") or "" for c in result.content)
 
 
+async def all_tools(c) -> list:
+    """Every page of tools/list (the management server pages at 100)."""
+    tools, cursor = [], None
+    while True:
+        page = await c.list_tools(cursor=cursor)
+        tools.extend(page.tools)
+        cursor = page.next_cursor
+        if not cursor:
+            return tools
+
+
 def run(main) -> None:
     """Run an async main, print a summary and exit non-zero on failures."""
     import asyncio

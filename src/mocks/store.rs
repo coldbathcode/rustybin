@@ -442,6 +442,11 @@ impl MockStore {
         }
     }
 
+    /// Write the saved copy of `name` as it is now (after a restore).
+    pub fn persist(&self, name: &str) {
+        self.persist_now(name);
+    }
+
     pub fn limits(&self) -> MockLimits {
         self.limits
     }

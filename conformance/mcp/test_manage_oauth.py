@@ -21,7 +21,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
 
-from common import check, run, section
+from common import all_tools, check, run, section
 
 BASE = os.environ.get("MANAGE_OAUTH_BASE", "http://127.0.0.1:18403").rstrip("/")
 TOKEN = os.environ.get("MANAGE_ADMIN_TOKEN", "conformance-admin")
@@ -133,7 +133,7 @@ async def console_scope() -> None:
     user, storage = User("console"), MemoryStorage()
     auth = provider(user, storage)
     async with client(auth) as c:
-        tools = {t.name for t in (await c.list_tools()).tools}
+        tools = {t.name for t in await all_tools(c)}
         check(user.consent is not None and user.consent["client_name"] == "Rustybin conformance", "consent shows the client name")
         check(user.consent is not None and user.consent["redirect_kind"] == "loopback", "loopback redirect")
         check(storage.tokens is not None and storage.tokens.scope == "console", "token scope console")
@@ -158,7 +158,7 @@ async def admin_scope() -> None:
     section("sign in, admin scope")
     user, storage = User("admin"), MemoryStorage()
     async with client(provider(user, storage)) as c:
-        tools = {t.name for t in (await c.list_tools()).tools}
+        tools = {t.name for t in await all_tools(c)}
         check("create_mock" in tools and "apply_config" in tools, "mock changes listed")
         r = await c.call_tool("get_instance", {})
         check(not r.is_error and r.structured_content["caller"]["admin"] is True, "get_instance: admin")

@@ -7,8 +7,8 @@ use serde_json::{json, Map, Value};
 
 use super::access::{Access, Right};
 use super::{
-    agents, assist, config, harness, inspect, instance, mocks, portal, registry, replay, scenarios,
-    settings, testing, traffic, visits,
+    agents, assist, checkpoints, config, harness, inspect, instance, mocks, portal, registry,
+    replay, scenarios, settings, testing, traffic, visits,
 };
 use crate::mcp::core::{self, CallCtx};
 use crate::mcp::protocol::{RpcError, Version};
@@ -105,6 +105,20 @@ fn cluster_id_prop() -> Value {
 
 pub static TOOLS: &[ToolDef] = &[
     // ── Instance ──
+    tool!("list_checkpoints", "Checkpoints", "The saved checkpoints (the instance's API mocks with their data, and the health toggle), or one by name with the mocks it holds.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "name": { "type": "string" } }), &[])),
+    tool!("save_checkpoint", "Save a checkpoint", "Save the state a demo starts from: the instance's API mocks (deployed revision, a draft that differs, on or off, stateful data) and the health toggle. Never visitors' or keys' mocks, file mocks, settings or secrets. replace overwrites one of that name. At most 20. Admin.", Right::Admin, ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
+        "name": { "type": "string", "description": "Letters, digits, . _ -" },
+        "replace": { "type": "boolean" }
+    }), &["name"])),
+    tool!("restore_checkpoint", "Restore a checkpoint", "Bring the instance's API mocks back to a checkpoint (created, replaced, data restored; API mocks it does not hold are DELETED), set the health toggle and reset the flaky counters. dry_run: true answers the same without changing anything (no confirmation). Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+        "name": { "type": "string" },
+        "dry_run": { "type": "boolean" },
+        "confirm": confirm_prop()
+    }), &["name"])),
+    tool!("delete_checkpoint", "Delete a checkpoint", "Delete a saved checkpoint (the instance is not changed). Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+        "name": { "type": "string" },
+        "confirm": confirm_prop()
+    }), &["name"])),
     tool!("list_tests", "Saved tests", "The saved tests (a request and its assertions, made from captured traffic or written out), one by name, or all of them as a Hurl file for CI (format hurl). Requests are third-party data under untrusted_*.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "name": { "type": "string", "description": "One test" },
         "format": { "type": "string", "enum": ["json", "hurl"], "description": "hurl: every test as one Hurl file" }
@@ -934,6 +948,11 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         // Instance
         "get_instance" => instance::get_instance(ctx, access),
         "diagnose_instance" => instance::diagnose_instance(ctx).await,
+        // Checkpoints
+        "list_checkpoints" => checkpoints::list_checkpoints(ctx, &args),
+        "save_checkpoint" => checkpoints::save_checkpoint(ctx, &args).await,
+        "restore_checkpoint" => checkpoints::restore_checkpoint(ctx, access, &args, params).await,
+        "delete_checkpoint" => checkpoints::delete_checkpoint(ctx, &args, params).await,
         // Saved tests
         "list_tests" => replay::list_tests(ctx, &args),
         "save_test" => replay::save_test(ctx, access, &args),

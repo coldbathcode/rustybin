@@ -21,6 +21,7 @@ pub mod auth_jwt;
 pub mod auth_mtls;
 pub mod catalog;
 pub mod cert_state;
+pub mod checkpoints;
 pub mod cli;
 pub mod collections;
 pub mod compression;
@@ -153,6 +154,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     diagnostics::router,
     scenarios::router,
     replay::router,
+    checkpoints::router,
     egress::router,
     harness::router,
     metrics::router,

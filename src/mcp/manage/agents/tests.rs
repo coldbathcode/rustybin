@@ -447,15 +447,25 @@ async fn rpc(
     (status, body_json(resp).await)
 }
 
+/// Every page of `tools/list`.
 async fn names(app: &Router, auth: &str, client: &str) -> Vec<String> {
-    let (status, j) = rpc(app, auth, Some(client), &[], "tools/list", json!({})).await;
-    assert_eq!(status, StatusCode::OK, "{j}");
-    j["result"]["tools"]
-        .as_array()
-        .expect("tools")
-        .iter()
-        .filter_map(|t| t["name"].as_str().map(str::to_string))
-        .collect()
+    let mut out = Vec::new();
+    let mut params = json!({});
+    loop {
+        let (status, j) = rpc(app, auth, Some(client), &[], "tools/list", params).await;
+        assert_eq!(status, StatusCode::OK, "{j}");
+        out.extend(
+            j["result"]["tools"]
+                .as_array()
+                .expect("tools")
+                .iter()
+                .filter_map(|t| t["name"].as_str().map(str::to_string)),
+        );
+        match j["result"]["nextCursor"].as_str() {
+            Some(c) => params = json!({ "cursor": c }),
+            None => return out,
+        }
+    }
 }
 
 async fn call(app: &Router, auth: &str, client: &str, tool: &str) -> Value {
@@ -516,9 +526,22 @@ fn find_agent<'a>(list: &'a Value, name: &str) -> &'a Value {
 async fn two_clients_on_one_token_are_two_agents() {
     let app = test_app_with(test_state_with(admin_config()));
     let auth = bearer();
-    assert!(names(&app, &auth, "claude-code")
-        .await
-        .contains(&"create_mock".to_string()));
+    // One tools/list call (its first page): the agent's list count is 1.
+    let (status, j) = rpc(
+        &app,
+        &auth,
+        Some("claude-code"),
+        &[],
+        "tools/list",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert!(j["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .any(|t| t["name"] == "create_mock"));
     call(&app, &auth, "claude-code", "list_mocks").await;
     call(&app, &auth, "cursor", "get_instance").await;
     let (status, list) = control(&app, "GET", "/_rustybin/agents", None).await;

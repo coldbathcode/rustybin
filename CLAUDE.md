@@ -225,6 +225,12 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
 - `src/diagnostics.rs`: `GET /_rustybin/diagnostics` (admin; `rustybin doctor`, `diagnose_instance`, Management,
   Diagnostics): checks with a status, what was seen and the fix, never a credential; startup problems go in
   `AppState.diagnostics.note`. A new failure an operator can fix belongs here as a check.
+- `src/checkpoints.rs`: checkpoints (`/_rustybin/checkpoints*`, `rustybin checkpoint`, the `*_checkpoint(s)`
+  tools, Management, Checkpoints). `covered` is the scope (instance-owned API mocks without an expiry); a
+  checkpoint keeps each one's deployed revision, a differing draft, on or off and `MockState::copy`, plus the
+  health toggle; `restore` (on the compile pool, with `dry_run`) answers created / replaced / data_restored /
+  unchanged / deleted and resets the flaky counters. 20 checkpoints in `<state>/checkpoints/`. Never settings,
+  secrets, visitors' or keys' mocks.
 - `src/replay/`: saved tests (`/_rustybin/tests*`, `rustybin tests`, `list_tests` / `save_test` / `delete_test` /
   `run_tests`, the console's Saved tests view and Live traffic's Save as test, `tests:` of `rustybin.yaml`).
   `mod.rs` the model (`SavedTest`, `Assertion`: one kind each), validation, the store (`AppState.saved_tests`,

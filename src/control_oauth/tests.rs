@@ -216,18 +216,26 @@ async fn mcp(
     .await
 }
 
+/// Every page of `tools/list`.
 async fn tool_names(app: &Router, token: &str) -> Vec<String> {
-    let resp = mcp(app, Some(token), "tools/list", json!({})).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let v = body_json(resp).await;
-    v["result"]["tools"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|t| t["name"].as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+    let mut out = Vec::new();
+    let mut params = json!({});
+    loop {
+        let resp = mcp(app, Some(token), "tools/list", params).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        out.extend(
+            v["result"]["tools"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|t| t["name"].as_str().map(str::to_string)),
+        );
+        match v["result"]["nextCursor"].as_str() {
+            Some(c) => params = json!({ "cursor": c }),
+            None => return out,
+        }
+    }
 }
 
 #[tokio::test]

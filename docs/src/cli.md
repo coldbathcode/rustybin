@@ -318,6 +318,26 @@ rustybin bins get 0123456789abcdef01234567 1
 rustybin bins tail 0123456789abcdef01234567 --max 3
 ```
 
+## checkpoint
+
+Checkpoints: the instance's API mocks and health, saved and restored
+
+| Command | What it does | Calls |
+|---|---|---|
+| `rustybin checkpoint list` | The checkpoints and the mocks each holds. | `GET /_rustybin/checkpoints` |
+| `rustybin checkpoint show <name>` | One checkpoint. | `GET /_rustybin/checkpoints/{name}` |
+| `rustybin checkpoint save <name> [--replace]` | Save the instance's API mocks (with their data) and the health toggle. Flags: `--replace`. | `POST /_rustybin/checkpoints` |
+| `rustybin checkpoint restore <name> [--dry-run]` | Bring the API mocks, their data and health back (other API mocks are deleted, flaky counters reset); --dry-run says what would change. Flags: `--dry-run`. | `POST /_rustybin/checkpoints/{name}/restore` |
+| `rustybin checkpoint delete <name>` | Delete a checkpoint (the instance is not changed). | `DELETE /_rustybin/checkpoints/{name}` |
+
+```bash
+rustybin checkpoint list
+rustybin checkpoint show demo-start
+rustybin checkpoint save demo-start
+rustybin checkpoint restore demo-start --yes
+rustybin checkpoint delete demo-start --yes
+```
+
 ## tests
 
 Saved tests: captured requests with assertions, run here, through a gateway or in CI

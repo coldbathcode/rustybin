@@ -1071,6 +1071,31 @@ def run_theme(browser, theme):
 
     step("saved tests: save from live traffic, run, export, delete", saved_tests)
 
+    def checkpoints():
+        # Save a checkpoint, flip health, preview and restore it (health
+        # comes back), delete it.
+        name = f"e2e-{theme}"
+        page.goto(BASE + "/ui/#/manage/checkpoints")
+        page.fill("#checkpoint-name", name)
+        page.click("#checkpoint-save")
+        row = page.locator(f"tr[data-checkpoint='{name}']")
+        row.wait_for()
+        expect(row).to_contain_text("healthy")
+        http("POST", "/health/toggle")
+        page.click(f"[data-preview='{name}']")
+        expect(page.locator("#checkpoint-changes")).to_contain_text("would change")
+        page.once("dialog", lambda d: d.accept())
+        page.click(f"[data-restore='{name}']")
+        expect(page.locator("#checkpoint-changes")).to_contain_text("Restored " + name)
+        assert http("GET", "/health") == 200
+        shot(page, theme, "20c-checkpoints")
+        assert_icons_sized(page, "management, checkpoints")
+        page.once("dialog", lambda d: d.accept())
+        page.click(f"[data-delete='{name}']")
+        expect(page.locator(f"tr[data-checkpoint='{name}']")).to_have_count(0)
+
+    step("management: checkpoints save, preview, restore, delete", checkpoints)
+
     def via_gateway():
         # A second origin for the same server stands in for a gateway with CORS.
         alt = BASE.replace("127.0.0.1", "localhost") if "127.0.0.1" in BASE else BASE.replace("localhost", "127.0.0.1")

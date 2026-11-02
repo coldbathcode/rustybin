@@ -754,6 +754,9 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET PUT DELETE | `/_rustybin/tests/{name}` | A saved test: read, replace or delete it (admin) |
 | POST | `/_rustybin/tests/run` | Run saved tests in process or through their gateway; JSON or JUnit (?format=junit) (admin) |
 | GET | `/_rustybin/tests/export` | The saved tests as a Hurl file, assertions included, for CI |
+| GET POST | `/_rustybin/checkpoints` | Checkpoints of the instance's API mocks and health: list them, or save one (admin) |
+| GET DELETE | `/_rustybin/checkpoints/{name}` | A checkpoint: what it holds; DELETE removes it (admin) |
+| POST | `/_rustybin/checkpoints/{name}/restore` | Restore a checkpoint: mocks, their data and health back, flaky counters reset; ?dry_run=true says what would change (admin) |
 | GET | `/_rustybin/egress` | The outbound connection policy: the allowlist, each feature's rule and the last 100 decisions |
 | GET | `/_rustybin/metrics` | Prometheus metrics (requests by route template, latency, streams, egress, protocols, LLM tokens, requests and faults, limit rejections) |
 | GET | `/_rustybin/usage` | Plan, limits and current usage (requests, egress, in flight, streams) |
