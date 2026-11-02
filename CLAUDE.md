@@ -225,6 +225,14 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
 - `src/diagnostics.rs`: `GET /_rustybin/diagnostics` (admin; `rustybin doctor`, `diagnose_instance`, Management,
   Diagnostics): checks with a status, what was seen and the fix, never a credential; startup problems go in
   `AppState.diagnostics.note`. A new failure an operator can fix belongs here as a check.
+- `src/replay/`: saved tests (`/_rustybin/tests*`, `rustybin tests`, `list_tests` / `save_test` / `delete_test` /
+  `run_tests`, the console's Saved tests view and Live traffic's Save as test, `tests:` of `rustybin.yaml`).
+  `mod.rs` the model (`SavedTest`, `Assertion`: one kind each), validation, the store (`AppState.saved_tests`,
+  `<state>/tests.json`, 200 tests, 64 KiB each), `request_from_capture` (secret-looking headers and query values
+  become `{{NAME}}` variables, never values); `run.rs` the runner (in process through `state.router` with the
+  caller's session, or the test's gateway under `Purpose::Replay`; 200 requests, 60 s; variables from the run or
+  `RUSTYBIN_TEST_*` only; JUnit); `hurl.rs` the export. Variables are `{{name}}`, not `${VAR}` (a file load
+  expands `${VAR}` across the whole document).
 - `src/scenarios/`: guided gateway scenarios (`/_rustybin/scenarios*`, `rustybin scenario`, the
   `*_gateway_scenario` tools, the console's Gateway scenarios view). `catalog.rs` is the one table (what each
   proves, the upstream, the steps, the requests, `evaluate`); `mod.rs` the runs (`AppState.scenarios`, 32, an hour,

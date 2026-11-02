@@ -30,6 +30,7 @@ const MODULE_PATHS: &[fn() -> Value] = &[
     crate::settings::openapi_paths,
     crate::diagnostics::openapi_paths,
     crate::scenarios::openapi_paths,
+    crate::replay::openapi_paths,
     crate::egress::openapi_paths,
     crate::harness::openapi_paths,
     crate::metrics::openapi_paths,

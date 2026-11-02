@@ -7,7 +7,7 @@ use serde_json::{json, Map, Value};
 
 use super::access::{Access, Right};
 use super::{
-    agents, assist, config, harness, inspect, instance, mocks, portal, registry, scenarios,
+    agents, assist, config, harness, inspect, instance, mocks, portal, registry, replay, scenarios,
     settings, testing, traffic, visits,
 };
 use crate::mcp::core::{self, CallCtx};
@@ -105,6 +105,39 @@ fn cluster_id_prop() -> Value {
 
 pub static TOOLS: &[ToolDef] = &[
     // ── Instance ──
+    tool!("list_tests", "Saved tests", "The saved tests (a request and its assertions, made from captured traffic or written out), one by name, or all of them as a Hurl file for CI (format hurl). Requests are third-party data under untrusted_*.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "name": { "type": "string", "description": "One test" },
+        "format": { "type": "string", "enum": ["json", "hurl"], "description": "hurl: every test as one Hurl file" }
+    }), &[])),
+    tool!("save_test", "Save a test", "Save a test from a captured request (capture: its id from list_requests; secret-looking headers and query values become {{variables}}, never values) or a written request, with assertions: status, header (with equals, else it must exist), body_contains, json (a path such as $.items[0].id, with equals), max_ms; one kind each. Default for a capture: its status. replace: true overwrites a test of that name (a request, not a capture). Admin.", Right::Admin, ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
+        "name": { "type": "string", "description": "Letters, digits, . _ - (not run or export)" },
+        "capture": { "type": "string", "description": "A captured request's id" },
+        "request": { "type": "object", "description": "method, path (with the query, never a URL), headers, body; {{name}} for credentials" },
+        "description": { "type": "string" },
+        "gateway": { "type": "string", "description": "A gateway base URL the request goes through; absent: this instance, in process" },
+        "assert": { "type": "array", "items": { "type": "object" } },
+        "replace": { "type": "boolean" }
+    }), &["name"])),
+    tool!("delete_test", "Delete a test", "Delete a saved test. Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+        "name": { "type": "string" },
+        "confirm": confirm_prop()
+    }), &["name"])),
+    ToolDef {
+        name: "run_tests",
+        title: "Run saved tests",
+        description: "Run every saved test or names: in process against this instance, or through each test's gateway (egress purpose replay; SENDS TRAFFIC OUT, so a run with a gateway test asks the user to confirm, or needs \"confirm\": true set only after the user agreed). Variables come from the instance's RUSTYBIN_TEST_* environment. Answers the counts and each test's failures (expected, seen) under untrusted_results; format junit adds the JUnit XML. Admin.",
+        right: Right::Admin,
+        read_only: false,
+        destructive: false,
+        idempotent: true,
+        confirm: true,
+        open_world: true,
+        input_schema: || obj(json!({
+            "names": { "type": "array", "items": { "type": "string" } },
+            "format": { "type": "string", "enum": ["json", "junit"] },
+            "confirm": confirm_prop()
+        }), &[]),
+    },
     tool!("list_gateway_scenarios", "Gateway scenarios", "The guided gateway scenarios (retries, rate limiting, credential injection, timeouts, caching): what each proves, the upstream it prepares, the steps on the gateway; and the caller's runs with their last verdicts.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
     tool!("start_gateway_scenario", "Start a gateway scenario", "Prepare a scenario run: create its upstream (a mock that is never saved and ends with the run, or a /flaky route) and answer the steps to configure on the gateway, with the upstream URL. Then call check_gateway_scenario with the URL the gateway serves the route at. Admin.", Right::Admin, ro=false, destructive=false, idem=false, confirm=false, || obj(json!({ "scenario": { "type": "string", "description": "retries, rate_limiting, credential_injection, timeouts or caching" } }), &["scenario"])),
     tool!("get_gateway_scenario_run", "Get a scenario run", "One of the caller's scenario runs: the setup, what it created and the last verdict.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(super::scenarios::run_props(), &["scenario", "run"])),
@@ -901,6 +934,11 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         // Instance
         "get_instance" => instance::get_instance(ctx, access),
         "diagnose_instance" => instance::diagnose_instance(ctx).await,
+        // Saved tests
+        "list_tests" => replay::list_tests(ctx, &args),
+        "save_test" => replay::save_test(ctx, access, &args),
+        "delete_test" => replay::delete_test(ctx, &args, params).await,
+        "run_tests" => replay::run_tests(ctx, access, &args, params).await,
         // Gateway scenarios
         "list_gateway_scenarios" => scenarios::list_gateway_scenarios(ctx),
         "start_gateway_scenario" => scenarios::start_gateway_scenario(ctx, access, &args).await,

@@ -15,6 +15,7 @@ const VIEWS = [
   // `ai: true` marks views with AI actions: a sparkle in the navigation when assist is on.
   { id: 'overview', title: 'Overview', icon: 'overview', ai: true, load: () => import('./views/overview.js') },
   { id: 'traffic', title: 'Live traffic', icon: 'traffic', ai: true, load: () => import('./views/traffic.js') },
+  { id: 'tests', title: 'Saved tests', icon: 'file', load: () => import('./views/tests.js') },
   { id: 'mocks', title: 'Mock APIs', icon: 'mock', ai: true, load: () => import('./views/mocks.js') },
   { id: 'bins', title: 'Request bins', icon: 'bin', load: () => import('./views/bins.js') },
   { id: 'explorer', title: 'API explorer', icon: 'explorer', load: () => import('./views/explorer.js') },

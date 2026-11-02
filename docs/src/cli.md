@@ -318,6 +318,30 @@ rustybin bins get 0123456789abcdef01234567 1
 rustybin bins tail 0123456789abcdef01234567 --max 3
 ```
 
+## tests
+
+Saved tests: captured requests with assertions, run here, through a gateway or in CI
+
+| Command | What it does | Calls |
+|---|---|---|
+| `rustybin tests list` | The saved tests and the variables each uses. | `GET /_rustybin/tests` |
+| `rustybin tests show <name>` | One saved test. | `GET /_rustybin/tests/{name}` |
+| `rustybin tests save <name> --capture ID [--gateway U] [--description D]` | Save a captured request as a test (its status asserted; credentials become {{variables}}). Flags: `--capture` value, `--gateway` value, `--description` value. | `POST /_rustybin/tests` |
+| `rustybin tests put <name> --file F` | Save or replace a test from a file (JSON or YAML: request, gateway, assert). Flags: `--file` value. | `PUT /_rustybin/tests/{name}` |
+| `rustybin tests delete <name>` | Delete a saved test. | `DELETE /_rustybin/tests/{name}` |
+| `rustybin tests run [--names a,b] [--var NAME=value]... [--junit]` | Run saved tests (all by default); exits 1 when one fails. --junit prints JUnit XML for CI. Flags: `--names` value, `--var` value, `--junit`. | `POST /_rustybin/tests/run` |
+| `rustybin tests export` | Every saved test as one Hurl file (hurl --test --variable base_url=...). | `GET /_rustybin/tests/export` |
+
+```bash
+rustybin tests list
+rustybin tests show order-1
+rustybin tests save order-1 --capture 0123456789abcdef
+rustybin tests put order-1 --file '{"request":{"path":"/status/200"},"assert":[{"status":200}]}'
+rustybin tests delete order-1 --yes
+rustybin tests run --junit
+rustybin tests export
+```
+
 ## scenario
 
 Guided gateway scenarios: prepare the upstream, check through the gateway, clean up

@@ -51,6 +51,7 @@ portal:
     title: Orders API
     tags:
     - payments
+tests: []
 agents:
   default_ceiling: traffic
   rules:

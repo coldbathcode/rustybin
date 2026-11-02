@@ -100,6 +100,10 @@ pub const NOUNS: &[(&str, &str)] = &[
     ("requests", "The request inspector"),
     ("bins", "Request bins"),
     (
+        "tests",
+        "Saved tests: captured requests with assertions, run here, through a gateway or in CI",
+    ),
+    (
         "scenario",
         "Guided gateway scenarios: prepare the upstream, check through the gateway, clean up",
     ),
@@ -228,6 +232,13 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("requests", "get", "<id>", "One captured request.", NO_FLAGS, [("GET", "/_rustybin/requests/{id}")], false, "requests get 42"),
     cmd!("requests", "tail", "", "Follow the requests as they arrive.", TAIL_FLAGS, [("GET", "/_rustybin/requests/stream")], false, "requests tail --max 5"),
     cmd!("requests", "clear", "", "Forget the captured requests.", NO_FLAGS, [("DELETE", "/_rustybin/requests")], true, "requests clear --yes"),
+    cmd!("tests", "list", "", "The saved tests and the variables each uses.", NO_FLAGS, [("GET", "/_rustybin/tests")], false, "tests list"),
+    cmd!("tests", "show", "<name>", "One saved test.", NO_FLAGS, [("GET", "/_rustybin/tests/{name}")], false, "tests show order-1"),
+    cmd!("tests", "save", "<name> --capture ID [--gateway U] [--description D]", "Save a captured request as a test (its status asserted; credentials become {{variables}}).", &[Flag::value("--capture", "The captured request's id (rustybin requests list)"), Flag::value("--gateway", "Send it through this gateway base URL"), Flag::value("--description", "What it checks")], [("POST", "/_rustybin/tests")], false, "tests save order-1 --capture 0123456789abcdef"),
+    cmd!("tests", "put", "<name> --file F", "Save or replace a test from a file (JSON or YAML: request, gateway, assert).", &[Flag::value("--file", "The test: a file, - for stdin, or inline JSON")], [("PUT", "/_rustybin/tests/{name}")], false, r#"tests put order-1 --file '{"request":{"path":"/status/200"},"assert":[{"status":200}]}'"#),
+    cmd!("tests", "delete", "<name>", "Delete a saved test.", NO_FLAGS, [("DELETE", "/_rustybin/tests/{name}")], true, "tests delete order-1 --yes"),
+    cmd!("tests", "run", "[--names a,b] [--var NAME=value]... [--junit]", "Run saved tests (all by default); exits 1 when one fails. --junit prints JUnit XML for CI.", &[Flag::value("--names", "Only these tests, comma separated"), Flag::value("--var", "A {{variable}} value, NAME=value (repeat it)"), Flag::switch("--junit", "Print the JUnit XML report")], [("POST", "/_rustybin/tests/run")], false, "tests run --junit"),
+    cmd!("tests", "export", "", "Every saved test as one Hurl file (hurl --test --variable base_url=...).", NO_FLAGS, [("GET", "/_rustybin/tests/export")], false, "tests export"),
     cmd!("scenario", "list", "", "The gateway scenarios (retries, rate limiting, credential injection, timeouts, caching) and your runs.", NO_FLAGS, [("GET", "/_rustybin/scenarios")], false, "scenario list"),
     cmd!("scenario", "start", "<scenario>", "Prepare a run: its upstream and the steps to configure on the gateway.", NO_FLAGS, [("POST", "/_rustybin/scenarios/{id}/runs")], false, "scenario start caching"),
     cmd!("scenario", "show", "<scenario> <run>", "A run: the setup, what it created, the last verdict.", NO_FLAGS, [("GET", "/_rustybin/scenarios/{id}/runs/{run}")], false, "scenario show caching 1a2b3c4d"),
@@ -576,6 +587,7 @@ pub async fn dispatch(ctx: &mut Ctx) -> Result<()> {
         "bins" => bins(ctx, cmd.verb).await,
         "agents" => agents(ctx, cmd.verb).await,
         "scenario" => scenario(ctx, cmd.verb).await,
+        "tests" => tests(ctx, cmd.verb).await,
         "ai" => ai(ctx, cmd.verb).await,
         "mcp" => mcp(ctx, cmd.verb).await,
         "registry" => registry(ctx, cmd.verb).await,
@@ -1389,6 +1401,135 @@ async fn bins(ctx: &mut Ctx, verb: &str) -> Result<()> {
         }
         _ => Err(Fail::Usage(format!("bins {verb}: not implemented"))),
     }
+}
+
+// ── Saved tests ─────────────────────────────────────────────────────
+
+async fn tests(ctx: &mut Ctx, verb: &str) -> Result<()> {
+    match verb {
+        "list" => get(ctx, "/_rustybin/tests", &[]).await,
+        "export" => get(ctx, "/_rustybin/tests/export", &[]).await,
+        "run" => tests_run(ctx).await,
+        _ => {
+            let name = ctx.args.arg(0, "a test name")?.to_string();
+            let path = format!("/_rustybin/tests/{}", enc(&name));
+            match verb {
+                "show" => get(ctx, &path, &[]).await,
+                "delete" => delete(ctx, &path, &[]).await,
+                "save" => {
+                    let capture = ctx
+                        .args
+                        .value("--capture")
+                        .ok_or_else(|| Fail::Usage("--capture: a captured request's id".into()))?
+                        .to_string();
+                    let mut body = json!({ "name": name, "capture": capture });
+                    if let Some(g) = ctx.args.value("--gateway") {
+                        body["gateway"] = json!(g);
+                    }
+                    if let Some(d) = ctx.args.value("--description") {
+                        body["description"] = json!(d);
+                    }
+                    post(ctx, "/_rustybin/tests", Body::Json(body)).await
+                }
+                "put" => {
+                    let file = ctx
+                        .args
+                        .value("--file")
+                        .ok_or_else(|| Fail::Usage("--file: the test as JSON or YAML".into()))?
+                        .to_string();
+                    let text = ctx.input(&file)?;
+                    let v: Value = serde_yaml::from_str(&text)
+                        .map_err(|e| Fail::Usage(format!("--file: not JSON or YAML ({e})")))?;
+                    let reply = ctx.client()?.put(&path, Body::Json(v)).await?;
+                    emit_reply(ctx, &reply);
+                    Ok(())
+                }
+                _ => Err(Fail::Usage(format!("tests {verb}: not implemented"))),
+            }
+        }
+    }
+}
+
+/// `rustybin tests run`: a table (or JSON, or JUnit XML); exit 1 when a
+/// test fails or cannot run.
+async fn tests_run(ctx: &mut Ctx) -> Result<()> {
+    let mut body = json!({});
+    if let Some(names) = list_flag(&ctx.args, "--names") {
+        body["names"] = json!(names);
+    }
+    let mut vars = Map::new();
+    for v in ctx.args.values("--var") {
+        let (k, val) = v
+            .split_once('=')
+            .ok_or_else(|| Fail::Usage(format!("--var {v}: NAME=value")))?;
+        vars.insert(k.to_string(), json!(val));
+    }
+    if !vars.is_empty() {
+        body["variables"] = Value::Object(vars);
+    }
+    let junit = ctx.args.has("--junit");
+    let query: Vec<(&str, String)> = if junit {
+        vec![("format", "junit".to_string())]
+    } else {
+        Vec::new()
+    };
+    let reply = ctx
+        .client()?
+        .send(
+            Method::POST,
+            "/_rustybin/tests/run",
+            &query,
+            Body::Json(body),
+        )
+        .await?
+        .ok()?;
+    let passed = if junit {
+        ctx.raw(&reply.text);
+        !reply.text.contains("<failure") && !reply.text.contains("<error")
+    } else {
+        let v = reply.value();
+        if ctx.json {
+            ctx.emit(&v);
+        } else {
+            let rows: Vec<Value> = v["results"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|r| {
+                    let failures: Vec<String> = r["failures"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|f| {
+                            format!(
+                                "{}: expected {}, saw {}",
+                                f["assertion"].as_str().unwrap_or(""),
+                                f["expected"].as_str().unwrap_or(""),
+                                f["seen"].as_str().unwrap_or("")
+                            )
+                        })
+                        .collect();
+                    let problem = r["error"]
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| failures.join("; "));
+                    json!({
+                        "test": r["name"],
+                        "passed": r["passed"],
+                        "status": r["status"],
+                        "ms": r["ms"],
+                        "problem": problem,
+                    })
+                })
+                .collect();
+            ctx.emit(&json!({ "passed": v["passed"], "results": rows }));
+        }
+        v["passed"] == true
+    };
+    if !passed {
+        return Err(Fail::Failed("a test failed (see above)".into()));
+    }
+    Ok(())
 }
 
 // ── Gateway scenarios ───────────────────────────────────────────────

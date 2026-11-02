@@ -750,6 +750,10 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | POST | `/_rustybin/scenarios/{id}/runs` | Start a scenario run: prepare its upstream and get the gateway setup (admin) |
 | GET DELETE | `/_rustybin/scenarios/{id}/runs/{run}` | A scenario run with its setup and last verdict; DELETE ends it and removes what it created (admin) |
 | POST | `/_rustybin/scenarios/{id}/runs/{run}/check` | Send the run's test traffic through the gateway and compare what the client got with what reached the upstream (admin; egress purpose scenario) |
+| GET POST | `/_rustybin/tests` | Saved tests: list them, or save one from a captured request or a written one (admin) |
+| GET PUT DELETE | `/_rustybin/tests/{name}` | A saved test: read, replace or delete it (admin) |
+| POST | `/_rustybin/tests/run` | Run saved tests in process or through their gateway; JSON or JUnit (?format=junit) (admin) |
+| GET | `/_rustybin/tests/export` | The saved tests as a Hurl file, assertions included, for CI |
 | GET | `/_rustybin/egress` | The outbound connection policy: the allowlist, each feature's rule and the last 100 decisions |
 | GET | `/_rustybin/metrics` | Prometheus metrics (requests by route template, latency, streams, egress, protocols, LLM tokens, requests and faults, limit rejections) |
 | GET | `/_rustybin/usage` | Plan, limits and current usage (requests, egress, in flight, streams) |

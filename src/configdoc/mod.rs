@@ -109,6 +109,7 @@ pub struct Extra {
     pub settings: Option<BTreeMap<String, Value>>,
     pub secrets: Option<BTreeMap<String, Option<String>>>,
     pub harness: Option<HarnessSection>,
+    pub tests: Option<Vec<crate::replay::SavedTest>>,
     pub health: Option<HealthSection>,
 }
 
@@ -120,6 +121,7 @@ impl Extra {
             settings: file.settings.take(),
             secrets: file.secrets.take(),
             harness: file.harness.take(),
+            tests: file.tests.take(),
             health: file.health.take(),
         }
     }
@@ -129,6 +131,7 @@ impl Extra {
             && self.settings.is_none()
             && self.secrets.is_none()
             && self.harness.is_none()
+            && self.tests.is_none()
             && self.health.is_none()
     }
 
@@ -140,6 +143,7 @@ impl Extra {
             settings: self.settings,
             secrets: self.secrets,
             harness: self.harness,
+            tests: self.tests,
             health: self.health,
             ..MocksFile::default()
         }
@@ -319,6 +323,7 @@ pub fn export(state: &AppState, secrets: SecretsMode, bundle: bool) -> Export {
                 })
                 .collect(),
         }),
+        tests: Some(state.saved_tests.list()),
         agents: Some(agents_section(&state.mocks.file_agents())),
         health: Some(HealthSection {
             initial: if state.health.is_healthy() {
@@ -828,6 +833,17 @@ pub fn diff(before: &MocksFile, after: &MocksFile, base: Option<&Path>) -> Vec<C
             .collect();
         map_changes(&mut out, "harness", &b, &a, |_| String::new());
     }
+    if let Some(a) = &after.tests {
+        let b: BTreeMap<String, &crate::replay::SavedTest> = before
+            .tests
+            .iter()
+            .flatten()
+            .map(|t| (t.name.clone(), t))
+            .collect();
+        let a: BTreeMap<String, &crate::replay::SavedTest> =
+            a.iter().map(|t| (t.name.clone(), t)).collect();
+        map_changes(&mut out, "tests", &b, &a, |_| String::new());
+    }
     if let Some(a) = &after.agents {
         let b = before.agents.clone().unwrap_or_default();
         value_change(
@@ -1124,6 +1140,7 @@ pub fn apply(state: &AppState, file: MocksFile, opts: &ApplyOptions) -> Value {
         "harness",
         apply_harness(state, file.harness, opts, &mut problems),
     );
+    put("tests", apply_tests(state, file.tests, opts, &mut problems));
     put(
         "agents",
         apply_agents(state, file.agents, opts, &mut problems),
@@ -1178,6 +1195,7 @@ pub fn apply_extra(state: &AppState, extra: Extra, principal: &str) -> Vec<Strin
     apply_settings(state, &file, &opts, &mut problems);
     apply_secrets(state, &file, &opts, &mut problems);
     apply_harness(state, file.harness, &opts, &mut problems);
+    apply_tests(state, file.tests, &opts, &mut problems);
     apply_health(state, file.health, &opts, &mut problems);
     problems
 }
@@ -1729,6 +1747,62 @@ fn apply_harness(
         }
     }
     let deleted: Vec<String> = delete.into_iter().filter(|n| h.saved.delete(n)).collect();
+    Some(json!({ "saved": saved, "deleted": deleted }))
+}
+
+/// `tests:`: each valid test saved (replacing one of its name); with
+/// `prune`, saved tests the document does not name are deleted. A test that
+/// fails validation is reported and kept, never pruned.
+fn apply_tests(
+    state: &AppState,
+    section: Option<Vec<crate::replay::SavedTest>>,
+    opts: &ApplyOptions,
+    problems: &mut Vec<String>,
+) -> Option<Value> {
+    let section = section?;
+    let store = &state.saved_tests;
+    let named: BTreeSet<String> = section.iter().map(|t| t.name.clone()).collect();
+    let mut valid = Vec::new();
+    for t in section {
+        match t.validate() {
+            Ok(()) => valid.push(t),
+            Err(e) => problems.push(format!("tests.{}: {e} (skipped)", t.name)),
+        }
+    }
+    let delete: Vec<String> = if opts.prune {
+        store
+            .list()
+            .into_iter()
+            .map(|t| t.name)
+            .filter(|n| !named.contains(n))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let save: Vec<String> = valid.iter().map(|t| t.name.clone()).collect();
+    if opts.dry_run {
+        let existing = store.list();
+        let new = save
+            .iter()
+            .filter(|n| !existing.iter().any(|t| &t.name == *n))
+            .count();
+        if existing.len() + new > crate::replay::MAX_TESTS + delete.len() {
+            problems.push(format!(
+                "tests: an instance keeps at most {} saved tests",
+                crate::replay::MAX_TESTS
+            ));
+        }
+        return Some(json!({ "save": save, "delete": delete }));
+    }
+    let deleted: Vec<String> = delete.into_iter().filter(|n| store.delete(n)).collect();
+    let mut saved = Vec::new();
+    for t in valid {
+        let name = t.name.clone();
+        match store.put(t, true) {
+            Ok(_) => saved.push(name),
+            Err(e) => problems.push(format!("tests.{name}: {}", e.message())),
+        }
+    }
     Some(json!({ "saved": saved, "deleted": deleted }))
 }
 

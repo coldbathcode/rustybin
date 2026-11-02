@@ -93,6 +93,8 @@ pub struct AppState {
     pub diagnostics: Arc<crate::diagnostics::Diagnostics>,
     /// Gateway scenario runs (`crate::scenarios`), bounded.
     pub scenarios: Arc<crate::scenarios::Scenarios>,
+    /// Saved tests (`crate::replay`), `<state>/tests.json`.
+    pub saved_tests: Arc<crate::replay::Tests>,
 }
 
 impl AppState {
@@ -185,6 +187,7 @@ impl AppState {
         ));
         let mcp_inspector = Arc::new(crate::mcp::inspector::Inspector::new(settings.clone()));
         let flaky = Arc::new(crate::flaky::FlakyState::for_config(&config));
+        let saved_tests = Arc::new(crate::replay::Tests::new(config.state_dir.as_deref()));
         Self {
             keys,
             limits,
@@ -209,6 +212,7 @@ impl AppState {
             flaky,
             diagnostics: Arc::new(crate::diagnostics::Diagnostics::default()),
             scenarios: Arc::new(crate::scenarios::Scenarios::default()),
+            saved_tests,
         }
     }
 }

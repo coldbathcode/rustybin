@@ -367,6 +367,7 @@ const SOURCES: &[fn() -> Vec<Endpoint>] = &[
     crate::settings::catalog,
     crate::diagnostics::catalog,
     crate::scenarios::catalog,
+    crate::replay::catalog,
     crate::egress::catalog,
     crate::harness::catalog,
     crate::metrics::catalog,

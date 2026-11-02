@@ -43,6 +43,7 @@
 
 - [Gateway recipes](gateway-recipes.md)
 - [Gateway scenarios](gateway-scenarios.md)
+- [Saved tests](saved-tests.md)
 - [Request inspector](concepts/inspector.md)
 - [Sessions and public mode](concepts/sessions.md)
 - [Fault injection](concepts/fault-injection.md)

@@ -222,9 +222,26 @@ export default {
           h('div', { class: 'row' },
             copyButton(() => curlFor(e), { label: 'Copy as curl', toast: 'curl command copied (replays directly to Rustybin)' }),
             jsonLink(e),
+            saveAsTest(e),
             assist.assistButton('Explain', 'explain', () => ({ kind: 'request', subject: { method: e.method, uri: e.uri, path: e.uri.replace(/^https?:\/\/[^/]+/, '').split('?')[0], query: e.query, status: e.status, latency_ms: e.latency_ms, headers: Object.fromEntries((e.headers || []).map((x) => [x.name, x.value])), body: bodyOf(e).slice(0, 4000) } }), { class: 'assist-explain' }),
             h('button', { class: 'btn sm', type: 'button', onclick: () => { state.compare = true; state.a = e.id; state.b = null; renderPause(); schedule(); renderDetail(); } }, icon('diff'), 'Compare with...'))),
         t.el);
+    }
+
+    // Save the entry as a test (admin): POST /_rustybin/tests with the
+    // capture's id and its session (a public instance checks it).
+    function saveAsTest(e) {
+      return h('button', { class: 'btn sm', type: 'button', 'data-save-test': e.id, onclick: async () => {
+        const path = (e.path || '/').replace(/^\//, '').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+        const name = window.prompt('Name of the test', (e.method.toLowerCase() + '-' + path).slice(0, 64));
+        if (!name) return;
+        const headers = { 'Content-Type': 'application/json' };
+        if (e.session) headers['X-Rustybin-Session'] = e.session;
+        const r = await send({ control: true, admin: true, session: false, method: 'POST', url: SERVER + '/_rustybin/tests', headers, body: JSON.stringify({ name, capture: e.id }) });
+        if (!r.ok) { toast('Not saved: ' + ((r.json && r.json.error) || r.error || r.status), 'err'); return; }
+        const vars = (r.json.introduced_variables || []);
+        toast(`Saved test ${name}` + (vars.length ? ` (credentials became the variables ${vars.join(', ')})` : '') + ': see Saved tests');
+      } }, icon('check'), 'Save as test');
     }
 
     // Raw JSON of an entry. With control-plane auth a plain link would lack

@@ -218,6 +218,7 @@ under a **purpose** with its own rule, on only when the feature is configured:
 | `assist` | The [AI assist](ai-assist.md) provider's host once its key is set (`api.anthropic.com`, `api.openai.com`, `generativelanguage.googleapis.com`, the compatible base URL's host). |
 | `git` | The git remote's host once configured; see [source control](source-control.md). |
 | `mcp_relay` | No default: name the MCP servers the [inspector](mcp/inspector.md) may relay to and run checks against in `RUSTYBIN_EGRESS_ALLOW`. This instance's own MCP servers are relayed in process and need no entry. |
+| `replay` | No default: name the gateways [saved tests](saved-tests.md) run through in `RUSTYBIN_EGRESS_ALLOW`. Tests without a gateway run in process and need no entry. |
 | `scenario` | No default: name the gateway a [gateway scenario](gateway-scenarios.md) checks through in `RUSTYBIN_EGRESS_ALLOW` (`RUSTYBIN_EGRESS_ALLOW_LOOPBACK=true` for a gateway on the same machine). |
 
 ```hurl

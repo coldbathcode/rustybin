@@ -29,3 +29,34 @@ tests save | list | run [--junit] | export`), `rustybin.yaml` (`tests:`).
 Save from a capture, run direct (pass), change the mock, run again (the failing assertion named),
 JUnit output, a gateway run refused by egress until allowed, redaction (a captured key is not in the
 test), another session's captures cannot be saved.
+
+## Build notes (2026-11-02)
+
+- `src/replay/` (`mod.rs` model, store and routes; `run.rs` the runner and JUnit; `hurl.rs`
+  the export). The routes are the plan's; `run` and `export` are reserved test names.
+- **Variables are `{{name}}`, not `${VAR}`.** A `rustybin.yaml` loaded from a file has every
+  `${VAR}` expanded at load (`config_file::expand_env`), which would turn a test's credential
+  reference into the instance's own environment (or an error). `{{name}}` is also Hurl's own
+  syntax, so the export needs no rewriting. A run reads its `variables`, else only the
+  environment variables named `RUSTYBIN_TEST_<NAME>`: a test cannot read any other variable
+  of the instance. MCP tools never take variables (secrets are never tool inputs).
+- From a capture: the transport's and Rustybin's own headers are dropped; every
+  secret-looking header and query value (`keys::looks_secret`) becomes a variable named
+  after it, and the answer lists them (`introduced_variables`). A capture whose body was cut
+  is refused. Visibility is the inspector's: a key's captures in shared mode, the session's
+  on a public instance.
+- Saving, replacing, deleting and running are admin; reading is the console scope. The MCP
+  results go under `untrusted_*` (tests come from captured traffic; a run's `seen` values from
+  answers); `run_tests` asks for confirmation only when a selected test has a gateway.
+- `tests:` in `rustybin.yaml`: exported, diffed, applied (`apply_tests`) and loaded from
+  `RUSTYBIN_CONFIG_FILE` (`Extra`). A test that fails validation is reported and kept, never
+  pruned (the rule step 01 set for mocks). The export snapshot gains `tests: []`.
+- Console: **Save as test** on a Live traffic entry (sends the entry's session), and the
+  Saved tests view (run all or one, with variables for the run, failures, Hurl download,
+  delete). The UI conformance covers both.
+- Tests: from a capture to a passing run, the mock changed and the failing assertion named
+  (JSON and JUnit), the Hurl export's lines; credentials become variables (and a run without
+  them names the missing one); another session's capture on a public instance; a gateway run
+  refused by egress, then allowed; validation and the cap; JSON paths; a restart; a document
+  that prunes only what it does not name.
+- Also here: the step 05 timeouts test delay is 1.5 s (600 ms failed once on a loaded machine).

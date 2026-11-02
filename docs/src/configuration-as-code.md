@@ -31,6 +31,10 @@ portal:
   items: [{ id: "mock:orders", title: Orders API, tags: [payments] }]
 harness:
   scenarios: [{ name: smoke, scenario: { ... } }]   # saved scenarios (harness mode)
+tests:                              # saved tests: a request and its assertions
+  - name: order-1
+    request: { path: /mock/orders/orders/1, headers: { x-api-key: "{{X_API_KEY}}" } }
+    assert: [{ status: 200 }, { json: $.id, equals: 1 }]
 agents:
   default_ceiling: traffic
   rules: [{ match: { name: "ci-*" }, ceiling: read-only }]
@@ -47,6 +51,7 @@ health:
 | `registry` | `servers`: `server.json` documents of the [mock MCP registry](mcp/registry.md) | the registry's file copy (entries published through the API that the document names move into it) |
 | `portal` | `items`: what the [dev portal](portal.md) publishes | the portal (a mock the item names must exist; a `mock:` item of a visitor is skipped) |
 | `harness` | `scenarios`: the [saved scenarios](harness.md), inline, validated against the node's caps | the harness (a problem when harness mode is off) |
+| `tests` | The [saved tests](saved-tests.md), with `{{variables}}` for credentials (never values); a test that fails validation is a problem and is kept, never pruned | the saved tests (`<state>/tests.json`) |
 | `agents` | The default ceiling and the rules of [AI agents](agent-mcp.md#managing-agents) | the agents policy |
 | `health` | `initial`: `healthy` or `unhealthy` | the `/health` toggle |
 
@@ -57,7 +62,7 @@ Two rules make a document safe to apply:
   nothing), so an export is the whole instance.
 - **With `prune`, a present section is the whole truth for its part of the
   instance.** API-created mocks, published portal items, published registry entries,
-  saved scenarios and stored settings or secrets that the section does not name are
+  saved scenarios, saved tests and stored settings or secrets that the section does not name are
   removed. Without `prune`, applying only adds and updates. The `git.*` settings are
   never exported nor pruned: where an instance keeps its configuration is the
   deployment's business. A mock the document names but cannot load (a spec that cannot

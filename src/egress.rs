@@ -697,10 +697,12 @@ pub enum Purpose {
     KeyRegistry,
     /// Test traffic of a gateway scenario, sent to the gateway's URL.
     Scenario,
+    /// Saved tests replayed through their gateway.
+    Replay,
 }
 
 impl Purpose {
-    pub const ALL: [Purpose; 8] = [
+    pub const ALL: [Purpose; 9] = [
         Purpose::Assist,
         Purpose::McpRelay,
         Purpose::Registry,
@@ -709,6 +711,7 @@ impl Purpose {
         Purpose::Leads,
         Purpose::KeyRegistry,
         Purpose::Scenario,
+        Purpose::Replay,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -721,6 +724,7 @@ impl Purpose {
             Purpose::Leads => "leads",
             Purpose::KeyRegistry => "key_registry",
             Purpose::Scenario => "scenario",
+            Purpose::Replay => "replay",
         }
     }
 
@@ -735,6 +739,7 @@ impl Purpose {
             Purpose::Leads => "Leads webhook",
             Purpose::KeyRegistry => "API key registry",
             Purpose::Scenario => "Gateway scenarios",
+            Purpose::Replay => "Saved tests through a gateway",
         }
     }
 
@@ -749,6 +754,7 @@ impl Purpose {
             Purpose::Leads => "the host of RUSTYBIN_LEADS_WEBHOOK_URL",
             Purpose::KeyRegistry => "the host of RUSTYBIN_KEYS_URL",
             Purpose::Scenario => "RUSTYBIN_EGRESS_ALLOW only (the gateway's host; no default)",
+            Purpose::Replay => "RUSTYBIN_EGRESS_ALLOW only (the tests' gateways; no default)",
         }
     }
 }

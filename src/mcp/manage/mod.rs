@@ -25,6 +25,7 @@ pub mod mocks;
 pub mod portal;
 pub mod prompts;
 pub mod registry;
+pub mod replay;
 pub mod resources;
 pub mod scenarios;
 pub mod settings;

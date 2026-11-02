@@ -161,7 +161,7 @@ def run_theme(browser, theme):
         page.wait_for_selector("text=Requests captured")
         page.wait_for_selector("text=What Rustybin sees of this browser")
         page.wait_for_selector(".url-row code")
-        expect(page.locator(".nav-link")).to_have_count(14)
+        expect(page.locator(".nav-link")).to_have_count(15)
         # No plan configured (RUSTYBIN_PLAN=none): no "Plan and usage" card.
         expect(page.locator("text=Plan and usage")).to_have_count(0)
         # AI assist with the mock provider: the Ask card offers suggestions.
@@ -1043,6 +1043,33 @@ def run_theme(browser, theme):
             assert not any(m["name"] == mock for m in json.load(r)["mocks"]), mock
 
     step("gateway scenarios: prepare, a refused check, clean up", gateway_scenarios)
+
+    def saved_tests():
+        # A captured request saved from Live traffic, run on the Saved tests
+        # view, exported as Hurl, deleted.
+        name = f"e2e-test-{theme}"
+        http("GET", "/anything/saved-test-" + theme)
+        page.goto(BASE + "/ui/#/traffic")
+        page.locator(".traffic-row", has_text="/anything/saved-test-" + theme).first.click()
+        page.once("dialog", lambda d: d.accept(name))
+        page.locator("[data-save-test]").first.click()
+        page.wait_for_selector("text=Saved test " + name)
+        page.goto(BASE + "/ui/#/tests")
+        row = page.locator(f"tr[data-test='{name}']")
+        row.wait_for()
+        expect(row).to_contain_text("/anything/saved-test-" + theme)
+        page.click("#tests-run")
+        expect(row.locator(".badge")).to_contain_text("pass")
+        with page.expect_download() as dl:
+            page.click("#tests-export")
+        assert dl.value.suggested_filename == "rustybin-tests.hurl", dl.value.suggested_filename
+        shot(page, theme, "16c-saved-tests")
+        assert_icons_sized(page, "saved tests")
+        page.once("dialog", lambda d: d.accept())
+        page.click(f"[data-delete='{name}']")
+        expect(page.locator(f"tr[data-test='{name}']")).to_have_count(0)
+
+    step("saved tests: save from live traffic, run, export, delete", saved_tests)
 
     def via_gateway():
         # A second origin for the same server stands in for a gateway with CORS.

@@ -51,7 +51,7 @@ removes the created mock and nothing else; another session cannot see or end the
   console scope. A dropped check request clears the run's `checking` flag (a drop guard).
 - The check answers statuses and timings only, never the gateway's headers or bodies, so the
   MCP result has no third-party content to put under `untrusted_*`.
-- The timeouts upstream waits 3 s (600 ms under `cfg(test)`, so the tests stay fast).
+- The timeouts upstream waits 3 s (1.5 s under `cfg(test)`: fast, with room for a loaded test machine).
 - Tests: a stand-in gateway that retries, limits, adds a header, times out and caches passes
   every scenario; a pass-through proxy and the instance itself (no gateway) fail each with the
   right expectation named; ending removes the mock and the run's counters and nothing else (the

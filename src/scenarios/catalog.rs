@@ -13,7 +13,7 @@ use crate::mocks::model::{
 };
 
 /// How long the slow upstream of `timeouts` takes to answer.
-pub const SLOW_MS: u64 = if cfg!(test) { 600 } else { 3000 };
+pub const SLOW_MS: u64 = if cfg!(test) { 1500 } else { 3000 };
 /// The header the gateway adds in `credential_injection`.
 pub const KEY_HEADER: &str = "X-Upstream-Key";
 /// The rate limit the check assumes when the caller gives none.
