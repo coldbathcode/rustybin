@@ -33,7 +33,7 @@ export function exportPanel() {
 
   async function load() {
     replace(status, spinner('Exporting'));
-    const r = await send({ url: SERVER + '/_rustybin/config/export?secrets=' + secrets.value, admin: true, session: false });
+    const r = await send({ control: true, url: SERVER + '/_rustybin/config/export?secrets=' + secrets.value, admin: true, session: false });
     if (!r.ok) { replace(status, notice('err', errorText(r, 'export'))); return; }
     current = r.text;
     yamlEl.value = current;
@@ -41,7 +41,7 @@ export function exportPanel() {
     replace(status, h('span', { class: 'muted small' }, 'Exported ' + new Date().toLocaleTimeString() + ', ' + current.length + ' characters.'));
     if (last && last !== current) {
       // The diff against the last export seen here: the server names what changed.
-      const d = await send({ method: 'POST', url: SERVER + '/_rustybin/config/apply', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ document: last, dry_run: true }), admin: true, session: false });
+      const d = await send({ control: true, method: 'POST', url: SERVER + '/_rustybin/config/apply', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ document: last, dry_run: true }), admin: true, session: false });
       if (d.ok && d.json) {
         const lines = d.json.summary || [];
         replace(diffEl, card('Since the last export in this browser', { hint: lines.length ? lines.length + ' difference(s), read as "what applying the old export would change"' : 'nothing changed' },
@@ -52,7 +52,7 @@ export function exportPanel() {
   }
 
   async function bundle() {
-    const r = await send({ url: SERVER + '/_rustybin/config/export?format=bundle&secrets=' + secrets.value, admin: true, session: false, stream: true });
+    const r = await send({ control: true, url: SERVER + '/_rustybin/config/export?format=bundle&secrets=' + secrets.value, admin: true, session: false, stream: true });
     if (!r.ok || !r.response) { toast(errorText(r, 'bundle'), 'err'); return; }
     const blob = await r.response.blob();
     const url = URL.createObjectURL(blob);
@@ -99,7 +99,7 @@ function applyCard() {
     const text = doc.value;
     if (!text.trim()) { replace(result, notice('warn', 'Paste or upload a document first.')); return; }
     replace(result, spinner(dryRun ? 'Checking' : 'Applying'));
-    const r = await send({ method: 'POST', url: SERVER + '/_rustybin/config/apply', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ document: text, prune: prune.input.checked, dry_run: dryRun }), admin: true, session: false, timeout: 120000 });
+    const r = await send({ control: true, method: 'POST', url: SERVER + '/_rustybin/config/apply', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ document: text, prune: prune.input.checked, dry_run: dryRun }), admin: true, session: false, timeout: 120000 });
     if (!r.ok || !r.json) { replace(result, notice('err', errorText(r, 'apply'))); return; }
     const report = r.json;
     const head = dryRun

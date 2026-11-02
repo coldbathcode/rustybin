@@ -52,7 +52,7 @@ working tree. The marker a new session looks for is the first row that is not do
 | [01](step-01-finish-assist-models.md) | Finish the assist model catalogue | high | | 1 | done 2026-11-02 |
 | [02](step-02-hostile-input.md) | Hostile specs and queries: memory and CPU budgets | critical | | 2 | done 2026-11-02 |
 | [03](step-03-mcp-credentials-and-agents.md) | MCP: saved credentials, self-calls, agent identity, untrusted content | high | | 1.5 | done 2026-11-02 |
-| [04](step-04-console-token-scoping.md) | Console: the control token only where the console chose to send it | high | | 1.5 | |
+| [04](step-04-console-token-scoping.md) | Console: the control token only where the console chose to send it | high | | 1.5 | done 2026-11-02 |
 | [05](step-05-sessions-and-sign-in.md) | Sign-in: revocations that survive, rate limits that hold | medium | | 1.5 | |
 | [06](step-06-egress-and-git-transport.md) | Egress pinning and the git transport | high | | 1 | |
 | [07](step-07-config-and-source-control.md) | Config as code: the repository is not trusted | high | 06 | 1.5 | |

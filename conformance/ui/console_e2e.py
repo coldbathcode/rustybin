@@ -1296,6 +1296,95 @@ def run_jwt(browser):
 
     step("jwt: inspector connects to the management server with the console token", inspector_management_server)
 
+    def hostile_mcp_server():
+        # A malicious MCP server on another origin: its legacy endpoint and its
+        # OAuth metadata point at this instance's control plane. The console
+        # must never send its control token there.
+        import http.server
+        import threading
+
+        class Hostile(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def cors(self):
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Headers", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+                self.send_header("Access-Control-Expose-Headers", "WWW-Authenticate, Mcp-Session-Id")
+
+            def do_OPTIONS(self):
+                self.send_response(204)
+                self.cors()
+                self.end_headers()
+
+            def do_GET(self):
+                if self.path.startswith("/sse"):
+                    self.send_response(200)
+                    self.cors()
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    self.wfile.write(f"event: endpoint\ndata: {jwt_base}/_rustybin/mcp\n\n".encode())
+                    self.wfile.flush()
+                    time.sleep(1)
+                    return
+                self.send_response(404)
+                self.cors()
+                self.end_headers()
+
+            def do_POST(self):
+                self.send_response(401)
+                self.cors()
+                self.send_header("WWW-Authenticate", f'Bearer resource_metadata="{jwt_base}/_rustybin/settings"')
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error": "unauthorized"}')
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Hostile)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        hostile = f"http://127.0.0.1:{srv.server_address[1]}"
+        leaked = []
+
+        def watch(req):
+            path = urllib.parse.urlparse(req.url).path
+            if path in ("/_rustybin/mcp", "/_rustybin/settings") and req.headers.get("authorization"):
+                leaked.append(f"{req.method} {req.url}")
+
+        page.on("request", watch)
+        try:
+            page.goto(jwt_base + "/ui/#/mcp&token=" + control_jwt("admin"))
+            # The bearer only when the caller asks for it, and only to this
+            # server's control plane.
+            hdrs = page.evaluate("""async () => {
+                const m = await import('/ui/lib/http.js');
+                const u = m.SERVER + '/_rustybin/settings';
+                const has = (l) => l.some(([k]) => k.toLowerCase() === 'authorization');
+                return [has(m.withConsoleHeaders([], { url: u })),
+                        has(m.withConsoleHeaders([], { url: u, control: true })),
+                        has(m.withConsoleHeaders([], { url: 'https://elsewhere.example/_rustybin/settings', control: true }))];
+            }""")
+            assert hdrs == [False, True, False], hdrs
+            page.locator(".seg button", has_text="Another server").click()
+            # The legacy transport: the endpoint event names the control plane.
+            page.fill("#mcp-url", hostile + "/sse")
+            page.select_option("#mcp-version", "2024-11-05")
+            page.locator("#mcp-connect").click()
+            page.locator("#mcp-log .log-row").first.wait_for()
+            page.wait_for_timeout(1500)
+            # OAuth discovery: the challenge's metadata URL is the control plane.
+            page.fill("#mcp-url", hostile + "/mcp")
+            page.select_option("#mcp-version", "2026-07-28")
+            page.select_option("#mcp-auth-kind", "oauth")
+            page.locator("#mcp-oauth-start").click()
+            page.wait_for_selector("text=The OAuth walk stopped")
+            page.wait_for_timeout(500)
+        finally:
+            page.remove_listener("request", watch)
+            srv.shutdown()
+        assert not leaked, f"the control token went to: {leaked}"
+
+    step("jwt: a hostile MCP server never receives the control token", hostile_mcp_server)
+
     def expiry_and_sign_out():
         page.goto(jwt_base + "/ui/#/overview&token=" + control_jwt("console", ttl=3))
         page.wait_for_selector("text=Requests captured")

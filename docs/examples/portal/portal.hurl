@@ -95,8 +95,10 @@ GET {{base_url}}/portal/reference/mock:inventory
 HTTP 200
 [Asserts]
 header "Content-Type" startsWith "text/html"
+header "Content-Security-Policy" == "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox"
 body contains "api-reference"
-body contains "mock/inventory/_rustybin/openapi.json"
+body contains "integrity=\"sha384-"
+body contains "/mock/inventory"
 # ANCHOR_END: reference
 
 # ANCHOR: event

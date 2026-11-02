@@ -5,7 +5,7 @@
 // POST /_rustybin/mcp-relay, which forwards the same messages from the
 // instance under the egress policy). Every message in and out goes to the
 // `log` callback with the HTTP headers that carried it.
-import { send, sseParser, readText, SERVER } from './http.js';
+import { send, sseParser, readText, SERVER, isControlUrl } from './http.js';
 import { utf8, toBase64 } from './crypto.js';
 
 export const MODERN = '2026-07-28';
@@ -143,7 +143,7 @@ export class McpClient {
       const body = { target: this.url, transport: this.transport === 'legacy' ? 'legacy' : 'streamable', headers: hmap, message: msg };
       if (this.relaySession) body.session = this.relaySession;
       if (this.connection) body.connection = this.connection;
-      const r = await send({ method: 'POST', url: SERVER + '/_rustybin/mcp-relay', headers: [['Content-Type', 'application/json'], ['Accept', 'text/event-stream']], body: JSON.stringify(body), session: false, stream: true, timeout: 60000, signal: opts.signal });
+      const r = await send({ control: true, method: 'POST', url: SERVER + '/_rustybin/mcp-relay', headers: [['Content-Type', 'application/json'], ['Accept', 'text/event-stream']], body: JSON.stringify(body), session: false, stream: true, timeout: 60000, signal: opts.signal });
       if (r.error || !r.ok) {
         let detail = r.error;
         let reason = null;
@@ -196,7 +196,9 @@ export class McpClient {
   // ── Legacy HTTP+SSE in the browser ──
 
   async legacyOpen() {
-    if (this.legacy) return this.legacy;
+    // A stream that ended is opened again (else every call waits 30 s).
+    if (this.legacy && this.legacy.closed) this.legacy = null;
+    if (this.legacy) return this.legacy.ready;
     const st = { endpoint: null, pending: new Map(), ctrl: new AbortController(), ready: null, closed: false };
     this.legacy = st;
     st.ready = new Promise((resolve, reject) => {
@@ -207,7 +209,19 @@ export class McpClient {
         try {
           await readText(r.response, sseParser((ev) => {
             if (ev.event === 'endpoint') {
-              st.endpoint = new URL(ev.data.trim(), this.absolute(this.url)).toString();
+              // The posts carry the credentials: the endpoint must stay on
+              // the stream's origin, never a URL the server picks elsewhere
+              // (this instance's control plane included).
+              let ep = null;
+              try { ep = new URL(ev.data.trim(), this.absolute(this.url)); } catch { ep = null; }
+              const origin = new URL(this.absolute(this.url)).origin;
+              if (!ep || ep.origin !== origin || isControlUrl(ep.toString())) {
+                st.closed = true;
+                st.ctrl.abort();
+                reject(new Error('the server named an endpoint on another origin (or this instance\'s control plane): refused'));
+                return;
+              }
+              st.endpoint = ep.toString();
               resolve(st);
               return;
             }
@@ -319,7 +333,7 @@ export class McpClient {
   async close() {
     if (this.mode === 'relay' && this.relaySession) {
       this.log('note', { action: 'end relay session', session: this.relaySession });
-      await send({ method: 'DELETE', url: SERVER + '/_rustybin/mcp-relay/' + encodeURIComponent(this.relaySession), session: false, timeout: 10000 });
+      await send({ control: true, method: 'DELETE', url: SERVER + '/_rustybin/mcp-relay/' + encodeURIComponent(this.relaySession), session: false, timeout: 10000 });
       this.relaySession = null;
     } else if (this.transport === 'session' && this.sessionId) {
       this.log('note', { action: 'DELETE session', session: this.sessionId });

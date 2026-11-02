@@ -101,14 +101,14 @@ function remoteRow(r, hint) {
 }
 
 async function validateDoc(doc) {
-  const r = await send({ url: SERVER + '/_rustybin/registry/validate', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: typeof doc === 'string' ? doc : JSON.stringify(doc), session: false });
+  const r = await send({ control: true, url: SERVER + '/_rustybin/registry/validate', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: typeof doc === 'string' ? doc : JSON.stringify(doc), session: false });
   if (r.error) throw new Error(r.error);
   if (!r.ok) throw new Error((r.json && r.json.error) || r.status + ' ' + r.statusText);
   return r.json;
 }
 
 async function saveSetting(key, value) {
-  const r = await send({ url: SERVER + '/_rustybin/settings', method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ values: { [key]: value } }), session: false });
+  const r = await send({ control: true, url: SERVER + '/_rustybin/settings', method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ values: { [key]: value } }), session: false });
   if (!r.ok) throw new Error((r.json && (r.json.error || (r.json.problems && r.json.problems.join('; ')))) || r.status + ' ' + r.statusText);
   return r.json;
 }
@@ -213,7 +213,7 @@ export default {
       };
       const del = e.source === 'published'
         ? h('button', { class: 'btn sm', type: 'button', title: 'Remove this version', 'aria-label': 'Remove ' + e.name + ' ' + e.version, onclick: async () => {
-          const r = await send({ url: SERVER + '/_rustybin/registry/servers/' + encodeURIComponent(e.name) + '?version=' + encodeURIComponent(e.version), method: 'DELETE', session: false });
+          const r = await send({ control: true, url: SERVER + '/_rustybin/registry/servers/' + encodeURIComponent(e.name) + '?version=' + encodeURIComponent(e.version), method: 'DELETE', session: false });
           if (r.ok) { toast('Removed ' + e.name + ' ' + e.version); reload(); } else toast('Not removed: ' + ((r.json && r.json.error) || r.status), 'err');
         } }, icon('trash'))
         : null;
@@ -345,7 +345,7 @@ export default {
         if (st.version) q.set('version', st.version);
         if (cursor) q.set('cursor', cursor);
         replace(resultsEl, spinner('Fetching ' + url));
-        const r = await send({ url: SERVER + '/_rustybin/registry/browse?' + q.toString(), session: false, timeout: 30000 });
+        const r = await send({ control: true, url: SERVER + '/_rustybin/registry/browse?' + q.toString(), session: false, timeout: 30000 });
         if (!alive) return;
         if (!r.ok) {
           const reason = r.json && r.json.reason;

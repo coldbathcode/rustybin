@@ -7,7 +7,7 @@
 // safe markdown renderer (DOM nodes, never innerHTML). Without a key every
 // entry point is an invitation that opens Management, AI.
 import { h, replace, clear, icon, notice, toast, copyText, badge, spinner, field, textarea } from './dom.js';
-import { SERVER, send, getJson, sseParser, readText } from './http.js';
+import { SERVER, send, getJson, sseParser, readText, isServerUrl, isControlUrl } from './http.js';
 import { renderMarkdown } from './markdown.js';
 import * as auth from './auth.js';
 import * as settings from './settings.js';
@@ -96,7 +96,7 @@ export async function run(task, inputs, on = {}, opts = {}) {
   const result = { text: '', json: null, actions: [], usage: null, sent: null, error: null };
   const body = { task, inputs, stream: true };
   if (opts.model) body.model = opts.model;
-  const r = await send({ method: 'POST', url: SERVER + '/_rustybin/assist/run', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' }, body: JSON.stringify(body), session: false, stream: true, timeout: 120000, signal: opts.signal });
+  const r = await send({ control: true, method: 'POST', url: SERVER + '/_rustybin/assist/run', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' }, body: JSON.stringify(body), session: false, stream: true, timeout: 120000, signal: opts.signal });
   if (r.error || !r.ok) {
     let detail = r.error;
     if (!detail && r.response) {
@@ -153,8 +153,16 @@ export function applyCard(action) {
     detail = String(p.text || '').slice(0, 200);
     apply = () => copyText(String(p.text || ''), 'Text');
   } else if (a.action === 'run_request') {
-    title = a.label || ('Send ' + p.method + ' ' + p.path);
+    // The title is always the method and path, never a label the model
+    // chose; the request goes to this server's data plane only, without the
+    // console's control credentials.
+    title = 'Send ' + p.method + ' ' + p.path;
     detail = p.method + ' ' + p.path;
+    let target = null;
+    try { target = new URL(SERVER + String(p.path || '')); } catch { target = null; }
+    const refused = !target || !String(p.path || '').startsWith('/') || !isServerUrl(target.toString())
+      || isControlUrl(target.toString()) || /^\/(ui|portal)(\/|$)/.test(target.pathname.slice(new URL(SERVER + '/').pathname.length - 1));
+    if (refused) return notice('warn', 'An action to ' + String(p.method) + ' ' + String(p.path) + ' was refused: the assistant may only send requests to this instance\'s data plane.');
     apply = async (card) => {
       const out = card.querySelector('.apply-result') || h('div', { class: 'apply-result' });
       replace(out, spinner('Sending'));
@@ -162,7 +170,7 @@ export function applyCard(action) {
       const body = p.body === undefined || p.body === null ? undefined : (typeof p.body === 'string' ? p.body : JSON.stringify(p.body));
       const headers = Object.entries(p.headers || {});
       if (body && typeof p.body !== 'string' && !headers.some(([k]) => k.toLowerCase() === 'content-type')) headers.push(['Content-Type', 'application/json']);
-      const r = await send({ method: p.method, url: SERVER + p.path, headers, body, timeout: 30000 });
+      const r = await send({ method: p.method, url: target.toString(), headers, body, timeout: 30000 });
       if (r.error) { replace(out, notice('err', r.error)); return; }
       replace(out, h('div', { class: 'stack-sm' },
         h('div', { class: 'row' }, badge(String(r.status), r.ok ? 'ok' : 'err'), h('span', { class: 'muted small' }, Math.round(r.ms) + ' ms')),

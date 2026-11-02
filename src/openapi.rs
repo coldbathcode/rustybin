@@ -1,6 +1,6 @@
 use axum::{
     http::{header, HeaderValue, StatusCode},
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     routing::get,
     Router,
 };
@@ -1487,22 +1487,53 @@ async fn openapi_yaml_handler() -> Response {
     rendered_response(doc, "text/yaml; charset=utf-8")
 }
 
-async fn docs_handler() -> Html<&'static str> {
-    Html(DOCS_HTML)
+async fn docs_handler() -> Response {
+    static PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let html = PAGE.get_or_init(|| reference_html("Rustybin API Docs", &build_spec()));
+    reference_response(html.clone())
 }
 
-const DOCS_HTML: &str = r#"<!DOCTYPE html>
-<html>
-<head>
-    <title>Rustybin API Docs</title>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-</head>
-<body>
-    <script id="api-reference" data-url="/openapi.json"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
-</body>
-</html>"#;
+/// The Scalar API reference, pinned (version and Subresource Integrity).
+pub const SCALAR_SCRIPT: &str =
+    "https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.76.4/dist/browser/standalone.js";
+pub const SCALAR_INTEGRITY: &str =
+    "sha384-hwB9WroDTpZaI38gr+u9CXA6ksz5gUYgD2GxXazKl/agT1L2GWUiRFWGJYNiFu4Q";
+/// A reference page runs third-party code over a publisher's spec: it gets an
+/// opaque origin (no access to the console's storage or cookies).
+pub const REFERENCE_CSP: &str = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox";
+
+/// An in-memory `localStorage` for the sandboxed page (an opaque origin has
+/// none, and the reference reads it at start).
+const STORAGE_SHIM: &str = "try{window.localStorage.length}catch(e){var m=new Map(),s={getItem:function(k){return m.has(k)?m.get(k):null},setItem:function(k,v){m.set(String(k),String(v))},removeItem:function(k){m.delete(k)},clear:function(){m.clear()},key:function(i){return Array.from(m.keys())[i]||null},get length(){return m.size}};Object.defineProperty(window,'localStorage',{value:s,configurable:true});Object.defineProperty(window,'sessionStorage',{value:s,configurable:true})}";
+
+/// The API reference of `spec`, inlined (no fetch from the sandboxed page,
+/// so no CORS needed), with the pinned script and the sandbox CSP.
+pub fn reference_page(title: &str, spec: &Value) -> Response {
+    reference_response(reference_html(title, spec))
+}
+
+fn reference_html(title: &str, spec: &Value) -> String {
+    // Inside a script element `<` could end it: JSON allows it escaped.
+    let doc = serde_json::to_string(spec)
+        .unwrap_or_else(|_| "{}".into())
+        .replace('<', "\\u003c");
+    format!(
+        "<!DOCTYPE html>\n<html>\n<head>\n    <title>{}</title>\n    <meta charset=\"utf-8\" />\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n</head>\n<body>\n    <script>{STORAGE_SHIM}</script>\n    <script id=\"api-reference\" type=\"application/json\">{doc}</script>\n    <script src=\"{SCALAR_SCRIPT}\" integrity=\"{SCALAR_INTEGRITY}\" crossorigin=\"anonymous\"></script>\n</body>\n</html>",
+        crate::landing::html_escape(title)
+    )
+}
+
+fn reference_response(html: String) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CONTENT_SECURITY_POLICY, REFERENCE_CSP),
+            (header::REFERRER_POLICY, "same-origin"),
+        ],
+        html,
+    )
+        .into_response()
+}
 
 // ── Router ──────────────────────────────────────────────────────
 
@@ -1630,10 +1661,26 @@ mod tests {
             .expect("response");
 
         assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-security-policy")
+                .and_then(|v| v.to_str().ok()),
+            Some(REFERENCE_CSP)
+        );
         let body = body_string(resp).await;
         assert!(body.contains("Rustybin API Docs"));
-        assert!(body.contains("@scalar/api-reference"));
-        assert!(body.contains("/openapi.json"));
+        assert!(body.contains(SCALAR_SCRIPT));
+        assert!(body.contains(&format!("integrity=\"{SCALAR_INTEGRITY}\"")));
+        assert!(body.contains("crossorigin=\"anonymous\""));
+        // The document inlined, with `<` escaped inside the script element.
+        assert!(body.contains("\"/openapi.json\""));
+        let doc = body
+            .split("type=\"application/json\">")
+            .nth(1)
+            .and_then(|r| r.split("</script>").next())
+            .expect("inline document");
+        assert!(!doc.contains('<'));
+        assert!(serde_json::from_str::<Value>(doc).is_ok());
     }
 
     #[tokio::test]

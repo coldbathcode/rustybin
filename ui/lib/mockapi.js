@@ -26,7 +26,7 @@ export function api(method, path, body, opts = {}) {
       headers.push(['Content-Type', 'application/json']);
     }
   }
-  return send({ method, url: SERVER + API + path, headers, body: payload, session: false, admin: method !== 'GET', timeout: opts.timeout || 20000, signal: opts.signal });
+  return send({ control: true, method, url: SERVER + API + path, headers, body: payload, session: false, admin: method !== 'GET', timeout: opts.timeout || 20000, signal: opts.signal });
 }
 
 /** GET JSON from the management API (throws an Error with a readable message). */

@@ -85,27 +85,36 @@ export function headerList(headers) {
 }
 
 /**
- * Add the console session / admin headers when configured, and the
- * control-plane token (`Authorization: Bearer`) on calls to this server's
- * `/_rustybin/*` routes.
+ * Add the console's own headers, each only where it belongs:
+ * - the session header, to this server only;
+ * - the control-plane token (`Authorization: Bearer`), only when the caller
+ *   asks with `control: true` (the console's own calls to `/_rustybin/*`,
+ *   whose URL it built itself) and the URL is this server's control plane.
+ *   Never inferred from the URL: a URL that came from an MCP server, a
+ *   discovery document or an AI answer must not receive it;
+ * - the token bound to a shared-mode key, on this server's data plane;
+ * - the visitor's manage tokens, on this server's mock API;
+ * - the admin token, with `admin: true`, to this server only.
  */
 export function withConsoleHeaders(list, opts = {}) {
   const out = list.slice();
+  const url = opts.url;
+  const ours = url && isServerUrl(url);
   const session = settings.get('session');
-  if (opts.session !== false && session && !hasHeader(out, SESSION_HEADER)) out.push([SESSION_HEADER, session]);
+  if (opts.session !== false && session && ours && !hasHeader(out, SESSION_HEADER)) out.push([SESSION_HEADER, session]);
   const control = auth.getToken();
-  if (control && opts.url && isControlUrl(opts.url) && !hasHeader(out, 'authorization')) out.push(['Authorization', 'Bearer ' + control]);
+  if (control && opts.control === true && url && isControlUrl(url) && !hasHeader(out, 'authorization')) out.push(['Authorization', 'Bearer ' + control]);
   // Signed in for a shared-mode key: this server's data plane needs the key,
   // which the console never holds; the token bound to it stands in.
-  if (control && auth.boundKey() && opts.url && isServerUrl(opts.url) && !isControlUrl(opts.url)
+  if (control && auth.boundKey() && ours && !isControlUrl(url)
     && !hasHeader(out, 'x-rustybin-key') && !hasHeader(out, KEY_TOKEN_HEADER)) out.push([KEY_TOKEN_HEADER, control]);
   // Self-service: the visitor's manage tokens, to this server's mock API only.
   const mockTokens = visit.tokens();
-  if (mockTokens.length && opts.url && isMocksUrl(opts.url) && !hasHeader(out, visit.HEADER)) out.push([visit.HEADER, mockTokens.join(', ')]);
+  if (mockTokens.length && url && isMocksUrl(url) && !hasHeader(out, visit.HEADER)) out.push([visit.HEADER, mockTokens.join(', ')]);
   // Admin actions: the configured admin token, else the control token (the
   // admin token itself in token mode, or a JWT that may carry the admin scope).
   const admin = settings.get('adminToken') || (auth.required() ? control : '');
-  if (opts.admin && admin && !hasHeader(out, 'x-rustybin-admin-token')) out.push(['X-Rustybin-Admin-Token', admin]);
+  if (opts.admin && admin && ours && !hasHeader(out, 'x-rustybin-admin-token')) out.push(['X-Rustybin-Admin-Token', admin]);
   return out;
 }
 
@@ -159,9 +168,16 @@ export async function send(req) {
     return hit ? hit[1] : null;
   };
   try {
-    const init = { method, headers, signal: ctrl.signal, redirect: req.redirect || 'follow', cache: 'no-store' };
+    // Credentials the console added never follow a redirect (a mock may
+    // answer 302 to another host): the redirect is answered as it is.
+    const added = headers.length > own.length && headers.slice(own.length).some(([k]) => CREDENTIAL_HEADERS.includes(k.toLowerCase()));
+    const init = { method, headers, signal: ctrl.signal, redirect: req.redirect || (added ? 'manual' : 'follow'), cache: 'no-store' };
     if (req.body !== undefined && req.body !== null && method !== 'GET' && method !== 'HEAD') init.body = req.body;
     const resp = await fetch(url, init);
+    if (resp.type === 'opaqueredirect') {
+      result.error = 'The server answered with a redirect, which the console does not follow with your credentials. Copy as curl to follow it from a terminal.';
+      return result;
+    }
     result.status = resp.status;
     result.statusText = resp.statusText;
     result.ok = resp.ok;
@@ -191,7 +207,9 @@ export async function send(req) {
 
 /** GET JSON from this server; resolves to the parsed body or throws an Error with a readable message. */
 export async function getJson(path, opts = {}) {
-  const r = await send(Object.assign({ url: SERVER + path, timeout: 15000 }, opts));
+  // `path` is always a literal of the console's own code: a control path
+  // gets the control token.
+  const r = await send(Object.assign({ url: SERVER + path, timeout: 15000, control: true }, opts));
   if (r.error) throw new Error(r.error);
   if (!r.ok) throw new Error(`${r.status} ${r.statusText}: ${(r.json && (r.json.error || r.json.message)) || r.text.slice(0, 200)}`);
   if (r.json === undefined) throw new Error('Expected JSON from ' + path);

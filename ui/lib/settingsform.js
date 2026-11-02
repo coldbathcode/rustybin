@@ -43,8 +43,11 @@ function valueControl(setting) {
     ctl = select([['false', 'Off'], ['true', 'On']], initial ? 'true' : 'false', props);
     read = () => ctl.value === 'true';
   } else if (Array.isArray(schema.enum)) {
-    ctl = select(schema.enum.map((v) => [v, v]), initial === null || initial === undefined ? setting.default : initial, props);
-    read = () => ctl.value;
+    // An empty first option stands for "not set" (null): without it the
+    // browser would preselect the first choice and a save would store it.
+    const unset = setting.default === null || setting.default === undefined ? '(not set)' : '(default: ' + setting.default + ')';
+    ctl = select([['', unset], ...schema.enum.map((v) => [v, v])], initial === null || initial === undefined ? '' : initial, props);
+    read = () => (ctl.value === '' ? null : ctl.value);
   } else if (type === 'integer' || type === 'number') {
     ctl = input(Object.assign({ type: 'number', class: 'input mono', value: initial === null || initial === undefined ? '' : String(initial), min: schema.minimum, max: schema.maximum, step: type === 'integer' ? '1' : 'any' }, props));
     read = () => (ctl.value === '' ? null : Number(ctl.value));
@@ -162,7 +165,7 @@ export function settingsForm(doc, group, opts = {}) {
       changed.push(c.setting.key);
     }
     if (!changed.length) { toast('Nothing to save'); return; }
-    const r = await send({ method: 'PATCH', url: SERVER + '/_rustybin/settings', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ values, secrets }), admin: true, session: false });
+    const r = await send({ control: true, method: 'PATCH', url: SERVER + '/_rustybin/settings', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ values, secrets }), admin: true, session: false });
     if (r.error || !r.ok) {
       const j = r.json || {};
       const detail = (j.problems || j.locked || []).join('; ');

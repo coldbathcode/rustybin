@@ -2,7 +2,7 @@
 // v1.0 or v0.3 JSON-RPC, a task timeline with state badges and artifacts,
 // input-required / auth-required continuation, cancel, and the push
 // notification sink.
-import { h, replace, clear, card, field, input, notice, empty, icon, badge, fmtTime, segmented, spinner, toast, checkbox, randomId, copyText } from '../lib/dom.js';
+import { h, replace, clear, card, field, input, notice, empty, icon, badge, fmtTime, segmented, spinner, toast, checkbox, randomId, copyText, webUrl } from '../lib/dom.js';
 import { jsonView, codeBlock } from '../lib/format.js';
 import { send, sseParser, readText, toCurl } from '../lib/http.js';
 import { targetPicker } from '../lib/widgets.js';
@@ -293,7 +293,11 @@ export default {
           text ? codeBlock(text, null, 'short') : null,
           ...nonText.map((p) => {
             if (p.kind === 'data') return jsonView(p.data, 'short');
-            if (p.kind === 'file' && p.url) return h('div', null, h('a', { href: p.url, target: '_blank', rel: 'noopener' }, p.name || p.url), (p.mediaType || '').startsWith('image/') ? h('img', { src: p.url, alt: p.name || 'artifact image' }) : null);
+            if (p.kind === 'file' && p.url) {
+              const safe = webUrl(p.url);
+              if (!safe) return h('div', null, badge(p.name || 'file', 'outline'), h('span', { class: 'tiny muted' }, ' (a URL that is not http or https: not linked)'));
+              return h('div', null, h('a', { href: safe, target: '_blank', rel: 'noopener noreferrer' }, p.name || safe), (p.mediaType || '').startsWith('image/') ? h('img', { src: safe, alt: p.name || 'artifact image' }) : null);
+            }
             if (p.kind === 'file' && p.bytes) {
               let decoded = null;
               if ((p.mediaType || '').startsWith('text/')) { try { decoded = base64UrlText(p.bytes); } catch { decoded = null; } }

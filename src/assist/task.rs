@@ -233,7 +233,11 @@ fn valid_action(v: &Value) -> Option<Value> {
                 return None;
             }
             let path = payload.get("path")?.as_str()?;
-            if !path.starts_with('/') || path.starts_with("//") || path.len() > 2048 {
+            if !path.starts_with('/')
+                || path.starts_with("//")
+                || path.len() > 2048
+                || !data_plane_path(path)
+            {
                 return None;
             }
             let mut m = Map::new();
@@ -343,4 +347,58 @@ pub fn validate(value: &Value, schema: &Value) -> Result<(), String> {
         })
         .collect::<Vec<_>>()
         .join("; "))
+}
+
+/// Whether a `run_request` path stays on the data plane: never the control
+/// plane, the console or the portal (`/_rustybin`, `/ui`, `/portal`), and
+/// nothing a browser could normalise into one (dot segments, backslashes,
+/// encoded dots, slashes or underscores). An AI answer may quote captured
+/// traffic; its actions must not reach the instance's own controls.
+pub fn data_plane_path(path: &str) -> bool {
+    let p = path.split(['?', '#']).next().unwrap_or("");
+    let lower = p.to_ascii_lowercase();
+    if lower.contains("/.") || lower.contains('\\') {
+        return false;
+    }
+    if ["%2e", "%2f", "%5c", "%5f"]
+        .iter()
+        .any(|e| lower.contains(e))
+    {
+        return false;
+    }
+    !["/_rustybin", "/ui", "/portal"]
+        .iter()
+        .any(|root| lower == *root || lower.starts_with(&format!("{root}/")))
+}
+
+#[cfg(test)]
+mod run_request_tests {
+    use super::data_plane_path;
+
+    #[test]
+    fn run_request_stays_on_the_data_plane() {
+        for ok in [
+            "/anything",
+            "/mock/petstore/pets?x=/_rustybin",
+            "/uix",
+            "/portals/x",
+        ] {
+            assert!(data_plane_path(ok), "{ok}");
+        }
+        for refused in [
+            "/_rustybin/settings",
+            "/_rustybin",
+            "/_RUSTYBIN/settings",
+            "/ui/",
+            "/portal",
+            "/portal/api/catalog",
+            "/./_rustybin/settings",
+            "/x/../_rustybin/settings",
+            "/%5Frustybin/settings",
+            "/%2e%2e/_rustybin",
+            "/a\\..\\_rustybin",
+        ] {
+            assert!(!data_plane_path(refused), "{refused}");
+        }
+    }
 }

@@ -33,7 +33,9 @@ password, and the top bar shows who is signed in and when the session expires. W
 that form is folded under "Use a token instead"); a token also comes in the URL
 fragment, `/ui/#token=<token>` (or `/ui/#/traffic&token=<token>`). The console
 keeps the token for the browser tab, strips it from the address bar, sends it as
-`Authorization: Bearer` (the live traffic feed included), and shows the sign-in
+`Authorization: Bearer` (the live traffic feed included) on its own control-plane
+calls only, never to a URL that came from elsewhere (an MCP server's endpoint, an
+OAuth discovery document, an AI answer's action), and shows the sign-in
 screen again when the token is refused, revoked or its `exp` passes. A valid token
 with a narrow scope (`inspector`) signs in too, and the views it may not read say
 so. **Management, General, Sign out** revokes a sign-in token and forgets it.

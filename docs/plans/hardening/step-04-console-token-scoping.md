@@ -33,3 +33,43 @@ test of `withConsoleHeaders`; a `task.rs` test refusing control paths.
 
 No console code path attaches the control token to a URL it did not build itself, and the UI
 conformance run is green in open and jwt mode.
+
+## Build notes (2026-11-02)
+
+- Every finding is fixed; none was closed as not reproducible.
+- `withConsoleHeaders` adds the bearer only with `control: true` and a control URL of
+  this server; 53 literal control calls got `control: true`, plus the ones whose URL
+  is built in a variable (`traffic.js`, `agents.js`, `lib/traffic.js`,
+  `authorize.js`). `getJson` defaults to `control: true` (its paths are always
+  literals). The API explorer sends `control: isControlUrl(url)`: the user picked the
+  route in the console's own tool. `fetchDoc`, `run_request` and the MCP client's
+  browser calls never ask for it (the management server's token is an explicit auth
+  header the MCP view fills in).
+- The session header goes to this server only; the admin header too; credentials the
+  console added make the fetch `redirect: 'manual'` (an opaque redirect answers with
+  an error that says why).
+- `mcpclient.js`: a legacy `endpoint` on another origin, or on this instance's control
+  plane, is refused; a closed legacy stream is opened again, and `legacyOpen` now
+  returns the ready promise (it returned the state object, so a call could race the
+  endpoint event).
+- `mcpauth.js`: `untrustedUrlProblem` allows absolute `https:`, `http:` on loopback or
+  this instance's origin, and never `/_rustybin/*` other than `/_rustybin/oauth/*`;
+  the popup opens only an http(s) URL. `dom.webUrl` guards the A2A artifact links and
+  images.
+- `run_request`: `assist::task::data_plane_path` refuses `/_rustybin`, `/ui`,
+  `/portal` and anything a browser could normalise into them (dot segments,
+  backslashes, `%2e`, `%2f`, `%5c`, `%5f`); the console checks the normalised URL
+  again, shows a notice instead of a card when refused, and titles the card with the
+  method and path only.
+- Scalar: pinned to 1.76.4 with its sha384, the document inlined into the page
+  (`<` escaped), served with `Content-Security-Policy: sandbox allow-scripts
+  allow-popups allow-popups-to-escape-sandbox`. An opaque origin has no
+  `localStorage`, which the viewer reads at start, so the page installs an in-memory
+  one first; checked in Chromium. Inlining also means the page needs no CORS.
+- Settings forms: a choice gets a first option, `(not set)` or `(default: x)`, read as
+  `null`.
+- Tests: the jwt run of `conformance/ui` has a hostile MCP server (legacy endpoint and
+  OAuth metadata pointing at the control plane) and checks that no request to
+  `/_rustybin/mcp` or `/_rustybin/settings` carries the bearer, plus
+  `withConsoleHeaders` evaluated in the page; `task.rs` and the `/docs` and portal
+  reference tests in Rust.

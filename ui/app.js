@@ -387,7 +387,7 @@ function renderSignIn() {
 async function verifyAndResume() {
   // Check the new token once. A 401 already brought the sign-in screen back
   // with the reason; an unreachable server says so instead of doing nothing.
-  const r = await send({ url: SERVER + '/_rustybin/status', session: false, timeout: 15000 });
+  const r = await send({ control: true, url: SERVER + '/_rustybin/status', session: false, timeout: 15000 });
   if (r.status === 401) return;
   if (r.error) {
     auth.markUnauthorized('unreachable');

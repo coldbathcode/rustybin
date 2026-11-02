@@ -30,6 +30,17 @@ function append(el, children) {
   }
 }
 
+/** An `http:` or `https:` URL from untrusted content, else null (never
+ *  `javascript:`, `data:` or another scheme in an href, src or window.open). */
+export function webUrl(u) {
+  try {
+    const url = new URL(String(u), location.href);
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 export function clear(el) {
   while (el.firstChild) el.removeChild(el.firstChild);
   return el;

@@ -21,11 +21,11 @@ export function portalUrl() {
 
 /** Publish (or update) item `id` with `meta`. Resolves to the send() result. */
 export function publish(id, meta) {
-  return send({ method: 'PUT', url: SERVER + BASE + '/items/' + encodeURIComponent(id), headers: [['Content-Type', 'application/json']], body: JSON.stringify(meta || {}), session: false, admin: true });
+  return send({ control: true, method: 'PUT', url: SERVER + BASE + '/items/' + encodeURIComponent(id), headers: [['Content-Type', 'application/json']], body: JSON.stringify(meta || {}), session: false, admin: true });
 }
 
 export function unpublish(id) {
-  return send({ method: 'DELETE', url: SERVER + BASE + '/items/' + encodeURIComponent(id), session: false, admin: true });
+  return send({ control: true, method: 'DELETE', url: SERVER + BASE + '/items/' + encodeURIComponent(id), session: false, admin: true });
 }
 
 function errorOf(r) {

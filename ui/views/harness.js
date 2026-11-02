@@ -184,7 +184,7 @@ export default {
 
     // ── Node ──
     async function loadNode() {
-      const r = await send({ url: SERVER + PREFIX, timeout: 10000 });
+      const r = await send({ control: true, url: SERVER + PREFIX, timeout: 10000 });
       if (!alive) return null;
       if (!r.ok || !r.json) {
         replace(nodeEl, notice('err', r.error || `GET ${PREFIX} answered ${r.status}`));
@@ -242,11 +242,11 @@ export default {
           h('div', { class: 'row' }, h('code', null, joinToken.token), copyButton(() => joinToken.token, { label: 'Copy token' })))));
       }
       for (const c of leads) {
-        const r = await send({ url: `${SERVER}${PREFIX}/clusters/${encodeURIComponent(c.cluster_id)}`, timeout: 10000 });
+        const r = await send({ control: true, url: `${SERVER}${PREFIX}/clusters/${encodeURIComponent(c.cluster_id)}`, timeout: 10000 });
         if (!alive) return;
         if (!r.ok || !r.json) { parts.push(notice('err', r.error || `answered ${r.status}`)); continue; }
         const d = r.json;
-        const ups = await send({ url: `${SERVER}${PREFIX}/clusters/${encodeURIComponent(c.cluster_id)}/upstreams`, timeout: 10000 });
+        const ups = await send({ control: true, url: `${SERVER}${PREFIX}/clusters/${encodeURIComponent(c.cluster_id)}/upstreams`, timeout: 10000 });
         const upstreams = (ups.ok && Array.isArray(ups.json)) ? ups.json : [];
         parts.push(h('div', { class: 'stack-sm' },
           h('div', { class: 'row' }, h('strong', null, d.cluster_id), badge(`leader ${d.leader.node_id}, term ${d.term}`, 'violet'),
@@ -277,7 +277,7 @@ export default {
       if (n.cluster && !leads.some((c) => c.cluster_id === n.cluster.cluster_id)) {
         const m = n.cluster;
         // Every member answers who leads, as its snapshot says.
-        const lr = await send({ url: `${SERVER}${PREFIX}/clusters/${encodeURIComponent(m.cluster_id)}/leader`, timeout: 10000 });
+        const lr = await send({ control: true, url: `${SERVER}${PREFIX}/clusters/${encodeURIComponent(m.cluster_id)}/leader`, timeout: 10000 });
         if (!alive) return;
         const lv = (lr.ok && lr.json) || {};
         parts.push(h('div', { class: 'row' }, h('strong', null, m.cluster_id), m.leader && m.leader.node_id ? badge(`leader ${m.leader.node_id}, term ${m.leader.term}`, 'violet') : badge('not joined yet', 'outline'),
@@ -301,7 +301,7 @@ export default {
         const create = async () => {
           const body = { min_nodes: { client: Number(minC.value) || 0, server: Number(minS.value) || 0 } };
           if (idIn.value.trim()) body.cluster_id = idIn.value.trim();
-          const r = await send({ method: 'POST', url: SERVER + PREFIX + '/clusters', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), admin: true, timeout: 10000 });
+          const r = await send({ control: true, method: 'POST', url: SERVER + PREFIX + '/clusters', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), admin: true, timeout: 10000 });
           if (r.status !== 201 || !r.json) { replace(msg, notice('err', (r.json && r.json.error) || r.error || `answered ${r.status}`)); return; }
           joinToken = { id: r.json.cluster_id, token: r.json.join_token, url: location.origin.replace(/\/$/, '') + SERVER + PREFIX + '/clusters/' + r.json.cluster_id };
           st.cluster = r.json.cluster_id;
@@ -316,7 +316,7 @@ export default {
     }
 
     async function killSwitch() {
-      const r = await send({ method: 'POST', url: SERVER + PREFIX + '/stop', admin: true, timeout: 10000 });
+      const r = await send({ control: true, method: 'POST', url: SERVER + PREFIX + '/stop', admin: true, timeout: 10000 });
       if (r.ok) { toast('All load stopped'); replace(killMsg); }
       else replace(killMsg, notice('err', (r.json && r.json.error) || r.error || `answered ${r.status}`));
       loadNode();
@@ -332,8 +332,8 @@ export default {
 
     async function loadBuilder() {
       const [sr, lr] = await Promise.all([
-        send({ url: SERVER + PREFIX + '/schema', timeout: 10000 }),
-        send({ url: SERVER + PREFIX + '/scenarios', timeout: 10000 }),
+        send({ control: true, url: SERVER + PREFIX + '/schema', timeout: 10000 }),
+        send({ control: true, url: SERVER + PREFIX + '/scenarios', timeout: 10000 }),
       ]);
       if (!alive) return;
       if (!sr.ok || !sr.json) {
@@ -346,7 +346,7 @@ export default {
       builtinSel = select([['', 'Scenarios...'], ...builtins.map((b) => [b.name, `${b.name}: ${b.description || ''}`.slice(0, 90)]), ...savedList.map((b) => [b.name, `saved: ${b.name}`])], '', { 'aria-label': 'Built-in or saved scenario', id: 'harness-builtin' });
       builtinSel.addEventListener('change', async () => {
         if (!builtinSel.value) return;
-        const r = await send({ url: `${SERVER}${PREFIX}/scenarios/${builtinSel.value}`, timeout: 10000 });
+        const r = await send({ control: true, url: `${SERVER}${PREFIX}/scenarios/${builtinSel.value}`, timeout: 10000 });
         if (r.ok && r.json) {
           st.builtin = builtinSel.value;
           setScenario(r.json);
@@ -357,7 +357,7 @@ export default {
         try { initial = JSON.parse(st.scenarioText); } catch { initial = null; }
       }
       if (!initial) {
-        const r = await send({ url: `${SERVER}${PREFIX}/scenarios/${st.builtin || 'smoke'}`, timeout: 10000 });
+        const r = await send({ control: true, url: `${SERVER}${PREFIX}/scenarios/${st.builtin || 'smoke'}`, timeout: 10000 });
         initial = (r.ok && r.json) || { name: 'smoke' };
       }
       form = scenarioForm(schema, normalise(initial));
@@ -403,7 +403,7 @@ export default {
       if (!form || !alive) return;
       let value;
       try { value = form.value(); } catch { return; }
-      const r = await send({ method: 'POST', url: SERVER + PREFIX + '/preview', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value), timeout: 10000 });
+      const r = await send({ control: true, method: 'POST', url: SERVER + PREFIX + '/preview', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value), timeout: 10000 });
       if (!alive || !r.ok || !r.json) return;
       replace(previewEl, previewChart(r.json));
     }
@@ -413,7 +413,7 @@ export default {
       try { value = form.value(); } catch (e) { replace(problemsEl, notice('err', e.message)); return; }
       const name = window.prompt('Save the scenario as (letters, digits, . _ -):', (value.name || 'scenario').replace(/[^A-Za-z0-9._-]/g, '-'));
       if (!name) return;
-      const r = await send({ method: 'PUT', url: `${SERVER}${PREFIX}/scenarios/${encodeURIComponent(name)}`, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value), admin: true, timeout: 10000 });
+      const r = await send({ control: true, method: 'PUT', url: `${SERVER}${PREFIX}/scenarios/${encodeURIComponent(name)}`, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value), admin: true, timeout: 10000 });
       if (r.ok) {
         toast(`Saved as ${name}`);
         if (builtinSel && ![...builtinSel.options].some((o) => o.value === name)) builtinSel.append(h('option', { value: name }, `saved: ${name}`));
@@ -448,7 +448,7 @@ export default {
     }
 
     async function applyYaml() {
-      const r = await send({ method: 'POST', url: SERVER + PREFIX + '/validate', headers: { 'Content-Type': 'application/yaml' }, body: yamlArea.value, timeout: 10000 });
+      const r = await send({ control: true, method: 'POST', url: SERVER + PREFIX + '/validate', headers: { 'Content-Type': 'application/yaml' }, body: yamlArea.value, timeout: 10000 });
       if (!r.json) { replace(problemsEl, notice('err', r.error || `answered ${r.status}`)); return; }
       if (r.status === 400) { replace(problemsEl, notice('err', r.json.error)); return; }
       form.set(r.json.scenario);
@@ -469,7 +469,7 @@ export default {
       let value;
       try { value = form.value(); } catch (e) { replace(problemsEl, notice('err', e.message)); return; }
       st.scenarioText = JSON.stringify(value);
-      const r = await send({ method: 'POST', url: SERVER + PREFIX + '/validate', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value), timeout: 10000 });
+      const r = await send({ control: true, method: 'POST', url: SERVER + PREFIX + '/validate', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value), timeout: 10000 });
       if (!r.json) { replace(problemsEl, notice('err', r.error || `answered ${r.status}`)); return; }
       if (r.status === 400) { replace(problemsEl, notice('err', r.json.error)); return; }
       if (!showValidation(r.json) || !thenRun) return;
@@ -477,12 +477,12 @@ export default {
       const where = st.cluster ? ` from the client nodes of cluster ${st.cluster}` : '';
       if (!window.confirm(`Send load to ${targets}${where} for ${num(r.json.summary.duration_secs)} s at a peak of ${num(r.json.summary.peak_rate)} requests/s?`)) return;
       const showError = (res) => replace(problemsEl, notice('err', h('div', null, res.json.error, res.json.problems ? h('ul', null, ...res.json.problems.map((p) => h('li', null, p))) : null)));
-      let run = await send({ method: 'POST', url: SERVER + runBase() + '/runs', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value), admin: true, timeout: 20000 });
+      let run = await send({ control: true, method: 'POST', url: SERVER + runBase() + '/runs', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value), admin: true, timeout: 20000 });
       if (!run.json) { replace(problemsEl, notice('err', run.error || `answered ${run.status}`)); return; }
       if (st.cluster) {
         // A cluster run is submitted, then started once the quorum is there.
         if (run.status !== 201) { showError(run); return; }
-        run = await send({ method: 'POST', url: `${SERVER}${runBase()}/runs/${run.json.run_id}/start`, admin: true, timeout: 20000 });
+        run = await send({ control: true, method: 'POST', url: `${SERVER}${runBase()}/runs/${run.json.run_id}/start`, admin: true, timeout: 20000 });
         if (!run.json) { replace(problemsEl, notice('err', run.error || `answered ${run.status}`)); return; }
       }
       if (run.status !== 202) {
@@ -538,7 +538,7 @@ export default {
 
     async function stopRun() {
       if (!st.runId) return;
-      const r = await send({ method: 'POST', url: `${SERVER}${runBase()}/runs/${st.runId}/stop`, admin: true, timeout: 10000 });
+      const r = await send({ control: true, method: 'POST', url: `${SERVER}${runBase()}/runs/${st.runId}/stop`, admin: true, timeout: 10000 });
       if (r.ok) toast('Stopping the run');
       else toast((r.json && r.json.error) || r.error || `answered ${r.status}`, 'err');
     }
@@ -568,7 +568,7 @@ export default {
       if (!id || !alive) return;
       const ctrl = new AbortController();
       feedCtrl = ctrl;
-      const r = await send({ url: `${SERVER}${runBase()}/runs/${id}/events`, stream: true, timeout: 15000, signal: ctrl.signal });
+      const r = await send({ control: true, url: `${SERVER}${runBase()}/runs/${id}/events`, stream: true, timeout: 15000, signal: ctrl.signal });
       if (r.error || !r.response || !r.contentType.includes('event-stream')) {
         if (!ctrl.signal.aborted) startPolling();
         return;
@@ -600,7 +600,7 @@ export default {
     let controlsKey = '';
     async function change(body) {
       if (!st.runId) return;
-      const r = await send({ method: 'PATCH', url: `${SERVER}${runBase()}/runs/${st.runId}`, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), admin: true, timeout: 10000 });
+      const r = await send({ control: true, method: 'PATCH', url: `${SERVER}${runBase()}/runs/${st.runId}`, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), admin: true, timeout: 10000 });
       if (r.ok) {
         toast(`Applied: ${r.json.applied}`);
         controlsKey = '';
@@ -670,7 +670,7 @@ export default {
 
     async function poll() {
       if (!alive || !st.runId) return;
-      const r = await send({ url: `${SERVER}${runBase()}/runs/${st.runId}`, timeout: 10000 });
+      const r = await send({ control: true, url: `${SERVER}${runBase()}/runs/${st.runId}`, timeout: 10000 });
       if (!alive) return;
       if (!r.ok || !r.json) {
         if (r.status === 404) { clearInterval(pollTimer); pollTimer = null; st.runId = null; }
@@ -688,7 +688,7 @@ export default {
     // ── Report ──
     async function loadReport(id) {
       const base = runBase();
-      const r = await send({ url: `${SERVER}${base}/runs/${id}/report`, timeout: 15000 });
+      const r = await send({ control: true, url: `${SERVER}${base}/runs/${id}/report`, timeout: 15000 });
       if (!alive || !r.ok || !r.json) return;
       const rep = r.json;
       const t = rep.totals || {};

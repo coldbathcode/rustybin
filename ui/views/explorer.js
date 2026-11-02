@@ -2,7 +2,7 @@
 // category filters and a "Try it" request builder prefilled from examples.
 import { h, replace, clear, card, input, textarea, select, notice, empty, icon, methodBadge, badge, spinner, debounce, copyButton } from '../lib/dom.js';
 import { codeBlock } from '../lib/format.js';
-import { getJson, send, toCurl, sseParser, readText } from '../lib/http.js';
+import { getJson, send, toCurl, sseParser, readText, isControlUrl } from '../lib/http.js';
 import { targetPicker, responseView, headerEditor } from '../lib/widgets.js';
 import * as settings from '../lib/settings.js';
 
@@ -115,7 +115,9 @@ export default {
         sendBtn.disabled = false;
         return;
       }
-      const r = await send(Object.assign({ timeout: 60000 }, req));
+      // The user picked this route in the console's own explorer: a control
+      // route gets the console's token.
+      const r = await send(Object.assign({ timeout: 60000, control: isControlUrl(req.url) }, req));
       sendBtn.disabled = false;
       if (!alive) return;
       replace(respEl, responseView(r));
@@ -124,7 +126,7 @@ export default {
     async function doStream(req) {
       streamCtrl = new AbortController();
       const ctrl = streamCtrl;
-      const r = await send(Object.assign({ stream: true, timeout: 30000, signal: ctrl.signal }, req));
+      const r = await send(Object.assign({ stream: true, timeout: 30000, signal: ctrl.signal, control: isControlUrl(req.url) }, req));
       if (!alive) return;
       if (r.error || !r.response) { replace(respEl, responseView(r)); return; }
       const out = codeBlock('', null, 'tall');

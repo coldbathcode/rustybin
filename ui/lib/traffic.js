@@ -86,6 +86,7 @@ function retry(message) {
 async function follow(ctrl) {
   const q = query();
   const r = await send({
+    control: true,
     url: SERVER + '/_rustybin/requests/stream' + (q ? '?' + q : ''),
     headers: [['Accept', 'text/event-stream']],
     stream: true,

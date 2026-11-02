@@ -8,7 +8,8 @@
 // credentials, the token exchange and refresh. Documents are fetched from
 // the browser, or through the instance (POST /_rustybin/mcp-relay/fetch) in
 // relay mode or when the browser cannot reach them.
-import { send, SERVER } from './http.js';
+import { send, SERVER, isControlUrl } from './http.js';
+import { webUrl } from './dom.js';
 import { utf8, toBase64, randomString, pkceChallenge } from './crypto.js';
 import { parseChallenge } from './mcpclient.js';
 
@@ -47,8 +48,26 @@ export function withQuery(url, query) {
  * Fetch one document: directly, or through the instance. Resolves
  * {status, json, text, headers: {name: value}, via}.
  */
+/**
+ * Why a URL from a discovery document may not be fetched, or null. These
+ * URLs come from the server being inspected: only absolute `https:` (or
+ * `http:` on a loopback host or this instance's own origin), and never this
+ * instance's control plane (its OAuth sign-in endpoints aside).
+ */
+export function untrustedUrlProblem(url) {
+  let u;
+  try { u = new URL(String(url)); } catch { return 'not an absolute URL: ' + String(url).slice(0, 80); }
+  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
+  const ours = u.origin === new URL(SERVER).origin;
+  if (u.protocol !== 'https:' && !(u.protocol === 'http:' && (loopback || ours))) return 'only https URLs are followed (' + u.protocol + ' refused)';
+  if (isControlUrl(u.toString()) && !u.pathname.includes('/_rustybin/oauth/')) return 'the document points at this instance\'s control plane: refused';
+  return null;
+}
+
 export async function fetchDoc(url, opts = {}) {
-  const abs = /^https?:\/\//i.test(url) ? url : SERVER + url;
+  const problem = untrustedUrlProblem(url);
+  if (problem) return { status: 0, json: null, text: '', headers: {}, via: 'browser', error: problem };
+  const abs = url;
   const sameOrigin = (() => { try { return new URL(abs).origin === location.origin; } catch { return false; } })();
   const tryDirect = opts.mode !== 'relay' || sameOrigin;
   if (tryDirect) {
@@ -63,7 +82,7 @@ export async function fetchDoc(url, opts = {}) {
   const hmap = {};
   for (const [k, v] of opts.headers || []) hmap[k] = v;
   const target = sameOrigin ? new URL(abs).pathname + new URL(abs).search : abs;
-  const r = await send({ method: 'POST', url: SERVER + '/_rustybin/mcp-relay/fetch', headers: [['Content-Type', 'application/json']], body: JSON.stringify({ url: target, method: opts.method || 'GET', headers: hmap, body: opts.body }), timeout: 30000, session: false });
+  const r = await send({ control: true, method: 'POST', url: SERVER + '/_rustybin/mcp-relay/fetch', headers: [['Content-Type', 'application/json']], body: JSON.stringify({ url: target, method: opts.method || 'GET', headers: hmap, body: opts.body }), timeout: 30000, session: false });
   if (r.error || !r.ok) return { status: r.status, json: null, text: r.text, headers: {}, via: 'relay', error: r.error || (r.json && r.json.error) || ('HTTP ' + r.status) };
   return { status: r.json.status, json: r.json.json, text: r.json.body, headers: r.json.headers || {}, via: 'relay' };
 }
@@ -139,8 +158,10 @@ export async function oauthWalk(ctx) {
     const state = randomString(12);
     const q = new URLSearchParams({ response_type: 'code', client_id: clientId, redirect_uri: redirect, scope, state, resource, code_challenge: pkceChallenge(verifier), code_challenge_method: 'S256' });
     const url = asm.authorization_endpoint + (asm.authorization_endpoint.includes('?') ? '&' : '?') + q.toString();
+    const authProblem = untrustedUrlProblem(asm.authorization_endpoint);
+    if (authProblem) { s5.fail(authProblem); throw new Error(authProblem); }
     const code = await new Promise((resolve, reject) => {
-      const popup = window.open(url, 'rustybin-mcp-oauth', 'width=520,height=700');
+      const popup = webUrl(url) ? window.open(url, 'rustybin-mcp-oauth', 'width=520,height=700') : null;
       if (!popup) { reject(new Error('the popup was blocked: allow popups for this console')); return; }
       const onMsg = (ev) => {
         if (ev.origin !== location.origin || !ev.data || ev.data.type !== 'rustybin-oauth-callback') return;

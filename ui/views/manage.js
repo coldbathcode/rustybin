@@ -174,7 +174,7 @@ function passwordCard(doc, status, onChanged) {
     const body = { current_password: current.value, new_password: next.value };
     const name = nameInput.value.trim();
     if (name && name !== ((user && user.value) || 'rustybin')) body.username = name;
-    const r = await send({ method: 'PUT', url: SERVER + '/_rustybin/password', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), admin: true, session: false });
+    const r = await send({ control: true, method: 'PUT', url: SERVER + '/_rustybin/password', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), admin: true, session: false });
     submit.disabled = false;
     if (r.error || !r.ok) {
       const j = r.json || {};
@@ -202,12 +202,12 @@ function sessionsCard(reloadRef) {
         h('td', { class: 'small', title: s.last_used }, fmtTime(s.last_used)),
         h('td', { class: 'small', title: s.expires_at }, fmtTime(s.expires_at)),
         h('td', null, h('button', { class: 'btn sm ghost', type: 'button', 'aria-label': 'End session ' + s.id, onclick: async () => {
-          const r = await send({ method: 'DELETE', url: SERVER + '/_rustybin/sessions/' + encodeURIComponent(s.id), admin: true, session: false });
+          const r = await send({ control: true, method: 'DELETE', url: SERVER + '/_rustybin/sessions/' + encodeURIComponent(s.id), admin: true, session: false });
           if (r.ok) { toast(s.id === d.current ? 'This session ended' : 'Session ended'); load(); } else toast('Could not end the session (' + r.status + ')', 'err');
         } }, 'End'))));
       const everywhere = h('button', { class: 'btn sm danger', type: 'button', id: 'sign-out-everywhere', onclick: async () => {
         if (!window.confirm('Sign out everywhere? Every sign-in token issued so far stops working, this one included.')) return;
-        const r = await send({ method: 'DELETE', url: SERVER + '/_rustybin/sessions', admin: true, session: false });
+        const r = await send({ control: true, method: 'DELETE', url: SERVER + '/_rustybin/sessions', admin: true, session: false });
         if (!r.ok) toast('Could not sign out everywhere (' + r.status + ')', 'err');
         // The server refuses this token from now on; the next call brings the sign-in screen.
         else auth.signOut();
@@ -269,7 +269,7 @@ function aiPanel(doc, reload, error) {
   let st = null;
 
   function pick(values) {
-    return send({ method: 'PATCH', url: SERVER + '/_rustybin/settings', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ values }), admin: true, session: false })
+    return send({ control: true, method: 'PATCH', url: SERVER + '/_rustybin/settings', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ values }), admin: true, session: false })
       .then((r) => {
         if (r.error || !r.ok) { toast(r.error || (r.json && r.json.error) || ('Save failed (' + r.status + ')'), 'err'); return; }
         toast('Saved ' + Object.keys(values).join(', '));
@@ -303,7 +303,7 @@ function aiPanel(doc, reload, error) {
   async function test(btn, out) {
     btn.disabled = true;
     replace(out, spinner('Calling the provider'));
-    const r = await send({ method: 'POST', url: SERVER + '/_rustybin/assist/test', admin: true, session: false, timeout: 70000 });
+    const r = await send({ control: true, method: 'POST', url: SERVER + '/_rustybin/assist/test', admin: true, session: false, timeout: 70000 });
     btn.disabled = false;
     const j = r.json || {};
     if (r.error || !r.ok) { replace(out, notice('err', r.error || j.error || ('The test failed (' + r.status + ')'))); return; }
@@ -350,7 +350,7 @@ function aiPanel(doc, reload, error) {
     loadBtn.addEventListener('click', async () => {
       loadBtn.disabled = true;
       replace(out, spinner('Asking ' + c.provider + ' for its models'));
-      const r = await send({ method: 'POST', url: SERVER + '/_rustybin/assist/models', admin: true, session: false, timeout: 70000 });
+      const r = await send({ control: true, method: 'POST', url: SERVER + '/_rustybin/assist/models', admin: true, session: false, timeout: 70000 });
       loadBtn.disabled = false;
       const j = r.json || {};
       if (r.error || !r.ok) { replace(out, notice('err', r.error || j.error || ('Loading failed (' + r.status + ')'))); return; }

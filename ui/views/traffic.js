@@ -233,7 +233,7 @@ export default {
       const url = SERVER + '/_rustybin/requests/' + encodeURIComponent(e.id) + (e.session ? '?session=' + encodeURIComponent(e.session) : '');
       if (!auth.required()) return h('a', { class: 'btn sm', href: url, target: '_blank', rel: 'noopener' }, icon('external'), 'JSON');
       return h('button', { class: 'btn sm', type: 'button', onclick: async () => {
-        const r = await send({ url, session: false });
+        const r = await send({ control: true, url, session: false });
         if (!r.ok) { toast(r.error || ('JSON not available: ' + r.status), 'err'); return; }
         const blob = new Blob([JSON.stringify(r.json, null, 2)], { type: 'application/json' });
         const href = URL.createObjectURL(blob);
@@ -305,11 +305,11 @@ export default {
       const session = settings.get('session');
       const scoped = settings.instance.publicMode || settings.get('trafficSessionOnly');
       if (scoped && session) {
-        const r = await send({ method: 'DELETE', url: SERVER + '/_rustybin/requests?session=' + encodeURIComponent(session), session: false });
+        const r = await send({ control: true, method: 'DELETE', url: SERVER + '/_rustybin/requests?session=' + encodeURIComponent(session), session: false });
         if (r.ok) { traffic.clearLocal(); toast(`Cleared ${r.json ? r.json.cleared : ''} requests of session ${session}`); }
         else toast(r.error || `Clear failed: ${r.status} ${(r.json && r.json.error) || ''}`, 'err');
       } else {
-        const r = await send({ method: 'DELETE', url: SERVER + '/_rustybin/requests', session: false, admin: true });
+        const r = await send({ control: true, method: 'DELETE', url: SERVER + '/_rustybin/requests', session: false, admin: true });
         if (r.ok) { traffic.clearLocal(); toast(`Cleared ${r.json ? r.json.cleared : ''} captured requests`); }
         else if (r.status === 401 || r.status === 403) toast('Clearing every request needs the admin token (Management, General), or narrow the feed to your session.', 'err');
         else toast(r.error || `Clear failed: ${r.status}`, 'err');

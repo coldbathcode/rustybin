@@ -56,7 +56,7 @@ export default {
         return fail('info', 'Sign in to the console to answer this request.');
       }
       replace(body, spinner('Loading the sign-in request'));
-      const r = await send({ url, session: false });
+      const r = await send({ control: true, url, session: false });
       if (!alive) return;
       if (!r.ok || !r.json) return explain(r);
       render(r.json);
@@ -100,7 +100,7 @@ export default {
         replace(err);
         const payload = { decision };
         if (decision === 'approve') payload.scope = choice[0];
-        const r = await send({ url, method: 'POST', session: false, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        const r = await send({ control: true, url, method: 'POST', session: false, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         if (!alive) return;
         if (!r.ok || !r.json || !r.json.redirect_to) {
           approve.disabled = !choice;

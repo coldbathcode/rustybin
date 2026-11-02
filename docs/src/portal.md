@@ -176,7 +176,7 @@ calls are reported to `/portal/api/events`:
 | `GET /portal/api/catalog` | The published items |
 | `POST /portal/api/events` | `{item, event: "view" \| "try"}` |
 | `GET /portal/api/items/{id}/collections/{format}` | A published mock as a collection |
-| `GET /portal/reference/{id}` | A published mock's spec in the API reference viewer (loads it from a CDN, like `/docs`) |
+| `GET /portal/reference/{id}` | A published mock's spec in the API reference viewer (pinned and sandboxed like `/docs`, the spec inlined) |
 | `GET /_rustybin/portal` | The console's view: settings, every publishable item, why a published one is hidden, its counters |
 | `PUT`, `DELETE /_rustybin/portal/items/{id}` | Publish or update, unpublish |
 | `GET /_rustybin/portal/insights` | The counters |

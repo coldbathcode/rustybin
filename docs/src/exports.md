@@ -44,7 +44,11 @@ the variable after importing.
 
 `/openapi.json` and `/openapi.yaml` describe the HTTP API (OpenAPI 3.0.3), and
 `/docs` renders it as an interactive reference (the Scalar viewer, loaded from a CDN, so
-`/docs` needs internet access unlike the [web console](console.md)). Import the spec into a gateway to
+`/docs` needs internet access unlike the [web console](console.md)). The viewer's
+script is pinned to one version with Subresource Integrity, the document is inlined
+into the page, and the page is served with `Content-Security-Policy: sandbox
+allow-scripts allow-popups`, so it runs in an opaque origin: the viewer cannot read
+the console's stored token or cookies. Import the spec into a gateway to
 generate routes, or into a client generator. The landing page `/` lists every
 endpoint with a runnable example.
 

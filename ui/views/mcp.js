@@ -277,7 +277,7 @@ export default {
         if (a.kind === 'headers') { spec.headers = a.headers.filter(([k]) => k).map(([k]) => k); for (const [k, v] of a.headers) if (k && v) secrets['header:' + k] = v; }
         if (a.kind === 'oauth') { spec.oauth = { client_id: a.clientId || null, scope: a.scope || null, token_endpoint: oauthState ? oauthState.tokenEndpoint : null, issuer: oauthState ? oauthState.issuer : null }; if (oauthState && oauthState.refresh) secrets.refresh_token = oauthState.refresh; if (a.clientSecret) secrets.client_secret = a.clientSecret; }
         const body = { name: nameIn.value.trim() || id, target: targetPath(), transport: transportOf(st.version), version: transportOf(st.version) === 'session' ? st.version : undefined, mode: st.mode, auth: spec, secrets };
-        const r = await send({ method: 'PUT', url: SERVER + '/_rustybin/mcp-connections/' + encodeURIComponent(id), headers: [['Content-Type', 'application/json']], body: JSON.stringify(body), admin: true, session: false });
+        const r = await send({ control: true, method: 'PUT', url: SERVER + '/_rustybin/mcp-connections/' + encodeURIComponent(id), headers: [['Content-Type', 'application/json']], body: JSON.stringify(body), admin: true, session: false });
         if (!r.ok) { replace(msg, notice('err', (r.json && r.json.error) || r.error || ('HTTP ' + r.status))); return; }
         replace(msg);
         toast('Connection saved: credentials are sealed on the instance');
@@ -729,7 +729,7 @@ export default {
         for (const [k, v] of parts.headers) hmap[k] = v;
         const body = { target: withQuery(target, parts.query), transport: transportOf(st.version), version: transportOf(st.version) === 'session' ? st.version : undefined, headers: hmap, checks: [...chosen], include_destructive: destructive.input.checked, max_tools: Number(maxTools.value) || 25, ai_arguments: ai.input.checked };
         if (st.source === 'saved' && st.saved) body.connection = st.saved;
-        const r = await send({ method: 'POST', url: SERVER + '/_rustybin/mcp-checks', headers: [['Content-Type', 'application/json']], body: JSON.stringify(body), timeout: 600000, session: false });
+        const r = await send({ control: true, method: 'POST', url: SERVER + '/_rustybin/mcp-checks', headers: [['Content-Type', 'application/json']], body: JSON.stringify(body), timeout: 600000, session: false });
         runBtn.disabled = false;
         if (!alive) return;
         if (!r.ok || !r.json) { replace(out, notice('err', (r.json && r.json.error) || r.error || ('HTTP ' + r.status))); return; }
@@ -757,7 +757,7 @@ export default {
       const s = r.summary || {};
       const download = (name, text, type) => { const a = h('a', { href: URL.createObjectURL(new Blob([text], { type })), download: name }); document.body.appendChild(a); a.click(); a.remove(); };
       const junitBtn = h('button', { class: 'btn sm', type: 'button', id: 'mcp-checks-junit', onclick: async () => {
-        const rr = await send({ url: SERVER + '/_rustybin/mcp-checks/' + encodeURIComponent(r.id) + '?format=junit', session: false });
+        const rr = await send({ control: true, url: SERVER + '/_rustybin/mcp-checks/' + encodeURIComponent(r.id) + '?format=junit', session: false });
         if (rr.ok) download('mcp-checks.xml', rr.text, 'application/xml'); else toast('JUnit export failed', 'err');
       } }, icon('download'), 'JUnit');
       const jsonBtn = h('button', { class: 'btn sm', type: 'button', onclick: () => download('mcp-checks.json', JSON.stringify(r, null, 2), 'application/json') }, icon('download'), 'JSON');

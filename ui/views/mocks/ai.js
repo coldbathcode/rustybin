@@ -29,7 +29,7 @@ export const PLACEHOLDER = 'An orders API for a coffee shop: customers, products
  */
 export async function aiCall(path, body, on = {}, opts = {}) {
   const out = { ok: false, result: null, error: null, status: 0 };
-  const r = await send({ method: 'POST', url: SERVER + API + path, headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' }, body: JSON.stringify(Object.assign({ stream: true }, body)), session: false, admin: true, stream: true, timeout: 180000, signal: opts.signal });
+  const r = await send({ control: true, method: 'POST', url: SERVER + API + path, headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' }, body: JSON.stringify(Object.assign({ stream: true }, body)), session: false, admin: true, stream: true, timeout: 180000, signal: opts.signal });
   out.status = r.status;
   if (r.error || !r.ok) {
     let detail = r.error;

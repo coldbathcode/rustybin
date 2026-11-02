@@ -32,7 +32,7 @@ function ceilingBadge(r) {
 }
 
 async function call(method, path, body) {
-  const opts = { url: SERVER + path, method, session: false };
+  const opts = { control: true, url: SERVER + path, method, session: false };
   if (body !== undefined) { opts.headers = { 'Content-Type': 'application/json' }; opts.body = JSON.stringify(body); }
   const r = await send(opts);
   if (r.error) throw new Error(r.error);
@@ -270,7 +270,7 @@ export default {
       const ctrl = new AbortController();
       feedCtrl = ctrl;
       renderFeed();
-      const r = await send({ url: SERVER + BASE + '/events', stream: true, timeout: 15000, signal: ctrl.signal, session: false });
+      const r = await send({ control: true, url: SERVER + BASE + '/events', stream: true, timeout: 15000, signal: ctrl.signal, session: false });
       if (r.error || !r.response || !(r.contentType || '').includes('event-stream')) {
         if (feedCtrl === ctrl) { feedCtrl = null; renderFeed(); }
         toast('The live feed is not available: ' + (r.error || (r.json && r.json.error) || r.status), 'err');

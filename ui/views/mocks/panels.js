@@ -442,7 +442,7 @@ export function trafficPanel(ctx) {
     feed = ctrl;
     const headers = [['Accept', 'text/event-stream']];
     if (lastSeq) headers.push(['Last-Event-ID', String(lastSeq)]);
-    const r = await send({ url: SERVER + '/_rustybin/mocks/' + enc(ctx.name) + '/requests/stream', headers, stream: true, session: false, timeout: 15000, signal: ctrl.signal });
+    const r = await send({ control: true, url: SERVER + '/_rustybin/mocks/' + enc(ctx.name) + '/requests/stream', headers, stream: true, session: false, timeout: 15000, signal: ctrl.signal });
     if (feed !== ctrl) return;
     if (r.error || !r.ok) {
       if (r.status === 404) { gone = true; setState('err', 'mock not found'); return; }

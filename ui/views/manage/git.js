@@ -152,7 +152,7 @@ export function gitPanel(doc, reload, error) {
 
   async function loadHistory() {
     if (!st.initialised) { replace(historyEl); return; }
-    const r = await send({ url: SERVER + '/_rustybin/git/history', admin: true, session: false });
+    const r = await send({ control: true, url: SERVER + '/_rustybin/git/history', admin: true, session: false });
     const commits = (r.ok && r.json && r.json.commits) || [];
     replace(historyEl, card('History', { hint: commits.length ? 'the last ' + commits.length + ' commits' : 'no commits yet' },
       commits.length ? h('table', { class: 'table small' }, h('thead', null, h('tr', null, h('th', null, 'Commit'), h('th', null, 'Message'), h('th', null, 'Author'), h('th', null, 'When'), h('th', null, 'Files'))),

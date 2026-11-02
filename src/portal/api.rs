@@ -431,34 +431,35 @@ async fn reference(
         )
             .into_response();
     };
-    let spec_url = if s.owner.is_visitor() {
-        let ctx = ctx(&state, &headers, &extensions, &uri);
-        format!(
-            "{}/_rustybin/openapi.json",
-            ctx.mock_base(&s.owner, &s.name)
+    let Some(c) = s.live.clone() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "the published mock is not deployed" })),
         )
-    } else {
-        format!("../../mock/{}/_rustybin/openapi.json", s.name)
+            .into_response();
     };
+    let (mut server, idp) = crate::mocks::handlers::served_bases(
+        &c,
+        &s.name,
+        &headers,
+        &extensions,
+        &uri,
+        &state.config,
+    );
+    if s.owner.is_visitor() {
+        let ctx = ctx(&state, &headers, &extensions, &uri);
+        server = format!("{}{}", ctx.mock_base(&s.owner, &s.name), c.path_prefix());
+    }
     let title = entry
         .published
         .title
         .clone()
-        .or_else(|| s.live.as_ref().map(|c| c.spec.title.clone()))
-        .unwrap_or_else(|| s.name.clone());
-    let html = format!(
-        "<!DOCTYPE html>\n<html>\n<head>\n    <title>{}</title>\n    <meta charset=\"utf-8\" />\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n</head>\n<body>\n    <script id=\"api-reference\" data-url=\"{}\"></script>\n    <script src=\"https://cdn.jsdelivr.net/npm/@scalar/api-reference\"></script>\n</body>\n</html>",
-        html_escape(&title),
-        html_escape(&spec_url)
-    );
-    (
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::REFERRER_POLICY, "same-origin"),
-        ],
-        html,
+        .unwrap_or_else(|| c.spec.title.clone());
+    // The spec inlined into a sandboxed page (pinned script, opaque origin).
+    crate::openapi::reference_page(
+        &title,
+        &crate::mocks::handlers::served_spec(&c, &server, &idp, &s.name),
     )
-        .into_response()
 }
 
 // ── Control plane ───────────────────────────────────────────────────

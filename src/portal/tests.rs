@@ -658,14 +658,26 @@ async fn operator_strings_are_escaped() {
     }
     let (_, _, html) = call(&app, "GET", "/portal/a/b", &[], None).await;
     assert!(html.as_str().expect("html").contains("<base href=\"../\">"));
-    let (status, _, html) = call(&app, "GET", "/portal/reference/mock:petstore", &[], None).await;
+    let (status, headers, html) =
+        call(&app, "GET", "/portal/reference/mock:petstore", &[], None).await;
     assert_eq!(status, StatusCode::OK);
     let html = html.as_str().expect("html").to_string();
     assert!(
         html.contains("&lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt;"),
         "{html}"
     );
-    assert!(html.contains("data-url=\"../../mock/petstore/_rustybin/openapi.json\""));
+    // The spec inlined (no fetch from the sandbox), the script pinned with
+    // its integrity, and an opaque origin for the page.
+    assert!(html.contains("<script id=\"api-reference\" type=\"application/json\">"));
+    assert!(html.contains("/mock/petstore"), "the served spec's server");
+    assert!(html.contains(crate::openapi::SCALAR_INTEGRITY));
+    assert!(html.contains("@scalar/api-reference@1."));
+    assert_eq!(
+        headers
+            .get("content-security-policy")
+            .and_then(|v| v.to_str().ok()),
+        Some(crate::openapi::REFERENCE_CSP)
+    );
     let (status, _, _) = call(&app, "GET", "/portal/reference/llm", &[], None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
