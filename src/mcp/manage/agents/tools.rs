@@ -16,6 +16,23 @@ fn refused(e: AgentError) -> Value {
     }
 }
 
+/// Refuse an operator action on the caller's own agent, or on any agent of
+/// the caller's credential (rights and revocations follow the credential's
+/// fingerprint, so a sibling client would lift the caller's own limits).
+fn own_agent(ctx: &CallCtx, access: &Access, own_id: &str, id: &str, what: &str) -> Option<Value> {
+    let same_credential = ctx
+        .app
+        .agents
+        .credential_of(id)
+        .is_some_and(|c| c.fingerprint() == access.credential.fingerprint());
+    (id == own_id || same_credential).then(|| {
+        err(format!(
+            "an agent cannot {what} an agent of its own credential: ask the operator to do it \
+             in the console (Management, AI agents) or with `rustybin agents`"
+        ))
+    })
+}
+
 /// `list_agents` (admin): every agent, the policy and the ceilings.
 pub fn list_agents(ctx: &CallCtx, _access: &Access, _args: &Value) -> Value {
     let state = &ctx.app;
@@ -109,11 +126,14 @@ fn tool_list(args: &Value, key: &str) -> Result<Option<Vec<String>>, Value> {
 
 /// `set_agent_rights` (admin): a ceiling, allow and deny lists and a note;
 /// `reset` goes back to the rules and the default.
-pub fn set_agent_rights(ctx: &CallCtx, _access: &Access, args: &Value) -> Value {
+pub fn set_agent_rights(ctx: &CallCtx, access: &Access, own_id: &str, args: &Value) -> Value {
     let id = match need_str(args, "id") {
         Ok(i) => i,
         Err(e) => return e,
     };
+    if let Some(refusal) = own_agent(ctx, access, own_id, id, "change the rights of") {
+        return refusal;
+    }
     let reset = arg_bool(args, "reset").unwrap_or(false);
     let ceiling = match arg_str(args, "ceiling") {
         None => None,
@@ -226,11 +246,14 @@ pub async fn revoke_agent(
 }
 
 /// `restore_agent` (admin): undo a revocation.
-pub fn restore_agent(ctx: &CallCtx, _access: &Access, args: &Value) -> Value {
+pub fn restore_agent(ctx: &CallCtx, access: &Access, own_id: &str, args: &Value) -> Value {
     let id = match need_str(args, "id") {
         Ok(i) => i,
         Err(e) => return e,
     };
+    if let Some(refusal) = own_agent(ctx, access, own_id, id, "restore") {
+        return refusal;
+    }
     match ctx.app.agents.restore(id, &ctx.app.config.console_tokens) {
         Ok(v) => ok(ctx, format!("Restored agent {id}"), v),
         Err(e) => refused(e),
@@ -239,11 +262,14 @@ pub fn restore_agent(ctx: &CallCtx, _access: &Access, args: &Value) -> Value {
 
 /// `end_agent_sessions` (admin): close the agent's handshake-era sessions
 /// without revoking it.
-pub fn end_agent_sessions(ctx: &CallCtx, _access: &Access, args: &Value) -> Value {
+pub fn end_agent_sessions(ctx: &CallCtx, access: &Access, own_id: &str, args: &Value) -> Value {
     let id = match need_str(args, "id") {
         Ok(i) => i,
         Err(e) => return e,
     };
+    if let Some(refusal) = own_agent(ctx, access, own_id, id, "end the sessions of") {
+        return refusal;
+    }
     match ctx.app.agents.end_sessions(id) {
         Ok(n) => ok(
             ctx,

@@ -244,6 +244,14 @@ pub fn build_app(state: AppState) -> Router {
         config.limits.active() || state.keys.shared(),
     ) {
         router = router.layer(cors);
+        // The control plane answers cross-origin only to the origins
+        // RUSTYBIN_CORS_ORIGINS names (never to `*`): a web page the
+        // operator opens must not sign in with the default password or
+        // drive an open control plane from the browser.
+        router = router.layer(middleware::from_fn_with_state(
+            std::sync::Arc::new(listed_origins(&config.cors_allow_origins)),
+            control_cors,
+        ));
     }
 
     // A client-only harness node with RUSTYBIN_HARNESS_DATA_PLANE=off serves
@@ -368,6 +376,57 @@ fn cors_layer(origins: &[String], plan_headers: bool) -> Option<CorsLayer> {
             .expose_headers(ExposeHeaders::list(expose))
             .max_age(Duration::from_secs(600)),
     )
+}
+
+/// The origins named explicitly in `RUSTYBIN_CORS_ORIGINS` (not `*`),
+/// without a trailing slash.
+fn listed_origins(origins: &[String]) -> Vec<String> {
+    origins
+        .iter()
+        .map(|o| o.trim().trim_end_matches('/').to_string())
+        .filter(|o| !o.is_empty() && o != "*")
+        .collect()
+}
+
+/// Paths that answer cross-origin only to listed origins: the control plane
+/// (`/_rustybin/*`, the sign-in and the OAuth endpoints included). The OAuth
+/// discovery documents under `/.well-known/` stay on the data plane's policy.
+pub fn is_cross_origin_closed(path: &str) -> bool {
+    path == "/_rustybin" || path.starts_with("/_rustybin/")
+}
+
+/// Drop the CORS answer of a control-plane request whose `Origin` is not
+/// listed: a browser then refuses the preflight and hides the response from
+/// the page. Same-origin requests need no CORS headers.
+async fn control_cors(
+    axum::extract::State(listed): axum::extract::State<std::sync::Arc<Vec<String>>>,
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> Response {
+    if !is_cross_origin_closed(req.uri().path()) {
+        return next.run(req).await;
+    }
+    let allowed = req
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|o| o.to_str().ok())
+        .is_some_and(|o| {
+            let o = o.trim().trim_end_matches('/');
+            listed.iter().any(|l| l.eq_ignore_ascii_case(o))
+        });
+    let mut resp = next.run(req).await;
+    if !allowed {
+        let names: Vec<HeaderName> = resp
+            .headers()
+            .keys()
+            .filter(|k| k.as_str().starts_with("access-control-"))
+            .cloned()
+            .collect();
+        for name in names {
+            resp.headers_mut().remove(name);
+        }
+    }
+    resp
 }
 
 async fn not_found(method: Method, uri: Uri) -> Response {

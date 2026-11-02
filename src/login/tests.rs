@@ -295,19 +295,19 @@ async fn failed_attempts_are_rate_limited_per_address() {
     let ip: IpAddr = "10.0.0.9".parse().expect("ip");
     for round in 0..6u32 {
         for _ in 0..FAILURES_PER_WINDOW {
-            tokens.failed(Some(ip));
+            tokens.failed(Some(ip), "u");
         }
-        let wait = tokens.check(Some(ip)).expect_err("blocked");
+        let wait = tokens.check(Some(ip), "u").expect_err("blocked");
         let expected = (FIRST_BLOCK_SECS << round).min(MAX_BLOCK_SECS);
         assert_eq!(wait, expected, "round {round}");
         clock.advance(Duration::from_secs(expected));
-        assert!(tokens.check(Some(ip)).is_ok());
+        assert!(tokens.check(Some(ip), "u").is_ok());
     }
     // Attempts without a client address are never blocked, and the table is bounded.
-    assert!(tokens.check(None).is_ok());
+    assert!(tokens.check(None, "u").is_ok());
     for i in 0..(MAX_ATTEMPT_ADDRESSES as u32 + 50) {
         let ip = IpAddr::from([10, 1, (i >> 8) as u8, (i & 255) as u8]);
-        tokens.failed(Some(ip));
+        tokens.failed(Some(ip), "u");
     }
     assert!(lock(&tokens.attempts).len() <= MAX_ATTEMPT_ADDRESSES);
 }
@@ -620,7 +620,7 @@ async fn settings_patch_validates_the_hash() {
         "PATCH",
         "/_rustybin/settings",
         &token,
-        json!({"secrets": {HASH_KEY: "garbage"}}),
+        json!({"secrets": {HASH_KEY: "garbage"}, "current_password": DEFAULT_PASSWORD}),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
@@ -629,11 +629,19 @@ async fn settings_patch_validates_the_hash() {
         "PATCH",
         "/_rustybin/settings",
         &token,
-        json!({"values": {USER_KEY: "no spaces"}}),
+        json!({"values": {USER_KEY: "no spaces"}, "current_password": DEFAULT_PASSWORD}),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+}
+
+#[tokio::test]
+async fn the_sign_in_changes_through_the_settings_only_with_the_current_password() {
+    let app = app(password_config());
+    let token = token_for(&app).await;
     let hash = hash_password("patched-secret").expect("hash");
+    // Without the current password (an admin-scoped token is not enough),
+    // and with a wrong one: refused, nothing changes.
     let (status, v) = with_token(
         &app,
         "PATCH",
@@ -642,11 +650,54 @@ async fn settings_patch_validates_the_hash() {
         json!({"values": {USER_KEY: "patched"}, "secrets": {HASH_KEY: hash}}),
     )
     .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["reason"], "current_password_required");
+    let (status, v) = with_token(
+        &app,
+        "PATCH",
+        "/_rustybin/settings",
+        &token,
+        json!({"secrets": {HASH_KEY: hash}, "current_password": "wrong"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["reason"], "invalid_credentials");
+    let (status, _) = with_token(
+        &app,
+        "PATCH",
+        "/_rustybin/settings",
+        &token,
+        json!({"values": {USER_KEY: "patched"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        login(&app, DEFAULT_USER, DEFAULT_PASSWORD).await.0,
+        StatusCode::OK
+    );
+    // Other settings need nothing more.
+    let (status, v) = with_token(
+        &app,
+        "PATCH",
+        "/_rustybin/settings",
+        &token,
+        json!({"values": {"console.title": "Ops"}}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{v}");
-    // A PATCH does not rotate tokens; the new credentials sign in.
+    // With it: changed, and every session is signed out.
+    let (status, v) = with_token(
+        &app,
+        "PATCH",
+        "/_rustybin/settings",
+        &token,
+        json!({"values": {USER_KEY: "patched"}, "secrets": {HASH_KEY: hash}, "current_password": DEFAULT_PASSWORD}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(
         status_of(&app, "GET", "/_rustybin/config", Some(&token)).await,
-        StatusCode::OK
+        StatusCode::UNAUTHORIZED
     );
     assert_eq!(
         login(&app, "patched", "patched-secret").await.0,
@@ -656,6 +707,119 @@ async fn settings_patch_validates_the_hash() {
         login(&app, DEFAULT_USER, DEFAULT_PASSWORD).await.0,
         StatusCode::UNAUTHORIZED
     );
+    // Unsetting the hash: not with a sign-in token alone; PATCH with the
+    // current password clears it, and signs everyone out again.
+    let fresh = token_for_user(&app, "patched", "patched-secret").await;
+    let (status, v) = with_token(
+        &app,
+        "DELETE",
+        &format!("/_rustybin/settings/{HASH_KEY}"),
+        &fresh,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v["problems"][0]
+        .as_str()
+        .unwrap_or("")
+        .contains("current password"));
+    let (status, v) = with_token(
+        &app,
+        "PATCH",
+        "/_rustybin/settings",
+        &fresh,
+        json!({"secrets": {HASH_KEY: null}, "current_password": "patched-secret"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        status_of(&app, "GET", "/_rustybin/config", Some(&fresh)).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        login(&app, "patched", DEFAULT_PASSWORD).await.0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn the_admin_token_resets_a_forgotten_password() {
+    let mut c = password_config();
+    c.admin_token = Some("admin-secret".into());
+    let state = test_state_with(c);
+    let hash = hash_password("forgotten-secret").expect("hash");
+    let mut secrets = BTreeMap::new();
+    secrets.insert(HASH_KEY.to_string(), Some(hash));
+    state
+        .settings
+        .update_sign_in(BTreeMap::new(), secrets, "test")
+        .expect("set");
+    let app = test_app_with(state.clone());
+    let token = token_for_user(&app, DEFAULT_USER, "forgotten-secret").await;
+    let (status, v) = with_token(
+        &app,
+        "DELETE",
+        &format!("/_rustybin/settings/{HASH_KEY}"),
+        "admin-secret",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        status_of(&app, "GET", "/_rustybin/config", Some(&token)).await,
+        StatusCode::UNAUTHORIZED,
+        "the reset signs every session out"
+    );
+    assert_eq!(
+        login(&app, DEFAULT_USER, DEFAULT_PASSWORD).await.0,
+        StatusCode::OK
+    );
+}
+
+#[test]
+fn a_plain_settings_update_never_changes_the_sign_in_in_password_mode() {
+    // The rule sits in the store, so the management MCP tools and
+    // documents meet it too.
+    let state = test_state_with(password_config());
+    let generation = state.config.console_tokens.generation();
+    let mut values = BTreeMap::new();
+    values.insert(USER_KEY.to_string(), json!("someone"));
+    assert!(state
+        .settings
+        .update(values.clone(), BTreeMap::new(), "test")
+        .is_err());
+    let mut same = BTreeMap::new();
+    same.insert(USER_KEY.to_string(), json!(DEFAULT_USER));
+    assert!(
+        state.settings.update(same, BTreeMap::new(), "test").is_ok(),
+        "the value in force is no change"
+    );
+    let mut secrets = BTreeMap::new();
+    secrets.insert(
+        HASH_KEY.to_string(),
+        Some(hash_password("another-secret").expect("hash")),
+    );
+    assert!(state
+        .settings
+        .update(BTreeMap::new(), secrets.clone(), "test")
+        .is_err());
+    assert_eq!(state.config.console_tokens.generation(), generation);
+    // The sign-in path changes it and rotates the generation.
+    state
+        .settings
+        .update_sign_in(values, secrets, "test")
+        .expect("sign-in update");
+    assert!(state.config.console_tokens.generation() > generation);
+    assert!(state.settings.unset(HASH_KEY, "test").is_err());
+    assert!(state.settings.unset(USER_KEY, "test").is_err());
+    // Outside password mode nothing is guarded.
+    let state = test_state_with(Config::for_tests());
+    let mut values = BTreeMap::new();
+    values.insert(USER_KEY.to_string(), json!("someone"));
+    assert!(state
+        .settings
+        .update(values, BTreeMap::new(), "test")
+        .is_ok());
 }
 
 #[tokio::test]
@@ -780,7 +944,7 @@ async fn public_mode_refuses_the_default_password() {
     let state = test_state_with(c);
     state
         .settings
-        .update(
+        .update_sign_in(
             BTreeMap::new(),
             BTreeMap::from([(
                 HASH_KEY.to_string(),
@@ -883,17 +1047,17 @@ fn parallel_attempts_count_before_their_answers() {
     let tokens = Tokens::new();
     let ip = Some("203.0.113.7".parse().expect("ip"));
     // Fifty guesses in flight at once: only the window's allowance starts.
-    let started = (0..50).filter(|_| tokens.check(ip).is_ok()).count();
+    let started = (0..50).filter(|_| tokens.check(ip, "u").is_ok()).count();
     assert_eq!(started, FAILURES_PER_WINDOW as usize);
     for _ in 0..started {
-        tokens.failed(ip);
+        tokens.failed(ip, "u");
     }
-    assert!(tokens.check(ip).is_err(), "blocked once they failed");
+    assert!(tokens.check(ip, "u").is_err(), "blocked once they failed");
     // Another address is not affected; an abandoned attempt frees its slot.
     let other = Some("203.0.113.8".parse().expect("ip"));
-    assert!(tokens.check(other).is_ok());
-    tokens.abandoned(other);
-    assert!(tokens.check(other).is_ok());
+    assert!(tokens.check(other, "u").is_ok());
+    tokens.abandoned(other, "u");
+    assert!(tokens.check(other, "u").is_ok());
 }
 
 #[tokio::test]
@@ -906,4 +1070,88 @@ async fn the_hash_pool_is_bounded() {
     assert!(tokens.hash_permit().is_none());
     drop(held);
     assert!(tokens.hash_permit().is_some());
+}
+
+#[test]
+fn one_client_trying_other_names_does_not_lock_the_user_out() {
+    // Behind a proxy without RUSTYBIN_TRUST_FORWARD every client shares one
+    // address: failures under another user name leave the real one alone.
+    let tokens = Tokens::new();
+    let proxy = Some("10.0.0.1".parse().expect("ip"));
+    for _ in 0..(FAILURES_PER_WINDOW * 3) {
+        if tokens.check(proxy, "admin").is_ok() {
+            tokens.failed(proxy, "admin");
+        }
+    }
+    assert!(tokens.check(proxy, "admin").is_err());
+    assert!(
+        tokens.check(proxy, "Admin").is_err(),
+        "names count in lower case"
+    );
+    assert!(tokens.check(proxy, DEFAULT_USER).is_ok());
+}
+
+#[test]
+fn an_ipv6_host_rotating_in_its_slash_64_is_one_address() {
+    let tokens = Tokens::new();
+    for i in 0..FAILURES_PER_WINDOW {
+        let ip = std::net::Ipv6Addr::new(0x2001, 0xdb8, 7, 7, i as u16, 0, 0, 1);
+        let ip = Some(IpAddr::V6(ip));
+        assert!(tokens.check(ip, DEFAULT_USER).is_ok());
+        tokens.failed(ip, DEFAULT_USER);
+    }
+    let next = Some(IpAddr::V6(std::net::Ipv6Addr::new(
+        0x2001, 0xdb8, 7, 7, 0xbeef, 0, 0, 9,
+    )));
+    assert!(tokens.check(next, DEFAULT_USER).is_err());
+    let elsewhere = Some(IpAddr::V6(std::net::Ipv6Addr::new(
+        0x2001, 0xdb8, 7, 8, 0, 0, 0, 1,
+    )));
+    assert!(tokens.check(elsewhere, DEFAULT_USER).is_ok());
+}
+
+#[test]
+fn failures_from_every_address_share_a_budget() {
+    let clock = Arc::new(ManualClock::new(chrono::Utc::now()));
+    let tokens = Tokens::with_clock(clock.clone());
+    for i in 0..GLOBAL_FAILURES_PER_WINDOW {
+        let ip = Some(IpAddr::from([198, 51, (i >> 8) as u8, (i & 255) as u8]));
+        assert!(tokens.check(ip, DEFAULT_USER).is_ok(), "attempt {i}");
+        tokens.failed(ip, DEFAULT_USER);
+    }
+    // A fresh address waits for the window's end, then may try again.
+    let fresh = Some("203.0.113.200".parse().expect("ip"));
+    let wait = tokens
+        .check(fresh, DEFAULT_USER)
+        .expect_err("global budget");
+    assert!((1..=WINDOW_SECS).contains(&wait), "{wait}");
+    clock.advance(Duration::from_secs(WINDOW_SECS + 1));
+    assert!(tokens.check(fresh, DEFAULT_USER).is_ok());
+}
+
+#[test]
+fn concurrent_revocations_all_reach_the_file() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let tokens = Arc::new(Tokens::persistent(Some(dir.path())));
+    let far = chrono::Utc::now().timestamp() + 3600;
+    let threads: Vec<_> = (0..32)
+        .map(|t| {
+            let tokens = tokens.clone();
+            std::thread::spawn(move || {
+                for i in 0..10 {
+                    tokens.revoke_for_agent(&format!("t{t}-{i}"), far);
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().expect("thread");
+    }
+    drop(tokens);
+    let reloaded = Tokens::persistent(Some(dir.path()));
+    for t in 0..32 {
+        for i in 0..10 {
+            assert!(reloaded.is_revoked(&format!("t{t}-{i}")), "t{t}-{i} lost");
+        }
+    }
 }

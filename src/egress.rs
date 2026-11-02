@@ -433,6 +433,7 @@ pub fn forbidden_address(ip: IpAddr) -> Option<&'static str> {
             } else if v4 == Ipv4Addr::new(169, 254, 169, 254)
                 || v4 == Ipv4Addr::new(100, 100, 100, 200)
                 || v4 == Ipv4Addr::new(192, 0, 0, 192)
+                || v4 == Ipv4Addr::new(168, 63, 129, 16)
             {
                 Some("the cloud metadata address")
             } else if v4.is_link_local() {
@@ -1527,6 +1528,8 @@ mod tests {
             ("::a9fe:a9fe", "metadata"),
             ("100.100.100.200", "metadata"),
             ("192.0.0.192", "metadata"),
+            ("168.63.129.16", "metadata"),
+            ("::ffff:168.63.129.16", "metadata"),
             ("64:ff9b::a9fe:1", "link-local"),
             ("2002:e000:1::", "multicast"),
         ] {

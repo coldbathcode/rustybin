@@ -279,7 +279,9 @@ impl Access {
         }
     }
 
-    /// How the caller is named in the audit log (never a secret).
+    /// How the caller is named in the audit log and the per-caller caps
+    /// (the assist calls per minute): never a secret. A token caller is its
+    /// credential's fingerprint, never the session header it chooses.
     pub fn principal(&self) -> String {
         if let Some(k) = &self.key_id {
             return format!("key:{k}");
@@ -292,6 +294,11 @@ impl Access {
         }
         if self.caller.admin {
             return "admin".into();
+        }
+        if self.grant.is_some()
+            && !matches!(self.credential, super::agents::Credential::Open { .. })
+        {
+            return self.credential.fingerprint();
         }
         format!(
             "session:{}",
@@ -334,5 +341,44 @@ impl Access {
             "visit": self.caller.visit().is_some(),
             "rights": rights,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{control_jwt, jwt_config, test_state_with};
+
+    fn access_with(state: &AppState, token: &str, session: &str) -> Access {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_str(&format!("Bearer {token}")).expect("header"),
+        );
+        headers.insert(
+            "x-rustybin-session",
+            axum::http::HeaderValue::from_str(session).expect("header"),
+        );
+        let mut extensions = Extensions::new();
+        let grant = Grant::from_scope_claim(Some(&json!("console")));
+        extensions.insert(ControlAuthorized(grant));
+        Access::from_request(
+            state,
+            &headers,
+            &extensions,
+            &Uri::from_static("/_rustybin/mcp"),
+        )
+    }
+
+    #[test]
+    fn a_token_caller_is_its_credential_whatever_the_session_header() {
+        // The assist caps key on the principal: a console-scope token that
+        // changes X-Rustybin-Session per call must stay one caller.
+        let state = test_state_with(jwt_config());
+        let token = control_jwt(Some("console"));
+        let a = access_with(&state, &token, "one");
+        let b = access_with(&state, &token, "two");
+        assert_eq!(a.principal(), b.principal());
+        assert_eq!(a.principal(), "jwt:user-1");
     }
 }

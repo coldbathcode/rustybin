@@ -245,7 +245,9 @@ async fn data_plane_ready_and_console_files_stay_open() {
 
 #[tokio::test]
 async fn cors_preflight_is_answered_without_credentials() {
-    let app = app(jwt_config());
+    let mut c = jwt_config();
+    c.cors_allow_origins = vec!["https://portal.example.com".to_string()];
+    let app = app(c);
     let req = HttpRequest::builder()
         .method("OPTIONS")
         .uri("/_rustybin/status")
@@ -482,7 +484,10 @@ async fn hosted_mode_preset() {
     let (c, w) = Config::from_lookup(lookup(&[
         ("RUSTYBIN_HOSTED_MODE", "true"),
         ("RUSTYBIN_INSTANCE_ID", "acme"),
-        ("RUSTYBIN_ADMIN_TOKEN", "t"),
+        (
+            "RUSTYBIN_ADMIN_TOKEN",
+            "a-long-enough-admin-token-for-tests",
+        ),
         (
             "RUSTYBIN_CONTROL_JWT_PUBLIC_KEY",
             "zD7+5ZDAX/ZxKGaO1Bm32ZSI1/eWEnNKkeiV8s2lyu0=",
@@ -518,4 +523,99 @@ async fn hosted_mode_preset() {
     let (c, _) = Config::from_lookup(lookup(&[]));
     assert_eq!(c.control_auth, ControlAuth::Password);
     assert_eq!(c.log_format, crate::logging::LogFormat::Text);
+}
+
+fn preflight(path: &str, origin: &str) -> HttpRequest<Body> {
+    HttpRequest::builder()
+        .method("OPTIONS")
+        .uri(path)
+        .header("origin", origin)
+        .header("access-control-request-method", "POST")
+        .header("access-control-request-headers", "content-type")
+        .body(Body::empty())
+        .expect("request")
+}
+
+async fn allow_origin(app: &Router, req: HttpRequest<Body>) -> Option<String> {
+    let resp = app.clone().oneshot(req).await.expect("response");
+    resp.headers()
+        .get("access-control-allow-origin")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
+
+#[tokio::test]
+async fn the_control_plane_answers_cross_origin_only_to_listed_origins() {
+    // The default (`*`): the data plane answers any origin, the control
+    // plane (the sign-in included) none, so a web page the operator opens
+    // cannot sign in with the default password and read the token.
+    let mut c = Config::for_tests();
+    c.control_auth = ControlAuth::Password;
+    let app = app(c);
+    let evil = "https://evil.example";
+    assert_eq!(
+        allow_origin(&app, preflight("/echo", evil))
+            .await
+            .as_deref(),
+        Some("*")
+    );
+    for path in [
+        "/_rustybin/login",
+        "/_rustybin/settings",
+        "/_rustybin/mcp",
+        "/_rustybin/oauth/token",
+    ] {
+        assert_eq!(
+            allow_origin(&app, preflight(path, evil)).await,
+            None,
+            "{path}"
+        );
+    }
+    let login = HttpRequest::builder()
+        .method("POST")
+        .uri("/_rustybin/login")
+        .header("origin", evil)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"username":"rustybin","password":"rustybin"}"#,
+        ))
+        .expect("request");
+    let resp = app.clone().oneshot(login).await.expect("response");
+    assert!(!resp.headers().contains_key("access-control-allow-origin"));
+    assert!(!resp.headers().contains_key("access-control-expose-headers"));
+    // The OAuth discovery documents keep the data plane's policy.
+    assert_eq!(
+        allow_origin(
+            &app,
+            HttpRequest::builder()
+                .uri(crate::control_oauth::PRM_PATH)
+                .header("origin", evil)
+                .body(Body::empty())
+                .expect("request")
+        )
+        .await
+        .as_deref(),
+        Some("*")
+    );
+
+    // Listed origins: those (and only those) reach the control plane.
+    let mut c = Config::for_tests();
+    c.control_auth = ControlAuth::Password;
+    c.cors_allow_origins = vec!["*".into(), "https://ops.example/".into()];
+    let app = self::app(c);
+    assert!(
+        allow_origin(&app, preflight("/_rustybin/login", "https://ops.example"))
+            .await
+            .is_some()
+    );
+    assert_eq!(
+        allow_origin(&app, preflight("/_rustybin/login", evil)).await,
+        None
+    );
+    assert_eq!(
+        allow_origin(&app, preflight("/echo", evil))
+            .await
+            .as_deref(),
+        Some("*")
+    );
 }

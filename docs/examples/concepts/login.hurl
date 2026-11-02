@@ -226,8 +226,10 @@ jsonpath "$.reason" == "revoked"
 # ANCHOR_END: sign_out_everywhere
 
 # Back to the default for anyone who runs the examples twice against one
-# instance: the password is reset through the settings (admin), which is
-# how an operator recovers a forgotten one with the admin token.
+# instance. The settings change the sign-in only with the current password
+# (the admin token, RUSTYBIN_ADMIN_TOKEN itself, may also DELETE
+# /_rustybin/settings/console.password_hash: how an operator recovers a
+# forgotten one).
 POST {{password_url}}/_rustybin/login
 Content-Type: application/json
 { "username": "rustybin", "password": "a-longer-secret-k3Qx" }
@@ -235,9 +237,32 @@ HTTP 200
 [Captures]
 cleanup: jsonpath "$.token"
 
+# ANCHOR: reset_needs_password
 DELETE {{password_url}}/_rustybin/settings/console.password_hash
 Authorization: Bearer {{cleanup}}
+HTTP 400
+[Asserts]
+jsonpath "$.problems[0]" contains "current password"
+
+PATCH {{password_url}}/_rustybin/settings
+Authorization: Bearer {{cleanup}}
+Content-Type: application/json
+{ "secrets": { "console.password_hash": null } }
+HTTP 403
+[Asserts]
+jsonpath "$.reason" == "current_password_required"
+
+PATCH {{password_url}}/_rustybin/settings
+Authorization: Bearer {{cleanup}}
+Content-Type: application/json
+{ "secrets": { "console.password_hash": null }, "current_password": "a-longer-secret-k3Qx" }
 HTTP 200
+
+# Every session ended with the change.
+GET {{password_url}}/_rustybin/status
+Authorization: Bearer {{cleanup}}
+HTTP 401
+# ANCHOR_END: reset_needs_password
 
 POST {{password_url}}/_rustybin/login
 Content-Type: application/json

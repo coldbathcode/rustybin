@@ -501,13 +501,19 @@ fn random_key() -> [u8; 32] {
 
 /// Read the key file, or generate one (mode 0600) when it is missing.
 fn load_or_create_key(path: &Path) -> Result<[u8; 32], String> {
+    load_or_create_key_file(path, "secrets key")
+}
+
+/// Read a 32-byte key file (base64 or hex), or generate a random one (mode
+/// 0600) when it is missing. `what` names it in the log line.
+pub(crate) fn load_or_create_key_file(path: &Path, what: &str) -> Result<[u8; 32], String> {
     match std::fs::read_to_string(path) {
         Ok(text) => decode_key(&text).map_err(|e| format!("{}: {e}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let key = random_key();
             let text = base64::engine::general_purpose::STANDARD.encode(key);
             write_private(path, text.as_bytes())?;
-            tracing::info!("secrets key generated at {}", path.display());
+            tracing::info!("{what} generated at {}", path.display());
             Ok(key)
         }
         Err(e) => Err(format!("cannot read {}: {e}", path.display())),
@@ -698,10 +704,27 @@ pub struct Settings {
     /// the stored hash would bring back the default password, so it is
     /// refused (a new password replaces it instead).
     keep_password_hash: bool,
+    /// The password sign-in is on: its user name and password hash change
+    /// only with the current password or the admin token
+    /// ([`Settings::update_sign_in`], [`Settings::unset_sign_in`]), never
+    /// through a plain update (an admin-scoped token, an agent, a document).
+    sign_in_guard: bool,
+    /// The sign-in state: a change of the user name or the password signs
+    /// every session out (the token generation rotates).
+    console_tokens: Arc<crate::login::Tokens>,
 }
 
 /// What a public instance answers to clearing the console password hash.
 const KEEP_HASH: &str = "console.password_hash: a public instance would fall back to the default password: set a new password instead";
+
+/// What a plain update of the sign-in answers in password mode.
+fn sign_in_refusal(key: &str) -> String {
+    format!(
+        "{key}: the console sign-in changes only with the current password: PUT \
+         /_rustybin/password (Management, Sign-in, or `rustybin password change`), or PATCH \
+         /_rustybin/settings with current_password; the admin token may also reset it"
+    )
+}
 
 fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
@@ -760,6 +783,8 @@ impl Settings {
             keep_password_hash: config.public_mode
                 && config.console_password.is_none()
                 && config.console_password_hash.is_none(),
+            sign_in_guard: crate::login::enabled(config),
+            console_tokens: config.console_tokens.clone(),
         };
         store.check_secrets();
         store.sync();
@@ -1120,13 +1145,89 @@ impl Settings {
         Ok((new_values, new_secrets))
     }
 
+    /// Set values and secrets. In password mode a change of the console
+    /// user name or password hash is refused here (see
+    /// [`Settings::update_sign_in`]).
     pub fn update(
         &self,
         values: BTreeMap<String, Value>,
         secrets: BTreeMap<String, Option<String>>,
         principal: &str,
     ) -> Result<Vec<String>, UpdateError> {
+        self.update_with(values, secrets, principal, false)
+    }
+
+    /// [`Settings::update`] that may change the sign-in: for callers that
+    /// checked the current password (`PUT /_rustybin/password`, a settings
+    /// PATCH with `current_password`) or hold the admin token.
+    pub fn update_sign_in(
+        &self,
+        values: BTreeMap<String, Value>,
+        secrets: BTreeMap<String, Option<String>>,
+        principal: &str,
+    ) -> Result<Vec<String>, UpdateError> {
+        self.update_with(values, secrets, principal, true)
+    }
+
+    /// Does the change touch the sign-in? The user name when its effective
+    /// value changes, the hash when one is set or a stored one cleared.
+    fn sign_in_change(
+        &self,
+        values: &BTreeMap<String, Option<Value>>,
+        secrets: &BTreeMap<String, Option<Sealed>>,
+    ) -> Option<&'static str> {
+        use crate::login::{HASH_KEY, USER_KEY};
+        if let Some(v) = values.get(USER_KEY) {
+            let after = match v {
+                Some(v) => v.clone(),
+                None => self.fallback(USER_KEY),
+            };
+            if after != self.get(USER_KEY).0 {
+                return Some(USER_KEY);
+            }
+        }
+        match secrets.get(HASH_KEY) {
+            Some(Some(_)) => Some(HASH_KEY),
+            Some(None) if self.read().secrets.contains_key(HASH_KEY) => Some(HASH_KEY),
+            _ => None,
+        }
+    }
+
+    /// The value of `key` without a stored one: the seed, else the default.
+    fn fallback(&self, key: &str) -> Value {
+        if let Some(v) = self.seeds.get(key) {
+            return v.clone();
+        }
+        self.spec(key)
+            .map(|s| s.default.clone())
+            .unwrap_or(Value::Null)
+    }
+
+    /// Sign every session out when the sign-in changed.
+    fn after_sign_in_change(&self, user_before: &Value, hash_changed: bool) {
+        if hash_changed || self.get(crate::login::USER_KEY).0 != *user_before {
+            self.console_tokens.rotate();
+            tracing::info!(
+                target: "rustybin::auth",
+                "the console sign-in changed: every session is signed out"
+            );
+        }
+    }
+
+    fn update_with(
+        &self,
+        values: BTreeMap<String, Value>,
+        secrets: BTreeMap<String, Option<String>>,
+        principal: &str,
+        sign_in: bool,
+    ) -> Result<Vec<String>, UpdateError> {
         let (new_values, new_secrets) = self.validated(values, secrets)?;
+        if self.sign_in_guard && !sign_in {
+            if let Some(key) = self.sign_in_change(&new_values, &new_secrets) {
+                return Err(UpdateError::Invalid(vec![sign_in_refusal(key)]));
+            }
+        }
+        let user_before = self.get(crate::login::USER_KEY).0;
         let mut changed = Vec::new();
         let mut doc = self.write();
         let mut next = doc.clone();
@@ -1186,15 +1287,44 @@ impl Settings {
             );
         }
         self.sync();
+        self.after_sign_in_change(
+            &user_before,
+            changed.iter().any(|k| k == crate::login::HASH_KEY),
+        );
         Ok(changed)
     }
 
     /// Forget the stored value of a key (back to the seed or the default).
-    /// `Ok(false)` when nothing was stored.
+    /// `Ok(false)` when nothing was stored. In password mode the sign-in's
+    /// keys are refused here (see [`Settings::unset_sign_in`]).
     pub fn unset(&self, key: &str, principal: &str) -> Result<bool, UpdateError> {
+        self.unset_with(key, principal, false)
+    }
+
+    /// [`Settings::unset`] that may reset the sign-in (the admin token).
+    pub fn unset_sign_in(&self, key: &str, principal: &str) -> Result<bool, UpdateError> {
+        self.unset_with(key, principal, true)
+    }
+
+    fn unset_with(&self, key: &str, principal: &str, sign_in: bool) -> Result<bool, UpdateError> {
         if self.keep_password_hash && key == crate::login::HASH_KEY {
             return Err(UpdateError::Invalid(vec![KEEP_HASH.to_string()]));
         }
+        if self.sign_in_guard && !sign_in {
+            let stored = {
+                let doc = self.read();
+                doc.values.contains_key(key) || doc.secrets.contains_key(key)
+            };
+            let changes = match key {
+                crate::login::HASH_KEY => stored,
+                crate::login::USER_KEY => stored && self.fallback(key) != self.get(key).0,
+                _ => false,
+            };
+            if changes {
+                return Err(UpdateError::Invalid(vec![sign_in_refusal(key)]));
+            }
+        }
+        let user_before = self.get(crate::login::USER_KEY).0;
         let Some(spec) = self.spec(key) else {
             return Err(UpdateError::Invalid(vec![format!(
                 "{key}: unknown setting"
@@ -1223,6 +1353,7 @@ impl Settings {
             "setting reset"
         );
         self.sync();
+        self.after_sign_in_change(&user_before, key == crate::login::HASH_KEY);
         Ok(true)
     }
 
@@ -1363,11 +1494,96 @@ struct Patch {
     values: BTreeMap<String, Value>,
     #[serde(default)]
     secrets: BTreeMap<String, Option<String>>,
+    /// The console password, needed (in password mode) when the patch
+    /// changes `console.user` or `console.password_hash`, unless the caller
+    /// presents the admin token.
+    #[serde(default)]
+    current_password: Option<String>,
+}
+
+/// Does the request present `RUSTYBIN_ADMIN_TOKEN` itself (the operator's
+/// recovery credential, not a token minted from it)?
+fn presents_admin_token(headers: &HeaderMap, config: &Config) -> bool {
+    match (
+        crate::control_auth::presented_token(headers),
+        config.admin_token.as_deref(),
+    ) {
+        (Some(t), Some(admin)) => crate::control_auth::constant_time_eq(t, admin),
+        _ => false,
+    }
+}
+
+fn sign_in_refused(status: StatusCode, message: String, reason: &str) -> Response {
+    (status, Json(json!({ "error": message, "reason": reason }))).into_response()
+}
+
+/// May this PATCH change the sign-in? The admin token may; anyone else
+/// sends the current password (checked and throttled like a sign-in).
+#[allow(clippy::result_large_err)]
+async fn sign_in_allowed(
+    state: &AppState,
+    headers: &HeaderMap,
+    extensions: &axum::http::Extensions,
+    current_password: Option<&str>,
+) -> Result<(), Response> {
+    if presents_admin_token(headers, &state.config) {
+        return Ok(());
+    }
+    let Some(password) = current_password else {
+        return Err(sign_in_refused(
+            StatusCode::FORBIDDEN,
+            "console.user and console.password_hash change only with the current password: send current_password, or use PUT /_rustybin/password".into(),
+            "current_password_required",
+        ));
+    };
+    let tokens = &state.config.console_tokens;
+    let ip = crate::session::client_ip(headers, extensions, &state.config);
+    let user = crate::login::effective_user(&state.settings);
+    if let Err(wait) = tokens.check(ip, &user) {
+        return Err(sign_in_refused(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("too many failed sign-in attempts: try again in {wait} s"),
+            "rate_limited",
+        ));
+    }
+    let ok = if password.chars().count() > crate::login::MAX_PASSWORD_CHARS * 4 {
+        Some(false)
+    } else {
+        crate::login::check_credentials(state, &user, password).await
+    };
+    match ok {
+        Some(true) => {
+            tokens.succeeded(ip, &user);
+            Ok(())
+        }
+        Some(false) => {
+            tokens.failed(ip, &user);
+            Err(sign_in_refused(
+                StatusCode::FORBIDDEN,
+                "the current password is wrong".into(),
+                "invalid_credentials",
+            ))
+        }
+        None => {
+            tokens.abandoned(ip, &user);
+            Err(sign_in_refused(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many sign-ins at once: try again in a moment".into(),
+                "busy",
+            ))
+        }
+    }
+}
+
+fn touches_sign_in(patch: &Patch) -> bool {
+    patch.values.contains_key(crate::login::USER_KEY)
+        || patch.secrets.contains_key(crate::login::HASH_KEY)
 }
 
 async fn patch_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     body: Result<Json<Patch>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
@@ -1384,7 +1600,27 @@ async fn patch_settings(
         }
     };
     let who = principal(&headers, &state.config);
-    match state.settings.update(patch.values, patch.secrets, &who) {
+    let sign_in = crate::login::enabled(&state.config) && touches_sign_in(&patch);
+    if sign_in {
+        if let Err(resp) = sign_in_allowed(
+            &state,
+            &headers,
+            &extensions,
+            patch.current_password.as_deref(),
+        )
+        .await
+        {
+            return resp;
+        }
+    }
+    let result = if sign_in {
+        state
+            .settings
+            .update_sign_in(patch.values, patch.secrets, &who)
+    } else {
+        state.settings.update(patch.values, patch.secrets, &who)
+    };
+    match result {
         Ok(changed) => {
             let mut view = state.settings.view();
             if let Value::Object(m) = &mut view {
@@ -1412,7 +1648,14 @@ async fn delete_setting(
             .into_response();
     }
     let who = principal(&headers, &state.config);
-    match state.settings.unset(&key, &who) {
+    // The sign-in is reset here only with the admin token (the operator's
+    // recovery); anyone else sends PATCH with current_password.
+    let result = if presents_admin_token(&headers, &state.config) {
+        state.settings.unset_sign_in(&key, &who)
+    } else {
+        state.settings.unset(&key, &who)
+    };
+    match result {
         Ok(reset) => {
             let mut view = state.settings.view();
             if let Value::Object(m) = &mut view {
@@ -1489,20 +1732,23 @@ pub fn openapi_paths() -> Value {
             "patch": {
                 "tags": ["Control Plane"],
                 "summary": "Change settings",
-                "description": "Values are validated against each setting's schema; a `null` value forgets the stored one. A secret value is sealed at rest; `null` clears it. Admin.",
+                "description": "Values are validated against each setting's schema; a `null` value forgets the stored one. A secret value is sealed at rest; `null` clears it. Admin. In password mode a change of console.user or console.password_hash also needs current_password (or the admin token itself), and signs every session out.",
                 "operationId": "patchRustybinSettings",
                 "requestBody": { "required": true, "content": { "application/json": { "schema": {
                     "type": "object",
                     "properties": {
                         "values": { "type": "object", "additionalProperties": {}, "description": "Non-secret settings by key" },
-                        "secrets": { "type": "object", "additionalProperties": { "type": ["string", "null"] }, "description": "Secret settings by key" }
+                        "secrets": { "type": "object", "additionalProperties": { "type": ["string", "null"] }, "description": "Secret settings by key" },
+                        "current_password": { "type": "string", "description": "The console password: needed in password mode to change console.user or console.password_hash" }
                     }
                 } } } },
                 "responses": {
                     "200": { "description": "The new settings, with `changed` listing the keys that changed", "content": { "application/json": { "schema": view } } },
                     "400": { "description": "Unknown keys or invalid values (`problems`)" },
                     "401": { "description": "Admin token required" },
-                    "409": { "description": "Locked by RUSTYBIN_SETTINGS_LOCK (`locked`)" }
+                    "403": { "description": "The sign-in changes only with the current password (`reason`: current_password_required, invalid_credentials)" },
+                    "409": { "description": "Locked by RUSTYBIN_SETTINGS_LOCK (`locked`)" },
+                    "429": { "description": "Too many failed password checks (`reason`: rate_limited)" }
                 }
             }
         },
@@ -1510,10 +1756,12 @@ pub fn openapi_paths() -> Value {
             "delete": {
                 "tags": ["Control Plane"],
                 "summary": "Forget a stored setting",
+                "description": "In password mode console.user and console.password_hash are reset here only with the admin token itself (the operator's recovery); anyone else sends PATCH with current_password.",
                 "operationId": "deleteRustybinSetting",
                 "parameters": [{ "name": "key", "in": "path", "required": true, "schema": { "type": "string" }, "example": "console.title" }],
                 "responses": {
                     "200": { "description": "The settings after the reset", "content": { "application/json": { "schema": view } } },
+                    "400": { "description": "Invalid (`problems`), the sign-in without the admin token included" },
                     "404": { "description": "No such setting" },
                     "409": { "description": "Locked by RUSTYBIN_SETTINGS_LOCK" }
                 }

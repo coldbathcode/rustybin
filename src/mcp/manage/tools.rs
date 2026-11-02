@@ -343,9 +343,10 @@ pub static TOOLS: &[ToolDef] = &[
         "group": { "type": "string", "description": "Only this group (console, egress, assist, portal, registry, git, agents, ...)" },
         "key": { "type": "string", "description": "Only this dotted key (console.title)" }
     }), &[])),
-    tool!("update_settings", "Change settings", "Set instance settings (values: key to value; null forgets a stored value) and/or unset stored values (back to the environment or the default). Never secrets: provider keys, tokens and passwords are set by the operator in the console, the CLI or the environment. Admin.", Right::Admin, ro=false, destructive=false, idem=true, confirm=false, || obj(json!({
+    tool!("update_settings", "Change settings", "Set instance settings (values: key to value; null forgets a stored value) and/or unset stored values (back to the environment or the default). Never secrets: provider keys, tokens and passwords are set by the operator in the console, the CLI or the environment; the console sign-in changes only with its current password. A change of egress.*, agents.*, console.* or git.* asks the user to confirm. Admin.", Right::Admin, ro=false, destructive=false, idem=true, confirm=true, || obj(json!({
         "values": { "type": "object", "description": "Setting key to value, in the key's kind (get_settings shows kinds and defaults)", "additionalProperties": true },
-        "unset": { "type": "array", "items": { "type": "string" }, "description": "Keys whose stored value to forget" }
+        "unset": { "type": "array", "items": { "type": "string" }, "description": "Keys whose stored value to forget" },
+        "confirm": confirm_prop()
     }), &[])),
     tool!("check_egress", "Outbound policy", "The outbound connection policy (the allowlist, the loopback switch, each feature's rule, the last decisions) and, with url, whether that URL would be allowed for a purpose before DNS, with the reasons when not. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "url": { "type": "string", "description": "An http(s) URL to check" },
@@ -554,7 +555,7 @@ pub static TOOLS: &[ToolDef] = &[
     // ── Agents ──
     tool!("list_agents", "AI agents", "Every agent that called this management server (its credential and client name, first and last seen, calls, sessions, status, rights) and the policy (default ceiling, the rules of rustybin.yaml). Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, no_args),
     tool!("get_agent", "One agent", "One agent in full: calls per tool with their outcomes, last errors, sessions, the tools its rights allow and where the rights come from, recent activity. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "id": { "type": "string", "description": "The agent id (list_agents)" } }), &["id"])),
-    tool!("set_agent_rights", "Set an agent's rights", "Limit an agent: a ceiling (read-only, traffic, manage, full), tools allowed, tools denied, a note; reset true clears its own rights (back to the rules and the default). An agent never gets more than its credential allows. Admin.", Right::Admin, ro=false, destructive=false, idem=true, confirm=false, || obj(json!({
+    tool!("set_agent_rights", "Set an agent's rights", "Limit an agent: a ceiling (read-only, traffic, manage, full), tools allowed, tools denied, a note; reset true clears its own rights (back to the rules and the default). An agent never gets more than its credential allows, and never changes an agent of its own credential. Admin.", Right::Admin, ro=false, destructive=false, idem=true, confirm=false, || obj(json!({
         "id": { "type": "string" },
         "ceiling": { "type": "string", "enum": ["read-only", "traffic", "manage", "full"] },
         "allow": { "type": "array", "items": { "type": "string" }, "description": "Only these tools" },
@@ -563,8 +564,8 @@ pub static TOOLS: &[ToolDef] = &[
         "reset": { "type": "boolean", "default": false }
     }), &["id"])),
     tool!("revoke_agent", "Revoke an agent", "Refuse the agent's calls, end its sessions and revoke its tokens (console sign-in tokens, OAuth tokens and refresh tokens it used). An agent cannot revoke itself. Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({ "id": { "type": "string" }, "confirm": confirm_prop() }), &["id"])),
-    tool!("restore_agent", "Restore an agent", "Undo a revocation. Admin.", Right::Admin, ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "id": { "type": "string" } }), &["id"])),
-    tool!("end_agent_sessions", "End an agent's sessions", "Close the agent's handshake-era MCP sessions without revoking it. Admin.", Right::Admin, ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "id": { "type": "string" } }), &["id"])),
+    tool!("restore_agent", "Restore an agent", "Undo a revocation (never of an agent of the caller's own credential). Admin.", Right::Admin, ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "id": { "type": "string" } }), &["id"])),
+    tool!("end_agent_sessions", "End an agent's sessions", "Close the agent's handshake-era MCP sessions without revoking it (never of an agent of the caller's own credential). Admin.", Right::Admin, ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "id": { "type": "string" } }), &["id"])),
     // ── Sign-in sessions ──
     tool!("list_sessions", "Sign-in sessions", "The console's sign-in sessions since the last restart (user, issued, expiry, last seen), when the password sign-in is on. The password itself is changed only in the console, with rustybin password change, or through the environment. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, no_args),
     tool!("end_session", "End a sign-in session", "End one console sign-in session by id, or with all true sign out everywhere (every token issued so far is refused, the user's own console included; destructive: confirmed). Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
@@ -1050,7 +1051,7 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         "start_run" => harness::start_run(ctx, &args, params).await,
         // Settings and egress
         "get_settings" => settings::get_settings(ctx, access, &args),
-        "update_settings" => settings::update_settings(ctx, access, &args),
+        "update_settings" => settings::update_settings(ctx, access, &args, params).await,
         "check_egress" => settings::check_egress(ctx, access, &args),
         // AI assist
         "assist_status" => assist::assist_status(ctx, access, &args),
@@ -1096,10 +1097,10 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         // Agents
         "list_agents" => agents::tools::list_agents(ctx, access, &args),
         "get_agent" => agents::tools::get_agent(ctx, access, &args),
-        "set_agent_rights" => agents::tools::set_agent_rights(ctx, access, &args),
+        "set_agent_rights" => agents::tools::set_agent_rights(ctx, access, &agent.id, &args),
         "revoke_agent" => agents::tools::revoke_agent(ctx, access, &agent.id, &args, params).await,
-        "restore_agent" => agents::tools::restore_agent(ctx, access, &args),
-        "end_agent_sessions" => agents::tools::end_agent_sessions(ctx, access, &args),
+        "restore_agent" => agents::tools::restore_agent(ctx, access, &agent.id, &args),
+        "end_agent_sessions" => agents::tools::end_agent_sessions(ctx, access, &agent.id, &args),
         // Sign-in sessions
         "list_sessions" => instance::list_sessions(ctx, access),
         "end_session" => instance::end_session(ctx, access, &args, params).await,
@@ -1137,11 +1138,12 @@ fn audit(def: &ToolDef, access: &Access, agent: &str, args: &Value, outcome: &st
         .or_else(|| arg_str(args, "id"))
         .or_else(|| arg_str(args, "mock"))
         .or_else(|| arg_str(args, "run_id"))
-        .unwrap_or("-");
+        .map(|t| crate::logging::printable(t, 128))
+        .unwrap_or_else(|| "-".to_string());
     tracing::info!(
         target: "rustybin::manage",
         tool = def.name,
-        target = target,
+        target = %target,
         caller = %access.principal(),
         agent,
         outcome,

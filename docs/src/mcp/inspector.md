@@ -204,7 +204,13 @@ every header and query value that looks like a credential.
 
 The relay, the fetch helper and check runs are read-only control-plane calls: an admin
 or a console-scope token may use them, and a console token may end its own relay
-sessions. Saving or deleting connections, deleting runs and using a saved connection
+sessions. Without admin rights a server on another host only sees read-only methods
+(`initialize`, `server/discover`, `ping`, `tools/list`, `resources/list`,
+`resources/read`, `resources/templates/list`, `prompts/list`, `prompts/get`) and
+notifications: the relay answers `403` with
+`reason: admin_required` to anything else, a check run skips `tools_call` and
+`bad_arguments`, and the `mcp_call` tool refuses. The servers of this instance take any
+method. Saving or deleting connections, deleting runs and using a saved connection
 that holds credentials need admin.
 
 ## On every surface

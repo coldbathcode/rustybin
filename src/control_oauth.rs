@@ -82,8 +82,8 @@ type HmacSha256 = Hmac<Sha256>;
 pub enum KeySource {
     /// `RUSTYBIN_CONTROL_OAUTH_KEY`.
     Setting,
-    /// Derived from `RUSTYBIN_ADMIN_TOKEN` (rotating it signs everyone out).
-    AdminToken,
+    /// A random key kept in `<state>/control-oauth.key`.
+    StateFile,
     /// Random per process (tokens end with a restart).
     Random,
 }
@@ -92,11 +92,14 @@ impl KeySource {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Setting => "setting",
-            Self::AdminToken => "admin_token",
+            Self::StateFile => "state_file",
             Self::Random => "random",
         }
     }
 }
+
+/// The file of the instance key under the state directory.
+pub const KEY_FILE: &str = "control-oauth.key";
 
 /// The key signing client ids and tokens of the built-in server. Its
 /// `Debug` never shows the bytes.
@@ -114,29 +117,40 @@ impl std::fmt::Debug for OAuthKey {
 
 impl OAuthKey {
     /// From `RUSTYBIN_CONTROL_OAUTH_KEY` (already checked to be long
-    /// enough), else the admin token, else random.
-    pub fn from_settings(explicit: Option<&str>, admin_token: Option<&str>) -> Self {
-        let (seed, source) = match (explicit, admin_token) {
-            (Some(k), _) => (
-                format!("rustybin-control-oauth\nsetting\n{}", k.trim()),
-                KeySource::Setting,
-            ),
-            (None, Some(t)) => (
-                format!("rustybin-control-oauth\nadmin-token\n{t}"),
-                KeySource::AdminToken,
-            ),
-            (None, None) => {
-                let mut bytes = [0u8; 32];
-                rand::thread_rng().fill_bytes(&mut bytes);
-                return Self {
-                    bytes,
-                    source: KeySource::Random,
-                };
+    /// enough), else a random key kept in `<state>/control-oauth.key`, else
+    /// a random key for this process. Never derived from the admin token: a
+    /// registration answers a MAC under this key, which must not let anyone
+    /// test guesses of a short admin token offline.
+    pub fn from_settings(explicit: Option<&str>, state_dir: Option<&std::path::Path>) -> Self {
+        if let Some(k) = explicit {
+            let seed = format!("rustybin-control-oauth\nsetting\n{}", k.trim());
+            return Self {
+                bytes: Sha256::digest(seed.as_bytes()).into(),
+                source: KeySource::Setting,
+            };
+        }
+        if let Some(dir) = state_dir {
+            match crate::settings::load_or_create_key_file(
+                &dir.join(KEY_FILE),
+                "control-plane signing key",
+            ) {
+                Ok(bytes) => {
+                    return Self {
+                        bytes,
+                        source: KeySource::StateFile,
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    target: "rustybin::auth",
+                    "control-plane signing key unavailable ({e}): using a key for this process, sign-ins end with a restart"
+                ),
             }
-        };
+        }
+        let mut bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut bytes);
         Self {
-            bytes: Sha256::digest(seed.as_bytes()).into(),
-            source,
+            bytes,
+            source: KeySource::Random,
         }
     }
 
@@ -616,41 +630,93 @@ struct Code {
 pub struct OAuthState {
     pending: BoundedStore<Pending>,
     codes: BoundedStore<Code>,
-    /// Sign-in requests per client address in the last minute: a loop of
-    /// registrations and authorizations cannot push a real user's pending
-    /// consent out of the bounded store.
+    /// Sign-in requests per client address (an IPv6 /64) in the last
+    /// minute: a loop of registrations and authorizations cannot push a real
+    /// user's pending consent out of the bounded store.
     per_address: std::sync::Mutex<
         std::collections::HashMap<std::net::IpAddr, std::collections::VecDeque<std::time::Instant>>,
     >,
+    /// Sign-in requests from every address in the last minute: at most
+    /// [`OAuthState::global_per_minute`], so many addresses together cannot
+    /// fill the pending store within its time to live either.
+    global: std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>,
+    global_per_minute: usize,
+    /// The pending request ids of each client (by fingerprint), oldest
+    /// first: a client holds at most [`MAX_PENDING_PER_CLIENT`].
+    per_client:
+        std::sync::Mutex<std::collections::HashMap<String, std::collections::VecDeque<String>>>,
 }
 
 /// Sign-in requests one client address may open per minute.
 pub const AUTHORIZE_PER_MINUTE: usize = 10;
 /// Addresses tracked by that limit.
 const MAX_AUTHORIZE_ADDRESSES: usize = 4096;
+/// Pending sign-in requests one client keeps (a new one evicts its oldest).
+pub const MAX_PENDING_PER_CLIENT: usize = 3;
 
 impl OAuthState {
-    /// Count a sign-in request from `ip`; false past the minute's allowance.
+    /// Count a sign-in request from `ip`; false past the minute's allowance
+    /// (the address's or every address's together).
     fn allow_authorize(&self, ip: Option<std::net::IpAddr>) -> bool {
-        let Some(ip) = ip else { return true };
         let now = std::time::Instant::now();
         let minute = std::time::Duration::from_secs(60);
-        let mut map = self.per_address.lock().unwrap_or_else(|e| e.into_inner());
-        if !map.contains_key(&ip) && map.len() >= MAX_AUTHORIZE_ADDRESSES {
-            map.retain(|_, q| q.back().is_some_and(|t| now.duration_since(*t) < minute));
-            if map.len() >= MAX_AUTHORIZE_ADDRESSES {
-                return false;
-            }
+        let mut global = self.global.lock().unwrap_or_else(|e| e.into_inner());
+        while global
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= minute)
+        {
+            global.pop_front();
         }
-        let q = map.entry(ip).or_default();
-        while q.front().is_some_and(|t| now.duration_since(*t) >= minute) {
-            q.pop_front();
-        }
-        if q.len() >= AUTHORIZE_PER_MINUTE {
+        if global.len() >= self.global_per_minute {
             return false;
         }
-        q.push_back(now);
+        if let Some(ip) = ip.map(crate::session::address_bucket) {
+            let mut map = self.per_address.lock().unwrap_or_else(|e| e.into_inner());
+            if !map.contains_key(&ip) && map.len() >= MAX_AUTHORIZE_ADDRESSES {
+                map.retain(|_, q| q.back().is_some_and(|t| now.duration_since(*t) < minute));
+                if map.len() >= MAX_AUTHORIZE_ADDRESSES {
+                    return false;
+                }
+            }
+            let q = map.entry(ip).or_default();
+            while q.front().is_some_and(|t| now.duration_since(*t) >= minute) {
+                q.pop_front();
+            }
+            if q.len() >= AUTHORIZE_PER_MINUTE {
+                return false;
+            }
+            q.push_back(now);
+        }
+        global.push_back(now);
         true
+    }
+
+    /// Keep a pending request, evicting the client's oldest past
+    /// [`MAX_PENDING_PER_CLIENT`].
+    fn add_pending(&self, request_id: String, pending: Pending) {
+        let client = fingerprint(&pending.client_id);
+        let mut per_client = self.per_client.lock().unwrap_or_else(|e| e.into_inner());
+        let ids = per_client.entry(client).or_default();
+        ids.retain(|id| self.pending.contains(id));
+        while ids.len() >= MAX_PENDING_PER_CLIENT {
+            if let Some(oldest) = ids.pop_front() {
+                self.pending.remove(&oldest);
+            }
+        }
+        ids.push_back(request_id.clone());
+        self.pending.insert(request_id, pending);
+        // Bounded by the live pending requests: forget clients whose
+        // requests all ended.
+        if per_client.len() > self.pending_capacity() {
+            per_client.retain(|_, ids| {
+                ids.retain(|id| self.pending.contains(id));
+                !ids.is_empty()
+            });
+        }
+    }
+
+    fn pending_capacity(&self) -> usize {
+        self.global_per_minute * (PENDING_TTL_SECS as usize / 60)
     }
 }
 
@@ -665,6 +731,11 @@ impl OAuthState {
             pending: BoundedStore::new(cap, PENDING_TTL_SECS),
             codes: BoundedStore::new(cap, CODE_TTL_SECS),
             per_address: std::sync::Mutex::new(std::collections::HashMap::new()),
+            global: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            // The store's capacity spread over the time to live: the rate
+            // alone never fills it.
+            global_per_minute: (cap / (PENDING_TTL_SECS as usize / 60)).max(1),
+            per_client: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -998,7 +1069,7 @@ async fn authorize_handler(State(app): State<AppState>, st: St, req: Request) ->
         );
     }
     let request_id = random_id();
-    st.pending.insert(
+    st.add_pending(
         request_id.clone(),
         Pending {
             client_id: id.clone(),

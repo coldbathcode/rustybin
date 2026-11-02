@@ -1891,11 +1891,41 @@ async fn settings_and_egress_tools() {
         .as_array()
         .is_some_and(|a| a.len() > 10));
     assert!(r["structuredContent"]["groups"].is_array());
+    // The console, egress, agents and git groups are confirmed by the user.
+    for values in [
+        json!({ "console.title": "Team mocks" }),
+        json!({ "egress.allow_loopback": true }),
+        json!({ "agents.default_ceiling": "full" }),
+        json!({ "git.branch": "other" }),
+    ] {
+        let r = tool(&app, &[], "update_settings", json!({ "values": values })).await;
+        assert!(
+            is_error(&r) && text_of(&r).contains("confirm"),
+            "{values}: {}",
+            text_of(&r)
+        );
+    }
+    let r = tool(
+        &app,
+        &[],
+        "get_settings",
+        json!({ "key": "egress.allow_loopback" }),
+    )
+    .await;
+    assert_ne!(r["structuredContent"]["settings"][0]["source"], "stored");
     let r = tool(
         &app,
         &[],
         "update_settings",
-        json!({ "values": { "console.title": "Team mocks" } }),
+        json!({ "unset": ["agents.default_ceiling"] }),
+    )
+    .await;
+    assert!(is_error(&r) && text_of(&r).contains("confirm"), "{r}");
+    let r = tool(
+        &app,
+        &[],
+        "update_settings",
+        json!({ "values": { "console.title": "Team mocks" }, "confirm": true }),
     )
     .await;
     assert!(!is_error(&r), "{r}");
@@ -1937,7 +1967,7 @@ async fn settings_and_egress_tools() {
         &app,
         &[],
         "update_settings",
-        json!({ "unset": ["console.title"] }),
+        json!({ "unset": ["console.title"], "confirm": true }),
     )
     .await;
     assert!(!is_error(&r), "{r}");
@@ -2642,7 +2672,7 @@ async fn git_tools_against_a_bare_repository() {
         &app,
         &[],
         "update_settings",
-        json!({ "values": { "git.remote": format!("file://{}", bare.display()) } }),
+        json!({ "values": { "git.remote": format!("file://{}", bare.display()) }, "confirm": true }),
     )
     .await;
     assert!(!is_error(&r), "{r}");
@@ -2732,15 +2762,31 @@ async fn agent_tools() {
             || r["structuredContent"]["activity"].is_object(),
         "{r}"
     );
+    // An agent never changes its own rights (nor those of an agent of its
+    // credential): the operator does, here through the REST route.
     let r = tool(
         &app,
         &[],
         "set_agent_rights",
-        json!({ "id": id, "ceiling": "manage", "deny": ["delete_mock"], "note": "team bot" }),
+        json!({ "id": id, "ceiling": "full", "note": "team bot" }),
     )
     .await;
-    assert!(!is_error(&r), "{r}");
-    assert_eq!(r["structuredContent"]["rights"]["ceiling"], "manage");
+    assert!(
+        is_error(&r) && text_of(&r).contains("its own credential"),
+        "{}",
+        text_of(&r)
+    );
+    let req = Request::builder()
+        .method("PATCH")
+        .uri(format!("/_rustybin/agents/{id}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "rights": { "ceiling": "manage", "deny": ["delete_mock"] }, "note": "team bot" })
+                .to_string(),
+        ))
+        .expect("request");
+    let resp = app.clone().oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
     // The ceiling applies to this very agent at once.
     let names = tool_names(&app, &[]).await;
     assert!(
@@ -2758,16 +2804,24 @@ async fn agent_tools() {
         .expect("request");
     let resp = app.clone().oneshot(req).await.expect("response");
     assert_eq!(resp.status(), StatusCode::OK);
-    let r = tool(&app, &[], "set_agent_rights", json!({ "id": id })).await;
+    let r = tool(&app, &[], "set_agent_rights", json!({ "id": "nope" })).await;
     assert!(is_error(&r) && text_of(&r).contains("give a ceiling"));
     let r = tool(
         &app,
         &[],
         "set_agent_rights",
-        json!({ "id": id, "ceiling": "huge" }),
+        json!({ "id": "nope", "ceiling": "huge" }),
     )
     .await;
     assert!(is_error(&r));
+    let r = tool(
+        &app,
+        &[],
+        "set_agent_rights",
+        json!({ "id": "nope", "ceiling": "manage" }),
+    )
+    .await;
+    assert!(is_error(&r) && text_of(&r).contains("no such agent"));
     let r = tool(
         &app,
         &[],
@@ -2788,11 +2842,16 @@ async fn agent_tools() {
     )
     .await;
     assert!(is_error(&r) && text_of(&r).contains("no such agent"));
-    let r = tool(&app, &[], "restore_agent", json!({ "id": id })).await;
-    assert!(!is_error(&r), "{r}");
-    let r = tool(&app, &[], "end_agent_sessions", json!({ "id": id })).await;
-    assert!(!is_error(&r), "{r}");
-    assert_eq!(r["structuredContent"]["sessions_ended"], 0);
+    for t in ["restore_agent", "end_agent_sessions"] {
+        let r = tool(&app, &[], t, json!({ "id": id })).await;
+        assert!(
+            is_error(&r) && text_of(&r).contains("its own credential"),
+            "{t}: {}",
+            text_of(&r)
+        );
+        let r = tool(&app, &[], t, json!({ "id": "nope" })).await;
+        assert!(is_error(&r) && text_of(&r).contains("no such agent"), "{t}");
+    }
 }
 
 #[tokio::test]
@@ -3033,6 +3092,31 @@ async fn the_new_tools_follow_the_control_scopes() {
     .await;
     assert!(
         is_error(&r) && text_of(&r).contains("not allowed"),
+        "{}",
+        text_of(&r)
+    );
+    // A tool call to a server on another host needs admin; lists do not.
+    let r = tool(
+        &app,
+        &[("authorization", &format!("Bearer {console}"))],
+        "mcp_call",
+        json!({ "target": "https://mcp.example.com/mcp", "method": "tools/call", "params": { "name": "x" }, "confirm": true }),
+    )
+    .await;
+    assert!(
+        is_error(&r) && text_of(&r).contains("needs admin rights"),
+        "{}",
+        text_of(&r)
+    );
+    let r = tool(
+        &app,
+        &[("authorization", &format!("Bearer {console}"))],
+        "mcp_call",
+        json!({ "target": "https://mcp.example.com/mcp", "method": "tools/list", "confirm": true }),
+    )
+    .await;
+    assert!(
+        !text_of(&r).contains("needs admin rights"),
         "{}",
         text_of(&r)
     );

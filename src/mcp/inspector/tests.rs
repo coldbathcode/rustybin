@@ -975,4 +975,86 @@ async fn a_query_string_key_never_shows_in_a_report() {
     assert!(!list.to_string().contains("qs-secret-7777"), "{list}");
     let file = std::fs::read_to_string(dir.path().join(store::FILE)).expect("file");
     assert!(!file.contains("qs-secret-7777"));
+
+async fn the_console_scope_sends_only_list_methods_to_another_host() {
+    let mut c = Config::for_tests();
+    c.control_auth = crate::control_auth::ControlAuth::Jwt;
+    c.control_jwt_key = crate::control_auth::parse_public_key(control_keys::CONTROL_JWT_PUBLIC_PEM);
+    c.admin_token = Some("admin-secret".into());
+    let state = test_state_with(c);
+    let app = test_app_with(state.clone());
+    let console = control_jwt(Some("console"));
+    let send = |token: String, body: Value| {
+        let app = app.clone();
+        async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri(RELAY_PATH)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(body.to_string()))
+                .expect("req");
+            let resp = app.oneshot(req).await.expect("r");
+            let status = resp.status();
+            let bytes = body_bytes(resp).await;
+            (
+                status,
+                serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+            )
+        }
+    };
+    let remote = "https://mcp.example.com/mcp";
+    let call = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "delete_everything", "arguments": {} } });
+    let (status, v) = send(
+        console.clone(),
+        json!({ "target": remote, "message": call }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["reason"], "admin_required");
+    // A list method passes this rule (the outbound policy decides next).
+    let list = json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {} });
+    let (_, v) = send(
+        console.clone(),
+        json!({ "target": remote, "message": list }),
+    )
+    .await;
+    assert_ne!(v["reason"], "admin_required", "{v}");
+    // The admin token may call; this instance's own servers stay open to
+    // the console scope.
+    let (_, v) = send(
+        "admin-secret".into(),
+        json!({ "target": remote, "message": call }),
+    )
+    .await;
+    assert_ne!(v["reason"], "admin_required", "{v}");
+    let local = json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "echo", "arguments": { "text": "hi" } } });
+    let (status, _) = send(
+        console,
+        json!({ "target": "/mcp", "headers": modern_headers("tools/call"), "message": local }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The checks: tool calls against another host only for admin callers.
+    let body = |target: &str| ChecksBody {
+        target: target.to_string(),
+        transport: None,
+        version: None,
+        headers: Value::Null,
+        connection: None,
+        checks: Value::Null,
+        include_destructive: None,
+        max_tools: None,
+        ai_arguments: None,
+        save: None,
+        format: None,
+    };
+    let inspector = &state.mcp_inspector;
+    let spec = build_run_spec(inspector, body(remote), "t".into(), false).expect("spec");
+    assert!(!spec.call_tools);
+    let spec = build_run_spec(inspector, body(remote), "t".into(), true).expect("spec");
+    assert!(spec.call_tools);
+    let spec = build_run_spec(inspector, body("/mcp"), "t".into(), false).expect("spec");
+    assert!(spec.call_tools);
 }

@@ -113,12 +113,16 @@ admin checks and other instances refuse it. Access tokens last an hour; the agen
 renews them with a refresh token (30 days) without asking you again, and a refresh can
 narrow the scopes, never widen them.
 
-**The key.** Client registrations and tokens are signed with a key, never stored, so
-nothing grows on the server. The key comes from `RUSTYBIN_CONTROL_OAUTH_KEY` (32
-characters or more), else from `RUSTYBIN_ADMIN_TOKEN`, else it is random per process.
-Rotating it (or the admin token it derives from) signs every agent out. With a random
-key a restart signs agents out too, and several replicas behind one URL need
-`RUSTYBIN_CONTROL_OAUTH_KEY` set to the same value. Single tokens cannot be revoked.
+**The key.** Client registrations and tokens are signed with a key, so no client or
+token is stored and nothing grows on the server. The key comes from
+`RUSTYBIN_CONTROL_OAUTH_KEY` (32 characters or more), else it is a random key kept in
+`<state>/control-oauth.key` with a state directory, else it is random per process; it is
+never derived from the admin token. Rotating it signs every agent out. With a key per
+process a restart signs agents out too, and several replicas behind one URL need
+`RUSTYBIN_CONTROL_OAUTH_KEY` set to the same value (or one state directory). Single
+tokens cannot be revoked. Sign-in requests are limited per client address (an IPv6
+/64) and for every address together, and one client keeps at most three pending
+consents (a new one replaces its oldest).
 
 **Clients.** Registration is open ([RFC 7591](https://www.rfc-editor.org/rfc/rfc7591)),
 for public clients with PKCE (S256) only. Redirect URIs are `https`, `http` on a
@@ -407,7 +411,7 @@ never tool inputs and never returned: the operator sets them in the console or w
 | Tool | Right | |
 |---|---|---|
 | `get_settings` | admin | Every [instance setting](configuration.md#state-directory-settings-and-secrets) with its value, source and lock state, or one group or key; secrets show `{set, hint}` |
-| `update_settings` | admin | Set values (`null` forgets a stored one) and unset stored values; secrets are refused |
+| `update_settings` | admin | Set values (`null` forgets a stored one) and unset stored values; secrets are refused, and so is the console sign-in in password mode (it changes only with its current password); a change of `egress.*`, `agents.*`, `console.*` or `git.*` is confirmed by the user |
 | `check_egress` | admin | The [outbound policy](configuration.md#outbound-connections) and, with `url` and `purpose`, whether that URL would be allowed before DNS and why not |
 
 ### MCP inspector and registry
@@ -457,9 +461,9 @@ The token for an https remote is the secret `git.token`: an agent cannot set it.
 | Tool | Right | |
 |---|---|---|
 | `list_agents` / `get_agent` | admin | The [agents](#managing-agents) and the policy; one agent with its calls per tool, errors, sessions, rights and recent activity |
-| `set_agent_rights` | admin | A ceiling, allow and deny lists, a note; `reset: true` clears the agent's own rights |
-| `revoke_agent` / `restore_agent` | admin | Revoke (confirmed; an agent cannot revoke itself) and restore |
-| `end_agent_sessions` | admin | Close an agent's handshake-era sessions |
+| `set_agent_rights` | admin | A ceiling, allow and deny lists, a note; `reset: true` clears the agent's own rights. Never on the caller's own agent or an agent of the caller's credential |
+| `revoke_agent` / `restore_agent` | admin | Revoke (confirmed; an agent cannot revoke itself) and restore (never an agent of the caller's credential) |
+| `end_agent_sessions` | admin | Close an agent's handshake-era sessions (never of an agent of the caller's credential) |
 | `list_sessions` | admin | The console's sign-in sessions, when the password sign-in is on |
 | `end_session` | admin | End one session by id, or `all: true` to sign out everywhere (confirmed) |
 

@@ -104,9 +104,10 @@ pub const INSTRUCTIONS: &str = "This server manages one Rustybin instance: an HT
 /// The router: `POST, GET, DELETE /_rustybin/mcp`.
 pub fn router(state: &AppState) -> Router<AppState> {
     let mut cfg = McpConfig::from_config(&state.config);
-    // CORS like the rest of the control plane: a browser agent connects
-    // from the origins the operator allows (`*` when CORS is on for all,
-    // and when CORS is off, so the browser's own policy decides).
+    // The Origin check (DNS rebinding): the origins the operator lists in
+    // RUSTYBIN_CORS_ORIGINS, else any. Cross-origin answers on the control
+    // plane go only to listed origins anyway (`control_cors` in lib.rs), so
+    // a browser agent on another origin needs its origin listed.
     let cors = &state.config.cors_allow_origins;
     cfg.allowed_origins = if cors.is_empty() || cors.iter().any(|o| o == "*") {
         vec!["*".to_string()]

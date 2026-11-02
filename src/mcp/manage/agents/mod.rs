@@ -149,8 +149,9 @@ impl Credential {
         }
     }
 
-    /// The part of the identity the credential contributes.
-    fn fingerprint(&self) -> String {
+    /// The part of the identity the credential contributes (rights,
+    /// revocations and the assist caps follow it).
+    pub(crate) fn fingerprint(&self) -> String {
         match self {
             Self::Admin => "admin".into(),
             Self::Console { user } => format!("console:{user}"),
@@ -1087,6 +1088,14 @@ impl Agents {
     }
 
     /// One agent with its tools, errors and sessions.
+    /// The credential of an agent.
+    pub fn credential_of(&self, id: &str) -> Option<Credential> {
+        lock(&self.inner)
+            .records
+            .get(id)
+            .map(|r| r.credential.clone())
+    }
+
     pub fn get(&self, id: &str, policy: &Policy) -> Option<Value> {
         let now = self.now();
         let inner = lock(&self.inner);

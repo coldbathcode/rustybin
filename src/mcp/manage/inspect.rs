@@ -136,6 +136,13 @@ pub async fn mcp_call(ctx: &CallCtx, access: &Access, args: &Value, params: &Val
         Ok(c) => c,
         Err(e) => return e,
     };
+    if !access.is_admin() && !inspector::allowed_without_admin(&target, Some(method)) {
+        return err(format!(
+            "{method} to a server on another host needs admin rights; without them only {} and \
+             notifications go there",
+            inspector::READ_ONLY_METHODS.join(", ")
+        ));
+    }
     if let Some(v) = confirm_remote(ctx, "mcp_call", args, params, &target, "send a call to").await
     {
         return v;

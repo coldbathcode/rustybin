@@ -98,7 +98,14 @@ pub struct RunSpec {
     /// Ask the assist provider for the tool arguments (else the generator).
     pub ai_arguments: bool,
     pub principal: String,
+    /// May the run call the server's tools (`tools_call`, `bad_arguments`)?
+    /// Admin callers, or a server of this instance: without admin rights a
+    /// remote server only sees read-only methods.
+    pub call_tools: bool,
 }
+
+/// Why a tool-calling check was skipped for a caller without admin rights.
+const NEEDS_ADMIN: &str = "calling the tools of a server on another host needs admin rights";
 
 /// Validate a list of check ids.
 pub fn parse_only(v: &Value) -> Result<Option<Vec<String>>, String> {
@@ -585,7 +592,15 @@ pub async fn run(state: &AppState, spec: RunSpec) -> Value {
 
     // tools_call
     if wanted("tools_call") {
-        if tools.is_empty() {
+        if !spec.call_tools {
+            results.push(CheckResult {
+                id: "tools_call",
+                status: Status::Skip,
+                message: NEEDS_ADMIN.into(),
+                ms: 0,
+                details: Value::Null,
+            });
+        } else if tools.is_empty() {
             results.push(CheckResult {
                 id: "tools_call",
                 status: Status::Skip,
@@ -710,7 +725,15 @@ pub async fn run(state: &AppState, spec: RunSpec) -> Value {
     }
 
     // bad_arguments
-    if wanted("bad_arguments") {
+    if wanted("bad_arguments") && !spec.call_tools {
+        results.push(CheckResult {
+            id: "bad_arguments",
+            status: Status::Skip,
+            message: NEEDS_ADMIN.into(),
+            ms: 0,
+            details: Value::Null,
+        });
+    } else if wanted("bad_arguments") {
         let candidate = tools.iter().find(|t| {
             let req = t
                 .get("inputSchema")

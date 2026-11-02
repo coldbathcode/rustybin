@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 use super::access::Access;
-use super::tools::{arg_str, err, ok};
+use super::tools::{arg_str, confirm, err, ok, Confirm};
 use crate::egress::{forbidden_address, parse_url, Purpose};
 use crate::mcp::core::CallCtx;
 use crate::settings::UpdateError;
@@ -92,10 +92,25 @@ pub fn get_settings(ctx: &CallCtx, _access: &Access, args: &Value) -> Value {
     ok(ctx, summary, view)
 }
 
+/// Setting groups whose change widens what the instance reaches or who may
+/// sign in: the outbound policy, the agents' ceilings, the console sign-in
+/// and git. A change there is confirmed by the user.
+pub const SENSITIVE_PREFIXES: &[&str] = &["egress.", "agents.", "console.", "git."];
+
+fn sensitive(key: &str) -> bool {
+    SENSITIVE_PREFIXES.iter().any(|p| key.starts_with(p))
+}
+
 /// `update_settings` (admin): set values and/or forget stored ones. Secrets
 /// are refused: keys and passwords are set in the console, the CLI or the
-/// environment, never through an agent.
-pub fn update_settings(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
+/// environment, never through an agent. A change of `egress.*`, `agents.*`,
+/// `console.*` or `git.*` asks the user to confirm.
+pub async fn update_settings(
+    ctx: &CallCtx,
+    access: &Access,
+    args: &Value,
+    params: &Value,
+) -> Value {
     let settings = &ctx.app.settings;
     let values: BTreeMap<String, Value> = match args.get("values") {
         None | Some(Value::Null) => BTreeMap::new(),
@@ -130,6 +145,23 @@ pub fn update_settings(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
                 ))
             }
             Some(_) => {}
+        }
+    }
+    let mut touched: Vec<&str> = values
+        .keys()
+        .chain(unset.iter())
+        .map(String::as_str)
+        .filter(|k| sensitive(k))
+        .collect();
+    touched.sort_unstable();
+    touched.dedup();
+    if !touched.is_empty() {
+        let action = format!(
+            "change {} (the outbound policy, the agents' rights, the console sign-in or git)",
+            touched.join(", ")
+        );
+        if let Confirm::Answer(v) = confirm(ctx, "update_settings", args, params, &action).await {
+            return v;
         }
     }
     let who = access.principal();

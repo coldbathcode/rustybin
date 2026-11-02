@@ -70,9 +70,35 @@ pub fn init(config: &Config) {
     let _ = subscriber(config, std::io::stdout, ansi).try_init();
 }
 
+/// Caller-chosen text for a log field: at most `max` characters, control
+/// characters escaped (`\n`, `\u{1b}`), so a value cannot forge a log line
+/// or a terminal sequence in the text format.
+pub fn printable(s: &str, max: usize) -> String {
+    let mut out = String::new();
+    for c in s.chars().take(max) {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn printable_escapes_control_characters() {
+        assert_eq!(printable("alice", 64), "alice");
+        assert_eq!(
+            printable("a\nINFO forged\r\u{1b}[31m", 64),
+            "a\\nINFO forged\\r\\u{1b}[31m"
+        );
+        assert_eq!(printable("abcdef", 3), "abc");
+        assert_eq!(printable("caf\u{e9}", 8), "caf\u{e9}");
+    }
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 

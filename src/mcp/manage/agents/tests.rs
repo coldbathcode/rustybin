@@ -1016,3 +1016,65 @@ async fn a_new_client_name_does_not_escape_a_revocation_or_a_limit() {
     let r = call(&app, &auth, "a-brand-new-name", "get_instance").await;
     assert_ne!(r["isError"], true, "{r}");
 }
+
+async fn call_with(app: &Router, auth: &str, client: &str, tool: &str, args: Value) -> Value {
+    let (status, j) = rpc(
+        app,
+        auth,
+        Some(client),
+        &[],
+        "tools/call",
+        json!({ "name": tool, "arguments": args }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    j["result"].clone()
+}
+
+#[tokio::test]
+async fn an_agent_cannot_lift_its_own_limits() {
+    let app = test_app_with(test_state_with(admin_config()));
+    let auth = bearer();
+    call(&app, &auth, "ci-bot", "get_instance").await;
+    let (_, list) = control(&app, "GET", "/_rustybin/agents", None).await;
+    let id = find_agent(&list, "ci-bot")["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+    // The operator denies one tool to the agent.
+    let (status, v) = control(
+        &app,
+        "PATCH",
+        &format!("/_rustybin/agents/{id}"),
+        Some(json!({ "rights": { "deny": ["set_health"] } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    // The agent itself, and another client on the same credential, cannot
+    // lift it, restore or end the sessions of an agent of that credential.
+    for client in ["ci-bot", "sibling"] {
+        for (tool, args) in [
+            ("set_agent_rights", json!({ "id": id, "reset": true })),
+            (
+                "set_agent_rights",
+                json!({ "id": id, "ceiling": "full", "deny": [] }),
+            ),
+            ("restore_agent", json!({ "id": id })),
+            ("end_agent_sessions", json!({ "id": id })),
+        ] {
+            let r = call_with(&app, &auth, client, tool, args).await;
+            assert_eq!(r["isError"], true, "{client} {tool}: {r}");
+            assert!(
+                r["content"][0]["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("its own credential"),
+                "{r}"
+            );
+        }
+    }
+    let (_, v) = control(&app, "GET", &format!("/_rustybin/agents/{id}"), None).await;
+    assert_eq!(v["rights"]["deny"], json!(["set_health"]), "{v}");
+    let r = call(&app, &auth, "ci-bot", "set_health").await;
+    assert_eq!(r["isError"], true);
+}

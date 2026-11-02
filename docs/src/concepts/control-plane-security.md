@@ -76,8 +76,15 @@ required) or through `PUT /_rustybin/password` is stored as an argon2id hash in 
 [settings store](#settings-and-secrets-at-rest) (the secret `console.password_hash`)
 and wins over the environment, unless `RUSTYBIN_SETTINGS_LOCK` makes the
 environment authoritative. The change ends every other session; the caller gets a
-fresh token. Forgot it? `DELETE /_rustybin/settings/console.password_hash` with the
-admin token goes back to the environment's password or the default.
+fresh token. The settings API changes `console.user` and `console.password_hash` only
+with the current password (`current_password` in the `PATCH /_rustybin/settings`
+body; `403` with `reason: current_password_required` or `invalid_credentials`
+otherwise), so a stolen sign-in token or an agent cannot lock the owner out or keep
+its access; the management MCP server and documents never change them. Any change
+of the user name or the password signs every session out. Forgot it?
+`DELETE /_rustybin/settings/console.password_hash` with the admin token
+(`RUSTYBIN_ADMIN_TOKEN` itself) goes back to the environment's password or the
+default.
 
 ```hurl
 {{#include ../../examples/concepts/login.hurl:wrong_password}}
@@ -101,6 +108,10 @@ admin token goes back to the environment's password or the default.
 
 ```hurl
 {{#include ../../examples/concepts/login.hurl:hash_in_settings}}
+```
+
+```hurl
+{{#include ../../examples/concepts/login.hurl:reset_needs_password}}
 ```
 
 **Sessions.** `POST /_rustybin/logout` revokes the presented token for the rest of
@@ -129,18 +140,25 @@ the console shows who is signed in.
 {{#include ../../examples/concepts/login.hurl:sign_out_everywhere}}
 ```
 
-**Brute force.** Five failed attempts from one client address within a minute, and
-the address waits: `429` with `Retry-After`, a minute the first time, doubling up to
-ten minutes. Attempts count as they start, so five guesses sent in parallel take the
-whole allowance. Every attempt is logged on the `rustybin::auth` target with the user
-name, the address and the outcome, never the password. Passwords are compared in
+**Brute force.** Five failed attempts from one client address with one user name
+within a minute, and they wait: `429` with `Retry-After`, a minute the first time,
+doubling up to ten minutes. An IPv6 address counts by its /64, so rotating inside it
+gains nothing, and a client trying other user names behind a shared address does not
+lock the real user out. Past 100 failures in a minute from every address together,
+every sign-in waits for the minute's end. Attempts count as they start, so five
+guesses sent in parallel take the whole allowance. Every attempt is logged on the
+`rustybin::auth` target with the user name (control characters escaped), the address
+and the outcome, never the password. Passwords are compared in
 constant time; hashes are verified off the request threads, at most four at once
 (`429` with `reason: busy` beyond). The address is the TCP peer, or with
 `RUSTYBIN_TRUST_FORWARD` the one header named by `proxy.client_ip_header`
 (`RUSTYBIN_TRUST_FORWARD_HEADER`): `fly`, `forwarded`, `x-forwarded-for` (its
 rightmost outside hop) or `x-real-ip`. The default, `any`, takes the first usable of
 them, which a client can spoof behind a proxy that does not set them all: name your
-proxy's header (Management, Network, Behind a proxy).
+proxy's header (Management, Network, Behind a proxy). Behind a proxy without
+`RUSTYBIN_TRUST_FORWARD` every client has the proxy's address, for the sign-in and
+every limit: the instance warns once when a sign-in carries a forwarding header it
+does not trust, and a public instance warns at startup.
 
 **The default password.** With it the instance logs a warning at startup,
 `GET /_rustybin/status` and the sign-in answer carry `default_password: true`, and
@@ -149,10 +167,14 @@ the console shows a banner until it is changed. A public instance
 choose `open` on purpose.
 
 **Tokens across restarts.** Sign-in tokens are signed with the same key as the
-OAuth sign-in: `RUSTYBIN_CONTROL_OAUTH_KEY`, else derived from `RUSTYBIN_ADMIN_TOKEN`,
-else random per process. With a random key (and the default audience, a random
-instance id) a restart signs everyone out; set one of them, and
-`RUSTYBIN_INSTANCE_ID`, so sessions survive restarts and replicas.
+OAuth sign-in: `RUSTYBIN_CONTROL_OAUTH_KEY`, else a random key kept in
+`<state>/control-oauth.key` (mode 0600) with a state directory, else random per
+process. It is never derived from `RUSTYBIN_ADMIN_TOKEN`, so nothing the instance
+answers lets anyone test guesses of the admin token offline. With a key per process
+(and the default audience, a random instance id) a restart signs everyone out; set a
+state directory or the key, and `RUSTYBIN_INSTANCE_ID`, so sessions survive restarts,
+and the key (or one state directory) on every replica. An admin token shorter than 24
+characters warns at startup.
 
 **What survives a restart.** With a state directory (`RUSTYBIN_STATE_DIR`),
 `<state>/sessions.json` (mode 0600) keeps the token generation, the revoked token

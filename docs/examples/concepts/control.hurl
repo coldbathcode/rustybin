@@ -51,6 +51,25 @@ header "Access-Control-Allow-Headers" == "x-custom"
 header "Access-Control-Max-Age" == "600"
 # ANCHOR_END: cors_preflight
 
+# ANCHOR: cors_control_plane
+# The control plane answers cross-origin only to listed origins (this
+# instance lists none by name), the sign-in included.
+OPTIONS {{base_url}}/_rustybin/login
+Origin: https://app.example.com
+Access-Control-Request-Method: POST
+Access-Control-Request-Headers: content-type
+HTTP 200
+[Asserts]
+header "Access-Control-Allow-Origin" not exists
+header "Access-Control-Allow-Methods" not exists
+
+GET {{base_url}}/_rustybin/version
+Origin: https://app.example.com
+HTTP 200
+[Asserts]
+header "Access-Control-Allow-Origin" not exists
+# ANCHOR_END: cors_control_plane
+
 # ANCHOR: ready
 GET {{base_url}}/_rustybin/ready
 HTTP 200

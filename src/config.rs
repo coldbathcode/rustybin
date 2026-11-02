@@ -15,6 +15,8 @@ use crate::control_auth::ControlAuth;
 use crate::limits::{LimitsConfig, Period, Plan, Scope};
 use crate::logging::LogFormat;
 
+/// Below this many characters `RUSTYBIN_ADMIN_TOKEN` warns at startup.
+pub const MIN_ADMIN_TOKEN_CHARS: usize = 24;
 /// Maximum delay a client may request via `X-Rustybin-Delay` (normal mode).
 pub const MAX_DELAY_MS: u64 = 30_000;
 /// Maximum delay a client may request via `X-Rustybin-Delay` (public mode).
@@ -120,8 +122,9 @@ pub struct Config {
     /// External authorization server named in the metadata instead of the
     /// built-in one (`RUSTYBIN_CONTROL_OAUTH_ISSUER`).
     pub control_oauth_issuer: Option<String>,
-    /// Key of the built-in authorization server (`RUSTYBIN_CONTROL_OAUTH_KEY`,
-    /// else derived from the admin token, else random). Never exposed.
+    /// Key of the built-in authorization server and the console sign-in
+    /// (`RUSTYBIN_CONTROL_OAUTH_KEY`, else a random key in
+    /// `<state>/control-oauth.key`, else random per process). Never exposed.
     pub control_oauth_key: crate::control_oauth::OAuthKey,
     /// Log line format (`RUSTYBIN_LOG_FORMAT`, `text` or `json`).
     pub log_format: LogFormat,
@@ -735,6 +738,7 @@ impl Config {
                 None
             }
         });
+        let state_dir = get("RUSTYBIN_STATE_DIR").map(PathBuf::from);
         let oauth_key_setting = get("RUSTYBIN_CONTROL_OAUTH_KEY");
         if oauth_key_setting
             .as_ref()
@@ -748,8 +752,17 @@ impl Config {
             oauth_key_setting
                 .as_deref()
                 .filter(|k| k.trim().len() >= 32),
-            admin_token.as_deref(),
+            state_dir.as_deref(),
         );
+        if admin_token
+            .as_deref()
+            .is_some_and(|t| t.chars().count() < MIN_ADMIN_TOKEN_CHARS)
+        {
+            warnings.push(format!(
+                "RUSTYBIN_ADMIN_TOKEN is shorter than {MIN_ADMIN_TOKEN_CHARS} characters: choose a \
+                 long random value (openssl rand -hex 32)"
+            ));
+        }
         match control_auth {
             ControlAuth::Token if admin_token.is_none() => warnings.push(
                 "RUSTYBIN_CONTROL_AUTH=token without RUSTYBIN_ADMIN_TOKEN: every control-plane \
@@ -858,7 +871,6 @@ impl Config {
             &mut warnings,
         );
         let mut harness = parse_harness(&get, hosted_mode, &mut warnings);
-        let state_dir = get("RUSTYBIN_STATE_DIR").map(PathBuf::from);
         let mut mocks_state_dir = get("RUSTYBIN_MOCKS_STATE_DIR");
         if let Some(dir) = &state_dir {
             if mocks_state_dir.is_none() {

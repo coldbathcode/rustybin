@@ -22,10 +22,11 @@
 //! check takes `&Config`): the generation counter ("sign out everywhere"
 //! rotates it), the revoked `jti`s (a bounded denylist that expires with the
 //! tokens), the issued sessions (bounded, for Management, Sign-in) and the
-//! failed attempts per client address (5 per minute, then 429 with
-//! `Retry-After`, exponential up to 10 minutes). Every attempt is audited on
-//! the `rustybin::auth` target with the user name, the address and the
-//! outcome, never the password.
+//! failed attempts per client address (an IPv6 /64) and user name (5 per
+//! minute, then 429 with `Retry-After`, exponential up to 10 minutes), plus
+//! a budget of failures from every address together. Every attempt is
+//! audited on the `rustybin::auth` target with the user name (control
+//! characters escaped), the address and the outcome, never the password.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::IpAddr;
@@ -73,8 +74,12 @@ pub const MAX_REVOKED: usize = 4096;
 pub const MAX_REVOKED_SUBJECTS: usize = 1024;
 pub const MAX_SESSIONS: usize = 256;
 pub const MAX_ATTEMPT_ADDRESSES: usize = 1024;
-/// Failed attempts per address and window before the address waits.
+/// Failed attempts per address and user name and window before they wait.
 pub const FAILURES_PER_WINDOW: u32 = 5;
+/// Failed attempts from every address together per window before every
+/// sign-in waits for the window's end: rotating addresses buys no more
+/// guesses than this.
+pub const GLOBAL_FAILURES_PER_WINDOW: u32 = 100;
 pub const WINDOW_SECS: u64 = 60;
 pub const FIRST_BLOCK_SECS: u64 = 60;
 pub const MAX_BLOCK_SECS: u64 = 600;
@@ -140,6 +145,41 @@ pub fn warn_default_password(state: &AppState) {
             target: "rustybin::auth",
             "the console uses the default password ({DEFAULT_USER} / {DEFAULT_PASSWORD}): set \
              RUSTYBIN_CONSOLE_PASSWORD or change it in Management, Sign-in"
+        );
+    }
+}
+
+/// The startup warning of a public instance whose proxy is not trusted:
+/// every client then shares the proxy's address for the sign-in throttle
+/// and the limits.
+pub fn warn_untrusted_forwarding(state: &AppState) {
+    if enabled(&state.config) && state.config.public_mode && !state.config.trust_forward {
+        tracing::warn!(
+            target: "rustybin::auth",
+            "RUSTYBIN_PUBLIC_MODE without RUSTYBIN_TRUST_FORWARD: behind a proxy every client \
+             shares the proxy's address, for the sign-in throttle and every limit. Set \
+             RUSTYBIN_TRUST_FORWARD=true (and RUSTYBIN_TRUST_FORWARD_HEADER) when a proxy you \
+             run sets the client address"
+        );
+    }
+}
+
+/// Once per process: a sign-in arrived with a forwarding header the
+/// instance does not trust, so the throttle counts the proxy's address.
+fn warn_untrusted_proxy(headers: &HeaderMap, config: &Config) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if config.trust_forward || WARNED.load(Ordering::Relaxed) {
+        return;
+    }
+    let forwarded = ["x-forwarded-for", "forwarded", "x-real-ip", "fly-client-ip"]
+        .iter()
+        .any(|h| headers.contains_key(*h));
+    if forwarded && !WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            target: "rustybin::auth",
+            "a sign-in came through a proxy (a forwarding header is present) but \
+             RUSTYBIN_TRUST_FORWARD is off: the sign-in throttle and the limits count the \
+             proxy's address for every client behind it"
         );
     }
 }
@@ -344,12 +384,44 @@ pub struct Tokens {
     /// load.
     agent_revoked: Mutex<BTreeMap<String, i64>>,
     issued: Mutex<VecDeque<Issued>>,
-    attempts: Mutex<HashMap<IpAddr, Attempt>>,
+    /// Failed attempts per client address (an IPv6 /64) and user name: one
+    /// client behind a shared address (a proxy without
+    /// `RUSTYBIN_TRUST_FORWARD`) typing another name does not lock the
+    /// real user out.
+    attempts: Mutex<HashMap<AttemptKey, Attempt>>,
+    /// Failures from every address in the current window.
+    global: Mutex<GlobalWindow>,
+    /// One writer of `sessions.json` at a time, the snapshot taken under it:
+    /// a slower save never overwrites a newer one (a revocation is never lost).
+    saving: Mutex<()>,
     /// Password hashes computed at once (argon2id takes 19 MiB each).
     hashing: Arc<tokio::sync::Semaphore>,
     /// `<state>/sessions.json`: the generation and the revocations survive a
     /// restart there.
     file: Option<std::path::PathBuf>,
+}
+
+/// What the sign-in throttle counts: the client address (an IPv6 /64) and
+/// the user name tried (lower case, at most 64 characters).
+type AttemptKey = (IpAddr, String);
+
+/// Failures from every address in one window.
+#[derive(Clone, Copy, Debug, Default)]
+struct GlobalWindow {
+    start: Duration,
+    failures: u32,
+}
+
+fn attempt_key(ip: Option<IpAddr>, user: &str) -> Option<AttemptKey> {
+    ip.map(|ip| {
+        (
+            crate::session::address_bucket(ip),
+            user.chars()
+                .take(MAX_USER_CHARS)
+                .collect::<String>()
+                .to_lowercase(),
+        )
+    })
 }
 
 /// Password hashes (sign-in, password change) computed at once.
@@ -408,6 +480,8 @@ impl Tokens {
             agent_revoked: Mutex::new(BTreeMap::new()),
             issued: Mutex::new(VecDeque::new()),
             attempts: Mutex::new(HashMap::new()),
+            global: Mutex::new(GlobalWindow::default()),
+            saving: Mutex::new(()),
             hashing: Arc::new(tokio::sync::Semaphore::new(HASH_PERMITS)),
             file: None,
         }
@@ -456,6 +530,7 @@ impl Tokens {
     /// Write the generation and the revocations (0600, replaced atomically).
     fn save(&self) {
         let Some(path) = &self.file else { return };
+        let _writer = lock(&self.saving);
         let doc = SessionsDoc {
             version: 1,
             generation: self.generation(),
@@ -499,6 +574,11 @@ impl Tokens {
         };
         self.save();
         n
+    }
+
+    /// The number of listed sessions.
+    pub fn listed(&self) -> usize {
+        lock(&self.issued).len()
     }
 
     /// Forget sessions whose tokens expired.
@@ -630,17 +710,33 @@ impl Tokens {
             .collect()
     }
 
-    /// May `ip` try to sign in? `Err(seconds)` while it waits. An allowed
-    /// attempt counts as pending until `failed` or `succeeded` settles it, so
-    /// parallel guesses are refused once the window's allowance is taken.
-    pub fn check(&self, ip: Option<IpAddr>) -> Result<(), u64> {
-        let Some(ip) = ip else { return Ok(()) };
+    /// May `ip` try to sign in as `user`? `Err(seconds)` while it waits
+    /// (the address and name, or every sign-in once the window's failures
+    /// from all addresses reach [`GLOBAL_FAILURES_PER_WINDOW`]). An allowed
+    /// attempt counts as pending until `failed` or `succeeded` settles it,
+    /// so parallel guesses are refused once the window's allowance is taken.
+    pub fn check(&self, ip: Option<IpAddr>, user: &str) -> Result<(), u64> {
         let now = self.clock.mono();
+        {
+            let g = lock(&self.global);
+            let elapsed = now.saturating_sub(g.start);
+            if elapsed <= Duration::from_secs(WINDOW_SECS)
+                && g.failures >= GLOBAL_FAILURES_PER_WINDOW
+            {
+                return Err(Duration::from_secs(WINDOW_SECS)
+                    .saturating_sub(elapsed)
+                    .as_secs()
+                    .max(1));
+            }
+        }
+        let Some(key) = attempt_key(ip, user) else {
+            return Ok(());
+        };
         let mut attempts = lock(&self.attempts);
-        if !attempts.contains_key(&ip) && attempts.len() >= MAX_ATTEMPT_ADDRESSES {
+        if !attempts.contains_key(&key) && attempts.len() >= MAX_ATTEMPT_ADDRESSES {
             Self::evict_attempts(&mut attempts, now);
         }
-        let a = attempts.entry(ip).or_default();
+        let a = attempts.entry(key).or_default();
         if let Some(until) = a.blocked_until.filter(|u| *u > now) {
             return Err((until - now).as_secs().max(1));
         }
@@ -659,43 +755,51 @@ impl Tokens {
         Ok(())
     }
 
-    fn evict_attempts(attempts: &mut HashMap<IpAddr, Attempt>, now: Duration) {
+    fn evict_attempts(attempts: &mut HashMap<AttemptKey, Attempt>, now: Duration) {
         let stale = Duration::from_secs(MAX_BLOCK_SECS);
         attempts.retain(|_, a| {
             a.blocked_until.is_some_and(|u| u > now) || now.saturating_sub(a.last) < stale
         });
         if attempts.len() >= MAX_ATTEMPT_ADDRESSES {
-            if let Some(oldest) = attempts.iter().min_by_key(|(_, a)| a.last).map(|(k, _)| *k) {
+            if let Some(oldest) = attempts
+                .iter()
+                .min_by_key(|(_, a)| a.last)
+                .map(|(k, _)| k.clone())
+            {
                 attempts.remove(&oldest);
             }
         }
     }
 
     /// Settle a pending attempt that did not run (the hash pool was full).
-    pub fn abandoned(&self, ip: Option<IpAddr>) {
-        let Some(ip) = ip else { return };
-        if let Some(a) = lock(&self.attempts).get_mut(&ip) {
+    pub fn abandoned(&self, ip: Option<IpAddr>, user: &str) {
+        let Some(key) = attempt_key(ip, user) else {
+            return;
+        };
+        if let Some(a) = lock(&self.attempts).get_mut(&key) {
             a.pending = a.pending.saturating_sub(1);
         }
     }
 
-    /// A failed attempt from `ip`.
-    pub fn failed(&self, ip: Option<IpAddr>) {
-        let Some(ip) = ip else { return };
+    /// A failed attempt from `ip` as `user`.
+    pub fn failed(&self, ip: Option<IpAddr>, user: &str) {
         let now = self.clock.mono();
-        let mut attempts = lock(&self.attempts);
-        if !attempts.contains_key(&ip) && attempts.len() >= MAX_ATTEMPT_ADDRESSES {
-            let stale = Duration::from_secs(MAX_BLOCK_SECS);
-            attempts.retain(|_, a| {
-                a.blocked_until.is_some_and(|u| u > now) || now.saturating_sub(a.last) < stale
-            });
-            if attempts.len() >= MAX_ATTEMPT_ADDRESSES {
-                if let Some(oldest) = attempts.iter().min_by_key(|(_, a)| a.last).map(|(k, _)| *k) {
-                    attempts.remove(&oldest);
-                }
+        {
+            let mut g = lock(&self.global);
+            if now.saturating_sub(g.start) > Duration::from_secs(WINDOW_SECS) {
+                g.start = now;
+                g.failures = 0;
             }
+            g.failures = g.failures.saturating_add(1);
         }
-        let a = attempts.entry(ip).or_default();
+        let Some(key) = attempt_key(ip, user) else {
+            return;
+        };
+        let mut attempts = lock(&self.attempts);
+        if !attempts.contains_key(&key) && attempts.len() >= MAX_ATTEMPT_ADDRESSES {
+            Self::evict_attempts(&mut attempts, now);
+        }
+        let a = attempts.entry(key).or_default();
         a.pending = a.pending.saturating_sub(1);
         if now.saturating_sub(a.window_start) > Duration::from_secs(WINDOW_SECS) {
             a.failures = 0;
@@ -712,10 +816,10 @@ impl Tokens {
         }
     }
 
-    /// A successful sign-in from `ip` clears its record.
-    pub fn succeeded(&self, ip: Option<IpAddr>) {
-        if let Some(ip) = ip {
-            lock(&self.attempts).remove(&ip);
+    /// A successful sign-in from `ip` as `user` clears its record.
+    pub fn succeeded(&self, ip: Option<IpAddr>, user: &str) {
+        if let Some(key) = attempt_key(ip, user) {
+            lock(&self.attempts).remove(&key);
         }
     }
 }
@@ -904,7 +1008,7 @@ fn audit(event: &str, user: &str, ip: Option<IpAddr>, outcome: &str) {
     tracing::info!(
         target: "rustybin::auth",
         event,
-        user = %user.chars().take(MAX_USER_CHARS).collect::<String>(),
+        user = %crate::logging::printable(user, MAX_USER_CHARS),
         ip = %ip.map(|i| i.to_string()).unwrap_or_default(),
         outcome,
         "console sign-in"
@@ -963,15 +1067,17 @@ async fn login_handler(
         }
     };
     let ip = client_ip(&headers, &extensions, config);
+    warn_untrusted_proxy(&headers, config);
     let tokens = &config.console_tokens;
-    if let Err(wait) = tokens.check(ip) {
+    let tried = body.username.as_str();
+    if let Err(wait) = tokens.check(ip, tried) {
         audit("login", &body.username, ip, "rate_limited");
         return rate_limited(wait);
     }
     if body.username.chars().count() > MAX_USER_CHARS
         || body.password.chars().count() > MAX_PASSWORD_CHARS * 4
     {
-        tokens.failed(ip);
+        tokens.failed(ip, tried);
         audit("login", &body.username, ip, "invalid_credentials");
         return error(
             StatusCode::UNAUTHORIZED,
@@ -980,11 +1086,11 @@ async fn login_handler(
         );
     }
     let Some(ok) = check_credentials(&state, &body.username, &body.password).await else {
-        tokens.abandoned(ip);
+        tokens.abandoned(ip, tried);
         return busy();
     };
     if !ok {
-        tokens.failed(ip);
+        tokens.failed(ip, tried);
         audit("login", &body.username, ip, "invalid_credentials");
         return error(
             StatusCode::UNAUTHORIZED,
@@ -992,7 +1098,7 @@ async fn login_handler(
             "invalid_credentials",
         );
     }
-    tokens.succeeded(ip);
+    tokens.succeeded(ip, tried);
     let user = effective_user(&state.settings);
     let Some((token, claims)) = mint(config, &user) else {
         return error(
@@ -1224,23 +1330,23 @@ async fn password_handler(
     };
     let ip = client_ip(&headers, &extensions, config);
     let tokens = &config.console_tokens;
-    if let Err(wait) = tokens.check(ip) {
+    let current_user = effective_user(&state.settings);
+    if let Err(wait) = tokens.check(ip, &current_user) {
         return rate_limited(wait);
     }
-    let current_user = effective_user(&state.settings);
     let current_ok = if body.current_password.chars().count() > MAX_PASSWORD_CHARS * 4 {
         false
     } else {
         match check_credentials(&state, &current_user, &body.current_password).await {
             Some(ok) => ok,
             None => {
-                tokens.abandoned(ip);
+                tokens.abandoned(ip, &current_user);
                 return busy();
             }
         }
     };
     if !current_ok {
-        tokens.failed(ip);
+        tokens.failed(ip, &current_user);
         audit(
             "change_password",
             &current_user,
@@ -1253,7 +1359,7 @@ async fn password_handler(
             "invalid_credentials",
         );
     }
-    tokens.succeeded(ip);
+    tokens.succeeded(ip, &current_user);
     if let Err(e) = valid_new_password(&body.new_password) {
         return error(
             StatusCode::BAD_REQUEST,
@@ -1304,7 +1410,11 @@ async fn password_handler(
     let mut secrets = BTreeMap::new();
     secrets.insert(HASH_KEY.to_string(), Some(hash));
     let who = crate::settings::principal(&headers, config);
-    if let Err(e) = state.settings.update(values, secrets, &who) {
+    // The store signs every session out with the change: count them, and
+    // see whether the caller signed in with one, first.
+    let listed = tokens.listed();
+    let had_session = presented_claims(&headers, config).is_some();
+    if let Err(e) = state.settings.update_sign_in(values, secrets, &who) {
         return match e {
             crate::settings::UpdateError::Locked(keys) => (
                 StatusCode::CONFLICT,
@@ -1330,8 +1440,7 @@ async fn password_handler(
     let user = new_user.unwrap_or(current_user);
     // Every other session ends; the caller gets a fresh token when it signed
     // in with one.
-    let had_session = presented_claims(&headers, config).is_some();
-    let ended = tokens.rotate();
+    let ended = listed;
     audit("change_password", &user, ip, "ok");
     let mut out = json!({
         "changed": true,
@@ -1387,7 +1496,8 @@ pub fn catalog() -> Vec<Endpoint> {
         .description(
             "Never behind control-plane auth. Answers a 12 hour control token (scope admin) \
              that every control-plane route, the management MCP server and the admin guard \
-             accept. 5 failed attempts per client address and minute, then 429 with Retry-After. \
+             accept. 5 failed attempts per client address and user name and minute (100 \
+             from every address together), then 429 with Retry-After. \
              404 unless RUSTYBIN_CONTROL_AUTH=password (the default).",
         )
         .example(

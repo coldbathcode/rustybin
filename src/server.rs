@@ -342,6 +342,7 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
     );
 
     crate::login::warn_default_password(&state);
+    crate::login::warn_untrusted_forwarding(&state);
 
     match &config.state_dir {
         Some(dir) => tracing::info!(

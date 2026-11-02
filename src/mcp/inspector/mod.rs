@@ -63,6 +63,30 @@ pub fn is_console_post(path: &str) -> bool {
     matches!(path, RELAY_PATH | RELAY_FETCH_PATH | CHECKS_PATH)
 }
 
+/// JSON-RPC methods that only read what a server offers: all a caller
+/// without admin rights may send to a server on another host (the console
+/// scope's relay and checks, a read-only agent's `mcp_call`). `tools/call`
+/// and the rest act on that server, so they need admin.
+pub const READ_ONLY_METHODS: &[&str] = &[
+    "initialize",
+    "server/discover",
+    "ping",
+    "tools/list",
+    "resources/list",
+    "resources/read",
+    "resources/templates/list",
+    "prompts/list",
+    "prompts/get",
+];
+
+/// May a caller without admin rights send `method` to `target`? Anything
+/// to this instance's own servers (in process); read-only methods and
+/// notifications elsewhere.
+pub fn allowed_without_admin(target: &client::Target, method: Option<&str>) -> bool {
+    matches!(target, client::Target::Local(_))
+        || method.is_some_and(|m| READ_ONLY_METHODS.contains(&m) || m.starts_with("notifications/"))
+}
+
 /// DELETE of a relay session: the console scope may end its own sessions.
 pub fn is_relay_session_path(path: &str) -> bool {
     path.strip_prefix("/_rustybin/mcp-relay/")
@@ -280,6 +304,8 @@ pub fn build_run_spec(
         Err(e) => return Err((StatusCode::BAD_REQUEST, e, "invalid_checks")),
     };
     Ok(checks::RunSpec {
+        // Tool calls go to another host's server only for admin callers.
+        call_tools: admin || matches!(target, Target::Local(_)),
         target,
         transport,
         auth,

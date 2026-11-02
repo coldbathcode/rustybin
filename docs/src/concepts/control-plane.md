@@ -41,6 +41,21 @@ plain `OPTIONS` request without that header reaches the route. Responses expose
 To demonstrate a gateway's own CORS plugin, turn Rustybin's off with
 `RUSTYBIN_CORS_ORIGINS=off`, or restrict it with a comma-separated origin list.
 
+**The control plane answers only the origins you name.** `*` covers the data plane
+only: on `/_rustybin/*` (the sign-in, the OAuth endpoints and the management MCP
+server included) the CORS headers are dropped unless the request's `Origin` is listed
+in `RUSTYBIN_CORS_ORIGINS` by name. A web page the operator happens to open cannot
+then sign in with the default password, or drive an open control plane, from the
+operator's browser. The console is served from the instance itself, so it needs no
+CORS. A browser app on another origin that calls the control API (or a browser MCP
+client on `/_rustybin/mcp`) needs its origin in the list, next to `*` if the data plane
+should stay open: `RUSTYBIN_CORS_ORIGINS=*,https://ops.example.com`. The OAuth
+discovery documents under `/.well-known/` keep the data plane's answer.
+
+```hurl
+{{#include ../../examples/concepts/control.hurl:cors_control_plane}}
+```
+
 ## Control plane
 
 Routes under `/_rustybin/` describe and manage the instance. They are never

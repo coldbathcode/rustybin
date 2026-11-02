@@ -313,6 +313,7 @@ pub async fn relay(
         Err(e) => return error(StatusCode::BAD_REQUEST, e, "invalid_headers"),
     };
     let legacy = matches!(req.transport.as_deref(), Some("legacy") | Some("sse"));
+    let admin = crate::admin::admin_check(&request_headers, &state.config).is_ok();
     // An existing session decides the target; otherwise the body does.
     let existing = match &req.session {
         Some(id) => match inspector.relay.touch(id) {
@@ -334,7 +335,6 @@ pub async fn relay(
                 Ok(t) => t,
                 Err(e) => return error(StatusCode::BAD_REQUEST, e, "invalid_target"),
             };
-            let admin = crate::admin::admin_check(&request_headers, &state.config).is_ok();
             let (h, q) =
                 match connection_auth(&inspector, req.connection.as_deref(), &req.target, admin) {
                     Ok(a) => a,
@@ -372,6 +372,20 @@ pub async fn relay(
             StatusCode::BAD_REQUEST,
             "message must be one JSON-RPC object",
             "invalid_body",
+        );
+    }
+    if !admin
+        && !super::allowed_without_admin(&target, message.get("method").and_then(Value::as_str))
+    {
+        audit("post", &target, "refused");
+        return error(
+            StatusCode::FORBIDDEN,
+            format!(
+                "only {} and notifications go through the relay to a server on another \
+                 host without admin rights",
+                super::READ_ONLY_METHODS.join(", ")
+            ),
+            "admin_required",
         );
     }
     if legacy {

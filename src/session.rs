@@ -118,6 +118,22 @@ pub fn is_internal_ip(ip: &IpAddr) -> bool {
     }
 }
 
+/// The address a per-client throttle counts: IPv4 as it is (an IPv4-mapped
+/// IPv6 address as its IPv4), IPv6 by its /64 network, since one host
+/// usually holds a whole /64 and could rotate through it.
+pub fn address_bucket(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return IpAddr::V4(v4);
+            }
+            let s = v6.segments();
+            IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+        }
+    }
+}
+
 /// Parse one forwarded address: `1.2.3.4`, `1.2.3.4:567`, `2001:db8::1`,
 /// `[2001:db8::1]`, `[2001:db8::1]:443` (optionally quoted). `unknown` and
 /// obfuscated identifiers (`_hidden`) yield `None`.
@@ -678,6 +694,19 @@ mod tests {
             h.append(*k, HeaderValue::from_static(v));
         }
         h
+    }
+
+    #[test]
+    fn address_buckets_group_an_ipv6_slash_64() {
+        let a: IpAddr = "2001:db8:1:2:aaaa::1".parse().expect("ip");
+        let b: IpAddr = "2001:db8:1:2:ffff:1:2:3".parse().expect("ip");
+        let c: IpAddr = "2001:db8:1:3::1".parse().expect("ip");
+        assert_eq!(address_bucket(a), address_bucket(b));
+        assert_ne!(address_bucket(a), address_bucket(c));
+        let v4: IpAddr = "203.0.113.7".parse().expect("ip");
+        assert_eq!(address_bucket(v4), v4);
+        let mapped: IpAddr = "::ffff:203.0.113.7".parse().expect("ip");
+        assert_eq!(address_bucket(mapped), v4);
     }
 
     #[test]

@@ -24,7 +24,7 @@ fn token_config() -> Config {
     let mut c = Config::for_tests();
     c.control_auth = ControlAuth::Token;
     c.admin_token = Some(ADMIN.into());
-    c.control_oauth_key = OAuthKey::from_settings(None, Some(ADMIN));
+    c.control_oauth_key = OAuthKey::from_settings(None, None);
     c
 }
 
@@ -722,17 +722,73 @@ fn key_sources_and_debug() {
         OAuthKey::from_settings(None, None).source(),
         KeySource::Random
     );
-    assert_eq!(
-        OAuthKey::from_settings(None, Some("t")).source(),
-        KeySource::AdminToken
-    );
-    let k = OAuthKey::from_settings(Some("s"), Some("t"));
+    let k = OAuthKey::from_settings(Some("s"), None);
     assert_eq!(k.source(), KeySource::Setting);
     assert!(format!("{k:?}").contains("redacted"));
-    // Derived keys are stable across restarts.
-    let a = OAuthKey::from_settings(None, Some("t"));
-    let b = OAuthKey::from_settings(None, Some("t"));
-    assert_eq!(a.mac("x", b"y"), b.mac("x", b"y"));
+    // A set key is stable across restarts.
+    let a = OAuthKey::from_settings(Some("s"), None);
+    assert_eq!(a.mac("x", b"y"), k.mac("x", b"y"));
+}
+
+#[test]
+fn the_key_is_random_per_instance_never_the_admin_token() {
+    // Two instances with the same admin token and no key of their own sign
+    // with different keys: a registration's MAC says nothing about the
+    // admin token.
+    let a = OAuthKey::from_settings(None, None);
+    let b = OAuthKey::from_settings(None, None);
+    assert_ne!(a.mac("client", b"x"), b.mac("client", b"x"));
+    let derived: [u8; 32] =
+        Sha256::digest(format!("rustybin-control-oauth\nadmin-token\n{ADMIN}").as_bytes()).into();
+    assert_ne!(a.bytes, derived);
+    // From the environment: the admin token alone never makes the key.
+    let (c, _) = Config::from_lookup(|k| (k == "RUSTYBIN_ADMIN_TOKEN").then(|| ADMIN.into()));
+    assert_eq!(c.control_oauth_key.source(), KeySource::Random);
+    // With a state directory the key is kept there (0600) and survives a
+    // restart, so sign-ins do too.
+    let dir = tempfile::tempdir().expect("tmp");
+    let first = OAuthKey::from_settings(None, Some(dir.path()));
+    assert_eq!(first.source(), KeySource::StateFile);
+    let again = OAuthKey::from_settings(None, Some(dir.path()));
+    assert_eq!(first.mac("x", b"y"), again.mac("x", b"y"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.path().join(KEY_FILE))
+            .expect("key file")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let path = dir.path().to_string_lossy().into_owned();
+    let (c, _) = Config::from_lookup(|k| match k {
+        "RUSTYBIN_STATE_DIR" => Some(path.clone()),
+        "RUSTYBIN_ADMIN_TOKEN" => Some(ADMIN.into()),
+        _ => None,
+    });
+    assert_eq!(c.control_oauth_key.source(), KeySource::StateFile);
+    assert_eq!(c.control_oauth_key.mac("x", b"y"), first.mac("x", b"y"));
+    // The explicit key wins over the file.
+    let set = OAuthKey::from_settings(Some(&"k".repeat(40)), Some(dir.path()));
+    assert_eq!(set.source(), KeySource::Setting);
+}
+
+#[test]
+fn a_short_admin_token_warns() {
+    let (_, warnings) =
+        Config::from_lookup(|k| (k == "RUSTYBIN_ADMIN_TOKEN").then(|| "short".into()));
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("RUSTYBIN_ADMIN_TOKEN is shorter")),
+        "{warnings:?}"
+    );
+    let long = "x".repeat(crate::config::MIN_ADMIN_TOKEN_CHARS);
+    let (_, warnings) =
+        Config::from_lookup(|k| (k == "RUSTYBIN_ADMIN_TOKEN").then(|| long.clone()));
+    assert!(!warnings
+        .iter()
+        .any(|w| w.contains("RUSTYBIN_ADMIN_TOKEN is shorter")));
 }
 
 #[test]
@@ -864,4 +920,63 @@ fn sign_in_requests_are_limited_per_address() {
     }
     assert!(!st.allow_authorize(a));
     assert!(st.allow_authorize(Some("203.0.113.2".parse().expect("ip"))));
+}
+
+#[test]
+fn sign_in_requests_have_a_global_rate_and_ipv6_counts_by_slash_64() {
+    // Many addresses together: at most the store's capacity over its time
+    // to live, so a handful of hosts cannot fill the pending consents.
+    let st = OAuthState::new(true);
+    let global = MAX_PENDING_PUBLIC / (PENDING_TTL_SECS as usize / 60);
+    let mut allowed = 0;
+    for i in 0..(global as u32 + 20) {
+        if st.allow_authorize(Some(std::net::IpAddr::from([
+            198,
+            51,
+            (i >> 8) as u8,
+            i as u8,
+        ]))) {
+            allowed += 1;
+        }
+    }
+    assert_eq!(allowed, global);
+    // One IPv6 host rotating inside its /64 is one address.
+    let st = OAuthState::new(false);
+    let mut allowed = 0;
+    for i in 0..(AUTHORIZE_PER_MINUTE as u16 + 5) {
+        let ip = std::net::IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 1, 2, i, 1, 2, 3));
+        if st.allow_authorize(Some(ip)) {
+            allowed += 1;
+        }
+    }
+    assert_eq!(allowed, AUTHORIZE_PER_MINUTE);
+}
+
+fn pending_for(client_id: &str) -> Pending {
+    Pending {
+        client_id: client_id.into(),
+        client_name: "c".into(),
+        redirect_uri: REDIRECT.into(),
+        state: None,
+        challenge: CHALLENGE.into(),
+        scopes: vec!["console"],
+        resource: format!("{BASE}/_rustybin/mcp"),
+        issuer: format!("{BASE}{ISSUER_PATH}"),
+    }
+}
+
+#[test]
+fn a_client_keeps_a_few_pending_sign_ins() {
+    let st = OAuthState::new(true);
+    for i in 0..(MAX_PENDING_PER_CLIENT + 4) {
+        st.add_pending(format!("a-{i}"), pending_for("client-a"));
+    }
+    st.add_pending("b-0".into(), pending_for("client-b"));
+    // The newest of client a survive, its oldest were evicted; b is kept.
+    assert_eq!(st.pending.len(), MAX_PENDING_PER_CLIENT + 1);
+    assert!(!st.pending.contains("a-0"));
+    assert!(st
+        .pending
+        .contains(&format!("a-{}", MAX_PENDING_PER_CLIENT + 3)));
+    assert!(st.pending.contains("b-0"));
 }
