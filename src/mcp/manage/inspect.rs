@@ -147,6 +147,9 @@ pub async fn mcp_call(ctx: &CallCtx, access: &Access, args: &Value, params: &Val
     {
         return v;
     }
+    let Some(_slot) = ctx.app.mcp_inspector.call_slot() else {
+        return err(inspector::CALLS_BUSY);
+    };
     let call_params = args.get("params").cloned().unwrap_or_else(|| json!({}));
     let mut conn = Conn::new(ctx.app.clone(), target.clone(), transport, auth);
     let handshake = if transport == Transport::Modern || method == "initialize" {
@@ -303,7 +306,10 @@ pub async fn run_mcp_checks(ctx: &CallCtx, access: &Access, args: &Value, params
             return v;
         }
     };
-    let report = inspector::run_and_save(&ctx.app, &ctx.app.mcp_inspector, spec, save).await;
+    let Some(report) = inspector::run_and_save(&ctx.app, &ctx.app.mcp_inspector, spec, save).await
+    else {
+        return err(inspector::CHECKS_BUSY);
+    };
     let counts = report["counts"].clone();
     // The rows carry the server's tool names, errors and headers: the
     // report goes back under untrusted_report, cut like any server answer.

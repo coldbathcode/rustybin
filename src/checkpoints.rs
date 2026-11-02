@@ -78,7 +78,7 @@ impl Checkpoint {
 /// A mock a checkpoint covers: the instance's own, created through the API,
 /// not a scenario's scratch mock (it expires).
 pub fn covered(s: &Snapshot) -> bool {
-    s.owner == Owner::Instance && s.origin == Origin::Api && s.expires_at.is_none()
+    s.owner == Owner::Instance && s.origin == Origin::Api && s.expires_at.is_none() && !s.scratch
 }
 
 fn rev_of(c: &crate::mocks::compile::Compiled) -> Rev {
@@ -294,6 +294,8 @@ pub fn save(state: &AppState, name: &str, replace: bool) -> Result<Value, Refuse
             format!("name {name:?}: 1 to 64 letters, digits, . _ -"),
         ));
     }
+    // Under the mocks' edit lock: never half of a restore or of an edit.
+    let _edit = state.mocks.edit_lock();
     let mocks: Vec<KeptMock> = state
         .mocks
         .list()
@@ -322,6 +324,9 @@ pub fn restore(state: &AppState, name: &str, dry_run: bool) -> Result<Value, Ref
         )
     })?;
     let store = &state.mocks;
+    // One restore at a time, and no edit in the middle of one: the edit
+    // lock is held from the first read to the last write.
+    let _edit = store.edit_lock();
     let current: BTreeMap<String, Snapshot> = store
         .list()
         .into_iter()
@@ -389,19 +394,13 @@ pub fn restore(state: &AppState, name: &str, dry_run: bool) -> Result<Value, Ref
                 continue;
             }
         };
-        if now.is_some() {
-            store.delete_quietly(&m.name);
+        if live.is_none() && draft.is_none() {
+            problems.push(format!("{}: no revision in the checkpoint", m.name));
+            continue;
         }
-        let made = match (live, draft) {
-            (Some(l), d) => store.restore(&m.name, l, d, Origin::Api, Owner::Instance, m.enabled),
-            (None, Some(d)) => {
-                store.restore_undeployed(&m.name, d, Origin::Api, Owner::Instance, m.enabled)
-            }
-            (None, None) => {
-                problems.push(format!("{}: no revision in the checkpoint", m.name));
-                continue;
-            }
-        };
+        // Built above, swapped in one write: a mock that cannot be restored
+        // keeps what it has.
+        let made = store.restore_replacing(&m.name, live, draft, m.enabled);
         match made {
             Ok(s) => {
                 s.state.restore(&m.state);
@@ -412,7 +411,7 @@ pub fn restore(state: &AppState, name: &str, dry_run: bool) -> Result<Value, Ref
                     created.push(m.name.clone());
                 }
             }
-            Err(e) => problems.push(format!("{}: {e:?}", m.name)),
+            Err(e) => problems.push(format!("{}: {} (left as it is)", m.name, e.message())),
         }
     }
     for (n, s) in &current {

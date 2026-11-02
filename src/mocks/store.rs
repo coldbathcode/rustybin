@@ -166,6 +166,9 @@ struct Entry {
     capture: CaptureLog,
     state: MockState,
     expires: Option<(Instant, DateTime<Utc>)>,
+    /// A gateway scenario's upstream ([`MockStore::create_scratch`]): never
+    /// saved, never exported.
+    scratch: bool,
     /// Why the last reload of this file mock failed (its last good
     /// revision, if any, keeps answering).
     load_error: Option<String>,
@@ -203,6 +206,9 @@ pub struct Snapshot {
     pub capture: CaptureLog,
     pub state: MockState,
     pub expires_at: Option<DateTime<Utc>>,
+    /// A gateway scenario's upstream: never saved, exported nor kept in a
+    /// checkpoint.
+    pub scratch: bool,
     pub load_error: Option<String>,
 }
 
@@ -214,6 +220,14 @@ impl Snapshot {
             (Some(_), true) => "live",
             (Some(_), false) => "off",
         }
+    }
+
+    /// May a prune (a document applied with `prune`, a reload) delete this
+    /// mock when the document does not name it? Only the instance's own:
+    /// never a visitor's or an API key's mock, nor a gateway scenario's
+    /// scratch mock (its run is going). The origin is checked by the caller.
+    pub fn prunable(&self) -> bool {
+        self.owner == Owner::Instance && !self.scratch
     }
 
     pub fn has_draft_changes(&self) -> bool {
@@ -315,6 +329,37 @@ pub const VISITOR_COMPILES_PER_MINUTE: usize = 30;
 /// Visitors tracked by the compile rate limit.
 pub const MAX_RECOMPILE_KEYS: usize = 4096;
 
+/// 2026-01-01T00:00:00Z in Unix milliseconds.
+const REVISION_EPOCH_MS: i64 = 1_767_225_600_000;
+
+/// The first revision number of a store: the milliseconds since 2026, so
+/// numbering continues across restarts instead of starting at 1 again, and
+/// an `If-Match` named before a restart (a console left open) never matches
+/// a draft compiled after it. A process would have to make more than a
+/// thousand revisions a second, every second it ran, to catch up with the
+/// clock.
+fn first_revision() -> u64 {
+    let ms = Utc::now()
+        .timestamp_millis()
+        .saturating_sub(REVISION_EPOCH_MS);
+    u64::try_from(ms).unwrap_or(0).max(1)
+}
+
+/// Run blocking file work (a synced write, a removal) off the async
+/// workers: on a worker of the multi-threaded runtime the thread hands its
+/// tasks over and blocks as a blocking-pool thread would
+/// (`block_in_place`); on the blocking pool, outside a runtime or on a
+/// current-thread runtime (tests) it runs where it is. Mutations stay
+/// synchronous: a save is on disk when the call returns.
+pub(crate) fn off_runtime<R>(f: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
+}
+
 impl MockStore {
     pub fn new(config: &Config) -> Self {
         Self::with_limits(MockLimits::for_config(config))
@@ -323,7 +368,7 @@ impl MockStore {
     pub fn with_limits(limits: MockLimits) -> Self {
         Self {
             inner: Arc::new(RwLock::new(BTreeMap::new())),
-            revision: Arc::new(AtomicU64::new(1)),
+            revision: Arc::new(AtomicU64::new(first_revision())),
             load_errors: Arc::new(RwLock::new(Vec::new())),
             limits,
             persist_dir: None,
@@ -448,15 +493,20 @@ impl MockStore {
     /// it when the mock is gone). Called after the mutation's lock is
     /// released; the persistence lock orders the writes, and each one reads
     /// the current state, so a slow earlier save never overwrites a later one
-    /// nor brings a deleted mock back.
+    /// nor brings a deleted mock back. A gateway scenario's scratch mock is
+    /// never saved. The file work (a synced write) runs off the async
+    /// workers ([`off_runtime`]).
     fn persist_now(&self, name: &str) {
         let Some(dir) = &self.persist_dir else { return };
-        let _order = self.persist_lock.lock().unwrap_or_else(|p| p.into_inner());
-        let current = self.read().get(name).map(|e| snapshot(name, e));
-        match current {
-            Some(s) => super::persist::save(dir, &s),
-            None => super::persist::remove(dir, name),
-        }
+        off_runtime(|| {
+            let _order = self.persist_lock.lock().unwrap_or_else(|p| p.into_inner());
+            let current = self.read().get(name).map(|e| snapshot(name, e));
+            match current {
+                Some(s) if s.scratch => {}
+                Some(s) => super::persist::save(dir, &s),
+                None => super::persist::remove(dir, name),
+            }
+        });
     }
 
     /// Held for the read, recompile and write of one edit (blocking: call it
@@ -490,10 +540,12 @@ impl MockStore {
             }
             keep
         });
-        if let Some(dir) = &self.persist_dir {
-            for name in &gone {
-                super::persist::remove(dir, name);
-            }
+        if let (Some(dir), false) = (&self.persist_dir, gone.is_empty()) {
+            off_runtime(|| {
+                for name in &gone {
+                    super::persist::remove(dir, name);
+                }
+            });
         }
         map
     }
@@ -635,23 +687,22 @@ impl MockStore {
         compiled: Compiled,
         ttl: Duration,
     ) -> Result<Snapshot, StoreError> {
-        let snap = self.create_inner(
-            name,
-            compiled,
-            Origin::Api,
-            Owner::Instance,
-            true,
-            true,
-            false,
-        )?;
+        Self::check_new(name, &compiled, true, false)?;
+        let owner = Owner::Instance;
+        let mut map = self.write();
+        self.admit(&map, name, &owner, false)?;
+        let mut entry = self.new_entry(compiled, Origin::Api, owner, true, true);
+        // Marked in the same write that adds it: no save, export or
+        // checkpoint ever sees it unmarked.
+        entry.scratch = true;
         let at = Instant::now() + ttl;
         let wall = Utc::now() + chrono::TimeDelta::from_std(ttl).unwrap_or_default();
-        if let Some(e) = self.write().get_mut(name) {
-            e.expires = Some(match e.expires {
-                Some((i, w)) if i < at => (i, w),
-                _ => (at, wall),
-            });
-        }
+        entry.expires = Some(match entry.expires {
+            Some((i, w)) if i < at => (i, w),
+            _ => (at, wall),
+        });
+        let snap = snapshot(name, &entry);
+        map.insert(name.to_string(), entry);
         Ok(snap)
     }
 
@@ -727,6 +778,22 @@ impl MockStore {
         deploy: bool,
         force: bool,
     ) -> Result<Snapshot, StoreError> {
+        Self::check_new(name, &compiled, deploy, force)?;
+        let mut map = self.write();
+        self.admit(&map, name, &owner, false)?;
+        let entry = self.new_entry(compiled, origin, owner, enabled, deploy);
+        let snap = snapshot(name, &entry);
+        map.insert(name.to_string(), entry);
+        Ok(snap)
+    }
+
+    /// A new mock's name and (when it goes live) its checks.
+    fn check_new(
+        name: &str,
+        compiled: &Compiled,
+        deploy: bool,
+        force: bool,
+    ) -> Result<(), StoreError> {
         if !valid_name(name) {
             return Err(StoreError::Invalid(format!(
                 "invalid name {name:?}: use 1 to 40 characters a-z, 0-9 and '-' (not at either end)"
@@ -735,21 +802,33 @@ impl MockStore {
         if deploy && !force && !compiled.report.ok {
             return Err(StoreError::ChecksFailed(Box::new(compiled.report.clone())));
         }
-        let mut map = self.write();
-        if map.contains_key(name) {
+        Ok(())
+    }
+
+    /// May `name` (of `owner`) go into `map`: free (unless it `replaces` the
+    /// mock of that name) and within the caps, a replaced mock not counted.
+    fn admit(
+        &self,
+        map: &BTreeMap<String, Entry>,
+        name: &str,
+        owner: &Owner,
+        replaces: bool,
+    ) -> Result<(), StoreError> {
+        if !replaces && map.contains_key(name) {
             return Err(StoreError::Conflict(format!(
                 "a mock named {name:?} already exists"
             )));
         }
+        let others = map.iter().filter(|(n, _)| n.as_str() != name);
         if owner.is_visitor() {
             let cfg = self
                 .visits
                 .as_ref()
                 .map(|v| v.config().clone())
                 .unwrap_or_default();
-            let (mine, visitors) = map.values().fold((0, 0), |(mine, all), e| {
+            let (mine, visitors) = others.fold((0, 0), |(mine, all), (_, e)| {
                 (
-                    mine + usize::from(e.owner == owner),
+                    mine + usize::from(&e.owner == owner),
                     all + usize::from(e.owner.is_visitor()),
                 )
             });
@@ -764,7 +843,7 @@ impl MockStore {
                 ));
             }
         } else {
-            let instance = map.values().filter(|e| !e.owner.is_visitor()).count();
+            let instance = others.filter(|(_, e)| !e.owner.is_visitor()).count();
             if instance >= self.limits.max_mocks {
                 return Err(StoreError::Full(format!(
                     "this instance holds at most {} mocks: delete one first",
@@ -772,6 +851,19 @@ impl MockStore {
                 )));
             }
         }
+        Ok(())
+    }
+
+    /// The entry of a new mock (live when `deploy`), with the public-mode
+    /// expiry of API mocks.
+    fn new_entry(
+        &self,
+        compiled: Compiled,
+        origin: Origin,
+        owner: Owner,
+        enabled: bool,
+        deploy: bool,
+    ) -> Entry {
         let draft = Arc::new(compiled);
         let now = Utc::now();
         // A visit's mocks end with the visit, not after the public-mode TTL.
@@ -786,7 +878,7 @@ impl MockStore {
             )),
             _ => None,
         };
-        let entry = Entry {
+        Entry {
             origin,
             owner,
             created_at: now,
@@ -798,11 +890,9 @@ impl MockStore {
             capture: CaptureLog::new(self.limits.captures, self.limits.capture_bytes),
             state: MockState::new(self.limits.state_items, self.limits.state_bytes),
             expires,
+            scratch: false,
             load_error: None,
-        };
-        let snap = snapshot(name, &entry);
-        map.insert(name.to_string(), entry);
-        Ok(snap)
+        }
     }
 
     /// Request-path lookup.
@@ -985,15 +1075,39 @@ impl MockStore {
 
     /// Make the draft live.
     pub fn deploy(&self, name: &str, force: bool) -> Result<Snapshot, StoreError> {
-        let r = self.deploy_inner(name, force);
+        self.deploy_if(name, force, None)
+    }
+
+    /// [`Self::deploy`], refused with [`StoreError::Stale`] unless the draft
+    /// is revision `expected` (checked under the write lock, so the revision
+    /// that goes live is the one named).
+    pub fn deploy_if(
+        &self,
+        name: &str,
+        force: bool,
+        expected: Option<u64>,
+    ) -> Result<Snapshot, StoreError> {
+        let r = self.deploy_inner(name, force, expected);
         self.saved(r)
     }
 
-    fn deploy_inner(&self, name: &str, force: bool) -> Result<Snapshot, StoreError> {
+    fn deploy_inner(
+        &self,
+        name: &str,
+        force: bool,
+        expected: Option<u64>,
+    ) -> Result<Snapshot, StoreError> {
         let mut map = self.write();
         let e = map
             .get_mut(name)
             .ok_or_else(|| StoreError::NotFound(name.to_string()))?;
+        if let Some(x) = expected.filter(|x| *x != e.draft.revision) {
+            return Err(StoreError::Stale {
+                name: name.to_string(),
+                expected: x,
+                current: e.draft.revision,
+            });
+        }
         if e.live.is_none() {
             if let Some(error) = &e.load_error {
                 return Err(StoreError::Conflict(format!(
@@ -1107,6 +1221,81 @@ impl MockStore {
         self.write().remove(name).is_some()
     }
 
+    /// Write `compiled` as the draft of `name`, deploy it (forced) and set it
+    /// on or off, in one write: refused with [`StoreError::Stale`] unless
+    /// the draft is still revision `base` (an apply's update).
+    fn replace_deployed(
+        &self,
+        name: &str,
+        compiled: Compiled,
+        enabled: bool,
+        base: u64,
+    ) -> Result<Snapshot, StoreError> {
+        let r = {
+            let mut map = self.write();
+            match map.get_mut(name) {
+                None => Err(StoreError::NotFound(name.to_string())),
+                Some(e) if e.draft.revision != base => Err(StoreError::Stale {
+                    name: name.to_string(),
+                    expected: base,
+                    current: e.draft.revision,
+                }),
+                Some(e) => {
+                    if compiled.source != e.draft.source {
+                        e.load_error = None;
+                    }
+                    let draft = Arc::new(compiled);
+                    if let Some(prev) = e.live.take() {
+                        e.history.push_back(prev);
+                        while e.history.len() > self.limits.revisions {
+                            e.history.pop_front();
+                        }
+                    }
+                    e.live = Some(draft.clone());
+                    e.draft = draft;
+                    e.enabled = enabled;
+                    e.updated_at = Utc::now();
+                    Ok(snapshot(name, e))
+                }
+            }
+        };
+        self.saved(r)
+    }
+
+    /// Put a checkpoint's mock in place of whatever has its name, in one
+    /// write: `live` deployed (with `draft` on top when it differs), else
+    /// `draft` undeployed. Built before the swap, so a mock that cannot be
+    /// restored is left as it was, never lost. Not saved (the caller saves
+    /// it once its data is back).
+    pub fn restore_replacing(
+        &self,
+        name: &str,
+        live: Option<Compiled>,
+        draft: Option<Compiled>,
+        enabled: bool,
+    ) -> Result<Snapshot, StoreError> {
+        let (first, on_top, deploy) = match (live, draft) {
+            (Some(l), d) => (l, d, true),
+            (None, Some(d)) => (d, None, false),
+            (None, None) => {
+                return Err(StoreError::Invalid(format!(
+                    "{name}: no revision to restore"
+                )))
+            }
+        };
+        Self::check_new(name, &first, deploy, true)?;
+        let owner = Owner::Instance;
+        let mut map = self.write();
+        self.admit(&map, name, &owner, true)?;
+        let mut entry = self.new_entry(first, Origin::Api, owner, enabled, deploy);
+        if let Some(d) = on_top {
+            entry.draft = Arc::new(d);
+        }
+        let snap = snapshot(name, &entry);
+        map.insert(name.to_string(), entry);
+        Ok(snap)
+    }
+
     /// Recreate a saved mock: `live` deployed, with `draft` on top when it
     /// differs. Not saved again.
     pub fn restore(
@@ -1195,6 +1384,10 @@ impl MockStore {
         let mut listed: Vec<String> = defs.iter().map(|d| d.name.clone()).collect();
         listed.extend(keep.iter().cloned());
         for def in defs {
+            // One edit per definition: read, recompile and write under the
+            // edit lock, so a concurrent edit is never deployed by it nor
+            // lost to it.
+            let _edit = self.edit_lock();
             let existing = self.get(&def.name);
             // The same document in another formatting (an export re-applied)
             // is the same spec.
@@ -1232,10 +1425,8 @@ impl MockStore {
             };
             let warnings = compiled.report.errors;
             let result = match existing {
-                Some(_) => self
-                    .set_draft(&def.name, Some(compiled), None)
-                    .and_then(|_| self.deploy(&def.name, true))
-                    .and_then(|_| self.set_enabled(&def.name, def.enabled))
+                Some(s) => self
+                    .replace_deployed(&def.name, compiled, def.enabled, s.draft.revision)
                     .map(|_| report.updated.push(def.name.clone())),
                 None => self
                     .create(&def.name, compiled, origin, def.enabled, true, true)
@@ -1260,7 +1451,7 @@ impl MockStore {
             let stale: Vec<String> = self
                 .list()
                 .into_iter()
-                .filter(|s| s.origin == prune_origin && !listed.contains(&s.name))
+                .filter(|s| s.origin == prune_origin && s.prunable() && !listed.contains(&s.name))
                 .map(|s| s.name)
                 .collect();
             for name in stale {
@@ -1287,6 +1478,7 @@ fn snapshot(name: &str, e: &Entry) -> Snapshot {
         capture: e.capture.clone(),
         state: e.state.clone(),
         expires_at: e.expires.map(|(_, at)| at),
+        scratch: e.scratch,
         load_error: e.load_error.clone(),
     }
 }
@@ -1451,5 +1643,186 @@ mod tests {
         }
         assert!(!s.allow_visitor_compile("visit-a"));
         assert!(s.allow_visitor_compile("visit-b"), "per visitor");
+    }
+
+    // ── Review 0.3.1 step 06 ────────────────────────────────────────
+
+    #[test]
+    fn revision_numbers_continue_across_a_restart() {
+        // Two stores stand for one instance before and after a restart: an
+        // If-Match from before can never name a draft compiled after.
+        let before = store();
+        let mut last = 0;
+        for _ in 0..3 {
+            last = before
+                .compile(SPEC, MockSettings::default())
+                .expect("compile")
+                .revision;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+        let after = store();
+        let first = after
+            .compile(SPEC, MockSettings::default())
+            .expect("compile")
+            .revision;
+        assert!(
+            first > last,
+            "revision {first} after a restart, {last} before"
+        );
+    }
+
+    #[test]
+    fn a_deploy_naming_a_revision_refuses_another_draft() {
+        let s = store();
+        let c = s.compile(SPEC, MockSettings::default()).expect("compile");
+        let made = s
+            .create("t", c, Origin::Api, true, false, false)
+            .expect("create");
+        let seen = made.draft.revision;
+        let newer = s.compile(SPEC, MockSettings::default()).expect("compile");
+        s.set_draft("t", Some(newer), None).expect("draft");
+        match s.deploy_if("t", false, Some(seen)) {
+            Err(StoreError::Stale {
+                expected, current, ..
+            }) => {
+                assert_eq!(expected, seen);
+                assert!(current > seen);
+            }
+            other => panic!("expected a stale refusal, got {:?}", other.map(|s| s.name)),
+        }
+        assert!(s.get("t").expect("t").live.is_none(), "nothing went live");
+        let current = s.get("t").expect("t").draft.revision;
+        let live = s.deploy_if("t", false, Some(current)).expect("deploy");
+        assert_eq!(live.live.as_ref().map(|l| l.revision), Some(current));
+    }
+
+    #[test]
+    fn a_scratch_mock_is_never_saved() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let s = MockStore::new(&Config::for_tests()).with_persistence(tmp.path().to_path_buf());
+        let c = s.compile(SPEC, MockSettings::default()).expect("compile");
+        let snap = s
+            .create_scratch("scn-x", c, Duration::from_secs(60))
+            .expect("scratch");
+        assert!(snap.scratch);
+        // A later mutation saves the mock it changed: never this one.
+        s.set_enabled("scn-x", false).expect("off");
+        s.deploy("scn-x", true).expect("deploy");
+        assert!(
+            !tmp.path().join("scn-x.json").exists(),
+            "the scratch mock was saved"
+        );
+        assert!(s.get("scn-x").expect("listed").scratch);
+        // An ordinary mock still is.
+        let c = s.compile(SPEC, MockSettings::default()).expect("compile");
+        s.create("kept", c, Origin::Api, true, true, false)
+            .expect("create");
+        assert!(tmp.path().join("kept.json").exists());
+    }
+
+    #[test]
+    fn an_apply_waits_for_an_edit_in_progress() {
+        let s = store();
+        let c = s.compile(SPEC, MockSettings::default()).expect("compile");
+        s.create("a", c, Origin::File, true, true, false)
+            .expect("a");
+        let before = s.get("a").expect("a").draft.revision;
+        let edit = s.edit_lock();
+        let applying = {
+            let s = s.clone();
+            std::thread::spawn(move || {
+                let settings: MockSettings =
+                    serde_json::from_value(json!({"responses": {"mode": "static"}}))
+                        .expect("settings");
+                s.apply(
+                    vec![Definition {
+                        name: "a".into(),
+                        source: SPEC.into(),
+                        settings,
+                        enabled: false,
+                    }],
+                    Origin::File,
+                    None,
+                )
+            })
+        };
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            s.get("a").expect("a").draft.revision,
+            before,
+            "the apply wrote while an edit held the lock"
+        );
+        drop(edit);
+        let report = applying.join().expect("apply");
+        assert_eq!(report.updated, vec!["a"]);
+        let a = s.get("a").expect("a");
+        // Draft, live and off in one write.
+        assert_eq!(a.live.as_ref().map(|l| l.revision), Some(a.draft.revision));
+        assert!(!a.enabled);
+        assert_eq!(a.history.len(), 1);
+    }
+
+    #[test]
+    fn a_restore_replaces_a_mock_in_one_write_within_the_cap() {
+        let mut limits = MockLimits::for_config(&Config::for_tests());
+        limits.max_mocks = 1;
+        let s = MockStore::with_limits(limits);
+        let c = s.compile(SPEC, MockSettings::default()).expect("compile");
+        s.create("a", c, Origin::Api, true, true, false).expect("a");
+        // At the cap: the replaced mock does not count.
+        let live = s.compile(SPEC, MockSettings::default()).expect("compile");
+        let draft = s.compile(SPEC, bad_settings()).expect("compile");
+        let (lr, dr) = (live.revision, draft.revision);
+        let back = s
+            .restore_replacing("a", Some(live), Some(draft), false)
+            .expect("restored");
+        assert_eq!(back.live.as_ref().map(|l| l.revision), Some(lr));
+        assert_eq!(back.draft.revision, dr);
+        assert!(!back.enabled);
+        // A second name is still refused.
+        let other = s.compile(SPEC, MockSettings::default()).expect("compile");
+        assert!(matches!(
+            s.restore_replacing("b", Some(other), None, true),
+            Err(StoreError::Full(_))
+        ));
+        assert!(matches!(
+            s.restore_replacing("a", None, None, true),
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(s.get("a").is_some(), "a failed restore keeps the mock");
+    }
+
+    #[test]
+    fn file_work_leaves_the_async_workers() {
+        // One worker: without block_in_place a blocking save would stop the
+        // other task on it.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_time()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let ticker = tokio::spawn(async {
+                let start = Instant::now();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                start.elapsed()
+            });
+            let blocker = tokio::spawn(async {
+                tokio::task::yield_now().await;
+                off_runtime(|| std::thread::sleep(Duration::from_millis(400)));
+            });
+            let waited = ticker.await.expect("ticker");
+            blocker.await.expect("blocker");
+            assert!(
+                waited < Duration::from_millis(300),
+                "the worker was held for {waited:?}"
+            );
+        });
+        // Outside a runtime and on a current-thread one it runs in place.
+        assert_eq!(off_runtime(|| 7), 7);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        assert_eq!(rt.block_on(async { off_runtime(|| 8) }), 8);
     }
 }

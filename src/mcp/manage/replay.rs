@@ -125,18 +125,24 @@ pub async fn delete_test(ctx: &CallCtx, args: &Value, params: &Value) -> Value {
     {
         return v;
     }
-    if ctx.app.saved_tests.delete(name) {
-        ok(
+    match ctx.app.saved_tests.delete(name) {
+        Ok(true) => ok(
             ctx,
             format!("Deleted test {name}"),
             json!({ "deleted": name }),
-        )
-    } else {
-        err(format!("no test named {name:?}"))
+        ),
+        Ok(false) => err(format!("no test named {name:?}")),
+        Err(e) => err(e.message()),
     }
 }
 
-/// `run_tests`: confirmed when a test goes through a gateway.
+/// Methods a run sends without asking: they read, never change.
+const SAFE_METHODS: &[&str] = &["GET", "HEAD", "OPTIONS"];
+
+/// `run_tests`: confirmed when a test goes through a gateway or sends a
+/// method that changes something (`POST`, `PUT`, `PATCH`, `DELETE`: the
+/// mocks' stateful data, a flaky counter, a gateway's upstream); one run at
+/// a time.
 pub async fn run_tests(ctx: &CallCtx, access: &Access, args: &Value, params: &Value) -> Value {
     let names: Vec<String> = args
         .get("names")
@@ -159,12 +165,38 @@ pub async fn run_tests(ctx: &CallCtx, access: &Access, args: &Value, params: &Va
         .iter()
         .filter_map(|t| t.gateway.as_deref().map(crate::egress::url_origin))
         .collect();
+    let mut writes: Vec<&str> = selected
+        .iter()
+        .filter(|t| {
+            !SAFE_METHODS
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case(t.request.method.trim()))
+        })
+        .map(|t| t.name.as_str())
+        .collect();
+    writes.truncate(10);
+    let mut what = Vec::new();
     if !gateways.is_empty() {
-        let action = format!("send saved test requests through {}", gateways.join(", "));
+        what.push(format!(
+            "send saved test requests through {}",
+            gateways.join(", ")
+        ));
+    }
+    if !writes.is_empty() {
+        what.push(format!(
+            "replay requests that change state (tests {})",
+            writes.join(", ")
+        ));
+    }
+    if !what.is_empty() {
+        let action = what.join(" and ");
         if let Confirm::Answer(v) = confirm(ctx, "run_tests", args, params, &action).await {
             return v;
         }
     }
+    let Some(_running) = ctx.app.saved_tests.begin_run() else {
+        return err(replay::RUN_BUSY);
+    };
     let body = run::RunBody {
         names,
         variables: Default::default(),

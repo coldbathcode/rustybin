@@ -745,3 +745,32 @@ async fn ai_use_sets_the_model_the_fast_model_or_a_job() {
     assert_eq!(job(&v, "explain")["source"], "default");
     inst.server.shutdown();
 }
+
+#[tokio::test]
+async fn mocks_deploy_can_name_the_revision_it_publishes() {
+    let inst = instance().await;
+    inst.login().await;
+    let spec = inst.home.path().join("orders.json");
+    std::fs::write(&spec, SPEC).expect("spec");
+    let spec = spec.display().to_string();
+    let v = inst
+        .json(&["mocks", "create", "orders", "--spec", &spec, "--no-deploy"])
+        .await;
+    let rev = v["draft_revision"].as_u64().expect("draft_revision");
+    // An older revision than the draft: refused, nothing deployed.
+    let stale = (rev - 1).to_string();
+    let (code, _, message) = inst
+        .run_full(
+            None,
+            &["mocks", "deploy", "orders", "--expect-revision", &stale],
+        )
+        .await;
+    assert_ne!(code, 0, "{message}");
+    assert!(message.contains("409"), "{message}");
+    let current = rev.to_string();
+    let v = inst
+        .json(&["mocks", "deploy", "orders", "--expect-revision", &current])
+        .await;
+    assert_eq!(v["revision"], rev, "{v}");
+    inst.server.shutdown();
+}

@@ -13,7 +13,8 @@ mod tests;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
@@ -290,7 +291,21 @@ pub struct Tests {
     path: Option<PathBuf>,
     items: Mutex<BTreeMap<String, Entry>>,
     save_lock: Mutex<()>,
+    /// A run is going: one at a time ([`Tests::begin_run`]).
+    running: Arc<AtomicBool>,
 }
+
+/// Held while a run goes; the next one may start once it is dropped.
+pub struct RunGuard(Arc<AtomicBool>);
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// The refusal of a run while another goes.
+pub const RUN_BUSY: &str = "a run of the saved tests is going: try again when it ends";
 
 /// Why a store change was refused.
 #[derive(Debug)]
@@ -299,6 +314,8 @@ pub enum StoreError {
     Exists(String),
     Full,
     NotFound(String),
+    /// The tests file could not be written: nothing changed.
+    Io(String),
 }
 
 impl StoreError {
@@ -308,6 +325,7 @@ impl StoreError {
             StoreError::Exists(_) => StatusCode::CONFLICT,
             StoreError::Full => StatusCode::INSUFFICIENT_STORAGE,
             StoreError::NotFound(_) => StatusCode::NOT_FOUND,
+            StoreError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -319,6 +337,9 @@ impl StoreError {
             }
             StoreError::Full => format!("at most {MAX_TESTS} saved tests: delete one first"),
             StoreError::NotFound(n) => format!("no test named {n:?}"),
+            StoreError::Io(e) => {
+                format!("the tests file could not be written ({e}): nothing changed")
+            }
         }
     }
 }
@@ -358,6 +379,7 @@ impl Tests {
             path,
             items: Mutex::new(items),
             save_lock: Mutex::new(()),
+            running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -365,21 +387,38 @@ impl Tests {
         self.items.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Write the file (serialised under the lock, written after it).
-    fn save_unlock(&self, items: MutexGuard<'_, BTreeMap<String, Entry>>) -> Result<(), String> {
-        let Some(path) = &self.path else {
-            return Ok(());
-        };
-        let doc = Doc {
-            version: 1,
-            tests: items.values().cloned().collect(),
-        };
-        let bytes = serde_json::to_vec_pretty(&doc).map_err(|e| e.to_string())?;
-        let order = self.save_lock.lock().unwrap_or_else(|e| e.into_inner());
-        drop(items);
-        let r = crate::settings::write_private(path, &bytes);
-        drop(order);
-        r
+    /// Make one change: under the save lock (one change at a time), `change`
+    /// builds the next set of tests from the current one, the file is
+    /// written (off the items lock: reads go on meanwhile), and only then
+    /// does the store hold it. A failed write changes nothing.
+    fn change<T>(
+        &self,
+        change: impl FnOnce(&mut BTreeMap<String, Entry>) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let _order = self.save_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next = self.lock().clone();
+        let out = change(&mut next)?;
+        if let Some(path) = &self.path {
+            let doc = Doc {
+                version: 1,
+                tests: next.values().cloned().collect(),
+            };
+            let bytes =
+                serde_json::to_vec_pretty(&doc).map_err(|e| StoreError::Io(e.to_string()))?;
+            crate::mocks::store::off_runtime(|| crate::settings::write_private(path, &bytes))
+                .map_err(StoreError::Io)?;
+        }
+        *self.lock() = next;
+        Ok(out)
+    }
+
+    /// Start a run: `None` while another one goes (runs are single-flight,
+    /// whichever surface starts them).
+    pub fn begin_run(&self) -> Option<RunGuard> {
+        self.running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| RunGuard(self.running.clone()))
     }
 
     pub fn len(&self) -> usize {
@@ -417,37 +456,35 @@ impl Tests {
     }
 
     /// Save a test: `replace` lets it overwrite one of the same name.
+    /// A file that cannot be written refuses the change
+    /// ([`StoreError::Io`]): the store and the file never disagree.
     pub fn put(&self, test: SavedTest, replace: bool) -> Result<Value, StoreError> {
         test.validate().map_err(StoreError::Invalid)?;
-        let mut items = self.lock();
-        let exists = items.contains_key(&test.name);
-        if exists && !replace {
-            return Err(StoreError::Exists(test.name));
-        }
-        if !exists && items.len() >= MAX_TESTS {
-            return Err(StoreError::Full);
-        }
-        let entry = Entry {
-            saved_at: now(),
-            test,
-        };
-        let view = Self::view(&entry);
-        items.insert(entry.test.name.clone(), entry);
-        if let Err(e) = self.save_unlock(items) {
-            tracing::warn!("tests: {e}");
-        }
-        Ok(view)
+        self.change(|items| {
+            let exists = items.contains_key(&test.name);
+            if exists && !replace {
+                return Err(StoreError::Exists(test.name));
+            }
+            if !exists && items.len() >= MAX_TESTS {
+                return Err(StoreError::Full);
+            }
+            let entry = Entry {
+                saved_at: now(),
+                test,
+            };
+            let view = Self::view(&entry);
+            items.insert(entry.test.name.clone(), entry);
+            Ok(view)
+        })
     }
 
-    pub fn delete(&self, name: &str) -> bool {
-        let mut items = self.lock();
-        let removed = items.remove(name).is_some();
-        if removed {
-            if let Err(e) = self.save_unlock(items) {
-                tracing::warn!("tests: {e}");
-            }
+    /// Delete a test: `Ok(false)` when there is none of that name, an
+    /// error (nothing deleted) when the file cannot be written.
+    pub fn delete(&self, name: &str) -> Result<bool, StoreError> {
+        if !self.lock().contains_key(name) {
+            return Ok(false);
         }
-        removed
+        self.change(|items| Ok(items.remove(name).is_some()))
     }
 }
 
@@ -808,10 +845,10 @@ async fn delete_handler(
     if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
         return r;
     }
-    if state.saved_tests.delete(&name) {
-        Json(json!({ "deleted": name })).into_response()
-    } else {
-        refuse(StatusCode::NOT_FOUND, format!("no test named {name:?}"))
+    match state.saved_tests.delete(&name) {
+        Ok(true) => Json(json!({ "deleted": name })).into_response(),
+        Ok(false) => refuse(StatusCode::NOT_FOUND, format!("no test named {name:?}")),
+        Err(e) => refuse(e.status(), e.message()),
     }
 }
 
@@ -848,6 +885,9 @@ async fn run_handler(
                 format!("format {f:?}: json or junit"),
             )
         }
+    };
+    let Some(_running) = state.saved_tests.begin_run() else {
+        return refuse(StatusCode::CONFLICT, RUN_BUSY);
     };
     match run::run(&state, &session, body).await {
         Ok(report) if junit => (
@@ -954,7 +994,7 @@ pub fn openapi_paths() -> Value {
         },
         RUN_PATH: { "post": {
             "tags": ["Control Plane"], "summary": "Run saved tests (admin)",
-            "description": "Every test, or names; variables fill {{name}} references (else RUSTYBIN_TEST_* environment variables). Tests without a gateway run in process with the caller's session; gateway tests go through the egress policy (purpose replay). At most 200 requests and 60 seconds a run.",
+            "description": "Every test, or names; variables fill {{name}} references (else RUSTYBIN_TEST_* environment variables). Tests without a gateway run in process with the caller's session; gateway tests go through the egress policy (purpose replay). At most 200 requests and 60 seconds a run; one run at a time (409 while another goes).",
             "operationId": "runSavedTests",
             "parameters": [{ "name": "format", "in": "query", "required": false, "schema": { "type": "string", "enum": ["json", "junit"] } }],
             "requestBody": { "required": false, "content": { "application/json": { "schema": {
@@ -967,7 +1007,8 @@ pub fn openapi_paths() -> Value {
             "responses": {
                 "200": { "description": "The report (JSON, or JUnit XML)", "content": { "application/json": { "schema": { "type": "object" } }, "application/xml": { "schema": { "type": "string" } } } },
                 "403": { "description": "The egress policy refused a gateway" },
-                "404": { "description": "No such test" }
+                "404": { "description": "No such test" },
+                "409": { "description": "Another run is going" }
             }
         } },
         EXPORT_PATH: { "get": {

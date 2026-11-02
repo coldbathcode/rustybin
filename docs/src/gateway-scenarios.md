@@ -17,7 +17,7 @@ No gateway product is assumed: the steps are written for any gateway.
 ## How a run works
 
 1. **Prepare.** Starting a run creates its upstream: a mock named `scn-<run>` (never
-   saved; it ends with the run) or, for `retries`, a `/flaky` route. The answer has
+   saved, exported, kept in a checkpoint nor pruned; it ends with the run) or, for `retries`, a `/flaky` route. The answer has
    the upstream URL and the steps for the gateway.
 2. **Configure the gateway.** Create a route whose upstream is that URL, turn on the
    feature, and let the route forward the `X-Rustybin-Session` request header. The
@@ -84,6 +84,12 @@ Starting, checking and ending a run need the admin token (or a control token wit
 the admin scope): a run creates a mock and sends traffic. A run belongs to the
 session that started it (`X-Rustybin-Session`, else the client address): another
 session neither lists nor ends it. At most 32 runs exist at once, each for an hour.
+A run id is 96 random bits, and the sessions of a check's requests carry a secret of
+the run that is never shown, so requests sent to the upstream by anyone else never
+count in a verdict. The `credential_injection` key is in the setup only for callers
+with admin rights (who can read it on the run's mock anyway): someone without them who
+shares the session key (one address behind a NAT, a console-scope token) sees the run
+with `key_hidden: true` and a placeholder in place of the key.
 Pass the CLI's `--session` to reach a run the console started.
 
 ## On every surface

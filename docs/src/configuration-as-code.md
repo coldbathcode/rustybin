@@ -67,7 +67,10 @@ Two rules make a document safe to apply:
   never exported nor pruned: where an instance keeps its configuration is the
   deployment's business. A mock the document names but cannot load (a spec that cannot
   be read, does not parse or does not compile) is a problem in the answer and is kept
-  as it is: it is never pruned, and the dry run's `would_delete` says the same.
+  as it is: it is never pruned, and the dry run's `would_delete` says the same. A
+  prune of `mocks` deletes only the instance's own API mocks: never a visitor's or an
+  API key's mock (self-service), nor a running gateway scenario's mock, which is not
+  exported either.
 
 Mocks applied through the API or a repository are `origin: api` (saved in the mocks
 state directory, as console changes are); the ones a `RUSTYBIN_CONFIG_FILE` declares

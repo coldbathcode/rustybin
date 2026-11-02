@@ -40,7 +40,10 @@ The demo changes things:
 A restore brings each saved mock back (`created` when it was deleted, `replaced`
 when its revisions or on/off changed, `data_restored` when only its data did,
 `unchanged` otherwise), deletes the instance's API mocks the checkpoint does not
-hold, sets the health toggle and resets the flaky counters:
+hold, sets the health toggle and resets the flaky counters. One restore runs at a
+time, and no mock edit lands in the middle of one (a save waits for it too). Each mock
+is built first and swapped in with one write, so a mock that cannot be restored keeps
+what it had (a problem in the answer), never lost:
 
 ```hurl
 {{#include ../examples/config/checkpoints.hurl:restore}}

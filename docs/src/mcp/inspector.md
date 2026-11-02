@@ -90,6 +90,8 @@ status and a safe subset of its headers), a `message` event per JSON-RPC message
 `body` event for an answer that is not JSON-RPC, then `done`. The relay session (at most
 64, idle 10 minutes) keeps the upstream `Mcp-Session-Id` or the legacy stream;
 `DELETE /_rustybin/mcp-relay/{session}` ends it, and the upstream session with it.
+At most 16 relay exchanges and management `mcp_call`s go at once, and two check runs
+(`mcp-checks`, `run_mcp_checks`): past that the answer is `503` (`reason: busy`).
 
 ```hurl
 {{#include ../../examples/mcp/inspector.hurl:relay}}

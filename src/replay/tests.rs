@@ -403,7 +403,7 @@ fn saved_tests_survive_a_restart() {
     assert_eq!(b.get("kept"), Some(t.clone()));
     t.name = "other".into();
     b.put(t, false).expect("put");
-    assert!(b.delete("kept"));
+    assert!(b.delete("kept").expect("deleted"));
     let c = Tests::new(Some(dir.path()));
     assert_eq!(
         c.list().iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
@@ -592,4 +592,65 @@ async fn saved_tests_are_read_by_an_admin_only() {
             .expect("resp");
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{uri}");
     }
+}
+
+fn plain_test(name: &str) -> SavedTest {
+    SavedTest {
+        name: name.into(),
+        description: None,
+        request: TestRequest {
+            method: "GET".into(),
+            path: "/status/200".into(),
+            headers: Default::default(),
+            body: None,
+        },
+        gateway: None,
+        assert: vec![Assertion::status(200)],
+    }
+}
+
+#[test]
+fn a_save_or_delete_the_file_refuses_changes_nothing() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let store = Tests::new(Some(dir.path()));
+    store.put(plain_test("kept"), false).expect("put");
+    // The file's place is taken by a directory: no write can land.
+    let file = dir.path().join(FILE);
+    std::fs::remove_file(&file).expect("rm");
+    std::fs::create_dir(&file).expect("dir");
+    match store.put(plain_test("new"), false) {
+        Err(StoreError::Io(_)) => {}
+        other => panic!("expected an I/O refusal, got {other:?}"),
+    }
+    assert!(
+        store.get("new").is_none(),
+        "the store took a change the file did not"
+    );
+    assert!(matches!(store.delete("kept"), Err(StoreError::Io(_))));
+    assert!(
+        store.get("kept").is_some(),
+        "the delete was kept in memory only"
+    );
+    assert!(!store.delete("missing").expect("no file needed"));
+    assert_eq!(
+        StoreError::Io("x".into()).status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+}
+
+#[tokio::test]
+async fn one_run_of_the_saved_tests_at_a_time() {
+    let (state, app) = with_orders(Config::for_tests()).await;
+    state.saved_tests.put(plain_test("t"), false).expect("put");
+    let held = state.saved_tests.begin_run().expect("first run");
+    assert!(
+        state.saved_tests.begin_run().is_none(),
+        "a second run started"
+    );
+    let (s, v) = call(&app, "POST", "/_rustybin/tests/run", "ops", None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    drop(held);
+    let (s, v) = call(&app, "POST", "/_rustybin/tests/run", "ops", None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["passed"], true, "{v}");
 }

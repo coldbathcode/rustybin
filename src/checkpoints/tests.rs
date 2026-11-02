@@ -326,3 +326,51 @@ async fn checkpoints_are_admin_only_bounded_and_survive_a_restart() {
     let (s, _) = call(&app, "POST", "/_rustybin/checkpoints/nope/restore", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
+
+/// A restore holds the mocks' edit lock from its first read to its last
+/// write: it waits for an edit in progress, and two restores never
+/// interleave (each one reports a clean run).
+#[test]
+fn restores_run_one_at_a_time_under_the_edit_lock() {
+    let state = test_state_with(config());
+    let make = |n: &str| {
+        let c = state
+            .mocks
+            .compile(ITEMS, Default::default())
+            .expect("compile");
+        state
+            .mocks
+            .create(n, c, Origin::Api, true, true, false)
+            .expect("create");
+    };
+    make("a");
+    make("b");
+    save(&state, "start", false).expect("save");
+    // While an edit holds the lock, a restore waits.
+    let edit = state.mocks.edit_lock();
+    let restoring = {
+        let state = state.clone();
+        std::thread::spawn(move || restore(&state, "start", false))
+    };
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    assert!(!restoring.is_finished(), "the restore ran during an edit");
+    drop(edit);
+    restoring.join().expect("join").expect("restore");
+    // Restores racing each other: every one is clean, the mocks end as saved.
+    for _ in 0..10 {
+        state.mocks.delete("a");
+        state.mocks.set_enabled("b", false).expect("off");
+        let runs: Vec<_> = (0..3)
+            .map(|_| {
+                let state = state.clone();
+                std::thread::spawn(move || restore(&state, "start", false).expect("restore"))
+            })
+            .collect();
+        for r in runs {
+            let v = r.join().expect("join");
+            assert_eq!(v["problems"], json!([]), "{v}");
+        }
+        assert!(state.mocks.get("a").is_some());
+        assert!(state.mocks.get("b").expect("b").enabled);
+    }
+}

@@ -3334,3 +3334,168 @@ async fn reset_flaky_sends_no_captured_request() {
     assert!(!captured.contains("/flaky/reset"), "{captured}");
     assert!(!captured.contains("admin-secret"));
 }
+
+// ── Review 0.3.1 step 06 ────────────────────────────────────────────
+
+#[tokio::test]
+async fn deploy_mock_refuses_a_draft_it_did_not_name() {
+    let app = app_with(open_config());
+    let got = tool(&app, &[], "get_mock", json!({ "name": "petstore" })).await;
+    let seen = got["structuredContent"]["draft_revision"]
+        .as_u64()
+        .expect("draft_revision");
+    let r = tool(
+        &app,
+        &[],
+        "update_mock",
+        json!({ "name": "petstore", "responses": { "mode": "static" }, "deploy": false, "expected_revision": seen }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    let r = tool(
+        &app,
+        &[],
+        "deploy_mock",
+        json!({ "name": "petstore", "expected_revision": seen }),
+    )
+    .await;
+    assert!(is_error(&r), "{r}");
+    assert!(text_of(&r).contains("changed since"), "{r}");
+    let now = tool(&app, &[], "get_mock", json!({ "name": "petstore" })).await;
+    let current = now["structuredContent"]["draft_revision"].clone();
+    let r = tool(
+        &app,
+        &[],
+        "deploy_mock",
+        json!({ "name": "petstore", "expected_revision": current }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["revision"], current);
+}
+
+#[tokio::test]
+async fn run_tests_asks_before_replaying_a_request_that_changes_state() {
+    let state = test_state_with(open_config());
+    let app = test_app_with(state.clone());
+    let test = |name: &str, method: &str| crate::replay::SavedTest {
+        name: name.into(),
+        description: None,
+        request: crate::replay::TestRequest {
+            method: method.into(),
+            path: "/status/200".into(),
+            headers: Default::default(),
+            body: None,
+        },
+        gateway: None,
+        assert: vec![crate::replay::Assertion::status(200)],
+    };
+    state
+        .saved_tests
+        .put(test("reads", "GET"), false)
+        .expect("put");
+    // Reads only: no question.
+    let r = tool(&app, &[], "run_tests", json!({})).await;
+    assert!(!is_error(&r), "{r}");
+    state
+        .saved_tests
+        .put(test("writes", "POST"), false)
+        .expect("put");
+    let r = tool(&app, &[], "run_tests", json!({})).await;
+    assert!(is_error(&r), "{r}");
+    assert!(text_of(&r).contains("writes"), "{r}");
+    let r = tool(&app, &[], "run_tests", json!({ "confirm": true })).await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["total"], 2, "{r}");
+    // One run at a time, whichever surface started the other.
+    let held = state.saved_tests.begin_run().expect("run");
+    let r = tool(&app, &[], "run_tests", json!({ "names": ["reads"] })).await;
+    assert!(is_error(&r), "{r}");
+    assert!(
+        text_of(&r).contains("a run of the saved tests is going"),
+        "{r}"
+    );
+    drop(held);
+}
+
+#[tokio::test]
+async fn in_process_requests_carry_the_callers_own_address() {
+    let mut c = open_config();
+    c.trust_forward = true;
+    let app = app_with(c);
+    let mut seen = Vec::new();
+    for ip in ["203.0.113.7", "198.51.100.9"] {
+        let r = tool(
+            &app,
+            &[("x-forwarded-for", ip)],
+            "try_request",
+            json!({ "method": "GET", "path": "/ip" }),
+        )
+        .await;
+        assert!(!is_error(&r), "{r}");
+        let body = r["structuredContent"].to_string();
+        assert!(body.contains(ip), "{ip}: {body}");
+        assert!(!body.contains("127.0.0.1"), "{body}");
+        seen.push(body);
+    }
+    // Without an address the peer is still the caller's own, never one
+    // every tool user shares.
+    let a = crate::session::in_process_peer(None, "alice");
+    let b = crate::session::in_process_peer(None, "bob");
+    assert_ne!(a, b);
+    assert!(!a.ip().is_loopback());
+    assert_eq!(
+        crate::session::in_process_peer(None, "ip:192.0.2.4")
+            .ip()
+            .to_string(),
+        "192.0.2.4"
+    );
+}
+
+#[tokio::test]
+async fn mcp_checks_and_calls_have_a_concurrency_cap() {
+    let state = test_state_with(open_config());
+    let app = test_app_with(state.clone());
+    let inspector = &state.mcp_inspector;
+    // Every slot taken.
+    let _checks: Vec<_> = (0..crate::mcp::inspector::MAX_CHECK_RUNS)
+        .map(|_| {
+            inspector
+                .check_runs
+                .clone()
+                .try_acquire_owned()
+                .expect("slot")
+        })
+        .collect();
+    let _calls: Vec<_> = (0..crate::mcp::inspector::MAX_CALLS)
+        .map(|_| inspector.call_slot().expect("slot"))
+        .collect();
+    let r = tool(&app, &[], "run_mcp_checks", json!({ "target": "/mcp" })).await;
+    assert!(is_error(&r), "{r}");
+    assert!(text_of(&r).contains("already running"), "{r}");
+    let r = tool(
+        &app,
+        &[],
+        "mcp_call",
+        json!({ "target": "/mcp", "method": "tools/list" }),
+    )
+    .await;
+    assert!(is_error(&r), "{r}");
+    assert!(text_of(&r).contains("too many MCP inspector calls"), "{r}");
+    for (path, body) in [
+        ("/_rustybin/mcp-checks", json!({ "target": "/mcp" })),
+        (
+            "/_rustybin/mcp-relay",
+            json!({ "target": "/mcp", "message": { "jsonrpc": "2.0", "id": 1, "method": "ping" } }),
+        ),
+    ] {
+        let req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request");
+        let resp = app.clone().oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+    }
+}

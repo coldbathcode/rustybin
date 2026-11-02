@@ -359,6 +359,25 @@ fn encode_segment(raw: &str) -> String {
     out
 }
 
+/// A cookie name or value: the bytes RFC 6265 allows in a cookie value
+/// pass, every other one (`;`, `,`, space, quotes, backslash, controls,
+/// non-ASCII, `=` in a `name`) and `%` itself are percent-encoded, so an
+/// argument can never end its cookie and start another.
+fn encode_cookie(raw: &str, name: bool) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for b in raw.bytes() {
+        let allowed = matches!(b, 0x21 | 0x23..=0x2B | 0x2D..=0x3A | 0x3C..=0x5B | 0x5D..=0x7E)
+            && b != b'%'
+            && !(name && b == b'=');
+        if allowed {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// A scalar argument as text (`None` for objects and arrays).
 fn scalar(v: &Value) -> Option<String> {
     match v {
@@ -492,7 +511,11 @@ fn build_request(
             }
             Location::Cookie => {
                 let s = scalar(v).unwrap_or_else(|| v.to_string());
-                cookies.push(format!("{}={}", a.param, s));
+                cookies.push(format!(
+                    "{}={}",
+                    encode_cookie(&a.param, true),
+                    encode_cookie(&s, false)
+                ));
             }
         }
     }

@@ -46,14 +46,37 @@ pub const CONNECTIONS_PATH: &str = "/_rustybin/mcp-connections";
 pub struct Inspector {
     pub relay: relay::Relay,
     pub store: store::Store,
+    /// Check runs at once (`mcp-checks`, `run_mcp_checks`).
+    pub check_runs: Arc<tokio::sync::Semaphore>,
+    /// Relay exchanges and `mcp_call`s at once.
+    pub calls: Arc<tokio::sync::Semaphore>,
 }
+
+/// Check suites that may run at once, every caller together.
+pub const MAX_CHECK_RUNS: usize = 2;
+/// Relay exchanges and management `mcp_call`s that may go at once.
+pub const MAX_CALLS: usize = 16;
+
+/// The answer when every check run is taken.
+pub const CHECKS_BUSY: &str =
+    "the MCP checks are already running twice on this instance: try again when one ends";
+/// The answer when every relay call is taken.
+pub const CALLS_BUSY: &str =
+    "too many MCP inspector calls at once on this instance: try again in a moment";
 
 impl Inspector {
     pub fn new(settings: std::sync::Arc<crate::settings::Settings>) -> Self {
         Self {
             relay: relay::Relay::default(),
             store: store::Store::new(settings),
+            check_runs: Arc::new(tokio::sync::Semaphore::new(MAX_CHECK_RUNS)),
+            calls: Arc::new(tokio::sync::Semaphore::new(MAX_CALLS)),
         }
+    }
+
+    /// A relay or `mcp_call` slot, held for the exchange (`None`: all taken).
+    pub fn call_slot(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.calls.clone().try_acquire_owned().ok()
     }
 }
 
@@ -357,7 +380,9 @@ async fn run_checks(
         Ok(s) => s,
         Err((status, message, reason)) => return error(status, message, reason),
     };
-    let report = run_and_save(&state, &inspector, spec, save).await;
+    let Some(report) = run_and_save(&state, &inspector, spec, save).await else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, CHECKS_BUSY, "busy");
+    };
     if wants_junit(&headers, format.as_deref()) {
         return junit_response(&report);
     }
@@ -365,13 +390,15 @@ async fn run_checks(
 }
 
 /// Run the checks, log the run and keep its report (unless `save` is
-/// false). Shared with the management tool `run_mcp_checks`.
+/// false). Shared with the management tool `run_mcp_checks`. `None` when
+/// [`MAX_CHECK_RUNS`] runs are going already.
 pub async fn run_and_save(
     state: &AppState,
     inspector: &Inspector,
     spec: checks::RunSpec,
     save: bool,
-) -> Value {
+) -> Option<Value> {
+    let _slot = inspector.check_runs.clone().try_acquire_owned().ok()?;
     let target = spec
         .target
         .as_str()
@@ -386,7 +413,7 @@ pub async fn run_and_save(
             tracing::warn!(target: "rustybin::mcp_inspector", "check run not saved: {e}");
         }
     }
-    report
+    Some(report)
 }
 
 async fn list_runs(Extension(inspector): Extension<Arc<Inspector>>) -> Response {

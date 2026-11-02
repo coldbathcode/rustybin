@@ -66,7 +66,10 @@ whole test.
 `POST /_rustybin/tests/run` runs every test, or `names`. A test without a `gateway`
 goes through this instance's application in process, with the caller's session; a
 test with one is sent to the gateway's URL plus its path. The answer has each test's
-status, time and failed assertions (what was expected, what was seen).
+status, time and failed assertions (what was expected, what was seen). One run goes
+at a time, whichever surface starts it: another answers `409` until it ends. A test
+run in process carries a peer address of the caller's own (its session), so
+per-address limits and `ip:` sessions are never shared by every run.
 
 ```hurl
 {{#include ../examples/tests/saved-tests.hurl:run}}
@@ -118,5 +121,5 @@ exits `1` when a test fails.
 | API | `GET`, `POST /_rustybin/tests`, `GET`, `PUT`, `DELETE /_rustybin/tests/{name}`, `POST /_rustybin/tests/run` (`?format=junit`), `GET /_rustybin/tests/export` |
 | Console | **Live traffic**: **Save as test** on an entry; **Saved tests**: the list, **Run all** with variables, a test's run, the failures, **Export as Hurl**, delete |
 | CLI | `rustybin tests list | show | save | put | delete | run | export` (`run --junit`, `--var NAME=value`, `--var NAME=-` or `NAME=@file` for a credential) ([reference](cli.md#tests)) |
-| Management MCP | `list_tests` (one, all, or `format: hurl`), `save_test`, `delete_test` (confirmed), `run_tests` (confirmed when a test goes through a gateway; variables only from `RUSTYBIN_TEST_*`) ([agent page](agent-mcp.md)) |
+| Management MCP | `list_tests` (one, all, or `format: hurl`), `save_test`, `delete_test` (confirmed), `run_tests` (confirmed when a test goes through a gateway or sends a method other than `GET`, `HEAD` or `OPTIONS`; one run at a time; variables only from `RUSTYBIN_TEST_*`) ([agent page](agent-mcp.md)) |
 | `rustybin.yaml` | `tests:`, a list of tests as above ([instance as code](configuration-as-code.md)) |

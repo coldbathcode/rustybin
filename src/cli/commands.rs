@@ -192,7 +192,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("mocks", "create", "<name> --spec FILE", "Create a mock from an OpenAPI file (YAML or JSON).", &[Flag::value("--spec", "The OpenAPI document"), Flag::value("--mode", "examples, generated, static or stateful"), Flag::switch("--disabled", "Create it switched off"), Flag::switch("--no-deploy", "Keep it as a draft"), Flag::switch("--strip-server-prefix", "Serve the paths without the spec's server prefix")], [("POST", "/_rustybin/mocks")], false, "mocks create orders --spec orders.yaml --mode generated"),
     cmd!("mocks", "import", "--spec FILE", "Preview a spec: title, operations, the checks, the suggested name.", &[Flag::value("--spec", "The OpenAPI document")], [("POST", "/_rustybin/mocks/import")], false, "mocks import --spec orders.yaml"),
     cmd!("mocks", "update", "<name> [--spec FILE] [--mode M] [--settings JSON]", "Change a mock's spec or settings (the draft, deployed unless --no-deploy).", &[Flag::value("--spec", "A new OpenAPI document"), Flag::value("--mode", "examples, generated, static or stateful"), Flag::value("--settings", "Settings as JSON or a file: responses, security, operations, mcp, strip_server_prefix"), Flag::switch("--no-deploy", "Change the draft only"), Flag::switch("--force", "Deploy even when the checks report errors"), Flag::value("--expect-revision", "Refuse (409) unless the draft is still this revision (default: the one read just before)")], [("PATCH", "/_rustybin/mocks/{name}")], false, "mocks update orders --mode stateful"),
-    cmd!("mocks", "deploy", "<name> [--force]", "Deploy the draft.", &[Flag::switch("--force", "Deploy despite check errors")], [("POST", "/_rustybin/mocks/{name}/deploy")], false, "mocks deploy orders"),
+    cmd!("mocks", "deploy", "<name> [--force] [--expect-revision N]", "Deploy the draft.", &[Flag::switch("--force", "Deploy despite check errors"), Flag::value("--expect-revision", "Refuse (409) unless the draft is still this revision (default: deploy the draft as it is)")], [("POST", "/_rustybin/mocks/{name}/deploy")], false, "mocks deploy orders"),
     cmd!("mocks", "rollback", "<name> [--revision N]", "Go back to the previous (or a given) revision.", &[Flag::value("--revision", "The revision to restore")], [("POST", "/_rustybin/mocks/{name}/rollback")], false, "mocks rollback orders"),
     cmd!("mocks", "enable", "<name>", "Switch a mock on.", NO_FLAGS, [("POST", "/_rustybin/mocks/{name}/enable")], false, "mocks enable orders"),
     cmd!("mocks", "disable", "<name>", "Switch a mock off.", NO_FLAGS, [("POST", "/_rustybin/mocks/{name}/disable")], false, "mocks disable orders"),
@@ -1099,7 +1099,15 @@ async fn mocks(ctx: &mut Ctx, verb: &str) -> Result<()> {
             } else {
                 format!("{base}/deploy")
             };
-            post(ctx, &path, Body::None).await
+            // Only a revision named here: a deploy without one publishes the
+            // draft as it is.
+            let body = match ctx.args.value("--expect-revision") {
+                Some(_) => {
+                    Body::Json(json!({ "expected_revision": expected_revision(ctx, &base).await? }))
+                }
+                None => Body::None,
+            };
+            post(ctx, &path, body).await
         }
         "rollback" => {
             need_name(ctx)?;

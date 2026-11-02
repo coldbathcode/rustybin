@@ -7,8 +7,14 @@
 //! what it created and nothing else.
 //!
 //! Runs are bounded ([`MAX_RUNS`], [`RUN_TTL`]) and belong to the session
-//! that started them (`X-Rustybin-Session`, else the client address).
-//! Test traffic goes through the egress policy under `Purpose::Scenario`.
+//! that started them (`X-Rustybin-Session`, else the client address). A run
+//! id has 96 random bits; the sessions of a run's requests carry a per-run
+//! secret that is never shown, so nobody can send requests that count in a
+//! check. The credential-injection key is in the setup for admin callers
+//! only (who could read it on the run's mock anyway): callers without admin
+//! rights that share a session key with the starter (one address behind a
+//! NAT, a console-scope token) see the run without it. Test traffic goes
+//! through the egress policy under `Purpose::Scenario`.
 
 pub mod catalog;
 #[cfg(test)]
@@ -46,6 +52,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_BODY: usize = 64 * 1024;
 /// The header that ties an upstream request to the check request.
 pub const SESSION_HEADER: &str = "x-rustybin-session";
+/// Random bytes of a run id (96 bits).
+const RUN_ID_BYTES: usize = 12;
+/// Random bytes of a run's session secret (64 bits).
+const RUN_SECRET_BYTES: usize = 8;
+/// What the setup shows in place of the key to callers without admin rights.
+const KEY_HIDDEN: &str = "<the run's key: shown to admins only>";
 
 pub const LIST_PATH: &str = "/_rustybin/scenarios";
 const RUNS_PATH: &str = "/_rustybin/scenarios/{id}/runs";
@@ -62,20 +74,29 @@ struct Run {
     mock: Option<String>,
     upstream: String,
     key: Option<String>,
+    /// In every session of the run's requests (`scn-<id>-<secret>-...`),
+    /// never shown: a request without it does not count in a check.
+    secret: String,
     checks: u32,
     checking: bool,
     last: Option<Value>,
 }
 
 impl Run {
-    fn view(&self) -> Value {
+    /// The run as its owner sees it; the key only with `reveal` (admin).
+    fn view(&self, reveal: bool) -> Value {
         let mut resources = Vec::new();
         if let Some(m) = &self.mock {
             resources.push(json!({ "kind": "mock", "name": m }));
         }
         if let Upstream::Flaky(p) = self.scenario.upstream {
-            resources.push(json!({ "kind": "flaky_counters", "route": p, "sessions": format!("{}*", self.session_prefix()) }));
+            resources.push(json!({ "kind": "flaky_counters", "route": p, "sessions": format!("scn-{}-*", self.id) }));
         }
+        let key = match (&self.key, reveal) {
+            (Some(k), true) => Some(k.as_str()),
+            (Some(_), false) => Some(KEY_HIDDEN),
+            (None, _) => None,
+        };
         json!({
             "id": self.id,
             "scenario": self.scenario.id,
@@ -85,7 +106,8 @@ impl Run {
             "expires_at": self.expires_at,
             "upstream": self.upstream,
             "request_path": self.scenario.request_path,
-            "setup": self.scenario.setup_for(&self.upstream, self.key.as_deref()),
+            "setup": self.scenario.setup_for(&self.upstream, key),
+            "key_hidden": self.key.is_some() && !reveal,
             "resources": resources,
             "checks": self.checks,
             "checking": self.checking,
@@ -93,8 +115,9 @@ impl Run {
         })
     }
 
+    /// The prefix of every session the run's requests carry.
     fn session_prefix(&self) -> String {
-        format!("scn-{}-", self.id)
+        format!("scn-{}-{}-", self.id, self.secret)
     }
 }
 
@@ -151,14 +174,15 @@ fn random_hex(bytes: usize) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// The catalogue and the caller's runs.
-pub fn list(state: &AppState, owner: &str) -> Value {
+/// The catalogue and the caller's runs (`reveal`: the caller holds admin
+/// rights and sees the credential-injection key).
+pub fn list(state: &AppState, owner: &str, reveal: bool) -> Value {
     let runs: Vec<Value> = state
         .scenarios
         .runs()
         .iter()
         .filter(|r| r.owner == owner)
-        .map(Run::view)
+        .map(|r| r.view(reveal))
         .collect();
     json!({
         "scenarios": SCENARIOS.iter().map(Scenario::view).collect::<Vec<_>>(),
@@ -167,14 +191,20 @@ pub fn list(state: &AppState, owner: &str) -> Value {
     })
 }
 
-/// One of the caller's runs.
-pub fn get_run(state: &AppState, owner: &str, scenario: &str, run: &str) -> Result<Value, Refused> {
+/// One of the caller's runs (`reveal` as in [`list`]).
+pub fn get_run(
+    state: &AppState,
+    owner: &str,
+    scenario: &str,
+    run: &str,
+    reveal: bool,
+) -> Result<Value, Refused> {
     state
         .scenarios
         .runs()
         .iter()
         .find(|r| r.id == run && r.scenario.id == scenario && r.owner == owner)
-        .map(Run::view)
+        .map(|r| r.view(reveal))
         .ok_or_else(|| not_found(scenario, run))
 }
 
@@ -209,7 +239,7 @@ pub async fn start(
     if state.scenarios.len() >= MAX_RUNS {
         return Err(full());
     }
-    let id = random_hex(4);
+    let id = random_hex(RUN_ID_BYTES);
     let key = (sc.id == "credential_injection").then(|| format!("scn-{}", random_hex(12)));
     let base = svc.links.base_url().to_string();
     let (mock, upstream) = match sc.upstream {
@@ -242,11 +272,13 @@ pub async fn start(
         mock,
         upstream,
         key,
+        secret: random_hex(RUN_SECRET_BYTES),
         checks: 0,
         checking: false,
         last: None,
     };
-    let view = run.view();
+    // The starter is admin (checked above): the answer holds the key.
+    let view = run.view(true);
     {
         let mut runs = state.scenarios.runs();
         if runs.len() < MAX_RUNS {
@@ -299,7 +331,7 @@ pub async fn check(
     let bad = |m: String| Refused::new(StatusCode::BAD_REQUEST, m);
     let gateway = body.gateway_url.trim().trim_end_matches('/').to_string();
     crate::egress::parse_url(&gateway, false).map_err(|e| bad(format!("gateway_url: {e}")))?;
-    let (sc, k, upstream) = {
+    let (sc, k, upstream, prefix) = {
         let mut runs = state.scenarios.runs();
         let r = runs
             .iter_mut()
@@ -319,7 +351,7 @@ pub async fn check(
         }
         r.checking = true;
         r.checks += 1;
-        (r.scenario, r.checks, r.upstream.clone())
+        (r.scenario, r.checks, r.upstream.clone(), r.session_prefix())
     };
     let _checking = Checking {
         scenarios: state.scenarios.clone(),
@@ -345,7 +377,8 @@ pub async fn check(
         .client(&pinned, REQUEST_TIMEOUT)
         .map_err(|e| Refused::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let prefix = format!("scn-{run}-{k}-");
+    // The run's secret prefix: only the requests of this check match it.
+    let prefix = format!("{prefix}{k}-");
     let mut sent = Vec::new();
     for n in 0..sc.requests(limit) {
         let session = format!("{prefix}{n}");
@@ -480,8 +513,18 @@ pub fn end(state: &AppState, owner: &str, scenario: &str, run: &str) -> Result<V
 
 // ── Routes ──────────────────────────────────────────────────────────
 
-async fn list_handler(State(state): State<AppState>, Session(owner): Session) -> Json<Value> {
-    Json(list(&state, &owner))
+/// Does the caller hold admin rights (and see a run's key)?
+fn reveals(state: &AppState, headers: &HeaderMap, extensions: &Extensions) -> bool {
+    crate::mocks::selfservice::caller(state, headers, extensions).admin
+}
+
+async fn list_handler(
+    State(state): State<AppState>,
+    Session(owner): Session,
+    headers: HeaderMap,
+    extensions: Extensions,
+) -> Json<Value> {
+    Json(list(&state, &owner, reveals(&state, &headers, &extensions)))
 }
 
 async fn start_handler(
@@ -506,8 +549,11 @@ async fn get_handler(
     State(state): State<AppState>,
     Session(owner): Session,
     Path((id, run)): Path<(String, String)>,
+    headers: HeaderMap,
+    extensions: Extensions,
 ) -> Response {
-    match get_run(&state, &owner, &id, &run) {
+    let reveal = reveals(&state, &headers, &extensions);
+    match get_run(&state, &owner, &id, &run, reveal) {
         Ok(v) => Json(v).into_response(),
         Err(e) => e.into_response(),
     }

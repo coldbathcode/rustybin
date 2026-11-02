@@ -236,6 +236,34 @@ pub fn client_ip(headers: &HeaderMap, extensions: &Extensions, config: &Config) 
     peer_addr(extensions).map(|addr| addr.ip())
 }
 
+/// The peer an in-process request (a management tool's `try_request`, a
+/// saved test's run) carries, so per-address limits and `ip:` sessions are
+/// the caller's own, never one shared by every tool user: the caller's
+/// address when known, else the one in an `ip:<address>` session key, else
+/// a synthetic address made from the session (in `fd00::/8`, unique local,
+/// never routed).
+pub fn in_process_peer(caller: Option<IpAddr>, session: &str) -> SocketAddr {
+    let ip = caller
+        .or_else(|| {
+            derived_session(session)
+                .then(|| session.get(3..))
+                .flatten()
+                .and_then(|a| a.parse().ok())
+        })
+        .unwrap_or_else(|| {
+            let digest = crate::mocks::visits::sha256_hex(session);
+            let mut seg = [0xfd00u16, 0, 0, 0, 0, 0, 0, 0];
+            for (i, s) in seg.iter_mut().enumerate().skip(1) {
+                let hex = digest.get(i * 4..i * 4 + 4).unwrap_or("0");
+                *s = u16::from_str_radix(hex, 16).unwrap_or(0);
+            }
+            IpAddr::V6(Ipv6Addr::new(
+                seg[0], seg[1], seg[2], seg[3], seg[4], seg[5], seg[6], seg[7],
+            ))
+        });
+    SocketAddr::new(ip, 0)
+}
+
 /// The TCP peer address (`ConnectInfo`, or `MockConnectInfo` in tests).
 pub fn peer_addr(extensions: &Extensions) -> Option<SocketAddr> {
     extensions

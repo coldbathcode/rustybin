@@ -388,8 +388,16 @@ pub async fn relay(
             "admin_required",
         );
     }
+    // One of the instance's relay slots for the exchange (held until the
+    // answer's stream ends).
+    let Some(slot) = inspector.call_slot() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, super::CALLS_BUSY, "busy");
+    };
     if legacy {
-        return relay_legacy(state, inspector, target, headers, message, existing, extra).await;
+        return relay_legacy(
+            state, inspector, target, headers, message, existing, extra, slot,
+        )
+        .await;
     }
     // Streamable HTTP: the stored upstream session unless the browser sends one.
     if let Some((_, (_, Some(sid), _, _))) = &existing {
@@ -473,6 +481,7 @@ pub async fn relay(
     let is_sse = resp.is_sse();
     let id = message.get("id").cloned();
     let stream = async_stream::stream! {
+        let _slot = slot;
         yield frame("relay", &meta);
         if is_sse {
             let mut events = Box::pin(client::sse_events(resp.body));
@@ -512,6 +521,7 @@ pub async fn relay(
     sse(stream)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn relay_legacy(
     state: AppState,
     inspector: Arc<Inspector>,
@@ -520,6 +530,7 @@ async fn relay_legacy(
     message: Value,
     existing: Option<(String, SessionFacts)>,
     extra: Vec<(String, String)>,
+    slot: tokio::sync::OwnedSemaphorePermit,
 ) -> Response {
     let (session_id, legacy) = match existing.and_then(|(id, (_, _, l, _))| l.map(|l| (id, l))) {
         Some(found) => found,
@@ -571,6 +582,7 @@ async fn relay_legacy(
     let meta =
         json!({ "session": session_id, "status": status, "headers": {}, "transport": "legacy" });
     let stream = async_stream::stream! {
+        let _slot = slot;
         yield frame("relay", &meta);
         if expects_answer && status < 400 {
             let deadline = Instant::now() + client::TIMEOUT;

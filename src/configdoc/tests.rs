@@ -1073,3 +1073,120 @@ fn an_untrusted_document_cannot_repoint_outbound_requests() {
     );
     assert_eq!(r["problems"], json!([]), "{r}");
 }
+
+/// A prune deletes the instance's own API mocks the document does not name,
+/// never a visitor's, an API key's or a running gateway scenario's: not in
+/// the dry run, not in the apply, not through the mocks API.
+#[test]
+fn a_prune_leaves_visitors_keys_and_scenarios_mocks_alone() {
+    use crate::mocks::visits::{EmailInput, Owner};
+    let mut c = Config::for_tests();
+    c.self_service.enabled = true;
+    let state = test_state_with(c);
+    let store = &state.mocks;
+    let compiled = || store.compile(SPEC, Default::default()).expect("compile");
+    let (_, hash) = store
+        .visits()
+        .expect("self-service")
+        .start("ip:192.0.2.1/s", &EmailInput::default())
+        .expect("visit");
+    store
+        .create_owned(
+            "visitor-mock",
+            compiled(),
+            Origin::Api,
+            Owner::Visit(hash),
+            true,
+            true,
+            false,
+        )
+        .expect("visitor");
+    store
+        .create_owned(
+            "key-mock",
+            compiled(),
+            Origin::Api,
+            Owner::Key("k1".into()),
+            true,
+            true,
+            false,
+        )
+        .expect("key");
+    store
+        .create_scratch("scn-run", compiled(), std::time::Duration::from_secs(600))
+        .expect("scratch");
+    store
+        .create("instance-mock", compiled(), Origin::Api, true, true, false)
+        .expect("instance");
+    let kept = ["visitor-mock", "key-mock", "scn-run"];
+    let doc = || crate::mocks::config_file::parse("version: 2\nmocks: []\n").expect("parse");
+    let mut opts = ApplyOptions {
+        prune: true,
+        dry_run: true,
+        principal: "test".into(),
+        base: None,
+        untrusted: false,
+    };
+    let preview = apply(&state, doc(), &opts);
+    assert_eq!(
+        preview["results"]["mocks"]["would_delete"],
+        json!(["instance-mock"]),
+        "{preview}"
+    );
+    // The mocks API's dry run says the same.
+    let svc = crate::mocks::service::Svc::from_request(
+        &state,
+        &axum::http::HeaderMap::new(),
+        &axum::http::Extensions::new(),
+        &"/_rustybin/mocks/apply".parse().expect("uri"),
+    );
+    let dry = svc
+        .apply_dry_run("version: 2\nmocks: []\n", true)
+        .expect("dry run");
+    assert_eq!(dry["would_delete"], json!(["instance-mock"]), "{dry}");
+    let report = svc.apply("version: 2\nmocks: []\n", true).expect("apply");
+    assert_eq!(report["deleted"], json!(["instance-mock"]), "{report}");
+    opts.dry_run = false;
+    let applied = apply(&state, doc(), &opts);
+    assert_eq!(
+        applied["results"]["mocks"]["deleted"],
+        json!([]),
+        "{applied}"
+    );
+    for name in kept {
+        assert!(store.get(name).is_some(), "{name} was pruned");
+    }
+}
+
+/// A gateway scenario's scratch mock (it holds the run's credential and ends
+/// with the run) is never in an export, nor in the mocks API's.
+#[test]
+fn an_export_leaves_out_a_scenarios_scratch_mock() {
+    let state = test_state_with(Config::for_tests());
+    let compiled = || {
+        state
+            .mocks
+            .compile(SPEC, Default::default())
+            .expect("compile")
+    };
+    state
+        .mocks
+        .create_scratch("scn-run", compiled(), std::time::Duration::from_secs(600))
+        .expect("scratch");
+    state
+        .mocks
+        .create("orders", compiled(), Origin::Api, true, true, false)
+        .expect("orders");
+    let yaml = export(&state, SecretsMode::Refs, false).yaml();
+    assert!(yaml.contains("name: orders"), "{yaml}");
+    assert!(!yaml.contains("scn-run"), "{yaml}");
+    let svc = crate::mocks::service::Svc::from_request(
+        &state,
+        &axum::http::HeaderMap::new(),
+        &axum::http::Extensions::new(),
+        &"/_rustybin/mocks/export".parse().expect("uri"),
+    );
+    let mocks_yaml = svc.export_all();
+    assert!(mocks_yaml.contains("orders"), "{mocks_yaml}");
+    assert!(!mocks_yaml.contains("scn-run"), "{mocks_yaml}");
+}

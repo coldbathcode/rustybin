@@ -173,7 +173,7 @@ OpenAPI mocks on the instance (rustybin mock ... works offline)
 | `rustybin mocks create <name> --spec FILE` | Create a mock from an OpenAPI file (YAML or JSON). Flags: `--spec` value, `--mode` value, `--disabled`, `--no-deploy`, `--strip-server-prefix`. | `POST /_rustybin/mocks` |
 | `rustybin mocks import --spec FILE` | Preview a spec: title, operations, the checks, the suggested name. Flags: `--spec` value. | `POST /_rustybin/mocks/import` |
 | `rustybin mocks update <name> [--spec FILE] [--mode M] [--settings JSON]` | Change a mock's spec or settings (the draft, deployed unless --no-deploy). Flags: `--spec` value, `--mode` value, `--settings` value, `--no-deploy`, `--force`, `--expect-revision` value. | `PATCH /_rustybin/mocks/{name}` |
-| `rustybin mocks deploy <name> [--force]` | Deploy the draft. Flags: `--force`. | `POST /_rustybin/mocks/{name}/deploy` |
+| `rustybin mocks deploy <name> [--force] [--expect-revision N]` | Deploy the draft. Flags: `--force`, `--expect-revision` value. | `POST /_rustybin/mocks/{name}/deploy` |
 | `rustybin mocks rollback <name> [--revision N]` | Go back to the previous (or a given) revision. Flags: `--revision` value. | `POST /_rustybin/mocks/{name}/rollback` |
 | `rustybin mocks enable <name>` | Switch a mock on. | `POST /_rustybin/mocks/{name}/enable` |
 | `rustybin mocks disable <name>` | Switch a mock off. | `POST /_rustybin/mocks/{name}/disable` |

@@ -234,6 +234,8 @@ Authorization: Bearer {{admin_token}}
 Content-Type: application/json
 {"strip_server_prefix": true}
 HTTP 200
+[Captures]
+draft: jsonpath "$.draft_revision"
 [Asserts]
 jsonpath "$.state" == "live"
 jsonpath "$.has_draft_changes" == true
@@ -242,8 +244,11 @@ jsonpath "$.revisions[0].draft" == true
 GET {{base_url}}/mock/docs-orders/api/orders/7
 HTTP 200
 
+# Deploy the draft just read: If-Match (or expected_revision in the body)
+# refuses with 409 a draft someone changed since.
 POST {{base_url}}/_rustybin/mocks/docs-orders/deploy
 Authorization: Bearer {{admin_token}}
+If-Match: "{{draft}}"
 HTTP 200
 [Asserts]
 jsonpath "$.deployed" == true
@@ -297,6 +302,14 @@ jsonpath "$.error" == "rustybin_stale_revision"
 jsonpath "$.expected_revision" == {{revision}}
 jsonpath "$.current_revision" > {{revision}}
 jsonpath "$.changed" contains "responses"
+
+# A deploy naming that revision is refused too: the draft is not what was read.
+POST {{base_url}}/_rustybin/mocks/docs-orders/deploy
+Authorization: Bearer {{admin_token}}
+If-Match: "{{revision}}"
+HTTP 409
+[Asserts]
+jsonpath "$.error" == "rustybin_stale_revision"
 # ANCHOR_END: conflict
 
 # ANCHOR: switch

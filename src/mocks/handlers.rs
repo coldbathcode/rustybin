@@ -955,6 +955,15 @@ pub struct ForceQuery {
     force: Option<bool>,
 }
 
+/// The optional body of a deploy.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DeployBody {
+    /// The draft revision to deploy (else `If-Match`): refused with `409`
+    /// when the draft has moved on.
+    expected_revision: Option<u64>,
+}
+
 pub async fn deploy(
     State(state): State<AppState>,
     Path(MockPath { name }): Path<MockPath>,
@@ -962,9 +971,14 @@ pub async fn deploy(
     headers: HeaderMap,
     extensions: Extensions,
     uri: Uri,
+    body: Bytes,
 ) -> Result<Response, ServiceError> {
     let s = svc(&state, &headers, &extensions, &uri);
-    Ok(Json(s.deploy(&name, q.force.unwrap_or(false))?).into_response())
+    // Access first, then the body, as for the other mutations.
+    s.manageable(&name)?;
+    let req: DeployBody = parse_optional(&body)?;
+    let expected = expected_revision(&headers, req.expected_revision)?;
+    Ok(Json(s.deploy(&name, q.force.unwrap_or(false), expected)?).into_response())
 }
 
 #[derive(Deserialize, Default)]
@@ -1299,7 +1313,10 @@ pub async fn duplicate(
     let s = svc(&state, &headers, &extensions, &uri);
     s.manageable(&name)?;
     let req: DuplicateBody = parse_optional(&body)?;
-    Ok(created(s.duplicate(&name, req.name)?))
+    // The copy is a new revision compiled from the source: on the pool.
+    Ok(created(
+        s.compiling(move |s| s.duplicate(&name, req.name)).await?,
+    ))
 }
 
 /// Which rule would answer a captured request.

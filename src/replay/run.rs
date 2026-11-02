@@ -248,8 +248,9 @@ async fn direct(state: &AppState, p: Prepared, session: &str) -> Result<Answer, 
     let mut req = b
         .body(p.body.map(Body::from).unwrap_or_else(Body::empty))
         .map_err(|e| format!("invalid request: {e}"))?;
+    // A peer of the caller's own (its session), not one every run shares.
     req.extensions_mut()
-        .insert(ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 0))));
+        .insert(ConnectInfo(crate::session::in_process_peer(None, session)));
     // Its credentials were filled from the run's variables: the capture
     // redacts every secret-looking header and query value, as it does for
     // the MCP inspector's own requests.

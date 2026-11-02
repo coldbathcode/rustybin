@@ -658,3 +658,125 @@ fn the_ledger_key_is_the_address_not_the_session_header() {
     assert!(r.is_err(), "the shared entry is over its hourly allowance");
     assert!(crate::mocks::service::RESERVED_NAMES.contains(&"ai"));
 }
+
+// ── Review 0.3.1 step 06 ────────────────────────────────────────────
+
+#[tokio::test]
+async fn callers_without_a_manage_token_spend_a_compile_allowance_too() {
+    let (app, _, _) = app_on(config(None));
+    let limit = crate::mocks::store::VISITOR_COMPILES_PER_MINUTE;
+    // A new session per request changes nothing: the address is counted.
+    for i in 0..limit {
+        let session = format!("rotating-{i}");
+        let (status, _, out) = call(
+            &app,
+            "POST",
+            "/_rustybin/mocks/import",
+            &[("x-rustybin-session", &session)],
+            Some(shop()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "preview {i}: {out}");
+    }
+    let (status, h, out) = call(
+        &app,
+        "POST",
+        "/_rustybin/mocks/import",
+        &[("x-rustybin-session", "yet-another")],
+        Some(shop()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{out}");
+    assert!(h.contains_key("retry-after"));
+    // So is a creation that would start a visit.
+    let (status, out) = visitor_create(&app, "fresh", None, shop()).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{out}");
+    // The operator is never counted.
+    let (status, _, out) = call(
+        &app,
+        "POST",
+        "/_rustybin/mocks/import",
+        &[ADMIN],
+        Some(shop()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+}
+
+#[tokio::test]
+async fn a_creation_past_the_caps_is_refused_before_its_spec_is_compiled() {
+    let (app, _, _) = app_on(config(None));
+    let (_, first) = visitor_create(&app, "a", None, shop()).await;
+    let token = first["manage_token"].as_str().expect("token").to_string();
+    for _ in 0..2 {
+        let (status, out) = visitor_create(&app, "a", Some(&token), shop()).await;
+        assert_eq!(status, StatusCode::CREATED, "{out}");
+    }
+    // At the cap a document that does not even parse answers the cap, not
+    // a parse error: nothing was compiled.
+    let (status, out) = visitor_create(
+        &app,
+        "a",
+        Some(&token),
+        json!({ "spec": "this is not an OpenAPI document" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{out}");
+    assert_eq!(out["error"], "rustybin_mock_cap");
+    // A blocked name given up front is refused before the compile too.
+    let mut c = config(None);
+    c.self_service.blocked_names = vec!["paypal".into()];
+    let (app, _, _) = app_on(c);
+    let (status, out) = visitor_create(
+        &app,
+        "b",
+        None,
+        json!({ "name": "paypal", "spec": "this is not an OpenAPI document" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{out}");
+    assert!(
+        out["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("not available"),
+        "{out}"
+    );
+}
+
+#[tokio::test]
+async fn duplicates_and_generated_examples_compile_on_the_pool_with_the_allowance() {
+    let (app, _, _) = app_on(config(None));
+    let (_, first) = visitor_create(&app, "a", None, shop()).await;
+    let token = first["manage_token"].as_str().expect("token").to_string();
+    let name = first["name"].as_str().expect("name").to_string();
+    let t = [("x-rustybin-mock-token", token.as_str())];
+    // The creation was counted on the address (it had no token yet): the
+    // visit's previews spend its own allowance.
+    for i in 0..crate::mocks::store::VISITOR_COMPILES_PER_MINUTE {
+        let (status, _, out) =
+            call(&app, "POST", "/_rustybin/mocks/import", &t, Some(shop())).await;
+        assert_eq!(status, StatusCode::OK, "preview {i}: {out}");
+    }
+    let (status, _, out) = call(
+        &app,
+        "POST",
+        &format!("/_rustybin/mocks/{name}/duplicate"),
+        &t,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{out}");
+    let (status, _, out) = call(
+        &app,
+        "POST",
+        &format!("/_rustybin/mocks/{name}/ai/examples"),
+        &t,
+        Some(json!({ "source": "generated" })),
+    )
+    .await;
+    assert!(
+        out.to_string().contains("compiles per minute"),
+        "{status}: {out}"
+    );
+}

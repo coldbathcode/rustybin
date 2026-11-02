@@ -4,7 +4,7 @@
 
 use serde_json::{json, Value};
 
-use super::access::Access;
+use super::access::{Access, Right};
 use super::tools::{arg_u64, confirm, err, need_str, ok, Confirm};
 use crate::mcp::core::CallCtx;
 use crate::scenarios::{self, CheckBody};
@@ -18,9 +18,14 @@ fn ids(args: &Value) -> Result<(&str, &str), Value> {
     Ok((need_str(args, "scenario")?, need_str(args, "run")?))
 }
 
+/// Does the caller see a run's credential-injection key (admin rights)?
+fn reveals(access: &Access) -> bool {
+    access.allows(Right::Admin)
+}
+
 /// `list_gateway_scenarios`.
-pub fn list_gateway_scenarios(ctx: &CallCtx) -> Value {
-    let v = scenarios::list(&ctx.app, &owner(ctx));
+pub fn list_gateway_scenarios(ctx: &CallCtx, access: &Access) -> Value {
+    let v = scenarios::list(&ctx.app, &owner(ctx), reveals(access));
     let runs = v["runs"].as_array().map(Vec::len).unwrap_or(0);
     ok(
         ctx,
@@ -64,12 +69,12 @@ pub async fn start_gateway_scenario(ctx: &CallCtx, access: &Access, args: &Value
 }
 
 /// `get_gateway_scenario_run`.
-pub fn get_gateway_scenario_run(ctx: &CallCtx, args: &Value) -> Value {
+pub fn get_gateway_scenario_run(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     let (id, run) = match ids(args) {
         Ok(x) => x,
         Err(e) => return e,
     };
-    match scenarios::get_run(&ctx.app, &owner(ctx), id, run) {
+    match scenarios::get_run(&ctx.app, &owner(ctx), id, run, reveals(access)) {
         Ok(v) => ok(ctx, format!("Run {run} of {id}"), v),
         Err(e) => err(e.1),
     }

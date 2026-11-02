@@ -218,6 +218,24 @@ struct Inner {
     creations: HashMap<String, VecDeque<DateTime<Utc>>>,
     #[serde(skip)]
     instance_creations: VecDeque<DateTime<Utc>>,
+    /// Changes saved so far: orders the copies written off the lock.
+    #[serde(skip)]
+    saves: u64,
+}
+
+impl Inner {
+    /// What the file keeps (the rate windows are not saved): cloned under
+    /// the lock, serialised after it.
+    fn saved_copy(&self) -> Inner {
+        Inner {
+            visits: self.visits.clone(),
+            day: self.day,
+            email_minutes: self.email_minutes.clone(),
+            anon_visits: self.anon_visits.clone(),
+            sessions_per_address: self.sessions_per_address.clone(),
+            ..Inner::default()
+        }
+    }
 }
 
 /// What a visit looks like to its owner (`GET /_rustybin/mocks/visit`).
@@ -247,29 +265,45 @@ pub struct Visits {
     leads: Arc<Leads>,
     persist: Option<PathBuf>,
     /// The latest serialised state waiting to be written, and the order of
-    /// the writes: the file is written off the visits lock (and, under a
-    /// runtime, off the request thread), latest state wins.
+    /// the writes: the state is copied under the visits lock, serialised and
+    /// written after it (off the async workers), the latest change wins.
     writer: Arc<Writer>,
 }
 
 #[derive(Default)]
 struct Writer {
-    pending: Mutex<Option<(PathBuf, Vec<u8>)>>,
-    order: Mutex<()>,
+    /// The newest copy offered and not yet written: its change number, the
+    /// file and the text.
+    pending: Mutex<Option<(u64, PathBuf, Vec<u8>)>>,
+    /// The change number last written (held for the write: one at a time).
+    written: Mutex<u64>,
 }
 
 impl Writer {
+    /// Offer the copy of change `seq`: an older one than what waits is
+    /// dropped.
+    fn offer(&self, seq: u64, path: PathBuf, text: Vec<u8>) {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if pending.as_ref().is_none_or(|(s, _, _)| *s < seq) {
+            *pending = Some((seq, path, text));
+        }
+    }
+
+    /// Write what waits, unless a newer change was written already.
     fn flush(&self) {
-        let _order = self.order.lock().unwrap_or_else(|e| e.into_inner());
+        let mut written = self.written.lock().unwrap_or_else(|e| e.into_inner());
         let next = self
             .pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
-        if let Some((path, text)) = next {
-            if let Err(e) = crate::settings::write_private(&path, &text) {
-                tracing::warn!("visits not saved to {}: {e}", path.display());
-            }
+        if let Some((seq, path, text)) = next.filter(|(seq, _, _)| *seq > *written) {
+            *written = seq;
+            super::store::off_runtime(|| {
+                if let Err(e) = crate::settings::write_private(&path, &text) {
+                    tracing::warn!("visits not saved to {}: {e}", path.display());
+                }
+            });
         }
     }
 }
@@ -383,6 +417,13 @@ impl Visits {
         let Some((address, session)) = key.split_once('/') else {
             return key.to_string();
         };
+        // A new address once the map is full shares one entry (the map
+        // never grows past its cap, whichever caller adds to it).
+        if !inner.sessions_per_address.contains_key(address)
+            && inner.sessions_per_address.len() >= MAX_LEDGER
+        {
+            return format!("{address}/*");
+        }
         let set = inner
             .sessions_per_address
             .entry(address.to_string())
@@ -397,29 +438,25 @@ impl Visits {
         format!("{address}/*")
     }
 
-    fn save(&self, inner: &Inner) {
+    /// Copy the state, let go of the lock, then serialise and write it: a
+    /// save never holds up the visitors' requests (the data plane checks
+    /// visits on every call), and the latest change wins.
+    fn save_unlock(&self, mut inner: std::sync::MutexGuard<'_, Inner>) {
         let Some(path) = &self.persist else {
             return;
         };
-        let text = match serde_json::to_vec(inner) {
+        inner.saves += 1;
+        let seq = inner.saves;
+        let copy = inner.saved_copy();
+        drop(inner);
+        let text = match serde_json::to_vec(&copy) {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!("visits not saved: {e}");
                 return;
             }
         };
-        *self
-            .writer
-            .pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some((path.clone(), text));
-    }
-
-    /// Serialise the state, let go of the lock, then write the file: the
-    /// write never holds up other visitors (the latest state wins).
-    fn save_unlock(&self, inner: std::sync::MutexGuard<'_, Inner>) {
-        self.save(&inner);
-        drop(inner);
+        self.writer.offer(seq, path.clone(), text);
         self.writer.flush();
     }
 
@@ -1091,5 +1128,63 @@ mod tests {
         assert_eq!(second.view(&hash).expect("view").minutes_used, 60);
         clock.advance(Duration::from_secs(3601));
         assert!(make().resolve([token.as_str()]).is_empty());
+    }
+
+    #[test]
+    fn counting_creations_never_grows_the_address_ledger_past_its_cap() {
+        let (v, _) = visits(false);
+        for i in 0..MAX_LEDGER + 50 {
+            // Refused past the instance rate, counted in the ledger all the same.
+            let _ = v.note_creation(&format!(
+                "ip:10.{}.{}.{}/s",
+                i >> 16,
+                (i >> 8) & 255,
+                i & 255
+            ));
+        }
+        assert!(v.lock().sessions_per_address.len() <= MAX_LEDGER);
+    }
+
+    #[test]
+    fn saves_written_off_the_lock_keep_the_latest_state() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let clock = Arc::new(ManualClock::new(at("2026-10-18T09:00:00Z")));
+        let cfg = SelfServiceConfig {
+            enabled: true,
+            leads_salt: Some("salt".into()),
+            max_mocks: 200,
+            ..SelfServiceConfig::default()
+        };
+        let make = || {
+            Arc::new(
+                Visits::new(cfg.clone(), clock.clone(), Arc::new(Leads::disabled()))
+                    .with_persistence(tmp.path().to_path_buf()),
+            )
+        };
+        let v = make();
+        let threads: Vec<_> = (0..8)
+            .map(|t| {
+                let v = v.clone();
+                std::thread::spawn(move || {
+                    for i in 0..10 {
+                        let _ = v.start(&format!("ip:192.0.2.{t}/s{i}"), &EmailInput::default());
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("thread");
+        }
+        let running = v.running();
+        assert!(running > 0);
+        assert_eq!(make().running(), running, "the file holds the last change");
+        // An older copy offered after a newer one was written is dropped.
+        let w = Writer::default();
+        let path = tmp.path().join("order.json");
+        w.offer(2, path.clone(), b"new".to_vec());
+        w.flush();
+        w.offer(1, path.clone(), b"old".to_vec());
+        w.flush();
+        assert_eq!(std::fs::read(&path).expect("file"), b"new");
     }
 }

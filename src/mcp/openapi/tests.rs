@@ -749,3 +749,44 @@ async fn the_mock_detail_describes_its_mcp_server() {
     assert!(text.contains("mcp:"), "{text}");
     assert!(text.contains("- listPets"), "{text}");
 }
+
+#[tokio::test]
+async fn a_cookie_argument_cannot_add_another_cookie() {
+    const SPEC: &str = r#"{"openapi":"3.0.3","info":{"title":"C","version":"1"},"paths":{"/me":{"get":{"operationId":"me","parameters":[{"name":"session","in":"cookie","required":true,"schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"example":{"ok":true}}}}}}}}}"#;
+    let state = test_state_with(Config::for_tests());
+    let app = test_app_with(state.clone());
+    let resp = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/_rustybin/mocks",
+            &json!({ "name": "cookies", "spec": SPEC }),
+        ))
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let r = call_tool(
+        &app,
+        "/mock/cookies/_rustybin/mcp",
+        "me",
+        json!({ "session": "abc; admin=true, x=\"1\" %" }),
+    )
+    .await;
+    assert_ne!(r["isError"], true, "{r}");
+    let mock = state.mocks.get("cookies").expect("mock");
+    let entry = mock.capture.entries(1).into_iter().next().expect("a call");
+    let cookie = serde_json::to_value(&entry.headers)
+        .expect("headers")
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|h| h.to_string().to_lowercase().contains("cookie"))
+        .map(|h| h.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        cookie.contains("session=abc%3B%20admin=true%2C%20x=%221%22%20%25"),
+        "{cookie}"
+    );
+    assert!(!cookie.contains("; admin"), "{cookie}");
+}

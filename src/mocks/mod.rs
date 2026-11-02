@@ -839,6 +839,24 @@ pub fn openapi_paths() -> Value {
         }
         op
     };
+    let mut deploy_op = admin(
+        "deployMock",
+        "Deploy the draft",
+        json!([
+            name,
+            { "name": "force", "in": "query", "schema": { "type": "boolean" } },
+            { "name": "If-Match", "in": "header", "required": false, "schema": { "type": "string" }, "description": "The draft revision to deploy (the mock's ETag): 409 rustybin_stale_revision when the draft has moved on" }
+        ]),
+    );
+    if let Some(o) = deploy_op.as_object_mut() {
+        o.insert("requestBody".into(), json!({ "required": false, "content": { "application/json": { "schema": {
+            "type": "object", "additionalProperties": false,
+            "properties": { "expected_revision": { "type": "integer", "description": "The draft revision to deploy (else If-Match; both must agree)" } }
+        } } } }));
+    }
+    deploy_op["responses"]["409"] = json!({ "description": "rustybin_stale_revision: the draft is no longer the revision named" });
+    deploy_op["responses"]["422"] =
+        json!({ "description": "The deploy checks found errors (deploy with force)" });
     let mut paths = json!({
         "/mock/{name}": { "post": mock_call("callMock", json!([name])) },
         "/mock/{name}/{path}": { "post": mock_call("callMockPath", json!([name, path])) },
@@ -860,7 +878,7 @@ pub fn openapi_paths() -> Value {
         },
         "/_rustybin/mocks/{name}/enable": { "post": admin("enableMock", "Switch on", json!([name])) },
         "/_rustybin/mocks/{name}/disable": { "post": admin("disableMock", "Switch off", json!([name])) },
-        "/_rustybin/mocks/{name}/deploy": { "post": admin("deployMock", "Deploy the draft", json!([name, { "name": "force", "in": "query", "schema": { "type": "boolean" } }])) },
+        "/_rustybin/mocks/{name}/deploy": { "post": deploy_op },
         "/_rustybin/mocks/{name}/rollback": { "post": admin("rollbackMock", "Roll back", json!([name])) },
         "/_rustybin/mocks/{name}/report": { "get": simple("getMockReport", "Deploy-check report", json!([name])) },
         "/_rustybin/mocks/{name}/coverage": { "get": simple("getMockCoverage", "Example coverage: which operations have an example for their success responses (draft and live)", json!([name])) },

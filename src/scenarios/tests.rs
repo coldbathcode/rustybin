@@ -399,3 +399,63 @@ async fn runs_are_bounded() {
     let r = start(&state, svc(&state, "http://127.0.0.1:9"), "me", "nope").await;
     assert!(matches!(r, Err(Refused(StatusCode::NOT_FOUND, _))));
 }
+
+#[tokio::test]
+async fn a_run_cannot_be_guessed_nor_its_check_skewed_by_forged_sessions() {
+    let (_server, state, base) = instance(config()).await;
+    let run = run_of(&state, &base, "caching").await;
+    let id = run["id"].as_str().expect("id").to_string();
+    assert_eq!(id.len(), 24, "96-bit run ids: {id}");
+    let upstream = run["upstream"].as_str().expect("upstream").to_string();
+    // Requests sent to the upstream under the sessions a check would use
+    // when the run id is known: they must not count.
+    let client = reqwest::Client::new();
+    for n in 0..3 {
+        for k in 1..3 {
+            let forged = format!("scn-{id}-{k}-{n}");
+            let _ = client
+                .get(format!(
+                    "{upstream}{}",
+                    catalog::find("caching").expect("caching").request_path
+                ))
+                .header(SESSION_HEADER, forged)
+                .send()
+                .await;
+        }
+    }
+    let gateway = start_gw(behaving("caching", &upstream, None)).await;
+    let v = check_via(&state, &run, &gateway).await;
+    assert_eq!(v["passed"], true, "{v:#}");
+    // The secret in the sessions is never shown.
+    let shown = get_run(&state, "me", "caching", &id, true).expect("run");
+    let secret = state
+        .scenarios
+        .runs()
+        .iter()
+        .find(|r| r.id == id)
+        .map(|r| r.secret.clone())
+        .expect("run");
+    assert!(!shown.to_string().contains(&secret), "{shown}");
+    assert!(!v.to_string().contains(&secret), "{v}");
+    end(&state, "me", "caching", &id).expect("end");
+}
+
+#[tokio::test]
+async fn the_injected_credential_is_shown_to_admins_only() {
+    let (_server, state, base) = instance(config()).await;
+    let run = run_of(&state, &base, "credential_injection").await;
+    let key = key_of(&run).expect("the start answer holds the key");
+    let id = run["id"].as_str().expect("id");
+    let admin = get_run(&state, "me", "credential_injection", id, true).expect("run");
+    assert!(admin.to_string().contains(&key));
+    assert_eq!(admin["key_hidden"], false);
+    // Someone else behind the same address (the same session key) without
+    // admin rights: the run, never its key.
+    let other = get_run(&state, "me", "credential_injection", id, false).expect("run");
+    assert!(!other.to_string().contains(&key), "{other}");
+    assert_eq!(other["key_hidden"], true);
+    let listed = list(&state, "me", false);
+    assert!(!listed.to_string().contains(&key), "{listed}");
+    assert!(list(&state, "me", true).to_string().contains(&key));
+    end(&state, "me", "credential_injection", id).expect("end");
+}

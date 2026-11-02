@@ -207,7 +207,9 @@ impl Links {
     }
 }
 
-/// The service for one caller.
+/// The service for one caller (cloned to run more than one call on the
+/// compile pool).
+#[derive(Clone)]
 pub struct Svc {
     pub state: AppState,
     pub caller: Caller,
@@ -694,25 +696,23 @@ impl Svc {
     /// Run a call that parses or compiles a spec on the blocking pool, at
     /// most `COMPILE_PERMITS` at once (503 when none frees up within
     /// `COMPILE_WAIT`), so a hostile spec never holds an async worker; a
-    /// visitor gets `VISITOR_COMPILES_PER_MINUTE` (429 past it).
+    /// caller without admin rights (a visitor, with a manage token or not)
+    /// gets `VISITOR_COMPILES_PER_MINUTE` (429 past it), see
+    /// [`Self::compile_key`].
     pub async fn compiling<T, F>(self, f: F) -> SvcResult<T>
     where
         T: Send + 'static,
         F: FnOnce(&Svc) -> SvcResult<T> + Send + 'static,
     {
-        if !self.caller.admin {
-            if let Some(visit) = self.caller.visit() {
-                if !self.store().allow_visitor_compile(visit) {
-                    return Err(ServiceError::retry(
-                        StatusCode::TOO_MANY_REQUESTS,
-                        format!(
-                            "at most {} spec compiles per minute for a visitor: try again in a minute",
-                            super::store::VISITOR_COMPILES_PER_MINUTE
-                        ),
-                        60,
-                    ));
-                }
-            }
+        if !self.caller.admin && !self.store().allow_visitor_compile(&self.compile_key()) {
+            return Err(ServiceError::retry(
+                StatusCode::TOO_MANY_REQUESTS,
+                format!(
+                    "at most {} spec compiles per minute for a visitor: try again in a minute",
+                    super::store::VISITOR_COMPILES_PER_MINUTE
+                ),
+                60,
+            ));
         }
         let permits = self.store().compile_permits();
         let permit = tokio::time::timeout(super::store::COMPILE_WAIT, permits.acquire_owned())
@@ -737,6 +737,22 @@ impl Svc {
                 "the compile did not finish",
             )
         })?
+    }
+
+    /// Whose compile allowance a call without admin rights spends: the
+    /// visit, else the API key, else the client's address (the address part
+    /// of the ledger key, which a new `X-Rustybin-Session` per request does
+    /// not change), so a caller without a manage token is counted too.
+    fn compile_key(&self) -> String {
+        let c = &self.caller;
+        if let Some(v) = c.visit() {
+            return format!("visit:{v}");
+        }
+        if let Some(k) = c.key() {
+            return format!("key:{k}");
+        }
+        let address = c.ledger.split('/').next().unwrap_or(&c.ledger);
+        format!("anon:{address}")
     }
 
     fn store(&self) -> &MockStore {
@@ -911,7 +927,12 @@ impl Svc {
 
     /// Caps and rates a visitor's creation must pass before a visit starts.
     fn visitor_admission(&self, name_slug: &str) -> SvcResult<()> {
-        let c = &self.caller;
+        self.visitor_name(name_slug)?;
+        self.visitor_caps()
+    }
+
+    /// A visitor's mock name is neither blocked nor reserved.
+    fn visitor_name(&self, name_slug: &str) -> SvcResult<()> {
         let Some(visits) = self.store().visits() else {
             return Ok(());
         };
@@ -923,6 +944,20 @@ impl Svc {
                 "the name {name_slug:?} is not available: pick another"
             )));
         }
+        Ok(())
+    }
+
+    /// The caps and the creation rate (counted here) of a visitor's new
+    /// mock, checked before its spec is compiled.
+    fn visitor_caps(&self) -> SvcResult<()> {
+        let c = &self.caller;
+        let Some(visits) = self.store().visits() else {
+            return Ok(());
+        };
+        if visits.paused() {
+            return Err(ss::visit_error(VisitError::Paused, self.config()));
+        }
+        let cfg = visits.config();
         let mine = c
             .owners
             .iter()
@@ -961,6 +996,14 @@ impl Svc {
             self.require_admin()?;
         }
         let text = spec_text(&req.spec).map_err(ServiceError::bad_request)?;
+        if visitor {
+            // The name given, the caps and the creation rate before the
+            // compile: a refused creation costs no compile.
+            if let Some(n) = req.name.as_deref() {
+                self.visitor_name(&slug(n, VISITOR_SLUG_MAX))?;
+            }
+            self.visitor_caps()?;
+        }
         let settings = MockSettings {
             strip_server_prefix: req.strip_server_prefix.unwrap_or(false),
             responses: req.responses.unwrap_or_default(),
@@ -984,7 +1027,7 @@ impl Svc {
                     .unwrap_or(&compiled.spec.suggested_name()),
                 VISITOR_SLUG_MAX,
             );
-            self.visitor_admission(&base)?;
+            self.visitor_name(&base)?;
             let owner = self.visitor_owner()?;
             (visitor_name(self.store(), &base), owner)
         } else {
@@ -1134,12 +1177,19 @@ impl Svc {
                 Err(e) => return Err(self.stale(e)),
             }
         };
-        drop(edit);
         if req.deploy == Some(true) {
+            // The revision just written goes live, still under the edit
+            // lock: a newer draft is never deployed by this call.
             snap = self
                 .store()
-                .deploy(&snap.name, req.force.unwrap_or(false))?;
+                .deploy_if(
+                    &snap.name,
+                    req.force.unwrap_or(false),
+                    Some(snap.draft.revision),
+                )
+                .map_err(|e| self.stale(e))?;
         }
+        drop(edit);
         Ok(self.detail_of(&snap, self.caller.reveals(&snap)))
     }
 
@@ -1225,10 +1275,16 @@ impl Svc {
         Ok(self.store().set_enabled(name, on)?.summary())
     }
 
-    /// `POST /_rustybin/mocks/{name}/deploy`.
-    pub fn deploy(&self, name: &str, force: bool) -> SvcResult<Value> {
+    /// `POST /_rustybin/mocks/{name}/deploy`. With `expected` (`If-Match` or
+    /// `expected_revision`), refused with `409` unless the draft is that
+    /// revision, checked under the store's write lock: what goes live is
+    /// what the caller saw.
+    pub fn deploy(&self, name: &str, force: bool, expected: Option<u64>) -> SvcResult<Value> {
         self.manageable(name)?;
-        let s = self.store().deploy(name, force)?;
+        let s = self
+            .store()
+            .deploy_if(name, force, expected)
+            .map_err(|e| self.stale(e))?;
         let root = self.links.mock_base(&s.owner, &s.name);
         Ok(json!({
             "deployed": true,
@@ -1278,7 +1334,11 @@ impl Svc {
             .store()
             .list()
             .into_iter()
-            .filter(|s| s.origin != Origin::Sample && (!s.owner.is_visitor() || c.owns(&s.owner)))
+            .filter(|s| {
+                s.origin != Origin::Sample
+                    && !s.scratch
+                    && (!s.owner.is_visitor() || c.owns(&s.owner))
+            })
             .collect();
         config_file::export(&all, reveal)
     }
@@ -1342,7 +1402,7 @@ impl Svc {
             self.store()
                 .list()
                 .into_iter()
-                .filter(|s| s.origin == Origin::Api && !names.contains(&s.name))
+                .filter(|s| s.origin == Origin::Api && s.prunable() && !names.contains(&s.name))
                 .map(|s| s.name)
                 .collect()
         } else {

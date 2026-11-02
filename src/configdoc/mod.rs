@@ -295,7 +295,9 @@ pub fn export(state: &AppState, secrets: SecretsMode, bundle: bool) -> Export {
         .mocks
         .list()
         .into_iter()
-        .filter(|s| s.origin != Origin::Sample && !s.owner.is_visitor())
+        // Never the sample, visitors' mocks nor a gateway scenario's
+        // scratch mock (it holds the run's credential and ends with it).
+        .filter(|s| s.origin != Origin::Sample && !s.owner.is_visitor() && !s.scratch)
         .collect();
     snapshots.sort_by(|a, b| a.name.cmp(&b.name));
     let mocks: Vec<MockDoc> = snapshots
@@ -1555,7 +1557,7 @@ fn apply_mocks(
                 .mocks
                 .list()
                 .into_iter()
-                .filter(|s| s.origin == Origin::Api && !names.contains(&s.name))
+                .filter(|s| s.origin == Origin::Api && s.prunable() && !names.contains(&s.name))
                 .map(|s| s.name)
                 .collect()
         } else {
@@ -1913,7 +1915,14 @@ fn apply_tests(
         }
         return Some(json!({ "save": save, "delete": delete }));
     }
-    let deleted: Vec<String> = delete.into_iter().filter(|n| store.delete(n)).collect();
+    let mut deleted: Vec<String> = Vec::new();
+    for n in delete {
+        match store.delete(&n) {
+            Ok(true) => deleted.push(n),
+            Ok(false) => {}
+            Err(e) => problems.push(format!("tests.{n}: {}", e.message())),
+        }
+    }
     let mut saved = Vec::new();
     for t in valid {
         let name = t.name.clone();

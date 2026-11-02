@@ -2,7 +2,6 @@
 //! application) and `issue_token` (a token from the built-in identity
 //! provider), plus the in-process request helper the traffic tools use.
 
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -139,9 +138,14 @@ pub async fn in_process(
             None => Body::empty(),
         })
         .map_err(|e| err(format!("invalid request: {e}")))?;
-    // A peer address for the handlers that need one (never a real socket).
+    // The caller's own address as the peer (never a real socket): its
+    // per-address limits and `ip:` session, not one every tool user shares.
+    let caller_ip = ctx.http.client_ip.as_deref().and_then(|s| s.parse().ok());
     req.extensions_mut()
-        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+        .insert(ConnectInfo(crate::session::in_process_peer(
+            caller_ip,
+            &access.caller.session,
+        )));
 
     let started = Instant::now();
     let resp = match tokio::time::timeout(TIMEOUT, router.oneshot(req)).await {

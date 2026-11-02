@@ -442,7 +442,11 @@ pub fn deploy_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
         Ok(n) => n,
         Err(e) => return e,
     };
-    match svc(ctx, access).deploy(name, arg_bool(args, "force").unwrap_or(false)) {
+    match svc(ctx, access).deploy(
+        name,
+        arg_bool(args, "force").unwrap_or(false),
+        arg_u64(args, "expected_revision"),
+    ) {
         Ok(r) => ok(
             ctx,
             format!(
@@ -510,13 +514,17 @@ pub fn set_mock_enabled(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     }
 }
 
-/// `duplicate_mock`.
-pub fn duplicate_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
+/// `duplicate_mock` (the copy is compiled on the pool, as on the REST route).
+pub async fn duplicate_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     let name = match need_str(args, "name") {
-        Ok(n) => n,
+        Ok(n) => n.to_string(),
         Err(e) => return e,
     };
-    match svc(ctx, access).duplicate(name, arg_str(args, "new_name").map(str::to_string)) {
+    let new_name = arg_str(args, "new_name").map(str::to_string);
+    match svc(ctx, access)
+        .compiling(move |s| s.duplicate(&name, new_name))
+        .await
+    {
         Ok(d) => {
             let summary = mock_summary(&d, "Duplicated into");
             ok(ctx, summary, d)

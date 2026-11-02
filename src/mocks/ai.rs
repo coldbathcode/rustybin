@@ -310,7 +310,9 @@ pub async fn spec_work(
         &json!({ "message": "checking the document" }),
     ));
     let text = serde_json::to_string_pretty(doc).unwrap_or_default();
-    match s.preview(&text) {
+    // The preview compiles the document: on the pool, as every compile.
+    let shown = text.clone();
+    match s.compiling(move |s| s.preview(&shown)).await {
         Ok(preview) => Ok(
             json!({ "spec": doc, "text": text, "preview": preview, "usage": collected.usage, "sent": collected.sent }),
         ),
@@ -459,15 +461,54 @@ pub async fn examples_work(
     let task = task::find("examples_for_operations")
         .ok_or_else(|| json!({ "error": "no task", "reason": "internal" }))?;
     let assist = Arc::clone(&state.assist);
+    let progress = |i: usize, batch: &[String]| {
+        frame(
+            "progress",
+            &json!({ "message": format!("operations {} to {} of {} (batch {} of {total})", i * examples_for_operations::BATCH + 1, i * examples_for_operations::BATCH + batch.len(), wanted.len(), i + 1), "batch": i + 1, "batches": total }),
+        )
+    };
     let mut all: Map<String, Value> = Map::new();
     let mut usage = Value::Null;
-    for (i, batch) in batches.iter().enumerate() {
-        let _ = tx.send(frame("progress", &json!({ "message": format!("operations {} to {} of {} (batch {} of {total})", i * examples_for_operations::BATCH + 1, i * examples_for_operations::BATCH + batch.len(), wanted.len(), i + 1), "batch": i + 1, "batches": total })));
-        let inputs = json!({ "spec": doc, "operations": batch, "per_response": per_response, "persona": persona });
-        let answer = if generated {
-            examples_for_operations::generate(&inputs)
-                .map_err(|e| json!({ "error": e, "reason": "generator" }))?
-        } else {
+    if generated {
+        // The generator walks the schemas of every operation asked for: one
+        // call on the compile pool (the visitor compile allowance applies),
+        // never on an async worker.
+        let frames: Vec<Bytes> = batches
+            .iter()
+            .enumerate()
+            .map(|(i, b)| progress(i, b))
+            .collect();
+        let (doc, persona, sender) = (doc.clone(), persona.clone(), tx.clone());
+        all = s
+            .clone()
+            .compiling(move |_| {
+                let mut all = Map::new();
+                for (batch, f) in batches.iter().zip(frames) {
+                    let _ = sender.send(f);
+                    let inputs = json!({ "spec": doc, "operations": batch, "per_response": per_response, "persona": persona });
+                    let answer = examples_for_operations::generate(&inputs)
+                        .map_err(|e| ServiceError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+                    if let Some(m) = answer.get("examples").and_then(Value::as_object) {
+                        for (k, val) in m {
+                            all.insert(k.clone(), val.clone());
+                        }
+                    }
+                }
+                Ok(all)
+            })
+            .await
+            .map_err(|e| {
+                let reason = if e.status == StatusCode::UNPROCESSABLE_ENTITY {
+                    "generator"
+                } else {
+                    "busy"
+                };
+                json!({ "error": e.message(), "reason": reason })
+            })?;
+    } else {
+        for (i, batch) in batches.iter().enumerate() {
+            let _ = tx.send(progress(i, batch));
+            let inputs = json!({ "spec": doc, "operations": batch, "per_response": per_response, "persona": persona });
             let stream = assist
                 .run(RunParams {
                     task,
@@ -481,14 +522,13 @@ pub async fn examples_work(
             })
             .await;
             usage = c.usage.clone();
-            match &c.json {
-                Some(v) => v.clone(),
-                None => return Err(failure(&c, "examples_for_operations")),
-            }
-        };
-        if let Some(m) = answer.get("examples").and_then(Value::as_object) {
-            for (k, val) in m {
-                all.insert(k.clone(), val.clone());
+            let Some(answer) = &c.json else {
+                return Err(failure(&c, "examples_for_operations"));
+            };
+            if let Some(m) = answer.get("examples").and_then(Value::as_object) {
+                for (k, val) in m {
+                    all.insert(k.clone(), val.clone());
+                }
             }
         }
     }
@@ -613,9 +653,15 @@ pub async fn edit_work(
         &json!({ "message": "checking the new document" }),
     ));
     let text = serde_json::to_string_pretty(&after).unwrap_or_default();
-    let preview = s.preview(&text).map_err(|e| {
-        json!({ "error": e.message(), "reason": "invalid_spec", "usage": collected.usage, "sent": collected.sent })
-    })?;
+    // The preview compiles the document: on the pool, as every compile.
+    let shown = text.clone();
+    let preview = s
+        .clone()
+        .compiling(move |s| s.preview(&shown))
+        .await
+        .map_err(|e| {
+            json!({ "error": e.message(), "reason": "invalid_spec", "usage": collected.usage, "sent": collected.sent })
+        })?;
     let summary = edit_spec::diff(&before, &after).describe();
     let mut result = json!({
         "spec": after,

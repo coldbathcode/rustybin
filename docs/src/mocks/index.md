@@ -221,7 +221,12 @@ Every mock answer carries its `draft_revision`, and `GET /_rustybin/mocks/{name}
 it was made from, as `If-Match: "12"` or `"expected_revision": 12` in the body, is
 refused with `409` when the draft has moved on since. The answer names the current
 revision and what changed (the spec, the responses, an operation), and nothing is
-saved: read the mock again, then edit.
+saved: read the mock again, then edit. A deploy can name the revision it publishes
+the same way (`If-Match` or `{"expected_revision": 12}` on `POST .../deploy`): a
+draft changed since is refused with `409` and nothing goes live. `PATCH` with
+`"deploy": true` always publishes the revision it just wrote. Revision numbers keep
+growing across restarts (a new process starts counting from the clock), so a revision
+read before a restart never matches a draft compiled after it.
 
 ```hurl
 {{#include ../../examples/mocks/mocks.hurl:conflict}}
@@ -236,10 +241,10 @@ revision mandatory for every caller: an edit without one answers `428`.
 
 | Surface | Where |
 |---|---|
-| API | `If-Match` or `expected_revision` on `PATCH /_rustybin/mocks/{name}` and `PUT /_rustybin/mocks/{name}/operations/{op}`; the `ETag` on the mock and its operations |
-| Console | Sent with every edit; a `409` says what changed and offers to reload |
-| CLI | `rustybin mocks update` and `mocks set-operation` with `--expect-revision N` (default: read just before) |
-| Management MCP | `expected_revision` on `update_mock` and `set_operation` |
+| API | `If-Match` or `expected_revision` on `PATCH /_rustybin/mocks/{name}`, `PUT /_rustybin/mocks/{name}/operations/{op}` and `POST /_rustybin/mocks/{name}/deploy`; the `ETag` on the mock and its operations |
+| Console | Sent with every edit and deploy; a `409` says what changed and offers to reload |
+| CLI | `rustybin mocks update` and `mocks set-operation` with `--expect-revision N` (default: read just before); `mocks deploy --expect-revision N` (default: the draft as it is) |
+| Management MCP | `expected_revision` on `update_mock`, `set_operation` and `deploy_mock` |
 | `rustybin.yaml` | `settings: { mocks.require_revision: true }` |
 
 ## On and off
@@ -340,10 +345,13 @@ counts one per item). A path template may name a parameter once and hold at most
 of them (other paths are skipped with a warning), a server URL is at most 2 KiB once
 its variables are filled in (else `servers[0]` is ignored with a warning), and a
 sample request cuts a path value at 1 KiB. Parsing and compiling a spec (preview,
-create, edits, operation settings, samples) runs off the request threads, four at a
-time: past five seconds of waiting the answer is `503` with `Retry-After`, and a
-visitor of a [self-service](self-service.md) instance gets 30 compiles a minute
-(`429` past it).
+create, edits, operation settings, samples, duplicates, AI previews and generated
+examples) runs off the request threads, four at a time: past five seconds of waiting
+the answer is `503` with `Retry-After`, and a caller without admin rights gets 30
+compiles a minute (`429` past it): a visitor's per visit, an API key's per key, and
+a caller without a manage token per address (a new session header per request does
+not reset it). A visitor's creation past the caps is refused before its spec is
+compiled.
 `GET /_rustybin/mocks` returns the instance's limits as `limits`.
 
 ## Control API

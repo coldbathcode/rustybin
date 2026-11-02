@@ -328,3 +328,89 @@ fn edit_draft_refuses_a_stale_revision_and_merges_racing_edits() {
         Some(7)
     );
 }
+
+#[tokio::test]
+async fn a_deploy_names_the_revision_it_publishes() {
+    let (state, app, rev) = app().await;
+    let tag = format!("\"{rev}\"");
+    // Someone edits the draft meanwhile.
+    let (s, _, v) = call(
+        &app,
+        "PATCH",
+        "/_rustybin/mocks/orders",
+        None,
+        Some(json!({ "responses": { "mode": "generated" }, "deploy": false })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let live_before = v["live_revision"].clone();
+    // A deploy of the revision the page showed is refused, with what changed.
+    let (s, _, v) = call(
+        &app,
+        "POST",
+        "/_rustybin/mocks/orders/deploy",
+        Some(&tag),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"], "rustybin_stale_revision");
+    assert_eq!(v["expected_revision"], rev);
+    assert!(v["changed"].to_string().contains("responses"), "{v}");
+    let mock = state.mocks.get("orders").expect("orders");
+    assert_eq!(
+        json!(mock.live.as_ref().map(|l| l.revision)),
+        live_before,
+        "nothing went live"
+    );
+    // The body form, with the current revision, publishes it.
+    let current = mock.draft.revision;
+    let (s, _, v) = call(
+        &app,
+        "POST",
+        "/_rustybin/mocks/orders/deploy",
+        None,
+        Some(json!({ "expected_revision": current })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["revision"], current);
+    // Both forms must agree; an unknown field is refused; no body still deploys.
+    let (s, _, _) = call(
+        &app,
+        "POST",
+        "/_rustybin/mocks/orders/deploy",
+        Some(&tag),
+        Some(json!({ "expected_revision": current })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _, _) = call(
+        &app,
+        "POST",
+        "/_rustybin/mocks/orders/deploy",
+        None,
+        Some(json!({ "revision": current })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _, v) = call(&app, "POST", "/_rustybin/mocks/orders/deploy", None, None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+}
+
+#[tokio::test]
+async fn a_patch_with_deploy_publishes_the_revision_it_wrote() {
+    let (_, app, rev) = app().await;
+    let (s, etag, v) = call(
+        &app,
+        "PATCH",
+        "/_rustybin/mocks/orders",
+        Some(&format!("\"{rev}\"")),
+        Some(json!({ "responses": { "mode": "static" }, "deploy": true })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let written = v["draft_revision"].as_u64().expect("draft");
+    assert_eq!(v["live_revision"], written, "{v}");
+    assert_eq!(etag, Some(format!("\"{written}\"")));
+}
