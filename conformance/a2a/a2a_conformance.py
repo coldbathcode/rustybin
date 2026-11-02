@@ -312,8 +312,9 @@ async def push_and_list_suite(base: str, binding: str) -> None:
                 await asyncio.sleep(0.1)
             received = (await http.get(sink_url)).json()
             notes = received.get("notifications", [])
-            auth_ok = any(n["headers"].get("authorization") == "Bearer sink-secret" for n in notes)
-            token_ok = any(n["headers"].get("x-a2a-notification-token") == "tok-1" for n in notes)
+            # The sink keeps credential headers as a hint, never the value.
+            auth_ok = any(n["headers"].get("authorization") == "[redacted, ends cret]" for n in notes)
+            token_ok = any(n["headers"].get("x-a2a-notification-token") == "[redacted]" for n in notes)
             final = any(
                 n["body"].get("statusUpdate", {}).get("status", {}).get("state") == "TASK_STATE_COMPLETED" for n in notes
             )
