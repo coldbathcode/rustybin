@@ -52,6 +52,10 @@ Nothing more:
   the same name when applied; the files under the harness state directory are sealed
   with the secrets key.
 
+A pull reads the document and every spec it names whole, up to their supported sizes
+(8 MiB for `rustybin.yaml`, the instance's spec limit for a spec): a larger file is an
+error of the pull, never a shortened file.
+
 ## Connect a repository
 
 The `git.*` settings (**Management, Source control**, or `PATCH /_rustybin/settings`;

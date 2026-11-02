@@ -727,3 +727,75 @@ fn askpass_answers_only_the_remote_host() {
     let sneaky = run("Password for 'https://git.example.com.evil.example': ");
     assert!(!sneaky.status.success());
 }
+
+/// Specs larger than the diagnostic output cut (8 KiB) travel through a
+/// pull intact: no truncation, no false drift, the preview is ok.
+#[tokio::test]
+async fn large_specs_survive_a_pull() {
+    if !git_installed() {
+        return;
+    }
+    let root = tempfile::tempdir().expect("tempdir");
+    let remote = bare_repo(root.path());
+    let a = instance(root.path(), "a", &remote);
+    let spec = |size: usize| {
+        json!({
+            "openapi": "3.0.3",
+            "info": { "title": "Large", "version": "1", "description": "x".repeat(size) },
+            "paths": { "/items": { "get": { "operationId": "listItems",
+                "responses": { "200": { "description": "ok" } } } } }
+        })
+        .to_string()
+    };
+    for (name, size) in [("medium", 14_000), ("large", 900_000)] {
+        let report = a.mocks.apply(
+            vec![Definition {
+                name: name.into(),
+                source: spec(size),
+                settings: Default::default(),
+                enabled: true,
+            }],
+            Origin::Api,
+            None,
+        );
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+    }
+    a.git.init("ann").await.expect("init");
+    a.git
+        .commit(&a, "Large specs", "ann")
+        .await
+        .expect("commit");
+    a.git.push("ann").await.expect("push");
+    let b = instance(root.path(), "b", &remote);
+    b.git.init("bob").await.expect("init b");
+    let dry = b
+        .git
+        .pull(&b, true, true, true, "bob")
+        .await
+        .expect("preview");
+    assert_eq!(dry["applied"]["ok"], json!(true), "{dry}");
+    let pull = b
+        .git
+        .pull(&b, true, false, true, "bob")
+        .await
+        .expect("pull");
+    assert_eq!(pull["applied"]["ok"], json!(true), "{pull}");
+    for name in ["medium", "large"] {
+        let mock = b.mocks.get(name).expect("pulled");
+        assert!(mock.draft.source.len() > 14_000, "{name} arrived whole");
+    }
+    let status = b.git.status(&b, false).await;
+    assert_eq!(status["drift"]["changes"], json!([]), "{status}");
+    // A file over the supported size is an error, never a cut file.
+    let repo = a.git.repo_dir().expect("repo");
+    let env = a
+        .git
+        .git_env(&parse_remote(&remote).expect("remote"))
+        .expect("env");
+    let e = a
+        .git
+        .git_bytes(&env, &repo, "HEAD:rustybin/specs/large.json", 1024)
+        .await
+        .expect_err("too large");
+    assert!(e.contains("larger than 1024 bytes"), "{e}");
+}

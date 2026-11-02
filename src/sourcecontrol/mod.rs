@@ -510,6 +510,8 @@ pub struct SourceControl {
     /// The remote's host, port and the addresses the policy pinned for it
     /// (set by `permit`): network git commands go there only.
     pinned: Mutex<Option<(String, u16, Vec<std::net::SocketAddr>)>>,
+    /// The largest spec a pull reads (the instance's mock limit).
+    max_spec_bytes: usize,
 }
 
 impl SourceControl {
@@ -521,6 +523,7 @@ impl SourceControl {
             instance_id: config.instance_id.clone(),
             lock: tokio::sync::Mutex::new(()),
             pinned: Mutex::new(None),
+            max_spec_bytes: crate::mocks::store::MockLimits::for_config(config).max_spec_bytes,
             timeline: Mutex::new(VecDeque::new()),
             last_pull: Mutex::new(None),
             git_version: OnceLock::new(),
@@ -858,15 +861,43 @@ impl SourceControl {
         Ok(path)
     }
 
-    /// Run one git command in `cwd`.
-    async fn git(&self, env: &GitEnv, cwd: &Path, args: &[&str]) -> Output {
+    /// A file's bytes at a revision (`git show <rev>:<path>`), whole: content
+    /// reads never pass through the diagnostic cut and scrub of [`Self::git`].
+    /// More than `max` bytes is an error, never a shortened file.
+    async fn git_bytes(
+        &self,
+        env: &GitEnv,
+        cwd: &Path,
+        object: &str,
+        max: usize,
+    ) -> Result<Vec<u8>, String> {
+        let mut cmd = self.command(env, cwd, &["show", object]);
+        match tokio::time::timeout(GIT_TIMEOUT, cmd.output()).await {
+            Ok(Ok(out)) if out.status.success() => {
+                if out.stdout.len() > max {
+                    Err(format!(
+                        "{object} is larger than {max} bytes: not read (the supported size)"
+                    ))
+                } else {
+                    Ok(out.stdout)
+                }
+            }
+            Ok(Ok(_)) => Err(format!("{object} is not in the repository")),
+            Ok(Err(e)) => Err(format!("git could not be started: {e}")),
+            Err(_) => Err(format!(
+                "git show did not finish within {} s",
+                GIT_TIMEOUT.as_secs()
+            )),
+        }
+    }
+
+    /// The git command line and environment every call uses.
+    fn command(&self, env: &GitEnv, cwd: &Path, args: &[&str]) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new("git");
         for c in &env.config {
             cmd.arg("-c").arg(c);
         }
         cmd.args(args).current_dir(cwd).kill_on_drop(true);
-        // Only what git needs: never the instance's own environment (its
-        // secrets key, provider keys, tokens).
         cmd.env_clear();
         for k in GIT_ENV_PASSTHROUGH {
             if let Some(v) = std::env::var_os(k) {
@@ -877,6 +908,14 @@ impl SourceControl {
             cmd.env(k, v);
         }
         cmd.stdin(std::process::Stdio::null());
+        cmd
+    }
+
+    /// Run one git command in `cwd`.
+    async fn git(&self, env: &GitEnv, cwd: &Path, args: &[&str]) -> Output {
+        // Only what git needs: never the instance's own environment (its
+        // secrets key, provider keys, tokens).
+        let mut cmd = self.command(env, cwd, args);
         let token = self.settings.secret(TOKEN_KEY);
         let scrub = |s: &[u8]| -> String {
             let mut text = String::from_utf8_lossy(s).to_string();
@@ -1484,22 +1523,33 @@ impl SourceControl {
             Some(p) => format!("{p}/"),
             None => String::new(),
         };
-        let show = |object: String| async move {
-            let out = self.git(env, repo, &["show", &object]).await;
-            if out.ok {
-                Ok(out.stdout)
-            } else {
-                Err(GitError::conflict(format!(
-                    "the repository has no {object} on {r}: commit and push from an instance first"
-                )))
-            }
-        };
-        let text = show(format!("{r}:{prefix}{DOCUMENT_NAME}")).await?;
+        // Documents and specs are read whole, within their supported sizes.
+        let doc_object = format!("{r}:{prefix}{DOCUMENT_NAME}");
+        let bytes = self
+            .git_bytes(
+                env,
+                repo,
+                &doc_object,
+                crate::mocks::config_file::MAX_FILE_BYTES as usize,
+            )
+            .await
+            .map_err(|e| {
+                if e.contains("not in the repository") {
+                    GitError::conflict(format!(
+                        "the repository has no {doc_object}: commit and push from an instance first"
+                    ))
+                } else {
+                    GitError::failed(e)
+                }
+            })?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| GitError::failed(format!("{DOCUMENT_NAME} is not UTF-8 text")))?;
         let doc = temp.join(DOCUMENT_NAME);
         std::fs::write(&doc, text.as_bytes())
             .map_err(|e| GitError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let (file, _) =
             crate::mocks::config_file::parse_lenient(&text).map_err(GitError::failed)?;
+        let max_spec = self.max_spec_bytes;
         for spec in file.mocks().iter().filter_map(|m| m.spec.as_deref()) {
             let rel = Path::new(spec);
             if rel.is_absolute()
@@ -1509,15 +1559,21 @@ impl SourceControl {
             {
                 continue; // reported by the apply as unreadable
             }
-            let content = match show(format!("{r}:{prefix}{spec}")).await {
+            let content = match self
+                .git_bytes(env, repo, &format!("{r}:{prefix}{spec}"), max_spec)
+                .await
+            {
                 Ok(c) => c,
-                Err(_) => continue,
+                // Missing: the apply reports it as unreadable. Too large: an
+                // error of the whole read, never a cut spec.
+                Err(e) if e.contains("not in the repository") => continue,
+                Err(e) => return Err(GitError::failed(e)),
             };
             let target = temp.join(rel);
             if let Some(parent) = target.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let _ = std::fs::write(&target, content.as_bytes());
+            let _ = std::fs::write(&target, &content);
         }
         Ok(temp.to_path_buf())
     }

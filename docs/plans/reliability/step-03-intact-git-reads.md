@@ -17,3 +17,14 @@ diagnostic output is cut.
 
 A 14 KB and a 2 MB spec through commit, push, a pull preview and an apply on a second instance:
 no drift, the spec compiles, the preview is `ok`. A document over the limit is an error.
+
+## Build notes (2026-11-02)
+
+- `SourceControl::git_bytes(env, cwd, object, max)` runs `git show` with the same command
+  line (`SourceControl::command`, now shared with `git`), keeps the bytes whole, and
+  refuses more than `max`; `extract` reads the document (8 MiB) and each spec (the
+  instance's `max_spec_bytes`, a new field) through it. A missing spec is still left to
+  the apply to report; an oversize one fails the whole read.
+- The test sends a 14 KB and a 900 KB spec through commit, push, a dry-run pull (which
+  reads through `extract`) and an apply on a second instance: `ok`, no drift.
+- Diagnostic output (`git`) keeps its 8 KiB cut and token scrub.
