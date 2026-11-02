@@ -943,12 +943,59 @@ impl Settings {
 
     /// Apply a change: validated against the specs, bounded, written to disk,
     /// audited. Returns the keys that changed.
-    pub fn update(
+    /// What `update` would refuse, without changing anything: the dry run
+    /// of a configuration apply checks with the same rules (kinds, checks,
+    /// locks, sizes, the public password guard).
+    pub fn check(
         &self,
         values: BTreeMap<String, Value>,
         secrets: BTreeMap<String, Option<String>>,
-        principal: &str,
-    ) -> Result<Vec<String>, UpdateError> {
+    ) -> Result<(), UpdateError> {
+        let (new_values, new_secrets) = self.validated(values, secrets)?;
+        let doc = self.read();
+        let mut keys: BTreeSet<&String> = doc.values.keys().collect();
+        for (k, v) in &new_values {
+            if v.is_some() {
+                keys.insert(k);
+            } else {
+                keys.remove(k);
+            }
+        }
+        if keys.len() > MAX_KEYS {
+            return Err(UpdateError::Invalid(vec![format!(
+                "more than {MAX_KEYS} settings"
+            )]));
+        }
+        let mut sec: BTreeSet<&String> = doc.secrets.keys().collect();
+        for (k, v) in &new_secrets {
+            if v.is_some() {
+                sec.insert(k);
+            } else {
+                sec.remove(k);
+            }
+        }
+        if sec.len() > MAX_SECRETS {
+            return Err(UpdateError::Invalid(vec![format!(
+                "more than {MAX_SECRETS} secrets"
+            )]));
+        }
+        Ok(())
+    }
+
+    /// The validation half of `update`: normalised values and sealed
+    /// secrets, or why not.
+    #[allow(clippy::type_complexity)]
+    fn validated(
+        &self,
+        values: BTreeMap<String, Value>,
+        secrets: BTreeMap<String, Option<String>>,
+    ) -> Result<
+        (
+            BTreeMap<String, Option<Value>>,
+            BTreeMap<String, Option<Sealed>>,
+        ),
+        UpdateError,
+    > {
         let mut problems = Vec::new();
         let mut locked = Vec::new();
         let mut new_values = BTreeMap::new();
@@ -1043,6 +1090,16 @@ impl Settings {
         if !problems.is_empty() {
             return Err(UpdateError::Invalid(problems));
         }
+        Ok((new_values, new_secrets))
+    }
+
+    pub fn update(
+        &self,
+        values: BTreeMap<String, Value>,
+        secrets: BTreeMap<String, Option<String>>,
+        principal: &str,
+    ) -> Result<Vec<String>, UpdateError> {
+        let (new_values, new_secrets) = self.validated(values, secrets)?;
         let mut changed = Vec::new();
         let mut doc = self.write();
         let mut next = doc.clone();

@@ -43,7 +43,7 @@ The marker a session looks for is the first row that is not done.
 | Step | Title | Needs | Status |
 |---|---|---|---|
 | [01](step-01-safe-pruning.md) | Safe pruning when a definition cannot load | | done 2026-11-02 |
-| [02](step-02-validated-previews.md) | One validated plan for preview and apply | 01 | |
+| [02](step-02-validated-previews.md) | One validated plan for preview and apply | 01 | done 2026-11-02 |
 | [03](step-03-intact-git-reads.md) | Git documents read whole | | |
 | [04](step-04-diagnostics.md) | Instance diagnostics: `rustybin doctor` and a health panel | | |
 | [05](step-05-guided-scenarios.md) | Guided gateway scenarios | 04 | |

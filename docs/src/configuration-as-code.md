@@ -110,7 +110,12 @@ computed before anything changed (`changes`, and `summary` as lines such as
 under `results`, and `problems` (an entry that could not be applied never stops the
 others; `ok` is false when there were any).
 
-A dry run answers the same and changes nothing:
+A dry run answers the same and changes nothing. It validates with the apply's rules:
+setting kinds and checks, locked settings, secret references, every mock compiled, the
+portal's metadata, and the instance's capacities, so a document the apply would refuse
+has `ok: false` in its preview too. An apply is not one transaction: sections are applied
+in order (settings, secrets, mocks, registry, portal, harness, agents, health), and an
+entry that fails is reported while the others go ahead, so preview first.
 
 ```hurl
 {{#include ../examples/config/config.hurl:dry_run}}

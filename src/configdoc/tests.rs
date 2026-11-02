@@ -955,3 +955,51 @@ async fn concurrent_changes_persist_the_last_acknowledged_state() {
     let reloaded = again.mocks.get("orders").expect("reloaded");
     assert_eq!(reloaded.enabled, last, "the saved copy is the last state");
 }
+
+/// A preview validates like the apply: what the apply refuses, the dry run
+/// reports, and it changes nothing.
+#[test]
+fn a_preview_refuses_what_the_apply_refuses() {
+    let state = test_state_with(Config::for_tests());
+    let doc = || {
+        crate::mocks::config_file::parse(
+            "version: 2\nsettings:\n  console.title: 42\nmocks:\n  - name: broken\n    spec_inline: \"{not json\"\n",
+        )
+        .expect("parse")
+    };
+    let opts = |dry_run| ApplyOptions {
+        prune: false,
+        dry_run,
+        principal: "test".into(),
+        base: None,
+        untrusted: false,
+    };
+    let preview = apply(&state, doc(), &opts(true));
+    assert_eq!(preview["ok"], false, "{preview}");
+    let p = preview["problems"].to_string();
+    assert!(p.contains("console.title"), "{p}");
+    assert!(p.contains("mocks.broken"), "{p}");
+    assert!(
+        state.settings.string("console.title").is_none(),
+        "nothing changed"
+    );
+    assert!(state.mocks.get("broken").is_none());
+    let applied = apply(&state, doc(), &opts(false));
+    assert_eq!(applied["ok"], false);
+    for key in ["console.title", "mocks.broken"] {
+        assert!(applied["problems"].to_string().contains(key), "{applied}");
+    }
+    // A locked setting is reported by the preview too.
+    let mut c = Config::for_tests();
+    c.settings_lock = true;
+    c.console_title = Some("From the environment".into());
+    let locked = test_state_with(c);
+    let doc = crate::mocks::config_file::parse("version: 2\nsettings:\n  console.title: Other\n")
+        .expect("parse");
+    let preview = apply(&locked, doc, &opts(true));
+    assert_eq!(preview["ok"], false, "{preview}");
+    assert!(
+        preview["problems"].to_string().contains("locked"),
+        "{preview}"
+    );
+}

@@ -1226,6 +1226,10 @@ fn apply_settings(
     }
     let set: Vec<String> = values.keys().cloned().collect();
     if opts.dry_run {
+        // The same validation the apply runs (kinds, checks, locks, sizes).
+        if let Err(e) = state.settings.check(values, BTreeMap::new()) {
+            settings_error("settings", e, problems);
+        }
         return Some(json!({ "set": set, "unset": unset }));
     }
     let mut changed = Vec::new();
@@ -1361,6 +1365,11 @@ fn apply_secrets(
         .map(|(k, _)| k.clone())
         .collect();
     if opts.dry_run {
+        if !set.is_empty() {
+            if let Err(e) = state.settings.check(BTreeMap::new(), set) {
+                settings_error("secrets", e, problems);
+            }
+        }
         return Some(json!({ "set": names, "kept": kept, "unset": cleared }));
     }
     let mut changed = Vec::new();
@@ -1422,11 +1431,23 @@ fn apply_mocks(
     if opts.dry_run {
         let (mut create, mut update) = (Vec::new(), Vec::new());
         for d in &defs {
+            // Compiled as the apply would, so a spec that does not compile
+            // is a problem of the preview too.
+            if let Err(e) = state.mocks.compile(&d.source, d.settings.clone()) {
+                problems.push(format!("mocks.{}: {e}", d.name));
+                continue;
+            }
             if state.mocks.get(&d.name).is_some() {
                 update.push(d.name.clone());
             } else {
                 create.push(d.name.clone());
             }
+        }
+        let max = state.mocks.limits().max_mocks;
+        if state.mocks.list().len() + create.len() > max {
+            problems.push(format!(
+                "mocks: the instance holds at most {max} mocks; the document would go past it"
+            ));
         }
         let delete: Vec<String> = if opts.prune {
             state
@@ -1563,6 +1584,19 @@ fn apply_portal(
     };
     let ids: Vec<String> = publish.iter().map(|(i, _)| i.id.clone()).collect();
     if opts.dry_run {
+        for (item, _) in &publish {
+            if let Err(e) = crate::portal::clean_meta(&item.meta()) {
+                problems.push(format!("portal.items.{}: {e} (skipped)", item.id));
+            }
+        }
+        let current = state.portal.published();
+        let new = ids.iter().filter(|i| !current.contains_key(*i)).count();
+        if current.len() + new > crate::portal::MAX_ITEMS + unpublish.len() {
+            problems.push(format!(
+                "portal: the portal holds at most {} items",
+                crate::portal::MAX_ITEMS
+            ));
+        }
         return Some(json!({ "publish": ids, "kept_by_file": kept, "unpublish": unpublish }));
     }
     let now = chrono::Utc::now();
@@ -1674,6 +1708,17 @@ fn apply_harness(
         Vec::new()
     };
     if opts.dry_run {
+        let existing = h.saved.list();
+        let new = names
+            .iter()
+            .filter(|n| !existing.iter().any(|s| &s.name == *n))
+            .count();
+        if existing.len() + new > crate::harness::saved::MAX_SAVED + delete.len() {
+            problems.push(format!(
+                "harness: a node keeps at most {} saved scenarios",
+                crate::harness::saved::MAX_SAVED
+            ));
+        }
         return Some(json!({ "save": names, "delete": delete }));
     }
     let mut saved = Vec::new();

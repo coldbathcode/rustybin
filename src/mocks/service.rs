@@ -1176,19 +1176,24 @@ impl Svc {
             check_name(&doc.name)?;
         }
         let names: Vec<String> = file.mocks().iter().map(|d| d.name.clone()).collect();
-        let (defs, errors) = config_file::definitions(
+        let (defs, mut errors) = config_file::definitions(
             file.mocks.unwrap_or_default(),
             None,
             self.store().limits().max_spec_bytes as u64,
         );
-        let defined: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         let mut create = Vec::new();
         let mut update = Vec::new();
-        for n in &defined {
-            if self.store().get(n).is_some() {
-                update.push((*n).to_string());
+        for d in &defs {
+            // Compiled like the apply compiles it: the preview reports the
+            // same errors.
+            if let Err(e) = self.store().compile(&d.source, d.settings.clone()) {
+                errors.push(json!({ "name": d.name, "error": e }));
+                continue;
+            }
+            if self.store().get(&d.name).is_some() {
+                update.push(d.name.clone());
             } else {
-                create.push((*n).to_string());
+                create.push(d.name.clone());
             }
         }
         let pruned: Vec<String> = if prune {
