@@ -45,10 +45,18 @@ pub async fn pin(target: &ParsedTarget, allowlist: &Allowlist) -> Result<Vec<Soc
 
 /// The kill switch: stops every run on the node. Runs poll [`KillSwitch::is_set`]
 /// and the engine's scheduler wakes on [`KillSwitch::notified`].
+///
+/// Every press counts a generation. The switch clears once a whole hold
+/// passes with no new press (one clearing thread at most, however often it
+/// is pressed), and a start that is still being prepared compares the
+/// generation it began under ([`KillSwitch::generation`]), so a press
+/// during its preparation stops it even after the switch has cleared.
 #[derive(Default)]
 pub struct KillSwitch {
     set: AtomicBool,
     notify: Notify,
+    /// The generation (presses so far) and whether a clearer is waiting.
+    presses: std::sync::Mutex<(u64, bool)>,
 }
 
 impl KillSwitch {
@@ -60,12 +68,59 @@ impl KillSwitch {
         self.set.load(Ordering::SeqCst)
     }
 
+    /// Presses so far: a start records it before its first await and
+    /// refuses to start when it changed.
+    pub fn generation(&self) -> u64 {
+        self.presses.lock().unwrap_or_else(|p| p.into_inner()).0
+    }
+
     pub fn set(&self) {
-        self.set.store(true, Ordering::SeqCst);
+        {
+            let mut presses = self.presses.lock().unwrap_or_else(|p| p.into_inner());
+            presses.0 = presses.0.wrapping_add(1);
+            self.set.store(true, Ordering::SeqCst);
+        }
         self.notify.notify_waiters();
     }
 
-    /// Clear after every run stopped, so the next run may start.
+    /// Press, and clear once `hold` passes without another press, so the
+    /// next run may start. A press while a clearer waits extends the hold
+    /// (no second thread).
+    pub fn press_for(self: &Arc<Self>, hold: Duration) {
+        self.set();
+        {
+            let mut presses = self.presses.lock().unwrap_or_else(|p| p.into_inner());
+            if presses.1 {
+                return;
+            }
+            presses.1 = true;
+        }
+        let me = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("harness-kill".into())
+            .spawn(move || me.clear_when_quiet(hold));
+        if spawned.is_err() {
+            // No thread: the switch stays set until the next press finds
+            // one (runs refuse to start meanwhile, the safe side).
+            self.presses.lock().unwrap_or_else(|p| p.into_inner()).1 = false;
+        }
+    }
+
+    fn clear_when_quiet(&self, hold: Duration) {
+        let mut seen = self.generation();
+        loop {
+            std::thread::sleep(hold);
+            let mut presses = self.presses.lock().unwrap_or_else(|p| p.into_inner());
+            if presses.0 == seen {
+                self.set.store(false, Ordering::SeqCst);
+                presses.1 = false;
+                return;
+            }
+            seen = presses.0;
+        }
+    }
+
+    /// Clear now (tests).
     pub fn clear(&self) {
         self.set.store(false, Ordering::SeqCst);
     }
@@ -113,50 +168,87 @@ impl Lease {
     }
 }
 
-/// Check a coordinator URL before joining: `http` or `https`, no
-/// credentials, and never a host that resolves to a forbidden address
-/// (link-local, cloud metadata, unspecified, multicast). Joining sends a few
-/// small requests to the URL a controller names, never to those places.
-pub async fn check_join_url(url: &str) -> Result<(), String> {
+/// Check a node URL without resolving it: `http` or `https`, no
+/// credentials, a host, and a literal address that is never a forbidden
+/// one. Returns the host (brackets trimmed) and port. Every node-to-node
+/// call runs this (literal addresses never reach a resolver); a name is
+/// checked by [`NodeResolver`] at every connection.
+pub fn check_node_url(url: &str) -> Result<(String, u16), String> {
     if url.len() > 2048 {
-        return Err("the join URL is longer than 2048 characters".into());
+        return Err("the node URL is longer than 2048 characters".into());
     }
-    let parsed = reqwest::Url::parse(url.trim()).map_err(|e| format!("invalid join URL: {e}"))?;
+    let parsed = reqwest::Url::parse(url.trim()).map_err(|e| format!("invalid node URL: {e}"))?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return Err("the join URL must use http or https".into());
+        return Err("the node URL must use http or https".into());
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err("the join URL must not contain credentials".into());
+        return Err("the node URL must not contain credentials".into());
     }
     let host = parsed
         .host_str()
-        .ok_or("the join URL has no host")?
+        .ok_or("the node URL has no host")?
         .trim_matches(['[', ']'])
         .to_string();
     let port = parsed
         .port_or_known_default()
-        .ok_or("the join URL has no port")?;
-    let resolved = tokio::time::timeout(
-        RESOLVE_TIMEOUT,
-        tokio::net::lookup_host((host.as_str(), port)),
-    )
-    .await
-    .map_err(|_| format!("resolving {host} timed out"))?
-    .map_err(|e| format!("cannot resolve {host}: {e}"))?;
-    let mut any = false;
+        .ok_or("the node URL has no port")?;
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if let Some(why) = forbidden_address(ip) {
+            return Err(format!("{host} is {why}: never a cluster node"));
+        }
+    }
+    Ok((host, port))
+}
+
+/// Resolve a node's host name, refusing it when any address is a forbidden
+/// one (link-local, cloud metadata, unspecified, multicast, broadcast).
+async fn resolve_node(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    let resolved = tokio::time::timeout(RESOLVE_TIMEOUT, tokio::net::lookup_host((host, port)))
+        .await
+        .map_err(|_| format!("resolving {host} timed out"))?
+        .map_err(|e| format!("cannot resolve {host}: {e}"))?;
+    let mut addrs = Vec::new();
     for addr in resolved.take(MAX_PINNED_ADDRS) {
-        any = true;
         if let Some(why) = forbidden_address(addr.ip()) {
             return Err(format!(
-                "{host} resolves to {} ({why}): never a coordinator",
+                "{host} resolves to {} ({why}): never a cluster node",
                 addr.ip()
             ));
         }
+        addrs.push(addr);
     }
-    if !any {
+    if addrs.is_empty() {
         return Err(format!("{host} does not resolve"));
     }
-    Ok(())
+    Ok(addrs)
+}
+
+/// Check a coordinator URL before joining: [`check_node_url`], and never a
+/// host that resolves to a forbidden address. Joining sends a few small
+/// requests to the URL a controller names, never to those places. The
+/// node client checks again at every connection ([`NodeResolver`]), so a
+/// name that changes its answer after this check (DNS rebinding) is
+/// refused too.
+pub async fn check_join_url(url: &str) -> Result<(), String> {
+    let (host, port) = check_node_url(url)?;
+    resolve_node(&host, port).await.map(|_| ())
+}
+
+/// The resolver of the node-to-node client: the system's answer, refused
+/// whole when any address is a forbidden one. Every connection resolves
+/// through it, so no node call reaches such an address whatever the name
+/// resolved to when its URL was checked.
+pub struct NodeResolver;
+
+impl reqwest::dns::Resolve for NodeResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().trim_end_matches('.').to_string();
+        Box::pin(async move {
+            // The port is the URL's; reqwest sets it on every address.
+            let addrs = resolve_node(&host, 0).await?;
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -309,6 +401,38 @@ mod tests {
         let l3 = list(&["other.example.com"]);
         let err = pin(&t, &l3).await.unwrap_err();
         assert!(err.contains("not in RUSTYBIN_HARNESS_TARGETS"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn node_resolver_refuses_forbidden_addresses() {
+        use reqwest::dns::Resolve;
+        use std::str::FromStr;
+        let r = NodeResolver;
+        let ok: Vec<SocketAddr> = r
+            .resolve(reqwest::dns::Name::from_str("localhost").unwrap())
+            .await
+            .map_err(|e| e.to_string())
+            .unwrap()
+            .collect();
+        assert!(!ok.is_empty() && ok.iter().all(|a| a.ip().is_loopback()));
+        for name in ["169.254.169.254", "0.0.0.0", "fe80::1"] {
+            let err = r
+                .resolve(reqwest::dns::Name::from_str(name).unwrap())
+                .await
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            assert!(err.contains("never a cluster node"), "{name}: {err}");
+        }
+        assert!(check_node_url("http://[fd00:ec2::254]/x")
+            .unwrap_err()
+            .contains("metadata"));
+        assert!(check_node_url("ftp://n/x").is_err());
+        assert!(check_node_url("http://u:p@n/x").is_err());
+        assert_eq!(
+            check_node_url("http://n.example:8080/x").unwrap(),
+            ("n.example".to_string(), 8080)
+        );
     }
 
     #[test]

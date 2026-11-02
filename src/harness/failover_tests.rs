@@ -633,4 +633,100 @@ async fn a_forged_election_announcement_is_refused() {
         harness(&s).membership().expect("member").leader().node_id,
         "f9-leader"
     );
+    for n in [c, s, l] {
+        n.stop().await;
+    }
+}
+
+/// A member cannot depose the leader. A heartbeat that claims a newer term
+/// makes the leader look for that term's leader (none answers, so it keeps
+/// leading); an announcement to the leader is followed only from an
+/// eligible node, at a plausible term, from the URL it joined with; and a
+/// member checks a leader it is told to follow the same way.
+#[tokio::test]
+async fn a_member_cannot_depose_the_leader() {
+    let id = "fo-depose";
+    let (l, url) = lead(coordinator(), "f10-leader", id).await;
+    let c = node_named(client_config(1000), "f10-c").await;
+    let s = node_named(
+        eligible(harness_config(&[Role::Server], &[]), LeaderPolicy::Auto),
+        "f10-s",
+    )
+    .await;
+    for n in [&c, &s] {
+        join(n, &url).await;
+    }
+    wait_for_alive(&l, id, 1, 1).await;
+    let until = Instant::now() + Duration::from_secs(6);
+    while Instant::now() < until && succession(&s, id).await.is_empty() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let credential = |n: &Node| {
+        harness(n)
+            .membership()
+            .and_then(|m| m.credential_for_tests())
+            .expect("credential")
+    };
+    let (c_cred, s_cred) = (credential(&c), credential(&s));
+    let post = |path: String, cred: String, body: Value| async move {
+        let resp = reqwest::Client::new()
+            .post(path)
+            .bearer_auth(cred)
+            .json(&body)
+            .send()
+            .await
+            .expect("sent");
+        resp.status().as_u16()
+    };
+    // A client node (not eligible) claims a newer term in its heartbeat:
+    // it is told this leader is not its leader, and nothing else happens.
+    let status = post(
+        format!("{url}/nodes/f10-c/heartbeat"),
+        c_cred.clone(),
+        json!({ "t1": 0, "term": 5 }),
+    )
+    .await;
+    assert_eq!(status, 409);
+    // The client announces itself to the leader.
+    let elected = format!("{url}/election/elected");
+    let announce = |node: &str, term: u64, control: String| json!({ "leader": { "node_id": node, "term": term, "control_url": control } });
+    assert_eq!(
+        post(elected.clone(), c_cred, announce("f10-c", 2, c.base())).await,
+        403
+    );
+    // An eligible node: from another URL than it joined with, then at a
+    // term far ahead.
+    assert_eq!(
+        post(
+            elected.clone(),
+            s_cred.clone(),
+            announce("f10-s", 2, "http://127.0.0.1:9".into())
+        )
+        .await,
+        403
+    );
+    assert_eq!(
+        post(elected, s_cred, announce("f10-s", u64::MAX, s.base())).await,
+        409
+    );
+    // The leader looked for a newer leader and found none: it still leads.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(leads(&l, id), "a member deposed the leader");
+    // A member follows only a leader that passes the same checks.
+    let m = harness(&s).membership().expect("member");
+    let term = m.leader().term;
+    let leader = |node: &str, term: u64, control: String| super::wire::Leader {
+        node_id: node.into(),
+        term,
+        control_url: Some(control),
+        since: None,
+    };
+    assert!(!m.follow(leader("f10-c", term + 1, c.base())));
+    assert!(!m.follow(leader("f10-leader", term + 1, "http://127.0.0.1:9".into())));
+    assert!(!m.follow(leader("f10-leader", term + 100, l.base())));
+    assert_eq!(m.leader().node_id, "f10-leader");
+    assert_eq!(m.leader().term, term);
+    for n in [c, s, l] {
+        n.stop().await;
+    }
 }

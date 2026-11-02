@@ -1036,8 +1036,21 @@ pub async fn node_elected(
         if let Err(e) = c.authenticate(&req.leader.node_id, credential) {
             return node_error(e);
         }
-        if req.leader.term > c.term {
-            super::election::step_down(&h, &c, Some(req.leader.clone()));
+        // The leader steps down only for an eligible node, at a plausible
+        // term, announcing the control URL it joined with: a member with a
+        // node credential cannot crown itself, nor send this node's calls
+        // (and its credential) elsewhere.
+        let leader = match c.check_new_leader(&req.leader, false) {
+            Ok(l) => l,
+            Err(e) => return node_error(e),
+        };
+        if leader.term > c.term {
+            if let Some(url) = &leader.control_url {
+                if let Err(e) = super::safety::check_join_url(url).await {
+                    return node_error(NodeError::new(400, e));
+                }
+            }
+            super::election::step_down(&h, &c, Some(leader));
             return Json(json!({ "accepted": true, "stepped_down": true })).into_response();
         }
         return Json(json!({ "accepted": false, "term": c.term })).into_response();

@@ -755,7 +755,10 @@ impl Harness {
 
     /// The kill switch: stop every run now. Returns the ids stopped.
     pub fn stop_all(&self) -> Vec<String> {
-        self.kill.set();
+        // Runs check the switch on their next tick; it clears once they
+        // have seen it and no later press came, so the next run may start.
+        // A start still being prepared compares the kill generation.
+        self.kill.press_for(engine::MAX_SLEEP * 4);
         let mut stopped: Vec<String> = self
             .runs()
             .iter()
@@ -780,13 +783,6 @@ impl Harness {
             runs = ?stopped,
             "harness kill switch: all local load stopped"
         );
-        // Runs check the switch on their next tick; it is cleared once they
-        // have seen it, so the next run may start.
-        let kill = self.kill.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(engine::MAX_SLEEP * 4);
-            kill.clear();
-        });
         stopped
     }
 
@@ -888,6 +884,20 @@ impl Harness {
         if !options.share.valid() {
             return Err(RunError::new(400, "the share must be within 0 to 1"));
         }
+        // A cluster's run id (the leader's) names the report file.
+        if options
+            .id
+            .as_deref()
+            .is_some_and(|id| !cluster::safe_id(id))
+        {
+            return Err(RunError::new(
+                400,
+                "the run id must be 1 to 64 letters, digits, '.', '_' or '-'",
+            ));
+        }
+        // A press from here on stops this start, even one the switch has
+        // cleared from by the time the targets are verified.
+        let kill_generation = self.kill.generation();
         scenario.normalise();
         let problems = scenario.validate_scaled(&self.caps(), options.share.fraction());
         if !problems.is_empty() {
@@ -1044,8 +1054,9 @@ impl Harness {
         } else {
             None
         };
-        // The kill switch may have been pressed while the run was prepared.
-        if self.kill.is_set() {
+        // The kill switch may have been pressed while the run was prepared
+        // (and cleared since: the generation tells).
+        if self.kill.is_set() || self.kill.generation() != kill_generation {
             return Err(RunError::new(
                 409,
                 "the kill switch was set while the run was being prepared: not started",

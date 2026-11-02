@@ -204,6 +204,10 @@ pub(super) async fn post_json<T: serde::de::DeserializeOwned>(
     }
     #[cfg(not(test))]
     let _ = from;
+    // Wherever the URL came from (a join, a leader named in a 409, the
+    // succession), a literal forbidden address is refused here and a name
+    // by the client's resolver.
+    super::safety::check_node_url(url).map_err(LinkError::Other)?;
     let resp = client
         .post(url)
         .bearer_auth(bearer)
@@ -332,6 +336,10 @@ pub fn cluster_url(raw: &str, cluster: Option<&str>) -> Result<(String, String),
     }
 }
 
+/// The node-to-node client: no redirects, no system proxy (it would resolve
+/// the name itself), and every name resolved through
+/// [`super::safety::NodeResolver`], so a name that rebinds to a forbidden
+/// address after its URL was checked is refused at the connection.
 pub(super) fn http_client() -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder();
     match crate::a2a::push::tls_config() {
@@ -339,6 +347,8 @@ pub(super) fn http_client() -> Result<reqwest::Client, String> {
         Err(e) => tracing::warn!("harness join: https unavailable ({e})"),
     }
     builder
+        .no_proxy()
+        .dns_resolver(Arc::new(super::safety::NodeResolver))
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("rustybin-harness/", env!("CARGO_PKG_VERSION")))
         .build()
@@ -1059,18 +1069,93 @@ impl Membership {
             .any(|c| c.error.is_none() && c.run.as_ref().is_none_or(|r| r.is_active()))
     }
 
-    /// Follow `leader` (an announcement, or a node that names it): calls go
-    /// to its control URL, and it gets every run's stats again.
-    pub fn follow(&self, leader: Leader) {
+    /// Whether `leader` may lead this cluster, as this node's snapshot
+    /// says: an eligible node, within [`MAX_TERM_JUMP`] of the known term
+    /// unless it answered itself at its own control URL (`direct`), and at
+    /// the control URL it joined with. Returns it with that URL. A node
+    /// that holds no snapshot yet (it has just joined) has nothing to check
+    /// against; its calls still never reach a forbidden address
+    /// ([`post_json`]).
+    fn checked_leader(st: &AgentState, leader: &Leader, direct: bool) -> Result<Leader, NodeError> {
+        let Some(snap) = st.snapshot.as_ref() else {
+            return Ok(leader.clone());
+        };
+        if !snap.eligible.contains(&leader.node_id) {
+            return Err(NodeError::new(
+                403,
+                "the announced leader is not an eligible node of this cluster",
+            ));
+        }
+        if !direct && leader.term > st.leader.term.saturating_add(MAX_TERM_JUMP) {
+            return Err(NodeError::new(
+                409,
+                "the announced term is too far ahead of this cluster's",
+            ));
+        }
+        let known = snap
+            .succession
+            .iter()
+            .find(|c| c.node_id == leader.node_id && !c.control_url.is_empty())
+            .map(|c| c.control_url.clone())
+            .or_else(|| {
+                snap.state.as_ref().and_then(|s| {
+                    s.members
+                        .iter()
+                        .find(|m| m.node_id == leader.node_id)
+                        .and_then(|m| m.control_url.clone())
+                })
+            })
+            .or_else(|| {
+                (snap.leader.node_id == leader.node_id)
+                    .then(|| snap.leader.control_url.clone())
+                    .flatten()
+            });
+        let mut out = leader.clone();
+        match (&leader.control_url, known) {
+            (Some(announced), Some(known)) if *announced != known => {
+                return Err(NodeError::new(
+                    403,
+                    "the announced control URL is not the one that node joined with",
+                ));
+            }
+            (None, known) => out.control_url = known,
+            _ => {}
+        }
+        Ok(out)
+    }
+
+    /// Follow `leader` (an announcement, or a node that names it, as in a
+    /// 409's body): calls go to its control URL, and it gets every run's
+    /// stats again. Only a leader that passes [`Self::checked_leader`];
+    /// returns whether it followed.
+    pub fn follow(&self, leader: Leader) -> bool {
         let mut st = lock(&self.state);
         if leader.term < st.leader.term
             || (leader.term == st.leader.term && leader.node_id == st.leader.node_id)
         {
-            return;
+            return false;
         }
         if leader.node_id == self.node_id {
-            return;
+            return false;
         }
+        let leader = match Self::checked_leader(&st, &leader, false) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(
+                    target: "rustybin::harness",
+                    cluster = %self.cluster_id,
+                    named = %leader.node_id,
+                    term = leader.term,
+                    "harness: a leader this node was told to follow is refused: {}",
+                    e.error
+                );
+                st.last_error = Some(format!(
+                    "told to follow {} (term {}), refused: {}",
+                    leader.node_id, leader.term, e.error
+                ));
+                return false;
+            }
+        };
         if let Some(url) = &leader.control_url {
             st.target = Target::Url(cluster_url_of(url, &self.cluster_id));
         }
@@ -1093,6 +1178,7 @@ impl Membership {
             cr.final_acked = false;
             cr.timeline_ack = 0;
         }
+        true
     }
 
     /// This node leads now (it won an election): calls stay in process.
@@ -1186,39 +1272,13 @@ impl Membership {
             check_credential(state, &self.cluster_id, &req.leader.node_id, credential)?;
             // Only a node that may lead, at a plausible term, from where
             // it joined: a member with a node credential cannot crown itself.
-            let snap = st.snapshot.as_ref();
-            if !snap.is_some_and(|s| s.eligible.contains(&req.leader.node_id)) {
-                return Err(NodeError::new(
-                    403,
-                    "the announced leader is not an eligible node of this cluster",
-                ));
-            }
-            if req.leader.term > st.leader.term.saturating_add(MAX_TERM_JUMP) {
-                return Err(NodeError::new(
-                    409,
-                    "the announced term is too far ahead of this cluster's",
-                ));
-            }
-            let known_url = snap.and_then(|s| {
-                s.succession
-                    .iter()
-                    .find(|c| c.node_id == req.leader.node_id)
-                    .map(|c| c.control_url.clone())
-            });
-            if let (Some(announced), Some(known)) = (&req.leader.control_url, &known_url) {
-                if announced != known {
-                    return Err(NodeError::new(
-                        403,
-                        "the announced control URL is not the one that node joined with",
-                    ));
-                }
-            }
-            req.leader.term > st.leader.term
+            let leader = Self::checked_leader(&st, &req.leader, false)?;
+            (leader.term > st.leader.term).then_some(leader)
         };
-        if newer {
-            self.follow(req.leader.clone());
-        }
-        Ok(newer)
+        Ok(match newer {
+            Some(leader) => self.follow(leader),
+            None => false,
+        })
     }
 
     /// A heartbeat that reached this node, which does not lead: name the
@@ -1427,11 +1487,16 @@ impl Membership {
             let Some(snap) = st.snapshot.as_ref() else {
                 return;
             };
-            let urls: Vec<String> = snap
+            let urls: Vec<(String, String)> = snap
                 .succession
                 .iter()
                 .filter(|s| s.node_id != self.node_id && !s.control_url.is_empty())
-                .map(|s| cluster_url_of(&s.control_url, &self.cluster_id))
+                .map(|s| {
+                    (
+                        s.node_id.clone(),
+                        cluster_url_of(&s.control_url, &self.cluster_id),
+                    )
+                })
                 .collect();
             let Some(credential) = st.credential.clone() else {
                 return;
@@ -1446,12 +1511,13 @@ impl Membership {
         let mut req = self.heartbeat_request(h, false);
         req.wait_ms = 0;
         let t1 = req.t1;
-        let calls = urls.into_iter().map(|url| {
+        let calls = urls.into_iter().map(|(node, url)| {
             let req = &req;
             let credential = &credential;
             async move {
                 if super::safety::check_join_url(&url).await.is_err() {
-                    return (url, Err(LinkError::Other("forbidden address".into())));
+                    let refused = Err(LinkError::Other("forbidden address".into()));
+                    return (node, url, refused);
                 }
                 let answer = post_json::<HeartbeatResponse>(
                     &self.client,
@@ -1462,21 +1528,29 @@ impl Membership {
                     timeout,
                 )
                 .await;
-                (url, answer)
+                (node, url, answer)
             }
         });
         let mut pending: futures_util::stream::FuturesUnordered<_> = calls.collect();
-        while let Some((url, answer)) = futures_util::StreamExt::next(&mut pending).await {
+        while let Some((node, url, answer)) = futures_util::StreamExt::next(&mut pending).await {
             match answer {
-                // That node leads a newer term: follow it.
-                Ok(resp) if resp.leader.term > term => {
-                    lock(&self.state).target = Target::Url(url);
-                    self.accept_answer(h, resp, t1);
-                    return;
+                // That node leads a newer term, answering at the URL the
+                // succession lists for it: follow it.
+                Ok(resp) if resp.leader.term > term && resp.leader.node_id == node => {
+                    let checked = {
+                        let st = lock(&self.state);
+                        Self::checked_leader(&st, &resp.leader, true)
+                    };
+                    if checked.is_ok() {
+                        lock(&self.state).target = Target::Url(url);
+                        self.accept_answer(h, resp, t1);
+                        return;
+                    }
                 }
                 Err(LinkError::NotLeader(Some(l))) if l.term > term => {
-                    self.follow(l);
-                    return;
+                    if self.follow(l) {
+                        return;
+                    }
                 }
                 _ => {}
             }
@@ -1600,8 +1674,12 @@ async fn agent(me: Arc<Membership>, h: Weak<Harness>) {
         let answered = match result {
             Ok(resp) => me.accept_answer(&harness, resp, t1),
             Err(LinkError::NotLeader(Some(l))) if l.term > lock(&me.state).leader.term => {
-                me.follow(l);
-                continue;
+                if me.follow(l) {
+                    continue;
+                }
+                // A leader that fails the checks is not followed: this
+                // leader did not answer.
+                false
             }
             Err(LinkError::Auth(e)) => {
                 // A rejoin needs the join token and a leader that knows it;
@@ -1746,6 +1824,34 @@ mod tests {
         assert!(c.best().unwrap().offset_ns > 0);
         c.reset();
         assert!(c.best().is_none());
+    }
+
+    /// Every node-to-node call checks where it goes, whatever told the
+    /// node the URL (a join, a 409's leader, the succession): a forbidden
+    /// address is refused before any connection.
+    #[tokio::test]
+    async fn node_calls_never_reach_forbidden_addresses() {
+        let client = http_client().unwrap();
+        for url in [
+            "http://169.254.169.254:9/_rustybin/harness/clusters/x/nodes",
+            "http://[fe80::1]:9/x",
+            "http://0.0.0.0:9/x",
+        ] {
+            let started = Instant::now();
+            let err = post_json::<Value>(
+                &client,
+                None,
+                url,
+                "token",
+                &json!({}),
+                Duration::from_secs(3),
+            )
+            .await
+            .unwrap_err();
+            let text = err.text();
+            assert!(text.contains("never a cluster node"), "{url}: {text}");
+            assert!(started.elapsed() < Duration::from_secs(1), "{url}");
+        }
     }
 
     #[test]

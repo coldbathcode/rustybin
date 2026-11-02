@@ -85,6 +85,10 @@ pub const DRAIN_GRACE: Duration = Duration::from_secs(1);
 pub const USERS_TICK: Duration = Duration::from_millis(100);
 /// Longest single sleep of the scheduler (so a stop is noticed quickly).
 pub const MAX_SLEEP: Duration = Duration::from_millis(50);
+/// Tests: a run with this id panics after giving back the in-flight slot
+/// of every other request (the drop guard must give it back once).
+#[cfg(test)]
+pub const PANIC_AFTER_RELEASE: &str = "test-panic-after-release";
 /// One-second buckets up to here, then ten-second buckets.
 pub const FINE_TIMELINE_SECS: u64 = 3_600;
 /// Longest response body read per request (the rest is dropped, not counted).
@@ -2521,7 +2525,13 @@ impl Run {
             streams,
         };
         drop(totals);
-        if let Some(dir) = &self.report_dir {
+        // The run id names the file: only a safe id (no separators, checked
+        // at the start too) is written.
+        if let Some(dir) = self
+            .report_dir
+            .as_ref()
+            .filter(|_| super::cluster::safe_id(&self.id))
+        {
             let path = dir.join(format!("{}.json", self.id));
             match serde_json::to_vec_pretty(&report) {
                 Ok(bytes) => {
@@ -2889,36 +2899,55 @@ struct TestReq {
     retry: bool,
 }
 
-/// Send one request and record its outcome. The caller counted it in flight.
-/// One request, guarded: a panic anywhere in it (an answer the code did
-/// not expect) still gives back its in-flight slot, so a run whose target
-/// answers oddly keeps sending instead of filling `inflight_cap` with
-/// requests that never finished.
-async fn send_one(run: Arc<Run>, job: Job) {
-    use futures_util::FutureExt;
-    let guard = run.clone();
-    let outcome = std::panic::AssertUnwindSafe(send_one_inner(run, job))
-        .catch_unwind()
-        .await;
-    if outcome.is_err() {
-        // Never below zero (the slot may have been given back already).
-        let mut current = guard.inflight.load(Ordering::Relaxed);
-        while current > 0 {
-            match guard.inflight.compare_exchange_weak(
-                current,
-                current - 1,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(seen) => current = seen,
-            }
+/// A request's in-flight slot, counted by the caller: given back exactly
+/// once, by [`InFlight::release`] when the answer is in, or on drop when the
+/// request ended without it (an early return, a panic).
+struct InFlight<'a> {
+    count: &'a AtomicUsize,
+    released: AtomicBool,
+}
+
+impl<'a> InFlight<'a> {
+    fn new(count: &'a AtomicUsize) -> Self {
+        Self {
+            count,
+            released: AtomicBool::new(false),
         }
-        tracing::warn!(target: "rustybin::harness", run = %guard.id, "a request panicked: its in-flight slot is released");
+    }
+
+    fn release(&self) {
+        if !self.released.swap(true, Ordering::Relaxed) {
+            self.count.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 
-async fn send_one_inner(run: Arc<Run>, job: Job) {
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// Send one request and record its outcome. The caller counted it in flight.
+/// One request, guarded: a panic anywhere in it (an answer the code did
+/// not expect) still gives back its in-flight slot, once, so a run whose
+/// target answers oddly keeps sending instead of filling `inflight_cap`
+/// with requests that never finished.
+async fn send_one(run: Arc<Run>, job: Job) {
+    use futures_util::FutureExt;
+    let guard = run.clone();
+    let slot = InFlight::new(&guard.inflight);
+    let outcome = std::panic::AssertUnwindSafe(send_one_inner(run, job, &slot))
+        .catch_unwind()
+        .await;
+    if outcome.is_err() {
+        tracing::warn!(target: "rustybin::harness", run = %guard.id, "a request panicked: its in-flight slot is released");
+    }
+    // The slot goes back here if the request did not give it back itself.
+    drop(slot);
+}
+
+async fn send_one_inner(run: Arc<Run>, job: Job, slot: &InFlight<'_>) {
     let Job {
         layer: layer_idx,
         target: target_idx,
@@ -2934,11 +2963,11 @@ async fn send_one_inner(run: Arc<Run>, job: Job) {
     } = job.clone();
     let view = run.view();
     let Some(live) = view.layers.get(layer_idx) else {
-        run.inflight.fetch_sub(1, Ordering::Relaxed);
+        slot.release();
         return;
     };
     let Some((tpl, planned)) = request_of(live, tpl_idx) else {
-        run.inflight.fetch_sub(1, Ordering::Relaxed);
+        slot.release();
         return;
     };
     let protocol = live.protocol;
@@ -3013,7 +3042,7 @@ async fn send_one_inner(run: Arc<Run>, job: Job) {
         Ok(r) => r,
         Err(e) => {
             tracing::debug!("harness request {seq} not built: {e}");
-            run.inflight.fetch_sub(1, Ordering::Relaxed);
+            slot.release();
             return;
         }
     };
@@ -3302,7 +3331,11 @@ async fn send_one_inner(run: Arc<Run>, job: Job) {
             },
         )
     });
-    run.inflight.fetch_sub(1, Ordering::Relaxed);
+    slot.release();
+    #[cfg(test)]
+    if run.id == PANIC_AFTER_RELEASE && seq % 2 == 0 {
+        panic!("test: a panic after the in-flight slot was given back");
+    }
     run.record(Outcome {
         layer: layer_idx,
         target: target_idx,

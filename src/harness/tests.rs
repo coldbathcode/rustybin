@@ -1368,3 +1368,186 @@ async fn kill_during_verification_prevents_the_start() {
     server.shutdown();
     let _ = server.wait().await;
 }
+
+/// A target that serves `token` at the verification path after `delay`.
+async fn slow_verifier(token: String, delay: Duration) -> String {
+    const WELL_KNOWN: &str = "/.well-known/rustybin-harness";
+    let slow = axum::Router::new().route(
+        WELL_KNOWN,
+        axum::routing::get(move || {
+            let token = token.clone();
+            async move {
+                tokio::time::sleep(delay).await;
+                token
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, slow).await;
+    });
+    format!("http://{addr}")
+}
+
+/// A kill pressed early in a long verification: the switch clears long
+/// before the verification ends, and the run still does not start (the
+/// start recorded the kill generation it began under).
+#[tokio::test]
+async fn a_kill_during_a_long_verification_prevents_the_start() {
+    let mut config = harness_config(&[Role::Client], &["127.0.0.1"]);
+    config.harness.verify_targets = true;
+    let (server, app, state) = running(config).await;
+    let h = state.harness.clone().expect("harness");
+    let target = slow_verifier(h.verification_token.clone(), Duration::from_millis(1000)).await;
+    let start = {
+        let app = app.clone();
+        tokio::spawn(async move {
+            send(
+                &app,
+                Method::POST,
+                "/_rustybin/harness/runs",
+                Some(smoke(&target, 5, "1s")),
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    h.stop_all();
+    // The switch clears well before the verification answers.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!h.kill.is_set());
+    let (status, v) = start.await.expect("join");
+    assert_eq!(status, StatusCode::CONFLICT, "{v}");
+    assert!(v.to_string().contains("kill switch"), "{v}");
+    assert!(h.active_run().is_none());
+    server.shutdown();
+    let _ = server.wait().await;
+}
+
+/// Two kills in a row: the first one's clearing never ends the second one
+/// early.
+#[tokio::test]
+async fn a_later_kill_is_not_cleared_by_an_earlier_one() {
+    let (server, _app, state) = running(harness_config(&[Role::Client], &["127.0.0.1"])).await;
+    let h = state.harness.clone().expect("harness");
+    h.stop_all();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    h.stop_all();
+    // 250 ms after the first press, 100 ms after the second.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(h.kill.is_set(), "the second press was cleared early");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(!h.kill.is_set(), "the switch never cleared");
+    server.shutdown();
+    let _ = server.wait().await;
+}
+
+/// A run id names the report file: a leader's id that is not a safe id
+/// is refused before anything starts.
+#[tokio::test]
+async fn an_unsafe_run_id_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut config = harness_config(&[Role::Client, Role::Server], &["127.0.0.1"]);
+    config.harness.report_dir = Some(dir.path().join("reports"));
+    let (server, _app, state) = running(config).await;
+    let h = state.harness.clone().expect("harness");
+    let url = format!("http://{}", server.http_addr);
+    let scenario = Scenario::parse(&smoke(&url, 5, "1s").to_string()).expect("scenario");
+    let long = "x".repeat(65);
+    for id in ["../escape", "a/b", "", long.as_str()] {
+        let started = h
+            .start_local_run(
+                scenario.clone(),
+                super::RunOptions {
+                    id: Some(id.to_string()),
+                    ..super::RunOptions::default()
+                },
+            )
+            .await;
+        match started {
+            Ok(run) => {
+                run.stop("test");
+                run.wait().await;
+                panic!("{id:?} was accepted");
+            }
+            Err(e) => assert_eq!(e.status, 400, "{id}: {}", e.error),
+        }
+    }
+    assert!(!dir.path().join("escape.json").exists());
+    server.shutdown();
+    let _ = server.wait().await;
+}
+
+/// What verification proves: the target serves the token. The token is
+/// public (anyone may read it), so a server that copies it passes too:
+/// verification proves routing, not the target owner's consent (the docs
+/// say so).
+#[tokio::test]
+async fn verification_proves_routing_not_consent() {
+    let mut config = harness_config(&[Role::Client], &["127.0.0.1"]);
+    config.harness.verify_targets = true;
+    let (server, app, state) = running(config).await;
+    let h = state.harness.clone().expect("harness");
+    // Read without any credential, like any client of the node.
+    let token = reqwest::get(format!(
+        "http://{}/.well-known/rustybin-harness",
+        server.http_addr
+    ))
+    .await
+    .expect("token")
+    .text()
+    .await
+    .expect("text");
+    assert_eq!(token, h.verification_token);
+    let copy = slow_verifier(token, Duration::ZERO).await;
+    let (status, run) = send(
+        &app,
+        Method::POST,
+        "/_rustybin/harness/runs",
+        Some(smoke(&copy, 5, "1s")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{run}");
+    h.stop_all();
+    server.shutdown();
+    let _ = server.wait().await;
+}
+
+/// A request that panics after it gave its in-flight slot back: the slot
+/// is given back once, so the count ends at zero and nothing is refused
+/// for a full in-flight cap.
+#[tokio::test]
+async fn a_panic_after_the_release_gives_the_slot_back_once() {
+    let (server, _app, state) = running(harness_config(
+        &[Role::Client, Role::Server],
+        &["127.0.0.1"],
+    ))
+    .await;
+    let h = state.harness.clone().expect("harness");
+    let url = format!("http://{}", server.http_addr);
+    let mut sc = smoke(&url, 50, "1s");
+    sc["source"] = json!({ "request": { "path": "/delay/100" } });
+    sc["thresholds"] = json!({});
+    let scenario = Scenario::parse(&sc.to_string()).expect("scenario");
+    let run = h
+        .start_local_run(
+            scenario,
+            super::RunOptions {
+                id: Some(super::engine::PANIC_AFTER_RELEASE.to_string()),
+                ..super::RunOptions::default()
+            },
+        )
+        .await
+        .expect("started");
+    tokio::time::timeout(Duration::from_secs(20), run.wait())
+        .await
+        .expect("finished");
+    let snap = run.snapshot();
+    assert_eq!(snap["in_flight"], 0, "{snap}");
+    assert_eq!(snap["not_sent"], 0, "{snap}");
+    server.shutdown();
+    let _ = server.wait().await;
+}

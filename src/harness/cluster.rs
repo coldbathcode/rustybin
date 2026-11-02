@@ -50,6 +50,7 @@ use tokio::sync::watch;
 use super::correlate::{now_ns, ChangesReport, RunKey, ServerReport};
 use super::engine::Share;
 use super::live::{Change, Controls, LiveView, StageLog};
+use super::member::MAX_TERM_JUMP;
 use super::ratelimit::LimitAcc;
 use super::report::{
     self, decode_numbers, encode_numbers, histogram, Breakdown, Bucket, ClusterReport, Counts,
@@ -891,7 +892,9 @@ impl ClusterRun {
                     exit_code = report.exit_code,
                     "harness cluster run ended"
                 );
-                if let Some(dir) = &cluster.report_dir {
+                // A run resumed from a snapshot keeps the id another node
+                // gave it: only a safe id names a file.
+                if let Some(dir) = cluster.report_dir.as_ref().filter(|_| safe_id(&self.id)) {
                     let path = dir.join(format!("{}.json", self.id));
                     match serde_json::to_vec_pretty(&report) {
                         Ok(bytes) => {
@@ -1886,6 +1889,10 @@ pub struct Cluster {
     version: watch::Sender<u64>,
     /// A newer term exists: this node no longer leads (it steps down).
     stale: std::sync::atomic::AtomicBool,
+    /// A member's heartbeat claimed this newer term (0: none): the leader
+    /// looks for that term's leader, and steps down only when it finds one
+    /// that passes [`Cluster::check_new_leader`].
+    newer_claim: std::sync::atomic::AtomicU64,
     /// Taken over from a snapshot: the leader before, and when.
     previous_leader: Option<String>,
     promoted_at: Option<Instant>,
@@ -1999,6 +2006,61 @@ impl Cluster {
             );
             self.bump();
         }
+    }
+
+    /// The newer term a member's heartbeat claimed since the last look,
+    /// taken (the leader's ticker probes for its leader).
+    pub fn take_newer_claim(&self) -> Option<u64> {
+        match self
+            .newer_claim
+            .swap(0, std::sync::atomic::Ordering::Relaxed)
+        {
+            0 => None,
+            t => Some(t),
+        }
+    }
+
+    /// Whether `l` may be the leader of a newer term this node steps down
+    /// for: an eligible member (not this node), within [`MAX_TERM_JUMP`] of
+    /// this term unless it answered itself at its own control URL
+    /// (`direct`), and at the control URL it joined with. Returns the
+    /// leader with that URL. The caller checks that the term is newer.
+    pub fn check_new_leader(&self, l: &Leader, direct: bool) -> Result<Leader, NodeError> {
+        if l.node_id == self.leader {
+            return Err(NodeError::new(409, "this node leads that term itself"));
+        }
+        let known = {
+            let inner = lock(&self.inner);
+            let Some(m) = inner
+                .members
+                .iter()
+                .find(|m| m.node_id == l.node_id && m.eligible())
+            else {
+                return Err(NodeError::new(
+                    403,
+                    "the announced leader is not an eligible node of this cluster",
+                ));
+            };
+            m.control_url.clone()
+        };
+        if !direct && l.term > self.term.saturating_add(MAX_TERM_JUMP) {
+            return Err(NodeError::new(
+                409,
+                "the announced term is too far ahead of this cluster's",
+            ));
+        }
+        let mut out = l.clone();
+        match (&l.control_url, known) {
+            (Some(announced), Some(known)) if *announced != known => {
+                return Err(NodeError::new(
+                    403,
+                    "the announced control URL is not the one that node joined with",
+                ));
+            }
+            (None, known) => out.control_url = known,
+            _ => {}
+        }
+        Ok(out)
     }
 
     /// The nodes that may lead (this leader included): elections need a
@@ -2400,8 +2462,17 @@ impl Cluster {
     ) -> Result<HeartbeatResponse, NodeError> {
         self.authenticate(node_id, credential)?;
         if req.term > self.term {
-            // The node follows a newer leader: this one is out of date.
-            self.mark_stale();
+            // The node says it follows a newer leader. Any member can say
+            // so, so the claim only makes this leader look for that term's
+            // leader (`election::lead`); it steps down when one answers.
+            if req.term <= self.term.saturating_add(MAX_TERM_JUMP) {
+                self.newer_claim
+                    .fetch_max(req.term, std::sync::atomic::Ordering::Relaxed);
+            }
+            return Err(NodeError::new(
+                409,
+                "this node does not lead the term this node follows",
+            ));
         }
         if self.is_stale() {
             return Err(NodeError::new(
@@ -2752,6 +2823,7 @@ impl Cluster {
             }),
             version,
             stale: std::sync::atomic::AtomicBool::new(false),
+            newer_claim: std::sync::atomic::AtomicU64::new(0),
             previous_leader: Some(snap.leader.node_id.clone()),
             promoted_at: Some(now),
             shed_pending: std::sync::atomic::AtomicBool::new(true),
@@ -3725,6 +3797,7 @@ impl Coordinator {
             }),
             version,
             stale: std::sync::atomic::AtomicBool::new(false),
+            newer_claim: std::sync::atomic::AtomicU64::new(0),
             previous_leader: None,
             promoted_at: None,
             shed_pending: std::sync::atomic::AtomicBool::new(false),
@@ -4234,7 +4307,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.leader.term, 2);
         assert!(resp.snapshot.is_some());
-        // A member that knows a newer term makes this leader stale.
+        // A member that claims a newer term is told this node is not its
+        // leader; the claim alone never deposes the leader (it looks for
+        // that term's leader first).
         let err = next
             .heartbeat(
                 "c",
@@ -4248,7 +4323,30 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.status, 409);
-        assert!(next.is_stale());
+        assert!(!next.is_stale());
+        assert_eq!(next.take_newer_claim(), Some(3));
+        assert_eq!(next.take_newer_claim(), None);
+        // What a newer leader must be for this one to step down.
+        let named = |node: &str, term: u64, url: Option<&str>| Leader {
+            node_id: node.into(),
+            term,
+            control_url: url.map(str::to_string),
+            since: None,
+        };
+        let refused =
+            |l: Leader, direct: bool| next.check_new_leader(&l, direct).unwrap_err().status;
+        assert_eq!(refused(named("c", 3, None), false), 403, "not eligible");
+        assert_eq!(refused(named("nobody", 3, None), false), 403);
+        assert_eq!(refused(named("a", 3, None), false), 409, "itself");
+        assert_eq!(
+            refused(named("b", 3, Some("http://elsewhere.example:9")), false),
+            403
+        );
+        assert_eq!(refused(named("b", 2 + MAX_TERM_JUMP + 1, None), false), 409);
+        let b = next
+            .check_new_leader(&named("b", 2 + MAX_TERM_JUMP + 1, None), true)
+            .unwrap();
+        assert_eq!(b.control_url.as_deref(), Some("http://b.example:9"));
         // The old leader refuses votes: it is alive.
         let v = c
             .answer_vote(

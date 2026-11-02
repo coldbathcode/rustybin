@@ -58,11 +58,25 @@ pub async fn lead(h: Weak<Harness>, cluster: Weak<Cluster>) {
                 tracing::warn!(target: "rustybin::harness", cluster = %c.id, term = c.term, "harness: the leader no longer hears a majority of the eligible nodes: no lease renewals until it does");
             }
         }
-        if !quorum && last_probe.is_none_or(|t| t.elapsed() >= c.election_timeout / 2) {
-            last_probe = Some(Instant::now());
-            if let Some(l) = probe(&h, &c).await {
-                step_down(&h, &c, Some(l));
-                break;
+        // Without a quorum, or when a member claimed a newer term, ask the
+        // eligible nodes (at most every half election timeout, so claims
+        // cannot make it call them in a loop). Only a leader they prove
+        // makes this one step down.
+        if last_probe.is_none_or(|t| t.elapsed() >= c.election_timeout / 2) {
+            let claimed = c.take_newer_claim();
+            if claimed.is_some() || !quorum {
+                last_probe = Some(Instant::now());
+                match probe(&h, &c).await {
+                    Some(l) => {
+                        step_down(&h, &c, Some(l));
+                        break;
+                    }
+                    None => {
+                        if let Some(term) = claimed {
+                            tracing::warn!(target: "rustybin::harness", cluster = %c.id, term = c.term, claimed = term, "harness: a member claimed a newer term, but no eligible node leads one: this node keeps leading");
+                        }
+                    }
+                }
             }
         }
     }
@@ -134,7 +148,9 @@ pub fn spawn_lead(h: &Arc<Harness>, cluster: &Arc<Cluster>) {
 }
 
 /// Ask the eligible nodes whether a newer leader exists: a node that leads
-/// a newer term answers the heartbeat, a member names the leader it follows.
+/// a newer term answers the heartbeat itself (at the control URL it joined
+/// with), a member names the leader it follows. Either must pass
+/// [`Cluster::check_new_leader`]; that is the proof this node steps down on.
 async fn probe(h: &Arc<Harness>, c: &Cluster) -> Option<Leader> {
     let credential = c.self_credential()?;
     let client = match h.membership() {
@@ -142,7 +158,14 @@ async fn probe(h: &Arc<Harness>, c: &Cluster) -> Option<Leader> {
         None => super::member::http_client().ok()?,
     };
     let timeout = (c.election_timeout / 2).min(Duration::from_secs(2));
-    for (_, control) in c.peer_urls() {
+    let proven = |l: &Leader, direct: bool| match c.check_new_leader(l, direct) {
+        Ok(l) => Some(l),
+        Err(e) => {
+            tracing::warn!(target: "rustybin::harness", cluster = %c.id, named = %l.node_id, term = l.term, "harness: a newer leader named in a probe is refused: {}", e.error);
+            None
+        }
+    };
+    for (peer, control) in c.peer_urls() {
         let url = cluster_url_of(&control, &c.id);
         if super::safety::check_join_url(&url).await.is_err() {
             continue;
@@ -162,14 +185,17 @@ async fn probe(h: &Arc<Harness>, c: &Cluster) -> Option<Leader> {
         )
         .await;
         match answer {
-            Ok(resp) if resp.leader.term > c.term => {
-                let mut l = resp.leader;
-                if l.control_url.is_none() {
-                    l.control_url = Some(control);
+            // The node called leads: it must be the node at that URL.
+            Ok(resp) if resp.leader.term > c.term && resp.leader.node_id == peer => {
+                if let Some(l) = proven(&resp.leader, true) {
+                    return Some(l);
                 }
-                return Some(l);
             }
-            Err(LinkError::NotLeader(Some(l))) if l.term > c.term => return Some(l),
+            Err(LinkError::NotLeader(Some(l))) if l.term > c.term => {
+                if let Some(l) = proven(&l, false) {
+                    return Some(l);
+                }
+            }
             _ => {}
         }
     }
@@ -191,7 +217,9 @@ pub fn step_down(h: &Arc<Harness>, c: &Cluster, leader: Option<Leader>) {
     );
     if let Some(m) = h.membership().filter(|m| m.cluster_id == c.id) {
         match leader {
-            Some(l) => m.follow(l),
+            Some(l) => {
+                m.follow(l);
+            }
             None => m.lose_leader(),
         }
     }

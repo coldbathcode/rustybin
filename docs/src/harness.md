@@ -59,6 +59,18 @@ passes, which also proves the route before any load is sent:
 {{#include ../examples/harness/api.hurl:verification}}
 ```
 
+What verification proves, and what it does not. The token is public: the node serves it
+to anyone, without a credential, and a cluster's server nodes serve the cluster's. A
+target passes when a `GET` of its URL plus `/.well-known/rustybin-harness` answers `2xx`
+with the token, so passing proves that the target routes that path to a node that serves
+the token (or to anything that copied it), and that the route works. It does **not** prove
+that whoever owns the target agreed to the load: a server that fetched the token and
+serves it passes as well, and so does one that relays the path to a node. Consent and
+scope come from the allowlist (`RUSTYBIN_HARNESS_TARGETS`, set by the operator) and the
+caps; verification catches a typo in a target, a route that does not reach the cluster,
+and a gateway in front of the wrong instance. A random challenge would not change that (a
+relay passes it too), so there is none.
+
 ## A scenario
 
 A scenario is YAML or JSON. The smallest one names a target, a request and a pattern:
@@ -176,8 +188,12 @@ threshold, for CI):
 ```
 
 A node keeps its last runs in memory (and every report in
-`RUSTYBIN_HARNESS_REPORT_DIR` when set). The kill switch stops all load on the node at
-once, whatever started it:
+`RUSTYBIN_HARNESS_REPORT_DIR` when set, named after the run id; an id is 1 to 64 letters,
+digits, `.`, `_` or `-`, and a cluster part with any other id is refused). The kill switch
+stops all load on the node at once, whatever started it. It clears once 200 ms pass
+without another press, so the next run may start; a run that was still being prepared
+when it was pressed (resolving, fetching tokens or verifying its targets) never starts,
+however long the preparation takes:
 
 ```hurl
 {{#include ../examples/harness/api.hurl:kill_switch}}
@@ -453,13 +469,21 @@ the clients never stop; they report their cumulative stats to it again, which fi
 gap exactly. Whatever the old leader's own client part may have sent after its last
 checkpoint is reported as `unreported`, an upper bound, never dropped silently. A leader
 that cannot hear a majority stops renewing leases (the minority side of a partition stops
-sending), and one that hears a newer term steps down. A crashed leader that restarts is a
-new node: start it as a standby pointing at any eligible member to rejoin.
+sending), and one that finds the leader of a newer term steps down. A crashed leader that
+restarts is a new node: start it as a standby pointing at any eligible member to rejoin.
 
-A member follows an `elected` announcement only from a node the snapshot lists as
-eligible, at a term at most 16 ahead of the one it knows, and from the control URL that
-node joined with (checked like a join URL); anything else is refused, so a member's
-node credential cannot crown its holder. **The join token is a cluster credential**: a
+A leader steps down only for a newer leader it can check: an announcement from a node it
+knows as eligible, at a term at most 16 ahead of its own, naming the control URL that node
+joined with; or, when a member's heartbeat claims a newer term, an eligible node that answers
+its probe as that term's leader at its own control URL (or names one that passes the same
+checks). The claim alone only starts the probe (at most every half election timeout), so a
+member cannot depose the leader by saying so. A member follows a leader on the same terms,
+whether an `elected` announcement names it, a node's `409` does or a probe of the succession
+finds it; anything else is refused, so a member's node credential cannot crown its holder.
+Every call between nodes refuses link-local, cloud metadata, unspecified, multicast and
+broadcast addresses at the connection itself (names are resolved and checked for each
+connection), so a name that changes its answer after a URL was checked gets nowhere. **The
+join token is a cluster credential**: a
 holder can join as an eligible node (with a control URL) and so receive the snapshot,
 secrets included, and stand in elections. Treat it like the admin token: give it only
 to the nodes you run, and rotate it (a new cluster) if it leaks.
@@ -481,7 +505,8 @@ Load only goes where the operator said: the allowlist (`RUSTYBIN_HARNESS_TARGETS
 checked by name and by every resolved address, with link-local, cloud metadata, multicast
 and the node's own control plane always refused; pinned connections, so a DNS change
 during a run cannot redirect it; optional target verification through
-`/.well-known/rustybin-harness`; caps per node on rate, requests in flight and duration;
+`/.well-known/rustybin-harness` (proof of the route, not of the owner's consent, see
+above); caps per node on rate, requests in flight and duration;
 one run at a time (a start being prepared holds the slot, so parallel starts get `409`, and
 a kill pressed while a run is still resolving or verifying its targets keeps it from
 starting); a node never sends above its rate cap, whatever the live multipliers and its
