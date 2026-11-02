@@ -8,7 +8,10 @@ the pages for the features that exist today describe current behaviour.
 **Testing workflows 2**, for 0.4.0 (planned 2026-11-02, not started): a history of saved-test runs,
 saved tests on a schedule with a failure webhook, gateway scenarios for circuit breakers,
 request size limits, CORS and header transformation, checkpoints in the configuration
-repository, and a compare view for an edit refused as stale.
+repository, and a compare view for an edit refused as stale. Then **access control**:
+several users with roles made of named permissions (built-in and custom), invitations,
+single sign-on with any OpenID Connect provider, projects so teams share an instance,
+agents that act for a user, and an audit log.
 `docs/plans/testing-2/master-plan.md` in the repository.
 
 ## Recently built
