@@ -31,8 +31,12 @@ browser demos and the web console work without a gateway. A preflight (an
 `OPTIONS` request with `Access-Control-Request-Method`) is answered directly,
 mirroring the requested method and headers, with `Access-Control-Max-Age: 600`. A
 plain `OPTIONS` request without that header reaches the route. Responses expose
-`X-Request-Id`, `X-Rustybin-Fault`, `Content-Length`, `Mcp-Session-Id`,
-`MCP-Protocol-Version` and `WWW-Authenticate` to browser code.
+`X-Request-Id`, `X-Rustybin-Fault`, `Content-Length`, the mock LLM's metadata
+(`X-Rustybin-Request-Id`, `-Credential`, `-Provider`, `-Model`, `-Mode`),
+`Mcp-Session-Id`, `MCP-Protocol-Version`, `WWW-Authenticate`, the OpenAPI mocks'
+`X-Rustybin-Mock`, `-Mock-Operation`, `-Mock-Source`, `-Mock-Validation` and `Allow`,
+and with plan limits or shared mode on, `Retry-After` and the rate-limit and quota headers to browser
+code.
 
 ```hurl
 {{#include ../../examples/concepts/control.hurl:cors_preflight}}
@@ -69,6 +73,7 @@ ask for a token from the sign-in with the console's user name and password
 | `GET /_rustybin/config` | Effective configuration, without secrets |
 | `GET /_rustybin/version` | Name, version, commit (`git_sha`), MSRV, build profile and the control auth mode |
 | `GET /_rustybin/ready` | Readiness probe: always `200` while serving, independent of `/health`; never authenticated, limited or captured |
+| `GET /_rustybin/diagnostics` | What is wrong with the instance and how to fix it (admin; see [Troubleshooting](../troubleshooting.md#ask-the-instance-first)) |
 | `GET /_rustybin/metrics` | Prometheus metrics (see [Control-plane security, metrics and operations](control-plane-security.md#metrics)) |
 | `GET, DELETE /_rustybin/requests`, `GET /_rustybin/requests/{id}`, `GET /_rustybin/requests/stream` | The [request inspector](inspector.md) |
 | `GET /_rustybin/catalog` | The route catalogue as JSON (the [web console](../console.md)'s API explorer) |

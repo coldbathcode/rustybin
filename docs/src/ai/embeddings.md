@@ -46,7 +46,8 @@ Dimensions are capped at 4096 (1536 in public mode) and inputs per request at 20
 shape Jina and Voyage style clients use) score `documents` against `query`:
 query-word overlap blended with the cosine similarity of the mock embeddings.
 Results are sorted by `relevance_score`; `top_n` limits them and
-`return_documents: true` includes the text.
+`return_documents: true` includes the text. Scoring reads the first 8,192 characters of
+the query.
 
 ```hurl
 {{#include ../../examples/ai/embeddings_guardrails.hurl:rerank}}

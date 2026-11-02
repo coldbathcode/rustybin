@@ -112,6 +112,8 @@ objects and arrays, `$ref` into `$defs` / `definitions`, `anyOf` / `oneOf` /
 `allOf`, string formats and bounds, number bounds, `const` and `default`. String
 values are chosen from the property name (`email`, `city`, `date`, ...) and the
 user text, so `location` becomes "Paris" for "What is the weather in Paris?".
+Generation is bounded: at most 2,000 values, 12 levels deep, and strings of at most
+1,024 characters (a larger `minLength` is clamped, not obeyed).
 
 ```hurl
 {{#include ../../examples/ai/behaviour.hurl:tool_call}}

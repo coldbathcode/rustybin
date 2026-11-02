@@ -54,8 +54,11 @@ for a demo without a key.
 The provider's host is allowed under the [outbound policy](configuration.md#outbound-connections)'s
 `assist` purpose the moment its key is set (`api.anthropic.com`, `api.openai.com`,
 `generativelanguage.googleapis.com`, the compatible base URL's host); calls carry a
-60 second timeout, a 2 MiB response cap, pinned addresses and no redirects. In public
-mode no feature may reach any host, so only the mock provider works there.
+60 second timeout, a 2 MiB response cap, pinned addresses and no redirects. The rule
+names only the provider's host, so it holds in public mode too. A `rustybin.yaml`
+pulled from [source control](source-control.md) cannot change `assist.provider` or
+`assist.base_url` (a different value is reported and kept), so a repository never
+sends the stored key to another host.
 
 ## Models and jobs
 
@@ -141,6 +144,10 @@ errors, at most twice.
 | `examples_for_operations` | `spec`, `operations`, `per_response`, `persona` | `{examples: {op: {status: [...]}}}`, each validated against its schema | capable |
 | `edit_spec` | `spec`, `instruction` | The whole document, checked, with a bounded structural diff | capable |
 | `request_examples` | `spec`, `operation`, `count` | `{requests: [{path, query, headers, body}]}`, validated | fast |
+| `tool_arguments` | `tool` (name, description, `inputSchema`), `hint` | `{arguments}`, validated against the tool's `inputSchema` ([inspector](mcp/inspector.md)) | fast |
+| `sampling` | `messages` (at most 50), `system_prompt` | The reply to a server's `sampling/createMessage` | fast |
+| `server_json` | `draft` (the generated entry), `tools`, `hint` | `{server, notes}`, valid against the registry schema ([registry](mcp/registry.md)) | fast |
+| `summarise_for_portal` | `title`, `description`, `operations`, `hint` | `{title, summary, tags}`, checked like a publish ([portal](portal.md)) | fast |
 
 `POST /_rustybin/assist/run` runs one. Streamed (`stream: true`, or `Accept:
 text/event-stream`), the events are `sent` (what goes to the provider, never the
@@ -185,7 +192,8 @@ the instance need admin, like `test` and `usage`.
 - **What was sent** in the drawer is the record the server made: the provider, the
   model, the system prompt, the user prompt and the schema.
 - **Caps**: `RUSTYBIN_ASSIST_MAX_CALLS_PER_MINUTE` (20) per caller (the control
-  principal, plus the client address on an open control plane) answers `429` with
+  principal, plus the client address on an open control plane; a token caller of the
+  management MCP is its credential, whatever its `X-Rustybin-Session`) answers `429` with
   `Retry-After`; `RUSTYBIN_ASSIST_MAX_OUTPUT_TOKENS` (8192) bounds every answer. A
   reasoning model (OpenAI's GPT-5 and o-series) spends part of that budget thinking:
   Rustybin asks it for low reasoning effort, and an answer the budget cuts off is
@@ -222,7 +230,7 @@ The same job from the API, the console, the command line, an agent and the confi
 |---|---|
 | API | `GET /_rustybin/assist`, `POST /_rustybin/assist/run`, `POST /_rustybin/assist/test`, `GET /_rustybin/assist/usage`, `GET` and `POST /_rustybin/assist/models` |
 | Console | The assist bar (`Ctrl+K`), the sparkles in every view, **Management, AI** (the provider, keys, models and jobs) |
-| CLI | `rustybin ai status | models [--load] | jobs | use | usage | test | run`, `rustybin settings set assist.provider ...`, `rustybin settings set-secret assist.anthropic_key` ([reference](cli.md#ai)) |
+| CLI | `rustybin ai status \| models [--load] \| jobs \| use \| usage \| test \| run`, `rustybin settings set assist.provider ...`, `rustybin settings set-secret assist.anthropic_key` ([reference](cli.md#ai)) |
 | Management MCP | `assist_status`, `list_assist_models`, `load_assist_models` (confirmed), `assist_usage`, `test_assist`, `run_assist_task` (the read tasks); choosing a model is `update_settings`; keys are never tool inputs ([agent page](agent-mcp.md)) |
 | `rustybin.yaml` | `settings: assist.provider, assist.model, assist.fast_model, assist.base_url, assist.job.<task>`; the keys under `secrets:` as `${VAR}` or `secret:stored` references, never values |
 | Environment | `RUSTYBIN_ASSIST_PROVIDER`, `_MODEL`, `_FAST_MODEL`, `_BASE_URL`, `_ANTHROPIC_KEY`, `_OPENAI_KEY`, `_GEMINI_KEY`, `_COMPATIBLE_KEY`, `_MAX_CALLS_PER_MINUTE`, `_MAX_OUTPUT_TOKENS`, `_VISITORS` ([configuration](configuration.md#ai-assist)) |

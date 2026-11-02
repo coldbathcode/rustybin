@@ -72,9 +72,15 @@ control JWT) instead of signing in.
 Several instances are several profiles: `--profile staging` on the login names one,
 `rustybin profiles list | use | remove` manage them, and `--profile` (or
 `RUSTYBIN_PROFILE`) picks one for a call. For a call, `--url` and `--token` win over
-`RUSTYBIN_URL` and `RUSTYBIN_TOKEN`, which win over the profile; with nothing set the
-default is `http://localhost:80` (the server's own default, so `docker exec <container>
+`RUSTYBIN_URL` and `RUSTYBIN_TOKEN` (else `RUSTYBIN_ADMIN_TOKEN`), which win over the
+profile; with nothing set the default is `http://localhost:80` (the port from
+`RUSTYBIN_HTTP_PORT` when set: the server's own default, so `docker exec <container>
 rustybin status` works inside the image).
+
+A token from the environment goes to a `--url` only when it is `RUSTYBIN_URL`'s instance
+or one on this machine (loopback), so an exported local admin token is never handed to
+another host; a profile's token goes only to its own URL. The command line warns when it
+sends a token over plain `http://` to another host, and it follows no redirects.
 
 `rustybin whoami` says who the credential is; `rustybin logout` revokes the token and
 forgets it; `rustybin password change` takes the current and a new password (two lines of
@@ -86,9 +92,9 @@ stdin with `--stdin`) and keeps the fresh token the instance answers with.
 {{#include ../examples/cli/cli.sh:nouns}}
 ```
 
-Nouns mirror the control API: `mocks`, `requests`, `bins`, `agents`, `ai`, `mcp`,
-`registry`, `portal`, `config`, `git`, `harness`, `settings`, `sessions`, `visits`,
-`keys`, `egress`, `instance`. `rustybin help <noun>` lists the verbs, `--help` on any
+Nouns mirror the control API: `mocks`, `requests`, `bins`, `tests`, `scenario`,
+`checkpoint`, `agents`, `ai`, `mcp`, `registry`, `portal`, `config`, `git`, `harness`,
+`settings`, `sessions`, `visits`, `visit`, `keys`, `egress`, `instance`, `profiles`. `rustybin help <noun>` lists the verbs, `--help` on any
 command its flags and an example. Verbs that remove or replace something (`delete`,
 `clear`, `revoke`, `end-all`, `apply --prune`, `git resolve`) ask first; `--yes` answers
 for a script, and without a terminal they refuse rather than wait.
@@ -106,7 +112,8 @@ the spec files the document references, as `rustybin mock push` does.
 
 `--json` prints the instance's answer as it is; `jq` does the rest. Exit codes: `0`
 done, `1` the instance refused or the operation failed (a 4xx or 5xx, failed
-thresholds, a document applied with problems), `2` usage, `3` the instance could not
+thresholds, a document applied with problems, a failed `doctor` check, saved test or
+scenario expectation), `2` usage, `3` the instance could not
 be reached or the credential was refused. `--quiet` drops the progress and confirmation
 lines.
 
@@ -150,4 +157,4 @@ The same job from the API, the console, the command line, an agent and the confi
 | CLI | This page |
 | Management MCP | `rustybin mcp-stdio --url <url> --profile <p>` bridges a local agent to a remote instance's management server with the profile's token; the resource `rustybin://cli.md` is this reference ([agent page](agent-mcp.md)) |
 | `rustybin.yaml` | `rustybin config export > rustybin.yaml`, `rustybin config apply rustybin.yaml --dry-run` ([the whole instance as code](configuration-as-code.md)) |
-| Environment | `RUSTYBIN_URL`, `RUSTYBIN_TOKEN`, `RUSTYBIN_PROFILE`, `RUSTYBIN_MOCK_TOKEN`, `RUSTYBIN_CONFIG_HOME` (where `profiles.json` lives) |
+| Environment | `RUSTYBIN_URL`, `RUSTYBIN_TOKEN` (else `RUSTYBIN_ADMIN_TOKEN`), `RUSTYBIN_HTTP_PORT` (the default URL's port), `RUSTYBIN_PROFILE`, `RUSTYBIN_MOCK_TOKEN`, `RUSTYBIN_CONFIG_HOME` (where `profiles.json` lives) |

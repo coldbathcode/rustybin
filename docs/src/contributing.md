@@ -17,6 +17,8 @@ cargo fmt
 cargo clippy --all-targets -- -D warnings
 cargo test                                   # unit tests + tests/integration.rs, a few seconds
 RUSTYBIN_UPDATE_README=1 cargo test readme_endpoints   # regenerate the README endpoint tables
+RUSTYBIN_UPDATE_CLI_DOCS=1 cargo test cli_docs         # regenerate the CLI reference (docs/src/cli.md)
+bash scripts/check-no-dashes.sh              # no em or en dashes in tracked files
 docs/examples/run.sh                         # the documentation examples (needs hurl 8)
 python3 docs/tools/check_includes.py         # all example includes and anchors
 mdbook build docs                            # the documentation site (needs mdbook)
@@ -31,23 +33,29 @@ dependency versions compatible with it, so `cargo update` cannot silently raise 
 
 The crate is a library plus a thin binary:
 
-- `src/main.rs`: the CLI (`--print-endpoints-markdown`, `--version`, `--help`).
+- `src/main.rs`: the binary (`--print-endpoints-markdown`, `--version`, `--help`,
+  `--config`); every other noun goes to the command line in `src/cli/`.
 - `src/lib.rs`: the module list, `ROUTERS` (every module's router) and `build_app`,
-  which wraps them in the middleware stack (outermost first): request id, tracing,
-  request id propagation, CORS, time-to-headers timeout, inspector capture, body
-  limit, fault injection. Unknown routes get a JSON 404.
-- `src/server.rs`: the HTTP (required), HTTPS and gRPC (optional) listeners and
-  graceful shutdown.
+  which wraps them in the middleware stack (outermost first): the mock host rewrite,
+  request id, tracing, metrics, request id propagation, the control plane's CORS
+  rule, CORS, control-plane auth, API keys, plan limits, time-to-headers timeout,
+  harness correlation, inspector capture, body limit, fault injection. Unknown routes
+  get a JSON 404.
+- `src/server.rs`: the HTTP (required), HTTPS and gRPC (optional) listeners, with a
+  header read timeout and a connection cap, and graceful shutdown.
 - `src/config.rs`: `Config` from `RUSTYBIN_*` variables.
-- `src/state.rs`: `AppState { config, jwt, certs, identity, inspector, health }`,
-  with `FromRef` for each part.
+- `src/state.rs`: `AppState` (the config, settings, egress policy, AI assist, JWT
+  and certificate state, identity, inspector, health, limits, metrics, keys, mocks
+  and the features added since), with `FromRef` for each part.
 - `src/catalog.rs`: the [route catalogue](concepts/catalogue.md) and its
   consistency tests; `src/openapi.rs` merges the per-module OpenAPI fragments.
 - Cross-cutting helpers: `src/session.rs` (session key, client IP, request origin),
   `src/admin.rs` (admin guard), `src/fault.rs`, `src/inspector.rs`,
   `src/content_negotiation.rs`.
 - Feature modules: one file or directory per area (`src/ai/`, `src/mcp/`,
-  `src/a2a/`, `src/oidc/`, `src/graphql.rs`, ...), and the web console in
+  `src/a2a/`, `src/oidc/`, `src/mocks/`, `src/harness/`, `src/portal/`,
+  `src/configdoc/`, `src/replay/`, `src/scenarios/`, `src/graphql.rs`, ...), the
+  command line in `src/cli/`, and the web console in
   `src/ui.rs` plus `ui/` (embedded at build time by `build.rs`).
 
 ## Adding a module
@@ -101,7 +109,7 @@ versions in `conformance/requirements.txt`:
 | MCP | `PYTHON=... conformance/mcp/run.sh [--inspector]` | the Python MCP SDK, optionally the MCP Inspector CLI (Node) |
 | A2A | `PYTHON=... conformance/a2a/run.sh` | `a2a-sdk` |
 | OAuth / OIDC | `PYTHON=... conformance/oauth/run.sh` | `httpx` |
-| Web console | `PYTHON=... conformance/ui/run.sh` | Playwright (Chromium): every view in light and dark mode, the sign-in flows, visitors, the harness builder, the 0.2 views (assist bar, AI mocks, inspector, registry, portal, agents, Management with export and source control) |
+| Web console | `PYTHON=... conformance/ui/run.sh` | Playwright (Chromium): every view in light and dark mode, the sign-in flows, visitors, the harness builder, the 0.2 views (assist bar, AI mocks, inspector, registry, portal, agents, Management with export and source control), the 0.3 workflows (gateway scenarios, saved tests, checkpoints, diagnostics, stale edits) and sign-out clearing the tab |
 | Harness cluster | `conformance/harness/run.sh` | Docker Compose: the compose cluster with the leader killed mid-run |
 
 ## Continuous integration

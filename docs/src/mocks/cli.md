@@ -155,8 +155,9 @@ Errors print the server's message and exit with code `2`
 Applies a config file (default `./rustybin.yaml`) with
 [`POST /_rustybin/mocks/apply`](config.md#export-and-apply): spec files are read
 locally and inlined, so the server never needs access to them, and environment
-variables are expanded. `--prune` deletes the mocks created through the API or
-console that the file does not list. Pushing an unchanged file changes nothing.
+variables are expanded. `--prune` deletes the instance's own mocks created through
+the API or console that the file does not list (never a visitor's, an API key's or a
+gateway scenario's; see [export and apply](config.md#export-and-apply)). Pushing an unchanged file changes nothing.
 
 ```bash
 {{#include ../../examples/mocks/cli.sh:push}}

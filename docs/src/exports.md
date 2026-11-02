@@ -40,6 +40,18 @@ the variable after importing.
 {{#include ../examples/exports/exports.hurl:other_exports}}
 ```
 
+## A mock as a collection
+
+`GET /_rustybin/mocks/{name}/collections/{format}` writes one
+[mock](mocks/index.md)'s operations as a collection: `postman`, `hurl`, `curl`,
+`http`, `k6`, `bruno` or `insomnia`, one valid sample request per operation
+(`?base_url=` as above). Callers who cannot change the mock get placeholders for its
+[demo credentials](mocks/security.md#demo-credentials). Spec text that would break a
+line (a newline, the Unicode line and paragraph separators, NEL) is written on one
+line, and a spec path with whitespace or a control character is not served, so a
+spec cannot add requests to a downloaded file. The [dev portal](portal.md) offers
+the same downloads for published mocks.
+
 ## OpenAPI
 
 `/openapi.json` and `/openapi.yaml` describe the HTTP API (OpenAPI 3.0.3), and

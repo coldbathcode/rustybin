@@ -5,7 +5,7 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-**Testing workflows 2** (planned 2026-11-02, not started): a history of saved-test runs,
+**Testing workflows 2**, for 0.4.0 (planned 2026-11-02, not started): a history of saved-test runs,
 saved tests on a schedule with a failure webhook, gateway scenarios for circuit breakers,
 request size limits, CORS and header transformation, checkpoints in the configuration
 repository, and a compare view for an edit refused as stale.
@@ -13,6 +13,12 @@ repository, and a compare view for an edit refused as stale.
 
 ## Recently built
 
+- [Rustybin 0.3.1, the 0.3 review](changelog.md#031-2026-11-02-the-03-review)
+  (2026-11-02): no new features; what a review of 0.3.0 found, fixed in eight steps:
+  control-plane CORS only for listed origins, a random signing key per instance, the
+  sign-in changed only with the current password, admin-only saved tests, prunes that
+  leave visitors', keys' and scenarios' mocks alone, deploys that name their revision,
+  and the [threat model](concepts/public-instances.md) updated.
 - [Rustybin 0.3, reliability and testing workflows](changelog.md#030-2026-11-02-reliability-and-testing-workflows)
   (2026-11-02): applies that never prune what they cannot load, previews that validate
   like an apply, git documents read whole; then [diagnostics](troubleshooting.md#ask-the-instance-first),
@@ -22,7 +28,6 @@ repository, and a compare view for an edit refused as stale.
 - [Rustybin 0.2.2, the hardening release](changelog.md#022-2026-11-02-the-hardening-release)
   (2026-11-02): no new features; what a full code review found for public instances, fixed
   in ten steps, and the [threat model](concepts/public-instances.md) it now meets.
-
 - [Rustybin 0.2, the AI-assisted mocking service](changelog.md#020-2026-10-30-the-ai-assisted-mocking-service)
   (2026-10-29 to 2026-10-30): the console locked with a user name and password out of
   the box; a settings store with secrets at rest and one outbound policy; your own AI

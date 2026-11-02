@@ -144,10 +144,13 @@ same five steps in the console.
   OAuth2 with scopes via the built-in IdP, mTLS) and every call is captured. The
   same mocks are configurable as code in `rustybin.yaml` and with
   `rustybin mock ...` ([OpenAPI mocks](docs/src/mocks/index.md)).
-- **Dev portal** at `/portal`: testers find what you published (mock APIs with Try it,
-  downloads and their MCP servers, the mock MCP servers, the LLM, agents, tools) without
-  the console or its password; open, behind the console sign-in or an API key, with
-  view and download counts ([dev portal](docs/src/portal.md)).
+- **Testing workflows**: [gateway scenarios](docs/src/gateway-scenarios.md) prove that a
+  gateway retries, rate limits, injects a credential, times out or caches, by comparing
+  what the client got with what reached the upstream; [saved tests](docs/src/saved-tests.md)
+  turn a captured request into assertions that run in process, through a gateway or in
+  CI as Hurl; [checkpoints](docs/src/checkpoints.md) put the mocks back where a demo
+  started; [diagnostics](docs/src/troubleshooting.md#ask-the-instance-first)
+  (`rustybin doctor`) say what is wrong and the fix.
 - Echo, any status code, delays, caching with ETags, compression, ranges, redirects,
   cookies, images.
 - Real credential checks: Basic, API keys, JWT (HS256 and RS256), HMAC signatures,
@@ -183,10 +186,11 @@ same five steps in the console.
 
 `/ui` is a browser console for presenting and for managing: Overview, Live traffic
 (what the gateway forwarded, with gateway headers highlighted), Mock APIs (describe
-or upload a spec, edit responses, toggle mocks and mocked security), Request bins,
-API explorer, AI playground, MCP inspector, MCP registry, A2A client, AI agents,
-Harness, Chaos and health (with a small load generator), Token lab, and a
-Management area (sign-in, AI, network, portal, export, source control). It is
+or upload a spec, edit responses, toggle mocks and mocked security), Saved tests,
+Request bins, API explorer, AI playground, MCP inspector, MCP registry, A2A client,
+AI agents, Gateway scenarios, Harness, Chaos and health (with a small load
+generator), Token lab, and a Management area (sign-in, AI, network, portal, export,
+source control, checkpoints, diagnostics). It is
 embedded in the binary and works offline. Set a gateway base URL in its settings to
 send every request through your gateway. It signs in with the console's user name
 and password (`rustybin` / `rustybin` until changed; `RUSTYBIN_CONTROL_AUTH=open`
@@ -225,7 +229,7 @@ to the default. `GET /_rustybin/config` shows the effective configuration. Detai
 | `RUSTYBIN_TLS_CERT` / `RUSTYBIN_TLS_KEY` | `certs/server.crt` / `certs/server.key` | HTTPS certificate and key; generated (with a persisted demo CA) when missing |
 | `RUSTYBIN_MTLS_IN_HEADER` | unset | Header in which a gateway forwards the client certificate for `/auth/mtls` |
 | `RUSTYBIN_PUBLIC_MODE` | `false` | Hardening for shared instances: lower caps, session-scoped inspector, global mutations need the admin token |
-| `RUSTYBIN_ADMIN_TOKEN` | unset | Required (Bearer or `X-Rustybin-Admin-Token`) for health toggles, global flaky reset and clearing all captured requests |
+| `RUSTYBIN_ADMIN_TOKEN` | unset | Required (Bearer or `X-Rustybin-Admin-Token`) for health toggles, global flaky reset and clearing all captured requests; shorter than 24 characters warns at startup |
 | `RUSTYBIN_CONTROL_AUTH` | `password` | `/_rustybin/*` (except `/_rustybin/ready` and the sign-in) needs a token from `POST /_rustybin/login` with the console's user name and password, the admin token or a control JWT; `open` (no credentials, the default before 0.2), `token` (admin token) or `jwt` (admin token or Ed25519 JWT with scope `inspector`, `console`, `harness` or `admin`) |
 | `RUSTYBIN_CONSOLE_USER` / `_PASSWORD` / `_PASSWORD_HASH` | `rustybin` / `rustybin` / unset | The sign-in credentials; the hash (argon2id PHC) wins over the plain password; a password changed in the console is stored as a hash and wins over both |
 | `RUSTYBIN_ASSIST_PROVIDER` / `_MODEL` / `_FAST_MODEL` / `_BASE_URL` / `_*_KEY` | unset | [Your own AI](docs/src/ai-assist.md) behind the console's assist bar: `anthropic`, `openai`, `gemini`, `compatible` (any OpenAI-compatible endpoint) or `mock`; the keys are sealed secrets that never leave the instance |
@@ -239,7 +243,7 @@ to the default. `GET /_rustybin/config` shows the effective configuration. Detai
 | `RUSTYBIN_OIDC_USERS_FILE` | unset | Your own users for the built-in OIDC provider instead of the demo ones (`rustybin oidc-hash-password`) |
 | `RUSTYBIN_CONTROL_OAUTH` | `true` | With `token` / `jwt` control auth: agents sign in to `/_rustybin/mcp` through the browser (RFC 9728 metadata, built-in authorization server at `/_rustybin/oauth`, consent in the console) |
 | `RUSTYBIN_CONTROL_OAUTH_ISSUER` | unset | Name an external authorization server instead (its tokens must be control JWTs) |
-| `RUSTYBIN_CONTROL_OAUTH_KEY` | derived | Secret (32+ characters) signing OAuth client ids and tokens; unset: derived from the admin token, else random per process |
+| `RUSTYBIN_CONTROL_OAUTH_KEY` | random | Secret (32+ characters) signing console sign-in tokens, OAuth client ids and tokens; unset: a random key in `<state>/control-oauth.key`, else random per process (never derived from the admin token) |
 | `RUSTYBIN_CONTROL_JWT_PUBLIC_KEY` / `_AUDIENCE` | unset / instance id | Ed25519 public key (PEM or base64) and required `aud` of control-plane JWTs |
 | `RUSTYBIN_HOSTED_MODE` | `false` | Preset for one-instance-per-customer platforms: control auth `jwt` and JSON logs |
 | `RUSTYBIN_GRPC_ON_HTTP` | `false` | Also serve gRPC (`content-type: application/grpc*`) on the HTTP and HTTPS listeners |
@@ -249,7 +253,7 @@ to the default. `GET /_rustybin/config` shows the effective configuration. Detai
 | `RUSTYBIN_MOCKS_SAMPLE` | `true` (`false` in public mode) | Create the built-in `petstore` mock |
 | `RUSTYBIN_MOCKS_STATE_DIR` | unset | Save mocks created or edited through the API or console here (one JSON file each) and reload them at startup |
 | `RUSTYBIN_MOCKS_HOST` | unset | Domain for host-based mock URLs: `<name>.<domain>` serves the mock `<name>` at its root (needs wildcard DNS) |
-| `RUSTYBIN_CORS_ORIGINS` | `*` | Allowed CORS origins, comma separated; `off` disables Rustybin's CORS |
+| `RUSTYBIN_CORS_ORIGINS` | `*` | Allowed CORS origins, comma separated; `off` disables Rustybin's CORS. The control plane (`/_rustybin/*`) answers cross-origin only to origins named here (`*` covers the data plane only) |
 | `RUSTYBIN_INSPECTOR_CAPACITY` | `500` | Requests kept by the inspector (max 10000) |
 | `RUSTYBIN_PLAN` | `none` | Plan limits preset: `none` (no limits, no headers), `free`, `pro`, `team`, `enterprise` ([plans and limits](docs/src/concepts/plans-and-limits.md)) |
 | `RUSTYBIN_LIMIT_RPS` / `_BURST` / `_CONCURRENCY` / `_STREAMS` / `_STREAM_SECS` | plan | Override one dimension of the plan; `0` or `unlimited` turns it off |

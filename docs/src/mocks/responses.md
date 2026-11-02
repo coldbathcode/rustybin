@@ -17,7 +17,8 @@ and, in `enforce` mode, request validation), the first of these that applies win
    (several directives can be combined: `Prefer: code=404, dynamic=true`). Clients
    that cannot set `Prefer` send `X-Rustybin-Mock-Status: 404` and
    `X-Rustybin-Mock-Example: lamp`. A status or example preference skips the rules
-   and overrides below.
+   and overrides below. A requested status must be 200 to 599; any other is
+   ignored.
 2. **Rules** of the operation, in order: the first rule whose conditions all hold
    answers with its `respond`.
 3. **The operation's `respond` override**: a fixed status, example, body and
@@ -29,7 +30,7 @@ and, in `enforce` mode, request validation), the first of these that applies win
 The status chosen by a preference, rule or override then gets its body: a literal
 `body` if one is configured, else the named `example`, else the mode. A status the
 spec does not document answers an `application/problem+json` body when it is an
-error status (empty otherwise); `204`, `304` and `1xx` are always empty. Response
+error status (empty otherwise); `204` and `304` are always empty. Response
 headers documented in the spec are sent with values from their examples or
 schemas; configured `headers` are added on top (and replace documented ones with
 the same name). The media type follows `Accept` among the response's `content`
@@ -136,7 +137,7 @@ sits under `operations.<operationId>` in `PATCH` bodies and in
 
 | Field | Meaning |
 |---|---|
-| `respond` | The operation's override: `status`, `example` (a named example of that status), `body` (JSON is serialised; a string is sent as is, labelled JSON when it parses as JSON, else text) and `headers` |
+| `respond` | The operation's override: `status` (200 to 599), `example` (a named example of that status), `body` (JSON is serialised; a string is sent as is, labelled JSON when it parses as JSON, else text) and `headers` |
 | `rules` | Ordered list of `{name?, when, respond}`; the first match wins (20 per operation, 10 in public mode) |
 | `mode` | `examples`, `generated` or `static` for this operation |
 | `examples` | Examples stored with the mock, by status: `{"200": [{"name", "value", "source": "user" or "ai" or "generated"}]}`; served where the spec has none for the status, and by name with `Prefer: example=<name>`. At most 8 per status. See [Build mocks with AI](ai.md) |

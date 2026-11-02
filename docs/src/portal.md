@@ -139,7 +139,10 @@ browser, through the gateway when the operator set one), copyable curl commands 
 connection snippets, and downloads.
 
 The portal reads one endpoint, `GET /portal/api/catalog`: only published items, with
-what their pages show. It carries an `ETag`:
+what their pages show. A rendered catalogue is cached; the instance renders a new one
+at most 30 times a minute in all (a host name it has not seen, a publish), and past
+that a cache miss answers `503` with `Retry-After` while cached catalogues keep being
+served. It carries an `ETag`:
 
 ```hurl
 {{#include ../examples/portal/portal.hurl:catalog}}
@@ -196,7 +199,7 @@ The same job from the API, the console, the command line, an agent and the confi
 |---|---|
 | API | `GET /_rustybin/portal`, `PUT`, `DELETE /_rustybin/portal/items/{id}`, `GET /_rustybin/portal/insights`; what testers read: `/portal`, `/portal/api/catalog`, `/portal/api/items/{id}/collections/{format}`, `/portal/reference/{id}` |
 | Console | **Management, Portal** (status, branding, items, insights, Preview), **Publish to portal** on a mock's page |
-| CLI | `rustybin portal status | publish <id> | unpublish <id> | insights | branding | open` ([reference](cli.md#portal)) |
+| CLI | `rustybin portal status \| publish <id> \| unpublish <id> \| insights \| branding \| open` ([reference](cli.md#portal)) |
 | Management MCP | `list_portal_items`, `publish_portal_item`, `unpublish_portal_item`, `set_portal_branding`, `get_portal_insights`; the prompt `publish_portal`; the resource `rustybin://portal/catalog` ([agent page](agent-mcp.md)) |
 | `rustybin.yaml` | `portal.items` (the published items with their metadata), `settings: portal.*` ([the whole instance as code](configuration-as-code.md)) |
 | Environment | `RUSTYBIN_PORTAL`, `RUSTYBIN_PORTAL_AUTH`, `RUSTYBIN_PORTAL_BASE_URL`, `RUSTYBIN_PORTAL_VISITORS` ([configuration](configuration.md#dev-portal)) |

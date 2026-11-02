@@ -15,7 +15,8 @@ Common behaviour, useful for gateway WebSocket proxying tests:
   keeps reading the socket, so a client close or ping mid-stream is honoured.
 - **Limits**: messages up to 1 MiB (256 KiB in public mode, else close `1009`); idle
   timeout 5 minutes (1 minute) and maximum lifetime 1 hour (10 minutes), both closing
-  with `1001`.
+  with `1001`. A send to a client that stops reading gives up after the idle timeout,
+  so it cannot hold the connection open either.
 
 Examples with [websocat](https://github.com/vi/websocat) (`$WS` is the base URL
 with `ws://`, for example `ws://localhost:8080`; use `wss://` and port 443 for the

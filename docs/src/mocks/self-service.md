@@ -21,7 +21,7 @@ RUSTYBIN_MOCKS_SELF_SERVICE_HOST=rustybin-mock.dev \
 RUSTYBIN_LEADS_WEBHOOK_URL=https://hooks.example.com/rustybin-leads \
 RUSTYBIN_LEADS_WEBHOOK_TOKEN=change-me \
 RUSTYBIN_PRIVACY_URL=https://example.com/privacy \
-RUSTYBIN_ADMIN_TOKEN=change-me-too \
+RUSTYBIN_ADMIN_TOKEN=change-me-to-a-long-random-value \
 rustybin
 ```
 
@@ -311,3 +311,16 @@ same replica.
 | `POST /_rustybin/mocks/visit/token` | the visitor | A new manage token |
 | `DELETE /_rustybin/mocks/visit` | the visitor | End the visit, delete its mocks |
 | Every `/_rustybin/mocks/{name}*` route | the owner, admins | As for any mock |
+
+## On every surface
+
+The same job from the API, the console, the command line, an agent and the configuration document.
+
+| Surface | Where |
+|---|---|
+| API | The [routes](#routes) above and the [operator routes](#operators) |
+| Console | The [mocks view](../console.md#self-service) with the visit banner, Extend and Copy manage link |
+| CLI | `rustybin visit get \| start \| extend \| rotate-token \| end` (with `--mock-token`), `rustybin visits list \| end \| end-all \| pause \| resume` ([reference](../cli.md)) |
+| Management MCP | `get_visit`, `extend_visit`, `list_visits`, `end_visit`, `pause_self_service`, `resume_self_service`; a new manage token is console or CLI only (a credential shown once) ([agent page](../agent-mcp.md)) |
+| `rustybin.yaml` | None: visits and visitor mocks belong to their visitors, never to the instance document |
+| Environment | `RUSTYBIN_MOCKS_SELF_SERVICE*`, `RUSTYBIN_MOCKS_*` and `RUSTYBIN_LEADS_*` ([configuration](../configuration.md#self-service-mocks)) |

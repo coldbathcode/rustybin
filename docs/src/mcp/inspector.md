@@ -174,7 +174,9 @@ when running):
 ```
 
 `GET /_rustybin/mcp-checks` lists the saved runs and `DELETE
-/_rustybin/mcp-checks/{id}` (admin) removes one.
+/_rustybin/mcp-checks/{id}` (admin) removes one. A report, an answer and an audit line
+show the target without its query string, which may hold a saved connection's API key
+(a run saved before 0.3.1 is stripped when read).
 
 ## Saved connections
 
@@ -221,9 +223,9 @@ The same job from the API, the console, the command line, an agent and the confi
 
 | Surface | Where |
 |---|---|
-| API | `GET /_rustybin/mcp-servers`, `POST /_rustybin/mcp-relay` and `DELETE /_rustybin/mcp-relay/{session}`, `POST /_rustybin/mcp-relay/fetch`, `POST`, `GET /_rustybin/mcp-checks` and `/{id}`, `GET`, `PUT`, `DELETE /_rustybin/mcp-connections/{id}` |
+| API | `GET /_rustybin/mcp-servers`, `POST /_rustybin/mcp-relay` and `DELETE /_rustybin/mcp-relay/{session}`, `POST /_rustybin/mcp-relay/fetch`, `POST`, `GET /_rustybin/mcp-checks`, `GET`, `DELETE /_rustybin/mcp-checks/{id}`, `GET /_rustybin/mcp-connections`, `GET`, `PUT`, `DELETE /_rustybin/mcp-connections/{id}` |
 | Console | The **MCP inspector** view (servers, connections, the protocol tabs, the timeline, checks); a mock's **MCP** tab opens it on the mock's server |
-| CLI | `rustybin mcp servers | tools <target> | call <target> <method> | check <target> [--junit] | runs | run <id> | connections | save-connection | fetch | end-relay` ([reference](../cli.md#mcp)) |
-| Management MCP | `list_mcp_servers`, `mcp_call` (answers under `untrusted_result`), `run_mcp_checks`, `list_mcp_check_runs`, `list_mcp_connections`; the prompt `test_mcp_server` ([agent page](../agent-mcp.md)) |
+| CLI | `rustybin mcp servers \| tools <target> \| call <target> <method> \| check <target> [--junit] \| runs \| run <id> \| delete-run <id> \| connections \| connection <id> \| save-connection \| delete-connection <id> \| fetch \| end-relay` ([reference](../cli.md#mcp)) |
+| Management MCP | `list_mcp_servers`, `mcp_call` (answers under `untrusted_result`), `run_mcp_checks` and `list_mcp_check_runs` (reports under `untrusted_report`), `list_mcp_connections`; the prompt `test_mcp_server` ([agent page](../agent-mcp.md)) |
 | `rustybin.yaml` | Nothing: saved connections hold credentials and stay in `<state>/mcp-inspector.json`; the servers a document creates (mocks with MCP on) appear in the server list |
 | Environment | `RUSTYBIN_EGRESS_ALLOW` and `RUSTYBIN_EGRESS_ALLOW_LOOPBACK` for the relay's destinations, `RUSTYBIN_STATE_DIR` for saved connections and runs ([configuration](../configuration.md#outbound-connections)) |

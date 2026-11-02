@@ -3,16 +3,18 @@
 The inspector records recent requests so you can see what actually reached the
 upstream after the gateway rewrote, enriched or stripped it. It captures every
 request except the control plane (`/_rustybin/*`), the web console (`/ui/*`), the
-landing page (`/`) and `/favicon.ico`.
+[dev portal](../portal.md) (`/portal/*`), the landing page (`/`) and `/favicon.ico`.
 
 Each entry has: an inspector `id`, the `request_id` (`X-Request-Id`), timestamp,
 method, URI, path, query, HTTP version, every header, client IP, the
 `X-Rustybin-Session` value, the body (up to 64 KiB; UTF-8 as `body`, anything else
 as `body_base64`, with `body_size` and `body_truncated`), the response status and the
-time to response headers in `latency_ms`.
+time to response headers in `latency_ms`. An entry keeps at most 16 KiB of headers
+(the headers past that are counted in one `x-rustybin-capture` header) and 4 KiB of
+each header value, of the URI, the path and the query.
 
 Entries live in a ring buffer of `RUSTYBIN_INSPECTOR_CAPACITY` entries (default 500,
-at most 10000); the oldest entry is evicted first.
+at most 10000) and at most 64 MiB in all; the oldest entry is evicted first.
 
 ## Tag, list, fetch
 
@@ -76,7 +78,10 @@ to [request bins](../reference/request-bin.md), to the traffic of OpenAPI mocks 
 `[redacted]` when it carries a Rustybin control credential: `Bearer` with the admin
 token, or a control JWT this instance accepts. Every other header, any other
 `Authorization` value included, is captured as it arrived, since seeing what a
-gateway sent is the point.
+gateway sent is the point. Requests the instance sends to itself with saved
+credentials (the [MCP inspector](../mcp/inspector.md)'s in-process calls, a
+[saved test](../saved-tests.md) run in process) lose every secret-looking header and
+query value to `[redacted]`.
 
 ## Public mode
 

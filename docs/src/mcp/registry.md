@@ -223,7 +223,7 @@ The same job from the API, the console, the command line, an agent and the confi
 |---|---|
 | API | The registry itself under `/mcp-registry/v0.1` (and `/v0`); `GET /_rustybin/registry`, `DELETE /_rustybin/registry/servers/{serverName}`, `POST /_rustybin/registry/validate`, `GET /_rustybin/registry/browse` |
 | Console | The **MCP registry** view: Mock registry (the scenario, the entries, Publish a server.json) and Browse a registry (Open in inspector) |
-| CLI | `rustybin registry status | publish <file> | delete <name> | validate <file> | browse [--registry U] [--search S]`, `rustybin settings set registry.scenario flaky` ([reference](../cli.md#registry)) |
+| CLI | `rustybin registry status \| publish <file> \| delete <name> \| validate <file> \| browse [--registry U] [--search S]`, `rustybin settings set registry.scenario flaky` ([reference](../cli.md#registry)) |
 | Management MCP | `list_registry_servers` (entries under `untrusted_entries`, paged), `set_registry_scenario`, `browse_registry` (under `untrusted_*`), `validate_server_json`, `unpublish_registry_server` ([agent page](../agent-mcp.md)) |
 | `rustybin.yaml` | `registry.servers` (file entries, validated on load), `settings: registry.scenario, registry.saved` ([configuration as code](../mocks/config.md)) |
 | Environment | `RUSTYBIN_REGISTRY_SCENARIO`, `RUSTYBIN_REGISTRY_SAVED`, `RUSTYBIN_EGRESS_ALLOW` for registries beyond the public one ([configuration](../configuration.md#mcp-server)) |

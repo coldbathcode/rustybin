@@ -65,7 +65,7 @@ satisfies the admin guard:
 | Field | Default | Meaning |
 |---|---|---|
 | `spec` | required | The OpenAPI document: an object, or JSON / YAML text |
-| `name` | slug of `info.title` | 1 to 40 characters `a-z`, `0-9` and `-`, not at either end; `import`, `export`, `apply` and `reload` are reserved. A taken default gets a `-2`, `-3`, ... suffix; a taken explicit name is a `409`. |
+| `name` | slug of `info.title` | 1 to 40 characters `a-z`, `0-9` and `-`, not at either end; `import`, `export`, `apply`, `reload`, `visit`, `visits` and `ai` are reserved. A taken default gets a `-2`, `-3`, ... suffix; a taken explicit name is a `409`. |
 | `deploy` | `true` | Run the checks and make the draft live. `false` creates a draft only (its URL answers `503` until deployed). |
 | `force` | `false` | Deploy even when the checks report errors |
 | `enabled` | `true` | The on/off switch |
@@ -341,8 +341,9 @@ Generated strings are padded to `minLength` up to 64 KiB (a larger minimum gives
 value that fails its own schema, which the deploy checks report), one generated value
 holds at most 1 MiB of string content (past it strings stay short and the rest is
 null), and one request validation makes at most 500,000 schema checks (`uniqueItems`
-counts one per item). A path template may name a parameter once and hold at most 32
-of them (other paths are skipped with a warning), a server URL is at most 2 KiB once
+counts one per item). A path template may name a parameter once, hold at most 32
+of them and contain no whitespace or control character (other paths are skipped
+with a warning), a server URL is at most 2 KiB once
 its variables are filled in (else `servers[0]` is ignored with a warning), and a
 sample request cuts a path value at 1 KiB. Parsing and compiling a spec (preview,
 create, edits, operation settings, samples, duplicates, AI previews and generated
@@ -368,9 +369,15 @@ compiled.
 | `POST /_rustybin/mocks/{name}/deploy` | Check and publish the draft, `?force=true` (admin) |
 | `POST /_rustybin/mocks/{name}/rollback` | Previous revision, or `{"revision": n}` (admin) |
 | `GET /_rustybin/mocks/{name}/report` | [Deploy checks](responses.md#deploy-checks) of the draft |
+| `GET /_rustybin/mocks/{name}/spec` | The draft's spec as uploaded (JSON or YAML as written) |
+| `POST /_rustybin/mocks/{name}/duplicate` | Copy the mock, `{"name": ...}` optional (default `<name>-copy`) (admin) |
+| `GET`, `DELETE /_rustybin/mocks/{name}/state` | The items of a [stateful](responses.md#stateful-mode) mock, or reset them (admin) |
+| `GET /_rustybin/mocks/{name}/coverage` | [Example coverage](ai.md#examples-and-the-alert-when-a-spec-has-none) of the draft and the live revision |
+| `GET /_rustybin/mocks/{name}/collections/{format}` | The mock as a [collection](../exports.md) |
 | `GET`, `PUT /_rustybin/mocks/{name}/operations/{op}` | One operation, or set its [settings](responses.md#operation-settings) (admin) |
 | `GET /_rustybin/mocks/{name}/operations/{op}/sample` | A [valid request and response](responses.md#samples-and-validation) |
 | `POST /_rustybin/mocks/{name}/operations/{op}/validate` | Validate a body against the operation's schema |
+| `POST /_rustybin/mocks/{name}/operations/{op}/rules/test` | Which [rule](responses.md#rules) would answer a request |
 | `GET`, `DELETE /_rustybin/mocks/{name}/requests`, `.../requests/{n}`, `.../requests/stream` | [Traffic](#traffic) |
 | `GET /_rustybin/mocks/{name}/export`, `GET /_rustybin/mocks/export` | [`rustybin.yaml` export](config.md#export-and-apply) |
 | `POST /_rustybin/mocks/apply` | Apply a `rustybin.yaml` document, `?prune=true` (admin) |
@@ -380,3 +387,16 @@ compiled.
 `{op}` is the `operationId` (or the id Rustybin made up, shown in the details and
 in `X-Rustybin-Mock-Operation`). The routes are also in `/openapi.json` under the
 `Mocks` tag and in the console's API explorer.
+
+## On every surface
+
+The same job from the API, the console, the command line, an agent and the configuration document.
+
+| Surface | Where |
+|---|---|
+| API | `/_rustybin/mocks*` ([above](#control-api)); the mocks themselves at `/mock/{name}/...` |
+| Console | **Mock APIs** (`/ui/#/mocks`): the wizard, a mock's settings, security, operations, traffic, data, MCP server and deploy report ([console](../console.md#mock-apis)) |
+| CLI | `rustybin mocks ...` for every route above ([reference](../cli.md#mocks)); `rustybin mock validate`, `init`, `sample` and `check-config` offline ([CLI](cli.md)) |
+| Management MCP | `list_mocks`, `get_mock`, `preview_spec`, `get_mock_spec`, `create_mock`, `update_mock`, `set_operation`, `test_rules`, `check_mock`, `deploy_mock`, `rollback_mock`, `set_mock_enabled`, `duplicate_mock`, `delete_mock`, `sample_request`, `validate_payload`, `export_collection`, `get_mock_data`, `clear_mock_data`, `get_mock_traffic`, `clear_traffic`, `reload_mocks`, `try_request`; the prompt `mock_an_api` ([agent page](../agent-mcp.md)) |
+| `rustybin.yaml` | `mocks:` ([mocks as code](config.md)), in a version 2 document with the rest of the instance ([the whole instance as code](../configuration-as-code.md)) |
+| Environment | `RUSTYBIN_CONFIG_FILE`, `RUSTYBIN_MOCKS_DIR`, `RUSTYBIN_MOCKS_SAMPLE`, `RUSTYBIN_MOCKS_HOST`, `RUSTYBIN_MOCKS_STATE_DIR` ([configuration](../configuration.md#openapi-mocks)) |

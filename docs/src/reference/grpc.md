@@ -22,6 +22,9 @@ on one port:
 
 Use `Fail` for gRPC-to-HTTP status mapping and retry policy demos.
 
+Client and bidi streams end with `DEADLINE_EXCEEDED` after 60 seconds without a message
+or 10 minutes open.
+
 ## With grpcurl
 
 `$GRPC` is the listener's `host:port`, for example `localhost:50051`:

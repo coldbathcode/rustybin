@@ -38,7 +38,12 @@ calls only, never to a URL that came from elsewhere (an MCP server's endpoint, a
 OAuth discovery document, an AI answer's action), and shows the sign-in
 screen again when the token is refused, revoked or its `exp` passes. A valid token
 with a narrow scope (`inspector`) signs in too, and the views it may not read say
-so. **Management, General, Sign out** revokes a sign-in token and forgets it.
+so. **Management, General, Sign out** revokes a sign-in token and forgets it, and
+clears what the tab holds (captured traffic, the admin token, the MCP inspector's
+auth form, the assistant's history, the last export); so does a token for another
+user arriving in the tab. The MCP inspector never copies the console token into its
+auth form: it adds it at send time, only to this instance's own `/_rustybin/mcp` with
+the bearer field left empty.
 Details: [Control-plane security](concepts/control-plane-security.md#user-name-and-password).
 
 ```hurl
@@ -203,7 +208,7 @@ secrets](configuration.md#state-directory-settings-and-secrets).
 | AI | **AI assist**: on or why not, **Test the key**, **Use the built-in mock LLM**, the caps, the curated models of every provider with tier and price and **Use** / **Fast** buttons. **Provider and keys**: the `assist.*` settings (provider, model, fast model, compatible base URL, one secret key per provider). **Usage since start** and the privacy note. See [Bring your own AI](ai-assist.md). |
 | Network | **Outbound connections**: the allowlist and the loopback switch (`egress.allow`, `egress.allow_loopback`). **Policy as the instance sees it**: the merged list, the always-refused addresses, each feature's own rule, and the last 100 decisions with a refresh. **Leads webhook**: the bearer token (a secret). See [Outbound connections](configuration.md#outbound-connections). |
 | Portal | **Dev portal**: on or off and why, its URL with **Preview the portal**, who may read it, the base URL testers use, whether changes persist. **Branding and access**: the `portal.*` settings. **Items**: every publishable item by kind (mock APIs, MCP servers, the mock LLM, agents, the HTTP tools, the registry) with its state, why a published item is hidden, its views this week, **Publish** / **Edit** (the metadata dialog) and checkboxes to publish or unpublish several. **Insights**: views over 7 and 30 days, downloads, Try it calls. See [Dev portal](portal.md). |
-| Export | **This instance as rustybin.yaml**: the version 2 document with secrets as references or omitted, **Copy**, **Download**, **Bundle** (a `.tar.gz` with the specs as files), the differences since the last export seen in this browser. **Apply a document**: paste or upload, **Dry run** (the changes and problems, nothing applied), then **Apply** (enabled by the dry run), **Prune** as an explicit checkbox with a confirmation. See [The whole instance as code](configuration-as-code.md). |
+| Export | **This instance as rustybin.yaml**: the version 2 document with secrets as references or omitted, **Copy**, **Download**, **Bundle** (a `.tar.gz` with the specs as files), the differences since the last export seen in this browser. **Apply a document**: paste or upload, **Dry run** (the changes and problems, nothing applied), then **Apply** (enabled by the dry run, and disabled again when **Prune** changes after it), **Prune** as an explicit checkbox with a confirmation. See [The whole instance as code](configuration-as-code.md). |
 | Source control | **Repository**: the `git.*` settings (remote, branch, directory, authentication, the token as a secret, the author, the automatic mode). **Status**: git and the working copy, the last commit, ahead and behind (**Ask the remote**), what a commit would record. **Connect**, **Commit and push** (with **Write the commit message** from the AI), **Pull** (a dry run with the diff, then apply, prune as a checkbox), the two buttons that resolve a diverged branch, **Deploy key** (generate, copy the public half), **History** and **Operations**. See [Source control](source-control.md). |
 | Checkpoints | **Save a checkpoint**: a name, replace. **Checkpoints**: each with its mocks and health, **Preview** (what a restore would change), **Restore** (confirmed), delete. See [Checkpoints](checkpoints.md). |
 | Diagnostics | Every check with its status, what was seen and the fix, **Run again**. See [Troubleshooting](troubleshooting.md#ask-the-instance-first). |
@@ -252,7 +257,7 @@ The same job from the API, the console, the command line, an agent and the confi
 |---|---|
 | API | The control plane the console calls, listed above; `POST /_rustybin/login` for a token, `GET /_rustybin/status` for what the overview shows |
 | Console | `/ui`: every view, the gear for **Management** |
-| CLI | `rustybin login`, `status`, `whoami`, `sessions list | end | end-all`, `password` ([reference](cli.md)) |
+| CLI | `rustybin login`, `status`, `whoami`, `sessions list`, `sessions end`, `sessions end-all`, `password` ([reference](cli.md)) |
 | Management MCP | `get_instance`, `list_sessions`, `end_session`, `get_settings` ([agent page](agent-mcp.md)) |
-| `rustybin.yaml` | `instance:` (the console title and user), `settings: console.*` ([the whole instance as code](configuration-as-code.md)) |
+| `rustybin.yaml` | `instance:` (the console title and user), `settings: console.*` ([the whole instance as code](configuration-as-code.md)); in password mode a document never changes the user name or the password |
 | Environment | `RUSTYBIN_CONTROL_AUTH`, `RUSTYBIN_CONSOLE_USER`, `RUSTYBIN_CONSOLE_PASSWORD`, `RUSTYBIN_CONSOLE_PASSWORD_HASH`, `RUSTYBIN_CONSOLE_TITLE`, `RUSTYBIN_CONSOLE_BACKLINK` ([configuration](configuration.md#control-plane-and-console)) |

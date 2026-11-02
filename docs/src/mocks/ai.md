@@ -124,7 +124,9 @@ in the MCP inspector when an AI provider is configured.
 The instance's key belongs to the operator: on a [self-service](self-service.md)
 instance visitors get `403` from the AI routes unless `RUSTYBIN_ASSIST_VISITORS=true`
 (their calls count against the same per-caller cap); **Use generated values** works
-for them regardless. What goes to the provider is the task's prompt: the description
+for them regardless. The previews of a described spec and of an edit, and the
+generated values, compile on the shared pool and spend the caller's 30 compiles a
+minute when it has no admin rights (see [Limits](index.md#limits)). What goes to the provider is the task's prompt: the description
 or instruction, the spec (or the operations and schemas that need examples) and the
 style; the "What was sent" record of the console and the `sent` field of the JSON
 answers show it exactly, and the [redact pass](../ai-assist.md#privacy-and-costs)

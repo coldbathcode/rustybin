@@ -51,6 +51,8 @@ See [Configuration](../configuration.md#plan-limits) for the full variable list.
 [session key](sessions.md): the `X-Rustybin-Session` header, else the client IP (with
 `RUSTYBIN_TRUST_FORWARD=true` behind a proxy). Session scope is a fairness tool for a
 shared demo instance, not abuse protection: a client can pick a new session header.
+In [public mode](sessions.md#public-mode) the counters are kept per client address
+instead, so a fresh header per request does not reset them.
 At most 10,000 session counter sets are kept; when full, idle sets are dropped first.
 
 ## Responses

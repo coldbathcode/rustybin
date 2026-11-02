@@ -5,7 +5,7 @@ next run. Its scope is deliberately narrow:
 
 | Saved and restored | Never touched |
 |---|---|
-| The instance's mocks created through the API or the console: the deployed revision, a draft that differs from it, on or off, the stateful data | Visitors' self-service mocks and API keys' mocks |
+| The instance's mocks created through the API or the console: the deployed revision, a draft that differs from it, on or off, the stateful data | Visitors' self-service mocks, API keys' mocks and mocks with an expiry (a public instance's API mocks) |
 | The `/health` toggle | Mocks from `rustybin.yaml` files and the mocks directory, the built-in sample, a [gateway scenario](gateway-scenarios.md)'s mock |
 | (on restore) the `/flaky` counters are reset | Settings, secrets, saved tests, captured traffic |
 
@@ -22,6 +22,8 @@ next run. Its scope is deliberately narrow:
 A name is 1 to 64 letters, digits, `.`, `_` or `-`; `replace: true` overwrites a
 checkpoint of that name. At most 20 checkpoints, 16 MiB each and 64 MiB together,
 kept in `<state>/checkpoints/` (in memory without a state directory).
+Saving, restoring and deleting need admin rights; the list and a checkpoint's
+contents are readable with the console scope.
 
 ## Restore
 
@@ -70,6 +72,6 @@ and restore a checkpoint between runs.
 |---|---|
 | API | `GET`, `POST /_rustybin/checkpoints`, `GET`, `DELETE /_rustybin/checkpoints/{name}`, `POST /_rustybin/checkpoints/{name}/restore` (`?dry_run=true`) |
 | Console | **Management, Checkpoints**: save, the list, **Preview**, **Restore** (confirmed), delete |
-| CLI | `rustybin checkpoint list | show | save | restore | delete` (`restore --dry-run`) ([reference](cli.md#checkpoint)) |
+| CLI | `rustybin checkpoint list`, `show`, `save`, `restore`, `delete` (`restore --dry-run`) ([reference](cli.md#checkpoint)) |
 | Management MCP | `list_checkpoints`, `save_checkpoint`, `restore_checkpoint` (confirmed unless `dry_run`), `delete_checkpoint` (confirmed) ([agent page](agent-mcp.md)) |
 | `rustybin.yaml` | Nothing: a checkpoint is a snapshot of the instance, and the document already is one |

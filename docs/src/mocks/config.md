@@ -182,7 +182,8 @@ kill -HUP "$(pidof rustybin)"            # or: docker kill --signal HUP rustybin
 ## Export and apply
 
 `GET /_rustybin/mocks/{name}/export` returns one mock, and `GET /_rustybin/mocks/export`
-every mock except the built-in sample, as a `rustybin.yaml` document with the spec
+every mock except the built-in sample, a gateway scenario's mock and other owners'
+mocks (a visitor or API key gets its own), as a `rustybin.yaml` document with the spec
 inlined (`spec_inline`) and every setting spelled out. It describes the draft, so
 it includes changes that are not deployed yet. The console offers the same
 export, so "build it in the console, export it, commit the file" is a supported
@@ -196,9 +197,12 @@ workflow.
 running instance: listed mocks are created, or updated and redeployed when their
 spec or settings differ, and reported as `created`, `updated`, `unchanged`;
 problems are listed in `errors` (a changed mock is deployed even with check errors,
-which are named there). With `?prune=true`, mocks created through the console or
-the API that the document does not list are deleted (`deleted`); file-defined mocks
-and the sample are never pruned. This is what `rustybin mock push` calls.
+which are named there). With `?prune=true`, the instance's own mocks created through
+the console or the API that the document does not list are deleted (`deleted`).
+File-defined mocks, the sample, visitors' and API keys' mocks and a running
+[gateway scenario](../gateway-scenarios.md)'s mock are never pruned, and neither is a
+mock whose entry is in the document but could not be read. This is what
+`rustybin mock push` calls.
 
 ```hurl
 {{#include ../../examples/mocks/config.hurl:apply}}

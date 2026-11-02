@@ -44,7 +44,7 @@ health:
 
 | Section | What it holds | Applied through |
 |---|---|---|
-| `instance` | `title` (the `console.title` setting) and `console.user` | the settings store |
+| `instance` | `title` (the `console.title` setting) and `console.user` (in password mode a document never changes the user name: a different one is a problem) | the settings store |
 | `settings` | Non-secret settings by dotted key, as `GET /_rustybin/settings` lists them; `null` unsets the stored value | the settings store |
 | `secrets` | Secret settings as references: `${VAR}` reads the variable from the environment when the document is loaded or applied, `secret:stored` keeps what the instance holds, `null` unsets it; a value that resolves to nothing is kept as it is and reported | the settings store |
 | `mocks` | The mocks, each with its spec inline (`spec_inline`) or as a file next to the document (`spec`), exactly the [version 1 entries](mocks/config.md#reference) | the mock store, as `POST /_rustybin/mocks/apply` |
@@ -65,12 +65,14 @@ Two rules make a document safe to apply:
   saved scenarios, saved tests and stored settings or secrets that the section does not name are
   removed. Without `prune`, applying only adds and updates. The `git.*` settings are
   never exported nor pruned: where an instance keeps its configuration is the
-  deployment's business. A mock the document names but cannot load (a spec that cannot
-  be read, does not parse or does not compile) is a problem in the answer and is kept
-  as it is: it is never pruned, and the dry run's `would_delete` says the same. A
-  prune of `mocks` deletes only the instance's own API mocks: never a visitor's or an
-  API key's mock (self-service), nor a running gateway scenario's mock, which is not
-  exported either.
+  deployment's business. A mock the document names but cannot load (an entry that
+  does not parse, a spec that cannot be read, does not parse or does not compile) is a
+  problem in the answer and is kept as it is: it is never pruned, and the dry run's
+  `would_delete` says the same. A prune of `mocks` deletes only the instance's own API
+  mocks: never a visitor's or an API key's mock (self-service), nor a running gateway
+  scenario's mock, which is not exported either. The `harness` and `registry` sections
+  prune only what the document does not name at all (an entry that fails validation
+  is a problem, and its saved copy stays).
 
 Mocks applied through the API or a repository are `origin: api` (saved in the mocks
 state directory, as console changes are); the ones a `RUSTYBIN_CONFIG_FILE` declares
@@ -122,8 +124,14 @@ A dry run answers the same and changes nothing. It validates with the apply's ru
 setting kinds and checks, locked settings, secret references, every mock compiled, the
 portal's metadata, and the instance's capacities, so a document the apply would refuse
 has `ok: false` in its preview too. An apply is not one transaction: sections are applied
-in order (settings, secrets, mocks, registry, portal, harness, agents, health), and an
-entry that fails is reported while the others go ahead, so preview first.
+in order (settings, secrets, mocks, registry, portal, harness, tests, agents, health),
+and an entry that fails is reported while the others go ahead, so preview first. An
+apply (and its dry run) runs on the compile pool, as mock edits do: when the pool stays
+busy the answer is `503` with `Retry-After`.
+
+A document pulled from a repository is applied with stricter rules (it cannot repoint
+outbound requests, the sign-in or a test's gateway); [Source
+control](source-control.md#what-a-repository-writer-can-do) lists them.
 
 ```hurl
 {{#include ../examples/config/config.hurl:dry_run}}
@@ -169,7 +177,7 @@ The same job from the API, the console, the command line, an agent and the confi
 |---|---|
 | API | `GET /_rustybin/config/export`, `POST /_rustybin/config/apply` (`dry_run`, `prune`), `GET /_rustybin/config/schema` |
 | Console | **Management, Export**: the document, copy, download, the bundle, the diff, apply with a dry run |
-| CLI | `rustybin config export | apply | diff | schema | check` ([reference](cli.md#config)) |
+| CLI | `rustybin config export`, `apply`, `diff`, `schema`, `check` ([reference](cli.md#config)) |
 | Management MCP | `export_config`, `diff_config`, `apply_config`; the resource `rustybin://config.schema.json`; the prompt `build_instance` ends with an export ([agent page](agent-mcp.md)) |
 | `rustybin.yaml` | This page: the document is the surface |
 | Environment | `RUSTYBIN_CONFIG_FILE` (loaded at startup and on reload), `RUSTYBIN_STATE_DIR` (where applied state persists), `RUSTYBIN_SETTINGS_LOCK` ([configuration](configuration.md#state-directory-settings-and-secrets)) |

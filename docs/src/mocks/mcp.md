@@ -68,7 +68,9 @@ mock's detail lists them under `mcp.skipped` with the reason.
 ## Calling a tool
 
 A call becomes a request to the operation (path parameters substituted and
-percent-encoded, the query string, header and cookie arguments, the JSON body) and
+percent-encoded, the query string, header and cookie arguments (a cookie argument is
+percent-encoded where RFC 6265 does not allow the byte, so it cannot add another
+cookie), the JSON body) and
 runs through the mock exactly like a request over HTTP. Rules, overrides,
 examples, generated data, stateful mode, request validation, mocked security,
 delays and the restrictions on self-service responses all apply, so a tool returns
@@ -157,7 +159,8 @@ build a mock and then connect to its tools.
 
 ## Limits
 
-- Tools per mock are bounded by the operations a mock may have (200); `tools/list`
+- Tools per mock are bounded by the operations a mock may have (500, 200 in public
+  mode); `tools/list`
   is paginated like on `/mcp` (`?page_size=`).
 - The tool list is computed once per deployed revision and dropped with it; sessions
   of the handshake versions use the bounded session store of `/mcp` and belong to

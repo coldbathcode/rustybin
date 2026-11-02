@@ -98,6 +98,6 @@ Pass the CLI's `--session` to reach a run the console started.
 |---|---|
 | API | `GET /_rustybin/scenarios`, `POST /_rustybin/scenarios/{id}/runs`, `GET`, `DELETE /_rustybin/scenarios/{id}/runs/{run}`, `POST .../check` |
 | Console | **Gateway scenarios**: prepare, the steps with the upstream URL, the gateway URL, **Check through the gateway**, the verdict table, **Clean up** |
-| CLI | `rustybin scenario list | start | show | check | end` (`check` exits `1` when an expectation fails) ([reference](cli.md#scenario)) |
+| CLI | `rustybin scenario list`, `start`, `show`, `check`, `end` (`check` exits `1` when an expectation fails) ([reference](cli.md#scenario)) |
 | Management MCP | `list_gateway_scenarios`, `start_gateway_scenario`, `get_gateway_scenario_run`, `check_gateway_scenario` (confirmed: it sends traffic out), `end_gateway_scenario` (confirmed) ([agent page](agent-mcp.md)) |
-| `rustybin.yaml` | Nothing: runs are transient. While a run lasts its mock is an instance mock (an export includes it); it is never saved to disk and ends with the run |
+| `rustybin.yaml` | Nothing: runs are transient. A run's mock is never exported, saved to disk, kept in a checkpoint nor pruned; it ends with the run |

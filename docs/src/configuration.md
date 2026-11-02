@@ -47,7 +47,7 @@ filesystem, see [Containers](concepts/control-plane-security.md#containers).
 
 | Variable | Default | Description |
 |---|---|---|
-| `RUSTYBIN_TRUST_FORWARD` | `false` | Trust proxy headers. Client IP: `Fly-Client-IP`, then RFC 7239 `Forwarded: for=`, `X-Forwarded-For` (the rightmost address that is not private or loopback, so clients cannot spoof it by prepending), then `X-Real-IP`. Scheme, host and port: `X-Forwarded-Proto`, `X-Forwarded-Host`, `X-Forwarded-Port` and `Forwarded: proto= host=`. The OIDC issuer also honours `X-Forwarded-Prefix`. Enable it only behind a proxy you control. |
+| `RUSTYBIN_TRUST_FORWARD` | `false` | Trust proxy headers. Client IP: `Fly-Client-IP`, then RFC 7239 `Forwarded: for=`, `X-Forwarded-For` (the rightmost address that is not private or loopback, so clients cannot spoof it by prepending), then `X-Real-IP`. Scheme, host and port: `X-Forwarded-Proto`, `X-Forwarded-Host`, `X-Forwarded-Port` and `Forwarded: proto= host=`. The OIDC issuer also honours `X-Forwarded-Prefix`. Enable it only behind a proxy you control. Off, every client behind a proxy shares the proxy's address (the sign-in throttle and every limit): a public instance without it warns at startup, and the first sign-in that carries a forwarding header warns once. |
 | `RUSTYBIN_TRUST_FORWARD_HEADER` | `any` | With `RUSTYBIN_TRUST_FORWARD`, the one header that names the client: `fly` (`Fly-Client-IP`), `forwarded`, `x-forwarded-for` or `x-real-ip`; `any` keeps the order above. Seeds the `proxy.client_ip_header` setting (Management, Network). Name your proxy's header: with `any`, a client behind a proxy that does not set every header can name its own address. |
 | `RUSTYBIN_TLS_CERT` | `certs/server.crt` | Certificate of the HTTPS listener (relative to the working directory). |
 | `RUSTYBIN_TLS_KEY` | `certs/server.key` | Private key of the HTTPS listener. |
@@ -96,7 +96,7 @@ See [Control-plane security, metrics and operations](concepts/control-plane-secu
 
 | Variable | Default | Description |
 |---|---|---|
-| `RUSTYBIN_CONTROL_AUTH` | `password` | `password`: every `/_rustybin/*` route except `/_rustybin/ready` and `POST /_rustybin/login` needs a token from the [sign-in](concepts/control-plane-security.md#user-name-and-password) with the console's user name and password (or the admin token, or a control JWT). `open`: no credentials (the default before 0.2). `token`: the admin token only. `jwt`: the admin token or an Ed25519 JWT signed by `RUSTYBIN_CONTROL_JWT_PUBLIC_KEY` (scopes `inspector`, `console`, `harness`, `admin`). Data-plane routes and the console's static files are never affected. `jwt` by default in hosted mode, `open` in shared mode. |
+| `RUSTYBIN_CONTROL_AUTH` | `password` | `password`: every `/_rustybin/*` route except `/_rustybin/ready`, `POST /_rustybin/login` and the OAuth sign-in endpoints (`/_rustybin/oauth/{register,authorize,token}`) needs a token from the [sign-in](concepts/control-plane-security.md#user-name-and-password) with the console's user name and password (or the admin token, or a control JWT). `open`: no credentials (the default before 0.2). `token`: the admin token only. `jwt`: the admin token or an Ed25519 JWT signed by `RUSTYBIN_CONTROL_JWT_PUBLIC_KEY` (scopes `inspector`, `console`, `harness`, `admin`). Data-plane routes and the console's static files are never affected. `jwt` by default in hosted mode, `open` in shared mode. |
 | `RUSTYBIN_CONSOLE_USER` | `rustybin` | The user name of the sign-in (letters, digits and `. _ @ -`, at most 64 characters). Seeds the `console.user` setting. |
 | `RUSTYBIN_CONSOLE_PASSWORD` | `rustybin` | The password of the sign-in, in the clear. With the default the instance warns at startup, `/_rustybin/status` says `default_password: true` and the console shows a banner; a public instance refuses to start. Never returned by any endpoint. |
 | `RUSTYBIN_CONSOLE_PASSWORD_HASH` | unset | The password as an argon2id PHC string (`$argon2id$v=19$m=...`), preferred for deployments; wins over `RUSTYBIN_CONSOLE_PASSWORD`. Seeds the secret `console.password_hash`, which a password changed in the console replaces (unless `RUSTYBIN_SETTINGS_LOCK`). Invalid: warning, ignored. |
@@ -104,7 +104,7 @@ See [Control-plane security, metrics and operations](concepts/control-plane-secu
 | `RUSTYBIN_CONTROL_JWT_AUDIENCE` | `RUSTYBIN_INSTANCE_ID` | Required `aud` claim of control-plane JWTs. |
 | `RUSTYBIN_CONTROL_OAUTH` | `true` | OAuth sign-in for agents on the management MCP server ([Sign in with OAuth](agent-mcp.md#sign-in-with-oauth)): with `password`, `token` or `jwt` control auth (not in shared mode), `/_rustybin/mcp` answers `401` with RFC 9728 metadata and the built-in authorization server at `/_rustybin/oauth` issues tokens after approval on the console's consent page. `false` turns it off. |
 | `RUSTYBIN_CONTROL_OAUTH_ISSUER` | unset | An external authorization server (absolute `http(s)` URL) named in the metadata instead of the built-in one, which then answers `404`. Its tokens must be control JWTs (`RUSTYBIN_CONTROL_JWT_PUBLIC_KEY`, `RUSTYBIN_CONTROL_JWT_AUDIENCE`). Invalid: warning, built-in server. |
-| `RUSTYBIN_CONTROL_OAUTH_KEY` | random | Secret (32 characters or more) signing the built-in server's client registrations and tokens, and the console's sign-in tokens. Unset: a random key kept in `<state>/control-oauth.key` (mode 0600) with `RUSTYBIN_STATE_DIR`, else random per process (agents and the console sign in again after a restart). Never derived from `RUSTYBIN_ADMIN_TOKEN`. Set the same value on every replica that does not share the state directory. Rotating it (or deleting the key file) signs every agent and every console out. Never returned by any endpoint. |
+| `RUSTYBIN_CONTROL_OAUTH_KEY` | random | Secret (32 characters or more; shorter: warning, ignored) signing the built-in server's client registrations and tokens, and the console's sign-in tokens. Unset: a random key kept in `<state>/control-oauth.key` (mode 0600) with `RUSTYBIN_STATE_DIR`, else random per process (agents and the console sign in again after a restart). Never derived from `RUSTYBIN_ADMIN_TOKEN`. Set the same value on every replica that does not share the state directory. Rotating it (or deleting the key file) signs every agent and every console out. Never returned by any endpoint. |
 | `RUSTYBIN_AGENTS_DEFAULT_CEILING` | `full` | The most an AI agent on the management MCP server may do unless a rule of `rustybin.yaml` or its own rights say otherwise: `read-only`, `traffic`, `manage` or `full` ([Managing agents](agent-mcp.md#managing-agents); an invalid value warns and is ignored). Seeds the `agents.default_ceiling` setting. |
 | `RUSTYBIN_HOSTED_MODE` | `false` | Preset for platforms running one instance per customer: control auth `jwt` and JSON logs, unless `RUSTYBIN_CONTROL_AUTH` / `RUSTYBIN_LOG_FORMAT` say otherwise. |
 | `RUSTYBIN_CONSOLE_TITLE` | unset | Shown in the console header and tab title (control characters removed, at most 80 characters). Seeds the `console.title` setting. |
@@ -123,7 +123,10 @@ memory, as before, and the settings API says `"persisted": false`.
 
 The state directory also holds `config.json` (the registry and agents sections last
 applied through the API or a repository), `repo/` (the [source control](source-control.md)
-working copy), `repo.key` (the deploy key) and `agents.json`, `portal.json`,
+working copy), `repo.key` (the deploy key), `control-oauth.key` (the signing key of
+sign-in and OAuth tokens, unless `RUSTYBIN_CONTROL_OAUTH_KEY` is set), `sessions.json`
+(listed and revoked console sessions), `tests.json` (the [saved tests](saved-tests.md)),
+`checkpoints/` (the [checkpoints](checkpoints.md)) and `agents.json`, `portal.json`,
 `mcp-inspector.json`.
 
 ## Source control
@@ -141,6 +144,11 @@ and the rest can also be set under **Management, Source control**.
 | `RUSTYBIN_CONFIG_GIT_AUTO` | `off` | `push_on_change` (commit and push every change, checked every 30 s) or `pull` (pull and apply with prune every `git.pull_every`, 5 minutes by default). Seeds `git.auto`. |
 | `RUSTYBIN_CONFIG_GIT_REQUIRED` | `false` | A clone or apply failure at startup stops the instance. By default it warns and starts without the repository's configuration. |
 
+Three `git.*` settings have no variable: `git.username` (the user name sent with the
+token, `x-access-token` by default), `git.author` (the commits' `Name <email>`,
+`Rustybin <rustybin@example.invalid>` by default) and `git.pull_every` (the pull mode's
+interval, `1m` to `24h`, `5m` by default).
+
 **Settings** are dotted keys owned by features (`console.title`, `egress.allow`,
 `leads.webhook_token`), each with a schema, a default, and usually an environment
 variable that seeds it. Resolution, for every key: the value saved through the API,
@@ -149,7 +157,11 @@ else the default. `GET /_rustybin/settings` lists every registered key with its
 value, its `source` (`stored`, `env`, `default`), whether the lock holds it and its
 schema; `PATCH` changes values and secrets; `DELETE /_rustybin/settings/{key}`
 forgets a stored value. All three need the admin token (or a control token with the
-`admin` scope). Every change is logged on the `rustybin::settings` target with the
+`admin` scope). In password mode `console.user` and `console.password_hash` change only
+with the current password (`current_password` in the `PATCH` body, or
+`PUT /_rustybin/password`; else `403 current_password_required`) or the admin token
+itself, and a change signs every session out; `DELETE` resets them only with the admin
+token (the recovery of a forgotten password). Every change is logged on the `rustybin::settings` target with the
 key, the source and the principal, never the value.
 
 ```hurl
@@ -175,12 +187,18 @@ answer `400` with one problem per key:
 time where they are checked, returned by the API only as `{ "set": true, "hint":
 "k3Qx" }` (the last four characters, and only for secrets of eight characters or
 more), never written to a configuration export in the clear, and never settable
-through the management MCP. The settings of this release: `console.title`,
+through the management MCP (its `update_settings` also asks the user to confirm a
+change under `egress.`, `agents.`, `console.` or `git.`, and never changes the sign-in
+in password mode). The settings of this release: `console.title`,
 `console.backlink`, the sign-in's `console.user` and secret `console.password_hash`,
-the `assist.*` settings of [AI assist](ai-assist.md) (the provider keys are secrets),
-`egress.allow`, `egress.allow_loopback`, `registry.scenario`, `registry.saved`, the
-`portal.*` settings of the [dev portal](#dev-portal) and the secret
-`leads.webhook_token`; source control also registers `git.*` settings, including the secret `git.token`.
+the `assist.*` settings of [AI assist](ai-assist.md) (the provider keys are secrets,
+`assist.job.<task>` the model per job), `proxy.client_ip_header`, `egress.allow`,
+`egress.allow_loopback`, `agents.default_ceiling`, `registry.scenario`,
+`registry.saved`, the `portal.*` settings of the [dev portal](#dev-portal), the secret
+`leads.webhook_token`, `mocks.require_revision` (no variable; `false` by default: when
+on, every mock edit must name the draft revision it was made from, else `428`, see
+[two people editing one mock](mocks/index.md#two-people-editing-one-mock)) and the
+`git.*` settings of [source control](#source-control), including the secret `git.token`.
 
 ## Outbound connections
 
@@ -269,7 +287,8 @@ token. See [Self-service mocks](mocks/self-service.md).
 (see [Environment variables](mocks/config.md#environment-variables)). The
 [`rustybin mock` CLI](mocks/cli.md) reads `RUSTYBIN_SERVER` (default
 `http://localhost` on `RUSTYBIN_HTTP_PORT`, port 80 when unset) and `RUSTYBIN_TOKEN` (else `RUSTYBIN_ADMIN_TOKEN`) as
-defaults for `--server` and `--token`.
+defaults for `--server` and `--token`; the rest of the command line is under
+[Command line and saved tests](#command-line-and-saved-tests).
 
 ## Plan limits
 
@@ -355,8 +374,9 @@ See [Faults, latency, credentials, inspection](ai/gateway-features.md#credential
 
 ## AI assist
 
-See [Bring your own AI](ai-assist.md). Every variable seeds an `assist.*` setting a
-value saved under Management, AI overrides.
+See [Bring your own AI](ai-assist.md). The provider, the models, the base URL and the
+keys seed `assist.*` settings, which a value saved under Management, AI overrides; the
+two caps and `RUSTYBIN_ASSIST_VISITORS` are read from the environment only.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -365,7 +385,7 @@ value saved under Management, AI overrides.
 | `RUSTYBIN_ASSIST_FAST_MODEL` | provider's fast default | The model for cheap tasks (suggestions, explanations). |
 | `RUSTYBIN_ASSIST_BASE_URL` | unset | The compatible endpoint's base URL, without `/chat/completions` (for example `http://localhost:11434/v1`; loopback needs `RUSTYBIN_EGRESS_ALLOW_LOOPBACK`). Invalid: warning, ignored. |
 | `RUSTYBIN_ASSIST_ANTHROPIC_KEY`, `RUSTYBIN_ASSIST_OPENAI_KEY`, `RUSTYBIN_ASSIST_GEMINI_KEY`, `RUSTYBIN_ASSIST_COMPATIBLE_KEY` | unset | The provider keys (secrets `assist.*_key`: sealed at rest, returned as `{set, hint}`, never in prompts, exports or captures). Not to be confused with `RUSTYBIN_AI_API_KEY`, the key the mock LLM *accepts*. |
-| `RUSTYBIN_ASSIST_MAX_CALLS_PER_MINUTE` | `20` | AI calls per minute per caller (the control principal, plus the client address on an open control plane); more answer `429` with `Retry-After`. 1 to 1000. |
+| `RUSTYBIN_ASSIST_MAX_CALLS_PER_MINUTE` | `20` | AI calls per minute per caller (the control principal: a token caller by its credential, whatever its `X-Rustybin-Session`; plus the client address on an open control plane); more answer `429` with `Retry-After`. 1 to 1000. |
 | `RUSTYBIN_ASSIST_MAX_OUTPUT_TOKENS` | `8192` | The output cap of every answer. 256 to 128000. |
 | (setting only) `assist.job.<task>` | unset | The model one job runs on, one setting per task (`assist.job.explain`, `assist.job.spec_from_description`, ...; group "AI models per job"). Unset: the job's tier default. A model the provider does not offer is ignored (see [Models and jobs](ai-assist.md#models-and-jobs)). |
 | `RUSTYBIN_ASSIST_VISITORS` | `false` | On a [self-service](mocks/self-service.md) instance, let visitors use the instance's AI key on their own mocks (describe, generate examples, edit). Off: visitors get `403` from the AI routes; the deterministic generator stays available to them. |
@@ -392,7 +412,7 @@ control plane is protected, and follows the admin token on an open one.
 | `RUSTYBIN_HARNESS` | `off` | Turn harness mode on. |
 | `RUSTYBIN_HARNESS_ROLES` | `server` | `client` (generates load), `server` (an upstream), `both` (loop-through: the node sends to a gateway that routes back to it), `coordinator`; comma separated. |
 | `RUSTYBIN_HARNESS_TARGETS` | unset | What a client may send load to: host names, `*.domain` wildcards, IP addresses and CIDRs, each with an optional `:port`, comma separated. Nothing is allowed without it. Names are resolved once per run and the connections pinned to those addresses; link-local, cloud metadata, multicast and the node's own control plane are always refused. |
-| `RUSTYBIN_HARNESS_VERIFY_TARGETS` | `false` (`true` in hosted mode) | Before a run every target must serve this node's token at `/.well-known/rustybin-harness`. A gateway routing to the node passes, which also proves the route before any load is sent. |
+| `RUSTYBIN_HARNESS_VERIFY_TARGETS` | `false` (`true` in hosted mode) | Before a run every target must serve this node's token at `/.well-known/rustybin-harness`. A gateway routing to the node passes, which also proves the route before any load is sent. It proves the route, not the target owner's consent: that comes from `RUSTYBIN_HARNESS_TARGETS` and the caps. |
 | `RUSTYBIN_HARNESS_MAX_RATE` | `50000` | Requests per second per node (the sum of a scenario's layer peaks). |
 | `RUSTYBIN_HARNESS_MAX_INFLIGHT` | `10000` | Requests in flight per node, and at most what the descriptor limit allows (the engine raises the soft limit to the hard limit at startup and keeps 256 descriptors free; in `both` mode each request costs two). Beyond it requests are counted as `not_sent` and the run is flagged as saturated. |
 | `RUSTYBIN_HARNESS_MAX_DURATION` | `1h` | Longest run (`30m`, `2h`, up to `24h`). |
@@ -459,8 +479,10 @@ of a client node that went silent once that node's lease has surely expired, so 
 cluster never sends more than planned. Requests the old leader's own client part may
 have sent after its last checkpoint are reported as `unreported`, an upper bound,
 never dropped silently. A leader that does not hear a majority of the eligible nodes
-stops renewing leases, so the minority side of a partition stops sending; when it
-hears a newer term it steps down and follows the new leader as a member. A crashed
+stops renewing leases, so the minority side of a partition stops sending. A member's
+claim of a newer term never deposes it: it steps down only on a proven newer leader (an
+eligible member answering as leader at the control URL it joined with), then follows it
+as a member. A crashed
 leader that restarts is a new, empty node: start it as a standby (with
 `RUSTYBIN_HARNESS_JOIN` pointing at the leader or any eligible member, which names
 the leader) to rejoin the cluster. The node routes
@@ -651,6 +673,21 @@ The same engine runs from the command line: `rustybin harness run scenario.yaml
 validate` checks a scenario offline, `rustybin harness report` renders a saved report
 (text or JUnit). `GET /_rustybin/harness/schema` is the JSON Schema of a scenario.
 
+## Command line and saved tests
+
+The [`rustybin` command line](cli-guide.md) and `rustybin mcp-stdio` read these on the
+machine they run on, not on the instance; `RUSTYBIN_TEST_*` is read by the instance.
+
+| Variable | Used by |
+|---|---|
+| `RUSTYBIN_URL` (also `RUSTYBIN_SERVER`) | The instance a command calls when there is no `--url` (it wins over the profile; with neither, `http://localhost` on `RUSTYBIN_HTTP_PORT`, port 80 when unset). |
+| `RUSTYBIN_TOKEN`, else `RUSTYBIN_ADMIN_TOKEN` | The credential when there is no `--token`. Sent only to `RUSTYBIN_URL`'s instance or one on this machine; plain http to another host warns. |
+| `RUSTYBIN_PROFILE` | The profile of `rustybin login` to use (also for `rustybin mcp-stdio`). |
+| `RUSTYBIN_CONFIG_HOME` | Where `profiles.json` lives (else `$XDG_CONFIG_HOME/rustybin`, else `~/.config/rustybin`). |
+| `RUSTYBIN_MOCK_TOKEN` | A self-service manage token, when there is no `--mock-token`. |
+| `RUSTYBIN_MCP_URL` | `rustybin mcp-stdio`'s `--server` ([Management MCP](agent-mcp.md)). |
+| `RUSTYBIN_TEST_<NAME>` | On the instance: the value of a [saved test](saved-tests.md)'s `{{NAME}}` variable when the run does not pass it (only that prefix is ever read). |
+
 ## Development only
 
 | Variable | Used by |
@@ -677,12 +714,18 @@ Request-reachable state is always bounded. The main caps (normal mode / public m
 | JSON-RPC batch size | 100 | 20 |
 | gRPC message size, and the bytes of one `ClientStream` call | `RUSTYBIN_BODY_LIMIT` | same |
 | WebSocket message size / idle timeout / lifetime | 1 MiB / 5 min / 1 h | 256 KiB / 1 min / 10 min |
-| Request bins (total / per session / requests per bin / bytes per bin / TTL) | 200 / 200 / 100 / 1 MiB / 24 h | 100 / 10 / 50 / 256 KiB / 1 h |
-| Flaky counters (idle TTL 1 h) | 10000 | 2000 |
-| OAuth codes, refresh tokens, revocations / registered clients | 10000 / 1000 | 2000 / 200 |
+| Connections at once (the HTTP and HTTPS listeners together) / time to send a request head | 16384 / 30 s | same |
+| Request bins (total / per session / per address / requests per bin / bytes per bin / TTL) | 200 / 200 / 200 / 100 / 1 MiB / 24 h | 100 / 10 / 20 / 50 / 256 KiB / 1 h |
+| Flaky counters (idle TTL 1 h) / per address | 10000 / no cap | 2000 / 200 |
+| OAuth codes, refresh tokens, revocations / registered clients / registrations per address and minute | 10000 / 1000 / 100 | 2000 / 200 / 10 |
 | Mock LLM request records (1 h TTL) / choices `n` / embedding dimensions | 1000 / 8 / 4096 | 200 / 2 / 1536 |
 | MCP sessions (idle TTL) / long-lived streams | 1000 (30 min) / 1 h | 200 (10 min) / 5 min |
-| A2A tasks (total / per session / idle TTL) | 5000 / 1000 / 1 h | 2000 / 50 / 15 min |
+| A2A tasks (total / per session / idle TTL / bytes in all) | 5000 / 1000 / 1 h / 256 MiB | 2000 / 50 / 15 min / 64 MiB |
+| A2A message / task bytes | 256 KiB / 1 MiB | same |
+| A2A webhook sinks / notifications per sink (1 h TTL) | 500 / 50 | 100 / 10 (ids of 16 characters or more) |
 | OpenAPI mocks (mocks / spec size / operations / captured requests per mock / lifetime of API-created mocks) | 100 / 1 MiB / 500 / 200 / unlimited | 50 / 256 KiB / 200 / 50 / 24 h |
-| Inspector entries | `RUSTYBIN_INSPECTOR_CAPACITY` (max 10000) | same |
+| Spec compiles per minute for a caller without admin rights (per visit, key or address) | 30 | same |
+| MCP inspector check runs / relay calls at once | 2 / 16 | same |
+| Registry token mints per address and minute | 60 | 10 |
+| Inspector entries / captured bytes in all / captured headers per request | `RUSTYBIN_INSPECTOR_CAPACITY` (max 10000) / 64 MiB / 16 KiB | same |
 | Metrics series (`route` values / LLM token series) | 1024 / 256 (beyond: `other`) | same |

@@ -17,7 +17,7 @@ Both are off by default.
 ```bash
 RUSTYBIN_SHARED_MODE=true \
 RUSTYBIN_KEYS_FILE=/etc/rustybin/keys.json \
-RUSTYBIN_ADMIN_TOKEN=change-me \
+RUSTYBIN_ADMIN_TOKEN=change-me-to-a-long-random-value \
 rustybin
 ```
 

@@ -207,13 +207,20 @@ the instance only needs the public key. A token must have:
 |---|---|
 | `inspector` | read-only `/_rustybin/requests*` (the [request inspector](inspector.md) and its live feed) |
 | `console` | read-only `/_rustybin/*` (everything the console reads, metrics included) |
+| `harness` | the [load test](../harness.md) routes, runs and stops included (`console` reads them) |
 | `admin` | everything, including mutations; also accepted wherever the [admin token](sessions.md) is (health toggles, global resets) |
 
 A mutation (any method other than GET, HEAD or OPTIONS) needs the admin token or the
-`admin` scope; other scopes get `403` with `reason: insufficient_scope`. Two `POST`
-routes change nothing and are open to the `console` scope: previewing a mock spec
-(`/_rustybin/mocks/import`) and validating a body against a mock operation
-(`/_rustybin/mocks/{name}/operations/{op}/validate`).
+`admin` scope; other scopes get `403` with `reason: insufficient_scope`. A few `POST`
+routes change nothing on the instance and are open to the `console` scope: previewing
+a mock spec (`/_rustybin/mocks/import`), validating a body against a mock operation
+(`/_rustybin/mocks/{name}/operations/{op}/validate`), testing its rules
+(`.../rules/test`), the AI assist's read tasks (`/_rustybin/assist/run`), validating a
+`server.json` (`/_rustybin/registry/validate`), and the MCP inspector's relay and
+check runs (`/_rustybin/mcp-relay`, `/_rustybin/mcp-relay/fetch`,
+`/_rustybin/mcp-checks`). Without admin rights the relay and the checks send a server
+on another host read-only methods only (no `tools/call`: `403 admin_required`). The
+management MCP server (`/_rustybin/mcp`) checks each tool against the scope itself.
 
 ```hurl
 {{#include ../../examples/concepts/control_auth.hurl:console_token}}
@@ -330,6 +337,13 @@ repository manages. Reads and writes need the admin token or the `admin` scope:
 Everything the instance sends of its own goes through the [egress
 policy](../configuration.md#outbound-connections): an allowlist, pinned addresses,
 always-refused ranges and an audited decision per call.
+
+## Listeners
+
+The HTTP and HTTPS listeners close a connection whose request head has not arrived
+within 30 seconds (an idle keep-alive connection too), and hold at most 16,384
+connections at once between them; a connection over that is closed as it is
+accepted. Neither is configurable.
 
 ## Readiness
 

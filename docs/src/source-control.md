@@ -24,7 +24,8 @@ pinned (curl's resolve list for https, ssh's `HostName` for ssh, the host key st
 checked under the remote's name), follows no redirect, may use only the remote's
 transport (`protocol.allow=never` plus https, ssh or file), and runs with a cleared
 environment (`PATH` and its own variables, never the instance's secrets). Transport
-helpers (`name::address` remotes) are refused.
+helpers (`name::address` remotes) are refused, and so is a remote's user name that
+starts with `-` (it would reach git as an option).
 
 ## What a repository writer can do
 
@@ -44,17 +45,29 @@ Nothing more:
   `RUSTYBIN_CONFIG_FILE` is the operator's own and is still expanded as before.)
 - **Not secret values in answers.** A diff names a secret's reference or says "a
   value", never the value, and the same reference on both sides is no change.
-- **Not the sign-in.** Pruning never removes the console's password hash or user
-  name, so a document without them cannot bring back the default password; a public
-  instance refuses to clear the hash at all.
+- **Not where the instance sends requests.** `egress.allow`, `egress.allow_loopback`,
+  `assist.provider`, `assist.base_url` and `proxy.client_ip_header` are never changed
+  by a pulled document: a different value is a problem and the setting is kept as it
+  is (prune leaves them alone too; the same value is quiet, so an export round-trips).
+  A test in the document may name a gateway only when its saved copy already names
+  that one.
+- **Not the sign-in.** In password mode a document never changes the console's user
+  name or password hash (a change is a problem), and pruning never removes them, so a
+  document without them cannot bring back the default password; a public instance
+  refuses to clear the hash at all.
+- **Not other people's mocks.** A prune deletes only the instance's own mocks: never a
+  visitor's, an API key's or a running [gateway scenario](gateway-scenarios.md)'s, and
+  never a mock the document names but could not read (an entry with a typo included).
 - **Not the harness's credentials.** Saved scenarios are exported with their API keys
   and OAuth client secrets as `secret:stored`, filled back from the saved scenario of
-  the same name when applied; the files under the harness state directory are sealed
-  with the secrets key.
+  the same name when applied, and only when the scenario's targets (scheme, host, port,
+  `host` override) are those of the saved one; the files under the harness state
+  directory are sealed with the secrets key.
 
 A pull reads the document and every spec it names whole, up to their supported sizes
 (8 MiB for `rustybin.yaml`, the instance's spec limit for a spec): a larger file is an
-error of the pull, never a shortened file.
+error of the pull, never a shortened file. Each file's size is checked before it is
+read.
 
 ## Connect a repository
 
@@ -129,10 +142,13 @@ AI for one from the drift summary ([Bring your own AI](ai-assist.md)).
 
 `POST /_rustybin/git/pull` `{apply, dry_run, prune}` fetches and fast-forwards the
 working copy; with `apply` it applies the repository's document through [the
-configuration document's apply](configuration-as-code.md#apply-with-a-dry-run-first)
-(`spec:` files resolve in the working copy). A dry run reads the document from the
-remote branch without moving the working copy and answers the diff; `prune` makes the
-document the whole truth. The console shows the diff first, then **Pull and apply**.
+configuration document's apply](configuration-as-code.md#apply-with-a-dry-run-first).
+The document and its `spec:` files are read from one commit (`HEAD` after the pull),
+never from the working copy's files. A dry run reads the commit the pull would move
+to (the remote branch) without moving the working copy and answers the diff, so the
+preview and the apply read the same files; `prune` makes the document the whole
+truth. The apply runs on the compile pool: when it stays busy the pull answers `503`.
+The console shows the diff first, then **Pull and apply**.
 
 ```bash
 {{#include ../examples/config/source-control.sh:pull_dry_run}}
@@ -218,9 +234,9 @@ The same job from the API, the console, the command line, an agent and the confi
 
 | Surface | Where |
 |---|---|
-| API | `GET /_rustybin/git`, `POST /_rustybin/git/init | commit | push | pull | resolve`, `GET`, `POST /_rustybin/git/key`, `GET /_rustybin/git/history` |
+| API | `GET /_rustybin/git`, `POST /_rustybin/git/init`, `/commit`, `/push`, `/pull`, `/resolve`, `GET`, `POST /_rustybin/git/key`, `GET /_rustybin/git/history` |
 | Console | **Management, Source control**: the repository form, status, connect, commit and push, pull, resolve, the deploy key, history |
-| CLI | `rustybin git status | init | commit | push | pull | resolve | key | history` ([reference](cli.md#git)) |
+| CLI | `rustybin git status`, `init`, `commit`, `push`, `pull`, `resolve`, `key`, `history` ([reference](cli.md#git)) |
 | Management MCP | `git_status`, `git_init`, `git_commit`, `git_push`, `git_pull`, `git_resolve`, `git_deploy_key`; the prompt `backup_to_git` ([agent page](agent-mcp.md)) |
 | `rustybin.yaml` | Never: the `git.*` settings (the remote, the token) are not exported, so a document in a repository cannot point the instance elsewhere |
 | Environment | `RUSTYBIN_CONFIG_GIT`, `_REF`, `_PATH`, `_AUTH`, `_TOKEN`, `_AUTO`, `_REQUIRED` ([configuration](configuration.md#source-control)) |

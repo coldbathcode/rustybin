@@ -120,6 +120,6 @@ exits `1` when a test fails.
 |---|---|
 | API | `GET`, `POST /_rustybin/tests`, `GET`, `PUT`, `DELETE /_rustybin/tests/{name}`, `POST /_rustybin/tests/run` (`?format=junit`), `GET /_rustybin/tests/export` |
 | Console | **Live traffic**: **Save as test** on an entry; **Saved tests**: the list, **Run all** with variables, a test's run, the failures, **Export as Hurl**, delete |
-| CLI | `rustybin tests list | show | save | put | delete | run | export` (`run --junit`, `--var NAME=value`, `--var NAME=-` or `NAME=@file` for a credential) ([reference](cli.md#tests)) |
+| CLI | `rustybin tests list`, `show`, `save`, `put`, `delete`, `run`, `export` (`run --junit`, `--var NAME=value`, `--var NAME=-` or `NAME=@file` for a credential) ([reference](cli.md#tests)) |
 | Management MCP | `list_tests` (one, all, or `format: hurl`), `save_test`, `delete_test` (confirmed), `run_tests` (confirmed when a test goes through a gateway or sends a method other than `GET`, `HEAD` or `OPTIONS`; one run at a time; variables only from `RUSTYBIN_TEST_*`) ([agent page](agent-mcp.md)) |
 | `rustybin.yaml` | `tests:`, a list of tests as above ([instance as code](configuration-as-code.md)) |

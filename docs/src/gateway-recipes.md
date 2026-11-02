@@ -2,10 +2,11 @@
 
 Rustybin is designed to sit behind any API gateway, AI gateway, service mesh or
 load balancer. This page lists, per capability, what to configure in the gateway and
-what to look at in Rustybin to prove it worked. The first part is gateway-agnostic;
-a few vendor snippets follow at the end. For retries, rate limiting, credential
-injection, timeouts and caching, a [gateway scenario](gateway-scenarios.md) prepares
-the upstream and checks the result for you.
+what to look at in Rustybin to prove it worked. Every recipe is gateway-agnostic:
+your gateway's own documentation has the configuration syntax. For retries, rate
+limiting, credential injection, timeouts and caching, a
+[gateway scenario](gateway-scenarios.md) prepares the upstream and checks the result
+for you.
 
 General setup, whatever the gateway:
 
@@ -70,103 +71,6 @@ General setup, whatever the gateway:
 | MCP gateway with the customer's API | Per-tool authorization, rate limits and guardrails, credential injection (key or token exchange) | `/mock/<name>/_rustybin/mcp` ([MCP server of a mock](mocks/mcp.md)) | Tools named after their operations; the mock's Traffic tab shows each call with the injected credential and an MCP badge |
 | REST to MCP conversion | The gateway's conversion of a REST API into MCP tools | the mock's spec (`/mock/<name>/_rustybin/openapi.json`) as input, the mock as upstream | Compare with the mock's own MCP server: same data behind both |
 | Agent (A2A) gateway | Route per agent, authenticate, rewrite Agent Card URLs | `/a2a/*`, `/.well-known/agent-card.json` | Card URLs pointing at the gateway (with `RUSTYBIN_TRUST_FORWARD`) |
-
-## Vendor examples
-
-The snippets below are **illustrative examples, not executed in CI**. They show
-how the generic patterns map onto a few well-known gateways; check them against
-your gateway version's documentation. Rustybin itself stays vendor neutral.
-
-### Kong (declarative configuration)
-
-Route `/demo` to Rustybin with key authentication and a rate limit, then look at
-`/demo/anything` in the Live traffic view:
-
-```yaml
-_format_version: "3.0"
-services:
-  - name: rustybin
-    url: http://rustybin:80
-    routes:
-      - name: rustybin-demo
-        paths: ["/demo"]
-        strip_path: true
-    plugins:
-      - name: key-auth
-      - name: rate-limiting
-        config:
-          minute: 5
-          policy: local
-consumers:
-  - username: alice
-    keyauth_credentials:
-      - key: alice-key
-```
-
-### Envoy (static configuration)
-
-A listener on port 10000 forwarding to Rustybin with a 2 second timeout and
-retries on 5xx; try it with `/flaky/recover/2` and `/delay/5s`:
-
-```yaml
-static_resources:
-  listeners:
-    - name: listener_0
-      address:
-        socket_address: { address: 0.0.0.0, port_value: 10000 }
-      filter_chains:
-        - filters:
-            - name: envoy.filters.network.http_connection_manager
-              typed_config:
-                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-                stat_prefix: ingress_http
-                route_config:
-                  virtual_hosts:
-                    - name: rustybin
-                      domains: ["*"]
-                      routes:
-                        - match: { prefix: "/" }
-                          route:
-                            cluster: rustybin
-                            timeout: 2s
-                            retry_policy:
-                              retry_on: 5xx
-                              num_retries: 3
-                http_filters:
-                  - name: envoy.filters.http.router
-                    typed_config:
-                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
-  clusters:
-    - name: rustybin
-      type: STRICT_DNS
-      load_assignment:
-        cluster_name: rustybin
-        endpoints:
-          - lb_endpoints:
-              - endpoint:
-                  address:
-                    socket_address: { address: rustybin, port_value: 80 }
-```
-
-### Apache APISIX (Admin API)
-
-A route for `/echo` with round robin over two Rustybin instances (use `/identity`
-to see the distribution):
-
-```bash
-curl http://127.0.0.1:9180/apisix/admin/routes/rustybin -X PUT \
-  -H "X-API-KEY: $APISIX_ADMIN_KEY" \
-  -d '{
-    "uris": ["/echo", "/identity"],
-    "upstream": {
-      "type": "roundrobin",
-      "nodes": { "rustybin-01:80": 1, "rustybin-02:80": 1 }
-    }
-  }'
-```
-
-Tyk, KrakenD and other gateways follow the same patterns; no snippets are given for
-them here.
 
 ## On every surface
 

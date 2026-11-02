@@ -3,7 +3,8 @@
 Two request headers turn any route into a misbehaving upstream, so retry, timeout,
 circuit breaker and failover policies can be shown against the endpoint you were
 already demoing. They work on every route except the control plane
-(`/_rustybin/*`) and the web console (`/ui/*`).
+(`/_rustybin/*`), the web console (`/ui/*`) and the [dev portal](../portal.md)
+(`/portal/*`).
 
 | Header | Effect |
 |---|---|

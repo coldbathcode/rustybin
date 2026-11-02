@@ -72,8 +72,11 @@ example, on an alternative port if the first container is still running:
 
 ```bash
 docker run -d -p 8081:80 -e RUSTYBIN_INSTANCE_ID=demo-1 \
-  -e RUSTYBIN_ADMIN_TOKEN=change-me ghcr.io/coldbathcode/rustybin:latest
+  -e RUSTYBIN_ADMIN_TOKEN=change-me-to-a-long-random-value \
+  ghcr.io/coldbathcode/rustybin:latest
 ```
+
+An admin token shorter than 24 characters works but warns at startup.
 
 ## First requests
 

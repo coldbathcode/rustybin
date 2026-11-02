@@ -120,7 +120,9 @@ draws as you edit:
 ```
 
 Save a scenario by name next to the built-ins (validated; kept in
-`RUSTYBIN_HARNESS_STATE_DIR` when set):
+`RUSTYBIN_HARNESS_STATE_DIR` when set). Wherever a scenario is shown (the API, the
+management tools, a report), credential-looking header values, listed API keys, OAuth
+client secrets and secret-looking query values in its paths read `[redacted]`:
 
 ```hurl
 {{#include ../examples/harness/api.hurl:saved_scenario}}
@@ -514,7 +516,9 @@ share say (a re-split share is checked with the multipliers in force, and the sc
 clamps too); answers with absurd `Server-Timing` or `Retry-After` values cannot stall a
 run; a lease that stops a cluster's clients when the leader is gone; a kill switch; the `harness` control scope; and a fatal refusal to start in public mode or with
 self-service mocks. In a cluster, each node applies its own caps and allowlist to every
-assignment it receives.
+assignment it receives, and node-to-node calls (join, heartbeat, vote, announcement) refuse
+a URL with credentials and every link-local, cloud metadata or multicast address, checked
+at each connection, so a DNS change cannot turn a node into a way to reach one.
 
 ## Testing it
 
@@ -532,9 +536,9 @@ The same job from the API, the console, the command line, an agent and the confi
 
 | Surface | Where |
 |---|---|
-| API | `GET /_rustybin/harness`, `/schema`, `/scenarios`, `POST /_rustybin/harness/validate | preview | runs`, `GET`, `PATCH /_rustybin/harness/runs/{run}`, `/stop`, `/events`, `/report`, the cluster routes under `/_rustybin/harness/clusters` |
+| API | `GET /_rustybin/harness`, `/schema`, `/scenarios`, `POST /_rustybin/harness/validate \| preview \| runs`, `GET`, `PATCH /_rustybin/harness/runs/{run}`, `/stop`, `/events`, `/report`, the cluster routes under `/_rustybin/harness/clusters` |
 | Console | The **Harness** view (shown when harness mode is on): the builder generated from the schema, runs, live tuning, reports |
-| CLI | `rustybin harness validate | run | report` offline, the same with `--remote` and `status | scenarios | runs | show | tune | stop | events | clusters ...` against an instance ([reference](cli.md#harness)) |
-| Management MCP | `harness_status`, `list_scenarios`, `get_scenario`, `save_scenario`, `list_patterns`, `validate_scenario`, `preview_scenario`, `create_run`, `start_run`, `update_run`, `list_runs`, `get_run`, `stop_run`, `get_run_report`, `create_cluster` and the cluster tools; the prompt `load_test_gateway`; the resource `rustybin://harness.schema.json` ([agent page](agent-mcp.md#harness)) |
+| CLI | `rustybin harness validate \| run \| report` offline, the same with `--remote` and `status \| scenarios \| runs \| show \| tune \| stop \| stop-all \| events \| clusters ...` against an instance ([reference](cli.md#harness)) |
+| Management MCP | `harness_status`, `list_scenarios`, `get_scenario`, `save_scenario`, `list_patterns`, `validate_scenario`, `preview_scenario`, `create_run`, `start_run`, `update_run`, `list_runs`, `get_run`, `stop_run`, `get_run_report`, `harness_stop` (the kill switch), `create_cluster` and the cluster tools; the prompt `load_test_gateway`; the resource `rustybin://harness.schema.json` ([agent page](agent-mcp.md#harness)) |
 | `rustybin.yaml` | `harness:` (the saved scenarios) ([the whole instance as code](configuration-as-code.md)) |
 | Environment | `RUSTYBIN_HARNESS`, `_ROLES`, `_TARGETS`, `_MAX_RATE`, `_MAX_INFLIGHT`, `_MAX_DURATION`, `_VERIFY_TARGETS`, `_SCENARIO`, `_START`, `_REPORT`, `_EXIT` and the cluster variables ([configuration](configuration.md#harness-mode)) |

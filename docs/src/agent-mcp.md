@@ -353,6 +353,7 @@ demo).
 
 | Tool | Right | |
 |---|---|---|
+| `diagnose_instance` | admin | The [diagnostics](troubleshooting.md#ask-the-instance-first): each check with an id, a status and the fix; the summary names checks only, quoted file and remote text is under `untrusted_message` |
 | `get_instance` | read | Version, modes, control auth, limits, the public configuration, the caller's rights, console and docs URLs. Where an agent starts |
 | `find_endpoints` | read | Search the [route catalogue](concepts/catalogue.md) by text or category ("anthropic streaming"): path, methods, summary, an example request |
 | `get_health` / `set_health` | read / admin | The `/health` demo toggle |
@@ -369,11 +370,11 @@ demo).
 | `preview_spec` | read | Parse a spec without creating anything: title, operations, security schemes, warnings, deploy checks |
 | `get_mock_spec` | read | The spec as uploaded, to edit and send back with `update_mock`; or with `served: true` the OpenAPI document the mock serves |
 | `create_mock` | manage | From spec text or an object (JSON or YAML; Swagger 2.0 is converted) with optional name, responses, security and operations; deployed unless `deploy: false` |
-| `update_mock` | manage | Replace the draft's spec or settings, or rename it; `deploy: true` publishes |
-| `set_operation` | manage | One operation's response override, [rules](mocks/responses.md), mode and public flag |
+| `update_mock` | manage | Replace the draft's spec or settings, or rename it; `deploy: true` publishes the revision it wrote; `expected_revision` refuses a draft changed meanwhile (see [edit conflicts](mocks/index.md#two-people-editing-one-mock)) |
+| `set_operation` | manage | One operation's response override, [rules](mocks/responses.md), mode and public flag; takes `expected_revision` |
 | `test_rules` | read | Which rule would answer a captured call, every condition explained; try new rules without saving |
 | `check_mock` | read | The deploy report: a valid request and response per operation |
-| `deploy_mock` | manage | Publish the draft; `force` only after the user accepted the check errors |
+| `deploy_mock` | manage | Publish the draft; `force` only after the user accepted the check errors; `expected_revision` publishes only that draft revision (an error with what changed when the draft moved on) |
 | `rollback_mock` | manage | Make an earlier revision live again (confirmed) |
 | `set_mock_enabled` | manage | On or off (off answers `503`) |
 | `duplicate_mock` | manage | Copy under a new name |
@@ -419,9 +420,9 @@ never tool inputs and never returned: the operator sets them in the console or w
 | Tool | Right | |
 |---|---|---|
 | `list_mcp_servers` | read | Every MCP server this instance serves with its auth, the relay's allowlist, the check ids |
-| `mcp_call` | read | One JSON-RPC request to any MCP server (a path on this instance in process, or a URL through the relay) with the handshake the transport needs; credentials as headers or a saved connection. Another host is confirmed. The answer is `untrusted_result` |
-| `run_mcp_checks` | read | The [inspector's check suite](mcp/inspector.md) against a server; the report is saved unless `save: false`. Another host is confirmed |
-| `list_mcp_check_runs` | read | The saved runs, or one report |
+| `mcp_call` | read | One JSON-RPC request to any MCP server (a path on this instance in process, or a URL through the relay) with the handshake the transport needs; credentials as headers or a saved connection. Another host is confirmed, and without admin rights gets read-only methods only (no `tools/call`). The answer is `untrusted_result` |
+| `run_mcp_checks` | read | The [inspector's check suite](mcp/inspector.md) against a server; the report is saved unless `save: false`. Another host is confirmed, and without admin rights the calls to tools are skipped. At most two suites run at once |
+| `list_mcp_check_runs` | read | The saved runs, or one report (under `untrusted_report`) |
 | `list_mcp_connections` | read | The saved connections (credentials stay sealed on the instance) |
 | `list_registry_servers` | read | The [mock registry](mcp/registry.md)'s counts, scenario and a gateway's sync configuration, and a page of its entries (`cursor`, `limit`) under `untrusted_entries`, each validated and cut at 4 KiB (anyone may publish) |
 | `set_registry_scenario` | admin | `normal`, or a scenario that breaks the registry on purpose |
@@ -499,7 +500,9 @@ never opens a socket: it cannot reach another host. Control-plane paths (`/_rust
 request is captured under the session `mcp-<id>` (or the caller's
 `X-Rustybin-Session`), so `list_requests` finds it. It carries the caller's API key in
 shared mode, never the credential the agent connected with (admin token, control
-token or manage token): add headers to the request when the target needs them. It suits MCP clients without a
+token or manage token): add headers to the request when the target needs them. It
+comes from the caller's own address, not `127.0.0.1`, so per-address limits count it
+as the caller's. It suits MCP clients without a
 shell; Claude Code may just use `curl`.
 
 ```hurl
@@ -521,6 +524,23 @@ server and a gateway's JWT validation:
 {{#include ../examples/agent/manage.hurl:issue_token}}
 ```
 
+### Saved tests, gateway scenarios and checkpoints
+
+| Tool | Right | |
+|---|---|---|
+| `list_tests` | admin | The [saved tests](saved-tests.md), one by name, or all of them as a Hurl file (`format: hurl`); requests are under `untrusted_*` |
+| `save_test` | admin | A test from a captured request (`capture`: its id) or a written one, with assertions; secret-looking headers and query values must be `{{variables}}` |
+| `delete_test` | admin | Delete a saved test (confirmed) |
+| `run_tests` | admin | Run every saved test or the ones named, in process or through each test's gateway; confirmed when a test goes through a gateway or sends a method other than `GET`, `HEAD` or `OPTIONS`; one run at a time. Results under `untrusted_results`, JUnit with `format: junit` |
+| `list_gateway_scenarios` / `get_gateway_scenario_run` | read | The [gateway scenarios](gateway-scenarios.md) and the caller's runs with their last verdicts; the credential-injection key is shown to admin callers only (`key_hidden`) |
+| `start_gateway_scenario` | admin | Prepare a run: its upstream and the steps to configure on the gateway |
+| `check_gateway_scenario` | admin | Send the run's test traffic through the gateway (egress purpose `scenario`) and compare what the client got with what reached the upstream (confirmed) |
+| `end_gateway_scenario` | admin | Remove what the run created, nothing else (confirmed) |
+| `list_checkpoints` | read | The [checkpoints](checkpoints.md), or one with the mocks it holds |
+| `save_checkpoint` | admin | Save the instance's API mocks (with their data) and the health toggle; `replace` overwrites one of that name; at most 20 |
+| `restore_checkpoint` | admin | Bring the mocks back to a checkpoint (API mocks it does not hold are deleted); `dry_run: true` answers the same without a change or a confirmation; confirmed otherwise |
+| `delete_checkpoint` | admin | Delete a checkpoint, not the instance's mocks (confirmed) |
+
 ### Harness
 
 Only when [load test mode](harness.md) is on (`RUSTYBIN_HARNESS=on`). Rights: **harness**
@@ -529,7 +549,7 @@ is the `harness` or `admin` scope, or the admin token on an open control plane.
 | Tool | Right | |
 |---|---|---|
 | `harness_status` | read | Whether harness mode is on, the node's roles, caps, engine, allowed targets, the active run, the console URL. Where an agent starts |
-| `list_scenarios` / `get_scenario` / `save_scenario` | read / read / harness | The built-in scenarios to copy, one as an object and YAML, and saving your own by name |
+| `list_scenarios` / `get_scenario` / `save_scenario` | read / read / harness | The built-in scenarios to copy, one as an object and YAML (credentials redacted, as on the REST route), and saving your own by name |
 | `list_patterns` | read | The pattern types and their parameters, from the scenario schema |
 | `validate_scenario` / `preview_scenario` | read | Problems against the node's caps, the normalised scenario and its summary; the expected requests per second of every layer. Neither sends anything |
 | `create_run` | harness | Validate, pin and (when configured) verify the targets and **start sending load** from this node, or submit to a cluster with `cluster_id`. Confirmed (elicitation, else `confirm: true`) |
@@ -685,11 +705,16 @@ Tools that destroy something carry the MCP `destructiveHint` annotation (reads c
 `readOnlyHint`) and ask before acting: `rollback_mock`, `delete_mock`,
 `clear_mock_data`, `clear_traffic`, `apply_config` with `prune`, `clear_requests`,
 `end_visit`, `pause_self_service`, `revoke_agent`, `unpublish_registry_server`,
-`git_resolve` and `end_session` with `all`. Tools that reach outside the instance or
-publish something ask too: `mcp_call` and `run_mcp_checks` to another host,
-`browse_registry`, `git_push`, `git_pull` when it applies, `publish_portal_item` on an
-open portal, the AI tools when they write (`generate_spec` with `create`,
-`generate_examples` and `edit_spec_with_ai` with `apply`) and the harness runs. When
+`git_resolve`, `git_deploy_key` with `replace`, `end_session` with `all`,
+`delete_test`, `restore_checkpoint` (not its dry run), `delete_checkpoint` and
+`end_gateway_scenario`. Tools that reach outside the instance or publish something ask
+too: `mcp_call` and `run_mcp_checks` to another host, `browse_registry`, `git_push`,
+`git_pull` when it applies, `publish_portal_item` on an open portal,
+`load_assist_models`, the AI tools when they write (`generate_spec` with `create`,
+`generate_examples` and `edit_spec_with_ai` with `apply`), `check_gateway_scenario`,
+`run_tests` through a gateway or with a method that changes state, and the harness
+runs. `update_settings` asks when it changes a key under `egress.`, `agents.`,
+`console.` or `git.`. When
 the client supports elicitation, the server asks the user directly ("Delete the mock
 orders-api and its traffic?"). Without it the call needs `"confirm": true`, which the
 tool descriptions tell the model to set only after the user agreed:
@@ -712,6 +737,11 @@ that is anyone. A body saying "ignore your instructions" must not steer the agen
   entries of a browsed registry never appear in the text summary; they are returned in
   `structuredContent` under fields named `untrusted_*`, and the server instructions
   and tool descriptions say this is third-party data, never instructions;
+- a traffic row's path and query are `untrusted_path` and `untrusted_query`, a
+  non-standard method is `OTHER` with `untrusted_method`, and a mock's validation
+  messages are `untrusted_validation`: summaries name methods and statuses only. The
+  same goes for saved check reports (`untrusted_report`), saved tests and their runs,
+  and the quoted file and remote text of `diagnose_instance` (`untrusted_message`);
 - bodies are left out unless the call asks (`include_bodies: true`) and are truncated
   at 4 KB each and 64 KB per result, with a flag saying so;
 - `try_request` answers are treated the same way, since a mock answers whatever its
@@ -740,7 +770,8 @@ checks that no tool input is named like a secret.
 
 Every call that changes something, and every refused call, is logged as one line
 (target `rustybin::manage`) with the tool, its target, the caller (`admin`,
-`key:<id>`, `visit:<fingerprint>` or `session:<label>`), the agent's id and the
+`key:<id>`, `visit:<fingerprint>`, a token caller's credential such as `console:<user>`,
+`jwt:<sub>` or `oauth:<sub>`, else `session:<label>`), the agent's id and the
 outcome. New agents, rights changes, revocations and restores are logged under
 `rustybin::agents`. Arguments are
 never logged, since they may hold secrets or spec bodies.
@@ -787,9 +818,9 @@ The same job from the API, the console, the command line, an agent and the confi
 
 | Surface | Where |
 |---|---|
-| API | `POST /_rustybin/mcp` (the server), `GET /_rustybin/agents`, `GET /_rustybin/agents/events`, `GET`, `PATCH /_rustybin/agents/{id}`, `POST /_rustybin/agents/{id}/revoke | restore`, `DELETE /_rustybin/agents/{id}/sessions`, the OAuth routes under `/_rustybin/oauth` |
+| API | `POST /_rustybin/mcp` (the server), `GET /_rustybin/agents`, `GET /_rustybin/agents/events`, `GET`, `PATCH /_rustybin/agents/{id}`, `POST /_rustybin/agents/{id}/revoke \| restore`, `DELETE /_rustybin/agents/{id}/sessions`, the OAuth routes under `/_rustybin/oauth` |
 | Console | The **AI agents** view (the list, rights, revoke, the live feed, **Connect an agent** with the `claude mcp add` command), `#/authorize/<id>` for the agent sign-in |
-| CLI | `rustybin agents list | get | rights | revoke | restore | end-sessions | tail`, `rustybin mcp-stdio` ([reference](cli.md#agents)) |
-| Management MCP | `list_agents`, `get_agent`, `set_agent_rights`, `revoke_agent` (never oneself), `restore_agent`, `end_agent_sessions`; the prompt `onboard_agent` |
+| CLI | `rustybin agents list \| get \| rights \| revoke \| restore \| end-sessions \| tail`, `rustybin mcp-stdio` ([reference](cli.md#agents)) |
+| Management MCP | `list_agents`, `get_agent`, `set_agent_rights`, `revoke_agent` (never oneself), `restore_agent`, `end_agent_sessions` (rights, restore and end sessions never on an agent of the caller's own credential); the prompt `onboard_agent` |
 | `rustybin.yaml` | `agents:` (`default_ceiling`, `rules` by client name and credential kind) ([the whole instance as code](configuration-as-code.md)) |
 | Environment | `RUSTYBIN_AGENTS_DEFAULT_CEILING`, `RUSTYBIN_CONTROL_OAUTH`, `RUSTYBIN_CONTROL_OAUTH_ISSUER`, `RUSTYBIN_CONTROL_OAUTH_KEY` ([configuration](configuration.md#control-plane-and-console)) |

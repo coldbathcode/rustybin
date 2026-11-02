@@ -31,4 +31,4 @@ Streaming (SSE), Redirects & Cookies, Info & Random, Auth: Basic & API Key, Auth
 HMAC, Auth: JWT, Auth: OIDC Provider, Auth: mTLS, AI: OpenAI-compatible, AI:
 Anthropic-compatible, AI: Mock LLM, AI: Guardrails, MCP Server, A2A Agents, GraphQL,
 Orchestration, SOAP / XML, WebSocket, Reliability Testing, Request Bin & Webhooks,
-Health & Identity, Control Plane, Docs & Exports.
+Mock APIs (OpenAPI), Health & Identity, Harness, Control Plane, Docs & Exports.

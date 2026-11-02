@@ -49,7 +49,7 @@ The route is admin only; a console token without the admin scope gets `403`:
 | API | `GET /_rustybin/diagnostics` (admin) |
 | Console | **Management, Diagnostics**: one row per check with its fix, **Run again** |
 | CLI | `rustybin doctor` (`--json` for the report; exit `1` on a `fail`) ([reference](cli.md#doctor)) |
-| Management MCP | `diagnose_instance` (read only, admin) ([agent page](agent-mcp.md)) |
+| Management MCP | `diagnose_instance` (read only, admin; the messages of `mock_load_errors` and `source_control` quote file and remote text, so they come as `untrusted_message`) ([agent page](agent-mcp.md)) |
 | `rustybin.yaml` | Nothing to configure: the checks read the instance's state |
 
 ## I cannot connect to the instance
@@ -145,8 +145,9 @@ keep it in [source control](source-control.md). See
 - **404:** check the mock name and the spec's server prefix. The built-in sample
   is `/mock/petstore/v1/pets/42`, including `/v1`. An unknown operation is also 404;
   the problem response includes the base path.
-- **503:** check whether the mock is disabled or has a draft that has never been
-  deployed. In the console's **Mock APIs**, inspect its state and deploy report.
+- **503:** check whether the mock is disabled, has a draft that has never been
+  deployed, or comes from a file that did not load (the answer has `load_error`). In
+  the console's **Mock APIs**, inspect its state and deploy report.
 - **Petstore is missing:** the sample is off by default in public mode and can be
   disabled with `RUSTYBIN_MOCKS_SAMPLE=false`.
 
