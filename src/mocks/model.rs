@@ -369,8 +369,10 @@ fn check_response(
     limits: &SettingsLimits,
 ) -> Result<(), String> {
     if let Some(s) = r.status {
-        if !(100..=599).contains(&s) {
-            return Err(format!("{where_}: status {s} is not between 100 and 599"));
+        if !(200..=599).contains(&s) {
+            return Err(format!(
+                "{where_}: status {s} is not between 200 and 599 (a 1xx is not a final answer)"
+            ));
         }
     }
     if r.headers.len() > MAX_HEADERS {

@@ -14,6 +14,10 @@ use super::schema::{self, Direction, GenOptions};
 use super::spec::{Media, Operation, ResponseDef};
 use super::state::MockState;
 
+/// Statuses a request may ask for: a 1xx cannot be a final answer (the
+/// server would turn it into a 500 and log an error per request).
+const FINAL_STATUSES: std::ops::RangeInclusive<u16> = 200..=599;
+
 /// Header alternative to `Prefer: code=...`.
 pub const STATUS_HEADER: &str = "x-rustybin-mock-status";
 /// Header alternative to `Prefer: example=...`.
@@ -93,7 +97,7 @@ fn preference(headers: &HeaderMap) -> Preference {
             let key = kv.next().unwrap_or("").trim().to_ascii_lowercase();
             let val = kv.next().unwrap_or("").trim().trim_matches('"');
             match key.as_str() {
-                "code" => p.code = val.parse().ok().filter(|c| (100..=599).contains(c)),
+                "code" => p.code = val.parse().ok().filter(|c| FINAL_STATUSES.contains(c)),
                 "example" if !val.is_empty() => p.example = Some(val.to_string()),
                 "dynamic" => p.dynamic = Some(val.eq_ignore_ascii_case("true")),
                 _ => {}
@@ -107,7 +111,7 @@ fn preference(headers: &HeaderMap) -> Preference {
             .map(str::trim)
     };
     if let Some(code) = header(STATUS_HEADER).and_then(|v| v.parse().ok()) {
-        if (100..=599).contains(&code) {
+        if FINAL_STATUSES.contains(&code) {
             p.code = Some(code);
         }
     }

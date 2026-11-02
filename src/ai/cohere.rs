@@ -66,10 +66,12 @@ async fn rerank(Extension(ctx): Extension<AiCtx>, raw: Bytes) -> Response {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let texts: Vec<String> = docs.iter().map(doc_text).collect();
+    // The query is prepared once (it was re-read for every document).
+    let prepared = embed::Query::new(query);
     let mut scored: Vec<(usize, f64)> = texts
         .iter()
         .enumerate()
-        .map(|(i, t)| (i, embed::relevance(query, t)))
+        .map(|(i, t)| (i, prepared.relevance(t)))
         .collect();
     scored.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
@@ -289,6 +291,27 @@ pub fn openapi_paths() -> Value {
 mod tests {
     use super::super::test_util::*;
     use super::*;
+
+    #[tokio::test]
+    async fn a_large_query_is_prepared_once() {
+        // A 500 KB query against 256 documents was re-read per document.
+        let query = "word ".repeat(100_000);
+        let docs: Vec<String> = (0..256).map(|i| format!("document {i}")).collect();
+        let started = std::time::Instant::now();
+        let (s, _, _) = send(
+            &app(),
+            "/ai/v1/rerank",
+            &json!({ "query": query, "documents": docs }),
+            &[],
+        )
+        .await;
+        assert_eq!(s, 200);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
 
     #[tokio::test]
     async fn rerank_orders_and_limits() {

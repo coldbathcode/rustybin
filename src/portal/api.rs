@@ -270,7 +270,20 @@ async fn catalog_handler(
     let entry = match state.portal.cached(&fingerprint) {
         Some(c) => c,
         None => {
-            let body = serde_json::to_vec(&items::catalog_json(&state, &ctx)).unwrap_or_default();
+            if !state.portal.allow_render() {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(axum::http::header::RETRY_AFTER, "10")],
+                    Json(json!({ "error": "the catalogue is being rendered too often: try again shortly" })),
+                )
+                    .into_response();
+            }
+            let render_state = state.clone();
+            let body = tokio::task::spawn_blocking(move || {
+                serde_json::to_vec(&items::catalog_json(&render_state, &ctx)).unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
             let etag = crate::ui::etag_of(&body);
             let c = Arc::new(Cached {
                 fingerprint,

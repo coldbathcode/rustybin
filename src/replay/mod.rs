@@ -183,6 +183,21 @@ impl SavedTest {
         if !r.path.starts_with('/') || r.path.starts_with("//") {
             return Err("request.path: a path starting with / (never a URL)".into());
         }
+        // The path and gateway go into request lines and the Hurl export:
+        // no whitespace or control characters.
+        let unsafe_char = |c: char| c.is_whitespace() || c.is_control();
+        if r.path.chars().any(unsafe_char) {
+            return Err(
+                "request.path: no spaces or control characters (percent-encode them)".into(),
+            );
+        }
+        if self
+            .gateway
+            .as_deref()
+            .is_some_and(|g| g.chars().any(unsafe_char))
+        {
+            return Err("gateway: no spaces or control characters".into());
+        }
         let path_only = r.path.split('?').next().unwrap_or("");
         if crate::control::is_control_path(path_only) {
             return Err(

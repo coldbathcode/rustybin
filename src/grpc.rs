@@ -42,6 +42,10 @@ pub const DEFAULT_STREAM_COUNT: u32 = 3;
 pub const MAX_STREAM_COUNT: u32 = 100;
 /// Maximum messages accepted by ClientStream / BidiStream per call.
 pub const MAX_STREAM_MESSAGES: u32 = 1000;
+/// How long a client or bidi stream waits for the client's next message.
+pub const STREAM_IDLE: Duration = Duration::from_secs(60);
+/// How long a client or bidi stream lives at most.
+pub const STREAM_LIFETIME: Duration = Duration::from_secs(600);
 
 #[derive(Clone)]
 pub struct EchoSvc {
@@ -168,7 +172,27 @@ impl EchoService for EchoSvc {
         let mut stream = request.into_inner();
         let mut messages = Vec::new();
         let mut bytes = 0usize;
-        while let Some(req) = stream.next().await {
+        let deadline = tokio::time::Instant::now() + STREAM_LIFETIME;
+        loop {
+            // A client that stops sending (or never ends the stream) cannot
+            // hold the call open: an idle and a lifetime limit.
+            let next = tokio::time::timeout(STREAM_IDLE, stream.next());
+            let req = match tokio::time::timeout_at(deadline, next).await {
+                Ok(Ok(Some(req))) => req,
+                Ok(Ok(None)) => break,
+                Ok(Err(_)) => {
+                    return Err(Status::deadline_exceeded(format!(
+                        "ClientStream: no message for {} s",
+                        STREAM_IDLE.as_secs()
+                    )))
+                }
+                Err(_) => {
+                    return Err(Status::deadline_exceeded(format!(
+                        "ClientStream: open for more than {} s",
+                        STREAM_LIFETIME.as_secs()
+                    )))
+                }
+            };
             if messages.len() as u32 >= MAX_STREAM_MESSAGES {
                 return Err(Status::resource_exhausted(format!(
                     "ClientStream accepts at most {MAX_STREAM_MESSAGES} messages"
@@ -201,7 +225,17 @@ impl EchoService for EchoSvc {
         let mut stream = request.into_inner();
         let out = async_stream::stream! {
             let mut index = 0u32;
-            while let Some(req) = stream.next().await {
+            let deadline = tokio::time::Instant::now() + STREAM_LIFETIME;
+            loop {
+                let next = tokio::time::timeout(STREAM_IDLE, stream.next());
+                let req = match tokio::time::timeout_at(deadline, next).await {
+                    Ok(Ok(Some(req))) => req,
+                    Ok(Ok(None)) => break,
+                    Ok(Err(_)) | Err(_) => {
+                        yield Err(Status::deadline_exceeded("BidiStream: idle or open too long"));
+                        break;
+                    }
+                };
                 if index >= MAX_STREAM_MESSAGES {
                     yield Err(Status::resource_exhausted(format!(
                         "BidiStream accepts at most {MAX_STREAM_MESSAGES} messages"

@@ -155,7 +155,7 @@ fn echo_params(v: &mut Value, echo: &[(String, String)], schema: &Value, root: &
         let Some((_, raw)) = source else {
             continue;
         };
-        let prop_schema = property_schema(schema, &key, root, 0).unwrap_or(Value::Null);
+        let prop_schema = property_schema(schema, &key, root).unwrap_or(Value::Null);
         let coerced = coerce(raw, &prop_schema, root);
         if validate(&coerced, &prop_schema, root, Direction::Response).is_empty() {
             obj.insert(key, coerced);
@@ -163,11 +163,30 @@ fn echo_params(v: &mut Value, echo: &[(String, String)], schema: &Value, root: &
     }
 }
 
+/// Schema nodes one `allOf` walk visits ([`property_schema`],
+/// [`declared_properties`]); each `$ref` is followed once per walk, so a
+/// spec whose levels each reference the next many times stays linear.
+const ALLOF_WALK_NODES: usize = 2_000;
+
 /// The schema of property `name` of an object schema (through `$ref` / `allOf`).
-fn property_schema(schema: &Value, name: &str, root: &Value, depth: usize) -> Option<Value> {
-    if depth > 8 {
+fn property_schema(schema: &Value, name: &str, root: &Value) -> Option<Value> {
+    let mut seen = Vec::new();
+    let mut budget = ALLOF_WALK_NODES;
+    property_schema_in(schema, name, root, 0, &mut seen, &mut budget)
+}
+
+fn property_schema_in(
+    schema: &Value,
+    name: &str,
+    root: &Value,
+    depth: usize,
+    seen: &mut Vec<String>,
+    budget: &mut usize,
+) -> Option<Value> {
+    if depth > 8 || *budget == 0 || !first_visit(schema, seen) {
         return None;
     }
+    *budget -= 1;
     let schema = deref(schema, root);
     if let Some(p) = schema.pointer(&format!("/properties/{}", escape_pointer(name))) {
         return Some(p.clone());
@@ -176,7 +195,19 @@ fn property_schema(schema: &Value, name: &str, root: &Value, depth: usize) -> Op
         .get("allOf")
         .and_then(Value::as_array)?
         .iter()
-        .find_map(|s| property_schema(s, name, root, depth + 1))
+        .find_map(|s| property_schema_in(s, name, root, depth + 1, seen, budget))
+}
+
+/// False when `schema` is a `$ref` this walk already followed.
+fn first_visit(schema: &Value, seen: &mut Vec<String>) -> bool {
+    match schema.get("$ref").and_then(Value::as_str) {
+        Some(r) if seen.iter().any(|s| s == r) => false,
+        Some(r) => {
+            seen.push(r.to_string());
+            true
+        }
+        None => true,
+    }
 }
 
 /// Follow `$ref`s (bounded); unresolvable refs give `{}`.
@@ -737,10 +768,24 @@ fn merge_schema(parent: &mut Map<String, Value>, branch: &Value) {
 }
 
 /// Property names declared by a schema and its `allOf` parts.
-fn declared_properties(schema: &Value, root: &Value, out: &mut Vec<String>, depth: usize) {
-    if depth > 8 {
+fn declared_properties(schema: &Value, root: &Value, out: &mut Vec<String>) {
+    let mut seen = Vec::new();
+    let mut budget = ALLOF_WALK_NODES;
+    declared_properties_in(schema, root, out, 0, &mut seen, &mut budget);
+}
+
+fn declared_properties_in(
+    schema: &Value,
+    root: &Value,
+    out: &mut Vec<String>,
+    depth: usize,
+    seen: &mut Vec<String>,
+    budget: &mut usize,
+) {
+    if depth > 8 || *budget == 0 || !first_visit(schema, seen) {
         return;
     }
+    *budget -= 1;
     let schema = deref(schema, root);
     if let Some(props) = schema.get("properties").and_then(Value::as_object) {
         for k in props.keys() {
@@ -751,7 +796,7 @@ fn declared_properties(schema: &Value, root: &Value, out: &mut Vec<String>, dept
     }
     if let Some(parts) = schema.get("allOf").and_then(Value::as_array) {
         for p in parts {
-            declared_properties(p, root, out, depth + 1);
+            declared_properties_in(p, root, out, depth + 1, seen, budget);
         }
     }
 }
@@ -920,13 +965,15 @@ pub fn pattern_string(pattern: &str) -> Option<String> {
     re.is_match(&out).then_some(out)
 }
 
-/// Patterns the shared cache keeps (least recently used out).
-pub const REGEX_CACHE: usize = 512;
+/// Patterns the shared cache keeps (least recently used out): with
+/// [`REGEX_SIZE_LIMIT`] for the program and as much for the lazy DFA, the
+/// cache holds tens of MB at worst, whatever visitors send.
+pub const REGEX_CACHE: usize = 128;
 /// Patterns one revision pins (compiled with the revision, never evicted
 /// while it lives).
 pub const MAX_PINNED_PER_REVISION: usize = 64;
 /// Compiled size limit of a pattern (the shared cache).
-const REGEX_SIZE_LIMIT: usize = 1 << 20;
+const REGEX_SIZE_LIMIT: usize = 256 * 1024;
 /// Compiled size limit of a pinned pattern (larger ones use the cache).
 const PINNED_SIZE_LIMIT: usize = 64 * 1024;
 
@@ -957,7 +1004,7 @@ fn pinned() -> &'static Pinned {
 fn build_regex(pattern: &str, size_limit: usize) -> Option<Regex> {
     regex::RegexBuilder::new(pattern)
         .size_limit(size_limit)
-        .dfa_size_limit(size_limit.max(256 * 1024))
+        .dfa_size_limit(size_limit.clamp(64 * 1024, 256 * 1024))
         .build()
         .ok()
 }
@@ -1434,7 +1481,7 @@ impl Validator<'_> {
         }
         if let Some(Value::Array(parts)) = obj.get("allOf") {
             let mut names = Vec::new();
-            declared_properties(schema, self.root, &mut names, 0);
+            declared_properties(schema, self.root, &mut names);
             let saved = self.allof_props.replace((ptr.to_string(), names));
             for p in parts {
                 self.check(value, p, ptr, depth + 1);

@@ -98,19 +98,43 @@ pub fn to_base64(v: &[f32]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-/// Deterministic relevance of `doc` to `query` in 0..=1: query-word overlap
-/// blended with embedding similarity.
+/// The most of a query that relevance scoring reads.
+pub const MAX_QUERY_CHARS: usize = 8 * 1024;
+
+/// A query prepared once for scoring many documents (its words and
+/// embedding), read up to [`MAX_QUERY_CHARS`].
+pub struct Query {
+    words: Vec<String>,
+    embedding: Vec<f32>,
+}
+
+impl Query {
+    pub fn new(query: &str) -> Self {
+        let query: String = query.chars().take(MAX_QUERY_CHARS).collect();
+        Self {
+            words: super::engine::words(&query),
+            embedding: embed(&query, 256),
+        }
+    }
+
+    /// Deterministic relevance of `doc` in 0..=1: query-word overlap
+    /// blended with embedding similarity.
+    pub fn relevance(&self, doc: &str) -> f64 {
+        let d: std::collections::HashSet<String> = super::engine::words(doc).into_iter().collect();
+        let overlap = if self.words.is_empty() {
+            0.0
+        } else {
+            self.words.iter().filter(|w| d.contains(*w)).count() as f64 / self.words.len() as f64
+        };
+        let cos = f64::from(cosine(&self.embedding, &embed(doc, 256))).max(0.0);
+        let score = 0.7 * overlap + 0.3 * cos;
+        (score.clamp(0.0, 1.0) * 1_000_000.0).round() / 1_000_000.0
+    }
+}
+
+/// [`Query::relevance`] for one document.
 pub fn relevance(query: &str, doc: &str) -> f64 {
-    let q = super::engine::words(query);
-    let d: std::collections::HashSet<String> = super::engine::words(doc).into_iter().collect();
-    let overlap = if q.is_empty() {
-        0.0
-    } else {
-        q.iter().filter(|w| d.contains(*w)).count() as f64 / q.len() as f64
-    };
-    let cos = f64::from(cosine(&embed(query, 256), &embed(doc, 256))).max(0.0);
-    let score = 0.7 * overlap + 0.3 * cos;
-    (score.clamp(0.0, 1.0) * 1_000_000.0).round() / 1_000_000.0
+    Query::new(query).relevance(doc)
 }
 
 #[cfg(test)]

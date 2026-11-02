@@ -136,8 +136,7 @@ fn prompt(inputs: &Value) -> Result<String, String> {
                 .unwrap_or_default()
         ));
         for (status, s) in pairs {
-            let inlined =
-                crate::mocks::service::inline_refs(s, &compiled.spec.root, &mut Vec::new(), 0);
+            let inlined = crate::mocks::service::inline_refs(s, &compiled.spec.root);
             out.push_str(&format!(
                 "  {status}: {}\n",
                 crate::assist::task::truncate_bytes(&inlined.to_string(), 6 * 1024)

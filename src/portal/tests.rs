@@ -996,3 +996,42 @@ fn embedded_portal_files() {
         );
     }
 }
+
+#[tokio::test]
+async fn rotating_host_names_cannot_render_the_catalogue_without_bound() {
+    let (app, _) = app();
+    let (status, _, _) = call(
+        &app,
+        "PUT",
+        "/_rustybin/portal/items/llm",
+        &[],
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let mut refused = 0;
+    for i in 0..(crate::portal::MAX_RENDERS_PER_MINUTE + 5) {
+        let req = Request::get("/portal/api/catalog")
+            .header("host", format!("h{i}.example.com"))
+            .body(Body::empty())
+            .expect("req");
+        let resp = app.clone().oneshot(req).await.expect("resp");
+        if resp.status() == StatusCode::SERVICE_UNAVAILABLE {
+            assert!(resp.headers().contains_key("retry-after"));
+            refused += 1;
+        }
+    }
+    assert!(refused >= 5, "{refused} refused");
+    // A cached catalogue (the last one rendered) is still served.
+    let req = Request::get("/portal/api/catalog")
+        .header(
+            "host",
+            format!("h{}.example.com", crate::portal::MAX_RENDERS_PER_MINUTE - 1),
+        )
+        .body(Body::empty())
+        .expect("req");
+    assert_eq!(
+        app.clone().oneshot(req).await.expect("resp").status(),
+        StatusCode::OK
+    );
+}

@@ -961,3 +961,6 @@ mod tests;
 
 #[cfg(test)]
 mod revision_tests;
+
+#[cfg(test)]
+mod fanout_tests;

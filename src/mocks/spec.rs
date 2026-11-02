@@ -788,6 +788,15 @@ fn expand_server_url(url: &str, vars: &Value) -> Result<String, String> {
 /// Why a path template cannot be served: a placeholder named twice, or more
 /// than `MAX_PATH_PARAMS` of them.
 fn path_template_problem(path: &str) -> Option<String> {
+    // A path goes into URLs, request lines and exported collections: no
+    // whitespace or control characters (a newline would add a request to a
+    // downloaded Hurl file).
+    if path
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    {
+        return Some("contains whitespace or a control character".into());
+    }
     let names = template_params(path);
     if names.len() > MAX_PATH_PARAMS {
         return Some(format!("has more than {MAX_PATH_PARAMS} path parameters"));

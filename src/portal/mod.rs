@@ -540,7 +540,15 @@ pub struct Portal {
     /// Bumped on every publish and unpublish (part of the cache key).
     generation: AtomicU64,
     cache: Mutex<VecDeque<Arc<Cached>>>,
+    /// When the catalogue was last rendered (cache misses), for
+    /// [`MAX_RENDERS_PER_MINUTE`].
+    renders: Mutex<VecDeque<std::time::Instant>>,
 }
+
+/// Catalogue renders (cache misses) per minute, every caller together: the
+/// cache key includes the request's base URL, so rotating `Host` would
+/// otherwise render the whole catalogue per request.
+pub const MAX_RENDERS_PER_MINUTE: usize = 30;
 
 /// Why a publish was refused.
 #[derive(Debug, PartialEq, Eq)]
@@ -589,6 +597,7 @@ impl Portal {
             save_lock: Mutex::new(()),
             generation: AtomicU64::new(1),
             cache: Mutex::new(VecDeque::new()),
+            renders: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -602,6 +611,7 @@ impl Portal {
             save_lock: Mutex::new(()),
             generation: AtomicU64::new(1),
             cache: Mutex::new(VecDeque::new()),
+            renders: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -779,6 +789,24 @@ impl Portal {
     }
 
     // ── Catalogue cache ──
+
+    /// May the catalogue be rendered now (a cache miss)? At most
+    /// [`MAX_RENDERS_PER_MINUTE`].
+    pub fn allow_render(&self) -> bool {
+        let now = std::time::Instant::now();
+        let mut renders = self.renders.lock().unwrap_or_else(|e| e.into_inner());
+        while renders
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > std::time::Duration::from_secs(60))
+        {
+            renders.pop_front();
+        }
+        if renders.len() >= MAX_RENDERS_PER_MINUTE {
+            return false;
+        }
+        renders.push_back(now);
+        true
+    }
 
     pub fn cached(&self, fingerprint: &str) -> Option<Arc<Cached>> {
         self.cache

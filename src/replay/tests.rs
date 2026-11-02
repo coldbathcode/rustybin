@@ -335,6 +335,13 @@ fn tests_are_validated_and_bounded() {
     let mut url = t("url");
     url.request.path = "https://example.com/".into();
     assert!(store.put(url, false).is_err());
+    // A newline or space would turn one exported Hurl request into several.
+    let mut injected = t("injected");
+    injected.request.path = "/a\nGET http://evil.example/".into();
+    assert!(store.put(injected, false).is_err());
+    let mut spaced = t("spaced");
+    spaced.gateway = Some("http://gw.example.com/a b".into());
+    assert!(store.put(spaced, false).is_err());
     let mut two = t("two-kinds");
     two.assert = vec![Assertion {
         status: Some(200),

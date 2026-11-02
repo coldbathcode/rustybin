@@ -79,8 +79,7 @@ fn prompt(inputs: &Value) -> Result<String, String> {
     let op = compiled.spec.operation(&id).ok_or("no operation")?;
     let n = count(inputs);
     let op_json = serde_json::to_value(op).unwrap_or(Value::Null);
-    let inlined =
-        crate::mocks::service::inline_refs(&op_json, &compiled.spec.root, &mut Vec::new(), 0);
+    let inlined = crate::mocks::service::inline_refs(&op_json, &compiled.spec.root);
     Ok(format!(
         "{ABOUT}\n\nThe API: {} {}.\nWrite {n} request(s) for this operation:\n{}\n",
         compiled.spec.title,

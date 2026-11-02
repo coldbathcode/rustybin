@@ -16,6 +16,120 @@ use crate::state::AppState;
 /// Boxed error returned by the server entry points.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
+/// How long a client may take to send a request head (and how long an idle
+/// keep-alive connection waits for the next one): a slow client cannot hold
+/// a connection open without sending a request.
+pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 2 } else { 30 });
+/// Connections the HTTP and HTTPS listeners hold at once, together; one
+/// more is closed as soon as it is accepted.
+pub const MAX_CONNECTIONS: usize = 16_384;
+
+/// The hyper settings every listener uses: a header read timeout (it needs
+/// a timer).
+fn tune(builder: &mut hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor>) {
+    builder
+        .http1()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(HEADER_READ_TIMEOUT);
+    builder.http2().timer(hyper_util::rt::TokioTimer::new());
+}
+
+/// An acceptor that holds one of [`MAX_CONNECTIONS`] permits per connection
+/// (released when the connection closes) and refuses a connection when none
+/// is left.
+#[derive(Clone)]
+struct Limited<A> {
+    inner: A,
+    permits: Arc<tokio::sync::Semaphore>,
+}
+
+impl<A, I, S> axum_server::accept::Accept<I, S> for Limited<A>
+where
+    A: axum_server::accept::Accept<I, S> + Clone + Send + Sync + 'static,
+    A::Stream: Unpin,
+    A::Future: Send + 'static,
+    I: Send + 'static,
+    S: Send + 'static,
+{
+    type Stream = Permitted<A::Stream>;
+    type Service = A::Service;
+    type Future = std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = std::io::Result<(Self::Stream, Self::Service)>> + Send,
+        >,
+    >;
+
+    fn accept(&self, stream: I, service: S) -> Self::Future {
+        let permit = self.permits.clone().try_acquire_owned();
+        let inner = self.inner.accept(stream, service);
+        Box::pin(async move {
+            let Ok(permit) = permit else {
+                return Err(std::io::Error::other("connection limit reached"));
+            };
+            let (stream, service) = inner.await?;
+            Ok((
+                Permitted {
+                    inner: stream,
+                    _permit: permit,
+                },
+                service,
+            ))
+        })
+    }
+}
+
+/// A connection's stream with its permit.
+struct Permitted<S> {
+    inner: S,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Permitted<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Permitted<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+}
+
 /// How long in-flight connections (SSE, WebSocket, slow requests) get to
 /// finish after a shutdown signal before they are dropped.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
@@ -201,6 +315,7 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
         .await
         .map_err(|e| format!("failed to bind HTTP listener on {http_bind}: {e}"))?;
     let http_addr = http_listener.local_addr()?;
+    let connections = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     // Harness clusters (RUSTYBIN_HARNESS_CLUSTER, RUSTYBIN_HARNESS_JOIN):
     // a coordinator creates its cluster, a member starts joining. A bad
     // setting is fatal like the other harness startup checks.
@@ -264,14 +379,26 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
                 http_addr.port(),
             )));
         let rx = shutdown.subscribe();
+        let handle = axum_server::Handle::new();
+        let shutdown_handle = handle.clone();
+        tokio::spawn(async move {
+            wait_for(rx).await;
+            // RunningServer bounds the wait (SHUTDOWN_GRACE), then aborts.
+            shutdown_handle.graceful_shutdown(None);
+        });
+        let listener = http_listener.into_std()?;
+        listener.set_nonblocking(true)?;
+        let mut server = axum_server::from_tcp(listener)?.acceptor(Limited {
+            inner: axum_server::accept::DefaultAcceptor::new(),
+            permits: connections.clone(),
+        });
+        tune(server.http_builder());
         tokio::spawn(async move {
             tracing::info!("HTTP listening on {http_addr}");
-            axum::serve(
-                http_listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(wait_for(rx))
-            .await
+            server
+                .handle(handle)
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                .await
         })
     };
 
@@ -395,7 +522,7 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
     }
 
     // HTTPS: optional.
-    let https_addr = match start_https(&state, app, shutdown.subscribe()) {
+    let https_addr = match start_https(&state, app, shutdown.subscribe(), connections.clone()) {
         Ok((addr, task)) => {
             optional_tasks.push(("HTTPS", task));
             Some(addr)
@@ -529,6 +656,7 @@ fn start_https(
     state: &AppState,
     app: Router,
     rx: watch::Receiver<bool>,
+    connections: Arc<tokio::sync::Semaphore>,
 ) -> Result<(SocketAddr, JoinHandle<()>), Error> {
     use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 
@@ -575,11 +703,14 @@ fn start_https(
         shutdown_handle.graceful_shutdown(Some(SHUTDOWN_GRACE));
     });
 
-    let server = axum_server::from_tcp(listener)?;
+    let mut server = axum_server::from_tcp(listener)?.acceptor(Limited {
+        inner: acceptor,
+        permits: connections,
+    });
+    tune(server.http_builder());
     let task = tokio::spawn(async move {
         tracing::info!("HTTPS listening on {addr} (optional client cert verification enabled)");
         let result = server
-            .acceptor(acceptor)
             .handle(handle)
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await;
@@ -617,5 +748,47 @@ pub async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn a_client_that_never_finishes_its_request_head_is_dropped() {
+        let server = super::start_with_state(crate::state::AppState::for_tests(
+            crate::config::Config::for_tests(),
+        ))
+        .await
+        .expect("start");
+        let mut tcp = tokio::net::TcpStream::connect(server.http_addr)
+            .await
+            .expect("connect");
+        tcp.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n")
+            .await
+            .expect("write");
+        let started = Instant::now();
+        let mut buf = [0u8; 512];
+        // The server answers 408 or just closes: either way the read ends.
+        let read = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match tcp.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => continue,
+                }
+            }
+        })
+        .await;
+        assert!(read.is_ok(), "the half-open request was kept past 10 s");
+        assert!(started.elapsed() >= super::HEADER_READ_TIMEOUT - Duration::from_millis(200));
+        // A complete request still works.
+        let resp = reqwest::get(format!("http://{}/", server.http_addr))
+            .await
+            .expect("get");
+        assert_eq!(resp.status(), 200);
+        server.shutdown();
+        let _ = server.wait().await;
     }
 }

@@ -70,6 +70,9 @@ pub fn generate(schema: &Value, hints: &Hints) -> Value {
 
 /// Upper bound on generated nodes (recursive schemas cannot blow up).
 const MAX_NODES: usize = 2_000;
+/// The longest generated string (a caller's `minLength` is clamped to it):
+/// with MAX_NODES, at most a few MiB per answer.
+pub const MAX_STRING: usize = 1024;
 
 struct Gen<'a> {
     root: &'a Value,
@@ -257,7 +260,7 @@ impl Gen<'_> {
                     Value::String(s) if i > 0 => json!(format!("{s} {}", i + 1)),
                     Value::Number(num) if i > 0 => num
                         .as_i64()
-                        .map(|x| json!(x + i as i64))
+                        .map(|x| json!(x.saturating_add(i as i64)))
                         .unwrap_or(Value::Number(num)),
                     other => other,
                 };
@@ -293,13 +296,13 @@ fn gen_integer(obj: &Map<String, Value>, name: &str) -> i64 {
         v = v.max(min.ceil() as i64);
     }
     if let Some(min) = bound(obj, "exclusiveMinimum") {
-        v = v.max(min.floor() as i64 + 1);
+        v = v.max((min.floor() as i64).saturating_add(1));
     }
     if let Some(max) = bound(obj, "maximum") {
         v = v.min(max.floor() as i64);
     }
     if let Some(max) = bound(obj, "exclusiveMaximum") {
-        v = v.min(max.ceil() as i64 - 1);
+        v = v.min((max.ceil() as i64).saturating_sub(1));
     }
     if let Some(m) = obj
         .get("multipleOf")
@@ -366,13 +369,20 @@ fn gen_string(obj: &Map<String, Value>, name: &str, hints: &Hints) -> String {
         "duration" => "PT1H".to_string(),
         _ => placeholder_string(name, hints),
     };
-    let min = obj.get("minLength").and_then(Value::as_u64).unwrap_or(0) as usize;
+    // `minLength` comes from the caller's schema: padded to at most
+    // MAX_STRING characters, in one step.
+    let min = obj
+        .get("minLength")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(MAX_STRING as u64) as usize;
     let max = obj
         .get("maxLength")
         .and_then(Value::as_u64)
         .map(|m| m as usize);
-    while s.chars().count() < min {
-        s.push('x');
+    let have = s.chars().count();
+    if have < min {
+        s.push_str(&"x".repeat(min - have));
     }
     if let Some(max) = max {
         if s.chars().count() > max {
@@ -618,6 +628,21 @@ fn validate_at(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hostile_bounds_are_clamped_not_obeyed() {
+        // One anonymous request used to pad to the caller's minLength.
+        let schema = serde_json::json!({ "type": "object", "properties": {
+            "s": { "type": "string", "minLength": 10_000_000_000u64 },
+            "a": { "type": "integer", "exclusiveMinimum": 1e30 },
+            "b": { "type": "integer", "exclusiveMaximum": -1e30 }
+        } });
+        let started = std::time::Instant::now();
+        let v = super::generate(&schema, &super::Hints::default());
+        assert_eq!(v["s"].as_str().map(str::len), Some(super::MAX_STRING));
+        assert!(v["a"].is_i64() && v["b"].is_i64(), "{v}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
     use super::*;
 
     fn check(schema: Value) -> Value {

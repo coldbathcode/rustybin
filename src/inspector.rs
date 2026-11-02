@@ -45,6 +45,39 @@ use crate::state::AppState;
 pub const MAX_CAPTURED_BODY: usize = 64 * 1024;
 /// Hard upper bound on the ring buffer, whatever the configuration says.
 pub const MAX_CAPACITY: usize = 10_000;
+/// Bytes of request head (header names and values) kept per entry; the
+/// rest of the headers are named in one `x-rustybin-capture` header.
+pub const MAX_CAPTURED_HEAD: usize = 16 * 1024;
+/// Bytes kept of one header value, and of the URI, path and query.
+pub const MAX_CAPTURED_FIELD: usize = 4 * 1024;
+/// Bytes the whole ring holds (an estimate per entry): the oldest entries go
+/// first, whatever the capacity.
+pub const MAX_RING_BYTES: usize = 64 * 1024 * 1024;
+
+/// `s` cut to `max` bytes on a character boundary, marked when cut.
+fn cut_field(s: String, max: usize) -> String {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...[cut at {max} bytes]", &s[..end])
+}
+
+/// Roughly how many bytes an entry holds.
+fn entry_bytes(e: &CapturedRequest) -> usize {
+    256 + e.uri.len()
+        + e.path.len()
+        + e.query.as_deref().map_or(0, str::len)
+        + e.headers
+            .iter()
+            .map(|h| h.name.len() + h.value.len() + 16)
+            .sum::<usize>()
+        + e.body.as_deref().map_or(0, str::len)
+        + e.body_base64.as_deref().map_or(0, str::len)
+}
 /// Default and maximum page size of the list endpoint.
 pub const DEFAULT_LIMIT: usize = 100;
 
@@ -108,6 +141,8 @@ pub struct KeyRetention {
 #[derive(Default)]
 struct Store {
     ring: VecDeque<Arc<CapturedRequest>>,
+    /// [`entry_bytes`] of every entry in the ring.
+    bytes: usize,
     per_key: HashMap<String, VecDeque<u64>>,
     next_seq: u64,
     has_ttl: bool,
@@ -118,6 +153,7 @@ impl Store {
     /// Drop the oldest entry (global capacity).
     fn pop_oldest(&mut self) {
         if let Some(old) = self.ring.pop_front() {
+            self.bytes = self.bytes.saturating_sub(entry_bytes(&old));
             self.unindex(&old);
         }
     }
@@ -140,6 +176,7 @@ impl Store {
     fn remove_seq(&mut self, seq: u64) {
         if let Ok(pos) = self.ring.binary_search_by_key(&seq, |e| e.seq) {
             if let Some(old) = self.ring.remove(pos) {
+                self.bytes = self.bytes.saturating_sub(entry_bytes(&old));
                 self.unindex(&old);
             }
         }
@@ -163,6 +200,7 @@ impl Store {
     }
 
     fn reindex(&mut self) {
+        self.bytes = self.ring.iter().map(|e| entry_bytes(e)).sum();
         self.per_key.clear();
         for e in &self.ring {
             if let Some(k) = &e.key_id {
@@ -310,9 +348,13 @@ impl Inspector {
                     }
                 }
             }
-            while store.ring.len() >= self.inner.capacity {
+            let size = entry_bytes(&entry);
+            while store.ring.len() >= self.inner.capacity
+                || (!store.ring.is_empty() && store.bytes + size > MAX_RING_BYTES)
+            {
                 store.pop_oldest();
             }
+            store.bytes += size;
             let entry = Arc::new(entry);
             if let Some(key) = &entry.key_id {
                 store
@@ -398,6 +440,7 @@ impl Inspector {
         let n = store.ring.len();
         store.ring.clear();
         store.per_key.clear();
+        store.bytes = 0;
         n
     }
 
@@ -500,18 +543,36 @@ pub async fn capture(State(state): State<AppState>, req: Request, next: Next) ->
         .extensions
         .get::<crate::mcp::inspector::client::InspectorOrigin>()
         .is_some();
-    let headers = parts
-        .headers
-        .iter()
-        .map(|(k, v)| CapturedHeader {
+    // The head is kept up to MAX_CAPTURED_HEAD (a client sends what it
+    // likes); the headers past it are counted, not kept.
+    let mut headers = Vec::new();
+    let mut head_bytes = 0usize;
+    let mut dropped = 0usize;
+    for (k, v) in parts.headers.iter() {
+        let value = if from_inspector && crate::keys::looks_secret(k.as_str()) {
+            "[redacted]".to_string()
+        } else {
+            crate::keys::redact_header(k.as_str(), v.as_bytes(), control_auth)
+        };
+        let value = cut_field(value, MAX_CAPTURED_FIELD);
+        if head_bytes + k.as_str().len() + value.len() > MAX_CAPTURED_HEAD {
+            dropped += 1;
+            continue;
+        }
+        head_bytes += k.as_str().len() + value.len();
+        headers.push(CapturedHeader {
             name: k.as_str().to_string(),
-            value: if from_inspector && crate::keys::looks_secret(k.as_str()) {
-                "[redacted]".to_string()
-            } else {
-                crate::keys::redact_header(k.as_str(), v.as_bytes(), control_auth)
-            },
-        })
-        .collect();
+            value,
+        });
+    }
+    if dropped > 0 {
+        headers.push(CapturedHeader {
+            name: "x-rustybin-capture".into(),
+            value: format!(
+                "{dropped} header(s) not kept: the head is over {MAX_CAPTURED_HEAD} bytes"
+            ),
+        });
+    }
     let redacted_query = parts.uri.query().and_then(|q| {
         if from_inspector {
             crate::keys::redact_secret_query(q).map(|r| crate::keys::redact_query(&r).unwrap_or(r))
@@ -538,18 +599,23 @@ pub async fn capture(State(state): State<AppState>, req: Request, next: Next) ->
         request_id,
         timestamp,
         method: parts.method.to_string(),
-        uri: {
-            let text = parts.uri.to_string();
-            match (&redacted_query, text.find('?')) {
-                (Some(q), Some(pos)) => format!("{}?{q}", &text[..pos]),
-                _ => text,
-            }
-        },
-        path: parts.uri.path().to_string(),
-        query: parts
-            .uri
-            .query()
-            .map(|q| redacted_query.clone().unwrap_or_else(|| q.to_string())),
+        uri: cut_field(
+            {
+                let text = parts.uri.to_string();
+                match (&redacted_query, text.find('?')) {
+                    (Some(q), Some(pos)) => format!("{}?{q}", &text[..pos]),
+                    _ => text,
+                }
+            },
+            MAX_CAPTURED_FIELD,
+        ),
+        path: cut_field(parts.uri.path().to_string(), MAX_CAPTURED_FIELD),
+        query: parts.uri.query().map(|q| {
+            cut_field(
+                redacted_query.clone().unwrap_or_else(|| q.to_string()),
+                MAX_CAPTURED_FIELD,
+            )
+        }),
         version: format!("{:?}", parts.version),
         headers,
         client_ip,
@@ -874,6 +940,50 @@ mod tests {
     use crate::test_support::{body_json, get_request, test_app_with, test_state, test_state_with};
     use axum::http::Request as HttpRequest;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn a_huge_request_head_is_kept_cut_and_the_ring_counts_bytes() {
+        let state = test_state();
+        let app = test_app_with(state.clone());
+        let big = "v".repeat(6000);
+        let mut b = HttpRequest::get(format!("/anything?q={}", "x".repeat(20_000)))
+            .header("x-rustybin-session", "big");
+        for i in 0..40 {
+            b = b.header(format!("x-h{i}"), big.as_str());
+        }
+        let resp = app
+            .oneshot(b.body(axum::body::Body::empty()).expect("req"))
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), 200);
+        let e = state
+            .inspector
+            .for_session("big", 1)
+            .pop()
+            .expect("captured");
+        let head: usize = e.headers.iter().map(|h| h.name.len() + h.value.len()).sum();
+        assert!(head <= MAX_CAPTURED_HEAD + 200, "{head}");
+        assert!(
+            e.headers.iter().any(|h| h.name == "x-rustybin-capture"),
+            "no marker"
+        );
+        assert!(
+            e.uri.len() <= MAX_CAPTURED_FIELD + 40
+                && e.query.as_ref().map_or(0, |q| q.len()) <= MAX_CAPTURED_FIELD + 40
+        );
+        // The ring's byte count is the sum of its entries', through evictions.
+        let ins = Inspector::new(3, false);
+        for i in 0..10 {
+            ins.record(entry(&format!("/p{i}"), Some("s")));
+        }
+        ins.clear_session("nobody");
+        let store = ins.store();
+        assert_eq!(
+            store.bytes,
+            store.ring.iter().map(|e| entry_bytes(e)).sum::<usize>()
+        );
+        assert_eq!(store.ring.len(), 3);
+    }
 
     fn entry(path: &str, session: Option<&str>) -> CapturedRequest {
         CapturedRequest {

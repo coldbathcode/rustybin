@@ -656,9 +656,12 @@ pub async fn completions_impl(ctx: AiCtx, body: Bytes, model_override: Option<St
                 Bytes::from(format!("data: {c}\n\n"))
             };
             if !pace.ttft.is_zero() { tokio::time::sleep(pace.ttft).await; }
+            // One pacing budget for the whole stream: every choice of every
+            // prompt shares it (each used to get its own, 128 times over).
+            let total: usize = choices.iter().map(|(t, _, _)| super::tokens::pieces(t).len()).sum();
+            let delay = pace.per_piece(total);
             for (i, (text, fin, _)) in choices.iter().enumerate() {
                 let pieces = super::tokens::pieces(text);
-                let delay = pace.per_piece(pieces.len());
                 for p in pieces {
                     if !delay.is_zero() { tokio::time::sleep(delay).await; }
                     yield Ok::<_, Infallible>(chunk(json!([{"text": p, "index": i, "logprobs": null, "finish_reason": null}]), None));

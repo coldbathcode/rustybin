@@ -565,30 +565,54 @@ fn mcp_detail(s: &Snapshot, root: &str, host: Option<&HostBase>) -> Value {
     out
 }
 
-/// Replace `$ref`s with their targets (bounded; recursive refs are kept and
+/// Nodes [`inline_refs`] writes for one value: past it a `$ref` is left
+/// in place (marked), so a spec whose levels each reference the next many
+/// times cannot grow the answer exponentially.
+pub const INLINE_REFS_NODES: usize = 20_000;
+
+/// Replace `$ref`s with their targets (bounded: recursive refs, refs past the
+/// depth and every ref once [`INLINE_REFS_NODES`] are written are kept and
 /// marked) so the console can build forms without a resolver.
-pub fn inline_refs(v: &Value, root: &Value, stack: &mut Vec<String>, depth: usize) -> Value {
+pub fn inline_refs(v: &Value, root: &Value) -> Value {
+    let mut budget = INLINE_REFS_NODES;
+    inline_refs_in(v, root, &mut Vec::new(), 0, &mut budget)
+}
+
+fn inline_refs_in(
+    v: &Value,
+    root: &Value,
+    stack: &mut Vec<String>,
+    depth: usize,
+    budget: &mut usize,
+) -> Value {
     if depth > 24 {
         return json!({});
     }
+    *budget = budget.saturating_sub(1);
     match v {
         Value::Object(m) => {
             if let Some(Value::String(r)) = m.get("$ref") {
                 if stack.contains(r) || stack.len() > 10 {
                     return json!({ "$ref": r, "x-recursive": true });
                 }
+                if *budget == 0 {
+                    return json!({ "$ref": r, "x-not-expanded": true });
+                }
                 let Ok(target) = spec::resolve_pointer(root, r) else {
                     return json!({});
                 };
                 stack.push(r.clone());
-                let mut out = inline_refs(target, root, stack, depth + 1);
+                let mut out = inline_refs_in(target, root, stack, depth + 1, budget);
                 stack.pop();
                 if let Value::Object(o) = &mut out {
                     let title = r.rsplit('/').next().unwrap_or_default().to_string();
                     o.entry("title").or_insert(json!(title));
                     for (k, val) in m {
                         if k != "$ref" {
-                            o.insert(k.clone(), inline_refs(val, root, stack, depth + 1));
+                            o.insert(
+                                k.clone(),
+                                inline_refs_in(val, root, stack, depth + 1, budget),
+                            );
                         }
                     }
                 }
@@ -596,14 +620,19 @@ pub fn inline_refs(v: &Value, root: &Value, stack: &mut Vec<String>, depth: usiz
             }
             Value::Object(
                 m.iter()
-                    .map(|(k, val)| (k.clone(), inline_refs(val, root, stack, depth + 1)))
+                    .map(|(k, val)| {
+                        (
+                            k.clone(),
+                            inline_refs_in(val, root, stack, depth + 1, budget),
+                        )
+                    })
                     .collect(),
             )
         }
         Value::Array(items) => Value::Array(
             items
                 .iter()
-                .map(|i| inline_refs(i, root, stack, depth + 1))
+                .map(|i| inline_refs_in(i, root, stack, depth + 1, budget))
                 .collect(),
         ),
         other => other.clone(),
@@ -613,7 +642,7 @@ pub fn inline_refs(v: &Value, root: &Value, stack: &mut Vec<String>, depth: usiz
 fn operation_detail(c: &Compiled, op_id: &str, root: &str, reveal: bool) -> Option<Value> {
     let op = c.spec.operation(op_id)?;
     let mut op_json = serde_json::to_value(op).unwrap_or(Value::Null);
-    let op_json = inline_refs(&op_json.take(), &c.spec.root, &mut Vec::new(), 0);
+    let op_json = inline_refs(&op_json.take(), &c.spec.root);
     let mut report = c.report.operations.iter().find(|r| r.id == op_id).cloned();
     let mut sample = checks::sample_request(c, op);
     if !reveal {

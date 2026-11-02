@@ -34,9 +34,11 @@ struct Item {
     status: Option<u16>,
 }
 
-/// Header and line values come from the spec: keep them on one line.
+/// Header and line values come from the spec: keep them on one line. The
+/// Unicode line and paragraph separators and NEL end a line (or a `//`
+/// comment in a k6 script) too.
 fn one_line(s: &str) -> String {
-    s.replace(['\r', '\n'], " ")
+    s.replace(['\r', '\n', '\u{2028}', '\u{2029}', '\u{85}'], " ")
 }
 
 fn query_string(q: &[(String, String)]) -> String {

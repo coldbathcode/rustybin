@@ -111,13 +111,23 @@ fn configure(ws: WebSocketUpgrade, headers: &HeaderMap, limits: WsLimits) -> Web
     }
 }
 
+/// Send one message, giving up after `limit`: a client that never reads
+/// cannot hold the connection past the idle and lifetime timers (a send
+/// blocks outside them). False when the connection should end.
+async fn send_bounded(socket: &mut WebSocket, msg: Message, limit: Duration) -> bool {
+    matches!(
+        tokio::time::timeout(limit, socket.send(msg)).await,
+        Ok(Ok(()))
+    )
+}
+
 /// Send a close frame and wait (bounded) for the peer's reply.
 async fn close_with(socket: &mut WebSocket, code: u16, reason: &'static str) {
     let frame = CloseFrame {
         code,
         reason: reason.into(),
     };
-    if socket.send(Message::Close(Some(frame))).await.is_err() {
+    if !send_bounded(socket, Message::Close(Some(frame)), CLOSE_GRACE).await {
         return;
     }
     let _ = tokio::time::timeout(CLOSE_GRACE, async {
@@ -165,12 +175,12 @@ async fn handle_echo(mut socket: WebSocket, limits: WsLimits, lease: Option<Stre
         tokio::select! {
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Text(text))) => {
-                    if socket.send(Message::Text(text)).await.is_err() {
+                    if !send_bounded(&mut socket, Message::Text(text), limits.idle_timeout).await {
                         return;
                     }
                 }
                 Some(Ok(Message::Binary(bin))) => {
-                    if socket.send(Message::Binary(bin)).await.is_err() {
+                    if !send_bounded(&mut socket, Message::Binary(bin), limits.idle_timeout).await {
                         return;
                     }
                 }
@@ -246,7 +256,7 @@ async fn handle_time(
                     "timestamp": chrono::Utc::now().to_rfc3339(),
                 })
                 .to_string();
-                if socket.send(Message::Text(payload.into())).await.is_err() {
+                if !send_bounded(&mut socket, Message::Text(payload.into()), limits.idle_timeout).await {
                     return;
                 }
                 sent += 1;
