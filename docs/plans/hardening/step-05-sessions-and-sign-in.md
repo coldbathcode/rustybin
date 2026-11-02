@@ -28,3 +28,32 @@ wrong logins from one address count as 50; a spoofed `Fly-Client-IP` behind `xff
 
 The tests pass and `docs/src/security.md` (or the sign-in page) states what survives a restart and
 which forwarded header is trusted.
+
+## Build notes (2026-11-02)
+
+- Every finding is fixed; none was closed as not reproducible.
+- `Tokens::persistent(state_dir)` (from `Config::from_env`) keeps the generation, the
+  revoked ids, the revoked subjects and the agents' revoked ids in
+  `<state>/sessions.json` (0600 through `settings::write_private`), rewritten on
+  every change. Without a state directory the generation starts at the start time
+  (Unix seconds), so it only grows: a restart signs every token out. The listed
+  sessions are not persisted (they are a view; the denylist is what holds).
+- Agent revocations live in their own set (`revoke_for_agent`), which `rotate()`
+  leaves alone; `Agents::load` puts the ids of revoked agents back
+  (`remember_agent_revocation`, the expiry from the record's tokens, else 12 h).
+- OAuth access and refresh tokens carry `rb_gen`; `verify` refuses another
+  generation (`signed_out`), and tokens minted before this build (none) too.
+- Sign-in attempts count as pending in `check` and settle in `failed`,
+  `succeeded` or `abandoned`; argon2 runs under `HASH_PERMITS` (4) permits, `429`
+  `busy` when none is free (sign-in and password change).
+- The trusted header is the setting `proxy.client_ip_header` (group `proxy`, seeded
+  by `RUSTYBIN_TRUST_FORWARD_HEADER`, default `any` for compatibility): `fly`,
+  `forwarded`, `x-forwarded-for` (rightmost outside hop) or `x-real-ip`. It is read
+  where only `Config` is at hand, so `Config.forward_header` is an atomic the
+  settings store updates after every change (`Settings::sync`). Being a setting, it
+  is on the API, the console (Management, Network, Behind a proxy), the management
+  MCP, the CLI and `rustybin.yaml`.
+- `admin_check`: a valid control JWT without the admin scope is 403 whether or not
+  an admin token is configured.
+- `/_rustybin/oauth/authorize`: at most 10 sign-in requests per client address per
+  minute (4096 addresses tracked), a `429` page beyond.

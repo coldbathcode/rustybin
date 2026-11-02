@@ -34,6 +34,10 @@ pub struct Config {
     pub log_level: String,
     /// Trust `X-Forwarded-For` for client IP detection (`RUSTYBIN_TRUST_FORWARD`).
     pub trust_forward: bool,
+    /// The one proxy header trusted for the client address
+    /// (`RUSTYBIN_TRUST_FORWARD_HEADER`, the `proxy.client_ip_header`
+    /// setting, which updates it).
+    pub forward_header: std::sync::Arc<crate::session::TrustedHeader>,
     /// Maximum request body size in bytes (`RUSTYBIN_BODY_LIMIT`, default 1 MiB).
     /// Enforced for every request (413 when exceeded) and used as the echo display limit.
     pub body_limit: usize,
@@ -885,6 +889,18 @@ impl Config {
             host,
             log_level,
             trust_forward: parse_bool_or(&get, "RUSTYBIN_TRUST_FORWARD", false, &mut warnings),
+            forward_header: std::sync::Arc::new(crate::session::TrustedHeader::new(
+                match get("RUSTYBIN_TRUST_FORWARD_HEADER") {
+                    None => crate::session::ForwardHeader::Any,
+                    Some(raw) => crate::session::ForwardHeader::parse(&raw).unwrap_or_else(|| {
+                        warnings.push(format!(
+                            "RUSTYBIN_TRUST_FORWARD_HEADER={raw:?} is not one of {}: using any",
+                            crate::session::FORWARD_HEADERS.join(", ")
+                        ));
+                        crate::session::ForwardHeader::Any
+                    }),
+                },
+            )),
             body_limit: parse_or(&get, "RUSTYBIN_BODY_LIMIT", 1_048_576, &mut warnings),
             instance_id,
             tls_cert: get("RUSTYBIN_TLS_CERT").unwrap_or_else(|| "certs/server.crt".to_string()),
@@ -912,7 +928,9 @@ impl Config {
             assist_max_calls_per_minute,
             assist_max_output_tokens,
             assist_visitors,
-            console_tokens: std::sync::Arc::new(crate::login::Tokens::new()),
+            console_tokens: std::sync::Arc::new(crate::login::Tokens::persistent(
+                state_dir.as_deref(),
+            )),
             control_jwt_key,
             control_jwt_audience,
             control_oauth,
@@ -1072,6 +1090,7 @@ impl Config {
             host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             log_level: "warn".to_string(),
             trust_forward: false,
+            forward_header: std::sync::Arc::new(crate::session::TrustedHeader::default()),
             body_limit: 1_048_576,
             instance_id: "test-instance".to_string(),
             // Empty paths: the server never writes certificate files and
@@ -1190,6 +1209,7 @@ impl Config {
             "host": self.host.to_string(),
             "log_level": self.log_level,
             "trust_forward": self.trust_forward,
+            "trust_forward_header": self.forward_header.get().as_str(),
             "body_limit": self.body_limit,
             "instance_id": self.instance_id,
             "tls_cert": self.tls_cert,

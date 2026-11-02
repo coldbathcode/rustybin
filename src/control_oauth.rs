@@ -373,6 +373,12 @@ fn verify(token: &str, audience: &str, use_: &str, config: &Config) -> Result<Va
     if data.claims.get("rb_use").and_then(Value::as_str) != Some(use_) {
         return Err("wrong_token_type");
     }
+    // A sign out everywhere or a password change (a new generation) ends
+    // the OAuth tokens too, refresh tokens included.
+    if data.claims.get("rb_gen").and_then(Value::as_u64) != Some(config.console_tokens.generation())
+    {
+        return Err("signed_out");
+    }
     // An agent revoked by the operator (Management, AI agents): its access
     // tokens and its refresh tokens.
     let tokens = &config.console_tokens;
@@ -407,6 +413,7 @@ fn issue(
             "exp": iat + ttl,
             "jti": uuid::Uuid::new_v4().to_string(),
             "rb_use": use_,
+            "rb_gen": config.console_tokens.generation(),
         })
     };
     let (Some(access), Some(refresh)) = (
@@ -609,6 +616,42 @@ struct Code {
 pub struct OAuthState {
     pending: BoundedStore<Pending>,
     codes: BoundedStore<Code>,
+    /// Sign-in requests per client address in the last minute: a loop of
+    /// registrations and authorizations cannot push a real user's pending
+    /// consent out of the bounded store.
+    per_address: std::sync::Mutex<
+        std::collections::HashMap<std::net::IpAddr, std::collections::VecDeque<std::time::Instant>>,
+    >,
+}
+
+/// Sign-in requests one client address may open per minute.
+pub const AUTHORIZE_PER_MINUTE: usize = 10;
+/// Addresses tracked by that limit.
+const MAX_AUTHORIZE_ADDRESSES: usize = 4096;
+
+impl OAuthState {
+    /// Count a sign-in request from `ip`; false past the minute's allowance.
+    fn allow_authorize(&self, ip: Option<std::net::IpAddr>) -> bool {
+        let Some(ip) = ip else { return true };
+        let now = std::time::Instant::now();
+        let minute = std::time::Duration::from_secs(60);
+        let mut map = self.per_address.lock().unwrap_or_else(|e| e.into_inner());
+        if !map.contains_key(&ip) && map.len() >= MAX_AUTHORIZE_ADDRESSES {
+            map.retain(|_, q| q.back().is_some_and(|t| now.duration_since(*t) < minute));
+            if map.len() >= MAX_AUTHORIZE_ADDRESSES {
+                return false;
+            }
+        }
+        let q = map.entry(ip).or_default();
+        while q.front().is_some_and(|t| now.duration_since(*t) >= minute) {
+            q.pop_front();
+        }
+        if q.len() >= AUTHORIZE_PER_MINUTE {
+            return false;
+        }
+        q.push_back(now);
+        true
+    }
 }
 
 impl OAuthState {
@@ -621,6 +664,7 @@ impl OAuthState {
         Self {
             pending: BoundedStore::new(cap, PENDING_TTL_SECS),
             codes: BoundedStore::new(cap, CODE_TTL_SECS),
+            per_address: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -945,6 +989,13 @@ async fn authorize_handler(State(app): State<AppState>, st: St, req: Request) ->
                 "resource must be this instance's /_rustybin/mcp URL",
             );
         }
+    }
+    let ip = crate::session::client_ip(req.headers(), req.extensions(), config);
+    if !st.allow_authorize(ip) {
+        return error_page(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many sign-in requests from this address: wait a minute and start again.",
+        );
     }
     let request_id = random_id();
     st.pending.insert(

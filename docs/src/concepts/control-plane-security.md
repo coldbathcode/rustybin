@@ -131,9 +131,16 @@ the console shows who is signed in.
 
 **Brute force.** Five failed attempts from one client address within a minute, and
 the address waits: `429` with `Retry-After`, a minute the first time, doubling up to
-ten minutes. Every attempt is logged on the `rustybin::auth` target with the user
+ten minutes. Attempts count as they start, so five guesses sent in parallel take the
+whole allowance. Every attempt is logged on the `rustybin::auth` target with the user
 name, the address and the outcome, never the password. Passwords are compared in
-constant time; hashes are verified off the request threads.
+constant time; hashes are verified off the request threads, at most four at once
+(`429` with `reason: busy` beyond). The address is the TCP peer, or with
+`RUSTYBIN_TRUST_FORWARD` the one header named by `proxy.client_ip_header`
+(`RUSTYBIN_TRUST_FORWARD_HEADER`): `fly`, `forwarded`, `x-forwarded-for` (its
+rightmost outside hop) or `x-real-ip`. The default, `any`, takes the first usable of
+them, which a client can spoof behind a proxy that does not set them all: name your
+proxy's header (Management, Network, Behind a proxy).
 
 **The default password.** With it the instance logs a warning at startup,
 `GET /_rustybin/status` and the sign-in answer carry `default_password: true`, and
@@ -146,6 +153,16 @@ OAuth sign-in: `RUSTYBIN_CONTROL_OAUTH_KEY`, else derived from `RUSTYBIN_ADMIN_T
 else random per process. With a random key (and the default audience, a random
 instance id) a restart signs everyone out; set one of them, and
 `RUSTYBIN_INSTANCE_ID`, so sessions survive restarts and replicas.
+
+**What survives a restart.** With a state directory (`RUSTYBIN_STATE_DIR`),
+`<state>/sessions.json` (mode 0600) keeps the token generation, the revoked token
+ids (sign-outs, ended sessions), the revoked OAuth subjects and the token ids
+revoked with an AI agent: a revoked token stays revoked, and a sign out everywhere
+or a password change stays in force. Without one, the generation starts from the
+start time, so a restart signs every token out. A sign out everywhere never undoes
+an agent's revocation, and it ends the OAuth access and refresh tokens of the
+management server's sign-in too (they carry the generation). The list of sessions
+in Management, Sign-in starts empty after a restart.
 
 **Migration from 0.1.** Instances that relied on an open control plane now ask for
 `rustybin` / `rustybin`. Keep the old behaviour with `RUSTYBIN_CONTROL_AUTH=open`,

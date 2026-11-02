@@ -341,6 +341,11 @@ pub fn groups() -> Vec<Group> {
             description: "The model each AI job runs on. Empty: the job's tier default (the fast model or the model). Load the provider's list to pick from what your key can call.",
         },
         Group {
+            id: "proxy",
+            title: "Behind a proxy",
+            description: "Which proxy header names the client, with RUSTYBIN_TRUST_FORWARD on (the per-address limits and sessions use it).",
+        },
+        Group {
             id: "egress",
             title: "Outbound connections",
             description: "Where this instance may send requests of its own (AI providers, webhooks, registries, git remotes).",
@@ -406,6 +411,7 @@ pub fn specs() -> Vec<Spec> {
     let mut all = console_specs();
     all.extend(crate::login::specs());
     all.extend(crate::assist::specs());
+    all.extend(crate::session::specs());
     all.extend(crate::egress::specs());
     all.extend(crate::mcp::registry::specs());
     all.extend(crate::mcp::manage::agents::specs());
@@ -675,6 +681,9 @@ pub struct Settings {
     secrets: Secrets,
     locked: bool,
     unreadable: RwLock<BTreeSet<String>>,
+    /// The trusted proxy header in the configuration, kept in step with
+    /// `proxy.client_ip_header`.
+    forward_header: Arc<crate::session::TrustedHeader>,
 }
 
 fn now() -> String {
@@ -727,9 +736,24 @@ impl Settings {
             secrets,
             locked: config.settings_lock,
             unreadable: RwLock::new(BTreeSet::new()),
+            forward_header: config.forward_header.clone(),
         };
         store.check_secrets();
+        store.sync();
         store
+    }
+
+    /// Push the settings the configuration mirrors (read where only the
+    /// configuration is at hand) into it.
+    fn sync(&self) {
+        if self.spec("proxy.client_ip_header").is_some() {
+            if let Some(h) = self
+                .string("proxy.client_ip_header")
+                .and_then(|s| crate::session::ForwardHeader::parse(&s))
+            {
+                self.forward_header.set(h);
+            }
+        }
     }
 
     /// Every stored secret is opened once: the ones sealed under another
@@ -1061,6 +1085,7 @@ impl Settings {
                 "setting changed"
             );
         }
+        self.sync();
         Ok(changed)
     }
 
@@ -1094,6 +1119,7 @@ impl Settings {
             principal = %principal,
             "setting reset"
         );
+        self.sync();
         Ok(true)
     }
 

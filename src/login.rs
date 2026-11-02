@@ -262,16 +262,21 @@ pub fn valid_new_password(plain: &str) -> Result<(), String> {
 /// Do `user` and `password` sign in? The stored or seeded hash wins, else the
 /// plain password from the environment, else the default. Both the user name
 /// and the password are always checked (constant-time comparison, the hash
-/// off the async runtime), whatever the outcome.
-pub async fn check_credentials(state: &AppState, user: &str, password: &str) -> bool {
+/// off the async runtime), whatever the outcome. `None`: every hash permit is
+/// taken (`HASH_PERMITS`), try again in a moment.
+pub async fn check_credentials(state: &AppState, user: &str, password: &str) -> Option<bool> {
     let user_ok = constant_time_eq(user, &effective_user(&state.settings));
     let password_ok = match state.settings.secret(HASH_KEY) {
         Some(hash) => {
+            let permit = state.config.console_tokens.hash_permit()?;
             let hash = hash.clone();
             let plain = password.to_string();
-            tokio::task::spawn_blocking(move || verify_hash(&hash, &plain))
-                .await
-                .unwrap_or(false)
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                verify_hash(&hash, &plain)
+            })
+            .await
+            .unwrap_or(false)
         }
         None => constant_time_eq(
             password,
@@ -282,7 +287,22 @@ pub async fn check_credentials(state: &AppState, user: &str, password: &str) -> 
                 .unwrap_or(DEFAULT_PASSWORD),
         ),
     };
-    user_ok & password_ok
+    Some(user_ok & password_ok)
+}
+
+fn busy() -> Response {
+    let mut resp = (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({
+            "error": "too many sign-ins at once: try again in a moment",
+            "reason": "busy",
+            "retry_after": 1,
+        })),
+    )
+        .into_response();
+    resp.headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    resp
 }
 
 // ── Tokens: generation, revocation, sessions, attempts ───────────────
@@ -301,6 +321,9 @@ struct Issued {
 #[derive(Clone, Copy, Debug, Default)]
 struct Attempt {
     failures: u32,
+    /// Attempts under way (counted in `check`, settled by `failed` or
+    /// `succeeded`): parallel guesses count before their answers.
+    pending: u32,
     window_start: Duration,
     blocked_until: Option<Duration>,
     strikes: u32,
@@ -316,8 +339,33 @@ pub struct Tokens {
     /// client revoked from Management, AI agents. Kept across "sign out
     /// everywhere".
     revoked_subjects: Mutex<BTreeMap<String, i64>>,
+    /// Token ids revoked with an AI agent (Management, AI agents): a sign
+    /// out everywhere never clears them; rebuilt from the agents' records at
+    /// load.
+    agent_revoked: Mutex<BTreeMap<String, i64>>,
     issued: Mutex<VecDeque<Issued>>,
     attempts: Mutex<HashMap<IpAddr, Attempt>>,
+    /// Password hashes computed at once (argon2id takes 19 MiB each).
+    hashing: Arc<tokio::sync::Semaphore>,
+    /// `<state>/sessions.json`: the generation and the revocations survive a
+    /// restart there.
+    file: Option<std::path::PathBuf>,
+}
+
+/// Password hashes (sign-in, password change) computed at once.
+pub const HASH_PERMITS: usize = 4;
+/// The file of the sign-in state under the state directory.
+pub const SESSIONS_FILE: &str = "sessions.json";
+
+/// What `<state>/sessions.json` holds.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct SessionsDoc {
+    version: u32,
+    generation: u64,
+    revoked: BTreeMap<String, i64>,
+    revoked_subjects: BTreeMap<String, i64>,
+    agent_revoked: BTreeMap<String, i64>,
 }
 
 impl std::fmt::Debug for Tokens {
@@ -348,14 +396,84 @@ impl Tokens {
     }
 
     pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
+        // Without a state file the generation starts at the start time, so it
+        // only grows across restarts: a restart signs every token out rather
+        // than letting a revoked one work again.
+        let start = u64::try_from(clock.wall().timestamp()).unwrap_or(1).max(1);
         Self {
             clock,
-            generation: AtomicU64::new(1),
+            generation: AtomicU64::new(start),
             revoked: Mutex::new(BTreeMap::new()),
             revoked_subjects: Mutex::new(BTreeMap::new()),
+            agent_revoked: Mutex::new(BTreeMap::new()),
             issued: Mutex::new(VecDeque::new()),
             attempts: Mutex::new(HashMap::new()),
+            hashing: Arc::new(tokio::sync::Semaphore::new(HASH_PERMITS)),
+            file: None,
         }
+    }
+
+    /// The sign-in state of an instance: kept in `<state>/sessions.json`
+    /// when there is a state directory (the generation, revoked token ids
+    /// and subjects survive a restart), else in memory.
+    pub fn persistent(state_dir: Option<&std::path::Path>) -> Self {
+        Self::persistent_with_clock(state_dir, Arc::new(SystemClock::new()))
+    }
+
+    pub fn persistent_with_clock(
+        state_dir: Option<&std::path::Path>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        let mut t = Self::with_clock(clock);
+        let Some(dir) = state_dir else { return t };
+        if let Err(e) = crate::settings::create_private_dir(dir) {
+            tracing::warn!(target: "rustybin::auth", dir = %dir.display(), error = %e, "the state directory could not be created: the sign-in state stays in memory");
+            return t;
+        }
+        let path = dir.join(SESSIONS_FILE);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            match serde_json::from_str::<SessionsDoc>(&text) {
+                Ok(doc) => {
+                    let now = t.now();
+                    let live = |m: BTreeMap<String, i64>, cap: usize| -> BTreeMap<String, i64> {
+                        m.into_iter().filter(|(_, e)| *e > now).take(cap).collect()
+                    };
+                    t.generation = AtomicU64::new(doc.generation.max(1));
+                    *lock(&t.revoked) = live(doc.revoked, MAX_REVOKED);
+                    *lock(&t.revoked_subjects) = live(doc.revoked_subjects, MAX_REVOKED_SUBJECTS);
+                    *lock(&t.agent_revoked) = live(doc.agent_revoked, MAX_REVOKED);
+                }
+                Err(e) => {
+                    tracing::warn!(target: "rustybin::auth", file = %path.display(), error = %e, "the sign-in state could not be read: every earlier token is signed out");
+                }
+            }
+        }
+        t.file = Some(path);
+        t.save();
+        t
+    }
+
+    /// Write the generation and the revocations (0600, replaced atomically).
+    fn save(&self) {
+        let Some(path) = &self.file else { return };
+        let doc = SessionsDoc {
+            version: 1,
+            generation: self.generation(),
+            revoked: lock(&self.revoked).clone(),
+            revoked_subjects: lock(&self.revoked_subjects).clone(),
+            agent_revoked: lock(&self.agent_revoked).clone(),
+        };
+        let Ok(text) = serde_json::to_vec_pretty(&doc) else {
+            return;
+        };
+        if let Err(e) = crate::settings::write_private(path, &text) {
+            tracing::warn!(target: "rustybin::auth", file = %path.display(), error = %e, "the sign-in state could not be saved");
+        }
+    }
+
+    /// A permit to compute one password hash, if one is free now.
+    pub fn hash_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.hashing.clone().try_acquire_owned().ok()
     }
 
     fn now(&self) -> i64 {
@@ -373,9 +491,13 @@ impl Tokens {
     pub fn rotate(&self) -> usize {
         self.generation.fetch_add(1, Ordering::Relaxed);
         lock(&self.revoked).clear();
-        let mut issued = lock(&self.issued);
-        let n = issued.len();
-        issued.clear();
+        let n = {
+            let mut issued = lock(&self.issued);
+            let n = issued.len();
+            issued.clear();
+            n
+        };
+        self.save();
         n
     }
 
@@ -383,6 +505,7 @@ impl Tokens {
     fn prune(&self) {
         let now = self.now();
         lock(&self.revoked).retain(|_, exp| *exp > now);
+        lock(&self.agent_revoked).retain(|_, exp| *exp > now);
         lock(&self.issued).retain(|s| s.expires_at > now);
     }
 
@@ -400,51 +523,61 @@ impl Tokens {
     pub fn revoke(&self, jti: &str, expires_at: i64) {
         self.prune();
         lock(&self.issued).retain(|s| s.jti != jti);
-        let mut revoked = lock(&self.revoked);
-        revoked.insert(jti.to_string(), expires_at);
-        while revoked.len() > MAX_REVOKED {
-            // Drop the entry that expires first.
-            let Some(first) = revoked
-                .iter()
-                .min_by_key(|(_, exp)| **exp)
-                .map(|(k, _)| k.clone())
-            else {
-                break;
-            };
-            revoked.remove(&first);
+        insert_bounded(&mut lock(&self.revoked), jti, expires_at, MAX_REVOKED);
+        self.save();
+    }
+
+    /// Revoke a token id with an AI agent: kept apart from sign-outs, so a
+    /// sign out everywhere (which clears those) keeps it.
+    pub fn revoke_for_agent(&self, jti: &str, expires_at: i64) {
+        self.prune();
+        lock(&self.issued).retain(|s| s.jti != jti);
+        insert_bounded(&mut lock(&self.agent_revoked), jti, expires_at, MAX_REVOKED);
+        self.save();
+    }
+
+    /// Re-add an agent's revocation at load, without writing the file.
+    pub fn remember_agent_revocation(&self, jti: &str, expires_at: i64) {
+        if expires_at > self.now() {
+            insert_bounded(&mut lock(&self.agent_revoked), jti, expires_at, MAX_REVOKED);
         }
     }
 
     pub fn is_revoked(&self, jti: &str) -> bool {
         let now = self.now();
         lock(&self.revoked).get(jti).is_some_and(|exp| *exp > now)
+            || lock(&self.agent_revoked)
+                .get(jti)
+                .is_some_and(|exp| *exp > now)
     }
 
     /// Take back a revocation (an agent restored by the operator).
     pub fn unrevoke(&self, jti: &str) -> bool {
-        lock(&self.revoked).remove(jti).is_some()
+        let was = lock(&self.agent_revoked).remove(jti).is_some()
+            | lock(&self.revoked).remove(jti).is_some();
+        if was {
+            self.save();
+        }
+        was
     }
 
     /// Refuse every token of `sub` until `until`.
     pub fn revoke_subject(&self, sub: &str, until: i64) {
         let now = self.now();
-        let mut subjects = lock(&self.revoked_subjects);
-        subjects.retain(|_, exp| *exp > now);
-        subjects.insert(sub.to_string(), until);
-        while subjects.len() > MAX_REVOKED_SUBJECTS {
-            let Some(first) = subjects
-                .iter()
-                .min_by_key(|(_, exp)| **exp)
-                .map(|(k, _)| k.clone())
-            else {
-                break;
-            };
-            subjects.remove(&first);
+        {
+            let mut subjects = lock(&self.revoked_subjects);
+            subjects.retain(|_, exp| *exp > now);
+            insert_bounded(&mut subjects, sub, until, MAX_REVOKED_SUBJECTS);
         }
+        self.save();
     }
 
     pub fn restore_subject(&self, sub: &str) -> bool {
-        lock(&self.revoked_subjects).remove(sub).is_some()
+        let was = lock(&self.revoked_subjects).remove(sub).is_some();
+        if was {
+            self.save();
+        }
+        was
     }
 
     pub fn is_subject_revoked(&self, sub: &str) -> bool {
@@ -497,14 +630,52 @@ impl Tokens {
             .collect()
     }
 
-    /// May `ip` try to sign in? `Err(seconds)` while it waits.
+    /// May `ip` try to sign in? `Err(seconds)` while it waits. An allowed
+    /// attempt counts as pending until `failed` or `succeeded` settles it, so
+    /// parallel guesses are refused once the window's allowance is taken.
     pub fn check(&self, ip: Option<IpAddr>) -> Result<(), u64> {
         let Some(ip) = ip else { return Ok(()) };
         let now = self.clock.mono();
-        let attempts = lock(&self.attempts);
-        match attempts.get(&ip).and_then(|a| a.blocked_until) {
-            Some(until) if until > now => Err((until - now).as_secs().max(1)),
-            _ => Ok(()),
+        let mut attempts = lock(&self.attempts);
+        if !attempts.contains_key(&ip) && attempts.len() >= MAX_ATTEMPT_ADDRESSES {
+            Self::evict_attempts(&mut attempts, now);
+        }
+        let a = attempts.entry(ip).or_default();
+        if let Some(until) = a.blocked_until.filter(|u| *u > now) {
+            return Err((until - now).as_secs().max(1));
+        }
+        if now.saturating_sub(a.window_start) > Duration::from_secs(WINDOW_SECS) {
+            a.failures = 0;
+            a.pending = 0;
+            a.window_start = now;
+        }
+        if a.failures + a.pending >= FAILURES_PER_WINDOW {
+            let left =
+                Duration::from_secs(WINDOW_SECS).saturating_sub(now.saturating_sub(a.window_start));
+            return Err(left.as_secs().max(1));
+        }
+        a.pending += 1;
+        a.last = now;
+        Ok(())
+    }
+
+    fn evict_attempts(attempts: &mut HashMap<IpAddr, Attempt>, now: Duration) {
+        let stale = Duration::from_secs(MAX_BLOCK_SECS);
+        attempts.retain(|_, a| {
+            a.blocked_until.is_some_and(|u| u > now) || now.saturating_sub(a.last) < stale
+        });
+        if attempts.len() >= MAX_ATTEMPT_ADDRESSES {
+            if let Some(oldest) = attempts.iter().min_by_key(|(_, a)| a.last).map(|(k, _)| *k) {
+                attempts.remove(&oldest);
+            }
+        }
+    }
+
+    /// Settle a pending attempt that did not run (the hash pool was full).
+    pub fn abandoned(&self, ip: Option<IpAddr>) {
+        let Some(ip) = ip else { return };
+        if let Some(a) = lock(&self.attempts).get_mut(&ip) {
+            a.pending = a.pending.saturating_sub(1);
         }
     }
 
@@ -525,6 +696,7 @@ impl Tokens {
             }
         }
         let a = attempts.entry(ip).or_default();
+        a.pending = a.pending.saturating_sub(1);
         if now.saturating_sub(a.window_start) > Duration::from_secs(WINDOW_SECS) {
             a.failures = 0;
             a.window_start = now;
@@ -545,6 +717,22 @@ impl Tokens {
         if let Some(ip) = ip {
             lock(&self.attempts).remove(&ip);
         }
+    }
+}
+
+/// Insert into a bounded map of expiries, dropping the entry that expires
+/// first past `cap`.
+fn insert_bounded(map: &mut BTreeMap<String, i64>, key: &str, until: i64, cap: usize) {
+    map.insert(key.to_string(), until);
+    while map.len() > cap {
+        let Some(first) = map
+            .iter()
+            .min_by_key(|(_, exp)| **exp)
+            .map(|(k, _)| k.clone())
+        else {
+            break;
+        };
+        map.remove(&first);
     }
 }
 
@@ -791,7 +979,11 @@ async fn login_handler(
             "invalid_credentials",
         );
     }
-    if !check_credentials(&state, &body.username, &body.password).await {
+    let Some(ok) = check_credentials(&state, &body.username, &body.password).await else {
+        tokens.abandoned(ip);
+        return busy();
+    };
+    if !ok {
         tokens.failed(ip);
         audit("login", &body.username, ip, "invalid_credentials");
         return error(
@@ -1036,9 +1228,18 @@ async fn password_handler(
         return rate_limited(wait);
     }
     let current_user = effective_user(&state.settings);
-    if body.current_password.chars().count() > MAX_PASSWORD_CHARS * 4
-        || !check_credentials(&state, &current_user, &body.current_password).await
-    {
+    let current_ok = if body.current_password.chars().count() > MAX_PASSWORD_CHARS * 4 {
+        false
+    } else {
+        match check_credentials(&state, &current_user, &body.current_password).await {
+            Some(ok) => ok,
+            None => {
+                tokens.abandoned(ip);
+                return busy();
+            }
+        }
+    };
+    if !current_ok {
         tokens.failed(ip);
         audit(
             "change_password",
@@ -1076,7 +1277,15 @@ async fn password_handler(
         }
     }
     let plain = body.new_password.clone();
-    let hash = match tokio::task::spawn_blocking(move || hash_password(&plain)).await {
+    let Some(permit) = tokens.hash_permit() else {
+        return busy();
+    };
+    let hash = match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        hash_password(&plain)
+    })
+    .await
+    {
         Ok(Ok(h)) => h,
         _ => {
             return error(

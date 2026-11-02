@@ -851,6 +851,19 @@ impl Agents {
             if let (Some(_), Credential::Oauth { sub }) = (&r.revoked, &r.credential) {
                 tokens.revoke_subject(sub, now + crate::control_oauth::REFRESH_TTL_SECS);
             }
+            // The token ids revoked with the agent, refused again after a
+            // restart and never cleared by a sign out everywhere.
+            if r.revoked.is_some() {
+                for jti in &r.revoked_tokens {
+                    let exp = r
+                        .tokens
+                        .iter()
+                        .find(|(j, _)| j == jti)
+                        .map(|(_, e)| *e)
+                        .unwrap_or(now + crate::login::TOKEN_TTL_SECS);
+                    tokens.remember_agent_revocation(jti, exp);
+                }
+            }
             records.insert(r.id.clone(), r);
         }
         let (events, _) = broadcast::channel(256);
@@ -1180,7 +1193,7 @@ impl Agents {
             if r.credential.revocable() {
                 for (jti, exp) in &r.tokens {
                     if *exp > now.timestamp() {
-                        tokens.revoke(jti, *exp);
+                        tokens.revoke_for_agent(jti, *exp);
                         if !r.revoked_tokens.contains(jti) {
                             r.revoked_tokens.push(jti.clone());
                         }

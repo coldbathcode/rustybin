@@ -485,6 +485,8 @@ function networkPanel(doc, reload, error) {
     el.appendChild(card('Outbound connections', { hint: 'what this instance may reach' }, form.el));
     loadPolicy();
     el.appendChild(card('Policy as the instance sees it', { hint: 'the merged list, each feature, the last 100 decisions' }, policyEl));
+    const proxy = settingsForm(doc, 'proxy', { saveLabel: 'Save proxy settings', onSaved: reload });
+    el.appendChild(card('Behind a proxy', { hint: 'which header names the client (RUSTYBIN_TRUST_FORWARD)' }, proxy.el));
     const leads = settingsForm(doc, 'leads', { saveLabel: 'Save leads webhook settings', onSaved: reload });
     el.appendChild(card('Leads webhook', { hint: 'self-service mocks' }, leads.el));
     const registry = settingsForm(doc, 'registry', { saveLabel: 'Save registry settings', onSaved: reload });

@@ -795,7 +795,7 @@ def run_theme(browser, theme):
         expect(page.locator("#assist-jobs >> text=mock-fast-9")).to_have_count(0)
         page.get_by_role("tab", name="Network").click()
         for s in doc["settings"]:
-            if s["group"] in ("egress", "leads", "registry"):
+            if s["group"] in ("egress", "leads", "registry", "proxy"):
                 expect(page.locator(f"[aria-label='{s['key']}']")).to_have_count(1)
         # The policy card: the global list, each feature, no decisions yet.
         page.wait_for_selector("text=Allowed by feature")

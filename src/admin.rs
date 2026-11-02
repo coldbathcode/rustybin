@@ -65,6 +65,12 @@ pub fn admin_check(headers: &HeaderMap, config: &Config) -> Result<(), (StatusCo
                 ))
             }
         }
+        // A control token without the admin scope is never admin, whether
+        // or not an admin token is configured.
+        None if valid_jwt => Err((
+            StatusCode::FORBIDDEN,
+            "this operation needs the admin token or a control token with the admin scope",
+        )),
         None if config.public_mode => Err((
             StatusCode::FORBIDDEN,
             "this operation is disabled in public mode (no admin token configured)",
@@ -120,5 +126,27 @@ mod tests {
         assert!(require_admin(&h, &c).is_ok());
         h.insert(ADMIN_TOKEN_HEADER, HeaderValue::from_static("wrong"));
         assert!(require_admin(&h, &c).is_err());
+    }
+
+    #[test]
+    fn a_control_jwt_without_the_admin_scope_is_not_admin_without_an_admin_token() {
+        let mut c = crate::test_support::jwt_config();
+        c.admin_token = None;
+        let mut h = HeaderMap::new();
+        let console = crate::test_support::control_jwt(Some("console"));
+        h.insert(
+            "authorization",
+            format!("Bearer {console}").parse().expect("header"),
+        );
+        let e = admin_check(&h, &c).expect_err("not admin");
+        assert_eq!(e.0, StatusCode::FORBIDDEN);
+        let admin = crate::test_support::control_jwt(Some("admin"));
+        h.insert(
+            "authorization",
+            format!("Bearer {admin}").parse().expect("header"),
+        );
+        assert!(admin_check(&h, &c).is_ok());
+        // No credential, no admin token, normal mode: open, as before.
+        assert!(admin_check(&HeaderMap::new(), &c).is_ok());
     }
 }

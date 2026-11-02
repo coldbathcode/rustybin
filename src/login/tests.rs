@@ -384,10 +384,14 @@ async fn logout_revokes_and_sign_out_everywhere_rotates() {
 
     // Sign out everywhere: the caller included.
     let d = token_for(&app).await;
+    let (_, before) = with_token(&app, "GET", SESSION_PATH, &b, json!({})).await;
     let (status, v) = with_token(&app, "DELETE", SESSIONS_PATH, &b, json!({})).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["ended"], 2);
-    assert_eq!(v["generation"], 2);
+    assert!(
+        v["generation"].as_u64() > before["generation"].as_u64(),
+        "{v} {before}"
+    );
     for t in [&b, &d] {
         let resp = app
             .clone()
@@ -823,7 +827,83 @@ fn tokens_are_bounded() {
     assert!(tokens.end("s-50"));
     assert!(!tokens.end("s-50"));
     assert!(tokens.is_revoked("s-50"));
+    let generation = tokens.generation();
     assert_eq!(tokens.rotate(), MAX_SESSIONS - 1);
-    assert_eq!(tokens.generation(), 2);
+    assert_eq!(tokens.generation(), generation + 1);
     assert!(tokens.sessions().is_empty());
+}
+
+#[test]
+fn revocations_and_the_generation_survive_a_restart() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let far = chrono::Utc::now().timestamp() + 3600;
+    let a = Tokens::persistent(Some(dir.path()));
+    a.revoke("signed-out", far);
+    a.revoke_for_agent("agent-token", far);
+    a.revoke_subject("client:abc", far);
+    a.rotate();
+    let generation = a.generation();
+    drop(a);
+    let file = dir.path().join(SESSIONS_FILE);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&file).expect("file").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let b = Tokens::persistent(Some(dir.path()));
+    assert_eq!(b.generation(), generation, "the generation survives");
+    assert!(b.is_revoked("agent-token"));
+    assert!(b.is_subject_revoked("client:abc"));
+    // The sign-out was cleared by the rotation (its generation is gone).
+    assert!(!b.is_revoked("signed-out"));
+    b.revoke("signed-out-2", far);
+    drop(b);
+    assert!(Tokens::persistent(Some(dir.path())).is_revoked("signed-out-2"));
+    // Without a state directory the generation only grows across starts.
+    let t = Tokens::new();
+    assert!(t.generation() > 1_600_000_000);
+}
+
+#[test]
+fn a_sign_out_everywhere_keeps_an_agent_revocation() {
+    let tokens = Tokens::new();
+    let far = chrono::Utc::now().timestamp() + 3600;
+    tokens.revoke_for_agent("agent-jti", far);
+    tokens.revoke("plain-jti", far);
+    tokens.rotate();
+    assert!(tokens.is_revoked("agent-jti"));
+    assert!(!tokens.is_revoked("plain-jti"));
+    assert!(tokens.unrevoke("agent-jti"));
+    assert!(!tokens.is_revoked("agent-jti"));
+}
+
+#[test]
+fn parallel_attempts_count_before_their_answers() {
+    let tokens = Tokens::new();
+    let ip = Some("203.0.113.7".parse().expect("ip"));
+    // Fifty guesses in flight at once: only the window's allowance starts.
+    let started = (0..50).filter(|_| tokens.check(ip).is_ok()).count();
+    assert_eq!(started, FAILURES_PER_WINDOW as usize);
+    for _ in 0..started {
+        tokens.failed(ip);
+    }
+    assert!(tokens.check(ip).is_err(), "blocked once they failed");
+    // Another address is not affected; an abandoned attempt frees its slot.
+    let other = Some("203.0.113.8".parse().expect("ip"));
+    assert!(tokens.check(other).is_ok());
+    tokens.abandoned(other);
+    assert!(tokens.check(other).is_ok());
+}
+
+#[tokio::test]
+async fn the_hash_pool_is_bounded() {
+    let tokens = Tokens::new();
+    let held: Vec<_> = (0..HASH_PERMITS)
+        .filter_map(|_| tokens.hash_permit())
+        .collect();
+    assert_eq!(held.len(), HASH_PERMITS);
+    assert!(tokens.hash_permit().is_none());
+    drop(held);
+    assert!(tokens.hash_permit().is_some());
 }

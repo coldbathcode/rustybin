@@ -814,3 +814,46 @@ async fn a_revoked_agent_loses_its_tokens_until_restored() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(!tool_names(&app, &access).await.is_empty());
 }
+
+#[tokio::test]
+async fn a_sign_out_everywhere_ends_the_oauth_tokens() {
+    let c = token_config();
+    let console_tokens = c.console_tokens.clone();
+    let app = app(c);
+    let (client_id, tokens) = sign_in(&app, ADMIN, Some("console")).await;
+    let access = tokens["access_token"].as_str().expect("access").to_string();
+    let refresh = tokens["refresh_token"]
+        .as_str()
+        .expect("refresh")
+        .to_string();
+    assert!(!tool_names(&app, &access).await.is_empty());
+    // A password change or a sign out everywhere: a new generation.
+    console_tokens.rotate();
+    let resp = mcp(&app, Some(&access), "tools/list", json!({})).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let form = form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "refresh_token")
+        .append_pair("client_id", &client_id)
+        .append_pair("refresh_token", &refresh)
+        .finish();
+    let resp = send(
+        &app,
+        "POST",
+        TOKEN_PATH,
+        &[],
+        Some(("application/x-www-form-urlencoded", form)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn sign_in_requests_are_limited_per_address() {
+    let st = OAuthState::new(false);
+    let a = Some("203.0.113.1".parse().expect("ip"));
+    for _ in 0..AUTHORIZE_PER_MINUTE {
+        assert!(st.allow_authorize(a));
+    }
+    assert!(!st.allow_authorize(a));
+    assert!(st.allow_authorize(Some("203.0.113.2".parse().expect("ip"))));
+}

@@ -48,6 +48,7 @@ filesystem, see [Containers](concepts/control-plane-security.md#containers).
 | Variable | Default | Description |
 |---|---|---|
 | `RUSTYBIN_TRUST_FORWARD` | `false` | Trust proxy headers. Client IP: `Fly-Client-IP`, then RFC 7239 `Forwarded: for=`, `X-Forwarded-For` (the rightmost address that is not private or loopback, so clients cannot spoof it by prepending), then `X-Real-IP`. Scheme, host and port: `X-Forwarded-Proto`, `X-Forwarded-Host`, `X-Forwarded-Port` and `Forwarded: proto= host=`. The OIDC issuer also honours `X-Forwarded-Prefix`. Enable it only behind a proxy you control. |
+| `RUSTYBIN_TRUST_FORWARD_HEADER` | `any` | With `RUSTYBIN_TRUST_FORWARD`, the one header that names the client: `fly` (`Fly-Client-IP`), `forwarded`, `x-forwarded-for` or `x-real-ip`; `any` keeps the order above. Seeds the `proxy.client_ip_header` setting (Management, Network). Name your proxy's header: with `any`, a client behind a proxy that does not set every header can name its own address. |
 | `RUSTYBIN_TLS_CERT` | `certs/server.crt` | Certificate of the HTTPS listener (relative to the working directory). |
 | `RUSTYBIN_TLS_KEY` | `certs/server.key` | Private key of the HTTPS listener. |
 | `RUSTYBIN_MTLS_IN_HEADER` | unset | Name of a request header in which a gateway that terminated mTLS forwards the client certificate (URL-encoded PEM, raw PEM or base64 DER). `/auth/mtls` then verifies it against the demo CA. See [Authentication](reference/auth.md#mtls). |

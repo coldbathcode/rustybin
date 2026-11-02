@@ -204,7 +204,7 @@ fn split_outside_quotes(s: &str, sep: char) -> Vec<&str> {
 /// hop). Otherwise, or when none is usable, the TCP peer address.
 pub fn client_ip(headers: &HeaderMap, extensions: &Extensions, config: &Config) -> Option<IpAddr> {
     if config.trust_forward {
-        if let Some(ip) = forwarded_client_ip(headers) {
+        if let Some(ip) = forwarded_client_ip_with(headers, config.forward_header.get()) {
             return Some(ip);
         }
     }
@@ -221,6 +221,123 @@ pub fn peer_addr(extensions: &Extensions) -> Option<SocketAddr> {
                 .get::<MockConnectInfo<SocketAddr>>()
                 .map(|MockConnectInfo(addr)| *addr)
         })
+}
+
+/// Which proxy header names the client (`proxy.client_ip_header`, seeded by
+/// `RUSTYBIN_TRUST_FORWARD_HEADER`): `any` takes the first usable of them
+/// all; the others trust that one header only, so a client cannot pick
+/// another (a fresh `Fly-Client-IP` per request behind a proxy that does not
+/// set it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ForwardHeader {
+    Any = 0,
+    Fly = 1,
+    Forwarded = 2,
+    XForwardedFor = 3,
+    XRealIp = 4,
+}
+
+/// The choices of `proxy.client_ip_header`.
+pub const FORWARD_HEADERS: &[&str] = &["any", "fly", "forwarded", "x-forwarded-for", "x-real-ip"];
+
+impl ForwardHeader {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "any" => Some(Self::Any),
+            "fly" | "fly-client-ip" => Some(Self::Fly),
+            "forwarded" => Some(Self::Forwarded),
+            "x-forwarded-for" | "xff" => Some(Self::XForwardedFor),
+            "x-real-ip" => Some(Self::XRealIp),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        FORWARD_HEADERS[self as usize]
+    }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Fly,
+            2 => Self::Forwarded,
+            3 => Self::XForwardedFor,
+            4 => Self::XRealIp,
+            _ => Self::Any,
+        }
+    }
+}
+
+/// The trusted header, shared by the configuration and the settings store
+/// (which updates it when the setting changes).
+#[derive(Debug, Default)]
+pub struct TrustedHeader(std::sync::atomic::AtomicU8);
+
+impl TrustedHeader {
+    pub fn new(h: ForwardHeader) -> Self {
+        Self(std::sync::atomic::AtomicU8::new(h as u8))
+    }
+
+    pub fn get(&self) -> ForwardHeader {
+        ForwardHeader::from_u8(self.0.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    pub fn set(&self, h: ForwardHeader) {
+        self.0.store(h as u8, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The settings of the proxy in front of the instance.
+pub fn specs() -> Vec<crate::settings::Spec> {
+    vec![crate::settings::Spec::new(
+        "proxy.client_ip_header",
+        "proxy",
+        "Client address header",
+        "With RUSTYBIN_TRUST_FORWARD on, the one proxy header that names the client: fly (Fly-Client-IP), forwarded (RFC 7239), x-forwarded-for (its rightmost outside hop) or x-real-ip. any takes the first usable of them, which a client can spoof behind a proxy that does not set them all: name your proxy's header.",
+        crate::settings::Kind::Choice { options: FORWARD_HEADERS },
+        serde_json::Value::String("any".into()),
+    )
+    .env("RUSTYBIN_TRUST_FORWARD_HEADER", |c| {
+        Some(serde_json::Value::String(c.forward_header.get().as_str().to_string()))
+    })]
+}
+
+/// The client IP claimed by the trusted proxy header (`mode`).
+pub fn forwarded_client_ip_with(headers: &HeaderMap, mode: ForwardHeader) -> Option<IpAddr> {
+    let fly = || {
+        headers
+            .get("fly-client-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_forwarded_ip)
+    };
+    let forwarded = || {
+        let fwd: Vec<IpAddr> = parse_forwarded(headers)
+            .iter()
+            .filter_map(|e| e.for_.as_deref().and_then(parse_forwarded_ip))
+            .collect();
+        pick_client(&fwd)
+    };
+    let xff = || {
+        let hops: Vec<IpAddr> = joined(headers, "x-forwarded-for")?
+            .split(',')
+            .take(64)
+            .filter_map(parse_forwarded_ip)
+            .collect();
+        pick_client(&hops)
+    };
+    let real = || {
+        headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_forwarded_ip)
+    };
+    match mode {
+        ForwardHeader::Any => forwarded_client_ip(headers),
+        ForwardHeader::Fly => fly(),
+        ForwardHeader::Forwarded => forwarded(),
+        ForwardHeader::XForwardedFor => xff(),
+        ForwardHeader::XRealIp => real(),
+    }
 }
 
 /// The client IP claimed by proxy headers (see [`client_ip`]), regardless of
@@ -742,5 +859,54 @@ mod tests {
             request_origin(&h, &ext, &uri, &config).base_url(),
             "http://internal:8080"
         );
+    }
+
+    #[test]
+    fn only_the_named_header_names_the_client() {
+        let mut h = HeaderMap::new();
+        h.insert("fly-client-ip", "198.51.100.66".parse().expect("v"));
+        h.insert(
+            "x-forwarded-for",
+            "198.51.100.66, 203.0.113.9".parse().expect("v"),
+        );
+        h.insert("x-real-ip", "192.0.2.44".parse().expect("v"));
+        let xff: IpAddr = "203.0.113.9".parse().expect("ip");
+        // A spoofed Fly-Client-IP behind a proxy that sets X-Forwarded-For.
+        assert_eq!(
+            forwarded_client_ip_with(&h, ForwardHeader::XForwardedFor),
+            Some(xff)
+        );
+        assert_eq!(
+            forwarded_client_ip_with(&h, ForwardHeader::Any),
+            "198.51.100.66".parse().ok()
+        );
+        assert_eq!(
+            forwarded_client_ip_with(&h, ForwardHeader::XRealIp),
+            "192.0.2.44".parse().ok()
+        );
+        assert_eq!(forwarded_client_ip_with(&h, ForwardHeader::Forwarded), None);
+        // The setting moves the configuration's header (every surface writes
+        // through the settings store).
+        let mut c = Config::for_tests();
+        c.trust_forward = true;
+        let settings = crate::settings::Settings::new(&c);
+        settings
+            .update(
+                std::collections::BTreeMap::from([(
+                    "proxy.client_ip_header".to_string(),
+                    serde_json::json!("x-forwarded-for"),
+                )]),
+                std::collections::BTreeMap::new(),
+                "test",
+            )
+            .expect("set");
+        assert_eq!(c.forward_header.get(), ForwardHeader::XForwardedFor);
+        let mut ext = Extensions::new();
+        ext.insert(ConnectInfo(SocketAddr::from(([10, 0, 0, 1], 1234))));
+        assert_eq!(client_ip(&h, &ext, &c), Some(xff));
+        settings
+            .unset("proxy.client_ip_header", "test")
+            .expect("unset");
+        assert_eq!(c.forward_header.get(), ForwardHeader::Any);
     }
 }
