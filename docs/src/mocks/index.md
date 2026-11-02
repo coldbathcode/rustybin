@@ -305,8 +305,17 @@ fixed caps: 20 headers per configured response, `matches` patterns up to 256
 characters, 50 API keys, bearer tokens and basic users per mock, `$ref` chains up
 to 32 deep, a `rustybin.yaml` up to 8 MiB and 200 files in the mocks directory.
 Generated strings are padded to `minLength` up to 64 KiB (a larger minimum gives a
-value that fails its own schema, which the deploy checks report), and one request
-validation makes at most 500,000 schema checks.
+value that fails its own schema, which the deploy checks report), one generated value
+holds at most 1 MiB of string content (past it strings stay short and the rest is
+null), and one request validation makes at most 500,000 schema checks (`uniqueItems`
+counts one per item). A path template may name a parameter once and hold at most 32
+of them (other paths are skipped with a warning), a server URL is at most 2 KiB once
+its variables are filled in (else `servers[0]` is ignored with a warning), and a
+sample request cuts a path value at 1 KiB. Parsing and compiling a spec (preview,
+create, edits, operation settings, samples) runs off the request threads, four at a
+time: past five seconds of waiting the answer is `503` with `Retry-After`, and a
+visitor of a [self-service](self-service.md) instance gets 30 compiles a minute
+(`429` past it).
 `GET /_rustybin/mocks` returns the instance's limits as `limits`.
 
 ## Control API

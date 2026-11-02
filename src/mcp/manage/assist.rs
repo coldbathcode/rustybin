@@ -324,7 +324,7 @@ pub async fn generate_spec(ctx: &CallCtx, access: &Access, args: &Value, params:
             create_args[key] = v.clone();
         }
     }
-    let created = super::mocks::create_mock(ctx, access, &create_args);
+    let created = super::mocks::create_mock(ctx, access, &create_args).await;
     if created["isError"].as_bool() == Some(true) {
         let mut v = created;
         result["created"] = Value::Null;

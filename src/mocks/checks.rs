@@ -185,6 +185,27 @@ fn text_of(v: &Value) -> String {
 }
 
 /// Characters kept as is in a generated path segment.
+/// Longest path segment a sample request carries (a 128 KB example of a
+/// path parameter would otherwise be repeated into every sample path).
+pub const MAX_SAMPLE_SEGMENT: usize = 1024;
+
+/// Cut an encoded segment to `MAX_SAMPLE_SEGMENT` bytes, never inside a
+/// `%XX` escape.
+fn cap_segment(mut seg: String) -> String {
+    if seg.len() <= MAX_SAMPLE_SEGMENT {
+        return seg;
+    }
+    let mut cut = MAX_SAMPLE_SEGMENT;
+    while let Some(i) = seg[..cut].rfind('%') {
+        if i + 3 <= cut {
+            break;
+        }
+        cut = i;
+    }
+    seg.truncate(cut);
+    seg
+}
+
 fn encode_segment(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
@@ -248,7 +269,11 @@ pub fn sample_request_variant(c: &Compiled, op: &Operation, variant: u64) -> Sam
     let mut path = op.path.clone();
     for p in op.params_in(Location::Path) {
         let v = param_value(c, &p.name, &p.schema, p.example.as_ref(), 0, variant);
-        path = path.replace(&format!("{{{}}}", p.name), &encode_segment(&v));
+        path = path.replacen(
+            &format!("{{{}}}", p.name),
+            &cap_segment(encode_segment(&v)),
+            1,
+        );
     }
     let mut query = Vec::new();
     for p in op.params_in(Location::Query).filter(|p| p.required) {
@@ -1195,5 +1220,28 @@ mod tests {
             assert!(headers.contains(&pair(shown)), "{mode:?}: {headers:?}");
             assert!(!headers.contains(&pair(real)), "{mode:?}: {headers:?}");
         }
+    }
+
+    #[test]
+    fn a_long_path_example_is_cut_in_the_sample_path() {
+        let example = "a".repeat(128 * 1024);
+        let doc = json!({
+            "openapi": "3.0.3", "info": {"title": "t", "version": "1"},
+            "paths": {"/items/{id}": {"get": {"operationId": "get",
+                "parameters": [{"name": "id", "in": "path", "required": true,
+                    "schema": {"type": "string"}, "example": example}],
+                "responses": {"200": {"description": "ok"}}}}}
+        });
+        let started = std::time::Instant::now();
+        let c = compile(&doc.to_string(), MockSettings::default());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        let op = &c.spec.operations[0];
+        let s = sample_request(&c, op);
+        assert!(s.path.len() <= MAX_SAMPLE_SEGMENT + 16, "{}", s.path.len());
+        assert_eq!(
+            cap_segment("%41%42".repeat(400)).len() % 3,
+            0,
+            "never inside an escape"
+        );
     }
 }

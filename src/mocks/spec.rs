@@ -547,6 +547,10 @@ pub fn parse_value(root: Value, limits: ParseLimits) -> Result<ParsedSpec, Strin
             warnings.push(format!("path {path:?} does not start with '/', skipped"));
             continue;
         }
+        if let Some(problem) = path_template_problem(path) {
+            warnings.push(format!("path {path:?} {problem}, skipped"));
+            continue;
+        }
         let item = match resolve(&root, item) {
             Ok(i) => i,
             Err(e) => {
@@ -741,6 +745,60 @@ pub fn template_params(path: &str) -> Vec<String> {
     out
 }
 
+/// Longest server URL after its variables are substituted.
+pub const MAX_SERVER_URL: usize = 2048;
+/// Most `{name}` placeholders in one path template.
+pub const MAX_PATH_PARAMS: usize = 32;
+
+/// Substitute a server URL's `{name}` variables with their defaults in one
+/// left-to-right pass: inserted text is never scanned again (a default of
+/// `{a}{a}` cannot double the URL), and the result is at most
+/// `MAX_SERVER_URL` bytes.
+fn expand_server_url(url: &str, vars: &Value) -> Result<String, String> {
+    let mut out = String::new();
+    let mut rest = url;
+    while let Some(start) = rest.find('{') {
+        let Some(end) = rest[start..].find('}') else {
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let name = &rest[start + 1..start + end];
+        let default = vars
+            .get(name)
+            .and_then(|v| v.get("default"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("server variable {{{name}}} has no default"))?;
+        out.push_str(default);
+        if out.len() > MAX_SERVER_URL {
+            return Err(format!(
+                "the server URL is longer than {MAX_SERVER_URL} bytes once its variables are filled in"
+            ));
+        }
+        rest = &rest[start + end + 1..];
+    }
+    out.push_str(rest);
+    if out.len() > MAX_SERVER_URL {
+        return Err(format!(
+            "the server URL is longer than {MAX_SERVER_URL} bytes once its variables are filled in"
+        ));
+    }
+    Ok(out)
+}
+
+/// Why a path template cannot be served: a placeholder named twice, or more
+/// than `MAX_PATH_PARAMS` of them.
+fn path_template_problem(path: &str) -> Option<String> {
+    let names = template_params(path);
+    if names.len() > MAX_PATH_PARAMS {
+        return Some(format!("has more than {MAX_PATH_PARAMS} path parameters"));
+    }
+    let mut seen = HashSet::new();
+    names
+        .iter()
+        .find(|n| !seen.insert(n.as_str()))
+        .map(|n| format!("names the path parameter {{{n}}} more than once"))
+}
+
 fn conflict_warnings(ops: &[Operation], warnings: &mut Vec<String>) {
     let mut seen: BTreeMap<(String, String), &str> = BTreeMap::new();
     for op in ops {
@@ -773,20 +831,11 @@ fn server_prefix(root: &Value, warnings: &mut Vec<String>) -> String {
     };
     if url.contains('{') {
         let vars = server.get("variables").cloned().unwrap_or(Value::Null);
-        for name in template_params(&url) {
-            let default = vars
-                .get(&name)
-                .and_then(|v| v.get("default"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            match default {
-                Some(d) => url = url.replace(&format!("{{{name}}}"), &d),
-                None => {
-                    warnings.push(format!(
-                        "server variable {{{name}}} has no default, servers[0] is ignored"
-                    ));
-                    return String::new();
-                }
+        match expand_server_url(&url, &vars) {
+            Ok(expanded) => url = expanded,
+            Err(problem) => {
+                warnings.push(format!("{problem}, servers[0] is ignored"));
+                return String::new();
             }
         }
     }
@@ -1259,5 +1308,53 @@ components:
         let bomb = "a: &a [x, x, x, x, x, x, x, x, x]\nb: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a]\nc: &c [*b, *b, *b, *b, *b, *b, *b, *b, *b]\nd: &d [*c, *c, *c, *c, *c, *c, *c, *c, *c]\ne: &e [*d, *d, *d, *d, *d, *d, *d, *d, *d]\nf: &f [*e, *e, *e, *e, *e, *e, *e, *e, *e]\ng: &g [*f, *f, *f, *f, *f, *f, *f, *f, *f]\nh: &h [*g, *g, *g, *g, *g, *g, *g, *g, *g]\n";
         // serde_yaml caps alias expansion; either way this must not hang.
         let _ = parse_document(bomb);
+    }
+
+    #[test]
+    fn server_variables_expand_once_and_within_a_cap() {
+        // Old: every {a} was replaced again and again, the URL doubling per
+        // pass until the allocation failed.
+        let url = "{a}".repeat(64);
+        let doc = serde_json::json!({
+            "openapi": "3.0.3", "info": {"title": "t", "version": "1"},
+            "servers": [{"url": format!("https://x.example/{url}"), "variables": {"a": {"default": "{a}{a}"}}}],
+            "paths": {}
+        });
+        let started = std::time::Instant::now();
+        let p = parse(&doc.to_string(), LIMITS).expect("parses");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        // One pass: the defaults are inserted as text, never expanded again.
+        assert_eq!(p.server_prefix, format!("/{}", "{a}{a}".repeat(64)));
+        // Past 2 KiB: a warning and no prefix.
+        let doc = serde_json::json!({
+            "openapi": "3.0.3", "info": {"title": "t", "version": "1"},
+            "servers": [{"url": format!("https://x.example/{url}"), "variables": {"a": {"default": "x".repeat(100)}}}],
+            "paths": {}
+        });
+        let p = parse(&doc.to_string(), LIMITS).expect("parses");
+        assert_eq!(p.server_prefix, "");
+        assert!(
+            p.warnings.iter().any(|w| w.contains("longer than 2048")),
+            "{:?}",
+            p.warnings
+        );
+    }
+
+    #[test]
+    fn a_path_naming_a_parameter_twice_or_too_many_is_skipped() {
+        let many: String = (0..33).map(|i| format!("/{{p{i}}}")).collect();
+        let doc = serde_json::json!({
+            "openapi": "3.0.3", "info": {"title": "t", "version": "1"},
+            "paths": {
+                "/a/{x}/b/{x}": {"get": {"responses": {"200": {"description": "ok"}}}},
+                many.clone(): {"get": {"responses": {"200": {"description": "ok"}}}},
+                "/ok/{x}": {"get": {"responses": {"200": {"description": "ok"}}}}
+            }
+        });
+        let p = parse(&doc.to_string(), LIMITS).expect("parses");
+        assert_eq!(p.operations.len(), 1);
+        assert_eq!(p.operations[0].path, "/ok/{x}");
+        assert!(p.warnings.iter().any(|w| w.contains("more than once")));
+        assert!(p.warnings.iter().any(|w| w.contains("more than 32")));
     }
 }

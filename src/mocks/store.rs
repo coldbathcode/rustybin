@@ -281,7 +281,20 @@ pub struct MockStore {
     /// The `agents:` section of `rustybin.yaml` (validated): the default
     /// ceiling and the rules of the management MCP server's agents.
     file_agents: Arc<RwLock<crate::mcp::manage::agents::FilePolicy>>,
+    /// Compiles that may run at once off the async runtime (`Svc::compiling`).
+    compiles: Arc<tokio::sync::Semaphore>,
+    /// Recent compiles per visitor (rate limit), bounded by `MAX_RECOMPILE_KEYS`.
+    recompiles: Arc<std::sync::Mutex<std::collections::HashMap<String, VecDeque<Instant>>>>,
 }
+
+/// Compiles that run at once on the blocking pool.
+pub const COMPILE_PERMITS: usize = 4;
+/// How long a compile waits for a permit before the answer is 503.
+pub const COMPILE_WAIT: Duration = Duration::from_secs(5);
+/// Compiles one visitor may start per minute (preview, create, edits).
+pub const VISITOR_COMPILES_PER_MINUTE: usize = 30;
+/// Visitors tracked by the compile rate limit.
+pub const MAX_RECOMPILE_KEYS: usize = 4096;
 
 impl MockStore {
     pub fn new(config: &Config) -> Self {
@@ -299,7 +312,41 @@ impl MockStore {
             file_registry: Arc::new(RwLock::new((Vec::new(), Utc::now()))),
             file_portal: Arc::new(RwLock::new((Vec::new(), Utc::now()))),
             file_agents: Arc::new(RwLock::new(Default::default())),
+            compiles: Arc::new(tokio::sync::Semaphore::new(COMPILE_PERMITS)),
+            recompiles: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
+    }
+
+    /// The permits of compiles off the runtime.
+    pub fn compile_permits(&self) -> Arc<tokio::sync::Semaphore> {
+        self.compiles.clone()
+    }
+
+    /// Count a visitor's compile; false when the minute's allowance is spent.
+    pub fn allow_visitor_compile(&self, key: &str) -> bool {
+        let now = Instant::now();
+        let mut map = self.recompiles.lock().unwrap_or_else(|p| p.into_inner());
+        if !map.contains_key(key) && map.len() >= MAX_RECOMPILE_KEYS {
+            map.retain(|_, q| {
+                q.back()
+                    .is_some_and(|t| now.duration_since(*t) < Duration::from_secs(60))
+            });
+            if map.len() >= MAX_RECOMPILE_KEYS {
+                return false;
+            }
+        }
+        let q = map.entry(key.to_string()).or_default();
+        while q
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(60))
+        {
+            q.pop_front();
+        }
+        if q.len() >= VISITOR_COMPILES_PER_MINUTE {
+            return false;
+        }
+        q.push_back(now);
+        true
     }
 
     /// Replace the portal items of the config file (the load time is kept
@@ -1265,5 +1312,15 @@ mod tests {
             s.duplicate("x", "y"),
             Err(StoreError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn a_visitor_gets_a_bounded_number_of_compiles_per_minute() {
+        let s = store();
+        for _ in 0..VISITOR_COMPILES_PER_MINUTE {
+            assert!(s.allow_visitor_compile("visit-a"));
+        }
+        assert!(!s.allow_visitor_compile("visit-a"));
+        assert!(s.allow_visitor_compile("visit-b"), "per visitor");
     }
 }

@@ -147,7 +147,7 @@ fn spec_arg(args: &Value) -> Result<Value, Value> {
 }
 
 /// `preview_spec`.
-pub fn preview_spec(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
+pub async fn preview_spec(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     let spec = match spec_arg(args) {
         Ok(s) => s,
         Err(e) => return e,
@@ -156,7 +156,7 @@ pub fn preview_spec(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
         Ok(t) => t,
         Err(e) => return err(e),
     };
-    match svc(ctx, access).preview(&text) {
+    match svc(ctx, access).compiling(move |s| s.preview(&text)).await {
         Ok(p) => {
             let ops = p["operations"].as_array().map(|a| a.len()).unwrap_or(0);
             let summary = format!(
@@ -232,7 +232,7 @@ fn settings_from<T: serde::de::DeserializeOwned>(
 }
 
 /// `create_mock`.
-pub fn create_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
+pub async fn create_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     let spec = match spec_arg(args) {
         Ok(s) => s,
         Err(e) => return e,
@@ -261,7 +261,7 @@ pub fn create_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
             Err(e) => return e,
         },
     };
-    match svc(ctx, access).create(body) {
+    match svc(ctx, access).compiling(move |s| s.create(body)).await {
         Ok(d) => {
             let summary = mock_summary(&d, "Created");
             ok(ctx, summary, d)
@@ -271,7 +271,7 @@ pub fn create_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
 }
 
 /// `update_mock`.
-pub fn update_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
+pub async fn update_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     let name = match need_str(args, "name") {
         Ok(n) => n,
         Err(e) => return e,
@@ -318,7 +318,11 @@ pub fn update_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
         return err("nothing to change: give spec, responses, security, operations, mcp, strip_server_prefix, rename or deploy");
     }
     let deployed = body.deploy == Some(true);
-    match svc(ctx, access).update(name, body) {
+    let owned = name.to_string();
+    match svc(ctx, access)
+        .compiling(move |s| s.update(&owned, body))
+        .await
+    {
         Ok(d) => {
             let mut summary = mock_summary(&d, "Updated");
             if deployed {
@@ -333,7 +337,7 @@ pub fn update_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
 }
 
 /// `set_operation`.
-pub fn set_operation(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
+pub async fn set_operation(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     let (name, op) = match (need_str(args, "name"), need_str(args, "operation")) {
         (Ok(n), Ok(o)) => (n, o),
         (Err(e), _) | (_, Err(e)) => return e,
@@ -349,7 +353,11 @@ pub fn set_operation(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
             _ => return err("give settings (an object) or clear: true"),
         }
     };
-    match svc(ctx, access).set_operation(name, op, settings) {
+    let (n, o) = (name.to_string(), op.to_string());
+    match svc(ctx, access)
+        .compiling(move |s| s.set_operation(&n, &o, settings))
+        .await
+    {
         Ok(d) => ok(
             ctx,
             format!(
@@ -532,7 +540,7 @@ pub async fn delete_mock(ctx: &CallCtx, access: &Access, args: &Value, params: &
 }
 
 /// `sample_request`.
-pub fn sample_request(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
+pub async fn sample_request(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     let (name, op) = match (need_str(args, "name"), need_str(args, "operation")) {
         (Ok(n), Ok(o)) => (n, o),
         (Err(e), _) | (_, Err(e)) => return e,
@@ -547,7 +555,11 @@ pub fn sample_request(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
         mode,
         example: arg_str(args, "example").map(str::to_string),
     };
-    match svc(ctx, access).sample(name, op, &q) {
+    let (n, o) = (name.to_string(), op.to_string());
+    match svc(ctx, access)
+        .compiling(move |s| s.sample(&n, &o, &q))
+        .await
+    {
         Ok(mut r) => {
             let request = r["request"].clone();
             let url = r["url"].as_str().unwrap_or("").to_string();

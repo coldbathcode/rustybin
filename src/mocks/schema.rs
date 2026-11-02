@@ -31,6 +31,46 @@ pub enum Direction {
     Response,
 }
 
+/// A value's text with object keys sorted and numbers in one form, so that
+/// two values equal as JSON have the same text (`uniqueItems`).
+fn canonical(v: &Value, out: &mut String) {
+    match v {
+        Value::Object(m) => {
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (i, k) in keys.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&Value::String(k.clone()).to_string());
+                out.push(':');
+                if let Some(x) = m.get(k) {
+                    canonical(x, out);
+                }
+            }
+            out.push('}');
+        }
+        Value::Array(a) => {
+            out.push('[');
+            for (i, x) in a.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                canonical(x, out);
+            }
+            out.push(']');
+        }
+        Value::Number(n) => match n.as_f64() {
+            Some(f) if n.is_f64() && f.fract() == 0.0 && f.abs() < 9.0e15 => {
+                out.push_str(&(f as i64).to_string())
+            }
+            _ => out.push_str(&n.to_string()),
+        },
+        other => out.push_str(&other.to_string()),
+    }
+}
+
 /// One validation problem; `pointer` is a JSON pointer into the value.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Issue {
@@ -52,6 +92,10 @@ const MAX_NODES: usize = 5_000;
 const MAX_ISSUES: usize = 50;
 /// Longest string the generator pads to for `minLength`.
 const MAX_GENERATED_STRING: usize = 64 * 1024;
+/// Bytes of string content one generated value may hold in all: nested
+/// `minItems` around long `minLength` strings would otherwise build hundreds
+/// of megabytes. Past it, strings stay unpadded and the rest is null.
+pub const MAX_GENERATED_BYTES: usize = 1024 * 1024;
 /// Schema checks one validation may make, sub-checks of `anyOf`, `oneOf`,
 /// `not` and `if` included (about 175 ms in a release build). A schema whose
 /// alternatives refer back to themselves would otherwise multiply the work at
@@ -84,6 +128,7 @@ pub fn generate_named(schema: &Value, name: &str, opts: &GenOptions) -> Value {
     let mut g = Gen {
         opts,
         budget: MAX_NODES,
+        bytes: MAX_GENERATED_BYTES,
         stack: Vec::new(),
     };
     let mut v = g.gen(schema, name, name, 0, 0);
@@ -238,6 +283,8 @@ const CITIES: &[&str] = &["Lisbon", "Oslo", "Austin", "Kyoto", "Nairobi", "Toron
 struct Gen<'a, 'b> {
     opts: &'b GenOptions<'a>,
     budget: usize,
+    /// String bytes left (`MAX_GENERATED_BYTES`).
+    bytes: usize,
     /// `$ref`s being expanded (recursion guard).
     stack: Vec<String>,
 }
@@ -245,13 +292,14 @@ struct Gen<'a, 'b> {
 impl Gen<'_, '_> {
     /// `ptr` identifies the position (for seeding), `name` is the property name.
     fn gen(&mut self, schema: &Value, name: &str, ptr: &str, index: usize, depth: usize) -> Value {
-        if depth > MAX_DEPTH || self.budget == 0 {
+        if depth > MAX_DEPTH || self.budget == 0 || self.bytes == 0 {
             return Value::Null;
         }
         self.budget -= 1;
         let root = self.opts.root;
         let Some(obj) = schema.as_object() else {
-            return json!(self.string_for(&Map::new(), name, ptr, index));
+            let s = self.string_for(&Map::new(), name, ptr, index);
+            return json!(self.charge(s));
         };
         if let Some(Value::String(r)) = obj.get("$ref") {
             let Ok(target) = resolve_pointer(root, r) else {
@@ -383,7 +431,10 @@ impl Gen<'_, '_> {
             "number" => number_for(obj, name),
             "boolean" => json!(!mix(self.opts.seed, ptr, index).is_multiple_of(4)),
             "null" => Value::Null,
-            _ => json!(self.string_for(obj, name, ptr, index)),
+            _ => {
+                let s = self.string_for(obj, name, ptr, index);
+                json!(self.charge(s))
+            }
         }
     }
 
@@ -566,6 +617,12 @@ impl Gen<'_, '_> {
         v
     }
 
+    /// Count a generated string against the byte budget.
+    fn charge(&mut self, s: String) -> String {
+        self.bytes = self.bytes.saturating_sub(s.len().max(1));
+        s
+    }
+
     fn string_for(&self, obj: &Map<String, Value>, name: &str, ptr: &str, index: usize) -> String {
         let h = mix(self.opts.seed, ptr, index);
         let format = obj
@@ -603,7 +660,8 @@ impl Gen<'_, '_> {
             .get("minLength")
             .and_then(Value::as_u64)
             .map_or(0, |m| usize::try_from(m).unwrap_or(usize::MAX))
-            .min(MAX_GENERATED_STRING);
+            .min(MAX_GENERATED_STRING)
+            .min(self.bytes);
         let max = obj
             .get("maxLength")
             .and_then(Value::as_u64)
@@ -862,23 +920,182 @@ pub fn pattern_string(pattern: &str) -> Option<String> {
     re.is_match(&out).then_some(out)
 }
 
-/// Compiled patterns, bounded (cleared when full).
+/// Patterns the shared cache keeps (least recently used out).
+pub const REGEX_CACHE: usize = 512;
+/// Patterns one revision pins (compiled with the revision, never evicted
+/// while it lives).
+pub const MAX_PINNED_PER_REVISION: usize = 64;
+/// Compiled size limit of a pattern (the shared cache).
+const REGEX_SIZE_LIMIT: usize = 1 << 20;
+/// Compiled size limit of a pinned pattern (larger ones use the cache).
+const PINNED_SIZE_LIMIT: usize = 64 * 1024;
+
+struct RegexCache {
+    map: HashMap<String, (Option<Regex>, u64)>,
+    tick: u64,
+}
+
+fn regex_cache() -> &'static Mutex<RegexCache> {
+    static CACHE: OnceLock<Mutex<RegexCache>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        Mutex::new(RegexCache {
+            map: HashMap::new(),
+            tick: 0,
+        })
+    })
+}
+
+/// Pinned patterns: the compiled pattern and how many revisions hold it.
+type Pinned = std::sync::RwLock<HashMap<String, (Option<Regex>, usize)>>;
+
+/// The patterns live revisions pinned, with how many revisions hold each.
+fn pinned() -> &'static Pinned {
+    static PINNED: OnceLock<Pinned> = OnceLock::new();
+    PINNED.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
+}
+
+fn build_regex(pattern: &str, size_limit: usize) -> Option<Regex> {
+    regex::RegexBuilder::new(pattern)
+        .size_limit(size_limit)
+        .dfa_size_limit(size_limit.max(256 * 1024))
+        .build()
+        .ok()
+}
+
+/// A compiled `pattern`: a pinned one of a live revision, else the shared
+/// LRU cache. Compiling happens outside every lock, so one tenant's slow
+/// pattern never makes another tenant's lookups wait.
 pub(crate) fn cached_regex(pattern: &str) -> Option<Regex> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Option<Regex>>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut map = cache.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some(r) = map.get(pattern) {
+    if let Some((r, _)) = pinned()
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(pattern)
+    {
         return r.clone();
     }
-    if map.len() >= 512 {
-        map.clear();
+    {
+        let mut cache = regex_cache().lock().unwrap_or_else(|p| p.into_inner());
+        cache.tick += 1;
+        let tick = cache.tick;
+        if let Some(entry) = cache.map.get_mut(pattern) {
+            entry.1 = tick;
+            return entry.0.clone();
+        }
     }
-    let compiled = regex::RegexBuilder::new(pattern)
-        .size_limit(1 << 20)
-        .build()
-        .ok();
-    map.insert(pattern.to_string(), compiled.clone());
+    let compiled = build_regex(pattern, REGEX_SIZE_LIMIT);
+    let mut cache = regex_cache().lock().unwrap_or_else(|p| p.into_inner());
+    if cache.map.len() >= REGEX_CACHE && !cache.map.contains_key(pattern) {
+        if let Some(oldest) = cache
+            .map
+            .iter()
+            .min_by_key(|(_, (_, t))| *t)
+            .map(|(k, _)| k.clone())
+        {
+            cache.map.remove(&oldest);
+        }
+    }
+    cache.tick += 1;
+    let tick = cache.tick;
+    cache
+        .map
+        .insert(pattern.to_string(), (compiled.clone(), tick));
     compiled
+}
+
+/// The `pattern`s of a spec, compiled once with the revision and kept while
+/// it lives (`Compiled` holds this): its validation never waits on, or is
+/// evicted by, other tenants' patterns in the shared cache.
+#[derive(Debug, Default)]
+pub struct PinnedPatterns(Vec<String>);
+
+impl PinnedPatterns {
+    /// Pin up to `MAX_PINNED_PER_REVISION` patterns found in `root`.
+    pub fn of(root: &Value) -> Self {
+        let mut found: Vec<String> = Vec::new();
+        let mut stack = vec![root];
+        let mut nodes = 0usize;
+        while let Some(v) = stack.pop() {
+            nodes += 1;
+            if nodes > 200_000 || found.len() >= MAX_PINNED_PER_REVISION {
+                break;
+            }
+            match v {
+                Value::Object(m) => {
+                    if let Some(Value::String(p)) = m.get("pattern") {
+                        if !found.contains(p) {
+                            found.push(p.clone());
+                        }
+                    }
+                    stack.extend(m.values());
+                }
+                Value::Array(a) => stack.extend(a.iter()),
+                _ => {}
+            }
+        }
+        let mut kept = Vec::new();
+        for p in found {
+            let known = pinned()
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&p);
+            let compiled = if known {
+                None
+            } else {
+                match build_regex(&p, PINNED_SIZE_LIMIT) {
+                    Some(r) => Some(r),
+                    // Too large to pin, or invalid: the shared cache answers.
+                    None => continue,
+                }
+            };
+            let mut map = pinned().write().unwrap_or_else(|e| e.into_inner());
+            match map.get_mut(&p) {
+                Some(entry) => entry.1 += 1,
+                None => match compiled {
+                    Some(r) => {
+                        map.insert(p.clone(), (Some(r), 1));
+                    }
+                    // Unpinned by its last holder meanwhile.
+                    None => continue,
+                },
+            }
+            kept.push(p);
+        }
+        Self(kept)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl Drop for PinnedPatterns {
+    fn drop(&mut self) {
+        if self.0.is_empty() {
+            return;
+        }
+        let mut map = pinned().write().unwrap_or_else(|e| e.into_inner());
+        for p in &self.0 {
+            if let Some(entry) = map.get_mut(p) {
+                entry.1 = entry.1.saturating_sub(1);
+                if entry.1 == 0 {
+                    map.remove(p);
+                }
+            }
+        }
+    }
+}
+
+/// Whether a pattern is pinned by a live revision (tests).
+#[cfg(test)]
+pub(crate) fn is_pinned(pattern: &str) -> bool {
+    pinned()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(pattern)
 }
 
 /// `$ref` depth followed by [`inline`].
@@ -1354,8 +1571,15 @@ impl Validator<'_> {
             }
         }
         if obj.get("uniqueItems").and_then(Value::as_bool) == Some(true) {
+            // Linear: each item's canonical form in a set, charged to the
+            // check budget (a quadratic scan of 1 MB of numbers took minutes).
+            let left = self.budget.get();
+            self.budget.set(left.saturating_sub(items.len()));
+            let mut seen = std::collections::HashSet::with_capacity(items.len());
             for (i, a) in items.iter().enumerate() {
-                if items[..i].contains(a) {
+                let mut key = String::new();
+                canonical(a, &mut key);
+                if !seen.insert(key) {
                     self.push(&format!("{ptr}/{i}"), "duplicate item".into());
                     break;
                 }
@@ -1852,5 +2076,60 @@ mod tests {
         );
         let s = json!({ "type": "string", "examples": ["first"] });
         assert_eq!(gen(&s, &root, Direction::Response), json!("first"));
+    }
+
+    #[test]
+    fn generation_stops_at_the_byte_budget() {
+        // Old: about 310 MB per value (20 x 20 x 20 strings of 64 KiB).
+        let schema = json!({"type": "array", "minItems": 20, "items":
+            {"type": "array", "minItems": 20, "items":
+                {"type": "array", "minItems": 20, "items": {"type": "string", "minLength": 65536}}}});
+        let started = std::time::Instant::now();
+        let v = gen(&schema, &json!({}), Direction::Response);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        let size = serde_json::to_vec(&v).expect("json").len();
+        assert!(size < MAX_GENERATED_BYTES + 64 * 1024, "{size}");
+    }
+
+    #[test]
+    fn unique_items_is_linear() {
+        let items: Vec<Value> = (0..100_000).map(|i| json!(i)).collect();
+        let schema = json!({"type": "array", "uniqueItems": true});
+        let started = std::time::Instant::now();
+        let issues = validate(&json!(items), &schema, &json!({}), Direction::Request);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(issues.is_empty(), "{issues:?}");
+        // Equal as JSON is a duplicate: 1 and 1.0, objects in another key order.
+        let issues = validate(&json!([1, 1.0]), &schema, &json!({}), Direction::Request);
+        assert_eq!(issues.len(), 1);
+        let issues = validate(
+            &json!([{"a": 1, "b": 2}, {"b": 2, "a": 1}]),
+            &schema,
+            &json!({}),
+            Direction::Request,
+        );
+        assert_eq!(issues.len(), 1);
+    }
+
+    #[test]
+    fn a_revision_pins_its_patterns_and_the_cache_is_lru() {
+        let root = json!({"components": {"schemas": {"A": {"type": "string", "pattern": "^pinned-[0-9]{3}$"}}}});
+        let pins = PinnedPatterns::of(&root);
+        assert_eq!(pins.len(), 1);
+        assert!(is_pinned("^pinned-[0-9]{3}$"));
+        assert!(cached_regex("^pinned-[0-9]{3}$").is_some_and(|r| r.is_match("pinned-123")));
+        drop(pins);
+        assert!(!is_pinned("^pinned-[0-9]{3}$"));
+        // The cache keeps what is used: a hot pattern survives a flood.
+        assert!(cached_regex("^hot$").is_some());
+        for i in 0..(REGEX_CACHE * 2) {
+            let _ = cached_regex(&format!("^flood-{i}$"));
+            if i % 64 == 0 {
+                let _ = cached_regex("^hot$");
+            }
+        }
+        let cache = regex_cache().lock().unwrap_or_else(|p| p.into_inner());
+        assert!(cache.map.len() <= REGEX_CACHE);
+        assert!(cache.map.contains_key("^hot$"));
     }
 }

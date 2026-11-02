@@ -46,12 +46,21 @@ pub const MAX_STREAM_MESSAGES: u32 = 1000;
 #[derive(Clone)]
 pub struct EchoSvc {
     instance_id: String,
+    /// Bytes a client stream may send in all (`RUSTYBIN_BODY_LIMIT`, as
+    /// for HTTP bodies); also the largest single message.
+    max_bytes: usize,
 }
 
 impl EchoSvc {
     pub fn new(instance_id: impl Into<String>) -> Self {
+        Self::with_limit(instance_id, 1_048_576)
+    }
+
+    /// An echo service whose client streams carry at most `max_bytes`.
+    pub fn with_limit(instance_id: impl Into<String>, max_bytes: usize) -> Self {
         Self {
             instance_id: instance_id.into(),
+            max_bytes: max_bytes.max(1024),
         }
     }
 
@@ -158,13 +167,22 @@ impl EchoService for EchoSvc {
         let template = self.response(&request, String::new(), 0);
         let mut stream = request.into_inner();
         let mut messages = Vec::new();
+        let mut bytes = 0usize;
         while let Some(req) = stream.next().await {
             if messages.len() as u32 >= MAX_STREAM_MESSAGES {
                 return Err(Status::resource_exhausted(format!(
                     "ClientStream accepts at most {MAX_STREAM_MESSAGES} messages"
                 )));
             }
-            messages.push(req?.message);
+            let message = req?.message;
+            bytes = bytes.saturating_add(message.len() + 1);
+            if bytes > self.max_bytes {
+                return Err(Status::resource_exhausted(format!(
+                    "ClientStream accepts at most {} bytes in all",
+                    self.max_bytes
+                )));
+            }
+            messages.push(message);
         }
         Ok(Response::new(EchoResponse {
             index: messages.len() as u32,
@@ -288,8 +306,15 @@ pub fn routes(
         .build_v1alpha()?;
     let limits = state.limits.clone();
     let keys = state.keys.clone();
-    let routes = tonic::service::Routes::new(EchoServiceServer::with_interceptor(
-        EchoSvc::new(state.config.instance_id.clone()),
+    let max_bytes = state.config.body_limit.max(1024);
+    let echo = EchoServiceServer::new(EchoSvc::with_limit(
+        state.config.instance_id.clone(),
+        max_bytes,
+    ))
+    .max_decoding_message_size(max_bytes)
+    .max_encoding_message_size(max_bytes.saturating_mul(2));
+    let routes = tonic::service::Routes::new(tonic::service::interceptor::InterceptedService::new(
+        echo,
         // API keys (x-rustybin-key metadata) and plan limits (rate and request
         // quota); health and reflection are exempt.
         move |req: Request<()>| crate::keys::check_grpc(&keys, &limits, &req).map(|()| req),
@@ -774,5 +799,33 @@ mod tests {
             .contains("access-control-allow-origin: http://example.com"));
         assert!(text.contains("grpc-status:0"), "{text}");
         assert!(text.contains("web"));
+    }
+
+    #[tokio::test]
+    async fn client_stream_is_bounded_by_the_body_limit() {
+        let mut config = crate::config::Config::for_tests();
+        config.body_limit = 4096;
+        let (url, _) = spawn_with(crate::test_support::test_state_with(config)).await;
+        let mut client = EchoServiceClient::connect(url).await.expect("connect");
+        let messages: Vec<EchoRequest> = (0..10).map(|_| req(&"x".repeat(1000), 0)).collect();
+        let status = client
+            .client_stream(tokio_stream::iter(messages))
+            .await
+            .expect_err("over the limit");
+        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+        // One message larger than the limit is refused by tonic's decoder
+        // (which answers OutOfRange).
+        let status = client
+            .client_stream(tokio_stream::iter(vec![req(&"x".repeat(8192), 0)]))
+            .await
+            .expect_err("too large");
+        assert_eq!(status.code(), tonic::Code::OutOfRange);
+        // Within the limit: echoed.
+        let ok = client
+            .client_stream(tokio_stream::iter(vec![req("a", 0), req("b", 0)]))
+            .await
+            .expect("ok")
+            .into_inner();
+        assert_eq!(ok.message, "a b");
     }
 }

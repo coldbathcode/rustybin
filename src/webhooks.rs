@@ -219,25 +219,26 @@ fn check_timestamp(
     tolerance: Option<i64>,
 ) -> Option<VerifyError> {
     report.timestamp = Some(ts);
-    report.age_seconds = Some(now - ts);
+    let age = now.saturating_sub(ts);
+    report.age_seconds = Some(age);
     let Some(tol) = tolerance else {
         report.timestamp_valid = Some(true);
         return None;
     };
-    let err = if now - ts > tol {
+    let err = if age > tol {
         Some(VerifyError::new(
             "timestamp_too_old",
             format!(
                 "timestamp is {} s old, tolerance is {tol} s (replay protection)",
-                now - ts
+                age
             ),
         ))
-    } else if ts - now > tol {
+    } else if ts.saturating_sub(now) > tol {
         Some(VerifyError::new(
             "timestamp_too_new",
             format!(
                 "timestamp is {} s in the future, tolerance is {tol} s",
-                ts - now
+                ts.saturating_sub(now)
             ),
         ))
     } else {
@@ -1221,5 +1222,15 @@ mod tests {
         let a = standard_key("whsec_ab+c").expect("key");
         let b = standard_key("whsec_ab c").expect("key");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn an_extreme_timestamp_does_not_overflow() {
+        let mut report = Report::default();
+        let e = check_timestamp(&mut report, i64::MIN, 1_700_000_000, Some(300));
+        assert!(e.is_some());
+        assert_eq!(report.age_seconds, Some(i64::MAX));
+        let mut report = Report::default();
+        assert!(check_timestamp(&mut report, i64::MAX, -5, Some(300)).is_some());
     }
 }

@@ -33,3 +33,37 @@ compile runs off the runtime (a stalled compile does not delay `GET /`).
 
 Every hostile input above answers quickly with an error or a bounded result, and `GET /` stays
 responsive while ten hostile compiles run.
+
+## Build notes (2026-11-02)
+
+- Every finding is fixed; none was closed as not reproducible.
+- Server variables: `spec::expand_server_url` substitutes in one pass and gives up past
+  2 KiB (`MAX_SERVER_URL`) with a warning; `servers[0]` is then ignored, as for a
+  variable without a default.
+- Path templates: a path that names a parameter twice or more than 32 times
+  (`MAX_PATH_PARAMS`) is skipped with a warning rather than refusing the whole spec
+  (lenient parsing, as for other odd paths). The sample path cuts each value at
+  1 KiB (`checks::MAX_SAMPLE_SEGMENT`), never inside a `%XX` escape.
+- Generation: `Gen.bytes` charges every generated string against 1 MiB
+  (`schema::MAX_GENERATED_BYTES`); `minLength` padding stops at what is left. The
+  capture gets the preview bytes only (one byte past `MAX_RESPONSE_PREVIEW`, so it
+  still marks the body truncated).
+- `uniqueItems` hashes a canonical form of each item (sorted keys, `1` and `1.0`
+  alike, which also fixes their comparison) and charges the item count to
+  `MAX_CHECKS`.
+- GraphQL: `count_aliases` memoises each fragment's count; linear in the document.
+  The WebSocket path is unchanged (its complexity limit bounds it).
+- gRPC: `EchoSvc::with_limit` counts a client stream's bytes against
+  `RUSTYBIN_BODY_LIMIT` (`resource_exhausted`); `max_decoding_message_size` is the
+  same limit, and tonic answers `out_of_range` to a larger single message.
+- Off the runtime: `Svc::compiling` runs preview, create, update, operation settings
+  and samples (REST handlers and the five MCP tools) on the blocking pool behind
+  `COMPILE_PERMITS` (4); a permit not free within 5 s is `503` with `Retry-After: 2`;
+  a visitor gets 30 compiles a minute (`429`, `Retry-After: 60`), tracked for at
+  most 4096 visitors. Config applies, file loads and the AI routes' checks still
+  compile in their own tasks: they are admin or startup work, and the parse caps
+  above bound them.
+- Regexes: the shared cache is an LRU of 512 that compiles outside its lock, and
+  every `Compiled` pins up to 64 of its spec's patterns (`PinnedPatterns`, 64 KiB
+  compiled size each; larger ones use the cache), released when the revision drops.
+- Webhooks: `saturating_sub` for the timestamp age.

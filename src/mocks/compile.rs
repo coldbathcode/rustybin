@@ -31,6 +31,8 @@ pub struct Compiled {
     pub visitor: bool,
     /// The MCP tools of this revision, built on first use.
     mcp_tools: OnceLock<Arc<ToolSet>>,
+    /// The spec's `pattern`s, compiled with the revision.
+    pub patterns: super::schema::PinnedPatterns,
 }
 
 /// One segment of a path template.
@@ -182,6 +184,7 @@ impl Compiled {
         // Most specific first (literal segments beat parameters, left to
         // right); declaration order breaks ties. sort_by_key is stable.
         routes.sort_by_key(|r| r.segments.iter().map(Seg::rank).collect::<Vec<_>>());
+        let patterns = super::schema::PinnedPatterns::of(&spec.root);
         let mut compiled = Self {
             revision,
             created_at: Utc::now(),
@@ -192,6 +195,7 @@ impl Compiled {
             report: Report::default(),
             visitor: limits.settings.visitor,
             mcp_tools: OnceLock::new(),
+            patterns,
         };
         compiled.report = checks::run(&compiled);
         Ok(compiled)

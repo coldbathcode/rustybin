@@ -573,7 +573,10 @@ pub(crate) async fn serve(
         .map(respond::Body::to_bytes)
         .unwrap_or_default();
     let status = StatusCode::from_u16(out.status).unwrap_or(StatusCode::OK);
-    let mut resp = (status, bytes.clone()).into_response();
+    // The capture keeps a preview: hand it only that (one byte past the cut,
+    // so it still knows the body was longer), not a copy of the whole body.
+    let preview = bytes[..bytes.len().min(MAX_RESPONSE_PREVIEW + 1)].to_vec();
+    let mut resp = (status, bytes).into_response();
     if let Some(ct) = out
         .content_type
         .as_deref()
@@ -609,7 +612,7 @@ pub(crate) async fn serve(
         validation: issues,
         auth: auth_label,
     };
-    record(resp, entry, Some(bytes))
+    record(resp, entry, Some(preview))
 }
 
 /// The deployed spec, rewritten for this mock's URL (and the built-in IdP).
@@ -828,7 +831,8 @@ pub async fn import(
 ) -> Result<Response, ServiceError> {
     let text = import_text(&headers, &body).map_err(ServiceError::bad_request)?;
     let s = svc(&state, &headers, &extensions, &uri);
-    Ok(Json(s.preview(&text)?).into_response())
+    let v = s.compiling(move |s| s.preview(&text)).await?;
+    Ok(Json(v).into_response())
 }
 
 pub async fn create(
@@ -844,7 +848,7 @@ pub async fn create(
         s.require_admin()?;
     }
     let req: CreateBody = parse_body(&body)?;
-    Ok(created(s.create(req)?))
+    Ok(created(s.compiling(move |s| s.create(req)).await?))
 }
 
 pub async fn get_one(
@@ -870,7 +874,8 @@ pub async fn patch(
     // Access first, then the body, as before.
     s.manageable(&name)?;
     let req: PatchBody = parse_body(&body)?;
-    Ok(Json(s.update(&name, req)?).into_response())
+    let v = s.compiling(move |s| s.update(&name, req)).await?;
+    Ok(Json(v).into_response())
 }
 
 pub async fn delete(
@@ -1052,7 +1057,10 @@ pub async fn put_operation(
     s.manageable(&name)?;
     let settings: Option<OperationSettings> = serde_json::from_slice(&body)
         .map_err(|e| ServiceError::bad_request(format!("invalid operation settings: {e}")))?;
-    Ok(Json(s.set_operation(&name, &op, settings)?).into_response())
+    let v = s
+        .compiling(move |s| s.set_operation(&name, &op, settings))
+        .await?;
+    Ok(Json(v).into_response())
 }
 
 pub async fn sample(
@@ -1064,7 +1072,8 @@ pub async fn sample(
     uri: Uri,
 ) -> Result<Response, ServiceError> {
     let s = svc(&state, &headers, &extensions, &uri);
-    Ok(Json(s.sample(&name, &op, &q)?).into_response())
+    let v = s.compiling(move |s| s.sample(&name, &op, &q)).await?;
+    Ok(Json(v).into_response())
 }
 
 pub async fn validate(

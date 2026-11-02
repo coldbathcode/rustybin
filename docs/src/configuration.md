@@ -665,6 +665,7 @@ Request-reachable state is always bounded. The main caps (normal mode / public m
 | `/sse` events / interval / stream lifetime | 1000 / 60 s / 10 min | 100 / 10 s / 2 min |
 | `/sse/chat` tokens / delay per token | 500 / 2 s | 200 / 1 s |
 | JSON-RPC batch size | 100 | 20 |
+| gRPC message size, and the bytes of one `ClientStream` call | `RUSTYBIN_BODY_LIMIT` | same |
 | WebSocket message size / idle timeout / lifetime | 1 MiB / 5 min / 1 h | 256 KiB / 1 min / 10 min |
 | Request bins (total / per session / requests per bin / bytes per bin / TTL) | 200 / 200 / 100 / 1 MiB / 24 h | 100 / 10 / 50 / 256 KiB / 1 h |
 | Flaky counters (idle TTL 1 h) | 10000 | 2000 |

@@ -1053,50 +1053,65 @@ fn sha256_hex(s: &str) -> String {
 
 // ── Static analysis (aliases, operation type) ───────────────────────
 
+/// The most aliases any operation of the document selects, through its
+/// fragments. Each fragment is counted once and remembered, so a chain of
+/// fragments that each spread the next ten times costs its size, not ten to
+/// the depth. Stops counting past `limit`.
 fn count_aliases(doc: &ExecutableDocument, limit: usize) -> usize {
     fn walk(
         set: &SelectionSet,
         doc: &ExecutableDocument,
         stack: &mut Vec<String>,
-        count: &mut usize,
+        memo: &mut std::collections::HashMap<String, usize>,
         limit: usize,
-    ) {
+    ) -> usize {
+        let mut count: usize = 0;
         for item in &set.items {
-            if *count > limit {
-                return;
+            if count > limit {
+                return count;
             }
             match &item.node {
                 Selection::Field(f) => {
                     if f.node.alias.is_some() {
-                        *count += 1;
+                        count = count.saturating_add(1);
                     }
-                    walk(&f.node.selection_set.node, doc, stack, count, limit);
+                    let inner = walk(&f.node.selection_set.node, doc, stack, memo, limit);
+                    count = count.saturating_add(inner);
                 }
                 Selection::InlineFragment(fr) => {
-                    walk(&fr.node.selection_set.node, doc, stack, count, limit);
+                    let inner = walk(&fr.node.selection_set.node, doc, stack, memo, limit);
+                    count = count.saturating_add(inner);
                 }
                 Selection::FragmentSpread(spread) => {
                     let name = spread.node.fragment_name.node.to_string();
+                    if let Some(known) = memo.get(&name) {
+                        count = count.saturating_add(*known);
+                        continue;
+                    }
                     if stack.contains(&name) || stack.len() > MAX_DEPTH {
                         continue;
                     }
                     if let Some(fragment) = doc.fragments.get(&spread.node.fragment_name.node) {
-                        stack.push(name);
-                        walk(&fragment.node.selection_set.node, doc, stack, count, limit);
+                        stack.push(name.clone());
+                        let inner =
+                            walk(&fragment.node.selection_set.node, doc, stack, memo, limit);
                         stack.pop();
+                        memo.insert(name, inner);
+                        count = count.saturating_add(inner);
                     }
                 }
             }
         }
+        count
     }
+    let mut memo = std::collections::HashMap::new();
     let mut max = 0;
     for (_, op) in doc.operations.iter() {
-        let mut count = 0;
-        walk(
+        let count = walk(
             &op.node.selection_set.node,
             doc,
             &mut Vec::new(),
-            &mut count,
+            &mut memo,
             limit,
         );
         max = max.max(count);
@@ -2413,5 +2428,31 @@ mod tests {
             }
         };
         assert_eq!(closed.map(|f| f.code), Some(CloseCode::Policy));
+    }
+
+    #[test]
+    fn nested_fragment_spreads_are_counted_once() {
+        // Ten fragments, each spreading the next ten times: old, 10^9 walks.
+        let mut q = String::from("{ users { ...F0 } }\n");
+        for i in 0..9 {
+            q.push_str(&format!(
+                "fragment F{i} on User {{ {} }}\n",
+                format!("...F{} ", i + 1).repeat(10)
+            ));
+        }
+        q.push_str("fragment F9 on User { id }\n");
+        let doc = async_graphql::parser::parse_query(&q).expect("parses");
+        let started = std::time::Instant::now();
+        assert_eq!(count_aliases(&doc, MAX_ALIASES), 0);
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        // The same chain ending in an alias: far past the limit, still quick.
+        let q = q.replace(
+            "fragment F9 on User { id }",
+            "fragment F9 on User { a: id }",
+        );
+        let doc = async_graphql::parser::parse_query(&q).expect("parses");
+        let started = std::time::Instant::now();
+        assert!(count_aliases(&doc, MAX_ALIASES) > MAX_ALIASES);
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
     }
 }

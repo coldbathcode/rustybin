@@ -94,6 +94,13 @@ impl ServiceError {
             .unwrap_or_else(|| self.status.to_string())
     }
 
+    /// A refusal with `Retry-After`.
+    pub fn retry(status: StatusCode, message: impl Into<String>, secs: u64) -> Self {
+        let mut e = Self::new(status, message);
+        e.retry_after = Some(secs);
+        e
+    }
+
     /// The machine-readable code when the body carries one (`rustybin_*`).
     pub fn code(&self) -> Option<&str> {
         self.body
@@ -631,6 +638,54 @@ impl Svc {
             links: Links::from_request(headers, extensions, uri, &state.config),
             state: state.clone(),
         }
+    }
+
+    /// Run a call that parses or compiles a spec on the blocking pool, at
+    /// most `COMPILE_PERMITS` at once (503 when none frees up within
+    /// `COMPILE_WAIT`), so a hostile spec never holds an async worker; a
+    /// visitor gets `VISITOR_COMPILES_PER_MINUTE` (429 past it).
+    pub async fn compiling<T, F>(self, f: F) -> SvcResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Svc) -> SvcResult<T> + Send + 'static,
+    {
+        if !self.caller.admin {
+            if let Some(visit) = self.caller.visit() {
+                if !self.store().allow_visitor_compile(visit) {
+                    return Err(ServiceError::retry(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        format!(
+                            "at most {} spec compiles per minute for a visitor: try again in a minute",
+                            super::store::VISITOR_COMPILES_PER_MINUTE
+                        ),
+                        60,
+                    ));
+                }
+            }
+        }
+        let permits = self.store().compile_permits();
+        let permit = tokio::time::timeout(super::store::COMPILE_WAIT, permits.acquire_owned())
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .ok_or_else(|| {
+                ServiceError::retry(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "the instance is busy compiling other specs: try again in a moment",
+                    2,
+                )
+            })?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            f(&self)
+        })
+        .await
+        .map_err(|_| {
+            ServiceError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the compile did not finish",
+            )
+        })?
     }
 
     fn store(&self) -> &MockStore {
@@ -1481,5 +1536,78 @@ impl Svc {
                 known.join(", ")
             ))
         })
+    }
+}
+
+#[cfg(test)]
+mod compile_pool_tests {
+    use super::*;
+    use crate::test_support::{test_app_with, test_state};
+    use tower::ServiceExt;
+
+    fn admin_svc(state: &AppState) -> Svc {
+        let headers = HeaderMap::new();
+        let mut svc = Svc::from_request(
+            state,
+            &headers,
+            &axum::http::Extensions::new(),
+            &Uri::from_static("/_rustybin/mocks"),
+        );
+        svc.caller.admin = true;
+        svc
+    }
+
+    /// Ten compiles that each hold a thread for a while do not delay `GET /`:
+    /// they run on the blocking pool, four at a time.
+    #[tokio::test]
+    async fn compiles_run_off_the_runtime() {
+        let state = test_state();
+        let mut jobs = Vec::new();
+        for _ in 0..10 {
+            let svc = admin_svc(&state);
+            jobs.push(tokio::spawn(svc.compiling(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                Ok(())
+            })));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let app = test_app_with(state.clone());
+        let started = std::time::Instant::now();
+        let resp = app
+            .oneshot(
+                axum::http::Request::get("/")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(250),
+            "GET / waited {:?}",
+            started.elapsed()
+        );
+        for j in jobs {
+            assert!(j.await.expect("join").is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_visitor_past_the_compile_allowance_gets_429() {
+        let state = test_state();
+        let mut svc = admin_svc(&state);
+        svc.caller.admin = false;
+        svc.caller.owners = vec![crate::mocks::visits::Owner::Visit("v-1".into())];
+        for _ in 0..super::super::store::VISITOR_COMPILES_PER_MINUTE {
+            let s = Svc {
+                state: svc.state.clone(),
+                caller: svc.caller.clone(),
+                links: svc.links.clone(),
+            };
+            assert!(s.compiling(|_| Ok(())).await.is_ok());
+        }
+        let e = svc.compiling(|_| Ok(())).await.expect_err("refused");
+        assert_eq!(e.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(e.retry_after, Some(60));
     }
 }
