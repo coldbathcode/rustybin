@@ -178,26 +178,37 @@ async fn distributed_finds_counters_local_to_each_gateway_node() {
 
 #[tokio::test]
 async fn limit_probe_measures_the_limit_within_five_percent() {
-    let report = through(
-        vec![limited(Limiter::new(Algorithm::SlidingWindow, 10, second()))],
-        json!({
-            "name": "probe",
-            "layers": [layer(
-                "probe",
-                json!({ "type": "limit_test", "test": "limit_probe", "min": 1, "max": 20, "steps": 6, "every": "2s" }),
-                json!({ "limit": 10, "window": "1s" }),
-            )],
-        }),
-    )
-    .await;
-    assert_eq!(report["state"], "finished", "{}", report["error"]);
+    // A measurement against wall-clock rates: a test machine starved by the
+    // rest of the suite sends in bursts, which a sliding window refuses
+    // early (9.3 once in a dozen full runs). Measure again before failing;
+    // the 5 % bound itself stays.
+    let mut attempt = 0;
+    let (report, rate) = loop {
+        attempt += 1;
+        let report = through(
+            vec![limited(Limiter::new(Algorithm::SlidingWindow, 10, second()))],
+            json!({
+                "name": "probe",
+                "layers": [layer(
+                    "probe",
+                    json!({ "type": "limit_test", "test": "limit_probe", "min": 1, "max": 20, "steps": 6, "every": "2s" }),
+                    json!({ "limit": 10, "window": "1s" }),
+                )],
+            }),
+        )
+        .await;
+        assert_eq!(report["state"], "finished", "{}", report["error"]);
+        let rate = analysis(&report, "probe")["measured_limit_rate"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{}", report["findings"]));
+        if (rate - 10.0).abs() <= 0.5 || attempt == 2 {
+            break (report, rate);
+        }
+    };
     let r = analysis(&report, "probe");
-    let rate = r["measured_limit_rate"]
-        .as_f64()
-        .unwrap_or_else(|| panic!("{r}"));
     assert!(
         (rate - 10.0).abs() <= 0.5,
-        "measured {rate}: {}",
+        "measured {rate} twice in a row: {}",
         report["findings"]
     );
     assert!(

@@ -499,26 +499,30 @@ pub async fn examples_work(
             "progress",
             &json!({ "message": "saving the examples in the draft" }),
         ));
-        // The caller passed the manage guard above; the store update
-        // reuses the draft's settings with the examples merged in.
-        let draft = match state.mocks.get(&name) {
-            Some(snap) => snap.draft,
-            None => return Err(json!({ "error": "the mock is gone", "reason": "not_found" })),
-        };
-        let mut operations = draft.settings.operations.clone();
-        let stored = merge_examples(&mut operations, &all, source);
-        let compiled = state
-            .mocks
-            .recompile(&draft, None, {
-                let mut settings = draft.settings.clone();
-                settings.operations = operations;
-                settings
+        // The caller passed the manage guard above. The examples merge into
+        // the draft as one edit (the edit lock, compare and swap: a change
+        // made meanwhile is kept, not overwritten), compiled on the pool.
+        let stored_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = stored_count.clone();
+        let target = name.clone();
+        let snap = s
+            .compiling(move |s| {
+                s.state
+                    .mocks
+                    .edit_draft(&target, None, |draft| {
+                        let mut settings = draft.settings.clone();
+                        let n = merge_examples(&mut settings.operations, &all, source);
+                        counted.store(n, std::sync::atomic::Ordering::Relaxed);
+                        s.state
+                            .mocks
+                            .recompile(draft, None, settings)
+                            .map_err(crate::mocks::store::StoreError::Invalid)
+                    })
+                    .map_err(ServiceError::from)
             })
-            .map_err(|e| json!({ "error": e, "reason": "invalid_settings" }))?;
-        let snap = state
-            .mocks
-            .set_draft(&name, Some(compiled), None)
-            .map_err(|e| json!({ "error": ServiceError::from(e).message(), "reason": "store" }))?;
+            .await
+            .map_err(|e| json!({ "error": e.message(), "reason": "store" }))?;
+        let stored = stored_count.load(std::sync::atomic::Ordering::Relaxed);
         result["applied"] = json!(true);
         result["stored"] = json!(stored);
         result["coverage"] = super::service::coverage_summary(&snap.draft);

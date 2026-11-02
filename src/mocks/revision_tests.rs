@@ -250,3 +250,81 @@ fn concurrent_operation_edits_without_a_revision_are_both_kept() {
         Some(2)
     );
 }
+
+#[test]
+fn edit_draft_refuses_a_stale_revision_and_merges_racing_edits() {
+    let state = test_state_with(Config::for_tests());
+    let c = state
+        .mocks
+        .compile(SPEC, Default::default())
+        .expect("compile");
+    state
+        .mocks
+        .create("e", c, crate::mocks::store::Origin::Api, true, true, false)
+        .expect("create");
+    let rev = state.mocks.get("e").expect("mock").draft.revision;
+    // From the current revision: passes; from it again: stale.
+    let store = &state.mocks;
+    store
+        .edit_draft("e", Some(rev), |d| {
+            let mut s = d.settings.clone();
+            s.responses.delay_ms = 5;
+            store
+                .recompile(d, None, s)
+                .map_err(crate::mocks::store::StoreError::Invalid)
+        })
+        .map_err(|e| e.message())
+        .expect("first edit");
+    let stale = store.edit_draft("e", Some(rev), |d| {
+        store
+            .recompile(d, None, d.settings.clone())
+            .map_err(crate::mocks::store::StoreError::Invalid)
+    });
+    assert!(
+        matches!(stale, Err(crate::mocks::store::StoreError::Stale { .. })),
+        "a stale edit went through"
+    );
+    // The AI examples path and an operation edit racing: both kept.
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            for _ in 0..10 {
+                store
+                    .edit_draft("e", None, |d| {
+                        let mut st = d.settings.clone();
+                        st.responses.seed = 99;
+                        store
+                            .recompile(d, None, st)
+                            .map_err(crate::mocks::store::StoreError::Invalid)
+                    })
+                    .map_err(|e| e.message())
+                    .expect("seed");
+            }
+        });
+        s.spawn(|| {
+            for _ in 0..10 {
+                store
+                    .set_operation(
+                        "e",
+                        "listOrders",
+                        Some(crate::mocks::model::OperationSettings {
+                            delay_ms: Some(7),
+                            ..Default::default()
+                        }),
+                        None,
+                    )
+                    .map_err(|e| e.message())
+                    .expect("op");
+            }
+        });
+    });
+    let d = store.get("e").expect("mock").draft;
+    assert_eq!(d.settings.responses.seed, 99);
+    assert_eq!(d.settings.responses.delay_ms, 5);
+    assert_eq!(
+        d.settings
+            .operations
+            .get("listOrders")
+            .and_then(|o| o.delay_ms),
+        Some(7)
+    );
+}

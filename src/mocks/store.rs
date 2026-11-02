@@ -925,16 +925,17 @@ impl MockStore {
             .ok_or_else(|| StoreError::NotFound(name.to_string()))
     }
 
-    /// Recompile the draft with one operation's settings replaced.
-    /// Set one operation's settings. With `expected`, refused unless the
-    /// draft is that revision; without, an edit that raced another is made
-    /// again on top of it (never lost).
-    pub fn set_operation(
+    /// Change a draft as one edit: under the edit lock, read the draft,
+    /// build the new one with `edit`, and write it only if the draft is still
+    /// the one read. With `expected`, refused unless the draft is that
+    /// revision; without, an edit that raced another is made again on top of
+    /// it (never lost). Blocking (`edit` compiles): call it on the blocking
+    /// pool, as every edit is.
+    pub fn edit_draft(
         &self,
         name: &str,
-        op: &str,
-        settings: Option<OperationSettings>,
         expected: Option<u64>,
+        edit: impl Fn(&Compiled) -> Result<Compiled, StoreError>,
     ) -> Result<Snapshot, StoreError> {
         let _edit = self.edit_lock();
         let mut attempt = 0;
@@ -948,6 +949,23 @@ impl MockStore {
                     current: draft.revision,
                 });
             }
+            let compiled = edit(&draft)?;
+            match self.set_draft_if(name, Some(compiled), None, Some(draft.revision)) {
+                Err(StoreError::Stale { .. }) if expected.is_none() && attempt < 3 => continue,
+                r => return r,
+            }
+        }
+    }
+
+    /// Set one operation's settings (an [`Self::edit_draft`]).
+    pub fn set_operation(
+        &self,
+        name: &str,
+        op: &str,
+        settings: Option<OperationSettings>,
+        expected: Option<u64>,
+    ) -> Result<Snapshot, StoreError> {
+        self.edit_draft(name, expected, |draft| {
             if draft.spec.operation(op).is_none() {
                 return Err(StoreError::NotFound(format!("{name}/{op}")));
             }
@@ -960,14 +978,9 @@ impl MockStore {
                     new_settings.operations.remove(op);
                 }
             }
-            let compiled = self
-                .recompile(&draft, None, new_settings)
-                .map_err(StoreError::Invalid)?;
-            match self.set_draft_if(name, Some(compiled), None, Some(draft.revision)) {
-                Err(StoreError::Stale { .. }) if expected.is_none() && attempt < 3 => continue,
-                r => return r,
-            }
-        }
+            self.recompile(draft, None, new_settings)
+                .map_err(StoreError::Invalid)
+        })
     }
 
     /// Make the draft live.
