@@ -224,6 +224,9 @@ pub struct LimitsConfig {
     /// These limits belong to one API key (shared mode): rejections say
     /// "per API key" and usage reports scope `key`.
     pub per_key: bool,
+    /// Session scope counts per client address, not per session header
+    /// (public mode: a fresh header per request must not reset the limits).
+    pub by_address: bool,
 }
 
 impl LimitsConfig {
@@ -1152,7 +1155,11 @@ impl Limiter {
                 .get(crate::session::SESSION_HEADER)
                 .and_then(|v| v.to_str().ok())
                 .map(str::trim)
-                .filter(|s| crate::session::is_valid_session(s))
+                .filter(|s| {
+                    !self.cfg.by_address
+                        && crate::session::is_valid_session(s)
+                        && !crate::session::derived_session(s)
+                })
                 .map(str::to_string)
                 .unwrap_or_else(|| match req.remote_addr() {
                     Some(addr) => format!("ip:{}", addr.ip()),
@@ -1249,11 +1256,16 @@ fn is_event_stream(resp: &Response) -> bool {
         })
 }
 
-/// The session key used for session-scoped limits.
+/// The session key used for session-scoped limits: the session header,
+/// else the address; the address only on a public instance.
 fn scope_key(state: &AppState, req: &Request) -> Option<String> {
-    (state.limits.config().scope == Scope::Session).then(|| {
+    let cfg = state.limits.config();
+    (cfg.scope == Scope::Session).then(|| {
         let ip = crate::session::client_ip(req.headers(), req.extensions(), &state.config);
-        crate::session::session_key(req.headers(), ip)
+        match (cfg.by_address, ip) {
+            (true, Some(ip)) => format!("ip:{ip}"),
+            _ => crate::session::session_key(req.headers(), ip),
+        }
     })
 }
 

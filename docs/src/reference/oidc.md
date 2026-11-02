@@ -159,8 +159,9 @@ A refresh may narrow the scope (never widen it) and may name a new `resource`.
 ### Token exchange (RFC 8693)
 
 `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` exchanges a
-`subject_token` (access token, ID token or JWT issued by this server, RS256 or the
-HS256 demo secret) for a new access token with the requested `audience` /
+`subject_token` (an access token, ID token or JWT this server issued, RS256; the
+HS256 demo secret is public, so a token signed with it could name anyone and is
+refused, as an `actor_token` is) for a new access token with the requested `audience` /
 `resource` and an optionally narrowed `scope`. An `actor_token` adds an `act`
 claim (delegation, nested when the subject was already delegated).
 `requested_token_type` may be `access_token`, `jwt` or `id_token`.

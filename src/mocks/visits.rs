@@ -13,7 +13,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -207,8 +207,13 @@ struct Inner {
     day: Option<NaiveDate>,
     /// Minutes granted today, by email hash.
     email_minutes: HashMap<String, u64>,
-    /// Anonymous visits started today, by session key.
+    /// Anonymous visits started today, by ledger key (`address/session`).
     anon_visits: HashMap<String, u32>,
+    /// The sessions each address used today (at most
+    /// `SESSIONS_PER_ADDRESS`): past that, an address's new sessions share
+    /// one ledger entry, so rotating the header cannot fill the ledger.
+    #[serde(default)]
+    sessions_per_address: HashMap<String, BTreeSet<String>>,
     #[serde(skip)]
     creations: HashMap<String, VecDeque<DateTime<Utc>>>,
     #[serde(skip)]
@@ -241,7 +246,36 @@ pub struct Visits {
     paused: AtomicBool,
     leads: Arc<Leads>,
     persist: Option<PathBuf>,
+    /// The latest serialised state waiting to be written, and the order of
+    /// the writes: the file is written off the visits lock (and, under a
+    /// runtime, off the request thread), latest state wins.
+    writer: Arc<Writer>,
 }
+
+#[derive(Default)]
+struct Writer {
+    pending: Mutex<Option<(PathBuf, Vec<u8>)>>,
+    order: Mutex<()>,
+}
+
+impl Writer {
+    fn flush(&self) {
+        let _order = self.order.lock().unwrap_or_else(|e| e.into_inner());
+        let next = self
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some((path, text)) = next {
+            if let Err(e) = crate::settings::write_private(&path, &text) {
+                tracing::warn!("visits not saved to {}: {e}", path.display());
+            }
+        }
+    }
+}
+
+/// Sessions one address may use for its own ledger entries per day.
+pub const SESSIONS_PER_ADDRESS: usize = 20;
 
 /// File (in `RUSTYBIN_MOCKS_STATE_DIR`) holding visits and the day's ledger.
 pub const VISITS_FILE: &str = "_visits.json";
@@ -261,6 +295,7 @@ impl Visits {
             paused: AtomicBool::new(false),
             leads,
             persist: None,
+            writer: Arc::new(Writer::default()),
         }
     }
 
@@ -337,7 +372,29 @@ impl Visits {
             inner.day = Some(today);
             inner.email_minutes.clear();
             inner.anon_visits.clear();
+            inner.sessions_per_address.clear();
         }
+    }
+
+    /// The ledger entry of a caller's key (`address/session`, from
+    /// `Caller.ledger`): its own while the address has used fewer than
+    /// `SESSIONS_PER_ADDRESS` sessions today, else the address's shared one.
+    fn ledger_entry(inner: &mut Inner, key: &str) -> String {
+        let Some((address, session)) = key.split_once('/') else {
+            return key.to_string();
+        };
+        let set = inner
+            .sessions_per_address
+            .entry(address.to_string())
+            .or_default();
+        if set.contains(session) {
+            return key.to_string();
+        }
+        if set.len() < SESSIONS_PER_ADDRESS {
+            set.insert(session.to_string());
+            return key.to_string();
+        }
+        format!("{address}/*")
     }
 
     fn save(&self, inner: &Inner) {
@@ -351,15 +408,19 @@ impl Visits {
                 return;
             }
         };
-        let tmp = path.with_extension("json.tmp");
-        let result = path
-            .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|_| std::fs::write(&tmp, &text))
-            .and_then(|_| std::fs::rename(&tmp, path));
-        if let Err(e) = result {
-            tracing::warn!("visits not saved to {}: {e}", path.display());
-        }
+        *self
+            .writer
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((path.clone(), text));
+    }
+
+    /// Serialise the state, let go of the lock, then write the file: the
+    /// write never holds up other visitors (the latest state wins).
+    fn save_unlock(&self, inner: std::sync::MutexGuard<'_, Inner>) {
+        self.save(&inner);
+        drop(inner);
+        self.writer.flush();
     }
 
     pub fn pause(&self, paused: bool) {
@@ -407,7 +468,7 @@ impl Visits {
             for h in &ended {
                 inner.visits.remove(h);
             }
-            self.save(&inner);
+            self.save_unlock(inner);
         }
         ended
     }
@@ -501,6 +562,11 @@ impl Visits {
         let step = self.step();
         let email = self.email_step(&mut inner, input, now, step)?;
         if email.is_none() {
+            if inner.sessions_per_address.len() >= MAX_LEDGER {
+                return Err(VisitError::Busy { retry_after: 60 });
+            }
+            let entry = Self::ledger_entry(&mut inner, session);
+            let session = entry.as_str();
             let used = inner.anon_visits.get(session).copied().unwrap_or(0);
             if used >= self.cfg.anon_visits_per_day {
                 return Err(if self.cfg.leads_enabled() {
@@ -532,8 +598,7 @@ impl Visits {
                 email: email_hash,
             },
         );
-        self.save(&inner);
-        drop(inner);
+        self.save_unlock(inner);
         if let Some((address, _)) = email {
             self.lead(address, input, "mock_start", step, &[]);
         }
@@ -568,10 +633,9 @@ impl Visits {
             Some(h) => h.clone(),
             None if v.granted + step <= self.anon_minutes() => {
                 self.grant(&mut inner, hash, now, step);
-                self.save(&inner);
-                return self
-                    .view_locked(&inner, hash, now)
-                    .ok_or(VisitError::NotFound);
+                let view = self.view_locked(&inner, hash, now);
+                self.save_unlock(inner);
+                return view.ok_or(VisitError::NotFound);
             }
             None => {
                 let Some((address, h)) =
@@ -596,16 +660,15 @@ impl Visits {
         };
         let used = inner.email_minutes.get(&email_hash).copied().unwrap_or(0);
         if used + step > self.daily_minutes() {
-            self.save(&inner);
+            self.save_unlock(inner);
             return Err(VisitError::DailyLimit {
                 resets_at: self.next_midnight(now),
             });
         }
         *inner.email_minutes.entry(email_hash).or_insert(0) += step;
         self.grant(&mut inner, hash, now, step);
-        self.save(&inner);
         let view = self.view_locked(&inner, hash, now);
-        drop(inner);
+        self.save_unlock(inner);
         if let Some(address) = captured {
             self.lead(address, input, "mock_extend", v.granted + step, mocks);
         }
@@ -673,7 +736,7 @@ impl Visits {
         let token = new_token();
         let new_hash = sha256_hex(&token);
         inner.visits.insert(new_hash.clone(), v);
-        self.save(&inner);
+        self.save_unlock(inner);
         Some((token, new_hash))
     }
 
@@ -687,7 +750,7 @@ impl Visits {
                     *n = n.saturating_sub(1);
                 }
             }
-            self.save(&inner);
+            self.save_unlock(inner);
         }
     }
 
@@ -696,7 +759,7 @@ impl Visits {
         let mut inner = self.lock();
         let removed = inner.visits.remove(hash).is_some();
         if removed {
-            self.save(&inner);
+            self.save_unlock(inner);
         }
         removed
     }
@@ -705,7 +768,7 @@ impl Visits {
     pub fn end_all(&self) -> Vec<String> {
         let mut inner = self.lock();
         let all: Vec<String> = inner.visits.drain().map(|(h, _)| h).collect();
-        self.save(&inner);
+        self.save_unlock(inner);
         all
     }
 
@@ -715,6 +778,12 @@ impl Visits {
         let hour_ago = now - TimeDelta::hours(1);
         let minute_ago = now - TimeDelta::minutes(1);
         let mut inner = self.lock();
+        let now_day = now.date_naive();
+        if inner.day != Some(now_day) {
+            self.roll(&mut inner, now);
+        }
+        let entry = Self::ledger_entry(&mut inner, session);
+        let session = entry.as_str();
         while inner
             .instance_creations
             .front()

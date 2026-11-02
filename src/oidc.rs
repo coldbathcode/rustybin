@@ -32,6 +32,7 @@ use base64::Engine;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use crate::catalog::{category, Endpoint, Example};
@@ -96,6 +97,31 @@ struct OidcState {
     refresh_tokens: BoundedStore<RefreshGrant>,
     /// Revoked access token `jti`s, kept until the token would expire.
     revoked: BoundedStore<()>,
+    /// A public instance: the demo clients (any redirect URI) send the
+    /// browser on only to loopback or this host; elsewhere a page with the
+    /// link, so the demo domain is not an open redirect.
+    public_mode: bool,
+    /// Password checks (PBKDF2, up to millions of rounds) at once.
+    hashing: Arc<tokio::sync::Semaphore>,
+    /// Failed sign-ins per client address in the current minute.
+    failures: std::sync::Mutex<HashMap<IpAddr, (u32, std::time::Instant)>>,
+    /// The instance's configuration (the client address behind a proxy).
+    config: Option<Arc<crate::config::Config>>,
+}
+
+/// Password checks the demo IdP runs at once.
+pub const HASH_PERMITS: usize = 4;
+/// Failed sign-ins per client address per minute before it waits.
+pub const FAILURES_PER_MINUTE: u32 = 10;
+/// Addresses the failure count tracks.
+const MAX_FAILURE_ADDRESSES: usize = 4096;
+
+/// Why a password check did not run.
+enum CheckRefused {
+    /// Too many failures from this address: wait.
+    Limited,
+    /// Every permit is taken: try again.
+    Busy,
 }
 
 impl OidcState {
@@ -112,7 +138,69 @@ impl OidcState {
             codes: BoundedStore::new(cap, AUTH_CODE_TTL),
             refresh_tokens: BoundedStore::new(cap, REFRESH_TOKEN_TTL),
             revoked: BoundedStore::new(cap, ACCESS_TOKEN_TTL + 120),
+            public_mode,
+            hashing: Arc::new(tokio::sync::Semaphore::new(HASH_PERMITS)),
+            failures: std::sync::Mutex::new(HashMap::new()),
+            config: None,
         }
+    }
+
+    /// The client address of a request (proxy headers when trusted).
+    fn client_ip(
+        &self,
+        headers: &HeaderMap,
+        extensions: &axum::http::Extensions,
+    ) -> Option<IpAddr> {
+        match &self.config {
+            Some(c) => crate::session::client_ip(headers, extensions, c),
+            None => crate::session::peer_addr(extensions).map(|a| a.ip()),
+        }
+    }
+
+    /// Check a user's password off the request threads, a few at a time,
+    /// with a failure limit per address.
+    async fn authenticate(
+        &self,
+        ip: Option<IpAddr>,
+        username: &str,
+        password: &str,
+    ) -> Result<Option<&'static clients::DemoUser>, CheckRefused> {
+        if let Some(ip) = ip {
+            let failures = self.failures.lock().unwrap_or_else(|e| e.into_inner());
+            if failures
+                .get(&ip)
+                .is_some_and(|(n, at)| *n >= FAILURES_PER_MINUTE && at.elapsed().as_secs() < 60)
+            {
+                return Err(CheckRefused::Limited);
+            }
+        }
+        let permit = self
+            .hashing
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| CheckRefused::Busy)?;
+        let (u, p) = (username.to_string(), password.to_string());
+        let user = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            clients::authenticate_user(&u, &p)
+        })
+        .await
+        .unwrap_or(None);
+        if let (None, Some(ip)) = (user, ip) {
+            let mut failures = self.failures.lock().unwrap_or_else(|e| e.into_inner());
+            if !failures.contains_key(&ip) && failures.len() >= MAX_FAILURE_ADDRESSES {
+                failures.retain(|_, (_, at)| at.elapsed().as_secs() < 60);
+                if failures.len() >= MAX_FAILURE_ADDRESSES {
+                    return Ok(None);
+                }
+            }
+            let entry = failures.entry(ip).or_insert((0, std::time::Instant::now()));
+            if entry.1.elapsed().as_secs() >= 60 {
+                *entry = (0, std::time::Instant::now());
+            }
+            entry.0 += 1;
+        }
+        Ok(user)
     }
 
     fn is_revoked(&self, claims: &Value) -> bool {
@@ -588,7 +676,32 @@ fn issue_tokens(oidc: &OidcState, issuer: &str, grant: Grant) -> Result<Response
 
 async fn token(Extension(oidc): Extension<Arc<OidcState>>, parts: Parts, body: Bytes) -> Response {
     let issuer = request_issuer(&oidc, &parts);
-    match token_inner(&oidc, &issuer, &parts.headers, &body) {
+    // The password grant's check runs here, off the request threads.
+    let mut checked = None;
+    if let Ok(params) = Params::from_form(&parts.headers, &body) {
+        if let (Some(GRANT_PASSWORD), Some(u), Some(p)) = (
+            params.get("grant_type"),
+            params.get("username"),
+            params.get("password"),
+        ) {
+            let ip = oidc.client_ip(&parts.headers, &parts.extensions);
+            match oidc.authenticate(ip, u, p).await {
+                Ok(user) => checked = Some(user),
+                Err(CheckRefused::Limited) => {
+                    return OAuthError::bad(
+                        "slow_down",
+                        "too many failed sign-ins from this address: wait a minute",
+                    )
+                    .into_response()
+                }
+                Err(CheckRefused::Busy) => {
+                    return OAuthError::bad("temporarily_unavailable", "busy: try again")
+                        .into_response()
+                }
+            }
+        }
+    }
+    match token_inner(&oidc, &issuer, &parts.headers, &body, checked) {
         Ok(resp) => resp,
         Err(e) => e.into_response(),
     }
@@ -599,6 +712,7 @@ fn token_inner(
     issuer: &str,
     headers: &HeaderMap,
     body: &[u8],
+    checked: Option<Option<&'static clients::DemoUser>>,
 ) -> Result<Response, OAuthError> {
     let params = Params::from_form(headers, body)?;
     let grant_type = params
@@ -655,8 +769,11 @@ fn token_inner(
                     "username and password are required",
                 ));
             };
-            let user = clients::authenticate_user(username, password)
-                .ok_or_else(|| OAuthError::invalid_grant("invalid username or password"))?;
+            let user = match checked {
+                Some(user) => user,
+                None => clients::authenticate_user(username, password),
+            }
+            .ok_or_else(|| OAuthError::invalid_grant("invalid username or password"))?;
             let scope = normalize_scope(params.get("scope").unwrap_or("openid profile email"))?;
             issue_tokens(
                 oidc,
@@ -814,9 +931,20 @@ fn grant_token_exchange(
             "unsupported subject_token_type (access_token, id_token or jwt)",
         ));
     }
+    // Only tokens this IdP issued (RS256): the HS256 demo secret is public,
+    // so an HS256 subject could name anyone with any groups.
     let subject = oidc
         .verify(subject_token)
-        .map_err(|e| OAuthError::invalid_request(format!("subject_token is invalid: {e}")))?
+        .map_err(|e| OAuthError::invalid_request(format!("subject_token is invalid: {e}")))
+        .and_then(|v| {
+            if v.alg == "RS256" {
+                Ok(v)
+            } else {
+                Err(OAuthError::invalid_request(
+                    "subject_token must be a token this provider issued (RS256)",
+                ))
+            }
+        })?
         .claims;
     let sub = subject
         .get("sub")
@@ -840,10 +968,15 @@ fn grant_token_exchange(
                     ))
                 }
             }
-            let claims = oidc
+            let verified = oidc
                 .verify(actor_token)
-                .map_err(|e| OAuthError::invalid_request(format!("actor_token is invalid: {e}")))?
-                .claims;
+                .map_err(|e| OAuthError::invalid_request(format!("actor_token is invalid: {e}")))?;
+            if verified.alg != "RS256" {
+                return Err(OAuthError::invalid_request(
+                    "actor_token must be a token this provider issued (RS256)",
+                ));
+            }
+            let claims = verified.claims;
             Some(claims)
         }
     };
@@ -957,6 +1090,8 @@ enum AuthzError {
         error: &'static str,
         description: String,
         state: Option<String>,
+        /// A demo client (any redirect URI): see [`send_back`].
+        demo: bool,
     },
 }
 
@@ -985,8 +1120,10 @@ fn validate_authorize(oidc: &OidcState, params: &Params) -> Result<AuthzRequest,
     };
     let redirect_uri_given = params.get("redirect_uri").is_some();
     let state = params.get("state").map(String::from);
+    let demo = client.redirect_uris.is_empty();
     let redirect_err = |error: &'static str, description: &str| AuthzError::Redirect {
         redirect_uri: redirect_uri.clone(),
+        demo,
         error,
         description: description.to_string(),
         state: state.clone(),
@@ -1167,7 +1304,7 @@ fn redirect_response(redirect_uri: &str, params: &[(&str, &str)]) -> Response {
     }
 }
 
-fn authz_error_response(err: AuthzError) -> Response {
+fn authz_error_response(oidc: &OidcState, headers: &HeaderMap, err: AuthzError) -> Response {
     match err {
         AuthzError::Page(status, msg) => error_page(status, &msg),
         AuthzError::Redirect {
@@ -1175,7 +1312,11 @@ fn authz_error_response(err: AuthzError) -> Response {
             error,
             description,
             state,
-        } => redirect_response(
+            demo,
+        } => send_back(
+            oidc,
+            headers,
+            demo,
             &redirect_uri,
             &[
                 ("error", error),
@@ -1186,8 +1327,79 @@ fn authz_error_response(err: AuthzError) -> Response {
     }
 }
 
+/// Is `uri` on a loopback host or on the host this request came to?
+fn local_redirect(uri: &str, headers: &HeaderMap) -> bool {
+    let Ok(u) = reqwest::Url::parse(uri) else {
+        return false;
+    };
+    let Some(host) = u.host_str() else {
+        return false;
+    };
+    let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    if host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+    {
+        return true;
+    }
+    let authority = match u.port() {
+        Some(p) => format!("{host}:{p}"),
+        None => host,
+    };
+    headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|h| {
+            h.trim()
+                .trim_end_matches('.')
+                .eq_ignore_ascii_case(&authority)
+        })
+}
+
+/// Send the browser back to the client: a redirect, or on a public instance
+/// for a demo client and a URI elsewhere, a page with the link (the user
+/// decides to follow it; the demo domain never redirects there on its own).
+fn send_back(
+    oidc: &OidcState,
+    headers: &HeaderMap,
+    demo: bool,
+    redirect_uri: &str,
+    params: &[(&str, &str)],
+) -> Response {
+    if !(oidc.public_mode && demo) || local_redirect(redirect_uri, headers) {
+        return redirect_response(redirect_uri, params);
+    }
+    let Some(location) = clients::redirect_location(redirect_uri, params) else {
+        return error_page(StatusCode::BAD_REQUEST, "redirect_uri could not be used");
+    };
+    let href = location.to_str().unwrap_or("");
+    let origin = reqwest::Url::parse(redirect_uri)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_default();
+    let mut resp = html(
+        StatusCode::OK,
+        format!(
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Continue to the application</title>\
+             <meta name=\"referrer\" content=\"no-referrer\">\
+             <style>{PAGE_STYLE}</style></head><body><h2>Continue to the application</h2>\
+             <p>The demo sign-in is done. This is a public demo instance, so it does not send you to \
+             other sites on its own: continue only if you expected <strong>{}</strong>.</p>\
+             <p><a href=\"{}\" rel=\"noreferrer\">Continue to {}</a></p></body></html>",
+            html_escape(&origin),
+            html_escape(href),
+            html_escape(&origin)
+        ),
+    );
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp
+}
+
 async fn authorize_get(
     Extension(oidc): Extension<Arc<OidcState>>,
+    headers: HeaderMap,
     RawQuery(query): RawQuery,
 ) -> Response {
     let params = match Params::parse(query.unwrap_or_default().as_bytes()) {
@@ -1199,13 +1411,14 @@ async fn authorize_get(
             let hint = req.login_hint.clone().unwrap_or_else(|| "demo".into());
             login_page(&req, None, &hint)
         }
-        Err(e) => authz_error_response(e),
+        Err(e) => authz_error_response(&oidc, &headers, e),
     }
 }
 
 async fn authorize_post(
     Extension(oidc): Extension<Arc<OidcState>>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     body: Bytes,
 ) -> Response {
     let params = match Params::from_form(&headers, &body) {
@@ -1214,11 +1427,15 @@ async fn authorize_post(
     };
     let req = match validate_authorize(&oidc, &params) {
         Ok(r) => r,
-        Err(e) => return authz_error_response(e),
+        Err(e) => return authz_error_response(&oidc, &headers, e),
     };
     let state = req.state.as_deref().unwrap_or("");
+    let demo = req.client.redirect_uris.is_empty();
     if params.get("action") == Some("deny") {
-        return redirect_response(
+        return send_back(
+            &oidc,
+            &headers,
+            demo,
             &req.redirect_uri,
             &[
                 ("error", "access_denied"),
@@ -1229,8 +1446,20 @@ async fn authorize_post(
     }
     let username = params.get("username").unwrap_or("");
     let password = params.get("password").unwrap_or("");
-    let Some(user) = clients::authenticate_user(username, password) else {
-        return login_page(&req, Some("Invalid username or password."), username);
+    let ip = oidc.client_ip(&headers, &extensions);
+    let user = match oidc.authenticate(ip, username, password).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return login_page(&req, Some("Invalid username or password."), username),
+        Err(CheckRefused::Limited) => {
+            return login_page(
+                &req,
+                Some("Too many failed sign-ins from this address: wait a minute."),
+                username,
+            )
+        }
+        Err(CheckRefused::Busy) => {
+            return login_page(&req, Some("Busy: try again in a moment."), username)
+        }
     };
     let code = new_secret_token("");
     oidc.codes.insert(
@@ -1247,7 +1476,13 @@ async fn authorize_post(
             auth_time: chrono::Utc::now().timestamp(),
         },
     );
-    redirect_response(&req.redirect_uri, &[("code", &code), ("state", state)])
+    send_back(
+        &oidc,
+        &headers,
+        demo,
+        &req.redirect_uri,
+        &[("code", &code), ("state", state)],
+    )
 }
 
 // ── Userinfo, introspection, revocation ─────────────────────────────
@@ -1422,7 +1657,13 @@ async fn revoke(
             let jti = claims.get("jti").and_then(|j| j.as_str());
             let exp = claims.get("exp").and_then(|e| e.as_i64()).unwrap_or(0);
             if let (Some(jti), true) = (jti, owner == Some(client.client_id.as_str())) {
-                oidc.revoked.insert_until(jti.to_string(), (), exp + 60);
+                // A forged demo token may carry any exp: kept at most as long
+                // as one of ours could live.
+                let now = chrono::Utc::now().timestamp();
+                let until = exp
+                    .saturating_add(60)
+                    .min(now.saturating_add(ACCESS_TOKEN_TTL + 120));
+                oidc.revoked.insert_until(jti.to_string(), (), until);
             }
         }
         Ok(())
@@ -1536,11 +1777,13 @@ async fn jwks(Extension(oidc): Extension<Arc<OidcState>>) -> Response {
 // ── Router ──────────────────────────────────────────────────────────
 
 pub fn router(state: &AppState) -> Router<AppState> {
-    let oidc = Arc::new(OidcState::new(
+    let mut oidc = OidcState::new(
         state.jwt.clone(),
         OriginPolicy::from_config(&state.config),
         state.config.public_mode,
-    ));
+    );
+    oidc.config = Some(state.config.clone());
+    let oidc = Arc::new(oidc);
     Router::new()
         .route(
             "/.well-known/openid-configuration",
@@ -1590,14 +1833,21 @@ pub fn catalog() -> Vec<Endpoint> {
                 ("username", "demo"),
                 ("password", "demo"),
             ]))
-            .example(Example::post("Token Exchange (RFC 8693)", "/oauth/token").form(&[
-                ("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange"),
-                ("client_id", "rustybin"),
-                ("client_secret", "secret"),
-                ("subject_token", crate::auth_jwt::SAMPLE_JWT),
-                ("subject_token_type", "urn:ietf:params:oauth:token-type:access_token"),
-                ("audience", "https://api.example.com"),
-            ]))
+            .example(
+                Example::post(
+                    "Token Exchange (RFC 8693): the subject must be a token of this provider",
+                    "/oauth/token",
+                )
+                .form(&[
+                    ("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange"),
+                    ("client_id", "rustybin"),
+                    ("client_secret", "secret"),
+                    ("subject_token", crate::auth_jwt::SAMPLE_JWT),
+                    ("subject_token_type", "urn:ietf:params:oauth:token-type:access_token"),
+                    ("audience", "https://api.example.com"),
+                ])
+                .expect_status(400),
+            )
             .example(Example::post("Refresh token", "/oauth/token").form(&[
                 ("grant_type", "refresh_token"),
                 ("client_id", "rustybin"),

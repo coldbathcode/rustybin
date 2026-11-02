@@ -742,6 +742,11 @@ fn render_response(response: &BinResponse, recorded: &BinRequest) -> Response {
         resp.headers_mut()
             .insert(HeaderName::from_static("x-rustybin-bin-seq"), v);
     }
+    // Anyone may configure a bin, and it answers on the console's origin:
+    // no active content (HTML, scripts, SVG as text/plain), no cookies or
+    // security headers of its own, a sandbox CSP and nosniff, like a
+    // visitor's mock.
+    crate::mocks::restrict::harden(&mut resp);
     resp
 }
 
@@ -1450,5 +1455,36 @@ mod tests {
         assert!(text.contains("\"first\""), "{text}");
         assert!(text.contains("id: 2\n"), "{text}");
         assert!(text.contains("event: request"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_bin_never_answers_active_content() {
+        let app = app();
+        let created = create(
+            &app,
+            json!({
+                "status": 200,
+                "headers": { "content-type": "text/html", "set-cookie": "sid=planted; Domain=example.com" },
+                "body": "<form action=/login><input name=password></form>"
+            }),
+        )
+        .await;
+        let id = created["id"].as_str().expect("id").to_string();
+        let resp = app
+            .clone()
+            .oneshot(send("GET", &format!("/bin/{id}"), ""))
+            .await
+            .expect("response");
+        let h = resp.headers();
+        assert!(h["content-type"]
+            .to_str()
+            .unwrap_or("")
+            .starts_with("text/plain"));
+        assert!(h.get("set-cookie").is_none());
+        assert_eq!(h["x-content-type-options"], "nosniff");
+        assert!(h["content-security-policy"]
+            .to_str()
+            .unwrap_or("")
+            .contains("sandbox"));
     }
 }

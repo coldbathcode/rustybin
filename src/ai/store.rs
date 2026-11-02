@@ -77,11 +77,24 @@ impl RequestStore {
     }
 
     pub fn get(&self, request_id: &str) -> Option<Arc<AiRecord>> {
+        self.get_visible(request_id, |_| true)
+    }
+
+    /// The newest record with this request id that `visible` accepts: the
+    /// caller's filter runs inside the search, so another caller's record
+    /// with the same (client-chosen) id never hides it.
+    pub fn get_visible(
+        &self,
+        request_id: &str,
+        visible: impl Fn(&AiRecord) -> bool,
+    ) -> Option<Arc<AiRecord>> {
         let now = Instant::now();
         lock(&self.entries)
             .iter()
             .rev()
-            .find(|(t, r)| r.request_id == request_id && now.duration_since(*t) <= self.ttl)
+            .find(|(t, r)| {
+                r.request_id == request_id && now.duration_since(*t) <= self.ttl && visible(r)
+            })
             .map(|(_, r)| r.clone())
     }
 
@@ -206,5 +219,16 @@ mod tests {
         assert!(!c.hit([2; 32]));
         assert!(!c.hit([3; 32]));
         assert_eq!(c.len(), 2);
+    }
+
+    #[test]
+    fn another_callers_record_never_hides_yours() {
+        let s = RequestStore::new(10, Duration::from_secs(60));
+        s.insert(rec("same-id", "victim"));
+        s.insert(rec("same-id", "attacker"));
+        let found = s
+            .get_visible("same-id", |r| r.session == "victim")
+            .expect("the victim's record");
+        assert_eq!(found.session, "victim");
     }
 }

@@ -234,7 +234,7 @@ pub fn check(
         return Err(error_response(p, ErrorKind::MissingCredential, None));
     };
     if let Some(exp) = expected {
-        if c.value != exp {
+        if !crate::types::constant_time_eq(c.value.as_bytes(), exp.as_bytes()) {
             let msg = match p {
                 Provider::OpenAi => Some(format!(
                     "Incorrect API key provided: {}. You can find your API key in your account settings.",

@@ -37,7 +37,9 @@ use crate::config::Config;
 use crate::state::AppState;
 
 /// Names that would collide with fixed control-plane routes.
-pub const RESERVED_NAMES: &[&str] = &["import", "export", "apply", "reload", "visit", "visits"];
+pub const RESERVED_NAMES: &[&str] = &[
+    "import", "export", "apply", "reload", "visit", "visits", "ai",
+];
 
 // ── Errors ──────────────────────────────────────────────────────────
 
@@ -843,7 +845,7 @@ impl Svc {
                 started: None,
             });
         }
-        match visits.start(&c.session, &EmailInput::default()) {
+        match visits.start(&c.ledger, &EmailInput::default()) {
             Ok((token, hash)) => {
                 self.state.metrics.count_visit_event("started");
                 Ok(NewOwner {
@@ -894,7 +896,7 @@ impl Svc {
                 self.config(),
             ));
         }
-        visits.note_creation(&c.session).map_err(|e| {
+        visits.note_creation(&c.ledger).map_err(|e| {
             self.state.metrics.count_visit_event(ss::event_of(&e));
             ss::visit_error(e, self.config())
         })

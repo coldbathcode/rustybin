@@ -55,7 +55,17 @@ demo URL, a conference booth):
 - **Inspector**: only requests carrying `X-Rustybin-Session` are captured, and the
   inspector API only returns the entries of the `?session=` you ask for.
 - **Mock LLM records**: `/ai/requests` only lists the caller's own session, and an
-  IP-derived session cannot be claimed through `?session=`.
+  IP-derived session cannot be claimed through `?session=` (nor, on any instance,
+  through the `X-Rustybin-Session` header: an `ip:` value is ignored there).
+- **Per-session plan limits** count per client address, not per session header, so a
+  fresh header per request does not reset them.
+- **The demo identity provider** sends the browser on only to loopback or the
+  instance's own host for its demo clients; any other redirect URI gets a page with
+  the link to follow, so the demo domain is not an open redirect. Failed sign-ins
+  are limited per address (10 a minute), and password checks run four at a time.
+- **Request bins** answer like a visitor's mock on every instance: active content
+  (HTML, scripts, SVG) as `text/plain`, no cookies or security headers of their own, a
+  sandbox `Content-Security-Policy` and `nosniff`.
 - **Global mutations**: refused (`403`) unless `RUSTYBIN_ADMIN_TOKEN` is set.
 - **A2A push**: `RUSTYBIN_A2A_PUSH_ALLOW_ALL` is ignored.
 - **Lower caps** on delays (10 s), payload sizes, stream lengths and lifetimes,

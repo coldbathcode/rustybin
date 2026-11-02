@@ -643,13 +643,14 @@ async fn get_request(
 ) -> Response {
     let session = allowed_session(&shared, &headers, ip, &q);
     let key_id = caller_key(key);
-    match shared.store.get(&id) {
-        Some(r)
-            if session.as_deref().is_none_or(|s| r.session == s)
-                && key_id.is_none_or(|k| r.key_id.as_deref() == Some(k.as_str())) =>
-        {
-            Json(record_json(&shared, &r)).into_response()
-        }
+    let found = shared.store.get_visible(&id, |r| {
+        session.as_deref().is_none_or(|s| r.session == s)
+            && key_id
+                .as_deref()
+                .is_none_or(|k| r.key_id.as_deref() == Some(k))
+    });
+    match found {
+        Some(r) => Json(record_json(&shared, &r)).into_response(),
         _ => (
             StatusCode::NOT_FOUND,
             Json(json!({

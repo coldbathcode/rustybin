@@ -291,10 +291,12 @@ pub(crate) async fn serve(
 ) -> Response {
     let started = Instant::now();
     let store = &state.mocks;
-    let prefix_len = "/mock/".len() + name.len();
-    let sub_path = match uri.path().get(prefix_len..) {
-        Some("") | None => "/".to_string(),
-        Some(rest) => rest.to_string(),
+    // The raw path's own first segment (the name may arrive percent-encoded,
+    // so the decoded name's length says nothing about where it ends).
+    let raw = uri.path().strip_prefix("/mock/").unwrap_or("");
+    let sub_path = match raw.find('/') {
+        Some(i) => raw[i..].to_string(),
+        None => "/".to_string(),
     };
     if is_reserved_sub_path(&sub_path) {
         return problem(

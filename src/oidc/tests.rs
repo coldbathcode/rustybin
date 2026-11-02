@@ -429,7 +429,7 @@ async fn expired_code_is_rejected() {
         ("client_id", "rustybin"),
         ("client_secret", "secret"),
     ]);
-    let err = token_inner(&oidc, "http://localhost", &headers, body.as_bytes())
+    let err = token_inner(&oidc, "http://localhost", &headers, body.as_bytes(), None)
         .expect_err("expired code rejected");
     assert_eq!(err.error, "invalid_grant");
 }
@@ -852,18 +852,37 @@ async fn token_exchange_requires_verified_subject() {
         }
     };
 
-    // The HS256 sample token (demo secret) verifies.
+    // A token this provider issued (RS256) is exchanged.
+    let (_, user) = token(
+        &app,
+        &[
+            ("grant_type", "password"),
+            ("client_id", "rustybin"),
+            ("client_secret", "secret"),
+            ("username", "demo"),
+            ("password", "demo"),
+            ("scope", "openid profile"),
+        ],
+    )
+    .await;
+    let user_token = user["access_token"]
+        .as_str()
+        .expect("user token")
+        .to_string();
+    let (status, json) =
+        exchange(user_token.clone(), vec![("audience", "my-service".into())]).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["issued_token_type"], TOKEN_TYPE_ACCESS_TOKEN);
+    let c = claims(json["access_token"].as_str().expect("token"));
+    assert_eq!(c["sub"], "demo");
+    assert_eq!(c["aud"], "my-service");
+    // The HS256 sample (its demo secret is public) is not: it could name anyone.
     let (status, json) = exchange(
         crate::auth_jwt::SAMPLE_JWT.to_string(),
         vec![("audience", "my-service".into())],
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{json}");
-    assert_eq!(json["issued_token_type"], TOKEN_TYPE_ACCESS_TOKEN);
-    assert_eq!(json["scope"], "openid profile");
-    let c = claims(json["access_token"].as_str().expect("token"));
-    assert_eq!(c["sub"], "1234567890");
-    assert_eq!(c["aud"], "my-service");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
 
     // Forged / third-party tokens are rejected with invalid_request.
     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -888,7 +907,7 @@ async fn token_exchange_requires_verified_subject() {
     .await;
     let actor = cc["access_token"].as_str().expect("actor").to_string();
     let (status, json) = exchange(
-        crate::auth_jwt::SAMPLE_JWT.to_string(),
+        user_token.clone(),
         vec![
             ("actor_token", actor.clone()),
             ("actor_token_type", TOKEN_TYPE_ACCESS_TOKEN.into()),
@@ -901,7 +920,7 @@ async fn token_exchange_requires_verified_subject() {
 
     // Forged actor, missing actor type, scope escalation.
     let (status, _) = exchange(
-        crate::auth_jwt::SAMPLE_JWT.to_string(),
+        user_token.clone(),
         vec![
             ("actor_token", forged),
             ("actor_token_type", TOKEN_TYPE_ACCESS_TOKEN.into()),
@@ -909,25 +928,17 @@ async fn token_exchange_requires_verified_subject() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let (_, json) = exchange(
-        crate::auth_jwt::SAMPLE_JWT.to_string(),
-        vec![("actor_token", actor)],
-    )
-    .await;
+    let (_, json) = exchange(user_token.clone(), vec![("actor_token", actor)]).await;
     assert!(json["error_description"]
         .as_str()
         .unwrap_or("")
         .contains("actor_token_type"));
-    let (_, json) = exchange(
-        crate::auth_jwt::SAMPLE_JWT.to_string(),
-        vec![("scope", "admin".into())],
-    )
-    .await;
+    let (_, json) = exchange(user_token.clone(), vec![("scope", "admin".into())]).await;
     assert_eq!(json["error"], "invalid_scope");
 
     // Requested ID token.
     let (status, json) = exchange(
-        crate::auth_jwt::SAMPLE_JWT.to_string(),
+        user_token.clone(),
         vec![("requested_token_type", TOKEN_TYPE_ID_TOKEN.into())],
     )
     .await;
@@ -1039,4 +1050,95 @@ async fn jwks_has_the_signing_key() {
     let json = body_json(resp).await;
     assert_eq!(json["keys"][0]["kid"], crate::jwt_state::RS256_KID);
     assert_eq!(json["keys"][0]["alg"], "RS256");
+}
+
+fn public_app() -> Router {
+    let mut c = crate::config::Config::for_tests();
+    c.public_mode = true;
+    crate::test_support::module_app_with_config(c, router)
+}
+
+async fn get_with_host(app: &Router, uri: &str, host: &str) -> Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("host", host)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response")
+}
+
+/// On a public instance the demo clients do not redirect off-site on
+/// their own: a page with the link instead.
+#[tokio::test]
+async fn a_public_demo_idp_is_not_an_open_redirect() {
+    let evil = "/oauth/authorize?client_id=rustybin&redirect_uri=https%3A%2F%2Fevil.example%2Fcb&response_type=token&state=x";
+    let resp = get_with_host(&public_app(), evil, "idp.example").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(resp.headers().get("location").is_none());
+    let page = body_string(resp).await;
+    assert!(page.contains("Continue to evil.example"), "{page}");
+    // Loopback and the instance's own host still redirect at once.
+    let local = "/oauth/authorize?client_id=rustybin&redirect_uri=http%3A%2F%2Flocalhost%3A8080%2Fcb&response_type=token";
+    let resp = get_with_host(&public_app(), local, "idp.example").await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let own = "/oauth/authorize?client_id=rustybin&redirect_uri=https%3A%2F%2Fidp.example%2Fcb&response_type=token";
+    let resp = get_with_host(&public_app(), own, "idp.example").await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    // Not public: as before.
+    let resp = get_with_host(&app(), evil, "idp.example").await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+}
+
+#[tokio::test]
+async fn token_exchange_takes_only_this_providers_tokens() {
+    let app = app();
+    let (status, body) = token(
+        &app,
+        &[
+            (
+                "grant_type",
+                "urn:ietf:params:oauth:grant-type:token-exchange",
+            ),
+            ("client_id", "rustybin"),
+            ("client_secret", "secret"),
+            ("subject_token", crate::auth_jwt::SAMPLE_JWT),
+            (
+                "subject_token_type",
+                "urn:ietf:params:oauth:token-type:access_token",
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("RS256"), "{body}");
+}
+
+#[tokio::test]
+async fn failed_sign_ins_are_limited_per_address() {
+    let state = crate::test_support::test_state();
+    let oidc = OidcState::new(
+        state.jwt.clone(),
+        OriginPolicy::from_config(&state.config),
+        false,
+    );
+    let ip = Some("203.0.113.9".parse().expect("ip"));
+    for _ in 0..FAILURES_PER_MINUTE {
+        assert!(matches!(
+            oidc.authenticate(ip, "demo", "wrong").await,
+            Ok(None)
+        ));
+    }
+    assert!(matches!(
+        oidc.authenticate(ip, "demo", "demo").await,
+        Err(CheckRefused::Limited)
+    ));
+    let other = Some("203.0.113.10".parse().expect("ip"));
+    assert!(matches!(
+        oidc.authenticate(other, "demo", "demo").await,
+        Ok(Some(_))
+    ));
 }

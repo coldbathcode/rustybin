@@ -383,8 +383,31 @@ pub fn user_by_name(username: &str) -> Option<&'static DemoUser> {
 
 /// The user with these credentials (password compared in constant time).
 pub fn authenticate_user(username: &str, password: &str) -> Option<&'static DemoUser> {
-    let user = user_by_name(username)?;
-    user.check_password(password).then_some(user)
+    match user_by_name(username) {
+        Some(user) => user.check_password(password).then_some(user),
+        None => {
+            // An unknown name costs what a known one does when hashes are
+            // in use, so the answer time does not tell the names apart.
+            if super::users::active()
+                .iter()
+                .any(|u| u.password_hash.is_some())
+            {
+                let _ = dummy_hash().verify(password);
+            }
+            None
+        }
+    }
+}
+
+/// A hash no password matches, at the default cost (unknown users).
+fn dummy_hash() -> &'static super::users::PasswordHash {
+    static DUMMY: std::sync::OnceLock<super::users::PasswordHash> = std::sync::OnceLock::new();
+    DUMMY.get_or_init(|| {
+        super::users::PasswordHash::new(
+            &uuid::Uuid::new_v4().to_string(),
+            super::users::DEFAULT_ITERATIONS,
+        )
+    })
 }
 
 #[cfg(test)]

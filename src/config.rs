@@ -848,6 +848,7 @@ impl Config {
         }
         let public_mode =
             shared_mode || parse_bool_or(&get, "RUSTYBIN_PUBLIC_MODE", false, &mut warnings);
+        limits.by_address = public_mode;
         let mocks_sample =
             parse_bool_or(&get, "RUSTYBIN_MOCKS_SAMPLE", !public_mode, &mut warnings);
         let self_service = parse_self_service(

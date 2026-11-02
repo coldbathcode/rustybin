@@ -238,6 +238,11 @@ dropped are refused when saving.
 | Creations on the instance per minute | 30 | |
 | Blocked names | none | `RUSTYBIN_MOCKS_BLOCKED_NAMES` (comma separated globs, `*paypal*,login*`) |
 
+Visits and creations are counted per client address and session: visitors behind one
+address keep their own counts, up to 20 sessions per address per day; past that the
+address's new sessions share one count, so a new session header per request starts
+nothing new.
+Spec compiles are limited to 30 a minute per visitor (see [Limits](index.md#limits)).
 Spec size, operations, rules, revisions and captured calls follow the
 [public mode limits](../configuration.md#limits-that-are-not-configurable). A full
 instance never evicts someone else's mocks.

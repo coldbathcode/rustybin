@@ -24,14 +24,23 @@ pub const SESSION_HEADER: &str = "x-rustybin-session";
 /// Maximum accepted session id length.
 pub const MAX_SESSION_LEN: usize = 128;
 
-/// The validated `X-Rustybin-Session` header value, if any.
+/// The validated `X-Rustybin-Session` header value, if any. A value of the
+/// form `ip:...` is ignored: those keys are the ones derived from a client's
+/// address, and claiming one would read that client's state (a gateway's AI
+/// exchanges, its captured requests).
 pub fn session_header(headers: &HeaderMap) -> Option<String> {
     headers
         .get(SESSION_HEADER)
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
-        .filter(|s| is_valid_session(s))
+        .filter(|s| is_valid_session(s) && !derived_session(s))
         .map(str::to_string)
+}
+
+/// A session key derived from an address (`ip:<address>`), never one a client
+/// may name itself.
+pub fn derived_session(s: &str) -> bool {
+    s.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("ip:"))
 }
 
 /// Session ids are 1..=128 chars of `[A-Za-z0-9._:-]`.
@@ -908,5 +917,17 @@ mod tests {
             .unset("proxy.client_ip_header", "test")
             .expect("unset");
         assert_eq!(c.forward_header.get(), ForwardHeader::Any);
+    }
+
+    #[test]
+    fn a_derived_session_key_cannot_be_claimed() {
+        let h = hdrs(&[("x-rustybin-session", "ip:203.0.113.7")]);
+        assert_eq!(session_header(&h), None);
+        let ip: IpAddr = "198.51.100.1".parse().expect("ip");
+        assert_eq!(session_key(&h, Some(ip)), "ip:198.51.100.1");
+        let h = hdrs(&[("x-rustybin-session", "IP:203.0.113.7")]);
+        assert_eq!(session_header(&h), None);
+        let h = hdrs(&[("x-rustybin-session", "demo-1")]);
+        assert_eq!(session_header(&h).as_deref(), Some("demo-1"));
     }
 }

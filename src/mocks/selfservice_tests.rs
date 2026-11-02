@@ -624,3 +624,37 @@ async fn shared_mode_keys_own_their_mocks() {
     let (status, _, _) = call(&app, "POST", "/_rustybin/mocks/reload", &ka, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+/// The visit and creation ledgers count per client address: a fresh session
+/// header per request does not start over.
+#[test]
+fn the_ledger_key_is_the_address_not_the_session_header() {
+    let state = crate::test_support::test_state();
+    let mut ext = axum::http::Extensions::new();
+    ext.insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+        [203, 0, 113, 50],
+        4000,
+    ))));
+    let mut a = axum::http::HeaderMap::new();
+    a.insert("x-rustybin-session", "rotating-1".parse().expect("h"));
+    let mut b = axum::http::HeaderMap::new();
+    b.insert("x-rustybin-session", "rotating-2".parse().expect("h"));
+    let ca = super::caller(&state, &a, &ext);
+    let cb = super::caller(&state, &b, &ext);
+    assert_ne!(ca.session, cb.session);
+    assert_eq!(ca.ledger, "ip:203.0.113.50/rotating-1");
+    // Past SESSIONS_PER_ADDRESS sessions an address shares one entry: a new
+    // header per request does not start a new count.
+    let clock = Arc::new(ManualClock::new(at("2026-10-18T09:00:00Z")));
+    let visits = crate::mocks::visits::Visits::new(
+        config(None).self_service.clone(),
+        clock,
+        Arc::new(crate::mocks::leads::Leads::disabled()),
+    );
+    for i in 0..(crate::mocks::visits::SESSIONS_PER_ADDRESS + 50) {
+        let _ = visits.note_creation(&format!("ip:203.0.113.50/s-{i}"));
+    }
+    let r = visits.note_creation("ip:203.0.113.50/another");
+    assert!(r.is_err(), "the shared entry is over its hourly allowance");
+    assert!(crate::mocks::service::RESERVED_NAMES.contains(&"ai"));
+}

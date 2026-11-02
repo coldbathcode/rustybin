@@ -34,6 +34,12 @@ pub struct Caller {
     pub owners: Vec<Owner>,
     /// The session key (`X-Rustybin-Session`, else the client IP).
     pub session: String,
+    /// The key of the visit and creation ledgers: the client's address and
+    /// session (`ip:<address>/<session>`). Visitors behind one address keep
+    /// their own entries, up to `visits::SESSIONS_PER_ADDRESS` a day; past
+    /// that the address shares one, so a new header per request starts
+    /// nothing new.
+    pub ledger: String,
     /// The admin guard's own answer for this request
     /// ([`crate::admin::admin_check`]): what a refused instance-global
     /// change says.
@@ -98,10 +104,15 @@ pub fn caller(state: &AppState, headers: &HeaderMap, extensions: &Extensions) ->
         }
     }
     let ip = crate::session::client_ip(headers, extensions, config);
+    let session = crate::session::session_key(headers, ip);
     Caller {
         admin,
         owners,
-        session: crate::session::session_key(headers, ip),
+        ledger: match ip {
+            Some(ip) => format!("ip:{ip}/{session}"),
+            None => session.clone(),
+        },
+        session,
         admin_guard,
     }
 }
@@ -292,7 +303,7 @@ pub fn visit_view(state: &AppState, c: &Caller) -> Result<Value, ServiceError> {
 /// once) and the visit.
 pub fn start(state: &AppState, c: &Caller, input: &EmailInput) -> Result<Value, ServiceError> {
     let visits = visits_of(state)?.clone();
-    match visits.start(&c.session, input) {
+    match visits.start(&c.ledger, input) {
         Ok((token, hash)) => {
             state.metrics.count_visit_event("started");
             tracing::info!(owner = %Owner::Visit(hash.clone()).fingerprint(), "visit started");

@@ -56,7 +56,7 @@ working tree. The marker a new session looks for is the first row that is not do
 | [05](step-05-sessions-and-sign-in.md) | Sign-in: revocations that survive, rate limits that hold | medium | | 1.5 | done 2026-11-02 |
 | [06](step-06-egress-and-git-transport.md) | Egress pinning and the git transport | high | | 1 | done 2026-11-02 |
 | [07](step-07-config-and-source-control.md) | Config as code: the repository is not trusted | high | 06 | 1.5 | done 2026-11-02 |
-| [08](step-08-public-data-plane.md) | Public instances: bins, sessions, visits, the demo IdP | high | 05 | 1.5 | |
+| [08](step-08-public-data-plane.md) | Public instances: bins, sessions, visits, the demo IdP | high | 05 | 1.5 | done 2026-11-02 |
 | [09](step-09-harness.md) | Harness: one run at a time, cluster leadership, panics | high | | 1.5 | |
 | [10](step-10-dependencies-and-release.md) | Dependencies, docs, release 0.2.2 | medium | all | 1.5 | |
 
@@ -75,8 +75,8 @@ to done with the date, and push only when the user says go.
 - **Join token means cluster control** (step 09): a holder of the join token can join as an
   eligible node today. Either document it as intended or add an operator approval for eligible
   nodes.
-- **The demo IdP on public instances** (step 08): limiting the demo clients' redirect URIs on a
-  public instance changes how gateway demos that redirect to arbitrary hosts behave.
+- **The demo IdP on public instances** (step 08): decided 2026-11-02, a page with the link
+  for redirect URIs off loopback and the instance's own host (demo clients only).
 - **Provider aliases** (step 01): decided 2026-11-02, accepted again (normalised to the
   provider's name before the choice check).
 - **Secrets from git** (step 07): decided 2026-11-02, refused (a pulled document carries
