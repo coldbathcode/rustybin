@@ -5,7 +5,11 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-Nothing is queued: candidates are under consideration below.
+**Testing workflows 2** (planned 2026-11-02, not started): a history of saved-test runs,
+saved tests on a schedule with a failure webhook, gateway scenarios for circuit breakers,
+request size limits, CORS and header transformation, checkpoints in the configuration
+repository, and a compare view for an edit refused as stale.
+`docs/plans/testing-2/master-plan.md` in the repository.
 
 ## Recently built
 
@@ -41,11 +45,6 @@ Nothing is queued: candidates are under consideration below.
 ## Under consideration
 
 From the build notes of the 0.2 and 0.3 steps and the harness plan, in no order:
-
-- **Testing workflows**: saved tests on a schedule with a report history; more gateway
-  scenarios (circuit breakers, CORS, request size limits, header transformation);
-  checkpoints kept in the git repository next to `rustybin.yaml`; a compare view in the
-  console for an edit refused as stale (today it names what changed and offers a reload).
 
 - **AI mocks**: a per-operation "Generate examples" with a persona picker in the
   operation editor (today the dialog is scoped to the operation without its own
