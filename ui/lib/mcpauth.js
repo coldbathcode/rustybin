@@ -12,6 +12,7 @@ import { send, SERVER, isControlUrl } from './http.js';
 import { webUrl } from './dom.js';
 import { utf8, toBase64, randomString, pkceChallenge } from './crypto.js';
 import { parseChallenge } from './mcpclient.js';
+import { openPopup, waitForCallback } from './oauthpopup.js';
 
 export const MODES = [
   ['none', 'No authentication'],
@@ -48,24 +49,45 @@ export function withQuery(url, query) {
  * Fetch one document: directly, or through the instance. Resolves
  * {status, json, text, headers: {name: value}, via}.
  */
+/** True for a host name of this computer (`localhost`, `127.x.y.z`, `[::1]`, `*.localhost`). */
+function isLoopbackHost(host) {
+  const h = String(host || '').toLowerCase();
+  return h === 'localhost' || h.endsWith('.localhost') || h === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(h);
+}
+
+/** This instance's OAuth sign-in endpoints: the only control paths a discovery document may name. */
+const OWN_OAUTH = ['/_rustybin/oauth/register', '/_rustybin/oauth/authorize', '/_rustybin/oauth/token'];
+
 /**
  * Why a URL from a discovery document may not be fetched, or null. These
- * URLs come from the server being inspected: only absolute `https:` (or
- * `http:` on a loopback host or this instance's own origin), and never this
- * instance's control plane (its OAuth sign-in endpoints aside).
+ * URLs come from the server being inspected (`resource`, the URL the user
+ * chose): only absolute `https:` (or `http:` on a loopback host or this
+ * instance's own origin); a loopback host only when the inspected server is
+ * itself on loopback (a remote server's documents may not point the browser
+ * at this computer); and never this instance's control plane, its OAuth
+ * sign-in endpoints aside (exact paths).
  */
-export function untrustedUrlProblem(url) {
+export function untrustedUrlProblem(url, resource) {
   let u;
   try { u = new URL(String(url)); } catch { return 'not an absolute URL: ' + String(url).slice(0, 80); }
-  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
-  const ours = u.origin === new URL(SERVER).origin;
+  const base = new URL(SERVER + '/');
+  const ours = u.origin === base.origin;
+  const loopback = isLoopbackHost(u.hostname);
   if (u.protocol !== 'https:' && !(u.protocol === 'http:' && (loopback || ours))) return 'only https URLs are followed (' + u.protocol + ' refused)';
-  if (isControlUrl(u.toString()) && !u.pathname.includes('/_rustybin/oauth/')) return 'the document points at this instance\'s control plane: refused';
+  if (loopback && !ours) {
+    let local = false;
+    try { local = isLoopbackHost(new URL(String(resource || '')).hostname); } catch { local = false; }
+    if (!local) return 'a remote server\'s document points at this computer (' + u.host + '): refused';
+  }
+  if (isControlUrl(u.toString())) {
+    const root = base.pathname.replace(/\/$/, '');
+    if (!ours || !OWN_OAUTH.some((p) => u.pathname === root + p)) return 'the document points at this instance\'s control plane: refused';
+  }
   return null;
 }
 
 export async function fetchDoc(url, opts = {}) {
-  const problem = untrustedUrlProblem(url);
+  const problem = untrustedUrlProblem(url, opts.resource);
   if (problem) return { status: 0, json: null, text: '', headers: {}, via: 'browser', error: problem };
   const abs = url;
   const sameOrigin = (() => { try { return new URL(abs).origin === location.origin; } catch { return false; } })();
@@ -96,13 +118,15 @@ export async function fetchDoc(url, opts = {}) {
  */
 export async function oauthWalk(ctx) {
   const step = ctx.step;
-  const fetchOpts = { mode: ctx.mode, relayFallback: true };
   // 1. The challenge.
   const ch = parseChallenge(ctx.challenge || '');
   const s1 = step(1, 'The 401 challenge', 'WWW-Authenticate: ' + (ctx.challenge || '(missing: a gateway may not expose it through CORS)'));
   s1.done({ challenge: ch });
   // 2. Protected resource metadata (RFC 9728).
   const resUrl = new URL(/^https?:\/\//i.test(ctx.resource) ? ctx.resource : SERVER + ctx.resource);
+  // The server the user chose decides whether loopback documents are followed
+  // (the documents' own `resource` is the server's to say).
+  const fetchOpts = { mode: ctx.mode, relayFallback: true, resource: resUrl.toString() };
   const prmUrl = ch.resource_metadata || (resUrl.origin + '/.well-known/oauth-protected-resource' + resUrl.pathname);
   const s2 = step(2, 'Protected resource metadata (RFC 9728)', 'GET ' + prmUrl);
   const prm = await fetchDoc(prmUrl, fetchOpts);
@@ -158,23 +182,19 @@ export async function oauthWalk(ctx) {
     const state = randomString(12);
     const q = new URLSearchParams({ response_type: 'code', client_id: clientId, redirect_uri: redirect, scope, state, resource, code_challenge: pkceChallenge(verifier), code_challenge_method: 'S256' });
     const url = asm.authorization_endpoint + (asm.authorization_endpoint.includes('?') ? '&' : '?') + q.toString();
-    const authProblem = untrustedUrlProblem(asm.authorization_endpoint);
+    const authProblem = untrustedUrlProblem(asm.authorization_endpoint, resUrl.toString());
     if (authProblem) { s5.fail(authProblem); throw new Error(authProblem); }
-    const code = await new Promise((resolve, reject) => {
-      const popup = webUrl(url) ? window.open(url, 'rustybin-mcp-oauth', 'width=520,height=700') : null;
-      if (!popup) { reject(new Error('the popup was blocked: allow popups for this console')); return; }
-      const onMsg = (ev) => {
-        if (ev.origin !== location.origin || !ev.data || ev.data.type !== 'rustybin-oauth-callback') return;
-        window.removeEventListener('message', onMsg);
-        clearInterval(timer);
-        const p = new URLSearchParams(ev.data.search || '');
-        if (p.get('state') !== state) { reject(new Error('the state does not match')); return; }
-        if (p.get('error')) { reject(new Error(p.get('error') + (p.get('error_description') ? ': ' + p.get('error_description') : ''))); return; }
-        resolve(p.get('code'));
-      };
-      window.addEventListener('message', onMsg);
-      const timer = setInterval(() => { if (popup.closed) { clearInterval(timer); window.removeEventListener('message', onMsg); reject(new Error('the popup was closed before signing in')); } }, 500);
-    }).catch((e) => { s5.fail(e.message); throw e; });
+    // The authorization page is a third party's: the popup has no opener
+    // (no reverse tabnabbing), and the code comes back from /ui/callback
+    // over a BroadcastChannel, taken only with this flow's state.
+    const code = await (async () => {
+      const popup = webUrl(url) ? openPopup(url, 'width=520,height=700') : null;
+      if (!popup) throw new Error('the popup was blocked: allow popups for this console');
+      const p = await waitForCallback(state, popup);
+      if (p.get('error')) throw new Error(p.get('error') + (p.get('error_description') ? ': ' + p.get('error_description') : ''));
+      if (!p.get('code')) throw new Error('the callback carried no code');
+      return p.get('code');
+    })().catch((e) => { s5.fail(e.message); throw e; });
     s5.done({ code: code ? code.slice(0, 6) + '...' : null, state });
     tokenBody = new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: redirect, client_id: clientId, code_verifier: verifier, resource });
   }
@@ -183,7 +203,7 @@ export async function oauthWalk(ctx) {
   const tok = await fetchDoc(asm.token_endpoint, Object.assign({}, fetchOpts, { method: 'POST', headers: [['Content-Type', 'application/x-www-form-urlencoded']], body: tokenBody.toString() }));
   if (!tok.json || !tok.json.access_token) { s6.fail((tok.json && (tok.json.error_description || tok.json.error)) || tok.error || ('answered ' + tok.status)); throw new Error('no token'); }
   s6.done({ token_type: tok.json.token_type, expires_in: tok.json.expires_in, scope: tok.json.scope, refresh_token: tok.json.refresh_token ? '(kept)' : undefined }, tok.via);
-  return { token: tok.json.access_token, refresh: tok.json.refresh_token || null, expiresIn: tok.json.expires_in, tokenEndpoint: asm.token_endpoint, clientId, clientSecret, issuer, scope, resource, mode: ctx.mode };
+  return { token: tok.json.access_token, refresh: tok.json.refresh_token || null, expiresIn: tok.json.expires_in, tokenEndpoint: asm.token_endpoint, clientId, clientSecret, issuer, scope, resource, target: resUrl.toString(), mode: ctx.mode };
 }
 
 /** Refresh an OAuth token; resolves the new token response. */
@@ -191,7 +211,7 @@ export async function refreshToken(o) {
   const body = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: o.refresh, client_id: o.clientId });
   if (o.clientSecret) body.set('client_secret', o.clientSecret);
   if (o.resource) body.set('resource', o.resource);
-  const r = await fetchDoc(o.tokenEndpoint, { mode: o.mode, relayFallback: true, method: 'POST', headers: [['Content-Type', 'application/x-www-form-urlencoded']], body: body.toString() });
+  const r = await fetchDoc(o.tokenEndpoint, { mode: o.mode, relayFallback: true, resource: o.target, method: 'POST', headers: [['Content-Type', 'application/x-www-form-urlencoded']], body: body.toString() });
   if (!r.json || !r.json.access_token) throw new Error((r.json && (r.json.error_description || r.json.error)) || r.error || ('answered ' + r.status));
   return r.json;
 }

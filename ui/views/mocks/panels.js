@@ -235,13 +235,14 @@ export function securityPanel(ctx) {
   }
 
   async function setEnabled(on, sw) {
-    const d = ctx.detail();
+    // What the panel shows (a header refresh does not re-render it).
+    const d = last || ctx.detail();
     let deploy = true;
     if (d.has_draft_changes) {
       deploy = confirm(`The draft has other changes that are not live yet. Deploy them together with security ${on ? 'on' : 'off'}?\n\nOK deploys everything, Cancel only changes the draft.`);
     }
     const sec = Object.assign({}, d.settings.security, { enabled: on });
-    const r = await api('PATCH', '/' + enc(ctx.name), { security: sec, deploy });
+    const r = await api('PATCH', '/' + enc(ctx.name), { security: sec, deploy }, { revision: d.draft_revision });
     if (r.ok) toast(deploy ? `Security ${on ? 'on' : 'off'}` : `Security ${on ? 'on' : 'off'} in the draft: deploy to publish it`);
     else if (r.status === 422) toast('Saved to the draft, but the deploy checks failed: see the Deploy report tab.', 'err');
     else { toast(errorText(r, 'Changing security'), 'err'); sw.set(!on); return; }
@@ -308,7 +309,7 @@ export function securityPanel(ctx) {
       if (issIn.value.trim()) next.jwt.issuer = issIn.value.trim();
       if (audIn.value.trim()) next.jwt.audience = audIn.value.trim();
       saveBtn.disabled = true;
-      const r = await api('PATCH', '/' + enc(ctx.name), { security: next });
+      const r = await api('PATCH', '/' + enc(ctx.name), { security: next }, { revision: d.draft_revision });
       saveBtn.disabled = false;
       if (report(r, 'Saved to the draft. Deploy to publish it.', 'Saving')) { dirty = false; ctx.refresh(); }
     });
@@ -329,7 +330,7 @@ export function securityPanel(ctx) {
       const pubSw = toggleSwitch('Public: ' + op.method + ' ' + op.path, !!own.public, async (v) => {
         const next = Object.assign({}, own, { public: v });
         if (!v) delete next.public;
-        const r = await api('PUT', `/${enc(ctx.name)}/operations/${enc(op.id)}`, Object.keys(next).length ? next : null);
+        const r = await api('PUT', `/${enc(ctx.name)}/operations/${enc(op.id)}`, Object.keys(next).length ? next : null, { revision: d.draft_revision });
         if (report(r, v ? `${op.method} ${op.path} is public in the draft` : `${op.method} ${op.path} is secured in the draft`, 'Saving')) ctx.refresh();
         else pubSw.set(!v);
       }, { disabled: ro || !relevant });
@@ -591,6 +592,7 @@ export function mcpPanel(ctx) {
   function render() {
     dirty = false;
     const d = ctx.detail();
+    const rev = d.draft_revision;
     const m = d.mcp || { tools: [], skipped: [] };
     const cfg = (d.settings && d.settings.mcp) || { enabled: true, exclude: [] };
     const excluded = new Set(cfg.exclude || []);
@@ -650,7 +652,7 @@ export function mcpPanel(ctx) {
     saveBtn.addEventListener('click', async () => {
       const exclude = boxes.filter(([, box, skipped]) => !skipped && !box.checked).map(([id]) => id);
       saveBtn.disabled = true;
-      const r = await api('PATCH', '/' + enc(ctx.name), { mcp: { enabled: enabledBox.checked, exclude } });
+      const r = await api('PATCH', '/' + enc(ctx.name), { mcp: { enabled: enabledBox.checked, exclude } }, { revision: rev });
       saveBtn.disabled = false;
       if (report(r, 'Saved to the draft. Deploy to publish it.', 'Saving')) { dirty = false; ctx.refresh(); }
     });

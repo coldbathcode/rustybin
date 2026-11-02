@@ -485,6 +485,93 @@ def run_theme(browser, theme):
 
     step("mock MCP server tab (connect snippets, traffic badge, exclude)", mock_mcp)
 
+    def stale_edits():
+        # Each editor sends the draft revision it loaded: a change made in the
+        # background (another tab, the API) gets a 409 and the reload prompt,
+        # not a silent overwrite; the header's poll does not refresh a stale form.
+        name = f"stale-{theme}"
+
+        def api_json(method, path, body=None):
+            req = urllib.request.Request(BASE + "/_rustybin/mocks" + path, method=method, data=json.dumps(body).encode() if body is not None else None, headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    return r.status, json.load(r)
+            except urllib.error.HTTPError as e:
+                return e.code, {}
+
+        def responses(seed, delay):
+            return {"mode": "examples", "seed": seed, "delay_ms": delay, "validate_requests": "off", "disabled_status": 503}
+
+        api_json("DELETE", "/" + name)
+        status, _ = api_json("POST", "", {"name": name, "spec": SMALL_SPEC, "deploy": True})
+        assert status in (200, 201), status
+        # A first draft change, so the page offers Deploy.
+        status, _ = api_json("PATCH", "/" + name, {"responses": responses(1, 3)})
+        assert status == 200, status
+        page.evaluate(f"location.hash = '#/mocks/{name}/settings'")
+        page.get_by_label("Seed").wait_for()
+        # Freeze the header poll (it skips hidden tabs): the page keeps what it showed.
+        page.evaluate("Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })")
+        try:
+            _, before = api_json("GET", "/" + name)
+            status, _ = api_json("PATCH", "/" + name, {"responses": responses(42, 7)})
+            assert status == 200, status
+            prompts = []
+            page.once("dialog", lambda d: (prompts.append(d.message), d.dismiss()))
+            page.get_by_label("Seed").fill("5")
+            page.get_by_role("button", name="Save to draft").click()
+            deadline = time.time() + 10
+            while not prompts and time.time() < deadline:
+                page.wait_for_timeout(100)
+            assert prompts and "changed since you loaded it" in prompts[0], prompts
+            _, now = api_json("GET", "/" + name)
+            assert now["settings"]["responses"]["seed"] == 42 and now["settings"]["responses"]["delay_ms"] == 7, "the stale form overwrote the background change"
+            # Deploy names the draft the page showed: a newer one is asked about.
+            prompts.clear()
+            page.once("dialog", lambda d: (prompts.append(d.message), d.dismiss()))
+            page.locator(".mock-actions").get_by_role("button", name=re.compile("^Deploy")).click()
+            deadline = time.time() + 10
+            while not prompts and time.time() < deadline:
+                page.wait_for_timeout(100)
+            assert prompts and "changed since this page showed it" in prompts[0], prompts
+            page.wait_for_timeout(300)
+            _, after = api_json("GET", "/" + name)
+            assert after["live_revision"] == before["live_revision"], "deployed a draft the page never showed"
+        finally:
+            page.evaluate("delete document.hidden")
+            api_json("DELETE", "/" + name)
+
+    step("mocks: stale edits answer 409 with the reload prompt, deploy names the shown draft", stale_edits)
+
+    def console_guards():
+        # A malformed escape in the hash still routes (the portal's is in the dev portal step).
+        page.evaluate("location.hash = '#/mcp/server/%E0%A4%A'")
+        page.wait_for_function("document.title.startsWith('MCP inspector')")
+        got = page.evaluate("""async () => {
+            const a = await import('/ui/views/authorize.js');
+            const m = await import('/ui/lib/mcpauth.js');
+            const h = await import('/ui/lib/http.js');
+            const S = h.SERVER;
+            return {
+                redirects: ['https://agent.example.com/cb', 'http://127.0.0.1:3000/cb', 'cursor://anysphere/cb', 'com.example.app:/cb',
+                            'javascript:alert(1)', 'data:text/html,x', 'blob:https://x/y', 'not a url'].map((u) => a.redirectProblem(u) === ''),
+                docs: [
+                    m.untrustedUrlProblem(S + '/_rustybin/oauth/token', S + '/mcp') === null,
+                    m.untrustedUrlProblem(S + '/_rustybin/mocks/x/_rustybin/oauth/token', S + '/mcp') === null,
+                    m.untrustedUrlProblem(S + '/_rustybin/oauth/requests/abc', S + '/mcp') === null,
+                    m.untrustedUrlProblem('https://as.example.com/token', 'https://mcp.example.com/mcp') === null,
+                    m.untrustedUrlProblem('http://127.0.0.1:9/token', 'https://mcp.example.com/mcp') === null,
+                    m.untrustedUrlProblem('https://localhost:9/token', 'https://mcp.example.com/mcp') === null,
+                    m.untrustedUrlProblem('http://localhost:9/token', 'http://localhost:3000/mcp') === null,
+                    m.untrustedUrlProblem('http://as.example.com/token', 'https://mcp.example.com/mcp') === null,
+                ],
+            };
+        }""")
+        assert got["redirects"] == [True, True, True, True, False, False, False, False], got["redirects"]
+        assert got["docs"] == [True, False, False, True, False, False, True, False], got["docs"]
+
+    step("console guards: malformed hash escapes, consent redirects, discovery URLs", console_guards)
+
     def agent_panel():
         # Open control plane and no admin token held: the command has no header.
         goto_view(page, "mocks")
@@ -717,6 +804,8 @@ def run_theme(browser, theme):
         with page.expect_popup() as popup_info:
             page.get_by_role("button", name="Sign in").click()
         popup = popup_info.value
+        popup.locator("input[name=username]").wait_for()
+        assert popup.evaluate("window.opener === null"), "the OAuth popup can reach the console (window.opener)"
         popup.locator("input[name=username]").fill("alice")
         popup.locator("input[name=password]").fill("alice")
         popup.get_by_role("button", name="Authorize").click()
@@ -880,6 +969,16 @@ def run_theme(browser, theme):
         while http("GET", "/health") != 503 and time.time() < deadline:
             time.sleep(0.1)
         assert http("GET", "/health") == 503, "the applied document did not switch the health toggle"
+        # Prune ticked after a dry run: the preview no longer says what Apply
+        # would do, so Apply waits for a new dry run.
+        page.fill("#config-document", "version: 2\nhealth: {initial: healthy}\n")
+        page.locator("#config-dry-run").click()
+        page.wait_for_selector("#config-apply:enabled")
+        page.locator("#config-prune").check()
+        page.wait_for_selector("#config-apply:disabled")
+        expect(page.locator("#config-result")).to_contain_text("Prune changed")
+        page.locator("#config-prune").uncheck()
+        expect(page.locator("#config-apply")).to_be_disabled()
         page.fill("#config-document", "version: 2\nhealth: {initial: healthy}\n")
         page.locator("#config-dry-run").click()
         page.wait_for_selector("#config-apply:enabled")
@@ -1028,6 +1127,9 @@ def run_theme(browser, theme):
             assert p2.locator("table.table tbody tr").count() > 3
             shot(p2, theme, "17-portal-mcp")
             assert_icons_sized(p2, "the portal MCP page")
+            # A malformed escape in the hash still routes (shown as it is).
+            p2.goto(BASE + "/portal/#/k/bad%E0%A4%A")
+            p2.wait_for_selector("#view .crumbs >> text=bad%E0%A4%A")
         finally:
             ctx2.close()
         with urllib.request.urlopen(BASE + "/_rustybin/portal/insights", timeout=10) as r:
@@ -1164,14 +1266,14 @@ def run_theme(browser, theme):
     ctx.close()
 
 
-def control_jwt(scope="console", ttl=600):
+def control_jwt(scope="console", ttl=600, sub="e2e-user"):
     import jwt  # PyJWT (with cryptography for EdDSA)
 
     with open(os.environ["CONTROL_JWT_PRIVATE_KEY"], "rb") as f:
         key = f.read()
     claims = {
         "aud": os.environ.get("CONTROL_JWT_AUDIENCE", "ui-conformance"),
-        "sub": "e2e-user",
+        "sub": sub,
         "exp": int(time.time()) + ttl,
         "scope": scope,
     }
@@ -1410,6 +1512,38 @@ def run_jwt(browser):
         expect(page.locator(".mcp-right pre.code").first).to_contain_text("claude mcp add")
         assert token not in page.locator(".mcp-right").inner_text(), "control token shown in the export"
         shot(page, "jwt", "24-inspector-manage")
+        # The token is added at send time: the form never holds it.
+        expect(page.locator("#mcp-token")).to_have_value("")
+        state_js = "(async () => (await import('/ui/lib/settings.js')).recall('mcp.v2', null))()"
+        assert token not in json.dumps(page.evaluate(state_js)["auth"]), "the control token sits in the inspector's auth state"
+        # A registry link to another server ("Open in inspector", bearer)
+        # starts from an empty form: nothing reaches that server.
+        sent = []
+
+        def watch(req):
+            if req.method == "POST" and urllib.parse.urlparse(req.url).path == "/_rustybin/mcp-relay":
+                sent.append(req.post_data or "")
+
+        page.on("request", watch)
+        try:
+            page.evaluate("location.hash = '#/mcp/url/bearer/-/modern/' + encodeURIComponent('https://mcp.example.com/mcp')")
+            expect(page.locator("#mcp-url")).to_have_value("https://mcp.example.com/mcp")
+            expect(page.locator("#mcp-auth-kind")).to_have_value("bearer")
+            expect(page.locator("#mcp-token")).to_have_value("")
+            # Nothing of the management session stays (the timeline's headers included).
+            assert token not in json.dumps(page.evaluate(state_js)), "the control token stays in the inspector's state"
+            page.locator("#mcp-connect").click()
+            page.wait_for_selector("text=Connection failed")
+        finally:
+            page.remove_listener("request", watch)
+        assert sent, "no relay call seen"
+        assert not any(token in body for body in sent), "the control token went to another server through the relay"
+        # Back on the management server, the console token is used again.
+        page.evaluate("location.hash = '#/mcp/server/' + encodeURIComponent('/_rustybin/mcp')")
+        expect(page.locator("#mcp-server")).to_have_value("/_rustybin/mcp")
+        expect(page.locator("#mcp-token")).to_have_value("")
+        page.locator("#mcp-connect").click()
+        page.locator("#mcp-status .badge.ok", has_text="connected").wait_for()
 
     step("jwt: inspector connects to the management server with the console token", inspector_management_server)
 
@@ -1502,6 +1636,48 @@ def run_jwt(browser):
 
     step("jwt: a hostile MCP server never receives the control token", hostile_mcp_server)
 
+    def leave_traces():
+        # What a signed-in user leaves in the tab: captured traffic, an admin
+        # token, credentials typed into the MCP inspector, the assistant's
+        # history, the last export.
+        tag = "signout-" + str(time.time_ns())
+        urllib.request.urlopen(jwt_base + "/echo/" + tag, timeout=10).read()
+        page.wait_for_function("window.rustybinConsole.traffic.all().length > 0")
+        goto_view(page, "mcp")
+        page.locator(".seg button", has_text="Another server").click()
+        page.fill("#mcp-url", "https://mcp.example.com/mcp")
+        page.select_option("#mcp-auth-kind", "bearer")
+        page.fill("#mcp-token", "typed-secret")
+        page.evaluate("""async () => {
+            const s = await import('/ui/lib/settings.js');
+            s.set('adminToken', 'ui-admin-token');
+            sessionStorage.setItem('rustybin.config.lastExport', 'version: 2');
+            sessionStorage.setItem('rustybin.console.assist.history', JSON.stringify([{ id: 'x', question: 'q', text: 'a' }]));
+        }""")
+        page.evaluate("location.hash = '#/overview'")
+        page.wait_for_selector("text=Requests captured")
+
+    def assert_forgotten(when):
+        left = page.evaluate("""async () => {
+            const s = await import('/ui/lib/settings.js');
+            const m = s.recall('mcp.v2', null);
+            const hist = JSON.parse(sessionStorage.getItem('rustybin.console.assist.history') || '[]');
+            return {
+                admin: s.get('adminToken'),
+                inspector: m ? JSON.stringify(m.auth) : '',
+                export: sessionStorage.getItem('rustybin.config.lastExport'),
+                history: hist.length,
+                traffic: window.rustybinConsole.traffic.all().length,
+            };
+        }""")
+        assert left["admin"] == "", f"{when}: the admin token stays: {left}"
+        assert "typed-secret" not in left["inspector"], f"{when}: the inspector's credentials stay: {left}"
+        assert left["export"] is None, f"{when}: the last export stays: {left}"
+        assert left["history"] == 0, f"{when}: the assistant's history stays: {left}"
+        # (After another user's sign-in the feed backfills what that user may read.)
+        if when == "sign out":
+            assert left["traffic"] == 0, f"{when}: captured traffic stays: {left}"
+
     def expiry_and_sign_out():
         page.goto(jwt_base + "/ui/#/overview&token=" + control_jwt("console", ttl=3))
         page.wait_for_selector("text=Requests captured")
@@ -1510,12 +1686,26 @@ def run_jwt(browser):
         shot(page, "jwt", "22-expired")
         page.goto(jwt_base + "/ui/#/overview&token=" + control_jwt("console"))
         page.wait_for_selector("text=Requests captured")
+        leave_traces()
         page.get_by_role("button", name="Console settings", exact=True).click()
         page.locator("#sign-out").click()
         page.wait_for_selector("#signin")
         expect(page.locator("#signin")).to_contain_text("You signed out")
         stored = page.evaluate("sessionStorage.getItem('rustybin.console.controlToken')")
         assert not stored, "token kept after sign out"
+        assert_forgotten("sign out")
+        # Another user signing in (here over a #token= link) does not see the
+        # previous one's data either.
+        page.goto(jwt_base + "/ui/#/overview&token=" + control_jwt("console"))
+        page.wait_for_selector("text=Requests captured")
+        leave_traces()
+        page.goto(jwt_base + "/ui/#/overview&token=" + control_jwt("console", sub="e2e-other"))
+        page.wait_for_selector("text=Requests captured")
+        assert_forgotten("another user")
+        # The inspector's form starts empty for them.
+        goto_view(page, "mcp")
+        page.locator(".seg button", has_text="Another server").click()
+        expect(page.locator("#mcp-url")).to_have_value("")
 
     step("jwt: expiry and sign out", expiry_and_sign_out)
     ctx.close()

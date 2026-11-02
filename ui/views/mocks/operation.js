@@ -412,7 +412,8 @@ export function operationEditor(opts) {
   async function save(settings) {
     replace(saveMsg);
     saveBtn.disabled = true;
-    const r = await api('PUT', `/${encodeURIComponent(opts.name)}/operations/${encodeURIComponent(opts.opId)}`, settings);
+    // The revision the form was loaded from (init keeps it in `data`).
+    const r = await api('PUT', `/${encodeURIComponent(opts.name)}/operations/${encodeURIComponent(opts.opId)}`, settings, { revision: data && data.draft_revision });
     if (!alive) return;
     if (!r.ok || !r.json) {
       saveBtn.disabled = false;

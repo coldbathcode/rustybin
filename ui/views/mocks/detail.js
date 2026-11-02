@@ -245,7 +245,19 @@ export function mountDetail(root, name, sub) {
   // ── Actions ──
   async function deploy(force) {
     deployBtn.disabled = true;
-    const r = await api('POST', `/${enc(name)}/deploy${force ? '?force=true' : ''}`, undefined, { timeout: 60000 });
+    // Deploy publishes the draft the header shows. The server's deploy takes
+    // no revision yet, so the page reads the mock first: a draft changed
+    // since (by someone else, or another tab) is named before it goes live.
+    const shown = detail && detail.draft_revision;
+    const now = await api('GET', '/' + enc(name));
+    if (!alive) return;
+    if (now.ok && now.json && typeof shown === 'number' && now.json.draft_revision !== shown) {
+      const changes = (now.json.draft_changes || []).join(', ');
+      const go = window.confirm(`${name} changed since this page showed it (draft revision ${shown}, now ${now.json.draft_revision})${changes ? ': ' + changes : ''}.\n\nDeploy the current draft anyway? Cancel shows it first.`);
+      if (!go) { deployBtn.disabled = false; await refresh(); return; }
+    }
+    const rev = now.ok && now.json ? now.json.draft_revision : shown;
+    const r = await api('POST', `/${enc(name)}/deploy${force ? '?force=true' : ''}`, undefined, { timeout: 60000, revision: rev });
     if (!alive) return;
     if (r.ok && r.json) {
       replace(deployFailEl);
@@ -488,6 +500,8 @@ export function mountDetail(root, name, sub) {
     let dirty = false;
     function render() {
       dirty = false;
+      // The draft revision this form shows: every save names it (If-Match).
+      const rev = detail.draft_revision;
       const s = detail.settings;
       const r = s.responses;
       const visitorMock = detail.owner === 'visit' || detail.owner === 'key';
@@ -516,7 +530,7 @@ export function mountDetail(root, name, sub) {
       saveBtn.addEventListener('click', async () => {
         const responses = { mode: mode.value, seed: Number(seed.value) || 0, delay_ms: Number(delay.value) || 0, validate_requests: validate.value, disabled_status: Number(disabled.value) };
         saveBtn.disabled = true;
-        const rr = await api('PATCH', '/' + enc(name), { responses, strip_server_prefix: strip.checked });
+        const rr = await api('PATCH', '/' + enc(name), { responses, strip_server_prefix: strip.checked }, { revision: rev });
         saveBtn.disabled = false;
         if (report(rr, 'Saved to the draft. Deploy to publish it.', 'Saving')) { dirty = false; refresh(); }
       });
@@ -528,7 +542,7 @@ export function mountDetail(root, name, sub) {
         const n = nameIn.value.trim();
         const why = n === name ? 'That is the current name.' : nameProblem(n);
         if (why) { nameMsg.textContent = why; nameMsg.classList.add('err-text'); return; }
-        const rr = await api('PATCH', '/' + enc(name), { name: n });
+        const rr = await api('PATCH', '/' + enc(name), { name: n }, { revision: rev });
         if (report(rr, `Renamed to ${n}`, 'Renaming')) location.hash = '#/mocks/' + enc(n) + '/settings';
         else { nameMsg.textContent = errorText(rr); nameMsg.classList.add('err-text'); }
       });
@@ -544,7 +558,7 @@ export function mountDetail(root, name, sub) {
         if (!specIn.value.trim()) { replace(specMsg, notice('warn', 'Paste or drop the new spec first.')); return; }
         replaceBtn.disabled = true;
         replace(specMsg, spinner('Checking the spec'));
-        const rr = await api('PATCH', '/' + enc(name), { spec: specIn.value }, { timeout: 60000 });
+        const rr = await api('PATCH', '/' + enc(name), { spec: specIn.value }, { timeout: 60000, revision: rev });
         replaceBtn.disabled = false;
         if (rr.ok && rr.json) {
           specIn.value = '';

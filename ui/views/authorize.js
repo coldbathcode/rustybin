@@ -22,6 +22,25 @@ function destination(uri) {
   }
 }
 
+/** Schemes that run or show content in this page instead of handing off to an app. */
+const UNSAFE_SCHEMES = ['javascript:', 'data:', 'vbscript:', 'blob:', 'file:', 'about:', 'filesystem:'];
+
+/**
+ * Why the browser must not follow a consent answer's `redirect_to`, or ''.
+ * Allowed: absolute http(s) URLs and custom app schemes (`cursor:`,
+ * `vscode:`, `com.example.app:`); never a scheme that runs script or
+ * shows content here.
+ */
+export function redirectProblem(uri) {
+  let u;
+  try { u = new URL(String(uri || '')); } catch { return 'not an absolute URL'; }
+  const scheme = u.protocol.toLowerCase();
+  if (scheme === 'http:' || scheme === 'https:') return '';
+  if (UNSAFE_SCHEMES.includes(scheme)) return scheme + ' is not allowed';
+  if (!/^[a-z][a-z0-9+.-]*:$/.test(scheme)) return 'not a valid scheme';
+  return '';
+}
+
 export default {
   id: 'authorize',
   mount(root, { rest }) {
@@ -107,6 +126,14 @@ export default {
           deny.disabled = false;
           if (r.status === 404 || r.status === 401) return explain(r);
           replace(err, notice('err', r.json && r.json.error ? String(r.json.error) : r.error || ('HTTP ' + r.status)));
+          return;
+        }
+        // The server checks the redirect URI at registration; the page
+        // checks again: http(s), or an app's custom scheme that cannot run
+        // script in this page.
+        const problem = redirectProblem(r.json.redirect_to);
+        if (problem) {
+          replace(body, notice('err', 'The agent\'s redirect address was refused (' + problem + '). Your answer was recorded; return to the agent.'));
           return;
         }
         const done = decision === 'approve'

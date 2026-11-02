@@ -599,7 +599,9 @@ async function route() {
   const token = ++routing;
   const hash = location.hash.replace(/^#\/?/, '');
   const [section, ...rest] = hash.split('/');
-  const arg = decodeURIComponent(rest.join('/'));
+  // A malformed escape (a stray %) routes with the text as it is.
+  let arg = rest.join('/');
+  try { arg = decodeURIComponent(arg); } catch { /* keep it raw */ }
   if (!catalog) {
     replace(viewEl, spinner('Loading the portal'));
     let res;

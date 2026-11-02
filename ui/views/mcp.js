@@ -18,12 +18,36 @@ import * as assist from '../lib/assist.js';
 
 const SOURCES = [['instance', 'This instance'], ['saved', 'Saved'], ['url', 'Another server']];
 
+// The auth form's state. It only ever holds what the user typed (or an
+// OAuth walk fetched): the console's own control token never goes in here,
+// it is added at send time for this instance's management server only.
+function defaultAuth() {
+  return { kind: 'none', token: '', name: 'X-API-Key', location: 'header', key: '', username: '', password: '', headers: [['', '']], grant: 'authorization_code', clientId: '', clientSecret: '', scope: '' };
+}
+
 function defaultState() {
   return {
     source: 'instance', server: '/mcp', url: '', saved: '', version: MODERN, mode: 'browser',
-    auth: { kind: 'none', token: '', name: 'X-API-Key', location: 'header', key: '', username: '', password: '', headers: [['', '']], grant: 'authorization_code', clientId: '', clientSecret: '', scope: '' },
+    auth: defaultAuth(),
     log: [],
   };
+}
+
+/** The origin of a target (a path is this instance), or '' when it is not a URL. */
+function originOf(target) {
+  try { return new URL(/^https?:\/\//i.test(target) ? target : SERVER + target).origin; } catch { return ''; }
+}
+
+/** True when `target` is this instance's management MCP server (`/_rustybin/mcp`), and nothing else. */
+export function isOwnManageUrl(target) {
+  if (!target) return false;
+  try {
+    const u = new URL(/^https?:\/\//i.test(target) ? target : SERVER + target);
+    const base = new URL(SERVER + '/');
+    return u.origin === base.origin && u.pathname === base.pathname.replace(/\/$/, '') + '/_rustybin/mcp';
+  } catch {
+    return false;
+  }
 }
 
 export default {
@@ -59,10 +83,36 @@ export default {
         card('Export this session', { hint: 'Hurl, curl, Python MCP SDK, claude mcp add' }, exportEl))));
 
     // ── The connection column ──
-    const sourceSeg = segmented(SOURCES, st.source, (v) => { st.source = v; renderLeft(); }, 'Server source');
+    // Credentials belong to the server they were typed for: another source,
+    // server or URL starts from an empty form, and a new timeline (its
+    // entries keep the headers they were sent with, which the Hurl and curl
+    // exports replay against the current URL).
+    function resetAuth() {
+      st.auth = defaultAuth();
+      oauthState = null;
+      if (st.log.length) { st.log = []; renderLog(); }
+    }
+    const sourceSeg = segmented(SOURCES, st.source, (v) => {
+      if (v === st.source) return;
+      resetAuth();
+      st.source = v;
+      if (v === 'instance') applyServerDefaults(serverInfo());
+      renderLeft();
+    }, 'Server source');
     const serverSel = h('select', { class: 'select', 'aria-label': 'Server of this instance', id: 'mcp-server' });
     const urlIn = input({ value: st.url, placeholder: 'https://mcp.example.com/mcp', 'aria-label': 'Server URL', id: 'mcp-url', class: 'input mono' });
     urlIn.addEventListener('input', () => { st.url = urlIn.value.trim(); });
+    // A URL on another origin than the one the credentials were typed for clears them.
+    let committedUrl = st.url;
+    urlIn.addEventListener('change', () => {
+      const before = originOf(committedUrl);
+      committedUrl = st.url;
+      if (before && originOf(st.url) !== before && hasCredentials()) {
+        resetAuth();
+        renderAuth();
+        toast('Another server: the credentials were cleared');
+      }
+    });
     const savedSel = h('select', { class: 'select', 'aria-label': 'Saved connection', id: 'mcp-saved' });
     const versionSel = select(VERSIONS.map(([v, label]) => [v, label]), st.version, { 'aria-label': 'Protocol version', id: 'mcp-version' });
     versionSel.addEventListener('change', () => { st.version = versionSel.value; });
@@ -87,7 +137,6 @@ export default {
       st.auth.kind = a.kind === 'spec' ? 'bearer' : a.kind || 'none';
       if (a.kind === 'api_key') { st.auth.name = a.name || 'X-API-Key'; st.auth.location = 'header'; if (!st.auth.key) st.auth.key = 'demo-key'; }
       if (a.kind === 'oauth') { st.auth.grant = 'client_credentials'; st.auth.clientId = st.auth.clientId || 'rustybin'; st.auth.clientSecret = st.auth.clientSecret || 'secret'; }
-      if (s.kind === 'manage' && auth.required() && auth.getToken()) st.auth.token = auth.getToken();
       const v = (s.versions || [])[0];
       if ((s.transports || []).length === 1 && s.transports[0] === 'legacy') st.version = '2024-11-05';
       else if (transportOf(st.version) === 'legacy') st.version = v || MODERN;
@@ -102,7 +151,7 @@ export default {
         if (s.path === st.server) o.selected = true;
         serverSel.appendChild(o);
       }
-      serverSel.onchange = () => { st.server = serverSel.value; applyServerDefaults(serverInfo()); renderLeft(); };
+      serverSel.onchange = () => { st.server = serverSel.value; resetAuth(); applyServerDefaults(serverInfo()); renderLeft(); };
       clear(savedSel);
       savedSel.appendChild(h('option', { value: '' }, saved.length ? 'Choose a saved connection' : 'No saved connections yet'));
       for (const c of saved) {
@@ -112,6 +161,7 @@ export default {
       }
       savedSel.onchange = () => {
         st.saved = savedSel.value;
+        resetAuth();
         const c = saved.find((x) => x.id === st.saved);
         if (c) {
           st.version = c.version || (c.transport === 'legacy' ? '2024-11-05' : c.transport === 'session' ? '2025-11-25' : MODERN);
@@ -161,7 +211,11 @@ export default {
       kindSel.addEventListener('change', () => { a.kind = kindSel.value; renderAuth(); });
       const bind = (key, props) => { const el = input(Object.assign({ value: a[key] || '' }, props)); el.addEventListener('input', () => { a[key] = el.value; }); return el; };
       authEl.appendChild(field('Authentication', kindSel));
-      if (a.kind === 'bearer') authEl.appendChild(field('Bearer token', bind('token', { type: 'password', class: 'input mono', 'aria-label': 'Bearer token', id: 'mcp-token' })));
+      const own = consoleToken();
+      if (a.kind === 'bearer') {
+        authEl.appendChild(field('Bearer token', bind('token', { type: 'password', class: 'input mono', 'aria-label': 'Bearer token', id: 'mcp-token', placeholder: own ? 'empty: your console sign-in' : '' }),
+          own ? 'Left empty, your console sign-in is sent: to this instance\'s management server only, never to another server.' : null));
+      }
       if (a.kind === 'api_key') {
         const loc = select([['header', 'Header'], ['query', 'Query parameter']], a.location || 'header', { 'aria-label': 'API key location' });
         loc.addEventListener('change', () => { a.location = loc.value; });
@@ -201,9 +255,29 @@ export default {
       }
     }
 
+    /** True when the form holds a credential the user typed. */
+    function hasCredentials() {
+      const a = st.auth;
+      return !!(a.token || a.key || a.password || a.clientSecret || (a.headers || []).some(([, v]) => v));
+    }
+
+    /**
+     * The console's control token, when the target is this instance's
+     * management MCP server and the bearer field was left empty; else ''.
+     * Decided at send time from the target, never kept in the form.
+     */
+    function consoleToken() {
+      if (st.source === 'saved' || st.auth.kind !== 'bearer' || st.auth.token) return '';
+      if (!auth.required() || !auth.getToken() || !isOwnManageUrl(targetPath())) return '';
+      return auth.getToken();
+    }
+
     function authParts() {
       if (st.source === 'saved' && st.saved) return { headers: [], query: [] };
-      return buildAuth(st.auth);
+      const parts = buildAuth(st.auth);
+      const own = consoleToken();
+      if (own) parts.headers.push(['Authorization', 'Bearer ' + own]);
+      return parts;
     }
 
     // The OAuth walk as a timeline of steps with the raw documents.
@@ -798,16 +872,21 @@ export default {
     function route(r) {
       // From the registry view: url/<auth kind>/<header name or ->/<modern|legacy>/<url>.
       const u = /^url\/([a-z_]+)\/([^/]*)\/(modern|legacy)\/(.+)$/.exec(r || '');
+      const dec = (x) => { try { return decodeURIComponent(x); } catch { return x; } };
       if (u) {
+        // A link (the registry's "Open in inspector") starts from an empty
+        // auth form: nothing typed for another server goes along.
+        resetAuth();
         st.source = 'url';
         st.url = u[4];
         urlIn.value = st.url;
+        committedUrl = st.url;
         sourceSeg.set('url');
         // Registry remotes are rarely CORS-enabled: the relay connects.
         st.mode = 'relay';
         modeSeg.set('relay');
         st.auth.kind = MODES.some(([k]) => k === u[1]) ? u[1] : 'none';
-        if (st.auth.kind === 'api_key') { st.auth.name = decodeURIComponent(u[2]) === '-' ? 'X-API-Key' : decodeURIComponent(u[2]); st.auth.location = 'header'; }
+        if (st.auth.kind === 'api_key') { st.auth.name = dec(u[2]) === '-' ? 'X-API-Key' : dec(u[2]); st.auth.location = 'header'; }
         st.version = u[3] === 'legacy' ? '2024-11-05' : MODERN;
         versionSel.value = st.version;
         renderLeft();
@@ -815,10 +894,15 @@ export default {
       }
       const m = /^server\/(.+)$/.exec(r || '');
       if (m) {
-        const path = decodeURIComponent(m[1]);
+        const path = dec(m[1]);
+        resetAuth();
         st.source = 'instance';
         st.server = path;
         sourceSeg.set('instance');
+        // This instance's servers answer the browser directly (the relay
+        // refuses this instance's control plane).
+        st.mode = 'browser';
+        modeSeg.set('browser');
         applyServerDefaults(serverInfo());
         renderLeft();
       }

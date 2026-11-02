@@ -13,6 +13,11 @@ export const RESERVED = ['import', 'export', 'apply', 'reload', 'visit', 'visits
 /**
  * Call the management API. `path` is relative to /_rustybin/mocks; objects are
  * sent as JSON, strings as is. Mutations carry the admin credentials.
+ * `opts.revision`: the draft revision the caller's form was built from, sent
+ * as `If-Match` so an edit never silently overwrites a change made since
+ * (409 instead). Each editor keeps the revision it loaded and passes it;
+ * nothing here remembers revisions behind its back (a background refresh
+ * must not make a stale form look current).
  */
 export async function api(method, path, body, opts = {}) {
   const headers = [];
@@ -26,51 +31,23 @@ export async function api(method, path, body, opts = {}) {
       headers.push(['Content-Type', 'application/json']);
     }
   }
-  // An edit names the draft revision this page last saw, so it never
-  // silently overwrites someone else's change (409 instead).
-  const edit = editedMock(method, path);
-  if (edit && revisions.has(edit)) headers.push(['If-Match', `"${revisions.get(edit)}"`]);
+  if (Number.isInteger(opts.revision)) headers.push(['If-Match', `"${opts.revision}"`]);
   const r = await send({ control: true, method, url: SERVER + API + path, headers, body: payload, session: false, admin: method !== 'GET', timeout: opts.timeout || 20000, signal: opts.signal });
-  remember(path, r.json);
-  if (edit && r.status === 409 && r.json && r.json.error === 'rustybin_stale_revision') staleEdit(edit, r.json);
+  if (r.status === 409 && r.json && r.json.error === 'rustybin_stale_revision') staleEdit(mockOf(path) || 'The mock', r.json);
   return r;
 }
 
 /** GET JSON from the management API (throws an Error with a readable message). */
 export async function getMock(path) {
-  const v = await getJson(API + path, { session: false });
-  remember(path, v);
-  return v;
+  return getJson(API + path, { session: false });
 }
 
 // ── Draft revisions (conflict protection) ──
-
-/** The draft revision of each mock, as this page last read it. */
-const revisions = new Map();
 
 function mockOf(path) {
   const seg = (path || '').split('?')[0].split('/')[1];
   if (!seg || RESERVED.includes(seg) || seg === 'ai') return null;
   try { return decodeURIComponent(seg); } catch { return null; }
-}
-
-/** The mock an edit changes: PATCH /{name} or PUT /{name}/operations/{op}. */
-function editedMock(method, path) {
-  const parts = (path || '').split('?')[0].split('/');
-  if (method === 'PATCH' && parts.length === 2) return mockOf(path);
-  if (method === 'PUT' && parts.length === 4 && parts[2] === 'operations') return mockOf(path);
-  return null;
-}
-
-function remember(path, v) {
-  const name = mockOf(path);
-  if (!name || !v || typeof v.draft_revision !== 'number') return;
-  revisions.set(v.name && v.name !== name ? v.name : name, v.draft_revision);
-}
-
-/** The revision this page holds for a mock (`undefined` before a read). */
-export function knownRevision(name) {
-  return revisions.get(name);
 }
 
 /** Someone changed the mock since this page read it: say what, offer a reload. */

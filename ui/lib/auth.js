@@ -26,6 +26,8 @@ export const consoleTitle = meta('console-title');
 export const backlink = /^https?:\/\/[^\s"'<>`\\]+$/i.test(meta('console-backlink')) ? meta('console-backlink') : '';
 
 let token = '';
+// Who the data this tab holds belongs to (see identityOf), '' before a sign-in.
+let identity = '';
 // Why the sign-in screen is shown ('' = not needed): missing | expired |
 // signed-out | the server's reason (invalid_signature, invalid_audience, ...).
 let reason = '';
@@ -56,6 +58,17 @@ function parseClaims(t) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Who a token signs in (its subject, key and issuer; an opaque token is its
+ * own identity), or '' for no token. A new identity, or none, means the
+ * data the console holds for the previous one must go.
+ */
+function identityOf(t) {
+  if (!t) return '';
+  const c = parseClaims(t);
+  return c ? JSON.stringify([c.sub || '', c.rb_key || '', c.iss || '']) : 'opaque:' + t;
 }
 
 function tokenExpired(t) {
@@ -149,9 +162,19 @@ function scheduleExpiry() {
   expiryTimer = setTimeout(() => markUnauthorized('expired'), Math.min(ms, 0x7fffffff));
 }
 
-/** Use a token (empty: forget it). `remember` keeps it across tabs and restarts of the browser. */
+/**
+ * Use a token (empty: forget it). `remember` keeps it across tabs and
+ * restarts of the browser. Forgetting the token, or a token for someone
+ * else, first emits 'reset': the console drops what it holds of the
+ * previous user (captured traffic, the admin token, the MCP inspector's
+ * credentials, the assistant's history, the last export).
+ */
 export function setToken(t, remember) {
   token = String(t || '').trim();
+  const next = identityOf(token);
+  const changed = identity !== '' && next !== identity;
+  if (token || changed) identity = next;
+  if (changed) emit('reset');
   try {
     if (token) sessionStorage.setItem(KEY, token);
     else sessionStorage.removeItem(KEY);
@@ -248,7 +271,7 @@ export function consumeFragment() {
   return true;
 }
 
-/** Subscribe to 'token' (signed in) and 'required' (sign-in needed) events. */
+/** Subscribe to 'token' (signed in), 'required' (sign-in needed) and 'reset' (forget the previous user's data) events. */
 export function onChange(fn) {
   listeners.add(fn);
   return () => listeners.delete(fn);
@@ -256,4 +279,5 @@ export function onChange(fn) {
 
 // A stored JWT may have expired while the tab was closed.
 if (token) scheduleExpiry();
+identity = identityOf(token);
 if (required() && !token) reason = 'missing';

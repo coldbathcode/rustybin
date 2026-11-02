@@ -314,6 +314,16 @@ export function isDrawerOpen() {
   return drawerOpen;
 }
 
+/** Forget the conversation (sign-out, or another user signed in): history, the answer in flight, the drawer, the typed question. */
+export function forget() {
+  if (abort) { abort.abort(); abort = null; }
+  history = [];
+  saveHistory();
+  renderDrawerBody();
+  closeDrawer();
+  if (inputEl) inputEl.value = '';
+}
+
 /** Ask a question from the current view: streams the answer into the drawer. */
 export async function ask(question, opts = {}) {
   const q = String(question || '').trim();

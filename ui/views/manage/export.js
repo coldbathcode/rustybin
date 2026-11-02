@@ -86,38 +86,51 @@ function applyCard() {
   const result = h('div', { id: 'config-result' });
   const applyBtn = h('button', { class: 'btn primary', type: 'button', id: 'config-apply', disabled: true }, 'Apply');
   const dryBtn = h('button', { class: 'btn', type: 'button', id: 'config-dry-run' }, icon('play'), 'Dry run');
+  // The dry run that enabled Apply: its text and its prune choice. Apply
+  // sends exactly what was previewed; another text or prune choice needs a
+  // new dry run (a prune ticked after the preview would delete what the
+  // preview never listed).
   let checked = null;
+  const invalidate = (why) => {
+    const had = checked !== null;
+    checked = null;
+    applyBtn.disabled = true;
+    applyBtn.textContent = 'Apply';
+    if (had && why) replace(result, notice('warn', why));
+  };
 
   file.addEventListener('change', async () => {
     const f = file.files && file.files[0];
     if (!f) return;
-    try { doc.value = await readFile(f, MAX_DOCUMENT); checked = null; applyBtn.disabled = true; } catch (e) { toast(e.message, 'err'); }
+    try { doc.value = await readFile(f, MAX_DOCUMENT); invalidate('A new document: run the dry run again.'); } catch (e) { toast(e.message, 'err'); }
   });
-  doc.addEventListener('input', () => { checked = null; applyBtn.disabled = true; });
+  doc.addEventListener('input', () => invalidate(null));
+  prune.input.addEventListener('change', () => invalidate('Prune changed: run the dry run again to see what it would ' + (prune.input.checked ? 'remove' : 'change') + '.'));
 
   async function run(dryRun) {
     const text = doc.value;
     if (!text.trim()) { replace(result, notice('warn', 'Paste or upload a document first.')); return; }
     replace(result, spinner(dryRun ? 'Checking' : 'Applying'));
-    const r = await send({ control: true, method: 'POST', url: SERVER + '/_rustybin/config/apply', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ document: text, prune: prune.input.checked, dry_run: dryRun }), admin: true, session: false, timeout: 120000 });
+    const pruneSent = dryRun ? prune.input.checked : checked.prune;
+    const r = await send({ control: true, method: 'POST', url: SERVER + '/_rustybin/config/apply', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ document: text, prune: pruneSent, dry_run: dryRun }), admin: true, session: false, timeout: 120000 });
     if (!r.ok || !r.json) { replace(result, notice('err', errorText(r, 'apply'))); return; }
     const report = r.json;
     const head = dryRun
       ? notice('', icon('info'), h('div', { class: 'grow' }, h('strong', null, 'Dry run. '), 'Nothing changed. Sections: ' + (report.sections || []).join(', ') + '.'))
       : notice(report.ok ? 'ok' : 'warn', icon(report.ok ? 'check' : 'alert'), h('div', { class: 'grow' }, h('strong', null, report.ok ? 'Applied. ' : 'Applied with problems. '), 'Sections: ' + (report.sections || []).join(', ') + '.'));
     replace(result, head, changeList(report));
-    if (dryRun) { checked = text; applyBtn.disabled = false; applyBtn.textContent = (report.summary || []).length ? 'Apply ' + report.summary.length + ' change' + (report.summary.length === 1 ? '' : 's') : 'Apply (no changes)'; }
+    if (dryRun) { checked = { text, prune: pruneSent }; applyBtn.disabled = false; applyBtn.textContent = (report.summary || []).length ? 'Apply ' + report.summary.length + ' change' + (report.summary.length === 1 ? '' : 's') : 'Apply (no changes)'; }
     else { checked = null; applyBtn.disabled = true; applyBtn.textContent = 'Apply'; toast(report.ok ? 'Document applied' : 'Applied with problems', report.ok ? '' : 'err'); }
   }
   dryBtn.addEventListener('click', () => run(true));
   applyBtn.addEventListener('click', () => {
-    if (checked !== doc.value) { toast('Run the dry run first'); return; }
-    if (prune.input.checked && !confirm('Apply with prune? Everything a present section does not name is removed from this instance.')) return;
+    if (!checked || checked.text !== doc.value || checked.prune !== prune.input.checked) { invalidate(null); toast('Run the dry run first'); return; }
+    if (checked.prune && !confirm('Apply with prune? Everything a present section does not name is removed from this instance.')) return;
     run(false);
   });
   return card('Apply a document', { hint: 'a dry run shows what would change, then Apply' }, h('div', { class: 'stack' },
     field('Document', doc, 'YAML or JSON, version 1 (mocks only) or 2. Sections the document leaves out are left alone. Spec file paths are not readable here: inline the specs (spec_inline) or pull from a repository under Source control.'),
     h('div', { class: 'row', style: { gap: '8px', flexWrap: 'wrap' } }, file, h('span', { class: 'grow' }), prune.el),
-    h('div', { class: 'row', style: { gap: '8px' } }, dryBtn, applyBtn, h('span', { class: 'muted small' }, 'Apply is enabled by a dry run of the same text.')),
+    h('div', { class: 'row', style: { gap: '8px' } }, dryBtn, applyBtn, h('span', { class: 'muted small' }, 'Apply is enabled by a dry run of the same text and prune choice.')),
     result));
 }

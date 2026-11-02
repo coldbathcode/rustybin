@@ -8,6 +8,7 @@ import { SERVER, send, toCurl } from '../lib/http.js';
 import { responseView } from '../lib/widgets.js';
 import { decodeJwt, randomString, pkceChallenge, hmacSha256, sha256, utf8, toBase64 } from '../lib/crypto.js';
 import * as settings from '../lib/settings.js';
+import { openPopup, waitForCallback } from '../lib/oauthpopup.js';
 
 const USERS = [['demo', 'demo / demo'], ['alice', 'alice / alice (admins)'], ['bob', 'bob / bob']];
 const PENDING_KEY = 'rustybin.oauth.pending';
@@ -16,6 +17,7 @@ export default {
   id: 'tokens',
   mount(root) {
     let alive = true;
+    let flowCtrl = null;
     let countdown = null;
     let oauthOut = null;
     const st = settings.recall('tokens.state', { grant: 'client_credentials', clientId: 'rustybin', clientSecret: 'secret', scope: 'openid profile email', resource: '', user: 'alice', tokenResponse: null, jwt: '' });
@@ -120,25 +122,21 @@ export default {
       try { sessionStorage.setItem(PENDING_KEY, JSON.stringify(pending)); } catch { /* ignore */ }
       const url = SERVER + '/oauth/authorize?' + p.toString();
       replace(out, h('div', { class: 'stack-sm' }, spinner('Waiting for the login popup'), h('code', { class: 'small break' }, url)));
-      const popup = window.open(url, 'rustybin-login', 'width=520,height=680');
+      // No opener for the popup; the callback comes back over a
+      // BroadcastChannel with this flow's state (lib/oauthpopup.js).
+      const popup = openPopup(url, 'width=520,height=680');
       if (!popup) {
         replace(out, notice('warn', 'The popup was blocked. ', h('a', { href: url }, 'Continue in this window'), ' (you come back here after signing in).'));
         return;
       }
-      const onMsg = (ev) => {
-        if (ev.origin !== location.origin || !ev.data || ev.data.type !== 'rustybin-oauth-callback') return;
-        window.removeEventListener('message', onMsg);
-        finishCodeFlow(ev.data.search, out);
-      };
-      window.addEventListener('message', onMsg);
-      const watch = setInterval(() => {
-        if (!alive) { clearInterval(watch); window.removeEventListener('message', onMsg); return; }
-        if (popup.closed) {
-          clearInterval(watch);
-          setTimeout(() => { window.removeEventListener('message', onMsg); }, 1000);
-          if (out.querySelector('.spinner')) replace(out, notice('warn', 'The login window was closed before the sign in finished.'));
-        }
-      }, 700);
+      if (flowCtrl) flowCtrl.abort();
+      flowCtrl = new AbortController();
+      try {
+        const p = await waitForCallback(state, popup, { signal: flowCtrl.signal });
+        if (alive) finishCodeFlow(p.toString(), out);
+      } catch (e) {
+        if (alive && out.querySelector('.spinner')) replace(out, notice('warn', e.message === 'the popup was closed before signing in' ? 'The login window was closed before the sign in finished.' : 'The sign in did not finish: ' + e.message));
+      }
     }
 
     async function finishCodeFlow(search, out) {
@@ -293,7 +291,7 @@ export default {
         signed, verifyOut);
     }
 
-    return () => { alive = false; clearInterval(countdown); };
+    return () => { alive = false; clearInterval(countdown); if (flowCtrl) flowCtrl.abort(); };
   },
 };
 

@@ -75,3 +75,5 @@ export function onChange(fn) {
 const memory = new Map();
 export function remember(key, value) { memory.set(key, value); }
 export function recall(key, fallback) { return memory.has(key) ? memory.get(key) : fallback; }
+/** Forget every scratch value (sign-out: the MCP inspector's auth form, drafts of views, ...). */
+export function forgetScratch() { memory.clear(); }

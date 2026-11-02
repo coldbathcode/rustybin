@@ -9,6 +9,7 @@ import * as auth from './lib/auth.js';
 import * as visit from './lib/visit.js';
 import * as assist from './lib/assist.js';
 import { SERVER, getJson, send, trimBase } from './lib/http.js';
+import { deliverCallback } from './lib/oauthpopup.js';
 
 const VIEWS = [
   { section: 'Instance' },
@@ -129,7 +130,10 @@ function updateTrafficCount() {
 function parseRoute() {
   const m = /^#\/([\w-]+)(?:\/(.*))?$/.exec(location.hash || '');
   const id = m && VIEWS.some((v) => v.id === m[1]) ? m[1] : 'overview';
-  return { id, rest: m && m[2] ? decodeURIComponent(m[2]) : '' };
+  // A malformed escape (a stray %) routes with the text as it is.
+  let rest = m && m[2] ? m[2] : '';
+  try { rest = decodeURIComponent(rest); } catch { /* keep it raw */ }
+  return { id, rest };
 }
 
 async function route() {
@@ -268,22 +272,49 @@ function renderBanner() {
     ' or set RUSTYBIN_CONSOLE_PASSWORD.'));
 }
 
-// ── OAuth callback (authorization code flow of the token lab) ──────
+// ── OAuth callback (the token lab, the MCP inspector's OAuth walk) ──
 
 function handleCallback() {
   if (!/\/ui\/callback\/?$/.test(location.pathname)) return false;
   const params = location.search;
-  if (window.opener && !window.opener.closed) {
-    try {
-      window.opener.postMessage({ type: 'rustybin-oauth-callback', search: params }, location.origin);
+  // The code leaves the address bar at once.
+  try { history.replaceState(null, '', location.pathname); } catch { /* ignore */ }
+  // Popups have no opener (lib/oauthpopup.js): the query goes back over a
+  // BroadcastChannel to the flow whose state it carries. No flow took it:
+  // this is the token lab's same-window fallback.
+  document.body.textContent = 'Finishing the sign-in...';
+  deliverCallback(params).then((taken) => {
+    if (taken) {
       document.body.textContent = 'Signed in. You can close this window.';
       setTimeout(() => window.close(), 300);
-      return true;
-    } catch { /* fall through to same-window handling */ }
-  }
-  try { sessionStorage.setItem('rustybin.oauth.callback', params); } catch { /* ignore */ }
-  location.replace(location.pathname.replace(/callback\/?$/, '') + '#/tokens');
+      return;
+    }
+    try { sessionStorage.setItem('rustybin.oauth.callback', params); } catch { /* ignore */ }
+    location.replace(location.pathname.replace(/callback\/?$/, '') + '#/tokens');
+  });
   return true;
+}
+
+// ── Sign-out: nothing of the previous user stays in the tab ──
+
+/** Session keys of data a signed-in user saw (the last export, OAuth flows in progress). */
+const USER_SESSION_KEYS = ['rustybin.config.lastExport', 'rustybin.oauth.callback', 'rustybin.oauth.pending'];
+
+function forgetPreviousUser() {
+  traffic.disconnect();
+  traffic.clearLocal();
+  settings.set('adminToken', '');
+  settings.forgetScratch();
+  assist.forget();
+  for (const k of USER_SESSION_KEYS) { try { sessionStorage.removeItem(k); } catch { /* ignore */ } }
+  // The mounted view holds what it showed: unmount it (a sign-in mounts it again).
+  navToken++;
+  if (cleanup) {
+    try { (typeof cleanup === 'function' ? cleanup : cleanup.destroy)(); } catch (e) { console.error(e); }
+    cleanup = null;
+  }
+  currentId = null;
+  clear(viewEl);
 }
 
 // ── Sign-in screen (RUSTYBIN_CONTROL_AUTH = password | token | jwt) ──
@@ -465,7 +496,9 @@ function start() {
     route();
   });
   auth.onChange((kind) => {
-    if (kind === 'token') {
+    if (kind === 'reset') {
+      forgetPreviousUser();
+    } else if (kind === 'token') {
       renderActions();
       verifyAndResume();
     } else {
