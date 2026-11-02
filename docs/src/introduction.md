@@ -48,7 +48,7 @@ gateways. Run it locally, in a container or behind your gateway as the upstream.
 | Inspect requests or introduce failures | [Request inspector](concepts/inspector.md), [fault injection](concepts/fault-injection.md), [gateway recipes](gateway-recipes.md) |
 | Test authentication or another protocol | [Authentication](reference/auth.md), [OAuth / OIDC](reference/oidc.md), [HTTP and protocol reference](reference/http-basics.md) |
 | Measure a gateway under load | [Load testing](harness.md) |
-| Manage and reproduce an instance | [Web console](console.md), [CLI](cli-guide.md), [management MCP](agent-mcp.md), [instance as code](configuration-as-code.md), [source control](source-control.md) |
+| Manage and reproduce an instance | [Web console](console.md), [CLI](cli-guide.md), [management MCP](agent-mcp.md) and [your coding agent](coding-agents.md), [instance as code](configuration-as-code.md), [source control](source-control.md) |
 
 **Two AI features, different purposes:** the [mock LLM](ai/index.md) simulates
 provider responses without a real model or key. [AI assist](ai-assist.md) connects

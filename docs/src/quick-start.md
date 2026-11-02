@@ -230,7 +230,8 @@ rustybin config export > rustybin.yaml
 The console does the same: **Management, AI** for the key, the mock wizard's
 **Describe it** tab, **Publish to portal** on the mock, **Management, Export**; and
 an agent does it through the [management MCP server](agent-mcp.md) with the
-`build_instance` prompt. Without an AI key, skip step 2 and replace step 3 with
+`build_instance` prompt ([connect your coding agent](coding-agents.md): Claude Code,
+Codex CLI, Cursor, VS Code and others). Without an AI key, skip step 2 and replace step 3 with
 `rustybin mocks create orders --spec your-spec.yaml`. To explore without any spec,
 use the built-in Petstore mock and publish it with
 `rustybin portal publish mock:petstore --title "Petstore"`.

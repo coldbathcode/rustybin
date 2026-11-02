@@ -16,29 +16,22 @@ and error messages are identical.
 
 ## Connect an agent
 
-Claude Code:
+The server is at `https://<host>/_rustybin/mcp` (streamable HTTP), with the
+credential as `Authorization: Bearer <token>`. In Claude Code:
 
 ```bash
 claude mcp add --transport http rustybin https://<host>/_rustybin/mcp \
   --header "Authorization: Bearer <token>"
 ```
 
-Other clients take the usual `mcpServers` JSON:
+[Connect your coding agent](coding-agents.md) has the configuration for Claude
+Code, Codex CLI, Cursor, OpenCode, VS Code, Windsurf, Gemini CLI and Zed (with the
+token in an environment variable), how to get a credential, the rights to give, each
+client's tool limits and a walkthrough of building a test platform.
 
-```json
-{
-  "mcpServers": {
-    "rustybin": {
-      "type": "http",
-      "url": "https://<host>/_rustybin/mcp",
-      "headers": { "Authorization": "Bearer <token>" }
-    }
-  }
-}
-```
-
-The [web console](console.md) fills both in for you: "Connect an agent" in the AI
-agents view and "Connect an AI agent" in the Mock APIs view show the command with this instance's
+The [web console](console.md) fills the command in for you: "Connect an agent" in the AI
+agents view and "Connect an AI agent" in the Mock APIs view show it, and the
+`mcpServers` JSON, with this instance's
 URL and the credential the console already holds (the token of your password
 sign-in, a control token, the admin token or a visit's manage token). The token stays
 masked until you ask to see it; the copy buttons copy the real value. A script gets

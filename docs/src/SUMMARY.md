@@ -38,6 +38,7 @@
 - [MCP registry](mcp/registry.md)
 - [A2A agents](a2a/index.md)
 - [Management MCP](agent-mcp.md)
+  - [Connect your coding agent](coding-agents.md)
 
 # Test a gateway
 
