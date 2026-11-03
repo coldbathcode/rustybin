@@ -1898,6 +1898,12 @@ impl Agents {
             )
         };
         tracing::info!(target: "rustybin::agents", agent = id, by, "agent revoked");
+        // For the audit log: who revoked (the entry's actor) whose agent.
+        crate::audit::event("revoke_agent");
+        crate::audit::target("agent", id);
+        if let Some(o) = &owner {
+            crate::audit::target("owner", o);
+        }
         let _ = self.events.send(
             json!({ "at": now.to_rfc3339(), "agent": id, "owner": owner, "event": "revoked" }),
         );
@@ -1928,6 +1934,7 @@ impl Agents {
             ids
         };
         for id in &ids {
+            crate::audit::target("agent", id);
             let _ = self.events.send(json!({ "at": now.to_rfc3339(), "agent": id, "owner": user_id, "event": "revoked" }));
         }
         if !ids.is_empty() {

@@ -755,6 +755,8 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET | `/_rustybin/sso/callback` | The identity provider's redirect: the code is exchanged, the ID token verified, the user signed in |
 | POST | `/_rustybin/sso/token` | Trade the one-time code and the PKCE verifier for a sign-in token (single sign-on) |
 | POST | `/_rustybin/sso/test` | Test single sign-on: fetch the provider's discovery document and keys now, check the role map |
+| GET | `/_rustybin/audit` | The audit log: who changed what, every sign-in and every refusal (audit.read) |
+| GET | `/_rustybin/audit/stream` | Live tail of the audit log (audit.read) (SSE) |
 | GET | `/_rustybin/assist` | AI assist: the provider, models, whether a key is set, the tasks and usage |
 | POST | `/_rustybin/assist/test` | AI assist: one short call to the configured provider (admin) |
 | POST | `/_rustybin/assist/run` | AI assist: run a task (free_answer, explain, suggest) as SSE or one JSON answer |

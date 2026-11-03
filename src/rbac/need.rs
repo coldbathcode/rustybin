@@ -188,8 +188,7 @@ pub const PROJECT_ROUTES: &[&str] = &[
 ];
 
 /// Permissions no route, tool or check uses yet, and the step that will.
-pub const RESERVED: &[(Permission, &str)] =
-    &[(Permission::AuditRead, "the audit log (testing-2 step 14)")];
+pub const RESERVED: &[(Permission, &str)] = &[];
 
 /// The body of a refusal: what is missing, never what the caller holds.
 pub fn refusal_body(p: Permission, message: Option<&str>) -> Value {
@@ -214,8 +213,20 @@ pub fn forbidden(p: Permission) -> Response {
 /// (sending the admin token would let it through).
 pub fn refuse(caller: &Resolved, p: Permission) -> Response {
     let (status, message) = refusal_of(caller, p);
-    (status, Json(refusal_body(p, message.as_deref()))).into_response()
+    let mut resp = (status, Json(refusal_body(p, message.as_deref()))).into_response();
+    // For the audit log: who was refused, and what (also on the data plane,
+    // whose answers it does not read).
+    resp.extensions_mut().insert(Refusal(p));
+    resp.extensions_mut()
+        .insert(crate::control_auth::ControlCaller(std::sync::Arc::new(
+            caller.clone(),
+        )));
+    resp
 }
+
+/// Response extension of [`refuse`]: the permission that was missing.
+#[derive(Clone, Copy, Debug)]
+pub struct Refusal(pub Permission);
 
 /// The status and message of [`refuse`], as data.
 pub fn refusal_of(caller: &Resolved, p: Permission) -> (StatusCode, Option<String>) {

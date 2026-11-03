@@ -199,6 +199,28 @@
   answers `total` as the runs the caller may see; the management tools on mocks,
   saved tests and checkpoints are listed for a member of a project who holds their
   permission there.
+- The audit log (access control, step 14; [The audit log](audit-log.md)): who did
+  what, and when. Every mutating control route and every management tool that
+  changes something writes one entry (a new route or tool without code), with every
+  sign-in and failed sign-in (the user named only when one has that name),
+  invitations, role and project changes, single sign-on with the groups that mapped,
+  portal sign-ins and items opened or closed, agent revocations (whose agent),
+  config applies, git pulls with the commit, and every `403 permission_required`
+  (reads and the data plane's included). An entry: time, actor (a user, or the
+  credential's kind; the agent), via, action, event, targets, result, request id and
+  address; never a value, a body, a header, a password or a token. The last 10,000
+  entries in memory and, with a state directory, `<state>/audit/` as JSON Lines, one
+  file a UTC day, written off the request path, kept `audit.retention_days` (30, at
+  most 365) and at most `audit.max_bytes` (256 MiB; `RUSTYBIN_AUDIT_RETENTION_DAYS`,
+  `RUSTYBIN_AUDIT_MAX_BYTES`), both `settings.security` and refused from a pulled
+  document. Unauthenticated entries (sign-ins) are capped at 600 a minute. New routes
+  `GET /_rustybin/audit` (filters `actor`, `action`, `target`, `since`, `until`,
+  `result`, a cursor) and `GET /_rustybin/audit/stream` (SSE), both `audit.read`
+  (only the `admin` role has it). Console: **Management, Audit** (filters, the table
+  with links, older pages, a live tail, the retention settings). CLI: `rustybin
+  audit list | tail`. Management MCP: `list_audit` (137 tools for an admin), typed
+  names under `untrusted_*`. `rustybin.yaml`: the `audit.*` settings; the log is
+  never exported.
 
 - Security pass (area A): sign-in, invitations, single sign-on, the model and its
   enforcement (step 14 of the

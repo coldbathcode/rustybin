@@ -762,9 +762,9 @@ impl Svc {
                     2,
                 )
             })?;
-        tokio::task::spawn_blocking(move || {
+        let (out, note) = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            f(&self)
+            crate::audit::carried(|| f(&self))
         })
         .await
         .map_err(|_| {
@@ -772,7 +772,9 @@ impl Svc {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "the compile did not finish",
             )
-        })?
+        })?;
+        crate::audit::merge(note);
+        out
     }
 
     /// Whose compile allowance a call without admin rights spends: the
@@ -1137,6 +1139,10 @@ impl Svc {
                 },
             )
         };
+        crate::audit::target("mock", &name);
+        if let Some(p) = &project {
+            crate::audit::target("project", p);
+        }
         let created = self.store().create_in(
             &name,
             compiled,
@@ -1356,6 +1362,11 @@ impl Svc {
     /// in both (step 11). A visitor's mock never moves.
     pub fn move_to(&self, name: &str, to: Option<String>) -> SvcResult<Snapshot> {
         let to = to.filter(|t| t != crate::rbac::projects::INSTANCE && !t.is_empty());
+        crate::audit::target("mock", name);
+        crate::audit::target(
+            "project",
+            to.as_deref().unwrap_or(crate::rbac::projects::INSTANCE),
+        );
         if let Some(t) = &to {
             crate::rbac::projects::check_name(t).map_err(ServiceError::bad_request)?;
         }
@@ -1794,6 +1805,7 @@ impl Svc {
             check_name(&n)?;
             n
         };
+        crate::audit::target("mock", &new_name);
         match self.store().duplicate(name, &new_name) {
             Ok(s) => Ok(self.detail_of(&s, c.reveals(&s))),
             Err(e) => Err(ss::store_refusal(&e).unwrap_or_else(|| e.into())),

@@ -2452,6 +2452,78 @@ def run_users(browser):
     ctx.close()
 
 
+def run_audit(browser):
+    """The audit log (access control step 14) on the password instance,
+    after the users run: Management, Audit lists who did what (the
+    invitation of ivy, with a link to the user), the filters narrow it, the
+    live tail shows a failed sign-in made meanwhile, and the retention
+    settings are the audit group's form."""
+    base = os.environ["RUSTYBIN_PASSWORD_URL"].rstrip("/")
+    print(f"audit log: {base}")
+    ctx = browser.new_context(viewport={"width": 1400, "height": 900})
+    page = ctx.new_page()
+    page.set_default_timeout(TIMEOUT)
+    page.on("pageerror", lambda e: console_errors.append(f"[audit] uncaught: {e}"))
+
+    def table():
+        page.goto(base + "/ui/#/manage/audit")
+        page.wait_for_selector("#signin")
+        page.fill("#signin-user", "rustybin")
+        page.fill("#signin-password", "rustybin")
+        page.get_by_role("button", name="Sign in", exact=True).click()
+        page.wait_for_selector("#audit-table")
+        expect(page.locator("#manage-tab-audit")).to_have_attribute("aria-selected", "true")
+        expect(page.locator("#audit-log-status")).to_contain_text("in memory")
+        # The users run invited ivy: the entry names her, with a link.
+        page.fill("#audit-action", "invite")
+        page.locator("#audit-apply").click()
+        expect(page.locator("#audit-table [data-target='user:ivy']").first).to_be_visible()
+        expect(page.locator("#audit-table").first).to_contain_text("POST /_rustybin/users")
+        expect(page.locator("#audit-table [data-target='user:ivy']").first).to_have_attribute("href", "#/manage/users")
+        # Nothing secret is shown: the invitation's link is not in the page.
+        assert "rbi_" not in page.content(), "an invitation token is on the page"
+        shot(page, "password", "70-audit-log")
+
+    step("audit: Management, Audit lists who invited whom", table)
+
+    def live_tail():
+        page.fill("#audit-action", "login")
+        page.select_option("#audit-result", "error")
+        page.locator("#audit-apply").click()
+        # The table shows the filtered entries (its data-query says so).
+        page.wait_for_selector("#audit-entries[data-query*='action=login'][data-query*='result=error']")
+        rows = page.locator("#audit-table tbody tr")
+        before = rows.count()
+        page.locator("#audit-live").click()
+        expect(page.locator("#audit-live")).to_have_attribute("aria-pressed", "true")
+        page.wait_for_selector("#audit-live[data-connected=true]")
+        body = json.dumps({"username": "e2e-nobody", "password": "not-it"}).encode()
+        req = urllib.request.Request(base + "/_rustybin/login", data=body, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            urllib.request.urlopen(req, timeout=10)
+            raise AssertionError("a wrong sign-in was accepted")
+        except urllib.error.HTTPError as e:
+            assert e.code == 401, e.code
+        expect(rows).to_have_count(before + 1, timeout=15_000)
+        first = page.locator("#audit-table tbody tr").first
+        expect(first).to_contain_text("anonymous")
+        expect(first).to_contain_text("invalid_credentials")
+        # The name nobody has is never recorded.
+        expect(page.locator("#audit-table")).not_to_contain_text("e2e-nobody")
+        shot(page, "password", "71-audit-live-tail")
+        page.locator("#audit-live").click()
+        expect(page.locator("#audit-live")).to_have_attribute("aria-pressed", "false")
+
+    step("audit: the live tail shows a failed sign-in made meanwhile", live_tail)
+
+    def retention():
+        expect(page.get_by_text("Keep the audit files (days)")).to_be_visible()
+        expect(page.get_by_role("button", name="Save audit settings")).to_be_enabled()
+
+    step("audit: the retention settings are on the page", retention)
+    ctx.close()
+
+
 def run_projects(browser):
     """Projects (access control step 11) on the password instance: two
     users in two projects. pia, an editor of pay with no instance role, sees
@@ -2968,6 +3040,7 @@ def main():
         if os.environ.get("RUSTYBIN_PASSWORD_URL"):
             run_password(browser)
             run_users(browser)
+            run_audit(browser)
             run_projects(browser)
             run_agents_for_users(browser)
             run_portal_access(browser)

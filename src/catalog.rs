@@ -420,6 +420,7 @@ const SOURCES: &[fn() -> Vec<Endpoint>] = &[
     crate::rbac::api::catalog,
     crate::rbac::project_api::catalog,
     crate::sso::api::catalog,
+    crate::audit::catalog,
     crate::assist::catalog,
     crate::echo::catalog,
     crate::status::catalog,

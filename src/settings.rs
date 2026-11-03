@@ -390,6 +390,11 @@ pub fn groups() -> Vec<Group> {
             title: "Test schedule notices",
             description: "What the webhooks of scheduled saved tests receive with a failing run: the bearer token and the address its link starts with. Allow each webhook's host in the outbound connections (purpose notify).",
         },
+        Group {
+            id: "audit",
+            title: "Audit log",
+            description: "How long the audit files in <state>/audit/ are kept and how large they may grow. The log itself is on Management, Audit (audit.read); changing these needs settings.security.",
+        },
     ]
 }
 
@@ -436,6 +441,7 @@ pub fn specs() -> Vec<Spec> {
     all.extend(crate::replay::schedule::specs());
     all.extend(crate::mocks::specs());
     all.extend(crate::sourcecontrol::specs());
+    all.extend(crate::audit::specs());
     all
 }
 
@@ -1518,7 +1524,8 @@ pub fn principal(headers: &HeaderMap, config: &Config) -> String {
 /// Key prefixes of the security groups (egress, proxy, agents, the
 /// console and its sign-in, single sign-on): changing one needs
 /// `settings.security` on top of `settings.write`.
-pub const SECURITY_PREFIXES: &[&str] = &["egress.", "proxy.", "agents.", "console.", "sso."];
+pub const SECURITY_PREFIXES: &[&str] =
+    &["egress.", "proxy.", "agents.", "console.", "sso.", "audit."];
 /// Single keys of the security groups (where the AI prompts go).
 pub const SECURITY_KEYS: &[&str] = &["assist.provider", "assist.base_url"];
 
@@ -1730,6 +1737,9 @@ async fn patch_settings(
                 .into_response()
         }
     };
+    for k in patch.values.keys().chain(patch.secrets.keys()) {
+        crate::audit::target("setting", k);
+    }
     let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
     if let Err(resp) = check_keys(
         &caller,

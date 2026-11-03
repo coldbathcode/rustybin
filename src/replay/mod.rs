@@ -829,6 +829,7 @@ pub fn admit_for(
     caller: &Resolved,
     mut test: SavedTest,
 ) -> Result<SavedTest, ServiceError> {
+    crate::audit::target("test", &test.name);
     let write = Perm::TestsWrite;
     let old = state.saved_tests.get(&test.name);
     test.project = match (&old, test.project.as_deref()) {

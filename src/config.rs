@@ -250,6 +250,12 @@ pub struct Config {
     /// `RUSTYBIN_NOTIFY_BASE_URL`: the address a notice's link starts with.
     /// Seeds `notify.base_url`.
     pub notify_base_url: Option<String>,
+    /// `RUSTYBIN_AUDIT_RETENTION_DAYS`: the days of audit files kept (1 to
+    /// 365). Seeds `audit.retention_days`.
+    pub audit_retention_days: Option<i64>,
+    /// `RUSTYBIN_AUDIT_MAX_BYTES`: the audit files' largest total. Seeds
+    /// `audit.max_bytes`.
+    pub audit_max_bytes: Option<i64>,
     /// `RUSTYBIN_PORTAL_VISITORS`: visitors of a self-service instance may
     /// publish their own mocks. Seeds `portal.visitors`.
     pub portal_visitors: bool,
@@ -1116,6 +1122,18 @@ impl Config {
                 },
                 None => None,
             },
+            audit_retention_days: audit_seed(
+                &get,
+                "RUSTYBIN_AUDIT_RETENTION_DAYS",
+                crate::audit::RETENTION_KEY,
+                &mut warnings,
+            ),
+            audit_max_bytes: audit_seed(
+                &get,
+                "RUSTYBIN_AUDIT_MAX_BYTES",
+                crate::audit::MAX_BYTES_KEY,
+                &mut warnings,
+            ),
             a2a_push_allowlist,
             a2a_push_allow_all,
             harness,
@@ -1214,6 +1232,8 @@ impl Config {
             portal_visitors: false,
             notify_webhook_token: None,
             notify_base_url: None,
+            audit_retention_days: None,
+            audit_max_bytes: None,
             a2a_push_allowlist: Vec::new(),
             a2a_push_allow_all: false,
             harness: HarnessConfig::default(),
@@ -1872,6 +1892,28 @@ where
                 default
             }
         },
+    }
+}
+
+/// An `audit.*` integer seed, checked with its setting's own rule (an
+/// invalid one warns and seeds nothing).
+fn audit_seed(
+    get: &impl Fn(&str) -> Option<String>,
+    var: &str,
+    key: &str,
+    warnings: &mut Vec<String>,
+) -> Option<i64> {
+    let raw = get(var).filter(|v| !v.trim().is_empty())?;
+    let spec = crate::audit::specs().into_iter().find(|s| s.key == key)?;
+    match spec
+        .kind
+        .validate(&Value::String(raw.trim().replace('_', "")))
+    {
+        Ok(v) => v.as_i64(),
+        Err(e) => {
+            warnings.push(format!("{var}={raw:?}: {e}; ignored"));
+            None
+        }
     }
 }
 

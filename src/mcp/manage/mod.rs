@@ -17,6 +17,7 @@
 pub mod access;
 pub mod agents;
 pub mod assist;
+pub mod audit;
 pub mod checkpoints;
 pub mod config;
 pub mod harness;

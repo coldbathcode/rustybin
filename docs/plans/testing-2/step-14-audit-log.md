@@ -47,6 +47,102 @@ list, as the parity tests do); nothing secret in an entry (a test plants values 
 ring and the files); rotation and retention on an injectable clock; the filters and the cursor; the
 stream.
 
+## Build notes: the audit log (2026-11-03)
+
+The audit part of this step (Goal, Model, Surfaces, Tests) is built; the security pass is
+separate and still to come.
+
+- **Where it is.** `src/audit.rs` (the model, the store `AppState.audit`, the file writer, the
+  filters, the route layer, the `audit.*` settings, the routes), `src/audit/tests.rs` (9 tests),
+  `src/mcp/manage/audit.rs` (`list_audit`) and the recording of tool calls in
+  `mcp::manage::tools::call` (`record`, `tool_targets`), the CLI's `audit` noun in
+  `src/cli/commands.rs`, the console's `ui/views/manage/audit.js`, `docs/src/audit-log.md`,
+  `docs/examples/concepts/audit.hurl`, `run_audit` in `conformance/ui/console_e2e.py`.
+- **How every route and tool is covered without code.** `audit::layer` is a route layer added
+  after (so outside) `control_auth::check_route` in `build_app`: it sees the matched template, the
+  method and the answer, and the refusals the check makes. It records every `POST`, `PUT`, `PATCH`
+  and `DELETE` of a control route except `audit::NOT_RECORDED` (each row with its reason: the
+  management MCP transport, whose tool calls are entries of their own; the harness node traffic,
+  joins, heartbeats and elections every second; the `POST`s that compute and change nothing:
+  `/_rustybin/mocks/import`, the operation `validate` and `rules/test`, `registry/validate`,
+  `harness/preview` and `validate`). `tools::call` records every tool that is not `read_only` and
+  every refused call, once per call. `every_mutating_route_and_tool_writes_one_entry` walks the
+  catalogue (every control route and mutating method, 117 of them) and `TOOLS` (every tool that
+  changes something) against the full app and asserts exactly one entry with the expected action
+  (none for a `NOT_RECORDED` row, each of which must still exist).
+- **The caller.** `check_route` now leaves the caller it resolved on the response
+  (`ControlCaller`), and `rbac::refuse` marks its answer (`need::Refusal` plus the caller), so the
+  layer resolves nobody twice and a refusal on the data plane (the `/health` toggles, the global
+  `/flaky` reset) is recorded without reading its body. For control and portal routes a `401` or
+  `403` JSON answer of at most 16 KiB is read for its `reason` and `permission` (the refusals made
+  in handlers and services build their own bodies). An entry is recorded when the route is
+  mutating, a handler named an event, or the answer is a `permission_required` refusal; a `GET`
+  that is none of these is not, so reading the log is never an entry.
+- **What handlers add.** A task-local note (`audit::scoped` around the handler and around a tool's
+  dispatch) that `audit::target`, `audit::event` and `audit::actor_user` write into, a no-op
+  outside a request. Blocking closures carry their own (`audit::carried`, then `merge`), which
+  `Svc::compiling` and `configdoc::apply_on_pool` do, so the services name targets on the compile
+  pool too. Added: the user a sign-in names (`login::check_sign_in`, only for a user that exists;
+  the console's and the portal's), the invited user on a join, the SSO user and the groups that
+  mapped (the role map's groups the person is in, never the others), the event of every
+  `rustybin::auth` line (login, logout, join, reset, change_password, end_session,
+  sign_out_everywhere, sso, sso_start, sso_token, portal_login, portal_logout, and the users,
+  roles and projects events with their names), the keys of a settings change, a created or
+  duplicated mock and its project, a move (`move_to`: mock and project), a saved test and a
+  checkpoint, an agent revoked (`revoke_agent`, the agent and its `owner`, the user id; the agents
+  a user's removal revoked), a portal item opened or closed (`close_item`, `open_item`), a config
+  apply (`apply_config` and the sections the document changed), a pull (`git_pull` and the commit
+  reached). Path parameters are targets named after the segment before them (`mock`, `operation`,
+  `user`, `setting`, ...); the MCP relay's session and a consent request's id are a short hash.
+- **Decisions where the plan was silent.**
+  - **Unauthenticated requests are no entries** (a `401` from `control_auth::enforce` happens before
+    routing): anyone could fill the log. Sign-ins and refusals of callers without a credential are
+    entries, capped at 600 a minute for the instance (`ANONYMOUS_PER_MINUTE`, the rest counted in
+    `suppressed`), so nobody outside can flush the ring.
+  - **Read-only tools and `GET`s are not entries** unless refused; the read-only `POST`s are
+    `NOT_RECORDED`. The tracing lines stay as they were.
+  - **The actor**: `user` (id and name), `admin_token`, `token` (a control JWT's `sub`), `key`,
+    `visit` (the visit's fingerprint, from the manage token on a self-service instance), `open`,
+    `anonymous`, `system` (the automatic git pulls, `Audit::system`), plus `agent` for a tool call.
+  - **Ids** increase and, after a restart, continue after the newest entry read back from the files
+    (an entry that never reached a file may have had an id that is used again; the files never hold
+    two entries with one id).
+  - **Files**: `audit-YYYY-MM-DD.jsonl` by the entry's UTC day, mode `0600` in a `0700` directory,
+    written by one thread (`rustybin-audit`) from a channel of 4,096 (`try_send`: a full channel
+    counts `not_written`, never blocks a request). The retention runs at the writer's start, at
+    the first entry of each day and at every flush; past `audit.max_bytes` the oldest days go
+    first, never the day being written, whose later entries stay in memory (counted). Startup
+    reads the newest 10,000 entries back (at most the last 32 MiB of each file). `Audit::flush`
+    (tests) waits for the writer.
+  - **`audit.*` is a security group** (`settings::SECURITY_PREFIXES`: `settings.security` to change)
+    and in `configdoc::REPOSITORY_REFUSED_PREFIXES` (a pulled document cannot shorten the record of
+    what its pusher did). Seeds `RUSTYBIN_AUDIT_RETENTION_DAYS` and `RUSTYBIN_AUDIT_MAX_BYTES`
+    (checked with the settings' own rule: 1 to 365 days, at least 64 KiB).
+  - **`audit.read`** (no longer `RESERVED`) is the admin role's only; the two routes are in
+    `NEW_SINCE_0_4`. `list_audit` is an admin read tool for the ceilings (`OLD_RIGHTS`); 137 tools
+    for an admin, 118 without the harness ones.
+  - **Not done (left for later):** a project-scoped view of the log (a project's admin reading
+    its own trail, the `has_in` check step 11 suggested), per-item reader counts and portal
+    sessions in the sessions list (step 13's extras), a webhook or syslog target (master plan,
+    section 6), and reading older entries from the files through the API (the API searches the
+    entries in memory; the files are for `jq`, `grep` or a shipper).
+- **Surfaces.** API: `GET /_rustybin/audit` (filters `actor`, `action`, `target` with `kind:name`,
+  `since` and `until` as RFC 3339, a day or an age, `result` as an outcome or a status; `cursor`,
+  `limit`; `log` with the counts and bounds) and `GET /_rustybin/audit/stream` (an `entry` event
+  per matching entry, 16 listeners). Console: Management, **Audit** (`TABS`): the filters, the table
+  with links (a user to Users and roles, a mock to its page, an agent to AI agents), Older entries,
+  Live tail (`send({stream: true})` and `sseParser`), the log's state and the Retention card (the
+  `audit` group's settings form). MCP: `list_audit` at the end of `TOOLS`, typed names under
+  `untrusted_actor_name`, `untrusted_targets`, `untrusted_request_id`, none in the summary. CLI:
+  `rustybin audit list` (the filters, `--limit`, `--cursor`; a table for people, `--json` the
+  API's answer) and `rustybin audit tail` (the filters, `--max`, `--timeout`). `rustybin.yaml`:
+  the two settings under `settings:`; the log is never exported.
+- **The flaky docs example** (`docs/examples/harness/cli.sh`): the smoke scenario's thresholds were
+  `latency_p99_ms: 500` and `saturated: false` with a 2 s timeout, which a loaded machine misses
+  (one sending thread saturates, the p99 stretches). Now a 10 s timeout, `error_rate: 0` and
+  `latency_p99_ms: 5000` (every request answered, none slower than seconds), and the run's line is
+  checked for the 40 requested, not the 40 sent; the anchors are unchanged.
+
 ## Security pass build notes (area A)
 
 Sign-in, invitations, single sign-on, and the model and its enforcement: 18

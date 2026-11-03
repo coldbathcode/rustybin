@@ -1481,6 +1481,34 @@ impl SourceControl {
         let started = Instant::now();
         let result = self.pull_inner(state, apply, dry_run, prune, by).await;
         if !dry_run {
+            // For the audit log: the commit the pull reached.
+            let commit = result
+                .as_ref()
+                .ok()
+                .and_then(|v| v["head"]["sha"].as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            if crate::audit::in_scope() {
+                crate::audit::event("git_pull");
+                if let Some(c) = &commit {
+                    crate::audit::target("commit", c);
+                }
+            } else {
+                state.audit.system(
+                    "git pull",
+                    commit
+                        .iter()
+                        .map(|c| crate::audit::Target {
+                            kind: "commit".into(),
+                            name: c.clone(),
+                        })
+                        .collect(),
+                    crate::audit::Outcome {
+                        outcome: if result.is_ok() { "ok" } else { "error" }.into(),
+                        ..Default::default()
+                    },
+                );
+            }
             self.record(
                 "pull",
                 by,

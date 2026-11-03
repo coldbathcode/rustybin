@@ -1340,6 +1340,7 @@ fn not_found(config: &Config) -> Response {
 }
 
 fn audit(event: &str, user: &str, ip: Option<IpAddr>, outcome: &str) {
+    crate::audit::event(event);
     tracing::info!(
         target: "rustybin::auth",
         event,
@@ -1422,6 +1423,11 @@ pub(crate) async fn check_sign_in(
     warn_untrusted_proxy(headers, config);
     let tokens = &config.console_tokens;
     let tried = username;
+    // The audit log names the user the sign-in is for only when it exists
+    // (a name nobody has may be a password typed in the wrong field).
+    if let Some(u) = state.users.find_by_name(tried) {
+        crate::audit::actor_user(&u.id, &u.name);
+    }
     if let Err(wait) = tokens.check(ip, tried) {
         audit(event, username, ip, "rate_limited");
         return Err(rate_limited(wait));
@@ -2230,6 +2236,7 @@ async fn join_handler(
         tokens.abandoned(ip, JOIN_KEY);
         return locked_first_admin();
     }
+    crate::audit::actor_user(&invited.id, &invited.name);
     let Some(hash) = hash_off_runtime(tokens, &body.password).await else {
         tokens.abandoned(ip, JOIN_KEY);
         return busy();

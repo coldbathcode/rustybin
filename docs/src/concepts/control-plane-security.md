@@ -596,6 +596,21 @@ runs with which plan:
 {{#include ../../examples/concepts/control_auth.hurl:usage_build}}
 ```
 
+## The audit log
+
+Every change to the instance, every sign-in and every refusal that names a
+permission is an entry of the [audit log](../audit-log.md) (`GET /_rustybin/audit`,
+`audit.read`): who (a user, or the credential's kind), what (the route and method, or
+the management tool), the names it was about, the result, the request id and the
+client's address. Never a value, a body, a header, a password or a token. The last
+10,000 entries are in memory; with `RUSTYBIN_STATE_DIR` every entry is also a line of
+`<state>/audit/audit-YYYY-MM-DD.jsonl` (mode `0600`), kept `audit.retention_days` days
+(30) and at most `audit.max_bytes` (256 MiB). Those two settings need
+`settings.security`, and a document pulled from git cannot change them. Requests
+without a credential are no entries, except a sign-in (and a refusal on an open
+control plane), and those are capped at 600 a minute so nobody outside can flush the
+log.
+
 ## Logs
 
 `RUSTYBIN_LOG_FORMAT=json` writes one JSON object per line: `timestamp`, `level`,

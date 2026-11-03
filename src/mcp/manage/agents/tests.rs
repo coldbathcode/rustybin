@@ -1233,6 +1233,8 @@ const OLD_RIGHTS: &[(&str, &str, bool)] = &[
     ("list_projects", "read", true),
     ("save_project", "admin", false),
     ("delete_project", "admin", false),
+    // The audit log (step 14): an admin read tool, as 0.4 had them.
+    ("list_audit", "admin", true),
 ];
 
 /// The 0.4 ceilings, by right: `read-only` a read-only tool that is not a

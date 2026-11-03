@@ -783,12 +783,19 @@ pub fn publish_item(
         return Err(conflict_file(&key));
     }
     let meta = super::clean_meta(&meta).map_err(ServiceError::bad_request)?;
-    let access = meta
-        .access
-        .or_else(|| state.portal.get(&key).map(|p| p.access))
-        .unwrap_or_default();
+    let before = state.portal.get(&key).map(|p| p.access);
+    let access = meta.access.or(before).unwrap_or_default();
     if access == Access::Closed {
         check_closable(state, &id)?;
+    }
+    // For the audit log: an item opened or closed.
+    crate::audit::target("item", &key);
+    if before.map_or(access == Access::Closed, |b| b != access) {
+        crate::audit::event(if access == Access::Closed {
+            "close_item"
+        } else {
+            "open_item"
+        });
     }
     let (_, created) = state
         .portal

@@ -97,7 +97,8 @@ Two rules make a document safe to apply:
 Mocks applied through the API or a repository are `origin: api` (saved in the mocks
 state directory, as console changes are); the ones a `RUSTYBIN_CONFIG_FILE` declares
 stay `origin: file`. The built-in `petstore` sample and visitors' self-service mocks
-are never exported. The mocks' demo credentials (API keys, basic users, bearer tokens)
+are never exported, nor is the [audit log](audit-log.md) (its `audit.retention_days`
+and `audit.max_bytes` settings are, under `settings:`). The mocks' demo credentials (API keys, basic users, bearer tokens)
 are part of the mocks and exported with them unless `secrets=omit` is asked; a secret
 of the instance (an AI key, a webhook token, a password hash) never is.
 

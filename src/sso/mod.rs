@@ -1283,6 +1283,13 @@ impl Sso {
                 "the ID token names nobody this instance can call a user",
             )));
         };
+        // For the audit log: the groups that mapped (never the others the
+        // provider sent).
+        for (group, _) in &setup.role_map {
+            if person.groups.iter().any(|g| g == group) {
+                crate::audit::target("group", group);
+            }
+        }
         let (mapped, mut unknown) = map_roles(&setup, &person.groups, |r| {
             users.role_permissions(r).is_some()
         });

@@ -137,6 +137,7 @@ fn redirect_uri(
 }
 
 fn audit(event: &str, user: &str, ip: Option<std::net::IpAddr>, outcome: &str) {
+    crate::audit::event(event);
     tracing::info!(
         target: "rustybin::auth",
         event,
@@ -253,6 +254,7 @@ async fn callback_handler(
     match state.sso.complete(&state.users, &q.state, &q.code).await {
         Ok(done) => {
             tokens.succeeded(ip, SSO_KEY);
+            crate::audit::actor_user(&done.user.id, &done.user.name);
             audit("sso", &done.user.name, ip, "ok");
             back_with_code(&done.return_to, &done.code)
         }
@@ -322,6 +324,7 @@ async fn token_handler(
     match crate::login::sso_session(&state, &user, ip) {
         Some(body) => {
             tokens.succeeded(ip, SSO_KEY);
+            crate::audit::actor_user(&user.id, &user.name);
             audit("sso_token", &user.name, ip, "ok");
             no_store(Json(body).into_response())
         }

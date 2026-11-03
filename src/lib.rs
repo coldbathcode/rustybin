@@ -14,6 +14,7 @@ pub mod a2a;
 pub mod admin;
 pub mod ai;
 pub mod assist;
+pub mod audit;
 pub mod auth_apikey;
 pub mod auth_basic;
 pub mod auth_hmac;
@@ -154,6 +155,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     rbac::api::router,
     rbac::project_api::router,
     sso::api::router,
+    audit::router,
     assist::router,
     settings::router,
     diagnostics::router,
@@ -189,6 +191,10 @@ pub fn build_app(state: AppState) -> Router {
         state.clone(),
         control_auth::check_route,
     ));
+    // The audit log (outside the check, so it records the refusals too):
+    // every mutating control route, every refusal naming a permission, and
+    // the sign-ins handlers name.
+    let router = router.route_layer(middleware::from_fn_with_state(state.clone(), audit::layer));
 
     let mut router = router
         .fallback(not_found)

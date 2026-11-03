@@ -115,7 +115,18 @@ caller's `route_need`, `replay::visible` / `admit_for` / `select_for`, `checkpoi
 `ToolNeed::Project` and in `access::PROJECT_TOOLS`; another project's unreadable resource is `404`, lists leave it out;
 a move needs the write permission in both (`projects::check_move`); a project's roles never count as an instance admin;
 a document from git never changes members, prunes a project or moves a resource; a new kind of project resource is
-counted in `project_api::resources` (deletion and `move_to`).
+counted in `project_api::resources` (deletion and `move_to`). Step 14's audit log (user docs `docs/src/audit-log.md`;
+the security pass of step 14 is separate and still to come) is built: `src/audit.rs` (see below), `list_audit` in
+`src/mcp/manage/audit.rs`, `rustybin audit list | tail`, `ui/views/manage/audit.js`, the `audit.*` settings. Rules it
+left: a new mutating control route or management tool is an entry without code (`audit::layer`, the route layer
+outside `check_route`, and `tools::call`; `every_mutating_route_and_tool_writes_one_entry` walks the catalogue and
+`TOOLS`), and a mutating route that must not be one is a row of `audit::NOT_RECORDED` with its reason; a handler or a
+service names what only it knows with `audit::target`, `audit::event`, `audit::actor_user` (task-local, a no-op
+outside a request; blocking closures go through `audit::carried` and `merge`, as `Svc::compiling` and
+`configdoc::apply_on_pool` do); an entry never holds a value, a body, a header, a password or a token (a sign-in
+names the user only when it exists; `nothing_secret_reaches_an_entry_or_a_file` plants secrets and greps the ring
+and the files); `rbac::refuse` marks its answer (`need::Refusal`, the caller as `ControlCaller`) so a refusal is
+recorded on the data plane too; a document from git never changes `audit.*`.
 
 
 ## The whole instance as code, and source control (built)
@@ -274,7 +285,9 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
 - `src/lib.rs`: module list, `ROUTERS` (every module's router), `build_app(state)` with the middleware stack
   (outermost first): mock host rewrite (wraps the finished router, `mocks::host`), request id, trace, metrics,
   request id propagation, CORS, control-plane auth, API keys (`keys::enforce`), plan limits, time-to-headers timeout,
-  harness correlation (load test mode only), inspector capture, body limit, fault injection. JSON 404 fallback.
+  harness correlation (load test mode only), inspector capture, body limit, fault injection; on the routes
+  themselves the audit log (`audit::layer`) outside the one permission check (`control_auth::check_route`). JSON
+  404 fallback.
 - `src/server.rs`: `run(config)`, `start(config)`, `start_with_state(state)` -> `RunningServer`
   (bound addresses, `shutdown()`, `wait()`). HTTP bind failure is fatal; HTTPS and gRPC failures only warn.
   Ports may be 0. Graceful shutdown on SIGTERM/SIGINT with a 10 s grace period. With `RUSTYBIN_GRPC_ON_HTTP`
@@ -299,6 +312,14 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   `/_rustybin/egress` (admin). `AppState.egress`; A2A push, leads and the key registry resolve through it.
 - `src/control.rs`: `/_rustybin/config`, `/_rustybin/version`, `/_rustybin/ready` (readiness, never authenticated),
   `git_sha()` / `build_info()` (build.rs sets `RUSTYBIN_GIT_SHA`), `is_control_path()` (`/_rustybin/*`, `/ui/*`).
+- `src/audit.rs`: the audit log (`AppState.audit`, `GET /_rustybin/audit` with `actor`, `action`, `target`,
+  `since`, `until`, `result`, a cursor; `/_rustybin/audit/stream` SSE; `audit.read`). An `Entry` is time, `Actor`
+  (kind, user id and name, agent), via, action (route template and method, or tool), event, `Target`s, `Outcome`,
+  request id, address. A ring of 10,000 plus `<state>/audit/audit-YYYY-MM-DD.jsonl` written by one thread through a
+  bounded channel (full: counted in `not_written`), `audit.retention_days` (30, at most 365) and `audit.max_bytes`
+  (256 MiB) on the injectable `limits::Clock`; unauthenticated entries capped at 600 a minute. `layer` is a route
+  layer outside `control_auth::check_route` (which leaves the caller on the response as `ControlCaller`); it reads a
+  refusal's `reason` and `permission` from small 401/403 JSON bodies of control and portal routes.
 - `src/diagnostics.rs`: `GET /_rustybin/diagnostics` (admin; `rustybin doctor`, `diagnose_instance`, Management,
   Diagnostics): checks with a status, what was seen and the fix, never a credential; startup problems go in
   `AppState.diagnostics.note`. A new failure an operator can fix belongs here as a check.

@@ -99,6 +99,15 @@ pub fn principal_name(caller: &Resolved) -> String {
 }
 
 fn audit(event: &str, caller: &Resolved, target: &str, outcome: &str) {
+    crate::audit::event(event);
+    crate::audit::target(
+        if event.ends_with("_role") {
+            "role"
+        } else {
+            "user"
+        },
+        target,
+    );
     tracing::info!(
         target: "rustybin::auth",
         event,

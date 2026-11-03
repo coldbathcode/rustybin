@@ -71,8 +71,9 @@ pub const REPOSITORY_REFUSED: [&str; 5] = [
 /// beside [`REPOSITORY_REFUSED`]'s keys): single sign-on decides who signs
 /// in and with which roles (the issuer, the role map, the default roles,
 /// provisioning, the password sign-in), so a pusher must not repoint the
-/// issuer or map their own group to `admin`.
-pub const REPOSITORY_REFUSED_PREFIXES: [&str; 1] = ["sso."];
+/// issuer or map their own group to `admin`; the audit log's retention
+/// (`audit.*`), so a pusher cannot shorten the record of what they did.
+pub const REPOSITORY_REFUSED_PREFIXES: [&str; 2] = ["sso.", "audit."];
 
 /// Does a document from the repository leave this setting alone?
 pub fn repository_refused(key: &str) -> bool {
@@ -1378,12 +1379,24 @@ pub async fn apply_on_pool(
             "the instance is busy compiling other specs: try again in a moment".to_string()
         })?;
     let state = state.clone();
-    tokio::task::spawn_blocking(move || {
+    let dry_run = opts.dry_run;
+    let (report, note) = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        apply(&state, file, &opts)
+        crate::audit::carried(|| apply(&state, file, &opts))
     })
     .await
-    .map_err(|_| "the apply did not finish".to_string())
+    .map_err(|_| "the apply did not finish".to_string())?;
+    crate::audit::merge(note);
+    if !dry_run {
+        // For the audit log: the sections the document changed.
+        crate::audit::event("apply_config");
+        for c in report["changes"].as_array().into_iter().flatten() {
+            if let Some(s) = c["section"].as_str() {
+                crate::audit::target("section", s);
+            }
+        }
+    }
+    Ok(report)
 }
 
 /// Apply a document through every section's service. The answer carries

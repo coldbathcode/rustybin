@@ -119,6 +119,8 @@ memory, as before, and the settings API says `"persisted": false`.
 | Variable | Default | Description |
 |---|---|---|
 | `RUSTYBIN_STATE_DIR` | unset | Created (mode `0700`) when missing. Holds `settings.json` (the instance settings, mode `0600`), `secrets.key` (the key that seals stored secrets, generated once), and the defaults of `RUSTYBIN_MOCKS_STATE_DIR` (`<dir>/mocks`) and `RUSTYBIN_HARNESS_STATE_DIR` (`<dir>/harness`), which still override it when set. The startup log names the directory and what lives in it. |
+| `RUSTYBIN_AUDIT_RETENTION_DAYS` | `30` | How many UTC days of the [audit log](audit-log.md)'s files (`<state>/audit/audit-YYYY-MM-DD.jsonl`) are kept, 1 to 365. Seeds `audit.retention_days`; an invalid value warns and seeds nothing. |
+| `RUSTYBIN_AUDIT_MAX_BYTES` | `268435456` (256 MiB) | The audit files' largest total, 65536 or more: past it the oldest days are deleted, and when the day being written reaches it alone, new entries stay in memory until the next day. Seeds `audit.max_bytes`. |
 | `RUSTYBIN_SETTINGS_LOCK` | `false` | The environment is authoritative: stored values of the lockable settings are ignored, and writes to them answer `409`. For instances managed by a platform or from a configuration repository. |
 | `RUSTYBIN_SECRETS_KEY` | unset | The 32-byte key (base64, URL-safe base64 or hex) that seals stored secrets with ChaCha20-Poly1305. Unset: `<state>/secrets.key`, or a process-lifetime key without a state directory. Changing it makes the stored secrets unreadable: the instance logs it once, the API reports them `unreadable`, the console asks for them again, and the environment seed is used meanwhile. Never exposed. |
 

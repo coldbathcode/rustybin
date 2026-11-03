@@ -567,6 +567,7 @@ The token for an https remote is the secret `git.token`: an agent cannot set it.
 | `list_projects` | `instance.read` | The [projects](projects.md) the caller may see: the caller's roles there, what each holds, the members (with `users.read`); `name` for one |
 | `save_project` | `users.manage` | Create or change a project: description and members (`{user, roles}`, the whole list); confirmed when it gives a privileged role |
 | `delete_project` | `users.manage` | Delete a project (confirmed); one that holds mocks, saved tests or checkpoints needs `move_to` (another project, or `instance`) |
+| `list_audit` | `audit.read` | The [audit log](audit-log.md), newest first: who changed what, sign-ins and refusals, with the filters of `GET /_rustybin/audit` (`actor`, `action`, `target`, `since`, `until`, `result`) and `cursor`; names people typed under `untrusted_actor_name`, `untrusted_targets` and `untrusted_request_id` |
 
 No tool takes or returns a password or a hash: a person joins through the link
 `invite_user` answers and sets their own password in the browser, and changes it in

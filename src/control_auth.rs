@@ -593,8 +593,13 @@ pub async fn check_route(State(state): State<AppState>, mut req: Request, next: 
             req.extensions_mut().insert(RouteNeed(p));
         }
     }
-    req.extensions_mut().insert(ControlCaller(caller));
-    next.run(req).await
+    req.extensions_mut().insert(ControlCaller(caller.clone()));
+    let mut resp = next.run(req).await;
+    // Who called, for the audit log (`crate::audit::layer`, outside).
+    if resp.extensions().get::<ControlCaller>().is_none() {
+        resp.extensions_mut().insert(ControlCaller(caller));
+    }
+    resp
 }
 
 /// Does the caller act as a self-service visitor: no credential, an API

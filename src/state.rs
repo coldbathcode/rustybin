@@ -103,6 +103,9 @@ pub struct AppState {
     /// Single sign-on (`crate::sso`): sign-ins under way, one-time codes,
     /// the provider's discovery and keys.
     pub sso: Arc<crate::sso::Sso>,
+    /// The audit log (`crate::audit`): who did what, in memory and in
+    /// `<state>/audit/`.
+    pub audit: Arc<crate::audit::Audit>,
 }
 
 impl AppState {
@@ -210,6 +213,11 @@ impl AppState {
             egress.clone(),
             clock.clone(),
         ));
+        let audit = Arc::new(crate::audit::Audit::new(
+            config.state_dir.as_deref(),
+            settings.clone(),
+            clock.clone(),
+        ));
         Self {
             keys,
             limits,
@@ -238,6 +246,7 @@ impl AppState {
             checkpoints,
             users,
             sso,
+            audit,
         }
     }
 }

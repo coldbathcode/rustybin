@@ -201,6 +201,7 @@ pub fn issue_cookie(
 }
 
 fn audit(event: &str, user: &str, outcome: &str) {
+    crate::audit::event(event);
     tracing::info!(
         target: "rustybin::auth",
         event,

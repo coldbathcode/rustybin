@@ -151,6 +151,10 @@ pub const NOUNS: &[(&str, &str)] = &[
     ),
     ("keys", "API keys in shared mode"),
     ("egress", "The outbound connection policy"),
+    (
+        "audit",
+        "The audit log: who changed what, every sign-in and every refusal",
+    ),
 ];
 
 const NO_FLAGS: &[Flag] = &[];
@@ -192,6 +196,50 @@ const USER_FLAGS_UPDATE: &[Flag] = &[
     ),
 ];
 const TAIL_FLAGS: &[Flag] = &[
+    Flag::value("--max", "Stop after this many events"),
+    Flag::value("--timeout", "Stop after this many seconds (default 3600)"),
+];
+const AUDIT_FILTERS: [Flag; 6] = [
+    Flag::value(
+        "--actor",
+        "Contained in the actor's kind, user id, name or agent",
+    ),
+    Flag::value(
+        "--action",
+        "Contained in the action (route or tool) or the event (login, invite, sso)",
+    ),
+    Flag::value(
+        "--target",
+        "Contained in a target's name; kind:name for one kind (mock:orders)",
+    ),
+    Flag::value(
+        "--since",
+        "RFC 3339, a UTC day (2026-11-03) or an age (15m, 2h, 7d)",
+    ),
+    Flag::value("--until", "RFC 3339, a UTC day or an age"),
+    Flag::value(
+        "--result",
+        "ok, error, refused, asked, or an HTTP status code",
+    ),
+];
+const AUDIT_LIST_FLAGS: &[Flag] = &[
+    AUDIT_FILTERS[0],
+    AUDIT_FILTERS[1],
+    AUDIT_FILTERS[2],
+    AUDIT_FILTERS[3],
+    AUDIT_FILTERS[4],
+    AUDIT_FILTERS[5],
+    Flag::value("--limit", "At most this many (1 to 500, default 100)"),
+    Flag::value(
+        "--cursor",
+        "The next_cursor of the previous page (older entries)",
+    ),
+];
+const AUDIT_TAIL_FLAGS: &[Flag] = &[
+    AUDIT_FILTERS[0],
+    AUDIT_FILTERS[1],
+    AUDIT_FILTERS[2],
+    AUDIT_FILTERS[5],
     Flag::value("--max", "Stop after this many events"),
     Flag::value("--timeout", "Stop after this many seconds (default 3600)"),
 ];
@@ -453,6 +501,9 @@ pub static COMMANDS: &[Cmd] = &[
     // ── Keys and egress ──
     cmd!("keys", "usage", "[--day D] [--after A] [--limit N]", "Per-key usage in shared mode.", &[Flag::value("--day", "A UTC day (YYYY-MM-DD)"), Flag::value("--after", "The page cursor"), Flag::value("--limit", "At most this many")], [("GET", "/_rustybin/keys/usage")], false, "keys usage --day 2026-10-30"),
     cmd!("egress", "show", "", "The outbound policy: the allowlist, each feature's rule, the last decisions.", NO_FLAGS, [("GET", "/_rustybin/egress")], false, "egress show"),
+    // ── The audit log ──
+    cmd!("audit", "list", "[--actor A] [--action A] [--target T] [--since S] [--until U] [--result R] [--limit N] [--cursor C]", "The audit log, newest first: who did what and when, sign-ins and refusals (audit.read). --cursor pages back with the next_cursor printed last.", AUDIT_LIST_FLAGS, [("GET", "/_rustybin/audit")], false, "audit list --since 1h --result refused"),
+    cmd!("audit", "tail", "[--actor A] [--action A] [--target T] [--result R]", "Follow the audit log: one line per new entry that matches (audit.read).", AUDIT_TAIL_FLAGS, [("GET", "/_rustybin/audit/stream")], false, "audit tail --action mocks --max 10"),
 ];
 
 /// Catalogue paths no command calls, each with its reason (the parity test
@@ -731,6 +782,7 @@ pub async fn dispatch(ctx: &mut Ctx) -> Result<()> {
             .await
         }
         "egress" => get(ctx, "/_rustybin/egress", &[]).await,
+        "audit" => audit(ctx, cmd.verb).await,
         other => Err(Fail::Usage(format!("{other}: not implemented"))),
     }
 }
@@ -3787,5 +3839,116 @@ async fn harness(ctx: &mut Ctx, verb: &str) -> Result<()> {
         }
         "leave" => post(ctx, "/_rustybin/harness/leave", Body::None).await,
         _ => Err(Fail::Usage(format!("harness {verb}: not implemented"))),
+    }
+}
+
+/// Who an audit entry names, for people: a user's name, else the
+/// credential's kind (and name), plus the agent.
+fn audit_actor(a: &Value) -> String {
+    let kind = a["kind"].as_str().unwrap_or("");
+    let mut s = match (kind, a["name"].as_str()) {
+        ("user", Some(n)) => n.to_string(),
+        (k, Some(n)) => format!("{k}:{n}"),
+        (k, None) => k.to_string(),
+    };
+    if let Some(agent) = a["agent"].as_str() {
+        s.push_str(&format!(" (agent {agent})"));
+    }
+    s
+}
+
+/// An audit entry's targets as `kind:name`, comma separated.
+fn audit_targets(e: &Value) -> String {
+    e["targets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|t| {
+            format!(
+                "{}:{}",
+                t["kind"].as_str().unwrap_or(""),
+                t["name"].as_str().unwrap_or("")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// An audit entry's result: the status or the outcome, with a refusal's
+/// permission.
+fn audit_result(e: &Value) -> String {
+    let r = &e["result"];
+    let mut s = match r["status"].as_u64() {
+        Some(code) => code.to_string(),
+        None => r["outcome"].as_str().unwrap_or("").to_string(),
+    };
+    if let Some(p) = r["permission"].as_str() {
+        s.push_str(&format!(" {p}"));
+    } else if let Some(reason) = r["reason"].as_str() {
+        s.push_str(&format!(" {reason}"));
+    }
+    s
+}
+
+/// `rustybin audit list | tail`.
+async fn audit(ctx: &mut Ctx, verb: &str) -> Result<()> {
+    let filters = [
+        ("--actor", "actor"),
+        ("--action", "action"),
+        ("--target", "target"),
+        ("--since", "since"),
+        ("--until", "until"),
+        ("--result", "result"),
+    ];
+    match verb {
+        "list" => {
+            let mut query = q(&ctx.args.clone(), &filters);
+            query.extend(q(
+                &ctx.args.clone(),
+                &[("--limit", "limit"), ("--cursor", "cursor")],
+            ));
+            let v = ctx.client()?.get("/_rustybin/audit", &query).await?.value();
+            if ctx.json {
+                ctx.emit(&v);
+                return Ok(());
+            }
+            let rows: Vec<Value> = v["entries"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|e| {
+                    json!({
+                        "id": e["id"],
+                        "time": e["time"],
+                        "actor": audit_actor(&e["actor"]),
+                        "action": match e["event"].as_str() {
+                            Some(ev) => format!("{} [{ev}]", e["action"].as_str().unwrap_or("")),
+                            None => e["action"].as_str().unwrap_or("").to_string(),
+                        },
+                        "targets": audit_targets(e),
+                        "result": audit_result(e),
+                    })
+                })
+                .collect();
+            ctx.emit(&json!({ "entries": rows }));
+            if let Some(c) = v["next_cursor"].as_str() {
+                ctx.say(&format!("older entries: rustybin audit list --cursor {c}"));
+            }
+            Ok(())
+        }
+        "tail" => {
+            let query = q(&ctx.args.clone(), &filters);
+            let path = if query.is_empty() {
+                "/_rustybin/audit/stream".to_string()
+            } else {
+                let mut ser = form_urlencoded::Serializer::new(String::new());
+                for (k, v) in &query {
+                    ser.append_pair(k, v);
+                }
+                format!("/_rustybin/audit/stream?{}", ser.finish())
+            };
+            tail(ctx, &path).await
+        }
+        _ => Err(Fail::Usage(format!("audit {verb}: not implemented"))),
     }
 }

@@ -778,6 +778,20 @@ The outbound connection policy
 rustybin egress show
 ```
 
+## audit
+
+The audit log: who changed what, every sign-in and every refusal
+
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin audit list [--actor A] [--action A] [--target T] [--since S] [--until U] [--result R] [--limit N] [--cursor C]` | The audit log, newest first: who did what and when, sign-ins and refusals (audit.read). --cursor pages back with the next_cursor printed last. Flags: `--actor` value, `--action` value, `--target` value, `--since` value, `--until` value, `--result` value, `--limit` value, `--cursor` value. | `GET /_rustybin/audit` | `audit.read` |
+| `rustybin audit tail [--actor A] [--action A] [--target T] [--result R]` | Follow the audit log: one line per new entry that matches (audit.read). Flags: `--actor` value, `--action` value, `--target` value, `--result` value, `--max` value, `--timeout` value. | `GET /_rustybin/audit/stream` | `audit.read` |
+
+```bash
+rustybin audit list --since 1h --result refused
+rustybin audit tail --action mocks --max 10
+```
+
 ## Not covered by a command
 
 The management MCP endpoint (`rustybin mcp-stdio` bridges a client to it), the agent sign-in (OAuth) routes a browser walks, the harness cluster's node-to-node routes, a request bin's capture URLs and a mock's data plane.

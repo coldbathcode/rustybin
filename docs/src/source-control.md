@@ -64,6 +64,9 @@ Nothing more:
   names (the provider's groups would give it at the next sign-in). A role may
   narrow, and a new role nothing names is created (nobody holds it until someone
   with `users.manage` assigns it). Each refusal is a problem, the role kept as it is.
+- **Not the audit log's retention.** `audit.retention_days` and `audit.max_bytes`
+  are kept as they are (a pusher would otherwise shorten the [audit log](audit-log.md)
+  to erase what they did); a different value is a problem.
 - **Not the sign-in.** In password mode a document never changes the console's user
   name or password hash (a change is a problem), and pruning never removes them, so a
   document without them cannot bring back the default password; a public instance

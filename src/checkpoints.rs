@@ -853,6 +853,7 @@ pub fn save_for(
     replace: bool,
     project: Option<&str>,
 ) -> Result<Value, ServiceError> {
+    crate::audit::target("checkpoint", name);
     let write = crate::rbac::Permission::CheckpointsWrite;
     let project = crate::rbac::projects::target(&state.users, caller, write, project)?;
     if let Some(old) = state.checkpoints.get(name) {

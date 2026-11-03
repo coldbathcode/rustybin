@@ -222,6 +222,8 @@ pub fn check_members_change(
 }
 
 fn audit(event: &str, caller: &Resolved, project: &str) {
+    crate::audit::event(event);
+    crate::audit::target("project", project);
     tracing::info!(
         target: "rustybin::auth",
         event,

@@ -149,6 +149,7 @@ pub struct RunningServer {
     http_task: JoinHandle<std::io::Result<()>>,
     optional_tasks: Vec<(&'static str, JoinHandle<()>)>,
     limits: Arc<crate::limits::Limiter>,
+    audit: Arc<crate::audit::Audit>,
 }
 
 /// Cloneable trigger for a graceful shutdown.
@@ -211,6 +212,9 @@ impl RunningServer {
         }
         // Final usage file write, after in-flight responses were counted.
         self.limits.save();
+        // The audit entries still on their way to a file.
+        let audit = self.audit.clone();
+        let _ = tokio::task::spawn_blocking(move || audit.flush()).await;
         let shutting_down = *self.shutdown.borrow();
         match http_result {
             Ok(Ok(())) if shutting_down => {
@@ -583,6 +587,7 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
         http_task,
         optional_tasks,
         limits: state.limits.clone(),
+        audit: state.audit.clone(),
     })
 }
 
