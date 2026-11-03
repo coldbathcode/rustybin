@@ -501,7 +501,10 @@ pub static TOOLS: &[ToolDef] = &[
     }), &["document"])),
     tool!("git_status", "Git status", "Source control: the repository (remote, branch, auth, deploy key), the working copy, the drift between it and the instance, ahead and behind (with fetch), the timeline of operations and the last commits. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "fetch": { "type": "boolean", "default": false, "description": "Ask the remote for ahead and behind" } }), &[])),
     tool!("git_init", "Connect the repository", "Clone the configured remote (git.remote, git.branch settings) into the working copy, or start an empty one for a new repository. Admin.", Right::Admin, ro=false, destructive=false, idem=true, confirm=false, no_args),
-    tool!("git_commit", "Commit the configuration", "Export the instance into the working copy and commit with a message (nothing to commit is a fine answer). Admin.", Right::Admin, ro=false, destructive=false, idem=false, confirm=false, || obj(json!({ "message": { "type": "string" } }), &["message"])),
+    tool!("git_commit", "Commit the configuration", "Export the instance into the working copy and commit with a message (nothing to commit is a fine answer). checkpoints names local checkpoints (list_checkpoints) to write to <git.path>/checkpoints/<name>.json in the same commit: they hold mock data, so only when the user asks; the automatic mode never writes one. Admin.", Right::Admin, ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
+        "message": { "type": "string" },
+        "checkpoints": { "type": "array", "items": { "type": "string" }, "maxItems": crate::checkpoints::MAX_CHECKPOINTS, "description": "Local checkpoints to commit with the configuration (default none)" }
+    }), &["message"])),
     ToolDef {
         name: "git_push",
         title: "Push to the remote",
@@ -579,9 +582,10 @@ pub static TOOLS: &[ToolDef] = &[
         "name": { "type": "string", "description": "Letters, digits, . _ -" },
         "replace": { "type": "boolean" }
     }), &["name"])),
-    tool!("restore_checkpoint", "Restore a checkpoint", "Bring the instance's API mocks back to a checkpoint (created, replaced, data restored; API mocks it does not hold are DELETED), set the health toggle and reset the flaky counters. dry_run: true answers the same without changing anything (no confirmation). Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+    tool!("restore_checkpoint", "Restore a checkpoint", "Bring the instance's API mocks back to a checkpoint (created, replaced, data restored; API mocks it does not hold are DELETED), set the health toggle and reset the flaky counters. dry_run: true answers the same without changing anything (no confirmation). from: git restores the configuration repository's checkpoint of that name (list_repository_checkpoints; at the working copy's HEAD, git_pull first), checked like a local one. Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
         "name": { "type": "string" },
         "dry_run": { "type": "boolean" },
+        "from": { "type": "string", "enum": ["instance", "git"], "default": "instance", "description": "instance (a saved checkpoint) or git (the repository's)" },
         "confirm": confirm_prop()
     }), &["name"])),
     tool!("delete_checkpoint", "Delete a checkpoint", "Delete a saved checkpoint (the instance is not changed). Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
@@ -690,6 +694,8 @@ pub static TOOLS: &[ToolDef] = &[
         "name": name_prop(),
         "revision": { "type": "integer", "minimum": 0, "description": "The revision number (draft_revision, live_revision, get_mock's revisions, or a 409's expected_revision)" }
     }), &["name", "revision"])),
+    // Testing workflows 2: checkpoints in the configuration repository.
+    tool!("list_repository_checkpoints", "The repository's checkpoints", "The checkpoints committed to the configuration repository (<git.path>/checkpoints/ at the working copy's HEAD: git_pull first): name, saved_at, the mocks each holds, health, bytes, or why one cannot be restored (over the size cap, not a valid checkpoint). restore_checkpoint with from: git restores one. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({}), &[])),
 ];
 
 /// The tools the caller may use.
@@ -1014,6 +1020,7 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         "save_checkpoint" => checkpoints::save_checkpoint(ctx, &args).await,
         "restore_checkpoint" => checkpoints::restore_checkpoint(ctx, access, &args, params).await,
         "delete_checkpoint" => checkpoints::delete_checkpoint(ctx, &args, params).await,
+        "list_repository_checkpoints" => checkpoints::list_repository_checkpoints(ctx).await,
         // Saved tests
         "list_tests" => replay::list_tests(ctx, &args),
         "save_test" => replay::save_test(ctx, access, &args),

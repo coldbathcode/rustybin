@@ -4,8 +4,8 @@
 //!   and behind, the drift between the working copy and the instance, the
 //!   deploy key, the timeline).
 //! - `POST /_rustybin/git/init`: clone, or initialise for an empty remote.
-//! - `POST /_rustybin/git/commit` `{message}`: export into the working copy
-//!   and commit.
+//! - `POST /_rustybin/git/commit` `{message, checkpoints}`: export into the
+//!   working copy and commit, with the named checkpoints.
 //! - `POST /_rustybin/git/push`, `POST /_rustybin/git/pull` `{apply,
 //!   dry_run, prune}`, `POST /_rustybin/git/resolve` `{with, message}`.
 //! - `GET`, `POST /_rustybin/git/key` `{replace}`: the deploy key.
@@ -85,6 +85,9 @@ async fn init(State(state): State<AppState>, headers: HeaderMap) -> Response {
 struct CommitBody {
     #[serde(default)]
     message: String,
+    /// Local checkpoints to write next to the document (default none).
+    #[serde(default)]
+    checkpoints: Vec<String>,
 }
 
 async fn commit(
@@ -102,7 +105,12 @@ async fn commit(
     answer(
         state
             .git
-            .commit(&state, &b.message, &operator(&headers, &state))
+            .commit_with(
+                &state,
+                &b.message,
+                &b.checkpoints,
+                &operator(&headers, &state),
+            )
             .await,
     )
 }
@@ -260,7 +268,12 @@ pub fn catalog() -> Vec<Endpoint> {
             )
             .example(Example::post("Connect", INIT_PATH).expect_status(409)),
         Endpoint::new(COMMIT_PATH, &["POST"], category::CONTROL, "Commit the instance's configuration (admin)")
-            .description("{message}: export the instance as a bundle into the working copy and commit it.")
+            .description(
+                "{message, checkpoints}: export the instance as a bundle into the working copy and \
+                 commit it; checkpoints names local checkpoints to write to \
+                 <git.path>/checkpoints/<name>.json in the same commit (default none, never by \
+                 the automatic mode).",
+            )
             .example(
                 Example::post("Commit", COMMIT_PATH)
                     .json(r#"{"message": "Add the orders mock"}"#)
@@ -319,13 +332,16 @@ pub fn openapi_paths() -> Value {
         } },
         INIT_PATH: { "post": { "tags": tags, "summary": "Connect the repository", "operationId": "gitInit", "responses": ok("{initialised, fresh, remote_branch, head}") } },
         COMMIT_PATH: { "post": { "tags": tags, "summary": "Commit the instance's configuration", "operationId": "gitCommit",
-            "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["message"], "properties": { "message": { "type": "string", "maxLength": super::MAX_MESSAGE } } } } } },
-            "responses": ok("{committed, files, head}") } },
+            "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["message"], "properties": {
+                "message": { "type": "string", "maxLength": super::MAX_MESSAGE },
+                "checkpoints": { "type": "array", "items": { "type": "string" }, "maxItems": crate::checkpoints::MAX_CHECKPOINTS, "default": [],
+                    "description": "Local checkpoints written to <git.path>/checkpoints/<name>.json in this commit (mock data: an explicit commit only)" } } } } } },
+            "responses": ok("{committed, files, checkpoints, head}") } },
         PUSH_PATH: { "post": { "tags": tags, "summary": "Push", "operationId": "gitPush", "responses": ok("{pushed, head}") } },
         PULL_PATH: { "post": { "tags": tags, "summary": "Pull and apply", "operationId": "gitPull",
             "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": {
                 "apply": { "type": "boolean", "default": false }, "dry_run": { "type": "boolean", "default": false }, "prune": { "type": "boolean", "default": false } } } } } },
-            "responses": ok("{fast_forwarded, ahead, behind, head, applied}") } },
+            "responses": ok("{fast_forwarded, ahead, behind, head, applied, checkpoints (the repository's, by name)}") } },
         RESOLVE_PATH: { "post": { "tags": tags, "summary": "Resolve a diverged branch", "operationId": "gitResolve",
             "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["with"], "properties": {
                 "with": { "type": "string", "enum": ["instance", "repository"] }, "message": { "type": "string" } } } } } },

@@ -4,7 +4,9 @@
 //! data) and the health toggle; a restore also resets the flaky counters.
 //! Never visitors' or API keys' mocks, file mocks, the sample, a gateway
 //! scenario's mock, settings or secrets. At most [`MAX_CHECKPOINTS`], kept in
-//! `<state>/checkpoints/`.
+//! `<state>/checkpoints/`. An explicit git commit can also write one next to
+//! `rustybin.yaml` (`crate::sourcecontrol::checkpoints`); `?from=git` lists
+//! and restores the repository's, read as untrusted ([`parse_untrusted`]).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -106,6 +108,86 @@ pub fn valid_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// A checkpoint from outside the instance (a file of the configuration
+/// repository, `<name>.json`): parsed and held to what a local one can be.
+/// The size, the name (the file's), at most the instance's number of
+/// mocks, valid and distinct mock names, a revision each within the spec
+/// limit, the stateful data within a mock's budget. The specs and settings
+/// are then compiled and checked by the restore, like a local checkpoint's.
+pub fn parse_untrusted(
+    bytes: &[u8],
+    name: &str,
+    limits: &crate::mocks::store::MockLimits,
+) -> Result<Checkpoint, String> {
+    let file = format!("{name}.json");
+    if bytes.len() > MAX_CHECKPOINT_BYTES {
+        return Err(format!(
+            "{file} is {} bytes: at most {MAX_CHECKPOINT_BYTES}",
+            bytes.len()
+        ));
+    }
+    let cp: Checkpoint =
+        serde_json::from_slice(bytes).map_err(|e| format!("{file} is not a checkpoint: {e}"))?;
+    if cp.name != name || !valid_name(&cp.name) {
+        return Err(format!(
+            "{file} holds the checkpoint {:?}: a checkpoint file is named after its checkpoint",
+            truncate(&cp.name, 80)
+        ));
+    }
+    if cp.saved_at.len() > 64 {
+        return Err(format!("{file}: saved_at is not a time"));
+    }
+    if cp.mocks.len() > limits.max_mocks {
+        return Err(format!(
+            "{file} holds {} mocks: this instance keeps at most {}",
+            cp.mocks.len(),
+            limits.max_mocks
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for m in &cp.mocks {
+        if !crate::mocks::model::valid_name(&m.name) {
+            return Err(format!(
+                "{file}: mock {:?} is not a mock name (1 to 40 characters a-z, 0-9 and '-')",
+                truncate(&m.name, 80)
+            ));
+        }
+        if !seen.insert(m.name.as_str()) {
+            return Err(format!("{file}: mock {} appears twice", m.name));
+        }
+        if m.live.is_none() && m.draft.is_none() {
+            return Err(format!("{file}: mock {} has no revision", m.name));
+        }
+        for r in [&m.live, &m.draft].into_iter().flatten() {
+            if r.source.len() > limits.max_spec_bytes {
+                return Err(format!(
+                    "{file}: the spec of mock {} is {} bytes: at most {}",
+                    m.name,
+                    r.source.len(),
+                    limits.max_spec_bytes
+                ));
+            }
+        }
+        let collections = m.state.collections.len();
+        let items: usize = m.state.collections.iter().map(|(_, i)| i.len()).sum();
+        if collections > limits.state_items || items > limits.state_items {
+            return Err(format!(
+                "{file}: mock {} holds {items} stateful item(s) in {collections} collection(s): at most {}",
+                m.name, limits.state_items
+            ));
+        }
+    }
+    Ok(cp)
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", s.chars().take(max).collect::<String>())
+    }
 }
 
 // ── The store ───────────────────────────────────────────────────────
@@ -323,6 +405,17 @@ pub fn restore(state: &AppState, name: &str, dry_run: bool) -> Result<Value, Ref
             format!("no checkpoint named {name:?}"),
         )
     })?;
+    restore_checkpoint(state, &cp, dry_run)
+}
+
+/// Restore `cp`, a local checkpoint or one read from the repository (and
+/// checked by [`parse_untrusted`]). Runs on the blocking pool.
+pub fn restore_checkpoint(
+    state: &AppState,
+    cp: &Checkpoint,
+    dry_run: bool,
+) -> Result<Value, Refused> {
+    let name = cp.name.as_str();
     let store = &state.mocks;
     // One restore at a time, and no edit in the middle of one: the edit
     // lock is held from the first read to the last write.
@@ -472,12 +565,128 @@ pub struct SaveBody {
     pub replace: bool,
 }
 
-async fn list_handler(State(state): State<AppState>) -> Json<Value> {
+/// Where a checkpoint is read from: this instance's store, or the commit
+/// `HEAD` of the configuration repository's working copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Instance,
+    Git,
+}
+
+impl Source {
+    pub fn parse(raw: Option<&str>) -> Result<Self, Refused> {
+        match raw {
+            None | Some("") | Some("instance") => Ok(Self::Instance),
+            Some("git") => Ok(Self::Git),
+            Some(other) => Err(Refused::new(
+                StatusCode::BAD_REQUEST,
+                format!("from {other:?}: instance (the default) or git"),
+            )),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct FromQuery {
+    #[serde(default)]
+    from: Option<String>,
+}
+
+impl From<crate::sourcecontrol::GitError> for Refused {
+    fn from(e: crate::sourcecontrol::GitError) -> Self {
+        Self(e.status, e.message)
+    }
+}
+
+/// The repository's checkpoints at `HEAD` (admin): each summarised when it
+/// parses and passes the checks, else listed with the reason.
+pub async fn list_from_git(state: &AppState) -> Result<Value, Refused> {
+    let listing = state.git.repository_checkpoints().await?;
+    let limits = state.mocks.limits();
+    let max = state.git.max_checkpoint_bytes();
+    tokio::task::spawn_blocking(move || {
+        let items: Vec<Value> = listing
+            .entries
+            .into_iter()
+            .map(|(e, read)| {
+                match read.and_then(|b| parse_untrusted(&b, &e.name, &limits).map(|c| (c, b.len())))
+                {
+                    Ok((cp, n)) => {
+                        let mut s = cp.summary(n);
+                        s["ok"] = json!(true);
+                        s
+                    }
+                    Err(error) => {
+                        json!({ "name": e.name, "bytes": e.bytes, "ok": false, "error": error })
+                    }
+                }
+            })
+            .collect();
+        json!({
+            "from": "git",
+            "path": listing.path,
+            "head": listing.head,
+            "checkpoints": items,
+            "truncated": listing.truncated,
+            "max_checkpoints": MAX_CHECKPOINTS,
+            "max_checkpoint_bytes": max,
+        })
+    })
+    .await
+    .map_err(|_| {
+        Refused::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the listing did not finish",
+        )
+    })
+}
+
+/// Restore a checkpoint of the repository (`HEAD`): read whole within the
+/// cap, then parsed, checked ([`parse_untrusted`]) and restored on the
+/// service's compile pool, like a local one.
+pub async fn restore_from_git(svc: Svc, name: String, dry_run: bool) -> Result<Value, Refused> {
+    svc.require_admin()?;
+    let (bytes, head) = svc.state.git.repository_checkpoint(&name).await?;
+    let limits = svc.state.mocks.limits();
+    svc.compiling(move |s| {
+        let cp = parse_untrusted(&bytes, &name, &limits)
+            .map_err(|e| ServiceError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+        drop(bytes);
+        let mut v =
+            restore_checkpoint(&s.state, &cp, dry_run).map_err(|r| ServiceError::new(r.0, r.1))?;
+        v["from"] = json!("git");
+        v["head"] = head.unwrap_or(Value::Null);
+        Ok(v)
+    })
+    .await
+    .map_err(Refused::from)
+}
+
+async fn list_handler(
+    State(state): State<AppState>,
+    Query(q): Query<FromQuery>,
+    headers: HeaderMap,
+) -> Response {
+    match Source::parse(q.from.as_deref()) {
+        Err(e) => return e.into_response(),
+        Ok(Source::Git) => {
+            // The repository is source control's: admin, as its routes.
+            if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
+                return r;
+            }
+            return match list_from_git(&state).await {
+                Ok(v) => Json(v).into_response(),
+                Err(e) => e.into_response(),
+            };
+        }
+        Ok(Source::Instance) => {}
+    }
     Json(json!({
         "checkpoints": state.checkpoints.list(),
         "max_checkpoints": MAX_CHECKPOINTS,
         "scope": "the instance's API mocks (deployed revision, draft, on or off, stateful data) and the health toggle; a restore also resets the flaky counters. Never visitors' or keys' mocks, file mocks, settings or secrets.",
     }))
+    .into_response()
 }
 
 async fn save_handler(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
@@ -534,6 +743,8 @@ async fn delete_handler(
 struct RestoreQuery {
     #[serde(default)]
     dry_run: bool,
+    #[serde(default)]
+    from: Option<String>,
 }
 
 /// Restore through the service's compile pool (specs are compiled).
@@ -557,8 +768,16 @@ async fn restore_handler(
     if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
         return r;
     }
+    let source = match Source::parse(q.from.as_deref()) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
     let svc = Svc::from_request(&state, &headers, &extensions, &uri);
-    match restore_with(svc, name, q.dry_run).await {
+    let result = match source {
+        Source::Instance => restore_with(svc, name, q.dry_run).await,
+        Source::Git => restore_from_git(svc, name, q.dry_run).await,
+    };
+    match result {
         Ok(v) => Json(v).into_response(),
         Err(e) => e.into_response(),
     }
@@ -577,9 +796,13 @@ pub fn catalog() -> Vec<Endpoint> {
             LIST_PATH,
             &["GET", "POST"],
             category::CONTROL,
-            "Checkpoints of the instance's API mocks and health: list them, or save one (admin)",
+            "Checkpoints of the instance's API mocks and health: list them (?from=git: the configuration repository's, admin), or save one (admin)",
         )
-        .example(Example::get("Checkpoints", LIST_PATH)),
+        .example(Example::get("Checkpoints", LIST_PATH))
+        .example(
+            Example::get("The repository's checkpoints", "/_rustybin/checkpoints?from=git")
+                .expect_status(409),
+        ),
         Endpoint::new(
             ONE_PATH,
             &["GET", "DELETE"],
@@ -591,7 +814,7 @@ pub fn catalog() -> Vec<Endpoint> {
             RESTORE_PATH,
             &["POST"],
             category::CONTROL,
-            "Restore a checkpoint: mocks, their data and health back, flaky counters reset; ?dry_run=true says what would change (admin)",
+            "Restore a checkpoint: mocks, their data and health back, flaky counters reset; ?dry_run=true says what would change, ?from=git restores the configuration repository's (admin)",
         )
         .example(Example::post("Preview a restore", "/_rustybin/checkpoints/demo-start/restore?dry_run=true").expect_status(404)),
     ]
@@ -605,7 +828,9 @@ pub fn openapi_paths() -> Value {
         LIST_PATH: {
             "get": {
                 "tags": ["Control Plane"], "summary": "Checkpoints", "operationId": "listCheckpoints",
-                "responses": { "200": { "description": "The checkpoints and their scope", "content": obj } }
+                "description": "This instance's checkpoints; from=git lists the configuration repository's instead (the files under <git.path>/checkpoints/ at the working copy's HEAD, after a pull; admin), each read within the 16 MiB cap and checked, or listed with the reason it cannot be restored.",
+                "parameters": [{ "name": "from", "in": "query", "required": false, "schema": { "type": "string", "enum": ["instance", "git"], "default": "instance" } }],
+                "responses": { "200": { "description": "The checkpoints and their scope", "content": obj }, "409": { "description": "from=git: source control is not configured or connected" } }
             },
             "post": {
                 "tags": ["Control Plane"], "summary": "Save a checkpoint (admin)", "operationId": "saveCheckpoint",
@@ -631,9 +856,11 @@ pub fn openapi_paths() -> Value {
         },
         RESTORE_PATH: { "post": {
             "tags": ["Control Plane"], "summary": "Restore a checkpoint (admin)", "operationId": "restoreCheckpoint",
-            "description": "Brings the instance's API mocks back as saved (created, replaced, data restored, unchanged; mocks the checkpoint does not hold deleted), sets the health toggle and resets the flaky counters. dry_run answers the same without changing anything.",
-            "parameters": [name, { "name": "dry_run", "in": "query", "required": false, "schema": { "type": "boolean" } }],
-            "responses": { "200": { "description": "What changed", "content": obj }, "404": { "description": "No such checkpoint" } }
+            "description": "Brings the instance's API mocks back as saved (created, replaced, data restored, unchanged; mocks the checkpoint does not hold deleted), sets the health toggle and resets the flaky counters. dry_run answers the same without changing anything. from=git restores the configuration repository's checkpoint of that name (at the working copy's HEAD): untrusted input, read within the size cap, checked and compiled like a local one.",
+            "parameters": [name, { "name": "dry_run", "in": "query", "required": false, "schema": { "type": "boolean" } },
+                { "name": "from", "in": "query", "required": false, "schema": { "type": "string", "enum": ["instance", "git"], "default": "instance" } }],
+            "responses": { "200": { "description": "What changed", "content": obj }, "404": { "description": "No such checkpoint" },
+                "413": { "description": "from=git: the file is larger than a checkpoint may be" }, "422": { "description": "from=git: the file is not a valid checkpoint" } }
         } }
     })
 }

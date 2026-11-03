@@ -12,6 +12,20 @@
   and what the draft changed since; the store now also keeps the drafts replaced before
   they were deployed (as many as deployed revisions), so the `409`'s `changed` names
   the sections for an undeployed base too.
+- **Checkpoints in the configuration repository**: `POST /_rustybin/git/commit` takes
+  `checkpoints` and writes those [checkpoints](checkpoints.md#in-the-configuration-repository)
+  to `<git.path>/checkpoints/<name>.json` next to `rustybin.yaml` (only a commit that
+  names one: the automatic mode never writes one, and no commit stages anything else in
+  that directory). A pull answers the repository's checkpoints by name; `GET
+  /_rustybin/checkpoints?from=git` lists them with what each holds, and `POST
+  /_rustybin/checkpoints/{name}/restore?from=git` (with `dry_run`) restores one. A
+  checkpoint from the repository is untrusted: size-checked before it is read (16 MiB),
+  parsed and held to a local checkpoint's caps, compiled on the compile pool.
+  `rustybin git commit --checkpoint NAME`, `rustybin checkpoint list --from-git`,
+  `rustybin checkpoint restore NAME --from-git`; `git_commit` gains `checkpoints`,
+  `restore_checkpoint` gains `from`, the new tool `list_repository_checkpoints`; the
+  console's Checkpoints view gets an "In the repository" card and the Source control
+  commit card a checkpoint choice.
 - **Saved tests on a schedule, with a failure notice**: a [schedule](saved-tests.md#schedules)
   runs saved tests (every one, `names` or a `prefix`) `every` 5m to 24h or `at` a time of
   day (UTC), without anyone at the console; each run is in the history as

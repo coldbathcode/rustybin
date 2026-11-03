@@ -39,6 +39,7 @@ use crate::settings::{Kind, Settings, Spec};
 use crate::state::AppState;
 
 pub mod api;
+pub mod checkpoints;
 #[cfg(test)]
 mod tests;
 
@@ -518,6 +519,9 @@ pub struct SourceControl {
     pinned: Mutex<Option<(String, u16, Vec<std::net::SocketAddr>)>>,
     /// The largest spec a pull reads (the instance's mock limit).
     max_spec_bytes: usize,
+    /// The largest checkpoint read from the repository (a local
+    /// checkpoint's cap; lowered by tests).
+    max_checkpoint_bytes: std::sync::atomic::AtomicUsize,
 }
 
 impl SourceControl {
@@ -530,6 +534,9 @@ impl SourceControl {
             lock: tokio::sync::Mutex::new(()),
             pinned: Mutex::new(None),
             max_spec_bytes: crate::mocks::store::MockLimits::for_config(config).max_spec_bytes,
+            max_checkpoint_bytes: std::sync::atomic::AtomicUsize::new(
+                crate::checkpoints::MAX_CHECKPOINT_BYTES,
+            ),
             timeline: Mutex::new(VecDeque::new()),
             last_pull: Mutex::new(None),
             git_version: OnceLock::new(),
@@ -1287,10 +1294,24 @@ impl SourceControl {
     }
 
     /// `POST /_rustybin/git/commit`: export the instance into the working
-    /// copy and commit.
+    /// copy and commit. Never a checkpoint (the automatic mode commits
+    /// through here): [`Self::commit_with`] names them.
     pub async fn commit(&self, state: &AppState, message: &str, by: &str) -> GitResult<Value> {
+        self.commit_with(state, message, &[], by).await
+    }
+
+    /// [`Self::commit`] plus the named checkpoints, written to
+    /// `<git.path>/checkpoints/<name>.json`: an explicit commit only, a
+    /// checkpoint holds mock data.
+    pub async fn commit_with(
+        &self,
+        state: &AppState,
+        message: &str,
+        checkpoints: &[String],
+        by: &str,
+    ) -> GitResult<Value> {
         let started = Instant::now();
-        let result = self.commit_inner(state, message).await;
+        let result = self.commit_inner(state, message, checkpoints).await;
         self.record(
             "commit",
             by,
@@ -1303,8 +1324,15 @@ impl SourceControl {
         result
     }
 
-    async fn commit_inner(&self, state: &AppState, message: &str) -> GitResult<Value> {
+    async fn commit_inner(
+        &self,
+        state: &AppState,
+        message: &str,
+        checkpoints: &[String],
+    ) -> GitResult<Value> {
         let message = check_message(message)?;
+        // Every named checkpoint exists before anything is written.
+        let kept = checkpoints::to_write(state, checkpoints)?;
         let (repo, remote) = self.ready().await?;
         let env = self.git_env(&remote)?;
         let _guard = self.lock.try_lock().map_err(|_| busy())?;
@@ -1313,33 +1341,66 @@ impl SourceControl {
         let export = configdoc::export(state, SecretsMode::Refs, true);
         configdoc::write_dir_within(&export, &dir, &repo)
             .map_err(|e| GitError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        let written = self.write_checkpoints(&kept, &repo)?;
         let pathspec = self.path().unwrap_or_else(|| ".".into());
-        self.must(&env, &repo, &["add", "-A", "--", &pathspec])
+        // The document and specs, never the checkpoints directory: only
+        // the checkpoints this commit names are staged, so a file left
+        // there by anything else stays out of every commit.
+        let rel = self.checkpoints_rel();
+        let exclude = format!(":(exclude){rel}");
+        let _ = self
+            .git(&env, &repo, &["reset", "--quiet", "--", &rel])
+            .await;
+        self.must(&env, &repo, &["add", "-A", "--", &pathspec, &exclude])
             .await?;
-        let status = self
-            .must(&env, &repo, &["status", "--porcelain", "--", &pathspec])
+        if !written.is_empty() {
+            let mut args = vec!["add", "--"];
+            args.extend(written.iter().map(String::as_str));
+            self.must(&env, &repo, &args).await?;
+        }
+        let staged = self
+            .must(
+                &env,
+                &repo,
+                &["diff", "--cached", "--name-only", "--", &pathspec],
+            )
             .await?;
-        if status.trim().is_empty() {
+        let names: Vec<&str> = kept.iter().map(|c| c.name.as_str()).collect();
+        if staged.trim().is_empty() {
             return Ok(json!({
                 "committed": false,
+                "checkpoints": names,
                 "detail": "nothing to commit: the working copy already matches the instance",
                 "head": self.head(&env, &repo).await,
             }));
         }
-        let files = status.lines().count();
-        self.must(&env, &repo, &["commit", "--quiet", "-m", &message])
-            .await?;
+        let files = staged.lines().filter(|l| !l.trim().is_empty()).count();
+        if let Err(e) = self
+            .must(&env, &repo, &["commit", "--quiet", "-m", &message])
+            .await
+        {
+            // Nothing this commit named stays staged for a later one.
+            let _ = self
+                .git(&env, &repo, &["reset", "--quiet", "--", &rel])
+                .await;
+            return Err(e);
+        }
         let head = self.head(&env, &repo).await;
         let short = head
             .as_ref()
             .and_then(|h| h["short"].as_str())
             .unwrap_or("")
             .to_string();
+        let with = match names.len() {
+            0 => String::new(),
+            n => format!(", {n} checkpoint(s)"),
+        };
         Ok(json!({
             "committed": true,
             "files": files,
+            "checkpoints": names,
             "head": head,
-            "detail": format!("{short}: {} ({files} file(s))", message.lines().next().unwrap_or("")),
+            "detail": format!("{short}: {} ({files} file(s){with})", message.lines().next().unwrap_or("")),
         }))
     }
 
@@ -1476,6 +1537,14 @@ impl SourceControl {
             fast_forwarded = true;
         }
         let head = self.head(&env, &repo).await;
+        // The repository's checkpoints at the commit the pull reads (never
+        // applied by a pull: POST /_rustybin/checkpoints/{name}/restore?from=git).
+        let list_ref = if dry_run && (head.is_none() || behind > 0) {
+            upstream.as_str()
+        } else {
+            "HEAD"
+        };
+        let (entries, _) = self.checkpoint_entries(&env, &repo, list_ref).await;
         let mut body = json!({
             "fast_forwarded": fast_forwarded,
             "ahead": ahead,
@@ -1483,6 +1552,7 @@ impl SourceControl {
             "head": head,
             "applied": null,
             "dry_run": dry_run,
+            "checkpoints": entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
         });
         let mut detail = if behind > 0 {
             format!("pulled {behind} commit(s)")
@@ -1684,7 +1754,7 @@ impl SourceControl {
             } else {
                 message.to_string()
             };
-            let committed = self.commit_inner(state, &message).await?;
+            let committed = self.commit_inner(state, &message, &[]).await?;
             let pushed = if committed["committed"] == json!(true) {
                 Some(self.push_inner().await?)
             } else {

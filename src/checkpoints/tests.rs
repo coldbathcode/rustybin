@@ -374,3 +374,49 @@ fn restores_run_one_at_a_time_under_the_edit_lock() {
         assert!(state.mocks.get("b").expect("b").enabled);
     }
 }
+
+#[test]
+fn a_checkpoint_from_outside_is_held_to_the_local_caps() {
+    let limits = crate::mocks::store::MockLimits::for_config(&config());
+    let rev = json!({ "source": ITEMS, "settings": {} });
+    let mock = |name: &str| json!({ "name": name, "enabled": true, "live": rev.clone() });
+    let doc = |mocks: Vec<Value>| json!({ "name": "x", "saved_at": "2026-11-03T00:00:00Z", "healthy": true, "mocks": mocks });
+    let parse = |v: &Value| parse_untrusted(v.to_string().as_bytes(), "x", &limits);
+    let cp = parse(&doc(vec![mock("items")])).expect("valid");
+    assert_eq!(cp.mocks[0].name, "items");
+    let refused = |v: Value, says: &str| {
+        let e = parse(&v).expect_err(says);
+        assert!(e.contains(says), "{e}");
+    };
+    refused(json!({ "name": "x" }), "is not a checkpoint");
+    let mut renamed = doc(vec![]);
+    renamed["name"] = json!("y");
+    refused(renamed, "named after its checkpoint");
+    let mut dated = doc(vec![]);
+    dated["saved_at"] = json!("x".repeat(200));
+    refused(dated, "saved_at");
+    refused(doc(vec![mock("Not A Name")]), "is not a mock name");
+    refused(doc(vec![mock("a"), mock("a")]), "appears twice");
+    refused(
+        doc(vec![json!({ "name": "a", "enabled": true })]),
+        "has no revision",
+    );
+    refused(
+        doc((0..=limits.max_mocks)
+            .map(|i| mock(&format!("m{i}")))
+            .collect()),
+        "keeps at most",
+    );
+    let mut big = mock("big");
+    big["live"]["source"] = json!("x".repeat(limits.max_spec_bytes + 1));
+    refused(doc(vec![big]), "the spec of mock big");
+    let mut full = mock("full");
+    let items: Vec<Value> = (0..=limits.state_items)
+        .map(|i| json!([i.to_string(), { "n": i }]))
+        .collect();
+    full["state"] = json!({ "collections": [["/items", items]] });
+    refused(doc(vec![full]), "stateful item(s)");
+    let e = parse_untrusted(&vec![b' '; MAX_CHECKPOINT_BYTES + 1], "x", &limits)
+        .expect_err("too large");
+    assert!(e.contains("at most"), "{e}");
+}

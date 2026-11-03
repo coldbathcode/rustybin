@@ -251,7 +251,9 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   checkpoint keeps each one's deployed revision, a differing draft, on or off and `MockState::copy`, plus the
   health toggle; `restore` (on the compile pool, with `dry_run`) answers created / replaced / data_restored /
   unchanged / deleted and resets the flaky counters. 20 checkpoints in `<state>/checkpoints/`. Never settings,
-  secrets, visitors' or keys' mocks.
+  secrets, visitors' or keys' mocks. In git (`src/sourcecontrol/checkpoints.rs`), an explicit `git/commit` with
+  `checkpoints` writes `<git.path>/checkpoints/<name>.json` (never the automatic mode, whose commits exclude the
+  directory) and `?from=git` lists and restores the repository's through `parse_untrusted` and the compile pool.
 - `src/replay/`: saved tests (`/_rustybin/tests*`, `rustybin tests`, `list_tests` / `save_test` / `delete_test` /
   `run_tests`, the console's Saved tests view and Live traffic's Save as test, `tests:` of `rustybin.yaml`).
   `mod.rs` the model (`SavedTest`, `Assertion`: one kind each), validation, the store (`AppState.saved_tests`,

@@ -84,6 +84,49 @@ out=$(curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: applic
 expect "$out" '"dry_run":true'
 expect "$out" '"summary":\[\]'
 
+# A checkpoint of the first instance, committed next to rustybin.yaml.
+curl -s -o /dev/null -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"name": "demo-start"}' "$A/_rustybin/checkpoints"
+out=$(
+# ANCHOR: commit_checkpoint
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"message": "The demo-start checkpoint", "checkpoints": ["demo-start"]}' "$A/_rustybin/git/commit"
+curl -s -X POST -H "Authorization: Bearer $ADMIN" "$A/_rustybin/git/push"
+# ANCHOR_END: commit_checkpoint
+)
+echo "$out"
+expect "$out" '"checkpoints":\["demo-start"\]'
+expect "$(git -C config.git ls-tree -r --name-only main)" 'rustybin/checkpoints/demo-start.json'
+
+out=$(
+# ANCHOR: pull_checkpoints
+# The second instance pulls: the answer lists the repository's checkpoints
+# (a pull never restores one), and ?from=git shows what each holds.
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"apply": true}' "$B/_rustybin/git/pull"
+curl -s -H "Authorization: Bearer $ADMIN" "$B/_rustybin/checkpoints?from=git"
+# ANCHOR_END: pull_checkpoints
+)
+echo "$out"
+expect "$out" '"checkpoints":\["demo-start"\]'
+expect "$out" '"from":"git"'
+expect "$out" '"ok":true'
+
+out=$(
+# ANCHOR: restore_from_git
+# What a restore would change, then the restore.
+curl -s -X POST -H "Authorization: Bearer $ADMIN" \
+  "$B/_rustybin/checkpoints/demo-start/restore?from=git&dry_run=true"
+curl -s -X POST -H "Authorization: Bearer $ADMIN" \
+  "$B/_rustybin/checkpoints/demo-start/restore?from=git"
+# ANCHOR_END: restore_from_git
+)
+echo "$out"
+expect "$out" '"dry_run":true'
+expect "$out" '"dry_run":false'
+expect "$out" '"from":"git"'
+expect "$out" '"problems":\[\]'
+
 # ANCHOR: deploy_key
 # The deploy key for an ssh remote: none yet, then generated (the public half
 # is what the repository gets; the private half stays in <state>/repo.key).

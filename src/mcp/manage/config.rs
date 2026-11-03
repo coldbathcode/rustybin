@@ -301,10 +301,22 @@ pub async fn git_commit(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
         Ok(m) => m,
         Err(e) => return e,
     };
+    let checkpoints: Vec<String> = match args.get("checkpoints") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(list)) => match list
+            .iter()
+            .map(|v| v.as_str().map(str::to_string))
+            .collect::<Option<Vec<_>>>()
+        {
+            Some(names) => names,
+            None => return err("checkpoints: a list of checkpoint names"),
+        },
+        Some(_) => return err("checkpoints: a list of checkpoint names"),
+    };
     match ctx
         .app
         .git
-        .commit(&ctx.app, message, &access.principal())
+        .commit_with(&ctx.app, message, &checkpoints, &access.principal())
         .await
     {
         Ok(v) => ok(

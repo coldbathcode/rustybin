@@ -762,6 +762,64 @@ async fn ai_use_sets_the_model_the_fast_model_or_a_job() {
 }
 
 #[tokio::test]
+async fn git_commit_takes_checkpoints_and_restore_reads_the_repository() {
+    if !std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+    {
+        eprintln!("git is not installed: skipped");
+        return;
+    }
+    let inst = instance().await;
+    inst.login().await;
+    let bare = inst.home.path().join("remote.git");
+    let out = std::process::Command::new("git")
+        .args(["init", "--quiet", "--bare", "-b", "main"])
+        .arg(&bare)
+        .output()
+        .expect("git init --bare");
+    assert!(out.status.success());
+    let remote = format!("file://{}", bare.display());
+    inst.json(&["settings", "set", "git.remote", &remote]).await;
+    inst.json(&["git", "init"]).await;
+    inst.json(&["checkpoint", "save", "one"]).await;
+    inst.json(&["checkpoint", "save", "two"]).await;
+    let v = inst
+        .json(&[
+            "git",
+            "commit",
+            "-m",
+            "Two checkpoints",
+            "--checkpoint",
+            "one",
+            "--checkpoint",
+            "two,one",
+        ])
+        .await;
+    assert_eq!(v["checkpoints"], json!(["one", "two"]), "{v}");
+    let v = inst.json(&["checkpoint", "list", "--from-git"]).await;
+    assert_eq!(v["from"], json!("git"), "{v}");
+    assert_eq!(v["checkpoints"].as_array().map(Vec::len), Some(2), "{v}");
+    let v = inst
+        .json(&[
+            "checkpoint",
+            "restore",
+            "two",
+            "--from-git",
+            "--dry-run",
+            "--yes",
+        ])
+        .await;
+    assert_eq!(
+        (v["from"].clone(), v["dry_run"].clone()),
+        (json!("git"), json!(true)),
+        "{v}"
+    );
+    inst.server.shutdown();
+}
+
+#[tokio::test]
 async fn mocks_deploy_can_name_the_revision_it_publishes() {
     let inst = instance().await;
     inst.login().await;

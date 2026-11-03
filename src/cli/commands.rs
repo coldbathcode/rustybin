@@ -134,9 +134,13 @@ const TAIL_FLAGS: &[Flag] = &[
     Flag::value("--max", "Stop after this many events"),
     Flag::value("--timeout", "Stop after this many seconds (default 3600)"),
 ];
-const MESSAGE_FLAG: &[Flag] = &[
+const COMMIT_FLAGS: &[Flag] = &[
     Flag::value("--message", "The commit message (also -m)"),
     Flag::value("-m", "The commit message"),
+    Flag::value(
+        "--checkpoint",
+        "A local checkpoint to commit next to rustybin.yaml (repeatable, or comma separated)",
+    ),
 ];
 
 macro_rules! cmd {
@@ -237,10 +241,10 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("requests", "get", "<id>", "One captured request.", NO_FLAGS, [("GET", "/_rustybin/requests/{id}")], false, "requests get 42"),
     cmd!("requests", "tail", "", "Follow the requests as they arrive.", TAIL_FLAGS, [("GET", "/_rustybin/requests/stream")], false, "requests tail --max 5"),
     cmd!("requests", "clear", "", "Forget the captured requests.", NO_FLAGS, [("DELETE", "/_rustybin/requests")], true, "requests clear --yes"),
-    cmd!("checkpoint", "list", "", "The checkpoints and the mocks each holds.", NO_FLAGS, [("GET", "/_rustybin/checkpoints")], false, "checkpoint list"),
+    cmd!("checkpoint", "list", "[--from-git]", "The checkpoints and the mocks each holds; --from-git lists the configuration repository's (after git pull).", &[Flag::switch("--from-git", "The repository's checkpoints, at the working copy's HEAD")], [("GET", "/_rustybin/checkpoints")], false, "checkpoint list"),
     cmd!("checkpoint", "show", "<name>", "One checkpoint.", NO_FLAGS, [("GET", "/_rustybin/checkpoints/{name}")], false, "checkpoint show demo-start"),
     cmd!("checkpoint", "save", "<name> [--replace]", "Save the instance's API mocks (with their data) and the health toggle.", &[Flag::switch("--replace", "Overwrite a checkpoint of that name")], [("POST", "/_rustybin/checkpoints")], false, "checkpoint save demo-start"),
-    cmd!("checkpoint", "restore", "<name> [--dry-run]", "Bring the API mocks, their data and health back (other API mocks are deleted, flaky counters reset); --dry-run says what would change.", &[Flag::switch("--dry-run", "Only say what a restore would change")], [("POST", "/_rustybin/checkpoints/{name}/restore")], true, "checkpoint restore demo-start --yes"),
+    cmd!("checkpoint", "restore", "<name> [--dry-run] [--from-git]", "Bring the API mocks, their data and health back (other API mocks are deleted, flaky counters reset); --dry-run says what would change, --from-git restores the configuration repository's checkpoint.", &[Flag::switch("--dry-run", "Only say what a restore would change"), Flag::switch("--from-git", "The repository's checkpoint of that name (git pull first)")],[("POST", "/_rustybin/checkpoints/{name}/restore")], true, "checkpoint restore demo-start --yes"),
     cmd!("checkpoint", "delete", "<name>", "Delete a checkpoint (the instance is not changed).", NO_FLAGS, [("DELETE", "/_rustybin/checkpoints/{name}")], true, "checkpoint delete demo-start --yes"),
     cmd!("tests", "list", "", "The saved tests and the variables each uses.", NO_FLAGS, [("GET", "/_rustybin/tests")], false, "tests list"),
     cmd!("tests", "show", "<name>", "One saved test.", NO_FLAGS, [("GET", "/_rustybin/tests/{name}")], false, "tests show order-1"),
@@ -320,7 +324,7 @@ pub static COMMANDS: &[Cmd] = &[
     // ── Git ──
     cmd!("git", "status", "[--fetch]", "The repository, the working copy, the drift, the timeline.", &[Flag::switch("--fetch", "Ask the remote for ahead and behind")], [("GET", "/_rustybin/git")], false, "git status --fetch"),
     cmd!("git", "init", "", "Connect the repository (clone, or start an empty working copy).", NO_FLAGS, [("POST", "/_rustybin/git/init")], false, "git init"),
-    cmd!("git", "commit", "-m \"<message>\"", "Export the instance into the working copy and commit.", MESSAGE_FLAG, [("POST", "/_rustybin/git/commit")], false, "git commit -m \"Add the orders mock\""),
+    cmd!("git", "commit", "-m \"<message>\" [--checkpoint NAME]...", "Export the instance into the working copy and commit; --checkpoint also commits a local checkpoint (repeat it, or a,b).", COMMIT_FLAGS,[("POST", "/_rustybin/git/commit")], false, "git commit -m \"Add the orders mock\""),
     cmd!("git", "push", "", "Push the branch.", NO_FLAGS, [("POST", "/_rustybin/git/push")], false, "git push"),
     cmd!("git", "pull", "[--apply] [--dry-run] [--prune]", "Fetch and fast-forward; --apply applies the repository's document.", &[Flag::switch("--apply", "Apply the document"), Flag::switch("--dry-run", "Show the diff, apply nothing"), Flag::switch("--prune", "The document is the whole truth")], [("POST", "/_rustybin/git/pull")], false, "git pull --apply --dry-run"),
     cmd!("git", "resolve", "--with instance|repository", "After a diverged branch: the instance's copy wins, or the repository's.", &[Flag::value("--with", "instance or repository"), Flag::value("--message", "The commit message when the instance wins")], [("POST", "/_rustybin/git/resolve")], true, "git resolve --with repository --yes"),
@@ -1507,8 +1511,14 @@ async fn bins(ctx: &mut Ctx, verb: &str) -> Result<()> {
 // ── Checkpoints ─────────────────────────────────────────────────────
 
 async fn checkpoint(ctx: &mut Ctx, verb: &str) -> Result<()> {
+    let from_git = ctx.args.has("--from-git");
     if verb == "list" {
-        return get(ctx, "/_rustybin/checkpoints", &[]).await;
+        let query: Vec<(&str, String)> = if from_git {
+            vec![("from", "git".to_string())]
+        } else {
+            Vec::new()
+        };
+        return get(ctx, "/_rustybin/checkpoints", &query).await;
     }
     let name = ctx.args.arg(0, "a checkpoint name")?.to_string();
     let path = format!("/_rustybin/checkpoints/{}", enc(&name));
@@ -1520,11 +1530,13 @@ async fn checkpoint(ctx: &mut Ctx, verb: &str) -> Result<()> {
             post(ctx, "/_rustybin/checkpoints", Body::Json(body)).await
         }
         "restore" => {
-            let query: Vec<(&str, String)> = if ctx.args.has("--dry-run") {
-                vec![("dry_run", "true".to_string())]
-            } else {
-                Vec::new()
-            };
+            let mut query: Vec<(&str, String)> = Vec::new();
+            if ctx.args.has("--dry-run") {
+                query.push(("dry_run", "true".to_string()));
+            }
+            if from_git {
+                query.push(("from", "git".to_string()));
+            }
             let reply = ctx
                 .client()?
                 .send(Method::POST, &format!("{path}/restore"), &query, Body::None)
@@ -2678,12 +2690,20 @@ async fn git(ctx: &mut Ctx, verb: &str) -> Result<()> {
                 .or_else(|| ctx.args.value("-m"))
                 .ok_or_else(|| Fail::Usage("a message is required: -m \"...\"".into()))?
                 .to_string();
-            post(
-                ctx,
-                "/_rustybin/git/commit",
-                Body::Json(json!({ "message": message })),
-            )
-            .await
+            let checkpoints: Vec<String> = ctx
+                .args
+                .values("--checkpoint")
+                .iter()
+                .flat_map(|v| v.split(','))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            let mut body = json!({ "message": message });
+            if !checkpoints.is_empty() {
+                body["checkpoints"] = json!(checkpoints);
+            }
+            post(ctx, "/_rustybin/git/commit", Body::Json(body)).await
         }
         "push" => post(ctx, "/_rustybin/git/push", Body::None).await,
         "pull" => {

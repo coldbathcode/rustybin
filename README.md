@@ -764,9 +764,9 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET POST | `/_rustybin/tests/schedules` | Saved tests on a schedule: list them with their status, or create one (admin) |
 | GET PUT DELETE | `/_rustybin/tests/schedules/{name}` | A test schedule: read it with its status, save or replace it, delete it (admin) |
 | POST | `/_rustybin/tests/schedules/{name}/run` | Run a test schedule now: its tests, kept in the history, its notice when it fails (admin) |
-| GET POST | `/_rustybin/checkpoints` | Checkpoints of the instance's API mocks and health: list them, or save one (admin) |
+| GET POST | `/_rustybin/checkpoints` | Checkpoints of the instance's API mocks and health: list them (?from=git: the configuration repository's, admin), or save one (admin) |
 | GET DELETE | `/_rustybin/checkpoints/{name}` | A checkpoint: what it holds; DELETE removes it (admin) |
-| POST | `/_rustybin/checkpoints/{name}/restore` | Restore a checkpoint: mocks, their data and health back, flaky counters reset; ?dry_run=true says what would change (admin) |
+| POST | `/_rustybin/checkpoints/{name}/restore` | Restore a checkpoint: mocks, their data and health back, flaky counters reset; ?dry_run=true says what would change, ?from=git restores the configuration repository's (admin) |
 | GET | `/_rustybin/egress` | The outbound connection policy: the allowlist, each feature's rule and the last 100 decisions |
 | GET | `/_rustybin/metrics` | Prometheus metrics (requests by route template, latency, streams, egress, protocols, LLM tokens, requests and faults, limit rejections) |
 | GET | `/_rustybin/usage` | Plan, limits and current usage (requests, egress, in flight, streams) |

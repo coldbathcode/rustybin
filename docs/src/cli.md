@@ -326,10 +326,10 @@ Checkpoints: the instance's API mocks and health, saved and restored
 
 | Command | What it does | Calls |
 |---|---|---|
-| `rustybin checkpoint list` | The checkpoints and the mocks each holds. | `GET /_rustybin/checkpoints` |
+| `rustybin checkpoint list [--from-git]` | The checkpoints and the mocks each holds; --from-git lists the configuration repository's (after git pull). Flags: `--from-git`. | `GET /_rustybin/checkpoints` |
 | `rustybin checkpoint show <name>` | One checkpoint. | `GET /_rustybin/checkpoints/{name}` |
 | `rustybin checkpoint save <name> [--replace]` | Save the instance's API mocks (with their data) and the health toggle. Flags: `--replace`. | `POST /_rustybin/checkpoints` |
-| `rustybin checkpoint restore <name> [--dry-run]` | Bring the API mocks, their data and health back (other API mocks are deleted, flaky counters reset); --dry-run says what would change. Flags: `--dry-run`. | `POST /_rustybin/checkpoints/{name}/restore` |
+| `rustybin checkpoint restore <name> [--dry-run] [--from-git]` | Bring the API mocks, their data and health back (other API mocks are deleted, flaky counters reset); --dry-run says what would change, --from-git restores the configuration repository's checkpoint. Flags: `--dry-run`, `--from-git`. | `POST /_rustybin/checkpoints/{name}/restore` |
 | `rustybin checkpoint delete <name>` | Delete a checkpoint (the instance is not changed). | `DELETE /_rustybin/checkpoints/{name}` |
 
 ```bash
@@ -554,7 +554,7 @@ Source control
 |---|---|---|
 | `rustybin git status [--fetch]` | The repository, the working copy, the drift, the timeline. Flags: `--fetch`. | `GET /_rustybin/git` |
 | `rustybin git init` | Connect the repository (clone, or start an empty working copy). | `POST /_rustybin/git/init` |
-| `rustybin git commit -m "<message>"` | Export the instance into the working copy and commit. Flags: `--message` value, `-m` value. | `POST /_rustybin/git/commit` |
+| `rustybin git commit -m "<message>" [--checkpoint NAME]...` | Export the instance into the working copy and commit; --checkpoint also commits a local checkpoint (repeat it, or a,b). Flags: `--message` value, `-m` value, `--checkpoint` value. | `POST /_rustybin/git/commit` |
 | `rustybin git push` | Push the branch. | `POST /_rustybin/git/push` |
 | `rustybin git pull [--apply] [--dry-run] [--prune]` | Fetch and fast-forward; --apply applies the repository's document. Flags: `--apply`, `--dry-run`, `--prune`. | `POST /_rustybin/git/pull` |
 | `rustybin git resolve --with instance\|repository` | After a diverged branch: the instance's copy wins, or the repository's. Flags: `--with` value, `--message` value. | `POST /_rustybin/git/resolve` |

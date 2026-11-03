@@ -139,6 +139,18 @@ diffs them) and commits; nothing to commit is an answer, not an error. `POST
 In the console, **Commit and push** does both; **Write the commit message** asks the
 AI for one from the drift summary ([Bring your own AI](ai-assist.md)).
 
+**Checkpoints.** `checkpoints: ["demo-start"]` also writes those
+[checkpoints](checkpoints.md#in-the-configuration-repository) of the instance to
+`<git.path>/checkpoints/<name>.json` in the same commit (the console's commit card
+lists them to tick; `rustybin git commit --checkpoint demo-start`). A checkpoint holds
+mock data, so only a commit that names it writes one: the automatic mode never does,
+and no commit stages anything else in that directory. Another instance lists them
+after a pull and restores one with `?from=git`:
+
+```bash
+{{#include ../examples/config/source-control.sh:commit_checkpoint}}
+```
+
 ## Pull and apply
 
 `POST /_rustybin/git/pull` `{apply, dry_run, prune}` fetches and fast-forwards the
@@ -149,7 +161,10 @@ never from the working copy's files. A dry run reads the commit the pull would m
 to (the remote branch) without moving the working copy and answers the diff, so the
 preview and the apply read the same files; `prune` makes the document the whole
 truth. The apply runs on the compile pool: when it stays busy the pull answers `503`.
-The console shows the diff first, then **Pull and apply**.
+The console shows the diff first, then **Pull and apply**. Every pull also answers
+`checkpoints`, the names of the repository's checkpoints at the commit it read; a pull
+never restores one (`POST /_rustybin/checkpoints/{name}/restore?from=git` does, see
+[Checkpoints](checkpoints.md#in-the-configuration-repository)).
 
 ```bash
 {{#include ../examples/config/source-control.sh:pull_dry_run}}
@@ -205,7 +220,8 @@ creates the branch. The deploy key file, when the remote is ssh, is
 - `push_on_change`: every 30 seconds the instance compares its export with the working
   copy's document and, when they differ, commits with a message naming the changes
   (`Update mocks.orders: added; settings.portal.enabled: changed to on`) and pushes. A
-  failure is logged once until it changes.
+  failure is logged once until it changes. It never writes a checkpoint: those hold
+  mock data and are committed only on request.
 - `pull`: every `git.pull_every` the instance pulls and applies the repository with
   prune: the repository is the truth, console changes last until the next pull.
 
@@ -235,9 +251,9 @@ The same job from the API, the console, the command line, an agent and the confi
 
 | Surface | Where |
 |---|---|
-| API | `GET /_rustybin/git`, `POST /_rustybin/git/init`, `/commit`, `/push`, `/pull`, `/resolve`, `GET`, `POST /_rustybin/git/key`, `GET /_rustybin/git/history` |
-| Console | **Management, Source control**: the repository form, status, connect, commit and push, pull, resolve, the deploy key, history |
-| CLI | `rustybin git status`, `init`, `commit`, `push`, `pull`, `resolve`, `key`, `history` ([reference](cli.md#git)) |
-| Management MCP | `git_status`, `git_init`, `git_commit`, `git_push`, `git_pull`, `git_resolve`, `git_deploy_key`; the prompt `backup_to_git` ([agent page](agent-mcp.md)) |
+| API | `GET /_rustybin/git`, `POST /_rustybin/git/init`, `/commit` (with `checkpoints`), `/push`, `/pull`, `/resolve`, `GET`, `POST /_rustybin/git/key`, `GET /_rustybin/git/history`; the repository's checkpoints: `GET /_rustybin/checkpoints?from=git`, `POST /_rustybin/checkpoints/{name}/restore?from=git` |
+| Console | **Management, Source control**: the repository form, status, connect, commit and push (with a checkpoint choice), pull, resolve, the deploy key, history; **Management, Checkpoints, In the repository** |
+| CLI | `rustybin git status`, `init`, `commit` (`--checkpoint NAME`), `push`, `pull`, `resolve`, `key`, `history`; `rustybin checkpoint list --from-git`, `checkpoint restore NAME --from-git` ([reference](cli.md#git)) |
+| Management MCP | `git_status`, `git_init`, `git_commit` (`checkpoints`), `git_push`, `git_pull`, `git_resolve`, `git_deploy_key`, `list_repository_checkpoints`, `restore_checkpoint` with `from: "git"`; the prompt `backup_to_git` ([agent page](agent-mcp.md)) |
 | `rustybin.yaml` | Never: the `git.*` settings (the remote, the token) are not exported, so a document in a repository cannot point the instance elsewhere |
 | Environment | `RUSTYBIN_CONFIG_GIT`, `_REF`, `_PATH`, `_AUTH`, `_TOKEN`, `_AUTO`, `_REQUIRED` ([configuration](configuration.md#source-control)) |

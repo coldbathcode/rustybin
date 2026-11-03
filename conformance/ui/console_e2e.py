@@ -1030,6 +1030,8 @@ def run_theme(browser, theme):
         page.wait_for_selector("#git-status >> text=No state directory")
         expect(page.locator("#git-init")).to_be_disabled()
         expect(page.locator("#git-key-generate")).to_be_disabled()
+        # The commit card offers the instance's checkpoints to commit too.
+        page.wait_for_selector("#git-checkpoints >> text=checkpoint")
         shot(page, theme, "20-source-control")
         assert_icons_sized(page, "management, source control")
         # Diagnostics: one row per check of the API's report, each with its
@@ -1302,6 +1304,8 @@ def run_theme(browser, theme):
         row = page.locator(f"tr[data-checkpoint='{name}']")
         row.wait_for()
         expect(row).to_contain_text("healthy")
+        # In the repository: this instance has no source control, and says so.
+        expect(page.locator("#checkpoint-repo-off")).to_contain_text("Source control is not ready")
         http("POST", "/health/toggle")
         page.click(f"[data-preview='{name}']")
         expect(page.locator("#checkpoint-changes")).to_contain_text("would change")

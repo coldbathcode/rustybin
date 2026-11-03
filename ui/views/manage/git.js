@@ -1,7 +1,8 @@
 // Management, Source control: the repository form (the git.* settings), the
 // status (GET /_rustybin/git: remote, head, ahead and behind, the drift
 // between the working copy and the instance), Connect (POST
-// /_rustybin/git/init), Commit and push, Pull (a dry run with the diff,
+// /_rustybin/git/init), Commit and push (with a choice of checkpoints to
+// commit next to the document), Pull (a dry run with the diff,
 // then apply), Resolve a diverged branch, the deploy key, the history and
 // the timeline of operations. "Write the commit message" asks the AI from
 // the drift summary.
@@ -107,9 +108,28 @@ export function gitPanel(doc, reload, error) {
       load(false);
     }
     const connect = h('button', { class: 'btn primary', type: 'button', id: 'git-init', disabled: !ready, onclick: () => act('Connecting', '/_rustybin/git/init') }, icon('link'), st.initialised ? 'Reconnect' : 'Connect');
-    const commit = h('button', { class: 'btn', type: 'button', id: 'git-commit', disabled: !ready || !st.initialised, onclick: () => act('Committing', '/_rustybin/git/commit', { message: message.value }) }, icon('check'), 'Commit');
+    // The checkpoint choice: local checkpoints written next to rustybin.yaml
+    // in this commit (mock data, so only when ticked; never automatic).
+    const picked = new Set();
+    const choiceEl = h('div', { id: 'git-checkpoints', class: 'row', style: { gap: '8px', flexWrap: 'wrap' } }, h('span', { class: 'muted small' }, 'Loading the checkpoints'));
+    getJson('/_rustybin/checkpoints', { session: false }).then((d) => {
+      const list = (d && d.checkpoints) || [];
+      if (!list.length) {
+        replace(choiceEl, h('span', { class: 'muted small' }, 'No checkpoints to commit (Management, Checkpoints saves one).'));
+        return;
+      }
+      replace(choiceEl, h('span', { class: 'muted small' }, 'Also commit checkpoints (they hold mock data):'),
+        ...list.map((c) => {
+          const box = checkbox(c.name, false);
+          box.input.setAttribute('data-git-checkpoint', c.name);
+          box.input.addEventListener('change', () => { if (box.input.checked) picked.add(c.name); else picked.delete(c.name); });
+          return box.el;
+        }));
+    }).catch((e) => replace(choiceEl, h('span', { class: 'muted small' }, 'The checkpoints could not be loaded: ' + (e.message || e))));
+    const commitBody = () => (picked.size ? { message: message.value, checkpoints: [...picked] } : { message: message.value });
+    const commit = h('button', { class: 'btn', type: 'button', id: 'git-commit', disabled: !ready || !st.initialised, onclick: () => act('Committing', '/_rustybin/git/commit', commitBody()) }, icon('check'), 'Commit');
     const push = h('button', { class: 'btn', type: 'button', id: 'git-push', disabled: !ready || !st.initialised, onclick: () => act('Pushing', '/_rustybin/git/push') }, icon('upload'), 'Push');
-    const commitPush = h('button', { class: 'btn primary', type: 'button', id: 'git-commit-push', disabled: !ready || !st.initialised, onclick: () => act('Committing', '/_rustybin/git/commit', { message: message.value }, (j) => { if (j.committed) act('Pushing', '/_rustybin/git/push'); }) }, icon('upload'), 'Commit and push');
+    const commitPush = h('button', { class: 'btn primary', type: 'button', id: 'git-commit-push', disabled: !ready || !st.initialised, onclick: () => act('Committing', '/_rustybin/git/commit', commitBody(), (j) => { if (j.committed) act('Pushing', '/_rustybin/git/push'); }) }, icon('upload'), 'Commit and push');
     const pullDry = h('button', { class: 'btn', type: 'button', id: 'git-pull-dry', disabled: !ready || !st.initialised, onclick: () => act('Checking', '/_rustybin/git/pull', { apply: true, dry_run: true, prune: prune.input.checked }) }, icon('diff'), 'Pull, dry run');
     const pullApply = h('button', { class: 'btn primary', type: 'button', id: 'git-pull-apply', disabled: !ready || !st.initialised, onclick: () => { if (confirm('Pull and apply the repository\'s configuration' + (prune.input.checked ? ' with prune' : '') + '?')) act('Pulling', '/_rustybin/git/pull', { apply: true, dry_run: false, prune: prune.input.checked }); } }, icon('download'), 'Pull and apply');
     replace(actionsEl,
@@ -118,6 +138,7 @@ export function gitPanel(doc, reload, error) {
       card('Commit and push', { hint: 'export the instance into the working copy, commit, push' },
         h('div', { class: 'stack' },
           h('div', { class: 'row', style: { gap: '8px', flexWrap: 'wrap' } }, h('div', { class: 'grow' }, message), writeBtn),
+          choiceEl,
           h('div', { class: 'row', style: { gap: '8px', flexWrap: 'wrap' } }, commitPush, commit, push))),
       card('Pull', { hint: 'fetch, fast-forward, apply the repository\'s document' },
         h('div', { class: 'stack' },

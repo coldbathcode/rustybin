@@ -2740,12 +2740,71 @@ async fn git_tools_against_a_bare_repository() {
     );
     let r = tool(&app, &[], "git_push", json!({ "confirm": true })).await;
     assert!(!is_error(&r), "{r}");
+    // A checkpoint goes to the repository only when a commit names it.
+    let r = tool(&app, &[], "list_repository_checkpoints", json!({})).await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["untrusted_checkpoints"], json!([]));
+    let r = tool(&app, &[], "save_checkpoint", json!({ "name": "demo" })).await;
+    assert!(!is_error(&r), "{r}");
+    let r = tool(
+        &app,
+        &[],
+        "git_commit",
+        json!({ "message": "A checkpoint", "checkpoints": "demo" }),
+    )
+    .await;
+    assert!(is_error(&r) && text_of(&r).contains("a list"), "{r}");
+    let r = tool(
+        &app,
+        &[],
+        "git_commit",
+        json!({ "message": "A checkpoint", "checkpoints": ["demo"] }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["checkpoints"], json!(["demo"]));
+    let r = tool(&app, &[], "list_repository_checkpoints", json!({})).await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(
+        r["structuredContent"]["untrusted_checkpoints"][0]["name"],
+        json!("demo"),
+        "{r}"
+    );
+    assert!(text_of(&r).contains("demo"), "{}", text_of(&r));
+    let r = tool(
+        &app,
+        &[],
+        "restore_checkpoint",
+        json!({ "name": "demo", "from": "git" }),
+    )
+    .await;
+    assert!(is_error(&r) && text_of(&r).contains("confirm"), "{r}");
+    let r = tool(
+        &app,
+        &[],
+        "restore_checkpoint",
+        json!({ "name": "demo", "from": "git", "dry_run": true }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["from"], json!("git"));
+    assert_eq!(r["structuredContent"]["dry_run"], json!(true));
+    let r = tool(
+        &app,
+        &[],
+        "restore_checkpoint",
+        json!({ "name": "demo", "from": "elsewhere", "dry_run": true }),
+    )
+    .await;
+    assert!(is_error(&r) && text_of(&r).contains("git"), "{r}");
+    let r = tool(&app, &[], "git_push", json!({ "confirm": true })).await;
+    assert!(!is_error(&r), "{r}");
     let r = tool(&app, &[], "git_status", json!({ "fetch": true })).await;
     assert_eq!(r["structuredContent"]["ahead"], 0, "{r}");
     assert!(
         r["structuredContent"]["commits"]
             .as_array()
-            .is_some_and(|a| a.len() == 1),
+            .is_some_and(|a| a.len() == 2),
         "{r}"
     );
     let r = tool(&app, &[], "git_pull", json!({})).await;

@@ -445,7 +445,7 @@ never tool inputs and never returned: the operator sets them in the console or w
 | `apply_config` | admin | Apply a version 1 or 2 document; `dry_run` reports only; `prune` (confirmed) makes a present section the whole truth |
 | `git_status` | admin | The [repository](source-control.md), the working copy, the drift, ahead and behind (`fetch: true`), the timeline and the last commits |
 | `git_init` | admin | Clone the remote (`git.remote`, `git.branch` settings) or start an empty working copy |
-| `git_commit` | admin | Export the instance into the working copy and commit with a message |
+| `git_commit` | admin | Export the instance into the working copy and commit with a message; `checkpoints` names local [checkpoints](checkpoints.md#in-the-configuration-repository) to commit next to the document (never by the automatic mode) |
 | `git_push` | admin | Push the branch; confirmed, since the configuration leaves the host |
 | `git_pull` | admin | Fetch and fast-forward; `apply: true` applies the repository's document (confirmed unless `dry_run`) |
 | `git_resolve` | admin | After a diverged branch: the instance's copy wins or the repository's (confirmed) |
@@ -541,8 +541,9 @@ server and a gateway's JWT validation:
 | `end_gateway_scenario` | admin | Remove what the run created, nothing else (confirmed) |
 | `list_checkpoints` | read | The [checkpoints](checkpoints.md), or one with the mocks it holds |
 | `save_checkpoint` | admin | Save the instance's API mocks (with their data) and the health toggle; `replace` overwrites one of that name; at most 20 |
-| `restore_checkpoint` | admin | Bring the mocks back to a checkpoint (API mocks it does not hold are deleted); `dry_run: true` answers the same without a change or a confirmation; confirmed otherwise |
+| `restore_checkpoint` | admin | Bring the mocks back to a checkpoint (API mocks it does not hold are deleted); `dry_run: true` answers the same without a change or a confirmation; confirmed otherwise; `from: "git"` restores the configuration repository's checkpoint of that name |
 | `delete_checkpoint` | admin | Delete a checkpoint, not the instance's mocks (confirmed) |
+| `list_repository_checkpoints` | admin | The checkpoints committed to the configuration repository (at the working copy's `HEAD`), each with what it holds or why it cannot be restored, under `untrusted_checkpoints` |
 
 ### Harness
 
