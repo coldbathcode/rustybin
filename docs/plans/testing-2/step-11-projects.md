@@ -1,6 +1,6 @@
 # Step 11: Projects: roles on part of an instance
 
-Access control, chapter 5 of 7.
+Access control, chapter 5 of 8.
 
 ## Goal
 

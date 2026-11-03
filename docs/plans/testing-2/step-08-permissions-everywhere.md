@@ -1,6 +1,6 @@
 # Step 08: Every route and tool checks a permission
 
-Access control, chapter 2 of 7.
+Access control, chapter 2 of 8.
 
 ## Goal
 

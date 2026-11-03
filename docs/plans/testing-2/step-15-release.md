@@ -1,4 +1,4 @@
-# Step 14: Docs and release 0.4.0
+# Step 15: Docs and release 0.4.0
 
 ## Goal
 
@@ -14,12 +14,15 @@ with the binaries, digest commit) once the owner says go.
 - Access control: a new chapter "Teams and access control" with pages for users and invitations,
   roles and the permission table (generated from `Permission`, like the CLI reference, with
   `RUSTYBIN_UPDATE_RBAC_DOCS=1`), single sign-on (with the demo identity provider as the worked
-  example), projects, agents acting for a user, and the audit log.
+  example), projects, open and closed APIs on the portal (in `docs/src/portal.md` too), agents acting for a user, and the audit log.
 - `docs/src/concepts/control-plane-security.md` rewritten around users and roles; the
   configuration tables with every `sso.*`, `audit.*` and `agents.*` setting; the coding agents page
   says whose permissions an agent gets.
 - **Upgrading from 0.3**: the console user becomes the first admin, 0.3 tokens keep working until
-  they expire, the old scopes map to roles, what a `403` now names, the CLI's exit code 3.
+  they expire, the old scopes map to roles, what a `403` now names, the CLI's exit code 3, and the portal: every
+  published item stays open, `portal.auth=password` now asks for a portal sign-in (a user with
+  `portal.read`) instead of storing a console token, and a closed mock's spec leaves
+  `/mock/<name>/_rustybin/openapi.*`.
 
 ## Release
 

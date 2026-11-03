@@ -1,6 +1,6 @@
-# Step 13: The audit log, and a security pass over access control
+# Step 14: The audit log, and a security pass over access control
 
-Access control, chapter 7 of 7.
+Access control, chapter 8 of 8.
 
 ## Goal
 
@@ -21,7 +21,7 @@ surface. Then a review of the whole access-control build before the release.
   `audit.max_bytes`, default 256 MiB). The tracing audit lines stay as they are.
 - What is recorded: every mutating control route and tool call, every sign-in (and failure, with
   the user name only when it exists), invitations, role and permission changes, SSO sign-ins with
-  the groups that mapped, agent revocations, config applies and git pulls (with the commit), and
+  the groups that mapped, portal sign-ins and an item opened or closed, agent revocations, config applies and git pulls (with the commit), and
   every `403 permission_required`.
 
 ## Surfaces
@@ -34,9 +34,9 @@ table, live tail, an entry links to the user and the target), management MCP (`l
 
 ## The security pass
 
-A review of steps 07 to 13 with the same method as the 0.3 review (`docs/plans/review-0.3`):
+A review of steps 07 to 14 with the same method as the 0.3 review (`docs/plans/review-0.3`):
 reviewers per area (the model and resolution, enforcement and the parity tables, invitations and
-sign-in, SSO token checks, projects' filtering, agents, the audit log's completeness and what it
+sign-in, SSO token checks, projects' filtering, agents, the portal's session and closed items, the audit log's completeness and what it
 must never hold), each finding verified with a failing test, fixed in this step or listed for the
 owner. The threat model page (`docs/src/concepts/public-instances.md`) gains "a user with a role".
 

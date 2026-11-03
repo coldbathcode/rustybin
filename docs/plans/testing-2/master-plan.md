@@ -1,8 +1,9 @@
 # Master plan: testing workflows 2 and access control
 
 Planned 2026-11-02, after 0.3.0, from the first candidate under consideration in
-`docs/src/roadmap.md` and the build notes of the reliability plan; access control (steps 07 to 13)
-added the same day after 0.3.1, at the owner's request. Built only when the owner says go, one step
+`docs/src/roadmap.md` and the build notes of the reliability plan; access control (steps 07 to 14)
+added the same day after 0.3.1, at the owner's request; open and closed APIs on the portal (step
+13) added on 2026-11-03. Built only when the owner says go, one step
 at a time, each pushed as it lands. One release, 0.4.0, at the end.
 
 ## 1. What this milestone is
@@ -14,11 +15,12 @@ notice, more gateway scenarios (circuit breakers, request size limits, CORS, hea
 transformation), checkpoints kept in git next to `rustybin.yaml`, and a compare view when an edit
 is refused as stale.
 
-Then it makes an instance safe to share with a team (steps 07 to 13): several users, each with
-roles made of named permissions (four built-in roles, custom ones), invitations so nobody but its
+Then it makes an instance safe to share with a team (steps 07 to 14): several users, each with
+roles made of named permissions (five built-in roles, custom ones), invitations so nobody but its
 owner sees a password, single sign-on with any OpenID Connect provider whose groups pick the role,
 projects so teams share one instance with roles on their part of it, agents that act for a user and
-never exceed them, and an audit log of who did what. Every route and every tool declares the
+never exceed them, APIs on the portal that are open to anyone or closed behind a portal sign-in
+(user name and password), and an audit log of who did what. Every route and every tool declares the
 permission it needs, checked in one place.
 
 ## 2. Principles
@@ -52,6 +54,7 @@ permission it needs, checked in one place.
 | Edit conflicts (0.3 step 08) | a `409` names what changed and offers a reload; it does not show the difference |
 | Control plane (0.2 step 02, 0.3.1 step 04) | one console user with every right; four scopes (`admin`, `console`, `inspector`, `harness`) as booleans; 73 yes/no admin checks in 22 files |
 | Management MCP (0.2 step 08) | seven tool rights and four agent ceilings, separate from the scopes; an agent is tied to a credential, not a person |
+| Dev portal (0.2 step 07) | `portal.auth` is one switch for the whole portal; its `password` mode signs in with the console's admin account; a mock's reference page and spec are public whatever the switch says |
 | Audit | tracing lines without arguments; no record of who did what that a person can search |
 
 ## 4. Steps, order and status
@@ -72,12 +75,13 @@ The marker a session looks for is the first row that is not done.
 | [10](step-10-single-sign-on.md) | Access control 4: single sign-on with OpenID Connect | 09 | |
 | [11](step-11-projects.md) | Access control 5: projects, roles on part of an instance | 09 | |
 | [12](step-12-agents-for-users.md) | Access control 6: agents act for a user | 09 | |
-| [13](step-13-audit-log.md) | Access control 7: the audit log and a security pass | 07 to 12 | |
-| [14](step-14-release.md) | Docs and release 0.4.0 | all | |
+| [13](step-13-portal-access.md) | Access control 7: open and closed APIs on the portal | 09 | |
+| [14](step-14-audit-log.md) | Access control 8: the audit log and a security pass | 07 to 13 | |
+| [15](step-15-release.md) | Docs and release 0.4.0 | all | |
 
-Steps 01 to 06 and 07 to 13 are independent tracks; a testing step built after step 08 declares
-its routes' permissions as it lands, one built before is covered by step 08's sweep. Steps 10, 11
-and 12 may run in parallel once 09 is done.
+Steps 01 to 06 and 07 to 14 are independent tracks; a testing step built after step 08 declares
+its routes' permissions as it lands, one built before is covered by step 08's sweep. Steps 10, 11,
+12 and 13 may run in parallel once 09 is done.
 
 ## 5. How a session works
 
@@ -95,7 +99,7 @@ Add the step's build notes, set the row to done with the date, push.
   would each run it. The plan documents this rather than electing a runner.
 - **Checkpoints in git** (step 05) hold mock data, which may be test data a team does not want in a
   repository: they are written only on an explicit commit, never by the automatic mode.
-- **The built-in roles** (step 07): `viewer`, `tester`, `editor`, `admin`, with the permission sets
+- **The built-in roles** (step 07): `viewer`, `tester`, `editor`, `admin` and `portal_reader`, with the permission sets
   in the step file. Say if the team needs another split (for example an `operator` who changes
   settings but not mocks) before step 07; custom roles cover the rest afterwards.
 - **Users from git** (step 09): the plan refuses users, role changes and privileged roles from a
@@ -107,5 +111,13 @@ Add the step's build notes, set the row to done with the date, push.
 - **One release or two**: everything ships as 0.4.0 at the end. Releasing the testing workflows
   first (0.4.0 after step 06) and access control as 0.5.0 is the other way; say before step 07 is
   built.
-- **The audit log's home** (step 13): files in the state directory with retention. A webhook or a
+- **Closed APIs on the portal** (step 13): a signed-out visitor sees a closed API in the list with a
+  lock (title and summary only); say if closed APIs should be hidden from them entirely. Closed
+  hides the documentation, spec and credentials, not the mock's traffic: the gateway still calls
+  the mock, protected by its mocked security, API keys or the gateway. Say if closed should also
+  refuse the mock's own calls from anyone not signed in (that would stop gateway tests that do not
+  carry a portal sign-in). The step needs users (07 to 09); a smaller version (the open and closed
+  field, the portal session, the single console user as the only reader) could ship sooner as a
+  0.3.x point release if it is wanted before access control.
+- **The audit log's home** (step 14): files in the state directory with retention. A webhook or a
   syslog target for a central log is not in the plan; say if one is needed.

@@ -1,6 +1,6 @@
 # Step 09: Users and roles on every surface, with invitations
 
-Access control, chapter 3 of 7.
+Access control, chapter 3 of 8.
 
 ## Goal
 

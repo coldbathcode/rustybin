@@ -1,6 +1,6 @@
 # Step 12: Agents act for a user
 
-Access control, chapter 6 of 7.
+Access control, chapter 6 of 8.
 
 ## Goal
 

@@ -11,7 +11,8 @@ request size limits, CORS and header transformation, checkpoints in the configur
 repository, and a compare view for an edit refused as stale. Then **access control**:
 several users with roles made of named permissions (built-in and custom), invitations,
 single sign-on with any OpenID Connect provider, projects so teams share an instance,
-agents that act for a user, and an audit log.
+agents that act for a user, APIs on the dev portal that are open or closed behind a
+portal sign-in, and an audit log.
 `docs/plans/testing-2/master-plan.md` in the repository.
 
 ## Recently built

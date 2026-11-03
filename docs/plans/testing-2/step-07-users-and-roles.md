@@ -1,12 +1,12 @@
 # Step 07: Users, roles and permissions: the model
 
-Access control, chapter 1 of 7 (steps 07 to 13). This step builds the model and the store; step 08
+Access control, chapter 1 of 8 (steps 07 to 14). This step builds the model and the store; step 08
 makes every route enforce it, step 09 puts users on every surface.
 
 ## Goal
 
 Several people sign in to one instance, each with a role that says what they may do. A role is a
-set of named permissions; the four built-in roles cover the usual team, custom roles cover the
+set of named permissions; the five built-in roles cover the usual team, custom roles cover the
 rest. The single console user of 0.3 becomes the first admin, with nothing to do on upgrade.
 
 ## What exists (0.3.1)
@@ -34,7 +34,7 @@ a group and a one-line summary (the console and the docs render the table from i
 | Load | `harness.read`, `harness.run` (start, change, stop runs), `harness.cluster` |
 | AI | `assist.use`, `assist.jobs` (AI-built mocks) |
 | MCP | `mcp.inspect` (inspector and relay), `mcp.connections` (saved connections and their credentials), `registry.write` |
-| Portal | `portal.publish`, `portal.settings` |
+| Portal | `portal.read` (closed items on the portal, step 13), `portal.publish`, `portal.settings` |
 | As code | `config.export`, `config.apply`, `git.read`, `git.write` |
 | People | `agents.read`, `agents.manage`, `users.read`, `users.manage`, `audit.read` |
 | Self-service | `visits.operate` |
@@ -50,6 +50,7 @@ permissions here, never a yes/no admin check.
 | `tester` | Run what others built | `viewer` plus `traffic.read`, `tests.run`, `scenarios.run`, `harness.read`, `harness.run`, `assist.use`, `mcp.inspect` |
 | `editor` | Build mocks and tests | `tester` plus `mocks.*`, `tests.write`, `checkpoints.*`, `assist.jobs`, `portal.publish`, `registry.write`, `config.export`, `git.read`, `traffic.clear` |
 | `admin` | Everything | every permission |
+| `portal_reader` | A tester who reads the API portal's closed items (step 13) and opens nothing in the console | `portal.read` |
 
 Built-in roles cannot be changed or deleted. Custom roles (at most 50) pick any permissions; a role
 that grants `users.manage` or `settings.security` is marked privileged in every view.

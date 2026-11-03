@@ -1,6 +1,6 @@
 # Step 10: Single sign-on with OpenID Connect
 
-Access control, chapter 4 of 7.
+Access control, chapter 4 of 8.
 
 ## Goal
 
