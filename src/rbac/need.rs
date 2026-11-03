@@ -121,7 +121,11 @@ pub const BODY_CHECKS: &[(Permission, &str)] = &[
     ),
     (
         Permission::AgentsManage,
-        "a document with agents:",
+        "a document with agents:; changing, revoking, restoring or ending the sessions of an AI agent that is not the caller's own (a user's own: limit, revoke, end sessions, restore one they revoked)",
+    ),
+    (
+        Permission::AgentsRead,
+        "GET /_rustybin/agents* of agents that are not the caller's own (a user sees their own)",
     ),
     (
         Permission::UsersManage,

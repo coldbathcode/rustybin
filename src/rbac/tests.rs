@@ -1202,15 +1202,14 @@ async fn a_viewer_a_tester_and_an_editor_reach_what_their_roles_grant() {
             [Some("git.write"), Some("git.write"), Some("git.write")],
         ),
         ("GET", "/_rustybin/agents", None, [None, None, None]),
+        // A user may revoke their own agents (step 12): an unknown one is a
+        // 404 for anyone; another user's needs agents.manage (the agents
+        // tests).
         (
             "POST",
             "/_rustybin/agents/none-x/revoke",
             None,
-            [
-                Some("agents.manage"),
-                Some("agents.manage"),
-                Some("agents.manage"),
-            ],
+            [None, None, None],
         ),
         (
             "GET",

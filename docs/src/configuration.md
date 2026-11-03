@@ -161,7 +161,8 @@ forgets a stored value. All three need the admin token (or a control token with 
 `admin` scope). In password mode `console.user` and `console.password_hash` change only
 with the current password (`current_password` in the `PATCH` body, or
 `PUT /_rustybin/password`; else `403 current_password_required`) or the admin token
-itself, and a change signs every session out; `DELETE` resets them only with the admin
+itself, and a change signs the first admin out everywhere (their sessions and their
+agents; other users stay signed in); `DELETE` resets them only with the admin
 token (the recovery of a forgotten password). Every change is logged on the `rustybin::settings` target with the
 key, the source and the principal, never the value.
 
@@ -194,7 +195,7 @@ in password mode). The settings of this release: `console.title`,
 `console.backlink`, the sign-in's `console.user` and secret `console.password_hash`,
 the `assist.*` settings of [AI assist](ai-assist.md) (the provider keys are secrets,
 `assist.job.<task>` the model per job), `proxy.client_ip_header`, `egress.allow`,
-`egress.allow_loopback`, `agents.default_ceiling`, `registry.scenario`,
+`egress.allow_loopback`, `agents.default_ceiling` and `agents.default_ceiling_for` (the default ceiling of the agents of a role's users, `role=ceiling` entries), `registry.scenario`,
 `registry.saved`, the `portal.*` settings of the [dev portal](#dev-portal), the secret
 `leads.webhook_token`, the [test schedule notices](saved-tests.md#the-failure-notice)' secret
 `notify.webhook_token` and `notify.base_url`, `mocks.require_revision` (no variable; `false` by default: when

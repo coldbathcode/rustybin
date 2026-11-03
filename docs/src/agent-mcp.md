@@ -95,16 +95,23 @@ machine), choose what to grant and approve. The agent gets a token and carries o
 
 **What you can grant.** The consent page offers full access (`admin`), read only
 (`console`) and traffic only (`inspector`), the same scopes as [control
-JWTs](concepts/control-plane-security.md), but never more than the credential the
-console holds: a console signed in with a `console` scope token can let an agent read,
-not change anything. An `admin` grant is admin on the management server, like the
-admin token there.
+JWTs](concepts/control-plane-security.md), and lists the permissions the agent will
+hold. When a user approves (the console signed in with a user name and password), the
+agent [acts for that user](#agents-act-for-a-user): it holds the user's permissions
+within the scope, resolved again at every call, never more than the user; a scope is
+offered when it gives at least one permission the user holds. Approved with a
+credential that is no user (the admin token, a control JWT), the scopes are capped by
+that credential as before: a console signed in with a `console` scope token can let an
+agent read, not change anything, and an `admin` grant is admin on the management
+server, like the admin token there.
 
 **What the token opens.** Only `/_rustybin/mcp` on this instance and host: the token
 is bound to that URL (RFC 8707), and every other control-plane route, the data plane's
 admin checks and other instances refuse it. Access tokens last an hour; the agent
 renews them with a refresh token (30 days) without asking you again, and a refresh can
-narrow the scopes, never widen them.
+narrow the scopes, never widen them. A user's tokens carry the user and the user's
+sign-in generation, so the user's sign out everywhere, password change, disable or
+removal ends them, refresh tokens included.
 
 **The key.** Client registrations and tokens are signed with a key, so no client or
 token is stored and nothing grows on the server. The key comes from
@@ -193,9 +200,9 @@ mocks.write`), never a protocol error.
 | | the visit's manage token (`X-Rustybin-Mock-Token`) | The above, changes to the visit's own mocks, `get_visit`, `extend_visit` |
 | Shared mode | an API key (`X-Rustybin-Key`) | The key's own mocks, inspector entries and usage |
 
-`get_instance` reports what the caller is (`caller.admin`, `caller.scopes`,
-`caller.roles`, `caller.permissions`), so an agent can explain why a tool is missing. On a secured
-instance:
+`get_instance` reports what the caller is (`caller.admin`, `caller.user`, the user it
+acts for, `caller.via`, `caller.scopes`, `caller.roles`, `caller.permissions`), so an
+agent can explain why a tool is missing. On a secured instance:
 
 ```hurl
 {{#include ../examples/agent/manage_secured.hurl:secured_no_token}}
@@ -216,16 +223,17 @@ gives in `clientInfo` (sent with `initialize`, or in `_meta` of a 2026-07-28 cal
 Two clients on the same token are two agents; a client that sends no name is
 `unknown`. **The identity rule:** the name only tells agents apart in the list. A
 revocation, and the rights you set on an agent, follow its credential: every agent of
-the same credential (the same admin token, API key, visit, console user, JWT subject
+the same credential (the same admin token, API key, visit, user's sign-in, JWT subject
 or OAuth client) is refused while one is revoked, and must also pass the limits set on
 the others, so a new client name never starts over. Rules of `rustybin.yaml` still
 match by name. On an open control plane an agent is known only by its session label,
 which it can change: turn the sign-in on to control agents for real. The console's **AI agents** view (under AI and agents) lists them with
-their credential, first and last seen, calls today and in total, open sessions and
+the user each acts for (the **Owner** column, with a filter), their credential, first
+and last seen, calls today and in total, open sessions and
 status (`active`, `idle`, `revoked`), and opens one to show its calls per tool with
 their outcomes (ok, error, denied, asked to confirm), its last errors and its
 sessions. The live feed shows calls as they happen. The same data is at
-`GET /_rustybin/agents` (admin):
+`GET /_rustybin/agents` (`agents.read` for everyone's; a user's own without it):
 
 ```hurl
 {{#include ../examples/agent/manage_agents.hurl:agents_call}}
@@ -235,18 +243,25 @@ sessions. The live feed shows calls as they happen. The same data is at
 {{#include ../examples/agent/manage_agents.hurl:agents_list}}
 ```
 
-**Rights.** An agent never gets more than its credential allows; the operator can
-give it less. A **ceiling** caps its tools: `read-only` (read tools, no captured
-traffic), `traffic` (every read tool), `manage` (reads and mock changes; nothing
-instance-wide, no visit operator tools, no harness) or `full` (whatever the
-credential allows). An **allow** list narrows it to the tools named; a **deny** list
+**Rights.** An agent never gets more than its credential allows (a user's agent,
+more than its user); the operator can give it less. A **ceiling** caps its tools: a
+role, built-in or custom (`viewer`, `editor`, a role of your own: the tools whose
+permission the role grants), or one of the four 0.3 ceilings, which keep exactly the
+tools they had: `read-only` (read tools, no captured traffic; nearest to `viewer`),
+`traffic` (every read tool; `viewer` plus `traffic.read`), `manage` (reads and mock
+changes; nothing instance-wide, no visit operator tools, no harness; nearest to
+`editor`) or `full` (whatever the credential allows: a user's own). A 0.3 name wins
+over a custom role of the same name, and a ceiling naming a role that does not exist
+(any more) allows nothing. An **allow** list narrows it to the tools named; a **deny** list
 removes tools. A tool outside its rights is not in its `tools/list`, and calling it
 anyway answers a tool error that says the operator limited the agent. Rights come
 from, field by field: the agent's own (set in the console or with `PATCH
 /_rustybin/agents/{id}`), else the first matching rule of
-[`rustybin.yaml`](mocks/config.md)'s `agents:` section, else the default ceiling
-(the `agents.default_ceiling` setting, `RUSTYBIN_AGENTS_DEFAULT_CEILING`, `full` by
-default).
+[`rustybin.yaml`](mocks/config.md)'s `agents:` section, else (for the ceiling) the
+default for a role of its user (the `agents.default_ceiling_for` setting, entries
+`role=ceiling` such as `admin=editor`; the first entry whose role the user holds),
+else the default ceiling (the `agents.default_ceiling` setting,
+`RUSTYBIN_AGENTS_DEFAULT_CEILING`, `full` by default).
 
 ```hurl
 {{#include ../examples/agent/manage_agents.hurl:agents_rights}}
@@ -262,11 +277,22 @@ agents:
       note: Team assistants sign in with OAuth
     - match: { credential: admin }
       ceiling: full
+    - match: { role: admin }
+      ceiling: editor
+      note: An admin's agents build, they do not administer
+    - match: { user: "ci-*" }
+      ceiling: viewer
 ```
 
 `match.name` is the client's name, case insensitive, with `*` as a wildcard;
-`match.credential` is `admin`, `console`, `jwt`, `oauth`, `key`, `visit` or `open`.
-A saved or environment default ceiling wins over the file's `default_ceiling`.
+`match.credential` is `admin`, `user` (any user's agent), `console` (a user's agent on
+a sign-in token), `jwt`, `oauth` (a token of the built-in OAuth server, a user's or
+not), `key`, `visit` or `open`; `match.user` is the user the agent acts for (a sign-in
+name, with `*`, or a user id) and `match.role` a role that user holds (neither matches
+an agent that acts for nobody). A saved or environment default ceiling wins over the
+file's `default_ceiling`. Whatever a document says, a document pulled from git
+included, an agent acting for a user never holds more than the user: a ceiling only
+takes away.
 
 **Revoke** refuses every call of the agent (a tool error saying it was revoked), ends
 its sessions (their next request answers `403`), and revokes its tokens for their
@@ -298,20 +324,83 @@ tool, the outcome and the latency) and an `agent` event on revoke and restore:
 
 | Route | |
 |---|---|
-| `GET /_rustybin/agents` | The agents and the policy (default ceiling, rules) |
+| `GET /_rustybin/agents` | The agents (each with `owner`, the user it acts for, and `owner_label`) and the policy (default ceiling, the defaults per role, rules); `?owner=<user>` keeps one user's |
 | `GET /_rustybin/agents/events` | Server-Sent Events: a `call` per tool call, an `agent` event on revoke and restore (at most 16 listeners) |
-| `GET /_rustybin/agents/{id}` | One agent: calls per tool, last errors, sessions, the tools and whether its rights allow each |
-| `PATCH /_rustybin/agents/{id}` | `{"rights": {"ceiling", "allow", "deny"} \| null, "note": "..." \| null}` |
+| `GET /_rustybin/agents/{id}` | One agent: its user, calls per tool, last errors, sessions, the tools and whether its rights allow each |
+| `PATCH /_rustybin/agents/{id}` | `{"rights": {"ceiling", "allow", "deny"} \| null, "note": "..." \| null}`; a ceiling is a role or a 0.3 ceiling |
 | `POST /_rustybin/agents/{id}/revoke`, `/restore` | Revoke or restore |
 | `DELETE /_rustybin/agents/{id}/sessions` | End its sessions |
 
-All need admin rights. The registry keeps at most 512 agents (the least recently seen
+Everyone's agents need `agents.read` to see and `agents.manage` to change; a user
+without them sees, limits, revokes and ends the sessions of their own (see below).
+The registry keeps at most 512 agents (the least recently seen
 goes first, agents with rights, a note or a revocation last), 20 errors, 32 sessions
 and 16 token ids per agent. With `RUSTYBIN_STATE_DIR`, rights, notes, revocations and
 the call totals are kept in `<state>/agents.json`; sessions and errors are not. On an
 open control plane anyone may connect under any name, so rights there are advisory:
 turn on the console sign-in to control agents for real. **Explain what this agent
 did** (with an AI key) summarises an agent's calls, errors and rights.
+
+### Agents act for a user
+
+With the password sign-in, an agent that signs in as a user works on that user's
+behalf and never does more than they may: an agent on a user's sign-in token (pasted
+as a bearer, or the token of `rustybin login`), and an agent whose OAuth sign-in a
+user approved on the consent page. Its permissions are the user's, resolved at every
+call (a role change of the user applies to the agent's next call), within the scope
+it was given, then its ceiling, its allow and deny lists, the rules and the defaults
+take away from that. The admin token and control JWTs stay credentials of their own:
+their agents act for nobody, and the list says so (`owner` is `null`, `owner_label`
+names the credential).
+
+```hurl
+{{#include ../examples/agent/agents_for_users.hurl:user_agent}}
+```
+
+```hurl
+{{#include ../examples/agent/agents_for_users.hurl:owner}}
+```
+
+**Your own agents.** Seeing everyone's agents needs `agents.read` (the viewer role
+and up hold it), changing them `agents.manage`. Without them a user sees their own
+agents, limits them (rights that only take tools away: a change that would let a tool
+through again is refused), revokes them, ends their sessions, and restores one they
+revoked themselves; one the operator revoked is the operator's to restore.
+
+```hurl
+{{#include ../examples/agent/agents_for_users.hurl:role_ceiling}}
+```
+
+```hurl
+{{#include ../examples/agent/agents_for_users.hurl:own_limits}}
+```
+
+**The consent page** lists what the agent will hold: the approving user's permissions
+within the scope chosen, never more.
+
+```hurl
+{{#include ../examples/agent/agents_for_users.hurl:consent}}
+```
+
+**When a user goes.** Disabling or deleting a user revokes every agent acting for
+them (their calls are refused, their sessions end, their tokens and their OAuth
+clients' refresh tokens are refused); enabling the user again leaves the agents
+revoked until someone restores them. Signing a user out everywhere, and a change of
+their password, ends their agents' tokens and sessions without revoking the agents.
+The first admin's password change signs out the first admin only (their sessions,
+portal sessions and agents), no longer every user; tokens the OAuth server issued
+before 0.5 count as the first admin's, so they end too. Only an OAuth sign-in approved
+with the admin token or a control JWT (an agent acting for nobody) outlives it: sign
+everyone out (`DELETE /_rustybin/sessions`) to end those.
+
+```hurl
+{{#include ../examples/agent/agents_for_users.hurl:user_removed}}
+```
+
+Agents recorded before 0.5 (a console sign-in by user name, an OAuth client) are
+moved to their user at the first start with the password sign-in: a console record to
+the user of that name, an OAuth record to the first admin, with their rights, notes
+and revocations.
 
 ## Talking to the server
 
@@ -461,10 +550,10 @@ The token for an https remote is the secret `git.token`: an agent cannot set it.
 
 | Tool | Permission | |
 |---|---|---|
-| `list_agents` / `get_agent` | `agents.read` | The [agents](#managing-agents) and the policy; one agent with its calls per tool, errors, sessions, rights and recent activity |
-| `set_agent_rights` | `agents.manage` | A ceiling, allow and deny lists, a note; `reset: true` clears the agent's own rights. Never on the caller's own agent or an agent of the caller's credential |
-| `revoke_agent` / `restore_agent` | `agents.manage` | Revoke (confirmed; an agent cannot revoke itself) and restore (never an agent of the caller's credential) |
-| `end_agent_sessions` | `agents.manage` | Close an agent's handshake-era sessions (never of an agent of the caller's credential) |
+| `list_agents` / `get_agent` | `agents.read` or your own | The [agents](#managing-agents) with the user each acts for (`owner` keeps one user's) and the policy; one agent with its calls per tool, errors, sessions, rights and recent activity. Without `agents.read`, [your own](#agents-act-for-a-user) |
+| `set_agent_rights` | `agents.manage` or your own | A ceiling (a role, or `read-only`, `traffic`, `manage`, `full`), allow and deny lists, a note; `reset: true` clears the agent's own rights. Never on the caller's own agent or an agent of the caller's credential; without `agents.manage`, your own agents and only to limit them |
+| `revoke_agent` / `restore_agent` | `agents.manage` or your own | Revoke (confirmed; an agent cannot revoke itself) and restore (never an agent of the caller's credential; without `agents.manage`, one of yours you revoked) |
+| `end_agent_sessions` | `agents.manage` or your own | Close an agent's handshake-era sessions (never of an agent of the caller's credential) |
 | `list_sessions` | `users.read` | The console's sign-in sessions, when the password sign-in is on; `user` lists one user's |
 | `end_session` | `users.manage` | End one session by id; `user` signs one user out everywhere, `all: true` everyone (both confirmed) |
 | `list_users` | `users.read` | The [users](users.md): roles, status (active, invited, disabled), last sign-in, the open invitation (never its link); `user` for one with its permissions |
@@ -839,9 +928,9 @@ The same job from the API, the console, the command line, an agent and the confi
 
 | Surface | Where |
 |---|---|
-| API | `POST /_rustybin/mcp` (the server), `GET /_rustybin/agents`, `GET /_rustybin/agents/events`, `GET`, `PATCH /_rustybin/agents/{id}`, `POST /_rustybin/agents/{id}/revoke \| restore`, `DELETE /_rustybin/agents/{id}/sessions`, the OAuth routes under `/_rustybin/oauth` |
-| Console | The **AI agents** view (the list, rights, revoke, the live feed, **Connect an agent** with the `claude mcp add` command), `#/authorize/<id>` for the agent sign-in |
-| CLI | `rustybin agents list \| get \| rights \| revoke \| restore \| end-sessions \| tail`, `rustybin mcp-stdio` ([reference](cli.md#agents)) |
-| Management MCP | `list_agents`, `get_agent`, `set_agent_rights`, `revoke_agent` (never oneself), `restore_agent`, `end_agent_sessions` (rights, restore and end sessions never on an agent of the caller's own credential); the prompt `onboard_agent` |
-| `rustybin.yaml` | `agents:` (`default_ceiling`, `rules` by client name and credential kind) ([the whole instance as code](configuration-as-code.md)) |
+| API | `POST /_rustybin/mcp` (the server), `GET /_rustybin/agents` (each agent's `owner`, `?owner=`), `GET /_rustybin/agents/events`, `GET`, `PATCH /_rustybin/agents/{id}` (a role as the ceiling), `POST /_rustybin/agents/{id}/revoke \| restore`, `DELETE /_rustybin/agents/{id}/sessions`, the OAuth routes under `/_rustybin/oauth` (the consent request's `permissions`, `grants` and `approver`) |
+| Console | The **AI agents** view (the list with the **Owner** column and its filter, rights with a role as the ceiling, revoke, the live feed, **Connect an agent** with the `claude mcp add` command), `#/authorize/<id>` for the agent sign-in (the permissions the agent will hold) |
+| CLI | `rustybin agents list [--owner U] \| get \| rights [--ceiling ROLE] \| revoke \| restore \| end-sessions \| tail`, `rustybin mcp-stdio` ([reference](cli.md#agents)) |
+| Management MCP | `list_agents` (`owner`), `get_agent`, `set_agent_rights` (a role as the ceiling), `revoke_agent` (never oneself), `restore_agent`, `end_agent_sessions` (rights, restore and end sessions never on an agent of the caller's own credential; a user's own agents without `agents.read` / `agents.manage`); the prompt `onboard_agent` |
+| `rustybin.yaml` | `agents:` (`default_ceiling`, `rules` by client name, credential kind, user and role, a role as the ceiling), `settings: {agents.default_ceiling_for: [...]}` ([the whole instance as code](configuration-as-code.md)) |
 | Environment | `RUSTYBIN_AGENTS_DEFAULT_CEILING`, `RUSTYBIN_CONTROL_OAUTH`, `RUSTYBIN_CONTROL_OAUTH_ISSUER`, `RUSTYBIN_CONTROL_OAUTH_KEY` ([configuration](configuration.md#control-plane-and-console)) |

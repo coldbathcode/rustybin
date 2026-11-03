@@ -636,8 +636,8 @@ async fn me_works_for_every_role() {
         StatusCode::UNAUTHORIZED
     );
     // The first admin's own account (the sign-in settings): the change
-    // signs every session out, as in 0.4 (the OAuth tokens carry only the
-    // instance's generation).
+    // signs only the first admin out (their sign-in, portal and agents'
+    // OAuth tokens carry their generation), the other users stay in.
     let viewer = token(&app, "u-viewer", "same-secret-1").await;
     let first = token(&app, DEFAULT_USER, DEFAULT_PASSWORD).await;
     let (_, me) = send(&app, "GET", "/_rustybin/me", Some(&first), None).await;
@@ -659,8 +659,15 @@ async fn me_works_for_every_role() {
         send(&app, "GET", "/_rustybin/me", Some(&viewer), None)
             .await
             .0,
+        StatusCode::OK,
+        "the first admin's change signs only the first admin out (step 12)"
+    );
+    assert_eq!(
+        send(&app, "GET", "/_rustybin/me", Some(&first), None)
+            .await
+            .0,
         StatusCode::UNAUTHORIZED,
-        "the first admin's change signs every session out"
+        "the first admin's other sessions end"
     );
     let fresh = v["token"].as_str().expect("fresh token");
     assert_eq!(

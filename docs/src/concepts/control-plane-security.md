@@ -111,6 +111,8 @@ route's:
 | A settings change that sets or clears a secret, a document with `secrets:` | `secrets.write` |
 | A document (`POST /_rustybin/config/apply`, the `apply_config` tool) with `settings:` or `instance:`; with `agents:`; with `users:` or `roles:` | `settings.write`; `agents.manage`; `users.manage` |
 | `PUT /_rustybin/password` by a caller who is not a user (the admin token, a control JWT): the first admin's password | `users.manage` |
+| `GET /_rustybin/agents*` (and `list_agents`, `get_agent`) of AI agents that are not the caller's own | `agents.read` (a user sees their own [agents](../agent-mcp.md#agents-act-for-a-user) without it) |
+| Changing, revoking, restoring or ending the sessions of an AI agent that is not the caller's own | `agents.manage` (a user limits, revokes and ends the sessions of their own without it, and restores one they revoked) |
 | Inviting a user, giving roles, saving a custom role; changing, disabling, deleting or resetting a user | every permission of the roles given (or of the user's roles): nobody grants or manages more than they hold ([users and roles](../users.md#the-guard-rails)) |
 | The MCP relay and checks: a saved connection's credentials, or a method that acts on a server on another host (`tools/call`) | `mcp.connections` |
 | `GET /_rustybin/checkpoints?from=git` and a restore from the repository | `git.read` |
@@ -143,14 +145,18 @@ Sign-in**, the current password required) or through `PUT /_rustybin/me/password
 the 0.3 `PUT /_rustybin/password` is stored as an argon2id hash in the
 [settings store](#settings-and-secrets-at-rest) (the secret `console.password_hash`)
 and wins over the environment, unless `RUSTYBIN_SETTINGS_LOCK` makes the
-environment authoritative. The change ends every session, as in 0.4 (and the
-management server's OAuth tokens, which act for no user yet); the caller gets a fresh
-token. Another user's password change ends only their own other sessions. The settings API changes `console.user` and `console.password_hash` only
+environment authoritative. The change ends the first admin's sessions: their
+sign-in, portal and agents' tokens, OAuth tokens included (they carry the user they
+act for and the user's generation, and tokens issued before 0.5 count as the first
+admin's); other users stay signed in (until 0.5 every session ended). The caller gets
+a fresh token. Another user's password change ends only their own other sessions and
+their agents' tokens. The settings API changes `console.user` and `console.password_hash` only
 with the current password (`current_password` in the `PATCH /_rustybin/settings`
 body; `403` with `reason: current_password_required` or `invalid_credentials`
 otherwise), so a stolen sign-in token or an agent cannot lock the owner out or keep
 its access; the management MCP server and documents never change them. Any change
-of the first admin's user name or password signs every session out. Forgot it?
+of the first admin's user name or password signs the first admin out everywhere
+(`DELETE /_rustybin/sessions` signs everyone out). Forgot it?
 Another admin sends a new invitation (`POST /_rustybin/users/{id}/invite`, a reset),
 or `DELETE /_rustybin/settings/console.password_hash` with the admin token
 (`RUSTYBIN_ADMIN_TOKEN` itself) goes back to the environment's password or the
@@ -405,7 +411,10 @@ In `password`, `token` and `jwt` mode the management MCP server (`/_rustybin/mcp
 AI agent sign in through the browser: its `401` points at RFC 9728 metadata, the
 agent registers with Rustybin's built-in authorization server (`/_rustybin/oauth`),
 and you approve it on the console's consent page with the credential the console
-holds. The agent's token is capped by that credential's scopes and opens
+holds. Approved by a user, the agent acts for that user: it holds the user's
+permissions within the scope granted, resolved at every call, and the user's disable,
+removal, password change or sign out everywhere ends it. Approved with the admin token
+or a control JWT, the token is capped by that credential's scopes. Either way it opens
 `/_rustybin/mcp` only, never the rest of the control plane. `RUSTYBIN_CONTROL_OAUTH`
 turns it off, `RUSTYBIN_CONTROL_OAUTH_KEY` keeps sign-ins across restarts and
 replicas, and `RUSTYBIN_CONTROL_OAUTH_ISSUER` hands sign-in to an external

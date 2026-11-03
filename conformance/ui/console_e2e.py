@@ -2452,6 +2452,144 @@ def run_users(browser):
     ctx.close()
 
 
+def run_agents_for_users(browser):
+    """AI agents act for a user (access control step 12) on the password
+    instance: the admin sees whose agent it is (the Owner column and its
+    filter); a user without agents.read sees only their own agents and still
+    limits them (a role as the ceiling) and may revoke them; the consent
+    page lists the permissions an agent would hold, never more than the
+    user's; disabling the user revokes their agents."""
+    base = os.environ["RUSTYBIN_PASSWORD_URL"].rstrip("/")
+    print(f"agents for users: {base}")
+
+    def api(method, path, token=None, body=None):
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = "Bearer " + token
+        req = urllib.request.Request(base + path, method=method, headers=headers,
+                                     data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                raw = r.read()
+                return r.status, json.loads(raw) if raw else None
+        except urllib.error.HTTPError as e:
+            raw = e.read()
+            return e.code, json.loads(raw) if raw else None
+
+    def agent_call(token, client):
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": client, "version": "1"}}}}).encode()
+        req = urllib.request.Request(base + "/_rustybin/mcp", method="POST", data=body, headers={
+            "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list", "Authorization": "Bearer " + token})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return [t["name"] for t in json.loads(r.read())["result"]["tools"]]
+
+    held = {}
+    ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+    page = ctx.new_page()
+    page.set_default_timeout(TIMEOUT)
+    page.on("pageerror", lambda e: console_errors.append(f"[agents for users] uncaught: {e}"))
+    ctx2 = browser.new_context(viewport={"width": 1280, "height": 900})
+    p2 = ctx2.new_page()
+    p2.set_default_timeout(TIMEOUT)
+    p2.on("pageerror", lambda e: console_errors.append(f"[agents for users, user] uncaught: {e}"))
+
+    def setup():
+        status, v = api("POST", "/_rustybin/login", body={"username": "rustybin", "password": "rustybin"})
+        assert status == 200, (status, v)
+        held["admin"] = v["token"]
+        status, v = api("PUT", "/_rustybin/roles/e2e-builder", held["admin"],
+                        {"description": "Builds mocks", "permissions": ["instance.read", "mocks.read", "mocks.write"]})
+        assert status == 200, (status, v)
+        status, v = api("POST", "/_rustybin/users", held["admin"], {"name": "e2e-dana", "roles": ["e2e-builder"]})
+        assert status == 201, (status, v)
+        held["dana_id"] = v["user"]["id"]
+        status, v = api("POST", "/_rustybin/join", body={"token": v["invitation"]["token"], "password": "dana-secret-k3Qx"})
+        assert status == 200, (status, v)
+        # The agent signs in on a token of its own.
+        status, v = api("POST", "/_rustybin/login", body={"username": "e2e-dana", "password": "dana-secret-k3Qx"})
+        assert status == 200, (status, v)
+        names = agent_call(v["token"], "e2e-dana-agent")
+        assert "create_mock" in names and "apply_config" not in names, names
+        agent_call(held["admin"], "e2e-admin-agent")
+
+    step("agents for users: a user's agent and the admin's", setup)
+
+    def owner_column():
+        page.goto(base + "/ui/#/agents")
+        page.wait_for_selector("#signin")
+        page.fill("#signin-user", "rustybin")
+        page.fill("#signin-password", "rustybin")
+        page.get_by_role("button", name="Sign in", exact=True).click()
+        page.wait_for_selector("#agents-table")
+        expect(page.locator("#agents-table thead")).to_contain_text("Owner")
+        row = page.locator("#agents-table tr", has_text="e2e-dana-agent")
+        expect(row.locator("[data-col=owner]")).to_contain_text("e2e-dana")
+        mine = page.locator("#agents-table tr", has_text="e2e-admin-agent")
+        expect(mine.locator("[data-col=owner]")).to_contain_text("you")
+        page.select_option("#agents-owner-filter", held["dana_id"])
+        expect(page.locator("#agents-table tbody tr")).to_have_count(1)
+        expect(page.locator("#agents-table tbody tr")).to_contain_text("e2e-dana-agent")
+        shot(page, "password", "50-agents-owner")
+        page.select_option("#agents-owner-filter", "")
+
+    step("agents for users: the admin sees whose agent it is", owner_column)
+
+    def own_agents():
+        p2.goto(base + "/ui/#/agents")
+        p2.wait_for_selector("#signin")
+        p2.fill("#signin-user", "e2e-dana")
+        p2.fill("#signin-password", "dana-secret-k3Qx")
+        p2.get_by_role("button", name="Sign in", exact=True).click()
+        p2.wait_for_selector("#agents-table")
+        expect(p2.locator("#view")).to_contain_text("Your own agents")
+        expect(p2.locator("#agents-table tbody tr")).to_have_count(1)
+        expect(p2.locator("#agents-table")).not_to_contain_text("e2e-admin-agent")
+        p2.get_by_role("button", name="Open the agent e2e-dana-agent").click()
+        p2.wait_for_selector("#agent-ceiling")
+        expect(p2.locator("#agent-revoke")).to_be_enabled()
+        expect(p2.locator("#agent-save-rights")).to_be_enabled()
+        p2.select_option("#agent-ceiling", "viewer")
+        p2.locator("#agent-save-rights").click()
+        expect(p2.locator("#agents-table tr", has_text="e2e-dana-agent")).to_contain_text("role viewer")
+        shot(p2, "password", "51-agents-own")
+        # Widening it again is refused (agents.manage).
+        p2.locator("#agent-reset-rights").click()
+        expect(p2.locator("#agent-detail .notice.err")).to_contain_text("agents.manage")
+
+    step("agents for users: a user limits their own agent with a role", own_agents)
+
+    def consent():
+        verifier = "e2e-verifier-" + "x" * 40
+        _, request_id = oauth_start(base, "http://127.0.0.1:33420/callback", "E2E agent", verifier)
+        p2.goto(base + "/ui/#/authorize/" + request_id)
+        p2.wait_for_selector("#authorize-permissions")
+        expect(p2.locator("#authorize-permissions")).to_contain_text("It acts for you")
+        expect(p2.locator("#authorize-permissions [data-permission='mocks.write']")).to_have_count(1)
+        expect(p2.locator("#authorize-permissions [data-permission='settings.write']")).to_have_count(0)
+        shot(p2, "password", "52-consent-permissions")
+
+    step("agents for users: the consent page lists what the agent will hold", consent)
+
+    def removed():
+        status, v = api("PATCH", "/_rustybin/users/e2e-dana", held["admin"], {"disabled": True})
+        assert status == 200 and v["agents_revoked"] == 1, (status, v)
+        page.get_by_role("button", name="Refresh").first.click()
+        expect(page.locator("#agents-table tr", has_text="e2e-dana-agent")).to_contain_text("revoked")
+        status, _ = api("DELETE", "/_rustybin/users/e2e-dana", held["admin"])
+        assert status == 200, status
+        status, _ = api("DELETE", "/_rustybin/roles/e2e-builder", held["admin"])
+        assert status == 200, status
+        api("POST", "/_rustybin/logout", held["admin"])
+
+    step("agents for users: disabling the user revokes their agents", removed)
+    ctx2.close()
+    ctx.close()
+
+
 def run_portal_access(browser):
     """Open and closed APIs on the dev portal (access control step 13) on the
     password instance: the admin closes the sample mock from the publish
@@ -2697,6 +2835,7 @@ def main():
         if os.environ.get("RUSTYBIN_PASSWORD_URL"):
             run_password(browser)
             run_users(browser)
+            run_agents_for_users(browser)
             run_portal_access(browser)
         if os.environ.get("RUSTYBIN_SSO_URL"):
             run_sso(browser)

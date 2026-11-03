@@ -42,7 +42,9 @@ test_schedules:                     # saved tests on a schedule, a webhook for f
     webhook: https://hooks.example.com/rustybin
 agents:
   default_ceiling: traffic
-  rules: [{ match: { name: "ci-*" }, ceiling: read-only }]
+  rules:
+    - { match: { name: "ci-*" }, ceiling: read-only }
+    - { match: { role: admin }, ceiling: editor }   # an admin's agents build, never administer
 roles:                              # custom roles (the five built-in ones never change)
   - name: catalog-reader
     description: Reads mocks and traffic

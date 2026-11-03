@@ -1229,15 +1229,30 @@ impl Settings {
             }
         }
         if hash_changed || user_after != *user_before {
-            // Every session, as in 0.4: the management server's OAuth
-            // tokens carry only the instance's generation (they act for no
-            // user until agents do, testing-2 step 12), and a changed first
-            // admin's password must end them.
-            self.console_tokens.rotate();
-            tracing::info!(
-                target: "rustybin::auth",
-                "the console sign-in changed: every session is signed out"
-            );
+            // The first admin's sessions only: every token acting for them
+            // (sign-in, portal, and the management server's OAuth tokens,
+            // which carry the user and the user's generation since agents
+            // act for a user, as do the 0.4 ones read as theirs) carries
+            // the generation that moves on here. Other users stay signed
+            // in. Without a first admin (or when the store cannot write),
+            // every session, as in 0.4.
+            let first = self.users.first_admin();
+            match first.map(|u| (self.users.rotate_generation(&u.id), u)) {
+                Some((Ok(_), u)) => {
+                    self.console_tokens.forget_user(&u.id);
+                    tracing::info!(
+                        target: "rustybin::auth",
+                        "the console sign-in changed: the first admin's sessions are signed out"
+                    );
+                }
+                _ => {
+                    self.console_tokens.rotate();
+                    tracing::info!(
+                        target: "rustybin::auth",
+                        "the console sign-in changed: every session is signed out"
+                    );
+                }
+            }
         }
     }
 

@@ -139,6 +139,9 @@ everywhere:
 Disabling a user (`"disabled": true`) ends their sessions at once and drops their
 open invitation; their sign-in gets the same answer as a wrong password, so nobody
 learns the account exists. Enabling them again does not bring an old token back.
+Disabling or deleting a user also revokes every AI agent acting for them (their
+sign-in and OAuth agents: [Agents act for a user](agent-mcp.md#agents-act-for-a-user));
+enabling the user again leaves those agents revoked until someone restores them.
 
 ```hurl
 {{#include ../examples/concepts/users.hurl:disable}}

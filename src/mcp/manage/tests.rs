@@ -3779,6 +3779,7 @@ fn doc_label(need: super::access::ToolNeed) -> String {
     match need {
         ToolNeed::Perm(p) => format!("`{}`", p.name()),
         ToolNeed::Owner(p) => format!("`{}` or owner", p.name()),
+        ToolNeed::Own(p) => format!("`{}` or your own", p.name()),
         ToolNeed::Visitor => "the visit".into(),
     }
 }
@@ -3809,6 +3810,11 @@ fn every_tool_declares_a_permission() {
                 "{}: {} is not a per-mock permission",
                 t.name,
                 p.name()
+            ),
+            ToolNeed::Own(p) => assert!(
+                t.name.contains("agent") && matches!(p, P::AgentsRead | P::AgentsManage),
+                "{}: only the agents tools take the own-agents rule",
+                t.name
             ),
             ToolNeed::Perm(_) => {}
         }

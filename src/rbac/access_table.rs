@@ -682,7 +682,176 @@ pub(crate) const DELIBERATE: &[(Col, &str, &str, bool, &str)] = &[
         true,
         "traffic.read covers a mock's traffic",
     ),
+    // Step 12: a user sees, limits, revokes and ends the sessions of their
+    // own agents without agents.read or agents.manage, so any signed-in
+    // caller reaches the agents routes. These columns' callers are no user:
+    // the handlers still need agents.read (to see) and agents.manage (to
+    // change), body checks, so what they can do is unchanged.
+    (Col::Inspector, "GET", "/_rustybin/agents", true, OWN_READ),
+    (Col::Harness, "GET", "/_rustybin/agents", true, OWN_READ),
+    (Col::Anonymous, "GET", "/_rustybin/agents", true, OWN_READ),
+    (
+        Col::Inspector,
+        "GET",
+        "/_rustybin/agents/events",
+        true,
+        OWN_READ,
+    ),
+    (
+        Col::Harness,
+        "GET",
+        "/_rustybin/agents/events",
+        true,
+        OWN_READ,
+    ),
+    (
+        Col::Anonymous,
+        "GET",
+        "/_rustybin/agents/events",
+        true,
+        OWN_READ,
+    ),
+    (
+        Col::Inspector,
+        "GET",
+        "/_rustybin/agents/{id}",
+        true,
+        OWN_READ,
+    ),
+    (
+        Col::Harness,
+        "GET",
+        "/_rustybin/agents/{id}",
+        true,
+        OWN_READ,
+    ),
+    (
+        Col::Anonymous,
+        "GET",
+        "/_rustybin/agents/{id}",
+        true,
+        OWN_READ,
+    ),
+    (
+        Col::Console,
+        "PATCH",
+        "/_rustybin/agents/{id}",
+        true,
+        OWN_MANAGE,
+    ),
+    (
+        Col::Inspector,
+        "PATCH",
+        "/_rustybin/agents/{id}",
+        true,
+        OWN_MANAGE,
+    ),
+    (
+        Col::Harness,
+        "PATCH",
+        "/_rustybin/agents/{id}",
+        true,
+        OWN_MANAGE,
+    ),
+    (
+        Col::Anonymous,
+        "PATCH",
+        "/_rustybin/agents/{id}",
+        true,
+        OWN_MANAGE,
+    ),
+    (
+        Col::Console,
+        "POST",
+        "/_rustybin/agents/{id}/revoke",
+        true,
+        OWN_MANAGE,
+    ),
+    (
+        Col::Inspector,
+        "POST",
+        "/_rustybin/agents/{id}/revoke",
+        true,
+        OWN_MANAGE,
+    ),
+    (
+        Col::Harness,
+        "POST",
+        "/_rustybin/agents/{id}/revoke",
+        true,
+        OWN_MANAGE,
+    ),
+    (
+        Col::Anonymous,
+        "POST",
+        "/_rustybin/agents/{id}/revoke",
+        true,
+        OWN_MANAGE,
+    ),
+    (
+        Col::Console,
+        "POST",
+        "/_rustybin/agents/{id}/restore",
+        true,
+        OWN_MANAGE,
+    ),
+    (
+        Col::Inspector,
+        "POST",
+        "/_rustybin/agents/{id}/restore",
+        true,
+        OWN_MANAGE,
+    ),
+    (
+        Col::Harness,
+        "POST",
+        "/_rustybin/agents/{id}/restore",
+        true,
+        OWN_MANAGE,
+    ),
+    (
+        Col::Anonymous,
+        "POST",
+        "/_rustybin/agents/{id}/restore",
+        true,
+        OWN_MANAGE,
+    ),
+    (
+        Col::Console,
+        "DELETE",
+        "/_rustybin/agents/{id}/sessions",
+        true,
+        OWN_MANAGE,
+    ),
+    (
+        Col::Inspector,
+        "DELETE",
+        "/_rustybin/agents/{id}/sessions",
+        true,
+        OWN_MANAGE,
+    ),
+    (
+        Col::Harness,
+        "DELETE",
+        "/_rustybin/agents/{id}/sessions",
+        true,
+        OWN_MANAGE,
+    ),
+    (
+        Col::Anonymous,
+        "DELETE",
+        "/_rustybin/agents/{id}/sessions",
+        true,
+        OWN_MANAGE,
+    ),
 ];
+
+/// Why the agents' reads are reachable (step 12).
+const OWN_READ: &str =
+    "a user's own agents: a caller who is not a user still needs agents.read (a body check)";
+/// Why the agents' changes are reachable (step 12).
+const OWN_MANAGE: &str =
+    "a user's own agents: a caller who is not a user still needs agents.manage (a body check)";
 
 #[test]
 fn the_old_scopes_reach_what_they_reached() {

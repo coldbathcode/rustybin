@@ -692,12 +692,12 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | Methods | Path | Description |
 |---|---|---|
 | POST GET DELETE | `/_rustybin/mcp` | Management MCP server: configure this Rustybin from an AI agent |
-| GET | `/_rustybin/agents` | AI agents on the management MCP server (admin) |
-| GET | `/_rustybin/agents/events` | Live feed of agent calls (admin) (SSE) |
-| GET PATCH | `/_rustybin/agents/{id}` | One AI agent: its calls per tool, last errors, sessions and rights (admin) |
-| POST | `/_rustybin/agents/{id}/revoke` | Revoke an AI agent: refuse its calls, end its sessions, revoke its tokens (admin) |
-| POST | `/_rustybin/agents/{id}/restore` | Restore a revoked AI agent (admin) |
-| DELETE | `/_rustybin/agents/{id}/sessions` | End an AI agent's MCP sessions (admin) |
+| GET | `/_rustybin/agents` | AI agents on the management MCP server, each with the user it acts for (agents.read; a user's own without it) |
+| GET | `/_rustybin/agents/events` | Live feed of agent calls (agents.read; a user's own without it) (SSE) |
+| GET PATCH | `/_rustybin/agents/{id}` | One AI agent: its user, calls per tool, last errors, sessions and rights (agents.read / agents.manage; your own without them) |
+| POST | `/_rustybin/agents/{id}/revoke` | Revoke an AI agent: refuse its calls, end its sessions, revoke its tokens (agents.manage; your own without it) |
+| POST | `/_rustybin/agents/{id}/restore` | Restore a revoked AI agent (agents.manage; one of yours you revoked without it) |
+| DELETE | `/_rustybin/agents/{id}/sessions` | End an AI agent's MCP sessions (agents.manage; your own without it) |
 | GET | `/_rustybin/config/export` | The whole instance as rustybin.yaml (admin) |
 | POST | `/_rustybin/config/apply` | Apply a rustybin.yaml document (admin) |
 | GET | `/_rustybin/config/schema` | JSON Schema of rustybin.yaml (version 2) |

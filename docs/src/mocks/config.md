@@ -108,17 +108,20 @@ server):
 
 ```yaml
 agents:
-  default_ceiling: manage        # read-only | traffic | manage | full (default full)
+  default_ceiling: manage        # read-only | traffic | manage | full | a role (default full)
   rules:                         # the first rule that matches applies
     - match: { name: "claude-*", credential: oauth }   # name: clientInfo, * wildcard
       ceiling: read-only
+    - match: { role: admin }     # or user: a sign-in name (* wildcard) or a user id
+      ceiling: editor            # a role: the tools whose permission it grants
       allow: []                  # management tool names: only these
       deny: [delete_mock]        # never these
       note: Team assistants
 ```
 
 See [Managing agents](../agent-mcp.md#managing-agents). An invalid rule is skipped with
-a warning; the others apply.
+a warning; the others apply. An agent that acts for a user never holds more than the
+user, whatever the rules say.
 
 ### Editor completion
 

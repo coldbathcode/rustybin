@@ -103,6 +103,43 @@
   needs the sign-in too. A console sign-in (and an invitation) of an account whose
   only permission is `portal.read` answers `portal_only` with the portal's cookie,
   and the console sends the person to the portal.
+- AI agents act for a user (access control, step 12;
+  [Agents act for a user](agent-mcp.md#agents-act-for-a-user)). An agent on a user's
+  sign-in token, and one whose OAuth sign-in a user approved, works for that user and
+  never holds more than them: its permissions are the user's at every call (a role
+  change applies to the next call), within the scope it was given, then its ceiling,
+  allow and deny lists, rules and defaults take away. The agents list answers each
+  agent's `owner` (`null` for the admin token and control JWTs, which act for nobody)
+  and `owner_label`, `?owner=<user>` keeps one user's; the console's **AI agents**
+  view has an **Owner** column and filter; `list_agents` takes `owner`; `rustybin
+  agents list --owner`. A **ceiling may name a role** (built-in or custom: the tools
+  whose permission it grants); the four 0.3 ceilings keep exactly their tools (nearest
+  roles: `read-only` the viewer, `traffic` the viewer plus `traffic.read`, `manage`
+  the editor, `full` the user's own). The new setting `agents.default_ceiling_for`
+  (`role=ceiling`, such as `admin=editor`) gives a role's users' agents a default.
+  `rustybin.yaml`'s `agents:` rules match `user` and `role`, and `credential: user`.
+  **The consent page** lists the permissions the agent will hold (`grants`,
+  `permissions` and `approver` in `GET /_rustybin/oauth/requests/{id}`); a user grants
+  a scope that gives at least one permission they hold. **Your own agents**: seeing
+  everyone's needs `agents.read`, changing them `agents.manage`; without them a user
+  sees, limits (never widens), revokes and ends the sessions of their own, and
+  restores one they revoked. Disabling or deleting a user revokes every agent acting
+  for them and ends their sessions. Agents recorded before the upgrade move to their
+  user at the first start (a console record to its user, an OAuth record to the first
+  admin).
+
+  **Behaviour changes**: the first admin's password (or user name) change signs out
+  the first admin only (their sessions, portal sessions and agents, OAuth tokens
+  included), no longer every user; an OAuth agent approved with the admin token or a
+  control JWT outlives it (`DELETE /_rustybin/sessions` ends it). OAuth tokens carry
+  the user (`rb_uid`) and the user's generation (`rb_ugen`); a token issued before the
+  upgrade counts as the first admin's (with the password sign-in). Any signed-in
+  caller reaches the `/_rustybin/agents*` routes; a caller who is no user still needs
+  `agents.read` and `agents.manage` there, so what it can do is unchanged. The agents'
+  `credential.kind` is `user` (with `via`: `sign-in` or `oauth`) for a user's agent
+  (it was `console`, or `oauth` for one approved in the console); `match.credential:
+  console` and `oauth` still match them. Disabling or deleting a user answers
+  `agents_revoked`.
 
 - Single sign-on with OpenID Connect (access control, step 10;
   [Single sign-on](sso.md)): with the `sso.*` settings (`RUSTYBIN_SSO_*`, all

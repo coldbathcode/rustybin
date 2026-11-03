@@ -66,11 +66,19 @@ pub const ACTIVE_WINDOW_SECS: i64 = 15 * 60;
 const FLUSH_EVERY: Duration = Duration::from_secs(30);
 
 pub const DEFAULT_CEILING_KEY: &str = "agents.default_ceiling";
+/// The default ceiling per role of the agent's user (`role=ceiling`
+/// entries; the first entry whose role the user holds applies).
+pub const DEFAULT_CEILING_FOR_KEY: &str = "agents.default_ceiling_for";
+/// The 0.3 ceilings (a role name is a ceiling too).
 pub const CEILINGS: &[&str] = &["read-only", "traffic", "manage", "full"];
+/// Entries of `agents.default_ceiling_for`.
+pub const MAX_DEFAULT_FOR: usize = 20;
 
-/// The widest set of tools an agent may use, below its credential's rights.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+/// The widest set of tools an agent may use, below what its credential
+/// (its user) allows: one of the four 0.3 ceilings, which keep their 0.4
+/// tool lists exactly, or a role (built-in or custom), which lets an agent
+/// use a tool whose permission the role grants.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Ceiling {
     /// Read tools, not captured traffic.
     ReadOnly,
@@ -79,12 +87,25 @@ pub enum Ceiling {
     /// Reads and mock changes; nothing instance-global (admin, the visit
     /// operator tools, the harness).
     Manage,
-    /// Whatever the credential allows.
+    /// Whatever the credential allows (a user's agent: the user's own).
     #[default]
     Full,
+    /// A role: the tools whose permission it grants (an unknown role, a
+    /// custom role deleted since, allows nothing).
+    Role(String),
+}
+
+/// Shaped like a role name (lower case letters, digits, `_` and `-`,
+/// starting with a letter, at most 40 characters).
+pub fn role_shaped(s: &str) -> bool {
+    let mut chars = s.chars();
+    s.len() <= crate::rbac::role::MAX_ROLE_NAME_CHARS
+        && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
 impl Ceiling {
+    /// One of the four 0.3 ceilings.
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim() {
             "read-only" => Some(Self::ReadOnly),
@@ -95,12 +116,45 @@ impl Ceiling {
         }
     }
 
-    pub fn as_str(self) -> &'static str {
+    /// A 0.3 ceiling (its name wins over a custom role of the same name),
+    /// else a role-shaped name. Whether the role exists is checked where a
+    /// ceiling is set ([`Ceiling::check`]).
+    pub fn parse_any(s: &str) -> Option<Self> {
+        let s = s.trim();
+        Self::parse(s).or_else(|| role_shaped(s).then(|| Self::Role(s.to_string())))
+    }
+
+    pub fn as_str(&self) -> &str {
         match self {
             Self::ReadOnly => "read-only",
             Self::Traffic => "traffic",
             Self::Manage => "manage",
             Self::Full => "full",
+            Self::Role(r) => r,
+        }
+    }
+
+    /// The role a 0.3 ceiling is nearest to (the console and the docs show
+    /// it): `read-only` the viewer, `traffic` the viewer plus
+    /// `traffic.read`, `manage` the editor, `full` the user's own.
+    pub fn nearest_role(&self) -> Option<&'static str> {
+        match self {
+            Self::ReadOnly => Some("viewer"),
+            Self::Traffic => Some("viewer + traffic.read"),
+            Self::Manage => Some("editor"),
+            Self::Full => Some("the owner's own"),
+            Self::Role(_) => None,
+        }
+    }
+
+    /// A ceiling that names a role must name one that exists.
+    pub fn check(&self, users: &crate::rbac::Users) -> Result<(), String> {
+        match self {
+            Self::Role(r) if users.role_permissions(r).is_none() => Err(format!(
+                "ceiling {r:?} is neither one of {} nor a role (list_roles, GET /_rustybin/roles)",
+                CEILINGS.join(", ")
+            )),
+            _ => Ok(()),
         }
     }
 
@@ -109,8 +163,15 @@ impl Ceiling {
     /// `traffic.read`, `traffic` any read-only tool, `manage` a tool whose
     /// permission is in [`MANAGE_CEILING`] (or a visit's own), `full`
     /// anything (the tool counts of the 0.4 ceilings,
-    /// `ceilings_keep_their_tool_counts`).
-    pub fn allows(self, def: &ToolDef) -> bool {
+    /// `ceilings_keep_their_tool_counts`). A role needs its permissions
+    /// ([`Ceiling::allows_with`]); without them it allows nothing.
+    pub fn allows(&self, def: &ToolDef) -> bool {
+        self.allows_with(def, None)
+    }
+
+    /// [`Ceiling::allows`] given the permissions of the role a ceiling
+    /// names (`None`: unknown, nothing allowed).
+    pub fn allows_with(&self, def: &ToolDef, role: Option<crate::rbac::PermSet>) -> bool {
         match self {
             Self::ReadOnly => {
                 def.read_only && def.permission.permission() != Some(Permission::TrafficRead)
@@ -121,8 +182,65 @@ impl Ceiling {
                 .permission()
                 .is_none_or(|p| MANAGE_CEILING.contains(&p)),
             Self::Full => true,
+            Self::Role(_) => {
+                role.is_some_and(|perms| def.permission.permission().is_none_or(|p| perms.has(p)))
+            }
         }
     }
+}
+
+impl Serialize for Ceiling {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Ceiling {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ceiling::parse_any(&s).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "ceiling {s:?} is not one of {} nor a role name",
+                CEILINGS.join(", ")
+            ))
+        })
+    }
+}
+
+/// Parse `agents.default_ceiling_for`: `role=ceiling` entries.
+pub fn default_for_entries(list: &[String]) -> Result<Vec<(String, Ceiling)>, String> {
+    let mut out = Vec::new();
+    for e in list {
+        let Some((role, ceiling)) = e.split_once('=') else {
+            return Err(format!("{e:?}: expected role=ceiling (admin=editor)"));
+        };
+        let role = role.trim();
+        if !role_shaped(role) {
+            return Err(format!("{role:?} is not a role name"));
+        }
+        let Some(c) = Ceiling::parse_any(ceiling) else {
+            return Err(format!(
+                "{:?} is not one of {} nor a role name",
+                ceiling.trim(),
+                CEILINGS.join(", ")
+            ));
+        };
+        out.push((role.to_string(), c));
+    }
+    Ok(out)
+}
+
+fn valid_default_for(v: &Value) -> Result<(), String> {
+    let list: Vec<String> = v
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    default_for_entries(&list).map(|_| ())
 }
 
 /// What the `manage` ceiling lets an agent use: the reads, captured
@@ -152,11 +270,25 @@ pub const MANAGE_CEILING: &[Permission] = &[
 pub enum Credential {
     /// `RUSTYBIN_ADMIN_TOKEN`.
     Admin,
-    /// A console sign-in token (password mode), by user name.
+    /// A user's: their sign-in token (`client` empty), or a token of the
+    /// built-in OAuth server the user consented to (`client` its subject,
+    /// `client:<fingerprint>`). The agent acts for the user and never holds
+    /// more than the user does.
+    User {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client: Option<String>,
+    },
+    /// A console sign-in token by user name: an `agents.json` record from
+    /// before agents acted for a user, kept readable (moved to [`User`] at
+    /// startup when the user is known).
+    ///
+    /// [`User`]: Credential::User
     Console { user: String },
     /// A control JWT a platform issued (`RUSTYBIN_CONTROL_JWT_PUBLIC_KEY`).
     Jwt { sub: String, scopes: Vec<String> },
-    /// A token of the built-in OAuth server, by its client's subject.
+    /// A token of the built-in OAuth server approved by a credential that
+    /// is no user (the admin token, a control JWT), by its client's subject.
     Oauth { sub: String },
     /// An API key (shared mode).
     Key { id: String },
@@ -170,6 +302,7 @@ impl Credential {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Admin => "admin",
+            Self::User { .. } => "user",
             Self::Console { .. } => "console",
             Self::Jwt { .. } => "jwt",
             Self::Oauth { .. } => "oauth",
@@ -179,11 +312,61 @@ impl Credential {
         }
     }
 
+    /// How a user's agent signed in: `sign-in` (a sign-in token) or
+    /// `oauth` (the built-in OAuth server); `None` for the others.
+    pub fn via(&self) -> Option<&'static str> {
+        match self {
+            Self::User { client: None, .. } | Self::Console { .. } => Some("sign-in"),
+            Self::User {
+                client: Some(_), ..
+            }
+            | Self::Oauth { .. } => Some("oauth"),
+            _ => None,
+        }
+    }
+
+    /// The user the agent acts for, when it is a user's.
+    pub fn owner(&self) -> Option<&str> {
+        match self {
+            Self::User { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The OAuth client's subject, for a token of the built-in server.
+    pub fn oauth_subject(&self) -> Option<&str> {
+        match self {
+            Self::Oauth { sub }
+            | Self::User {
+                client: Some(sub), ..
+            } => Some(sub),
+            _ => None,
+        }
+    }
+
+    /// Does a rule's `match.credential` name this credential? `user` is
+    /// any user's agent; `console` one on a sign-in token (as in 0.4);
+    /// `oauth` one on a token of the built-in OAuth server, a user's or
+    /// not; the other kinds by name.
+    pub fn is_kind(&self, kind: &str) -> bool {
+        match kind {
+            "user" => matches!(self, Self::User { .. } | Self::Console { .. }),
+            "console" => self.via() == Some("sign-in"),
+            "oauth" => self.via() == Some("oauth"),
+            k => self.kind() == k,
+        }
+    }
+
     /// The part of the identity the credential contributes (rights,
     /// revocations and the assist caps follow it).
     pub(crate) fn fingerprint(&self) -> String {
         match self {
             Self::Admin => "admin".into(),
+            Self::User { id, client: None } => format!("user:{id}"),
+            Self::User {
+                id,
+                client: Some(sub),
+            } => format!("user:{id}:oauth:{sub}"),
             Self::Console { user } => format!("console:{user}"),
             Self::Jwt { sub, .. } => format!("jwt:{sub}"),
             Self::Oauth { sub } => format!("oauth:{sub}"),
@@ -193,10 +376,15 @@ impl Credential {
         }
     }
 
-    /// A short label for lists.
+    /// A short label for lists (a user's by id: [`Policy`] names them).
     pub fn label(&self) -> String {
         match self {
             Self::Admin => "admin token".into(),
+            Self::User { id, client: None } => format!("sign-in ({id})"),
+            Self::User {
+                id,
+                client: Some(sub),
+            } => format!("OAuth ({sub}) for {id}"),
             Self::Console { user } => format!("console sign-in ({user})"),
             Self::Jwt { sub, .. } => format!("control JWT ({sub})"),
             Self::Oauth { sub } => format!("OAuth ({sub})"),
@@ -211,7 +399,7 @@ impl Credential {
     pub fn revocable(&self) -> bool {
         matches!(
             self,
-            Self::Console { .. } | Self::Jwt { .. } | Self::Oauth { .. }
+            Self::User { .. } | Self::Console { .. } | Self::Jwt { .. } | Self::Oauth { .. }
         )
     }
 }
@@ -281,10 +469,15 @@ fn dedup(list: Vec<String>) -> Vec<String> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Effective {
     pub ceiling: Ceiling,
+    /// The permissions of the role the ceiling names (`None` for a 0.3
+    /// ceiling, and for a role that does not exist: nothing allowed).
+    pub ceiling_perms: Option<crate::rbac::PermSet>,
     pub allow: Vec<String>,
     pub deny: Vec<String>,
     pub note: Option<String>,
-    /// `agent` (its override), `rule` (of the config file) or `default`.
+    /// `agent` (its override), `rule` (of the config file), `role` (the
+    /// default for a role of its user, `agents.default_ceiling_for`) or
+    /// `default`.
     pub source: &'static str,
     /// The index of the matching rule, when one matched.
     pub rule: Option<usize>,
@@ -300,7 +493,7 @@ impl Effective {
     }
 
     fn allows_own(&self, def: &ToolDef) -> bool {
-        self.ceiling.allows(def)
+        self.ceiling.allows_with(def, self.ceiling_perms)
             && (self.allow.is_empty() || self.allow.iter().any(|t| t == def.name))
             && !self.deny.iter().any(|t| t == def.name)
     }
@@ -324,20 +517,38 @@ impl Effective {
                 def.name
             );
         }
-        format!(
-            "the operator limited this agent to {} tools",
-            self.ceiling.as_str()
-        )
+        match &self.ceiling {
+            Ceiling::Role(r) if self.ceiling_perms.is_none() => format!(
+                "the operator limited this agent to the role {r}, which does not exist (nothing is allowed)"
+            ),
+            Ceiling::Role(r) => format!(
+                "the operator limited this agent to the role {r}, which does not grant {}",
+                def.permission.label()
+            ),
+            c => format!("the operator limited this agent to {} tools", c.as_str()),
+        }
     }
 
     pub fn view(&self) -> Value {
         json!({
             "ceiling": self.ceiling.as_str(),
+            "ceiling_kind": if matches!(self.ceiling, Ceiling::Role(_)) { "role" } else { "ceiling" },
+            "ceiling_role": self.ceiling.nearest_role(),
+            "ceiling_known": !matches!(self.ceiling, Ceiling::Role(_)) || self.ceiling_perms.is_some(),
             "allow": self.allow,
             "deny": self.deny,
             "source": self.source,
             "rule": self.rule,
         })
+    }
+
+    /// The tools it allows, in `TOOLS` order.
+    pub fn allowed_tools(&self) -> Vec<&'static str> {
+        TOOLS
+            .iter()
+            .filter(|d| self.allows(d))
+            .map(|d| d.name)
+            .collect()
     }
 }
 
@@ -370,8 +581,9 @@ pub struct FileRule {
 
 /// Which agents a rule is for. `name` matches the client's name, case
 /// insensitive, with `*` as a wildcard; `credential` is a kind (`admin`,
-/// `console`, `jwt`, `oauth`, `key`, `visit`, `open`). Both empty: every
-/// agent.
+/// `user`, `console`, `jwt`, `oauth`, `key`, `visit`, `open`); `user` is
+/// the user the agent acts for (a sign-in name, `*` as a wildcard, or a
+/// user id); `role` a role that user holds. All empty: every agent.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Match {
@@ -379,15 +591,23 @@ pub struct Match {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
-pub const CREDENTIAL_KINDS: &[&str] = &["admin", "console", "jwt", "oauth", "key", "visit", "open"];
+pub const CREDENTIAL_KINDS: &[&str] = &[
+    "admin", "user", "console", "jwt", "oauth", "key", "visit", "open",
+];
 
 /// A validated rule.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rule {
     pub name: Option<String>,
     pub credential: Option<String>,
+    pub user: Option<String>,
+    pub role: Option<String>,
     pub ceiling: Option<Ceiling>,
     pub allow: Vec<String>,
     pub deny: Vec<String>,
@@ -410,10 +630,10 @@ pub fn file_policy(section: Option<FileSection>) -> (FilePolicy, Vec<String>) {
         return (out, problems);
     };
     if let Some(c) = &section.default_ceiling {
-        match Ceiling::parse(c) {
+        match Ceiling::parse_any(c) {
             Some(c) => out.default_ceiling = Some(c),
             None => problems.push(format!(
-                "agents.default_ceiling: {c:?} is not one of {} (ignored)",
+                "agents.default_ceiling: {c:?} is not one of {} nor a role name (ignored)",
                 CEILINGS.join(", ")
             )),
         }
@@ -449,12 +669,24 @@ fn rule(r: FileRule) -> Result<Rule, String> {
             ))
         }
     };
+    let user = r
+        .matcher
+        .user
+        .map(|n| clean(&n, MAX_NAME))
+        .filter(|n| !n.is_empty());
+    let role = match r.matcher.role.map(|n| n.trim().to_string()) {
+        None => None,
+        Some(n) if role_shaped(&n) => Some(n),
+        Some(n) => return Err(format!("match.role {n:?} is not a role name")),
+    };
     let ceiling = match r.ceiling {
         None => None,
-        Some(c) => Some(
-            Ceiling::parse(&c)
-                .ok_or_else(|| format!("ceiling {c:?} is not one of {}", CEILINGS.join(", ")))?,
-        ),
+        Some(c) => Some(Ceiling::parse_any(&c).ok_or_else(|| {
+            format!(
+                "ceiling {c:?} is not one of {} nor a role name",
+                CEILINGS.join(", ")
+            )
+        })?),
     };
     let allow = dedup(r.allow);
     let deny = dedup(r.deny);
@@ -467,6 +699,8 @@ fn rule(r: FileRule) -> Result<Rule, String> {
     Ok(Rule {
         name,
         credential,
+        user,
+        role,
         ceiling,
         allow,
         deny,
@@ -500,18 +734,34 @@ pub fn glob(pattern: &str, text: &str) -> bool {
 }
 
 impl Rule {
-    pub fn matches(&self, name: &str, credential: &Credential) -> bool {
+    /// Does the rule apply to an agent named `name` on `credential`, acting
+    /// for `owner` (its user, resolved now)? A rule naming a user or a role
+    /// never matches an agent that acts for nobody.
+    pub fn matches(
+        &self,
+        name: &str,
+        credential: &Credential,
+        owner: Option<&crate::rbac::users::Resolution>,
+    ) -> bool {
         self.name.as_deref().is_none_or(|p| glob(p, name))
             && self
                 .credential
                 .as_deref()
-                .is_none_or(|c| c == credential.kind())
+                .is_none_or(|c| credential.is_kind(c))
+            && self
+                .user
+                .as_deref()
+                .is_none_or(|u| owner.is_some_and(|o| o.user.id == u || glob(u, &o.user.name)))
+            && self
+                .role
+                .as_deref()
+                .is_none_or(|r| owner.is_some_and(|o| o.roles.iter().any(|x| x == r)))
     }
 
     pub fn view(&self) -> Value {
         json!({
-            "match": { "name": self.name, "credential": self.credential },
-            "ceiling": self.ceiling.map(Ceiling::as_str),
+            "match": { "name": self.name, "credential": self.credential, "user": self.user, "role": self.role },
+            "ceiling": self.ceiling.as_ref().map(Ceiling::as_str),
             "allow": self.allow,
             "deny": self.deny,
             "note": self.note,
@@ -520,12 +770,28 @@ impl Rule {
 }
 
 /// The default ceiling and the rules, as they apply now.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Policy {
     pub default_ceiling: Ceiling,
     /// `stored`, `env`, `file` or `default`.
     pub default_source: &'static str,
+    /// `agents.default_ceiling_for`: the default per role of the agent's
+    /// user, in order (the first role the user holds applies).
+    pub default_for: Vec<(String, Ceiling)>,
     pub rules: Vec<Rule>,
+    /// The user store: owners, their roles, and the roles a ceiling names.
+    users: Option<Arc<crate::rbac::Users>>,
+}
+
+impl std::fmt::Debug for Policy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Policy")
+            .field("default_ceiling", &self.default_ceiling)
+            .field("default_source", &self.default_source)
+            .field("default_for", &self.default_for)
+            .field("rules", &self.rules)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Policy {
@@ -545,32 +811,137 @@ impl Policy {
         Self {
             default_ceiling,
             default_source,
+            default_for: default_for_entries(&state.settings.list(DEFAULT_CEILING_FOR_KEY))
+                .unwrap_or_default(),
             rules: file.rules,
+            users: Some(state.users.clone()),
+        }
+    }
+
+    /// The same policy reading `users` (tests).
+    pub fn with_users(mut self, users: Arc<crate::rbac::Users>) -> Self {
+        self.users = Some(users);
+        self
+    }
+
+    /// The user an agent acts for, resolved now (`None`: no user, or one
+    /// that is gone).
+    pub fn owner_of(&self, c: &Credential) -> Option<Arc<crate::rbac::users::Resolution>> {
+        let id = c.owner()?;
+        self.users.as_ref()?.resolve(id)
+    }
+
+    /// Does the user an agent acts for meet `def`'s need? (`true` for an
+    /// agent that acts for nobody: its credential decides at the call.)
+    pub fn owner_allows(&self, c: &Credential, def: &ToolDef) -> bool {
+        use super::access::ToolNeed;
+        if c.owner().is_none() {
+            return true;
+        }
+        let Some(o) = self.owner_of(c) else {
+            return false;
+        };
+        match def.permission {
+            ToolNeed::Own(_) => true,
+            ToolNeed::Visitor => false,
+            ToolNeed::Perm(p) | ToolNeed::Owner(p) => o.permissions.has(p),
+        }
+    }
+
+    fn role_perms(&self, c: &Ceiling) -> Option<crate::rbac::PermSet> {
+        match c {
+            Ceiling::Role(r) => self.users.as_ref()?.role_permissions(r),
+            _ => None,
+        }
+    }
+
+    /// `owner` as answers show it: the user's id, sign-in name and display
+    /// name, and whether they still exist (and are enabled).
+    pub fn owner_view(&self, c: &Credential) -> Value {
+        let Some(id) = c.owner() else {
+            return Value::Null;
+        };
+        match self.owner_of(c) {
+            Some(o) => json!({
+                "user_id": o.user.id,
+                "name": o.user.name,
+                "display_name": o.user.display_name,
+                "roles": o.roles,
+                "status": o.user.status(),
+            }),
+            None => {
+                json!({ "user_id": id, "name": null, "display_name": null, "roles": [], "status": "deleted" })
+            }
+        }
+    }
+
+    /// Who an agent is for, in a word: the user's sign-in name, or what the
+    /// credential is when it acts for nobody.
+    pub fn owner_label(&self, c: &Credential) -> String {
+        match c {
+            Credential::User { id, .. } => self
+                .owner_of(c)
+                .map(|o| o.user.name.clone())
+                .unwrap_or_else(|| format!("{id} (deleted)")),
+            Credential::Console { user } => format!("{user} (before 0.5)"),
+            Credential::Admin => "admin token (no user)".into(),
+            Credential::Jwt { sub, .. } => format!("control JWT {sub} (no user)"),
+            Credential::Oauth { .. } => "OAuth, approved by a credential with no user".into(),
+            Credential::Key { id } => format!("API key {id}"),
+            Credential::Visit { .. } => "a self-service visit".into(),
+            Credential::Open { .. } => "nobody (open control plane)".into(),
+        }
+    }
+
+    /// The credential's label with the user's name in place of their id.
+    pub fn credential_label(&self, c: &Credential) -> String {
+        match c {
+            Credential::User { client, .. } => {
+                let who = self.owner_label(c);
+                match client {
+                    None => format!("sign-in ({who})"),
+                    Some(sub) => format!("OAuth ({sub}) for {who}"),
+                }
+            }
+            other => other.label(),
         }
     }
 
     /// The rights of an agent: its override field by field, else the
-    /// first matching rule's, else the default.
+    /// first matching rule's, else the default for a role of its user,
+    /// else the default.
     pub fn effective(&self, rec: &Record) -> Effective {
+        let owner = self.owner_of(&rec.credential);
         let matched = self
             .rules
             .iter()
             .enumerate()
-            .find(|(_, r)| r.matches(&rec.name, &rec.credential));
+            .find(|(_, r)| r.matches(&rec.name, &rec.credential, owner.as_deref()));
         let rule = matched.map(|(_, r)| r);
+        let role_default = owner.as_deref().and_then(|o| {
+            self.default_for
+                .iter()
+                .find(|(role, _)| o.roles.iter().any(|r| r == role))
+                .map(|(_, c)| c.clone())
+        });
         let o = rec.rights.as_ref();
         let source = if o.is_some_and(|o| !o.is_empty()) || rec.note.is_some() {
             "agent"
         } else if rule.is_some() {
             "rule"
+        } else if role_default.is_some() {
+            "role"
         } else {
             "default"
         };
+        let ceiling = o
+            .and_then(|o| o.ceiling.clone())
+            .or_else(|| rule.and_then(|r| r.ceiling.clone()))
+            .or(role_default)
+            .unwrap_or_else(|| self.default_ceiling.clone());
         Effective {
-            ceiling: o
-                .and_then(|o| o.ceiling)
-                .or(rule.and_then(|r| r.ceiling))
-                .unwrap_or(self.default_ceiling),
+            ceiling_perms: self.role_perms(&ceiling),
+            ceiling,
             allow: o
                 .and_then(|o| o.allow.clone())
                 .or_else(|| rule.map(|r| r.allow.clone()))
@@ -593,6 +964,7 @@ impl Policy {
         json!({
             "default_ceiling": self.default_ceiling.as_str(),
             "default_source": self.default_source,
+            "default_ceiling_for": self.default_for.iter().map(|(r, c)| json!({ "role": r, "ceiling": c.as_str() })).collect::<Vec<_>>(),
             "rules": self.rules.iter().map(Rule::view).collect::<Vec<_>>(),
         })
     }
@@ -600,17 +972,31 @@ impl Policy {
 
 /// The settings this feature registers.
 pub fn specs() -> Vec<Spec> {
-    vec![Spec::new(
-        DEFAULT_CEILING_KEY,
-        "agents",
-        "Default ceiling for AI agents",
-        "The most an agent on the management MCP server may do unless a rule of rustybin.yaml or its own rights say otherwise: read-only (read tools, no captured traffic), traffic (every read tool), manage (reads and mock changes), full (whatever its credential allows).",
-        Kind::Choice { options: CEILINGS },
-        json!("full"),
-    )
-    .env("RUSTYBIN_AGENTS_DEFAULT_CEILING", |c| {
-        c.agents_default_ceiling.clone().map(Value::String)
-    })]
+    vec![
+        Spec::new(
+            DEFAULT_CEILING_KEY,
+            "agents",
+            "Default ceiling for AI agents",
+            "The most an agent on the management MCP server may do unless a rule of rustybin.yaml, the default for a role of its user or its own rights say otherwise: read-only (read tools, no captured traffic), traffic (every read tool), manage (reads and mock changes), full (whatever its credential allows). An agent that acts for a user never does more than that user, whatever the ceiling.",
+            Kind::Choice { options: CEILINGS },
+            json!("full"),
+        )
+        .env("RUSTYBIN_AGENTS_DEFAULT_CEILING", |c| {
+            c.agents_default_ceiling.clone().map(Value::String)
+        }),
+        Spec::new(
+            DEFAULT_CEILING_FOR_KEY,
+            "agents",
+            "Default ceiling per role",
+            "The default ceiling of the agents of users who hold a role, as role=ceiling (admin=editor: an admin's agents default to what an editor may do). The ceiling is one of read-only, traffic, manage, full or a role name; the first entry whose role the user holds applies, before the default ceiling and after the rules of rustybin.yaml and the agent's own rights.",
+            Kind::List {
+                max_items: MAX_DEFAULT_FOR,
+                max_len: 100,
+            },
+            json!([]),
+        )
+        .check(valid_default_for),
+    ]
 }
 
 // ── Records ─────────────────────────────────────────────────────────
@@ -644,6 +1030,10 @@ impl Counts {
 pub struct Revocation {
     pub at: DateTime<Utc>,
     pub by: String,
+    /// The user who revoked it, when one did (they may restore their own
+    /// agent without `agents.manage`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_user: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -808,6 +1198,144 @@ pub enum AgentError {
     NotFound,
     Invalid(String),
     Io(String),
+    /// The caller lacks the permission (with why it was needed).
+    Needs(Permission, String),
+}
+
+// ── Whose agents a caller sees and manages ──────────────────────────
+
+/// Which agents a caller sees: every agent with `agents.read` (`Ok(None)`),
+/// else a user's own (`Ok(Some(user id))`); a caller who is neither (a
+/// control JWT, nobody on an open control plane) needs `agents.read`.
+pub fn visible_to(caller: &crate::rbac::Resolved) -> Result<Option<String>, AgentError> {
+    if caller.has(Permission::AgentsRead) {
+        return Ok(None);
+    }
+    match caller.user_id() {
+        Some(id) => Ok(Some(id.to_string())),
+        None => Err(AgentError::Needs(
+            Permission::AgentsRead,
+            "listing AI agents needs the agents.read permission".into(),
+        )),
+    }
+}
+
+/// May `caller` read agent `id`? Every agent with `agents.read`, a user
+/// their own.
+pub fn may_read(
+    agents: &Agents,
+    caller: &crate::rbac::Resolved,
+    id: &str,
+) -> Result<(), AgentError> {
+    let visible = visible_to(caller)?;
+    let owner = agents.owner_of(id)?;
+    match visible {
+        None => Ok(()),
+        Some(me) if owner.as_deref() == Some(me.as_str()) => Ok(()),
+        Some(_) => Err(AgentError::Needs(
+            Permission::AgentsRead,
+            "this agent acts for someone else: reading other people's agents needs the agents.read permission".into(),
+        )),
+    }
+}
+
+/// An operator action on one agent.
+pub enum Action {
+    /// New rights (`Some(None)` clears them, `None` keeps them) and a note.
+    Rights(Option<Option<Rights>>),
+    Revoke,
+    Restore,
+    EndSessions,
+}
+
+/// May `caller` take `action` on agent `id`? Any agent with
+/// `agents.manage`; without it, a user's own agent only: limit it (rights
+/// that never allow a tool it may not use now), revoke it, end its
+/// sessions, and restore it when they revoked it themselves.
+pub fn may_manage(
+    agents: &Agents,
+    policy: &Policy,
+    caller: &crate::rbac::Resolved,
+    id: &str,
+    action: &Action,
+) -> Result<(), AgentError> {
+    let needs = || {
+        AgentError::Needs(
+            Permission::AgentsManage,
+            "changing an AI agent that is not yours needs the agents.manage permission".into(),
+        )
+    };
+    if !caller.has(Permission::AgentsManage) && caller.user_id().is_none() {
+        return Err(needs());
+    }
+    let owner = agents.owner_of(id)?;
+    if caller.has(Permission::AgentsManage) {
+        return Ok(());
+    }
+    let Some(me) = caller.user_id().filter(|me| owner.as_deref() == Some(*me)) else {
+        return Err(needs());
+    };
+    match action {
+        Action::Rights(rights) => {
+            let (then, now) = agents.allowed_with(id, rights.clone(), policy)?;
+            match then.iter().find(|t| !now.contains(t)) {
+                None => Ok(()),
+                Some(t) => Err(AgentError::Needs(
+                    Permission::AgentsManage,
+                    format!(
+                        "you may limit your own agent, not widen it ({t} would be allowed again): widening an agent's rights needs the agents.manage permission"
+                    ),
+                )),
+            }
+        }
+        Action::Restore => {
+            if agents.revoked_by_user(id).as_deref() == Some(me) {
+                Ok(())
+            } else {
+                Err(AgentError::Needs(
+                    Permission::AgentsManage,
+                    "someone else revoked this agent (or your user was disabled): restoring it needs the agents.manage permission".into(),
+                ))
+            }
+        }
+        Action::Revoke | Action::EndSessions => Ok(()),
+    }
+}
+
+/// The role names a ceiling may take, for a caller choosing one: every
+/// role with `users.read` or `agents.manage`, else the built-in ones (a
+/// custom role's name is the users' business).
+pub fn ceiling_roles(state: &AppState, caller: &crate::rbac::Resolved) -> Vec<String> {
+    let mut out: Vec<String> = crate::rbac::BuiltIn::ALL
+        .iter()
+        .map(|r| r.name().to_string())
+        .collect();
+    if caller.has(Permission::UsersRead) || caller.has(Permission::AgentsManage) {
+        out.extend(state.users.custom_roles().into_iter().map(|r| r.name));
+    }
+    out
+}
+
+/// A ceiling naming a role must name one that exists.
+pub fn check_rights(
+    rights: &Option<Option<Rights>>,
+    users: &crate::rbac::Users,
+) -> Result<(), AgentError> {
+    match rights {
+        Some(Some(Rights {
+            ceiling: Some(c), ..
+        })) => c.check(users).map_err(AgentError::Invalid),
+        _ => Ok(()),
+    }
+}
+
+/// The user id a filter names: an id, or a sign-in name the store knows
+/// (an unknown value is taken as an id, a deleted user's).
+pub fn owner_filter(users: &crate::rbac::Users, value: &str) -> String {
+    users
+        .find(value)
+        .map(|u| u.id)
+        .unwrap_or_else(|| value.to_string())
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -832,7 +1360,15 @@ pub struct Agents {
     events: broadcast::Sender<Value>,
     listeners: Arc<AtomicUsize>,
     last_flush: Mutex<Option<Instant>>,
+    /// `agents.json` was written before agents acted for a user (version
+    /// 1): its console and OAuth records are moved to their user once
+    /// ([`Agents::adopt_users`]).
+    legacy: std::sync::atomic::AtomicBool,
 }
+
+/// The version `agents.json` is written with: 2 since agents act for a
+/// user (a version 1 file's OAuth records were all approved before).
+pub const DOC_VERSION: u32 = 2;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -879,7 +1415,7 @@ impl Agents {
                 continue;
             }
             r.calls.retain(|t, _| TOOLS.iter().any(|d| d.name == t));
-            if let (Some(_), Credential::Oauth { sub }) = (&r.revoked, &r.credential) {
+            if let (Some(_), Some(sub)) = (&r.revoked, r.credential.oauth_subject()) {
                 tokens.revoke_subject(sub, now + crate::control_oauth::REFRESH_TTL_SECS);
             }
             // The token ids revoked with the agent, refused again after a
@@ -898,6 +1434,7 @@ impl Agents {
             records.insert(r.id.clone(), r);
         }
         let (events, _) = broadcast::channel(256);
+        let legacy = !records.is_empty() && doc.version < DOC_VERSION;
         Self {
             inner: Mutex::new(Inner {
                 records,
@@ -909,7 +1446,78 @@ impl Agents {
             events,
             listeners: Arc::new(AtomicUsize::new(0)),
             last_flush: Mutex::new(None),
+            legacy: std::sync::atomic::AtomicBool::new(legacy),
         }
+    }
+
+    /// At startup with the password sign-in on, once for an `agents.json`
+    /// written before agents acted for a user: a console record (by user
+    /// name) becomes its user's, by id; an OAuth record becomes the first
+    /// admin's (0.4 consents were the console user's, and its tokens are
+    /// verified as the first admin's: `crate::control_oauth`). Rights,
+    /// notes, revocations and totals move with the record. Answers how
+    /// many moved.
+    pub fn adopt_users(&self, users: &crate::rbac::Users) -> usize {
+        if !self.legacy.swap(false, Ordering::Relaxed) {
+            return 0;
+        }
+        let first = users.first_admin();
+        let moved = {
+            let mut inner = lock(&self.inner);
+            let old: Vec<String> = inner
+                .records
+                .values()
+                .filter(|r| {
+                    matches!(
+                        r.credential,
+                        Credential::Console { .. } | Credential::Oauth { .. }
+                    )
+                })
+                .map(|r| r.id.clone())
+                .collect();
+            let mut moved = 0;
+            for id in old {
+                let Some(r) = inner.records.get(&id) else {
+                    continue;
+                };
+                let credential = match &r.credential {
+                    Credential::Console { user } => match users.find_by_name(user) {
+                        Some(u) => Credential::User {
+                            id: u.id,
+                            client: None,
+                        },
+                        None => continue,
+                    },
+                    Credential::Oauth { sub } => match &first {
+                        Some(u) => Credential::User {
+                            id: u.id.clone(),
+                            client: Some(sub.clone()),
+                        },
+                        None => continue,
+                    },
+                    _ => continue,
+                };
+                let new_id = agent_id(&credential, &r.name);
+                if inner.records.contains_key(&new_id) {
+                    continue;
+                }
+                let Some(mut r) = inner.records.remove(&id) else {
+                    continue;
+                };
+                r.credential = credential;
+                r.id = new_id.clone();
+                inner.records.insert(new_id, r);
+                moved += 1;
+            }
+            moved
+        };
+        if moved > 0 {
+            tracing::info!(target: "rustybin::agents", moved, "agents from before 0.5 now act for their user");
+            if let Err(e) = self.save() {
+                tracing::warn!("agents: {e}");
+            }
+        }
+        moved
     }
 
     fn now(&self) -> DateTime<Utc> {
@@ -1077,6 +1685,7 @@ impl Agents {
                 "agent": r.id,
                 "name": r.name,
                 "credential": r.credential.kind(),
+                "owner": r.credential.owner(),
                 "tool": tool,
                 "outcome": outcome,
             })
@@ -1108,16 +1717,59 @@ impl Agents {
 
     // ── Operator actions ──
 
-    /// Every agent, most recently seen first.
-    pub fn list(&self, policy: &Policy) -> Vec<Value> {
+    /// Every agent, most recently seen first; with `owner`, only the agents
+    /// acting for that user (by id).
+    pub fn list(&self, policy: &Policy, owner: Option<&str>) -> Vec<Value> {
         let now = self.now();
         let inner = lock(&self.inner);
-        let mut all: Vec<&Record> = inner.records.values().collect();
+        let mut all: Vec<&Record> = inner
+            .records
+            .values()
+            .filter(|r| owner.is_none_or(|o| r.credential.owner() == Some(o)))
+            .collect();
         all.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.id.cmp(&b.id)));
         all.into_iter().map(|r| summary(r, policy, now)).collect()
     }
 
-    /// One agent with its tools, errors and sessions.
+    /// The user an agent acts for (`Ok(None)`: nobody), `Err` when there is
+    /// no such agent.
+    pub fn owner_of(&self, id: &str) -> Result<Option<String>, AgentError> {
+        lock(&self.inner)
+            .records
+            .get(id)
+            .map(|r| r.credential.owner().map(str::to_string))
+            .ok_or(AgentError::NotFound)
+    }
+
+    /// Who revoked an agent, when a user did (and it is revoked).
+    pub fn revoked_by_user(&self, id: &str) -> Option<String> {
+        lock(&self.inner)
+            .records
+            .get(id)
+            .and_then(|r| r.revoked.as_ref())
+            .and_then(|v| v.by_user.clone())
+    }
+
+    /// What an agent's rights would allow with `rights` in place of its own
+    /// (`Some(None)` clears them; `None` keeps them), and what they allow
+    /// now: the tool names, so a change can be told to only narrow.
+    pub fn allowed_with(
+        &self,
+        id: &str,
+        rights: Option<Option<Rights>>,
+        policy: &Policy,
+    ) -> Result<(Vec<&'static str>, Vec<&'static str>), AgentError> {
+        let inner = lock(&self.inner);
+        let r = inner.records.get(id).ok_or(AgentError::NotFound)?;
+        let now = policy.effective(r);
+        let mut changed = r.clone();
+        if let Some(rights) = rights {
+            changed.rights = rights.filter(|r| !r.is_empty());
+        }
+        let then = policy.effective(&changed);
+        Ok((then.allowed_tools(), now.allowed_tools()))
+    }
+
     /// The credential of an agent.
     pub fn credential_of(&self, id: &str) -> Option<Credential> {
         lock(&self.inner)
@@ -1167,7 +1819,8 @@ impl Agents {
                         "title": d.title,
                         "permission": d.permission.label(),
                         "read_only": d.read_only,
-                        "allowed": eff.allows(d),
+                        "allowed": eff.allows(d) && policy.owner_allows(&r.credential, d),
+                        "rights_allow": eff.allows(d),
                     })
                 })
                 .collect(),
@@ -1219,48 +1872,81 @@ impl Agents {
         by: &str,
         tokens: &crate::login::Tokens,
     ) -> Result<Value, AgentError> {
+        self.revoke_as(id, by, None, tokens)
+    }
+
+    /// [`Agents::revoke`] by a user (`by_user`, who may restore it without
+    /// `agents.manage` when the agent is theirs).
+    pub fn revoke_as(
+        &self,
+        id: &str,
+        by: &str,
+        by_user: Option<&str>,
+        tokens: &crate::login::Tokens,
+    ) -> Result<Value, AgentError> {
         let now = self.now();
-        let report = {
+        let (report, owner) = {
             let mut inner = lock(&self.inner);
             let r = inner.records.get_mut(id).ok_or(AgentError::NotFound)?;
-            r.revoked = Some(Revocation {
-                at: now,
-                by: clean(by, 64),
-            });
-            let ended = end_sessions(r);
-            let mut revoked = 0;
-            if r.credential.revocable() {
-                for (jti, exp) in &r.tokens {
-                    if *exp > now.timestamp() {
-                        tokens.revoke_for_agent(jti, *exp);
-                        if !r.revoked_tokens.contains(jti) {
-                            r.revoked_tokens.push(jti.clone());
-                        }
-                        revoked += 1;
-                    }
-                }
-            }
-            if let Credential::Oauth { sub } = &r.credential {
-                tokens.revoke_subject(
-                    sub,
-                    now.timestamp() + crate::control_oauth::REFRESH_TTL_SECS,
-                );
-            }
-            json!({
-                "id": r.id,
-                "revoked": true,
-                "sessions_ended": ended,
-                "tokens_revoked": revoked,
-                "credential": r.credential.kind(),
-                "note": credential_note(&r.credential),
-            })
+            (
+                revoke_record(r, now, by, by_user, tokens),
+                r.credential.owner().map(str::to_string),
+            )
         };
         tracing::info!(target: "rustybin::agents", agent = id, by, "agent revoked");
-        let _ = self
-            .events
-            .send(json!({ "at": now.to_rfc3339(), "agent": id, "event": "revoked" }));
+        let _ = self.events.send(
+            json!({ "at": now.to_rfc3339(), "agent": id, "owner": owner, "event": "revoked" }),
+        );
         self.save().map_err(AgentError::Io)?;
         Ok(report)
+    }
+
+    /// A user was disabled or deleted: revoke every agent acting for them
+    /// (their calls are refused, their sessions end, their tokens are
+    /// revoked). Answers how many agents were revoked now.
+    pub fn revoke_owned(&self, user_id: &str, by: &str, tokens: &crate::login::Tokens) -> usize {
+        let now = self.now();
+        let ids: Vec<String> = {
+            let mut inner = lock(&self.inner);
+            let mut ids = Vec::new();
+            for r in inner.records.values_mut() {
+                if r.credential.owner() != Some(user_id) {
+                    continue;
+                }
+                if r.revoked.is_none() {
+                    revoke_record(r, now, by, None, tokens);
+                    ids.push(r.id.clone());
+                } else {
+                    // Already revoked: its sessions still end.
+                    end_sessions(r);
+                }
+            }
+            ids
+        };
+        for id in &ids {
+            let _ = self.events.send(json!({ "at": now.to_rfc3339(), "agent": id, "owner": user_id, "event": "revoked" }));
+        }
+        if !ids.is_empty() {
+            tracing::info!(target: "rustybin::agents", agents = ids.len(), by, "the agents of a user were revoked");
+            if let Err(e) = self.save() {
+                tracing::warn!("agents: {e}");
+            }
+        }
+        ids.len()
+    }
+
+    /// A user's sessions ended (signed out everywhere, a password change):
+    /// the MCP sessions of every agent acting for them end too (their
+    /// tokens are refused by the user's moved generation). Answers how
+    /// many sessions ended.
+    pub fn end_owned_sessions(&self, user_id: &str) -> usize {
+        let mut inner = lock(&self.inner);
+        inner
+            .records
+            .values_mut()
+            .filter(|r| r.credential.owner() == Some(user_id))
+            .map(end_sessions)
+            .sum()
     }
 
     /// Undo a revocation (its token ids and its OAuth client are accepted
@@ -1274,7 +1960,7 @@ impl Agents {
             for jti in r.revoked_tokens.drain(..) {
                 tokens.unrevoke(&jti);
             }
-            if let Credential::Oauth { sub } = &r.credential {
+            if let Some(sub) = r.credential.oauth_subject() {
                 tokens.restore_subject(sub);
             }
             json!({ "id": r.id, "restored": was })
@@ -1325,7 +2011,7 @@ impl Agents {
             return Ok(());
         };
         let doc = Doc {
-            version: 1,
+            version: DOC_VERSION,
             agents: lock(&self.inner).records.values().cloned().collect(),
         };
         let bytes = serde_json::to_vec_pretty(&doc).map_err(|e| e.to_string())?;
@@ -1338,7 +2024,8 @@ impl Agents {
 impl Policy {
     fn effective_default(&self) -> Effective {
         Effective {
-            ceiling: self.default_ceiling,
+            ceiling: self.default_ceiling.clone(),
+            ceiling_perms: self.role_perms(&self.default_ceiling),
             allow: Vec::new(),
             deny: Vec::new(),
             note: None,
@@ -1347,6 +2034,49 @@ impl Policy {
             also: Vec::new(),
         }
     }
+}
+
+/// Revoke one record: refuse its calls, end its sessions, revoke the
+/// tokens it used and its OAuth client. Answers the report.
+fn revoke_record(
+    r: &mut Record,
+    now: DateTime<Utc>,
+    by: &str,
+    by_user: Option<&str>,
+    tokens: &crate::login::Tokens,
+) -> Value {
+    r.revoked = Some(Revocation {
+        at: now,
+        by: clean(by, 64),
+        by_user: by_user.map(str::to_string),
+    });
+    let ended = end_sessions(r);
+    let mut revoked = 0;
+    if r.credential.revocable() {
+        for (jti, exp) in &r.tokens {
+            if *exp > now.timestamp() {
+                tokens.revoke_for_agent(jti, *exp);
+                if !r.revoked_tokens.contains(jti) {
+                    r.revoked_tokens.push(jti.clone());
+                }
+                revoked += 1;
+            }
+        }
+    }
+    if let Some(sub) = r.credential.oauth_subject() {
+        tokens.revoke_subject(
+            sub,
+            now.timestamp() + crate::control_oauth::REFRESH_TTL_SECS,
+        );
+    }
+    json!({
+        "id": r.id,
+        "revoked": true,
+        "sessions_ended": ended,
+        "tokens_revoked": revoked,
+        "credential": r.credential.kind(),
+        "note": credential_note(&r.credential),
+    })
 }
 
 fn end_sessions(r: &mut Record) -> usize {
@@ -1379,8 +2109,12 @@ fn credential_note(c: &Credential) -> Option<&'static str> {
         Credential::Admin => Some(
             "The admin token cannot be revoked per agent: rotate RUSTYBIN_ADMIN_TOKEN. Meanwhile every agent that uses the admin token is refused on the management server, whatever client name it sends.",
         ),
-        Credential::Console { .. } => Some(
-            "The console sign-in tokens this agent used are revoked, and every agent of this console user is refused on the management server until you restore it: if it used your own console token, your console is signed out too.",
+        Credential::Console { .. }
+        | Credential::User { client: None, .. } => Some(
+            "The console sign-in tokens this agent used are revoked, and every agent on this user's sign-in tokens is refused on the management server until you restore it: if it used your own console token, your console is signed out too.",
+        ),
+        Credential::User { client: Some(_), .. } => Some(
+            "The OAuth client's tokens and refresh tokens are refused from now on; the user's other agents and their console are not touched.",
         ),
         Credential::Key { .. } => Some(
             "API keys are revoked in the key registry; meanwhile every agent that uses this key is refused on the management server, whatever client name it sends.",
@@ -1398,14 +2132,20 @@ fn summary(r: &Record, policy: &Policy, now: DateTime<Utc>) -> Value {
     let total = r.total();
     let mut cred = serde_json::to_value(&r.credential).unwrap_or(Value::Null);
     if let Value::Object(m) = &mut cred {
-        m.insert("label".into(), json!(r.credential.label()));
+        m.insert(
+            "label".into(),
+            json!(policy.credential_label(&r.credential)),
+        );
         m.insert("revocable".into(), json!(r.credential.revocable()));
+        m.insert("via".into(), json!(r.credential.via()));
     }
     json!({
         "id": r.id,
         "name": r.name,
         "version": r.version,
         "credential": cred,
+        "owner": policy.owner_view(&r.credential),
+        "owner_label": policy.owner_label(&r.credential),
         "transport": r.transport,
         "first_seen": r.first_seen.to_rfc3339(),
         "last_seen": r.last_seen.to_rfc3339(),
@@ -1421,11 +2161,13 @@ fn summary(r: &Record, policy: &Policy, now: DateTime<Utc>) -> Value {
         },
         "sessions_open": r.sessions_open(),
         "rights": eff.view(),
-        "tools_allowed": TOOLS.iter().filter(|d| eff.allows(d)).count(),
+        "tools_allowed": TOOLS.iter().filter(|d| eff.allows(d) && policy.owner_allows(&r.credential, d)).count(),
         "note": eff.note,
-        "revoked": r.revoked.as_ref().map(|v| json!({ "at": v.at.to_rfc3339(), "by": v.by })),
+        "revoked": r.revoked.as_ref().map(|v| json!({ "at": v.at.to_rfc3339(), "by": v.by, "by_owner": v.by_user.is_some() && v.by_user.as_deref() == r.credential.owner() })),
     })
 }
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod user_tests;

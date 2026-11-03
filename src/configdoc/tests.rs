@@ -67,7 +67,7 @@ fn state_with_everything() -> AppState {
         rules: vec![agents::FileRule {
             matcher: agents::Match {
                 name: Some("ci-*".into()),
-                credential: None,
+                ..Default::default()
             },
             ceiling: Some("read-only".into()),
             ..Default::default()

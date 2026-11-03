@@ -89,8 +89,14 @@ join page in `ui/app.js`, `users:` and `roles:` in `rustybin.yaml`. Rules it lef
 tool input or output (`every_tool_is_fully_defined` refuses keys containing `password` or `hash`), never in a
 document, a log line or a list; an invitation token is answered once, by the call that made it; nobody grants or
 manages more than they hold (`rbac::service`); a document from git changes display names and emails only
-(`configdoc::REPOSITORY_REFUSED_SECTIONS`); ending a user goes through `rbac::service::ended_user` (step 12 revokes
-the user's agents there). Step 10 (single sign-on with OpenID Connect; user docs `docs/src/sso.md`) is built:
+(`configdoc::REPOSITORY_REFUSED_SECTIONS`); ending a user goes through `rbac::service::ended_user` (their sessions
+and their agents' MCP sessions), removing one (disable, delete) through `removed_user` (also revokes their agents).
+Step 12 (agents act for a user; `docs/src/agent-mcp.md#agents-act-for-a-user`) is built: see the AI agents
+paragraph below. Rules it left: an agent acting for a user never holds more than the user (its caller is the user,
+resolved at every call, intersected with an OAuth token's scope; every limit only takes away); OAuth tokens carry
+`rb_uid` and `rb_ugen` (a token without `rb_uid` is the first admin's in password mode); the first admin's password
+change moves the first admin's generation only; a user's own agents need no `agents.read` / `agents.manage`
+(`agents::visible_to`, `may_manage`; limiting only narrows). Step 10 (single sign-on with OpenID Connect; user docs `docs/src/sso.md`) is built:
 `src/sso/` (see below), `Users::sso_sign_in` / `add_sso` and `User.sso` / `pinned_roles` in `src/rbac/users.rs`,
 `Purpose::Sso`, `login::sso_session`. Rules it left: a single sign-on user (`Source::Sso`) never gets a password, an
 invitation or a reset (the store refuses: `SSO_USER`) and its `roles` come from the provider's groups at every
@@ -191,15 +197,20 @@ the caller's API key, never their control credentials (captures would expose the
 AI agents (step 08 of the 0.2 plan, `src/mcp/manage/agents/`): every `tools/list` and `tools/call` is attributed to
 an agent (the caller's `Credential` from `Access` plus the client's `clientInfo` name) in `AppState.agents`, whose
 rights (a ceiling, tool allow and deny lists: the agent's own, a rule of `rustybin.yaml`'s `agents:` section, the
-`agents.default_ceiling` setting) apply after the credential's; revocation refuses calls, ends sessions and puts the
-agent's token ids and OAuth subject in `login::Tokens`. `/_rustybin/agents*` (admin), console view `ui/views/agents.js`.
-A new tool needs nothing here: ceilings follow its permission (`MANAGE_CEILING`) and `read_only`
-(`ceilings_keep_their_tool_counts` freezes the 0.4 sets).
+`agents.default_ceiling_for` per role of the user, the `agents.default_ceiling` setting) apply after the credential's;
+revocation refuses calls, ends sessions and puts the
+agent's token ids and OAuth subject in `login::Tokens`. `/_rustybin/agents*` (any signed-in caller: everyone's with
+`agents.read` / `agents.manage`, a user's own without), console view `ui/views/agents.js` (Owner column and filter).
+Since testing-2 step 12 a sign-in token's agent and a user-approved OAuth agent are `Credential::User { id, client }`
+(acting for the user; `Policy::owner_of` resolves them), the admin token and control JWTs act for nobody, a
+ceiling may name a role (`Ceiling::Role`; the four 0.3 ceilings keep their 0.4 tools), rules match `user` and
+`role`, and `Agents::adopt_users` moves 0.4 records to their user once. A new tool needs nothing here: ceilings
+follow its permission (`MANAGE_CEILING`) and `read_only` (`ceilings_keep_their_tool_counts` freezes the 0.4 sets).
 
 OAuth sign-in to `/_rustybin/mcp` ([docs/plans/control-oauth.md](docs/plans/control-oauth.md), 2026-10-21):
 `src/control_oauth.rs` is a small authorization server for the control plane (metadata, stateless client
 registration, PKCE, a consent API the console's `#/authorize/<id>` view calls with its own credential, HS256
-tokens bound to the `/_rustybin/mcp` URL). Its tokens must stay accepted on `/_rustybin/mcp` only
+tokens bound to the `/_rustybin/mcp` URL, carrying the approving user, `rb_uid` and `rb_ugen`, since testing-2 step 12). Its tokens must stay accepted on `/_rustybin/mcp` only
 (`control_auth::enforce` checks them there; `admin::admin_check` must never accept them).
 
 ## Hosted self-service mocks (built)

@@ -1747,7 +1747,7 @@ async fn own_password(
             )
         }
     };
-    tokens.forget_user(id);
+    crate::rbac::service::ended_user(state, id);
     audit("change_password", &user.name, ip, "ok");
     let mut out = json!({
         "changed": true,
@@ -1780,9 +1780,10 @@ async fn hash_off_runtime(tokens: &Tokens, plain: &str) -> Option<String> {
 }
 
 /// The first admin's password (and user name): the sign-in settings, as in
-/// 0.4. Every session ends (the settings rotate the instance's generation,
-/// which the management server's OAuth tokens carry too); the caller gets
-/// a fresh token when it signed in with one.
+/// 0.4. The first admin's sessions end (the settings move their
+/// generation, which their sign-in, portal and agents' OAuth tokens carry);
+/// other users stay signed in; the caller gets a fresh token when it signed
+/// in with one.
 async fn first_admin_password(
     state: &AppState,
     headers: &HeaderMap,
@@ -1872,10 +1873,14 @@ async fn first_admin_password(
     let mut secrets = BTreeMap::new();
     secrets.insert(HASH_KEY.to_string(), Some(hash));
     let who = crate::settings::principal(headers, config);
-    // The store signs every session out with the change (the first admin's
-    // sign-in is the instance's): count them, and see whether the caller
-    // signed in with one, first.
-    let listed = tokens.listed();
+    // The store signs the first admin's sessions out with the change (their
+    // generation moves on: sign-in, portal and their agents' OAuth tokens):
+    // count them, and see whether the caller signed in with one, first.
+    let first_id = first_admin(state).map(|u| u.id);
+    let listed = match &first_id {
+        Some(id) => tokens.sessions_of(id).len(),
+        None => tokens.listed(),
+    };
     let had_session = presented_claims(headers, config).is_some();
     if let Err(e) = state.settings.update_sign_in(values, secrets, &who) {
         return match e {
@@ -1901,8 +1906,11 @@ async fn first_admin_password(
         };
     }
     let user = new_user.unwrap_or(current_user);
-    // Every other session ends; the caller gets a fresh token when it signed
-    // in with one.
+    // The first admin's other sessions end, and their agents' MCP sessions;
+    // the caller gets a fresh token when it signed in with one.
+    if let Some(id) = &first_id {
+        state.agents.end_owned_sessions(id);
+    }
     let ended = listed;
     audit("change_password", &user, ip, "ok");
     let mut out = json!({

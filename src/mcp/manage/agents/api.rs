@@ -1,19 +1,25 @@
-//! The operator's routes over the agents registry (admin):
+//! The routes over the agents registry. Everyone's agents need
+//! `agents.read` to see and `agents.manage` to change; a user without them
+//! sees, limits, revokes and ends the sessions of their own agents (and
+//! restores one they revoked themselves): `super::visible_to`,
+//! `super::may_manage`. Any signed-in caller reaches the routes; the
+//! handlers check the rest.
 //!
-//! - `GET /_rustybin/agents`: every agent, the policy (default ceiling and
+//! - `GET /_rustybin/agents[?owner=<user>]`: the agents (each with the
+//!   user it acts for), the policy (default ceiling, the defaults per role,
 //!   the rules of `rustybin.yaml`).
 //! - `GET /_rustybin/agents/events`: the live feed of calls (SSE).
 //! - `GET /_rustybin/agents/{id}`: one agent with its tools, last errors and
 //!   sessions.
 //! - `PATCH /_rustybin/agents/{id}`: `{rights: {ceiling, allow, deny} | null,
-//!   note}`.
+//!   note}`; a ceiling is a 0.3 ceiling or a role name.
 //! - `POST /_rustybin/agents/{id}/revoke`, `/restore`.
 //! - `DELETE /_rustybin/agents/{id}/sessions`: end its sessions.
 
 use std::convert::Infallible;
 
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Path, Query, State};
+use axum::http::{Extensions, HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -23,8 +29,9 @@ use serde_json::{json, Value};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
-use super::{AgentError, Policy, Rights};
+use super::{Action, AgentError, Policy, Rights};
 use crate::catalog::{category, Endpoint, Example};
+use crate::rbac::Resolved;
 use crate::state::AppState;
 
 pub const AGENTS_PATH: &str = "/_rustybin/agents";
@@ -34,7 +41,7 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({ "error": message.into() }))).into_response()
 }
 
-fn refused(e: AgentError) -> Response {
+fn refused(caller: &Resolved, e: AgentError) -> Response {
     match e {
         AgentError::NotFound => error(StatusCode::NOT_FOUND, "no such agent"),
         AgentError::Invalid(m) => error(StatusCode::BAD_REQUEST, m),
@@ -42,42 +49,98 @@ fn refused(e: AgentError) -> Response {
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("the agents state could not be saved: {m}"),
         ),
+        AgentError::Needs(p, m) => {
+            let (status, _) = crate::rbac::need::refusal_of(caller, p);
+            (status, Json(crate::rbac::need::refusal_body(p, Some(&m)))).into_response()
+        }
     }
 }
 
 /// Who acts, for the revocation record and the audit line (never a secret).
-fn operator(headers: &HeaderMap) -> String {
-    let Some(token) = crate::control_auth::presented_token(headers) else {
-        return "operator".into();
-    };
-    if crate::login::is_console_token(token) {
-        if let Some(user) = crate::control_auth::unverified_claims(token)
-            .and_then(|c| crate::login::user_of(&c).map(str::to_string))
-        {
-            return format!("console:{user}");
-        }
+fn operator(caller: &Resolved) -> String {
+    match &caller.principal {
+        crate::rbac::Principal::User { name, .. } => format!("console:{name}"),
+        crate::rbac::Principal::AdminToken | crate::rbac::Principal::Open => "admin".into(),
+        _ => crate::rbac::service::principal_name(caller),
     }
-    "admin".into()
 }
 
-async fn list(State(state): State<AppState>) -> Response {
+fn caller(
+    state: &AppState,
+    headers: &HeaderMap,
+    extensions: &Extensions,
+) -> std::sync::Arc<Resolved> {
+    crate::control_auth::caller_of(state, headers, extensions)
+}
+
+#[derive(Deserialize, Default)]
+struct ListQuery {
+    #[serde(default)]
+    owner: Option<String>,
+}
+
+/// The owner a list is for: the one asked (`agents.read` for anyone but
+/// yourself), else the caller's own without `agents.read`.
+fn list_owner(
+    state: &AppState,
+    caller: &Resolved,
+    asked: Option<&str>,
+) -> Result<Option<String>, AgentError> {
+    let own = super::visible_to(caller)?;
+    let asked = asked
+        .map(str::trim)
+        .filter(|o| !o.is_empty())
+        .map(|o| super::owner_filter(&state.users, o));
+    match (own, asked) {
+        (Some(me), Some(o)) if o != me => Err(AgentError::Needs(
+            crate::rbac::Permission::AgentsRead,
+            "other people's agents need the agents.read permission".into(),
+        )),
+        (Some(me), _) => Ok(Some(me)),
+        (None, asked) => Ok(asked),
+    }
+}
+
+async fn list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    Query(q): Query<ListQuery>,
+) -> Response {
+    let caller = caller(&state, &headers, &extensions);
+    let owner = match list_owner(&state, &caller, q.owner.as_deref()) {
+        Ok(o) => o,
+        Err(e) => return refused(&caller, e),
+    };
     let policy = Policy::of(&state);
-    let agents = state.agents.list(&policy);
+    let agents = state.agents.list(&policy, owner.as_deref());
     Json(json!({
         "agents": agents,
+        "owner": owner,
+        "you": caller.user_id(),
         "policy": policy.view(),
         "capacity": super::MAX_AGENTS,
         "persisted": state.agents.persisted(),
         "control_auth": state.config.control_auth.as_str(),
         "ceilings": super::CEILINGS,
+        "roles": super::ceiling_roles(&state, &caller),
     }))
     .into_response()
 }
 
-async fn get_one(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+async fn get_one(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    Path(id): Path<String>,
+) -> Response {
+    let caller = caller(&state, &headers, &extensions);
+    if let Err(e) = super::may_read(&state.agents, &caller, &id) {
+        return refused(&caller, e);
+    }
     match state.agents.get(&id, &Policy::of(&state)) {
         Some(v) => Json(v).into_response(),
-        None => refused(AgentError::NotFound),
+        None => refused(&caller, AgentError::NotFound),
     }
 }
 
@@ -103,9 +166,11 @@ where
 async fn patch(
     State(state): State<AppState>,
     headers: HeaderMap,
+    extensions: Extensions,
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> Response {
+    let caller = caller(&state, &headers, &extensions);
     let p: Patch = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(e) => {
@@ -115,45 +180,111 @@ async fn patch(
             )
         }
     };
-    if let Err(e) = state.agents.set_rights(&id, p.rights, p.note) {
-        return refused(e);
+    if let Err(e) = super::check_rights(&p.rights, &state.users) {
+        return refused(&caller, e);
     }
-    tracing::info!(target: "rustybin::agents", agent = %id, by = %operator(&headers), "rights saved");
-    match state.agents.get(&id, &Policy::of(&state)) {
+    let policy = Policy::of(&state);
+    if let Err(e) = super::may_manage(
+        &state.agents,
+        &policy,
+        &caller,
+        &id,
+        &Action::Rights(p.rights.clone()),
+    ) {
+        return refused(&caller, e);
+    }
+    if let Err(e) = state.agents.set_rights(&id, p.rights, p.note) {
+        return refused(&caller, e);
+    }
+    tracing::info!(target: "rustybin::agents", agent = %id, by = %operator(&caller), "rights saved");
+    match state.agents.get(&id, &policy) {
         Some(v) => Json(v).into_response(),
-        None => refused(AgentError::NotFound),
+        None => refused(&caller, AgentError::NotFound),
     }
 }
 
 async fn revoke(
     State(state): State<AppState>,
     headers: HeaderMap,
+    extensions: Extensions,
     Path(id): Path<String>,
 ) -> Response {
-    match state
-        .agents
-        .revoke(&id, &operator(&headers), &state.config.console_tokens)
-    {
+    let caller = caller(&state, &headers, &extensions);
+    if let Err(e) = super::may_manage(
+        &state.agents,
+        &Policy::of(&state),
+        &caller,
+        &id,
+        &Action::Revoke,
+    ) {
+        return refused(&caller, e);
+    }
+    match state.agents.revoke_as(
+        &id,
+        &operator(&caller),
+        caller.user_id(),
+        &state.config.console_tokens,
+    ) {
         Ok(v) => Json(v).into_response(),
-        Err(e) => refused(e),
+        Err(e) => refused(&caller, e),
     }
 }
 
-async fn restore(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+async fn restore(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    Path(id): Path<String>,
+) -> Response {
+    let caller = caller(&state, &headers, &extensions);
+    if let Err(e) = super::may_manage(
+        &state.agents,
+        &Policy::of(&state),
+        &caller,
+        &id,
+        &Action::Restore,
+    ) {
+        return refused(&caller, e);
+    }
     match state.agents.restore(&id, &state.config.console_tokens) {
         Ok(v) => Json(v).into_response(),
-        Err(e) => refused(e),
+        Err(e) => refused(&caller, e),
     }
 }
 
-async fn end_sessions(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+async fn end_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    Path(id): Path<String>,
+) -> Response {
+    let caller = caller(&state, &headers, &extensions);
+    if let Err(e) = super::may_manage(
+        &state.agents,
+        &Policy::of(&state),
+        &caller,
+        &id,
+        &Action::EndSessions,
+    ) {
+        return refused(&caller, e);
+    }
     match state.agents.end_sessions(&id) {
         Ok(n) => Json(json!({ "id": id, "sessions_ended": n })).into_response(),
-        Err(e) => refused(e),
+        Err(e) => refused(&caller, e),
     }
 }
 
-async fn events(State(state): State<AppState>) -> Response {
+async fn events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+) -> Response {
+    let caller = caller(&state, &headers, &extensions);
+    // Without agents.read, the events of the caller's own agents only.
+    let own = match super::visible_to(&caller) {
+        Ok(o) => o,
+        Err(e) => return refused(&caller, e),
+    };
     let Some((rx, guard)) = state.agents.subscribe() else {
         return error(
             StatusCode::TOO_MANY_REQUESTS,
@@ -163,6 +294,11 @@ async fn events(State(state): State<AppState>) -> Response {
     let stream = BroadcastStream::new(rx).filter_map(move |item| {
         let _hold = &guard;
         let v = item.ok()?;
+        if let Some(me) = &own {
+            if v.get("owner").and_then(Value::as_str) != Some(me.as_str()) {
+                return None;
+            }
+        }
         let kind = if v.get("event").is_some() {
             "agent"
         } else {
@@ -193,27 +329,30 @@ pub fn catalog() -> Vec<Endpoint> {
             AGENTS_PATH,
             &["GET"],
             category::CONTROL,
-            "AI agents on the management MCP server (admin)",
+            "AI agents on the management MCP server, each with the user it acts for (agents.read; a user's own without it)",
         )
-.permission(crate::rbac::Permission::AgentsRead)
+        .authenticated(&[])
         .description(
             "Every client that called /_rustybin/mcp: its name and version (clientInfo), the \
-             credential it presents, first and last seen, calls today and in total, open \
+             credential it presents and the user it acts for (owner; the admin token and \
+             control JWTs act for nobody), first and last seen, calls today and in total, open \
              sessions, status (active, idle, revoked) and the rights that apply to it (ceiling, \
-             tool allow and deny lists, from its own override, a rule of rustybin.yaml or the \
-             default). Plus the policy: the default ceiling and the rules.",
+             tool allow and deny lists, from its own override, a rule of rustybin.yaml, the \
+             default for a role of its user or the default). Plus the policy. ?owner=<user id \
+             or sign-in name> keeps one user's agents. Everyone's need agents.read; a user \
+             without it sees their own.",
         )
         .example(Example::get("List the agents", AGENTS_PATH)),
         Endpoint::new(
             EVENTS_PATH,
             &["GET"],
             category::CONTROL,
-            "Live feed of agent calls (admin)",
+            "Live feed of agent calls (agents.read; a user's own without it)",
         )
-.permission(crate::rbac::Permission::AgentsRead)
+        .authenticated(&[])
         .description(
-            "Server-Sent Events: a `call` event per management tool call (agent, tool, outcome), \
-             an `agent` event when one is revoked or restored. At most 16 listeners.",
+            "Server-Sent Events: a `call` event per management tool call (agent, owner, tool, \
+             outcome), an `agent` event when one is revoked or restored. At most 16 listeners.",
         )
         .sse()
         .example(
@@ -223,13 +362,15 @@ pub fn catalog() -> Vec<Endpoint> {
             "/_rustybin/agents/{id}",
             &["GET", "PATCH"],
             category::CONTROL,
-            "One AI agent: its calls per tool, last errors, sessions and rights (admin)",
+            "One AI agent: its user, calls per tool, last errors, sessions and rights (agents.read / agents.manage; your own without them)",
         )
-.permission_for(&["GET"], crate::rbac::Permission::AgentsRead).permission_for(&["PATCH"], crate::rbac::Permission::AgentsManage)
+        .authenticated(&[])
         .description(
-            "PATCH {\"rights\": {\"ceiling\": \"read-only\" | \"traffic\" | \"manage\" | \"full\", \
-             \"allow\": [tools], \"deny\": [tools]}, \"note\": \"...\"}: the agent's own rights, \
-             field by field over the matching rule; \"rights\": null goes back to the rules.",
+            "PATCH {\"rights\": {\"ceiling\": \"read-only\" | \"traffic\" | \"manage\" | \"full\" | \
+             a role name, \"allow\": [tools], \"deny\": [tools]}, \"note\": \"...\"}: the agent's \
+             own rights, field by field over the matching rule; \"rights\": null goes back to \
+             the rules. Another user's agent needs agents.manage; your own you may limit \
+             (never widen) without it.",
         )
         .example(Example::get("An unknown agent", "/_rustybin/agents/0000000000000000").expect_status(404))
         .example(
@@ -241,25 +382,25 @@ pub fn catalog() -> Vec<Endpoint> {
             "/_rustybin/agents/{id}/revoke",
             &["POST"],
             category::CONTROL,
-            "Revoke an AI agent: refuse its calls, end its sessions, revoke its tokens (admin)",
+            "Revoke an AI agent: refuse its calls, end its sessions, revoke its tokens (agents.manage; your own without it)",
         )
-.permission(crate::rbac::Permission::AgentsManage)
+        .authenticated(&[])
         .example(Example::post("Revoke an unknown agent", "/_rustybin/agents/0000000000000000/revoke").expect_status(404)),
         Endpoint::new(
             "/_rustybin/agents/{id}/restore",
             &["POST"],
             category::CONTROL,
-            "Restore a revoked AI agent (admin)",
+            "Restore a revoked AI agent (agents.manage; one of yours you revoked without it)",
         )
-.permission(crate::rbac::Permission::AgentsManage)
+        .authenticated(&[])
         .example(Example::post("Restore an unknown agent", "/_rustybin/agents/0000000000000000/restore").expect_status(404)),
         Endpoint::new(
             "/_rustybin/agents/{id}/sessions",
             &["DELETE"],
             category::CONTROL,
-            "End an AI agent's MCP sessions (admin)",
+            "End an AI agent's MCP sessions (agents.manage; your own without it)",
         )
-.permission(crate::rbac::Permission::AgentsManage)
+        .authenticated(&[])
         .example(Example::delete("End the sessions of an unknown agent", "/_rustybin/agents/0000000000000000/sessions").expect_status(404)),
     ]
 }
@@ -269,32 +410,34 @@ pub fn openapi_paths() -> Value {
     let id =
         json!([{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }]);
     let not_found = json!({ "description": "No such agent" });
+    let forbidden = json!({ "description": "permission_required: agents.read (another user's agent) or agents.manage (changing another user's agent, or widening your own)" });
     let tool_list = json!({ "type": "array", "items": { "type": "string" }, "description": "Management tool names" });
     json!({
         AGENTS_PATH: { "get": {
             "tags": tags, "summary": "AI agents on the management MCP server", "operationId": "listAgents",
-            "responses": { "200": { "description": "{agents, policy, capacity, persisted}" }, "401": { "description": "Admin rights required" } }
+            "parameters": [{ "name": "owner", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Only the agents acting for this user (an id or a sign-in name)" }],
+            "responses": { "200": { "description": "{agents (each with owner and owner_label), owner, policy, capacity, persisted}" }, "403": forbidden }
         } },
         EVENTS_PATH: { "get": {
             "tags": tags, "summary": "Live feed of agent calls (SSE)", "operationId": "streamAgentEvents",
-            "responses": { "200": { "description": "text/event-stream: call and agent events" }, "429": { "description": "Too many listeners" } }
+            "responses": { "200": { "description": "text/event-stream: call and agent events" }, "403": forbidden, "429": { "description": "Too many listeners" } }
         } },
         "/_rustybin/agents/{id}": {
             "get": { "tags": tags, "summary": "One AI agent", "operationId": "getAgent", "parameters": id,
-                "responses": { "200": { "description": "The agent with tools, last_errors, sessions, override and available_tools" }, "404": not_found } },
+                "responses": { "200": { "description": "The agent with owner, tools, last_errors, sessions, override and available_tools" }, "403": forbidden, "404": not_found } },
             "patch": { "tags": tags, "summary": "Set an AI agent's rights and note", "operationId": "setAgentRights", "parameters": id,
                 "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "additionalProperties": false, "properties": {
                     "rights": { "type": ["object", "null"], "additionalProperties": false, "properties": {
-                        "ceiling": { "type": "string", "enum": super::CEILINGS },
+                        "ceiling": { "type": "string", "description": "read-only, traffic, manage, full, or a role name" },
                         "allow": tool_list, "deny": tool_list } },
                     "note": { "type": ["string", "null"], "maxLength": super::MAX_NOTE } } } } } },
-                "responses": { "200": { "description": "The agent" }, "400": { "description": "Invalid rights" }, "404": not_found } }
+                "responses": { "200": { "description": "The agent" }, "400": { "description": "Invalid rights (an unknown tool or role)" }, "403": forbidden, "404": not_found } }
         },
         "/_rustybin/agents/{id}/revoke": { "post": { "tags": tags, "summary": "Revoke an AI agent", "operationId": "revokeAgent", "parameters": id,
-            "responses": { "200": { "description": "{revoked, sessions_ended, tokens_revoked, note}" }, "404": not_found } } },
+            "responses": { "200": { "description": "{revoked, sessions_ended, tokens_revoked, note}" }, "403": forbidden, "404": not_found } } },
         "/_rustybin/agents/{id}/restore": { "post": { "tags": tags, "summary": "Restore a revoked AI agent", "operationId": "restoreAgent", "parameters": id,
-            "responses": { "200": { "description": "{restored}" }, "404": not_found } } },
+            "responses": { "200": { "description": "{restored}" }, "403": forbidden, "404": not_found } } },
         "/_rustybin/agents/{id}/sessions": { "delete": { "tags": tags, "summary": "End an AI agent's MCP sessions", "operationId": "endAgentSessions", "parameters": id,
-            "responses": { "200": { "description": "{sessions_ended}" }, "404": not_found } } },
+            "responses": { "200": { "description": "{sessions_ended}" }, "403": forbidden, "404": not_found } } },
     })
 }

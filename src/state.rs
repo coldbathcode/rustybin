@@ -182,6 +182,10 @@ impl AppState {
             &config.console_tokens,
             clock.clone(),
         ));
+        // Agents act for a user: 0.4 records move to their user once.
+        if crate::login::enabled(&config) {
+            agents.adopt_users(&config.users);
+        }
         let harness = crate::harness::Harness::new(&config, Some(metrics.clone()));
         if let Some(h) = &harness {
             h.attach(crate::harness::Resources {

@@ -1024,3 +1024,6 @@ async fn a_query_on_the_mcp_url_names_the_same_resource() {
         "another path was accepted"
     );
 }
+
+// Agents act for a user (testing-2 step 12).
+mod users;

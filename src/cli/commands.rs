@@ -339,9 +339,9 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("bins", "get", "<id> <n>", "One captured request of a bin.", NO_FLAGS, [("GET", "/bin/{id}/requests/{n}")], false, "bins get 0123456789abcdef01234567 1"),
     cmd!("bins", "tail", "<id>", "Follow a bin's requests.", TAIL_FLAGS, [("GET", "/bin/{id}/requests/stream")], false, "bins tail 0123456789abcdef01234567 --max 3"),
     // ── Agents ──
-    cmd!("agents", "list", "", "Every AI agent that called the management server, and the policy.", NO_FLAGS, [("GET", "/_rustybin/agents")], false, "agents list"),
-    cmd!("agents", "get", "<id>", "One agent: tools, last errors, sessions.", NO_FLAGS, [("GET", "/_rustybin/agents/{id}")], false, "agents get 1f3a..."),
-    cmd!("agents", "rights", "<id> [--ceiling C] [--allow T] [--deny T] [--note N] [--reset]", "Limit an agent: a ceiling, tools allowed or denied, a note; --reset goes back to the rules.", &[Flag::value("--ceiling", "read-only, traffic, manage or full"), Flag::value("--allow", "Tool names, comma separated"), Flag::value("--deny", "Tool names, comma separated"), Flag::value("--note", "A note"), Flag::switch("--reset", "Drop the agent's own rights and note")], [("PATCH", "/_rustybin/agents/{id}")], false, "agents rights 1f3a... --ceiling read-only --deny try_request"),
+    cmd!("agents", "list", "[--owner U]", "Every AI agent that called the management server, the user each acts for, and the policy (yours only without agents.read).", &[Flag::value("--owner", "Only the agents acting for this user (an id or a sign-in name)")], [("GET", "/_rustybin/agents")], false, "agents list"),
+    cmd!("agents", "get", "<id>", "One agent: its user, tools, last errors, sessions.", NO_FLAGS, [("GET", "/_rustybin/agents/{id}")], false, "agents get 1f3a..."),
+    cmd!("agents", "rights", "<id> [--ceiling C] [--allow T] [--deny T] [--note N] [--reset]", "Limit an agent: a ceiling (a role or a 0.3 ceiling), tools allowed or denied, a note; --reset goes back to the rules. Your own agents only to limit them, without agents.manage.", &[Flag::value("--ceiling", "A role (viewer, editor, a custom role) or read-only, traffic, manage, full"), Flag::value("--allow", "Tool names, comma separated"), Flag::value("--deny", "Tool names, comma separated"), Flag::value("--note", "A note"), Flag::switch("--reset", "Drop the agent's own rights and note")], [("PATCH", "/_rustybin/agents/{id}")], false, "agents rights 1f3a... --ceiling viewer --deny try_request"),
     cmd!("agents", "revoke", "<id>", "Refuse the agent's calls, end its sessions, revoke its tokens.", NO_FLAGS, [("POST", "/_rustybin/agents/{id}/revoke")], true, "agents revoke 1f3a... --yes"),
     cmd!("agents", "restore", "<id>", "Undo a revocation.", NO_FLAGS, [("POST", "/_rustybin/agents/{id}/restore")], false, "agents restore 1f3a..."),
     cmd!("agents", "end-sessions", "<id>", "End the agent's MCP sessions.", NO_FLAGS, [("DELETE", "/_rustybin/agents/{id}/sessions")], false, "agents end-sessions 1f3a..."),
@@ -2563,7 +2563,16 @@ async fn agents(ctx: &mut Ctx, verb: &str) -> Result<()> {
     let base = format!("/_rustybin/agents/{}", enc(&id));
     match verb {
         "list" => {
-            let v = ctx.client()?.get("/_rustybin/agents", &[]).await?.value();
+            let query: Vec<(&str, String)> = ctx
+                .args
+                .value("--owner")
+                .map(|o| vec![("owner", o.to_string())])
+                .unwrap_or_default();
+            let v = ctx
+                .client()?
+                .get("/_rustybin/agents", &query)
+                .await?
+                .value();
             if ctx.json {
                 ctx.emit(&v);
             } else {
@@ -2571,7 +2580,7 @@ async fn agents(ctx: &mut Ctx, verb: &str) -> Result<()> {
                     .as_array()
                     .map(|a| {
                         a.iter()
-                            .map(|x| json!({ "id": x["id"], "name": x["name"], "version": x["version"], "credential": x["credential"]["kind"], "status": x["status"], "ceiling": x["rights"]["ceiling"], "calls_today": x["calls"]["today"], "last_seen": x["last_seen"] }))
+                            .map(|x| json!({ "id": x["id"], "name": x["name"], "version": x["version"], "owner": x["owner_label"], "credential": x["credential"]["kind"], "status": x["status"], "ceiling": x["rights"]["ceiling"], "calls_today": x["calls"]["today"], "last_seen": x["last_seen"] }))
                             .collect()
                     })
                     .unwrap_or_default();

@@ -1,7 +1,9 @@
 // Consent page of the management MCP server's OAuth sign-in
 // (/ui/#/authorize/<id>): an agent asked to sign in; the person in front of
 // the console approves or denies with the console's own credential, and the
-// grant is capped by what that credential may do. Not in the navigation.
+// grant is capped by what that credential may do: a user's agent acts for
+// the user and holds the user's permissions within the scope (the list
+// the page shows, from the request's grants). Not in the navigation.
 import { h, replace, card, notice, icon, spinner, badge } from '../lib/dom.js';
 import { SERVER, send } from '../lib/http.js';
 import * as auth from '../lib/auth.js';
@@ -96,12 +98,28 @@ export default {
             : 'That is a website, not a local address. Approve only if you started this sign-in from that site and trust it.');
 
       let choice = CHOICES.find(([v]) => grantable.includes(v));
+      // What the agent will hold for the scope chosen: the approver's
+      // permissions within it (a user's agent never holds more than its user).
+      const grants = new Map((Array.isArray(req.grants) ? req.grants : []).map((g) => [g.scope, Array.isArray(g.permissions) ? g.permissions.map(String) : []]));
+      const approver = req.approver || {};
+      const holds = h('div', { id: 'authorize-permissions', class: 'stack-sm' });
+      const drawHolds = () => {
+        const list = choice ? grants.get(choice[0]) || [] : [];
+        replace(holds,
+          h('h3', { style: { margin: 0 } }, 'The agent will hold'),
+          h('p', { class: 'small muted', style: { margin: 0 } }, req.acts_for_user
+            ? ['It acts for you (', h('strong', null, String(approver.display_name || approver.name || '')), '): your permissions within this access, checked again at every call, so it never does more than you may. Disabling or removing your account ends it.']
+            : 'This console signed in with a credential that is no user (' + String(approver.name || '') + '): the agent holds what this access allows of it.'),
+          list.length
+            ? h('ul', { class: 'pill-list', style: { margin: 0, padding: 0, listStyle: 'none' } }, list.map((p) => h('li', { 'data-permission': p }, badge(p, 'outline'))))
+            : h('p', { class: 'small muted', style: { margin: 0 } }, 'Nothing.'));
+      };
       const cards = h('div', { class: 'radio-cards', role: 'radiogroup', 'aria-labelledby': 'authorize-access' });
       for (const [value, label, text] of CHOICES) {
         if (!requested.includes(value)) continue;
         const allowed = grantable.includes(value);
         const radio = h('input', { type: 'radio', name: 'authorize-scope', value, checked: choice && choice[0] === value, disabled: !allowed });
-        radio.addEventListener('change', () => { choice = CHOICES.find(([v]) => v === value); });
+        radio.addEventListener('change', () => { choice = CHOICES.find(([v]) => v === value); drawHolds(); });
         cards.appendChild(h('label', { class: 'radio-card', 'data-scope': value, style: allowed ? null : { opacity: '0.55', cursor: 'not-allowed' } }, radio,
           h('span', { class: 'stack-sm', style: { gap: '2px' } },
             h('strong', null, label, h('span', { class: 'mono small muted', style: { marginLeft: '8px' } }, value)),
@@ -157,8 +175,10 @@ export default {
           h('h3', { id: 'authorize-access' }, 'Access to grant'),
           grantable.length ? cards : notice('err', 'The credential this console signed in with cannot grant any of the access the agent asked for (',
             requested.join(', '), '). Sign in to the console with a token that has the needed scope, or deny.'),
+          grantable.length ? holds : null,
           err,
           h('div', { class: 'row' }, h('span', { class: 'grow small muted' }, expires ? 'This request expires in about ' + expires + ' min.' : null), deny, approve))));
+      drawHolds();
       const first = cards.querySelector('input:checked') || deny;
       first.focus();
     }

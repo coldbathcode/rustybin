@@ -1,7 +1,10 @@
 // AI agents: every client that talks to this instance through the
 // management MCP server (/_rustybin/mcp), what it did and the operator's
-// controls over it. The list (name and version, credential, first and last
-// seen, calls today, status), a detail panel per agent (calls per tool with
+// controls over it. The list (name and version, the user it acts for with
+// an owner filter, credential, first and last seen, calls today, status;
+// without agents.read the server answers the caller's own agents only, and
+// a user's own agents keep their controls without agents.manage), a detail
+// panel per agent (calls per tool with
 // their outcomes, last errors, sessions, the rights form with a ceiling and
 // tool allow or deny chips, a note, Revoke and Restore, End sessions), the
 // live feed of calls, the default ceiling and the rules of rustybin.yaml,
@@ -28,8 +31,32 @@ function statusBadgeOf(s) {
 }
 
 function ceilingBadge(r) {
-  const from = r.source === 'agent' ? 'its own' : r.source === 'rule' ? 'rule ' + (r.rule + 1) : 'default';
-  return h('span', { class: 'row nowrap', style: { gap: '4px' } }, badge(r.ceiling, r.ceiling === 'full' ? 'outline' : 'warn'), h('span', { class: 'tiny muted' }, from));
+  const from = r.source === 'agent' ? 'its own' : r.source === 'rule' ? 'rule ' + (r.rule + 1) : r.source === 'role' ? 'role default' : 'default';
+  const label = r.ceiling_kind === 'role' ? 'role ' + r.ceiling : r.ceiling;
+  return h('span', { class: 'row nowrap', style: { gap: '4px' } }, badge(label, r.ceiling === 'full' ? 'outline' : r.ceiling_known === false ? 'err' : 'warn'), h('span', { class: 'tiny muted' }, from));
+}
+
+/** The owner filter's key of an agent: its user's id, or '-' for a credential of its own. */
+function ownerKey(a) {
+  return a.owner && a.owner.user_id ? a.owner.user_id : '-';
+}
+
+/** Is the agent the signed-in user's own? */
+function isMine(a, list) {
+  return !!(list && list.you && a.owner && a.owner.user_id === list.you);
+}
+
+/** Guard a control with `p`, unless the agent is the caller's own (the server checks again). */
+function guardUnlessMine(el, p, a, list) {
+  return isMine(a, list) ? el : perms.guard(el, p);
+}
+
+function ownerCell(a, list) {
+  const mine = isMine(a, list);
+  return h('span', { class: 'row nowrap', style: { gap: '4px' } },
+    h('span', { class: a.owner ? '' : 'muted' }, a.owner_label || ''),
+    mine ? badge('you', 'ok') : null,
+    a.owner && a.owner.status && a.owner.status !== 'active' ? badge(a.owner.status, 'err') : null);
 }
 
 async function call(method, path, body) {
@@ -50,6 +77,7 @@ export default {
     let selected = rest || null;
     let detail = null;
     let feedCtrl = null;
+    let ownerFilter = '';
     const feed = [];
 
     root.appendChild(h('div', { class: 'view-head' },
@@ -90,12 +118,20 @@ export default {
       clear(listEl);
       if (listError) { listEl.appendChild(card('Agents', {}, notice('err', 'The agents could not be read: ' + listError.message))); return; }
       if (!list) { listEl.appendChild(card('Agents', {}, spinner('Loading the agents'))); return; }
-      const agents = list.agents || [];
+      const all = list.agents || [];
       const open = list.control_auth === 'open';
-      const rows = agents.map((a) => h('tr', { 'data-agent': a.id, class: a.id === selected ? 'hl' : '', style: { cursor: 'pointer' }, onclick: () => choose(a.id) },
+      // The owner filter: everyone, mine, one user, or the credentials that act for nobody.
+      const owners = new Map();
+      for (const a of all) if (!owners.has(ownerKey(a))) owners.set(ownerKey(a), ownerKey(a) === '-' ? 'No user (admin token, JWTs, keys)' : a.owner_label);
+      if (ownerFilter && ownerFilter !== 'mine' && !owners.has(ownerFilter)) ownerFilter = '';
+      const agents = all.filter((a) => !ownerFilter || (ownerFilter === 'mine' ? isMine(a, list) : ownerKey(a) === ownerFilter));
+      const filter = select([['', 'Everyone (' + all.length + ')'], ...(list.you ? [['mine', 'Mine']] : []), ...[...owners].map(([k, label]) => [k, label])], ownerFilter, { id: 'agents-owner-filter', 'aria-label': 'Owner' });
+      filter.addEventListener('change', () => { ownerFilter = filter.value; renderList(); });
+      const rows = agents.map((a) => h('tr', { 'data-agent': a.id, 'data-owner': ownerKey(a), class: a.id === selected ? 'hl' : '', style: { cursor: 'pointer' }, onclick: () => choose(a.id) },
         h('td', null, h('button', { class: 'linkish', type: 'button', 'aria-label': 'Open the agent ' + a.name, onclick: (e) => { e.stopPropagation(); choose(a.id); } }, h('strong', null, a.name)),
           a.version ? h('span', { class: 'tiny muted' }, ' ' + a.version) : null,
           h('div', { class: 'tiny muted' }, a.transport || '')),
+        h('td', { class: 'small', 'data-col': 'owner' }, ownerCell(a, list)),
         h('td', { class: 'small' }, a.credential.label),
         h('td', { class: 'small nowrap' }, when(a.first_seen)),
         h('td', { class: 'small nowrap' }, when(a.last_seen)),
@@ -103,11 +139,13 @@ export default {
         h('td', null, ceilingBadge(a.rights)),
         h('td', null, statusBadgeOf(a.status))));
       const table = h('div', { class: 'table-wrap' }, h('table', { class: 'table', id: 'agents-table' },
-        h('thead', null, h('tr', null, h('th', null, 'Agent'), h('th', null, 'Credential'), h('th', null, 'First seen'), h('th', null, 'Last seen'), h('th', null, 'Calls today / all'), h('th', null, 'Ceiling'), h('th', null, 'Status'))),
+        h('thead', null, h('tr', null, h('th', null, 'Agent'), h('th', null, 'Owner'), h('th', null, 'Credential'), h('th', null, 'First seen'), h('th', null, 'Last seen'), h('th', null, 'Calls today / all'), h('th', null, 'Ceiling'), h('th', null, 'Status'))),
         h('tbody', null, rows)));
-      listEl.appendChild(card('Agents', { hint: `${agents.length} of at most ${list.capacity}` + (list.persisted ? '' : ', kept until a restart') },
+      const ownOnly = !!list.owner && !perms.can('agents.read');
+      listEl.appendChild(card('Agents', { hint: `${all.length} of at most ${list.capacity}` + (list.persisted ? '' : ', kept until a restart'), actions: all.length ? h('label', { class: 'row nowrap small', style: { gap: '6px' } }, 'Owner', filter) : null },
         open ? notice('warn', icon('alert'), h('span', null, 'The control plane is open: anyone may connect under any client name, so rights and revocations here are advisory. Turn on the console sign-in (RUSTYBIN_CONTROL_AUTH=password) to control agents for real.')) : null,
-        agents.length ? table : empty('No agent yet', 'Agents appear here after their first call to /_rustybin/mcp. Connect one with the command below.', 'terminal')));
+        ownOnly ? notice('info', 'Your own agents: they act for you and never do more than you may. You may limit, revoke and end the sessions of them; other people\'s agents need the agents.read permission.') : null,
+        all.length ? (agents.length ? table : empty('No agent of this owner', 'Choose another owner above.', 'filter')) : empty('No agent yet', 'Agents appear here after their first call to /_rustybin/mcp. Connect one with the command below.', 'terminal')));
     }
 
     function choose(id) {
@@ -131,6 +169,7 @@ export default {
           revoked ? notice('err', icon('lock'), h('span', null, `Revoked ${when(a.revoked.at)} by ${a.revoked.by}: every call is refused.`)) : null,
           kvgrid([
             ['Status', statusBadgeOf(a.status)],
+            ['Acts for', ownerCell(a, list)],
             ['Credential', a.credential.label],
             ['Transport', a.transport || 'none yet'],
             ['First seen', when(a.first_seen)],
@@ -151,10 +190,10 @@ export default {
 
     function controlsRow(a) {
       const revoked = a.status === 'revoked';
-      const revoke = perms.guard(h('button', { class: 'btn' + (revoked ? '' : ' danger'), type: 'button', id: revoked ? 'agent-restore' : 'agent-revoke' }, icon(revoked ? 'unlock' : 'lock'), revoked ? 'Restore' : 'Revoke'), 'agents.manage');
+      const revoke = guardUnlessMine(h('button', { class: 'btn' + (revoked ? '' : ' danger'), type: 'button', id: revoked ? 'agent-restore' : 'agent-revoke' }, icon(revoked ? 'unlock' : 'lock'), revoked ? 'Restore' : 'Revoke'), 'agents.manage', a, list);
       revoke.addEventListener('click', async () => {
         if (!revoked) {
-          const warn = a.credential.kind === 'console'
+          const warn = a.credential.via === 'sign-in'
             ? ' Its console sign-in tokens are revoked too: if it uses your own token, this console signs out.'
             : a.credential.kind === 'admin' ? ' The admin token itself cannot be revoked per agent (rotate it); this agent\'s calls are refused.' : '';
           if (!window.confirm(`Revoke ${a.name}? Its calls are refused and its sessions end.${warn}`)) return;
@@ -167,7 +206,7 @@ export default {
           reload();
         } catch (e) { toast('Not changed: ' + e.message, 'err'); revoke.disabled = false; }
       });
-      const end = perms.guard(h('button', { class: 'btn', type: 'button', id: 'agent-end-sessions', disabled: !a.sessions_open }, icon('stop'), 'End sessions'), 'agents.manage');
+      const end = guardUnlessMine(h('button', { class: 'btn', type: 'button', id: 'agent-end-sessions', disabled: !a.sessions_open }, icon('stop'), 'End sessions'), 'agents.manage', a, list);
       end.addEventListener('click', async () => {
         end.disabled = true;
         try { const r = await call('DELETE', `${BASE}/${encodeURIComponent(a.id)}/sessions`); toast(`${r.sessions_ended} session(s) ended`); reload(); }
@@ -183,7 +222,10 @@ export default {
       const o = a.override || {};
       const r = a.rights;
       const inherited = r.source === 'agent' && o.ceiling ? null : r.ceiling;
-      const ceil = select([['', 'From the rules (' + (inherited || 'see below') + ')'], ...list.ceilings.map((c) => [c, c])], o.ceiling || '', { id: 'agent-ceiling', 'aria-label': 'Ceiling' });
+      const roles = (list.roles || []).filter((n) => !list.ceilings.includes(n));
+      if (o.ceiling && !list.ceilings.includes(o.ceiling) && !roles.includes(o.ceiling)) roles.push(o.ceiling);
+      const NEAREST = { 'read-only': 'viewer', traffic: 'viewer + traffic.read', manage: 'editor', full: 'its user\'s own' };
+      const ceil = select([['', 'From the rules (' + (inherited || 'see below') + ')'], ...list.ceilings.map((c) => [c, c + ' (' + NEAREST[c] + ')']), ...roles.map((n) => [n, 'role ' + n])], o.ceiling || '', { id: 'agent-ceiling', 'aria-label': 'Ceiling' });
       const marks = new Map();
       for (const t of o.allow || []) marks.set(t, 'allow');
       for (const t of o.deny || []) marks.set(t, 'deny');
@@ -205,11 +247,11 @@ export default {
       const note = textarea({ rows: 2, id: 'agent-note', 'aria-label': 'Note', class: 'textarea', maxlength: 500 });
       note.value = a.note || '';
       const out = h('div');
-      const save = perms.guard(h('button', { class: 'btn primary', type: 'submit', id: 'agent-save-rights' }, 'Save rights'), 'agents.manage');
-      const reset = perms.guard(h('button', { class: 'btn', type: 'button', id: 'agent-reset-rights' }, 'Back to the rules'), 'agents.manage');
+      const save = guardUnlessMine(h('button', { class: 'btn primary', type: 'submit', id: 'agent-save-rights' }, 'Save rights'), 'agents.manage', a, list);
+      const reset = guardUnlessMine(h('button', { class: 'btn', type: 'button', id: 'agent-reset-rights' }, 'Back to the rules'), 'agents.manage', a, list);
       const form = h('form', { class: 'stack-sm', 'aria-label': 'Rights of ' + a.name },
         h('h3', { style: { margin: 0 } }, 'Rights'),
-        h('p', { class: 'small muted', style: { margin: 0 } }, 'A ceiling caps the tools below what the credential allows: read-only (read tools, no captured traffic), traffic (every read tool), manage (reads and mock changes), full. An allowed tool narrows the agent to the allowed ones; a denied tool is never listed nor callable.'),
+        h('p', { class: 'small muted', style: { margin: 0 } }, 'A ceiling caps the tools below what the credential allows (an agent that acts for a user never does more than that user): a role (the tools whose permission it grants), or read-only (read tools, no captured traffic), traffic (every read tool), manage (reads and mock changes), full. An allowed tool narrows the agent to the allowed ones; a denied tool is never listed nor callable.', isMine(a, list) && !perms.can('agents.manage') ? ' This agent is yours: you may limit it, not widen it again.' : ''),
         h('label', { class: 'field' }, h('span', { class: 'label' }, 'Ceiling'), ceil),
         h('div', { class: 'stack-sm' }, h('span', { class: 'label' }, 'Tools'), chips),
         h('label', { class: 'field' }, h('span', { class: 'label' }, 'Note'), note),
@@ -307,7 +349,9 @@ export default {
       const src = { stored: 'saved in this instance', env: 'from RUSTYBIN_AGENTS_DEFAULT_CEILING', file: 'from rustybin.yaml', default: 'the default' }[p.default_source] || p.default_source;
       const rules = p.rules.length
         ? h('ol', { class: 'small stack-sm', id: 'agents-rules', style: { margin: 0, paddingLeft: '18px' } }, p.rules.map((r) => h('li', null,
-          'name ', h('code', null, r.match.name || '*'), ', credential ', h('code', null, r.match.credential || 'any'), ': ',
+          'name ', h('code', null, r.match.name || '*'), ', credential ', h('code', null, r.match.credential || 'any'),
+          r.match.user ? [', user ', h('code', null, r.match.user)] : null,
+          r.match.role ? [', role ', h('code', null, r.match.role)] : null, ': ',
           r.ceiling ? badge(r.ceiling, 'warn') : 'the default ceiling',
           r.allow.length ? [' allow ', h('span', { class: 'mono' }, r.allow.join(', '))] : null,
           r.deny.length ? [' deny ', h('span', { class: 'mono' }, r.deny.join(', '))] : null,
@@ -315,7 +359,8 @@ export default {
         : h('p', { class: 'small muted', style: { margin: 0 } }, 'No rule: put an agents: section in rustybin.yaml (default_ceiling and rules with match, ceiling, allow, deny, note).');
       replace(policyEl, card('Defaults and rules', { hint: 'what applies before an agent has rights of its own' },
         h('div', { class: 'stack' },
-          h('p', { class: 'small', style: { margin: 0 } }, 'The default ceiling is ', badge(p.default_ceiling, p.default_ceiling === 'full' ? 'outline' : 'warn'), ', ' + src + '. Rules of rustybin.yaml come next (the first that matches); an agent\'s own rights win field by field.'),
+          h('p', { class: 'small', style: { margin: 0 } }, 'The default ceiling is ', badge(p.default_ceiling, p.default_ceiling === 'full' ? 'outline' : 'warn'), ', ' + src + '. The default for a role of the agent\'s user comes before it, rules of rustybin.yaml before that (the first that matches); an agent\'s own rights win field by field. An agent that acts for a user never does more than the user.'),
+          (p.default_ceiling_for || []).length ? h('p', { class: 'small', id: 'agents-role-defaults', style: { margin: 0 } }, 'Per role: ', p.default_ceiling_for.map((e, i) => [i ? ', ' : '', h('code', null, e.role), ' ', badge(e.ceiling, 'warn')])) : null,
           doc ? settingsForm(doc, 'agents', { saveLabel: 'Save the default ceiling', onSaved: () => reload() }).el : null,
           h('h3', { style: { margin: 0 } }, 'Rules of rustybin.yaml'),
           rules)));

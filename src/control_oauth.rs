@@ -305,7 +305,7 @@ pub fn authorize_manage(
     let base = base_url(req.headers(), req.extensions(), req.uri(), config);
     Some(
         verify(token, &resource_url(&base), "access", config)
-            .map(|claims| crate::rbac::from_jwt_claims(&claims, &config.users))
+            .and_then(|(claims, user)| resolve_token(&claims, user.as_deref(), config))
             .map_err(|reason| {
                 let mut resp = (
                     StatusCode::UNAUTHORIZED,
@@ -382,9 +382,74 @@ fn sign(claims: &Value, config: &Config) -> Option<String> {
     .ok()
 }
 
+/// The user a token of ours acts for: `rb_uid` (a user id, or `null` when
+/// a credential that is no user approved it, the admin token or a control
+/// JWT). A token without the claim was issued before agents acted for a
+/// user: with the password sign-in it is the first admin's (0.4 consents
+/// were the console user's), elsewhere nobody's. `Err` when that user is
+/// gone, disabled, or signed out everywhere since (their generation moved
+/// past the token's `rb_ugen`), as a sign-in token would be.
+fn token_user(claims: &Value, config: &Config) -> Result<Option<String>, &'static str> {
+    let id = match claims.get("rb_uid") {
+        Some(Value::String(id)) => id.clone(),
+        Some(_) => return Ok(None),
+        None if crate::login::enabled(config) => config.users.first_admin().ok_or("signed_out")?.id,
+        None => return Ok(None),
+    };
+    let user = config.users.get(&id).ok_or("signed_out")?;
+    let ugen = claims
+        .get("rb_ugen")
+        .and_then(Value::as_u64)
+        .unwrap_or(crate::rbac::users::FIRST_GENERATION);
+    if user.disabled || user.generation != ugen {
+        return Err("signed_out");
+    }
+    Ok(Some(id))
+}
+
+/// The caller an access token is: for a user, the user (their roles and
+/// permissions resolved now) holding only what the token's scope allows
+/// too, never more than the user; for nobody, its scope as roles.
+fn resolve_token(
+    claims: &Value,
+    user: Option<&str>,
+    config: &Config,
+) -> Result<crate::rbac::Resolved, &'static str> {
+    let scoped = crate::rbac::from_jwt_claims(claims, &config.users);
+    let Some(id) = user else {
+        return Ok(scoped);
+    };
+    let r = config.users.resolve(id).ok_or("signed_out")?;
+    Ok(crate::rbac::Resolved {
+        principal: crate::rbac::Principal::User {
+            id: r.user.id.clone(),
+            name: r.user.name.clone(),
+            display_name: r.user.display_name.clone(),
+        },
+        roles: r.roles.clone(),
+        permissions: both(r.permissions, scoped.permissions),
+    })
+}
+
+/// The permissions in both sets.
+fn both(a: crate::rbac::PermSet, b: crate::rbac::PermSet) -> crate::rbac::PermSet {
+    a.iter().filter(|p| b.has(*p)).collect()
+}
+
+/// The permissions a scope list gives (the 0.3 scopes as roles).
+fn scope_permissions(scopes: &[&str]) -> crate::rbac::PermSet {
+    crate::rbac::from_scope_claim(Some(&Value::String(scopes.join(" ")))).1
+}
+
 /// Verify one of our tokens for `audience` and `use_` (`access` or
-/// `refresh`); returns its claims or the reason it was refused.
-fn verify(token: &str, audience: &str, use_: &str, config: &Config) -> Result<Value, &'static str> {
+/// `refresh`); returns its claims and the user it acts for, or the reason
+/// it was refused.
+fn verify(
+    token: &str,
+    audience: &str,
+    use_: &str,
+    config: &Config,
+) -> Result<(Value, Option<String>), &'static str> {
     let mut validation = Validation::new(Algorithm::HS256);
     validation.leeway = LEEWAY_SECS;
     validation.set_audience(&[audience]);
@@ -422,22 +487,39 @@ fn verify(token: &str, audience: &str, use_: &str, config: &Config) -> Result<Va
     {
         return Err("revoked");
     }
-    Ok(data.claims)
+    // The user it acts for: there, enabled, of the same generation.
+    let user = token_user(&data.claims, config)?;
+    Ok((data.claims, user))
 }
 
-/// A token response for `scopes`: an access token and a refresh token.
+/// A token response for `scopes`, acting for `user` (a user id, or `None`
+/// when a credential that is no user approved it): an access token and a
+/// refresh token, each with the user (`rb_uid`) and the user's generation
+/// (`rb_ugen`), so the user's sign out everywhere, password change,
+/// disable or removal ends them.
 #[allow(clippy::result_large_err)]
 fn issue(
     client_id: &str,
     scopes: &[&'static str],
     resource: &str,
     issuer: &str,
+    user: Option<&str>,
     config: &Config,
 ) -> Result<Value, Response> {
     let scope = scopes.join(" ");
     let iat = now();
+    let ugen = user
+        .and_then(|id| config.users.get(id))
+        .map(|u| u.generation);
+    if user.is_some() && ugen.is_none() {
+        return Err(oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "the user who approved this sign-in is gone",
+        ));
+    }
     let claims = |use_: &str, ttl: i64| {
-        json!({
+        let mut c = json!({
             "iss": issuer,
             "aud": resource,
             "sub": format!("client:{}", fingerprint(client_id)),
@@ -448,7 +530,12 @@ fn issue(
             "jti": uuid::Uuid::new_v4().to_string(),
             "rb_use": use_,
             "rb_gen": config.console_tokens.generation(),
-        })
+            "rb_uid": user,
+        });
+        if let Some(g) = ugen {
+            c["rb_ugen"] = json!(g);
+        }
+        c
     };
     let (Some(access), Some(refresh)) = (
         sign(&claims("access", ACCESS_TTL_SECS), config),
@@ -645,6 +732,8 @@ struct Code {
     scopes: Vec<&'static str>,
     resource: String,
     issuer: String,
+    /// The user who approved it (the agent acts for them), when a user did.
+    user: Option<String>,
 }
 
 pub struct OAuthState {
@@ -1123,6 +1212,47 @@ fn approver(extensions: &Extensions) -> Option<Grant> {
         .map(ControlAuthorized::grant)
 }
 
+/// Who approves: the caller control auth resolved.
+fn approver_resolved(extensions: &Extensions) -> Option<Arc<crate::rbac::Resolved>> {
+    extensions.get::<ControlAuthorized>().map(|a| a.0.clone())
+}
+
+/// May the approver grant `scope`? A user grants a scope that gives at
+/// least one permission they hold (the agent then holds the user's
+/// permissions within it, never more: [`resolve_token`]); a credential that
+/// is no user grants the scopes its grant covers, as in 0.4.
+fn may_grant(approver: &crate::rbac::Resolved, scope: &str) -> bool {
+    if approver.user_id().is_some() {
+        !both(approver.permissions, scope_permissions(&[scope])).is_empty()
+    } else {
+        grant_allows(&approver.grant(), scope)
+    }
+}
+
+/// What an agent approved with `scopes` will hold: the approver's
+/// permissions within the scopes.
+fn consent_permissions(approver: &crate::rbac::Resolved, scopes: &[&str]) -> crate::rbac::PermSet {
+    both(approver.permissions, scope_permissions(scopes))
+}
+
+/// The approver as the consent page shows them.
+fn approver_view(approver: &crate::rbac::Resolved) -> Value {
+    match &approver.principal {
+        crate::rbac::Principal::User {
+            id,
+            name,
+            display_name,
+        } => {
+            json!({ "kind": "user", "user_id": id, "name": name, "display_name": display_name, "roles": approver.roles })
+        }
+        _ => json!({
+            "kind": "credential",
+            "name": crate::rbac::service::principal_name(approver),
+            "roles": approver.roles,
+        }),
+    }
+}
+
 fn consent_error(status: StatusCode, message: &str) -> Response {
     no_store((status, Json(json!({ "error": message }))).into_response())
 }
@@ -1136,7 +1266,7 @@ async fn request_get_handler(
     if !builtin(&app.config) {
         return not_found(req.uri());
     }
-    let Some(grant) = approver(req.extensions()) else {
+    let Some(approver) = approver_resolved(req.extensions()) else {
         return consent_error(
             StatusCode::UNAUTHORIZED,
             "control-plane credentials required",
@@ -1152,7 +1282,18 @@ async fn request_get_handler(
         .scopes
         .iter()
         .copied()
-        .filter(|s| grant_allows(&grant, s))
+        .filter(|s| may_grant(&approver, s))
+        .collect();
+    // What the agent will hold per scope it may be given: the approver's
+    // permissions within it (resolved again at every call).
+    let grants: Vec<Value> = grantable
+        .iter()
+        .map(|s| {
+            json!({
+                "scope": s,
+                "permissions": consent_permissions(&approver, &[s]).names(),
+            })
+        })
         .collect();
     no_store(
         Json(json!({
@@ -1164,6 +1305,10 @@ async fn request_get_handler(
             "resource": p.resource,
             "scopes_requested": p.scopes,
             "scopes_grantable": grantable,
+            "approver": approver_view(&approver),
+            "acts_for_user": approver.user_id().is_some(),
+            "grants": grants,
+            "permissions": consent_permissions(&approver, &grantable).names(),
             "expires_in": (expires_at - now()).max(0),
         }))
         .into_response(),
@@ -1179,7 +1324,10 @@ async fn request_post_handler(
     if !builtin(&app.config) {
         return not_found(req.uri());
     }
-    let Some(grant) = approver(req.extensions()) else {
+    let (Some(grant), Some(approver)) = (
+        approver(req.extensions()),
+        approver_resolved(req.extensions()),
+    ) else {
         return consent_error(
             StatusCode::UNAUTHORIZED,
             "control-plane credentials required",
@@ -1234,7 +1382,7 @@ async fn request_post_handler(
         }
         let scopes: Vec<&'static str> = chosen
             .into_iter()
-            .filter(|s| grant_allows(&grant, s))
+            .filter(|s| may_grant(&approver, s))
             .collect();
         if scopes.is_empty() {
             return consent_error(
@@ -1259,6 +1407,7 @@ async fn request_post_handler(
                 scopes: scopes.clone(),
                 resource: p.resource.clone(),
                 issuer: p.issuer.clone(),
+                user: approver.user_id().map(str::to_string),
             },
         );
         audit("approve", &p.client_id, &scopes, Some(&grant));
@@ -1350,6 +1499,7 @@ async fn token_handler(State(app): State<AppState>, st: St, req: Request) -> Res
                 &entry.scopes,
                 &entry.resource,
                 &entry.issuer,
+                entry.user.as_deref(),
                 &config,
             )
         }
@@ -1358,7 +1508,7 @@ async fn token_handler(State(app): State<AppState>, st: St, req: Request) -> Res
                 return bad("invalid_request", "refresh_token is required");
             };
             let resource = resource_url(&base);
-            let claims = match verify(rt, &resource, "refresh", &config) {
+            let (claims, user) = match verify(rt, &resource, "refresh", &config) {
                 Ok(c) => c,
                 Err(reason) => {
                     return bad("invalid_grant", &format!("refresh token refused: {reason}"))
@@ -1386,7 +1536,14 @@ async fn token_handler(State(app): State<AppState>, st: St, req: Request) -> Res
                 .map(str::to_string)
                 .unwrap_or_else(|| issuer_url(&base, &config));
             audit("refresh", client_id, &scopes, None);
-            issue(client_id, &scopes, &resource, &issuer, &config)
+            issue(
+                client_id,
+                &scopes,
+                &resource,
+                &issuer,
+                user.as_deref(),
+                &config,
+            )
         }
         _ => {
             return bad(
@@ -1468,7 +1625,7 @@ pub fn openapi_paths() -> Value {
         REQUESTS_PATH: {
             "get": { "tags": tag, "summary": "A pending sign-in request (for the consent page)", "operationId": "getControlOAuthRequest",
                      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
-                     "responses": { "200": { "description": "The request" }, "401": { "description": "Control-plane credentials required" }, "404": { "description": "Unknown or expired" } } },
+                     "responses": { "200": { "description": "The request: the client, the scopes asked for and grantable, the approver, and what the agent will hold (grants per scope, permissions; a user's agent holds the user's permissions within the scope)" }, "401": { "description": "Control-plane credentials required" }, "404": { "description": "Unknown or expired" } } },
             "post": { "tags": tag, "summary": "Approve or deny a pending sign-in request", "operationId": "answerControlOAuthRequest",
                       "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
                       "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["decision"], "properties": {

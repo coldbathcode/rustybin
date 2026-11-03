@@ -494,18 +494,18 @@ AI agents on the management MCP server
 
 | Command | What it does | Calls | Needs |
 |---|---|---|---|
-| `rustybin agents list` | Every AI agent that called the management server, and the policy. | `GET /_rustybin/agents` | `agents.read` |
-| `rustybin agents get <id>` | One agent: tools, last errors, sessions. | `GET /_rustybin/agents/{id}` | `agents.read` |
-| `rustybin agents rights <id> [--ceiling C] [--allow T] [--deny T] [--note N] [--reset]` | Limit an agent: a ceiling, tools allowed or denied, a note; --reset goes back to the rules. Flags: `--ceiling` value, `--allow` value, `--deny` value, `--note` value, `--reset`. | `PATCH /_rustybin/agents/{id}` | `agents.manage` |
-| `rustybin agents revoke <id>` | Refuse the agent's calls, end its sessions, revoke its tokens. | `POST /_rustybin/agents/{id}/revoke` | `agents.manage` |
-| `rustybin agents restore <id>` | Undo a revocation. | `POST /_rustybin/agents/{id}/restore` | `agents.manage` |
-| `rustybin agents end-sessions <id>` | End the agent's MCP sessions. | `DELETE /_rustybin/agents/{id}/sessions` | `agents.manage` |
-| `rustybin agents tail` | Follow the agents' calls as they happen. Flags: `--max` value, `--timeout` value. | `GET /_rustybin/agents/events` | `agents.read` |
+| `rustybin agents list [--owner U]` | Every AI agent that called the management server, the user each acts for, and the policy (yours only without agents.read). Flags: `--owner` value. | `GET /_rustybin/agents` | signed in |
+| `rustybin agents get <id>` | One agent: its user, tools, last errors, sessions. | `GET /_rustybin/agents/{id}` | signed in |
+| `rustybin agents rights <id> [--ceiling C] [--allow T] [--deny T] [--note N] [--reset]` | Limit an agent: a ceiling (a role or a 0.3 ceiling), tools allowed or denied, a note; --reset goes back to the rules. Your own agents only to limit them, without agents.manage. Flags: `--ceiling` value, `--allow` value, `--deny` value, `--note` value, `--reset`. | `PATCH /_rustybin/agents/{id}` | signed in |
+| `rustybin agents revoke <id>` | Refuse the agent's calls, end its sessions, revoke its tokens. | `POST /_rustybin/agents/{id}/revoke` | signed in |
+| `rustybin agents restore <id>` | Undo a revocation. | `POST /_rustybin/agents/{id}/restore` | signed in |
+| `rustybin agents end-sessions <id>` | End the agent's MCP sessions. | `DELETE /_rustybin/agents/{id}/sessions` | signed in |
+| `rustybin agents tail` | Follow the agents' calls as they happen. Flags: `--max` value, `--timeout` value. | `GET /_rustybin/agents/events` | signed in |
 
 ```bash
 rustybin agents list
 rustybin agents get 1f3a...
-rustybin agents rights 1f3a... --ceiling read-only --deny try_request
+rustybin agents rights 1f3a... --ceiling viewer --deny try_request
 rustybin agents revoke 1f3a... --yes
 rustybin agents restore 1f3a...
 rustybin agents end-sessions 1f3a...

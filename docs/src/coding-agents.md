@@ -411,7 +411,13 @@ rule of `rustybin.yaml`; see [Managing agents](agent-mcp.md#managing-agents)):
 The counts are for an admin credential on an instance without self-service mocks;
 `tools/list` shows only what the agent may call. Start with `read-only` while you
 try a client, and move to `full` (an admin credential) when the agent builds for
-you. Destructive and outward-facing tools ask you before they act either way.
+you. Destructive and outward-facing tools ask you before they act either way. A
+ceiling may also name a role (`viewer`, `editor`, a custom role): the agent keeps the
+tools whose permission the role grants. With the password sign-in, an agent on your
+sign-in token or approved by you on the consent page [acts for
+you](agent-mcp.md#agents-act-for-a-user) and never does more than you may, whatever
+its ceiling; you can limit and revoke your own agents without the `agents.manage`
+permission.
 
 Rights follow the credential, not the client's name: two clients on the same token
 share the tightest limits set on either. To give two agents different rights, give

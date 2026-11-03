@@ -782,6 +782,7 @@ fn a_plain_settings_update_never_changes_the_sign_in_in_password_mode() {
     // documents meet it too.
     let state = test_state_with(password_config());
     let generation = state.config.console_tokens.generation();
+    let first_generation = state.users.first_admin().expect("first admin").generation;
     let mut values = BTreeMap::new();
     values.insert(USER_KEY.to_string(), json!("someone"));
     assert!(state
@@ -809,7 +810,10 @@ fn a_plain_settings_update_never_changes_the_sign_in_in_password_mode() {
         .settings
         .update_sign_in(values, secrets, "test")
         .expect("sign-in update");
-    assert!(state.config.console_tokens.generation() > generation);
+    // The first admin's generation, not the instance's (step 12): the
+    // other users stay signed in.
+    assert_eq!(state.config.console_tokens.generation(), generation);
+    assert!(state.users.first_admin().expect("first admin").generation > first_generation);
     assert!(state.settings.unset(HASH_KEY, "test").is_err());
     assert!(state.settings.unset(USER_KEY, "test").is_err());
     // Outside password mode nothing is guarded.

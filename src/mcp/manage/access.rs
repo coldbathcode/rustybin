@@ -27,6 +27,10 @@ pub enum ToolNeed {
     /// without it changes its own mocks only (checked per mock by the
     /// service; the tool is listed when the caller could change something).
     Owner(Permission),
+    /// A permission of the caller, or a user acting on their own AI agents
+    /// (the agents tools: everyone's with the permission, a user's own
+    /// without it; checked per agent by the tool).
+    Own(Permission),
     /// The caller's own self-service visit (its manage token).
     Visitor,
 }
@@ -35,7 +39,7 @@ impl ToolNeed {
     /// The permission, unless this is the visitor rule.
     pub fn permission(self) -> Option<Permission> {
         match self {
-            ToolNeed::Perm(p) | ToolNeed::Owner(p) => Some(p),
+            ToolNeed::Perm(p) | ToolNeed::Owner(p) | ToolNeed::Own(p) => Some(p),
             ToolNeed::Visitor => None,
         }
     }
@@ -45,6 +49,7 @@ impl ToolNeed {
         match self {
             ToolNeed::Perm(p) => p.name().to_string(),
             ToolNeed::Owner(p) => format!("{} (or the mock's owner)", p.name()),
+            ToolNeed::Own(p) => format!("{} (or your own agents)", p.name()),
             ToolNeed::Visitor => "a visit's manage token".to_string(),
         }
     }
@@ -98,6 +103,9 @@ fn credential_of(
     key_id: &Option<String>,
     caller: &Caller,
 ) -> (super::agents::Credential, Option<(String, i64)>) {
+    // The user a sign-in token or a user's OAuth token acts for, as
+    // control auth verified and resolved it.
+    let user = caller.resolved.user_id().map(str::to_string);
     use super::agents::{clean, Credential};
     if let Some(id) = key_id {
         return (Credential::Key { id: id.clone() }, None);
@@ -126,14 +134,23 @@ fn credential_of(
             .zip(c.get("exp").and_then(Value::as_i64));
         let sub = s("sub").unwrap_or_default();
         let credential = if extensions.get::<crate::control_oauth::ViaOAuth>().is_some() {
-            Credential::Oauth { sub }
+            match user {
+                Some(id) => Credential::User {
+                    id,
+                    client: Some(sub),
+                },
+                None => Credential::Oauth { sub },
+            }
         } else if c.get("rb_use").and_then(Value::as_str) == Some("console") {
-            // By the sign-in name (`rb_user`, or a 0.3 token's `user:<name>`),
-            // so an agent keeps its identity across the upgrade.
-            Credential::Console {
-                user: crate::login::user_of(&c)
-                    .map(|u| clean(u, 128))
-                    .unwrap_or(sub),
+            // By the user's id (a sign-in token always resolves to one;
+            // a 0.4 record by name moved to it at startup).
+            match user {
+                Some(id) => Credential::User { id, client: None },
+                None => Credential::Console {
+                    user: crate::login::user_of(&c)
+                        .map(|u| clean(u, 128))
+                        .unwrap_or(sub),
+                },
             }
         } else {
             Credential::Jwt {
@@ -231,6 +248,8 @@ impl Access {
                     || (self.grant.is_none()
                         && (!self.caller.owners.is_empty() || self.self_service))
             }
+            // A user always has their own agents to see and limit.
+            ToolNeed::Own(p) => self.has(p) || self.resolved.user_id().is_some(),
             ToolNeed::Visitor => self.self_service && self.caller.visit().is_some(),
         }
     }
@@ -250,7 +269,7 @@ impl Access {
             ToolNeed::Perm(Permission::VisitsOperate) if !self.self_service => {
                 "self-service mocks are off on this instance".into()
             }
-            ToolNeed::Perm(p) | ToolNeed::Owner(p) => {
+            ToolNeed::Perm(p) | ToolNeed::Owner(p) | ToolNeed::Own(p) => {
                 let (_, message) = crate::rbac::need::refusal_of(&self.resolved, p);
                 let mut out = format!(
                     "permission_required: {}. {}",
@@ -310,8 +329,14 @@ impl Access {
 
     /// `caller` block of `get_instance`.
     pub fn describe(&self) -> Value {
+        let user = match &self.resolved.principal {
+            crate::rbac::Principal::User { id, name, .. } => json!({ "id": id, "name": name }),
+            _ => Value::Null,
+        };
         json!({
             "admin": self.resolved.permissions.is_all(),
+            "user": user,
+            "via": self.credential.via(),
             "scopes": self.grant.map(|g| g.scopes()),
             "roles": self.resolved.roles,
             "permissions": self.resolved.permissions.names(),

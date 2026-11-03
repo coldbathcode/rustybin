@@ -617,7 +617,10 @@ fn portal_items(state: &AppState) -> Vec<crate::portal::FileItem> {
 /// A usable agents policy back as a file section.
 pub fn agents_section(policy: &agents::FilePolicy) -> agents::FileSection {
     agents::FileSection {
-        default_ceiling: policy.default_ceiling.map(|c| c.as_str().to_string()),
+        default_ceiling: policy
+            .default_ceiling
+            .as_ref()
+            .map(|c| c.as_str().to_string()),
         rules: policy
             .rules
             .iter()
@@ -625,8 +628,10 @@ pub fn agents_section(policy: &agents::FilePolicy) -> agents::FileSection {
                 matcher: agents::Match {
                     name: r.name.clone(),
                     credential: r.credential.clone(),
+                    user: r.user.clone(),
+                    role: r.role.clone(),
                 },
-                ceiling: r.ceiling.map(|c| c.as_str().to_string()),
+                ceiling: r.ceiling.as_ref().map(|c| c.as_str().to_string()),
                 allow: r.allow.clone(),
                 deny: r.deny.clone(),
                 note: r.note.clone(),
@@ -2247,8 +2252,27 @@ fn apply_agents(
     let section = section?;
     let (policy, section_problems) = agents::file_policy(Some(section));
     problems.extend(section_problems);
+    // A ceiling naming a role that does not exist allows nothing: said, and
+    // kept (the role may be created next). Whatever a document says, from
+    // git too, an agent acting for a user never holds more than the user.
+    let unknown = |c: &Option<agents::Ceiling>| match c {
+        Some(c @ agents::Ceiling::Role(_)) => c.check(&state.users).err(),
+        _ => None,
+    };
+    if let Some(e) = unknown(&policy.default_ceiling) {
+        problems.push(format!(
+            "agents.default_ceiling: {e} (agents it applies to get no tool)"
+        ));
+    }
+    for (i, r) in policy.rules.iter().enumerate() {
+        if let Some(e) = unknown(&r.ceiling) {
+            problems.push(format!(
+                "agents.rules[{i}]: {e} (agents it applies to get no tool)"
+            ));
+        }
+    }
     let view = json!({
-        "default_ceiling": policy.default_ceiling.map(|c| c.as_str()),
+        "default_ceiling": policy.default_ceiling.as_ref().map(|c| c.as_str()),
         "rules": policy.rules.len(),
     });
     if !opts.dry_run {

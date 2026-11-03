@@ -13,9 +13,10 @@
 //!   deletes only custom roles within their own permissions. An admin
 //!   holds every permission, so this binds only custom roles with
 //!   `users.manage`. The refusal names the first permission missing.
-//! - **Ending a user** (disabled, deleted, signed out everywhere) ends
-//!   their listed sessions; [`ended_user`] is the place step 12 revokes the
-//!   agents acting for them.
+//! - **Ending a user** (signed out everywhere) ends their listed sessions
+//!   and their agents' MCP sessions ([`ended_user`]); **removing one**
+//!   (disabled, deleted) also revokes every AI agent acting for them
+//!   ([`removed_user`]).
 //!
 //! Invitation links are answered once, by the call that made them, and
 //! never logged.
@@ -200,12 +201,27 @@ fn invitation_answer(state: &AppState, inv: &NewInvitation, base_url: &str) -> V
     })
 }
 
-/// A user's sessions end (disabled, deleted, signed out everywhere): their
-/// listed sessions are forgotten (their tokens are refused by the moved
-/// generation or the missing user). Step 12 revokes the agents acting for
-/// the user here.
+/// A user's sessions end (disabled, deleted, signed out everywhere, a
+/// password change): their listed sessions are forgotten and the MCP
+/// sessions of the agents acting for them end (their tokens, sign-in and
+/// OAuth alike, are refused by the moved generation or the missing user).
+/// Answers how many listed sessions there were.
 pub fn ended_user(state: &AppState, user_id: &str) -> usize {
+    state.agents.end_owned_sessions(user_id);
     state.config.console_tokens.forget_user(user_id)
+}
+
+/// A user is disabled or deleted: [`ended_user`], and every AI agent
+/// acting for them is revoked (an operator restores one, after enabling
+/// the user again). Answers the sessions and the agents.
+pub fn removed_user(state: &AppState, caller: &Resolved, user_id: &str) -> (usize, usize) {
+    let ended = ended_user(state, user_id);
+    let agents = state.agents.revoke_owned(
+        user_id,
+        &format!("{} (user removed)", principal_name(caller)),
+        &state.config.console_tokens,
+    );
+    (ended, agents)
 }
 
 // ── Users ───────────────────────────────────────────────────────────
@@ -385,13 +401,18 @@ pub fn update_user(
     within(caller, roles_permissions(state, &u.roles))?;
     let disabling = patch.disabled == Some(true) && !u.disabled;
     let updated = state.users.update(&u.id, patch).map_err(store_error)?;
+    let mut revoked = 0;
     if disabling {
-        ended_user(state, &u.id);
+        revoked = removed_user(state, caller, &u.id).1;
         audit("disable", caller, &u.name, "ok");
     } else {
         audit("update", caller, &u.name, "ok");
     }
-    Ok(user_view(state, &updated))
+    let mut v = user_view(state, &updated);
+    if disabling {
+        v["agents_revoked"] = json!(revoked);
+    }
+    Ok(v)
 }
 
 /// `DELETE /_rustybin/users/{id}`.
@@ -400,9 +421,11 @@ pub fn delete_user(state: &AppState, caller: &Resolved, id: &str) -> SvcResult<V
     let u = find(state, id)?;
     within(caller, roles_permissions(state, &u.roles))?;
     let gone = state.users.delete(&u.id).map_err(store_error)?;
-    let ended = ended_user(state, &gone.id);
+    let (ended, agents) = removed_user(state, caller, &gone.id);
     audit("delete", caller, &gone.name, "ok");
-    Ok(json!({ "deleted": gone.name, "id": gone.id, "sessions_ended": ended }))
+    Ok(
+        json!({ "deleted": gone.name, "id": gone.id, "sessions_ended": ended, "agents_revoked": agents }),
+    )
 }
 
 /// `GET /_rustybin/users/{id}/sessions`.

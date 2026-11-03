@@ -144,9 +144,11 @@ fn ceilings_cut_the_tool_set() {
     assert!(!Manage.allows(def("create_run")), "harness");
     assert!(!Manage.allows(def("end_visit")), "operator");
     assert!(Full.allows(def("apply_config")));
-    assert!(ReadOnly < Traffic && Traffic < Manage && Manage < Full);
     for c in CEILINGS {
-        assert_eq!(Ceiling::parse(c).map(Ceiling::as_str), Some(*c));
+        assert_eq!(
+            Ceiling::parse(c).map(|c| c.as_str().to_string()),
+            Some(c.to_string())
+        );
     }
     assert!(Ceiling::parse("admin").is_none());
 }
@@ -159,6 +161,7 @@ fn the_override_wins_field_by_field_over_the_rule_and_the_default() {
             matcher: Match {
                 name: Some("claude-*".into()),
                 credential: Some("console".into()),
+                ..Match::default()
             },
             ceiling: Some("manage".into()),
             allow: vec![],
@@ -171,6 +174,7 @@ fn the_override_wins_field_by_field_over_the_rule_and_the_default() {
         default_ceiling: file.default_ceiling.unwrap_or_default(),
         default_source: "file",
         rules: file.rules,
+        ..Policy::default()
     };
     let a = registry();
     let console = Credential::Console {
@@ -243,16 +247,17 @@ fn the_override_wins_field_by_field_over_the_rule_and_the_default() {
 #[test]
 fn file_rules_are_validated() {
     let (policy, problems) = file_policy(Some(FileSection {
-        default_ceiling: Some("root".into()),
+        default_ceiling: Some("Root!".into()),
         rules: vec![
             FileRule {
-                ceiling: Some("everything".into()),
+                ceiling: Some("every thing".into()),
                 ..FileRule::default()
             },
             FileRule {
                 matcher: Match {
                     name: None,
                     credential: Some("password".into()),
+                    ..Match::default()
                 },
                 ..FileRule::default()
             },
@@ -263,7 +268,7 @@ fn file_rules_are_validated() {
             FileRule {
                 matcher: Match {
                     name: Some("*".into()),
-                    credential: None,
+                    ..Match::default()
                 },
                 ceiling: Some("read-only".into()),
                 ..FileRule::default()
@@ -650,6 +655,7 @@ async fn the_default_ceiling_and_file_rules_apply_on_sight() {
             matcher: Match {
                 name: Some("trusted-*".into()),
                 credential: Some("admin".into()),
+                ..Match::default()
             },
             ceiling: Some("full".into()),
             ..FileRule::default()
@@ -756,8 +762,10 @@ async fn revoke_ends_sessions_and_the_console_token_and_restore_brings_them_back
 
     let (_, list) = control(&app, "GET", "/_rustybin/agents", None).await;
     let agent = find_agent(&list, "claude-code");
-    assert_eq!(agent["credential"]["kind"], "console");
-    assert_eq!(agent["credential"]["user"], "rustybin");
+    assert_eq!(agent["credential"]["kind"], "user");
+    assert_eq!(agent["credential"]["via"], "sign-in");
+    assert_eq!(agent["owner"]["name"], "rustybin");
+    assert_eq!(agent["owner_label"], "rustybin");
     assert_eq!(agent["transport"], "streamable-2025");
     assert_eq!(agent["sessions_open"], 1);
     let id = agent["id"].as_str().expect("id").to_string();
@@ -1226,12 +1234,13 @@ const OLD_RIGHTS: &[(&str, &str, bool)] = &[
 /// The 0.4 ceilings, by right: `read-only` a read-only tool that is not a
 /// traffic one, `traffic` any read-only tool, `manage` anything but the
 /// admin, operator and harness tools.
-fn old_ceiling_allows(c: Ceiling, right: &str, read_only: bool) -> bool {
+fn old_ceiling_allows(c: &Ceiling, right: &str, read_only: bool) -> bool {
     match c {
         Ceiling::ReadOnly => read_only && right != "traffic",
         Ceiling::Traffic => read_only,
         Ceiling::Manage => !matches!(right, "admin" | "operator" | "harness"),
         Ceiling::Full => true,
+        Ceiling::Role(_) => false,
     }
 }
 
@@ -1251,7 +1260,7 @@ fn ceilings_keep_their_tool_counts() {
         for (name, right, ro) in OLD_RIGHTS {
             let d = def(name);
             assert_eq!(d.read_only, *ro, "{name}: read_only changed");
-            let was = old_ceiling_allows(c, right, *ro);
+            let was = old_ceiling_allows(&c, right, *ro);
             let is = c.allows(d);
             assert_eq!(was, is, "{name} under the {} ceiling", c.as_str());
             old += usize::from(was);
