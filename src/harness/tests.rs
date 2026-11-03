@@ -161,12 +161,31 @@ async fn startup_refusal_is_fatal_for_the_server() {
 fn harness_scope_rules() {
     let harness = Grant::from_scope_claim(Some(&json!("harness")));
     assert!(harness.harness && !harness.console && !harness.admin);
-    assert!(harness.allows(&Method::GET, "/_rustybin/harness"));
-    assert!(harness.allows(&Method::POST, "/_rustybin/harness/runs"));
-    assert!(!harness.allows(&Method::GET, "/_rustybin/config"));
-    let console = Grant::from_scope_claim(None);
-    assert!(console.allows(&Method::GET, "/_rustybin/harness/runs"));
-    assert!(!console.allows(&Method::POST, "/_rustybin/harness/runs"));
+    assert!(crate::rbac::scope_may(
+        "harness",
+        "GET",
+        "/_rustybin/harness"
+    ));
+    assert!(crate::rbac::scope_may(
+        "harness",
+        "POST",
+        "/_rustybin/harness/runs"
+    ));
+    assert!(!crate::rbac::scope_may(
+        "harness",
+        "GET",
+        "/_rustybin/config"
+    ));
+    assert!(crate::rbac::scope_may(
+        "console",
+        "GET",
+        "/_rustybin/harness/runs"
+    ));
+    assert!(!crate::rbac::scope_may(
+        "console",
+        "POST",
+        "/_rustybin/harness/runs"
+    ));
     assert_eq!(
         Grant::ADMIN.scopes(),
         vec!["admin", "console", "inspector", "harness"]

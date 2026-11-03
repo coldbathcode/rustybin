@@ -14,42 +14,38 @@ use crate::control_auth::{ControlAuthorized, Grant};
 use crate::keys::KeyContext;
 use crate::mocks::selfservice::{self as ss, Caller};
 use crate::mocks::service::{Links, Svc};
+use crate::rbac::{Permission, Resolved};
 use crate::state::AppState;
 
-/// The right a tool needs.
+/// What a tool needs (`ToolDef.permission`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Right {
-    /// Read the instance and its mocks: the `console` scope, or anyone on
-    /// an open control plane (secrets redacted unless the caller may change
-    /// the mock).
-    Read,
-    /// Read captured traffic: `Read`, or the `inspector` scope.
-    Traffic,
-    /// Change mocks: admin for instance mocks, the owner for visitor and
-    /// key-owned mocks (checked per mock by the service; listed when the
-    /// caller could manage something).
-    Manage,
-    /// Instance-global changes: the admin token or the `admin` scope.
-    Admin,
-    /// The caller's own self-service visit.
+pub enum ToolNeed {
+    /// A permission of the caller.
+    Perm(Permission),
+    /// A permission of the caller, or ownership of the mock: on a
+    /// self-service instance (or for an API key in shared mode) a caller
+    /// without it changes its own mocks only (checked per mock by the
+    /// service; the tool is listed when the caller could change something).
+    Owner(Permission),
+    /// The caller's own self-service visit (its manage token).
     Visitor,
-    /// Self-service operator routes (admin, self-service on).
-    Operator,
-    /// The harness: runs and the kill switch (the `harness` scope, or
-    /// admin; on an open control plane whoever passes the admin guard).
-    Harness,
 }
 
-impl Right {
-    pub fn as_str(self) -> &'static str {
+impl ToolNeed {
+    /// The permission, unless this is the visitor rule.
+    pub fn permission(self) -> Option<Permission> {
         match self {
-            Right::Read => "read",
-            Right::Traffic => "traffic",
-            Right::Manage => "manage",
-            Right::Admin => "admin",
-            Right::Visitor => "visitor",
-            Right::Operator => "operator",
-            Right::Harness => "harness",
+            ToolNeed::Perm(p) | ToolNeed::Owner(p) => Some(p),
+            ToolNeed::Visitor => None,
+        }
+    }
+
+    /// How the docs' tool tables write it.
+    pub fn label(self) -> String {
+        match self {
+            ToolNeed::Perm(p) => p.name().to_string(),
+            ToolNeed::Owner(p) => format!("{} (or the mock's owner)", p.name()),
+            ToolNeed::Visitor => "a visit's manage token".to_string(),
         }
     }
 }
@@ -65,9 +61,11 @@ const FORWARDED: &[&str] = &["x-rustybin-key"];
 /// The caller of the management server.
 pub struct Access {
     pub caller: Caller,
-    /// The control-plane grant (`None` on an open control plane, and for
-    /// key holders in shared mode).
+    /// The 0.4 scopes of an authenticated caller (`None` on an open
+    /// control plane, and for key holders in shared mode): names only.
     pub grant: Option<Grant>,
+    /// The caller's roles and permissions, resolved for this request.
+    pub resolved: std::sync::Arc<Resolved>,
     /// The caller's API key in shared mode.
     pub key_id: Option<String>,
     pub key: Option<std::sync::Arc<crate::keys::KeyRecord>>,
@@ -163,7 +161,10 @@ impl Access {
         uri: &Uri,
     ) -> Self {
         let caller = ss::caller(state, headers, extensions);
-        let grant = extensions.get::<ControlAuthorized>().map(|g| g.0);
+        let grant = extensions
+            .get::<ControlAuthorized>()
+            .map(ControlAuthorized::grant);
+        let resolved = caller.resolved.clone();
         let key = extensions
             .get::<KeyContext>()
             .filter(|k| k.shared)
@@ -188,6 +189,7 @@ impl Access {
             stdio,
             caller,
             grant,
+            resolved,
             key_id,
             key,
             links: Links::from_request(headers, extensions, uri, &state.config),
@@ -208,57 +210,36 @@ impl Access {
         }
     }
 
-    pub fn is_admin(&self) -> bool {
-        self.caller.admin
+    /// Does the caller hold `p`?
+    pub fn has(&self, p: Permission) -> bool {
+        self.resolved.has(p)
     }
 
-    fn console(&self) -> bool {
-        self.grant.is_none_or(|g| g.console)
-    }
-
-    /// Does the caller hold `right`?
-    pub fn allows(&self, right: Right) -> bool {
-        match right {
-            Right::Read => self.console(),
-            Right::Traffic => self.grant.is_none_or(|g| g.console || g.inspector),
-            // On a self-service instance anyone may create their own mocks
-            // (the first creation starts a visit).
-            Right::Manage => {
-                self.console()
-                    && (self.caller.admin || !self.caller.owners.is_empty() || self.self_service)
+    /// Does the caller meet `need`?
+    pub fn allows(&self, need: ToolNeed) -> bool {
+        match need {
+            // The visit operator tools exist only with self-service on.
+            ToolNeed::Perm(Permission::VisitsOperate) => {
+                self.self_service && self.has(Permission::VisitsOperate)
             }
-            Right::Admin => self.caller.admin,
-            Right::Visitor => self.self_service && self.caller.visit().is_some(),
-            Right::Operator => self.self_service && self.caller.admin,
-            Right::Harness => match self.grant {
-                Some(g) => g.harness,
-                None => self.caller.admin,
-            },
+            ToolNeed::Perm(p) => self.has(p),
+            // On a self-service instance (or for a key) anyone without the
+            // permission may change their own mocks (the first creation
+            // starts a visit); an authenticated caller is held to it.
+            ToolNeed::Owner(p) => {
+                self.has(p)
+                    || (self.grant.is_none()
+                        && (!self.caller.owners.is_empty() || self.self_service))
+            }
+            ToolNeed::Visitor => self.self_service && self.caller.visit().is_some(),
         }
     }
 
-    /// Why a right is missing, for the tool error.
-    pub fn denial(&self, right: Right) -> String {
-        match right {
-            Right::Read | Right::Traffic => {
-                "this token's scope does not include reading the control plane: use a control \
-                 token with the console scope (or the admin token)"
-                    .into()
-            }
-            Right::Manage => match self.caller.admin_guard {
-                Err((_, m)) if self.caller.owners.is_empty() => format!(
-                    "changing this instance's mocks needs admin rights ({m}); on a self-service \
-                     demo send the visit's X-Rustybin-Mock-Token header to manage your own mocks"
-                ),
-                _ => "changing mocks needs the admin token or a token with the admin scope, or \
-                      ownership of the mock (a visit manage token or an API key)"
-                    .into(),
-            },
-            Right::Admin => match self.caller.admin_guard {
-                Err((_, m)) => format!("this tool changes the whole instance: {m}"),
-                Ok(()) => "this tool needs the admin token or a token with the admin scope".into(),
-            },
-            Right::Visitor => {
+    /// Why a need is not met, for the tool error: the permission that is
+    /// missing (never what the caller holds).
+    pub fn denial(&self, need: ToolNeed) -> String {
+        match need {
+            ToolNeed::Visitor => {
                 if !self.self_service {
                     "self-service mocks are off on this instance".into()
                 } else {
@@ -266,20 +247,24 @@ impl Access {
                         .into()
                 }
             }
-            Right::Operator => {
-                if !self.self_service {
-                    "self-service mocks are off on this instance".into()
-                } else {
-                    "the visit operator tools need admin rights".into()
-                }
+            ToolNeed::Perm(Permission::VisitsOperate) if !self.self_service => {
+                "self-service mocks are off on this instance".into()
             }
-            Right::Harness => match self.caller.admin_guard {
-                Err((_, m)) if self.grant.is_none() => {
-                    format!("starting and stopping harness runs needs admin rights ({m})")
+            ToolNeed::Perm(p) | ToolNeed::Owner(p) => {
+                let (_, message) = crate::rbac::need::refusal_of(&self.resolved, p);
+                let mut out = format!(
+                    "permission_required: {}. {}",
+                    p.name(),
+                    message.unwrap_or_else(|| format!(
+                        "This tool needs the {} permission (a role that grants it, or the admin token).",
+                        p.name()
+                    ))
+                );
+                if matches!(need, ToolNeed::Owner(_)) && self.self_service {
+                    out.push_str(" On a self-service demo send the visit's X-Rustybin-Mock-Token header to manage your own mocks.");
                 }
-                _ => "starting and stopping harness runs needs a control token with the harness scope (or the admin token)"
-                    .into(),
-            },
+                out
+            }
         }
     }
 
@@ -325,25 +310,13 @@ impl Access {
 
     /// `caller` block of `get_instance`.
     pub fn describe(&self) -> Value {
-        let rights: Vec<&str> = [
-            Right::Read,
-            Right::Traffic,
-            Right::Manage,
-            Right::Admin,
-            Right::Visitor,
-            Right::Operator,
-            Right::Harness,
-        ]
-        .iter()
-        .filter(|r| self.allows(**r))
-        .map(|r| r.as_str())
-        .collect();
         json!({
-            "admin": self.caller.admin,
+            "admin": self.resolved.permissions.is_all(),
             "scopes": self.grant.map(|g| g.scopes()),
+            "roles": self.resolved.roles,
+            "permissions": self.resolved.permissions.names(),
             "key_id": self.key_id,
             "visit": self.caller.visit().is_some(),
-            "rights": rights,
         })
     }
 }
@@ -364,8 +337,8 @@ mod tests {
             axum::http::HeaderValue::from_str(session).expect("header"),
         );
         let mut extensions = Extensions::new();
-        let grant = Grant::from_scope_claim(Some(&json!("console")));
-        extensions.insert(ControlAuthorized(grant));
+        let resolved = crate::rbac::from_jwt_claims(&json!({"scope": "console"}), &state.users);
+        extensions.insert(ControlAuthorized(std::sync::Arc::new(resolved)));
         Access::from_request(
             state,
             &headers,

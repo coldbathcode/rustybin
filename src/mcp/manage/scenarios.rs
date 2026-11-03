@@ -4,7 +4,7 @@
 
 use serde_json::{json, Value};
 
-use super::access::{Access, Right};
+use super::access::Access;
 use super::tools::{confirm, err, need_str, ok, Confirm};
 use crate::mcp::core::CallCtx;
 use crate::scenarios::{self, CheckBody};
@@ -18,9 +18,10 @@ fn ids(args: &Value) -> Result<(&str, &str), Value> {
     Ok((need_str(args, "scenario")?, need_str(args, "run")?))
 }
 
-/// Does the caller see a run's credential-injection key (admin rights)?
+/// Does the caller see a run's credential-injection key (`scenarios.run`,
+/// as the REST routes)?
 fn reveals(access: &Access) -> bool {
-    access.allows(Right::Admin)
+    access.has(crate::rbac::Permission::ScenariosRun)
 }
 
 /// `list_gateway_scenarios`.

@@ -734,6 +734,7 @@ async fn get_handler(
 async fn clear_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     Query(p): Query<SessionParam>,
 ) -> Response {
     // Clearing one session's entries only needs the session id; clearing
@@ -745,7 +746,12 @@ async fn clear_handler(
         let removed = state.inspector.clear_session(&session);
         return Json(json!({ "cleared": removed, "session": session })).into_response();
     }
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
+    // Everyone's captures: `traffic.clear` on top of the route's
+    // `traffic.read`.
+    if let Err(resp) = crate::rbac::require(
+        &crate::control_auth::caller_of(&state, &headers, &extensions),
+        crate::rbac::Permission::TrafficClear,
+    ) {
         return resp;
     }
     let removed = state.inspector.clear();
@@ -797,6 +803,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "List captured requests (newest first); DELETE clears them",
         )
+.permission(crate::rbac::Permission::TrafficRead)
         .description(
             "Filters: ?session=, ?path_prefix=, ?limit=. Public mode requires ?session= and only \
              returns that session's requests. Shared mode: a caller authenticated with an API key \
@@ -818,6 +825,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Live feed of captured requests",
         )
+.permission(crate::rbac::Permission::TrafficRead)
         .description("Server-Sent Events, one `request` event per captured request. Same filters as the list.")
         .sse()
         .example(
@@ -830,6 +838,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "One captured request by id",
         )
+.permission(crate::rbac::Permission::TrafficRead)
         .example(
             Example::get(
                 "Captured request by id",

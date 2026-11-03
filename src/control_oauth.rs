@@ -267,11 +267,14 @@ fn metadata_url(base: &str) -> String {
 // ── Checks on /_rustybin/mcp (called by `control_auth::enforce`) ─────
 
 /// A token from the built-in server presented to `/_rustybin/mcp`:
-/// `Some(Ok(grant))` when valid, `Some(Err(401))` when it is one of ours but
+/// `Some(Ok(caller))` (its scope as roles) when valid, `Some(Err(401))` when it is one of ours but
 /// invalid, `None` when the request carries something else (the admin token,
 /// a control JWT, nothing), which control auth then checks as usual.
 #[allow(clippy::result_large_err)]
-pub fn authorize_manage(req: &Request, config: &Config) -> Option<Result<Grant, Response>> {
+pub fn authorize_manage(
+    req: &Request,
+    config: &Config,
+) -> Option<Result<crate::rbac::Resolved, Response>> {
     if !builtin(config) || req.uri().path() != MANAGE_PATH {
         return None;
     }
@@ -295,7 +298,7 @@ pub fn authorize_manage(req: &Request, config: &Config) -> Option<Result<Grant, 
     let base = base_url(req.headers(), req.extensions(), req.uri(), config);
     Some(
         verify(token, &resource_url(&base), "access", config)
-            .map(|claims| Grant::from_scope_claim(claims.get("scope")))
+            .map(|claims| crate::rbac::from_jwt_claims(&claims, &config.users))
             .map_err(|reason| {
                 let mut resp = (
                     StatusCode::UNAUTHORIZED,
@@ -1108,7 +1111,9 @@ fn redirect_kind(uri: &str) -> &'static str {
 }
 
 fn approver(extensions: &Extensions) -> Option<Grant> {
-    extensions.get::<ControlAuthorized>().map(|g| g.0)
+    extensions
+        .get::<ControlAuthorized>()
+        .map(ControlAuthorized::grant)
 }
 
 fn consent_error(status: StatusCode, message: &str) -> Response {
@@ -1401,10 +1406,14 @@ pub fn catalog() -> Vec<Endpoint> {
         Endpoint::new(AS_METADATA_PATH, &["GET"], category::CONTROL, "Management MCP sign-in: authorization server metadata (RFC 8414)")
             .example(Example::get("Authorization server metadata", AS_METADATA_PATH).skip_check(OFF_IN_OPEN_MODE)),
         Endpoint::new(OIDC_METADATA_PATH, &["GET"], category::CONTROL, "Management MCP sign-in: the same metadata at the OpenID Connect discovery path"),
-        Endpoint::new(REGISTER_PATH, &["POST"], category::CONTROL, "Management MCP sign-in: dynamic client registration (RFC 7591, public clients)"),
-        Endpoint::new(AUTHORIZE_PATH, &["GET"], category::CONTROL, "Management MCP sign-in: authorization endpoint (redirects to the console's consent page)"),
-        Endpoint::new(REQUESTS_PATH, &["GET", "POST"], category::CONTROL, "Management MCP sign-in: a pending request, approved or denied by the console"),
-        Endpoint::new(TOKEN_PATH, &["POST"], category::CONTROL, "Management MCP sign-in: token endpoint (authorization code with PKCE, refresh token)"),
+        Endpoint::new(REGISTER_PATH, &["POST"], category::CONTROL, "Management MCP sign-in: dynamic client registration (RFC 7591, public clients)")
+.open(),
+        Endpoint::new(AUTHORIZE_PATH, &["GET"], category::CONTROL, "Management MCP sign-in: authorization endpoint (redirects to the console's consent page)")
+.open(),
+        Endpoint::new(REQUESTS_PATH, &["GET", "POST"], category::CONTROL, "Management MCP sign-in: a pending request, approved or denied by the console")
+.authenticated(&[]),
+        Endpoint::new(TOKEN_PATH, &["POST"], category::CONTROL, "Management MCP sign-in: token endpoint (authorization code with PKCE, refresh token)")
+.open(),
     ]
 }
 

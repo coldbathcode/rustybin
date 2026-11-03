@@ -4,6 +4,7 @@
 import { h, toast } from './dom.js';
 import { SERVER, send, getJson } from './http.js';
 import * as auth from './auth.js';
+import * as perms from './perms.js';
 import * as settings from './settings.js';
 import { compareStale, editOf } from './conflict.js';
 
@@ -99,6 +100,9 @@ export function report(r, okText, what) {
 
 /** Why the console may not change mocks, or '' when it may. */
 export function readOnlyReason() {
+  if (auth.required() && perms.isKnown()) {
+    return perms.can('mocks.write') ? '' : 'Mocks are read-only for you: changing them needs the mocks.write permission, which your roles do not grant. You can look at mocks and call them.';
+  }
   if (auth.required()) {
     const sc = auth.scopes();
     if (sc === null || sc.includes('admin') || settings.get('adminToken')) return '';

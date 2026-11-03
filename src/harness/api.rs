@@ -48,17 +48,6 @@ fn harness(state: &AppState) -> Result<Arc<Harness>, Response> {
     state.harness.clone().ok_or_else(off)
 }
 
-/// Mutations on an open control plane follow the admin guard (token set:
-/// required; public mode is refused at startup anyway). With control auth
-/// on, the enforce layer already checked the scope.
-#[allow(clippy::result_large_err)]
-fn guard_mutation(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
-    if state.config.control_auth == crate::control_auth::ControlAuth::Open && !state.keys.shared() {
-        crate::admin::require_admin(headers, &state.config)?;
-    }
-    Ok(())
-}
-
 fn run_error(e: RunError) -> Response {
     let status = StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_REQUEST);
     (status, Json(e.to_json())).into_response()
@@ -239,18 +228,11 @@ pub async fn list_runs(State(state): State<AppState>) -> Response {
 }
 
 /// `POST /_rustybin/harness/runs`.
-pub async fn create_run(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
+pub async fn create_run(State(state): State<AppState>, body: Bytes) -> Response {
     let h = match harness(&state) {
         Ok(h) => h,
         Err(resp) => return resp,
     };
-    if let Err(resp) = guard_mutation(&state, &headers) {
-        return resp;
-    }
     let scenario = match parse_body(&body) {
         Ok(s) => s,
         Err(resp) => return resp,
@@ -286,18 +268,11 @@ pub async fn get_run(State(state): State<AppState>, Path(id): Path<String>) -> R
 }
 
 /// `POST /_rustybin/harness/runs/{run}/stop`.
-pub async fn stop_run(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Response {
+pub async fn stop_run(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     let h = match harness(&state) {
         Ok(h) => h,
         Err(resp) => return resp,
     };
-    if let Err(resp) = guard_mutation(&state, &headers) {
-        return resp;
-    }
     let Some(run) = h.run(&id) else {
         return error(StatusCode::NOT_FOUND, format!("no run {id:?} on this node"));
     };
@@ -342,14 +317,11 @@ pub async fn run_report(
 }
 
 /// `POST /_rustybin/harness/stop`: the kill switch.
-pub async fn stop_all(State(state): State<AppState>, headers: HeaderMap) -> Response {
+pub async fn stop_all(State(state): State<AppState>) -> Response {
     let h = match harness(&state) {
         Ok(h) => h,
         Err(resp) => return resp,
     };
-    if let Err(resp) = guard_mutation(&state, &headers) {
-        return resp;
-    }
     let stopped = h.stop_all();
     Json(json!({ "stopped": stopped, "kill_switch": true })).into_response()
 }
@@ -472,18 +444,11 @@ pub async fn list_clusters(State(state): State<AppState>) -> Response {
 /// `POST /_rustybin/harness/clusters`: create a cluster led by this node.
 /// The join token is in the answer once. A node that also has the client
 /// or server role joins its own cluster.
-pub async fn create_cluster(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
+pub async fn create_cluster(State(state): State<AppState>, body: Bytes) -> Response {
     let h = match harness(&state) {
         Ok(h) => h,
         Err(resp) => return resp,
     };
-    if let Err(resp) = guard_mutation(&state, &headers) {
-        return resp;
-    }
     let req: CreateCluster = if body.iter().all(u8::is_ascii_whitespace) {
         CreateCluster::default()
     } else {
@@ -523,18 +488,11 @@ pub async fn get_cluster(
 }
 
 /// `DELETE /_rustybin/harness/clusters/{id}` (no active run).
-pub async fn delete_cluster(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Response {
+pub async fn delete_cluster(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     let h = match harness(&state) {
         Ok(h) => h,
         Err(resp) => return resp,
     };
-    if let Err(resp) = guard_mutation(&state, &headers) {
-        return resp;
-    }
     if let Err(e) = h.coordinator.remove(&id) {
         return run_error(e);
     }
@@ -692,7 +650,6 @@ pub async fn list_cluster_runs(
 /// (validated against the cluster, not started).
 pub async fn create_cluster_run(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     req_uri: axum::http::Uri,
     body: Bytes,
@@ -701,9 +658,6 @@ pub async fn create_cluster_run(
         Ok(h) => h,
         Err(resp) => return resp,
     };
-    if let Err(resp) = guard_mutation(&state, &headers) {
-        return resp;
-    }
     let c = match led_cluster(&h, &id, req_uri.path()) {
         Ok(c) => c,
         Err(resp) => return resp,
@@ -759,7 +713,6 @@ pub async fn get_cluster_run(
 /// and the synchronised start, once the quorum is there (409 before).
 pub async fn start_cluster_run(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path((id, run_id)): Path<(String, String)>,
     req_uri: axum::http::Uri,
 ) -> Response {
@@ -767,9 +720,6 @@ pub async fn start_cluster_run(
         Ok(h) => h,
         Err(resp) => return resp,
     };
-    if let Err(resp) = guard_mutation(&state, &headers) {
-        return resp;
-    }
     let c = match led_cluster(&h, &id, req_uri.path()) {
         Ok(c) => c,
         Err(resp) => return resp,
@@ -783,7 +733,6 @@ pub async fn start_cluster_run(
 /// `POST /_rustybin/harness/clusters/{id}/runs/{run}/stop`.
 pub async fn stop_cluster_run(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path((id, run_id)): Path<(String, String)>,
     req_uri: axum::http::Uri,
 ) -> Response {
@@ -791,9 +740,6 @@ pub async fn stop_cluster_run(
         Ok(h) => h,
         Err(resp) => return resp,
     };
-    if let Err(resp) = guard_mutation(&state, &headers) {
-        return resp;
-    }
     let c = match led_cluster(&h, &id, req_uri.path()) {
         Ok(c) => c,
         Err(resp) => return resp,
@@ -878,14 +824,11 @@ pub struct JoinBody {
 /// `POST /_rustybin/harness/join`: a controller tells this node to join a
 /// cluster (orchestrated). The URL is checked like every outbound address:
 /// never link-local, metadata or other forbidden addresses.
-pub async fn join(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+pub async fn join(State(state): State<AppState>, body: Bytes) -> Response {
     let h = match harness(&state) {
         Ok(h) => h,
         Err(resp) => return resp,
     };
-    if let Err(resp) = guard_mutation(&state, &headers) {
-        return resp;
-    }
     let req: JoinBody = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
@@ -911,14 +854,11 @@ pub async fn join(State(state): State<AppState>, headers: HeaderMap, body: Bytes
 
 /// `POST /_rustybin/harness/leave`: leave the cluster (its runs stop on
 /// this node).
-pub async fn leave(State(state): State<AppState>, headers: HeaderMap) -> Response {
+pub async fn leave(State(state): State<AppState>) -> Response {
     let h = match harness(&state) {
         Ok(h) => h,
         Err(resp) => return resp,
     };
-    if let Err(resp) = guard_mutation(&state, &headers) {
-        return resp;
-    }
     match h.leave().await {
         Some(id) => Json(json!({ "left": id })).into_response(),
         None => error(
@@ -1097,7 +1037,6 @@ fn problems(status: StatusCode, error: &str, problems: Vec<String>) -> Response 
 /// `PATCH /_rustybin/harness/runs/{run}`: a live change of a single-node run.
 pub async fn patch_run(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     body: Bytes,
 ) -> Response {
@@ -1105,9 +1044,6 @@ pub async fn patch_run(
         Ok(h) => h,
         Err(resp) => return resp,
     };
-    if let Err(resp) = guard_mutation(&state, &headers) {
-        return resp;
-    }
     let Some(run) = h.run(&id) else {
         return error(StatusCode::NOT_FOUND, format!("no run {id:?} on this node"));
     };
@@ -1137,7 +1073,6 @@ pub async fn patch_run(
 /// cluster run; every client node follows it on its next heartbeat.
 pub async fn patch_cluster_run(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path((id, run_id)): Path<(String, String)>,
     req_uri: axum::http::Uri,
     body: Bytes,
@@ -1146,9 +1081,6 @@ pub async fn patch_cluster_run(
         Ok(h) => h,
         Err(resp) => return resp,
     };
-    if let Err(resp) = guard_mutation(&state, &headers) {
-        return resp;
-    }
     let c = match led_cluster(&h, &id, req_uri.path()) {
         Ok(c) => c,
         Err(resp) => return resp,
@@ -1190,7 +1122,6 @@ pub async fn preview(State(state): State<AppState>, body: Bytes) -> Response {
 /// against this node's caps) under a name.
 pub async fn put_scenario(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(name): Path<String>,
     body: Bytes,
 ) -> Response {
@@ -1198,9 +1129,6 @@ pub async fn put_scenario(
         Ok(h) => h,
         Err(resp) => return resp,
     };
-    if let Err(resp) = guard_mutation(&state, &headers) {
-        return resp;
-    }
     if builtin_scenarios().iter().any(|(n, _)| *n == name) {
         return error(
             StatusCode::CONFLICT,
@@ -1237,18 +1165,11 @@ pub async fn put_scenario(
 }
 
 /// `DELETE /_rustybin/harness/scenarios/{name}`.
-pub async fn delete_scenario(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(name): Path<String>,
-) -> Response {
+pub async fn delete_scenario(State(state): State<AppState>, Path(name): Path<String>) -> Response {
     let h = match harness(&state) {
         Ok(h) => h,
         Err(resp) => return resp,
     };
-    if let Err(resp) = guard_mutation(&state, &headers) {
-        return resp;
-    }
     if builtin_scenarios().iter().any(|(n, _)| *n == name) {
         return error(StatusCode::CONFLICT, "built-in scenarios cannot be deleted");
     }

@@ -170,9 +170,11 @@ Self-service visitors keep sending their visit's manage token as a header.
 
 ## Credentials and what they allow
 
-The agent gets the rights its credential has, no more. `tools/list` shows only the
-tools the caller may use; a tool called anyway answers a tool error saying what is
-missing, never a protocol error.
+The agent gets the permissions its credential has, no more: every tool declares the
+[permission](concepts/control-plane-security.md#permissions) it needs (the tables
+below). `tools/list` shows only the tools the caller may use; a tool called anyway
+answers a tool error saying which permission is missing (`permission_required:
+mocks.write`), never a protocol error.
 
 | Instance | Credential | Tools |
 |---|---|---|
@@ -181,8 +183,10 @@ missing, never a protocol error.
 | | the admin token (`Authorization: Bearer`, or `X-Rustybin-Admin-Token`) | All |
 | `password` control auth (the default) | the token of a sign-in with the console's user name and password (`POST /_rustybin/login`) | All |
 | `password` / `token` / `jwt` control auth | no token | `401`, like the rest of the control plane |
-| | control JWT, `console` scope | Reads, tests and traffic |
+| | a sign-in of another user, or a control JWT with `rb_roles` / `rb_perms` | What its roles' permissions allow |
+| | control JWT, `console` scope | Reads (settings, saved tests, source control and agents included), tests and traffic |
 | | control JWT, `inspector` scope | Traffic only |
+| | control JWT, `harness` scope | The harness tools |
 | | the admin token, or a control JWT with the `admin` scope | All |
 | Public mode | none | Reads, tests and traffic (the inspector needs a session); changes are forbidden |
 | Self-service demo | none | Reads and tests, plus `create_mock` (the first one starts a visit) |
@@ -190,7 +194,7 @@ missing, never a protocol error.
 | Shared mode | an API key (`X-Rustybin-Key`) | The key's own mocks, inspector entries and usage |
 
 `get_instance` reports what the caller is (`caller.admin`, `caller.scopes`,
-`caller.rights`), so an agent can explain why a tool is missing. On a secured
+`caller.roles`, `caller.permissions`), so an agent can explain why a tool is missing. On a secured
 instance:
 
 ```hurl
@@ -338,49 +342,49 @@ can open: the mock's URL, its console page and a `curl` for a sample request.
 ## Tools
 
 Arguments mirror the REST bodies and [`rustybin.yaml`](mocks/config.md), so what you
-learn in one carries over to the other. Rights: **read** (the `console` scope, or
-anyone on an open control plane), **traffic** (read, or the `inspector` scope),
-**manage** (admin for instance mocks; the owner for visitor and key-owned mocks),
-**admin**, **visitor** (a running visit) and **operator** (admin on a self-service
-demo).
+learn in one carries over to the other. The **Permission** column names what each
+tool needs; "or owner" means a visitor or an API key may use it on its own mocks of a
+self-service instance (the instance's mocks need the permission), and "the visit" a
+running visit's manage token. The visit operator tools are listed only with
+self-service on.
 
 ### Instance
 
-| Tool | Right | |
+| Tool | Permission | |
 |---|---|---|
-| `diagnose_instance` | admin | The [diagnostics](troubleshooting.md#ask-the-instance-first): each check with an id, a status and the fix; the summary names checks only, quoted file and remote text is under `untrusted_message` |
-| `get_instance` | read | Version, modes, control auth, limits, the public configuration, the caller's rights, console and docs URLs. Where an agent starts |
-| `find_endpoints` | read | Search the [route catalogue](concepts/catalogue.md) by text or category ("anthropic streaming"): path, methods, summary, an example request |
-| `get_health` / `set_health` | read / admin | The `/health` demo toggle |
-| `get_usage` | read | The plan, its limits and what is left, for the caller (their key in shared mode), so an agent can explain a `429` |
-| `get_key_usage` | admin | Per-key daily totals in shared mode, paginated |
-| `reset_flaky` | read | Reset the `/flaky` counters of the caller's session between test runs; `scope: "all"` needs admin |
+| `diagnose_instance` | `settings.read` | The [diagnostics](troubleshooting.md#ask-the-instance-first): each check with an id, a status and the fix; the summary names checks only, quoted file and remote text is under `untrusted_message` |
+| `get_instance` | `instance.read` | Version, modes, control auth, limits, the public configuration, the caller's rights, console and docs URLs. Where an agent starts |
+| `find_endpoints` | `instance.read` | Search the [route catalogue](concepts/catalogue.md) by text or category ("anthropic streaming"): path, methods, summary, an example request |
+| `get_health` / `set_health` | `instance.read` / `settings.write` | The `/health` demo toggle |
+| `get_usage` | `instance.read` | The plan, its limits and what is left, for the caller (their key in shared mode), so an agent can explain a `429` |
+| `get_key_usage` | `settings.read` | Per-key daily totals in shared mode, paginated |
+| `reset_flaky` | `instance.read` | Reset the `/flaky` counters of the caller's session between test runs; `scope: "all"` needs admin |
 
 ### OpenAPI mocks
 
-| Tool | Right | |
+| Tool | Permission | |
 |---|---|---|
-| `list_mocks` | read | Name, URL, state, security, calls, owner; filter by text or state |
-| `get_mock` | read | Operations with hit counts, settings (secrets redacted unless the caller may change the mock), deploy report, revisions, undeployed draft changes |
-| `preview_spec` | read | Parse a spec without creating anything: title, operations, security schemes, warnings, deploy checks |
-| `get_mock_spec` | read | The spec as uploaded, to edit and send back with `update_mock`; or with `served: true` the OpenAPI document the mock serves |
-| `get_mock_revision` | read | A [kept revision](mocks/index.md#comparing-a-refused-edit) (`name`, `revision`): its spec and settings and what the draft changed since; read a `409`'s `expected_revision` to see what the other change did |
-| `create_mock` | manage | From spec text or an object (JSON or YAML; Swagger 2.0 is converted) with optional name, responses, security and operations; deployed unless `deploy: false` |
-| `update_mock` | manage | Replace the draft's spec or settings, or rename it; `deploy: true` publishes the revision it wrote; `expected_revision` refuses a draft changed meanwhile (see [edit conflicts](mocks/index.md#two-people-editing-one-mock)) |
-| `set_operation` | manage | One operation's response override, [rules](mocks/responses.md), mode and public flag; takes `expected_revision` |
-| `test_rules` | read | Which rule would answer a captured call, every condition explained; try new rules without saving |
-| `check_mock` | read | The deploy report: a valid request and response per operation |
-| `deploy_mock` | manage | Publish the draft; `force` only after the user accepted the check errors; `expected_revision` publishes only that draft revision (an error with what changed when the draft moved on) |
-| `rollback_mock` | manage | Make an earlier revision live again (confirmed) |
-| `set_mock_enabled` | manage | On or off (off answers `503`) |
-| `duplicate_mock` | manage | Copy under a new name |
-| `delete_mock` | manage | The mock, its revisions, stored data and traffic (confirmed) |
-| `sample_request` | read | A valid request for an operation, as `curl` and as parts, plus the response the mock would send |
-| `validate_payload` | read | Check a request or response body against an operation's schema, for example after a gateway transformation |
-| `export_collection` | read | The mock as a Postman collection, Hurl file, curl script, `.http` file, k6 script, Bruno collection or Insomnia export, optionally against a gateway's base URL (see [collection exports](exports.md)) |
-| `get_mock_data` / `clear_mock_data` | read / manage | What a `stateful` mock stored; clearing is confirmed |
-| `get_mock_traffic` / `clear_traffic` | traffic / manage | The calls a mock received: operation, status, validation and auth result, how the response was chosen; clearing is confirmed |
-| `reload_mocks` | admin | Reload the file-defined mocks (`RUSTYBIN_CONFIG_FILE`, `RUSTYBIN_MOCKS_DIR`), as SIGHUP does |
+| `list_mocks` | `mocks.read` | Name, URL, state, security, calls, owner; filter by text or state |
+| `get_mock` | `mocks.read` | Operations with hit counts, settings (secrets redacted unless the caller may change the mock), deploy report, revisions, undeployed draft changes |
+| `preview_spec` | `mocks.read` | Parse a spec without creating anything: title, operations, security schemes, warnings, deploy checks |
+| `get_mock_spec` | `mocks.read` | The spec as uploaded, to edit and send back with `update_mock`; or with `served: true` the OpenAPI document the mock serves |
+| `get_mock_revision` | `mocks.read` | A [kept revision](mocks/index.md#comparing-a-refused-edit) (`name`, `revision`): its spec and settings and what the draft changed since; read a `409`'s `expected_revision` to see what the other change did |
+| `create_mock` | `mocks.write` or owner | From spec text or an object (JSON or YAML; Swagger 2.0 is converted) with optional name, responses, security and operations; deployed unless `deploy: false` |
+| `update_mock` | `mocks.write` or owner | Replace the draft's spec or settings, or rename it; `deploy: true` publishes the revision it wrote; `expected_revision` refuses a draft changed meanwhile (see [edit conflicts](mocks/index.md#two-people-editing-one-mock)) |
+| `set_operation` | `mocks.write` or owner | One operation's response override, [rules](mocks/responses.md), mode and public flag; takes `expected_revision` |
+| `test_rules` | `mocks.read` | Which rule would answer a captured call, every condition explained; try new rules without saving |
+| `check_mock` | `mocks.read` | The deploy report: a valid request and response per operation |
+| `deploy_mock` | `mocks.write` or owner | Publish the draft; `force` only after the user accepted the check errors; `expected_revision` publishes only that draft revision (an error with what changed when the draft moved on) |
+| `rollback_mock` | `mocks.write` or owner | Make an earlier revision live again (confirmed) |
+| `set_mock_enabled` | `mocks.write` or owner | On or off (off answers `503`) |
+| `duplicate_mock` | `mocks.write` or owner | Copy under a new name |
+| `delete_mock` | `mocks.delete` or owner | The mock, its revisions, stored data and traffic (confirmed) |
+| `sample_request` | `mocks.read` | A valid request for an operation, as `curl` and as parts, plus the response the mock would send |
+| `validate_payload` | `mocks.read` | Check a request or response body against an operation's schema, for example after a gateway transformation |
+| `export_collection` | `mocks.read` | The mock as a Postman collection, Hurl file, curl script, `.http` file, k6 script, Bruno collection or Insomnia export, optionally against a gateway's base URL (see [collection exports](exports.md)) |
+| `get_mock_data` / `clear_mock_data` | `mocks.read` / `mocks.data` or owner | What a `stateful` mock stored; clearing is confirmed |
+| `get_mock_traffic` / `clear_traffic` | `traffic.read` / `mocks.data` or owner | The calls a mock received: operation, status, validation and auth result, how the response was chosen; clearing is confirmed |
+| `reload_mocks` | `config.apply` | Reload the file-defined mocks (`RUSTYBIN_CONFIG_FILE`, `RUSTYBIN_MOCKS_DIR`), as SIGHUP does |
 
 `get_mock` and `check_mock` carry the example `coverage` (which operations lack an
 example), the input of `generate_examples`.
@@ -391,91 +395,91 @@ Every model call is an [assist task](ai-assist.md) with the user's own key. Keys
 never tool inputs and never returned: the operator sets them in the console or with
 `rustybin settings set-secret`; `assist_status` shows `{set, hint}`.
 
-| Tool | Right | |
+| Tool | Permission | |
 |---|---|---|
-| `assist_status` | read | Whether assist is on, the provider and models, the caps, each provider's key state, the tasks, the usage total |
-| `list_assist_models` | read | The configured provider's models (as last loaded, merged with the curated table) and the model of every job; choose with `update_settings` on `assist.model`, `assist.fast_model` or `assist.job.<task>` |
-| `load_assist_models` | admin | Ask the provider for its model list with the stored key (confirmed; one outbound call, no tokens) |
-| `assist_usage` | admin | Calls, tokens and the estimated cost since start, per model and per task |
-| `test_assist` | admin | One small call to the configured provider |
-| `run_assist_task` | read | A read task with its inputs (`free_answer`, `explain`, `suggest`, `request_examples`, `tool_arguments`, `server_json`, `summarise_for_portal`); the mock tasks point at their own tools |
-| `generate_spec` | manage | An OpenAPI document from a description, checked like an upload; `create: true` (confirmed) creates the mock from it as `create_mock` would |
-| `generate_examples` | manage | Examples for the operations that lack one (or the ones named), from the provider or the deterministic generator; `apply: true` (confirmed) stores them in the draft |
-| `edit_spec_with_ai` | manage | The draft spec edited through an instruction: the document, the diff and its checks; `apply: true` (confirmed) saves it as the draft |
+| `assist_status` | `assist.use` | Whether assist is on, the provider and models, the caps, each provider's key state, the tasks, the usage total |
+| `list_assist_models` | `assist.use` | The configured provider's models (as last loaded, merged with the curated table) and the model of every job; choose with `update_settings` on `assist.model`, `assist.fast_model` or `assist.job.<task>` |
+| `load_assist_models` | `settings.write` | Ask the provider for its model list with the stored key (confirmed; one outbound call, no tokens) |
+| `assist_usage` | `settings.read` | Calls, tokens and the estimated cost since start, per model and per task |
+| `test_assist` | `settings.write` | One small call to the configured provider |
+| `run_assist_task` | `assist.use` | A read task with its inputs (`free_answer`, `explain`, `suggest`, `request_examples`, `tool_arguments`, `server_json`, `summarise_for_portal`); the mock tasks point at their own tools |
+| `generate_spec` | `assist.jobs` or owner | An OpenAPI document from a description, checked like an upload; `create: true` (confirmed) creates the mock from it as `create_mock` would |
+| `generate_examples` | `assist.jobs` or owner | Examples for the operations that lack one (or the ones named), from the provider or the deterministic generator; `apply: true` (confirmed) stores them in the draft |
+| `edit_spec_with_ai` | `assist.jobs` or owner | The draft spec edited through an instruction: the document, the diff and its checks; `apply: true` (confirmed) saves it as the draft |
 
 ### Settings and the outbound policy
 
-| Tool | Right | |
+| Tool | Permission | |
 |---|---|---|
-| `get_settings` | admin | Every [instance setting](configuration.md#state-directory-settings-and-secrets) with its value, source and lock state, or one group or key; secrets show `{set, hint}` |
-| `update_settings` | admin | Set values (`null` forgets a stored one) and unset stored values; secrets are refused, and so is the console sign-in in password mode (it changes only with its current password); a change of `egress.*`, `agents.*`, `console.*` or `git.*` is confirmed by the user |
-| `check_egress` | admin | The [outbound policy](configuration.md#outbound-connections) and, with `url` and `purpose`, whether that URL would be allowed before DNS and why not |
+| `get_settings` | `settings.read` | Every [instance setting](configuration.md#state-directory-settings-and-secrets) with its value, source and lock state, or one group or key; secrets show `{set, hint}` |
+| `update_settings` | `settings.write` | Set values (`null` forgets a stored one) and unset stored values; secrets are refused, and so is the console sign-in in password mode (it changes only with its current password); a change of `egress.*`, `agents.*`, `console.*` or `git.*` is confirmed by the user |
+| `check_egress` | `settings.read` | The [outbound policy](configuration.md#outbound-connections) and, with `url` and `purpose`, whether that URL would be allowed before DNS and why not |
 
 ### MCP inspector and registry
 
-| Tool | Right | |
+| Tool | Permission | |
 |---|---|---|
-| `list_mcp_servers` | read | Every MCP server this instance serves with its auth, the relay's allowlist, the check ids |
-| `mcp_call` | read | One JSON-RPC request to any MCP server (a path on this instance in process, or a URL through the relay) with the handshake the transport needs; credentials as headers or a saved connection. Another host is confirmed, and without admin rights gets read-only methods only (no `tools/call`). The answer is `untrusted_result` |
-| `run_mcp_checks` | read | The [inspector's check suite](mcp/inspector.md) against a server; the report is saved unless `save: false`. Another host is confirmed, and without admin rights the calls to tools are skipped. At most two suites run at once |
-| `list_mcp_check_runs` | read | The saved runs, or one report (under `untrusted_report`) |
-| `list_mcp_connections` | read | The saved connections (credentials stay sealed on the instance) |
-| `list_registry_servers` | read | The [mock registry](mcp/registry.md)'s counts, scenario and a gateway's sync configuration, and a page of its entries (`cursor`, `limit`) under `untrusted_entries`, each validated and cut at 4 KiB (anyone may publish) |
-| `set_registry_scenario` | admin | `normal`, or a scenario that breaks the registry on purpose |
-| `browse_registry` | read | A page of a real registry (the official one by default) through the outbound policy; confirmed for another host; the entries are `untrusted_servers` |
-| `validate_server_json` | read | A `server.json` against the registry schema and the semantic checks |
-| `unpublish_registry_server` | admin | Remove an entry published through the registry's API (confirmed) |
+| `list_mcp_servers` | `mcp.inspect` | Every MCP server this instance serves with its auth, the relay's allowlist, the check ids |
+| `mcp_call` | `mcp.inspect` | One JSON-RPC request to any MCP server (a path on this instance in process, or a URL through the relay) with the handshake the transport needs; credentials as headers or a saved connection. Another host is confirmed, and without admin rights gets read-only methods only (no `tools/call`). The answer is `untrusted_result` |
+| `run_mcp_checks` | `mcp.inspect` | The [inspector's check suite](mcp/inspector.md) against a server; the report is saved unless `save: false`. Another host is confirmed, and without admin rights the calls to tools are skipped. At most two suites run at once |
+| `list_mcp_check_runs` | `mcp.inspect` | The saved runs, or one report (under `untrusted_report`) |
+| `list_mcp_connections` | `mcp.inspect` | The saved connections (credentials stay sealed on the instance) |
+| `list_registry_servers` | `instance.read` | The [mock registry](mcp/registry.md)'s counts, scenario and a gateway's sync configuration, and a page of its entries (`cursor`, `limit`) under `untrusted_entries`, each validated and cut at 4 KiB (anyone may publish) |
+| `set_registry_scenario` | `registry.write` | `normal`, or a scenario that breaks the registry on purpose |
+| `browse_registry` | `mcp.inspect` | A page of a real registry (the official one by default) through the outbound policy; confirmed for another host; the entries are `untrusted_servers` |
+| `validate_server_json` | `instance.read` | A `server.json` against the registry schema and the semantic checks |
+| `unpublish_registry_server` | `registry.write` | Remove an entry published through the registry's API (confirmed) |
 
 ### Dev portal
 
-| Tool | Right | |
+| Tool | Permission | |
 |---|---|---|
-| `list_portal_items` | read | The [portal](portal.md)'s state and branding, every item that can be published with its metadata, whether it is hidden and why, its insights |
-| `publish_portal_item` | manage | Publish an item (`mock:<name>`, `mcp:<server>`, `llm`, `a2a:<agent>`, `tools`, `registry`) with a title, summary, tags, contact, order and the credentials switch; confirmed when the portal is on and open to anyone |
-| `unpublish_portal_item` | manage | Remove an item |
-| `set_portal_branding` | admin | The `portal.*` settings: `enabled`, `title`, `intro`, `contact`, `auth`, `base_url`, `visitors` |
-| `get_portal_insights` | read | Views, downloads and Try it calls per item |
+| `list_portal_items` | `instance.read` | The [portal](portal.md)'s state and branding, every item that can be published with its metadata, whether it is hidden and why, its insights |
+| `publish_portal_item` | `portal.publish` or owner | Publish an item (`mock:<name>`, `mcp:<server>`, `llm`, `a2a:<agent>`, `tools`, `registry`) with a title, summary, tags, contact, order and the credentials switch; confirmed when the portal is on and open to anyone |
+| `unpublish_portal_item` | `portal.publish` or owner | Remove an item |
+| `set_portal_branding` | `portal.settings` | The `portal.*` settings: `enabled`, `title`, `intro`, `contact`, `auth`, `base_url`, `visitors` |
+| `get_portal_insights` | `instance.read` | Views, downloads and Try it calls per item |
 
 ### Configuration as code and git
 
-| Tool | Right | |
+| Tool | Permission | |
 |---|---|---|
-| `export_config` | read | [`rustybin.yaml`](configuration-as-code.md) version 2 for an admin (the whole instance, secrets as references), the mocks the caller may see (version 1) for others, or one mock with `name`; `format` yaml or json |
-| `diff_config` | admin | What applying a document would change, section by section (a dry run) |
-| `apply_config` | admin | Apply a version 1 or 2 document; `dry_run` reports only; `prune` (confirmed) makes a present section the whole truth |
-| `git_status` | admin | The [repository](source-control.md), the working copy, the drift, ahead and behind (`fetch: true`), the timeline and the last commits |
-| `git_init` | admin | Clone the remote (`git.remote`, `git.branch` settings) or start an empty working copy |
-| `git_commit` | admin | Export the instance into the working copy and commit with a message; `checkpoints` names local [checkpoints](checkpoints.md#in-the-configuration-repository) to commit next to the document (never by the automatic mode) |
-| `git_push` | admin | Push the branch; confirmed, since the configuration leaves the host |
-| `git_pull` | admin | Fetch and fast-forward; `apply: true` applies the repository's document (confirmed unless `dry_run`) |
-| `git_resolve` | admin | After a diverged branch: the instance's copy wins or the repository's (confirmed) |
-| `git_deploy_key` | admin | The deploy key's public half; `generate: true` makes one, `replace: true` (confirmed) replaces it |
+| `export_config` | `mocks.read` | [`rustybin.yaml`](configuration-as-code.md) version 2 for an admin (the whole instance, secrets as references), the mocks the caller may see (version 1) for others, or one mock with `name`; `format` yaml or json |
+| `diff_config` | `config.apply` | What applying a document would change, section by section (a dry run) |
+| `apply_config` | `config.apply` | Apply a version 1 or 2 document; `dry_run` reports only; `prune` (confirmed) makes a present section the whole truth |
+| `git_status` | `git.read` | The [repository](source-control.md), the working copy, the drift, ahead and behind (`fetch: true`), the timeline and the last commits |
+| `git_init` | `git.write` | Clone the remote (`git.remote`, `git.branch` settings) or start an empty working copy |
+| `git_commit` | `git.write` | Export the instance into the working copy and commit with a message; `checkpoints` names local [checkpoints](checkpoints.md#in-the-configuration-repository) to commit next to the document (never by the automatic mode) |
+| `git_push` | `git.write` | Push the branch; confirmed, since the configuration leaves the host |
+| `git_pull` | `git.write` | Fetch and fast-forward; `apply: true` applies the repository's document (confirmed unless `dry_run`) |
+| `git_resolve` | `git.write` | After a diverged branch: the instance's copy wins or the repository's (confirmed) |
+| `git_deploy_key` | `git.write` | The deploy key's public half; `generate: true` makes one, `replace: true` (confirmed) replaces it |
 
 The token for an https remote is the secret `git.token`: an agent cannot set it.
 
 ### Agents and sign-in sessions
 
-| Tool | Right | |
+| Tool | Permission | |
 |---|---|---|
-| `list_agents` / `get_agent` | admin | The [agents](#managing-agents) and the policy; one agent with its calls per tool, errors, sessions, rights and recent activity |
-| `set_agent_rights` | admin | A ceiling, allow and deny lists, a note; `reset: true` clears the agent's own rights. Never on the caller's own agent or an agent of the caller's credential |
-| `revoke_agent` / `restore_agent` | admin | Revoke (confirmed; an agent cannot revoke itself) and restore (never an agent of the caller's credential) |
-| `end_agent_sessions` | admin | Close an agent's handshake-era sessions (never of an agent of the caller's credential) |
-| `list_sessions` | admin | The console's sign-in sessions, when the password sign-in is on |
-| `end_session` | admin | End one session by id, or `all: true` to sign out everywhere (confirmed) |
+| `list_agents` / `get_agent` | `agents.read` | The [agents](#managing-agents) and the policy; one agent with its calls per tool, errors, sessions, rights and recent activity |
+| `set_agent_rights` | `agents.manage` | A ceiling, allow and deny lists, a note; `reset: true` clears the agent's own rights. Never on the caller's own agent or an agent of the caller's credential |
+| `revoke_agent` / `restore_agent` | `agents.manage` | Revoke (confirmed; an agent cannot revoke itself) and restore (never an agent of the caller's credential) |
+| `end_agent_sessions` | `agents.manage` | Close an agent's handshake-era sessions (never of an agent of the caller's credential) |
+| `list_sessions` | `users.read` | The console's sign-in sessions, when the password sign-in is on |
+| `end_session` | `users.manage` | End one session by id, or `all: true` to sign out everywhere (confirmed) |
 
 The password is changed only in the console, with `rustybin password change` or
 through the environment.
 
 ### Traffic
 
-| Tool | Right | |
+| Tool | Permission | |
 |---|---|---|
-| `list_requests` / `get_request` | traffic | The [request inspector](concepts/inspector.md), newest first, with filters (path, method, status, session, since); scoped by key in shared mode |
-| `wait_for_requests` | traffic | Wait up to `timeout_secs` (default 30, at most 60) for the next captured requests matching a filter (path prefix, method, header, session, or a mock's calls) and return them |
-| `clear_requests` | admin | Empty the inspector (or one session's entries) before a test run (confirmed) |
-| `create_bin` / `get_bin` | read / traffic | A [request bin](reference/request-bin.md) owned by the caller's session, and what arrived in it |
-| `list_push_notifications` | traffic | What the [A2A](a2a/index.md) push notification sink received for a sink id |
+| `list_requests` / `get_request` | `traffic.read` | The [request inspector](concepts/inspector.md), newest first, with filters (path, method, status, session, since); scoped by key in shared mode |
+| `wait_for_requests` | `traffic.read` | Wait up to `timeout_secs` (default 30, at most 60) for the next captured requests matching a filter (path prefix, method, header, session, or a mock's calls) and return them |
+| `clear_requests` | `traffic.clear` | Empty the inspector (or one session's entries) before a test run (confirmed) |
+| `create_bin` / `get_bin` | `instance.read` / `traffic.read` | A [request bin](reference/request-bin.md) owned by the caller's session, and what arrived in it |
+| `list_push_notifications` | `traffic.read` | What the [A2A](a2a/index.md) push notification sink received for a sink id |
 
 `wait_for_requests` is for "I'll send it through the gateway now, tell me what arrived":
 the agent starts the wait, you send the call, the answer lists what Rustybin received.
@@ -484,10 +488,10 @@ retry.
 
 ### Testing
 
-| Tool | Right | |
+| Tool | Permission | |
 |---|---|---|
-| `try_request` | read | Send a request to this instance's own data plane and return status, headers, body and timing |
-| `issue_token` | read | A token from the built-in [identity provider](reference/oidc.md) (client credentials of the demo client, with the asked scopes and audience), returned with its decoded claims and expiry |
+| `try_request` | `instance.read` | Send a request to this instance's own data plane and return status, headers, body and timing |
+| `issue_token` | `instance.read` | A token from the built-in [identity provider](reference/oidc.md) (client credentials of the demo client, with the asked scopes and audience), returned with its decoded claims and expiry |
 
 `try_request` runs **in process** through the full application, with the same
 middleware a real client meets (plan limits, fault injection, inspector capture), and
@@ -522,48 +526,48 @@ server and a gateway's JWT validation:
 
 ### Saved tests, gateway scenarios and checkpoints
 
-| Tool | Right | |
+| Tool | Permission | |
 |---|---|---|
-| `list_tests` | admin | The [saved tests](saved-tests.md), one by name, or all of them as a Hurl file (`format: hurl`); requests are under `untrusted_*` |
-| `save_test` | admin | A test from a captured request (`capture`: its id) or a written one, with assertions; secret-looking headers and query values must be `{{variables}}` |
-| `delete_test` | admin | Delete a saved test (confirmed) |
-| `run_tests` | admin | Run every saved test or the ones named, in process or through each test's gateway; confirmed when a test goes through a gateway or sends a method other than `GET`, `HEAD` or `OPTIONS`; one run at a time. Results under `untrusted_results`, JUnit with `format: junit`; answers the kept run's `run_id` and the change since the previous run |
-| `list_test_runs` | admin | The [history of runs](saved-tests.md#history), newest first (`limit`, `cursor`): when, the trigger, who, the counts, the failing tests, newly failing and newly passing |
-| `get_test_run` | admin | One kept run by id: each test's result and failures under `untrusted_results`, JUnit with `format: junit` |
-| `clear_test_runs` | admin | Forget every kept run, the tests stay (confirmed) |
-| `list_test_schedules` | admin | The [test schedules](saved-tests.md#schedules), or one by name, with their status: next time, last result and run, skipped runs, the last notice |
-| `save_test_schedule` | admin | Save or replace a schedule: `every` or `at`, `names` or `prefix`, `enabled`, `webhook`, `notify_recovery` (confirmed when it names a new webhook) |
-| `delete_test_schedule` | admin | Delete a schedule, the tests and the history stay (confirmed) |
-| `run_test_schedule` | admin | Run a schedule now, kept in the history as `schedule:<name>` (confirmed when its tests go through a gateway or change state, or it has a webhook) |
-| `list_gateway_scenarios` / `get_gateway_scenario_run` | read | The [gateway scenarios](gateway-scenarios.md) and the caller's runs with their last verdicts; the credential-injection key is shown to admin callers only (`key_hidden`) |
-| `start_gateway_scenario` | admin | Prepare a run: its upstream and the steps to configure on the gateway |
-| `check_gateway_scenario` | admin | Send the run's test traffic through the gateway (egress purpose `scenario`) and compare what the client got with what reached the upstream, with the scenario's test parameters (`limit`, `half_open_ms`, `size_limit`, `allowed_origin`, `refused_origin`, `upstream_cors`, `add_request_header`, `add_request_value`, `remove_request_header`, `add_response_header`) (confirmed) |
-| `end_gateway_scenario` | admin | Remove what the run created, nothing else (confirmed) |
-| `list_checkpoints` | read | The [checkpoints](checkpoints.md), or one with the mocks it holds |
-| `save_checkpoint` | admin | Save the instance's API mocks (with their data) and the health toggle; `replace` overwrites one of that name; at most 20 |
-| `restore_checkpoint` | admin | Bring the mocks back to a checkpoint (API mocks it does not hold are deleted); `dry_run: true` answers the same without a change or a confirmation; confirmed otherwise; `from: "git"` restores the configuration repository's checkpoint of that name |
-| `delete_checkpoint` | admin | Delete a checkpoint, not the instance's mocks (confirmed) |
-| `list_repository_checkpoints` | admin | The checkpoints committed to the configuration repository (at the working copy's `HEAD`), each with what it holds or why it cannot be restored, under `untrusted_checkpoints` |
+| `list_tests` | `tests.read` | The [saved tests](saved-tests.md), one by name, or all of them as a Hurl file (`format: hurl`); requests are under `untrusted_*` |
+| `save_test` | `tests.write` | A test from a captured request (`capture`: its id) or a written one, with assertions; secret-looking headers and query values must be `{{variables}}` |
+| `delete_test` | `tests.write` | Delete a saved test (confirmed) |
+| `run_tests` | `tests.run` | Run every saved test or the ones named, in process or through each test's gateway; confirmed when a test goes through a gateway or sends a method other than `GET`, `HEAD` or `OPTIONS`; one run at a time. Results under `untrusted_results`, JUnit with `format: junit`; answers the kept run's `run_id` and the change since the previous run |
+| `list_test_runs` | `tests.read` | The [history of runs](saved-tests.md#history), newest first (`limit`, `cursor`): when, the trigger, who, the counts, the failing tests, newly failing and newly passing |
+| `get_test_run` | `tests.read` | One kept run by id: each test's result and failures under `untrusted_results`, JUnit with `format: junit` |
+| `clear_test_runs` | `tests.write` | Forget every kept run, the tests stay (confirmed) |
+| `list_test_schedules` | `tests.read` | The [test schedules](saved-tests.md#schedules), or one by name, with their status: next time, last result and run, skipped runs, the last notice |
+| `save_test_schedule` | `tests.write` | Save or replace a schedule: `every` or `at`, `names` or `prefix`, `enabled`, `webhook`, `notify_recovery` (confirmed when it names a new webhook) |
+| `delete_test_schedule` | `tests.write` | Delete a schedule, the tests and the history stay (confirmed) |
+| `run_test_schedule` | `tests.run` | Run a schedule now, kept in the history as `schedule:<name>` (confirmed when its tests go through a gateway or change state, or it has a webhook) |
+| `list_gateway_scenarios` / `get_gateway_scenario_run` | `instance.read` | The [gateway scenarios](gateway-scenarios.md) and the caller's runs with their last verdicts; the credential-injection key is shown to admin callers only (`key_hidden`) |
+| `start_gateway_scenario` | `scenarios.run` | Prepare a run: its upstream and the steps to configure on the gateway |
+| `check_gateway_scenario` | `scenarios.run` | Send the run's test traffic through the gateway (egress purpose `scenario`) and compare what the client got with what reached the upstream, with the scenario's test parameters (`limit`, `half_open_ms`, `size_limit`, `allowed_origin`, `refused_origin`, `upstream_cors`, `add_request_header`, `add_request_value`, `remove_request_header`, `add_response_header`) (confirmed) |
+| `end_gateway_scenario` | `scenarios.run` | Remove what the run created, nothing else (confirmed) |
+| `list_checkpoints` | `mocks.read` | The [checkpoints](checkpoints.md), or one with the mocks it holds |
+| `save_checkpoint` | `checkpoints.write` | Save the instance's API mocks (with their data) and the health toggle; `replace` overwrites one of that name; at most 20 |
+| `restore_checkpoint` | `checkpoints.restore` | Bring the mocks back to a checkpoint (API mocks it does not hold are deleted); `dry_run: true` answers the same without a change or a confirmation; confirmed otherwise; `from: "git"` restores the configuration repository's checkpoint of that name |
+| `delete_checkpoint` | `checkpoints.write` | Delete a checkpoint, not the instance's mocks (confirmed) |
+| `list_repository_checkpoints` | `git.read` | The checkpoints committed to the configuration repository (at the working copy's `HEAD`), each with what it holds or why it cannot be restored, under `untrusted_checkpoints` |
 
 ### Harness
 
 Only when [load test mode](harness.md) is on (`RUSTYBIN_HARNESS=on`). Rights: **harness**
 is the `harness` or `admin` scope, or the admin token on an open control plane.
 
-| Tool | Right | |
+| Tool | Permission | |
 |---|---|---|
-| `harness_status` | read | Whether harness mode is on, the node's roles, caps, engine, allowed targets, the active run, the console URL. Where an agent starts |
-| `list_scenarios` / `get_scenario` / `save_scenario` | read / read / harness | The built-in scenarios to copy, one as an object and YAML (credentials redacted, as on the REST route), and saving your own by name |
-| `list_patterns` | read | The pattern types and their parameters, from the scenario schema |
-| `validate_scenario` / `preview_scenario` | read | Problems against the node's caps, the normalised scenario and its summary; the expected requests per second of every layer. Neither sends anything |
-| `create_run` | harness | Validate, pin and (when configured) verify the targets and **start sending load** from this node, or submit to a cluster with `cluster_id`. Confirmed (elicitation, else `confirm: true`) |
-| `start_run` | harness | Start a submitted cluster run on every client node at once. Confirmed |
-| `update_run` | harness | Tune a running run: multiplier, pause, hold, skip, `set`, layers, faults. Confirmed |
-| `list_runs` / `get_run` | read | The node's runs, and the live view of one (progress, counts, latency, the last second, saturation, `report_ready`) |
-| `stop_run` | harness | Stop a run early (it drains and reports); with `cluster_id`, on every client node |
-| `get_run_report` | read | The final report as JSON, text or JUnit |
-| `harness_stop` | harness | The kill switch: all load on this node stops now (no confirmation) |
-| `create_cluster` / `list_cluster_nodes` / `export_upstreams` / `get_leader` | harness / read / read / read | A cluster led by this node (the join token once), its members, the server nodes' URLs for the gateway's upstream pool, and who leads with the succession and the history of leader changes |
+| `harness_status` | `harness.read` | Whether harness mode is on, the node's roles, caps, engine, allowed targets, the active run, the console URL. Where an agent starts |
+| `list_scenarios` / `get_scenario` / `save_scenario` | `harness.read` / `harness.run` | The built-in scenarios to copy, one as an object and YAML (credentials redacted, as on the REST route), and saving your own by name |
+| `list_patterns` | `harness.read` | The pattern types and their parameters, from the scenario schema |
+| `validate_scenario` / `preview_scenario` | `harness.read` | Problems against the node's caps, the normalised scenario and its summary; the expected requests per second of every layer. Neither sends anything |
+| `create_run` | `harness.run` | Validate, pin and (when configured) verify the targets and **start sending load** from this node, or submit to a cluster with `cluster_id`. Confirmed (elicitation, else `confirm: true`) |
+| `start_run` | `harness.run` | Start a submitted cluster run on every client node at once. Confirmed |
+| `update_run` | `harness.run` | Tune a running run: multiplier, pause, hold, skip, `set`, layers, faults. Confirmed |
+| `list_runs` / `get_run` | `harness.read` | The node's runs, and the live view of one (progress, counts, latency, the last second, saturation, `report_ready`) |
+| `stop_run` | `harness.run` | Stop a run early (it drains and reports); with `cluster_id`, on every client node |
+| `get_run_report` | `harness.read` | The final report as JSON, text or JUnit |
+| `harness_stop` | `harness.run` | The kill switch: all load on this node stops now (no confirmation) |
+| `create_cluster` / `list_cluster_nodes` / `export_upstreams` / `get_leader` | `harness.cluster` / `harness.read` | A cluster led by this node (the join token once), its members, the server nodes' URLs for the gateway's upstream pool, and who leads with the succession and the history of leader changes |
 
 Starting load reaches outside the instance, so `create_run`, `start_run` and `update_run`
 carry `openWorldHint` and ask the user to confirm; targets must be in
@@ -575,11 +579,11 @@ run, and `rustybin://harness.schema.json` is the scenario schema.
 
 Only on instances with [self-service mocks](mocks/self-service.md).
 
-| Tool | Right | |
+| Tool | Permission | |
 |---|---|---|
-| `get_visit` | visitor | Time left, hours used today, what the next extension needs |
-| `extend_visit` | visitor | One more period without the email step. When an address is needed the answer says so and links the console, where the form shows the consent choice and privacy notice |
-| `list_visits`, `end_visit`, `pause_self_service`, `resume_self_service` | operator | The [operator routes](mocks/self-service.md#operators); ending a visit and pausing are confirmed |
+| `get_visit` | the visit | Time left, hours used today, what the next extension needs |
+| `extend_visit` | the visit | One more period without the email step. When an address is needed the answer says so and links the console, where the form shows the consent choice and privacy notice |
+| `list_visits`, `end_visit`, `pause_self_service`, `resume_self_service` | `visits.operate` | The [operator routes](mocks/self-service.md#operators); ending a visit and pausing are confirmed |
 
 A visitor's agent needs no credential for its first mock: `create_mock` starts a visit
 and returns its manage token, which the agent then sends as `X-Rustybin-Mock-Token`.

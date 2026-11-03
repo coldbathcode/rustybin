@@ -55,11 +55,29 @@ impl Reply {
         })
     }
 
-    /// `Ok` for a 2xx; the failure otherwise. A 401, or a 403 about the
-    /// credential (the admin token, a scope), is exit code 3; a 403 the
-    /// instance's policy answers (egress, a visitor's mock) is a refusal.
+    /// The permission a refusal names (`reason: permission_required`).
+    pub fn missing_permission(&self) -> Option<String> {
+        let j = self.json.as_ref()?;
+        (j.get("reason").and_then(Value::as_str) == Some("permission_required"))
+            .then(|| j.get("permission").and_then(Value::as_str))
+            .flatten()
+            .map(str::to_string)
+    }
+
+    /// `Ok` for a 2xx; the failure otherwise. A missing permission (`403
+    /// permission_required`), a 401, or a 403 about the credential (the
+    /// admin token, a scope) is exit code 3; a 403 the instance's policy
+    /// answers (egress, a visitor's mock) is a refusal.
     pub fn ok(self) -> Result<Reply> {
         let message = self.error_message();
+        if !(200..=299).contains(&self.status) {
+            if let Some(p) = self.missing_permission() {
+                return Err(Fail::Permission(format!(
+                    "permission_required: {p} (HTTP {}: {message})",
+                    self.status
+                )));
+            }
+        }
         let about_credential = {
             let m = message.to_ascii_lowercase();
             m.contains("token")

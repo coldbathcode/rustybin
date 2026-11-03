@@ -55,6 +55,61 @@ same lock in `jwt` mode, as a hosted platform runs it:
 {{#include ../../examples/concepts/control_auth.hurl:open_routes}}
 ```
 
+## Permissions
+
+Every control-plane route names the permission it needs, per method (`GET
+/_rustybin/mocks` is `mocks.read`, `POST` is `mocks.write`), and one check makes the
+decision before the route's handler runs; a few routes are open (the readiness probe,
+the sign-in, the OAuth sign-in endpoints, the harness cluster's node routes, which
+check their own credential) and a few need only a signed-in caller (`GET
+/_rustybin/session`, sign-out, the management MCP server, whose tools check their own
+permission, the OAuth consent API and a self-service visit's own routes). The
+[route catalogue](catalogue.md), the [CLI reference](../cli.md) (the **Needs** column)
+and the [agent tool tables](../agent-mcp.md#tools) list what each one needs.
+
+A caller without the permission gets `403` naming what is missing, never what it
+holds, so the console stays signed in and a script can say why:
+
+```json
+{"error": "this needs the mocks.write permission", "reason": "permission_required", "permission": "mocks.write"}
+```
+
+```hurl
+{{#include ../../examples/concepts/control_auth.hurl:inspector_scope}}
+```
+
+The CLI prints `permission_required: mocks.write` and exits `3`; the console asks
+`GET /_rustybin/session` for the caller's permissions and disables what they do not
+allow, the control's title naming the permission.
+
+Who holds which permissions:
+
+| Caller | Permissions |
+|---|---|
+| A user (the sign-in) | its roles' (`viewer`, `tester`, `editor`, `admin`, `portal_reader`, custom roles) |
+| The admin token | every one (break glass, never a user) |
+| A control JWT | its `scope` as roles, plus `rb_roles` and `rb_perms` (see [jwt mode](#signed-access-tokens-jwt-mode)) |
+| Nobody, on an open control plane without an admin token (outside public mode) | every one, as before |
+| Nobody, on an open control plane with an admin token, or in public mode | the reads: `instance.read`, `mocks.read`, `traffic.read`, `harness.read`, `assist.use`, `mcp.inspect` |
+| An API key in [shared mode](shared-mode.md) | the same reads, inside the key layer's fence (its own requests, usage, status, the catalogue, the management server, and with self-service its own mocks) |
+| A [self-service](../mocks/self-service.md) visitor | the anonymous reads, and its own mocks through the visit's manage token |
+
+On a self-service instance a visitor or an API key without `mocks.write` still
+reaches the mock routes and manages its own mocks there; the instance's mocks stay
+the operator's. A few checks depend on the request itself and are made on top of the
+route's:
+
+| Request | Also needs |
+|---|---|
+| `DELETE /_rustybin/requests` without `?session=` (everyone's captures) | `traffic.clear` (one session's need only `traffic.read`) |
+| A settings change (`PATCH /_rustybin/settings`, `DELETE /_rustybin/settings/{key}`, a document's `settings:`) of `egress.*`, `proxy.*`, `agents.*`, `console.*`, `sso.*`, `assist.provider` or `assist.base_url` | `settings.security` |
+| A settings change of a `portal.*` setting | `portal.settings` |
+| A settings change that sets or clears a secret, a document with `secrets:` | `secrets.write` |
+| A document (`POST /_rustybin/config/apply`) with `settings:` or `instance:`; with `agents:` | `settings.write`; `agents.manage` |
+| The MCP relay and checks: a saved connection's credentials, or a method that acts on a server on another host (`tools/call`) | `mcp.connections` |
+| `GET /_rustybin/checkpoints?from=git` and a restore from the repository | `git.read` |
+| The `/health` toggles and `POST /flaky/reset?scope=all` (data plane) | `settings.write` |
+
 ## User name and password
 
 In `password` mode the console's sign-in screen, the [`rustybin` CLI](../cli-guide.md)
@@ -198,10 +253,8 @@ and `portal_reader`. A sign-in token carries the user id (`sub`), the sign-in na
 (`rb_user`), the instance's token generation (`rb_gen`) and the user's (`rb_ugen`),
 and its permissions are resolved from the user at every request, so a role change or
 a disable applies to the next one. The admin token is every permission and never a
-user (break glass); an open control plane is every permission, as before. In this
-release the permissions still map onto the four scopes below for every check (the
-`admin` role is the `admin` scope, the others read the control plane), so nothing a
-credential may do has changed yet; per-permission checks on every route come next.
+user (break glass); an open control plane is every permission, as before. Every
+route and tool checks one of them (see [Permissions](#permissions)).
 
 **Upgrading from 0.4.** Nothing to do: on the first start the console user (the
 `console.user` and `console.password_hash` settings, or `RUSTYBIN_CONSOLE_USER` and
@@ -231,28 +284,24 @@ the instance only needs the public key. A token must have:
 | `rb_perms` | optional: permission names (`mocks.write`), a string or an array |
 
 Unknown role and permission names are ignored and logged once, never an error, so a
-platform can roll out a newer token format first. The scopes are roles too: `admin`
-is the `admin` role, `console` the `viewer` role, `inspector` is `traffic.read` alone
-and `harness` is `harness.read` and `harness.run`.
+platform can roll out a newer token format first. The scopes are roles too, and each
+keeps the reach it had in 0.4:
 
-| Scope | Grants |
-|---|---|
-| `inspector` | read-only `/_rustybin/requests*` (the [request inspector](inspector.md) and its live feed) |
-| `console` | read-only `/_rustybin/*` (everything the console reads, metrics included) |
-| `harness` | the [load test](../harness.md) routes, runs and stops included (`console` reads them) |
-| `admin` | everything, including mutations; also accepted wherever the [admin token](sessions.md) is (health toggles, global resets) |
+| Scope | Permissions | What that reaches |
+|---|---|---|
+| `inspector` | `traffic.read` | the [request inspector](inspector.md) and its live feed, a mock's traffic |
+| `console` | the `viewer` role plus `traffic.read`, `assist.use` and `mcp.inspect` | everything the console reads (metrics, settings without secret values, saved tests, source control status, agents included), the AI assist's read tasks, the MCP inspector |
+| `harness` | `harness.read`, `harness.run`, `harness.cluster` | the [load test](../harness.md) routes, runs, stops and clusters |
+| `admin` | the `admin` role: every permission | everything; also accepted wherever the [admin token](sessions.md) is (health toggles, global resets) |
 
-A mutation (any method other than GET, HEAD or OPTIONS) needs the admin token or the
-`admin` scope; other scopes get `403` with `reason: insufficient_scope`. A few `POST`
-routes change nothing on the instance and are open to the `console` scope: previewing
-a mock spec (`/_rustybin/mocks/import`), validating a body against a mock operation
-(`/_rustybin/mocks/{name}/operations/{op}/validate`), testing its rules
-(`.../rules/test`), the AI assist's read tasks (`/_rustybin/assist/run`), validating a
-`server.json` (`/_rustybin/registry/validate`), and the MCP inspector's relay and
-check runs (`/_rustybin/mcp-relay`, `/_rustybin/mcp-relay/fetch`,
-`/_rustybin/mcp-checks`). Without admin rights the relay and the checks send a server
-on another host read-only methods only (no `tools/call`: `403 admin_required`). The
-management MCP server (`/_rustybin/mcp`) checks each tool against the scope itself.
+A route the token's permissions do not cover answers `403` with `reason:
+permission_required` and the `permission` it needs (see [Permissions](#permissions)).
+The `console` scope previews a mock spec, validates a body against a mock operation,
+tests its rules, runs the AI assist's read tasks, validates a `server.json` and uses
+the MCP inspector's relay and checks; the relay and the checks send a server on
+another host read-only methods only without `mcp.connections` (no `tools/call`: `403
+admin_required`). The management MCP server (`/_rustybin/mcp`) checks each tool's
+permission itself.
 
 ```hurl
 {{#include ../../examples/concepts/control_auth.hurl:console_token}}

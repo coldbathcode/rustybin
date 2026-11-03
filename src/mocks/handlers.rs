@@ -845,9 +845,9 @@ pub async fn create(
     body: Bytes,
 ) -> Result<Response, ServiceError> {
     let s = svc(&state, &headers, &extensions, &uri);
-    // The admin guard answers before the body is parsed, as before.
+    // The refusal answers before the body is parsed, as before.
     if !s.caller.admin && state.mocks.visits().is_none() {
-        s.require_admin()?;
+        s.need(crate::rbac::Permission::MocksWrite)?;
     }
     let req: CreateBody = parse_body(&body)?;
     Ok(created(s.compiling(move |s| s.create(req)).await?))
@@ -1065,7 +1065,7 @@ pub async fn apply(
     body: Bytes,
 ) -> Result<Response, ServiceError> {
     let s = svc(&state, &headers, &extensions, &uri);
-    s.require_admin()?;
+    s.need(crate::rbac::Permission::ConfigApply)?;
     let text = std::str::from_utf8(&body)
         .map_err(|_| ServiceError::bad_request("the document is not UTF-8 text"))?
         .to_string();

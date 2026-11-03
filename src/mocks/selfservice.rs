@@ -19,16 +19,19 @@ use super::service::ServiceError;
 use super::store::{Snapshot, StoreError};
 use super::visits::{EmailInput, Owner, VisitError, Visits, SELF_HOST_URL, TOKEN_HEADER};
 use crate::config::Config;
-use crate::control_auth::ControlAuthorized;
 use crate::keys::KeyContext;
 use crate::state::AppState;
 
 /// Who is calling.
 #[derive(Clone)]
 pub struct Caller {
-    /// Admin rights (the admin guard passes and the control-plane grant, if
-    /// any, has the admin scope).
+    /// Manages the instance's mocks: holds `mocks.write` (the admin token,
+    /// a user or token whose roles grant it, nobody on an open control
+    /// plane without an admin token). Sees every visitor's mocks and their
+    /// secrets; a caller without it is a visitor.
     pub admin: bool,
+    /// The caller's roles and permissions, resolved for this request.
+    pub resolved: std::sync::Arc<crate::rbac::Resolved>,
     /// Owners whose mocks the caller holds: running visits of the presented
     /// manage tokens, and the API key in shared mode.
     pub owners: Vec<Owner>,
@@ -40,13 +43,18 @@ pub struct Caller {
     /// that the address shares one, so a new header per request starts
     /// nothing new.
     pub ledger: String,
-    /// The admin guard's own answer for this request
-    /// ([`crate::admin::admin_check`]): what a refused instance-global
-    /// change says.
-    pub admin_guard: Result<(), (StatusCode, &'static str)>,
 }
 
 impl Caller {
+    /// `Ok` when the caller holds `p`, else the refusal naming it.
+    pub fn need(&self, p: crate::rbac::Permission) -> Result<(), ServiceError> {
+        if self.resolved.has(p) {
+            Ok(())
+        } else {
+            Err(ServiceError::permission(&self.resolved, p))
+        }
+    }
+
     pub fn owns(&self, owner: &Owner) -> bool {
         self.owners.contains(owner)
     }
@@ -78,16 +86,8 @@ impl Caller {
 
 pub fn caller(state: &AppState, headers: &HeaderMap, extensions: &Extensions) -> Caller {
     let config = &state.config;
-    let grant = extensions.get::<ControlAuthorized>().map(|g| g.0);
-    // A token from the control plane's OAuth server (accepted on the
-    // management MCP server only) with the admin scope is admin there.
-    let via_oauth = extensions.get::<crate::control_oauth::ViaOAuth>().is_some();
-    let admin_guard = if via_oauth && grant.is_some_and(|g| g.admin) {
-        Ok(())
-    } else {
-        crate::admin::admin_check(headers, config)
-    };
-    let admin = grant.is_none_or(|g| g.admin) && admin_guard.is_ok();
+    let resolved = crate::control_auth::caller_of(state, headers, extensions);
+    let admin = resolved.has(crate::rbac::Permission::MocksWrite);
     let mut owners = Vec::new();
     if let Some(visits) = state.mocks.visits() {
         let tokens: Vec<&str> = headers
@@ -113,7 +113,7 @@ pub fn caller(state: &AppState, headers: &HeaderMap, extensions: &Extensions) ->
             None => session.clone(),
         },
         session,
-        admin_guard,
+        resolved,
     }
 }
 
@@ -369,10 +369,7 @@ pub fn end_own(state: &AppState, c: &Caller) -> Result<Value, ServiceError> {
 /// The visit store for an operator (admin), else the refusal.
 fn operator(state: &AppState, c: &Caller) -> Result<std::sync::Arc<Visits>, ServiceError> {
     let visits = visits_of(state)?.clone();
-    if !c.admin {
-        c.admin_guard.map_err(ServiceError::admin)?;
-        return Err(ServiceError::forbidden("this route needs admin rights"));
-    }
+    c.need(crate::rbac::Permission::VisitsOperate)?;
     Ok(visits)
 }
 

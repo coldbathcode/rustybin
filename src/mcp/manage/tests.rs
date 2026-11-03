@@ -113,7 +113,7 @@ fn is_error(result: &Value) -> bool {
 }
 
 /// Every page of `tools/list`.
-async fn tool_names(app: &Router, headers: &[(&str, &str)]) -> Vec<String> {
+pub(crate) async fn tool_names(app: &Router, headers: &[(&str, &str)]) -> Vec<String> {
     let mut names = Vec::new();
     let mut params = json!({});
     loop {
@@ -1603,7 +1603,11 @@ async fn harness_tools_follow_the_control_scopes() {
     )
     .await;
     assert!(is_error(&r));
-    assert!(text_of(&r).contains("harness scope"), "{}", text_of(&r));
+    assert!(
+        text_of(&r).contains("permission_required: harness.run"),
+        "{}",
+        text_of(&r)
+    );
     // The prompt exists.
     let (status, j) = rpc(&app, &[("authorization", &format!("Bearer {console}"))], "prompts/get", json!({ "name": "load_test_gateway", "arguments": { "target": "https://gw.example", "rate": "250" } })).await;
     assert_eq!(status, StatusCode::OK, "{j}");
@@ -3152,14 +3156,17 @@ async fn the_new_tools_follow_the_control_scopes() {
         "list_portal_items",
         "get_portal_insights",
         "export_config",
+        // The viewer's reads (settings.read, git.read, agents.read).
+        "get_settings",
+        "check_egress",
+        "assist_usage",
+        "git_status",
+        "list_agents",
     ] {
         assert!(names.contains(&t.to_string()), "console scope lists {t}");
     }
     for t in [
-        "get_settings",
         "update_settings",
-        "check_egress",
-        "assist_usage",
         "test_assist",
         "generate_spec",
         "set_registry_scenario",
@@ -3168,9 +3175,7 @@ async fn the_new_tools_follow_the_control_scopes() {
         "set_portal_branding",
         "diff_config",
         "apply_config",
-        "git_status",
         "git_push",
-        "list_agents",
         "revoke_agent",
         "list_sessions",
         "end_session",
@@ -3745,5 +3750,103 @@ async fn mcp_checks_and_calls_have_a_concurrency_cap() {
             .expect("request");
         let resp = app.clone().oneshot(req).await.expect("response");
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+    }
+}
+
+/// How the tool tables of `docs/src/agent-mcp.md` write a tool's need.
+fn doc_label(need: super::access::ToolNeed) -> String {
+    use super::access::ToolNeed;
+    match need {
+        ToolNeed::Perm(p) => format!("`{}`", p.name()),
+        ToolNeed::Owner(p) => format!("`{}` or owner", p.name()),
+        ToolNeed::Visitor => "the visit".into(),
+    }
+}
+
+/// Every tool declares what it needs (a permission; ownership of the mock
+/// only for the mock changes self-service allows; the visit's manage token
+/// only for the visit's own tools), and the docs' tool tables say the same.
+#[test]
+fn every_tool_declares_a_permission() {
+    use super::access::ToolNeed;
+    use crate::rbac::Permission as P;
+    let owner_ok = [
+        P::MocksWrite,
+        P::MocksDelete,
+        P::MocksData,
+        P::AssistJobs,
+        P::PortalPublish,
+    ];
+    for t in super::tools::TOOLS {
+        match t.permission {
+            ToolNeed::Visitor => assert!(
+                matches!(t.name, "get_visit" | "extend_visit"),
+                "{}: only a visit's own tools take the visitor rule",
+                t.name
+            ),
+            ToolNeed::Owner(p) => assert!(
+                owner_ok.contains(&p),
+                "{}: {} is not a per-mock permission",
+                t.name,
+                p.name()
+            ),
+            ToolNeed::Perm(_) => {}
+        }
+        // A read-only tool never needs a write permission.
+        if let Some(p) = t.permission.permission() {
+            if t.read_only {
+                assert!(
+                    !matches!(
+                        p,
+                        P::MocksWrite | P::MocksDelete | P::GitWrite | P::TestsWrite
+                    ),
+                    "{}: read-only with {}",
+                    t.name,
+                    p.name()
+                );
+            }
+        }
+    }
+    // The docs' tables: a row per tool (or per pair), the Permission column
+    // in the same order as the names.
+    let doc = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/src/agent-mcp.md"),
+    )
+    .expect("agent-mcp.md");
+    let tools = doc
+        .split("\n## Tools")
+        .nth(1)
+        .and_then(|s| s.split("\n## ").next())
+        .expect("a Tools section");
+    let mut seen = std::collections::BTreeSet::new();
+    for line in tools.lines().filter(|l| l.starts_with("| `")) {
+        let cells: Vec<&str> = line.split(" | ").collect();
+        let names: Vec<&str> = cells[0]
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|n| super::tools::find(n).is_some())
+            .collect();
+        let mut labels: Vec<String> = Vec::new();
+        for n in &names {
+            seen.insert(n.to_string());
+            let l = doc_label(super::tools::find(n).expect("tool").permission);
+            if !labels.contains(&l) {
+                labels.push(l);
+            }
+        }
+        assert_eq!(
+            cells.get(1).copied().unwrap_or(""),
+            labels.join(" / "),
+            "the Permission column of {:?} in docs/src/agent-mcp.md",
+            names
+        );
+    }
+    for t in super::tools::TOOLS {
+        assert!(
+            seen.contains(t.name),
+            "{} is missing from the tool tables of docs/src/agent-mcp.md",
+            t.name
+        );
     }
 }

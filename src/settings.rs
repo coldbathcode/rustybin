@@ -1404,6 +1404,15 @@ impl Settings {
                         m.insert("source".into(), json!(source.as_str()));
                     }
                     m.insert("locked".into(), json!(locked));
+                    // What changing it needs (the console disables what the
+                    // caller may not change).
+                    let mut needs = vec![crate::rbac::Permission::SettingsWrite.name()];
+                    needs.extend(
+                        extra_permissions(spec.key, spec.secret)
+                            .iter()
+                            .map(|p| p.name()),
+                    );
+                    m.insert("needs".into(), json!(needs));
                     m.insert(
                         "stored".into(),
                         json!(
@@ -1475,6 +1484,50 @@ pub fn principal(headers: &HeaderMap, config: &Config) -> String {
     "open".into()
 }
 
+/// Key prefixes of the security groups (egress, proxy, agents, the
+/// console and its sign-in, single sign-on): changing one needs
+/// `settings.security` on top of `settings.write`.
+pub const SECURITY_PREFIXES: &[&str] = &["egress.", "proxy.", "agents.", "console.", "sso."];
+/// Single keys of the security groups (where the AI prompts go).
+pub const SECURITY_KEYS: &[&str] = &["assist.provider", "assist.base_url"];
+
+/// What changing `key` needs on top of the route's `settings.write`:
+/// `settings.security` for a security group, `portal.settings` for a portal
+/// setting, `secrets.write` for a secret (`secret`: the change sets or
+/// clears a secret value).
+pub fn extra_permissions(key: &str, secret: bool) -> Vec<crate::rbac::Permission> {
+    use crate::rbac::Permission as P;
+    let mut out = Vec::new();
+    if SECURITY_KEYS.contains(&key) || SECURITY_PREFIXES.iter().any(|p| key.starts_with(p)) {
+        out.push(P::SettingsSecurity);
+    }
+    if key.starts_with("portal.") {
+        out.push(P::PortalSettings);
+    }
+    if secret {
+        out.push(P::SecretsWrite);
+    }
+    out
+}
+
+/// The body check of a settings change: `Ok` when the caller holds what
+/// every key needs ([`extra_permissions`]), else the refusal naming the
+/// first permission missing.
+#[allow(clippy::result_large_err)]
+pub fn check_keys<'a>(
+    caller: &crate::rbac::Resolved,
+    settings: &Settings,
+    keys: impl IntoIterator<Item = (&'a str, bool)>,
+) -> Result<(), Response> {
+    for (key, secret) in keys {
+        let secret = secret || settings.spec(key).is_some_and(|s| s.secret);
+        for p in extra_permissions(key, secret) {
+            crate::rbac::require(caller, p)?;
+        }
+    }
+    Ok(())
+}
+
 fn refusal(e: UpdateError) -> Response {
     match e {
         UpdateError::Locked(keys) => (
@@ -1498,10 +1551,7 @@ fn refusal(e: UpdateError) -> Response {
     }
 }
 
-async fn get_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
+async fn get_settings(State(state): State<AppState>) -> Response {
     Json(state.settings.view()).into_response()
 }
 
@@ -1603,9 +1653,6 @@ async fn patch_settings(
     extensions: axum::http::Extensions,
     body: Result<Json<Patch>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
     let Json(patch) = match body {
         Ok(b) => b,
         Err(e) => {
@@ -1616,6 +1663,18 @@ async fn patch_settings(
                 .into_response()
         }
     };
+    let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
+    if let Err(resp) = check_keys(
+        &caller,
+        &state.settings,
+        patch
+            .values
+            .keys()
+            .map(|k| (k.as_str(), false))
+            .chain(patch.secrets.keys().map(|k| (k.as_str(), true))),
+    ) {
+        return resp;
+    }
     let who = principal(&headers, &state.config);
     let sign_in = crate::login::enabled(&state.config) && touches_sign_in(&patch);
     if sign_in {
@@ -1652,17 +1711,19 @@ async fn patch_settings(
 async fn delete_setting(
     State(state): State<AppState>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     RoutePath(key): RoutePath<String>,
 ) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
     if state.settings.spec(&key).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": format!("no setting named {key:?}") })),
         )
             .into_response();
+    }
+    let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
+    if let Err(resp) = check_keys(&caller, &state.settings, [(key.as_str(), false)]) {
+        return resp;
     }
     let who = principal(&headers, &state.config);
     // The sign-in is reset here only with the admin token (the operator's
@@ -1707,6 +1768,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Instance settings: every registered key with its value, source and lock state; PATCH changes values and secrets",
         )
+.permission_for(&["GET"], crate::rbac::Permission::SettingsRead).permission_for(&["PATCH"], crate::rbac::Permission::SettingsWrite)
         .description(
             "Admin. A stored value wins over its environment variable, which wins over the default \
              (`source` says which). Secrets are returned as `{set, hint}`, never as values. With \
@@ -1724,6 +1786,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Forget a stored setting: back to its environment variable or default",
         )
+.permission(crate::rbac::Permission::SettingsWrite)
         .example(Example::delete(
             "Reset the console title",
             "/_rustybin/settings/console.title",

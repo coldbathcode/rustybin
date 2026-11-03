@@ -1078,3 +1078,175 @@ async fn an_agent_cannot_lift_its_own_limits() {
     let r = call(&app, &auth, "ci-bot", "set_health").await;
     assert_eq!(r["isError"], true);
 }
+/// Every tool of 0.4 with its right and whether it was read-only.
+const OLD_RIGHTS: &[(&str, &str, bool)] = &[
+    ("diagnose_instance", "admin", true),
+    ("get_instance", "read", true),
+    ("find_endpoints", "read", true),
+    ("get_health", "read", true),
+    ("set_health", "admin", false),
+    ("get_usage", "read", true),
+    ("get_key_usage", "admin", true),
+    ("reset_flaky", "read", false),
+    ("list_mocks", "read", true),
+    ("get_mock", "read", true),
+    ("preview_spec", "read", true),
+    ("get_mock_spec", "read", true),
+    ("create_mock", "manage", false),
+    ("update_mock", "manage", false),
+    ("set_operation", "manage", false),
+    ("test_rules", "read", true),
+    ("check_mock", "read", true),
+    ("deploy_mock", "manage", false),
+    ("rollback_mock", "manage", false),
+    ("set_mock_enabled", "manage", false),
+    ("duplicate_mock", "manage", false),
+    ("delete_mock", "manage", false),
+    ("sample_request", "read", true),
+    ("validate_payload", "read", true),
+    ("export_collection", "read", true),
+    ("get_mock_data", "read", true),
+    ("clear_mock_data", "manage", false),
+    ("get_mock_traffic", "traffic", true),
+    ("clear_traffic", "manage", false),
+    ("reload_mocks", "admin", false),
+    ("list_requests", "traffic", true),
+    ("get_request", "traffic", true),
+    ("wait_for_requests", "traffic", true),
+    ("clear_requests", "admin", false),
+    ("create_bin", "read", false),
+    ("get_bin", "traffic", true),
+    ("list_push_notifications", "traffic", true),
+    ("try_request", "read", true),
+    ("issue_token", "read", true),
+    ("get_visit", "visitor", true),
+    ("extend_visit", "visitor", false),
+    ("list_visits", "operator", true),
+    ("end_visit", "operator", false),
+    ("pause_self_service", "operator", false),
+    ("resume_self_service", "operator", false),
+    ("harness_status", "read", true),
+    ("validate_scenario", "read", true),
+    ("list_scenarios", "read", true),
+    ("get_scenario", "read", true),
+    ("create_run", "harness", false),
+    ("create_cluster", "harness", false),
+    ("list_cluster_nodes", "read", true),
+    ("get_leader", "read", true),
+    ("export_upstreams", "read", true),
+    ("start_run", "harness", false),
+    ("list_patterns", "read", true),
+    ("preview_scenario", "read", true),
+    ("save_scenario", "harness", false),
+    ("update_run", "harness", false),
+    ("list_runs", "read", true),
+    ("get_run", "read", true),
+    ("stop_run", "harness", false),
+    ("get_run_report", "read", true),
+    ("harness_stop", "harness", false),
+    ("get_settings", "admin", true),
+    ("update_settings", "admin", false),
+    ("check_egress", "admin", true),
+    ("assist_status", "read", true),
+    ("list_assist_models", "read", true),
+    ("load_assist_models", "admin", false),
+    ("assist_usage", "admin", true),
+    ("test_assist", "admin", true),
+    ("run_assist_task", "read", true),
+    ("generate_spec", "manage", false),
+    ("generate_examples", "manage", false),
+    ("edit_spec_with_ai", "manage", false),
+    ("list_mcp_servers", "read", true),
+    ("mcp_call", "read", false),
+    ("run_mcp_checks", "read", false),
+    ("list_mcp_check_runs", "read", true),
+    ("list_mcp_connections", "read", true),
+    ("list_registry_servers", "read", true),
+    ("set_registry_scenario", "admin", false),
+    ("browse_registry", "read", true),
+    ("validate_server_json", "read", true),
+    ("unpublish_registry_server", "admin", false),
+    ("list_portal_items", "read", true),
+    ("publish_portal_item", "manage", false),
+    ("unpublish_portal_item", "manage", false),
+    ("set_portal_branding", "admin", false),
+    ("get_portal_insights", "read", true),
+    ("export_config", "read", true),
+    ("diff_config", "admin", true),
+    ("apply_config", "admin", false),
+    ("git_status", "admin", true),
+    ("git_init", "admin", false),
+    ("git_commit", "admin", false),
+    ("git_push", "admin", false),
+    ("git_pull", "admin", false),
+    ("git_resolve", "admin", false),
+    ("git_deploy_key", "admin", false),
+    ("list_agents", "admin", true),
+    ("get_agent", "admin", true),
+    ("set_agent_rights", "admin", false),
+    ("revoke_agent", "admin", false),
+    ("restore_agent", "admin", false),
+    ("end_agent_sessions", "admin", false),
+    ("list_sessions", "admin", true),
+    ("end_session", "admin", false),
+    ("list_checkpoints", "read", true),
+    ("save_checkpoint", "admin", false),
+    ("restore_checkpoint", "admin", false),
+    ("delete_checkpoint", "admin", false),
+    ("list_tests", "admin", true),
+    ("save_test", "admin", false),
+    ("delete_test", "admin", false),
+    ("run_tests", "admin", false),
+    ("list_gateway_scenarios", "read", true),
+    ("start_gateway_scenario", "admin", false),
+    ("get_gateway_scenario_run", "read", true),
+    ("check_gateway_scenario", "admin", false),
+    ("end_gateway_scenario", "admin", false),
+    ("list_test_runs", "admin", true),
+    ("get_test_run", "admin", true),
+    ("clear_test_runs", "admin", false),
+    ("list_test_schedules", "admin", true),
+    ("save_test_schedule", "admin", false),
+    ("delete_test_schedule", "admin", false),
+    ("run_test_schedule", "admin", false),
+    ("get_mock_revision", "read", true),
+    ("list_repository_checkpoints", "admin", true),
+];
+
+/// The 0.4 ceilings, by right: `read-only` a read-only tool that is not a
+/// traffic one, `traffic` any read-only tool, `manage` anything but the
+/// admin, operator and harness tools.
+fn old_ceiling_allows(c: Ceiling, right: &str, read_only: bool) -> bool {
+    match c {
+        Ceiling::ReadOnly => read_only && right != "traffic",
+        Ceiling::Traffic => read_only,
+        Ceiling::Manage => !matches!(right, "admin" | "operator" | "harness"),
+        Ceiling::Full => true,
+    }
+}
+
+/// The ceilings now read the tools' permissions: each one lets an agent use
+/// exactly the tools it did in 0.4 (so their counts do not change either).
+#[test]
+fn ceilings_keep_their_tool_counts() {
+    assert_eq!(TOOLS.len(), OLD_RIGHTS.len(), "a tool was added or removed");
+    for c in [
+        Ceiling::ReadOnly,
+        Ceiling::Traffic,
+        Ceiling::Manage,
+        Ceiling::Full,
+    ] {
+        let mut old = 0;
+        let mut new = 0;
+        for (name, right, ro) in OLD_RIGHTS {
+            let d = def(name);
+            assert_eq!(d.read_only, *ro, "{name}: read_only changed");
+            let was = old_ceiling_allows(c, right, *ro);
+            let is = c.allows(d);
+            assert_eq!(was, is, "{name} under the {} ceiling", c.as_str());
+            old += usize::from(was);
+            new += usize::from(is);
+        }
+        assert_eq!(old, new, "{}", c.as_str());
+    }
+}

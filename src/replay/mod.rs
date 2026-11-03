@@ -820,10 +820,7 @@ fn refuse(status: StatusCode, message: impl Into<String>) -> Response {
 }
 
 /// Every read is admin: a test may hold a captured request's body.
-async fn list_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
+async fn list_handler(State(state): State<AppState>) -> Response {
     Json(json!({
         "tests": state.saved_tests.views(),
         "max_tests": MAX_TESTS,
@@ -835,12 +832,8 @@ async fn save_handler(
     State(state): State<AppState>,
     Session(session): Session,
     key: Option<axum::Extension<crate::keys::KeyContext>>,
-    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
     let body: SaveBody = match serde_json::from_slice(&body) {
         Ok(b) => b,
         Err(e) => return refuse(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
@@ -854,14 +847,7 @@ async fn save_handler(
     }
 }
 
-async fn get_handler(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
+async fn get_handler(State(state): State<AppState>, Path(name): Path<String>) -> Response {
     match state.saved_tests.view_of(&name) {
         Some(v) => Json(v).into_response(),
         None => refuse(StatusCode::NOT_FOUND, format!("no test named {name:?}")),
@@ -889,12 +875,8 @@ pub fn test_from_value(name: &str, mut v: Value) -> Result<SavedTest, String> {
 async fn put_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
     let v: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return refuse(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
@@ -909,14 +891,7 @@ async fn put_handler(
     }
 }
 
-async fn delete_handler(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
+async fn delete_handler(State(state): State<AppState>, Path(name): Path<String>) -> Response {
     match state.saved_tests.delete(&name) {
         Ok(true) => Json(json!({ "deleted": name })).into_response(),
         Ok(false) => refuse(StatusCode::NOT_FOUND, format!("no test named {name:?}")),
@@ -958,9 +933,6 @@ async fn run_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
     let body: run::RunBody = if body.is_empty() {
         run::RunBody::default()
     } else {
@@ -995,14 +967,7 @@ struct PageQuery {
 
 /// `GET /_rustybin/tests/runs`: newest first, `limit` (20, at most 100)
 /// and `cursor` (the `next_cursor` of the page before).
-async fn runs_handler(
-    State(state): State<AppState>,
-    Query(q): Query<PageQuery>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
+async fn runs_handler(State(state): State<AppState>, Query(q): Query<PageQuery>) -> Response {
     Json(runs_page(&state, q.limit, q.cursor.as_deref())).into_response()
 }
 
@@ -1020,9 +985,6 @@ pub fn runs_page(state: &AppState, limit: Option<usize>, cursor: Option<&str>) -
 }
 
 async fn clear_runs_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
     let n = state.saved_tests.history.clear();
     tracing::info!(
         principal = %crate::settings::principal(&headers, &state.config),
@@ -1035,11 +997,7 @@ async fn run_one_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(q): Query<FormatQuery>,
-    headers: HeaderMap,
 ) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
     let junit = match junit_wanted(&q) {
         Ok(j) => j,
         Err(m) => return refuse(StatusCode::BAD_REQUEST, m),
@@ -1054,10 +1012,7 @@ async fn run_one_handler(
     }
 }
 
-async fn export_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
+async fn export_handler(State(state): State<AppState>) -> Response {
     (
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
         hurl::export(&state.saved_tests.list()),
@@ -1097,6 +1052,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Saved tests: list them, or save one from a captured request or a written one (admin)",
         )
+.permission_for(&["GET"], crate::rbac::Permission::TestsRead).permission_for(&["POST"], crate::rbac::Permission::TestsWrite)
         .example(Example::get("Saved tests", LIST_PATH)),
         Endpoint::new(
             ONE_PATH,
@@ -1104,6 +1060,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "A saved test: read, replace or delete it (admin)",
         )
+.permission_for(&["GET"], crate::rbac::Permission::TestsRead).permission_for(&["PUT", "DELETE"], crate::rbac::Permission::TestsWrite)
         .example(Example::get("A saved test", "/_rustybin/tests/pet-1").expect_status(404)),
         Endpoint::new(
             RUN_PATH,
@@ -1111,6 +1068,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Run saved tests in process or through their gateway; JSON or JUnit (?format=junit) (admin)",
         )
+.permission(crate::rbac::Permission::TestsRun)
         .example(Example::post("Run every test", RUN_PATH).json("{}")),
         Endpoint::new(
             RUNS_PATH,
@@ -1118,6 +1076,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "The history of saved-test runs, newest first (limit, cursor); DELETE forgets every run (admin)",
         )
+.permission_for(&["GET"], crate::rbac::Permission::TestsRead).permission_for(&["DELETE"], crate::rbac::Permission::TestsWrite)
         .example(Example::get("Test run history", RUNS_PATH)),
         Endpoint::new(
             RUN_ONE_PATH,
@@ -1125,6 +1084,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "One kept test run: each test's result, the change since the previous run; JSON or JUnit (?format=junit) (admin)",
         )
+.permission(crate::rbac::Permission::TestsRead)
         .example(
             Example::get("A test run", "/_rustybin/tests/runs/20261103T101500000Z-abc123")
                 .expect_status(404),
@@ -1135,6 +1095,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "The saved tests as a Hurl file, assertions included, for CI",
         )
+.permission(crate::rbac::Permission::TestsRead)
         .example(Example::get("Export as Hurl", EXPORT_PATH)),
     ];
     out.extend(schedule::catalog());

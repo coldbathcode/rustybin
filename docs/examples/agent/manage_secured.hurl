@@ -57,5 +57,6 @@ HTTP 200
 [Asserts]
 jsonpath "$.result.structuredContent.caller.admin" == true
 jsonpath "$.result.structuredContent.control_auth" == "jwt"
-jsonpath "$.result.structuredContent.caller.rights" contains "admin"
+jsonpath "$.result.structuredContent.caller.permissions" contains "settings.write"
+jsonpath "$.result.structuredContent.caller.roles" contains "admin"
 # ANCHOR_END: secured_admin

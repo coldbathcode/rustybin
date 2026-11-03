@@ -1453,6 +1453,7 @@ pub fn catalog() -> Vec<Endpoint> {
         category::CONTROL,
         "Plan, limits and current usage (requests, egress, in flight, streams)",
     )
+    .permission(crate::rbac::Permission::InstanceRead)
     .description(
         "Never limited. With session scope (the free plan) it reports the caller's own \
          counters (X-Rustybin-Session header, else client IP). Plan none reports active false. \

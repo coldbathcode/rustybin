@@ -15,6 +15,7 @@ import { jsonView } from '../lib/format.js';
 import { SERVER, send, getJson, sseParser, readText } from '../lib/http.js';
 import { scenarioForm, toYaml } from '../lib/scenarioform.js';
 import * as settings from '../lib/settings.js';
+import * as perms from '../lib/perms.js';
 
 const PREFIX = '/_rustybin/harness';
 
@@ -170,7 +171,7 @@ export default {
     const logEl = h('div', { class: 'stack-sm small', id: 'harness-log' });
     const reportEl = h('div', null, h('p', { class: 'muted small' }, 'The report appears when a run finishes.'));
     const killMsg = h('div');
-    const killBtn = h('button', { class: 'btn sm', type: 'button', id: 'harness-kill', onclick: killSwitch }, 'Kill switch: stop all load');
+    const killBtn = perms.guard(h('button', { class: 'btn sm', type: 'button', id: 'harness-kill', onclick: killSwitch }, 'Kill switch: stop all load'), 'harness.run');
     const clusterEl = h('div');
     const clusterCard = card('Cluster', { hint: 'GET /_rustybin/harness/clusters/{id}' }, clusterEl);
     clusterCard.hidden = true;
@@ -310,7 +311,7 @@ export default {
         parts.push(h('div', { class: 'stack-sm' },
           h('p', { class: 'small' }, 'This node is a coordinator: create a cluster, then start client and server nodes with its join URL and token. Its client nodes share the rate by capacity and its server nodes are the gateway\'s upstreams.'),
           h('div', { class: 'row' }, idIn, h('span', { class: 'small' }, 'wait for'), minC, h('span', { class: 'small' }, 'client(s) and'), minS, h('span', { class: 'small' }, 'server(s)'),
-            h('button', { class: 'btn sm', type: 'button', id: 'harness-create-cluster', onclick: create }, 'Create cluster')), msg));
+            perms.guard(h('button', { class: 'btn sm', type: 'button', id: 'harness-create-cluster', onclick: create }, 'Create cluster'), 'harness.cluster')), msg));
       }
       replace(clusterEl, h('div', { class: 'stack' }, ...parts));
     }
@@ -385,9 +386,9 @@ export default {
       }
       replace(builderEl, h('div', { class: 'stack' },
         h('div', { class: 'row' }, builtinSel, modes, h('span', { class: 'grow' }),
-          h('button', { class: 'btn', type: 'button', id: 'harness-save', onclick: saveAs }, 'Save as'),
+          perms.guard(h('button', { class: 'btn', type: 'button', id: 'harness-save', onclick: saveAs }, 'Save as'), 'harness.run'),
           h('button', { class: 'btn', type: 'button', id: 'harness-validate', onclick: () => validate(false) }, 'Validate'),
-          h('button', { class: 'btn primary', type: 'button', id: 'harness-run', onclick: () => validate(true) }, 'Run')),
+          perms.guard(h('button', { class: 'btn primary', type: 'button', id: 'harness-run', onclick: () => validate(true) }, 'Run'), 'harness.run')),
         summaryEl, problemsEl, previewEl, formPane, yamlPane));
       schedulePreview();
     }
@@ -508,7 +509,7 @@ export default {
       replace(runEl, h('div', { class: 'stack-sm' },
         h('div', { class: 'row' }, h('code', null, r.run_id), badge(r.state, active ? 'ok' : 'outline'), h('span', { class: 'muted small' }, r.scenario),
           r.saturated ? badge('client saturated', 'err') : null, h('span', { class: 'grow' }),
-          active ? h('button', { class: 'btn sm', type: 'button', id: 'harness-stop', onclick: stopRun }, 'Stop') : null),
+          active ? perms.guard(h('button', { class: 'btn sm', type: 'button', id: 'harness-stop', onclick: stopRun }, 'Stop'), 'harness.run') : null),
         h('div', { class: 'progress', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(Math.round((r.progress || 0) * 100)) }, h('div', { style: { width: Math.round((r.progress || 0) * 100) + '%' } })),
         h('div', { class: 'tiles' },
           tile('Elapsed', `${num(r.elapsed_secs, 1)} / ${num(r.planned_secs)} s`),
@@ -664,7 +665,7 @@ export default {
                 h('button', { class: 'btn sm', type: 'button', onclick: () => change({ layer: l.name, skip_stage: true }) }, 'Skip'))));
           }))) : null,
         h('div', { class: 'row' }, h('span', { class: 'small' }, 'Set'), setPath, setValue,
-          h('button', { class: 'btn sm', type: 'button', onclick: applySet }, 'Apply'))));
+          perms.guard(h('button', { class: 'btn sm', type: 'button', onclick: applySet }, 'Apply'), 'harness.run'))));
       fillControlCells(layers);
     }
 

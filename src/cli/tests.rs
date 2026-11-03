@@ -324,6 +324,7 @@ struct Instance {
     server: crate::server::RunningServer,
     url: String,
     home: tempfile::TempDir,
+    state: AppState,
 }
 
 async fn instance() -> Instance {
@@ -339,11 +340,17 @@ async fn instance_with(f: impl FnOnce(&mut Config)) -> Instance {
     config.control_auth = ControlAuth::Password;
     config.state_dir = Some(home.path().join("state"));
     config.egress_allow_loopback = true;
-    let server = crate::server::start_with_state(AppState::for_tests(config))
+    let state = AppState::for_tests(config);
+    let server = crate::server::start_with_state(state.clone())
         .await
         .expect("server starts");
     let url = format!("http://{}", server.http_addr);
-    Instance { server, url, home }
+    Instance {
+        server,
+        url,
+        home,
+        state,
+    }
 }
 
 impl Instance {
@@ -815,6 +822,49 @@ async fn git_commit_takes_checkpoints_and_restore_reads_the_repository() {
         (v["from"].clone(), v["dry_run"].clone()),
         (json!("git"), json!(true)),
         "{v}"
+    );
+    inst.server.shutdown();
+}
+
+/// A command the credential may not run prints the permission it needs and
+/// exits 3.
+#[tokio::test]
+async fn a_missing_permission_exits_3_and_names_it() {
+    let inst = instance().await;
+    let hash = crate::login::hash_password("vera-secret-1").expect("hash");
+    inst.state
+        .users
+        .add(crate::rbac::NewUser::new("vera", &["viewer"]), Some(hash))
+        .expect("user");
+    let (code, out) = inst
+        .run(
+            Some("vera-secret-1\n"),
+            &[
+                "login",
+                "--url",
+                &inst.url,
+                "--user",
+                "vera",
+                "--password-stdin",
+            ],
+        )
+        .await;
+    assert_eq!(code, 0, "{out}");
+    let (code, _, message) = inst.run_full(None, &["mocks", "list"]).await;
+    assert_eq!(code, 0, "{message}");
+    let (code, _, message) = inst
+        .run_full(None, &["mocks", "delete", "petstore", "--yes"])
+        .await;
+    assert_eq!(code, 3, "{message}");
+    assert!(
+        message.starts_with("permission_required: mocks.delete"),
+        "{message}"
+    );
+    let (code, _, message) = inst.run_full(None, &["requests", "list"]).await;
+    assert_eq!(code, 3, "{message}");
+    assert!(
+        message.starts_with("permission_required: traffic.read"),
+        "{message}"
     );
     inst.server.shutdown();
 }

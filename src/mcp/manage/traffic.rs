@@ -217,7 +217,9 @@ pub fn get_request(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
         Some(k) => e.key_id.as_deref() == Some(k.as_str()),
         None if access.shared_mode => true,
         None => {
-            !access.public_mode || access.is_admin() || (session.is_some() && e.session == session)
+            !access.public_mode
+                || access.has(crate::rbac::Permission::TrafficClear)
+                || (session.is_some() && e.session == session)
         }
     });
     match entry {

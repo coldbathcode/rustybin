@@ -257,7 +257,7 @@ pub async fn start(
             ),
         ));
     };
-    svc.require_admin()
+    svc.need(crate::rbac::Permission::ScenariosRun)
         .map_err(|e| Refused(e.status, e.message()))?;
     let full = || {
         Refused::new(
@@ -818,8 +818,11 @@ pub async fn restore_preflight(
 // ── Routes ──────────────────────────────────────────────────────────
 
 /// Does the caller hold admin rights (and see a run's key)?
+/// Does the caller see a run's credential-injection key? Who may start
+/// and end runs (`scenarios.run`).
 fn reveals(state: &AppState, headers: &HeaderMap, extensions: &Extensions) -> bool {
-    crate::mocks::selfservice::caller(state, headers, extensions).admin
+    crate::control_auth::caller_of(state, headers, extensions)
+        .has(crate::rbac::Permission::ScenariosRun)
 }
 
 async fn list_handler(
@@ -839,9 +842,6 @@ async fn start_handler(
     extensions: Extensions,
     uri: Uri,
 ) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
     let svc = Svc::from_request(&state, &headers, &extensions, &uri);
     match start(&state, svc, &owner, &id).await {
         Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
@@ -867,12 +867,8 @@ async fn check_handler(
     State(state): State<AppState>,
     Session(owner): Session,
     Path((id, run)): Path<(String, String)>,
-    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
     let body: CheckBody = match serde_json::from_slice(&body) {
         Ok(b) => b,
         Err(e) => {
@@ -890,11 +886,7 @@ async fn end_handler(
     State(state): State<AppState>,
     Session(owner): Session,
     Path((id, run)): Path<(String, String)>,
-    headers: HeaderMap,
 ) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
     match end(&state, &owner, &id, &run) {
         Ok(v) => Json(v).into_response(),
         Err(e) => e.into_response(),
@@ -917,6 +909,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Gateway scenarios (retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits, CORS, header transformation) and the caller's runs",
         )
+.permission(crate::rbac::Permission::InstanceRead)
         .example(Example::get("Scenarios", LIST_PATH)),
         Endpoint::new(
             RUNS_PATH,
@@ -924,6 +917,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Start a scenario run: prepare its upstream and get the gateway setup (admin)",
         )
+.permission(crate::rbac::Permission::ScenariosRun)
         .example(
             Example::post("Start a caching run", "/_rustybin/scenarios/caching/runs")
                 .expect_status(201),
@@ -934,6 +928,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "A scenario run with its setup and last verdict; DELETE ends it and removes what it created (admin)",
         )
+.permission_for(&["GET"], crate::rbac::Permission::InstanceRead).permission_for(&["DELETE"], crate::rbac::Permission::ScenariosRun)
         .example(
             Example::get("A run", "/_rustybin/scenarios/caching/runs/0000")
                 .skip_check("needs a run id"),
@@ -944,6 +939,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Send the run's test traffic through the gateway and compare what the client got with what reached the upstream (admin; egress purpose scenario)",
         )
+.permission(crate::rbac::Permission::ScenariosRun)
         .example(
             Example::post(
                 "Check through the gateway",

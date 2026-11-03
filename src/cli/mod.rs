@@ -14,8 +14,9 @@
 //! and the `mcp-stdio` bridge keep their own modules; `rustybin harness` with
 //! `--remote` or a remote verb lands here.
 //!
-//! Exit codes: 0, 1 a refused or failed operation, 2 usage, 3 the network
-//! or the credentials.
+//! Exit codes: 0, 1 a refused or failed operation, 2 usage, 3 the network,
+//! the credentials, or a permission the credential lacks (the message says
+//! `permission_required: <permission>`).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -80,6 +81,9 @@ pub enum Fail {
     Failed(String),
     /// Not signed in, or the credential was refused (3).
     Auth(String),
+    /// The credential lacks a permission the route needs (3): the message
+    /// starts `permission_required: <permission>`.
+    Permission(String),
     /// The instance could not be reached (3).
     Network(String),
 }
@@ -89,13 +93,17 @@ impl Fail {
         match self {
             Fail::Usage(_) => 2,
             Fail::Failed(_) => 1,
-            Fail::Auth(_) | Fail::Network(_) => 3,
+            Fail::Auth(_) | Fail::Permission(_) | Fail::Network(_) => 3,
         }
     }
 
     pub fn message(&self) -> &str {
         match self {
-            Fail::Usage(m) | Fail::Failed(m) | Fail::Auth(m) | Fail::Network(m) => m,
+            Fail::Usage(m)
+            | Fail::Failed(m)
+            | Fail::Auth(m)
+            | Fail::Permission(m)
+            | Fail::Network(m) => m,
         }
     }
 }
@@ -580,15 +588,17 @@ pub fn reference_markdown() -> String {
          the [mocks CLI](mocks/cli.md) covers the offline `rustybin mock` commands.\n\n\
          `rustybin <noun> <verb> [args] [flags]`. Every command takes the global flags; \
          `--json` prints the instance's answer as it is, `--yes` skips a confirmation. \
-         Exit codes: `0` done, `1` refused or failed, `2` usage, `3` the network or the \
-         credentials.\n\n| Flag | Meaning |\n|---|---|\n",
+         Exit codes: `0` done, `1` refused or failed, `2` usage, `3` the network, the \
+         credentials, or a permission the credential lacks (`permission_required: <permission>`). \
+         The **Needs** column names the permission each command needs (the routes it calls \
+         declare it).\n\n| Flag | Meaning |\n|---|---|\n",
     );
     for f in GLOBAL_FLAGS {
         s.push_str(&format!("| `{}` | {} |\n", f.name, f.help));
     }
     for (noun, summary) in NOUNS {
         s.push_str(&format!(
-            "\n## {noun}\n\n{summary}\n\n| Command | What it does | Calls |\n|---|---|---|\n"
+            "\n## {noun}\n\n{summary}\n\n| Command | What it does | Calls | Needs |\n|---|---|---|---|\n"
         ));
         for c in COMMANDS.iter().filter(|c| c.noun == *noun) {
             let routes = c
@@ -610,11 +620,12 @@ pub fn reference_markdown() -> String {
                 )
             };
             s.push_str(&format!(
-                "| `rustybin {}` | {}{} | {} |\n",
+                "| `rustybin {}` | {}{} | {} | {} |\n",
                 c.line().replace('|', "\\|"),
                 c.summary.replace('|', "\\|"),
                 flags.replace('|', "\\|"),
-                routes
+                routes,
+                needs_of(c)
             ));
         }
         let examples: Vec<&Cmd> = COMMANDS
@@ -631,6 +642,32 @@ pub fn reference_markdown() -> String {
     }
     s.push_str("\n## Not covered by a command\n\nThe management MCP endpoint (`rustybin mcp-stdio` bridges a client to it), the agent sign-in (OAuth) routes a browser walks, the harness cluster's node-to-node routes, a request bin's capture URLs and a mock's data plane.\n");
     s
+}
+
+/// The permissions a command needs: what the routes it calls declare
+/// (`open` and `signed in` for routes without one), in call order.
+pub fn needs_of(c: &Cmd) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for (m, p) in c.routes {
+        let path = p.split('?').next().unwrap_or(p);
+        let need = crate::catalog::control_route(path)
+            .or_else(|| crate::catalog::control_route_for_path(path))
+            .and_then(|e| e.need(m));
+        if let Some(n) = need {
+            let label = match n {
+                crate::rbac::Need::Perm(p) => format!("`{}`", p.name()),
+                other => other.label().to_string(),
+            };
+            if !out.contains(&label) {
+                out.push(label);
+            }
+        }
+    }
+    if out.is_empty() {
+        "(none)".to_string()
+    } else {
+        out.join(", ")
+    }
 }
 
 /// A shell completion script.

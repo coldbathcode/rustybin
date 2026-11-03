@@ -39,10 +39,10 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
-use super::access::Right;
 use super::tools::{ToolDef, TOOLS};
 use crate::limits::Clock;
 use crate::mcp::sessions::CancelToken;
+use crate::rbac::Permission;
 use crate::settings::{Kind, Settings, Spec};
 use crate::state::AppState;
 
@@ -104,15 +104,45 @@ impl Ceiling {
         }
     }
 
+    /// Does the ceiling let an agent use `def`? By the tool's permission
+    /// and annotations: `read-only` is a read-only tool that does not need
+    /// `traffic.read`, `traffic` any read-only tool, `manage` a tool whose
+    /// permission is in [`MANAGE_CEILING`] (or a visit's own), `full`
+    /// anything (the tool counts of the 0.4 ceilings,
+    /// `ceilings_keep_their_tool_counts`).
     pub fn allows(self, def: &ToolDef) -> bool {
         match self {
-            Self::ReadOnly => def.read_only && def.right != Right::Traffic,
+            Self::ReadOnly => {
+                def.read_only && def.permission.permission() != Some(Permission::TrafficRead)
+            }
             Self::Traffic => def.read_only,
-            Self::Manage => !matches!(def.right, Right::Admin | Right::Operator | Right::Harness),
+            Self::Manage => def
+                .permission
+                .permission()
+                .is_none_or(|p| MANAGE_CEILING.contains(&p)),
             Self::Full => true,
         }
     }
 }
+
+/// What the `manage` ceiling lets an agent use: the reads, captured
+/// traffic, and changes to mocks (theirs on a self-service instance),
+/// AI-built mocks and portal publishing; nothing instance-wide (settings,
+/// documents, source control, tests, checkpoints, agents, sessions, the
+/// visit operator tools, load test runs).
+pub const MANAGE_CEILING: &[Permission] = &[
+    Permission::InstanceRead,
+    Permission::MocksRead,
+    Permission::MocksWrite,
+    Permission::MocksDelete,
+    Permission::MocksData,
+    Permission::TrafficRead,
+    Permission::HarnessRead,
+    Permission::AssistUse,
+    Permission::AssistJobs,
+    Permission::McpInspect,
+    Permission::PortalPublish,
+];
 
 // ── Credentials ─────────────────────────────────────────────────────
 
@@ -1135,7 +1165,7 @@ impl Agents {
                     json!({
                         "name": d.name,
                         "title": d.title,
-                        "right": d.right.as_str(),
+                        "permission": d.permission.label(),
                         "read_only": d.read_only,
                         "allowed": eff.allows(d),
                     })

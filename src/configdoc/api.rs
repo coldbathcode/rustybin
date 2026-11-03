@@ -34,14 +34,7 @@ pub struct ExportQuery {
     secrets: Option<String>,
 }
 
-async fn export(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<ExportQuery>,
-) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
+async fn export(State(state): State<AppState>, Query(q): Query<ExportQuery>) -> Response {
     let secrets = match q.secrets.as_deref() {
         None => SecretsMode::Refs,
         Some(s) => match SecretsMode::parse(s) {
@@ -96,11 +89,9 @@ struct ApplyBody {
 async fn apply(
     State(state): State<AppState>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
     let body: ApplyBody = match serde_json::from_slice(&body) {
         Ok(b) => b,
         Err(e) => {
@@ -114,6 +105,10 @@ async fn apply(
         Ok(f) => f,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
+    let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
+    if let Err(resp) = super::check_sections(&caller, &state.settings, &file) {
+        return resp;
+    }
     let opts = ApplyOptions {
         prune: body.prune,
         dry_run: body.dry_run,
@@ -155,6 +150,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "The whole instance as rustybin.yaml (admin)",
         )
+        .permission(crate::rbac::Permission::ConfigExport)
         .description(
             "Version 2 of the configuration file: the instance (title, console user), the stored \
              settings, secret references (never values), every mock with its spec, registry \
@@ -173,6 +169,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Apply a rustybin.yaml document (admin)",
         )
+        .permission(crate::rbac::Permission::ConfigApply)
         .description(
             "{document, prune, dry_run}: the document as YAML or JSON text or a JSON object. A \
              section that is absent is left alone; with prune, a present section is the whole \
@@ -192,6 +189,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "JSON Schema of rustybin.yaml (version 2)",
         )
+        .permission(crate::rbac::Permission::InstanceRead)
         .example(Example::get("Config schema", SCHEMA_PATH)),
     ]
 }

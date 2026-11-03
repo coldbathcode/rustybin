@@ -482,6 +482,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Route catalogue as JSON (paths, methods, categories, examples)",
         )
+        .permission(crate::rbac::Permission::InstanceRead)
         .example(Example::get("Catalogue", "/_rustybin/catalog")),
         Endpoint::new(
             "/_rustybin/status",
@@ -489,6 +490,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Uptime, health state and inspector counters",
         )
+        .permission(crate::rbac::Permission::InstanceRead)
         .example(Example::get("Status", "/_rustybin/status")),
     ]
 }

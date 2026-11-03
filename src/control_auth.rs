@@ -1,31 +1,30 @@
-//! Control-plane authentication (`RUSTYBIN_CONTROL_AUTH`).
+//! Control-plane authentication (`RUSTYBIN_CONTROL_AUTH`) and the one
+//! permission check.
 //!
 //! Modes:
 //! - `password` (default): the console signs in with a user name and
 //!   password (`crate::login`, `rustybin` / `rustybin` out of the box) for a
 //!   control token; the admin token and Ed25519 control JWTs are accepted
 //!   as in `jwt` mode. `POST /_rustybin/login` is the one open route.
-//! - `open`: the control plane is reachable without credentials
-//!   (individual mutations still follow [`crate::admin::require_admin`]).
-//! - `token`: every `/_rustybin/*` route except `/_rustybin/ready` needs the
-//!   admin token (`Authorization: Bearer` or `X-Rustybin-Admin-Token`).
+//! - `open`: the control plane is reachable without credentials; a caller
+//!   without the admin token holds every permission when there is no admin
+//!   token outside public mode, else the anonymous reads
+//!   (`crate::rbac::need::ANONYMOUS`).
+//! - `token`: every `/_rustybin/*` route except the open ones needs the
+//!   admin token (`Authorization: Bearer` or `X-Rustybin-Admin-Token`),
+//!   which is every permission.
 //! - `jwt`: like `token`, and an Ed25519 (EdDSA) JWT signed by the key in
 //!   `RUSTYBIN_CONTROL_JWT_PUBLIC_KEY` is accepted too. It must carry
 //!   `aud` == `RUSTYBIN_CONTROL_JWT_AUDIENCE` (default: the instance id) and
-//!   `exp`. The optional `scope` claim (space separated string or array)
-//!   grants:
-//!   - `inspector`: read-only `/_rustybin/requests*`;
-//!   - `console` (the default when `scope` is absent): read-only
-//!     `/_rustybin/*`;
-//!   - `harness`: the harness control routes (`/_rustybin/harness*`),
-//!     reads and mutations (runs send load to allowlisted targets);
-//!   - `admin`: everything, including mutations.
+//!   `exp`. Its permissions come from the `scope` claim (the 0.4 scopes as
+//!   roles, see `crate::rbac::scope_role`), `rb_roles` and `rb_perms`.
 //!
-//! Mutations (any method other than GET, HEAD, OPTIONS) need the admin token
-//! or the `admin` scope. The exceptions are POST routes that only compute an
-//! answer (previewing a mock spec, validating a body against a mock
-//! operation, testing a mock's rules): the `console` scope may call them. Data-plane routes are never
-//! affected.
+//! Two steps: [`enforce`] (a layer outside routing) authenticates, `401`
+//! without a credential the instance accepts; [`check_route`] (a route
+//! layer, so it sees the matched route template) checks the permission the
+//! catalogue declares for the route and method before the handler runs,
+//! `403 {"reason": "permission_required", "permission": ...}` naming what is
+//! missing. Data-plane routes are never affected.
 //!
 //! The web console (`/ui/*`) is a set of static files with no instance data:
 //! it is served without credentials so a browser can load it and pick up a
@@ -33,9 +32,10 @@
 //! request it makes to `/_rustybin/*` carries that token.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
-use axum::extract::{Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::extract::{MatchedPath, Request, State};
+use axum::http::{header, Extensions, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -45,6 +45,7 @@ use serde_json::{json, Value};
 
 use crate::config::Config;
 use crate::control::CONTROL_PREFIX;
+use crate::rbac::{Need, Resolved};
 use crate::state::AppState;
 
 /// Readiness probe path, never authenticated.
@@ -95,7 +96,9 @@ impl ControlAuth {
     pub const NAMES: &'static str = "password, open, token or jwt";
 }
 
-/// What an authenticated caller may do on the control plane.
+/// The 0.4 scopes a caller's permissions amount to (answers, logs, the
+/// OAuth consent cap). Never a decision: routes and tools check
+/// permissions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Grant {
     /// Admin token or `admin` scope: everything.
@@ -142,45 +145,53 @@ impl Grant {
         }
         v
     }
+}
 
-    /// May this grant call `method path`?
-    pub fn allows(&self, method: &Method, path: &str) -> bool {
-        if self.admin {
-            return true;
-        }
-        // The management MCP server checks every tool against the grant
-        // itself (read-only tools for the console and inspector scopes).
-        if path == crate::mcp::manage::MANAGE_PATH {
-            return true;
-        }
-        // The OAuth consent API caps what it grants at the approver's own
-        // grant (any scope may approve what it holds).
-        if crate::control_oauth::is_consent_path(path) {
-            return true;
-        }
-        // The harness: reads for the console and harness scopes, runs and
-        // stops only for the harness scope (and admin).
-        if crate::harness::is_harness_path(path) {
-            return self.harness || (is_safe(method) && self.console);
-        }
-        if !is_safe(method) {
-            // The MCP inspector's relay sessions: the console ends its own.
-            if method == Method::DELETE && crate::mcp::inspector::is_relay_session_path(path) {
-                return self.console;
-            }
-            return self.console && method == Method::POST && is_read_only_post(path);
-        }
-        self.console || (self.inspector && is_inspector_path(path))
+/// Request extension set by [`enforce`] (and, in shared mode, by the key
+/// layer for the admin) on authenticated control-plane requests: the
+/// caller's roles and permissions. The plan limiter never rejects them.
+#[derive(Clone, Debug)]
+pub struct ControlAuthorized(pub Arc<Resolved>);
+
+impl ControlAuthorized {
+    /// The 0.4 scopes the permissions amount to (answers and logs).
+    pub fn grant(&self) -> Grant {
+        self.0.grant()
     }
 }
 
-/// Request extension set by [`enforce`] on authenticated control-plane
-/// requests (the plan limiter never rejects them).
-#[derive(Clone, Copy, Debug)]
-pub struct ControlAuthorized(pub Grant);
+/// Request extension set by [`check_route`] on every control request it
+/// lets through: the caller it checked (also on an open control plane and
+/// for API keys in shared mode), for the handlers' body checks.
+#[derive(Clone, Debug)]
+pub struct ControlCaller(pub Arc<Resolved>);
 
-fn is_safe(method: &Method) -> bool {
-    method == Method::GET || method == Method::HEAD || method == Method::OPTIONS
+/// The caller of a request: what [`check_route`] or [`enforce`] resolved,
+/// else (an open control plane, a data-plane route) the presented admin
+/// token, an API key in shared mode, or nobody ([`Resolved::anonymous`]).
+pub fn caller_of(state: &AppState, headers: &HeaderMap, extensions: &Extensions) -> Arc<Resolved> {
+    if let Some(c) = extensions.get::<ControlCaller>() {
+        return c.0.clone();
+    }
+    if let Some(a) = extensions.get::<ControlAuthorized>() {
+        return a.0.clone();
+    }
+    if let Some(k) = extensions
+        .get::<crate::keys::KeyContext>()
+        .filter(|k| k.shared && k.control)
+    {
+        return Arc::new(Resolved::key(&k.key.id));
+    }
+    Arc::new(open_caller(headers, &state.config))
+}
+
+/// The caller of a request that no control-plane layer authenticated (an
+/// open control plane, a data-plane route): the admin token (or, outside
+/// `open` mode, a control JWT) as it resolves, else nobody, which is every
+/// permission without an admin token outside public mode and the
+/// anonymous reads otherwise (the 0.4 admin guard, as permissions).
+pub fn open_caller(headers: &HeaderMap, config: &Config) -> Resolved {
+    credentials_resolved(headers, config).unwrap_or_else(|_| Resolved::anonymous(config))
 }
 
 fn under(path: &str, prefix: &str) -> bool {
@@ -188,34 +199,6 @@ fn under(path: &str, prefix: &str) -> bool {
         || path
             .strip_prefix(prefix)
             .is_some_and(|rest| rest.starts_with('/'))
-}
-
-/// POST routes that change nothing: `/_rustybin/mocks/import`,
-/// `/_rustybin/mocks/{name}/operations/{op}/validate`,
-/// `/_rustybin/mocks/{name}/operations/{op}/rules/test` and
-/// `/_rustybin/assist/run` (read tasks; the handler checks the task).
-fn is_read_only_post(path: &str) -> bool {
-    if path == "/_rustybin/mocks/import"
-        || path == crate::assist::RUN_PATH
-        || crate::mcp::inspector::is_console_post(path)
-        || crate::mcp::registry::is_console_post(path)
-    {
-        return true;
-    }
-    let Some(rest) = path.strip_prefix("/_rustybin/mocks/") else {
-        return false;
-    };
-    let parts: Vec<&str> = rest.split('/').collect();
-    match parts.as_slice() {
-        [name, "operations", op, "validate"] | [name, "operations", op, "rules", "test"] => {
-            !name.is_empty() && !op.is_empty()
-        }
-        _ => false,
-    }
-}
-
-fn is_inspector_path(path: &str) -> bool {
-    under(path, "/_rustybin/requests")
 }
 
 /// True for the paths [`enforce`] protects when control auth is on.
@@ -452,14 +435,10 @@ fn unauthorized(config: &Config, message: &str, reason: &str) -> Response {
     resp
 }
 
-/// Decide whether a control-plane request may proceed.
+/// Authenticate a control-plane request: the caller's roles and
+/// permissions, or the `401`.
 #[allow(clippy::result_large_err)]
-pub fn authorize(
-    method: &Method,
-    path: &str,
-    headers: &HeaderMap,
-    config: &Config,
-) -> Result<Grant, Response> {
+pub fn authenticate(headers: &HeaderMap, config: &Config) -> Result<Resolved, Response> {
     if presented_token(headers).is_none() {
         let hint = match config.control_auth {
             ControlAuth::Password => "control plane authentication required: sign in with POST /_rustybin/login (user name and password) and send the token as Authorization: Bearer, or send the admin token or a control JWT",
@@ -468,25 +447,8 @@ pub fn authorize(
         };
         return Err(unauthorized(config, hint, "missing_token"));
     }
-    match credentials_grant(headers, config) {
-        Ok(grant) if grant.allows(method, path) => Ok(grant),
-        Ok(grant) => {
-            let message = if is_safe(method) {
-                "the token's scope does not include this control-plane route"
-            } else {
-                "control-plane mutations need the admin token or a token with the admin scope"
-            };
-            Err((
-                StatusCode::FORBIDDEN,
-                Json(json!({
-                    "error": message,
-                    "reason": "insufficient_scope",
-                    "scopes": grant.scopes(),
-                    "control_auth": config.control_auth.as_str(),
-                })),
-            )
-                .into_response())
-        }
+    match credentials_resolved(headers, config) {
+        Ok(r) => Ok(r),
         Err(Some(e)) => Err(unauthorized(
             config,
             "invalid control-plane token",
@@ -515,8 +477,9 @@ pub async fn enforce(State(state): State<AppState>, mut req: Request, next: Next
     }
     // A token from the built-in OAuth server, on /_rustybin/mcp only.
     match crate::control_oauth::authorize_manage(&req, config) {
-        Some(Ok(grant)) => {
-            req.extensions_mut().insert(ControlAuthorized(grant));
+        Some(Ok(resolved)) => {
+            req.extensions_mut()
+                .insert(ControlAuthorized(Arc::new(resolved)));
             req.extensions_mut().insert(crate::control_oauth::ViaOAuth);
             return next.run(req).await;
         }
@@ -524,9 +487,11 @@ pub async fn enforce(State(state): State<AppState>, mut req: Request, next: Next
         None => {}
     }
     // CORS preflights carry no credentials; the CORS layer answers them.
-    match authorize(req.method(), req.uri().path(), req.headers(), config) {
-        Ok(grant) => {
-            req.extensions_mut().insert(ControlAuthorized(grant));
+    // The permission is checked once the route is known (`check_route`).
+    match authenticate(req.headers(), config) {
+        Ok(resolved) => {
+            req.extensions_mut()
+                .insert(ControlAuthorized(Arc::new(resolved)));
             next.run(req).await
         }
         Err(mut resp) => {
@@ -540,6 +505,63 @@ pub async fn enforce(State(state): State<AppState>, mut req: Request, next: Next
             resp
         }
     }
+}
+
+/// Route layer (`build_app`): the one permission check. For a control
+/// route it looks up what the catalogue declares for the matched template
+/// and the method, resolves the caller ([`caller_of`]) and answers the
+/// refusal when the caller lacks the permission; the handler runs only
+/// when it holds it. A route whose need is undeclared is refused (the
+/// parity test `every_control_route_declares_a_permission` keeps that from
+/// happening). On a self-service instance the routes that say so let a
+/// caller without the permission through to the per-mock rules (a visitor
+/// or an API key manages its own mocks only).
+pub async fn check_route(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
+    let Some(template) = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|m| m.as_str())
+        .filter(|t| under(t, CONTROL_PREFIX))
+    else {
+        return next.run(req).await;
+    };
+    let Some(endpoint) = crate::catalog::control_route(template) else {
+        return next.run(req).await;
+    };
+    // A method the route does not have: the router answers 405.
+    let method = match req.method().as_str() {
+        "HEAD" => "GET",
+        m => m,
+    };
+    if !endpoint.expanded_methods().contains(&method) {
+        return next.run(req).await;
+    }
+    let need = endpoint.need(method);
+    if need == Some(Need::Open) {
+        return next.run(req).await;
+    }
+    let caller = caller_of(&state, req.headers(), req.extensions());
+    match need {
+        None => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": "this route declares no permission",
+                    "reason": "permission_required",
+                    "permission": null,
+                })),
+            )
+                .into_response()
+        }
+        Some(Need::Perm(p))
+            if !caller.has(p) && !(endpoint.self_service && state.mocks.visits().is_some()) =>
+        {
+            return crate::rbac::refuse(&caller, p);
+        }
+        _ => {}
+    }
+    req.extensions_mut().insert(ControlCaller(caller));
+    next.run(req).await
 }
 
 #[cfg(test)]

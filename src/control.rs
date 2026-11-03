@@ -101,6 +101,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Effective configuration (no secrets)",
         )
+        .permission(crate::rbac::Permission::InstanceRead)
         .example(Example::get("Effective config", "/_rustybin/config")),
         Endpoint::new(
             "/_rustybin/version",
@@ -108,6 +109,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Service name, version, commit and control-plane auth mode",
         )
+        .permission(crate::rbac::Permission::InstanceRead)
         .example(Example::get("Version", "/_rustybin/version")),
         Endpoint::new(
             "/_rustybin/ready",
@@ -115,6 +117,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Readiness probe: 200 while serving, independent of the /health toggle",
         )
+        .open()
         .description(
             "Never authenticated (RUSTYBIN_CONTROL_AUTH), never limited by the plan, never \
              captured by the inspector. Use it for platform readiness checks; /health is a demo \

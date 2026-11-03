@@ -952,7 +952,8 @@ async fn control_auth_applies_to_the_assist_routes() {
         .await,
         StatusCode::OK
     );
-    // A read task is open to the console scope; test and usage need admin.
+    // A read task is open to the console scope (assist.use); the test needs
+    // settings.write; the usage is a viewer read (settings.read) since 0.5.
     assert_eq!(
         status(
             "POST",
@@ -978,6 +979,16 @@ async fn control_auth_applies_to_the_assist_routes() {
             "GET",
             USAGE_PATH,
             Some(control_jwt(Some("console"))),
+            json!({})
+        )
+        .await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status(
+            "GET",
+            USAGE_PATH,
+            Some(control_jwt(Some("inspector"))),
             json!({})
         )
         .await,

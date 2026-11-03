@@ -1040,21 +1040,6 @@ fn not_found(config: &Config) -> Response {
         .into_response()
 }
 
-/// The sign-in management routes need the admin token or a token with the
-/// admin scope (a sign-in token has it), never the open-mode leniency of
-/// `admin::require_admin`.
-#[allow(clippy::result_large_err)]
-fn admin_only(headers: &HeaderMap, config: &Config) -> Result<(), Response> {
-    match crate::control_auth::credentials_grant(headers, config) {
-        Ok(grant) if grant.admin => Ok(()),
-        _ => Err(error(
-            StatusCode::FORBIDDEN,
-            "this needs the admin token or a token with the admin scope",
-            "insufficient_scope",
-        )),
-    }
-}
-
 fn audit(event: &str, user: &str, ip: Option<IpAddr>, outcome: &str) {
     tracing::info!(
         target: "rustybin::auth",
@@ -1369,9 +1354,6 @@ async fn sessions_handler(State(state): State<AppState>, headers: HeaderMap) -> 
     if !enabled(config) {
         return not_found(config);
     }
-    if let Err(resp) = admin_only(&headers, config) {
-        return resp;
-    }
     let sessions = config.console_tokens.sessions();
     Json(json!({
         "generation": config.console_tokens.generation(),
@@ -1385,15 +1367,11 @@ async fn sessions_handler(State(state): State<AppState>, headers: HeaderMap) -> 
 
 async fn end_session_handler(
     State(state): State<AppState>,
-    headers: HeaderMap,
     RoutePath(id): RoutePath<String>,
 ) -> Response {
     let config = &state.config;
     if !enabled(config) {
         return not_found(config);
-    }
-    if let Err(resp) = admin_only(&headers, config) {
-        return resp;
     }
     let ended = config.console_tokens.end(&id);
     if ended {
@@ -1402,13 +1380,10 @@ async fn end_session_handler(
     Json(json!({ "ended": ended, "id": id })).into_response()
 }
 
-async fn end_all_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn end_all_handler(State(state): State<AppState>) -> Response {
     let config = &state.config;
     if !enabled(config) {
         return not_found(config);
-    }
-    if let Err(resp) = admin_only(&headers, config) {
-        return resp;
     }
     let n = config.console_tokens.rotate();
     audit("sign_out_everywhere", "", None, "ok");
@@ -1439,9 +1414,6 @@ async fn password_handler(
     let config = &state.config;
     if !enabled(config) {
         return not_found(config);
-    }
-    if let Err(resp) = admin_only(&headers, config) {
-        return resp;
     }
     let Json(body) = match body {
         Ok(b) => b,
@@ -1620,6 +1592,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Console sign-in: a user name and password for a control token (password mode)",
         )
+.open()
         .description(
             "Never behind control-plane auth. Answers a 12 hour control token for the user \
              (the first admin is the console user of the sign-in settings) that every \
@@ -1639,6 +1612,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Console sign-out: revoke the presented sign-in token",
         )
+.authenticated(&[])
         .example(Example::post("Sign out", LOGOUT_PATH).expect_status(404)),
         Endpoint::new(
             SESSION_PATH,
@@ -1646,6 +1620,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Who the presented credential is: user, roles, permissions, scopes, expiry, how it was obtained",
         )
+.authenticated(&[])
         .description(
             "A sign-in token answers its user (user, user_id, display_name), resolved from the \
              user store at every request; every credential answers its roles and permissions \
@@ -1658,6 +1633,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Sign-in sessions (admin): list them, or DELETE to sign out everywhere",
         )
+.permission_for(&["GET"], crate::rbac::Permission::UsersRead).permission_for(&["DELETE"], crate::rbac::Permission::UsersManage)
         .example(Example::get("Sessions", SESSIONS_PATH).expect_status(404)),
         Endpoint::new(
             "/_rustybin/sessions/{id}",
@@ -1665,6 +1641,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "End one sign-in session (admin)",
         )
+.permission(crate::rbac::Permission::UsersManage)
         .example(
             Example::delete(
                 "End a session",
@@ -1678,6 +1655,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Change the console user name and password (admin, current password required)",
         )
+.permission(crate::rbac::Permission::UsersManage)
         .description(
             "Stores an argon2id hash as the secret console.password_hash (and the user name as \
              console.user), ends every other session and answers a fresh token for the caller. \

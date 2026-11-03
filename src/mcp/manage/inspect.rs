@@ -54,7 +54,7 @@ fn connection(ctx: &CallCtx, access: &Access, args: &Value) -> Result<Connection
                 match store.use_connection(
                     id,
                     arg_str(args, "target").unwrap_or(""),
-                    access.is_admin(),
+                    access.has(crate::rbac::Permission::McpConnections),
                 ) {
                     Ok(r) => (
                         Some(r.conn.target),
@@ -136,7 +136,9 @@ pub async fn mcp_call(ctx: &CallCtx, access: &Access, args: &Value, params: &Val
         Ok(c) => c,
         Err(e) => return e,
     };
-    if !access.is_admin() && !inspector::allowed_without_admin(&target, Some(method)) {
+    if !access.has(crate::rbac::Permission::McpConnections)
+        && !inspector::allowed_without_admin(&target, Some(method))
+    {
         return err(format!(
             "{method} to a server on another host needs admin rights; without them only {} and \
              notifications go there",
@@ -296,7 +298,7 @@ pub async fn run_mcp_checks(ctx: &CallCtx, access: &Access, args: &Value, params
         &ctx.app.mcp_inspector,
         body,
         access.principal(),
-        access.is_admin(),
+        access.has(crate::rbac::Permission::McpConnections),
     ) {
         Ok(s) => s,
         Err((status, message, reason)) => {

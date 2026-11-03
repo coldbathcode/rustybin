@@ -8,7 +8,6 @@
 use std::sync::Mutex;
 
 use axum::extract::State;
-use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -273,10 +272,7 @@ pub fn report(state: &AppState) -> Value {
     })
 }
 
-async fn handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
+async fn handler(State(state): State<AppState>) -> Response {
     // The state directory probe touches the disk: off the request threads.
     let s = state.clone();
     match tokio::task::spawn_blocking(move || report(&s)).await {
@@ -300,6 +296,7 @@ pub fn catalog() -> Vec<Endpoint> {
         category::CONTROL,
         "Instance diagnostics: storage, the secrets key, load errors, listeners, outbound refusals, source control, the sign-in (admin)",
     )
+.permission(crate::rbac::Permission::SettingsRead)
     .description(
         "Each check has an id, a status (ok, warn, fail), a message and a fix; the answer's \
          status is the worst. Not readiness (/_rustybin/ready) and not the demo toggle (/health).",

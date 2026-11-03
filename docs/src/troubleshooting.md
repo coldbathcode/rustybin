@@ -37,7 +37,8 @@ rustybin doctor --profile prod
 | `harness` | load test mode with an engine problem |
 | `assist` | AI assist configured but not usable |
 
-The route is admin only; a console token without the admin scope gets `403`:
+The route needs `settings.read` (the `viewer` role and the `console` scope have it); a
+token without it, an `inspector` one say, gets `403` naming the permission:
 
 ```hurl
 {{#include ../examples/config/diagnostics.hurl:admin_only}}

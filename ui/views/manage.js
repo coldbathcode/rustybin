@@ -21,6 +21,7 @@ import * as portal from '../lib/portal.js';
 import { exportPanel } from './manage/export.js';
 import { gitPanel } from './manage/git.js';
 import { checkpointsPanel } from './manage/checkpoints.js';
+import * as perms from '../lib/perms.js';
 
 // The rail. Later steps append entries here; each renders its own panel.
 export const TABS = [
@@ -152,8 +153,8 @@ function passwordCard(doc, status, onChanged) {
   const next = input({ type: 'password', 'aria-label': 'console.password_hash', autocomplete: 'new-password', id: 'signin-next', placeholder: 'at least 8 characters' });
   const confirm = input({ type: 'password', 'aria-label': 'Confirm the new password', autocomplete: 'new-password', id: 'signin-confirm' });
   const err = h('div');
-  const submit = h('button', { class: 'btn primary', type: 'submit', disabled: locked || !on }, 'Change the password');
-  for (const c of [nameInput, current, next, confirm]) if (locked || !on) c.disabled = true;
+  const submit = perms.guard(h('button', { class: 'btn primary', type: 'submit', disabled: locked || !on }, 'Change the password'), 'users.manage');
+  for (const c of [nameInput, current, next, confirm]) if (locked || !on || !perms.can('users.manage')) c.disabled = true;
   const form = h('form', { class: 'stack', 'aria-label': 'Change the password' },
     field('User name', nameInput, 'Letters, digits and . _ @ - only. ' + (user ? 'Now ' + sourceText(user) + '.' : '')),
     field('Current password', current, 'Required to change anything here, even for an administrator.'),
@@ -211,13 +212,13 @@ function sessionsCard(reloadRef) {
           const r = await send({ control: true, method: 'DELETE', url: SERVER + '/_rustybin/sessions/' + encodeURIComponent(s.id), admin: true, session: false });
           if (r.ok) { toast(s.id === d.current ? 'This session ended' : 'Session ended'); load(); } else toast('Could not end the session (' + r.status + ')', 'err');
         } }, 'End'))));
-      const everywhere = h('button', { class: 'btn sm danger', type: 'button', id: 'sign-out-everywhere', onclick: async () => {
+      const everywhere = perms.guard(h('button', { class: 'btn sm danger', type: 'button', id: 'sign-out-everywhere', onclick: async () => {
         if (!window.confirm('Sign out everywhere? Every sign-in token issued so far stops working, this one included.')) return;
         const r = await send({ control: true, method: 'DELETE', url: SERVER + '/_rustybin/sessions', admin: true, session: false });
         if (!r.ok) toast('Could not sign out everywhere (' + r.status + ')', 'err');
         // The server refuses this token from now on; the next call brings the sign-in screen.
         else auth.signOut();
-      } }, icon('lock'), 'Sign out everywhere');
+      } }, icon('lock'), 'Sign out everywhere'), 'users.manage');
       replace(el,
         h('div', { class: 'row', style: { marginBottom: '10px' } },
           h('span', { class: 'muted small grow' }, d.count + ' session(s) since the last restart or sign-out-everywhere (generation ' + d.generation + '; at most ' + d.capacity + ' are listed).'),
@@ -363,7 +364,7 @@ function aiPanel(doc, reload, error) {
   }
 
   function renderCatalog(c) {
-    const loadBtn = h('button', { class: 'btn sm', type: 'button', id: 'assist-load-models', disabled: !c.provider }, icon('refresh'), 'Load the provider\'s models');
+    const loadBtn = perms.guard(h('button', { class: 'btn sm', type: 'button', id: 'assist-load-models', disabled: !c.provider }, icon('refresh'), 'Load the provider\'s models'), 'settings.write');
     const out = h('div');
     loadBtn.addEventListener('click', async () => {
       loadBtn.disabled = true;
@@ -415,7 +416,7 @@ function aiPanel(doc, reload, error) {
   async function load() {
     try {
       st = await getJson('/_rustybin/assist', { session: false });
-      const testBtn = h('button', { class: 'btn sm', type: 'button', id: 'assist-test', disabled: !st.enabled }, icon('send'), 'Test the key');
+      const testBtn = perms.guard(h('button', { class: 'btn sm', type: 'button', id: 'assist-test', disabled: !st.enabled }, icon('send'), 'Test the key'), 'settings.write');
       const testOut = h('div');
       testBtn.addEventListener('click', () => test(testBtn, testOut));
       const mockBtn = h('button', { class: 'btn sm ghost', type: 'button', id: 'assist-use-mock', onclick: () => pick({ 'assist.provider': 'mock' }) }, 'Use the built-in mock LLM');
@@ -598,8 +599,8 @@ function portalPanel(doc, reload, error) {
     const items = st.items || [];
     const bar = h('div', { class: 'row', style: { gap: '6px', flexWrap: 'wrap' } });
     const renderBar = () => replace(bar, h('span', { class: 'muted small grow' }, selected.size ? selected.size + ' selected' : 'Select items to publish several at once.'),
-      h('button', { class: 'btn sm', type: 'button', id: 'portal-bulk-publish', disabled: !selected.size, onclick: () => bulk(true) }, 'Publish selected'),
-      h('button', { class: 'btn sm ghost', type: 'button', disabled: !selected.size, onclick: () => bulk(false) }, 'Unpublish selected'));
+      perms.guard(h('button', { class: 'btn sm', type: 'button', id: 'portal-bulk-publish', disabled: !selected.size, onclick: () => bulk(true) }, 'Publish selected'), 'portal.publish'),
+      perms.guard(h('button', { class: 'btn sm ghost', type: 'button', disabled: !selected.size, onclick: () => bulk(false) }, 'Unpublish selected'), 'portal.publish'));
     renderBar();
     const groups = [];
     for (const kind of Object.keys(KIND_TITLES)) {

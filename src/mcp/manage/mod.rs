@@ -213,6 +213,7 @@ pub fn catalog() -> Vec<Endpoint> {
         category::CONTROL,
         "Management MCP server: configure this Rustybin from an AI agent",
     )
+.authenticated(&[])
     .description(
         "An MCP server (Streamable HTTP, 2026-07-28 and the 2025 handshake versions) whose tools \
          manage this instance: OpenAPI mocks (create, edit, check, deploy, roll back, delete, \
@@ -290,4 +291,4 @@ pub fn openapi_paths() -> Value {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

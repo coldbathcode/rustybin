@@ -161,9 +161,15 @@ or an operation, and the check results; the banner lists them). The **Security**
 deploys at once, and asks first when other draft changes would go live with it.
 Every view has its own link: `#/mocks/<name>/<tab>/<operationId>`.
 
-With a read-only control-plane token (`console` scope) the view shows everything
-but the controls that change mocks (bulk actions, Duplicate, Reset, Rename,
-Delete and the editors); downloads and the rule preview still work.
+With a read-only control-plane token (`console` scope, or a user without `mocks.write`)
+the view shows everything but the controls that change mocks (bulk actions, Duplicate,
+Reset, Rename, Delete and the editors); downloads and the rule preview still work.
+
+Every view follows the caller's [permissions](concepts/control-plane-security.md#permissions):
+the console reads them from `GET /_rustybin/session` and disables a control the
+caller's roles do not allow (a saved test's run, a schedule's save, a checkpoint, a
+source control action, an agent's rights, a portal publish, a harness run, a setting),
+its title naming the permission it needs. The server checks every request anyway.
 
 ### Self-service
 
@@ -255,7 +261,7 @@ The same job from the API, the console, the command line, an agent and the confi
 
 | Surface | Where |
 |---|---|
-| API | The control plane the console calls, listed above; `POST /_rustybin/login` for a token, `GET /_rustybin/status` for what the overview shows |
+| API | The control plane the console calls, listed above; `POST /_rustybin/login` for a token, `GET /_rustybin/status` for what the overview shows, `GET /_rustybin/session` for the caller's roles and permissions |
 | Console | `/ui`: every view, the gear for **Management** |
 | CLI | `rustybin login`, `status`, `whoami`, `sessions list`, `sessions end`, `sessions end-all`, `password` ([reference](cli.md)) |
 | Management MCP | `get_instance`, `list_sessions`, `end_session`, `get_settings` ([agent page](agent-mcp.md)) |

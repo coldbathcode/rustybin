@@ -2146,6 +2146,42 @@ pub fn load_applied(state: &AppState) {
 }
 
 /// Parse a document sent to the API: YAML or JSON text, or a JSON object.
+/// What applying `file` needs on top of `config.apply`, by its sections:
+/// `settings:` and `instance:` change settings (`settings.write`, plus what
+/// each key needs: `settings.security`, `portal.settings`, `secrets.write`),
+/// `secrets:` sets secrets (`secrets.write`), `agents:` changes the agents'
+/// rights (`agents.manage`). Checked by the REST route and the
+/// `apply_config` tool alike.
+#[allow(clippy::result_large_err)]
+pub fn check_sections(
+    caller: &crate::rbac::Resolved,
+    settings: &crate::settings::Settings,
+    file: &MocksFile,
+) -> Result<(), axum::response::Response> {
+    use crate::rbac::Permission as P;
+    if file.settings.is_some() || file.instance.is_some() {
+        crate::rbac::require(caller, P::SettingsWrite)?;
+    }
+    if let Some(values) = &file.settings {
+        crate::settings::check_keys(caller, settings, values.keys().map(|k| (k.as_str(), false)))?;
+    }
+    if let Some(i) = &file.instance {
+        if i.title.is_some() {
+            crate::settings::check_keys(caller, settings, [("console.title", false)])?;
+        }
+        if i.console.is_some() {
+            crate::settings::check_keys(caller, settings, [(crate::login::USER_KEY, false)])?;
+        }
+    }
+    if file.secrets.as_ref().is_some_and(|s| !s.is_empty()) {
+        crate::rbac::require(caller, P::SecretsWrite)?;
+    }
+    if file.agents.is_some() {
+        crate::rbac::require(caller, P::AgentsManage)?;
+    }
+    Ok(())
+}
+
 pub fn parse_document(document: &Value) -> Result<MocksFile, String> {
     match document {
         Value::String(text) => config_file::parse(text),

@@ -76,6 +76,13 @@ mock), checkpoints in the repository (`src/sourcecontrol/checkpoints.rs`, writte
 the compare view for a stale edit (`GET /_rustybin/mocks/{name}/revisions/{revision}`, `ui/lib/conflict.js`; the store
 keeps replaced drafts). Rules it left: a scenario parameter is a row of the parameter table (the console field, the
 MCP schema property and the CLI flag follow from it); a saved-test name never shadows a route (`runs`, `schedules`).
+Access control (steps 07 to 15, 0.5.0): step 07 (the model, `src/rbac/`) and step 08 (every route and tool checks a
+permission, see `src/control_auth.rs` and `src/rbac/` below) are built. Rules step 08 left: a control route declares
+its permission in the catalogue or `every_control_route_declares_a_permission` fails; a tool declares one or
+`every_tool_declares_a_permission` fails; a permission no route, tool or listed body check uses fails
+`every_permission_is_used`; who may call what is compared with 0.4 in `src/rbac/access_table.rs` (a change of reach
+is a deliberate row of `DELIBERATE`); a `403` names the missing permission (`reason: permission_required`), never
+what the caller holds.
 
 ## The whole instance as code, and source control (built)
 
@@ -150,7 +157,7 @@ route without one. A new control route therefore needs a tool (one module per fe
 `mocks.rs`, `traffic.rs`, `testing.rs`, `visits.rs`, `harness.rs`) that calls the same function as the REST
 handler (never a control route in process: `testing::in_process` refuses control paths; split the handler's
 logic out instead, as `mocks::ai::*_work`, `portal::api::publish_item` and `inspector::build_run_spec` were),
-a `ToolDef` with its `Right`, and a dispatch arm. Destructive and outward-facing tools carry `confirm`
+a `ToolDef` with its `permission` (`ToolNeed::Perm`, `Owner` for the per-mock rule, `Visitor`), and a dispatch arm. Destructive and outward-facing tools carry `confirm`
 (`every_tool_is_fully_defined` checks it) and ask only when the call is of that kind; secrets are never tool
 inputs (keys ending in `_key` or `_token` are refused by the same test). Third-party content (captured
 traffic, answers of other MCP servers, browsed registries) goes under `untrusted_*`. Prompts are the jobs
@@ -161,8 +168,8 @@ the catalogue, the harness schema, the portal catalogue and the CLI reference. `
 instance (`claude mcp add --transport http rustybin https://<host>/_rustybin/mcp --header "Authorization: Bearer
 <token>"`). It is a second profile family on the mock MCP server's protocol and transport code (`src/mcp/manage/`),
 separate from the mock server at `/mcp`. Its tools call `src/mocks/service.rs`, the layer the REST handlers use, so
-a new mock feature belongs in the service layer and then in both. Keep the rules when adding tools: a `Right` per
-tool and the role-filtered `tools/list`, annotations plus confirmation (elicitation, else `confirm: true`) on
+a new mock feature belongs in the service layer and then in both. Keep the rules when adding tools: a permission per
+tool (`every_tool_declares_a_permission`, the Permission column of `docs/src/agent-mcp.md`) and the filtered `tools/list`, annotations plus confirmation (elicitation, else `confirm: true`) on
 destructive tools, captured or mocked content only under `untrusted_*` fields (truncated, never in the text
 summary), audit lines without arguments. In-process requests from tools (`try_request` and friends) carry only
 the caller's API key, never their control credentials (captures would expose them).
@@ -172,7 +179,8 @@ an agent (the caller's `Credential` from `Access` plus the client's `clientInfo`
 rights (a ceiling, tool allow and deny lists: the agent's own, a rule of `rustybin.yaml`'s `agents:` section, the
 `agents.default_ceiling` setting) apply after the credential's; revocation refuses calls, ends sessions and puts the
 agent's token ids and OAuth subject in `login::Tokens`. `/_rustybin/agents*` (admin), console view `ui/views/agents.js`.
-A new tool needs nothing here: ceilings follow its `Right` and `read_only`.
+A new tool needs nothing here: ceilings follow its permission (`MANAGE_CEILING`) and `read_only`
+(`ceilings_keep_their_tool_counts` freezes the 0.4 sets).
 
 OAuth sign-in to `/_rustybin/mcp` ([docs/plans/control-oauth.md](docs/plans/control-oauth.md), 2026-10-21):
 `src/control_oauth.rs` is a small authorization server for the control plane (metadata, stateless client
@@ -287,11 +295,16 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   and published only when the write succeeded; password hashes kept apart from `User`, never returned;
   `resolve` cached a second per user and dropped at every change), `mod.rs` (`Resolved`: who, roles, permissions;
   the old scopes as roles, `rb_roles` / `rb_perms` on control JWTs, unknown names logged once; `from_sign_in`;
-  `grant_of`, which still drives `Grant` so behaviour is the 0.4 one; `migrate`, the console user becomes user one
-  at startup). User one's name and password stay the sign-in settings' (`console.user`, `console.password_hash`,
+  `grant_of`, the 0.4 scope names of a set, for answers only; `migrate`, the console user becomes user one
+  at startup), `need.rs` (`Need`: `Open`, `Authenticated`, `Perm`; `ANONYMOUS`, what nobody on an open control
+  plane with an admin token and a shared-mode key hold; the `403 permission_required` body, `refuse`, `require`;
+  `BODY_CHECKS` and `RESERVED`), `access_table.rs` (step 08's safety net: the 0.4 rules frozen, compared with the
+  declarations for every route and scope, `DELIBERATE` lists each difference; the parity tests
+  `every_control_route_declares_a_permission` and `every_permission_is_used`). User one's name and password stay the sign-in settings' (`console.user`, `console.password_hash`,
   the environment); other users' hashes live in the store. Sign-in tokens: `sub` the user id, `rb_user`, `rb_gen`,
   `rb_ugen`; an older token (0.3 and 0.4, `sub: "user:<name>"`) is user one. A new permission goes in the table of
-  `permission.rs` (and its test), never a yes/no admin check.
+  `permission.rs` (and its test), never a yes/no admin check. The scopes keep their 0.4 reach: `console` is the
+  viewer role plus `traffic.read`, `assist.use`, `mcp.inspect`; `harness` every `harness.*`.
 - `src/login.rs`: the console sign-in (`RUSTYBIN_CONTROL_AUTH=password`, the default): `RUSTYBIN_CONSOLE_USER`,
   `RUSTYBIN_CONSOLE_PASSWORD` or `_PASSWORD_HASH` (argon2id), the settings `console.user` and the secret
   `console.password_hash`, `POST /_rustybin/login` (open) minting HS256 control tokens (the OAuth key's `console`
@@ -314,11 +327,18 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   that parses, compiles and checks through `tasks::compile_doc` / `check_spec`; one file per task, `ALL`), `api.rs`
   (the routes; `RUN_PATH` is a read-only POST for control auth). A new AI feature is a new task file (and, when it
   writes, `writes: true`), never a prompt built elsewhere.
-- `src/control_auth.rs`: `RUSTYBIN_CONTROL_AUTH` (`password` / `open` / `token` / `jwt`), Ed25519 JWT verification with scopes
-  (`inspector`, `console`, `admin`), the `enforce` middleware (protects `/_rustybin/*` except `/_rustybin/ready` and
-  the OAuth sign-in endpoints `/_rustybin/oauth/{register,authorize,token}`; `/ui/*` static files stay open). Tests sign tokens with the keys in `tests/common/control_jwt_keys.rs`
-  (`test_support::control_jwt`). `admin::admin_check` answers 403 (not 401) to a valid control JWT without the
-  admin scope, so the console is not signed out by an admin-only call.
+- `src/control_auth.rs`: `RUSTYBIN_CONTROL_AUTH` (`password` / `open` / `token` / `jwt`), Ed25519 JWT verification
+  (scope, `rb_roles`, `rb_perms` resolved through `crate::rbac`), the `enforce` middleware (authentication only:
+  protects `/_rustybin/*` except `/_rustybin/ready` and the OAuth sign-in endpoints
+  `/_rustybin/oauth/{register,authorize,token}`; `/ui/*` static files stay open; inserts `ControlAuthorized`, the
+  caller's `Resolved`) and `check_route`, the one permission check: a route layer in `build_app` that reads the
+  matched template, looks up what the catalogue declares for the method, resolves the caller (`caller_of`: the
+  authenticated one, an API key in shared mode, else `open_caller`) and answers `403 permission_required` (or `401`
+  for nobody on an open control plane with an admin token) before the handler runs; it inserts `ControlCaller`
+  for the handlers' body checks (`rbac::require`). On a self-service instance routes marked `.self_service()`
+  let a caller without the permission through to the per-mock rules. Tests sign tokens with the keys in
+  `tests/common/control_jwt_keys.rs` (`test_support::control_jwt`). A valid credential lacking a permission gets
+  403 (not 401), so the console is not signed out.
 - `src/metrics.rs`: `Metrics` (in `AppState`), the `track` middleware (route label = `MatchedPath` template),
   `/_rustybin/metrics`. Every label is bounded; WebSocket handlers hold a guard from `metrics::open_ws`.
 - `src/logging.rs`: `RUSTYBIN_LOG_FORMAT` (`text` / `json`), `logging::subscriber(config, writer, ansi)`.
@@ -404,8 +424,8 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   harness run | validate | report`), `scenarios/*.yaml` (built-ins), `test_proxy.rs` (tests: a misbehaving
   gateway with reference rate limiters), `live_tests.rs` (patterns, loops and live changes through the test
   proxy), `limit_tests.rs` (the rate-limit tests against the proxy's limiters), `traffic_tests.rs` (mock
-  traffic and identities), `fault_tests.rs` (faults, streams and the protocol sources). MCP tools in `src/mcp/manage/harness.rs` (`Right::Harness`), console view `ui/views/harness.js`,
-  `rustybin_harness_*` in `metrics.rs`. The `harness` control scope (`control_auth::Grant`). Clusters:
+  traffic and identities), `fault_tests.rs` (faults, streams and the protocol sources). MCP tools in `src/mcp/manage/harness.rs` (`harness.run`, `harness.cluster`), console view `ui/views/harness.js`,
+  `rustybin_harness_*` in `metrics.rs`. The `harness` control scope (every `harness.*` permission). Clusters:
   `cluster.rs` (the leader: `Coordinator`, `Cluster`, `ClusterRun`, split, merge, report), `member.rs` (the
   agent each member runs: join, heartbeat, lease, clock, and the candidate and voter rules), `wire.rs` (the
   protocol and the replicated snapshot), `election.rs` (the leader's ticker, promotion, stepping down),
@@ -423,7 +443,9 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   capture, no faults) and exempt from the key layer. The console side is `ui/lib/portal.js` (publish dialog) and
   the Portal tab of `ui/views/manage.js`.
 - `src/fault.rs`: `X-Rustybin-Delay` / `X-Rustybin-Fail` middleware.
-- `src/admin.rs`: `require_admin(&headers, &config)` guard for instance-global mutations.
+- `src/admin.rs`: `require(&headers, &config, Permission)` for the data-plane routes that change something
+  instance-wide (the `/health` toggles, the global `/flaky` reset); `admin_check` (every permission) for shared
+  mode's gate between the operator and an API key.
 - `src/session.rs`: `session_key(&headers, client_ip)`, `client_ip(...)`, extractors `Session`, `ClientIp`, `PeerAddr`.
 - `src/test_support.rs` (`cfg(test)`): `test_state()`, `test_app()`, `module_app(router)`, `body_json(...)`, ...
 - `tests/integration.rs`: starts the real server on ephemeral ports.
@@ -436,7 +458,9 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
    - `pub fn catalog() -> Vec<Endpoint>` describing EVERY route it registers
      (`Endpoint::new(path, &["GET"], category::X, "summary").example(Example::get(...))`; use `"ANY"` for `any()`,
      `.websocket()` / `.sse()` for non-plain HTTP, `.expect_status(..)` / `.skip_check(..)` on examples that do not
-     return a normal response).
+     return a normal response); every control route (`/_rustybin/*`) also declares its permission
+     (`.permission(Permission::MocksRead)`, `.permission_for(&["POST"], Permission::MocksWrite)`, `.open()`,
+     `.authenticated(&[])`, plus `.self_service()` where the per-mock rules apply).
    - `pub fn openapi_paths() -> serde_json::Value` (and optionally `openapi_components()`).
 2. Register it once in each list: `pub mod foo;` and `ROUTERS` in `src/lib.rs`, `SOURCES` in `src/catalog.rs`,
    `MODULE_PATHS` (and `MODULE_COMPONENTS`) in `src/openapi.rs`. New categories go in `catalog::category`
@@ -454,8 +478,11 @@ missing from the OpenAPI spec (or lacks a method), or an example returns 404/405
 - `serde_json` has `preserve_order`: object keys serialise in insertion order (OpenAPI documents keep their
   path and property order). Do not write tests that rely on sorted keys.
 - Per-client state is scoped with `session::session_key` (`X-Rustybin-Session`, else client IP).
-- Global mutations call `admin::require_admin`: token set means it is required; no token is open in normal
-  mode and forbidden in public mode (`RUSTYBIN_PUBLIC_MODE`).
+- Every control route declares its permission in its `catalog()` (`Endpoint::permission`, `::permission_for`
+  per method, `::open`, `::authenticated`); `control_auth::check_route` checks it, a handler adds
+  `rbac::require(&caller, Permission)` only when the need depends on the body (listed in `rbac::need::BODY_CHECKS`).
+  Never a yes/no admin check. On an open control plane nobody holds every permission without an admin token
+  outside public mode, else the anonymous reads (`rbac::need::ANONYMOUS`); the admin token is every permission.
 - Control plane lives under `/_rustybin/*`, the web console under `/ui`; both are excluded from inspector
   capture and fault injection. Control-plane routes are protected by `control_auth::enforce` when
   `RUSTYBIN_CONTROL_AUTH` is `password` (the default), `token` or `jwt`; data-plane routes never are. The console must not use

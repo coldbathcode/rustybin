@@ -1528,6 +1528,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "Harness node status: roles, caps, allowlist, the active run",
         )
+.permission(crate::rbac::Permission::HarnessRead)
         .description(
             "Answers on every node (enabled: false when harness mode is off). Harness mode \
              (RUSTYBIN_HARNESS=on) makes this Rustybin a load client against allowlisted targets, \
@@ -1540,6 +1541,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "JSON Schema of a scenario, with this node's caps as bounds",
         )
+.permission(crate::rbac::Permission::HarnessRead)
         .example(Example::get("Scenario schema", "/_rustybin/harness/schema")),
         Endpoint::new(
             "/_rustybin/harness/scenarios",
@@ -1547,6 +1549,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "The built-in scenarios (smoke, ramp-to-target, soak, closed-users, step-plateaus, breakpoint, spike-and-recover, pulse, burst, daily-wave) and the saved ones",
         )
+.permission(crate::rbac::Permission::HarnessRead)
         .example(Example::get("Built-in scenarios", "/_rustybin/harness/scenarios")),
         Endpoint::new(
             "/_rustybin/harness/scenarios/{name}",
@@ -1554,6 +1557,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "A built-in or saved scenario (?format=yaml for YAML); PUT saves one under a name, DELETE removes it",
         )
+.permission_for(&["GET"], crate::rbac::Permission::HarnessRead).permission_for(&["PUT", "DELETE"], crate::rbac::Permission::HarnessRun)
         .description(
             "Saved scenarios are validated against this node's caps, kept by name (at most 100; \
              RUSTYBIN_HARNESS_STATE_DIR writes them to disk) and listed next to the built-in ones, \
@@ -1578,6 +1582,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "The expected rate per second per layer and in total, without sending anything",
         )
+.permission(crate::rbac::Permission::HarnessRead)
         .description(
             "Patterns are integrated exactly, so a 50 ms burst shows in its second. One point per \
              second (coarser past an hour, at most 3600). Works with harness mode off.",
@@ -1589,6 +1594,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "Validate a scenario (JSON or YAML) against this node's caps without sending anything",
         )
+.permission(crate::rbac::Permission::HarnessRead)
         .example(Example::post("Validate", "/_rustybin/harness/validate").json(SMOKE_JSON)),
         Endpoint::new(
             "/_rustybin/harness/runs",
@@ -1596,6 +1602,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "Runs on this node; POST a scenario (JSON or YAML) to validate, pin its targets and start it",
         )
+.permission_for(&["GET"], crate::rbac::Permission::HarnessRead).permission_for(&["POST"], crate::rbac::Permission::HarnessRun)
         .description(
             "Needs harness mode and the client role. Targets must be in RUSTYBIN_HARNESS_TARGETS; \
              link-local, metadata and control-plane targets are always refused. One run at a time per \
@@ -1614,6 +1621,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "Live stats of a run; PATCH tunes it while it runs (rate_multiplier, pause, resume, hold, skip_stage, set, add_layer, remove_layer)",
         )
+.permission_for(&["GET"], crate::rbac::Permission::HarnessRead).permission_for(&["PATCH"], crate::rbac::Permission::HarnessRun)
         .description(
             "A change is checked like a new scenario (the caps included), applied on the next \
              scheduler pass and recorded in the run's log and report.",
@@ -1630,6 +1638,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "The run's feed: a snapshot every second, change and finding events, finished at the end",
         )
+.permission(crate::rbac::Permission::HarnessRead)
         .sse()
         .example(
             Example::get("Run feed", "/_rustybin/harness/runs/missing/events").expect_status(404),
@@ -1640,6 +1649,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "Stop a run (it drains and reports)",
         )
+.permission(crate::rbac::Permission::HarnessRun)
         .example(
             Example::post("Stop a run", "/_rustybin/harness/runs/missing/stop").expect_status(404),
         ),
@@ -1649,6 +1659,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "Final report (JSON; ?format=text or junit)",
         )
+.permission(crate::rbac::Permission::HarnessRead)
         .example(
             Example::get("A report", "/_rustybin/harness/runs/missing/report").expect_status(404),
         ),
@@ -1658,6 +1669,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "Kill switch: stop all load on this node now",
         )
+.permission(crate::rbac::Permission::HarnessRun)
         .example(Example::post("Kill switch", "/_rustybin/harness/stop").expect_status(404)),
         Endpoint::new(
             "/_rustybin/harness/join",
@@ -1665,6 +1677,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "Join a cluster: {url, join_token, advertise?} (orchestrated)",
         )
+.permission(crate::rbac::Permission::HarnessCluster)
         .description(
             "Tells this node (client or server role) to join the cluster at url \
              (<leader>/_rustybin/harness/clusters/<id>). The node then heartbeats to the leader; \
@@ -1681,6 +1694,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "Leave the cluster (this node's runs of it stop)",
         )
+.permission(crate::rbac::Permission::HarnessCluster)
         .example(Example::post("Leave", "/_rustybin/harness/leave").expect_status(404)),
         Endpoint::new(
             "/_rustybin/harness/clusters",
@@ -1688,6 +1702,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "Clusters this node leads; POST {cluster_id?, min_nodes?, lease?, election_timeout?, join_token?} creates one",
         )
+.permission_for(&["GET"], crate::rbac::Permission::HarnessRead).permission_for(&["POST"], crate::rbac::Permission::HarnessCluster)
         .description(
             "Needs the coordinator role. The answer carries the join token once (only its hash is \
              kept). A coordinator that is also a client or server joins its own cluster.",
@@ -1704,6 +1719,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "A cluster: members, roles, health, clock offsets, the current run",
         )
+.permission_for(&["GET"], crate::rbac::Permission::HarnessRead).permission_for(&["DELETE"], crate::rbac::Permission::HarnessCluster)
         .description(
             "On a member of the cluster that is not its leader: 307 to the leader, with \
              X-Rustybin-Harness-Leader. DELETE needs no active run.",
@@ -1717,6 +1733,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "The server nodes' advertised URLs, for the gateway's upstream pool",
         )
+.permission(crate::rbac::Permission::HarnessRead)
         .example(
             Example::get("Upstreams", "/_rustybin/harness/clusters/perf-1/upstreams")
                 .expect_status(404),
@@ -1727,6 +1744,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "The leader, its term, the succession with work scores and the history of leader changes",
         )
+.permission(crate::rbac::Permission::HarnessRead)
         .description(
             "Answered by every member, never redirected, so a controller can always find the \
              leader. failover is available with three or more eligible nodes \
@@ -1742,6 +1760,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "Node route: a candidate asks an eligible node for its vote (node credential)",
         )
+.open()
         .example(
             Example::post("Vote (node)", "/_rustybin/harness/clusters/perf-1/election/vote")
                 .json(r#"{"term":2,"candidate":"n2","snapshot":{"term":1,"seq":7}}"#)
@@ -1753,6 +1772,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "Node route: a new leader announces its term (node credential); an older leader steps down",
         )
+.open()
         .example(
             Example::post(
                 "Announce (node)",
@@ -1767,6 +1787,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "Node route: join with the join token (bearer); returns a node credential and a lease",
         )
+.open()
         .example(
             Example::post("Join (node)", "/_rustybin/harness/clusters/perf-1/nodes")
                 .json("{}")
@@ -1778,6 +1799,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "Node route: heartbeat with the node credential; a long poll carrying stats, returning assignments",
         )
+.open()
         .example(
             Example::post(
                 "Heartbeat (node)",
@@ -1792,6 +1814,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "Cluster runs; POST a scenario to submit it (validated, not started)",
         )
+.permission_for(&["GET"], crate::rbac::Permission::HarnessRead).permission_for(&["POST"], crate::rbac::Permission::HarnessRun)
         .example(
             Example::get("Cluster runs", "/_rustybin/harness/clusters/perf-1/runs")
                 .expect_status(404),
@@ -1807,6 +1830,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "Live merged stats of a cluster run, with its quorum; PATCH tunes it on every client node",
         )
+.permission_for(&["GET"], crate::rbac::Permission::HarnessRead).permission_for(&["PATCH"], crate::rbac::Permission::HarnessRun)
         .description(
             "A change is checked against every client node's declared capacity for its share, \
              recorded in the run's log, carried in the cluster snapshot (it survives a failover), \
@@ -1831,6 +1855,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "The cluster run's feed: snapshots, changes, findings, scale_request, leader_changed, finished",
         )
+.permission(crate::rbac::Permission::HarnessRead)
         .sse()
         .example(
             Example::get(
@@ -1845,6 +1870,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "Start a cluster run: the rate split by capacity and a synchronised start (409 without the quorum)",
         )
+.permission(crate::rbac::Permission::HarnessRun)
         .example(
             Example::post(
                 "Start a cluster run",
@@ -1858,6 +1884,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "Stop a cluster run on every client node",
         )
+.permission(crate::rbac::Permission::HarnessRun)
         .example(
             Example::post(
                 "Stop a cluster run",
@@ -1871,6 +1898,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::HARNESS,
             "The merged report of a cluster run (JSON; ?format=text or junit)",
         )
+.permission(crate::rbac::Permission::HarnessRead)
         .example(
             Example::get(
                 "A cluster report",

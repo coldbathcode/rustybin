@@ -38,17 +38,17 @@ macro_rules! permissions {
 }
 
 permissions! {
-    InstanceRead => "instance.read", Instance, "Status, catalogue, version and diagnostics";
-    SettingsRead => "settings.read", Instance, "Read the instance settings (secrets show only whether they are set)";
+    InstanceRead => "instance.read", Instance, "Status, catalogue, version, metrics and the instance's public views";
+    SettingsRead => "settings.read", Instance, "Read the instance settings (secrets show only whether they are set), diagnostics, outbound decisions and usage";
     SettingsWrite => "settings.write", Instance, "Change the instance settings outside the security groups";
     SettingsSecurity => "settings.security", Instance, "Change the security groups: egress, the AI provider and base URL, proxy, agents, console and single sign-on";
     SecretsWrite => "secrets.write", Instance, "Set or clear stored secrets";
-    MocksRead => "mocks.read", Mocks, "List and read mocks, their revisions and reports";
+    MocksRead => "mocks.read", Mocks, "List and read mocks, their revisions, reports, stateful data and checkpoints";
     MocksWrite => "mocks.write", Mocks, "Create, edit, deploy, roll back and turn mocks on or off";
     MocksDelete => "mocks.delete", Mocks, "Delete mocks";
-    MocksData => "mocks.data", Mocks, "Read, change and reset a mock's stateful data";
+    MocksData => "mocks.data", Mocks, "Reset a mock's stateful data and clear its request log";
     TrafficRead => "traffic.read", Traffic, "Captured requests, bins and mock traffic";
-    TrafficClear => "traffic.clear", Traffic, "Clear captured requests and bins";
+    TrafficClear => "traffic.clear", Traffic, "Clear everyone's captured requests";
     TestsRead => "tests.read", Testing, "Read saved tests, schedules and their run history";
     TestsWrite => "tests.write", Testing, "Save, change and delete saved tests and schedules";
     TestsRun => "tests.run", Testing, "Run saved tests";
@@ -61,7 +61,7 @@ permissions! {
     AssistUse => "assist.use", Ai, "Ask AI assist (explain, suggest, answer)";
     AssistJobs => "assist.jobs", Ai, "AI-built mocks: specs, examples and edits";
     McpInspect => "mcp.inspect", Mcp, "The MCP inspector, its relay and checks";
-    McpConnections => "mcp.connections", Mcp, "Saved MCP connections and their credentials";
+    McpConnections => "mcp.connections", Mcp, "Saved MCP connections and their credentials, check runs, calls that act on a server elsewhere";
     RegistryWrite => "registry.write", Mcp, "Publish and change mock MCP registry entries";
     PortalRead => "portal.read", Portal, "Read the closed items of the API portal";
     PortalPublish => "portal.publish", Portal, "Publish and unpublish portal items";

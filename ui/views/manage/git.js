@@ -11,6 +11,7 @@ import { SERVER, getJson, send } from '../../lib/http.js';
 import { settingsForm } from '../../lib/settingsform.js';
 import * as assist from '../../lib/assist.js';
 import { errorText } from '../../lib/mockapi.js';
+import * as perms from '../../lib/perms.js';
 
 async function post(path, body) {
   return send({ method: 'POST', url: SERVER + path, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}), admin: true, session: false, timeout: 120000 });
@@ -96,8 +97,8 @@ export function gitPanel(doc, reload, error) {
       if (!r.ok) {
         const j = r.json || {};
         const conflict = j.conflict ? h('div', { class: 'row', style: { gap: '6px', marginTop: '6px', flexWrap: 'wrap' } },
-          h('button', { class: 'btn sm', type: 'button', id: 'git-resolve-instance', onclick: () => act('Resolving', '/_rustybin/git/resolve', { with: 'instance', message: message.value }) }, 'Replace the repository\'s copy with this instance\'s'),
-          h('button', { class: 'btn sm', type: 'button', id: 'git-resolve-repository', onclick: () => { if (confirm('Replace this instance\'s configuration with the repository\'s (with prune)?')) act('Resolving', '/_rustybin/git/resolve', { with: 'repository' }); } }, 'Replace this instance with the repository\'s')) : null;
+          perms.guard(h('button', { class: 'btn sm', type: 'button', id: 'git-resolve-instance', onclick: () => act('Resolving', '/_rustybin/git/resolve', { with: 'instance', message: message.value }) }, 'Replace the repository\'s copy with this instance\'s'), 'git.write'),
+          perms.guard(h('button', { class: 'btn sm', type: 'button', id: 'git-resolve-repository', onclick: () => { if (confirm('Replace this instance\'s configuration with the repository\'s (with prune)?')) act('Resolving', '/_rustybin/git/resolve', { with: 'repository' }); } }, 'Replace this instance with the repository\'s'), 'git.write')) : null;
         replace(result, notice('err', h('div', { class: 'grow' }, errorText(r, label), conflict)));
         load(false);
         return;
@@ -107,7 +108,7 @@ export function gitPanel(doc, reload, error) {
       if (after) after(j);
       load(false);
     }
-    const connect = h('button', { class: 'btn primary', type: 'button', id: 'git-init', disabled: !ready, onclick: () => act('Connecting', '/_rustybin/git/init') }, icon('link'), st.initialised ? 'Reconnect' : 'Connect');
+    const connect = perms.guard(h('button', { class: 'btn primary', type: 'button', id: 'git-init', disabled: !ready, onclick: () => act('Connecting', '/_rustybin/git/init') }, icon('link'), st.initialised ? 'Reconnect' : 'Connect'), 'git.write');
     // The checkpoint choice: local checkpoints written next to rustybin.yaml
     // in this commit (mock data, so only when ticked; never automatic).
     const picked = new Set();
@@ -127,11 +128,11 @@ export function gitPanel(doc, reload, error) {
         }));
     }).catch((e) => replace(choiceEl, h('span', { class: 'muted small' }, 'The checkpoints could not be loaded: ' + (e.message || e))));
     const commitBody = () => (picked.size ? { message: message.value, checkpoints: [...picked] } : { message: message.value });
-    const commit = h('button', { class: 'btn', type: 'button', id: 'git-commit', disabled: !ready || !st.initialised, onclick: () => act('Committing', '/_rustybin/git/commit', commitBody()) }, icon('check'), 'Commit');
-    const push = h('button', { class: 'btn', type: 'button', id: 'git-push', disabled: !ready || !st.initialised, onclick: () => act('Pushing', '/_rustybin/git/push') }, icon('upload'), 'Push');
-    const commitPush = h('button', { class: 'btn primary', type: 'button', id: 'git-commit-push', disabled: !ready || !st.initialised, onclick: () => act('Committing', '/_rustybin/git/commit', commitBody(), (j) => { if (j.committed) act('Pushing', '/_rustybin/git/push'); }) }, icon('upload'), 'Commit and push');
-    const pullDry = h('button', { class: 'btn', type: 'button', id: 'git-pull-dry', disabled: !ready || !st.initialised, onclick: () => act('Checking', '/_rustybin/git/pull', { apply: true, dry_run: true, prune: prune.input.checked }) }, icon('diff'), 'Pull, dry run');
-    const pullApply = h('button', { class: 'btn primary', type: 'button', id: 'git-pull-apply', disabled: !ready || !st.initialised, onclick: () => { if (confirm('Pull and apply the repository\'s configuration' + (prune.input.checked ? ' with prune' : '') + '?')) act('Pulling', '/_rustybin/git/pull', { apply: true, dry_run: false, prune: prune.input.checked }); } }, icon('download'), 'Pull and apply');
+    const commit = perms.guard(h('button', { class: 'btn', type: 'button', id: 'git-commit', disabled: !ready || !st.initialised, onclick: () => act('Committing', '/_rustybin/git/commit', commitBody()) }, icon('check'), 'Commit'), 'git.write');
+    const push = perms.guard(h('button', { class: 'btn', type: 'button', id: 'git-push', disabled: !ready || !st.initialised, onclick: () => act('Pushing', '/_rustybin/git/push') }, icon('upload'), 'Push'), 'git.write');
+    const commitPush = perms.guard(h('button', { class: 'btn primary', type: 'button', id: 'git-commit-push', disabled: !ready || !st.initialised, onclick: () => act('Committing', '/_rustybin/git/commit', commitBody(), (j) => { if (j.committed) act('Pushing', '/_rustybin/git/push'); }) }, icon('upload'), 'Commit and push'), 'git.write');
+    const pullDry = perms.guard(h('button', { class: 'btn', type: 'button', id: 'git-pull-dry', disabled: !ready || !st.initialised, onclick: () => act('Checking', '/_rustybin/git/pull', { apply: true, dry_run: true, prune: prune.input.checked }) }, icon('diff'), 'Pull, dry run'), 'git.write');
+    const pullApply = perms.guard(h('button', { class: 'btn primary', type: 'button', id: 'git-pull-apply', disabled: !ready || !st.initialised, onclick: () => { if (confirm('Pull and apply the repository\'s configuration' + (prune.input.checked ? ' with prune' : '') + '?')) act('Pulling', '/_rustybin/git/pull', { apply: true, dry_run: false, prune: prune.input.checked }); } }, icon('download'), 'Pull and apply'), 'git.write');
     replace(actionsEl,
       card('Connect', { hint: st.initialised ? 'the working copy exists' : 'clone the branch, or start one for an empty repository' },
         h('div', { class: 'row', style: { gap: '8px', flexWrap: 'wrap' } }, connect, h('span', { class: 'muted small' }, ready ? 'Clones ' + st.remote.url + ' (' + st.branch + ') into the state directory.' : 'Save a repository above first.'))),
@@ -149,13 +150,13 @@ export function gitPanel(doc, reload, error) {
 
   function renderKey() {
     const key = st.deploy_key;
-    const gen = h('button', { class: 'btn sm', type: 'button', id: 'git-key-generate', disabled: !st.state_dir, onclick: async () => {
+    const gen = perms.guard(h('button', { class: 'btn sm', type: 'button', id: 'git-key-generate', disabled: !st.state_dir, onclick: async () => {
       if (key && !confirm('Generate a new deploy key? The old public key stops working.')) return;
       const r = await post('/_rustybin/git/key', { replace: !!key });
       if (!r.ok) { toast(errorText(r, 'key'), 'err'); return; }
       toast('Deploy key generated');
       load(false);
-    } }, icon('token'), key ? 'Generate a new key' : 'Generate the deploy key');
+    } }, icon('token'), key ? 'Generate a new key' : 'Generate the deploy key'), 'git.write');
     replace(keyEl, card('Deploy key', { hint: 'ed25519, for ssh remotes; add the public key to the repository', actions: gen },
       key ? h('div', { class: 'stack' },
         h('div', { class: 'row', style: { gap: '6px' } }, h('code', { class: 'mono small', id: 'git-public-key', style: { wordBreak: 'break-all' } }, key.public), copyButton(() => key.public, { label: 'Copy', toast: 'Public key copied' })),

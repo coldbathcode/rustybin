@@ -102,30 +102,87 @@ fn scope_claims() {
     let g = Grant::from_scope_claim(Some(&json!(42)));
     assert!(!g.inspector);
 
-    let inspector = Grant::from_scope_claim(Some(&json!("inspector")));
-    assert!(inspector.allows(&Method::GET, "/_rustybin/requests"));
-    assert!(inspector.allows(&Method::GET, "/_rustybin/requests/stream"));
-    assert!(!inspector.allows(&Method::GET, "/_rustybin/requestsx"));
-    assert!(!inspector.allows(&Method::GET, "/_rustybin/config"));
-    assert!(!inspector.allows(&Method::DELETE, "/_rustybin/requests"));
-    let console = Grant::from_scope_claim(Some(&json!("console")));
-    assert!(console.allows(&Method::GET, "/_rustybin/metrics"));
-    assert!(!console.allows(&Method::DELETE, "/_rustybin/requests"));
-    assert!(console.allows(&Method::POST, "/_rustybin/mocks/import"));
-    assert!(console.allows(
-        &Method::POST,
+    assert!(crate::rbac::scope_may(
+        "inspector",
+        "GET",
+        "/_rustybin/requests"
+    ));
+    assert!(crate::rbac::scope_may(
+        "inspector",
+        "GET",
+        "/_rustybin/requests/stream"
+    ));
+    assert!(!crate::rbac::scope_may(
+        "inspector",
+        "GET",
+        "/_rustybin/requestsx"
+    ));
+    assert!(!crate::rbac::scope_may(
+        "inspector",
+        "GET",
+        "/_rustybin/config"
+    ));
+    // DELETE needs traffic.read for one session, traffic.clear (a body check) for all.
+    assert!(crate::rbac::scope_may(
+        "inspector",
+        "DELETE",
+        "/_rustybin/requests"
+    ));
+    assert!(crate::rbac::scope_may(
+        "console",
+        "GET",
+        "/_rustybin/metrics"
+    ));
+    assert!(crate::rbac::scope_may(
+        "console",
+        "DELETE",
+        "/_rustybin/requests"
+    ));
+    assert!(crate::rbac::scope_may(
+        "console",
+        "POST",
+        "/_rustybin/mocks/import"
+    ));
+    assert!(crate::rbac::scope_may(
+        "console",
+        "POST",
         "/_rustybin/mocks/petstore/operations/getPetById/validate"
     ));
-    assert!(console.allows(
-        &Method::POST,
+    assert!(crate::rbac::scope_may(
+        "console",
+        "POST",
         "/_rustybin/mocks/petstore/operations/getPetById/rules/test"
     ));
-    assert!(!console.allows(&Method::POST, "/_rustybin/mocks"));
-    assert!(!console.allows(&Method::POST, "/_rustybin/mocks/petstore/deploy"));
-    assert!(!console.allows(&Method::PUT, "/_rustybin/mocks/import"));
-    assert!(!console.allows(&Method::POST, "/_rustybin/mocks/a/operations/b/validate/x"));
-    assert!(!inspector.allows(&Method::POST, "/_rustybin/mocks/import"));
-    assert!(Grant::ADMIN.allows(&Method::DELETE, "/_rustybin/requests"));
+    assert!(!crate::rbac::scope_may(
+        "console",
+        "POST",
+        "/_rustybin/mocks"
+    ));
+    assert!(!crate::rbac::scope_may(
+        "console",
+        "POST",
+        "/_rustybin/mocks/petstore/deploy"
+    ));
+    assert!(!crate::rbac::scope_may(
+        "console",
+        "PUT",
+        "/_rustybin/mocks/import"
+    ));
+    assert!(!crate::rbac::scope_may(
+        "console",
+        "POST",
+        "/_rustybin/mocks/a/operations/b/validate/x"
+    ));
+    assert!(!crate::rbac::scope_may(
+        "inspector",
+        "POST",
+        "/_rustybin/mocks/import"
+    ));
+    assert!(crate::rbac::scope_may(
+        "admin",
+        "DELETE",
+        "/_rustybin/requests"
+    ));
 }
 
 #[test]
@@ -301,9 +358,11 @@ async fn jwt_mode_scopes() {
     );
     let (s, v) = reason_of(&app, "/_rustybin/config", &inspector).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
-    assert_eq!(v["reason"], "insufficient_scope");
-    assert_eq!(v["scopes"], json!(["inspector"]));
-    // Mutations need the admin token or the admin scope.
+    // The refusal names the missing permission, never what the token holds.
+    assert_eq!(v["reason"], "permission_required");
+    assert_eq!(v["permission"], "instance.read");
+    assert!(v.get("scopes").is_none(), "{v}");
+    // Clearing everyone's captures needs traffic.clear (the admin role).
     for t in [&console, &inspector, &no_scope] {
         assert_eq!(
             status_of(&app, "DELETE", "/_rustybin/requests", Some(t)).await,

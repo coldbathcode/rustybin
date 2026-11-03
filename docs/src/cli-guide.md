@@ -114,8 +114,10 @@ the spec files the document references, as `rustybin mock push` does.
 done, `1` the instance refused or the operation failed (a 4xx or 5xx, failed
 thresholds, a document applied with problems, a failed `doctor` check, saved test or
 scenario expectation), `2` usage, `3` the instance could not
-be reached or the credential was refused. `--quiet` drops the progress and confirmation
-lines.
+be reached, the credential was refused, or it lacks a permission the command needs:
+the message starts `permission_required: mocks.write` (the [CLI reference](cli.md)
+names each command's permission in its **Needs** column). `--quiet` drops the progress
+and confirmation lines.
 
 The tails (`requests tail`, `mocks traffic-tail`, `bins tail`, `agents tail`,
 `harness events`) follow a Server-Sent Events feed and print one line per event;

@@ -15,6 +15,9 @@ jsonpath "$.checks[?(@.id == 'listeners')].status" contains "ok"
 
 # ANCHOR: admin_only
 GET {{secured_url}}/_rustybin/diagnostics
-Authorization: Bearer {{console_token}}
+Authorization: Bearer {{inspector_token}}
 HTTP 403
+[Asserts]
+jsonpath "$.reason" == "permission_required"
+jsonpath "$.permission" == "settings.read"
 # ANCHOR_END: admin_only

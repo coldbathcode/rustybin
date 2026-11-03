@@ -6,6 +6,7 @@
 // *_checkpoint(s) tools.
 import { h, replace, card, input, checkbox, notice, toast, icon, badge, spinner, fmtTime } from '../../lib/dom.js';
 import { SERVER, getJson, send } from '../../lib/http.js';
+import * as perms from '../../lib/perms.js';
 
 const BASE = '/_rustybin/checkpoints';
 
@@ -36,7 +37,7 @@ export function checkpointsPanel() {
   const repoResultEl = h('div', { id: 'checkpoint-repo-result' });
   const name = input({ id: 'checkpoint-name', placeholder: 'demo-start' });
   const replaceBox = checkbox('Replace a checkpoint of that name', false);
-  const saveBtn = h('button', { class: 'btn primary', type: 'button', id: 'checkpoint-save' }, icon('download'), 'Save checkpoint');
+  const saveBtn = perms.guard(h('button', { class: 'btn primary', type: 'button', id: 'checkpoint-save' }, icon('download'), 'Save checkpoint'), 'checkpoints.write');
 
   async function load() {
     try {
@@ -54,8 +55,8 @@ export function checkpointsPanel() {
           h('td', null, badge(c.healthy ? 'healthy' : 'unhealthy', c.healthy ? 'ok' : 'warn')),
           h('td', null, h('div', { class: 'row nowrap' },
             h('button', { class: 'btn sm', type: 'button', 'data-preview': c.name, onclick: () => restore(c.name, true) }, 'Preview'),
-            h('button', { class: 'btn sm', type: 'button', 'data-restore': c.name, onclick: () => restore(c.name, false) }, icon('history'), 'Restore'),
-            h('button', { class: 'btn sm', type: 'button', title: 'Delete', 'data-delete': c.name, onclick: () => remove(c.name) }, icon('trash'))))))))));
+            perms.guard(h('button', { class: 'btn sm', type: 'button', 'data-restore': c.name, onclick: () => restore(c.name, false) }, icon('history'), 'Restore'), 'checkpoints.restore'),
+            perms.guard(h('button', { class: 'btn sm', type: 'button', title: 'Delete', 'data-delete': c.name, onclick: () => remove(c.name) }, icon('trash')), 'checkpoints.write')))))))));
     } catch (e) {
       replace(listEl, notice('err', 'The checkpoints could not be loaded: ' + e.message));
     }
@@ -97,7 +98,7 @@ export function checkpointsPanel() {
           h('td', null, badge(c.healthy ? 'healthy' : 'unhealthy', c.healthy ? 'ok' : 'warn')),
           h('td', null, h('div', { class: 'row nowrap' },
             h('button', { class: 'btn sm', type: 'button', 'data-repo-preview': c.name, onclick: () => restore(c.name, true, true) }, 'Preview'),
-            h('button', { class: 'btn sm', type: 'button', 'data-repo-restore': c.name, onclick: () => restore(c.name, false, true) }, icon('history'), 'Restore'))))
+            perms.guard(h('button', { class: 'btn sm', type: 'button', 'data-repo-restore': c.name, onclick: () => restore(c.name, false, true) }, icon('history'), 'Restore'), 'checkpoints.restore'))))
           : h('tr', { 'data-repo-checkpoint': c.name },
             h('td', { class: 'mono small' }, c.name),
             h('td', { colspan: 4 }, badge('cannot be restored', 'err'), ' ', h('span', { class: 'small muted' }, c.error))))))),

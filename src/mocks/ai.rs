@@ -64,7 +64,7 @@ fn parse_body<T: serde::de::DeserializeOwned>(body: &Bytes) -> Result<T, Service
 /// May the caller use the instance's AI on mocks? The operator always; a
 /// self-service visitor with `RUSTYBIN_ASSIST_VISITORS`.
 pub fn ai_allowed(s: &Svc) -> SvcResult<()> {
-    if s.caller.admin {
+    if s.caller.resolved.has(crate::rbac::Permission::AssistJobs) {
         return Ok(());
     }
     if s.state.mocks.visits().is_some() {
@@ -75,7 +75,7 @@ pub fn ai_allowed(s: &Svc) -> SvcResult<()> {
             "AI assist on this instance is for the operator: visitors may use it only with RUSTYBIN_ASSIST_VISITORS=true",
         ));
     }
-    s.require_admin()
+    s.need(crate::rbac::Permission::AssistJobs)
 }
 
 fn wants_stream(headers: &HeaderMap, body_flag: Option<bool>) -> bool {

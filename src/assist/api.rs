@@ -54,10 +54,7 @@ async fn status_handler(State(state): State<AppState>) -> Response {
     Json(status_json(&state)).into_response()
 }
 
-async fn test_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
+async fn test_handler(State(state): State<AppState>) -> Response {
     match state.assist.test().await {
         Ok(v) => Json(v).into_response(),
         Err(e) => {
@@ -90,10 +87,7 @@ async fn models_handler(State(state): State<AppState>) -> Response {
 
 /// `POST /_rustybin/assist/models`: ask the provider for its list with the
 /// stored key, keep it, answer the merged list (admin).
-async fn load_models_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
+async fn load_models_handler(State(state): State<AppState>) -> Response {
     match state.assist.load_models().await {
         Ok(v) => Json(v).into_response(),
         Err(e) => {
@@ -106,10 +100,7 @@ async fn load_models_handler(State(state): State<AppState>, headers: HeaderMap) 
     }
 }
 
-async fn usage_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
+async fn usage_handler(State(state): State<AppState>) -> Response {
     Json(state.assist.usage()).into_response()
 }
 
@@ -265,8 +256,11 @@ async fn run_handler(
             "unknown_task",
         );
     };
+    // A task that writes (an AI-built mock) needs `assist.jobs` on top of
+    // the route's `assist.use`.
     if task.writes {
-        if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
+        let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
+        if let Err(resp) = crate::rbac::require(&caller, crate::rbac::Permission::AssistJobs) {
             return resp;
         }
     }
@@ -365,6 +359,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "AI assist: the provider, models, whether a key is set, the tasks and usage",
         )
+.permission(crate::rbac::Permission::AssistUse)
         .example(Example::get("AI assist status", STATUS_PATH)),
         Endpoint::new(
             TEST_PATH,
@@ -372,6 +367,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "AI assist: one short call to the configured provider (admin)",
         )
+.permission(crate::rbac::Permission::SettingsWrite)
         .example(Example::post("Test the AI provider", TEST_PATH).expect_status(503)),
         Endpoint::new(
             RUN_PATH,
@@ -379,6 +375,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "AI assist: run a task (free_answer, explain, suggest) as SSE or one JSON answer",
         )
+.permission(crate::rbac::Permission::AssistUse)
         .description(
             "{task, inputs, model?, stream?}. Streams events sent, delta, json, action, usage, \
              error, done; with stream false answers one JSON document. 503 until a provider and \
@@ -396,6 +393,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "AI assist: calls, tokens, estimated cost per provider, model and task (admin)",
         )
+.permission(crate::rbac::Permission::SettingsRead)
         .example(Example::get("AI assist usage", USAGE_PATH)),
         Endpoint::new(
             MODELS_PATH,
@@ -403,6 +401,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "AI assist: the provider's models with tier, context, price and the jobs each runs; POST loads the list from the provider with the stored key (admin)",
         )
+.permission_for(&["GET"], crate::rbac::Permission::AssistUse).permission_for(&["POST"], crate::rbac::Permission::SettingsWrite)
         .example(Example::get("AI assist models", MODELS_PATH))
         .example(Example::post("Load the provider's models", MODELS_PATH).expect_status(503)),
     ]

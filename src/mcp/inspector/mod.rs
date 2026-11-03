@@ -80,12 +80,6 @@ impl Inspector {
     }
 }
 
-/// POST routes the console scope may call (they change nothing on the
-/// instance; outbound calls follow the egress policy).
-pub fn is_console_post(path: &str) -> bool {
-    matches!(path, RELAY_PATH | RELAY_FETCH_PATH | CHECKS_PATH)
-}
-
 /// JSON-RPC methods that only read what a server offers: all a caller
 /// without admin rights may send to a server on another host (the console
 /// scope's relay and checks, a read-only agent's `mcp_call`). `tools/call`
@@ -108,12 +102,6 @@ pub const READ_ONLY_METHODS: &[&str] = &[
 pub fn allowed_without_admin(target: &client::Target, method: Option<&str>) -> bool {
     matches!(target, client::Target::Local(_))
         || method.is_some_and(|m| READ_ONLY_METHODS.contains(&m) || m.starts_with("notifications/"))
-}
-
-/// DELETE of a relay session: the console scope may end its own sessions.
-pub fn is_relay_session_path(path: &str) -> bool {
-    path.strip_prefix("/_rustybin/mcp-relay/")
-        .is_some_and(|id| !id.is_empty() && id != "fetch" && !id.contains('/'))
 }
 
 fn error(status: StatusCode, message: impl Into<String>, reason: &str) -> Response {
@@ -375,7 +363,9 @@ async fn run_checks(
         }
     };
     let (save, format) = (req.save.unwrap_or(true), req.format.clone());
-    let admin = crate::admin::admin_check(&headers, &state.config).is_ok();
+    // Saved credentials and calls that act on a server elsewhere: `mcp.connections`.
+    let admin = crate::control_auth::open_caller(&headers, &state.config)
+        .has(crate::rbac::Permission::McpConnections);
     let spec = match build_run_spec(&inspector, req, principal, admin) {
         Ok(s) => s,
         Err((status, message, reason)) => return error(status, message, reason),
@@ -443,14 +433,9 @@ async fn get_run(
 }
 
 async fn delete_run(
-    State(state): State<AppState>,
     Extension(inspector): Extension<Arc<Inspector>>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
     match inspector.store.delete_run(&id) {
         Ok(true) => Json(json!({ "deleted": id })).into_response(),
         Ok(false) => error(
@@ -507,15 +492,10 @@ struct ConnectionBody {
 }
 
 async fn put_connection(
-    State(state): State<AppState>,
     Extension(inspector): Extension<Arc<Inspector>>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     body: Bytes,
 ) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
     let req: ConnectionBody = match serde_json::from_slice(&body) {
         Ok(b) => b,
         Err(e) => {
@@ -546,14 +526,9 @@ async fn put_connection(
 }
 
 async fn delete_connection(
-    State(state): State<AppState>,
     Extension(inspector): Extension<Arc<Inspector>>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
     match inspector.store.delete(&id) {
         Ok(true) => Json(json!({ "deleted": id })).into_response(),
         Ok(false) => error(
@@ -595,8 +570,10 @@ pub fn router(state: &AppState) -> Router<AppState> {
 pub fn catalog() -> Vec<Endpoint> {
     vec![
         Endpoint::new(SERVERS_PATH, &["GET"], category::CONTROL, "MCP inspector: every MCP server this instance serves, and the relay's policy")
+.permission(crate::rbac::Permission::McpInspect)
             .example(Example::get("MCP servers of this instance", SERVERS_PATH)),
         Endpoint::new(RELAY_PATH, &["POST"], category::CONTROL, "MCP inspector: forward one JSON-RPC message to an MCP server, the answer as SSE")
+.permission(crate::rbac::Permission::McpInspect)
             .description("Targets on this instance (/mcp*, /_rustybin/mcp, /mock/<name>/_rustybin/mcp) are served in process; other hosts go through the egress policy (RUSTYBIN_EGRESS_ALLOW). Events: relay (upstream status and headers, the relay session), message (one per JSON-RPC message), body (a non-JSON-RPC answer), error, done.")
             .example(
                 Example::post("Relay server/discover to /mcp", RELAY_PATH)
@@ -604,20 +581,26 @@ pub fn catalog() -> Vec<Endpoint> {
                     .skip_check("an SSE answer"),
             ),
         Endpoint::new(RELAY_FETCH_PATH, &["POST"], category::CONTROL, "MCP inspector: fetch one OAuth discovery or token document through the instance")
+.permission(crate::rbac::Permission::McpInspect)
             .example(
                 Example::post("Fetch protected resource metadata", RELAY_FETCH_PATH)
                     .json(r#"{"url":"/.well-known/oauth-protected-resource/mcp/protected"}"#),
             ),
         Endpoint::new("/_rustybin/mcp-relay/{session}", &["DELETE"], category::CONTROL, "MCP inspector: end a relay session")
+.permission(crate::rbac::Permission::McpInspect)
             .example(Example::delete("End a relay session", "/_rustybin/mcp-relay/0123456789abcdef01234567").expect_status(404)),
         Endpoint::new(CHECKS_PATH, &["GET", "POST"], category::CONTROL, "MCP inspector: run the check suite against an MCP server (JSON or JUnit), or list saved runs")
+.permission(crate::rbac::Permission::McpInspect)
             .example(Example::get("Saved check runs", CHECKS_PATH))
             .example(Example::post("Check /mcp", CHECKS_PATH).json(r#"{"target":"/mcp","checks":["connect","version","ping"],"save":false}"#)),
         Endpoint::new("/_rustybin/mcp-checks/{id}", &["GET", "DELETE"], category::CONTROL, "MCP inspector: one saved check run (format=junit for JUnit)")
+.permission_for(&["GET"], crate::rbac::Permission::McpInspect).permission_for(&["DELETE"], crate::rbac::Permission::McpConnections)
             .example(Example::get("A saved run", "/_rustybin/mcp-checks/run-unknown").expect_status(404)),
         Endpoint::new(CONNECTIONS_PATH, &["GET"], category::CONTROL, "MCP inspector: saved connections (credentials as {set, hint})")
+.permission(crate::rbac::Permission::McpInspect)
             .example(Example::get("Saved connections", CONNECTIONS_PATH)),
         Endpoint::new("/_rustybin/mcp-connections/{id}", &["GET", "PUT", "DELETE"], category::CONTROL, "MCP inspector: one saved connection; PUT and DELETE need admin")
+.permission_for(&["GET"], crate::rbac::Permission::McpInspect).permission_for(&["PUT", "DELETE"], crate::rbac::Permission::McpConnections)
             .example(Example::get("A saved connection", "/_rustybin/mcp-connections/unknown").expect_status(404)),
     ]
 }

@@ -445,7 +445,9 @@ async fn flaky_reset_handler(
     match query.scope.as_deref() {
         Some("all") => {
             // Resetting every client's counters is a global mutation.
-            if let Err(resp) = crate::admin::require_admin(&headers, &config) {
+            if let Err(resp) =
+                crate::admin::require(&headers, &config, crate::rbac::Permission::SettingsWrite)
+            {
                 return resp;
             }
             let removed = state.reset_all();

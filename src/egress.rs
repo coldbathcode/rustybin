@@ -27,7 +27,6 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use axum::extract::State;
-use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -1183,10 +1182,7 @@ pub fn specs() -> Vec<Spec> {
 
 // ── Route ───────────────────────────────────────────────────────────
 
-async fn egress_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
+async fn egress_handler(State(state): State<AppState>) -> Response {
     Json(state.egress.view()).into_response()
 }
 
@@ -1201,6 +1197,7 @@ pub fn catalog() -> Vec<Endpoint> {
         category::CONTROL,
         "The outbound connection policy: the allowlist, each feature's rule and the last 100 decisions",
     )
+.permission(crate::rbac::Permission::SettingsRead)
     .description(
         "Admin. `RUSTYBIN_EGRESS_ALLOW` (the `egress.allow` setting) applies to every outbound \
          feature; each feature adds its own rule when configured. Link-local, metadata, multicast \

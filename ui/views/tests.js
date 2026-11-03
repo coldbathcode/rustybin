@@ -10,6 +10,7 @@
 // tests every N minutes or at a time of day, a webhook for failures.
 import { h, replace, card, notice, icon, badge, spinner, toast, methodBadge, fmtTime } from '../lib/dom.js';
 import { getJson, send, SERVER } from '../lib/http.js';
+import * as perms from '../lib/perms.js';
 
 const BASE = '/_rustybin/tests';
 
@@ -34,7 +35,7 @@ export default {
         h('p', null, 'Requests with assertions, saved from Live traffic ("Save as test") or written out. Run them against this instance or through a gateway, and export them as Hurl for CI. Credentials are never saved: they become variables you fill when you run.'))));
     const listEl = h('div', { id: 'tests-list' }, spinner('Loading the saved tests'));
     const vars = h('textarea', { class: 'input mono', id: 'tests-vars', rows: 3, placeholder: 'NAME=value, one per line (not saved)' });
-    const runAll = h('button', { class: 'btn primary', type: 'button', id: 'tests-run' }, icon('play'), 'Run all');
+    const runAll = perms.guard(h('button', { class: 'btn primary', type: 'button', id: 'tests-run' }, icon('play'), 'Run all'), 'tests.run');
     const exportBtn = h('button', { class: 'btn', type: 'button', id: 'tests-export' }, icon('download'), 'Export as Hurl');
     const resultEl = h('div', { id: 'tests-result' });
     root.appendChild(card('Tests', { hint: 'GET ' + BASE, actions: h('div', { class: 'row' }, exportBtn, runAll) },
@@ -48,7 +49,7 @@ export default {
     const detailEl = h('div', { id: 'tests-run-detail' });
     const moreBtn = h('button', { class: 'btn sm', type: 'button', id: 'tests-history-more', hidden: true }, 'Older runs');
     const refreshBtn = h('button', { class: 'btn', type: 'button', id: 'tests-history-refresh', title: 'Refresh' }, icon('refresh'));
-    const clearBtn = h('button', { class: 'btn', type: 'button', id: 'tests-history-clear' }, icon('trash'), 'Clear history');
+    const clearBtn = perms.guard(h('button', { class: 'btn', type: 'button', id: 'tests-history-clear' }, icon('trash'), 'Clear history'), 'tests.write');
     root.appendChild(card('History', { hint: 'GET ' + BASE + '/runs', actions: h('div', { class: 'row' }, refreshBtn, clearBtn) },
       h('p', { class: 'muted small' }, 'Every run, from the console, the CLI, the API or an agent: the last 200 for 30 days (50 without a state directory). Variables are never kept.'),
       historyEl, moreBtn, detailEl));
@@ -66,7 +67,7 @@ export default {
     const sHook = h('input', { class: 'input mono', id: 'schedule-webhook', placeholder: 'https://hooks.example.com/rustybin (optional)' });
     const sRecovery = h('input', { type: 'checkbox', id: 'schedule-recovery' });
     const sEnabled = h('input', { type: 'checkbox', id: 'schedule-enabled', checked: true });
-    const sSave = h('button', { class: 'btn primary', type: 'button', id: 'schedule-save' }, icon('check'), 'Save schedule');
+    const sSave = perms.guard(h('button', { class: 'btn primary', type: 'button', id: 'schedule-save' }, icon('check'), 'Save schedule'), 'tests.write');
     const sReset = h('button', { class: 'btn', type: 'button', id: 'schedule-reset' }, 'New');
     const sResult = h('div', { id: 'schedule-result' });
     sWhen.onchange = () => { sValue.placeholder = sWhen.value === 'at' ? '02:30 (HH:MM, UTC)' : '15m (5m to 24h)'; };
@@ -116,7 +117,7 @@ export default {
         runAll.disabled = true;
         return;
       }
-      runAll.disabled = false;
+      runAll.disabled = !perms.can('tests.run');
       const rows = d.tests.map((t) => {
         const res = last.get(t.name);
         return h('tr', { 'data-test': t.name },
@@ -127,8 +128,8 @@ export default {
           h('td', { class: 'small' }, String((t.assert || []).length)),
           h('td', { class: 'mono small' }, (t.variables || []).join(', ')),
           h('td', null, h('div', { class: 'row nowrap' },
-            h('button', { class: 'btn sm', type: 'button', title: 'Run this test', onclick: () => run([t.name]) }, icon('play')),
-            h('button', { class: 'btn sm', type: 'button', title: 'Delete', 'data-delete': t.name, onclick: () => remove(t.name) }, icon('trash')))));
+            perms.guard(h('button', { class: 'btn sm', type: 'button', title: 'Run this test', onclick: () => run([t.name]) }, icon('play')), 'tests.run'),
+            perms.guard(h('button', { class: 'btn sm', type: 'button', title: 'Delete', 'data-delete': t.name, onclick: () => remove(t.name) }, icon('trash')), 'tests.write'))));
       });
       replace(listEl, h('div', { class: 'table-wrap' }, h('table', { class: 'table', id: 'tests-table' },
         h('thead', null, h('tr', null, h('th', null, ''), h('th', null, 'Name'), h('th', null, 'Request'), h('th', null, 'Target'), h('th', null, 'Assertions'), h('th', null, 'Variables'), h('th', null, ''))),
@@ -182,7 +183,7 @@ export default {
       runs = more ? runs.concat(d.runs) : d.runs;
       cursor = d.next_cursor || null;
       moreBtn.hidden = !cursor;
-      clearBtn.disabled = !runs.length;
+      clearBtn.disabled = !runs.length || !perms.can('tests.write');
       if (!runs.length) {
         replace(historyEl, h('p', { class: 'muted' }, 'No runs yet. Run the tests above, or with rustybin tests run.'));
         return;
@@ -326,9 +327,9 @@ export default {
           h('td', null, last),
           h('td', null, s.webhook ? noticeBadge(st.last_notice) : h('span', { class: 'muted small' }, 'no webhook')),
           h('td', null, h('div', { class: 'row nowrap' },
-            h('button', { class: 'btn sm', type: 'button', title: 'Run now', 'data-run-schedule': s.name, onclick: () => runSchedule(s.name) }, icon('play')),
-            h('button', { class: 'btn sm', type: 'button', title: 'Edit', 'data-edit-schedule': s.name, onclick: () => editSchedule(s) }, icon('edit')),
-            h('button', { class: 'btn sm', type: 'button', title: 'Delete', 'data-delete-schedule': s.name, onclick: () => removeSchedule(s.name) }, icon('trash')))));
+            perms.guard(h('button', { class: 'btn sm', type: 'button', title: 'Run now', 'data-run-schedule': s.name, onclick: () => runSchedule(s.name) }, icon('play')), 'tests.run'),
+            perms.guard(h('button', { class: 'btn sm', type: 'button', title: 'Edit', 'data-edit-schedule': s.name, onclick: () => editSchedule(s) }, icon('edit')), 'tests.write'),
+            perms.guard(h('button', { class: 'btn sm', type: 'button', title: 'Delete', 'data-delete-schedule': s.name, onclick: () => removeSchedule(s.name) }, icon('trash')), 'tests.write'))));
       });
       replace(schedulesEl, h('div', { class: 'table-wrap' }, h('table', { class: 'table', id: 'schedules-table' },
         h('thead', null, h('tr', null, h('th', null, 'Name'), h('th', null, 'When'), h('th', null, 'Tests'), h('th', null, 'On'), h('th', null, 'Next'), h('th', null, 'Last run'), h('th', null, 'Last notice'), h('th', null, ''))),

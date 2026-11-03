@@ -1199,10 +1199,7 @@ pub fn ran_view(state: &AppState, name: &str, ran: &Ran) -> Value {
     })
 }
 
-pub(super) async fn list_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
+pub(super) async fn list_handler(State(state): State<AppState>) -> Response {
     Json(json!({
         "schedules": state.saved_tests.schedules.views(),
         "max_schedules": MAX_SCHEDULES,
@@ -1224,9 +1221,6 @@ pub(super) async fn create_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
     let schedule: Schedule = match serde_json::from_slice(&body) {
         Ok(s) => s,
         Err(e) => return refuse(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
@@ -1244,11 +1238,7 @@ pub(super) async fn create_handler(
 pub(super) async fn get_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    headers: HeaderMap,
 ) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
     match state.saved_tests.schedules.view_of(&name) {
         Some(v) => Json(v).into_response(),
         None => refuse(
@@ -1264,9 +1254,6 @@ pub(super) async fn put_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
     let v: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return refuse(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
@@ -1289,9 +1276,6 @@ pub(super) async fn delete_handler(
     Path(name): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
     match state.saved_tests.schedules.delete(&name) {
         Ok(true) => {
             audit(&headers, &state, "deleted", &name);
@@ -1308,11 +1292,7 @@ pub(super) async fn delete_handler(
 pub(super) async fn run_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    headers: HeaderMap,
 ) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
     match run_now(&state, &name).await {
         Ok(ran) => Json(ran_view(&state, &name, &ran)).into_response(),
         Err((s, m)) => refuse(s, m),
@@ -1327,6 +1307,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Saved tests on a schedule: list them with their status, or create one (admin)",
         )
+.permission_for(&["GET"], crate::rbac::Permission::TestsRead).permission_for(&["POST"], crate::rbac::Permission::TestsWrite)
         .example(Example::get("Test schedules", LIST_PATH)),
         Endpoint::new(
             ONE_PATH,
@@ -1334,6 +1315,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "A test schedule: read it with its status, save or replace it, delete it (admin)",
         )
+.permission_for(&["GET"], crate::rbac::Permission::TestsRead).permission_for(&["PUT", "DELETE"], crate::rbac::Permission::TestsWrite)
         .example(Example::get("A test schedule", "/_rustybin/tests/schedules/nightly").expect_status(404)),
         Endpoint::new(
             RUN_PATH,
@@ -1341,6 +1323,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Run a test schedule now: its tests, kept in the history, its notice when it fails (admin)",
         )
+.permission(crate::rbac::Permission::TestsRun)
         .example(
             Example::post("Run a schedule now", "/_rustybin/tests/schedules/nightly/run")
                 .expect_status(404),

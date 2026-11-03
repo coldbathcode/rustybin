@@ -592,13 +592,7 @@ fn authorize_item(
     principal: &str,
 ) -> Result<(Option<Owner>, String), ServiceError> {
     let admin = |svc: &Svc| -> Result<(), ServiceError> {
-        svc.require_admin()?;
-        if !svc.caller.admin {
-            return Err(ServiceError::forbidden(
-                "publishing this item needs the admin token or a token with the admin scope",
-            ));
-        }
-        Ok(())
+        svc.need(crate::rbac::Permission::PortalPublish)
     };
     match id {
         ItemId::Mock(name) if state.mocks.get(name).is_some() => {
@@ -819,6 +813,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Dev portal: settings, every publishable item and its state",
         )
+        .permission(crate::rbac::Permission::InstanceRead)
         .description(
             "Every item that can be published (mock APIs, MCP servers, the mock LLM, A2A agents, \
              the HTTP tools, the MCP registry), with its portal metadata, why a published item is \
@@ -831,6 +826,8 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Publish an item to the dev portal (with its metadata), or unpublish it",
         )
+        .permission(crate::rbac::Permission::PortalPublish)
+        .self_service()
         .description(
             "Ids: mock:<name>, mcp:<server>, llm, a2a:<agent>, tools, registry. A mock needs \
              manage rights (visitors only with portal.visitors), everything else admin. Body: \
@@ -859,6 +856,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Dev portal insights: views per day, downloads by format, Try it calls",
         )
+        .permission(crate::rbac::Permission::InstanceRead)
         .example(Example::get(
             "Portal insights",
             "/_rustybin/portal/insights",

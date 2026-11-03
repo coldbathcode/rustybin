@@ -8,6 +8,7 @@ import * as traffic from './lib/traffic.js';
 import * as auth from './lib/auth.js';
 import * as visit from './lib/visit.js';
 import * as assist from './lib/assist.js';
+import * as perms from './lib/perms.js';
 import { SERVER, getJson, send, trimBase } from './lib/http.js';
 import { deliverCallback } from './lib/oauthpopup.js';
 
@@ -301,6 +302,7 @@ function handleCallback() {
 const USER_SESSION_KEYS = ['rustybin.config.lastExport', 'rustybin.oauth.callback', 'rustybin.oauth.pending'];
 
 function forgetPreviousUser() {
+  perms.reset();
   traffic.disconnect();
   traffic.clearLocal();
   settings.set('adminToken', '');
@@ -460,6 +462,12 @@ async function loadInstance() {
   } catch (e) {
     settings.instance.status = null;
     console.warn('status unavailable', e);
+  }
+  // What the caller may do (GET /_rustybin/session): a view whose controls
+  // depend on it is mounted again when it changes.
+  if (await perms.load() && currentId !== null) {
+    currentId = null;
+    route();
   }
   renderMeta();
   renderBanner();

@@ -396,12 +396,14 @@ HTTP 200
 [Asserts]
 jsonpath "$.mocks[*].name" contains "petstore"
 
-# ...but cannot change them (every POST, PUT, PATCH and DELETE needs admin).
+# ...but cannot change them (a change needs mocks.write, which the console
+# scope does not grant).
 POST {{secured_url}}/_rustybin/mocks/petstore/disable
 Authorization: Bearer {{console_token}}
 HTTP 403
 [Asserts]
-jsonpath "$.reason" == "insufficient_scope"
+jsonpath "$.reason" == "permission_required"
+jsonpath "$.permission" == "mocks.write"
 
 # The mocks themselves are data plane: no token.
 GET {{secured_url}}/mock/petstore/v1/pets

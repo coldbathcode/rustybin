@@ -1,91 +1,69 @@
-//! Admin guard for global-state mutations.
+//! Permission checks outside the control plane's route check.
 //!
-//! Rules:
-//! - `RUSTYBIN_ADMIN_TOKEN` set: the request must carry
-//!   `Authorization: Bearer <token>` or `X-Rustybin-Admin-Token: <token>`.
-//! - Token unset, normal mode: open (backwards compatible).
-//! - Token unset, public mode: global mutations are disabled (403).
-//!
-//! Usage inside a handler:
+//! Control routes (`/_rustybin/*`) declare their permission in the
+//! catalogue and `control_auth::check_route` checks it before the handler
+//! runs. This module is for the rest:
+//! - [`require`]: a data-plane route that changes something instance-wide
+//!   (the `/health` toggle, the global `/flaky` reset) names the permission
+//!   it needs; the caller is the admin token or a control JWT as it
+//!   resolves, else nobody, who holds every permission on an instance
+//!   without an admin token outside public mode (backwards compatible) and
+//!   the anonymous reads otherwise;
+//! - [`admin_check`]: every permission (the admin role), for shared mode's
+//!   gate between the instance's operator and an API key.
 //!
 //! ```ignore
-//! if let Err(resp) = crate::admin::require_admin(&headers, &config) {
+//! if let Err(resp) = crate::admin::require(&headers, &config, Permission::SettingsWrite) {
 //!     return resp;
 //! }
 //! ```
 
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::Json;
-use serde_json::json;
+use axum::response::Response;
 
 use crate::config::Config;
-use crate::control_auth::{constant_time_eq, presented_token};
+use crate::rbac::{Permission, Principal};
 
 /// Header accepted as an alternative to `Authorization: Bearer`.
 pub const ADMIN_TOKEN_HEADER: &str = "x-rustybin-admin-token";
 
-/// Returns `Ok(())` when the caller may perform a global mutation, otherwise
-/// the JSON error response to send back (401 or 403).
-///
-/// With `RUSTYBIN_CONTROL_AUTH=jwt`, a control-plane JWT with the `admin`
-/// scope is accepted as well.
+/// `Ok(())` when the request's caller holds `p`, otherwise the refusal
+/// (`401` without a credential when an admin token is configured, `403`
+/// otherwise, naming the permission).
 #[allow(clippy::result_large_err)]
-pub fn require_admin(headers: &HeaderMap, config: &Config) -> Result<(), Response> {
-    admin_check(headers, config).map_err(|(status, message)| error(status, message))
+pub fn require(headers: &HeaderMap, config: &Config, p: Permission) -> Result<(), Response> {
+    crate::rbac::require(&crate::control_auth::open_caller(headers, config), p)
 }
 
-/// [`require_admin`] as plain data: the status and message of the refusal.
+/// Does the request's caller hold every permission (the admin token, a
+/// control JWT with the admin role, or nobody on an instance without an
+/// admin token outside public mode)? The refusal as data otherwise.
 pub fn admin_check(headers: &HeaderMap, config: &Config) -> Result<(), (StatusCode, &'static str)> {
-    let token = presented_token(headers);
-    let mut valid_jwt = false;
-    if let Some(t) = token {
-        if let Ok(grant) = crate::control_auth::verify_jwt(t, config) {
-            if grant.admin {
-                return Ok(());
-            }
-            valid_jwt = true;
-        }
+    let caller = crate::control_auth::open_caller(headers, config);
+    if caller.permissions.is_all() {
+        return Ok(());
     }
-    match config.admin_token.as_deref() {
-        Some(expected) => {
-            if token.is_some_and(|t| constant_time_eq(t, expected)) {
-                Ok(())
-            } else if valid_jwt {
-                // Signed in with a control token that lacks the admin scope:
-                // authenticated, not allowed (a 401 would sign the console out).
-                Err((
-                    StatusCode::FORBIDDEN,
-                    "this operation needs the admin token or a control token with the admin scope",
-                ))
-            } else {
-                Err((
-                    StatusCode::UNAUTHORIZED,
-                    "admin token required: send Authorization: Bearer <token> or X-Rustybin-Admin-Token",
-                ))
-            }
-        }
-        // A control token without the admin scope is never admin, whether
-        // or not an admin token is configured.
-        None if valid_jwt => Err((
-            StatusCode::FORBIDDEN,
-            "this operation needs the admin token or a control token with the admin scope",
-        )),
-        None if config.public_mode => Err((
+    Err(match caller.principal {
+        Principal::Anonymous { admin_token: true } => (
+            StatusCode::UNAUTHORIZED,
+            "admin token required: send Authorization: Bearer <token> or X-Rustybin-Admin-Token",
+        ),
+        Principal::Anonymous { admin_token: false } => (
             StatusCode::FORBIDDEN,
             "this operation is disabled in public mode (no admin token configured)",
-        )),
-        None => Ok(()),
-    }
+        ),
+        // Signed in with a control token that lacks permissions:
+        // authenticated, not allowed (a 401 would sign the console out).
+        _ => (
+            StatusCode::FORBIDDEN,
+            "this operation needs the admin token or a control token with the admin role",
+        ),
+    })
 }
 
-/// True when the request carries a valid admin token (or none is required).
+/// True when the request's caller holds every permission.
 pub fn is_admin(headers: &HeaderMap, config: &Config) -> bool {
-    require_admin(headers, config).is_ok()
-}
-
-fn error(status: StatusCode, message: &str) -> Response {
-    (status, Json(json!({ "error": message }))).into_response()
+    admin_check(headers, config).is_ok()
 }
 
 #[cfg(test)]
@@ -100,14 +78,16 @@ mod tests {
         c
     }
 
+    const P: Permission = Permission::SettingsWrite;
+
     #[test]
     fn open_without_token() {
-        assert!(require_admin(&HeaderMap::new(), &cfg(None, false)).is_ok());
+        assert!(require(&HeaderMap::new(), &cfg(None, false), P).is_ok());
     }
 
     #[test]
     fn public_mode_without_token_is_forbidden() {
-        let err = require_admin(&HeaderMap::new(), &cfg(None, true)).unwrap_err();
+        let err = require(&HeaderMap::new(), &cfg(None, true), P).unwrap_err();
         assert_eq!(err.status(), StatusCode::FORBIDDEN);
     }
 
@@ -116,20 +96,20 @@ mod tests {
         let c = cfg(Some("s3cret"), true);
         let mut h = HeaderMap::new();
         assert_eq!(
-            require_admin(&h, &c).unwrap_err().status(),
+            require(&h, &c, P).unwrap_err().status(),
             StatusCode::UNAUTHORIZED
         );
         h.insert("authorization", HeaderValue::from_static("Bearer s3cret"));
-        assert!(require_admin(&h, &c).is_ok());
+        assert!(require(&h, &c, P).is_ok());
         let mut h = HeaderMap::new();
         h.insert(ADMIN_TOKEN_HEADER, HeaderValue::from_static("s3cret"));
-        assert!(require_admin(&h, &c).is_ok());
+        assert!(require(&h, &c, P).is_ok());
         h.insert(ADMIN_TOKEN_HEADER, HeaderValue::from_static("wrong"));
-        assert!(require_admin(&h, &c).is_err());
+        assert!(require(&h, &c, P).is_err());
     }
 
     #[test]
-    fn a_control_jwt_without_the_admin_scope_is_not_admin_without_an_admin_token() {
+    fn a_control_jwt_holds_what_its_roles_grant_without_an_admin_token() {
         let mut c = crate::test_support::jwt_config();
         c.admin_token = None;
         let mut h = HeaderMap::new();
@@ -140,6 +120,11 @@ mod tests {
         );
         let e = admin_check(&h, &c).expect_err("not admin");
         assert_eq!(e.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            require(&h, &c, P).unwrap_err().status(),
+            StatusCode::FORBIDDEN
+        );
+        assert!(require(&h, &c, Permission::SettingsRead).is_ok());
         let admin = crate::test_support::control_jwt(Some("admin"));
         h.insert(
             "authorization",

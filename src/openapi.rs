@@ -125,6 +125,39 @@ fn normalize_path(path: &str) -> String {
 /// Make the documented methods match the catalogue: routes registered with
 /// `any()` get get/post/put/patch/delete, and any catalogue method missing
 /// from a path item is added as a copy of an existing operation.
+/// Every control operation says what it needs (`x-rustybin-permission`: a
+/// permission name, `open` or `signed in`), from the catalogue's
+/// declarations, and documents the refusal.
+fn declare_permissions(paths: &mut serde_json::Map<String, Value>) {
+    let index: std::collections::HashMap<String, String> = paths
+        .keys()
+        .map(|k| (normalize_path(k), k.clone()))
+        .collect();
+    for ep in crate::catalog::all().iter().filter(|e| e.is_control()) {
+        let Some(key) = index.get(&normalize_path(ep.path)) else {
+            continue;
+        };
+        let Some(Value::Object(item)) = paths.get_mut(key) else {
+            continue;
+        };
+        for method in ep.expanded_methods() {
+            let (Some(need), Some(Value::Object(op))) =
+                (ep.need(method), item.get_mut(&method.to_ascii_lowercase()))
+            else {
+                continue;
+            };
+            op.insert("x-rustybin-permission".into(), json!(need.label()));
+            if let (Some(p), Some(Value::Object(responses))) =
+                (need.permission(), op.get_mut("responses"))
+            {
+                responses.entry("403").or_insert_with(|| {
+                    json!({ "description": format!("permission_required: the caller lacks {}", p.name()) })
+                });
+            }
+        }
+    }
+}
+
 fn align_methods_with_catalogue(paths: &mut serde_json::Map<String, Value>) {
     let index: std::collections::HashMap<String, String> = paths
         .keys()
@@ -174,6 +207,7 @@ pub fn build_spec() -> Value {
         merge_paths(&mut paths, fragment());
     }
     align_methods_with_catalogue(&mut paths);
+    declare_permissions(&mut paths);
 
     let mut components = build_components();
     for fragment in MODULE_COMPONENTS {

@@ -15,6 +15,40 @@
   and `permissions`; the sign-in answer and the sessions list carry `user_id`. What
   each credential may do is unchanged until every route checks a permission (step
   08). A new diagnostics check, `users`.
+- Every route and tool checks a permission (access control, step 08): each control
+  route declares the permission it needs per method in the catalogue (or that it is
+  open, or needs only a signed-in caller), one check makes the decision before the
+  handler runs, and each management tool declares one too; the yes/no admin check is
+  gone. A refusal is `403 {"error", "reason": "permission_required", "permission"}`
+  naming what is missing. The CLI prints `permission_required: <permission>` and exits
+  `3`, and its reference has a **Needs** column; the console asks `GET
+  /_rustybin/session` and disables what the caller may not do, saying which permission
+  it needs; the agent tool tables have a **Permission** column. `GET
+  /_rustybin/settings` answers what changing each setting `needs`.
+
+  **Behaviour changes** (the 0.4 scopes keep their reach, `console` as the `viewer`
+  role plus `traffic.read`, `assist.use` and `mcp.inspect`, `harness` as every
+  `harness.*` permission; every difference is listed in
+  [the step's build notes](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/testing-2/step-08-permissions-everywhere.md)):
+  - a `console` scope token (and the `viewer` role) now reads what 0.4 kept for admin:
+    the settings (secrets show only whether they are set), diagnostics, the outbound
+    decisions, the AI usage, per-key usage, saved tests, schedules and their runs,
+    source control status and history, and the AI agents; it also previews and
+    validates harness scenarios (they compute and send nothing), and the
+    management server lists the matching tools;
+  - any authenticated caller may read `GET /_rustybin/session`, sign out, and reach a
+    self-service visit's own routes (which answer `404` with control auth on);
+  - `DELETE /_rustybin/requests?session=...` needs `traffic.read` everywhere, as on an
+    open control plane; clearing everyone's captures needs `traffic.clear`;
+  - the `inspector` scope reads a mock's traffic (`/_rustybin/mocks/{name}/requests*`);
+  - the `harness` scope lists the harness read tools on the management server;
+  - a refusal says `reason: permission_required` and `permission` (it was
+    `insufficient_scope` with the caller's `scopes`); an API key refused by a
+    handler's check in shared mode gets `403` (was `401`), as the key layer already
+    answered; `get_instance` answers `caller.roles` and `caller.permissions` instead of
+    `caller.rights`; an agent's tool list answers each tool's `permission` instead of
+    its `right`; `export_config` is a `mocks.read` tool (the whole instance still needs
+    `config.export`).
 
 ## 0.4.0 (2026-11-03): testing workflows
 

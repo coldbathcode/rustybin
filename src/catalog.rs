@@ -16,7 +16,10 @@
 //! }
 //! ```
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
+
+use crate::rbac::{Need, Permission};
 
 /// Category names. Ordering for every generated view is [`CATEGORY_ORDER`];
 /// add new categories to both places (the tests enforce it).
@@ -246,6 +249,15 @@ pub struct Endpoint {
     pub examples: Vec<Example>,
     /// Transport (HTTP by default).
     pub protocol: Protocol,
+    /// What the route needs, per method (`""`: every method not listed on
+    /// its own). Every control route (`/_rustybin/*`) declares one
+    /// (`every_control_route_declares_a_permission`); `control_auth`
+    /// checks it before the handler runs.
+    pub needs: Vec<(&'static str, Need)>,
+    /// The per-mock rules of self-service apply: on a self-service instance
+    /// a visitor or an API key without the permission reaches the handler,
+    /// which lets it read and change only its own mocks.
+    pub self_service: bool,
 }
 
 /// Methods documented for `ANY` routes.
@@ -266,7 +278,72 @@ impl Endpoint {
             description: "",
             examples: Vec::new(),
             protocol: Protocol::Http,
+            needs: Vec::new(),
+            self_service: false,
         }
+    }
+
+    /// Every method of the route needs `p` (methods declared on their own
+    /// with [`Self::permission_for`] keep theirs).
+    pub fn permission(mut self, p: Permission) -> Self {
+        self.needs.push(("", Need::Perm(p)));
+        self
+    }
+
+    /// `methods` need `p` (`GET` mocks is `mocks.read`, `POST` is
+    /// `mocks.write`).
+    pub fn permission_for(mut self, methods: &[&'static str], p: Permission) -> Self {
+        for m in methods {
+            self.needs.push((m, Need::Perm(p)));
+        }
+        self
+    }
+
+    /// No credential needed (readiness, sign-in, OAuth sign-in, the harness
+    /// node routes with their own credential).
+    pub fn open(mut self) -> Self {
+        self.needs.push(("", Need::Open));
+        self
+    }
+
+    /// Any caller the control plane accepts (`methods` empty: every method).
+    pub fn authenticated(mut self, methods: &[&'static str]) -> Self {
+        if methods.is_empty() {
+            self.needs.push(("", Need::Authenticated));
+        }
+        for m in methods {
+            self.needs.push((m, Need::Authenticated));
+        }
+        self
+    }
+
+    /// The per-mock rules of self-service apply (see [`Self::self_service`]).
+    pub fn self_service(mut self) -> Self {
+        self.self_service = true;
+        self
+    }
+
+    /// What `method` needs (`HEAD` as `GET`); `None` when undeclared.
+    pub fn need(&self, method: &str) -> Option<Need> {
+        let method = if method.eq_ignore_ascii_case("HEAD") {
+            "GET"
+        } else {
+            method
+        };
+        self.needs
+            .iter()
+            .find(|(m, _)| m.eq_ignore_ascii_case(method))
+            .or_else(|| self.needs.iter().find(|(m, _)| m.is_empty()))
+            .map(|(_, n)| *n)
+    }
+
+    /// A control-plane route (`/_rustybin/*`).
+    pub fn is_control(&self) -> bool {
+        self.path == crate::control::CONTROL_PREFIX
+            || self
+                .path
+                .strip_prefix(crate::control::CONTROL_PREFIX)
+                .is_some_and(|r| r.starts_with('/'))
     }
 
     pub fn description(mut self, description: &'static str) -> Self {
@@ -388,6 +465,59 @@ pub fn all() -> &'static [Endpoint] {
         endpoints.sort_by_key(|e| category_rank(e.category));
         endpoints
     })
+}
+
+/// The control routes by path template (the route layer's lookup).
+fn control_routes() -> &'static HashMap<&'static str, &'static Endpoint> {
+    static MAP: OnceLock<HashMap<&'static str, &'static Endpoint>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        all()
+            .iter()
+            .filter(|e| e.is_control())
+            .map(|e| (e.path, e))
+            .collect()
+    })
+}
+
+/// The control route registered as `template`, if any.
+pub fn control_route(template: &str) -> Option<&'static Endpoint> {
+    control_routes().get(template).copied()
+}
+
+/// The control route a concrete path matches, as the router picks it (a
+/// literal segment wins over a parameter, a parameter over a wildcard).
+pub fn control_route_for_path(path: &str) -> Option<&'static Endpoint> {
+    let segs: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    // 2 for a literal, 1 for a parameter, 0 for a wildcard, per segment.
+    let score = |template: &str| -> Option<Vec<u8>> {
+        let t: Vec<&str> = template.trim_start_matches('/').split('/').collect();
+        let mut out = Vec::new();
+        for (i, seg) in t.iter().enumerate() {
+            if seg.starts_with("{*") {
+                return (segs.len() > i).then(|| {
+                    out.push(0);
+                    out
+                });
+            }
+            let actual = segs.get(i)?;
+            if seg.starts_with('{') {
+                if actual.is_empty() {
+                    return None;
+                }
+                out.push(1);
+            } else if seg == actual {
+                out.push(2);
+            } else {
+                return None;
+            }
+        }
+        (t.len() == segs.len()).then_some(out)
+    };
+    control_routes()
+        .values()
+        .filter_map(|e| score(e.path).map(|s| (s, *e)))
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, e)| e)
 }
 
 /// The catalogue grouped by category, in display order.

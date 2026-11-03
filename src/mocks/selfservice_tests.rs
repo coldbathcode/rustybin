@@ -652,9 +652,11 @@ async fn shared_mode_keys_own_their_mocks() {
     assert_eq!(status, StatusCode::OK);
     let (status, _, _) = call(&app, "GET", &format!("/mock/{name}/items/3"), &ka, None).await;
     assert_eq!(status, StatusCode::OK);
-    // Instance-wide actions still need the admin token.
-    let (status, _, _) = call(&app, "POST", "/_rustybin/mocks/reload", &ka, None).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // Instance-wide actions still need the admin token: a key's refusal is
+    // a 403 naming the permission (the key is a good credential).
+    let (status, _, body) = call(&app, "POST", "/_rustybin/mocks/reload", &ka, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["permission"], "config.apply", "{body}");
 }
 
 /// The visit and creation ledgers count per client address: a fresh session

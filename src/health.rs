@@ -109,7 +109,11 @@ async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
 }
 
 async fn set_unhealthy(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
+    if let Err(resp) = crate::admin::require(
+        &headers,
+        &state.config,
+        crate::rbac::Permission::SettingsWrite,
+    ) {
         return resp;
     }
     let now = state.health.set(false);
@@ -117,7 +121,11 @@ async fn set_unhealthy(State(state): State<AppState>, headers: HeaderMap) -> Res
 }
 
 async fn set_healthy(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
+    if let Err(resp) = crate::admin::require(
+        &headers,
+        &state.config,
+        crate::rbac::Permission::SettingsWrite,
+    ) {
         return resp;
     }
     let now = state.health.set(true);
@@ -125,7 +133,11 @@ async fn set_healthy(State(state): State<AppState>, headers: HeaderMap) -> Respo
 }
 
 async fn toggle(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
+    if let Err(resp) = crate::admin::require(
+        &headers,
+        &state.config,
+        crate::rbac::Permission::SettingsWrite,
+    ) {
         return resp;
     }
     let now = state.health.toggle();

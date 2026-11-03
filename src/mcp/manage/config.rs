@@ -37,7 +37,7 @@ pub fn export_config(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
             Err(e) => service_error(&e),
         };
     }
-    if !access.is_admin() {
+    if !access.has(crate::rbac::Permission::ConfigExport) {
         let text = s.export_all();
         return ok(
             ctx,

@@ -313,7 +313,9 @@ pub async fn relay(
         Err(e) => return error(StatusCode::BAD_REQUEST, e, "invalid_headers"),
     };
     let legacy = matches!(req.transport.as_deref(), Some("legacy") | Some("sse"));
-    let admin = crate::admin::admin_check(&request_headers, &state.config).is_ok();
+    // Saved credentials and calls that act on a server elsewhere: `mcp.connections`.
+    let admin = crate::control_auth::open_caller(&request_headers, &state.config)
+        .has(crate::rbac::Permission::McpConnections);
     // An existing session decides the target; otherwise the body does.
     let existing = match &req.session {
         Some(id) => match inspector.relay.touch(id) {

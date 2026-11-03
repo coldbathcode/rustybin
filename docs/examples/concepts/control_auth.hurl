@@ -42,8 +42,8 @@ DELETE {{secured_url}}/_rustybin/requests
 Authorization: Bearer {{console_token}}
 HTTP 403
 [Asserts]
-jsonpath "$.reason" == "insufficient_scope"
-jsonpath "$.scopes" contains "console"
+jsonpath "$.reason" == "permission_required"
+jsonpath "$.permission" == "traffic.clear"
 # ANCHOR_END: console_cannot_mutate
 
 # ANCHOR: inspector_scope
@@ -57,7 +57,8 @@ GET {{secured_url}}/_rustybin/config
 Authorization: Bearer {{inspector_token}}
 HTTP 403
 [Asserts]
-jsonpath "$.reason" == "insufficient_scope"
+jsonpath "$.reason" == "permission_required"
+jsonpath "$.permission" == "instance.read"
 # ANCHOR_END: inspector_scope
 
 # ANCHOR: refused_tokens

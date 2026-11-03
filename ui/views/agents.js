@@ -11,6 +11,7 @@ import { SERVER, send, getJson, sseParser, readText } from '../lib/http.js';
 import { agentPanel } from '../lib/agent.js';
 import { settingsForm } from '../lib/settingsform.js';
 import * as assist from '../lib/assist.js';
+import * as perms from '../lib/perms.js';
 
 const BASE = '/_rustybin/agents';
 const FEED_MAX = 50;
@@ -150,7 +151,7 @@ export default {
 
     function controlsRow(a) {
       const revoked = a.status === 'revoked';
-      const revoke = h('button', { class: 'btn' + (revoked ? '' : ' danger'), type: 'button', id: revoked ? 'agent-restore' : 'agent-revoke' }, icon(revoked ? 'unlock' : 'lock'), revoked ? 'Restore' : 'Revoke');
+      const revoke = perms.guard(h('button', { class: 'btn' + (revoked ? '' : ' danger'), type: 'button', id: revoked ? 'agent-restore' : 'agent-revoke' }, icon(revoked ? 'unlock' : 'lock'), revoked ? 'Restore' : 'Revoke'), 'agents.manage');
       revoke.addEventListener('click', async () => {
         if (!revoked) {
           const warn = a.credential.kind === 'console'
@@ -166,7 +167,7 @@ export default {
           reload();
         } catch (e) { toast('Not changed: ' + e.message, 'err'); revoke.disabled = false; }
       });
-      const end = h('button', { class: 'btn', type: 'button', id: 'agent-end-sessions', disabled: !a.sessions_open }, icon('stop'), 'End sessions');
+      const end = perms.guard(h('button', { class: 'btn', type: 'button', id: 'agent-end-sessions', disabled: !a.sessions_open }, icon('stop'), 'End sessions'), 'agents.manage');
       end.addEventListener('click', async () => {
         end.disabled = true;
         try { const r = await call('DELETE', `${BASE}/${encodeURIComponent(a.id)}/sessions`); toast(`${r.sessions_ended} session(s) ended`); reload(); }
@@ -192,7 +193,7 @@ export default {
         for (const t of a.available_tools) {
           const m = marks.get(t.name) || '';
           const label = t.name + (m === 'allow' ? ' (allowed)' : m === 'deny' ? ' (denied)' : '');
-          const b = h('button', { class: 'btn sm' + (m === 'deny' ? ' danger' : m === 'allow' ? ' primary' : ''), type: 'button', 'data-tool': t.name, 'aria-label': t.name + ': ' + (m || 'from the rules'), title: t.title + ' (' + t.right + (t.read_only ? ', read-only' : '') + '): click to allow, deny or reset', style: { opacity: !m && !t.allowed ? 0.55 : 1 } }, label);
+          const b = h('button', { class: 'btn sm' + (m === 'deny' ? ' danger' : m === 'allow' ? ' primary' : ''), type: 'button', 'data-tool': t.name, 'aria-label': t.name + ': ' + (m || 'from the rules'), title: t.title + ' (' + t.permission + (t.read_only ? ', read-only' : '') + '): click to allow, deny or reset', style: { opacity: !m && !t.allowed ? 0.55 : 1 } }, label);
           b.addEventListener('click', () => {
             marks.set(t.name, m === '' ? 'allow' : m === 'allow' ? 'deny' : '');
             drawChips();
@@ -204,8 +205,8 @@ export default {
       const note = textarea({ rows: 2, id: 'agent-note', 'aria-label': 'Note', class: 'textarea', maxlength: 500 });
       note.value = a.note || '';
       const out = h('div');
-      const save = h('button', { class: 'btn primary', type: 'submit', id: 'agent-save-rights' }, 'Save rights');
-      const reset = h('button', { class: 'btn', type: 'button', id: 'agent-reset-rights' }, 'Back to the rules');
+      const save = perms.guard(h('button', { class: 'btn primary', type: 'submit', id: 'agent-save-rights' }, 'Save rights'), 'agents.manage');
+      const reset = perms.guard(h('button', { class: 'btn', type: 'button', id: 'agent-reset-rights' }, 'Back to the rules'), 'agents.manage');
       const form = h('form', { class: 'stack-sm', 'aria-label': 'Rights of ' + a.name },
         h('h3', { style: { margin: 0 } }, 'Rights'),
         h('p', { class: 'small muted', style: { margin: 0 } }, 'A ceiling caps the tools below what the credential allows: read-only (read tools, no captured traffic), traffic (every read tool), manage (reads and mock changes), full. An allowed tool narrows the agent to the allowed ones; a denied tool is never listed nor callable.'),

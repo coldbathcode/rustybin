@@ -1178,15 +1178,10 @@ struct VersionQuery {
 }
 
 async fn delete_server(
-    State(state): State<AppState>,
     Extension(reg): Extension<Arc<Registry>>,
-    headers: HeaderMap,
     Path(name): Path<String>,
     Query(q): Query<VersionQuery>,
 ) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
     let removed = reg.delete_published(&name, q.version.as_deref());
     if removed == 0 {
         return (
@@ -1216,11 +1211,6 @@ async fn control_validate(body: Bytes) -> Response {
         )
             .into_response(),
     }
-}
-
-/// POST routes the console scope may call (they change nothing).
-pub fn is_console_post(path: &str) -> bool {
-    path == VALIDATE_PATH
 }
 
 // ── Router, catalogue, OpenAPI ──────────────────────────────────────
@@ -1304,12 +1294,16 @@ pub fn catalog() -> Vec<Endpoint> {
         Endpoint::new("/mcp-registry/v0/{*path}", &["ANY"], category::MCP, "Mock MCP registry: the same API under /v0")
             .example(Example::get("Servers under /v0", "/mcp-registry/v0/servers?limit=3")),
         Endpoint::new(STATUS_PATH, &["GET"], category::CONTROL, "Mock MCP registry: entries with their source and validity, the scenario, the sync snippet")
+.permission(crate::rbac::Permission::InstanceRead)
             .example(Example::get("The mock registry's state", STATUS_PATH)),
         Endpoint::new("/_rustybin/registry/servers/{serverName}", &["DELETE"], category::CONTROL, "Mock MCP registry: remove a published entry (all versions, or ?version=); admin")
+.permission(crate::rbac::Permission::RegistryWrite)
             .example(Example::delete("Remove an unknown entry", "/_rustybin/registry/servers/io.example%2Fnone").expect_status(404)),
         Endpoint::new(VALIDATE_PATH, &["POST"], category::CONTROL, "Validate a server.json document against the vendored schema and the registry's semantic checks")
+.permission(crate::rbac::Permission::InstanceRead)
             .example(Example::post("Validate a server.json", VALIDATE_PATH).json(GOOD)),
         Endpoint::new(BROWSE_PATH, &["GET"], category::CONTROL, "Browse an MCP registry (url, search, cursor, limit, version) through the egress policy; entries with their remotes")
+.permission(crate::rbac::Permission::McpInspect)
             .description("url is a registry base (https://registry.modelcontextprotocol.io by default, its host is allowed for browsing) or /mcp-registry for this instance (in process). Pages are cached for a minute.")
             .example(Example::get("Browse this instance's mock registry", "/_rustybin/registry/browse?url=/mcp-registry&limit=5")),
     ]

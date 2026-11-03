@@ -62,21 +62,11 @@ pub struct StatusQuery {
     fetch: Option<bool>,
 }
 
-async fn status(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<StatusQuery>,
-) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
+async fn status(State(state): State<AppState>, Query(q): Query<StatusQuery>) -> Response {
     Json(state.git.status(&state, q.fetch.unwrap_or(false)).await).into_response()
 }
 
 async fn init(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
     answer(state.git.init(&operator(&headers, &state)).await)
 }
 
@@ -95,9 +85,6 @@ async fn commit(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
     let b: CommitBody = match body(&bytes) {
         Ok(b) => b,
         Err(r) => return r,
@@ -116,9 +103,6 @@ async fn commit(
 }
 
 async fn push(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
     answer(state.git.push(&operator(&headers, &state)).await)
 }
 
@@ -138,9 +122,6 @@ async fn pull(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
     let b: PullBody = match body(&bytes) {
         Ok(b) => b,
         Err(r) => return r,
@@ -173,9 +154,6 @@ async fn resolve(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
     let b: ResolveBody = match body(&bytes) {
         Ok(b) => b,
         Err(r) => return r,
@@ -188,10 +166,7 @@ async fn resolve(
     )
 }
 
-async fn get_key(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
+async fn get_key(State(state): State<AppState>) -> Response {
     Json(json!({ "deploy_key": state.git.public_key() })).into_response()
 }
 
@@ -207,9 +182,6 @@ async fn generate_key(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
     let b: KeyBody = match body(&bytes) {
         Ok(b) => b,
         Err(r) => return r,
@@ -222,10 +194,7 @@ async fn generate_key(
     )
 }
 
-async fn history(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
+async fn history(State(state): State<AppState>) -> Response {
     answer(
         state
             .git
@@ -252,6 +221,7 @@ pub fn catalog() -> Vec<Endpoint> {
     // the examples say so.
     vec![
         Endpoint::new(GIT_PATH, &["GET"], category::CONTROL, "Source control status (admin)")
+.permission(crate::rbac::Permission::GitRead)
             .description(
                 "The configured repository (git.remote, git.branch, git.path, git.auth), whether git \
                  is installed and the working copy exists, the last commit, ahead and behind \
@@ -261,6 +231,7 @@ pub fn catalog() -> Vec<Endpoint> {
             )
             .example(Example::get("Source control status", GIT_PATH)),
         Endpoint::new(INIT_PATH, &["POST"], category::CONTROL, "Connect the repository (admin)")
+.permission(crate::rbac::Permission::GitWrite)
             .description(
                 "Clone the remote's branch into <state>/repo, or initialise an empty working copy \
                  when the remote has no such branch yet; an existing working copy is pointed at \
@@ -268,6 +239,7 @@ pub fn catalog() -> Vec<Endpoint> {
             )
             .example(Example::post("Connect", INIT_PATH).expect_status(409)),
         Endpoint::new(COMMIT_PATH, &["POST"], category::CONTROL, "Commit the instance's configuration (admin)")
+.permission(crate::rbac::Permission::GitWrite)
             .description(
                 "{message, checkpoints}: export the instance as a bundle into the working copy and \
                  commit it; checkpoints names local checkpoints to write to \
@@ -280,9 +252,11 @@ pub fn catalog() -> Vec<Endpoint> {
                     .expect_status(409),
             ),
         Endpoint::new(PUSH_PATH, &["POST"], category::CONTROL, "Push (admin)")
+.permission(crate::rbac::Permission::GitWrite)
             .description("Push the branch; a remote with commits this instance lacks answers 409 with the conflict.")
             .example(Example::post("Push", PUSH_PATH).expect_status(409)),
         Endpoint::new(PULL_PATH, &["POST"], category::CONTROL, "Pull and apply (admin)")
+.permission(crate::rbac::Permission::GitWrite)
             .description(
                 "{apply, dry_run, prune}: fetch and fast-forward; with apply, apply the repository's \
                  document to the instance (dry_run answers the diff without touching anything, \
@@ -295,6 +269,7 @@ pub fn catalog() -> Vec<Endpoint> {
                     .expect_status(409),
             ),
         Endpoint::new(RESOLVE_PATH, &["POST"], category::CONTROL, "Resolve a diverged branch (admin)")
+.permission(crate::rbac::Permission::GitWrite)
             .description(
                 "{with: instance | repository, message}: instance drops the local commits and \
                  commits and pushes this instance's configuration on top of the remote; \
@@ -306,6 +281,7 @@ pub fn catalog() -> Vec<Endpoint> {
                     .expect_status(409),
             ),
         Endpoint::new(KEY_PATH, &["GET", "POST"], category::CONTROL, "The deploy key (admin)")
+.permission_for(&["GET"], crate::rbac::Permission::GitRead).permission_for(&["POST"], crate::rbac::Permission::GitWrite)
             .description(
                 "GET shows the public half of the ed25519 deploy key; POST {replace} generates it \
                  (ssh-keygen) into <state>/repo.key.",
@@ -313,6 +289,7 @@ pub fn catalog() -> Vec<Endpoint> {
             .example(Example::get("Show the deploy key", KEY_PATH))
             .example(Example::post("Generate the deploy key", KEY_PATH).expect_status(409)),
         Endpoint::new(HISTORY_PATH, &["GET"], category::CONTROL, "Commit history (admin)")
+.permission(crate::rbac::Permission::GitRead)
             .description("The last 50 commits of the working copy with their file counts.")
             .example(Example::get("History", HISTORY_PATH).expect_status(409)),
     ]

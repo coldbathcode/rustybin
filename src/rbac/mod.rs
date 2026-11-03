@@ -16,10 +16,13 @@
 //! Unknown role and permission names are ignored and logged once, never an
 //! error.
 //!
-//! Enforcement still goes through [`Grant`] in this step: [`grant_of`]
-//! derives it from the permissions, and gives every 0.3 scope the grant it
-//! had.
+//! Enforcement ([`need`]): every control route and management tool
+//! declares a [`Need`]; `control_auth::check_route` checks a route's need
+//! against the caller's permissions before the handler runs, and a
+//! handler whose need depends on the body adds [`require`]. [`grant_of`]
+//! still names the 0.3 scopes a set amounts to (answers and logs).
 
+pub mod need;
 pub mod permission;
 pub mod role;
 pub mod users;
@@ -29,6 +32,7 @@ use std::sync::Mutex;
 
 use serde_json::{json, Value};
 
+pub use need::{forbidden, refuse, require, Need};
 pub use permission::{Group, PermSet, Permission};
 pub use role::{BuiltIn, CustomRole};
 pub use users::{NewUser, Source, User, Users, UsersError};
@@ -38,8 +42,16 @@ use crate::control_auth::Grant;
 /// Who a control-plane caller is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Principal {
-    /// The control plane is open (`RUSTYBIN_CONTROL_AUTH=open`).
+    /// The control plane is open (`RUSTYBIN_CONTROL_AUTH=open`) and has no
+    /// admin token, outside public mode: every permission, as before.
     Open,
+    /// No credential on an open control plane that has an admin token
+    /// (`admin_token: true`) or runs in public mode: the reads of
+    /// [`need::ANONYMOUS`].
+    Anonymous { admin_token: bool },
+    /// An API key in shared mode (or a control JWT bound to one): the reads
+    /// of [`need::ANONYMOUS`], inside the key layer's fence.
+    Key { id: String },
     /// `RUSTYBIN_ADMIN_TOKEN` itself.
     AdminToken,
     /// A user of the store (a sign-in token).
@@ -77,6 +89,31 @@ impl Resolved {
             principal: Principal::Open,
             roles: vec![BuiltIn::Admin.name().to_string()],
             permissions: PermSet::all(),
+        }
+    }
+
+    /// A caller without a credential on an open control plane: every
+    /// permission without an admin token outside public mode, else the
+    /// anonymous reads.
+    pub fn anonymous(config: &crate::config::Config) -> Self {
+        if config.admin_token.is_none() && !config.public_mode {
+            return Self::open();
+        }
+        Self {
+            principal: Principal::Anonymous {
+                admin_token: config.admin_token.is_some(),
+            },
+            roles: Vec::new(),
+            permissions: need::anonymous(),
+        }
+    }
+
+    /// An API key in shared mode.
+    pub fn key(id: &str) -> Self {
+        Self {
+            principal: Principal::Key { id: id.to_string() },
+            roles: Vec::new(),
+            permissions: need::anonymous(),
         }
     }
 
@@ -148,15 +185,36 @@ fn claim_names(claim: Option<&Value>) -> Option<Vec<String>> {
     }
 }
 
+/// What the `console` scope adds to the viewer role: the reads it had in
+/// 0.4 (captured traffic, the AI assist's read tasks and the MCP
+/// inspector), so a token a platform issued keeps its reach.
+pub const CONSOLE_SCOPE_EXTRA: &[Permission] = &[
+    Permission::TrafficRead,
+    Permission::AssistUse,
+    Permission::McpInspect,
+];
+
 /// The role and permissions of one 0.3 scope name (`None`: not a scope).
+/// Each scope keeps the reach it had in 0.4: `admin` is the admin role,
+/// `console` the viewer role plus [`CONSOLE_SCOPE_EXTRA`], `inspector`
+/// `traffic.read` alone, `harness` every `harness.*` permission.
 pub fn scope_role(scope: &str) -> Option<(Option<BuiltIn>, PermSet)> {
     match scope {
         "admin" => Some((Some(BuiltIn::Admin), BuiltIn::Admin.permissions())),
-        "console" => Some((Some(BuiltIn::Viewer), BuiltIn::Viewer.permissions())),
+        "console" => Some((
+            Some(BuiltIn::Viewer),
+            BuiltIn::Viewer
+                .permissions()
+                .union(PermSet::of(CONSOLE_SCOPE_EXTRA)),
+        )),
         "inspector" => Some((None, PermSet::of(&[Permission::TrafficRead]))),
         "harness" => Some((
             None,
-            PermSet::of(&[Permission::HarnessRead, Permission::HarnessRun]),
+            PermSet::of(&[
+                Permission::HarnessRead,
+                Permission::HarnessRun,
+                Permission::HarnessCluster,
+            ]),
         )),
         _ => None,
     }
@@ -369,5 +427,22 @@ pub fn diagnostics(
     })
 }
 
+/// May a token with `scope` call `method path` (by the catalogue's
+/// declarations)? `admin` is every permission. Tests.
+#[cfg(test)]
+pub(crate) fn scope_may(scope: &str, method: &str, path: &str) -> bool {
+    let perms = if scope == "admin" {
+        PermSet::all()
+    } else {
+        from_scope_claim(Some(&Value::String(scope.into()))).1
+    };
+    crate::catalog::control_route_for_path(path)
+        .filter(|e| e.expanded_methods().contains(&method))
+        .and_then(|e| e.need(method))
+        .is_some_and(|n| n.met_by(perms))
+}
+
+#[cfg(test)]
+mod access_table;
 #[cfg(test)]
 mod tests;

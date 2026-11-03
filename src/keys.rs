@@ -948,11 +948,14 @@ pub async fn enforce(State(state): State<AppState>, mut req: Request, next: Next
 /// wider scope.
 async fn control(state: AppState, mut req: Request, next: Next) -> Response {
     let config = &state.config;
-    if crate::admin::require_admin(req.headers(), config).is_ok() {
+    // Every permission (the admin token, a control JWT that holds them all):
+    // the whole control plane, as before. Anything less is a key.
+    if crate::admin::admin_check(req.headers(), config).is_ok() {
+        let caller = crate::control_auth::open_caller(req.headers(), config);
         req.extensions_mut()
-            .insert(crate::control_auth::ControlAuthorized(
-                crate::control_auth::Grant::ADMIN,
-            ));
+            .insert(crate::control_auth::ControlAuthorized(std::sync::Arc::new(
+                caller,
+            )));
         return next.run(req).await;
     }
     let self_service = config.self_service.enabled && is_mock_route(req.uri().path());
@@ -1226,12 +1229,8 @@ fn bad_request(message: &str) -> Response {
 
 async fn keys_usage_handler(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Query(q): Query<UsageQuery>,
 ) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
     let day = match q.day.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
         None => state.keys.today(),
         Some(raw) => match NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
@@ -1283,6 +1282,7 @@ pub fn catalog() -> Vec<Endpoint> {
         category::CONTROL,
         "Per-key daily totals (requests, response bytes), paginated (shared mode, admin)",
     )
+    .permission(crate::rbac::Permission::SettingsRead)
     .description(
         "?day=YYYY-MM-DD (default today, UTC), ?after=<key id>, ?limit= (1 to 1000, default \
          1000). Rows are sorted by key id; next_after is the key id to continue from, or null. \

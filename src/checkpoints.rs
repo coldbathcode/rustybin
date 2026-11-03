@@ -645,7 +645,8 @@ pub async fn list_from_git(state: &AppState) -> Result<Value, Refused> {
 /// cap, then parsed, checked ([`parse_untrusted`]) and restored on the
 /// service's compile pool, like a local one.
 pub async fn restore_from_git(svc: Svc, name: String, dry_run: bool) -> Result<Value, Refused> {
-    svc.require_admin()?;
+    svc.need(crate::rbac::Permission::CheckpointsRestore)?;
+    svc.need(crate::rbac::Permission::GitRead)?;
     let (bytes, head) = svc.state.git.repository_checkpoint(&name).await?;
     let limits = svc.state.mocks.limits();
     svc.compiling(move |s| {
@@ -666,12 +667,16 @@ async fn list_handler(
     State(state): State<AppState>,
     Query(q): Query<FromQuery>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
 ) -> Response {
     match Source::parse(q.from.as_deref()) {
         Err(e) => return e.into_response(),
         Ok(Source::Git) => {
-            // The repository is source control's: admin, as its routes.
-            if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
+            // The repository is source control's: `git.read`, as its routes.
+            if let Err(r) = crate::rbac::require(
+                &crate::control_auth::caller_of(&state, &headers, &extensions),
+                crate::rbac::Permission::GitRead,
+            ) {
                 return r;
             }
             return match list_from_git(&state).await {
@@ -689,10 +694,7 @@ async fn list_handler(
     .into_response()
 }
 
-async fn save_handler(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
+async fn save_handler(State(state): State<AppState>, body: Bytes) -> Response {
     let body: SaveBody = match serde_json::from_slice(&body) {
         Ok(b) => b,
         Err(e) => {
@@ -720,14 +722,7 @@ async fn get_handler(State(state): State<AppState>, UrlPath(name): UrlPath<Strin
     }
 }
 
-async fn delete_handler(
-    State(state): State<AppState>,
-    UrlPath(name): UrlPath<String>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
+async fn delete_handler(State(state): State<AppState>, UrlPath(name): UrlPath<String>) -> Response {
     if state.checkpoints.delete(&name) {
         Json(json!({ "deleted": name })).into_response()
     } else {
@@ -749,7 +744,7 @@ struct RestoreQuery {
 
 /// Restore through the service's compile pool (specs are compiled).
 pub async fn restore_with(svc: Svc, name: String, dry_run: bool) -> Result<Value, Refused> {
-    svc.require_admin()?;
+    svc.need(crate::rbac::Permission::CheckpointsRestore)?;
     svc.compiling(move |s| {
         restore(&s.state, &name, dry_run).map_err(|r| ServiceError::new(r.0, r.1))
     })
@@ -765,9 +760,6 @@ async fn restore_handler(
     extensions: Extensions,
     uri: Uri,
 ) -> Response {
-    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
-        return r;
-    }
     let source = match Source::parse(q.from.as_deref()) {
         Ok(s) => s,
         Err(e) => return e.into_response(),
@@ -798,6 +790,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Checkpoints of the instance's API mocks and health: list them (?from=git: the configuration repository's, admin), or save one (admin)",
         )
+.permission_for(&["GET"], crate::rbac::Permission::MocksRead).permission_for(&["POST"], crate::rbac::Permission::CheckpointsWrite)
         .example(Example::get("Checkpoints", LIST_PATH))
         .example(
             Example::get("The repository's checkpoints", "/_rustybin/checkpoints?from=git")
@@ -809,6 +802,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "A checkpoint: what it holds; DELETE removes it (admin)",
         )
+.permission_for(&["GET"], crate::rbac::Permission::MocksRead).permission_for(&["DELETE"], crate::rbac::Permission::CheckpointsWrite)
         .example(Example::get("A checkpoint", "/_rustybin/checkpoints/demo-start").expect_status(404)),
         Endpoint::new(
             RESTORE_PATH,
@@ -816,6 +810,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Restore a checkpoint: mocks, their data and health back, flaky counters reset; ?dry_run=true says what would change, ?from=git restores the configuration repository's (admin)",
         )
+.permission(crate::rbac::Permission::CheckpointsRestore)
         .example(Example::post("Preview a restore", "/_rustybin/checkpoints/demo-start/restore?dry_run=true").expect_status(404)),
     ]
 }

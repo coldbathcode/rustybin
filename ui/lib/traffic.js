@@ -8,6 +8,7 @@
 import * as settings from './settings.js';
 import * as auth from './auth.js';
 import { SERVER, getJson, send, readText, sseParser } from './http.js';
+import * as perms from './perms.js';
 
 const MAX = 1000;
 const entries = []; // newest first
@@ -66,6 +67,10 @@ export function connect() {
   }
   if (settings.instance.publicMode && !auth.boundKey() && !settings.get('session')) {
     setStatus('needs-session', 'This instance runs in public mode: set a session to see your requests.');
+    return;
+  }
+  if (!perms.can('traffic.read')) {
+    setStatus('forbidden', perms.reason('traffic.read'));
     return;
   }
   setStatus('connecting');

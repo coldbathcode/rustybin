@@ -2,7 +2,7 @@
 
 Generated from the command tree (`RUSTYBIN_UPDATE_CLI_DOCS=1 cargo test cli_docs`); the [CLI guide](cli-guide.md) says how to sign in, use profiles and script it, and the [mocks CLI](mocks/cli.md) covers the offline `rustybin mock` commands.
 
-`rustybin <noun> <verb> [args] [flags]`. Every command takes the global flags; `--json` prints the instance's answer as it is, `--yes` skips a confirmation. Exit codes: `0` done, `1` refused or failed, `2` usage, `3` the network or the credentials.
+`rustybin <noun> <verb> [args] [flags]`. Every command takes the global flags; `--json` prints the instance's answer as it is, `--yes` skips a confirmation. Exit codes: `0` done, `1` refused or failed, `2` usage, `3` the network, the credentials, or a permission the credential lacks (`permission_required: <permission>`). The **Needs** column names the permission each command needs (the routes it calls declare it).
 
 | Flag | Meaning |
 |---|---|
@@ -20,9 +20,9 @@ Generated from the command tree (`RUSTYBIN_UPDATE_CLI_DOCS=1 cargo test cli_docs
 
 Sign in to an instance and keep its token in a profile
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin login [--url U] [--user U] [--password-stdin] [--profile P]` | Sign in with the console user name and password (prompted, or the first line of stdin) and keep the token in a profile; --token keeps a token you already have. Flags: `--user` value, `--password-stdin`. | `POST /_rustybin/login`, `GET /_rustybin/session` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin login [--url U] [--user U] [--password-stdin] [--profile P]` | Sign in with the console user name and password (prompted, or the first line of stdin) and keep the token in a profile; --token keeps a token you already have. Flags: `--user` value, `--password-stdin`. | `POST /_rustybin/login`, `GET /_rustybin/session` | open, signed in |
 
 ```bash
 rustybin login --url https://mocks.example.com --user rustybin
@@ -32,9 +32,9 @@ rustybin login --url https://mocks.example.com --user rustybin
 
 Revoke the profile's token and forget it
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin logout` | Revoke the profile's token on the instance and forget it. | `POST /_rustybin/logout` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin logout` | Revoke the profile's token on the instance and forget it. | `POST /_rustybin/logout` | signed in |
 
 ```bash
 rustybin logout
@@ -44,9 +44,9 @@ rustybin logout
 
 Who the current credential is
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin whoami` | The credential the calls carry: user, scopes, expiry. | `GET /_rustybin/session` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin whoami` | The credential the calls carry: user, scopes, expiry. | `GET /_rustybin/session` | signed in |
 
 ```bash
 rustybin whoami
@@ -56,9 +56,9 @@ rustybin whoami
 
 The instance's status
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin status` | Name, version, modes, health, the features that are on. | `GET /_rustybin/status` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin status` | Name, version, modes, health, the features that are on. | `GET /_rustybin/status` | `instance.read` |
 
 ```bash
 rustybin status
@@ -68,9 +68,9 @@ rustybin status
 
 What is wrong with the instance, and the fix
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin doctor` | What is wrong with the instance and how to fix it; exits 1 when a check fails. | `GET /_rustybin/diagnostics` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin doctor` | What is wrong with the instance and how to fix it; exits 1 when a check fails. | `GET /_rustybin/diagnostics` | `settings.read` |
 
 ```bash
 rustybin doctor
@@ -80,14 +80,14 @@ rustybin doctor
 
 Version, readiness, the running configuration, the catalogue, metrics, usage
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin instance version` | Version and build. | `GET /_rustybin/version` |
-| `rustybin instance ready` | Readiness (never authenticated). | `GET /_rustybin/ready` |
-| `rustybin instance config` | The running configuration (no secrets). | `GET /_rustybin/config` |
-| `rustybin instance catalog [--category C]` | The route catalogue. Flags: `--category` value. | `GET /_rustybin/catalog` |
-| `rustybin instance metrics` | Prometheus metrics, as text. | `GET /_rustybin/metrics` |
-| `rustybin instance usage` | Plan limits and this client's usage. | `GET /_rustybin/usage` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin instance version` | Version and build. | `GET /_rustybin/version` | `instance.read` |
+| `rustybin instance ready` | Readiness (never authenticated). | `GET /_rustybin/ready` | open |
+| `rustybin instance config` | The running configuration (no secrets). | `GET /_rustybin/config` | `instance.read` |
+| `rustybin instance catalog [--category C]` | The route catalogue. Flags: `--category` value. | `GET /_rustybin/catalog` | `instance.read` |
+| `rustybin instance metrics` | Prometheus metrics, as text. | `GET /_rustybin/metrics` | `instance.read` |
+| `rustybin instance usage` | Plan limits and this client's usage. | `GET /_rustybin/usage` | `instance.read` |
 
 ```bash
 rustybin instance version
@@ -102,11 +102,11 @@ rustybin instance usage
 
 The profiles this machine keeps
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin profiles list` | The profiles and the default. |  |
-| `rustybin profiles use <name>` | Make a profile the default. |  |
-| `rustybin profiles remove <name>` | Forget a profile. |  |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin profiles list` | The profiles and the default. |  | (none) |
+| `rustybin profiles use <name>` | Make a profile the default. |  | (none) |
+| `rustybin profiles remove <name>` | Forget a profile. |  | (none) |
 
 ```bash
 rustybin profiles list
@@ -118,13 +118,13 @@ rustybin profiles remove old-instance
 
 Instance settings: get, set, secrets, unset, the schema
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin settings get [key]` | Every setting with its value and source, or one. | `GET /_rustybin/settings` |
-| `rustybin settings set <key> <value>` | Save a setting (JSON values are parsed, anything else is a string). | `PATCH /_rustybin/settings` |
-| `rustybin settings set-secret <key> [--stdin]` | Save a secret (prompted without echo, or the first line of stdin). Flags: `--stdin`. | `PATCH /_rustybin/settings` |
-| `rustybin settings unset <key>` | Forget the stored value (back to the environment or the default). | `DELETE /_rustybin/settings/{key}` |
-| `rustybin settings schema` | Every registered setting: key, kind, default, variable. | `GET /_rustybin/settings` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin settings get [key]` | Every setting with its value and source, or one. | `GET /_rustybin/settings` | `settings.read` |
+| `rustybin settings set <key> <value>` | Save a setting (JSON values are parsed, anything else is a string). | `PATCH /_rustybin/settings` | `settings.write` |
+| `rustybin settings set-secret <key> [--stdin]` | Save a secret (prompted without echo, or the first line of stdin). Flags: `--stdin`. | `PATCH /_rustybin/settings` | `settings.write` |
+| `rustybin settings unset <key>` | Forget the stored value (back to the environment or the default). | `DELETE /_rustybin/settings/{key}` | `settings.write` |
+| `rustybin settings schema` | Every registered setting: key, kind, default, variable. | `GET /_rustybin/settings` | `settings.read` |
 
 ```bash
 rustybin settings get console.title
@@ -138,11 +138,11 @@ rustybin settings schema
 
 The console's sign-in sessions
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin sessions list` | The sign-in sessions since the last restart. | `GET /_rustybin/sessions` |
-| `rustybin sessions end <id>` | End one session. | `DELETE /_rustybin/sessions/{id}` |
-| `rustybin sessions end-all` | Sign out everywhere (every token issued so far). | `DELETE /_rustybin/sessions` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin sessions list` | The sign-in sessions since the last restart. | `GET /_rustybin/sessions` | `users.read` |
+| `rustybin sessions end <id>` | End one session. | `DELETE /_rustybin/sessions/{id}` | `users.manage` |
+| `rustybin sessions end-all` | Sign out everywhere (every token issued so far). | `DELETE /_rustybin/sessions` | `users.manage` |
 
 ```bash
 rustybin sessions list
@@ -154,9 +154,9 @@ rustybin sessions end-all --yes
 
 Change the console user name and password
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin password change [--user U] [--stdin]` | Change the console password (and user name): the current and the new one prompted, or two lines of stdin. Flags: `--user` value, `--stdin`. | `PUT /_rustybin/password` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin password change [--user U] [--stdin]` | Change the console password (and user name): the current and the new one prompted, or two lines of stdin. Flags: `--user` value, `--stdin`. | `PUT /_rustybin/password` | `users.manage` |
 
 ```bash
 rustybin password change --stdin < passwords.txt
@@ -166,42 +166,42 @@ rustybin password change --stdin < passwords.txt
 
 OpenAPI mocks on the instance (rustybin mock ... works offline)
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin mocks list [--all]` | The mocks with their state and traffic. Flags: `--all`. | `GET /_rustybin/mocks` |
-| `rustybin mocks get <name>` | One mock: settings, operations, the deploy report. | `GET /_rustybin/mocks/{name}` |
-| `rustybin mocks create <name> --spec FILE` | Create a mock from an OpenAPI file (YAML or JSON). Flags: `--spec` value, `--mode` value, `--disabled`, `--no-deploy`, `--strip-server-prefix`. | `POST /_rustybin/mocks` |
-| `rustybin mocks import --spec FILE` | Preview a spec: title, operations, the checks, the suggested name. Flags: `--spec` value. | `POST /_rustybin/mocks/import` |
-| `rustybin mocks update <name> [--spec FILE] [--mode M] [--settings JSON]` | Change a mock's spec or settings (the draft, deployed unless --no-deploy). Flags: `--spec` value, `--mode` value, `--settings` value, `--no-deploy`, `--force`, `--expect-revision` value. | `PATCH /_rustybin/mocks/{name}` |
-| `rustybin mocks deploy <name> [--force] [--expect-revision N]` | Deploy the draft. Flags: `--force`, `--expect-revision` value. | `POST /_rustybin/mocks/{name}/deploy` |
-| `rustybin mocks rollback <name> [--revision N]` | Go back to the previous (or a given) revision. Flags: `--revision` value. | `POST /_rustybin/mocks/{name}/rollback` |
-| `rustybin mocks enable <name>` | Switch a mock on. | `POST /_rustybin/mocks/{name}/enable` |
-| `rustybin mocks disable <name>` | Switch a mock off. | `POST /_rustybin/mocks/{name}/disable` |
-| `rustybin mocks delete <name>` | Delete a mock. | `DELETE /_rustybin/mocks/{name}` |
-| `rustybin mocks duplicate <name> [--name NEW]` | Copy a mock. Flags: `--name` value. | `POST /_rustybin/mocks/{name}/duplicate` |
-| `rustybin mocks check <name>` | The deploy report: a valid request and response per operation. | `GET /_rustybin/mocks/{name}/report` |
-| `rustybin mocks coverage <name>` | Which operations lack an example. | `GET /_rustybin/mocks/{name}/coverage` |
-| `rustybin mocks spec <name>` | The mock's OpenAPI document as stored. | `GET /_rustybin/mocks/{name}/spec` |
-| `rustybin mocks revision <name> <revision>` | A kept revision: what changed since in the draft, its settings and spec (the whole answer with --json). Flags: `--spec`. | `GET /_rustybin/mocks/{name}/revisions/{revision}` |
-| `rustybin mocks export [name]` | One mock, or all, as a version 1 rustybin.yaml. | `GET /_rustybin/mocks/{name}/export`, `GET /_rustybin/mocks/export` |
-| `rustybin mocks apply <file> [--prune]` | Apply a rustybin.yaml (spec files are read locally and inlined); --prune deletes API mocks it does not name. Flags: `--prune`. | `POST /_rustybin/mocks/apply` |
-| `rustybin mocks reload` | Reload the file-defined mocks (RUSTYBIN_CONFIG_FILE, RUSTYBIN_MOCKS_DIR). | `POST /_rustybin/mocks/reload` |
-| `rustybin mocks schema` | The JSON Schema of rustybin.yaml. | `GET /_rustybin/mocks/config.schema.json` |
-| `rustybin mocks sample <name> <operationId>` | A valid response for an operation. Flags: `--status` value, `--seed` value, `--mode` value, `--example` value. | `GET /_rustybin/mocks/{name}/operations/{op}/sample` |
-| `rustybin mocks validate <name> <operationId> --body FILE` | Validate a request or response body against the spec. Flags: `--body` value, `--kind` value, `--status` value. | `POST /_rustybin/mocks/{name}/operations/{op}/validate` |
-| `rustybin mocks operation <name> <operationId>` | One operation's settings and statistics. | `GET /_rustybin/mocks/{name}/operations/{op}` |
-| `rustybin mocks set-operation <name> <operationId> --settings JSON` | Set an operation's settings (respond, rules, mode, delay_ms, public). Flags: `--settings` value, `--expect-revision` value. | `PUT /_rustybin/mocks/{name}/operations/{op}` |
-| `rustybin mocks test-rules <name> <operationId> [--rules FILE] [--request N]` | Try an operation's rules (or given ones) on a captured request. Flags: `--rules` value, `--request` value. | `POST /_rustybin/mocks/{name}/operations/{op}/rules/test` |
-| `rustybin mocks traffic <name> [--limit N]` | The mock's captured requests. Flags: `--limit` value. | `GET /_rustybin/mocks/{name}/requests` |
-| `rustybin mocks traffic-get <name> <n>` | One captured request of the mock. | `GET /_rustybin/mocks/{name}/requests/{n}` |
-| `rustybin mocks traffic-tail <name>` | Follow the mock's requests as they arrive. Flags: `--max` value, `--timeout` value. | `GET /_rustybin/mocks/{name}/requests/stream` |
-| `rustybin mocks traffic-clear <name>` | Forget the mock's captured requests. | `DELETE /_rustybin/mocks/{name}/requests` |
-| `rustybin mocks data <name>` | The items a stateful mock stored. | `GET /_rustybin/mocks/{name}/state` |
-| `rustybin mocks data-clear <name>` | Forget the items a stateful mock stored. | `DELETE /_rustybin/mocks/{name}/state` |
-| `rustybin mocks collection <name> <format>` | The mock as a postman, hurl, curl, http, k6, bruno or insomnia collection. Flags: `--base-url` value. | `GET /_rustybin/mocks/{name}/collections/{format}` |
-| `rustybin mocks describe "<description>"` | An OpenAPI spec from a description (AI), printed as JSON. Flags: `--openapi-version` value, `--model` value. | `POST /_rustybin/mocks/ai/spec` |
-| `rustybin mocks examples <name> [--apply]` | Example payloads for the operations that lack one (AI). Flags: `--operations` value, `--per-response` value, `--persona` value, `--source` value, `--apply`. | `POST /_rustybin/mocks/{name}/ai/examples` |
-| `rustybin mocks edit <name> "<instruction>" [--apply]` | Edit a spec with an instruction (AI): the diff, applied with --apply. Flags: `--apply`, `--model` value. | `POST /_rustybin/mocks/{name}/ai/edit` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin mocks list [--all]` | The mocks with their state and traffic. Flags: `--all`. | `GET /_rustybin/mocks` | `mocks.read` |
+| `rustybin mocks get <name>` | One mock: settings, operations, the deploy report. | `GET /_rustybin/mocks/{name}` | `mocks.read` |
+| `rustybin mocks create <name> --spec FILE` | Create a mock from an OpenAPI file (YAML or JSON). Flags: `--spec` value, `--mode` value, `--disabled`, `--no-deploy`, `--strip-server-prefix`. | `POST /_rustybin/mocks` | `mocks.write` |
+| `rustybin mocks import --spec FILE` | Preview a spec: title, operations, the checks, the suggested name. Flags: `--spec` value. | `POST /_rustybin/mocks/import` | `mocks.read` |
+| `rustybin mocks update <name> [--spec FILE] [--mode M] [--settings JSON]` | Change a mock's spec or settings (the draft, deployed unless --no-deploy). Flags: `--spec` value, `--mode` value, `--settings` value, `--no-deploy`, `--force`, `--expect-revision` value. | `PATCH /_rustybin/mocks/{name}` | `mocks.write` |
+| `rustybin mocks deploy <name> [--force] [--expect-revision N]` | Deploy the draft. Flags: `--force`, `--expect-revision` value. | `POST /_rustybin/mocks/{name}/deploy` | `mocks.write` |
+| `rustybin mocks rollback <name> [--revision N]` | Go back to the previous (or a given) revision. Flags: `--revision` value. | `POST /_rustybin/mocks/{name}/rollback` | `mocks.write` |
+| `rustybin mocks enable <name>` | Switch a mock on. | `POST /_rustybin/mocks/{name}/enable` | `mocks.write` |
+| `rustybin mocks disable <name>` | Switch a mock off. | `POST /_rustybin/mocks/{name}/disable` | `mocks.write` |
+| `rustybin mocks delete <name>` | Delete a mock. | `DELETE /_rustybin/mocks/{name}` | `mocks.delete` |
+| `rustybin mocks duplicate <name> [--name NEW]` | Copy a mock. Flags: `--name` value. | `POST /_rustybin/mocks/{name}/duplicate` | `mocks.write` |
+| `rustybin mocks check <name>` | The deploy report: a valid request and response per operation. | `GET /_rustybin/mocks/{name}/report` | `mocks.read` |
+| `rustybin mocks coverage <name>` | Which operations lack an example. | `GET /_rustybin/mocks/{name}/coverage` | `mocks.read` |
+| `rustybin mocks spec <name>` | The mock's OpenAPI document as stored. | `GET /_rustybin/mocks/{name}/spec` | `mocks.read` |
+| `rustybin mocks revision <name> <revision>` | A kept revision: what changed since in the draft, its settings and spec (the whole answer with --json). Flags: `--spec`. | `GET /_rustybin/mocks/{name}/revisions/{revision}` | `mocks.read` |
+| `rustybin mocks export [name]` | One mock, or all, as a version 1 rustybin.yaml. | `GET /_rustybin/mocks/{name}/export`, `GET /_rustybin/mocks/export` | `mocks.read` |
+| `rustybin mocks apply <file> [--prune]` | Apply a rustybin.yaml (spec files are read locally and inlined); --prune deletes API mocks it does not name. Flags: `--prune`. | `POST /_rustybin/mocks/apply` | `config.apply` |
+| `rustybin mocks reload` | Reload the file-defined mocks (RUSTYBIN_CONFIG_FILE, RUSTYBIN_MOCKS_DIR). | `POST /_rustybin/mocks/reload` | `config.apply` |
+| `rustybin mocks schema` | The JSON Schema of rustybin.yaml. | `GET /_rustybin/mocks/config.schema.json` | `mocks.read` |
+| `rustybin mocks sample <name> <operationId>` | A valid response for an operation. Flags: `--status` value, `--seed` value, `--mode` value, `--example` value. | `GET /_rustybin/mocks/{name}/operations/{op}/sample` | `mocks.read` |
+| `rustybin mocks validate <name> <operationId> --body FILE` | Validate a request or response body against the spec. Flags: `--body` value, `--kind` value, `--status` value. | `POST /_rustybin/mocks/{name}/operations/{op}/validate` | `mocks.read` |
+| `rustybin mocks operation <name> <operationId>` | One operation's settings and statistics. | `GET /_rustybin/mocks/{name}/operations/{op}` | `mocks.read` |
+| `rustybin mocks set-operation <name> <operationId> --settings JSON` | Set an operation's settings (respond, rules, mode, delay_ms, public). Flags: `--settings` value, `--expect-revision` value. | `PUT /_rustybin/mocks/{name}/operations/{op}` | `mocks.write` |
+| `rustybin mocks test-rules <name> <operationId> [--rules FILE] [--request N]` | Try an operation's rules (or given ones) on a captured request. Flags: `--rules` value, `--request` value. | `POST /_rustybin/mocks/{name}/operations/{op}/rules/test` | `mocks.read` |
+| `rustybin mocks traffic <name> [--limit N]` | The mock's captured requests. Flags: `--limit` value. | `GET /_rustybin/mocks/{name}/requests` | `traffic.read` |
+| `rustybin mocks traffic-get <name> <n>` | One captured request of the mock. | `GET /_rustybin/mocks/{name}/requests/{n}` | `traffic.read` |
+| `rustybin mocks traffic-tail <name>` | Follow the mock's requests as they arrive. Flags: `--max` value, `--timeout` value. | `GET /_rustybin/mocks/{name}/requests/stream` | `traffic.read` |
+| `rustybin mocks traffic-clear <name>` | Forget the mock's captured requests. | `DELETE /_rustybin/mocks/{name}/requests` | `mocks.data` |
+| `rustybin mocks data <name>` | The items a stateful mock stored. | `GET /_rustybin/mocks/{name}/state` | `mocks.read` |
+| `rustybin mocks data-clear <name>` | Forget the items a stateful mock stored. | `DELETE /_rustybin/mocks/{name}/state` | `mocks.data` |
+| `rustybin mocks collection <name> <format>` | The mock as a postman, hurl, curl, http, k6, bruno or insomnia collection. Flags: `--base-url` value. | `GET /_rustybin/mocks/{name}/collections/{format}` | `mocks.read` |
+| `rustybin mocks describe "<description>"` | An OpenAPI spec from a description (AI), printed as JSON. Flags: `--openapi-version` value, `--model` value. | `POST /_rustybin/mocks/ai/spec` | `assist.jobs` |
+| `rustybin mocks examples <name> [--apply]` | Example payloads for the operations that lack one (AI). Flags: `--operations` value, `--per-response` value, `--persona` value, `--source` value, `--apply`. | `POST /_rustybin/mocks/{name}/ai/examples` | `assist.jobs` |
+| `rustybin mocks edit <name> "<instruction>" [--apply]` | Edit a spec with an instruction (AI): the diff, applied with --apply. Flags: `--apply`, `--model` value. | `POST /_rustybin/mocks/{name}/ai/edit` | `assist.jobs` |
 
 ```bash
 rustybin mocks list
@@ -244,13 +244,13 @@ rustybin mocks edit orders "add a DELETE /orders/{id} operation" --apply
 
 Self-service visits, as the operator
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin visits list` | Every self-service visit. | `GET /_rustybin/mocks/visits` |
-| `rustybin visits end <id>` | End a visit (its mocks go). | `DELETE /_rustybin/mocks/visits/{id}` |
-| `rustybin visits end-all` | End every visit. | `DELETE /_rustybin/mocks/visits` |
-| `rustybin visits pause` | Stop accepting new visits. | `POST /_rustybin/mocks/visits/pause` |
-| `rustybin visits resume` | Accept new visits again. | `POST /_rustybin/mocks/visits/resume` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin visits list` | Every self-service visit. | `GET /_rustybin/mocks/visits` | `visits.operate` |
+| `rustybin visits end <id>` | End a visit (its mocks go). | `DELETE /_rustybin/mocks/visits/{id}` | `visits.operate` |
+| `rustybin visits end-all` | End every visit. | `DELETE /_rustybin/mocks/visits` | `visits.operate` |
+| `rustybin visits pause` | Stop accepting new visits. | `POST /_rustybin/mocks/visits/pause` | `visits.operate` |
+| `rustybin visits resume` | Accept new visits again. | `POST /_rustybin/mocks/visits/resume` | `visits.operate` |
 
 ```bash
 rustybin visits list
@@ -264,13 +264,13 @@ rustybin visits resume
 
 Your own self-service visit, as a visitor
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin visit get` | Your visit (needs --mock-token or RUSTYBIN_MOCK_TOKEN). | `GET /_rustybin/mocks/visit` |
-| `rustybin visit start [--email E]` | Start a visit; the manage token is shown once. Flags: `--email` value. | `POST /_rustybin/mocks/visit` |
-| `rustybin visit extend` | Extend your visit. | `POST /_rustybin/mocks/visit/extend` |
-| `rustybin visit rotate-token` | A new manage token for your visit. | `POST /_rustybin/mocks/visit/token` |
-| `rustybin visit end` | End your visit. | `DELETE /_rustybin/mocks/visit` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin visit get` | Your visit (needs --mock-token or RUSTYBIN_MOCK_TOKEN). | `GET /_rustybin/mocks/visit` | `mocks.read` |
+| `rustybin visit start [--email E]` | Start a visit; the manage token is shown once. Flags: `--email` value. | `POST /_rustybin/mocks/visit` | signed in |
+| `rustybin visit extend` | Extend your visit. | `POST /_rustybin/mocks/visit/extend` | signed in |
+| `rustybin visit rotate-token` | A new manage token for your visit. | `POST /_rustybin/mocks/visit/token` | signed in |
+| `rustybin visit end` | End your visit. | `DELETE /_rustybin/mocks/visit` | signed in |
 
 ```bash
 rustybin visit get --mock-token rbm_...
@@ -284,12 +284,12 @@ rustybin visit end --mock-token rbm_... --yes
 
 The request inspector
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin requests list [--limit N] [--path-prefix P]` | The captured requests. Flags: `--limit` value, `--path-prefix` value. | `GET /_rustybin/requests` |
-| `rustybin requests get <id>` | One captured request. | `GET /_rustybin/requests/{id}` |
-| `rustybin requests tail` | Follow the requests as they arrive. Flags: `--max` value, `--timeout` value. | `GET /_rustybin/requests/stream` |
-| `rustybin requests clear` | Forget the captured requests. | `DELETE /_rustybin/requests` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin requests list [--limit N] [--path-prefix P]` | The captured requests. Flags: `--limit` value, `--path-prefix` value. | `GET /_rustybin/requests` | `traffic.read` |
+| `rustybin requests get <id>` | One captured request. | `GET /_rustybin/requests/{id}` | `traffic.read` |
+| `rustybin requests tail` | Follow the requests as they arrive. Flags: `--max` value, `--timeout` value. | `GET /_rustybin/requests/stream` | `traffic.read` |
+| `rustybin requests clear` | Forget the captured requests. | `DELETE /_rustybin/requests` | `traffic.read` |
 
 ```bash
 rustybin requests list --limit 20
@@ -302,14 +302,14 @@ rustybin requests clear --yes
 
 Request bins
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin bins list` | Your request bins. | `GET /bin` |
-| `rustybin bins create [--status N] [--body B] [--delay-ms N]` | A new bin, with the answer it gives. Flags: `--status` value, `--body` value, `--delay-ms` value. | `POST /bin` |
-| `rustybin bins delete <id>` | Delete a bin. | `DELETE /bin/{id}` |
-| `rustybin bins requests <id> [--limit N]` | What a bin captured. Flags: `--limit` value. | `GET /bin/{id}/requests` |
-| `rustybin bins get <id> <n>` | One captured request of a bin. | `GET /bin/{id}/requests/{n}` |
-| `rustybin bins tail <id>` | Follow a bin's requests. Flags: `--max` value, `--timeout` value. | `GET /bin/{id}/requests/stream` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin bins list` | Your request bins. | `GET /bin` | (none) |
+| `rustybin bins create [--status N] [--body B] [--delay-ms N]` | A new bin, with the answer it gives. Flags: `--status` value, `--body` value, `--delay-ms` value. | `POST /bin` | (none) |
+| `rustybin bins delete <id>` | Delete a bin. | `DELETE /bin/{id}` | (none) |
+| `rustybin bins requests <id> [--limit N]` | What a bin captured. Flags: `--limit` value. | `GET /bin/{id}/requests` | (none) |
+| `rustybin bins get <id> <n>` | One captured request of a bin. | `GET /bin/{id}/requests/{n}` | (none) |
+| `rustybin bins tail <id>` | Follow a bin's requests. Flags: `--max` value, `--timeout` value. | `GET /bin/{id}/requests/stream` | (none) |
 
 ```bash
 rustybin bins list
@@ -324,13 +324,13 @@ rustybin bins tail 0123456789abcdef01234567 --max 3
 
 Checkpoints: the instance's API mocks and health, saved and restored
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin checkpoint list [--from-git]` | The checkpoints and the mocks each holds; --from-git lists the configuration repository's (after git pull). Flags: `--from-git`. | `GET /_rustybin/checkpoints` |
-| `rustybin checkpoint show <name>` | One checkpoint. | `GET /_rustybin/checkpoints/{name}` |
-| `rustybin checkpoint save <name> [--replace]` | Save the instance's API mocks (with their data) and the health toggle. Flags: `--replace`. | `POST /_rustybin/checkpoints` |
-| `rustybin checkpoint restore <name> [--dry-run] [--from-git]` | Bring the API mocks, their data and health back (other API mocks are deleted, flaky counters reset); --dry-run says what would change, --from-git restores the configuration repository's checkpoint. Flags: `--dry-run`, `--from-git`. | `POST /_rustybin/checkpoints/{name}/restore` |
-| `rustybin checkpoint delete <name>` | Delete a checkpoint (the instance is not changed). | `DELETE /_rustybin/checkpoints/{name}` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin checkpoint list [--from-git]` | The checkpoints and the mocks each holds; --from-git lists the configuration repository's (after git pull). Flags: `--from-git`. | `GET /_rustybin/checkpoints` | `mocks.read` |
+| `rustybin checkpoint show <name>` | One checkpoint. | `GET /_rustybin/checkpoints/{name}` | `mocks.read` |
+| `rustybin checkpoint save <name> [--replace]` | Save the instance's API mocks (with their data) and the health toggle. Flags: `--replace`. | `POST /_rustybin/checkpoints` | `checkpoints.write` |
+| `rustybin checkpoint restore <name> [--dry-run] [--from-git]` | Bring the API mocks, their data and health back (other API mocks are deleted, flaky counters reset); --dry-run says what would change, --from-git restores the configuration repository's checkpoint. Flags: `--dry-run`, `--from-git`. | `POST /_rustybin/checkpoints/{name}/restore` | `checkpoints.restore` |
+| `rustybin checkpoint delete <name>` | Delete a checkpoint (the instance is not changed). | `DELETE /_rustybin/checkpoints/{name}` | `checkpoints.write` |
 
 ```bash
 rustybin checkpoint list
@@ -344,23 +344,23 @@ rustybin checkpoint delete demo-start --yes
 
 Saved tests: captured requests with assertions, run here, through a gateway or in CI
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin tests list` | The saved tests and the variables each uses. | `GET /_rustybin/tests` |
-| `rustybin tests show <name>` | One saved test. | `GET /_rustybin/tests/{name}` |
-| `rustybin tests save <name> --capture ID [--gateway U] [--description D]` | Save a captured request as a test (its status asserted; credentials become {{variables}}). Flags: `--capture` value, `--gateway` value, `--description` value. | `POST /_rustybin/tests` |
-| `rustybin tests put <name> --file F` | Save or replace a test from a file (JSON or YAML: request, gateway, assert). Flags: `--file` value. | `PUT /_rustybin/tests/{name}` |
-| `rustybin tests delete <name>` | Delete a saved test. | `DELETE /_rustybin/tests/{name}` |
-| `rustybin tests run [--names a,b] [--var NAME=value]... [--junit]` | Run saved tests (all by default); exits 1 when one fails. --junit prints JUnit XML for CI. Flags: `--names` value, `--var` value, `--junit`. | `POST /_rustybin/tests/run` |
-| `rustybin tests export` | Every saved test as one Hurl file (hurl --test --variable base_url=...). | `GET /_rustybin/tests/export` |
-| `rustybin tests runs [--limit N] [--cursor C]` | The history of test runs, newest first: when, the trigger, who, the counts, what changed since the previous run. Flags: `--limit` value, `--cursor` value. | `GET /_rustybin/tests/runs` |
-| `rustybin tests run-show <id> [--junit]` | One kept run: each test's result and failures, the change since the previous run; --junit prints its JUnit XML. Flags: `--junit`. | `GET /_rustybin/tests/runs/{id}` |
-| `rustybin tests runs-clear` | Forget every kept test run (the tests stay). | `DELETE /_rustybin/tests/runs` |
-| `rustybin tests schedules` | The saved tests on a schedule: when, what, on or off, the last result, the next time, the last notice. | `GET /_rustybin/tests/schedules` |
-| `rustybin tests schedule-show <name>` | One test schedule with its status and recent outcomes. | `GET /_rustybin/tests/schedules/{name}` |
-| `rustybin tests schedule-save <name> (--every D \| --at HH:MM) [--names a,b \| --prefix P] [--webhook U] [--notify-recovery] [--disabled]` | Save or replace a test schedule: every 5m to 24h, or at HH:MM UTC; every saved test unless --names or --prefix. Flags: `--every` value, `--at` value, `--names` value, `--prefix` value, `--webhook` value, `--notify-recovery`, `--disabled`, `--description` value. | `PUT /_rustybin/tests/schedules/{name}` |
-| `rustybin tests schedule-run <name>` | Run a test schedule now, as the scheduler would (kept in the history); exits 1 when it fails. | `POST /_rustybin/tests/schedules/{name}/run` |
-| `rustybin tests schedule-delete <name>` | Delete a test schedule (the tests and the history stay). | `DELETE /_rustybin/tests/schedules/{name}` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin tests list` | The saved tests and the variables each uses. | `GET /_rustybin/tests` | `tests.read` |
+| `rustybin tests show <name>` | One saved test. | `GET /_rustybin/tests/{name}` | `tests.read` |
+| `rustybin tests save <name> --capture ID [--gateway U] [--description D]` | Save a captured request as a test (its status asserted; credentials become {{variables}}). Flags: `--capture` value, `--gateway` value, `--description` value. | `POST /_rustybin/tests` | `tests.write` |
+| `rustybin tests put <name> --file F` | Save or replace a test from a file (JSON or YAML: request, gateway, assert). Flags: `--file` value. | `PUT /_rustybin/tests/{name}` | `tests.write` |
+| `rustybin tests delete <name>` | Delete a saved test. | `DELETE /_rustybin/tests/{name}` | `tests.write` |
+| `rustybin tests run [--names a,b] [--var NAME=value]... [--junit]` | Run saved tests (all by default); exits 1 when one fails. --junit prints JUnit XML for CI. Flags: `--names` value, `--var` value, `--junit`. | `POST /_rustybin/tests/run` | `tests.run` |
+| `rustybin tests export` | Every saved test as one Hurl file (hurl --test --variable base_url=...). | `GET /_rustybin/tests/export` | `tests.read` |
+| `rustybin tests runs [--limit N] [--cursor C]` | The history of test runs, newest first: when, the trigger, who, the counts, what changed since the previous run. Flags: `--limit` value, `--cursor` value. | `GET /_rustybin/tests/runs` | `tests.read` |
+| `rustybin tests run-show <id> [--junit]` | One kept run: each test's result and failures, the change since the previous run; --junit prints its JUnit XML. Flags: `--junit`. | `GET /_rustybin/tests/runs/{id}` | `tests.read` |
+| `rustybin tests runs-clear` | Forget every kept test run (the tests stay). | `DELETE /_rustybin/tests/runs` | `tests.write` |
+| `rustybin tests schedules` | The saved tests on a schedule: when, what, on or off, the last result, the next time, the last notice. | `GET /_rustybin/tests/schedules` | `tests.read` |
+| `rustybin tests schedule-show <name>` | One test schedule with its status and recent outcomes. | `GET /_rustybin/tests/schedules/{name}` | `tests.read` |
+| `rustybin tests schedule-save <name> (--every D \| --at HH:MM) [--names a,b \| --prefix P] [--webhook U] [--notify-recovery] [--disabled]` | Save or replace a test schedule: every 5m to 24h, or at HH:MM UTC; every saved test unless --names or --prefix. Flags: `--every` value, `--at` value, `--names` value, `--prefix` value, `--webhook` value, `--notify-recovery`, `--disabled`, `--description` value. | `PUT /_rustybin/tests/schedules/{name}` | `tests.write` |
+| `rustybin tests schedule-run <name>` | Run a test schedule now, as the scheduler would (kept in the history); exits 1 when it fails. | `POST /_rustybin/tests/schedules/{name}/run` | `tests.run` |
+| `rustybin tests schedule-delete <name>` | Delete a test schedule (the tests and the history stay). | `DELETE /_rustybin/tests/schedules/{name}` | `tests.write` |
 
 ```bash
 rustybin tests list
@@ -384,13 +384,13 @@ rustybin tests schedule-delete nightly --yes
 
 Guided gateway scenarios: prepare the upstream, check through the gateway, clean up
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin scenario list` | The gateway scenarios (retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits, CORS, header transformation) and your runs. | `GET /_rustybin/scenarios` |
-| `rustybin scenario start <scenario>` | Prepare a run: its upstream and the steps to configure on the gateway. | `POST /_rustybin/scenarios/{id}/runs` |
-| `rustybin scenario show <scenario> <run>` | A run: the setup, what it created, the last verdict. | `GET /_rustybin/scenarios/{id}/runs/{run}` |
-| `rustybin scenario check <scenario> <run> --gateway U [--limit N] [--half-open-ms MS] [--size-limit BYTES] [--allowed-origin O] [--refused-origin O] [--upstream-cors] [--add-request-header H] [--add-request-value V] [--remove-request-header H] [--add-response-header H]` | Send the run's test requests through the gateway and compare what the client got with what reached the upstream; exits 1 when an expectation fails. Flags: `--gateway` value, `--limit` value, `--half-open-ms` value, `--size-limit` value, `--allowed-origin` value, `--refused-origin` value, `--upstream-cors`, `--add-request-header` value, `--add-request-value` value, `--remove-request-header` value, `--add-response-header` value. | `POST /_rustybin/scenarios/{id}/runs/{run}/check` |
-| `rustybin scenario end <scenario> <run>` | End a run: remove the mock and counters it created, nothing else. | `DELETE /_rustybin/scenarios/{id}/runs/{run}` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin scenario list` | The gateway scenarios (retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits, CORS, header transformation) and your runs. | `GET /_rustybin/scenarios` | `instance.read` |
+| `rustybin scenario start <scenario>` | Prepare a run: its upstream and the steps to configure on the gateway. | `POST /_rustybin/scenarios/{id}/runs` | `scenarios.run` |
+| `rustybin scenario show <scenario> <run>` | A run: the setup, what it created, the last verdict. | `GET /_rustybin/scenarios/{id}/runs/{run}` | `instance.read` |
+| `rustybin scenario check <scenario> <run> --gateway U [--limit N] [--half-open-ms MS] [--size-limit BYTES] [--allowed-origin O] [--refused-origin O] [--upstream-cors] [--add-request-header H] [--add-request-value V] [--remove-request-header H] [--add-response-header H]` | Send the run's test requests through the gateway and compare what the client got with what reached the upstream; exits 1 when an expectation fails. Flags: `--gateway` value, `--limit` value, `--half-open-ms` value, `--size-limit` value, `--allowed-origin` value, `--refused-origin` value, `--upstream-cors`, `--add-request-header` value, `--add-request-value` value, `--remove-request-header` value, `--add-response-header` value. | `POST /_rustybin/scenarios/{id}/runs/{run}/check` | `scenarios.run` |
+| `rustybin scenario end <scenario> <run>` | End a run: remove the mock and counters it created, nothing else. | `DELETE /_rustybin/scenarios/{id}/runs/{run}` | `scenarios.run` |
 
 ```bash
 rustybin scenario list
@@ -404,15 +404,15 @@ rustybin scenario end caching 1a2b3c4d --yes
 
 AI agents on the management MCP server
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin agents list` | Every AI agent that called the management server, and the policy. | `GET /_rustybin/agents` |
-| `rustybin agents get <id>` | One agent: tools, last errors, sessions. | `GET /_rustybin/agents/{id}` |
-| `rustybin agents rights <id> [--ceiling C] [--allow T] [--deny T] [--note N] [--reset]` | Limit an agent: a ceiling, tools allowed or denied, a note; --reset goes back to the rules. Flags: `--ceiling` value, `--allow` value, `--deny` value, `--note` value, `--reset`. | `PATCH /_rustybin/agents/{id}` |
-| `rustybin agents revoke <id>` | Refuse the agent's calls, end its sessions, revoke its tokens. | `POST /_rustybin/agents/{id}/revoke` |
-| `rustybin agents restore <id>` | Undo a revocation. | `POST /_rustybin/agents/{id}/restore` |
-| `rustybin agents end-sessions <id>` | End the agent's MCP sessions. | `DELETE /_rustybin/agents/{id}/sessions` |
-| `rustybin agents tail` | Follow the agents' calls as they happen. Flags: `--max` value, `--timeout` value. | `GET /_rustybin/agents/events` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin agents list` | Every AI agent that called the management server, and the policy. | `GET /_rustybin/agents` | `agents.read` |
+| `rustybin agents get <id>` | One agent: tools, last errors, sessions. | `GET /_rustybin/agents/{id}` | `agents.read` |
+| `rustybin agents rights <id> [--ceiling C] [--allow T] [--deny T] [--note N] [--reset]` | Limit an agent: a ceiling, tools allowed or denied, a note; --reset goes back to the rules. Flags: `--ceiling` value, `--allow` value, `--deny` value, `--note` value, `--reset`. | `PATCH /_rustybin/agents/{id}` | `agents.manage` |
+| `rustybin agents revoke <id>` | Refuse the agent's calls, end its sessions, revoke its tokens. | `POST /_rustybin/agents/{id}/revoke` | `agents.manage` |
+| `rustybin agents restore <id>` | Undo a revocation. | `POST /_rustybin/agents/{id}/restore` | `agents.manage` |
+| `rustybin agents end-sessions <id>` | End the agent's MCP sessions. | `DELETE /_rustybin/agents/{id}/sessions` | `agents.manage` |
+| `rustybin agents tail` | Follow the agents' calls as they happen. Flags: `--max` value, `--timeout` value. | `GET /_rustybin/agents/events` | `agents.read` |
 
 ```bash
 rustybin agents list
@@ -428,15 +428,15 @@ rustybin agents tail --max 10
 
 AI assist: status, models, usage, test, run a task
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin ai status` | Whether AI assist is on, the provider, the caps. | `GET /_rustybin/assist` |
-| `rustybin ai models [--load]` | The configured provider's models with tier, context, price, whether each reasons and the jobs it runs; --load asks the provider for its list with the stored key first (admin). Flags: `--load`. | `GET /_rustybin/assist/models`, `POST /_rustybin/assist/models` |
-| `rustybin ai jobs` | Which model each AI job (task) runs on, and whether a setting chose it. | `GET /_rustybin/assist/models` |
-| `rustybin ai use <model> [--job TASK] [--fast]` | Choose a model: the model for the capable jobs, with --fast the fast model, with --job the model of one job (empty with --job clears the choice). Flags: `--job` value, `--fast`. | `PATCH /_rustybin/settings` |
-| `rustybin ai usage` | Calls and tokens since start. | `GET /_rustybin/assist/usage` |
-| `rustybin ai test` | Call the provider once with the configured key. | `POST /_rustybin/assist/test` |
-| `rustybin ai run <task> [--input JSON] [--model M]` | Run an assist task (free_answer, explain, suggest, ...) and print its answer. Flags: `--input` value, `--model` value. | `POST /_rustybin/assist/run` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin ai status` | Whether AI assist is on, the provider, the caps. | `GET /_rustybin/assist` | `assist.use` |
+| `rustybin ai models [--load]` | The configured provider's models with tier, context, price, whether each reasons and the jobs it runs; --load asks the provider for its list with the stored key first (admin). Flags: `--load`. | `GET /_rustybin/assist/models`, `POST /_rustybin/assist/models` | `assist.use`, `settings.write` |
+| `rustybin ai jobs` | Which model each AI job (task) runs on, and whether a setting chose it. | `GET /_rustybin/assist/models` | `assist.use` |
+| `rustybin ai use <model> [--job TASK] [--fast]` | Choose a model: the model for the capable jobs, with --fast the fast model, with --job the model of one job (empty with --job clears the choice). Flags: `--job` value, `--fast`. | `PATCH /_rustybin/settings` | `settings.write` |
+| `rustybin ai usage` | Calls and tokens since start. | `GET /_rustybin/assist/usage` | `settings.read` |
+| `rustybin ai test` | Call the provider once with the configured key. | `POST /_rustybin/assist/test` | `settings.write` |
+| `rustybin ai run <task> [--input JSON] [--model M]` | Run an assist task (free_answer, explain, suggest, ...) and print its answer. Flags: `--input` value, `--model` value. | `POST /_rustybin/assist/run` | `assist.use` |
 
 ```bash
 rustybin ai status
@@ -452,21 +452,21 @@ rustybin ai run free_answer --input '{"question": "what does /delay do?"}'
 
 The MCP inspector: servers, saved connections, checks, calls through the relay
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin mcp servers` | This instance's MCP servers. | `GET /_rustybin/mcp-servers` |
-| `rustybin mcp connections` | The saved connections. | `GET /_rustybin/mcp-connections` |
-| `rustybin mcp connection <id>` | One saved connection. | `GET /_rustybin/mcp-connections/{id}` |
-| `rustybin mcp save-connection <id> --target URL` | Save a connection (its secrets sealed on the instance). Flags: `--target` value, `--name` value, `--transport` value, `--mode` value, `--auth` value, `--secret` value. | `PUT /_rustybin/mcp-connections/{id}` |
-| `rustybin mcp delete-connection <id>` | Forget a saved connection. | `DELETE /_rustybin/mcp-connections/{id}` |
-| `rustybin mcp check <target>` | Run the checks against a server (--junit writes a report). Flags: `--transport` value, `--version` value, `--header` value, `--connection` value, `--checks` value, `--junit` value. | `POST /_rustybin/mcp-checks` |
-| `rustybin mcp runs` | The saved check runs. | `GET /_rustybin/mcp-checks` |
-| `rustybin mcp run <id>` | One saved check run. | `GET /_rustybin/mcp-checks/{id}` |
-| `rustybin mcp delete-run <id>` | Forget a saved check run. | `DELETE /_rustybin/mcp-checks/{id}` |
-| `rustybin mcp call <target> <method> [--params JSON]` | Send one JSON-RPC message to a server through the instance's relay. Flags: `--params` value, `--transport` value, `--header` value, `--connection` value. | `POST /_rustybin/mcp-relay` |
-| `rustybin mcp tools <target>` | The tools a server offers (tools/list through the relay). Flags: `--header` value, `--connection` value. | `POST /_rustybin/mcp-relay` |
-| `rustybin mcp fetch <url>` | Fetch an OAuth discovery document through the instance. | `POST /_rustybin/mcp-relay/fetch` |
-| `rustybin mcp end-relay <session>` | End a relay session. | `DELETE /_rustybin/mcp-relay/{session}` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin mcp servers` | This instance's MCP servers. | `GET /_rustybin/mcp-servers` | `mcp.inspect` |
+| `rustybin mcp connections` | The saved connections. | `GET /_rustybin/mcp-connections` | `mcp.inspect` |
+| `rustybin mcp connection <id>` | One saved connection. | `GET /_rustybin/mcp-connections/{id}` | `mcp.inspect` |
+| `rustybin mcp save-connection <id> --target URL` | Save a connection (its secrets sealed on the instance). Flags: `--target` value, `--name` value, `--transport` value, `--mode` value, `--auth` value, `--secret` value. | `PUT /_rustybin/mcp-connections/{id}` | `mcp.connections` |
+| `rustybin mcp delete-connection <id>` | Forget a saved connection. | `DELETE /_rustybin/mcp-connections/{id}` | `mcp.connections` |
+| `rustybin mcp check <target>` | Run the checks against a server (--junit writes a report). Flags: `--transport` value, `--version` value, `--header` value, `--connection` value, `--checks` value, `--junit` value. | `POST /_rustybin/mcp-checks` | `mcp.inspect` |
+| `rustybin mcp runs` | The saved check runs. | `GET /_rustybin/mcp-checks` | `mcp.inspect` |
+| `rustybin mcp run <id>` | One saved check run. | `GET /_rustybin/mcp-checks/{id}` | `mcp.inspect` |
+| `rustybin mcp delete-run <id>` | Forget a saved check run. | `DELETE /_rustybin/mcp-checks/{id}` | `mcp.connections` |
+| `rustybin mcp call <target> <method> [--params JSON]` | Send one JSON-RPC message to a server through the instance's relay. Flags: `--params` value, `--transport` value, `--header` value, `--connection` value. | `POST /_rustybin/mcp-relay` | `mcp.inspect` |
+| `rustybin mcp tools <target>` | The tools a server offers (tools/list through the relay). Flags: `--header` value, `--connection` value. | `POST /_rustybin/mcp-relay` | `mcp.inspect` |
+| `rustybin mcp fetch <url>` | Fetch an OAuth discovery document through the instance. | `POST /_rustybin/mcp-relay/fetch` | `mcp.inspect` |
+| `rustybin mcp end-relay <session>` | End a relay session. | `DELETE /_rustybin/mcp-relay/{session}` | `mcp.inspect` |
 
 ```bash
 rustybin mcp servers
@@ -488,13 +488,13 @@ rustybin mcp end-relay 5b2c
 
 The mock MCP registry and registry browsing
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin registry status` | The mock registry: scenario, entries, capacity. | `GET /_rustybin/registry` |
-| `rustybin registry publish <file>` | Publish a server.json to the mock registry (through its publish API). |  |
-| `rustybin registry delete <name> [--version V]` | Delete a published entry. Flags: `--version` value. | `DELETE /_rustybin/registry/servers/{serverName}` |
-| `rustybin registry validate <file>` | Validate a server.json against the schema and the semantic checks. | `POST /_rustybin/registry/validate` |
-| `rustybin registry browse [--registry U] [--search S] [--cursor C]` | Browse a registry (the official one by default) through the instance. Flags: `--registry` value, `--search` value, `--cursor` value. | `GET /_rustybin/registry/browse` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin registry status` | The mock registry: scenario, entries, capacity. | `GET /_rustybin/registry` | `instance.read` |
+| `rustybin registry publish <file>` | Publish a server.json to the mock registry (through its publish API). |  | (none) |
+| `rustybin registry delete <name> [--version V]` | Delete a published entry. Flags: `--version` value. | `DELETE /_rustybin/registry/servers/{serverName}` | `registry.write` |
+| `rustybin registry validate <file>` | Validate a server.json against the schema and the semantic checks. | `POST /_rustybin/registry/validate` | `instance.read` |
+| `rustybin registry browse [--registry U] [--search S] [--cursor C]` | Browse a registry (the official one by default) through the instance. Flags: `--registry` value, `--search` value, `--cursor` value. | `GET /_rustybin/registry/browse` | `mcp.inspect` |
 
 ```bash
 rustybin registry status
@@ -508,14 +508,14 @@ rustybin registry browse --search weather
 
 The dev portal
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin portal status` | The portal: on or off, items, who may read it. | `GET /_rustybin/portal` |
-| `rustybin portal publish <id>` | Publish an item: mock:NAME, mcp:SERVER, llm, a2a:AGENT, tools or registry. Flags: `--title` value, `--summary` value, `--tags` value, `--contact` value, `--order` value, `--no-credentials`. | `PUT /_rustybin/portal/items/{id}` |
-| `rustybin portal unpublish <id>` | Remove an item from the portal. | `DELETE /_rustybin/portal/items/{id}` |
-| `rustybin portal insights` | Views, downloads and Try it calls. | `GET /_rustybin/portal/insights` |
-| `rustybin portal branding` | The portal.* settings. | `GET /_rustybin/settings` |
-| `rustybin portal open` | The portal's URL. |  |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin portal status` | The portal: on or off, items, who may read it. | `GET /_rustybin/portal` | `instance.read` |
+| `rustybin portal publish <id>` | Publish an item: mock:NAME, mcp:SERVER, llm, a2a:AGENT, tools or registry. Flags: `--title` value, `--summary` value, `--tags` value, `--contact` value, `--order` value, `--no-credentials`. | `PUT /_rustybin/portal/items/{id}` | `portal.publish` |
+| `rustybin portal unpublish <id>` | Remove an item from the portal. | `DELETE /_rustybin/portal/items/{id}` | `portal.publish` |
+| `rustybin portal insights` | Views, downloads and Try it calls. | `GET /_rustybin/portal/insights` | `instance.read` |
+| `rustybin portal branding` | The portal.* settings. | `GET /_rustybin/settings` | `settings.read` |
+| `rustybin portal open` | The portal's URL. |  | (none) |
 
 ```bash
 rustybin portal status
@@ -530,13 +530,13 @@ rustybin portal open
 
 The whole instance as rustybin.yaml
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin config export [--format F] [--secrets S] [--output FILE]` | The whole instance as rustybin.yaml (yaml, json, or a bundle to a file). Flags: `--format` value, `--secrets` value, `--output` value. | `GET /_rustybin/config/export` |
-| `rustybin config apply <file> [--dry-run] [--prune]` | Apply a document; a dry run shows the changes and touches nothing. Flags: `--dry-run`, `--prune`. | `POST /_rustybin/config/apply` |
-| `rustybin config diff <file>` | What applying a document would change (a dry run). Flags: `--prune`. | `POST /_rustybin/config/apply` |
-| `rustybin config schema` | The JSON Schema of rustybin.yaml, version 2. | `GET /_rustybin/config/schema` |
-| `rustybin config check <file>` | Check a document offline: every section parses, every mock compiles. |  |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin config export [--format F] [--secrets S] [--output FILE]` | The whole instance as rustybin.yaml (yaml, json, or a bundle to a file). Flags: `--format` value, `--secrets` value, `--output` value. | `GET /_rustybin/config/export` | `config.export` |
+| `rustybin config apply <file> [--dry-run] [--prune]` | Apply a document; a dry run shows the changes and touches nothing. Flags: `--dry-run`, `--prune`. | `POST /_rustybin/config/apply` | `config.apply` |
+| `rustybin config diff <file>` | What applying a document would change (a dry run). Flags: `--prune`. | `POST /_rustybin/config/apply` | `config.apply` |
+| `rustybin config schema` | The JSON Schema of rustybin.yaml, version 2. | `GET /_rustybin/config/schema` | `instance.read` |
+| `rustybin config check <file>` | Check a document offline: every section parses, every mock compiles. |  | (none) |
 
 ```bash
 rustybin config export --output rustybin.yaml
@@ -550,16 +550,16 @@ rustybin config check rustybin.yaml
 
 Source control
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin git status [--fetch]` | The repository, the working copy, the drift, the timeline. Flags: `--fetch`. | `GET /_rustybin/git` |
-| `rustybin git init` | Connect the repository (clone, or start an empty working copy). | `POST /_rustybin/git/init` |
-| `rustybin git commit -m "<message>" [--checkpoint NAME]...` | Export the instance into the working copy and commit; --checkpoint also commits a local checkpoint (repeat it, or a,b). Flags: `--message` value, `-m` value, `--checkpoint` value. | `POST /_rustybin/git/commit` |
-| `rustybin git push` | Push the branch. | `POST /_rustybin/git/push` |
-| `rustybin git pull [--apply] [--dry-run] [--prune]` | Fetch and fast-forward; --apply applies the repository's document. Flags: `--apply`, `--dry-run`, `--prune`. | `POST /_rustybin/git/pull` |
-| `rustybin git resolve --with instance\|repository` | After a diverged branch: the instance's copy wins, or the repository's. Flags: `--with` value, `--message` value. | `POST /_rustybin/git/resolve` |
-| `rustybin git key [--generate] [--replace]` | The deploy key's public half; --generate makes one. Flags: `--generate`, `--replace`. | `GET /_rustybin/git/key`, `POST /_rustybin/git/key` |
-| `rustybin git history` | The last commits of the working copy. | `GET /_rustybin/git/history` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin git status [--fetch]` | The repository, the working copy, the drift, the timeline. Flags: `--fetch`. | `GET /_rustybin/git` | `git.read` |
+| `rustybin git init` | Connect the repository (clone, or start an empty working copy). | `POST /_rustybin/git/init` | `git.write` |
+| `rustybin git commit -m "<message>" [--checkpoint NAME]...` | Export the instance into the working copy and commit; --checkpoint also commits a local checkpoint (repeat it, or a,b). Flags: `--message` value, `-m` value, `--checkpoint` value. | `POST /_rustybin/git/commit` | `git.write` |
+| `rustybin git push` | Push the branch. | `POST /_rustybin/git/push` | `git.write` |
+| `rustybin git pull [--apply] [--dry-run] [--prune]` | Fetch and fast-forward; --apply applies the repository's document. Flags: `--apply`, `--dry-run`, `--prune`. | `POST /_rustybin/git/pull` | `git.write` |
+| `rustybin git resolve --with instance\|repository` | After a diverged branch: the instance's copy wins, or the repository's. Flags: `--with` value, `--message` value. | `POST /_rustybin/git/resolve` | `git.write` |
+| `rustybin git key [--generate] [--replace]` | The deploy key's public half; --generate makes one. Flags: `--generate`, `--replace`. | `GET /_rustybin/git/key`, `POST /_rustybin/git/key` | `git.read`, `git.write` |
+| `rustybin git history` | The last commits of the working copy. | `GET /_rustybin/git/history` | `git.read` |
 
 ```bash
 rustybin git status --fetch
@@ -576,40 +576,40 @@ rustybin git history
 
 Load tests on the instance (--remote); validate, run and report work offline too
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin harness status` | Harness mode: roles, caps, runs, the kill switch. | `GET /_rustybin/harness` |
-| `rustybin harness schema` | The JSON Schema of a scenario. | `GET /_rustybin/harness/schema` |
-| `rustybin harness scenarios` | The built-in and saved scenarios. | `GET /_rustybin/harness/scenarios` |
-| `rustybin harness scenario <name> [--yaml]` | One scenario. Flags: `--yaml`. | `GET /_rustybin/harness/scenarios/{name}` |
-| `rustybin harness save-scenario <name> <file>` | Save a scenario under a name. | `PUT /_rustybin/harness/scenarios/{name}` |
-| `rustybin harness delete-scenario <name>` | Delete a saved scenario. | `DELETE /_rustybin/harness/scenarios/{name}` |
-| `rustybin harness validate <file> --remote` | Validate a scenario on the instance (without --remote: offline, in this process). Flags: `--remote`. | `POST /_rustybin/harness/validate` |
-| `rustybin harness preview <file>` | The run plan of a scenario: stages, requests, duration. | `POST /_rustybin/harness/preview` |
-| `rustybin harness runs` | The runs on this node. | `GET /_rustybin/harness/runs` |
-| `rustybin harness run <file> --remote [--wait]` | Start a run on the instance (without --remote: from this process); --wait follows it and prints the report. Flags: `--remote`, `--wait`, `--format` value. | `POST /_rustybin/harness/runs` |
-| `rustybin harness show <run>` | One run: state, progress, the live controls. | `GET /_rustybin/harness/runs/{run}` |
-| `rustybin harness tune <run> <change>` | A live change (JSON or a file): rate, users, pause, resume, ... | `PATCH /_rustybin/harness/runs/{run}` |
-| `rustybin harness stop <run>` | Stop a run. | `POST /_rustybin/harness/runs/{run}/stop` |
-| `rustybin harness stop-all` | The kill switch: stop every run on the node. | `POST /_rustybin/harness/stop` |
-| `rustybin harness events <run>` | Follow a run's events. Flags: `--max` value, `--timeout` value. | `GET /_rustybin/harness/runs/{run}/events` |
-| `rustybin harness report <run> --remote [--format F]` | A run's report (without --remote: render a saved report file). Flags: `--remote`, `--format` value. | `GET /_rustybin/harness/runs/{run}/report` |
-| `rustybin harness clusters` | The clusters this node leads. | `GET /_rustybin/harness/clusters` |
-| `rustybin harness create-cluster [--body JSON]` | Create a cluster (cluster_id, min_nodes, lease, join_token). Flags: `--body` value. | `POST /_rustybin/harness/clusters` |
-| `rustybin harness cluster <id>` | A cluster: nodes, leader, runs. | `GET /_rustybin/harness/clusters/{id}` |
-| `rustybin harness delete-cluster <id>` | Dissolve a cluster. | `DELETE /_rustybin/harness/clusters/{id}` |
-| `rustybin harness leader <id>` | The cluster's leader. | `GET /_rustybin/harness/clusters/{id}/leader` |
-| `rustybin harness upstreams <id>` | The cluster's server nodes as the gateway reaches them. | `GET /_rustybin/harness/clusters/{id}/upstreams` |
-| `rustybin harness cluster-runs <id>` | The cluster's runs. | `GET /_rustybin/harness/clusters/{id}/runs` |
-| `rustybin harness cluster-run <id> <file>` | Create a cluster run from a scenario (start it with cluster-start). | `POST /_rustybin/harness/clusters/{id}/runs` |
-| `rustybin harness cluster-show <id> <run>` | One cluster run. | `GET /_rustybin/harness/clusters/{id}/runs/{run}` |
-| `rustybin harness cluster-tune <id> <run> <change>` | A live change on a cluster run. | `PATCH /_rustybin/harness/clusters/{id}/runs/{run}` |
-| `rustybin harness cluster-start <id> <run>` | Start a cluster run. | `POST /_rustybin/harness/clusters/{id}/runs/{run}/start` |
-| `rustybin harness cluster-stop <id> <run>` | Stop a cluster run. | `POST /_rustybin/harness/clusters/{id}/runs/{run}/stop` |
-| `rustybin harness cluster-events <id> <run>` | Follow a cluster run's events. Flags: `--max` value, `--timeout` value. | `GET /_rustybin/harness/clusters/{id}/runs/{run}/events` |
-| `rustybin harness cluster-report <id> <run> [--format F]` | A cluster run's report. Flags: `--format` value. | `GET /_rustybin/harness/clusters/{id}/runs/{run}/report` |
-| `rustybin harness join <cluster-url> --join-token T` | Make this node join a cluster. Flags: `--join-token` value, `--advertise` value. | `POST /_rustybin/harness/join` |
-| `rustybin harness leave` | Leave the cluster. | `POST /_rustybin/harness/leave` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin harness status` | Harness mode: roles, caps, runs, the kill switch. | `GET /_rustybin/harness` | `harness.read` |
+| `rustybin harness schema` | The JSON Schema of a scenario. | `GET /_rustybin/harness/schema` | `harness.read` |
+| `rustybin harness scenarios` | The built-in and saved scenarios. | `GET /_rustybin/harness/scenarios` | `harness.read` |
+| `rustybin harness scenario <name> [--yaml]` | One scenario. Flags: `--yaml`. | `GET /_rustybin/harness/scenarios/{name}` | `harness.read` |
+| `rustybin harness save-scenario <name> <file>` | Save a scenario under a name. | `PUT /_rustybin/harness/scenarios/{name}` | `harness.run` |
+| `rustybin harness delete-scenario <name>` | Delete a saved scenario. | `DELETE /_rustybin/harness/scenarios/{name}` | `harness.run` |
+| `rustybin harness validate <file> --remote` | Validate a scenario on the instance (without --remote: offline, in this process). Flags: `--remote`. | `POST /_rustybin/harness/validate` | `harness.read` |
+| `rustybin harness preview <file>` | The run plan of a scenario: stages, requests, duration. | `POST /_rustybin/harness/preview` | `harness.read` |
+| `rustybin harness runs` | The runs on this node. | `GET /_rustybin/harness/runs` | `harness.read` |
+| `rustybin harness run <file> --remote [--wait]` | Start a run on the instance (without --remote: from this process); --wait follows it and prints the report. Flags: `--remote`, `--wait`, `--format` value. | `POST /_rustybin/harness/runs` | `harness.run` |
+| `rustybin harness show <run>` | One run: state, progress, the live controls. | `GET /_rustybin/harness/runs/{run}` | `harness.read` |
+| `rustybin harness tune <run> <change>` | A live change (JSON or a file): rate, users, pause, resume, ... | `PATCH /_rustybin/harness/runs/{run}` | `harness.run` |
+| `rustybin harness stop <run>` | Stop a run. | `POST /_rustybin/harness/runs/{run}/stop` | `harness.run` |
+| `rustybin harness stop-all` | The kill switch: stop every run on the node. | `POST /_rustybin/harness/stop` | `harness.run` |
+| `rustybin harness events <run>` | Follow a run's events. Flags: `--max` value, `--timeout` value. | `GET /_rustybin/harness/runs/{run}/events` | `harness.read` |
+| `rustybin harness report <run> --remote [--format F]` | A run's report (without --remote: render a saved report file). Flags: `--remote`, `--format` value. | `GET /_rustybin/harness/runs/{run}/report` | `harness.read` |
+| `rustybin harness clusters` | The clusters this node leads. | `GET /_rustybin/harness/clusters` | `harness.read` |
+| `rustybin harness create-cluster [--body JSON]` | Create a cluster (cluster_id, min_nodes, lease, join_token). Flags: `--body` value. | `POST /_rustybin/harness/clusters` | `harness.cluster` |
+| `rustybin harness cluster <id>` | A cluster: nodes, leader, runs. | `GET /_rustybin/harness/clusters/{id}` | `harness.read` |
+| `rustybin harness delete-cluster <id>` | Dissolve a cluster. | `DELETE /_rustybin/harness/clusters/{id}` | `harness.cluster` |
+| `rustybin harness leader <id>` | The cluster's leader. | `GET /_rustybin/harness/clusters/{id}/leader` | `harness.read` |
+| `rustybin harness upstreams <id>` | The cluster's server nodes as the gateway reaches them. | `GET /_rustybin/harness/clusters/{id}/upstreams` | `harness.read` |
+| `rustybin harness cluster-runs <id>` | The cluster's runs. | `GET /_rustybin/harness/clusters/{id}/runs` | `harness.read` |
+| `rustybin harness cluster-run <id> <file>` | Create a cluster run from a scenario (start it with cluster-start). | `POST /_rustybin/harness/clusters/{id}/runs` | `harness.run` |
+| `rustybin harness cluster-show <id> <run>` | One cluster run. | `GET /_rustybin/harness/clusters/{id}/runs/{run}` | `harness.read` |
+| `rustybin harness cluster-tune <id> <run> <change>` | A live change on a cluster run. | `PATCH /_rustybin/harness/clusters/{id}/runs/{run}` | `harness.run` |
+| `rustybin harness cluster-start <id> <run>` | Start a cluster run. | `POST /_rustybin/harness/clusters/{id}/runs/{run}/start` | `harness.run` |
+| `rustybin harness cluster-stop <id> <run>` | Stop a cluster run. | `POST /_rustybin/harness/clusters/{id}/runs/{run}/stop` | `harness.run` |
+| `rustybin harness cluster-events <id> <run>` | Follow a cluster run's events. Flags: `--max` value, `--timeout` value. | `GET /_rustybin/harness/clusters/{id}/runs/{run}/events` | `harness.read` |
+| `rustybin harness cluster-report <id> <run> [--format F]` | A cluster run's report. Flags: `--format` value. | `GET /_rustybin/harness/clusters/{id}/runs/{run}/report` | `harness.read` |
+| `rustybin harness join <cluster-url> --join-token T` | Make this node join a cluster. Flags: `--join-token` value, `--advertise` value. | `POST /_rustybin/harness/join` | `harness.cluster` |
+| `rustybin harness leave` | Leave the cluster. | `POST /_rustybin/harness/leave` | `harness.cluster` |
 
 ```bash
 rustybin harness status
@@ -650,9 +650,9 @@ rustybin harness leave
 
 API keys in shared mode
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin keys usage [--day D] [--after A] [--limit N]` | Per-key usage in shared mode. Flags: `--day` value, `--after` value, `--limit` value. | `GET /_rustybin/keys/usage` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin keys usage [--day D] [--after A] [--limit N]` | Per-key usage in shared mode. Flags: `--day` value, `--after` value, `--limit` value. | `GET /_rustybin/keys/usage` | `settings.read` |
 
 ```bash
 rustybin keys usage --day 2026-10-30
@@ -662,9 +662,9 @@ rustybin keys usage --day 2026-10-30
 
 The outbound connection policy
 
-| Command | What it does | Calls |
-|---|---|---|
-| `rustybin egress show` | The outbound policy: the allowlist, each feature's rule, the last decisions. | `GET /_rustybin/egress` |
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin egress show` | The outbound policy: the allowlist, each feature's rule, the last decisions. | `GET /_rustybin/egress` | `settings.read` |
 
 ```bash
 rustybin egress show

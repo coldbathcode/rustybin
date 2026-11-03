@@ -1143,6 +1143,7 @@ pub fn catalog() -> Vec<Endpoint> {
         category::CONTROL,
         "Prometheus metrics (requests by route template, latency, streams, egress, protocols, LLM tokens, requests and faults, limit rejections)",
     )
+.permission(crate::rbac::Permission::InstanceRead)
     .description(
         "Text exposition format 0.0.4. Labels are bounded: the route label is the matched route \
          template, never the raw path. Protected like the rest of the control plane \

@@ -9,6 +9,7 @@
 // registered setting has a control.
 import { h, field, input, select, textarea, notice, toast, icon, replace } from './dom.js';
 import { SERVER, send } from './http.js';
+import * as perms from './perms.js';
 
 const SOURCE_TEXT = {
   stored: 'Saved in this instance',
@@ -37,6 +38,8 @@ function valueControl(setting) {
   const initial = setting.value;
   const props = { 'aria-label': key };
   if (setting.locked) props.disabled = true;
+  const lacking = perms.missing(setting.needs);
+  if (lacking) { props.disabled = true; props.title = perms.reason(lacking); }
   let ctl;
   let read;
   if (type === 'boolean') {
@@ -85,6 +88,8 @@ function secretControl(setting) {
   const clearBtn = h('button', { class: 'btn sm ghost', type: 'button', 'aria-label': key + ' clear' }, 'Clear');
   const cancelBtn = h('button', { class: 'btn sm ghost', type: 'button', 'aria-label': key + ' cancel', hidden: true }, 'Keep current');
   if (setting.locked) { replaceBtn.disabled = true; clearBtn.disabled = true; }
+  const lacking = perms.missing(setting.needs);
+  if (lacking) { perms.guard(replaceBtn, lacking); perms.guard(clearBtn, lacking); pw.disabled = true; }
   function renderStatus() {
     if (mode === 'clear') {
       replace(status, h('span', { class: 'badge warn' }, 'will be cleared on save'));
@@ -140,8 +145,10 @@ export function settingsForm(doc, group, opts = {}) {
       controls.push(c);
       body.appendChild(c.el);
     }
-    const allLocked = items.length > 0 && items.every((s) => s.locked);
+    const allLocked = items.length > 0 && items.every((s) => s.locked || perms.missing(s.needs));
     const saveBtn = h('button', { class: 'btn primary', type: 'submit', disabled: allLocked }, opts.saveLabel || 'Save');
+    const lacking = items.map((s) => perms.missing(s.needs)).find(Boolean);
+    if (allLocked && lacking) saveBtn.title = perms.reason(lacking);
     const foot = h('div', { class: 'row', style: { flexWrap: 'wrap', gap: '8px' } },
       d.persisted ? h('span', { class: 'muted small inline-icon' }, icon('check'), ' Changes are saved to the state directory.')
         : h('span', { class: 'muted small inline-icon' }, icon('info'), ' No RUSTYBIN_STATE_DIR: changes last until the instance restarts.'),

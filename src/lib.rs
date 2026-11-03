@@ -177,6 +177,15 @@ pub fn build_app(state: AppState) -> Router {
         router = router.merge(make(&state));
     }
 
+    // The one permission check of the control plane: a route layer, so it
+    // sees the matched route template and runs before any handler (and its
+    // body extractors). Authentication happened outside (control auth, or
+    // the key layer in shared mode).
+    let router = router.route_layer(middleware::from_fn_with_state(
+        state.clone(),
+        control_auth::check_route,
+    ));
+
     let mut router = router
         .fallback(not_found)
         // innermost: per-route fault injection

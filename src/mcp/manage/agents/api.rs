@@ -60,10 +60,7 @@ fn operator(headers: &HeaderMap) -> String {
     "admin".into()
 }
 
-async fn list(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
+async fn list(State(state): State<AppState>) -> Response {
     let policy = Policy::of(&state);
     let agents = state.agents.list(&policy);
     Json(json!({
@@ -77,14 +74,7 @@ async fn list(State(state): State<AppState>, headers: HeaderMap) -> Response {
     .into_response()
 }
 
-async fn get_one(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
+async fn get_one(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     match state.agents.get(&id, &Policy::of(&state)) {
         Some(v) => Json(v).into_response(),
         None => refused(AgentError::NotFound),
@@ -116,9 +106,6 @@ async fn patch(
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
     let p: Patch = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(e) => {
@@ -143,9 +130,6 @@ async fn revoke(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
     match state
         .agents
         .revoke(&id, &operator(&headers), &state.config.console_tokens)
@@ -155,38 +139,21 @@ async fn revoke(
     }
 }
 
-async fn restore(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
+async fn restore(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     match state.agents.restore(&id, &state.config.console_tokens) {
         Ok(v) => Json(v).into_response(),
         Err(e) => refused(e),
     }
 }
 
-async fn end_sessions(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
+async fn end_sessions(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     match state.agents.end_sessions(&id) {
         Ok(n) => Json(json!({ "id": id, "sessions_ended": n })).into_response(),
         Err(e) => refused(e),
     }
 }
 
-async fn events(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(resp) = crate::admin::require_admin(&headers, &state.config) {
-        return resp;
-    }
+async fn events(State(state): State<AppState>) -> Response {
     let Some((rx, guard)) = state.agents.subscribe() else {
         return error(
             StatusCode::TOO_MANY_REQUESTS,
@@ -228,6 +195,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "AI agents on the management MCP server (admin)",
         )
+.permission(crate::rbac::Permission::AgentsRead)
         .description(
             "Every client that called /_rustybin/mcp: its name and version (clientInfo), the \
              credential it presents, first and last seen, calls today and in total, open \
@@ -242,6 +210,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Live feed of agent calls (admin)",
         )
+.permission(crate::rbac::Permission::AgentsRead)
         .description(
             "Server-Sent Events: a `call` event per management tool call (agent, tool, outcome), \
              an `agent` event when one is revoked or restored. At most 16 listeners.",
@@ -256,6 +225,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "One AI agent: its calls per tool, last errors, sessions and rights (admin)",
         )
+.permission_for(&["GET"], crate::rbac::Permission::AgentsRead).permission_for(&["PATCH"], crate::rbac::Permission::AgentsManage)
         .description(
             "PATCH {\"rights\": {\"ceiling\": \"read-only\" | \"traffic\" | \"manage\" | \"full\", \
              \"allow\": [tools], \"deny\": [tools]}, \"note\": \"...\"}: the agent's own rights, \
@@ -273,6 +243,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Revoke an AI agent: refuse its calls, end its sessions, revoke its tokens (admin)",
         )
+.permission(crate::rbac::Permission::AgentsManage)
         .example(Example::post("Revoke an unknown agent", "/_rustybin/agents/0000000000000000/revoke").expect_status(404)),
         Endpoint::new(
             "/_rustybin/agents/{id}/restore",
@@ -280,6 +251,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Restore a revoked AI agent (admin)",
         )
+.permission(crate::rbac::Permission::AgentsManage)
         .example(Example::post("Restore an unknown agent", "/_rustybin/agents/0000000000000000/restore").expect_status(404)),
         Endpoint::new(
             "/_rustybin/agents/{id}/sessions",
@@ -287,6 +259,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "End an AI agent's MCP sessions (admin)",
         )
+.permission(crate::rbac::Permission::AgentsManage)
         .example(Example::delete("End the sessions of an unknown agent", "/_rustybin/agents/0000000000000000/sessions").expect_status(404)),
     ]
 }

@@ -16,7 +16,7 @@ Mcp-Name: get_instance
 HTTP 200
 [Asserts]
 jsonpath "$.result.isError" == false
-jsonpath "$.result.content[0].text" contains "Caller rights: read, traffic, manage, admin"
+jsonpath "$.result.content[0].text" contains "Caller roles: admin; 38 of 38 permissions"
 jsonpath "$.result.structuredContent.caller.admin" == true
 jsonpath "$.result.structuredContent.urls.console" == "{{secured_url}}/ui/"
 # ANCHOR_END: connect_check

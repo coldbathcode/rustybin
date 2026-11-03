@@ -6,6 +6,7 @@
 import { h, replace, card, field, textarea, checkbox, notice, toast, icon, spinner, copyButton, select } from '../../lib/dom.js';
 import { SERVER, send } from '../../lib/http.js';
 import { download, readFile, errorText } from '../../lib/mockapi.js';
+import * as perms from '../../lib/perms.js';
 
 const LAST_EXPORT_KEY = 'rustybin.config.lastExport';
 const MAX_DOCUMENT = 8 * 1024 * 1024;
@@ -84,8 +85,8 @@ function applyCard() {
   const prune = checkbox('Prune: a present section is the whole truth (API mocks, published items and entries, saved scenarios and stored settings it does not name are removed)', false);
   prune.input.id = 'config-prune';
   const result = h('div', { id: 'config-result' });
-  const applyBtn = h('button', { class: 'btn primary', type: 'button', id: 'config-apply', disabled: true }, 'Apply');
-  const dryBtn = h('button', { class: 'btn', type: 'button', id: 'config-dry-run' }, icon('play'), 'Dry run');
+  const applyBtn = perms.guard(h('button', { class: 'btn primary', type: 'button', id: 'config-apply', disabled: true }, 'Apply'), 'config.apply');
+  const dryBtn = perms.guard(h('button', { class: 'btn', type: 'button', id: 'config-dry-run' }, icon('play'), 'Dry run'), 'config.apply');
   // The dry run that enabled Apply: its text and its prune choice. Apply
   // sends exactly what was previewed; another text or prune choice needs a
   // new dry run (a prune ticked after the preview would delete what the

@@ -175,8 +175,9 @@ Otherwise one JSON document comes back:
 {{#include ../examples/assist/assist.hurl:refusals}}
 ```
 
-With control-plane auth, read tasks are open to the `console` scope; tasks that change
-the instance need admin, like `test` and `usage`.
+With control-plane auth, the tasks need `assist.use` (the `tester` role, the `console`
+scope); testing the key and loading the models need `settings.write`, the usage
+`settings.read`, and AI-built mocks `assist.jobs`.
 
 ## Privacy and costs
 

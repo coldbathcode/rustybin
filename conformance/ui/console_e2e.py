@@ -1381,6 +1381,21 @@ def control_jwt(scope="console", ttl=600, sub="e2e-user"):
     return jwt.encode(claims, key, algorithm="EdDSA")
 
 
+def role_jwt(roles, ttl=600, sub="e2e-role"):
+    """A control JWT with `rb_roles` and no scope: exactly those roles."""
+    import jwt  # PyJWT (with cryptography for EdDSA)
+
+    with open(os.environ["CONTROL_JWT_PRIVATE_KEY"], "rb") as f:
+        key = f.read()
+    claims = {
+        "aud": os.environ.get("CONTROL_JWT_AUDIENCE", "ui-conformance"),
+        "sub": sub,
+        "exp": int(time.time()) + ttl,
+        "rb_roles": roles,
+    }
+    return jwt.encode(claims, key, algorithm="EdDSA")
+
+
 def run_jwt(browser):
     """Sign-in flow against an instance with RUSTYBIN_CONTROL_AUTH=jwt."""
     jwt_base = os.environ["RUSTYBIN_JWT_URL"].rstrip("/")
@@ -1524,6 +1539,52 @@ def run_jwt(browser):
         assert "Bearer " + token in copied, copied
 
     step("jwt: api explorer masks the control token", explorer_masks_the_control_token)
+
+    def roles_shape_the_controls():
+        # The console asks GET /_rustybin/session for the permissions and
+        # disables what the roles do not grant, saying which permission.
+        def signed_in(token, view):
+            c = browser.new_context(viewport={"width": 1280, "height": 860})
+            p = c.new_page()
+            p.set_default_timeout(TIMEOUT)
+            p.on("pageerror", lambda e: console_errors.append(f"[jwt roles] uncaught: {e}"))
+            p.goto(jwt_base + "/ui/#/" + view + "&token=" + token)
+            p.wait_for_selector("#view .view-head h1")
+            return c, p
+
+        # A viewer: no write control is enabled.
+        c, p = signed_in(role_jwt(["viewer"], sub="e2e-viewer"), "mocks")
+        p.locator(".mock-row", has_text="petstore").wait_for()
+        expect(p.get_by_role("button", name="New mock")).to_have_count(0)
+        expect(p.locator("#view")).to_contain_text("mocks.write")
+        goto_view(p, "tests")
+        expect(p.locator("#tests-run")).to_be_disabled()
+        expect(p.locator("#tests-run")).to_have_attribute("title", re.compile("tests.run"))
+        expect(p.locator("#schedule-save")).to_be_disabled()
+        p.evaluate("location.hash = '#/manage/checkpoints'")
+        expect(p.locator("#checkpoint-save")).to_be_disabled()
+        expect(p.locator("#checkpoint-save")).to_have_attribute("title", re.compile("checkpoints.write"))
+        p.evaluate("location.hash = '#/manage/general'")
+        p.wait_for_selector("form[aria-label='Settings: console']")
+        expect(p.locator("[aria-label='console.title']")).to_be_disabled()
+        expect(p.locator("form[aria-label='Settings: console'] button[type=submit]")).to_be_disabled()
+        shot(p, "jwt", "25-viewer")
+        c.close()
+
+        # An editor: changes mocks and runs tests; the settings stay read-only.
+        c, p = signed_in(role_jwt(["editor"], sub="e2e-editor"), "mocks")
+        p.locator(".mock-row", has_text="petstore").wait_for()
+        expect(p.get_by_role("button", name="New mock")).to_have_count(1)
+        goto_view(p, "tests")
+        expect(p.locator("#schedule-save")).to_be_enabled()
+        p.evaluate("location.hash = '#/manage/general'")
+        p.wait_for_selector("form[aria-label='Settings: console']")
+        expect(p.locator("[aria-label='console.title']")).to_be_disabled()
+        expect(p.locator("[aria-label='console.title']")).to_have_attribute("title", re.compile("settings.write"))
+        shot(p, "jwt", "26-editor")
+        c.close()
+
+    step("jwt: a viewer's and an editor's controls follow their permissions", roles_shape_the_controls)
 
     def agent_sign_in_read_only():
         # Fresh context: no console token yet, so the sign-in screen comes first.

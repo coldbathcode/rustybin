@@ -81,9 +81,14 @@ impl ServiceError {
         Self::new(StatusCode::FORBIDDEN, message)
     }
 
-    /// The refusal of the admin guard, as data.
-    pub fn admin(refusal: (StatusCode, &'static str)) -> Self {
-        Self::new(refusal.0, refusal.1)
+    /// The refusal of a caller without `p` (`403`, or `401` for nobody on
+    /// an instance with an admin token), naming the permission.
+    pub fn permission(caller: &crate::rbac::Resolved, p: crate::rbac::Permission) -> Self {
+        let (status, message) = crate::rbac::need::refusal_of(caller, p);
+        Self::with_body(
+            status,
+            crate::rbac::need::refusal_body(p, message.as_deref()),
+        )
     }
 
     /// The human-readable message (`message`, else `error`).
@@ -763,9 +768,9 @@ impl Svc {
         &self.state.config
     }
 
-    /// The admin guard's own answer (`Ok` when the caller holds admin rights).
-    pub fn require_admin(&self) -> SvcResult<()> {
-        self.caller.admin_guard.map_err(ServiceError::admin)
+    /// `Ok` when the caller holds `p`, else the refusal naming it.
+    pub fn need(&self, p: crate::rbac::Permission) -> SvcResult<()> {
+        self.caller.need(p)
     }
 
     /// The mock, if the caller may read it (`404` otherwise).
@@ -783,7 +788,7 @@ impl Svc {
         match self.readable(name) {
             Ok(s) => {
                 if !s.owner.is_visitor() && !self.caller.admin {
-                    self.require_admin()?;
+                    self.need(crate::rbac::Permission::MocksWrite)?;
                 }
                 Ok(s)
             }
@@ -792,7 +797,7 @@ impl Svc {
             // are 404.
             Err(not_found) => {
                 if self.store().visits().is_none() {
-                    self.require_admin()?;
+                    self.need(crate::rbac::Permission::MocksWrite)?;
                 }
                 Err(not_found)
             }
@@ -890,9 +895,9 @@ impl Svc {
     fn visitor_owner(&self) -> SvcResult<NewOwner> {
         let c = &self.caller;
         let Some(visits) = self.store().visits() else {
-            return Err(crate::admin::admin_check(&HeaderMap::new(), self.config())
+            return Err(self
+                .need(crate::rbac::Permission::MocksWrite)
                 .err()
-                .map(ServiceError::admin)
                 .unwrap_or_else(|| ServiceError::forbidden("admin rights required")));
         };
         if visits.paused() {
@@ -993,7 +998,7 @@ impl Svc {
         let c = &self.caller;
         let visitor = !c.admin;
         if visitor && self.store().visits().is_none() {
-            self.require_admin()?;
+            self.need(crate::rbac::Permission::MocksWrite)?;
         }
         let text = spec_text(&req.spec).map_err(ServiceError::bad_request)?;
         if visitor {
@@ -1093,7 +1098,7 @@ impl Svc {
         settings: MockSettings,
         ttl: std::time::Duration,
     ) -> SvcResult<String> {
-        self.require_admin()?;
+        self.need(crate::rbac::Permission::ScenariosRun)?;
         check_name(name)?;
         let compiled = self
             .store()
@@ -1341,7 +1346,7 @@ impl Svc {
     /// `POST /_rustybin/mocks/apply` (admin): apply a `rustybin.yaml`
     /// document; `prune` deletes API-created mocks it does not name.
     pub fn apply(&self, text: &str, prune: bool) -> SvcResult<Value> {
-        self.require_admin()?;
+        self.need(crate::rbac::Permission::ConfigApply)?;
         let file = config_file::parse(text).map_err(ServiceError::bad_request)?;
         for doc in file.mocks() {
             check_name(&doc.name)?;
@@ -1367,7 +1372,7 @@ impl Svc {
     /// What `apply` would do, without doing it: the mocks the document
     /// names, which exist, and the document's errors.
     pub fn apply_dry_run(&self, text: &str, prune: bool) -> SvcResult<Value> {
-        self.require_admin()?;
+        self.need(crate::rbac::Permission::ConfigApply)?;
         let file = config_file::parse(text).map_err(ServiceError::bad_request)?;
         for doc in file.mocks() {
             check_name(&doc.name)?;
@@ -1414,7 +1419,7 @@ impl Svc {
 
     /// `POST /_rustybin/mocks/reload` (admin): reload file-defined mocks.
     pub fn reload(&self) -> SvcResult<Value> {
-        self.require_admin()?;
+        self.need(crate::rbac::Permission::ConfigApply)?;
         let (report, problems) = super::reload_files(&self.state);
         Ok(json!({ "report": report, "problems": problems }))
     }

@@ -67,7 +67,8 @@ pub fn get_instance(ctx: &CallCtx, access: &Access) -> Value {
     });
     let summary = format!(
         "Rustybin {} ({}), instance {}: {} routes in {} categories, {} mocks; public mode {}, \
-         shared mode {}, self-service {}, control auth {}. Caller rights: {}. Console at {base}/ui/.",
+         shared mode {}, self-service {}, control auth {}. Caller roles: {}; {} of {} permissions. \
+         Console at {base}/ui/.",
         env!("CARGO_PKG_VERSION"),
         crate::control::git_sha().unwrap_or("no commit"),
         config.instance_id,
@@ -78,10 +79,11 @@ pub fn get_instance(ctx: &CallCtx, access: &Access) -> Value {
         state.keys.shared(),
         access.self_service,
         config.control_auth.as_str(),
-        structured["caller"]["rights"]
-            .as_array()
-            .map(|r| r.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "))
-            .unwrap_or_default(),
+        Some(access.resolved.roles.join(", "))
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| "none".into()),
+        access.resolved.permissions.len(),
+        crate::rbac::Permission::ALL.len(),
     );
     ok(ctx, summary, structured)
 }
@@ -313,10 +315,11 @@ pub async fn reset_flaky(ctx: &CallCtx, access: &Access, args: &Value) -> Value 
         return err("scope must be session or all");
     }
     if scope == "all" {
-        if !access.is_admin() {
+        let need = super::access::ToolNeed::Perm(crate::rbac::Permission::SettingsWrite);
+        if !access.allows(need) {
             return err(format!(
-                "resetting everyone's counters needs admin rights: {}",
-                access.denial(super::access::Right::Admin)
+                "resetting everyone's counters: {}",
+                access.denial(need)
             ));
         }
         let removed = ctx.app.flaky.reset_all();

@@ -57,12 +57,7 @@ fn from_profiles(
     profile: Option<&str>,
 ) -> Result<(String, Option<String>), String> {
     use crate::cli::profiles;
-    let fail = |e: crate::cli::Fail| match e {
-        crate::cli::Fail::Usage(m)
-        | crate::cli::Fail::Failed(m)
-        | crate::cli::Fail::Auth(m)
-        | crate::cli::Fail::Network(m) => m,
-    };
+    let fail = |e: crate::cli::Fail| e.message().to_string();
     let all = match profiles::path(env) {
         Some(p) => profiles::load(&p).map_err(fail)?,
         None if profile.is_some() => {

@@ -6,6 +6,7 @@
 import { h, replace, icon, notice, toast, input, textarea, field, checkbox } from './dom.js';
 import { SERVER, send, getJson } from './http.js';
 import * as assist from './assist.js';
+import * as perms from './perms.js';
 
 const BASE = '/_rustybin/portal';
 
@@ -86,8 +87,8 @@ export function openPublishDialog(item, opts = {}) {
     field('Contact', contact, 'Who testers ask about it (optional).'),
     item.kind === 'api' ? creds.el : null,
     err);
-  const publishBtn = h('button', { class: 'btn primary', type: 'button', id: 'portal-publish' }, icon('upload'), p.published_at ? 'Save' : 'Publish');
-  const unpublishBtn = p.published_at && p.source !== 'file' ? h('button', { class: 'btn danger', type: 'button', id: 'portal-unpublish' }, 'Unpublish') : null;
+  const publishBtn = perms.guard(h('button', { class: 'btn primary', type: 'button', id: 'portal-publish' }, icon('upload'), p.published_at ? 'Save' : 'Publish'), 'portal.publish');
+  const unpublishBtn = p.published_at && p.source !== 'file' ? perms.guard(h('button', { class: 'btn danger', type: 'button', id: 'portal-unpublish' }, 'Unpublish'), 'portal.publish') : null;
   publishBtn.addEventListener('click', async () => {
     const meta = {
       title: title.value.trim(),

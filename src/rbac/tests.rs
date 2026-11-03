@@ -331,10 +331,22 @@ fn the_old_scopes_keep_their_grants() {
     // The scopes as roles.
     let perms = |s: &str| from_scope_claim(Some(&json!(s))).1;
     assert_eq!(perms("admin"), PermSet::all());
-    assert_eq!(perms("console"), BuiltIn::Viewer.permissions());
+    // The console scope keeps its 0.4 reach: the viewer plus captured
+    // traffic, the assist's read tasks and the MCP inspector.
+    let console = BuiltIn::Viewer
+        .permissions()
+        .union(PermSet::of(super::CONSOLE_SCOPE_EXTRA));
+    assert_eq!(perms("console"), console);
+    assert_eq!(
+        PermSet::of(super::CONSOLE_SCOPE_EXTRA).names(),
+        ["traffic.read", "assist.use", "mcp.inspect"]
+    );
     assert_eq!(perms("inspector").names(), ["traffic.read"]);
-    assert_eq!(perms("harness").names(), ["harness.read", "harness.run"]);
-    assert_eq!(from_scope_claim(None).1, BuiltIn::Viewer.permissions());
+    assert_eq!(
+        perms("harness").names(),
+        ["harness.read", "harness.run", "harness.cluster"]
+    );
+    assert_eq!(from_scope_claim(None).1, console);
     assert_eq!(from_scope_claim(None).0, ["viewer"]);
     assert_eq!(
         from_scope_claim(Some(&json!("admin console"))).0,
@@ -382,7 +394,7 @@ fn rb_roles_and_rb_perms_join_the_scope_and_unknown_names_are_ignored() {
     assert_eq!(r.grant(), Grant::ADMIN);
     // Neither: the scope alone, with its console default.
     let r = from_jwt_claims(&json!({"sub": "x"}), &users);
-    assert_eq!(r.permissions, BuiltIn::Viewer.permissions());
+    assert_eq!(r.permissions, from_scope_claim(Some(&json!("console"))).1);
     // Junk shapes grant nothing and never fail.
     let r = from_jwt_claims(&json!({"rb_roles": 7, "rb_perms": {"a": 1}}), &users);
     assert!(r.permissions.is_empty());
@@ -430,13 +442,10 @@ async fn rb_claims_on_a_control_jwt_reach_the_grant_and_the_session() {
             .0,
         StatusCode::FORBIDDEN
     );
-    // The session route is outside the inspector grant, as in 0.3.
-    assert_eq!(
-        call(&app, "GET", crate::login::SESSION_PATH, Some(&traffic))
-            .await
-            .0,
-        StatusCode::FORBIDDEN
-    );
+    // The session answers any caller the control plane accepts (0.5).
+    let (status, v) = call(&app, "GET", crate::login::SESSION_PATH, Some(&traffic)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["permissions"], json!(["traffic.read"]));
     let tester = jwt(json!({"sub": "ci", "rb_roles": "tester"}));
     let (status, v) = call(&app, "GET", crate::login::SESSION_PATH, Some(&tester)).await;
     assert_eq!(status, StatusCode::OK, "{v}");
@@ -446,11 +455,14 @@ async fn rb_claims_on_a_control_jwt_reach_the_grant_and_the_session() {
     assert_eq!(v["permissions"], json!(names(BuiltIn::Tester)));
     assert_eq!(v["scopes"], json!(["console", "inspector", "harness"]));
     assert_eq!(v["user_id"], Value::Null);
-    // A console-scoped token: the viewer role.
+    // A console-scoped token: the viewer role, plus the scope's 0.4 extras.
     let console = crate::test_support::control_jwt(Some("console"));
     let (_, v) = call(&app, "GET", crate::login::SESSION_PATH, Some(&console)).await;
     assert_eq!(v["roles"], json!(["viewer"]));
-    assert_eq!(v["permissions"], json!(names(BuiltIn::Viewer)));
+    assert_eq!(
+        v["permissions"],
+        json!(from_scope_claim(Some(&json!("console"))).1.names())
+    );
     // The admin token: every permission, no user.
     let (_, v) = call(
         &app,
@@ -1000,4 +1012,431 @@ fn other_modes_have_no_users_and_the_diagnostics_check_the_store() {
     let dir = tempfile::tempdir().expect("tmp");
     let state = state_in(dir.path(), |_| {});
     assert_eq!(diagnostics(&state).map(|d| d.0), Some("ok"));
+}
+
+// ── Step 08: every route checks a permission ────────────────────────
+
+async fn send(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    token: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut b = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"));
+    let body = match body {
+        Some(v) => {
+            b = b.header("content-type", "application/json");
+            axum::body::Body::from(v.to_string())
+        }
+        None => axum::body::Body::empty(),
+    };
+    let resp = app
+        .clone()
+        .oneshot(b.body(body).expect("request"))
+        .await
+        .expect("response");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap_or_default();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// `Ok` when the route let the caller through, else the permission the
+/// 403 named.
+async fn reach(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    token: &str,
+    body: Option<Value>,
+) -> Result<StatusCode, String> {
+    let (status, v) = send(app, method, uri, token, body).await;
+    if status == StatusCode::FORBIDDEN && v["reason"] == "permission_required" {
+        // Never what the caller holds.
+        assert!(
+            v.get("permissions").is_none() && v.get("scopes").is_none(),
+            "{v}"
+        );
+        return Err(v["permission"].as_str().unwrap_or("?").to_string());
+    }
+    assert_ne!(status, StatusCode::UNAUTHORIZED, "{method} {uri}: {v}");
+    Ok(status)
+}
+
+fn user_with(state: &crate::state::AppState, name: &str, roles: &[&str]) -> String {
+    let hash = hash_password(&format!("{name}-secret-1")).expect("hash");
+    state
+        .users
+        .add(NewUser::new(name, roles), Some(hash))
+        .expect("user")
+        .id
+}
+
+#[tokio::test]
+async fn a_viewer_a_tester_and_an_editor_reach_what_their_roles_grant() {
+    let mut config = password_config();
+    config.harness.enabled = true;
+    config.harness.roles = vec![crate::harness::Role::Client];
+    config.harness.targets = vec!["127.0.0.1".into()];
+    let state = test_state_with(config);
+    let app = test_app_with(state.clone());
+    let viewer_id = user_with(&state, "vera", &["viewer"]);
+    user_with(&state, "tess", &["tester"]);
+    user_with(&state, "eddy", &["editor"]);
+    let viewer = token(&app, "vera", "vera-secret-1").await;
+    let tester = token(&app, "tess", "tess-secret-1").await;
+    let editor = token(&app, "eddy", "eddy-secret-1").await;
+    let none = json!({});
+    // (method, route, body, viewer, tester, editor): None reaches the
+    // handler, Some(p) is refused naming p.
+    type Row<'a> = (&'a str, &'a str, Option<Value>, [Option<&'a str>; 3]);
+    let rows: Vec<Row> = vec![
+        ("GET", "/_rustybin/config", None, [None, None, None]),
+        ("GET", "/_rustybin/session", None, [None, None, None]),
+        ("GET", "/_rustybin/mocks", None, [None, None, None]),
+        (
+            "POST",
+            "/_rustybin/mocks",
+            Some(none.clone()),
+            [Some("mocks.write"), Some("mocks.write"), None],
+        ),
+        (
+            "POST",
+            "/_rustybin/mocks/petstore/disable",
+            None,
+            [Some("mocks.write"), Some("mocks.write"), None],
+        ),
+        (
+            "DELETE",
+            "/_rustybin/mocks/petstore/state",
+            None,
+            [Some("mocks.data"), Some("mocks.data"), None],
+        ),
+        (
+            "POST",
+            "/_rustybin/mocks/reload",
+            None,
+            [
+                Some("config.apply"),
+                Some("config.apply"),
+                Some("config.apply"),
+            ],
+        ),
+        (
+            "GET",
+            "/_rustybin/requests",
+            None,
+            [Some("traffic.read"), None, None],
+        ),
+        (
+            "GET",
+            "/_rustybin/mocks/petstore/requests",
+            None,
+            [Some("traffic.read"), None, None],
+        ),
+        ("GET", "/_rustybin/settings", None, [None, None, None]),
+        (
+            "PATCH",
+            "/_rustybin/settings",
+            Some(json!({"values": {}})),
+            [
+                Some("settings.write"),
+                Some("settings.write"),
+                Some("settings.write"),
+            ],
+        ),
+        ("GET", "/_rustybin/tests", None, [None, None, None]),
+        (
+            "POST",
+            "/_rustybin/tests",
+            Some(none.clone()),
+            [Some("tests.write"), Some("tests.write"), None],
+        ),
+        (
+            "POST",
+            "/_rustybin/tests/run",
+            Some(json!({"names": ["none-x"]})),
+            [Some("tests.run"), None, None],
+        ),
+        ("GET", "/_rustybin/checkpoints", None, [None, None, None]),
+        (
+            "POST",
+            "/_rustybin/checkpoints",
+            Some(none.clone()),
+            [Some("checkpoints.write"), Some("checkpoints.write"), None],
+        ),
+        (
+            "POST",
+            "/_rustybin/checkpoints/none-x/restore",
+            Some(none.clone()),
+            [
+                Some("checkpoints.restore"),
+                Some("checkpoints.restore"),
+                None,
+            ],
+        ),
+        ("GET", "/_rustybin/git", None, [None, None, None]),
+        (
+            "POST",
+            "/_rustybin/git/commit",
+            Some(none.clone()),
+            [Some("git.write"), Some("git.write"), Some("git.write")],
+        ),
+        ("GET", "/_rustybin/agents", None, [None, None, None]),
+        (
+            "POST",
+            "/_rustybin/agents/none-x/revoke",
+            None,
+            [
+                Some("agents.manage"),
+                Some("agents.manage"),
+                Some("agents.manage"),
+            ],
+        ),
+        (
+            "GET",
+            "/_rustybin/config/export",
+            None,
+            [Some("config.export"), Some("config.export"), None],
+        ),
+        (
+            "POST",
+            "/_rustybin/config/apply",
+            Some(none.clone()),
+            [
+                Some("config.apply"),
+                Some("config.apply"),
+                Some("config.apply"),
+            ],
+        ),
+        ("GET", "/_rustybin/harness", None, [None, None, None]),
+        (
+            "POST",
+            "/_rustybin/harness/runs",
+            Some(none.clone()),
+            [Some("harness.run"), None, None],
+        ),
+        (
+            "POST",
+            "/_rustybin/harness/clusters",
+            Some(none.clone()),
+            [
+                Some("harness.cluster"),
+                Some("harness.cluster"),
+                Some("harness.cluster"),
+            ],
+        ),
+        (
+            "POST",
+            "/_rustybin/scenarios/caching/runs",
+            None,
+            [Some("scenarios.run"), None, None],
+        ),
+        (
+            "PUT",
+            "/_rustybin/portal/items/llm",
+            Some(none.clone()),
+            [Some("portal.publish"), Some("portal.publish"), None],
+        ),
+        (
+            "GET",
+            "/_rustybin/sessions",
+            None,
+            [Some("users.read"), Some("users.read"), Some("users.read")],
+        ),
+        ("GET", "/_rustybin/diagnostics", None, [None, None, None]),
+        (
+            "GET",
+            "/_rustybin/mcp-servers",
+            None,
+            [Some("mcp.inspect"), None, None],
+        ),
+        (
+            "PUT",
+            "/_rustybin/mcp-connections/none-x",
+            Some(none.clone()),
+            [
+                Some("mcp.connections"),
+                Some("mcp.connections"),
+                Some("mcp.connections"),
+            ],
+        ),
+        // A body check: clearing everyone's captures needs traffic.clear.
+        (
+            "DELETE",
+            "/_rustybin/requests",
+            None,
+            [Some("traffic.read"), Some("traffic.clear"), None],
+        ),
+        (
+            "DELETE",
+            "/_rustybin/requests?session=mine-1",
+            None,
+            [Some("traffic.read"), None, None],
+        ),
+        (
+            "POST",
+            "/_rustybin/assist/run",
+            Some(json!({"task": "explain", "inputs": {}})),
+            [Some("assist.use"), None, None],
+        ),
+    ];
+    let tokens = [&viewer, &tester, &editor];
+    for (method, uri, body, expected) in rows {
+        for (i, t) in tokens.iter().enumerate() {
+            let got = reach(&app, method, uri, t, body.clone()).await.err();
+            assert_eq!(
+                got.as_deref(),
+                expected[i],
+                "{} {method} {uri}",
+                ["viewer", "tester", "editor"][i]
+            );
+        }
+    }
+    // The management server lists what the roles allow.
+    let list = |t: String| {
+        let app = app.clone();
+        async move {
+            let auth = format!("Bearer {t}");
+            crate::mcp::manage::tests::tool_names(&app, &[("authorization", auth.as_str())]).await
+        }
+    };
+    let (v, e) = (list(viewer.clone()).await, list(editor.clone()).await);
+    assert!(
+        v.contains(&"list_mocks".to_string()) && !v.contains(&"create_mock".to_string()),
+        "{v:?}"
+    );
+    assert!(!v.contains(&"list_requests".to_string()), "{v:?}");
+    assert!(
+        e.contains(&"create_mock".to_string()) && !e.contains(&"apply_config".to_string()),
+        "{e:?}"
+    );
+    // A disabled user is refused at the next request (signed out).
+    state.users.set_disabled(&viewer_id, true).expect("disable");
+    let (status, v) = send(&app, "GET", "/_rustybin/config", &viewer, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{v}");
+}
+
+#[tokio::test]
+async fn a_settings_change_needs_what_its_keys_need() {
+    let state = test_state_with(password_config());
+    let app = test_app_with(state.clone());
+    state
+        .users
+        .save_role(CustomRole {
+            name: "operator".into(),
+            description: "Instance settings, not the security groups".into(),
+            permissions: vec![
+                "settings.read".into(),
+                "settings.write".into(),
+                "config.apply".into(),
+            ],
+        })
+        .expect("role");
+    user_with(&state, "olly", &["operator"]);
+    let t = token(&app, "olly", "olly-secret-1").await;
+    let patch = |v: Value| Some(v);
+    assert_eq!(
+        reach(
+            &app,
+            "PATCH",
+            "/_rustybin/settings",
+            &t,
+            patch(json!({"values": {"mocks.require_revision": true}}))
+        )
+        .await,
+        Ok(StatusCode::OK)
+    );
+    for (body, missing) in [
+        (
+            json!({"values": {"egress.allow": "example.com"}}),
+            "settings.security",
+        ),
+        (
+            json!({"values": {"assist.base_url": "https://llm.example.com"}}),
+            "settings.security",
+        ),
+        (
+            json!({"values": {"console.title": "Ours"}}),
+            "settings.security",
+        ),
+        (
+            json!({"values": {"portal.title": "Our APIs"}}),
+            "portal.settings",
+        ),
+        (
+            json!({"secrets": {"assist.openai_key": "sk-test-1"}}),
+            "secrets.write",
+        ),
+    ] {
+        assert_eq!(
+            reach(&app, "PATCH", "/_rustybin/settings", &t, Some(body.clone())).await,
+            Err(missing.to_string()),
+            "{body}"
+        );
+    }
+    assert_eq!(
+        reach(&app, "DELETE", "/_rustybin/settings/egress.allow", &t, None).await,
+        Err("settings.security".to_string())
+    );
+    assert_eq!(
+        reach(
+            &app,
+            "DELETE",
+            "/_rustybin/settings/mocks.require_revision",
+            &t,
+            None
+        )
+        .await,
+        Ok(StatusCode::OK)
+    );
+    // A document: settings and secrets are checked by key; agents need
+    // agents.manage.
+    let apply = |doc: Value| Some(json!({"document": doc, "dry_run": true}));
+    assert_eq!(
+        reach(
+            &app,
+            "POST",
+            "/_rustybin/config/apply",
+            &t,
+            apply(json!({"version": 2, "settings": {"mocks.require_revision": false}}))
+        )
+        .await,
+        Ok(StatusCode::OK)
+    );
+    for (doc, missing) in [
+        (
+            json!({"version": 2, "settings": {"egress.allow": "example.com"}}),
+            "settings.security",
+        ),
+        (
+            json!({"version": 2, "secrets": {"assist.openai_key": "${OPENAI_KEY}"}}),
+            "secrets.write",
+        ),
+        (
+            json!({"version": 2, "agents": {"default_ceiling": "traffic"}}),
+            "agents.manage",
+        ),
+    ] {
+        assert_eq!(
+            reach(
+                &app,
+                "POST",
+                "/_rustybin/config/apply",
+                &t,
+                apply(doc.clone())
+            )
+            .await,
+            Err(missing.to_string()),
+            "{doc}"
+        );
+    }
 }
