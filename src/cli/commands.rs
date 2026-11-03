@@ -108,6 +108,10 @@ pub const NOUNS: &[(&str, &str)] = &[
     ),
     ("passwd", "Change your own password"),
     (
+        "sso",
+        "Single sign-on with OpenID Connect: its status, and a test against the provider",
+    ),
+    (
         "mocks",
         "OpenAPI mocks on the instance (rustybin mock ... works offline)",
     ),
@@ -157,6 +161,10 @@ const USER_FLAGS_INVITE: &[Flag] = &[
         "--reset",
         "A new link for a user who exists (a password reset)",
     ),
+    Flag::switch(
+        "--sso",
+        "A single sign-on user, added ahead of their first sign-in: no link, no password (--role pins roles)",
+    ),
 ];
 const USER_FLAGS_UPDATE: &[Flag] = &[
     Flag::value(
@@ -165,6 +173,10 @@ const USER_FLAGS_UPDATE: &[Flag] = &[
     ),
     Flag::value("--display-name", "The name the console shows"),
     Flag::value("--email", "An email address (\"\" clears it)"),
+    Flag::value(
+        "--pin-role",
+        "A single sign-on user's pinned roles, on top of their groups' (repeatable, or comma separated; replaces them)",
+    ),
 ];
 const TAIL_FLAGS: &[Flag] = &[
     Flag::value("--max", "Stop after this many events"),
@@ -197,9 +209,9 @@ macro_rules! cmd {
 /// The command tree.
 pub static COMMANDS: &[Cmd] = &[
     // ── Sign-in ──
-    cmd!("login", "", "[--url U] [--user U] [--password-stdin] [--profile P]", "Sign in with the console user name and password (prompted, or the first line of stdin) and keep the token in a profile; --token keeps a token you already have.",
-        &[Flag::value("--user", "The console user name (default rustybin)"), Flag::switch("--password-stdin", "Read the password from the first line of stdin")],
-        [("POST", "/_rustybin/login"), ("GET", "/_rustybin/session")], false, "login --url https://mocks.example.com --user rustybin"),
+    cmd!("login", "", "[--url U] [--user U] [--password-stdin] [--sso [--no-browser] [--wait S]] [--profile P]", "Sign in with the console user name and password (prompted, or the first line of stdin) and keep the token in a profile; --sso signs in with the identity provider in the browser instead (a loopback address on this machine takes the answer); --token keeps a token you already have.",
+        &[Flag::value("--user", "The console user name (default rustybin)"), Flag::switch("--password-stdin", "Read the password from the first line of stdin"), Flag::switch("--sso", "Single sign-on: the browser signs in at the identity provider"), Flag::switch("--no-browser", "With --sso: print the address to open instead of opening it"), Flag::value("--wait", "With --sso: how long to wait for the browser, in seconds (default 300)")],
+        [("POST", "/_rustybin/login"), ("GET", "/_rustybin/session"), ("GET", "/_rustybin/sso/status"), ("GET", "/_rustybin/sso/start"), ("POST", "/_rustybin/sso/token")], false, "login --url https://mocks.example.com --user rustybin"),
     cmd!("logout", "", "", "Revoke the profile's token on the instance and forget it.", NO_FLAGS, [("POST", "/_rustybin/logout")], false, "logout"),
     cmd!("whoami", "", "", "The credential the calls carry: user, scopes, expiry.", NO_FLAGS, [("GET", "/_rustybin/session")], false, "whoami"),
     cmd!("status", "", "", "Name, version, modes, health, the features that are on.", NO_FLAGS, [("GET", "/_rustybin/status")], false, "status"),
@@ -228,9 +240,9 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("password", "change", "[--user U] [--stdin]", "Change your password (the first admin's also takes a new user name): the current and the new one prompted, or two lines of stdin.", &[Flag::value("--user", "A new user name (the first admin only)"), Flag::switch("--stdin", "Read the current and the new password from two lines of stdin")], [("PUT", "/_rustybin/password")], false, "password change --stdin < passwords.txt"),
     // ── Users, roles, your account ──
     cmd!("users", "list", "", "The users: roles, status (active, invited, disabled), last sign-in.", NO_FLAGS, [("GET", "/_rustybin/users")], false, "users list"),
-    cmd!("users", "invite", "<name> --role R [--display-name D] [--email E] [--reset]", "Invite a user: the answer is a link to send them (shown once), where they set their own password. --reset sends a user who exists a new link (a password reset).", USER_FLAGS_INVITE, [("POST", "/_rustybin/users"), ("POST", "/_rustybin/users/{id}/invite")], false, "users invite alice --role editor --display-name \"Alice Doe\""),
+    cmd!("users", "invite", "<name> --role R [--display-name D] [--email E] [--reset] [--sso]", "Invite a user: the answer is a link to send them (shown once), where they set their own password. --reset sends a user who exists a new link (a password reset); --sso adds a single sign-on user instead (no link).", USER_FLAGS_INVITE, [("POST", "/_rustybin/users"), ("POST", "/_rustybin/users/{id}/invite")], false, "users invite alice --role editor --display-name \"Alice Doe\""),
     cmd!("users", "show", "<user>", "One user (an id or a sign-in name): roles, permissions, status, the open invitation.", NO_FLAGS, [("GET", "/_rustybin/users/{id}")], false, "users show alice"),
-    cmd!("users", "update", "<user> [--role R] [--display-name D] [--email E]", "Change a user's roles (--role replaces them; repeatable), display name or email (--email \"\" clears it).", USER_FLAGS_UPDATE, [("PATCH", "/_rustybin/users/{id}")], false, "users update alice --role tester"),
+    cmd!("users", "update", "<user> [--role R] [--pin-role R] [--display-name D] [--email E]", "Change a user's roles (--role replaces them; repeatable), a single sign-on user's pinned roles (--pin-role), display name or email (--email \"\" clears it).", USER_FLAGS_UPDATE, [("PATCH", "/_rustybin/users/{id}")], false, "users update alice --role tester"),
     cmd!("users", "disable", "<user>", "Disable a user: their sessions end and their sign-in is refused.", NO_FLAGS, [("PATCH", "/_rustybin/users/{id}")], true, "users disable alice --yes"),
     cmd!("users", "enable", "<user>", "Enable a disabled user again (an invited one joins through the invitation).", NO_FLAGS, [("PATCH", "/_rustybin/users/{id}")], false, "users enable alice"),
     cmd!("users", "sessions", "<user> [--end]", "A user's sign-in sessions; --end signs them out everywhere.", &[Flag::switch("--end", "Sign the user out everywhere")], [("GET", "/_rustybin/users/{id}/sessions"), ("DELETE", "/_rustybin/users/{id}/sessions")], false, "users sessions alice"),
@@ -417,6 +429,9 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("harness", "cluster-report", "<id> <run> [--format F]", "A cluster run's report.", &[Flag::value("--format", "text (default), json or junit")], [("GET", "/_rustybin/harness/clusters/{id}/runs/{run}/report")], false, "harness cluster-report c-1 cr-1"),
     cmd!("harness", "join", "<cluster-url> --join-token T", "Make this node join a cluster.", &[Flag::value("--join-token", "The join token"), Flag::value("--advertise", "This server node's data-plane URL as the gateway reaches it")], [("POST", "/_rustybin/harness/join")], false, "harness join https://leader.example/_rustybin/harness/clusters/c-1 --join-token ..."),
     cmd!("harness", "leave", "", "Leave the cluster.", NO_FLAGS, [("POST", "/_rustybin/harness/leave")], false, "harness leave"),
+    // ── Single sign-on ──
+    cmd!("sso", "status", "", "Single sign-on as the sign-in screen sees it: on, ready, the button's name, whether the password sign-in works.", NO_FLAGS, [("GET", "/_rustybin/sso/status")], false, "sso status"),
+    cmd!("sso", "test", "", "Fetch the identity provider's discovery document and keys now, and check the role map; exits 1 when the provider cannot be read.", NO_FLAGS, [("POST", "/_rustybin/sso/test")], false, "sso test"),
     // ── Keys and egress ──
     cmd!("keys", "usage", "[--day D] [--after A] [--limit N]", "Per-key usage in shared mode.", &[Flag::value("--day", "A UTC day (YYYY-MM-DD)"), Flag::value("--after", "The page cursor"), Flag::value("--limit", "At most this many")], [("GET", "/_rustybin/keys/usage")], false, "keys usage --day 2026-10-30"),
     cmd!("egress", "show", "", "The outbound policy: the allowlist, each feature's rule, the last decisions.", NO_FLAGS, [("GET", "/_rustybin/egress")], false, "egress show"),
@@ -425,6 +440,10 @@ pub static COMMANDS: &[Cmd] = &[
 /// Catalogue paths no command calls, each with its reason (the parity test
 /// reads it).
 pub const UNCOVERED: &[(&str, &str)] = &[
+    (
+        "/_rustybin/sso/callback",
+        "the identity provider sends the browser there (rustybin login --sso waits for its answer on a loopback address)",
+    ),
     (
         "/_rustybin/join",
         "the invitation link a person opens in a browser, where they choose their password",
@@ -661,6 +680,7 @@ pub async fn dispatch(ctx: &mut Ctx) -> Result<()> {
         "sessions" => sessions(ctx, cmd.verb).await,
         "password" => password(ctx, "/_rustybin/password").await,
         "passwd" => password(ctx, "/_rustybin/me/password").await,
+        "sso" => sso(ctx, cmd.verb).await,
         "users" => users(ctx, cmd.verb).await,
         "roles" => roles(ctx, cmd.verb).await,
         "me" => me(ctx, cmd.verb).await,
@@ -724,6 +744,7 @@ async fn login(ctx: &mut Ctx) -> Result<()> {
                 session["user"].as_str().map(str::to_string),
             )
         }
+        None if ctx.args.has("--sso") => sso_login(ctx, &url).await?,
         None => {
             let user = ctx.args.value("--user").unwrap_or("rustybin").to_string();
             let password = ctx.secret("Password", ctx.args.has("--password-stdin"), 0)?;
@@ -740,6 +761,11 @@ async fn login(ctx: &mut Ctx) -> Result<()> {
                 401 => {
                     return Err(Fail::Auth(format!(
                         "{url}: the user name or password was refused"
+                    )))
+                }
+                403 if reply.value()["reason"] == "password_sign_in_off" => {
+                    return Err(Fail::Auth(format!(
+                        "{url}: the password sign-in is off: rustybin login --sso"
                     )))
                 }
                 404 | 409 => {
@@ -791,6 +817,222 @@ async fn login(ctx: &mut Ctx) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// `login --sso`: a loopback listener on this machine takes the browser
+/// back from the instance (`return_to`), whose one-time code and this
+/// process's PKCE verifier become a sign-in token. Answers the token, its
+/// expiry and the user.
+async fn sso_login(ctx: &mut Ctx, url: &str) -> Result<(String, Option<String>, Option<String>)> {
+    let client = super::client::Client::new(url, None)?;
+    let status = client.get("/_rustybin/sso/status", &[]).await?;
+    if status.status == 404 {
+        return Err(Fail::Failed(format!(
+            "{url}: single sign-on works with the password sign-in only (RUSTYBIN_CONTROL_AUTH=password); use --token"
+        )));
+    }
+    let status = status.ok()?.value();
+    if status["ready"] != json!(true) {
+        return Err(Fail::Failed(format!(
+            "{url}: single sign-on is not set up ({})",
+            status["reason"].as_str().unwrap_or("sso.enabled is off")
+        )));
+    }
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(|e| Fail::Failed(format!("no loopback port to listen on: {e}")))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| Fail::Failed(e.to_string()))?
+        .port();
+    let return_to = format!("http://127.0.0.1:{port}/callback");
+    let verifier = {
+        use base64::Engine;
+        use rand::RngCore;
+        let mut b = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut b);
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+    };
+    let start = format!(
+        "{}/_rustybin/sso/start?return_to={}&challenge={}",
+        url.trim_end_matches('/'),
+        enc(&return_to),
+        crate::sso::challenge_of(&verifier)
+    );
+    let name = status["name"]
+        .as_str()
+        .unwrap_or("the identity provider")
+        .to_string();
+    ctx.say(&format!(
+        "Sign in with {name} in the browser. If it does not open, visit:\n{start}"
+    ));
+    if !ctx.args.has("--no-browser") {
+        match &ctx.env.browser {
+            Some(b) => (b.0)(&start),
+            None => open_browser(&start),
+        }
+    }
+    let wait = ctx
+        .args
+        .value("--wait")
+        .and_then(|w| w.parse::<u64>().ok())
+        .unwrap_or(300)
+        .clamp(1, 3600);
+    let query = tokio::time::timeout(Duration::from_secs(wait), loopback_answer(listener))
+        .await
+        .map_err(|_| Fail::Failed(format!("the browser did not come back in {wait} s")))?
+        .map_err(|e| Fail::Failed(format!("the loopback listener failed: {e}")))?;
+    let pairs: std::collections::BTreeMap<String, String> =
+        form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect();
+    if let Some(reason) = pairs.get("error") {
+        return Err(Fail::Auth(format!(
+            "{url}: single sign-on refused ({reason}): {}",
+            pairs
+                .get("error_description")
+                .map(String::as_str)
+                .unwrap_or("")
+        )));
+    }
+    let code = pairs
+        .get("code")
+        .ok_or_else(|| Fail::Failed("the browser came back without a code".into()))?;
+    let reply = client
+        .send(
+            Method::POST,
+            "/_rustybin/sso/token",
+            &[],
+            Body::Json(json!({ "code": code, "verifier": verifier })),
+        )
+        .await?;
+    if reply.status == 401 {
+        return Err(Fail::Auth(format!(
+            "{url}: the sign-in's code was refused (used, expired, or not this sign-in's)"
+        )));
+    }
+    let v = reply.ok()?.value();
+    let token = v["token"]
+        .as_str()
+        .ok_or_else(|| Fail::Failed("the answer carries no token".into()))?
+        .to_string();
+    Ok((
+        token,
+        v["expires_at"].as_str().map(str::to_string),
+        v["user"].as_str().map(str::to_string),
+    ))
+}
+
+/// Open a URL with the system's opener (best effort: the address is
+/// printed too).
+fn open_browser(url: &str) {
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    } else if cfg!(target_os = "windows") {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", "", url]);
+        c
+    } else {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    let _ = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// Wait for the browser on the loopback listener: the query of the first
+/// `GET /callback`, answered with a page that says what happened (other
+/// requests, a favicon say, get a 404).
+async fn loopback_answer(listener: tokio::net::TcpListener) -> std::io::Result<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    loop {
+        let (mut stream, _) = listener.accept().await?;
+        let mut buf = Vec::with_capacity(1024);
+        let mut chunk = [0u8; 1024];
+        while !buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.len() < 8192 {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        let head = String::from_utf8_lossy(&buf);
+        let target = head
+            .lines()
+            .next()
+            .and_then(|l| l.strip_prefix("GET "))
+            .and_then(|l| l.split(' ').next())
+            .unwrap_or("")
+            .to_string();
+        let Some(rest) = target.strip_prefix("/callback") else {
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+            continue;
+        };
+        let query = rest.strip_prefix('?').unwrap_or("").to_string();
+        let failed = query.split('&').any(|p| p.starts_with("error="));
+        let body = if failed {
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Rustybin</title></head><body><h1>The sign-in was refused</h1><p>The command line says why. You can close this window.</p></body></html>"
+        } else {
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Rustybin</title></head><body><h1>Signed in</h1><p>The command line has the token. You can close this window.</p></body></html>"
+        };
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(resp.as_bytes()).await;
+        let _ = stream.shutdown().await;
+        return Ok(query);
+    }
+}
+
+async fn sso(ctx: &mut Ctx, verb: &str) -> Result<()> {
+    match verb {
+        "status" => get(ctx, "/_rustybin/sso/status", &[]).await,
+        "test" => {
+            let v = ctx
+                .client()?
+                .post("/_rustybin/sso/test", Body::None)
+                .await?
+                .ok()?
+                .value();
+            if ctx.json {
+                ctx.emit(&v);
+            } else if v["ok"] == json!(true) {
+                ctx.say(&format!(
+                    "Single sign-on is ready: {} answers its discovery document and {} key(s).\nRegister {} as the client's redirect URI.",
+                    v["issuer"].as_str().unwrap_or("the provider"),
+                    v["keys"].as_array().map(Vec::len).unwrap_or(0),
+                    v["redirect_uri"].as_str().unwrap_or("")
+                ));
+                if let Some(unknown) = v["unknown_roles"].as_array().filter(|a| !a.is_empty()) {
+                    let names: Vec<&str> = unknown.iter().filter_map(Value::as_str).collect();
+                    ctx.say(&format!(
+                        "The role map names roles this instance does not have: {}",
+                        names.join(", ")
+                    ));
+                }
+            }
+            if v["ok"] == json!(true) {
+                Ok(())
+            } else {
+                Err(Fail::Failed(format!(
+                    "single sign-on is not working: {}",
+                    v["error"].as_str().unwrap_or("not set up")
+                )))
+            }
+        }
+        other => Err(Fail::Usage(format!("sso {other}: not a command"))),
+    }
 }
 
 async fn logout(ctx: &mut Ctx) -> Result<()> {
@@ -1069,6 +1311,12 @@ fn emit_invitation(ctx: &mut Ctx, v: &Value) {
         return;
     }
     let name = v["user"]["name"].as_str().unwrap_or("");
+    if v["invitation"].is_null() {
+        ctx.say(&format!(
+            "{name} signs in with single sign-on: no link and no password; their groups add roles at every sign-in."
+        ));
+        return;
+    }
     ctx.say(&format!(
         "Invitation for {name} (shown once, valid until {}):\n{}\nSend it to them: they open it and set their own password.",
         v["invitation"]["expires_at"].as_str().unwrap_or(""),
@@ -1129,6 +1377,9 @@ async fn users(ctx: &mut Ctx, verb: &str) -> Result<()> {
                 ));
             }
             let mut body = json!({ "name": user, "roles": roles });
+            if ctx.args.has("--sso") {
+                body["sso"] = json!(true);
+            }
             if let Some(d) = ctx.args.value("--display-name") {
                 body["display_name"] = json!(d);
             }
@@ -1151,6 +1402,10 @@ async fn users(ctx: &mut Ctx, verb: &str) -> Result<()> {
             if !roles.is_empty() {
                 body["roles"] = json!(roles);
             }
+            let pinned = names_of(ctx, "--pin-role");
+            if !pinned.is_empty() {
+                body["pinned_roles"] = json!(pinned);
+            }
             if let Some(d) = ctx.args.value("--display-name") {
                 body["display_name"] = json!(d);
             }
@@ -1159,7 +1414,7 @@ async fn users(ctx: &mut Ctx, verb: &str) -> Result<()> {
             }
             if body.as_object().is_some_and(|m| m.is_empty()) {
                 return Err(Fail::Usage(
-                    "nothing to change: --role, --display-name or --email".into(),
+                    "nothing to change: --role, --pin-role, --display-name or --email".into(),
                 ));
             }
             let reply = ctx.client()?.patch(&path, Body::Json(body)).await?.ok()?;

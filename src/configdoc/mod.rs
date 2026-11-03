@@ -64,6 +64,21 @@ pub const REPOSITORY_REFUSED: [&str; 5] = [
     "assist.base_url",
     "proxy.client_ip_header",
 ];
+/// Setting groups a document from the repository never changes (prefixes,
+/// beside [`REPOSITORY_REFUSED`]'s keys): single sign-on decides who signs
+/// in and with which roles (the issuer, the role map, the default roles,
+/// provisioning, the password sign-in), so a pusher must not repoint the
+/// issuer or map their own group to `admin`.
+pub const REPOSITORY_REFUSED_PREFIXES: [&str; 1] = ["sso."];
+
+/// Does a document from the repository leave this setting alone?
+pub fn repository_refused(key: &str) -> bool {
+    REPOSITORY_REFUSED.contains(&key)
+        || REPOSITORY_REFUSED_PREFIXES
+            .iter()
+            .any(|p| key.starts_with(p))
+}
+
 /// What a document from the repository never changes in its sections
 /// (the sections rule beside [`REPOSITORY_REFUSED`]'s settings): whoever
 /// can push would otherwise make themselves admin. Each such entry is
@@ -135,19 +150,28 @@ pub struct UserDoc {
     pub roles: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
+    /// Signs in with single sign-on; `roles` are then the pinned ones (the
+    /// provider's groups give the rest at every sign-in).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sso: bool,
 }
 
 impl UserDoc {
     /// The document entry of a user: the display name when it differs from
     /// the name; an invited user is not `disabled` (they join through the
-    /// invitation).
+    /// invitation); a single sign-on user's roles are the pinned ones.
     pub fn of(u: &crate::rbac::User) -> Self {
         Self {
             name: u.name.clone(),
             display_name: (u.display_name != u.name).then(|| u.display_name.clone()),
             email: u.email.clone(),
-            roles: u.roles.clone(),
+            roles: if u.is_sso() {
+                u.pinned_roles.clone()
+            } else {
+                u.roles.clone()
+            },
             disabled: u.disabled && !u.pending,
+            sso: u.is_sso(),
         }
     }
 }
@@ -293,8 +317,9 @@ pub fn users_schema() -> Value {
                 "name": { "type": "string", "maxLength": crate::login::MAX_USER_CHARS, "description": "The sign-in name: letters, digits and . _ @ -" },
                 "display_name": { "type": "string", "maxLength": crate::rbac::users::MAX_DISPLAY_NAME_CHARS },
                 "email": { "type": "string", "maxLength": crate::rbac::users::MAX_EMAIL_CHARS },
-                "roles": { "type": "array", "items": { "type": "string" }, "maxItems": crate::rbac::users::MAX_ROLES_PER_USER, "description": "Built-in (viewer, tester, editor, admin, portal_reader) or custom role names" },
-                "disabled": { "type": "boolean", "default": false }
+                "roles": { "type": "array", "items": { "type": "string" }, "maxItems": crate::rbac::users::MAX_ROLES_PER_USER, "description": "Built-in (viewer, tester, editor, admin, portal_reader) or custom role names; for a single sign-on user, the roles pinned on top of the ones its groups give" },
+                "disabled": { "type": "boolean", "default": false },
+                "sso": { "type": "boolean", "default": false, "description": "Signs in with single sign-on: no password, no invitation; created ahead of the first sign-in, which links it by name. A document never changes how an existing user signs in" }
             }
         }
     })
@@ -1464,7 +1489,7 @@ fn apply_settings(
             Some(spec) if spec.secret => problems.push(format!(
                 "settings.{k}: a secret: put a reference under secrets (skipped)"
             )),
-            Some(_) if opts.untrusted && REPOSITORY_REFUSED.contains(&k.as_str()) => {
+            Some(_) if opts.untrusted && repository_refused(k) => {
                 if state.settings.get(k).0 != *v {
                     problems.push(format!(
                         "settings.{k}: a document from the repository cannot change it (set it through the API, the console or the environment): kept as it is"
@@ -1482,7 +1507,7 @@ fn apply_settings(
             if spec.secret
                 || values.contains_key(spec.key)
                 || SKIPPED_GROUPS.contains(&spec.group)
-                || (opts.untrusted && REPOSITORY_REFUSED.contains(&spec.key))
+                || (opts.untrusted && repository_refused(spec.key))
             {
                 continue;
             }
@@ -2415,6 +2440,7 @@ fn apply_users(
                 display_name: doc.display_name.clone(),
                 email: doc.email.clone(),
                 roles: doc.roles.clone(),
+                sso: doc.sso,
             };
             let missing = doc
                 .roles
@@ -2428,6 +2454,23 @@ fn apply_users(
                     "{key}: its roles need the {} permission, which the applying caller does not hold (skipped)",
                     p.name()
                 ));
+                continue;
+            }
+            // A single sign-on user is created as it is: no link, no
+            // password (the first sign-in links it by name).
+            if doc.sso {
+                let new = crate::rbac::NewUser {
+                    name: doc.name.clone(),
+                    display_name: doc.display_name.clone(),
+                    email: doc.email.clone(),
+                    roles: doc.roles.clone(),
+                    disabled: doc.disabled,
+                    source: crate::rbac::Source::Sso,
+                };
+                match state.users.add_sso(new) {
+                    Ok(_) => created.push(doc.name.clone()),
+                    Err(e) => problems.push(format!("{key}: {e} (skipped)")),
+                }
                 continue;
             }
             // A user the document creates disabled is not invited (a link
@@ -2498,6 +2541,13 @@ fn apply_users(
         if current == doc {
             continue;
         }
+        if doc.sso != current.sso {
+            problems.push(format!(
+                "{key}: a document never changes how a user signs in (sso: {}): kept as it is",
+                current.sso
+            ));
+            continue;
+        }
         let mut patch = crate::rbac::users::UserPatch::default();
         let want_display = doc.display_name.clone().unwrap_or_else(|| doc.name.clone());
         if want_display != user.display_name {
@@ -2506,7 +2556,7 @@ fn apply_users(
         if doc.email != user.email {
             patch.email = Some(doc.email.clone());
         }
-        let roles_change = doc.roles != user.roles;
+        let roles_change = doc.roles != current.roles;
         let disabled_change = doc.disabled != current.disabled;
         if opts.untrusted && (roles_change || disabled_change) {
             problems.push(format!(
@@ -2519,6 +2569,8 @@ fn apply_users(
                     problems.push(format!(
                         "{key}: nobody changes their own roles, the applying user included: kept"
                     ));
+                } else if user.is_sso() {
+                    patch.pinned_roles = Some(doc.roles.clone());
                 } else {
                     patch.roles = Some(doc.roles.clone());
                 }

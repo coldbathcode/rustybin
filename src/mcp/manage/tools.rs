@@ -347,7 +347,7 @@ pub static TOOLS: &[ToolDef] = &[
         "group": { "type": "string", "description": "Only this group (console, egress, assist, portal, registry, git, agents, ...)" },
         "key": { "type": "string", "description": "Only this dotted key (console.title)" }
     }), &[])),
-    tool!("update_settings", "Change settings", "Set instance settings (values: key to value; null forgets a stored value) and/or unset stored values (back to the environment or the default). Never secrets: provider keys, tokens and passwords are set by the operator in the console, the CLI or the environment; the console sign-in changes only with its current password. A change of egress.*, agents.*, console.* or git.* asks the user to confirm. Admin.", ToolNeed::Perm(Permission::SettingsWrite), ro=false, destructive=false, idem=true, confirm=true, || obj(json!({
+    tool!("update_settings", "Change settings", "Set instance settings (values: key to value; null forgets a stored value) and/or unset stored values (back to the environment or the default). Never secrets: provider keys, tokens and passwords are set by the operator in the console, the CLI or the environment; the console sign-in changes only with its current password. A change of egress.*, agents.*, console.*, git.* or sso.* asks the user to confirm. Admin.", ToolNeed::Perm(Permission::SettingsWrite), ro=false, destructive=false, idem=true, confirm=true, || obj(json!({
         "values": { "type": "object", "description": "Setting key to value, in the key's kind (get_settings shows kinds and defaults)", "additionalProperties": true },
         "unset": { "type": "array", "items": { "type": "string" }, "description": "Keys whose stored value to forget" },
         "confirm": confirm_prop()
@@ -709,17 +709,19 @@ pub static TOOLS: &[ToolDef] = &[
     tool!("list_users", "Users", "The users who sign in to this instance (password sign-in): name, display name, email, roles, status (active, invited, disabled), last sign-in, open invitation (never its link), sessions; user (an id or a sign-in name) for one with its permissions.", ToolNeed::Perm(Permission::UsersRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "user": { "type": "string", "description": "One user: an id (usr_...) or a sign-in name" }
     }), &[])),
-    tool!("invite_user", "Invite a user", "Create a user, invited (disabled until they accept), and answer the one-time link <instance>/ui/#/join/<token> (72 hours, shown once, never stored): send it to the person, who opens it and sets their own password. Nobody else ever sees or types a password. reset: true sends a user who exists a new link instead (a password reset: their password works until they accept). Roles: the caller grants only roles whose permissions it holds. Confirmed.", ToolNeed::Perm(Permission::UsersManage), ro=false, destructive=false, idem=false, confirm=true, || obj(json!({
+    tool!("invite_user", "Invite a user", "Create a user, invited (disabled until they accept), and answer the one-time link <instance>/ui/#/join/<token> (72 hours, shown once, never stored): send it to the person, who opens it and sets their own password. Nobody else ever sees or types a password. reset: true sends a user who exists a new link instead (a password reset: their password works until they accept). Roles: the caller grants only roles whose permissions it holds. sso: true adds a single sign-on user instead (no link and no password; the roles are pinned on top of what the provider's groups give; a single sign-on user never gets a link). Confirmed.", ToolNeed::Perm(Permission::UsersManage), ro=false, destructive=false, idem=false, confirm=true, || obj(json!({
         "name": { "type": "string", "description": "The sign-in name (letters, digits and . _ @ -, at most 64)" },
         "display_name": { "type": "string" },
         "email": { "type": "string" },
-        "roles": { "type": "array", "items": { "type": "string" }, "description": "Role names (list_roles): at least one for a new user" },
+        "roles": { "type": "array", "items": { "type": "string" }, "description": "Role names (list_roles): at least one for a new user (for a single sign-on user, the roles pinned on top of its groups')" },
         "reset": { "type": "boolean", "default": false, "description": "A new link for a user who exists (a password reset)" },
+        "sso": { "type": "boolean", "default": false, "description": "A single sign-on user, added ahead of their first sign-in (sso.provision off): no link, no password; the first sign-in links them by name" },
         "confirm": confirm_prop()
     }), &["name"])),
-    tool!("update_user", "Change a user", "Change a user's roles, display name, email (null clears it) or disabled. Disabling ends their sessions. Guard rails: the last enabled admin is never disabled or demoted; nobody changes their own roles; an invited user joins through the invitation, never by being enabled. Confirmed when it grants a privileged role (users.manage or settings.security).", ToolNeed::Perm(Permission::UsersManage), ro=false, destructive=false, idem=true, confirm=true, || obj(json!({
+    tool!("update_user", "Change a user", "Change a user's roles, display name, email (null clears it) or disabled; a single sign-on user's pinned_roles (their other roles come from the provider's groups at every sign-in). Disabling ends their sessions. Guard rails: the last enabled admin is never disabled or demoted; nobody changes their own roles; an invited user joins through the invitation, never by being enabled. Confirmed when it grants a privileged role (users.manage or settings.security).", ToolNeed::Perm(Permission::UsersManage), ro=false, destructive=false, idem=true, confirm=true, || obj(json!({
         "user": { "type": "string", "description": "A user id or sign-in name" },
-        "roles": { "type": "array", "items": { "type": "string" } },
+        "roles": { "type": "array", "items": { "type": "string" }, "description": "A password user's roles (a single sign-on user's come from the provider's groups)" },
+        "pinned_roles": { "type": "array", "items": { "type": "string" }, "description": "Roles pinned on a single sign-on user, on top of the ones its groups give" },
         "display_name": { "type": "string" },
         "email": { "type": ["string", "null"] },
         "disabled": { "type": "boolean" },
@@ -741,6 +743,8 @@ pub static TOOLS: &[ToolDef] = &[
     tool!("delete_role", "Delete a custom role", "Delete a custom role nobody holds (a role in use is refused, so no one's access changes; built-in roles never).", ToolNeed::Perm(Permission::UsersManage), ro=false, destructive=false, idem=true, confirm=false, || obj(json!({
         "name": { "type": "string" }
     }), &["name"])),
+    // Access control 4: single sign-on with OpenID Connect.
+    tool!("test_sso", "Test single sign-on", "Single sign-on's status (enabled, ready, the button's name, whether the password sign-in works) and the identity provider read now: its discovery document and keys through the outbound policy (purpose sso), the redirect URI to register at the provider, the role map and the roles it names that do not exist. The sso.* settings change with update_settings (settings.security); the client secret is never an input nor returned. Fetches from the provider only.", ToolNeed::Perm(Permission::SettingsWrite), ro=true, destructive=false, idem=true, confirm=false, no_args),
 ];
 
 /// The tools the caller may use.
@@ -1218,6 +1222,8 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         "list_roles" => users::list_roles(ctx, &args),
         "save_role" => users::save_role(ctx, access, &args, params).await,
         "delete_role" => users::delete_role(ctx, access, &args),
+        // Single sign-on
+        "test_sso" => settings::test_sso(ctx, access, &args).await,
         _ => return Err(RpcError::invalid_params(format!("Unknown tool: {name}"))),
     };
     let outcome = if result.get("isError").and_then(Value::as_bool) == Some(true) {

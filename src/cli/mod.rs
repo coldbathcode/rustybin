@@ -55,6 +55,19 @@ pub struct Env {
     pub home: Option<PathBuf>,
     /// Canned stdin (tests); `None` reads the real one.
     pub stdin: Option<String>,
+    /// What opens a URL in a browser (`rustybin login --sso`); `None` runs
+    /// the system's opener. Tests drive the sign-in here.
+    pub browser: Option<Browser>,
+}
+
+/// A function that opens a URL in a browser.
+#[derive(Clone)]
+pub struct Browser(pub std::sync::Arc<dyn Fn(&str) + Send + Sync>);
+
+impl std::fmt::Debug for Browser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Browser")
+    }
 }
 
 impl Env {
@@ -68,6 +81,7 @@ impl Env {
             mock_token: var("RUSTYBIN_MOCK_TOKEN"),
             home: var("HOME").map(PathBuf::from),
             stdin: None,
+            browser: None,
         }
     }
 }

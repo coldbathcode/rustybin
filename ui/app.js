@@ -426,6 +426,26 @@ const REASONS = {
   invalid_token: 'The token was refused.',
   missing_token: 'The token did not reach the server.',
   unreachable: 'Rustybin could not be reached to check the token: try again.',
+  password_sign_in_off: 'The password sign-in is off on this instance: sign in with single sign-on, or paste the admin token.',
+  // Single sign-on refusals (#/sso-error/<reason>, POST /_rustybin/sso/token).
+  sso_expired: 'The single sign-on took too long (or was used already): start again.',
+  sso_denied: 'The identity provider did not sign you in.',
+  sso_provider_error: 'The identity provider could not be reached or refused this instance: an admin checks Management, Sign-in (Test).',
+  sso_invalid_id_token: 'The identity provider\'s answer did not verify (issuer, audience, expiry, nonce or signature).',
+  sso_domain_not_allowed: 'Your email domain may not sign in here.',
+  sso_email_unverified: 'The identity provider says your email is not verified.',
+  sso_not_provisioned: 'You have no user on this instance yet: ask an admin to add you.',
+  sso_name_taken: 'A user who signs in with a password has your name here: ask an admin.',
+  sso_other_identity: 'Another identity at the provider signs in with your name here: ask an admin.',
+  sso_disabled: 'Your user is disabled on this instance.',
+  sso_no_role: 'None of your groups gives a role on this instance: ask an admin.',
+  sso_last_admin: 'You are the last admin and the provider no longer gives you the admin role: another admin is needed first.',
+  sso_rate_limited: 'Too many failed sign-ins from this address: wait a moment and try again.',
+  sso_busy: 'Too many sign-ins at once: try again in a moment.',
+  sso_not_configured: 'Single sign-on is not set up on this instance.',
+  sso_invalid_request: 'The sign-in request was not valid: start again.',
+  sso_invalid_code: 'The sign-in could not be finished (the code was used, expired, or this tab did not start it): start again.',
+  sso_unreachable: 'Rustybin could not be reached to finish the sign-in: try again.',
 };
 
 function renderSignIn() {
@@ -493,6 +513,23 @@ function renderSignIn() {
     passwordInput.value = '';
     passwordInput.focus();
   });
+  // Single sign-on: the button appears once the (open) status says it is
+  // ready; with the password sign-in off the password form goes.
+  const ssoBox = h('div', { id: 'signin-sso-box' });
+  if (password) {
+    auth.ssoStatus(SERVER).then((st) => {
+      if (!st || !st.ready || !ssoBox.isConnected) return;
+      const btn = h('button', { class: 'btn primary', type: 'button', id: 'signin-sso' }, icon('shield'), 'Sign in with ' + (st.name || 'single sign-on'));
+      btn.addEventListener('click', () => { btn.disabled = true; auth.startSso(SERVER, remember.input.checked); });
+      replace(ssoBox, h('div', { class: 'stack' }, btn,
+        st.password_sign_in ? h('p', { class: 'muted small', style: { margin: 0 } }, 'Or sign in with a user name and password:') : notice('', 'The password sign-in is off: single sign-on, or the admin token below.')));
+      if (!st.password_sign_in) {
+        passwordForm.hidden = true;
+        remember.el.hidden = false;
+        ssoBox.appendChild(remember.el);
+      }
+    });
+  }
   const body = h('div', { class: 'stack' },
     h('div', { class: 'row nowrap' }, icon('shield'), h('h1', { id: 'signin-title' }, expired ? 'Session expired' : (password ? 'Sign in' : 'Sign in required'))),
     why ? notice(expired || reason === 'signed-out' ? 'warn' : 'err', why) : null,
@@ -502,6 +539,7 @@ function renderSignIn() {
       : h('p', null, 'This Rustybin instance protects its control plane and console data (RUSTYBIN_CONTROL_AUTH=' + auth.mode + '). ',
         auth.backlink ? 'Open the console again from your portal to get a fresh access token, or paste a token below.' : 'Paste a token below, or open the console with #token=<token> appended to its URL.'),
     auth.backlink ? h('a', { class: 'btn primary', href: auth.backlink, rel: 'noopener', id: 'signin-backlink' }, icon('external'), 'Open ' + backlinkLabel()) : null,
+    password ? ssoBox : null,
     password ? passwordForm : tokenForm,
     password ? h('details', { class: 'disclosure', id: 'signin-token-details' }, h('summary', null, 'Use a token instead'), h('div', { style: { paddingTop: '8px' } }, tokenForm)) : null,
     h('p', { class: 'muted small' }, 'The data plane stays open: ', h('a', { href: SERVER + '/' }, 'endpoint list'), ', ', h('a', { href: SERVER + '/docs' }, 'OpenAPI docs'), '.'));
@@ -573,6 +611,8 @@ async function loadInstance() {
 function start() {
   if (handleCallback()) return;
   if (handleJoin()) return;
+  // Back from the identity provider: #/sso/<code> or #/sso-error/<reason>.
+  const sso = auth.takeSsoFragment();
   auth.consumeFragment();
   visit.consumeFragment();
   const menu = document.getElementById('menu-btn');
@@ -631,6 +671,10 @@ function start() {
     }
   });
   assist.onChange(showAiMarks);
+  if (sso && sso.error) auth.showReason('sso_' + sso.error);
+  if (sso && sso.code) {
+    auth.finishSso(SERVER, sso.code).then((r) => { if (!r.ok) auth.showReason('sso_' + r.reason); });
+  }
   route();
   loadInstance().then(() => { traffic.connect(); assist.refresh(); });
   // Refresh the health badge and footer now and then (cheap control-plane call).

@@ -24,8 +24,10 @@ RUSTYBIN_CONTROL_AUTH=open rustybin              # a laptop or a lab: no sign-in
 Always reachable without credentials, in every mode:
 
 - `GET /_rustybin/ready`, the readiness probe (see below),
-  `POST /_rustybin/login`, the sign-in itself, and `POST /_rustybin/join`, where an
-  [invitation](../users.md) sets a new user's password;
+  `POST /_rustybin/login`, the sign-in itself, `POST /_rustybin/join`, where an
+  [invitation](../users.md) sets a new user's password, and the
+  [single sign-on](../sso.md) round trip (`GET /_rustybin/sso/status`, `/start`,
+  `/callback`, `POST /_rustybin/sso/token`);
 - the data plane, including `GET /` (liveness) and `/health` (the demo toggle);
 - the console's static files under `/ui/`. They are the same open-source files for
   every instance and carry no instance data: a browser must be able to load them to
@@ -273,6 +275,19 @@ route and tool checks one of them (see [Permissions](#permissions)). An admin
 invites, changes, disables and removes users, and manages custom roles, from the
 console, the CLI, an agent or `rustybin.yaml`: [Users and roles](../users.md). A
 disabled user's sign-in gets the answer of a wrong password.
+
+**Single sign-on.** With the `sso.*` settings the sign-in screen also offers
+"Sign in with" any OpenID Connect provider, whose groups give the roles
+([Single sign-on](../sso.md)): the instance runs the authorization code flow with
+PKCE, `state` and `nonce`, verifies the ID token (issuer, audience, expiry, nonce;
+RS256 or ES256) with the provider's keys fetched under the outbound purpose `sso`,
+and answers the same sign-in token a password user gets (`rb_via: "sso"`, the
+session's `obtained: "sso"`). Its users have no password and no invitation; their
+roles are recomputed at every sign-in. `sso.password_sign_in` off leaves only
+single sign-on and the admin token (`POST /_rustybin/login` and `/join` answer
+`403 password_sign_in_off`), and only while single sign-on is set up; keep
+`RUSTYBIN_ADMIN_TOKEN` as the break glass. Every `sso.*` setting needs
+`settings.security`, and a document pulled from the repository never changes one.
 
 **Upgrading from 0.4.** Nothing to do: on the first start the console user (the
 `console.user` and `console.password_hash` settings, or `RUSTYBIN_CONSOLE_USER` and

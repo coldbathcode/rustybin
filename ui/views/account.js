@@ -67,6 +67,11 @@ function permissionsCard(me) {
 }
 
 function passwordCard(me) {
+  if (me.source === 'sso') {
+    return card('Your password', { hint: 'single sign-on' }, notice('', icon('lock'),
+      'You sign in with single sign-on' + (me.sso && me.sso.issuer ? ' (' + me.sso.issuer + ')' : '') + ': your password is the identity provider\'s, never this instance\'s. Your roles follow your groups there at every sign-in' +
+      (me.pinned_roles && me.pinned_roles.length ? ', plus ' + me.pinned_roles.join(', ') + ' pinned by an admin.' : '.')));
+  }
   const current = input({ type: 'password', id: 'me-current', autocomplete: 'current-password', 'aria-label': 'Current password' });
   const next = input({ type: 'password', id: 'me-next', autocomplete: 'new-password', placeholder: 'at least 8 characters', 'aria-label': 'New password' });
   const confirm = input({ type: 'password', id: 'me-confirm', autocomplete: 'new-password', 'aria-label': 'Confirm the new password' });

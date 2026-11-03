@@ -69,6 +69,17 @@ mode `0600`). The last login is the default profile, so the next commands need n
 `rustybin login --token <token>` keeps a token you already have (the admin token, a
 control JWT) instead of signing in.
 
+With [single sign-on](sso.md), `rustybin login --sso --url <url>` signs in with the
+identity provider in the browser: the command line listens on a loopback address of
+this machine, opens the browser on the instance's `/_rustybin/sso/start` (that
+address as `return_to`, with the S256 challenge of a verifier it keeps), takes the
+one-time code back and trades it for the token, which it keeps in the profile as
+above. `--no-browser` prints the address to open instead; `--wait` is how long it
+waits (seconds, default 300). A refusal (no role for your groups, a disabled user)
+exits `3` with the reason. `rustybin sso status` says whether single sign-on is ready,
+`rustybin sso test` fetches the provider's discovery document and keys now (exit `1`
+when it cannot).
+
 Several instances are several profiles: `--profile staging` on the login names one,
 `rustybin profiles list | use | remove` manage them, and `--profile` (or
 `RUSTYBIN_PROFILE`) picks one for a call. For a call, `--url` and `--token` win over
@@ -161,8 +172,9 @@ verbs: `source <(rustybin completion bash)` in `.bashrc`, or save the fish one u
 ## What the command line does not do
 
 The management MCP endpoint is for agents (`rustybin mcp-stdio` bridges a stdio client
-to it); the agent sign-in and an invitation link (`POST /_rustybin/join`) are browser
-flows; the harness cluster's node-to-node routes
+to it); the agent sign-in, an invitation link (`POST /_rustybin/join`) and the identity
+provider's redirect to `/_rustybin/sso/callback` (`login --sso` waits for its answer)
+are browser flows; the harness cluster's node-to-node routes
 are the nodes' business; a request bin's capture URLs are for the thing under test.
 Everything else on the control plane has a verb, and a test keeps it so: a route that
 lands without a command fails the build.

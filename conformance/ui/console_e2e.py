@@ -43,6 +43,11 @@ Environment:
                               password sign-in, rustybin / rustybin): the sign-in screen,
                               the default-password banner, Management, Sign-in (change the
                               password, the sessions, sign out everywhere), remember me
+    RUSTYBIN_SSO_URL          base URL of a password instance with single sign-on through
+                              the first instance's demo identity provider (role map
+                              admins=admin, the password sign-in off, admin token
+                              RUSTYBIN_SSO_ADMIN_TOKEN): Sign in with, the provider's page,
+                              back signed in; the sso.* settings and the Test; a refusal
 """
 
 import base64
@@ -2598,6 +2603,81 @@ def run_portal_access(browser):
 
     step("portal access: a console sign-in of a portal reader lands on the portal", console_sign_in_of_a_reader)
     ctx2.close()
+
+
+def run_sso(browser):
+    """Single sign-on (access control step 10): the sign-in screen offers the
+    provider (the first instance's demo identity provider), alice signs in
+    there and comes back signed in with her groups' roles; Management,
+    Sign-in has a control per sso.* setting and its Test reads the provider;
+    the users table marks her; bob (no mapped group) is refused with the
+    reason on the sign-in screen."""
+    base = os.environ["RUSTYBIN_SSO_URL"].rstrip("/")
+    admin = os.environ.get("RUSTYBIN_SSO_ADMIN_TOKEN", "")
+    print(f"single sign-on: {base}")
+    ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+    page = ctx.new_page()
+    page.set_default_timeout(TIMEOUT)
+    page.on("pageerror", lambda e: console_errors.append(f"[sso] uncaught: {e}"))
+
+    def provider_sign_in(p, user):
+        p.wait_for_selector("input[name=username]")
+        p.fill("input[name=username]", user)
+        p.fill("input[name=password]", user)
+        p.locator("button[value=approve]").click()
+
+    def sign_in():
+        page.goto(base + "/ui/")
+        page.wait_for_selector("#signin-sso")
+        expect(page.locator("#signin-sso")).to_contain_text("Sign in with Demo IdP")
+        # The password sign-in is off: its form is gone.
+        expect(page.locator("#signin-password-form")).to_be_hidden()
+        expect(page.locator("text=The password sign-in is off")).to_have_count(1)
+        shot(page, "sso", "50-sso-sign-in")
+        page.locator("#signin-sso").click()
+        provider_sign_in(page, "alice")
+        page.wait_for_selector("#signed-in")
+        expect(page.locator("#signed-in")).to_contain_text("alice")
+        assert "#/sso/" not in page.url, page.url
+
+    step("sso: sign in with the identity provider", sign_in)
+
+    def management():
+        page.goto(base + "/ui/#/manage/signin")
+        page.wait_for_selector("form[aria-label='Settings: sso']")
+        req = urllib.request.Request(base + "/_rustybin/settings", headers={"Authorization": "Bearer " + admin})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            doc = json.load(r)
+        keys = [s["key"] for s in doc["settings"] if s["group"] == "sso"]
+        assert "sso.role_map" in keys and "sso.client_secret" in keys, keys
+        for k in keys:
+            expect(page.locator(f"[aria-label='{k}']")).to_have_count(1)
+        page.locator("#sso-test").click()
+        page.wait_for_selector("text=The provider answers")
+        shot(page, "sso", "51-sso-management")
+        page.goto(base + "/ui/#/manage/users")
+        page.wait_for_selector("[data-user=alice]")
+        expect(page.locator("[data-user=alice]")).to_contain_text("single sign-on")
+        expect(page.locator("[data-user=alice]")).to_contain_text("admin")
+        expect(page.locator("[data-user=alice] [data-action=link]")).to_have_count(0)
+
+    step("sso: the settings, the Test and the users table", management)
+
+    def refused():
+        ctx2 = browser.new_context(viewport={"width": 1280, "height": 860})
+        p2 = ctx2.new_page()
+        p2.set_default_timeout(TIMEOUT)
+        p2.on("pageerror", lambda e: console_errors.append(f"[sso, bob] uncaught: {e}"))
+        p2.goto(base + "/ui/")
+        p2.wait_for_selector("#signin-sso")
+        p2.locator("#signin-sso").click()
+        provider_sign_in(p2, "bob")
+        p2.wait_for_selector("#signin")
+        expect(p2.locator("#signin")).to_contain_text("None of your groups gives a role")
+        shot(p2, "sso", "52-sso-refused")
+        ctx2.close()
+
+    step("sso: a person in no mapped group is refused with the reason", refused)
     ctx.close()
 
 
@@ -2618,6 +2698,8 @@ def main():
             run_password(browser)
             run_users(browser)
             run_portal_access(browser)
+        if os.environ.get("RUSTYBIN_SSO_URL"):
+            run_sso(browser)
         browser.close()
     for e in console_errors:
         failures.append("console: " + e)

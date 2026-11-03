@@ -37,7 +37,7 @@ use serde_json::{json, Value};
 pub use need::{forbidden, refuse, require, Need};
 pub use permission::{Group, PermSet, Permission};
 pub use role::{BuiltIn, CustomRole};
-pub use users::{NewUser, Source, User, Users, UsersError};
+pub use users::{NewUser, Source, SsoIdentity, SsoLink, User, Users, UsersError};
 
 use crate::control_auth::Grant;
 

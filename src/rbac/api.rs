@@ -108,9 +108,12 @@ pub fn patch_of(body: &Value) -> Result<UserPatch, String> {
         return Err("expected a JSON object".into());
     };
     for k in obj.keys() {
-        if !matches!(k.as_str(), "roles" | "display_name" | "email" | "disabled") {
+        if !matches!(
+            k.as_str(),
+            "roles" | "pinned_roles" | "display_name" | "email" | "disabled"
+        ) {
             return Err(format!(
-                "{} cannot be changed here (roles, display_name, email, disabled)",
+                "{} cannot be changed here (roles, pinned_roles, display_name, email, disabled)",
                 crate::logging::printable(k, 40)
             ));
         }
@@ -130,6 +133,7 @@ pub fn patch_of(body: &Value) -> Result<UserPatch, String> {
         email: nullable_string(obj.get("email")).map_err(|e| format!("email: {e}"))?,
         roles: string_list(obj.get("roles"), "roles")?,
         disabled,
+        pinned_roles: string_list(obj.get("pinned_roles"), "pinned_roles")?,
     })
 }
 
@@ -151,11 +155,17 @@ pub fn invite_of(body: &Value) -> Result<Invite, String> {
             Some(_) => Err(format!("{k}: expected a string")),
         }
     };
+    let sso = match obj.get("sso") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err("sso: expected true or false".into()),
+    };
     Ok(Invite {
         name,
         display_name: opt("display_name")?,
         email: opt("email")?,
         roles: string_list(obj.get("roles"), "roles")?.unwrap_or_default(),
+        sso,
     })
 }
 

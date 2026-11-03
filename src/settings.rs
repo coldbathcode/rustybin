@@ -331,6 +331,11 @@ pub fn groups() -> Vec<Group> {
             description: "Who may open the console and the control plane (RUSTYBIN_CONTROL_AUTH=password).",
         },
         Group {
+            id: "sso",
+            title: "Single sign-on",
+            description: "Sign in with your identity provider (any OpenID Connect provider): its groups decide the roles. Register this instance's /_rustybin/sso/callback as the client's redirect URI.",
+        },
+        Group {
             id: "assist",
             title: "AI assist",
             description: "Your own model provider and key for the console's AI features. Nothing calls a model until a key is set; keys never leave the instance.",
@@ -420,6 +425,7 @@ fn console_specs() -> Vec<Spec> {
 pub fn specs() -> Vec<Spec> {
     let mut all = console_specs();
     all.extend(crate::login::specs());
+    all.extend(crate::sso::specs());
     all.extend(crate::assist::specs());
     all.extend(crate::session::specs());
     all.extend(crate::egress::specs());

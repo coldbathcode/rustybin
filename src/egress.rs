@@ -702,10 +702,13 @@ pub enum Purpose {
     /// The failure notices of scheduled test runs, posted to a schedule's
     /// webhook.
     Notify,
+    /// Single sign-on: the identity provider's discovery document, keys
+    /// and token endpoint (`crate::sso`).
+    Sso,
 }
 
 impl Purpose {
-    pub const ALL: [Purpose; 10] = [
+    pub const ALL: [Purpose; 11] = [
         Purpose::Assist,
         Purpose::McpRelay,
         Purpose::Registry,
@@ -716,6 +719,7 @@ impl Purpose {
         Purpose::Scenario,
         Purpose::Replay,
         Purpose::Notify,
+        Purpose::Sso,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -730,6 +734,7 @@ impl Purpose {
             Purpose::Scenario => "scenario",
             Purpose::Replay => "replay",
             Purpose::Notify => "notify",
+            Purpose::Sso => "sso",
         }
     }
 
@@ -746,6 +751,7 @@ impl Purpose {
             Purpose::Scenario => "Gateway scenarios",
             Purpose::Replay => "Saved tests through a gateway",
             Purpose::Notify => "Test schedule notices",
+            Purpose::Sso => "Single sign-on provider",
         }
     }
 
@@ -762,6 +768,7 @@ impl Purpose {
             Purpose::Scenario => "RUSTYBIN_EGRESS_ALLOW only (the gateway's host; no default)",
             Purpose::Replay => "RUSTYBIN_EGRESS_ALLOW only (the tests' gateways; no default)",
             Purpose::Notify => "RUSTYBIN_EGRESS_ALLOW only (the schedules' webhooks; no default)",
+            Purpose::Sso => "the issuer's host, once single sign-on is set up",
         }
     }
 }

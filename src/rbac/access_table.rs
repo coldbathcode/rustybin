@@ -134,6 +134,11 @@ pub(crate) const NEW_SINCE_0_4: &[&str] = &[
     "/_rustybin/me/sessions",
     "/_rustybin/me/sessions/{id}",
     "/_rustybin/join",
+    "/_rustybin/sso/status",
+    "/_rustybin/sso/start",
+    "/_rustybin/sso/callback",
+    "/_rustybin/sso/token",
+    "/_rustybin/sso/test",
 ];
 
 /// The harness mutations an open control plane guarded with the admin

@@ -67,6 +67,9 @@ export function usersPanel() {
   const display = input({ id: 'invite-display', placeholder: 'Alice Doe', maxlength: 100 });
   const email = input({ id: 'invite-email', type: 'email', placeholder: 'alice@example.com' });
   const inviteRoles = h('div', { id: 'invite-roles' });
+  const ssoBox = h('input', { type: 'checkbox', id: 'invite-sso' });
+  const ssoField = h('label', { class: 'row small', style: { gap: '6px' } }, ssoBox,
+    'Single sign-on user: no link and no password (with sso.provision off, add people here before their first sign-in; the roles are pinned on top of their groups\')');
   const inviteBtn = perms.guard(h('button', { class: 'btn primary', type: 'submit', id: 'invite-submit' }, icon('plus'), 'Invite'), 'users.manage');
   // A tester's login: the portal_reader role alone, the portal's join link.
   const readerBtn = perms.guard(h('button', { class: 'btn', type: 'button', id: 'invite-portal-reader', title: 'The portal_reader role alone: the link opens the API portal, and the login opens nothing in the console' }, icon('lock'), 'Invite a portal reader'), 'users.manage');
@@ -81,6 +84,7 @@ export function usersPanel() {
       field('Display name', display),
       field('Email', email, 'Optional, never logged')),
     field('Roles', inviteRoles, 'You grant only roles whose permissions you hold.'),
+    ssoField,
     h('div', { class: 'row' }, h('span', { class: 'grow muted small' }, 'The user is created invited and joins through the link. A portal reader reads the API portal\'s closed items and nothing in the console.'), readerBtn, inviteBtn));
   inviteForm.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -94,8 +98,11 @@ export function usersPanel() {
       const body = { name: name.value.trim(), roles: chosen };
       if (display.value.trim()) body.display_name = display.value.trim();
       if (email.value.trim()) body.email = email.value.trim();
+      if (ssoBox.checked) body.sso = true;
       const v = await call('POST', '/_rustybin/users', body);
-      replace(resultEl, linkView(v));
+      if (v.invitation) replace(resultEl, linkView(v));
+      else replace(resultEl, notice('ok', icon('check'), v.user.name + ' signs in with single sign-on: no link to send.'));
+      ssoBox.checked = false;
       name.value = ''; display.value = ''; email.value = '';
       loadUsers();
     } catch (err) {
@@ -119,13 +126,18 @@ export function usersPanel() {
   }
 
   function rolesEditor(u, row) {
-    const checks = roleChecks(roles, u.roles, 'user-role');
-    const save = h('button', { class: 'btn sm primary', type: 'submit', id: 'user-roles-save' }, 'Save roles');
-    const form = h('form', { class: 'stack-sm', id: 'user-roles-form', 'aria-label': 'Roles of ' + u.name }, checks,
+    // A single sign-on user's roles come from their groups: an admin pins
+    // extra ones.
+    const sso = u.source === 'sso';
+    const checks = roleChecks(roles, sso ? (u.pinned_roles || []) : u.roles, 'user-role');
+    const save = h('button', { class: 'btn sm primary', type: 'submit', id: 'user-roles-save' }, sso ? 'Save pinned roles' : 'Save roles');
+    const form = h('form', { class: 'stack-sm', id: 'user-roles-form', 'aria-label': 'Roles of ' + u.name },
+      sso ? h('p', { class: 'muted small', style: { margin: 0 } }, 'From the provider\'s groups: ' + ((u.sso && u.sso.mapped_roles) || []).join(', ') + '. Pinned roles stay on top of them at every sign-in.') : null,
+      checks,
       h('div', { class: 'row' }, h('span', { class: 'grow' }), h('button', { class: 'btn sm', type: 'button', onclick: () => loadUsers() }, 'Cancel'), save));
     form.addEventListener('submit', (e) => {
       e.preventDefault();
-      act('Roles of ' + u.name + ' changed', () => call('PATCH', '/_rustybin/users/' + encodeURIComponent(u.id), { roles: checkedRoles(form) }));
+      act('Roles of ' + u.name + ' changed', () => call('PATCH', '/_rustybin/users/' + encodeURIComponent(u.id), sso ? { pinned_roles: checkedRoles(form) } : { roles: checkedRoles(form) }));
     });
     row.after(h('tr', { class: 'user-roles-row' }, h('td', { colspan: 6 }, form)));
   }
@@ -134,7 +146,8 @@ export function usersPanel() {
     const manage = (b) => perms.guard(b, 'users.manage');
     const row = h('tr', { 'data-user': u.name },
       h('td', null, h('div', { class: 'mono' }, u.name), u.display_name !== u.name ? h('div', { class: 'small muted' }, u.display_name) : null,
-        u.first_admin ? h('div', null, badge('first admin', 'info')) : null),
+        u.first_admin ? h('div', null, badge('first admin', 'info')) : null,
+        u.source === 'sso' ? h('div', null, badge('single sign-on', 'violet')) : null),
       h('td', null, h('div', { class: 'row', style: { gap: '4px', flexWrap: 'wrap' } }, u.roles.map((r) => badge(r, roles.find((x) => x.name === r && x.privileged) ? 'warn' : '')))),
       h('td', null, badge(u.status, STATUS[u.status] || ''), u.invitation ? h('div', { class: 'tiny muted' }, 'link until ' + when(u.invitation.expires_at)) : null),
       h('td', { class: 'small', title: u.last_sign_in || '' }, u.last_sign_in ? when(u.last_sign_in) : 'never'),
@@ -149,7 +162,7 @@ export function usersPanel() {
           if (!window.confirm('Disable ' + u.name + '? Their sessions end and their sign-in is refused.')) return;
           act(u.name + ' disabled', () => call('PATCH', '/_rustybin/users/' + encodeURIComponent(u.id), { disabled: true }));
         } }, 'Disable')),
-      u.status === 'disabled' ? null : manage(h('button', { class: 'btn sm', type: 'button', 'data-action': 'link', title: u.status === 'invited' ? 'A new invitation link' : 'A password reset: a new link; their password works until it is accepted', onclick: () => act('A new link', () => call('POST', '/_rustybin/users/' + encodeURIComponent(u.id) + '/invite')) }, icon('link'), u.status === 'invited' ? 'New link' : 'Reset')),
+      u.status === 'disabled' || u.source === 'sso' ? null : manage(h('button', { class: 'btn sm', type: 'button', 'data-action': 'link', title: u.status === 'invited' ? 'A new invitation link' : 'A password reset: a new link; their password works until it is accepted', onclick: () => act('A new link', () => call('POST', '/_rustybin/users/' + encodeURIComponent(u.id) + '/invite')) }, icon('link'), u.status === 'invited' ? 'New link' : 'Reset')),
       u.first_admin ? null : manage(h('button', { class: 'btn sm', type: 'button', title: 'Delete', 'aria-label': 'Delete ' + u.name, 'data-action': 'delete', onclick: () => {
         if (!window.confirm('Delete ' + u.name + '? They can no longer sign in.')) return;
         act(u.name + ' deleted', () => call('DELETE', '/_rustybin/users/' + encodeURIComponent(u.id)));

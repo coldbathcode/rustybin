@@ -1,6 +1,6 @@
 use super::*;
 use crate::jwt_state::decode_unverified;
-use crate::test_support::{body_json, body_string, module_app};
+use crate::test_support::{body_json, body_string, get_request, module_app};
 use axum::body::Body;
 use axum::http::Request;
 use tower::ServiceExt;
@@ -307,6 +307,40 @@ async fn password_grant_validates_users() {
     let (status, json) = token(&app, &bad).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(json["error"], "invalid_grant");
+}
+
+#[tokio::test]
+async fn the_groups_scope_puts_the_groups_in_the_id_token() {
+    let app = app();
+    let mut req = vec![
+        ("grant_type", "password"),
+        ("client_id", "rustybin"),
+        ("client_secret", "secret"),
+        ("username", "alice"),
+        ("password", "alice"),
+    ];
+    // Without the scope the ID token carries no groups (the access token
+    // always does).
+    let (status, json) = token(&app, &req).await;
+    assert_eq!(status, StatusCode::OK);
+    let id = claims(json["id_token"].as_str().expect("id"));
+    assert!(id.get("groups").is_none(), "{id}");
+    req.push(("scope", "openid profile email groups"));
+    let (status, json) = token(&app, &req).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let id = claims(json["id_token"].as_str().expect("id"));
+    assert_eq!(id["groups"], json!(["users", "admins"]));
+    let meta = body_json(
+        app.clone()
+            .oneshot(get_request("/.well-known/openid-configuration"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(meta["scopes_supported"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("groups")));
 }
 
 #[tokio::test]

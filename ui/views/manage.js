@@ -28,7 +28,7 @@ import * as perms from '../lib/perms.js';
 // The rail. Later steps append entries here; each renders its own panel.
 export const TABS = [
   { id: 'general', title: 'General', icon: 'settings', hint: 'Console title, this browser, your AI agent' },
-  { id: 'signin', title: 'Sign-in', icon: 'lock', hint: 'The console user name and password, active sessions' },
+  { id: 'signin', title: 'Sign-in', icon: 'lock', hint: 'The console user name and password, single sign-on, active sessions' },
   { id: 'users', title: 'Users and roles', icon: 'user', hint: 'Invite people, give them roles, disable or remove them; custom roles' },
   { id: 'ai', title: 'AI', icon: 'ai', hint: 'Your model provider and key for the AI features' },
   { id: 'network', title: 'Network', icon: 'globe', hint: 'Outbound connections and recent decisions' },
@@ -241,6 +241,41 @@ function sessionsCard(reloadRef) {
   return card('Sessions', { hint: 'sign-in tokens issued by this instance' }, el);
 }
 
+/** Single sign-on: the sso.* settings and a Test that reads the provider now. */
+function ssoCard(doc, reload) {
+  const out = h('div');
+  const testBtn = h('button', { class: 'btn', type: 'button', id: 'sso-test' }, icon('check'), 'Test');
+  perms.guard(testBtn, 'settings.write');
+  testBtn.addEventListener('click', async () => {
+    testBtn.disabled = true;
+    replace(out, spinner('Reading the provider\'s discovery document and keys'));
+    const r = await send({ control: true, method: 'POST', url: SERVER + '/_rustybin/sso/test', admin: true, session: false });
+    testBtn.disabled = false;
+    const v = r.json || {};
+    if (r.error || !r.ok) {
+      replace(out, notice('err', r.error || v.error || ('The test failed (' + r.status + ')')));
+      return;
+    }
+    const rows = [
+      ['Redirect URI to register', h('code', null, v.redirect_uri || '')],
+      ['Issuer', v.issuer || ''],
+      ['Client', (v.client_id || '') + (v.client_secret && v.client_secret.set ? ' (confidential: a secret is set)' : ' (public: PKCE only)')],
+      ['Scopes', (v.scopes || []).join(' ')],
+    ];
+    if (v.discovery) rows.push(['Token endpoint', v.discovery.token_endpoint], ['Keys', String((v.keys || []).length) + ' (' + (v.keys || []).map((k) => k.alg || k.kty).join(', ') + ')']);
+    replace(out, h('div', { class: 'stack' },
+      v.ok ? notice('ok', icon('check'), 'The provider answers: single sign-on is ready.') : notice('err', v.error || 'Not ready'),
+      v.unknown_roles && v.unknown_roles.length ? notice('warn', 'The role map names roles this instance does not have: ' + v.unknown_roles.join(', ')) : null,
+      kvgrid(rows)));
+  });
+  const form = doc ? settingsForm(doc, 'sso', { saveLabel: 'Save single sign-on', onSaved: (d) => { reload(d); document.dispatchEvent(new CustomEvent('rustybin-status')); } }) : null;
+  return card('Single sign-on', { hint: 'any OpenID Connect provider: its groups decide the roles' }, h('div', { class: 'stack' },
+    h('p', { class: 'muted small', style: { margin: 0 } }, 'Register ', h('code', null, SERVER + '/_rustybin/sso/callback'), ' as the client\'s redirect URI at the provider. The role map gives each group its roles (group=role role); a person\'s roles are recomputed at every sign-in. Turning the password sign-in off leaves single sign-on and the admin token.'),
+    form ? form.el : null,
+    h('div', { class: 'row' }, testBtn, h('span', { class: 'muted small' }, 'POST /_rustybin/sso/test: discovery and the keys, fetched now through the outbound policy (purpose sso).')),
+    out));
+}
+
 function signinPanel(doc, reload, error) {
   const el = h('div', { class: 'stack' });
   const ref = {};
@@ -257,6 +292,7 @@ function signinPanel(doc, reload, error) {
     el.appendChild(statusCard(doc, settings.instance.status));
     if (doc) el.appendChild(passwordCard(doc, settings.instance.status, onChanged));
     else el.appendChild(card('Change the password', {}, loadError(error)));
+    if (auth.passwordMode()) el.appendChild(ssoCard(doc, reload));
     if (auth.passwordMode()) el.appendChild(sessionsCard(ref));
   }
   const reloadDoc = reload;

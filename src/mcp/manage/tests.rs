@@ -1637,6 +1637,7 @@ const NODE_TO_NODE: &str = "node-to-node: a harness member's own traffic";
 const OAUTH_WALK: &str = "the agent sign-in a browser walks";
 const SIGN_IN: &str = "the sign-in transport: a token is what an agent connects with";
 const OWN_PASSWORD: &str = "a password passes through nobody but its owner: the console, rustybin passwd, or the environment for the first admin";
+const SSO_FLOW: &str = "the single sign-on round trip a person makes in a browser through their identity provider (the console's button, rustybin login --sso): an agent connects with a token";
 const OWN_ACCOUNT: &str = "a person's own account (console, My account; rustybin me): an agent's credential is not a person until agents act for a user (testing-2 step 12); get_instance answers the caller's roles and permissions";
 
 /// Every route under `/_rustybin/` and `/bin`, and what covers it. The
@@ -1711,6 +1712,11 @@ const COVERAGE: &[(&str, Cover)] = &[
     ("/_rustybin/password", Excluded(OWN_PASSWORD)),
     ("/_rustybin/me/password", Excluded(OWN_PASSWORD)),
     ("/_rustybin/join", Excluded("the invitation link a person opens in a browser, with the password they choose")),
+    ("/_rustybin/sso/status", Tool("test_sso")),
+    ("/_rustybin/sso/test", Tool("test_sso")),
+    ("/_rustybin/sso/start", Excluded(SSO_FLOW)),
+    ("/_rustybin/sso/callback", Excluded(SSO_FLOW)),
+    ("/_rustybin/sso/token", Excluded(SSO_FLOW)),
     ("/_rustybin/me", Excluded(OWN_ACCOUNT)),
     ("/_rustybin/me/sessions", Excluded(OWN_ACCOUNT)),
     ("/_rustybin/me/sessions/{id}", Excluded(OWN_ACCOUNT)),
@@ -3875,9 +3881,9 @@ async fn users_and_roles_tools_invite_confirm_and_never_carry_a_password() {
     let state = test_state_with(c);
     let app = test_app_with(state.clone());
     let headers: [(&str, &str); 1] = [("authorization", "Bearer admin-09")];
-    // The admin's tool list counts the step 09 tools (and the docs say so).
+    // The admin's tool list counts the step 09 and 10 tools (and the docs say so).
     let names = tool_names(&app, &headers).await;
-    assert_eq!(names.len(), 132, "docs/src/coding-agents.md counts 132");
+    assert_eq!(names.len(), 133, "docs/src/coding-agents.md counts 133");
     for t in [
         "list_users",
         "invite_user",
@@ -4086,4 +4092,65 @@ async fn portal_tools_open_and_close_items() {
     assert_eq!(pet["published"]["access"], "closed");
     assert_eq!(pet["secured"], true);
     assert_eq!(r["structuredContent"]["counts"]["closed"], 1);
+}
+
+// ── Access control 4: single sign-on ────────────────────────────────
+
+/// `test_sso` reads the provider (here Rustybin's own demo identity
+/// provider on a second instance) and says what to register; an agent
+/// changes the `sso.*` settings with `update_settings` but never the secret.
+#[tokio::test]
+async fn test_sso_reads_the_providers_discovery_and_keys() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut idp = Config::for_tests();
+    idp.tls_cert = dir.path().join("server.crt").display().to_string();
+    idp.tls_key = dir.path().join("server.key").display().to_string();
+    let server = crate::server::start_with_state(crate::state::AppState::for_tests(idp))
+        .await
+        .expect("the provider starts");
+    let issuer = format!("http://{}", server.http_addr);
+    let mut c = open_config();
+    c.control_auth = crate::control_auth::ControlAuth::Password;
+    c.admin_token = Some("admin-10".into());
+    c.egress_allow_loopback = true;
+    let state = test_state_with(c);
+    let app = test_app_with(state.clone());
+    let headers: [(&str, &str); 1] = [("authorization", "Bearer admin-10")];
+    let r = tool(&app, &headers, "test_sso", json!({})).await;
+    assert!(is_error(&r), "not set up yet: {r}");
+    assert!(text_of(&r).contains("sso.enabled"), "{}", text_of(&r));
+    let r = tool(
+        &app,
+        &headers,
+        "update_settings",
+        json!({ "values": {
+            "sso.enabled": true,
+            "sso.issuer": issuer,
+            "sso.client_id": crate::oidc::PUBLIC_CLIENT_ID,
+            "sso.role_map": ["admins=admin", "nobody=ghost"],
+        }, "confirm": true }),
+    )
+    .await;
+    assert!(!is_error(&r), "{}", text_of(&r));
+    let r = tool(
+        &app,
+        &headers,
+        "update_settings",
+        json!({ "values": { "sso.client_secret": "x" }, "confirm": true }),
+    )
+    .await;
+    assert!(is_error(&r), "an agent never sets the client secret: {r}");
+    let r = tool(&app, &headers, "test_sso", json!({})).await;
+    assert!(!is_error(&r), "{}", text_of(&r));
+    let v = &r["structuredContent"];
+    assert_eq!(v["ok"], json!(true), "{v}");
+    assert_eq!(v["discovery"]["issuer"], json!(issuer));
+    assert!(!v["keys"].as_array().expect("keys").is_empty());
+    assert_eq!(v["unknown_roles"], json!(["ghost"]));
+    assert!(
+        text_of(&r).contains("/_rustybin/sso/callback"),
+        "{}",
+        text_of(&r)
+    );
+    server.shutdown();
 }

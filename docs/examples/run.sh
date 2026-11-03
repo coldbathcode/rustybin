@@ -20,7 +20,9 @@
 #                       of a sixth, public instance with self-service mocks; +9 HTTP
 #                       of a seventh instance in harness mode, loop-through; +10 HTTP
 #                       of an eighth instance with the default control auth, the
-#                       password sign-in)
+#                       password sign-in; +11 HTTP of a ninth, the password sign-in
+#                       with single sign-on through the first instance's demo
+#                       identity provider)
 #   REQUIRE_ALL_TOOLS=1 fail instead of skipping when grpcurl / websocat / jq are missing (CI)
 set -euo pipefail
 
@@ -37,6 +39,8 @@ KEYED_PORT=$((PORT + 7))
 SS_PORT=$((PORT + 8))
 HARNESS_PORT=$((PORT + 9))
 PASSWORD_PORT=$((PORT + 10))
+SSO_PORT=$((PORT + 11))
+SSO_ADMIN_TOKEN="docs-sso-admin-token"
 ADMIN_TOKEN="docs-admin-token"
 SECURED_AUDIENCE="docs-secured"
 SHARED_AUDIENCE="docs-shared"
@@ -233,7 +237,31 @@ mkdir -p "$TMP/password"
   RUSTYBIN_TLS_KEY="$TMP/password/server.key" \
   "$TMP/rustybin-docs-examples") &
 PASSWORD_SERVER=$!
-ALL_SERVERS=("$SERVER" "$PLAN_SERVER" "$SECURED_SERVER" "$SHARED_SERVER" "$KEYED_SERVER" "$SS_SERVER" "$HARNESS_SERVER" "$PASSWORD_SERVER")
+# A ninth instance with single sign-on (docs/src/sso.md): its identity
+# provider is the first instance's demo one (alice is in admins and users,
+# bob in users), the client the demo's confidential one.
+mkdir -p "$TMP/sso"
+(cd "$TMP/sso" && exec env \
+  RUSTYBIN_HTTP_PORT="$SSO_PORT" \
+  RUSTYBIN_HTTPS_PORT=0 \
+  RUSTYBIN_GRPC_PORT=0 \
+  RUSTYBIN_HOST=127.0.0.1 \
+  RUSTYBIN_LOG_LEVEL=warn \
+  RUSTYBIN_INSTANCE_ID=docs-sso \
+  RUSTYBIN_TLS_CERT="$TMP/sso/server.crt" \
+  RUSTYBIN_TLS_KEY="$TMP/sso/server.key" \
+  RUSTYBIN_ADMIN_TOKEN="$SSO_ADMIN_TOKEN" \
+  RUSTYBIN_EGRESS_ALLOW_LOOPBACK=true \
+  RUSTYBIN_SSO_ENABLED=true \
+  RUSTYBIN_SSO_NAME="Demo IdP" \
+  RUSTYBIN_SSO_ISSUER="http://127.0.0.1:$PORT" \
+  RUSTYBIN_SSO_CLIENT_ID=rustybin \
+  RUSTYBIN_SSO_CLIENT_SECRET=secret \
+  RUSTYBIN_SSO_SCOPES="openid profile email groups" \
+  RUSTYBIN_SSO_ROLE_MAP="admins=admin,users=viewer" \
+  "$TMP/rustybin-docs-examples") &
+SSO_SERVER=$!
+ALL_SERVERS=("$SERVER" "$PLAN_SERVER" "$SECURED_SERVER" "$SHARED_SERVER" "$KEYED_SERVER" "$SS_SERVER" "$HARNESS_SERVER" "$PASSWORD_SERVER" "$SSO_SERVER")
 trap 'kill "${ALL_SERVERS[@]}" 2>/dev/null || true; wait "${ALL_SERVERS[@]}" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 
 BASE="http://127.0.0.1:$PORT"
@@ -244,7 +272,8 @@ KEYED_BASE="http://127.0.0.1:$KEYED_PORT"
 SS_BASE="http://127.0.0.1:$SS_PORT"
 HARNESS_BASE="http://127.0.0.1:$HARNESS_PORT"
 PASSWORD_BASE="http://127.0.0.1:$PASSWORD_PORT"
-for url in "$BASE" "$PLAN_BASE" "$SECURED_BASE" "$SHARED_BASE" "$KEYED_BASE" "$SS_BASE" "$HARNESS_BASE" "$PASSWORD_BASE"; do
+SSO_BASE="http://127.0.0.1:$SSO_PORT"
+for url in "$BASE" "$PLAN_BASE" "$SECURED_BASE" "$SHARED_BASE" "$KEYED_BASE" "$SS_BASE" "$HARNESS_BASE" "$PASSWORD_BASE" "$SSO_BASE"; do
   for _ in $(seq 1 100); do
     curl -fs -o /dev/null "$url/" && break
     sleep 0.1
@@ -313,6 +342,8 @@ if [[ ${#hurl_files[@]} -gt 0 ]]; then
     --variable "key_inspector_token=$KEY_INSPECTOR_TOKEN" \
     --variable "harness_url=$HARNESS_BASE" \
     --variable "password_url=$PASSWORD_BASE" \
+    --variable "sso_url=$SSO_BASE" \
+    --variable "sso_admin_token=$SSO_ADMIN_TOKEN" \
     "${hurl_files[@]}" || status=1
 fi
 

@@ -231,6 +231,12 @@ pub fn report(state: &AppState) -> Value {
         checks.push(check("users", status, message, fix));
     }
 
+    // Single sign-on (password mode): set up when it is on, and a way in
+    // when it is the only one.
+    if let Some((status, message, fix)) = crate::sso::diagnostics(state) {
+        checks.push(check("sso", status, message, fix));
+    }
+
     // The harness engine.
     if let Some(h) = &state.harness {
         checks.push(match h.engine_problem() {

@@ -244,6 +244,9 @@ pub struct Invite {
     pub display_name: Option<String>,
     pub email: Option<String>,
     pub roles: Vec<String>,
+    /// A single sign-on user, created ahead of their first sign-in (no
+    /// invitation, no password; `roles` are pinned on them).
+    pub sso: bool,
 }
 
 /// `POST /_rustybin/users`: create the user, invited, and answer the
@@ -278,15 +281,25 @@ pub fn invite_user(
         ));
     }
     within(caller, roles_permissions(state, &invite.roles))?;
+    let sso = invite.sso;
     let new = NewUser {
         name: invite.name.trim().to_string(),
         display_name: invite.display_name.filter(|d| !d.trim().is_empty()),
         email: invite.email.filter(|e| !e.trim().is_empty()),
         roles: invite.roles,
         disabled: false,
-        source,
+        source: if sso { Source::Sso } else { source },
     };
     let name = new.name.clone();
+    if sso {
+        let user = state.users.add_sso(new).map_err(store_error)?;
+        audit("add_sso_user", caller, &name, "ok");
+        return Ok(json!({
+            "user": user_view(state, &user),
+            "invitation": Value::Null,
+            "note": "the user signs in with single sign-on: no link, no password; the provider's groups add their roles at every sign-in, on top of the pinned ones",
+        }));
+    }
     let inv = state
         .users
         .invite_new(new, &principal_name(caller))
@@ -339,8 +352,18 @@ pub fn update_user(
         return Err(refused(
             StatusCode::BAD_REQUEST,
             "invalid",
-            "nothing to change: roles, display_name, email or disabled",
+            "nothing to change: roles, pinned_roles, display_name, email or disabled",
         ));
+    }
+    if let Some(pinned) = &patch.pinned_roles {
+        if caller.user_id() == Some(u.id.as_str()) && *pinned != u.pinned_roles {
+            return Err(refused(
+                StatusCode::FORBIDDEN,
+                "own_roles",
+                "nobody changes their own roles: ask another user who manages users",
+            ));
+        }
+        within(caller, roles_permissions(state, pinned))?;
     }
     if let Some(roles) = &patch.roles {
         if caller.user_id() == Some(u.id.as_str()) && *roles != u.roles {
@@ -561,7 +584,7 @@ pub fn me(state: &AppState, caller: &Resolved) -> SvcResult<Value> {
             "password".into(),
             json!({
                 "change": "PUT /_rustybin/me/password with current_password and new_password",
-                "kept_in": if state.users.is_first_admin(&u.id) { "the sign-in settings (console.password_hash)" } else { "the user store" },
+                "kept_in": if u.is_sso() { "the identity provider (single sign-on: no password on this instance)" } else if state.users.is_first_admin(&u.id) { "the sign-in settings (console.password_hash)" } else { "the user store" },
                 "locked": state.users.is_first_admin(&u.id) && state.settings.locked(),
             }),
         );

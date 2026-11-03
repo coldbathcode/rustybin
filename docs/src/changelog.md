@@ -104,6 +104,36 @@
   only permission is `portal.read` answers `portal_only` with the portal's cookie,
   and the console sends the person to the portal.
 
+- Single sign-on with OpenID Connect (access control, step 10;
+  [Single sign-on](sso.md)): with the `sso.*` settings (`RUSTYBIN_SSO_*`, all
+  `settings.security`) the sign-in screen offers "Sign in with" any OpenID Connect
+  provider, and its groups decide the roles through a role map (the union of a
+  person's groups' roles, else the default roles). The authorization code flow with
+  PKCE, `state` and `nonce`; the ID token verified (issuer, audience, expiry, nonce;
+  RS256 or ES256) with the provider's keys, fetched with discovery under the new
+  outbound purpose `sso` (the issuer's host) and cached for an hour; the provider's
+  tokens are never kept. Users from single sign-on (`source: sso`) are created at
+  their first sign-in (`sso.provision`, or added ahead with `"sso": true`), have no
+  password and no invitation, get their roles again at every sign-in, and may have
+  roles pinned by an admin (`pinned_roles`). `sso.allowed_domains` limits the email
+  domains; `sso.password_sign_in` off leaves only single sign-on and the admin token.
+  New routes: `GET /_rustybin/sso/status`, `/start`, `/callback`, `POST
+  /_rustybin/sso/token` (open, throttled like the sign-in) and `POST
+  /_rustybin/sso/test`; console: the sign-in button, **Management, Sign-in, Single
+  sign-on** with **Test**; CLI: `rustybin login --sso` (a loopback address takes the
+  browser back), `rustybin sso status`, `rustybin sso test`, `users invite --sso`,
+  `users update --pin-role`; management MCP: `test_sso` (133 tools for an admin);
+  `rustybin.yaml`: the `sso.*` settings, `sso: true` on a user. The demo identity
+  provider puts the groups in the ID token when the `groups` scope is asked for. A
+  new diagnostics check, `sso`.
+
+  **Behaviour changes**: a document pulled from git never changes an `sso.*`
+  setting; `update_settings` asks to confirm a change of `sso.*`; `GET
+  /_rustybin/session` answers `obtained: "sso"` for a single sign-on token;
+  `PATCH /_rustybin/users/{id}` refuses `roles` for a single sign-on user (409
+  `sso_user`) and takes `pinned_roles`; an invitation, a reset or a password change
+  for one is refused (409 `sso_user`).
+
 ## 0.4.0 (2026-11-03): testing workflows
 
 Saved tests run without anyone at the console and keep their history, four more

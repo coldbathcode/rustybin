@@ -22,7 +22,7 @@ Sign in to an instance and keep its token in a profile
 
 | Command | What it does | Calls | Needs |
 |---|---|---|---|
-| `rustybin login [--url U] [--user U] [--password-stdin] [--profile P]` | Sign in with the console user name and password (prompted, or the first line of stdin) and keep the token in a profile; --token keeps a token you already have. Flags: `--user` value, `--password-stdin`. | `POST /_rustybin/login`, `GET /_rustybin/session` | open, signed in |
+| `rustybin login [--url U] [--user U] [--password-stdin] [--sso [--no-browser] [--wait S]] [--profile P]` | Sign in with the console user name and password (prompted, or the first line of stdin) and keep the token in a profile; --sso signs in with the identity provider in the browser instead (a loopback address on this machine takes the answer); --token keeps a token you already have. Flags: `--user` value, `--password-stdin`, `--sso`, `--no-browser`, `--wait` value. | `POST /_rustybin/login`, `GET /_rustybin/session`, `GET /_rustybin/sso/status`, `GET /_rustybin/sso/start`, `POST /_rustybin/sso/token` | open, signed in |
 
 ```bash
 rustybin login --url https://mocks.example.com --user rustybin
@@ -169,9 +169,9 @@ Users: invite, change roles, disable, delete (the password sign-in)
 | Command | What it does | Calls | Needs |
 |---|---|---|---|
 | `rustybin users list` | The users: roles, status (active, invited, disabled), last sign-in. | `GET /_rustybin/users` | `users.read` |
-| `rustybin users invite <name> --role R [--display-name D] [--email E] [--reset]` | Invite a user: the answer is a link to send them (shown once), where they set their own password. --reset sends a user who exists a new link (a password reset). Flags: `--role` value, `--display-name` value, `--email` value, `--reset`. | `POST /_rustybin/users`, `POST /_rustybin/users/{id}/invite` | `users.manage` |
+| `rustybin users invite <name> --role R [--display-name D] [--email E] [--reset] [--sso]` | Invite a user: the answer is a link to send them (shown once), where they set their own password. --reset sends a user who exists a new link (a password reset); --sso adds a single sign-on user instead (no link). Flags: `--role` value, `--display-name` value, `--email` value, `--reset`, `--sso`. | `POST /_rustybin/users`, `POST /_rustybin/users/{id}/invite` | `users.manage` |
 | `rustybin users show <user>` | One user (an id or a sign-in name): roles, permissions, status, the open invitation. | `GET /_rustybin/users/{id}` | `users.read` |
-| `rustybin users update <user> [--role R] [--display-name D] [--email E]` | Change a user's roles (--role replaces them; repeatable), display name or email (--email "" clears it). Flags: `--role` value, `--display-name` value, `--email` value. | `PATCH /_rustybin/users/{id}` | `users.manage` |
+| `rustybin users update <user> [--role R] [--pin-role R] [--display-name D] [--email E]` | Change a user's roles (--role replaces them; repeatable), a single sign-on user's pinned roles (--pin-role), display name or email (--email "" clears it). Flags: `--role` value, `--display-name` value, `--email` value, `--pin-role` value. | `PATCH /_rustybin/users/{id}` | `users.manage` |
 | `rustybin users disable <user>` | Disable a user: their sessions end and their sign-in is refused. | `PATCH /_rustybin/users/{id}` | `users.manage` |
 | `rustybin users enable <user>` | Enable a disabled user again (an invited one joins through the invitation). | `PATCH /_rustybin/users/{id}` | `users.manage` |
 | `rustybin users sessions <user> [--end]` | A user's sign-in sessions; --end signs them out everywhere. Flags: `--end`. | `GET /_rustybin/users/{id}/sessions`, `DELETE /_rustybin/users/{id}/sessions` | `users.read`, `users.manage` |
@@ -234,6 +234,20 @@ Change your own password
 
 ```bash
 rustybin passwd --stdin < passwords.txt
+```
+
+## sso
+
+Single sign-on with OpenID Connect: its status, and a test against the provider
+
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin sso status` | Single sign-on as the sign-in screen sees it: on, ready, the button's name, whether the password sign-in works. | `GET /_rustybin/sso/status` | open |
+| `rustybin sso test` | Fetch the identity provider's discovery document and keys now, and check the role map; exits 1 when the provider cannot be read. | `POST /_rustybin/sso/test` | `settings.write` |
+
+```bash
+rustybin sso status
+rustybin sso test
 ```
 
 ## mocks

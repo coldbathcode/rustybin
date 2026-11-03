@@ -681,6 +681,11 @@ fn id_token_claims(issuer: &str, grant: &Grant, user: &DemoUser, now: i64) -> Ma
         claims.insert("nonce".into(), json!(nonce));
     }
     user_claims(&mut claims, user, &grant.scope);
+    // The `groups` scope puts the user's groups in the ID token too (a
+    // single sign-on client maps them to roles without calling userinfo).
+    if scope_has(&grant.scope, "groups") {
+        claims.insert("groups".into(), json!(user.groups));
+    }
     claims
 }
 
@@ -1793,7 +1798,7 @@ fn metadata(issuer: &str, oidc: bool) -> Value {
         "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "none"],
         "introspection_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
         "revocation_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "none"],
-        "scopes_supported": ["openid", "profile", "email"],
+        "scopes_supported": ["openid", "profile", "email", "groups"],
     });
     if oidc {
         if let Some(obj) = doc.as_object_mut() {

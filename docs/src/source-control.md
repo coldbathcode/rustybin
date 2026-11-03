@@ -52,6 +52,11 @@ Nothing more:
   A test in the document may name a gateway only when its saved copy already names
   that one, and a test schedule a webhook only when its saved copy already names that
   one.
+- **Not single sign-on.** Every `sso.*` setting (the issuer, the client, the role
+  map, the default roles, the groups claim, the allowed domains, provisioning, the
+  password sign-in) is kept as it is: a pusher would otherwise repoint the issuer
+  or map their own group to `admin` ([Single sign-on](sso.md)). A different value is
+  a problem, and prune leaves them alone.
 - **Not the sign-in.** In password mode a document never changes the console's user
   name or password hash (a change is a problem), and pruning never removes them, so a
   document without them cannot bring back the default password; a public instance

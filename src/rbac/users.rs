@@ -123,6 +123,63 @@ pub struct User {
     /// password and enables them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pending: bool,
+    /// A single sign-on user's identity at the provider (step 10): the
+    /// issuer, the subject and the roles its groups gave at the last
+    /// sign-in. `None` until the first sign-in links it (an SSO user an
+    /// admin created ahead).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sso: Option<SsoLink>,
+    /// Roles an admin pinned on a single sign-on user, kept on top of the
+    /// ones the provider's groups give (`roles` is their union).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pinned_roles: Vec<String>,
+}
+
+/// Who a single sign-on user is at the provider.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SsoLink {
+    pub issuer: String,
+    pub subject: String,
+    /// The roles the provider's groups gave at the last sign-in (the role
+    /// map, else the default roles).
+    #[serde(default)]
+    pub mapped_roles: Vec<String>,
+}
+
+/// What a verified sign-in at the provider says about the person
+/// (`crate::sso`): the store links, creates or updates the user from it.
+#[derive(Clone, Debug)]
+pub struct SsoIdentity {
+    pub issuer: String,
+    pub subject: String,
+    /// The sign-in name the instance gives a new user.
+    pub name: String,
+    pub display_name: Option<String>,
+    pub email: Option<String>,
+    /// The roles the groups map to (known roles only), else the default
+    /// roles; may be empty.
+    pub mapped_roles: Vec<String>,
+}
+
+/// The roles of `a` then those of `b` not in `a`.
+pub fn union_roles(a: &[String], b: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in a.iter().chain(b) {
+        if !out.contains(r) {
+            out.push(r.clone());
+        }
+    }
+    out
+}
+
+fn sso_refusal(name: &str) -> UsersError {
+    UsersError::Refused(
+        SSO_USER,
+        format!(
+            "{} signs in with single sign-on: no password and no invitation on this instance (the identity provider decides who they are)",
+            crate::logging::printable(name, 64)
+        ),
+    )
 }
 
 impl std::fmt::Debug for User {
@@ -152,7 +209,18 @@ impl User {
             "source": self.source.as_str(),
             "created_at": self.created_at,
             "last_sign_in": self.last_sign_in,
+            "sso": self.sso.as_ref().map(|l| json!({
+                "issuer": l.issuer,
+                "subject": l.subject,
+                "mapped_roles": l.mapped_roles,
+            })),
+            "pinned_roles": self.pinned_roles,
         })
+    }
+
+    /// Signs in with single sign-on (never a password or an invitation).
+    pub fn is_sso(&self) -> bool {
+        self.source == Source::Sso
     }
 
     /// `invited` (not joined yet), `disabled` or `active`.
@@ -281,6 +349,8 @@ pub struct UserPatch {
     pub email: Option<Option<String>>,
     pub roles: Option<Vec<String>>,
     pub disabled: Option<bool>,
+    /// The roles pinned on a single sign-on user (on top of its groups').
+    pub pinned_roles: Option<Vec<String>>,
 }
 
 impl UserPatch {
@@ -289,6 +359,7 @@ impl UserPatch {
             && self.email.is_none()
             && self.roles.is_none()
             && self.disabled.is_none()
+            && self.pinned_roles.is_none()
     }
 }
 
@@ -297,6 +368,17 @@ pub const LAST_ADMIN: &str = "last_admin";
 pub const FIRST_ADMIN: &str = "first_admin";
 pub const PENDING: &str = "invited";
 pub const ROLE_IN_USE: &str = "role_in_use";
+/// A single sign-on user: no password, no invitation, roles from the
+/// provider's groups (plus pinned ones).
+pub const SSO_USER: &str = "sso_user";
+/// A password user has no pinned roles (their roles are set directly).
+pub const NOT_SSO: &str = "not_sso";
+/// Why a single sign-on was refused ([`Users::sso_sign_in`]).
+pub const SSO_NAME_TAKEN: &str = "name_taken";
+pub const SSO_OTHER_IDENTITY: &str = "other_identity";
+pub const SSO_NOT_PROVISIONED: &str = "not_provisioned";
+pub const SSO_DISABLED: &str = "disabled";
+pub const SSO_NO_ROLE: &str = "no_role";
 
 /// What `<state>/users.json` holds.
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -803,6 +885,8 @@ impl Users {
                 last_sign_in: None,
                 generation: FIRST_GENERATION,
                 pending: false,
+                sso: None,
+                pinned_roles: Vec::new(),
             };
             // A user of that name from a newer version: it becomes user one.
             if let Some(existing) = doc.users.iter().find(|u| u.name == name) {
@@ -854,6 +938,9 @@ impl Users {
     /// sign in until an invitation sets one).
     pub fn add(&self, new: NewUser, password_hash: Option<String>) -> Result<User, UsersError> {
         Self::check_new(&new, password_hash.as_deref())?;
+        if new.source == Source::Sso && password_hash.is_some() {
+            return Err(sso_refusal(&new.name));
+        }
         let created_at = now_rfc3339(self.clock.as_ref());
         self.commit(|doc| Self::insert(doc, &new, password_hash, created_at, false))
     }
@@ -914,6 +1001,12 @@ impl Users {
             last_sign_in: None,
             generation: FIRST_GENERATION,
             pending,
+            sso: None,
+            pinned_roles: if new.source == Source::Sso {
+                new.roles.clone()
+            } else {
+                Vec::new()
+            },
         };
         if let Some(h) = password_hash {
             doc.password_hashes.insert(user.id.clone(), h);
@@ -928,6 +1021,130 @@ impl Users {
         Self::check_new(&new, None)?;
         let created_at = now_rfc3339(self.clock.as_ref());
         self.commit(|doc| Self::insert(doc, &new, None, created_at, true))
+    }
+
+    /// Add a single sign-on user ahead of their first sign-in (an admin
+    /// with `sso.provision` off, a document): no password, no invitation;
+    /// `new.roles` are pinned (the provider's groups add theirs at every
+    /// sign-in). The first sign-in links them by name.
+    pub fn add_sso(&self, new: NewUser) -> Result<User, UsersError> {
+        let new = NewUser {
+            source: Source::Sso,
+            ..new
+        };
+        Self::check_new(&new, None)?;
+        if new.roles.is_empty() {
+            return Err(UsersError::Invalid(vec![
+                "roles: a single sign-on user created ahead needs at least one role until the provider gives one".into(),
+            ]));
+        }
+        let created_at = now_rfc3339(self.clock.as_ref());
+        self.commit(|doc| Self::insert(doc, &new, None, created_at, false))
+    }
+
+    /// A verified single sign-on (`crate::sso`): the user linked to the
+    /// identity (issuer and subject), else a single sign-on user of that
+    /// name not linked to this issuer yet (created ahead, or linked to an
+    /// issuer the instance no longer uses), else a new user when
+    /// `provision` is on. Their roles become the mapped roles plus the
+    /// pinned ones, their display name and email follow the provider, and
+    /// the sign-in time is noted. Refused ([`UsersError::Refused`]): a
+    /// password user has the name ([`SSO_NAME_TAKEN`]: an identity never
+    /// takes over a password account), another identity of the same issuer
+    /// is linked to it ([`SSO_OTHER_IDENTITY`]), nobody to link and
+    /// provisioning off ([`SSO_NOT_PROVISIONED`]), the user is disabled
+    /// ([`SSO_DISABLED`]), no role at all ([`SSO_NO_ROLE`]), and the guard
+    /// rail ([`LAST_ADMIN`]: the provider dropped the last admin's group).
+    /// A refusal changes nothing.
+    pub fn sso_sign_in(&self, ident: &SsoIdentity, provision: bool) -> Result<User, UsersError> {
+        let now = now_rfc3339(self.clock.as_ref());
+        let display_name = ident
+            .display_name
+            .clone()
+            .filter(|d| valid_display_name(d).is_ok());
+        let email = ident.email.clone().filter(|e| valid_email(e).is_ok());
+        let printable = crate::logging::printable(&ident.name, 64).to_string();
+        self.commit(|doc| {
+            let linked = doc.users.iter().position(|u| {
+                u.sso
+                    .as_ref()
+                    .is_some_and(|l| l.issuer == ident.issuer && l.subject == ident.subject)
+            });
+            let pos = match linked {
+                Some(p) => p,
+                None => match doc
+                    .users
+                    .iter()
+                    .position(|u| u.name.eq_ignore_ascii_case(&ident.name))
+                {
+                    Some(p) => {
+                        let u = &doc.users[p];
+                        if !u.is_sso() {
+                            return Err(UsersError::Refused(
+                                SSO_NAME_TAKEN,
+                                format!("{printable} is a user who signs in with a password here: a single sign-on never takes over that account (an admin deletes it first)"),
+                            ));
+                        }
+                        if u.sso.as_ref().is_some_and(|l| l.issuer == ident.issuer) {
+                            return Err(UsersError::Refused(
+                                SSO_OTHER_IDENTITY,
+                                format!("another identity of the provider signs in as {printable}"),
+                            ));
+                        }
+                        p
+                    }
+                    None => {
+                        if !provision {
+                            return Err(UsersError::Refused(
+                                SSO_NOT_PROVISIONED,
+                                format!("{printable} has no user on this instance and sso.provision is off: an admin adds them first"),
+                            ));
+                        }
+                        let new = NewUser {
+                            name: ident.name.clone(),
+                            display_name: display_name.clone(),
+                            email: email.clone(),
+                            roles: Vec::new(),
+                            disabled: false,
+                            source: Source::Sso,
+                        };
+                        Self::check_new(&new, None)?;
+                        Self::insert(doc, &new, None, now.clone(), false)?;
+                        doc.users.len() - 1
+                    }
+                },
+            };
+            let user = &mut doc.users[pos];
+            if user.disabled {
+                return Err(UsersError::Refused(
+                    SSO_DISABLED,
+                    format!("{} is disabled on this instance", user.name),
+                ));
+            }
+            let roles = union_roles(&ident.mapped_roles, &user.pinned_roles);
+            if roles.is_empty() {
+                return Err(UsersError::Refused(
+                    SSO_NO_ROLE,
+                    format!("none of {}'s groups maps to a role (sso.role_map) and sso.default_roles is empty", user.name),
+                ));
+            }
+            user.roles = roles;
+            user.sso = Some(SsoLink {
+                issuer: ident.issuer.clone(),
+                subject: ident.subject.clone(),
+                mapped_roles: ident.mapped_roles.clone(),
+            });
+            if let Some(d) = &display_name {
+                user.display_name = d.clone();
+            }
+            if email.is_some() {
+                user.email = email.clone();
+            }
+            user.last_sign_in = Some(now.clone());
+            let out = user.clone();
+            doc.check_roles(&out.roles).map_err(UsersError::Invalid)?;
+            Ok(out)
+        })
     }
 
     /// A user by id, else by sign-in name (the API, the CLI and the tools
@@ -1015,6 +1232,9 @@ impl Users {
     /// invitation. The token is in the answer only.
     pub fn invite_new(&self, new: NewUser, by: &str) -> Result<NewInvitation, UsersError> {
         Self::check_new(&new, None)?;
+        if new.source == Source::Sso {
+            return Err(sso_refusal(&new.name));
+        }
         let created_at = now_rfc3339(self.clock.as_ref());
         let now = self.now_ts();
         self.commit(|doc| {
@@ -1043,6 +1263,9 @@ impl Users {
         let now = self.now_ts();
         self.commit(|doc| {
             let user = doc.user(id).cloned().ok_or(UsersError::NotFound)?;
+            if user.is_sso() {
+                return Err(sso_refusal(&user.name));
+            }
             if user.disabled && !user.pending {
                 return Err(UsersError::Refused(
                     "disabled",
@@ -1075,7 +1298,7 @@ impl Users {
             .iter()
             .find(|i| i.hash == hash && i.expires_at > now)?;
         let user = doc.user(&inv.user_id)?;
-        (!user.disabled || user.pending).then(|| user.clone())
+        ((!user.disabled || user.pending) && !user.is_sso()).then(|| user.clone())
     }
 
     /// Accept an invitation: one use. The password hash goes to the store
@@ -1104,7 +1327,7 @@ impl Users {
             let inv = doc.invitations.remove(pos);
             let first_admin = doc.first_admin.as_deref() == Some(inv.user_id.as_str());
             let user = doc.user_mut(&inv.user_id)?;
-            if user.disabled && !user.pending {
+            if (user.disabled && !user.pending) || user.is_sso() {
                 return Err(UsersError::NotFound);
             }
             if user.pending {
@@ -1141,6 +1364,9 @@ impl Users {
                 ));
             }
             let user = doc.user_mut(id)?;
+            if user.is_sso() {
+                return Err(sso_refusal(&user.name));
+            }
             user.generation = user.generation.saturating_add(1);
             let user = user.clone();
             doc.password_hashes.insert(id.to_string(), password_hash);
@@ -1171,7 +1397,48 @@ impl Users {
             if let Some(roles) = &patch.roles {
                 doc.check_roles(roles).map_err(UsersError::Invalid)?;
             }
+            if let Some(pinned) = &patch.pinned_roles {
+                doc.check_roles(pinned).map_err(UsersError::Invalid)?;
+            }
             let user = doc.user_mut(id)?;
+            if user.is_sso() && patch.roles.as_ref().is_some_and(|r| *r != user.roles) {
+                return Err(UsersError::Refused(
+                    SSO_USER,
+                    format!(
+                        "{} signs in with single sign-on: the provider's groups give their roles at every sign-in (the sso.role_map setting); pin extra roles with pinned_roles",
+                        user.name
+                    ),
+                ));
+            }
+            if !user.is_sso() && patch.pinned_roles.is_some() {
+                return Err(UsersError::Refused(
+                    NOT_SSO,
+                    format!(
+                        "{} signs in with a password: change their roles instead (pinned roles are for single sign-on users)",
+                        user.name
+                    ),
+                ));
+            }
+            if let Some(pinned) = &patch.pinned_roles {
+                let mapped = user
+                    .sso
+                    .as_ref()
+                    .map(|l| l.mapped_roles.clone())
+                    .unwrap_or_default();
+                let roles = union_roles(&mapped, pinned);
+                if roles.is_empty() {
+                    return Err(UsersError::Invalid(vec![
+                        "pinned_roles: the provider gave this user no role yet: pin at least one".into(),
+                    ]));
+                }
+                if roles.len() > MAX_ROLES_PER_USER {
+                    return Err(UsersError::Invalid(vec![format!(
+                        "roles: at most {MAX_ROLES_PER_USER}"
+                    )]));
+                }
+                user.pinned_roles = pinned.clone();
+                user.roles = roles;
+            }
             if patch.disabled == Some(false) && user.pending {
                 return Err(UsersError::Refused(
                     PENDING,

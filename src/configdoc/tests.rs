@@ -868,6 +868,7 @@ fn the_yaml_of_an_export_is_pinned() {
             email: Some("alice@example.com".into()),
             roles: vec!["editor".into(), "catalog-reader".into()],
             disabled: false,
+            ..Default::default()
         },
         super::UserDoc {
             name: "bob".into(),

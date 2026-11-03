@@ -748,6 +748,11 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET PATCH | `/_rustybin/me` | Your own account: who you are, your roles and permissions; PATCH your display name and email |
 | GET DELETE | `/_rustybin/me/sessions` | Your own sign-in sessions: list them, or DELETE to sign yourself out everywhere |
 | DELETE | `/_rustybin/me/sessions/{id}` | End one of your own sign-in sessions |
+| GET | `/_rustybin/sso/status` | Single sign-on for the sign-in screen: on, ready, the button's name, whether the password sign-in works |
+| GET | `/_rustybin/sso/start` | Start a single sign-on: the browser goes to the identity provider (authorization code, PKCE, state, nonce) |
+| GET | `/_rustybin/sso/callback` | The identity provider's redirect: the code is exchanged, the ID token verified, the user signed in |
+| POST | `/_rustybin/sso/token` | Trade the one-time code and the PKCE verifier for a sign-in token (single sign-on) |
+| POST | `/_rustybin/sso/test` | Test single sign-on: fetch the provider's discovery document and keys now, check the role map |
 | GET | `/_rustybin/assist` | AI assist: the provider, models, whether a key is set, the tasks and usage |
 | POST | `/_rustybin/assist/test` | AI assist: one short call to the configured provider (admin) |
 | POST | `/_rustybin/assist/run` | AI assist: run a task (free_answer, explain, suggest) as SSE or one JSON answer |

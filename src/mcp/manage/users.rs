@@ -114,14 +114,27 @@ pub async fn invite_user(ctx: &CallCtx, access: &Access, args: &Value, params: &
         Ok(i) => i,
         Err(e) => return err(e),
     };
-    let action = format!(
-        "invite {name} with the role(s) {}: the answer is a link that lets whoever opens it set the password and sign in as {name}",
-        invite.roles.join(", ")
-    );
+    let sso = invite.sso;
+    let action = if sso {
+        format!(
+            "add {name} as a single sign-on user with the pinned role(s) {}: whoever the identity provider signs in as {name} gets them",
+            invite.roles.join(", ")
+        )
+    } else {
+        format!(
+            "invite {name} with the role(s) {}: the answer is a link that lets whoever opens it set the password and sign in as {name}",
+            invite.roles.join(", ")
+        )
+    };
     if let Confirm::Answer(v) = confirm(ctx, "invite_user", args, params, &action).await {
         return v;
     }
     match service::invite_user(&ctx.app, &access.resolved, invite, &base, Source::Password) {
+        Ok(v) if sso => ok(
+            ctx,
+            format!("{name} signs in with single sign-on (no link, no password): their groups add roles at every sign-in."),
+            v,
+        ),
         Ok(v) => link_answer(ctx, &name, v),
         Err(e) => failed(e),
     }
@@ -155,7 +168,17 @@ pub async fn update_user(ctx: &CallCtx, access: &Access, args: &Value, params: &
         Ok(p) => p,
         Err(e) => return err(e),
     };
-    if let Some(role) = patch.roles.as_deref().and_then(|r| privileged(ctx, r)) {
+    let granted = patch
+        .roles
+        .as_deref()
+        .and_then(|r| privileged(ctx, r))
+        .or_else(|| {
+            patch
+                .pinned_roles
+                .as_deref()
+                .and_then(|r| privileged(ctx, r))
+        });
+    if let Some(role) = granted {
         let action = format!(
             "give {user} the privileged role {role}: it may change who may do what on this instance"
         );

@@ -90,7 +90,13 @@ tool input or output (`every_tool_is_fully_defined` refuses keys containing `pas
 document, a log line or a list; an invitation token is answered once, by the call that made it; nobody grants or
 manages more than they hold (`rbac::service`); a document from git changes display names and emails only
 (`configdoc::REPOSITORY_REFUSED_SECTIONS`); ending a user goes through `rbac::service::ended_user` (step 12 revokes
-the user's agents there).
+the user's agents there). Step 10 (single sign-on with OpenID Connect; user docs `docs/src/sso.md`) is built:
+`src/sso/` (see below), `Users::sso_sign_in` / `add_sso` and `User.sso` / `pinned_roles` in `src/rbac/users.rs`,
+`Purpose::Sso`, `login::sso_session`. Rules it left: a single sign-on user (`Source::Sso`) never gets a password, an
+invitation or a reset (the store refuses: `SSO_USER`) and its `roles` come from the provider's groups at every
+sign-in (admins pin extra ones with `pinned_roles`); an identity never takes over a password account; a document from
+git never changes an `sso.*` setting (`configdoc::REPOSITORY_REFUSED_PREFIXES`); the password sign-in can be off only
+while single sign-on is set up (`sso::password_sign_in`).
 
 ## The whole instance as code, and source control (built)
 
@@ -332,6 +338,18 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   `Config.console_tokens` because every credential check takes `&Config`; `control_auth::verify_jwt_claims` calls
   `login::verify` for sign-in tokens, so every caller accepts them. Public mode with the default password refuses
   to start (`login::check_startup`); the default password warns at startup and sets `default_password` in the status.
+- `src/sso/`: single sign-on with any OpenID Connect provider (password mode only; access control step 10). `mod.rs`
+  (the `sso.*` settings, group `sso`, seeded by `RUSTYBIN_SSO_*` through `Config.sso_env`; `setup()` and
+  `password_sign_in()`; `Sso` in `AppState.sso`: sign-ins under way (256, 10 per address, ten minutes), one-time
+  codes (256, two minutes), discovery and the JWKS cached an hour (a failure answered again for 10 s), `sync_egress`
+  permitting the issuer's host under `Purpose::Sso`; `begin`, `complete` (token endpoint, the ID token, the role map,
+  `Users::sso_sign_in`), `redeem` (the code plus the client's PKCE verifier), `test`; the diagnostics check `sso`),
+  `provider.rs` (discovery, JWKS, the token endpoint through `egress::Egress`, bounded bodies; `verify_id_token`:
+  RS256 or ES256 only, issuer, audience and `azp`, expiry, nonce; an unknown key id refetches the keys once), `api.rs`
+  (`/_rustybin/sso/status`, `/start`, `/callback`, `/token` are open, the callback and the token throttled by
+  `Tokens::check` under `(sso)`; `/test` is `settings.write`; the console gets `#/sso/<code>` or
+  `#/sso-error/<reason>`, the CLI's loopback address `?code=`). The console side is in `ui/lib/auth.js` (`startSso`,
+  `finishSso`) and `ui/app.js`; `rustybin login --sso` in `src/cli/commands.rs` (`Env.browser` lets tests drive it).
 - `src/assist/`: AI assist (`RUSTYBIN_ASSIST_*`, the `assist.*` settings). `mod.rs` (`Assist` in `AppState.assist`:
   `specs()`, `status()` resolved from the settings at every call, `sync_egress` permitting the provider's host under
   `Purpose::Assist`, the per-caller calls-per-minute cap, bounded usage, the `suggest` cache, `run(RunParams) ->

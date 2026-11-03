@@ -412,7 +412,7 @@ never tool inputs and never returned: the operator sets them in the console or w
 | Tool | Permission | |
 |---|---|---|
 | `get_settings` | `settings.read` | Every [instance setting](configuration.md#state-directory-settings-and-secrets) with its value, source and lock state, or one group or key; secrets show `{set, hint}` |
-| `update_settings` | `settings.write` | Set values (`null` forgets a stored one) and unset stored values; secrets are refused, and so is the console sign-in in password mode (it changes only with its current password); a change of `egress.*`, `agents.*`, `console.*` or `git.*` is confirmed by the user |
+| `update_settings` | `settings.write` | Set values (`null` forgets a stored one) and unset stored values; secrets are refused, and so is the console sign-in in password mode (it changes only with its current password); a change of `egress.*`, `agents.*`, `console.*`, `git.*` or `sso.*` is confirmed by the user |
 | `check_egress` | `settings.read` | The [outbound policy](configuration.md#outbound-connections) and, with `url` and `purpose`, whether that URL would be allowed before DNS and why not |
 
 ### MCP inspector and registry
@@ -468,12 +468,13 @@ The token for an https remote is the secret `git.token`: an agent cannot set it.
 | `list_sessions` | `users.read` | The console's sign-in sessions, when the password sign-in is on; `user` lists one user's |
 | `end_session` | `users.manage` | End one session by id; `user` signs one user out everywhere, `all: true` everyone (both confirmed) |
 | `list_users` | `users.read` | The [users](users.md): roles, status (active, invited, disabled), last sign-in, the open invitation (never its link); `user` for one with its permissions |
-| `invite_user` | `users.manage` | Create a user, invited, and answer the one-time link to send them (confirmed); `reset: true` sends a user who exists a new link (a password reset) |
-| `update_user` | `users.manage` | Roles, display name, email, disabled; confirmed when it grants a privileged role. The guard rails apply (the last enabled admin stays, nobody changes their own roles) |
+| `invite_user` | `users.manage` | Create a user, invited, and answer the one-time link to send them (confirmed); `reset: true` sends a user who exists a new link (a password reset); `sso: true` adds a [single sign-on](sso.md) user instead (no link) |
+| `update_user` | `users.manage` | Roles, display name, email, disabled, a single sign-on user's `pinned_roles`; confirmed when it grants a privileged role. The guard rails apply (the last enabled admin stays, nobody changes their own roles) |
 | `delete_user` | `users.manage` | Delete a user (confirmed; never the last enabled admin, never the first admin) |
 | `list_roles` | `users.read` | The built-in and custom roles with their permissions and holders, and the permission table; `name` for one |
 | `save_role` | `users.manage` | Create or change a custom role (confirmed when it is privileged) |
 | `delete_role` | `users.manage` | Delete a custom role nobody holds |
+| `test_sso` | `settings.write` | [Single sign-on](sso.md): its status, and the identity provider's discovery document and keys fetched now, the redirect URI to register, the role map's unknown roles. The `sso.*` settings change with `update_settings` |
 
 No tool takes or returns a password or a hash: a person joins through the link
 `invite_user` answers and sets their own password in the browser, and changes it in

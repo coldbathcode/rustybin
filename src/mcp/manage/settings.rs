@@ -94,8 +94,8 @@ pub fn get_settings(ctx: &CallCtx, _access: &Access, args: &Value) -> Value {
 
 /// Setting groups whose change widens what the instance reaches or who may
 /// sign in: the outbound policy, the agents' ceilings, the console sign-in
-/// and git. A change there is confirmed by the user.
-pub const SENSITIVE_PREFIXES: &[&str] = &["egress.", "agents.", "console.", "git."];
+/// git and single sign-on. A change there is confirmed by the user.
+pub const SENSITIVE_PREFIXES: &[&str] = &["egress.", "agents.", "console.", "git.", "sso."];
 
 fn sensitive(key: &str) -> bool {
     SENSITIVE_PREFIXES.iter().any(|p| key.starts_with(p))
@@ -327,4 +327,37 @@ pub fn check_egress(ctx: &CallCtx, _access: &Access, args: &Value) -> Value {
         },
         view,
     )
+}
+
+/// `test_sso`: single sign-on's status, and the provider's discovery
+/// document and keys fetched now (as `POST /_rustybin/sso/test`).
+pub async fn test_sso(ctx: &CallCtx, access: &Access, _args: &Value) -> Value {
+    let app = &ctx.app;
+    if !crate::login::enabled(&app.config) {
+        return err("single sign-on works with the password sign-in only (RUSTYBIN_CONTROL_AUTH=password, outside shared mode)");
+    }
+    let callback = format!(
+        "{}{}",
+        access.links.base_url().trim_end_matches('/'),
+        crate::sso::api::CALLBACK_PATH
+    );
+    let v = app.sso.test(&app.users, &callback).await;
+    if v["ok"] == json!(true) {
+        let keys = v["keys"].as_array().map(Vec::len).unwrap_or(0);
+        ok(
+            ctx,
+            format!(
+                "Single sign-on is ready: {} answers its discovery document and {keys} key(s). Register {callback} as the client's redirect URI.",
+                v["issuer"].as_str().unwrap_or("the provider")
+            ),
+            v,
+        )
+    } else {
+        let mut out = err(format!(
+            "single sign-on is not working: {}",
+            v["error"].as_str().unwrap_or("not set up")
+        ));
+        out["structuredContent"] = v;
+        out
+    }
 }

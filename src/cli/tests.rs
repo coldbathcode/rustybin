@@ -943,3 +943,96 @@ async fn mocks_deploy_can_name_the_revision_it_publishes() {
     assert_eq!(v["revision"], rev, "{v}");
     inst.server.shutdown();
 }
+
+// ── Single sign-on ──────────────────────────────────────────────────
+
+/// What a browser does with `rustybin login --sso`'s address: the
+/// instance's start, the demo provider's sign-in page (as `user`), the
+/// instance's callback, then the CLI's loopback address with the code.
+async fn browse_sso(start: String, user: &'static str) {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("client");
+    let next = |r: &reqwest::Response| {
+        r.headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    let r = client.get(&start).send().await.expect("start");
+    let authorize = next(&r);
+    let callback = crate::sso::tests::approve_at_demo_provider(&authorize, user).await;
+    let r = client.get(&callback).send().await.expect("callback");
+    let loopback = next(&r);
+    assert!(loopback.starts_with("http://127.0.0.1:"), "{loopback}");
+    let _ = client.get(&loopback).send().await;
+}
+
+#[tokio::test]
+async fn login_sso_takes_the_browser_back_on_a_loopback_address() {
+    let idp_dir = tempfile::tempdir().expect("tempdir");
+    let mut idp = Config::for_tests();
+    idp.tls_cert = idp_dir.path().join("server.crt").display().to_string();
+    idp.tls_key = idp_dir.path().join("server.key").display().to_string();
+    let provider = crate::server::start_with_state(AppState::for_tests(idp))
+        .await
+        .expect("the provider starts");
+    let inst = instance().await;
+    let mut values = std::collections::BTreeMap::new();
+    values.insert("sso.enabled".to_string(), json!(true));
+    values.insert(
+        "sso.issuer".to_string(),
+        json!(format!("http://{}", provider.http_addr)),
+    );
+    values.insert(
+        "sso.client_id".to_string(),
+        json!(crate::oidc::PUBLIC_CLIENT_ID),
+    );
+    values.insert(
+        "sso.scopes".to_string(),
+        json!(["openid", "profile", "email", "groups"]),
+    );
+    values.insert("sso.role_map".to_string(), json!(["admins=admin"]));
+    inst.state
+        .settings
+        .update(values, std::collections::BTreeMap::new(), "test")
+        .expect("settings");
+
+    let run = |user: &'static str| {
+        let mut env = inst.env(None);
+        env.browser = Some(Browser(Arc::new(move |url: &str| {
+            tokio::spawn(browse_sso(url.to_string(), user));
+        })));
+        let url = inst.url.clone();
+        async move {
+            let buf = Buf::default();
+            let mut out: Out = Box::new(buf.clone());
+            let args: Vec<String> = ["login", "--sso", "--url", url.as_str(), "--wait", "20"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let r = execute_inner(&args, &env, &mut out).await;
+            (r, buf.text())
+        }
+    };
+    let (r, out) = run("alice").await;
+    assert!(
+        r.is_ok(),
+        "{out} {:?}",
+        r.err().map(|f| f.message().to_string())
+    );
+    assert!(out.contains("Signed in to"), "{out}");
+    assert!(out.contains("as alice"), "{out}");
+    let who = inst.json(&["whoami"]).await;
+    assert_eq!(who["obtained"], json!("sso"), "{who}");
+    assert_eq!(who["user"], json!("alice"));
+    // bob's groups map to no role: the refusal comes back to the CLI.
+    let (r, out) = run("bob").await;
+    let f = r.expect_err("bob has no role");
+    assert_eq!(f.code(), 3, "{out}");
+    assert!(f.message().contains("no_role"), "{}", f.message());
+    provider.shutdown();
+    inst.server.shutdown();
+}

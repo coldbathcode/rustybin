@@ -931,6 +931,12 @@ fn mint(config: &Config, user: &crate::rbac::User) -> Option<(String, Value)> {
         "rb_gen": tokens.generation(),
         "rb_ugen": user.generation,
     });
+    let mut claims = claims;
+    if user.is_sso() {
+        // Informational: how the person signed in (the session answer and
+        // the console say so).
+        claims["rb_via"] = json!("sso");
+    }
     let mut header = Header::new(Algorithm::HS256);
     header.typ = Some("JWT".into());
     let token = jsonwebtoken::encode(
@@ -1062,6 +1068,36 @@ fn issue(
     Some((token, claims))
 }
 
+/// A sign-in token for a user single sign-on verified
+/// (`crate::sso::api`): listed as a session, the sign-in noted, answered as
+/// `POST /_rustybin/login` answers (plus `obtained: "sso"`). `None` when it
+/// could not be signed.
+pub(crate) fn sso_session(
+    state: &AppState,
+    account: &crate::rbac::User,
+    ip: Option<IpAddr>,
+) -> Option<Value> {
+    let (token, claims) = issue(&state.config, account, ip)?;
+    if let Err(e) = state.users.note_sign_in(&account.id) {
+        tracing::warn!(target: "rustybin::auth", error = %e, "the sign-in time could not be saved");
+    }
+    let mut body = token_body(&token, &claims, account, state);
+    body["obtained"] = json!("sso");
+    body["display_name"] = json!(account.display_name);
+    body["roles"] = json!(account.roles);
+    Some(body)
+}
+
+/// The refusal of a password sign-in while single sign-on is the only way
+/// in (`sso.password_sign_in` off and single sign-on set up).
+fn password_sign_in_off() -> Response {
+    error(
+        StatusCode::FORBIDDEN,
+        "the password sign-in is off on this instance: sign in with single sign-on (or the admin token)",
+        "password_sign_in_off",
+    )
+}
+
 /// The sign-in name a sign-in token carries: `rb_user`, or the `sub` of a
 /// 0.3 token (`user:<name>`).
 pub fn user_of(claims: &Value) -> Option<&str> {
@@ -1183,6 +1219,11 @@ pub(crate) async fn check_sign_in(
     event: &str,
 ) -> Result<(crate::rbac::User, Option<IpAddr>), Response> {
     let config = &state.config;
+    // Single sign-on as the only way in (step 10) closes every password
+    // sign-in: the console's and the portal's.
+    if !crate::sso::password_sign_in(&state.settings) {
+        return Err(password_sign_in_off());
+    }
     let ip = client_ip(headers, extensions, config);
     warn_untrusted_proxy(headers, config);
     let tokens = &config.console_tokens;
@@ -1458,10 +1499,15 @@ async fn session_handler(State(state): State<AppState>, headers: HeaderMap) -> R
             crate::rbac::Principal::User { name, .. } => Some(name.as_str()),
             _ => user_of(&claims),
         };
+        let obtained = if claims.get("rb_via").and_then(Value::as_str) == Some("sso") {
+            "sso"
+        } else {
+            "password"
+        };
         fill(
             &mut body,
             json!({
-                "obtained": "password",
+                "obtained": obtained,
                 "user": name,
                 "scopes": resolved.grant().scopes(),
                 "issued_at": rfc3339(claims["iat"].as_i64().unwrap_or(0)),
@@ -1635,6 +1681,13 @@ async fn own_password(
     let Some(user) = state.users.get(id) else {
         return error(StatusCode::UNAUTHORIZED, "signed out", "revoked");
     };
+    if user.is_sso() {
+        return error(
+            StatusCode::CONFLICT,
+            "you sign in with single sign-on: your password is the identity provider's, never this instance's",
+            crate::rbac::users::SSO_USER,
+        );
+    }
     let ip = client_ip(headers, extensions, config);
     let tokens = &config.console_tokens;
     if let Err(wait) = tokens.check(ip, &user.name) {
@@ -1938,6 +1991,9 @@ async fn join_handler(
             )
         }
     };
+    if !crate::sso::password_sign_in(&state.settings) {
+        return password_sign_in_off();
+    }
     let ip = client_ip(&headers, &extensions, config);
     warn_untrusted_proxy(&headers, config);
     let tokens = &config.console_tokens;
@@ -2218,7 +2274,7 @@ pub fn openapi_paths() -> Value {
         "type": "object",
         "properties": {
             "control_auth": { "type": "string" },
-            "obtained": { "type": "string", "enum": ["password", "admin_token", "control_jwt", "api_key"] },
+            "obtained": { "type": "string", "enum": ["password", "sso", "admin_token", "control_jwt", "api_key"], "description": "How the credential was obtained: password and sso are sign-in tokens (the user's own password, or single sign-on)" },
             "user": { "type": ["string", "null"], "description": "The sign-in name (sign-in tokens)" },
             "user_id": { "type": ["string", "null"], "description": "The user's id (sign-in tokens): usr_ plus 16 hex" },
             "display_name": { "type": ["string", "null"] },

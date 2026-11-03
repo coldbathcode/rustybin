@@ -9,6 +9,8 @@
 // keeps a sign-in token in localStorage until it expires (12 hours at most).
 // A JWT's `exp` claim schedules the "session expired" screen.
 
+import { randomString, pkceChallenge } from './crypto.js';
+
 const KEY = 'rustybin.console.controlToken';
 const REMEMBER_KEY = 'rustybin.console.rememberedToken';
 const listeners = new Set();
@@ -231,6 +233,93 @@ export async function signIn(server, username, password, remember) {
   return { ok: false, status: resp.status, reason, retryAfter, message: (json && json.error) || ('Sign-in failed (' + resp.status + ').') };
 }
 
+// ── Single sign-on (password mode with sso.* set up) ──
+//
+// The button starts GET /_rustybin/sso/start with the S256 challenge of a
+// verifier kept in this tab; the provider sends the browser back through the
+// instance's callback to #/sso/<code> (or #/sso-error/<reason>), and POST
+// /_rustybin/sso/token trades the code and the verifier for a sign-in token.
+
+const SSO_VERIFIER_KEY = 'rustybin.sso.verifier';
+const SSO_REMEMBER_KEY = 'rustybin.sso.remember';
+
+/** GET /_rustybin/sso/status (open): {enabled, ready, name, password_sign_in}, or null. */
+export async function ssoStatus(server) {
+  if (mode !== 'password') return null;
+  try {
+    const r = await fetch(server + '/_rustybin/sso/status', { headers: { Accept: 'application/json' }, credentials: 'omit', cache: 'no-store' });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch {
+    return null;
+  }
+}
+
+/** Go to the identity provider (the page leaves). */
+export function startSso(server, remember) {
+  const verifier = randomString(32);
+  try {
+    sessionStorage.setItem(SSO_VERIFIER_KEY, verifier);
+    sessionStorage.setItem(SSO_REMEMBER_KEY, remember ? '1' : '');
+  } catch { /* the sign-in cannot finish without storage: the server says so */ }
+  location.assign(server + '/_rustybin/sso/start?return_to=console&challenge=' + pkceChallenge(verifier));
+}
+
+/**
+ * The provider's answer in the address bar: {code} for #/sso/<code>,
+ * {error} for #/sso-error/<reason>, null otherwise. Stripped at once.
+ */
+export function takeSsoFragment() {
+  const m = /^#\/sso(-error)?\/([A-Za-z0-9_-]+)$/.exec(location.hash || '');
+  if (!m) return null;
+  try { history.replaceState(null, '', location.pathname + location.search); } catch { location.hash = ''; }
+  return m[1] ? { error: m[2] } : { code: m[2] };
+}
+
+/** Trade the code for a sign-in token. Resolves {ok} or {ok: false, reason, message}. */
+export async function finishSso(server, code) {
+  let verifier = '';
+  let remember = false;
+  try {
+    verifier = sessionStorage.getItem(SSO_VERIFIER_KEY) || '';
+    remember = sessionStorage.getItem(SSO_REMEMBER_KEY) === '1';
+    sessionStorage.removeItem(SSO_VERIFIER_KEY);
+    sessionStorage.removeItem(SSO_REMEMBER_KEY);
+  } catch { /* no storage */ }
+  if (!verifier) return { ok: false, reason: 'invalid_code', message: 'This tab did not start the sign-in: start again.' };
+  let resp;
+  let json = null;
+  try {
+    resp = await fetch(server + '/_rustybin/sso/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ code, verifier }),
+      credentials: 'omit',
+      cache: 'no-store',
+    });
+    try { json = await resp.json(); } catch { json = null; }
+  } catch {
+    return { ok: false, reason: 'unreachable', message: 'Rustybin could not be reached: try again.' };
+  }
+  if (resp.ok && json && json.token) {
+    setToken(json.token, remember);
+    return { ok: true, json };
+  }
+  return { ok: false, reason: (json && json.reason) || 'invalid_code', message: (json && json.error) || ('The sign-in failed (' + resp.status + ').') };
+}
+
+/** True when the token came from single sign-on (claim rb_via "sso"). */
+export function signedInWithSso() {
+  const c = claims();
+  return !!(c && c.rb_use === 'console' && c.rb_via === 'sso');
+}
+
+/** Show a refusal on the sign-in screen (a reason the screen has a text for). */
+export function showReason(why) {
+  reason = why || 'invalid_token';
+  emit('required');
+}
+
 /**
  * Sign out: a sign-in token is revoked on the server (POST /_rustybin/logout,
  * best effort), then every copy is forgotten.
@@ -255,6 +344,9 @@ export function signOut(server) {
 /** A control-plane call was refused with 401 (`why`: the server's reason). */
 export function markUnauthorized(why) {
   if (!required()) return;
+  // A single sign-on refusal stays on the screen until the next sign-in
+  // (the views' first calls answer 401 too).
+  if (!token && reason.startsWith('sso_')) return;
   const next = !token ? 'missing' : (why || 'invalid_token');
   if (reason === next) return;
   reason = next;

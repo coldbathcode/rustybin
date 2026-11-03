@@ -1219,6 +1219,8 @@ const OLD_RIGHTS: &[(&str, &str, bool)] = &[
     ("list_roles", "admin", true),
     ("save_role", "admin", false),
     ("delete_role", "admin", false),
+    // Single sign-on (step 10): as 0.4 had admin read settings tools.
+    ("test_sso", "admin", true),
 ];
 
 /// The 0.4 ceilings, by right: `read-only` a read-only tool that is not a

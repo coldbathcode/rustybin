@@ -73,6 +73,7 @@ pub mod settings;
 pub mod soap;
 pub mod sourcecontrol;
 pub mod sse;
+pub mod sso;
 pub mod state;
 pub mod status;
 pub mod transfer;
@@ -151,6 +152,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     control_oauth::router,
     login::router,
     rbac::api::router,
+    sso::api::router,
     assist::router,
     settings::router,
     diagnostics::router,

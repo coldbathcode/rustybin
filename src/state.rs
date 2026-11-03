@@ -100,6 +100,9 @@ pub struct AppState {
     /// Users and custom roles (`crate::rbac::users`, `<state>/users.json`):
     /// the same store as `Config.users`.
     pub users: Arc<crate::rbac::Users>,
+    /// Single sign-on (`crate::sso`): sign-ins under way, one-time codes,
+    /// the provider's discovery and keys.
+    pub sso: Arc<crate::sso::Sso>,
 }
 
 impl AppState {
@@ -198,6 +201,11 @@ impl AppState {
         let checkpoints = Arc::new(crate::checkpoints::Checkpoints::new(
             config.state_dir.as_deref(),
         ));
+        let sso = Arc::new(crate::sso::Sso::new(
+            settings.clone(),
+            egress.clone(),
+            clock.clone(),
+        ));
         Self {
             keys,
             limits,
@@ -225,6 +233,7 @@ impl AppState {
             saved_tests,
             checkpoints,
             users,
+            sso,
         }
     }
 }

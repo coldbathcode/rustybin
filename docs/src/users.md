@@ -4,6 +4,8 @@ An instance with the password sign-in (`RUSTYBIN_CONTROL_AUTH=password`, the
 default) is shared by a team: an admin adds people, gives them roles, disables or
 removes them. **Nobody but its owner ever sees or types a password**: people join
 through a one-time invitation link and choose their own, and change it themselves.
+With [single sign-on](sso.md) people sign in with the team's identity provider
+instead: they have no password here, and the provider's groups give their roles.
 
 A role is a set of named [permissions](concepts/control-plane-security.md#permissions).
 Five roles are built in and never change; custom roles pick any permissions.

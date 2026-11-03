@@ -84,6 +84,9 @@ pub struct Config {
     /// (`RUSTYBIN_CONSOLE_PASSWORD_HASH`; seeds the secret
     /// `console.password_hash`, preferred over the plain password).
     pub console_password_hash: Option<String>,
+    /// Single sign-on (`RUSTYBIN_SSO_*`, `crate::sso`): they seed the
+    /// `sso.*` settings.
+    pub sso_env: crate::sso::SsoEnv,
     /// AI assist (`crate::assist`, step 03): the provider (`anthropic`, `openai`,
     /// `gemini`, `compatible`, `mock`), the models, the compatible base URL
     /// (`RUSTYBIN_ASSIST_PROVIDER`, `_MODEL`, `_FAST_MODEL`, `_BASE_URL`); they
@@ -940,6 +943,7 @@ impl Config {
             console_user,
             console_password,
             console_password_hash,
+            sso_env: crate::sso::SsoEnv::from_lookup(get),
             assist_provider,
             assist_model,
             assist_fast_model,
@@ -1148,6 +1152,7 @@ impl Config {
             console_user: None,
             console_password: None,
             console_password_hash: None,
+            sso_env: crate::sso::SsoEnv::default(),
             assist_provider: None,
             assist_model: None,
             assist_fast_model: None,
