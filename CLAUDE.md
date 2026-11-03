@@ -64,9 +64,18 @@ client, test and example follows `nextCursor`); test traffic and replays go out 
 
 [docs/plans/review-0.3/master-plan.md](docs/plans/review-0.3/master-plan.md): a full review of 0.3.0, 89 findings, all
 fixed in eight steps with build notes; `v0.3.1` tagged, the signed image's digest is in the changelog, and the release
-carries Linux and macOS binaries (`.github/workflows/release-binaries.yml`). The next milestone is
-[docs/plans/testing-2/master-plan.md](docs/plans/testing-2/master-plan.md) (testing workflows and access control,
-0.4.0), built only when the user says go.
+carries Linux and macOS binaries (`.github/workflows/release-binaries.yml`). 
+## Rustybin 0.4, testing workflows (built 2026-11-03)
+
+[docs/plans/testing-2/master-plan.md](docs/plans/testing-2/master-plan.md), steps 01 to 06 (each with build notes;
+section 4 is the build marker; 0.4.0 released after step 06, access control steps 07 to 15 follow as 0.5.0). Built: the
+run history (`src/replay/history.rs`), schedules with a failure webhook (`src/replay/schedule.rs`, `Purpose::Notify`),
+four scenarios (`circuit_breaker`, `request_size_limit`, `cors`, `header_transformation`; test parameters are a typed
+table in `src/scenarios/catalog.rs`, and `scenarios::own_cors` keeps the instance's CORS layer off a `cors` run's
+mock), checkpoints in the repository (`src/sourcecontrol/checkpoints.rs`, written only by a commit that names them),
+the compare view for a stale edit (`GET /_rustybin/mocks/{name}/revisions/{revision}`, `ui/lib/conflict.js`; the store
+keeps replaced drafts). Rules it left: a scenario parameter is a row of the parameter table (the console field, the
+MCP schema property and the CLI flag follow from it); a saved-test name never shadows a route (`runs`, `schedules`).
 
 ## The whole instance as code, and source control (built)
 

@@ -5,18 +5,20 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-**Testing workflows 2**, for 0.4.0 (planned 2026-11-02, not started): a history of saved-test runs,
-saved tests on a schedule with a failure webhook, gateway scenarios for circuit breakers,
-request size limits, CORS and header transformation, checkpoints in the configuration
-repository, and a compare view for an edit refused as stale. Then **access control**, for 0.5.0:
-several users with roles made of named permissions (built-in and custom), invitations,
-single sign-on with any OpenID Connect provider, projects so teams share an instance,
-agents that act for a user, APIs on the dev portal that are open or closed behind a
-portal sign-in, and an audit log.
+**Access control**, for 0.5.0 (planned 2026-11-02, not started): several users with roles
+made of named permissions (built-in and custom), invitations, single sign-on with any
+OpenID Connect provider, projects so teams share an instance, agents that act for a user,
+APIs on the dev portal that are open or closed behind a portal sign-in, and an audit log.
 `docs/plans/testing-2/master-plan.md` in the repository.
 
 ## Recently built
 
+- [Rustybin 0.4, testing workflows](changelog.md#040-2026-11-03-testing-workflows)
+  (2026-11-03): a [history of saved-test runs](saved-tests.md#history), saved tests
+  [on a schedule](saved-tests.md#schedules) with a failure webhook, four more
+  [gateway scenarios](gateway-scenarios.md) (circuit breakers, request size limits, CORS,
+  header transformation), [checkpoints in the configuration repository](checkpoints.md#in-the-configuration-repository)
+  and a [compare view](mocks/index.md#comparing-a-refused-edit) for an edit refused as stale.
 - [Rustybin 0.3.1, the 0.3 review](changelog.md#031-2026-11-02-the-03-review)
   (2026-11-02): no new features; what a review of 0.3.0 found, fixed in eight steps:
   control-plane CORS only for listed origins, a random signing key per instance, the

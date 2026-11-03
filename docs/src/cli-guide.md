@@ -18,7 +18,7 @@ on the machine you run commands from; the instance it manages can be anywhere.
 `rustybin-<version>-<target>.tar.gz` and its `.sha256`:
 
 ```bash
-VERSION=v0.3.1
+VERSION=v0.4.0
 TARGET=aarch64-apple-darwin   # or x86_64-apple-darwin, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
 curl -fsSLO "https://github.com/coldbathcode/rustybin/releases/download/$VERSION/rustybin-$VERSION-$TARGET.tar.gz"
 curl -fsSLO "https://github.com/coldbathcode/rustybin/releases/download/$VERSION/rustybin-$VERSION-$TARGET.tar.gz.sha256"
@@ -36,7 +36,7 @@ or build from source. On Windows, use WSL or the image.
 **From source** with Rust 1.88 or later (no other tool is needed: `protoc` is vendored):
 
 ```bash
-cargo install --locked --git https://github.com/coldbathcode/rustybin --tag v0.3.1
+cargo install --locked --git https://github.com/coldbathcode/rustybin --tag v0.4.0
 ```
 
 **The container image**, with nothing installed: the image's entry point is the binary,

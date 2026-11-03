@@ -1,31 +1,47 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (2026-11-03): testing workflows
 
-- **A compare view for a stale edit**: an edit the console makes from a revision someone
-  changed since (the `409 rustybin_stale_revision`) opens a
-  [compare dialog](mocks/index.md#comparing-a-refused-edit): per section (spec,
-  responses, security, MCP, each operation) what the other change did beside the
-  refused edit; Keep mine sends it again on the current revision, Take theirs reloads.
-  The new `GET /_rustybin/mocks/{name}/revisions/{revision}` (the `get_mock_revision`
-  tool, `rustybin mocks revision NAME N`) answers a kept revision's spec and settings
-  and what the draft changed since; the store now also keeps the drafts replaced before
-  they were deployed (as many as deployed revisions), so the `409`'s `changed` names
-  the sections for an undeployed base too.
-- **Checkpoints in the configuration repository**: `POST /_rustybin/git/commit` takes
-  `checkpoints` and writes those [checkpoints](checkpoints.md#in-the-configuration-repository)
-  to `<git.path>/checkpoints/<name>.json` next to `rustybin.yaml` (only a commit that
-  names one: the automatic mode never writes one, and no commit stages anything else in
-  that directory). A pull answers the repository's checkpoints by name; `GET
-  /_rustybin/checkpoints?from=git` lists them with what each holds, and `POST
-  /_rustybin/checkpoints/{name}/restore?from=git` (with `dry_run`) restores one. A
-  checkpoint from the repository is untrusted: size-checked before it is read (16 MiB),
-  parsed and held to a local checkpoint's caps, compiled on the compile pool.
-  `rustybin git commit --checkpoint NAME`, `rustybin checkpoint list --from-git`,
-  `rustybin checkpoint restore NAME --from-git`; `git_commit` gains `checkpoints`,
-  `restore_checkpoint` gains `from`, the new tool `list_repository_checkpoints`; the
-  console's Checkpoints view gets an "In the repository" card and the Source control
-  commit card a checkpoint choice.
+Saved tests run without anyone at the console and keep their history, four more
+gateway scenarios, checkpoints that travel in the configuration repository, and a
+compare view when an edit is refused as stale
+([the plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/testing-2/master-plan.md),
+steps 01 to 06; access control follows in 0.5.0).
+
+**Behaviour changes** (what an operator or a script may notice):
+
+- A saved test can no longer be named `runs` or `schedules` (the new routes take those
+  paths); an existing test with either name is skipped with a warning when the instance
+  loads.
+- `POST /_rustybin/tests/run` answers more fields (`run_id`, `trigger`, `principal`,
+  `selection`, `change`); with `?format=junit` the run id is in the
+  `X-Rustybin-Test-Run` header. Every value given as a variable is replaced by its
+  `{{NAME}}` in the answer and in the kept run.
+- Every gateway scenario lists its test `parameters`; a check's body is the gateway URL
+  plus a map of parameters, and an unknown or out-of-range parameter is refused with a
+  `400` naming the bounds before anything is sent.
+- The mock store keeps the drafts replaced before they were deployed (as many as
+  deployed revisions, in memory), so a stale edit's `409` names what changed for an
+  undeployed base too.
+- A commit through source control never stages `<git.path>/checkpoints/` except the
+  checkpoints it names, and "nothing to commit" ignores untracked files.
+- `rustybin.yaml` has a `test_schedules:` section (empty when there are none).
+- The management MCP server has 125 tools for an admin; full rights without the
+  harness tools no longer fit one `tools/list` page (see
+  [tool limits](coding-agents.md#tool-limits)).
+
+**New**:
+
+- **A history of saved-test runs**: every run of the [saved tests](saved-tests.md#history)
+  (console, CLI, API, management MCP) is kept with its trigger, the caller (never a
+  credential), each test's result and what changed since the previous run (newly
+  failing, newly passing); the last 200 for 30 days in `<state>/test-runs/` (50 in
+  memory without a state directory), never a variable's value. `POST
+  /_rustybin/tests/run` answers `run_id` and `change`; `GET`, `DELETE
+  /_rustybin/tests/runs`, `GET /_rustybin/tests/runs/{id}` (`?format=junit`);
+  `rustybin tests runs | run-show | runs-clear`; the tools `list_test_runs`,
+  `get_test_run`, `clear_test_runs`; the console's Saved tests view has a History
+  card. A test can no longer be named `runs`.
 - **Saved tests on a schedule, with a failure notice**: a [schedule](saved-tests.md#schedules)
   runs saved tests (every one, `names` or a `prefix`) `every` 5m to 24h or `at` a time of
   day (UTC), without anyone at the console; each run is in the history as
@@ -43,6 +59,12 @@
   `delete_test_schedule`, `run_test_schedule`; a Schedules card on the console's Saved
   tests view; `test_schedules:` in `rustybin.yaml` (a pulled document cannot name a new
   webhook). A test can no longer be named `schedules`.
+- **Two more [gateway scenarios](gateway-scenarios.md)**: `circuit_breaker` (the
+  gateway stops forwarding to a failing upstream, then lets a trial through after the
+  half-open time you give as `half_open_ms`) and `request_size_limit` (a body over the
+  `size_limit` you give is answered `413` and never reaches the upstream). Every
+  scenario lists its test parameters with their bounds under `parameters`; the console
+  shows a field for each, the CLI adds `--half-open-ms` and `--size-limit`.
 - **CORS and header transformation [gateway scenarios](gateway-scenarios.md)**: `cors`
   (preflights from the `allowed_origin` and `refused_origin` you give, then a `GET`: the
   allowed preflight is answered with CORS by the gateway, or by the upstream with
@@ -52,22 +74,33 @@
   header names and booleans; the CLI adds a flag for each (`--allowed-origin`,
   `--upstream-cors`, `--add-request-header` and the rest), and an unknown parameter is
   refused with the list. A `cors` run's mock gets no CORS from the instance itself.
-- **Two more [gateway scenarios](gateway-scenarios.md)**: `circuit_breaker` (the
-  gateway stops forwarding to a failing upstream, then lets a trial through after the
-  half-open time you give as `half_open_ms`) and `request_size_limit` (a body over the
-  `size_limit` you give is answered `413` and never reaches the upstream). Every
-  scenario lists its test parameters with their bounds under `parameters`; the console
-  shows a field for each, the CLI adds `--half-open-ms` and `--size-limit`.
-- **A history of saved-test runs**: every run of the [saved tests](saved-tests.md#history)
-  (console, CLI, API, management MCP) is kept with its trigger, the caller (never a
-  credential), each test's result and what changed since the previous run (newly
-  failing, newly passing); the last 200 for 30 days in `<state>/test-runs/` (50 in
-  memory without a state directory), never a variable's value. `POST
-  /_rustybin/tests/run` answers `run_id` and `change`; `GET`, `DELETE
-  /_rustybin/tests/runs`, `GET /_rustybin/tests/runs/{id}` (`?format=junit`);
-  `rustybin tests runs | run-show | runs-clear`; the tools `list_test_runs`,
-  `get_test_run`, `clear_test_runs`; the console's Saved tests view has a History
-  card. A test can no longer be named `runs`.
+- **Checkpoints in the configuration repository**: `POST /_rustybin/git/commit` takes
+  `checkpoints` and writes those [checkpoints](checkpoints.md#in-the-configuration-repository)
+  to `<git.path>/checkpoints/<name>.json` next to `rustybin.yaml` (only a commit that
+  names one: the automatic mode never writes one, and no commit stages anything else in
+  that directory). A pull answers the repository's checkpoints by name; `GET
+  /_rustybin/checkpoints?from=git` lists them with what each holds, and `POST
+  /_rustybin/checkpoints/{name}/restore?from=git` (with `dry_run`) restores one. A
+  checkpoint from the repository is untrusted: size-checked before it is read (16 MiB),
+  parsed and held to a local checkpoint's caps, compiled on the compile pool.
+  `rustybin git commit --checkpoint NAME`, `rustybin checkpoint list --from-git`,
+  `rustybin checkpoint restore NAME --from-git`; `git_commit` gains `checkpoints`,
+  `restore_checkpoint` gains `from`, the new tool `list_repository_checkpoints`; the
+  console's Checkpoints view gets an "In the repository" card and the Source control
+  commit card a checkpoint choice.
+- **A compare view for a stale edit**: an edit the console makes from a revision someone
+  changed since (the `409 rustybin_stale_revision`) opens a
+  [compare dialog](mocks/index.md#comparing-a-refused-edit): per section (spec,
+  responses, security, MCP, each operation) what the other change did beside the
+  refused edit; Keep mine sends it again on the current revision, Take theirs reloads.
+  The new `GET /_rustybin/mocks/{name}/revisions/{revision}` (the `get_mock_revision`
+  tool, `rustybin mocks revision NAME N`) answers a kept revision's spec and settings
+  and what the draft changed since; the store now also keeps the drafts replaced before
+  they were deployed (as many as deployed revisions), so the `409`'s `changed` names
+  the sections for an undeployed base too.
+
+**Also**:
+
 - **Every tool on one page**: `?page_size=200` on the management MCP URL (it was
   accepted before) now also works with OAuth sign-in, whose resource check ignores the
   query. The new [Connect your coding agent](coding-agents.md) page uses it for the

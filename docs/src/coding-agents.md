@@ -403,10 +403,10 @@ rule of `rustybin.yaml`; see [Managing agents](agent-mcp.md#managing-agents)):
 
 | Ceiling | For | Tools an admin credential sees |
 |---|---|---|
-| `read-only` | Exploring: what is mocked, what the deploy checks say, sample requests | 55 |
-| `traffic` | Debugging a gateway: the above plus captured traffic | 61 |
-| `manage` | Building mocks: reads plus creating, editing and deploying mocks, AI-built examples, the portal | 68 |
-| `full` | Building the whole platform: settings, git, agents, saved tests, checkpoints, the harness | 116 |
+| `read-only` | Exploring: what is mocked, what the deploy checks say, sample requests | 60 |
+| `traffic` | Debugging a gateway: the above plus captured traffic | 66 |
+| `manage` | Building mocks: reads plus creating, editing and deploying mocks, AI-built examples, the portal | 69 |
+| `full` | Building the whole platform: settings, git, agents, saved tests, checkpoints, the harness | 125 |
 
 The counts are for an admin credential on an instance without self-service mocks;
 `tools/list` shows only what the agent may call. Start with `read-only` while you
@@ -435,7 +435,7 @@ rustybin agents rights <id> --ceiling manage --deny delete_mock,apply_config
 
 ## Tool limits
 
-With an admin credential the server has 116 tools, sent 100 to a `tools/list` page
+With an admin credential the server has 125 tools, sent 100 to a `tools/list` page
 with `nextCursor` for the rest. Clients differ in how many tools they take:
 
 | Client | Reads every `tools/list` page | Its own limit |
@@ -460,11 +460,10 @@ already carry it; it does no harm on the other clients.
 
 To keep a client's list short instead (a smaller context, or a client with a
 per-request limit), narrow the agent on the instance, then reconnect the client.
-Either of these fits in the default page of 100:
-
-- the `manage` ceiling (68 tools), for building mocks;
-- full rights without the 19 harness tools (97 tools), on an instance where you do
-  not run load tests:
+The `manage` ceiling (69 tools), for building mocks, fits in the default page of 100.
+Full rights without the 19 harness tools no longer do (106 tools since 0.4.0), so a
+client that reads one page and needs more than `manage` takes `?page_size=200`. To
+drop the harness tools anyway, for a smaller context:
 
 ```bash
 rustybin agents list    # the client's agent id, after it connected once
