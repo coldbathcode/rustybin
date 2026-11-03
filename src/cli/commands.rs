@@ -90,7 +90,23 @@ pub const NOUNS: &[(&str, &str)] = &[
         "Instance settings: get, set, secrets, unset, the schema",
     ),
     ("sessions", "The console's sign-in sessions"),
-    ("password", "Change the console user name and password"),
+    (
+        "password",
+        "Change the first admin's user name and password (0.3; rustybin passwd changes yours)",
+    ),
+    (
+        "users",
+        "Users: invite, change roles, disable, delete (the password sign-in)",
+    ),
+    (
+        "roles",
+        "Roles: the built-in ones and custom roles with their permissions",
+    ),
+    (
+        "me",
+        "Your own account: who you are, display name, email, sessions",
+    ),
+    ("passwd", "Change your own password"),
     (
         "mocks",
         "OpenAPI mocks on the instance (rustybin mock ... works offline)",
@@ -130,6 +146,26 @@ pub const NOUNS: &[(&str, &str)] = &[
 ];
 
 const NO_FLAGS: &[Flag] = &[];
+const USER_FLAGS_INVITE: &[Flag] = &[
+    Flag::value(
+        "--role",
+        "A role (repeatable, or comma separated; rustybin roles list shows them)",
+    ),
+    Flag::value("--display-name", "The name the console shows"),
+    Flag::value("--email", "An email address (never logged)"),
+    Flag::switch(
+        "--reset",
+        "A new link for a user who exists (a password reset)",
+    ),
+];
+const USER_FLAGS_UPDATE: &[Flag] = &[
+    Flag::value(
+        "--role",
+        "The user's roles (repeatable, or comma separated; replaces them)",
+    ),
+    Flag::value("--display-name", "The name the console shows"),
+    Flag::value("--email", "An email address (\"\" clears it)"),
+];
 const TAIL_FLAGS: &[Flag] = &[
     Flag::value("--max", "Stop after this many events"),
     Flag::value("--timeout", "Stop after this many seconds (default 3600)"),
@@ -189,7 +225,25 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("sessions", "list", "", "The sign-in sessions since the last restart.", NO_FLAGS, [("GET", "/_rustybin/sessions")], false, "sessions list"),
     cmd!("sessions", "end", "<id>", "End one session.", NO_FLAGS, [("DELETE", "/_rustybin/sessions/{id}")], false, "sessions end 3f2a"),
     cmd!("sessions", "end-all", "", "Sign out everywhere (every token issued so far).", NO_FLAGS, [("DELETE", "/_rustybin/sessions")], true, "sessions end-all --yes"),
-    cmd!("password", "change", "[--user U] [--stdin]", "Change the console password (and user name): the current and the new one prompted, or two lines of stdin.", &[Flag::value("--user", "A new user name"), Flag::switch("--stdin", "Read the current and the new password from two lines of stdin")], [("PUT", "/_rustybin/password")], false, "password change --stdin < passwords.txt"),
+    cmd!("password", "change", "[--user U] [--stdin]", "Change your password (the first admin's also takes a new user name): the current and the new one prompted, or two lines of stdin.", &[Flag::value("--user", "A new user name (the first admin only)"), Flag::switch("--stdin", "Read the current and the new password from two lines of stdin")], [("PUT", "/_rustybin/password")], false, "password change --stdin < passwords.txt"),
+    // ── Users, roles, your account ──
+    cmd!("users", "list", "", "The users: roles, status (active, invited, disabled), last sign-in.", NO_FLAGS, [("GET", "/_rustybin/users")], false, "users list"),
+    cmd!("users", "invite", "<name> --role R [--display-name D] [--email E] [--reset]", "Invite a user: the answer is a link to send them (shown once), where they set their own password. --reset sends a user who exists a new link (a password reset).", USER_FLAGS_INVITE, [("POST", "/_rustybin/users"), ("POST", "/_rustybin/users/{id}/invite")], false, "users invite alice --role editor --display-name \"Alice Doe\""),
+    cmd!("users", "show", "<user>", "One user (an id or a sign-in name): roles, permissions, status, the open invitation.", NO_FLAGS, [("GET", "/_rustybin/users/{id}")], false, "users show alice"),
+    cmd!("users", "update", "<user> [--role R] [--display-name D] [--email E]", "Change a user's roles (--role replaces them; repeatable), display name or email (--email \"\" clears it).", USER_FLAGS_UPDATE, [("PATCH", "/_rustybin/users/{id}")], false, "users update alice --role tester"),
+    cmd!("users", "disable", "<user>", "Disable a user: their sessions end and their sign-in is refused.", NO_FLAGS, [("PATCH", "/_rustybin/users/{id}")], true, "users disable alice --yes"),
+    cmd!("users", "enable", "<user>", "Enable a disabled user again (an invited one joins through the invitation).", NO_FLAGS, [("PATCH", "/_rustybin/users/{id}")], false, "users enable alice"),
+    cmd!("users", "sessions", "<user> [--end]", "A user's sign-in sessions; --end signs them out everywhere.", &[Flag::switch("--end", "Sign the user out everywhere")], [("GET", "/_rustybin/users/{id}/sessions"), ("DELETE", "/_rustybin/users/{id}/sessions")], false, "users sessions alice"),
+    cmd!("users", "delete", "<user>", "Delete a user (never the last enabled admin, never the first admin).", NO_FLAGS, [("DELETE", "/_rustybin/users/{id}")], true, "users delete alice --yes"),
+    cmd!("roles", "list", "", "The roles with their permissions, whether they are privileged and how many users hold them.", NO_FLAGS, [("GET", "/_rustybin/roles")], false, "roles list"),
+    cmd!("roles", "show", "<name>", "One role: its permissions and who holds it.", NO_FLAGS, [("GET", "/_rustybin/roles/{name}")], false, "roles show editor"),
+    cmd!("roles", "save", "<name> --permission P [--description D]", "Create or change a custom role (--permission repeatable, or comma separated).", &[Flag::value("--permission", "A permission (repeatable, or comma separated; rustybin roles list shows them)"), Flag::value("--description", "What the role is for")], [("PUT", "/_rustybin/roles/{name}"), ("POST", "/_rustybin/roles")], false, "roles save catalog-reader --permission mocks.read,traffic.read --description \"Reads mocks and traffic\""),
+    cmd!("roles", "delete", "<name>", "Delete a custom role nobody holds.", NO_FLAGS, [("DELETE", "/_rustybin/roles/{name}")], true, "roles delete catalog-reader --yes"),
+    cmd!("me", "", "", "Your own account: user, display name, email, roles, permissions.", NO_FLAGS, [("GET", "/_rustybin/me")], false, "me"),
+    cmd!("me", "update", "[--display-name D] [--email E]", "Change your display name or email (--email \"\" clears it).", &[Flag::value("--display-name", "Your display name"), Flag::value("--email", "Your email address")], [("PATCH", "/_rustybin/me")], false, "me update --display-name \"Ops on call\""),
+    cmd!("me", "sessions", "[--end-all]", "Your sign-in sessions; --end-all signs you out everywhere (this profile too).", &[Flag::switch("--end-all", "Sign yourself out everywhere")], [("GET", "/_rustybin/me/sessions"), ("DELETE", "/_rustybin/me/sessions")], false, "me sessions"),
+    cmd!("me", "end-session", "<id>", "End one of your sign-in sessions.", NO_FLAGS, [("DELETE", "/_rustybin/me/sessions/{id}")], false, "me end-session 3f2a"),
+    cmd!("passwd", "", "[--stdin]", "Change your own password: the current and the new one prompted, or two lines of stdin. Your other sessions end; the profile keeps a fresh token.", &[Flag::switch("--stdin", "Read the current and the new password from two lines of stdin")], [("PUT", "/_rustybin/me/password")], false, "passwd --stdin < passwords.txt"),
     // ── Mocks ──
     cmd!("mocks", "list", "[--all]", "The mocks with their state and traffic.", &[Flag::switch("--all", "Every visitor's mocks too (admin)")], [("GET", "/_rustybin/mocks")], false, "mocks list"),
     cmd!("mocks", "get", "<name>", "One mock: settings, operations, the deploy report.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}")], false, "mocks get petstore"),
@@ -371,6 +425,10 @@ pub static COMMANDS: &[Cmd] = &[
 /// Catalogue paths no command calls, each with its reason (the parity test
 /// reads it).
 pub const UNCOVERED: &[(&str, &str)] = &[
+    (
+        "/_rustybin/join",
+        "the invitation link a person opens in a browser, where they choose their password",
+    ),
     (
         "/_rustybin/mcp",
         "the management MCP endpoint: rustybin mcp-stdio bridges a client to it",
@@ -601,7 +659,11 @@ pub async fn dispatch(ctx: &mut Ctx) -> Result<()> {
         "profiles" => profiles_cmd(ctx, cmd.verb),
         "settings" => settings(ctx, cmd.verb).await,
         "sessions" => sessions(ctx, cmd.verb).await,
-        "password" => password(ctx).await,
+        "password" => password(ctx, "/_rustybin/password").await,
+        "passwd" => password(ctx, "/_rustybin/me/password").await,
+        "users" => users(ctx, cmd.verb).await,
+        "roles" => roles(ctx, cmd.verb).await,
+        "me" => me(ctx, cmd.verb).await,
         "mocks" => mocks(ctx, cmd.verb).await,
         "visits" => visits(ctx, cmd.verb).await,
         "visit" => visit(ctx, cmd.verb).await,
@@ -942,7 +1004,7 @@ async fn sessions(ctx: &mut Ctx, verb: &str) -> Result<()> {
     }
 }
 
-async fn password(ctx: &mut Ctx) -> Result<()> {
+async fn password(ctx: &mut Ctx, path: &str) -> Result<()> {
     let from_stdin = ctx.args.has("--stdin");
     let current = ctx.secret("Current password", from_stdin, 0)?;
     let new = ctx.secret("New password", from_stdin, 1)?;
@@ -950,10 +1012,7 @@ async fn password(ctx: &mut Ctx) -> Result<()> {
     if let Some(u) = ctx.args.value("--user") {
         body["username"] = json!(u);
     }
-    let reply = ctx
-        .client()?
-        .put("/_rustybin/password", Body::Json(body))
-        .await?;
+    let reply = ctx.client()?.put(path, Body::Json(body)).await?.ok()?;
     let v = reply.value();
     // The answer carries a fresh token: keep it in the profile.
     if let Some(token) = v["token"].as_str() {
@@ -978,6 +1037,236 @@ async fn password(ctx: &mut Ctx) -> Result<()> {
         ctx.say("Password changed; the other sessions ended.");
     }
     Ok(())
+}
+
+// ── Users, roles, your account ──────────────────────────────────────
+
+/// The names of a repeatable flag, each also comma separated.
+fn names_of(ctx: &Ctx, flag: &str) -> Vec<String> {
+    ctx.args
+        .values(flag)
+        .iter()
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// `--email ""` clears the email (null), any other value sets it.
+fn email_value(v: &str) -> Value {
+    if v.trim().is_empty() {
+        Value::Null
+    } else {
+        json!(v)
+    }
+}
+
+/// Print an invitation: the link first (it is shown once).
+fn emit_invitation(ctx: &mut Ctx, v: &Value) {
+    if ctx.json {
+        ctx.emit(v);
+        return;
+    }
+    let name = v["user"]["name"].as_str().unwrap_or("");
+    ctx.say(&format!(
+        "Invitation for {name} (shown once, valid until {}):\n{}\nSend it to them: they open it and set their own password.",
+        v["invitation"]["expires_at"].as_str().unwrap_or(""),
+        v["invitation"]["url"].as_str().unwrap_or("")
+    ));
+}
+
+async fn users(ctx: &mut Ctx, verb: &str) -> Result<()> {
+    if verb == "list" {
+        let v = ctx
+            .client()?
+            .get("/_rustybin/users", &[])
+            .await?
+            .ok()?
+            .value();
+        if ctx.json {
+            ctx.emit(&v);
+        } else {
+            let rows: Vec<Value> = v["users"]
+                .as_array()
+                .map(|l| {
+                    l.iter()
+                        .map(|u| {
+                            json!({
+                                "name": u["name"], "display_name": u["display_name"],
+                                "roles": u["roles"].as_array().map(|r| r.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")).unwrap_or_default(),
+                                "status": u["status"], "last_sign_in": u["last_sign_in"], "id": u["id"],
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            ctx.emit(&json!({ "count": v["count"], "users": rows }));
+        }
+        return Ok(());
+    }
+    let user = ctx
+        .args
+        .arg(0, "a user (an id or a sign-in name)")?
+        .to_string();
+    let path = format!("/_rustybin/users/{}", enc(&user));
+    match verb {
+        "invite" if ctx.args.has("--reset") => {
+            let v = ctx
+                .client()?
+                .post(&format!("{path}/invite"), Body::None)
+                .await?
+                .ok()?
+                .value();
+            emit_invitation(ctx, &v);
+            Ok(())
+        }
+        "invite" => {
+            let roles = names_of(ctx, "--role");
+            if roles.is_empty() {
+                return Err(Fail::Usage(
+                    "--role is required (rustybin roles list shows them)".into(),
+                ));
+            }
+            let mut body = json!({ "name": user, "roles": roles });
+            if let Some(d) = ctx.args.value("--display-name") {
+                body["display_name"] = json!(d);
+            }
+            if let Some(e) = ctx.args.value("--email") {
+                body["email"] = json!(e);
+            }
+            let v = ctx
+                .client()?
+                .post("/_rustybin/users", Body::Json(body))
+                .await?
+                .ok()?
+                .value();
+            emit_invitation(ctx, &v);
+            Ok(())
+        }
+        "show" => get(ctx, &path, &[]).await,
+        "update" => {
+            let mut body = json!({});
+            let roles = names_of(ctx, "--role");
+            if !roles.is_empty() {
+                body["roles"] = json!(roles);
+            }
+            if let Some(d) = ctx.args.value("--display-name") {
+                body["display_name"] = json!(d);
+            }
+            if let Some(e) = ctx.args.value("--email") {
+                body["email"] = email_value(e);
+            }
+            if body.as_object().is_some_and(|m| m.is_empty()) {
+                return Err(Fail::Usage(
+                    "nothing to change: --role, --display-name or --email".into(),
+                ));
+            }
+            let reply = ctx.client()?.patch(&path, Body::Json(body)).await?.ok()?;
+            emit_reply(ctx, &reply);
+            Ok(())
+        }
+        "disable" | "enable" => {
+            let body = json!({ "disabled": verb == "disable" });
+            let reply = ctx.client()?.patch(&path, Body::Json(body)).await?.ok()?;
+            emit_reply(ctx, &reply);
+            Ok(())
+        }
+        "sessions" if ctx.args.has("--end") => delete(ctx, &format!("{path}/sessions"), &[]).await,
+        "sessions" => get(ctx, &format!("{path}/sessions"), &[]).await,
+        "delete" => delete(ctx, &path, &[]).await,
+        _ => Err(Fail::Usage(format!("users {verb}: not implemented"))),
+    }
+}
+
+async fn roles(ctx: &mut Ctx, verb: &str) -> Result<()> {
+    if verb == "list" {
+        let v = ctx
+            .client()?
+            .get("/_rustybin/roles", &[])
+            .await?
+            .ok()?
+            .value();
+        if ctx.json {
+            ctx.emit(&v);
+        } else {
+            let rows: Vec<Value> = v["roles"]
+                .as_array()
+                .map(|l| {
+                    l.iter()
+                        .map(|r| {
+                            json!({
+                                "name": r["name"],
+                                "kind": if r["built_in"] == json!(true) { "built-in" } else { "custom" },
+                                "privileged": r["privileged"],
+                                "permissions": r["permissions"].as_array().map(Vec::len).unwrap_or(0),
+                                "users": r["users"],
+                                "description": r["description"],
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            ctx.emit(&json!({ "roles": rows }));
+        }
+        return Ok(());
+    }
+    let name = ctx.args.arg(0, "a role name")?.to_string();
+    let path = format!("/_rustybin/roles/{}", enc(&name));
+    match verb {
+        "show" => get(ctx, &path, &[]).await,
+        "save" => {
+            let permissions = names_of(ctx, "--permission");
+            if permissions.is_empty() {
+                return Err(Fail::Usage(
+                    "--permission is required (rustybin roles list shows the table)".into(),
+                ));
+            }
+            let mut body = json!({ "permissions": permissions });
+            if let Some(d) = ctx.args.value("--description") {
+                body["description"] = json!(d);
+            }
+            let reply = ctx.client()?.put(&path, Body::Json(body)).await?.ok()?;
+            emit_reply(ctx, &reply);
+            Ok(())
+        }
+        "delete" => delete(ctx, &path, &[]).await,
+        _ => Err(Fail::Usage(format!("roles {verb}: not implemented"))),
+    }
+}
+
+async fn me(ctx: &mut Ctx, verb: &str) -> Result<()> {
+    match verb {
+        "" => get(ctx, "/_rustybin/me", &[]).await,
+        "update" => {
+            let mut body = json!({});
+            if let Some(d) = ctx.args.value("--display-name") {
+                body["display_name"] = json!(d);
+            }
+            if let Some(e) = ctx.args.value("--email") {
+                body["email"] = email_value(e);
+            }
+            if body.as_object().is_some_and(|m| m.is_empty()) {
+                return Err(Fail::Usage(
+                    "nothing to change: --display-name or --email".into(),
+                ));
+            }
+            let reply = ctx
+                .client()?
+                .patch("/_rustybin/me", Body::Json(body))
+                .await?
+                .ok()?;
+            emit_reply(ctx, &reply);
+            Ok(())
+        }
+        "sessions" if ctx.args.has("--end-all") => delete(ctx, "/_rustybin/me/sessions", &[]).await,
+        "sessions" => get(ctx, "/_rustybin/me/sessions", &[]).await,
+        "end-session" => {
+            let id = ctx.args.arg(0, "a session id")?.to_string();
+            delete(ctx, &format!("/_rustybin/me/sessions/{}", enc(&id)), &[]).await
+        }
+        _ => Err(Fail::Usage(format!("me {verb}: not implemented"))),
+    }
 }
 
 // ── Mocks ───────────────────────────────────────────────────────────

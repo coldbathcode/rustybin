@@ -1618,6 +1618,8 @@ impl SourceControl {
             principal: format!("git:{by}"),
             base: Some(dir.clone()),
             untrusted: true,
+            caller: None,
+            base_url: None,
         };
         let mut report = configdoc::apply_on_pool(state, file, opts)
             .await

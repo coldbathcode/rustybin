@@ -64,6 +64,20 @@ pub const REPOSITORY_REFUSED: [&str; 5] = [
     "assist.base_url",
     "proxy.client_ip_header",
 ];
+/// What a document from the repository never changes in its sections
+/// (the sections rule beside [`REPOSITORY_REFUSED`]'s settings): whoever
+/// can push would otherwise make themselves admin. Each such entry is
+/// reported in `problems` and kept as it is.
+pub const REPOSITORY_REFUSED_SECTIONS: [(&str, &str); 2] = [
+    (
+        "users",
+        "a new user, a change of a user's roles or of disabled, a prune of users (display names and emails apply)",
+    ),
+    (
+        "roles",
+        "a privileged role (granting users.manage or settings.security) defined, changed or pruned",
+    ),
+];
 const USER_KEY: &str = crate::login::USER_KEY;
 const HEALTH_STATES: [&str; 2] = ["healthy", "unhealthy"];
 
@@ -105,6 +119,39 @@ pub struct ScenarioDoc {
     pub scenario: Value,
 }
 
+/// One entry of `users:`: who signs in, never a password or a hash (an
+/// unknown field, `password` say, makes the section fail to load). A user
+/// the document creates is invited: the apply answers the link.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserDoc {
+    /// The sign-in name: the entry's identity.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
+}
+
+impl UserDoc {
+    /// The document entry of a user: the display name when it differs from
+    /// the name; an invited user is not `disabled` (they join through the
+    /// invitation).
+    pub fn of(u: &crate::rbac::User) -> Self {
+        Self {
+            name: u.name.clone(),
+            display_name: (u.display_name != u.name).then(|| u.display_name.clone()),
+            email: u.email.clone(),
+            roles: u.roles.clone(),
+            disabled: u.disabled && !u.pending,
+        }
+    }
+}
+
 /// `health:`: the state of the `/health` toggle.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -123,6 +170,8 @@ pub struct Extra {
     pub harness: Option<HarnessSection>,
     pub tests: Option<Vec<crate::replay::SavedTest>>,
     pub test_schedules: Option<Vec<crate::replay::schedule::Schedule>>,
+    pub roles: Option<Vec<crate::rbac::CustomRole>>,
+    pub users: Option<Vec<UserDoc>>,
     pub health: Option<HealthSection>,
 }
 
@@ -136,6 +185,8 @@ impl Extra {
             harness: file.harness.take(),
             tests: file.tests.take(),
             test_schedules: file.test_schedules.take(),
+            roles: file.roles.take(),
+            users: file.users.take(),
             health: file.health.take(),
         }
     }
@@ -147,6 +198,8 @@ impl Extra {
             && self.harness.is_none()
             && self.tests.is_none()
             && self.test_schedules.is_none()
+            && self.roles.is_none()
+            && self.users.is_none()
             && self.health.is_none()
     }
 
@@ -160,6 +213,8 @@ impl Extra {
             harness: self.harness,
             tests: self.tests,
             test_schedules: self.test_schedules,
+            roles: self.roles,
+            users: self.users,
             health: self.health,
             ..MocksFile::default()
         }
@@ -221,6 +276,44 @@ pub fn harness_schema() -> Value {
                     "scenario": { "type": "object", "description": "A scenario (GET /_rustybin/harness/schema)" }
                 }
             } }
+        }
+    })
+}
+
+pub fn users_schema() -> Value {
+    json!({
+        "type": "array",
+        "maxItems": crate::rbac::users::MAX_USERS,
+        "description": "The users who sign in (the password sign-in). Never a password or a hash: a user the document creates is invited, and the apply answers the link to send them. Matched by name. A document from the repository changes display names and emails only.",
+        "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+                "name": { "type": "string", "maxLength": crate::login::MAX_USER_CHARS, "description": "The sign-in name: letters, digits and . _ @ -" },
+                "display_name": { "type": "string", "maxLength": crate::rbac::users::MAX_DISPLAY_NAME_CHARS },
+                "email": { "type": "string", "maxLength": crate::rbac::users::MAX_EMAIL_CHARS },
+                "roles": { "type": "array", "items": { "type": "string" }, "maxItems": crate::rbac::users::MAX_ROLES_PER_USER, "description": "Built-in (viewer, tester, editor, admin, portal_reader) or custom role names" },
+                "disabled": { "type": "boolean", "default": false }
+            }
+        }
+    })
+}
+
+pub fn roles_schema() -> Value {
+    json!({
+        "type": "array",
+        "maxItems": crate::rbac::role::MAX_CUSTOM_ROLES,
+        "description": "Custom roles: a name, a description and permission names. A role granting users.manage or settings.security is privileged; a document from the repository never defines one.",
+        "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "permissions"],
+            "properties": {
+                "name": { "type": "string", "maxLength": crate::rbac::role::MAX_ROLE_NAME_CHARS, "pattern": "^[a-z][a-z0-9_-]*$" },
+                "description": { "type": "string", "maxLength": crate::rbac::role::MAX_ROLE_DESCRIPTION_CHARS },
+                "permissions": { "type": "array", "minItems": 1, "items": { "type": "string", "enum": crate::rbac::Permission::ALL.iter().map(|p| p.name()).collect::<Vec<_>>() } }
+            }
         }
     })
 }
@@ -344,6 +437,11 @@ pub fn export(state: &AppState, secrets: SecretsMode, bundle: bool) -> Export {
         tests: Some(state.saved_tests.list()),
         test_schedules: Some(state.saved_tests.schedules.list()),
         agents: Some(agents_section(&state.mocks.file_agents())),
+        roles: Some(state.users.custom_roles()),
+        // Users sign in only with the password sign-in: other modes carry
+        // no `users:` (an apply there leaves them alone).
+        users: crate::login::enabled(&state.config)
+            .then(|| state.users.list().iter().map(UserDoc::of).collect()),
         health: Some(HealthSection {
             initial: if state.health.is_healthy() {
                 "healthy".into()
@@ -923,6 +1021,27 @@ pub fn diff(before: &MocksFile, after: &MocksFile, base: Option<&Path>) -> Vec<C
             ));
         }
     }
+    if let Some(a) = &after.roles {
+        let b: BTreeMap<String, &crate::rbac::CustomRole> = before
+            .roles
+            .iter()
+            .flatten()
+            .map(|r| (r.name.clone(), r))
+            .collect();
+        let a: BTreeMap<String, &crate::rbac::CustomRole> =
+            a.iter().map(|r| (r.name.clone(), r)).collect();
+        map_changes(&mut out, "roles", &b, &a, |_| String::new());
+    }
+    if let Some(a) = &after.users {
+        let b: BTreeMap<String, &UserDoc> = before
+            .users
+            .iter()
+            .flatten()
+            .map(|u| (u.name.clone(), u))
+            .collect();
+        let a: BTreeMap<String, &UserDoc> = a.iter().map(|u| (u.name.clone(), u)).collect();
+        map_changes(&mut out, "users", &b, &a, |_| String::new());
+    }
     if let Some(a) = &after.health {
         let b = before.health.as_ref().map(|h| h.initial.as_str());
         value_change(&mut out, "health", "initial", b, Some(a.initial.as_str()));
@@ -1154,6 +1273,15 @@ pub struct ApplyOptions {
     /// `${VAR}` for the variable that seeds that very secret (its `Spec.env`),
     /// `secret:stored` or `null`, never a literal value.
     pub untrusted: bool,
+    /// Who applies, for the rules of `users:` and `roles:` (a caller grants
+    /// only what it holds, never changes its own roles, is never pruned).
+    /// `None`: the instance itself (a file at startup), every permission.
+    pub caller: Option<std::sync::Arc<crate::rbac::Resolved>>,
+    /// Where this instance answers (`scheme://host[:port]`), for the
+    /// invitation links of the users a document creates. `None` (a file
+    /// load): they are created invited without a link (`POST
+    /// /_rustybin/users/{id}/invite` sends one).
+    pub base_url: Option<String>,
 }
 
 /// [`apply`] on the blocking pool behind the compile permits (a document
@@ -1234,6 +1362,23 @@ pub fn apply(state: &AppState, file: MocksFile, opts: &ApplyOptions) -> Value {
         "agents",
         apply_agents(state, file.agents, opts, &mut problems),
     );
+    let roles = file.roles;
+    let named_roles: Option<BTreeSet<String>> = roles
+        .as_ref()
+        .map(|r| r.iter().map(|r| r.name.clone()).collect());
+    // Roles first (users may hold new ones), the prune of roles after the
+    // users (a role the document takes from them goes too).
+    let mut roles_result = apply_roles(state, roles, opts, &mut problems);
+    let users_result = apply_users(state, file.users, opts, &mut problems);
+    if let (Some(named), Some(Value::Object(r))) = (named_roles, roles_result.as_mut()) {
+        let pruned = prune_roles(state, &named, opts, &mut problems);
+        r.insert(
+            if opts.dry_run { "delete" } else { "deleted" }.into(),
+            json!(pruned),
+        );
+    }
+    put("roles", roles_result);
+    put("users", users_result);
     put(
         "health",
         apply_health(state, file.health, opts, &mut problems),
@@ -1279,6 +1424,8 @@ pub fn apply_extra(state: &AppState, extra: Extra, principal: &str) -> Vec<Strin
         principal: principal.to_string(),
         base: None,
         untrusted: false,
+        caller: None,
+        base_url: None,
     };
     let mut problems = Vec::new();
     apply_settings(state, &file, &opts, &mut problems);
@@ -1286,6 +1433,8 @@ pub fn apply_extra(state: &AppState, extra: Extra, principal: &str) -> Vec<Strin
     apply_harness(state, file.harness, &opts, &mut problems);
     apply_tests(state, file.tests, &opts, &mut problems);
     apply_test_schedules(state, file.test_schedules, &opts, &mut problems);
+    apply_roles(state, file.roles, &opts, &mut problems);
+    apply_users(state, file.users, &opts, &mut problems);
     apply_health(state, file.health, &opts, &mut problems);
     problems
 }
@@ -2049,6 +2198,355 @@ fn apply_agents(
     Some(view)
 }
 
+/// The caller a document applies as: the one given, else the instance
+/// itself (every permission).
+fn applier(opts: &ApplyOptions) -> std::sync::Arc<crate::rbac::Resolved> {
+    opts.caller
+        .clone()
+        .unwrap_or_else(|| std::sync::Arc::new(crate::rbac::Resolved::admin_token()))
+}
+
+/// `roles:`: each custom role saved (created or changed); the prune runs
+/// after `users:` ([`prune_roles`]), so a role the document takes from its
+/// users goes too. A caller saves only roles within its permissions. A
+/// document from the repository never defines or changes a privileged role
+/// (one granting `users.manage` or `settings.security`): such an entry is
+/// reported and the role kept as it is.
+fn apply_roles(
+    state: &AppState,
+    section: Option<Vec<crate::rbac::CustomRole>>,
+    opts: &ApplyOptions,
+    problems: &mut Vec<String>,
+) -> Option<Value> {
+    let section = section?;
+    let caller = applier(opts);
+    let existing = state.users.custom_roles();
+    let mut save = Vec::new();
+    let mut refused = Vec::new();
+    for r in section {
+        let old = existing.iter().find(|o| o.name == r.name);
+        if old == Some(&r) {
+            continue;
+        }
+        if crate::rbac::BuiltIn::parse(&r.name).is_some() {
+            problems.push(format!(
+                "roles.{}: a built-in role, which never changes (skipped)",
+                r.name
+            ));
+            continue;
+        }
+        if opts.untrusted
+            && (crate::rbac::role::is_privileged(r.permission_set())
+                || old.is_some_and(|o| crate::rbac::role::is_privileged(o.permission_set())))
+        {
+            problems.push(format!(
+                "roles.{}: a document from the repository cannot define or change a privileged role (one granting users.manage or settings.security): kept as it is",
+                r.name
+            ));
+            refused.push(r.name.clone());
+            continue;
+        }
+        if let Err(e) = crate::rbac::role::validate_custom(&r) {
+            problems.push(format!("roles.{}: {} (skipped)", r.name, e.join("; ")));
+            continue;
+        }
+        if let Some(p) = r
+            .permission_set()
+            .union(old.map(|o| o.permission_set()).unwrap_or_default())
+            .iter()
+            .find(|p| !caller.has(*p))
+        {
+            problems.push(format!(
+                "roles.{}: needs the {} permission, which the applying caller does not hold (skipped)",
+                r.name,
+                p.name()
+            ));
+            continue;
+        }
+        save.push(r);
+    }
+    let names: Vec<String> = save.iter().map(|r| r.name.clone()).collect();
+    if opts.dry_run {
+        return Some(json!({ "save": names, "refused": refused }));
+    }
+    let mut saved = Vec::new();
+    for r in save {
+        let name = r.name.clone();
+        match state.users.save_role(r) {
+            Ok(()) => saved.push(name),
+            Err(e) => problems.push(format!("roles.{name}: {e}")),
+        }
+    }
+    Some(json!({ "saved": saved, "refused": refused }))
+}
+
+/// With `prune`, the custom roles `roles:` does not name are deleted, but
+/// never one somebody holds, nor (from the repository) a privileged one.
+fn prune_roles(
+    state: &AppState,
+    named: &BTreeSet<String>,
+    opts: &ApplyOptions,
+    problems: &mut Vec<String>,
+) -> Vec<String> {
+    if !opts.prune {
+        return Vec::new();
+    }
+    let caller = applier(opts);
+    let mut out = Vec::new();
+    for r in state.users.custom_roles() {
+        if named.contains(&r.name) {
+            continue;
+        }
+        if opts.untrusted && crate::rbac::role::is_privileged(r.permission_set()) {
+            problems.push(format!(
+                "roles.{}: a document from the repository cannot delete a privileged role: kept",
+                r.name
+            ));
+            continue;
+        }
+        if r.permission_set().iter().any(|p| !caller.has(p)) {
+            problems.push(format!(
+                "roles.{}: grants more than the applying caller holds: kept",
+                r.name
+            ));
+            continue;
+        }
+        let holders = state.users.holders(&r.name);
+        if holders > 0 {
+            problems.push(format!(
+                "roles.{}: held by {holders} user(s), so not pruned",
+                r.name
+            ));
+            continue;
+        }
+        if opts.dry_run {
+            out.push(r.name);
+            continue;
+        }
+        match state.users.delete_role(&r.name) {
+            Ok(()) => out.push(r.name),
+            Err(e) => problems.push(format!("roles.{}: {e}", r.name)),
+        }
+    }
+    out
+}
+
+/// `users:` (password sign-in only; elsewhere the section is reported and
+/// left alone). A user it names and the instance lacks is created invited:
+/// the answer carries the link to send them (none for a file load, which
+/// has nobody to answer). One it names and the instance has gets its
+/// display name, email, roles and disabled. With `prune`, users it does
+/// not name are deleted, never the first admin, the applying user nor the
+/// last enabled admin. The rules of the API apply: nobody changes their own
+/// roles, a caller grants and manages only what it holds. A document from
+/// the repository changes display names and emails only: a new user, a
+/// change of roles or of disabled, and a prune are reported and kept as
+/// they are (anyone who can push would otherwise make themselves admin).
+fn apply_users(
+    state: &AppState,
+    section: Option<Vec<UserDoc>>,
+    opts: &ApplyOptions,
+    problems: &mut Vec<String>,
+) -> Option<Value> {
+    let section = section?;
+    if !crate::login::enabled(&state.config) {
+        problems.push(
+            "users: users sign in only with RUSTYBIN_CONTROL_AUTH=password: the section is left alone"
+                .into(),
+        );
+        return Some(json!({ "skipped": true }));
+    }
+    let caller = applier(opts);
+    let named: BTreeSet<String> = section.iter().map(|u| u.name.clone()).collect();
+    let mut created = Vec::new();
+    let mut updated = Vec::new();
+    let mut invitations = Vec::new();
+    let mut refused = Vec::new();
+    for doc in section {
+        let key = format!("users.{}", crate::logging::printable(&doc.name, 64));
+        let Some(user) = state.users.find_by_name(&doc.name) else {
+            if opts.untrusted {
+                problems.push(format!(
+                    "{key}: a document from the repository cannot create users (invite them through the API, the console or the CLI): skipped"
+                ));
+                refused.push(doc.name.clone());
+                continue;
+            }
+            if opts.dry_run {
+                created.push(doc.name.clone());
+                continue;
+            }
+            let invite = crate::rbac::service::Invite {
+                name: doc.name.clone(),
+                display_name: doc.display_name.clone(),
+                email: doc.email.clone(),
+                roles: doc.roles.clone(),
+            };
+            let missing = doc
+                .roles
+                .iter()
+                .filter_map(|r| state.users.role_permissions(r))
+                .fold(crate::rbac::PermSet::EMPTY, crate::rbac::PermSet::union)
+                .iter()
+                .find(|p| !caller.has(*p));
+            if let Some(p) = missing {
+                problems.push(format!(
+                    "{key}: its roles need the {} permission, which the applying caller does not hold (skipped)",
+                    p.name()
+                ));
+                continue;
+            }
+            // A user the document creates disabled is not invited (a link
+            // is sent once they are enabled).
+            let link = if doc.disabled {
+                None
+            } else {
+                opts.base_url.as_deref()
+            };
+            if doc.disabled {
+                let new = crate::rbac::NewUser {
+                    name: doc.name.clone(),
+                    display_name: doc.display_name.clone(),
+                    email: doc.email.clone(),
+                    roles: doc.roles.clone(),
+                    disabled: true,
+                    source: crate::rbac::Source::Document,
+                };
+                match state.users.add(new, None) {
+                    Ok(_) => created.push(doc.name.clone()),
+                    Err(e) => problems.push(format!("{key}: {e} (skipped)")),
+                }
+                continue;
+            }
+            match link {
+                Some(base) => match crate::rbac::service::invite_user(
+                    state,
+                    &caller,
+                    invite,
+                    base,
+                    crate::rbac::Source::Document,
+                ) {
+                    Ok(v) => {
+                        created.push(doc.name.clone());
+                        invitations.push(json!({
+                            "name": doc.name,
+                            "url": v["invitation"]["url"],
+                            "expires_at": v["invitation"]["expires_at"],
+                        }));
+                    }
+                    Err(e) => problems.push(format!("{key}: {} (skipped)", e.message())),
+                },
+                None => {
+                    let new = crate::rbac::NewUser {
+                        name: doc.name.clone(),
+                        display_name: doc.display_name.clone(),
+                        email: doc.email.clone(),
+                        roles: doc.roles.clone(),
+                        disabled: false,
+                        source: crate::rbac::Source::Document,
+                    };
+                    match state.users.add_invited(new) {
+                        Ok(_) => {
+                            created.push(doc.name.clone());
+                            tracing::info!(
+                                target: "rustybin::auth",
+                                user = %crate::logging::printable(&doc.name, 64),
+                                "a user from the configuration file is invited without a link: POST /_rustybin/users/{{id}}/invite (rustybin users invite NAME --reset) sends one"
+                            );
+                        }
+                        Err(e) => problems.push(format!("{key}: {e} (skipped)")),
+                    }
+                }
+            }
+            continue;
+        };
+        let current = UserDoc::of(&user);
+        if current == doc {
+            continue;
+        }
+        let mut patch = crate::rbac::users::UserPatch::default();
+        let want_display = doc.display_name.clone().unwrap_or_else(|| doc.name.clone());
+        if want_display != user.display_name {
+            patch.display_name = Some(want_display);
+        }
+        if doc.email != user.email {
+            patch.email = Some(doc.email.clone());
+        }
+        let roles_change = doc.roles != user.roles;
+        let disabled_change = doc.disabled != current.disabled;
+        if opts.untrusted && (roles_change || disabled_change) {
+            problems.push(format!(
+                "{key}: a document from the repository cannot change a user's roles or disable them (change them through the API, the console or the CLI): kept as they are"
+            ));
+            refused.push(doc.name.clone());
+        } else {
+            if roles_change {
+                if caller.user_id() == Some(user.id.as_str()) {
+                    problems.push(format!(
+                        "{key}: nobody changes their own roles, the applying user included: kept"
+                    ));
+                } else {
+                    patch.roles = Some(doc.roles.clone());
+                }
+            }
+            if disabled_change {
+                patch.disabled = Some(doc.disabled);
+            }
+        }
+        if patch.is_empty() {
+            continue;
+        }
+        if opts.dry_run {
+            updated.push(doc.name.clone());
+            continue;
+        }
+        match crate::rbac::service::update_user(state, &caller, &user.id, patch) {
+            Ok(_) => updated.push(doc.name.clone()),
+            Err(e) => problems.push(format!("{key}: {} (kept)", e.message())),
+        }
+    }
+    let mut deleted = Vec::new();
+    if opts.prune {
+        for u in state.users.list() {
+            if named.contains(&u.name) {
+                continue;
+            }
+            let key = format!("users.{}", crate::logging::printable(&u.name, 64));
+            if state.users.is_first_admin(&u.id) || caller.user_id() == Some(u.id.as_str()) {
+                continue;
+            }
+            if opts.untrusted {
+                problems.push(format!(
+                    "{key}: a document from the repository cannot delete users: kept"
+                ));
+                continue;
+            }
+            if u.is_enabled_admin() && state.users.enabled_admins() <= 1 {
+                problems.push(format!("{key}: the last enabled admin is never pruned"));
+                continue;
+            }
+            if opts.dry_run {
+                deleted.push(u.name);
+                continue;
+            }
+            match crate::rbac::service::delete_user(state, &caller, &u.id) {
+                Ok(_) => deleted.push(u.name),
+                Err(e) => problems.push(format!("{key}: {} (kept)", e.message())),
+            }
+        }
+    }
+    let mut out = json!({
+        if opts.dry_run { "create" } else { "created" }: created,
+        if opts.dry_run { "update" } else { "updated" }: updated,
+        if opts.dry_run { "delete" } else { "deleted" }: deleted,
+        "refused": refused,
+    });
+    if !opts.dry_run {
+        out["invitations"] = json!(invitations);
+    }
+    Some(out)
+}
+
 fn apply_health(
     state: &AppState,
     section: Option<HealthSection>,
@@ -2158,28 +2656,52 @@ pub fn check_sections(
     settings: &crate::settings::Settings,
     file: &MocksFile,
 ) -> Result<(), axum::response::Response> {
+    match sections_need(caller, settings, file) {
+        Some(p) => Err(crate::rbac::refuse(caller, p)),
+        None => Ok(()),
+    }
+}
+
+/// The first permission [`check_sections`] finds missing, if any (the
+/// `apply_config` tool answers it as a tool error). `users:` and `roles:`
+/// need `users.manage`.
+pub fn sections_need(
+    caller: &crate::rbac::Resolved,
+    settings: &crate::settings::Settings,
+    file: &MocksFile,
+) -> Option<crate::rbac::Permission> {
     use crate::rbac::Permission as P;
+    let mut needs = Vec::new();
+    let key_needs = |key: &str| {
+        let secret = settings.spec(key).is_some_and(|s| s.secret);
+        crate::settings::extra_permissions(key, secret)
+    };
     if file.settings.is_some() || file.instance.is_some() {
-        crate::rbac::require(caller, P::SettingsWrite)?;
+        needs.push(P::SettingsWrite);
     }
     if let Some(values) = &file.settings {
-        crate::settings::check_keys(caller, settings, values.keys().map(|k| (k.as_str(), false)))?;
+        for k in values.keys() {
+            needs.extend(key_needs(k));
+        }
     }
     if let Some(i) = &file.instance {
         if i.title.is_some() {
-            crate::settings::check_keys(caller, settings, [("console.title", false)])?;
+            needs.extend(key_needs("console.title"));
         }
         if i.console.is_some() {
-            crate::settings::check_keys(caller, settings, [(crate::login::USER_KEY, false)])?;
+            needs.extend(key_needs(crate::login::USER_KEY));
         }
     }
     if file.secrets.as_ref().is_some_and(|s| !s.is_empty()) {
-        crate::rbac::require(caller, P::SecretsWrite)?;
+        needs.push(P::SecretsWrite);
     }
     if file.agents.is_some() {
-        crate::rbac::require(caller, P::AgentsManage)?;
+        needs.push(P::AgentsManage);
     }
-    Ok(())
+    if file.users.is_some() || file.roles.is_some() {
+        needs.push(P::UsersManage);
+    }
+    needs.into_iter().find(|p| !caller.has(*p))
 }
 
 pub fn parse_document(document: &Value) -> Result<MocksFile, String> {

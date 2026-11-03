@@ -49,6 +49,28 @@
     `caller.rights`; an agent's tool list answers each tool's `permission` instead of
     its `right`; `export_config` is a `mocks.read` tool (the whole instance still needs
     `config.export`).
+- Users and roles on every surface, with invitations (access control, step 09;
+  [Users and roles](users.md)). An admin invites people (`POST /_rustybin/users`
+  answers a one-time link `/ui/#/join/<token>`, 72 hours, kept only as a SHA-256, at
+  most 100 open), gives them roles, disables or deletes them; a reset is a new link.
+  Nobody but its owner sees a password: the person sets it on the join page (`POST
+  /_rustybin/join`, open and rate limited like the sign-in) and changes it under **My
+  account** (`/_rustybin/me`, `PUT /_rustybin/me/password`). Custom roles under
+  `/_rustybin/roles` (every mode). Guard rails: the last enabled admin stays, nobody
+  changes their own roles, the first admin is never deleted, a role in use is never
+  deleted, and nobody grants or manages more than they hold. The console's
+  **Management, Users and roles** with the permission matrix, the account menu's **My
+  account** and the join page; `rustybin users`, `roles`, `me` and `passwd`; the tools
+  `list_users`, `invite_user`, `update_user`, `delete_user`, `list_roles`,
+  `save_role`, `delete_role` (the admin's tool list is 132); `users:` and `roles:` in
+  `rustybin.yaml` (never a password; a document from the repository changes display
+  names and emails only).
+
+  **Behaviour changes**: `PUT /_rustybin/password` changes the caller's own password
+  (any signed-in user; a caller who is not a user still needs `users.manage` and
+  changes the first admin's); a disabled user's sign-in answers as a wrong password; the `apply_config` tool now checks what
+  a document's sections need (`settings:`, `secrets:`, `agents:`, `users:`, `roles:`)
+  as the REST route did; `list_sessions` and `end_session` take `user`.
 
 ## 0.4.0 (2026-11-03): testing workflows
 

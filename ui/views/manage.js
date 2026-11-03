@@ -1,6 +1,7 @@
 // Management: the instance's settings and this browser's, in tabs down the
-// left (General, Sign-in, AI, Network, Portal, Export, Source control,
-// Checkpoints, Diagnostics).
+// left (General, Sign-in, Users and roles, AI, Network, Portal, Export,
+// Source control, Checkpoints, Diagnostics). Users and roles lives in
+// ./manage/users.js.
 // Export and Source control live in ./manage/export.js and ./manage/git.js
 // (the whole instance as rustybin.yaml, and its git repository). Portal
 // publishes items to the dev portal at
@@ -21,12 +22,14 @@ import * as portal from '../lib/portal.js';
 import { exportPanel } from './manage/export.js';
 import { gitPanel } from './manage/git.js';
 import { checkpointsPanel } from './manage/checkpoints.js';
+import { usersPanel } from './manage/users.js';
 import * as perms from '../lib/perms.js';
 
 // The rail. Later steps append entries here; each renders its own panel.
 export const TABS = [
   { id: 'general', title: 'General', icon: 'settings', hint: 'Console title, this browser, your AI agent' },
   { id: 'signin', title: 'Sign-in', icon: 'lock', hint: 'The console user name and password, active sessions' },
+  { id: 'users', title: 'Users and roles', icon: 'user', hint: 'Invite people, give them roles, disable or remove them; custom roles' },
   { id: 'ai', title: 'AI', icon: 'ai', hint: 'Your model provider and key for the AI features' },
   { id: 'network', title: 'Network', icon: 'globe', hint: 'Outbound connections and recent decisions' },
   { id: 'portal', title: 'Portal', icon: 'explorer', hint: 'The dev portal: branding, access, published items, insights' },
@@ -141,6 +144,8 @@ function statusCard(doc, status) {
     items.unshift(notice('warn', h('strong', null, 'Default password. '), 'Anyone who reaches this instance can sign in with rustybin / rustybin: change it below, or set RUSTYBIN_CONSOLE_PASSWORD.'));
   }
   if (doc && doc.locked && (user && user.locked)) items.push(notice('', icon('lock'), h('div', { class: 'grow' }, 'RUSTYBIN_SETTINGS_LOCK is on: the environment is authoritative for the user name and password (RUSTYBIN_CONSOLE_USER, RUSTYBIN_CONSOLE_PASSWORD_HASH).')));
+  if (on) items.push(h('p', { class: 'small muted', style: { margin: 0 } }, 'The user name and password here are the first admin\'s (the instance\'s sign-in settings). Your own profile, password and sessions: ',
+    h('a', { href: '#/account' }, 'My account'), '. Everyone else: ', h('a', { href: '#/manage/users' }, 'Users and roles'), '.'));
   return card('Sign-in', { hint: 'who may open the console and the control plane' }, h('div', { class: 'stack' }, ...items));
 }
 
@@ -696,7 +701,7 @@ export default {
         b.tabIndex = tid === id ? 0 : -1;
       }
       if (location.hash !== '#/manage/' + id) history.replaceState(null, '', '#/manage/' + id);
-      const render = id === 'checkpoints' ? checkpointsPanel : id === 'diagnostics' ? diagnosticsPanel : id === 'network' ? networkPanel : id === 'signin' ? signinPanel : id === 'ai' ? aiPanel : id === 'portal' ? portalPanel : id === 'export' ? exportPanel : id === 'git' ? gitPanel : generalPanel;
+      const render = id === 'users' ? usersPanel : id === 'checkpoints' ? checkpointsPanel : id === 'diagnostics' ? diagnosticsPanel : id === 'network' ? networkPanel : id === 'signin' ? signinPanel : id === 'ai' ? aiPanel : id === 'portal' ? portalPanel : id === 'export' ? exportPanel : id === 'git' ? gitPanel : generalPanel;
       replace(panel, render(doc, (d) => { if (d) { doc = d; renderStatus(); } }, error));
     }
 

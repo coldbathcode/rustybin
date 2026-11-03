@@ -457,7 +457,7 @@ never tool inputs and never returned: the operator sets them in the console or w
 
 The token for an https remote is the secret `git.token`: an agent cannot set it.
 
-### Agents and sign-in sessions
+### Agents, users and sign-in sessions
 
 | Tool | Permission | |
 |---|---|---|
@@ -465,11 +465,20 @@ The token for an https remote is the secret `git.token`: an agent cannot set it.
 | `set_agent_rights` | `agents.manage` | A ceiling, allow and deny lists, a note; `reset: true` clears the agent's own rights. Never on the caller's own agent or an agent of the caller's credential |
 | `revoke_agent` / `restore_agent` | `agents.manage` | Revoke (confirmed; an agent cannot revoke itself) and restore (never an agent of the caller's credential) |
 | `end_agent_sessions` | `agents.manage` | Close an agent's handshake-era sessions (never of an agent of the caller's credential) |
-| `list_sessions` | `users.read` | The console's sign-in sessions, when the password sign-in is on |
-| `end_session` | `users.manage` | End one session by id, or `all: true` to sign out everywhere (confirmed) |
+| `list_sessions` | `users.read` | The console's sign-in sessions, when the password sign-in is on; `user` lists one user's |
+| `end_session` | `users.manage` | End one session by id; `user` signs one user out everywhere, `all: true` everyone (both confirmed) |
+| `list_users` | `users.read` | The [users](users.md): roles, status (active, invited, disabled), last sign-in, the open invitation (never its link); `user` for one with its permissions |
+| `invite_user` | `users.manage` | Create a user, invited, and answer the one-time link to send them (confirmed); `reset: true` sends a user who exists a new link (a password reset) |
+| `update_user` | `users.manage` | Roles, display name, email, disabled; confirmed when it grants a privileged role. The guard rails apply (the last enabled admin stays, nobody changes their own roles) |
+| `delete_user` | `users.manage` | Delete a user (confirmed; never the last enabled admin, never the first admin) |
+| `list_roles` | `users.read` | The built-in and custom roles with their permissions and holders, and the permission table; `name` for one |
+| `save_role` | `users.manage` | Create or change a custom role (confirmed when it is privileged) |
+| `delete_role` | `users.manage` | Delete a custom role nobody holds |
 
-The password is changed only in the console, with `rustybin password change` or
-through the environment.
+No tool takes or returns a password or a hash: a person joins through the link
+`invite_user` answers and sets their own password in the browser, and changes it in
+the console or with `rustybin passwd`. A caller grants only roles whose permissions it
+holds, and manages only users whose permissions it holds.
 
 ### Traffic
 
@@ -713,7 +722,8 @@ Tools that destroy something carry the MCP `destructiveHint` annotation (reads c
 `readOnlyHint`) and ask before acting: `rollback_mock`, `delete_mock`,
 `clear_mock_data`, `clear_traffic`, `apply_config` with `prune`, `clear_requests`,
 `end_visit`, `pause_self_service`, `revoke_agent`, `unpublish_registry_server`,
-`git_resolve`, `git_deploy_key` with `replace`, `end_session` with `all`,
+`git_resolve`, `git_deploy_key` with `replace`, `end_session` with `all` or `user`,
+`delete_user`,
 `delete_test`, `restore_checkpoint` (not its dry run), `delete_checkpoint` and
 `end_gateway_scenario`. Tools that reach outside the instance or publish something ask
 too: `mcp_call` and `run_mcp_checks` to another host, `browse_registry`, `git_push`,
@@ -721,7 +731,9 @@ too: `mcp_call` and `run_mcp_checks` to another host, `browse_registry`, `git_pu
 `load_assist_models`, the AI tools when they write (`generate_spec` with `create`,
 `generate_examples` and `edit_spec_with_ai` with `apply`), `check_gateway_scenario`,
 `run_tests` through a gateway or with a method that changes state, and the harness
-runs. `update_settings` asks when it changes a key under `egress.`, `agents.`,
+runs. `invite_user` always asks (its answer is a link that signs a person in),
+`update_user` when it grants a privileged role and `save_role` when the role is
+privileged. `update_settings` asks when it changes a key under `egress.`, `agents.`,
 `console.` or `git.`. When
 the client supports elicitation, the server asks the user directly ("Delete the mock
 orders-api and its traffic?"). Without it the call needs `"confirm": true`, which the

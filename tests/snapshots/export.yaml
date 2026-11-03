@@ -66,6 +66,26 @@ agents:
   - match:
       name: ci-*
     ceiling: read-only
+roles:
+- name: catalog-reader
+  description: Reads mocks and traffic
+  permissions:
+  - mocks.read
+  - traffic.read
+users:
+- name: payments
+  roles:
+  - admin
+- name: alice
+  display_name: Alice Doe
+  email: alice@example.com
+  roles:
+  - editor
+  - catalog-reader
+- name: bob
+  roles:
+  - viewer
+  disabled: true
 health:
   initial: unhealthy
 ---

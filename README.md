@@ -736,7 +736,18 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET | `/_rustybin/session` | Who the presented credential is: user, roles, permissions, scopes, expiry, how it was obtained |
 | GET DELETE | `/_rustybin/sessions` | Sign-in sessions (admin): list them, or DELETE to sign out everywhere |
 | DELETE | `/_rustybin/sessions/{id}` | End one sign-in session (admin) |
-| PUT | `/_rustybin/password` | Change the console user name and password (admin, current password required) |
+| PUT | `/_rustybin/password` | Change your own password (0.3's route, an alias of PUT /_rustybin/me/password); the first admin's also takes a new user name |
+| PUT | `/_rustybin/me/password` | Change your own password (the current one required) |
+| POST | `/_rustybin/join` | Accept an invitation: the link's token and your new password, for a sign-in token |
+| GET POST | `/_rustybin/users` | Users: list them, or POST to invite one (an invitation link, shown once) |
+| GET PATCH DELETE | `/_rustybin/users/{id}` | One user (by id or sign-in name): read, change roles, display name, email or disabled, delete |
+| POST | `/_rustybin/users/{id}/invite` | A new invitation link for a user: a password reset once they joined |
+| GET DELETE | `/_rustybin/users/{id}/sessions` | A user's sign-in sessions: list them, or DELETE to sign the user out everywhere |
+| GET POST | `/_rustybin/roles` | Roles: the built-in and custom roles with the permission table, or POST a custom role |
+| GET PUT DELETE | `/_rustybin/roles/{name}` | One role: read it and who holds it, PUT to create or change a custom role, DELETE one nobody holds |
+| GET PATCH | `/_rustybin/me` | Your own account: who you are, your roles and permissions; PATCH your display name and email |
+| GET DELETE | `/_rustybin/me/sessions` | Your own sign-in sessions: list them, or DELETE to sign yourself out everywhere |
+| DELETE | `/_rustybin/me/sessions/{id}` | End one of your own sign-in sessions |
 | GET | `/_rustybin/assist` | AI assist: the provider, models, whether a key is set, the tasks and usage |
 | POST | `/_rustybin/assist/test` | AI assist: one short call to the configured provider (admin) |
 | POST | `/_rustybin/assist/run` | AI assist: run a task (free_answer, explain, suggest) as SSE or one JSON answer |

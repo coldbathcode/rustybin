@@ -90,6 +90,7 @@ async fn apply(
     State(state): State<AppState>,
     headers: HeaderMap,
     extensions: axum::http::Extensions,
+    uri: axum::http::Uri,
     body: axum::body::Bytes,
 ) -> Response {
     let body: ApplyBody = match serde_json::from_slice(&body) {
@@ -115,6 +116,10 @@ async fn apply(
         principal: crate::settings::principal(&headers, &state.config),
         base: None,
         untrusted: false,
+        base_url: Some(
+            crate::session::request_origin(&headers, &extensions, &uri, &state.config).base_url(),
+        ),
+        caller: Some(caller),
     };
     match super::apply_on_pool(&state, file, opts).await {
         Ok(v) => Json(v).into_response(),

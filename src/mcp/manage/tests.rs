@@ -1636,6 +1636,8 @@ use Cover::{Excluded, Resource, Tool};
 const NODE_TO_NODE: &str = "node-to-node: a harness member's own traffic";
 const OAUTH_WALK: &str = "the agent sign-in a browser walks";
 const SIGN_IN: &str = "the sign-in transport: a token is what an agent connects with";
+const OWN_PASSWORD: &str = "a password passes through nobody but its owner: the console, rustybin passwd, or the environment for the first admin";
+const OWN_ACCOUNT: &str = "a person's own account (console, My account; rustybin me): an agent's credential is not a person until agents act for a user (testing-2 step 12); get_instance answers the caller's roles and permissions";
 
 /// Every route under `/_rustybin/` and `/bin`, and what covers it. The
 /// parity test fails on a route missing here, a tool or resource that does
@@ -1706,7 +1708,18 @@ const COVERAGE: &[(&str, Cover)] = &[
     ("/_rustybin/session", Tool("get_instance")),
     ("/_rustybin/sessions", Tool("list_sessions")),
     ("/_rustybin/sessions/{id}", Tool("end_session")),
-    ("/_rustybin/password", Excluded("the password is set only in the console, with rustybin password change, or through the environment")),
+    ("/_rustybin/password", Excluded(OWN_PASSWORD)),
+    ("/_rustybin/me/password", Excluded(OWN_PASSWORD)),
+    ("/_rustybin/join", Excluded("the invitation link a person opens in a browser, with the password they choose")),
+    ("/_rustybin/me", Excluded(OWN_ACCOUNT)),
+    ("/_rustybin/me/sessions", Excluded(OWN_ACCOUNT)),
+    ("/_rustybin/me/sessions/{id}", Excluded(OWN_ACCOUNT)),
+    ("/_rustybin/users", Tool("list_users")),
+    ("/_rustybin/users/{id}", Tool("update_user")),
+    ("/_rustybin/users/{id}/invite", Tool("invite_user")),
+    ("/_rustybin/users/{id}/sessions", Tool("end_session")),
+    ("/_rustybin/roles", Tool("list_roles")),
+    ("/_rustybin/roles/{name}", Tool("save_role")),
     ("/_rustybin/mcp", Excluded("this server")),
     ("/_rustybin/mcp-servers", Tool("list_mcp_servers")),
     ("/_rustybin/mcp-relay", Tool("mcp_call")),
@@ -1881,10 +1894,11 @@ fn every_tool_is_fully_defined() {
                 .into_iter()
                 .flatten()
                 .any(|(k, _)| k.ends_with("_key")
-                    || k == "password"
+                    || k.contains("password")
+                    || k.contains("hash")
                     || k == "secret"
                     || (k.ends_with("_token") && k != "join_token")),
-            "{}: secrets are never tool inputs",
+            "{}: secrets (keys, tokens, passwords, hashes) are never tool inputs",
             t.name
         );
     }
@@ -3849,4 +3863,180 @@ fn every_tool_declares_a_permission() {
             t.name
         );
     }
+}
+
+// ── Access control 3: users and roles ───────────────────────────────
+
+#[tokio::test]
+async fn users_and_roles_tools_invite_confirm_and_never_carry_a_password() {
+    let mut c = open_config();
+    c.control_auth = crate::control_auth::ControlAuth::Password;
+    c.admin_token = Some("admin-09".into());
+    let state = test_state_with(c);
+    let app = test_app_with(state.clone());
+    let headers: [(&str, &str); 1] = [("authorization", "Bearer admin-09")];
+    // The admin's tool list counts the step 09 tools (and the docs say so).
+    let names = tool_names(&app, &headers).await;
+    assert_eq!(names.len(), 132, "docs/src/coding-agents.md counts 132");
+    for t in [
+        "list_users",
+        "invite_user",
+        "update_user",
+        "delete_user",
+        "list_roles",
+        "save_role",
+        "delete_role",
+    ] {
+        assert!(names.iter().any(|n| n == t), "{t}");
+    }
+    // Inviting is confirmed; the answer carries the link once.
+    let r = tool(
+        &app,
+        &headers,
+        "invite_user",
+        json!({ "name": "dana", "roles": ["tester"] }),
+    )
+    .await;
+    assert!(
+        is_error(&r) && text_of(&r).contains("confirm"),
+        "{}",
+        text_of(&r)
+    );
+    assert!(state.users.find_by_name("dana").is_none());
+    let r = tool(
+        &app,
+        &headers,
+        "invite_user",
+        json!({ "name": "dana", "roles": ["tester"], "confirm": true }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    let url = r["structuredContent"]["invitation"]["url"]
+        .as_str()
+        .expect("url")
+        .to_string();
+    assert!(url.contains("/ui/#/join/rbi_") && text_of(&r).contains(&url));
+    let token = url.rsplit('/').next().unwrap_or("x").to_string();
+    let r = tool(&app, &headers, "list_users", json!({})).await;
+    assert!(!is_error(&r), "{r}");
+    assert!(!r.to_string().contains(&token));
+    assert!(
+        text_of(&r).contains("dana (tester, invited)"),
+        "{}",
+        text_of(&r)
+    );
+    // A privileged role is confirmed; a plain one is not.
+    let r = tool(
+        &app,
+        &headers,
+        "save_role",
+        json!({ "name": "people", "permissions": ["users.read", "users.manage"] }),
+    )
+    .await;
+    assert!(
+        is_error(&r) && text_of(&r).contains("confirm"),
+        "{}",
+        text_of(&r)
+    );
+    let r = tool(
+        &app,
+        &headers,
+        "save_role",
+        json!({ "name": "reader", "permissions": ["mocks.read"] }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    let r = tool(
+        &app,
+        &headers,
+        "update_user",
+        json!({ "user": "dana", "roles": ["admin"] }),
+    )
+    .await;
+    assert!(
+        is_error(&r) && text_of(&r).contains("confirm"),
+        "{}",
+        text_of(&r)
+    );
+    let r = tool(
+        &app,
+        &headers,
+        "update_user",
+        json!({ "user": "dana", "roles": ["reader"] }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["roles"], json!(["reader"]));
+    // The guard rails answer as tool errors with their reason.
+    let r = tool(
+        &app,
+        &headers,
+        "update_user",
+        json!({ "user": "rustybin", "disabled": true }),
+    )
+    .await;
+    assert!(is_error(&r));
+    assert_eq!(r["structuredContent"]["reason"], "last_admin");
+    let r = tool(&app, &headers, "delete_role", json!({ "name": "reader" })).await;
+    assert_eq!(r["structuredContent"]["reason"], "role_in_use", "{r}");
+    let r = tool(&app, &headers, "delete_user", json!({ "user": "dana" })).await;
+    assert!(is_error(&r) && text_of(&r).contains("confirm"));
+    let r = tool(
+        &app,
+        &headers,
+        "delete_user",
+        json!({ "user": "dana", "confirm": true }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    let r = tool(&app, &headers, "list_roles", json!({ "name": "reader" })).await;
+    assert_eq!(r["structuredContent"]["users"], 0);
+    let r = tool(&app, &headers, "delete_role", json!({ "name": "reader" })).await;
+    assert!(!is_error(&r), "{r}");
+    // No result of these tools ever carries a hash.
+    let r = tool(&app, &headers, "list_users", json!({ "user": "rustybin" })).await;
+    assert!(!r.to_string().contains("argon2"));
+    // One user's sessions, and signing one user out (confirmed).
+    let r = tool(
+        &app,
+        &headers,
+        "list_sessions",
+        json!({ "user": "rustybin" }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    let r = tool(&app, &headers, "end_session", json!({ "user": "rustybin" })).await;
+    assert!(is_error(&r) && text_of(&r).contains("confirm"));
+}
+
+#[tokio::test]
+async fn apply_config_checks_what_its_sections_need() {
+    let app = app_with(jwt_config());
+    let token = crate::test_support::sign_control_jwt(
+        &json!({
+            "aud": "test-instance",
+            "exp": chrono::Utc::now().timestamp() + 600,
+            "rb_perms": ["config.apply", "mocks.read"],
+        }),
+        false,
+    );
+    let bearer = format!("Bearer {token}");
+    let headers: [(&str, &str); 1] = [("authorization", &bearer)];
+    let r = tool(
+        &app,
+        &headers,
+        "apply_config",
+        json!({ "document": "version: 2\nroles: []\n", "dry_run": true }),
+    )
+    .await;
+    assert!(is_error(&r), "{r}");
+    assert!(text_of(&r).contains("users.manage"), "{}", text_of(&r));
+    let r = tool(
+        &app,
+        &headers,
+        "apply_config",
+        json!({ "document": "version: 2\nsecrets: { leads.webhook_token: null }\n", "dry_run": true }),
+    )
+    .await;
+    assert!(text_of(&r).contains("secrets.write"), "{}", text_of(&r));
 }

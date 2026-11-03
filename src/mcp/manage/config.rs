@@ -152,6 +152,8 @@ pub async fn diff_config(ctx: &CallCtx, access: &Access, args: &Value) -> Value 
         principal: access.principal(),
         base: None,
         untrusted: false,
+        caller: Some(access.resolved.clone()),
+        base_url: Some(access.links.base_url().to_string()),
     };
     let r = match configdoc::apply_on_pool(&ctx.app, file, opts).await {
         Ok(r) => r,
@@ -171,6 +173,14 @@ pub async fn apply_config(ctx: &CallCtx, access: &Access, args: &Value, params: 
     };
     let dry_run = arg_bool(args, "dry_run").unwrap_or(false);
     let prune = arg_bool(args, "prune").unwrap_or(false);
+    // What the document's sections need beyond config.apply, as the REST
+    // route checks it.
+    if let Some(p) = configdoc::sections_need(&access.resolved, &ctx.app.settings, &file) {
+        return err(format!(
+            "permission_required: {}: the document's sections need it (settings:, instance:, secrets:, agents:, users:, roles:)",
+            p.name()
+        ));
+    }
     if prune && !dry_run {
         let action = format!(
             "apply the document and remove what its present sections ({}) do not name (prune)",
@@ -186,6 +196,8 @@ pub async fn apply_config(ctx: &CallCtx, access: &Access, args: &Value, params: 
         principal: access.principal(),
         base: None,
         untrusted: false,
+        caller: Some(access.resolved.clone()),
+        base_url: Some(access.links.base_url().to_string()),
     };
     let r = match configdoc::apply_on_pool(&ctx.app, file, opts).await {
         Ok(r) => r,

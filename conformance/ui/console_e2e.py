@@ -2335,6 +2335,118 @@ def run_password(browser):
     ctx.close()
 
 
+def run_users(browser):
+    """Users and roles (access control step 09) on the password instance: an
+    admin invites a user, the person joins from the link in a second browser
+    context, the admin changes their role, and their view follows."""
+    base = os.environ["RUSTYBIN_PASSWORD_URL"].rstrip("/")
+    print(f"users and roles: {base}")
+    ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+    page = ctx.new_page()
+    page.set_default_timeout(TIMEOUT)
+    page.on("pageerror", lambda e: console_errors.append(f"[users] uncaught: {e}"))
+    held = {}
+
+    def invite():
+        page.goto(base + "/ui/#/manage/users")
+        page.wait_for_selector("#signin")
+        page.fill("#signin-user", "rustybin")
+        page.fill("#signin-password", "rustybin")
+        page.get_by_role("button", name="Sign in", exact=True).click()
+        page.wait_for_selector("#users-table")
+        expect(page.locator("#users-table")).to_contain_text("first admin")
+        page.wait_for_selector("#roles-matrix")
+        expect(page.locator("#roles-matrix")).to_contain_text("users.manage")
+        expect(page.locator("#roles-matrix thead")).to_contain_text("privileged")
+        page.fill("#invite-name", "ivy")
+        page.fill("#invite-display", "Ivy Test")
+        page.check("#invite-role-tester")
+        page.locator("#invite-submit").click()
+        page.wait_for_selector("#invite-link")
+        link = page.input_value("#invite-link")
+        assert "/ui/#/join/rbi_" in link, link
+        held["link"] = link
+        expect(page.locator("[data-user=ivy]")).to_contain_text("invited")
+        shot(page, "password", "40-users-invite")
+
+    step("users: an admin invites a user and copies the link", invite)
+
+    ctx2 = browser.new_context(viewport={"width": 1280, "height": 860})
+    p2 = ctx2.new_page()
+    p2.set_default_timeout(TIMEOUT)
+    p2.on("pageerror", lambda e: console_errors.append(f"[users, invited] uncaught: {e}"))
+
+    def join():
+        p2.goto(held["link"])
+        p2.wait_for_selector("#join")
+        assert "rbi_" not in p2.url, "the token stayed in the address bar"
+        expect(p2.locator("#signin")).to_have_count(0)
+        p2.fill("#join-password", "short")
+        p2.fill("#join-confirm", "short")
+        p2.locator("#join-submit").click()
+        p2.wait_for_selector("#join .notice.err")
+        p2.fill("#join-password", "ivy-secret-k3Qx")
+        p2.fill("#join-confirm", "ivy-secret-k3Qx")
+        shot(p2, "password", "41-join")
+        p2.locator("#join-submit").click()
+        # Signed in on My account.
+        p2.wait_for_selector("#me-name")
+        expect(p2.locator("#me-name")).to_have_text("ivy")
+        expect(p2.locator("#me-roles")).to_contain_text("tester")
+        expect(p2.locator("#signed-in")).to_contain_text("ivy")
+        shot(p2, "password", "42-my-account")
+        # A tester builds no mocks.
+        goto_view(p2, "mocks")
+        p2.locator(".mock-row", has_text="petstore").wait_for()
+        expect(p2.get_by_role("button", name="New mock")).to_have_count(0)
+        # The link worked once.
+        body = json.dumps({"token": held["link"].rsplit("/", 1)[1], "password": "ivy-secret-2"}).encode()
+        req = urllib.request.Request(base + "/_rustybin/join", data=body, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            urllib.request.urlopen(req, timeout=10)
+            raise AssertionError("the invitation worked twice")
+        except urllib.error.HTTPError as e:
+            assert e.code == 401, e.code
+        page.get_by_role("button", name="Refresh").first.click()
+        expect(page.locator("[data-user=ivy]")).to_contain_text("active")
+
+    step("users: the person joins from the link in another browser", join)
+
+    def change_role():
+        page.locator("[data-user=ivy] [data-action=roles]").click()
+        page.uncheck("#user-role-tester")
+        page.check("#user-role-editor")
+        page.locator("#user-roles-save").click()
+        expect(page.locator("[data-user=ivy]")).to_contain_text("editor")
+        shot(page, "password", "43-users-roles")
+        # Ivy's console asks again (the status refresh, every 15 s) and the
+        # view is mounted again with the editor's controls.
+        expect(p2.get_by_role("button", name="New mock")).to_have_count(1, timeout=40_000)
+        # The account menu's My account says so too.
+        p2.locator("#signed-in").click()
+        p2.locator("#account-link").click()
+        p2.wait_for_selector("#me-roles")
+        expect(p2.locator("#me-roles")).to_contain_text("editor")
+        expect(p2.locator("#me-permissions")).to_contain_text("mocks.write")
+
+    step("users: a role change, and the user's view follows", change_role)
+
+    def disable_and_clean_up():
+        page.once("dialog", lambda d: d.accept())
+        page.locator("[data-user=ivy] [data-action=disable]").click()
+        expect(page.locator("[data-user=ivy]")).to_contain_text("disabled")
+        # Ivy is signed out at the next call.
+        p2.reload()
+        p2.wait_for_selector("#signin")
+        page.once("dialog", lambda d: d.accept())
+        page.locator("[data-user=ivy] [data-action=delete]").click()
+        expect(page.locator("[data-user=ivy]")).to_have_count(0)
+
+    step("users: disable ends the sessions, then delete", disable_and_clean_up)
+    ctx2.close()
+    ctx.close()
+
+
 def main():
     print(f"console e2e against {BASE}")
     with sync_playwright() as p:
@@ -2350,6 +2462,7 @@ def main():
             run_harness(browser)
         if os.environ.get("RUSTYBIN_PASSWORD_URL"):
             run_password(browser)
+            run_users(browser)
         browser.close()
     for e in console_errors:
         failures.append("console: " + e)

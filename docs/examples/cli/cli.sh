@@ -82,6 +82,23 @@ rustybin requests tail --max 1 --timeout 5
 expect "$out" 'request:'
 expect "$out" 'from=the-test'
 
+out=$(
+# ANCHOR: users
+# Invite a teammate: the answer is the link to send them (shown once).
+rustybin users invite alice --role editor --display-name "Alice Doe"
+rustybin roles save catalog-reader --permission mocks.read,traffic.read --description "Reads mocks and traffic"
+rustybin users update alice --role catalog-reader
+rustybin users list
+rustybin me
+# ANCHOR_END: users
+)
+expect "$out" "$URL/ui/#/join/rbi_"
+expect "$out" 'catalog-reader'
+expect "$out" 'invited'
+expect "$out" 'name: rustybin'
+rustybin users delete alice --yes --quiet
+rustybin roles delete catalog-reader --yes --quiet
+
 # Exit codes: a refused operation is 1, usage 2, a bad credential 3.
 set +e
 rustybin mocks get nope --quiet; echo "exit $?"

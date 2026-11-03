@@ -168,6 +168,8 @@ fn export_then_apply_on_a_second_instance_gives_the_same_export() {
             principal: "test".into(),
             base: None,
             untrusted: false,
+            caller: None,
+            base_url: None,
         },
     );
     assert_eq!(report["problems"], json!([]), "{report}");
@@ -210,6 +212,8 @@ fn a_version_1_file_is_a_version_2_document_with_mocks_only() {
             principal: "t".into(),
             base: None,
             untrusted: false,
+            caller: None,
+            base_url: None,
         },
     );
     assert_eq!(report["results"]["mocks"]["created"], json!(["orders"]));
@@ -268,6 +272,8 @@ fn secret_references_resolve_from_the_environment_or_are_kept() {
         principal: "t".into(),
         base: None,
         untrusted: false,
+        caller: None,
+        base_url: None,
     };
     let report = apply(&state, file, &opts);
     let problems = report["problems"].as_array().expect("problems").clone();
@@ -566,6 +572,8 @@ fn the_applied_registry_and_agents_survive_a_restart() {
             principal: "t".into(),
             base: None,
             untrusted: false,
+            caller: None,
+            base_url: None,
         },
     );
     assert_eq!(report["problems"], json!([]), "{report}");
@@ -612,6 +620,8 @@ fn untrusted(prune: bool, base: Option<&Path>) -> ApplyOptions {
         principal: "git:test".into(),
         base: base.map(Path::to_path_buf),
         untrusted: true,
+        caller: None,
+        base_url: None,
     }
 }
 
@@ -840,6 +850,32 @@ fn the_yaml_of_an_export_is_pinned() {
     if let Some(instance) = file.instance.as_mut() {
         instance.title = Some("Snapshot: \"quotes\", colons: and # hashes".into());
     }
+    // Users and custom roles (an instance with the password sign-in).
+    file.roles = Some(vec![crate::rbac::CustomRole {
+        name: "catalog-reader".into(),
+        description: "Reads mocks and traffic".into(),
+        permissions: vec!["mocks.read".into(), "traffic.read".into()],
+    }]);
+    file.users = Some(vec![
+        super::UserDoc {
+            name: "payments".into(),
+            roles: vec!["admin".into()],
+            ..Default::default()
+        },
+        super::UserDoc {
+            name: "alice".into(),
+            display_name: Some("Alice Doe".into()),
+            email: Some("alice@example.com".into()),
+            roles: vec!["editor".into(), "catalog-reader".into()],
+            disabled: false,
+        },
+        super::UserDoc {
+            name: "bob".into(),
+            roles: vec!["viewer".into()],
+            disabled: true,
+            ..Default::default()
+        },
+    ]);
     let mut text = to_yaml(&file);
     // Plus the shapes a spec and a scenario take (multiline text, numbers,
     // booleans, nulls, keys that need quoting, empty collections).
@@ -905,6 +941,8 @@ fn a_failed_definition_is_never_pruned() {
         principal: "test".into(),
         base: None,
         untrusted: false,
+        caller: None,
+        base_url: None,
     };
     let preview = apply(&state, doc(), &opts);
     assert_eq!(
@@ -1006,6 +1044,8 @@ fn a_preview_refuses_what_the_apply_refuses() {
         principal: "test".into(),
         base: None,
         untrusted: false,
+        caller: None,
+        base_url: None,
     };
     let preview = apply(&state, doc(), &opts(true));
     assert_eq!(preview["ok"], false, "{preview}");
@@ -1053,6 +1093,8 @@ fn an_untrusted_document_cannot_repoint_outbound_requests() {
         principal: "git:test".into(),
         base: None,
         untrusted: true,
+        caller: None,
+        base_url: None,
     };
     let r = apply(&state, doc, &opts);
     let problems = r["problems"].to_string();
@@ -1144,6 +1186,8 @@ fn a_prune_leaves_visitors_keys_and_scenarios_mocks_alone() {
         principal: "test".into(),
         base: None,
         untrusted: false,
+        caller: None,
+        base_url: None,
     };
     let preview = apply(&state, doc(), &opts);
     assert_eq!(

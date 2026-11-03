@@ -694,6 +694,8 @@ fn the_document_round_trip_and_prune() {
         principal: "test".into(),
         base: None,
         untrusted,
+        caller: None,
+        base_url: None,
     };
     let r = apply(&b, parsed, &opts(false, false));
     assert_eq!(

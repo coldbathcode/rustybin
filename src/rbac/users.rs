@@ -26,6 +26,20 @@
 //! Resolution: [`Users::resolve`] answers a user's roles and permissions,
 //! cached for at most [`CACHE_TTL`] per user and dropped at every change,
 //! so a role change or a disable applies to the next request.
+//!
+//! Invitations (step 09): inviting a user creates them `pending` (and
+//! disabled) with a one-time token (32 random bytes, `rbi_` plus base64url)
+//! that is answered once and kept only as its SHA-256, for
+//! [`INVITATION_TTL_SECS`], at most [`MAX_OPEN_INVITATIONS`] open. A reset
+//! is a new invitation for a user who already joined; their old password
+//! works until it is accepted. Accepting sets the password, enables a
+//! pending user and moves their generation on (every older session ends).
+//!
+//! Guard rails, checked inside every change (`Users::commit`): the last
+//! enabled user with the `admin` role is never disabled, demoted or
+//! deleted; user one is never deleted (its sign-in is the instance's
+//! sign-in settings: disable it instead); a custom role somebody holds is
+//! never deleted.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -53,6 +67,14 @@ pub const MAX_ROLES_PER_USER: usize = 16;
 pub const CACHE_TTL: Duration = Duration::from_secs(1);
 /// The generation of a new user (and of a 0.3 token, which carries none).
 pub const FIRST_GENERATION: u64 = 1;
+/// Invitations open at once.
+pub const MAX_OPEN_INVITATIONS: usize = 100;
+/// How long an invitation link works.
+pub const INVITATION_TTL_SECS: i64 = 72 * 3600;
+/// What an invitation token starts with.
+pub const INVITATION_PREFIX: &str = "rbi_";
+/// The length of an invitation token (`rbi_` plus 43 base64url characters).
+pub const INVITATION_TOKEN_CHARS: usize = 4 + 43;
 
 /// Where a user comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +119,10 @@ pub struct User {
     pub last_sign_in: Option<String>,
     #[serde(default = "first_generation")]
     pub generation: u64,
+    /// Invited and not joined yet (also disabled): the invitation sets the
+    /// password and enables them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
 }
 
 impl std::fmt::Debug for User {
@@ -122,12 +148,155 @@ impl User {
             "email": self.email,
             "roles": self.roles,
             "disabled": self.disabled,
+            "status": self.status(),
             "source": self.source.as_str(),
             "created_at": self.created_at,
             "last_sign_in": self.last_sign_in,
         })
     }
+
+    /// `invited` (not joined yet), `disabled` or `active`.
+    pub fn status(&self) -> &'static str {
+        if self.pending {
+            "invited"
+        } else if self.disabled {
+            "disabled"
+        } else {
+            "active"
+        }
+    }
+
+    /// An enabled user with the built-in `admin` role (the guard rails
+    /// keep at least one).
+    pub fn is_enabled_admin(&self) -> bool {
+        !self.disabled && !self.pending && self.roles.iter().any(|r| r == BuiltIn::Admin.name())
+    }
 }
+
+/// An open invitation, kept as the SHA-256 of its token (never the token).
+#[derive(Clone, Serialize, Deserialize)]
+struct Invitation {
+    /// Hex SHA-256 of the token.
+    hash: String,
+    user_id: String,
+    created_at: i64,
+    expires_at: i64,
+    /// Who invited (a user name, or how the caller authenticated).
+    #[serde(default)]
+    by: String,
+    /// A new password for a user who joined already.
+    #[serde(default)]
+    reset: bool,
+}
+
+/// An invitation as answers show it (never the token, which only the
+/// answer that created it carries).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvitationInfo {
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub by: String,
+    pub reset: bool,
+}
+
+impl InvitationInfo {
+    pub fn view(&self) -> Value {
+        json!({
+            "created_at": rfc3339(self.created_at),
+            "expires_at": rfc3339(self.expires_at),
+            "by": self.by,
+            "reset": self.reset,
+        })
+    }
+}
+
+/// A freshly created invitation: the token is in this value only.
+#[derive(Clone)]
+pub struct NewInvitation {
+    pub token: String,
+    pub expires_at: i64,
+    pub user: User,
+}
+
+impl std::fmt::Debug for NewInvitation {
+    // Never the token.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewInvitation")
+            .field("user", &self.user)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
+}
+
+/// An accepted invitation: who joined, whether their password lives in
+/// the sign-in settings (user one) rather than the store, and whether it
+/// was a reset.
+#[derive(Clone, Debug)]
+pub struct Accepted {
+    pub user: User,
+    pub first_admin: bool,
+    pub reset: bool,
+}
+
+pub(crate) fn rfc3339(ts: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
+        .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_default()
+}
+
+/// A fresh invitation token: `rbi_` plus 32 random bytes in base64url.
+pub fn new_invitation_token() -> String {
+    use base64::Engine;
+    let mut b = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut b);
+    format!(
+        "{INVITATION_PREFIX}{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+    )
+}
+
+/// Is this shaped like an invitation token? (Checked before hashing.)
+pub fn is_invitation_token(s: &str) -> bool {
+    s.len() == INVITATION_TOKEN_CHARS
+        && s.strip_prefix(INVITATION_PREFIX).is_some_and(|rest| {
+            rest.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
+}
+
+/// The hex SHA-256 an invitation is kept as.
+pub fn invitation_hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(token.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// A change of a user (`PATCH /_rustybin/users/{id}`, a document entry).
+#[derive(Clone, Debug, Default)]
+pub struct UserPatch {
+    pub display_name: Option<String>,
+    /// `Some(None)` clears it.
+    pub email: Option<Option<String>>,
+    pub roles: Option<Vec<String>>,
+    pub disabled: Option<bool>,
+}
+
+impl UserPatch {
+    pub fn is_empty(&self) -> bool {
+        self.display_name.is_none()
+            && self.email.is_none()
+            && self.roles.is_none()
+            && self.disabled.is_none()
+    }
+}
+
+/// The reasons the guard rails give.
+pub const LAST_ADMIN: &str = "last_admin";
+pub const FIRST_ADMIN: &str = "first_admin";
+pub const PENDING: &str = "invited";
+pub const ROLE_IN_USE: &str = "role_in_use";
 
 /// What `<state>/users.json` holds.
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -141,6 +310,8 @@ struct Doc {
     /// argon2id PHC strings by user id (users who sign in with a password
     /// of their own; user one's stays in the sign-in settings).
     password_hashes: BTreeMap<String, String>,
+    /// Open invitations (the SHA-256 of their tokens).
+    invitations: Vec<Invitation>,
 }
 
 /// A new user.
@@ -178,6 +349,9 @@ pub enum UsersError {
     Full(String),
     /// The file could not be written: nothing changed.
     Io(String),
+    /// A guard rail ([`LAST_ADMIN`], [`FIRST_ADMIN`], [`PENDING`],
+    /// [`ROLE_IN_USE`]): the reason and the message.
+    Refused(&'static str, String),
 }
 
 impl std::fmt::Display for UsersError {
@@ -185,7 +359,10 @@ impl std::fmt::Display for UsersError {
         match self {
             UsersError::Invalid(p) => write!(f, "invalid: {}", p.join("; ")),
             UsersError::NotFound => f.write_str("not found"),
-            UsersError::Conflict(m) | UsersError::Full(m) | UsersError::Io(m) => f.write_str(m),
+            UsersError::Conflict(m)
+            | UsersError::Full(m)
+            | UsersError::Io(m)
+            | UsersError::Refused(_, m) => f.write_str(m),
         }
     }
 }
@@ -338,6 +515,15 @@ impl Doc {
         }
     }
 
+    fn enabled_admins(&self) -> usize {
+        self.users.iter().filter(|u| u.is_enabled_admin()).count()
+    }
+
+    /// Forget invitations past their expiry.
+    fn prune_invitations(&mut self, now: i64) {
+        self.invitations.retain(|i| i.expires_at > now);
+    }
+
     fn name_taken(&self, name: &str, except: Option<&str>) -> bool {
         self.users
             .iter()
@@ -391,6 +577,8 @@ impl Users {
                     let ids: std::collections::BTreeSet<String> =
                         doc.users.iter().map(|u| u.id.clone()).collect();
                     doc.password_hashes.retain(|id, _| ids.contains(id));
+                    doc.invitations.retain(|i| ids.contains(&i.user_id));
+                    doc.invitations.truncate(MAX_OPEN_INVITATIONS);
                     *store.doc.get_mut().unwrap_or_else(|e| e.into_inner()) = doc;
                     store.path = Some(path);
                 }
@@ -422,7 +610,15 @@ impl Users {
     ) -> Result<T, UsersError> {
         let _writer = lock(&self.writing);
         let mut next = self.read().clone();
+        let admins_before = next.enabled_admins();
         let out = change(&mut next)?;
+        // The last enabled admin stays, whatever the change.
+        if admins_before > 0 && next.enabled_admins() == 0 {
+            return Err(UsersError::Refused(
+                LAST_ADMIN,
+                "the last enabled user with the admin role cannot be disabled, demoted or deleted: give another user the admin role first".into(),
+            ));
+        }
         if let Some(path) = &self.path {
             let text = serde_json::to_vec_pretty(&next)
                 .map_err(|e| UsersError::Io(format!("users not saved: {e}")))?;
@@ -606,6 +802,7 @@ impl Users {
                 created_at: now_rfc3339(clock.as_ref()),
                 last_sign_in: None,
                 generation: FIRST_GENERATION,
+                pending: false,
             };
             // A user of that name from a newer version: it becomes user one.
             if let Some(existing) = doc.users.iter().find(|u| u.name == name) {
@@ -653,8 +850,15 @@ impl Users {
         })
     }
 
-    /// Add a user (step 09's invitations and documents build on this).
+    /// Add a user with a password hash of their own (or none: they cannot
+    /// sign in until an invitation sets one).
     pub fn add(&self, new: NewUser, password_hash: Option<String>) -> Result<User, UsersError> {
+        Self::check_new(&new, password_hash.as_deref())?;
+        let created_at = now_rfc3339(self.clock.as_ref());
+        self.commit(|doc| Self::insert(doc, &new, password_hash, created_at, false))
+    }
+
+    fn check_new(new: &NewUser, password_hash: Option<&str>) -> Result<(), UsersError> {
         let mut problems = Vec::new();
         if let Err(e) = crate::login::valid_user(&new.name) {
             problems.push(format!("name: {e}"));
@@ -669,45 +873,363 @@ impl Users {
                 problems.push(e);
             }
         }
-        if password_hash
-            .as_deref()
-            .is_some_and(|h| !crate::login::valid_hash(h))
-        {
+        if password_hash.is_some_and(|h| !crate::login::valid_hash(h)) {
             problems.push("password: not an argon2 hash".into());
+        }
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(UsersError::Invalid(problems))
+        }
+    }
+
+    fn insert(
+        doc: &mut Doc,
+        new: &NewUser,
+        password_hash: Option<String>,
+        created_at: String,
+        pending: bool,
+    ) -> Result<User, UsersError> {
+        doc.check_roles(&new.roles).map_err(UsersError::Invalid)?;
+        if doc.name_taken(&new.name, None) {
+            return Err(UsersError::Conflict(format!(
+                "a user named {} exists",
+                new.name
+            )));
+        }
+        if doc.users.len() >= MAX_USERS {
+            return Err(UsersError::Full(format!(
+                "an instance keeps at most {MAX_USERS} users"
+            )));
+        }
+        let user = User {
+            id: new_id(),
+            display_name: new.display_name.clone().unwrap_or_else(|| new.name.clone()),
+            name: new.name.clone(),
+            email: new.email.clone(),
+            roles: new.roles.clone(),
+            disabled: new.disabled || pending,
+            source: new.source,
+            created_at,
+            last_sign_in: None,
+            generation: FIRST_GENERATION,
+            pending,
+        };
+        if let Some(h) = password_hash {
+            doc.password_hashes.insert(user.id.clone(), h);
+        }
+        doc.users.push(user.clone());
+        Ok(user)
+    }
+
+    /// Add a user invited, without a link (a configuration file at startup
+    /// has nobody to answer one to): `invite` sends one later.
+    pub fn add_invited(&self, new: NewUser) -> Result<User, UsersError> {
+        Self::check_new(&new, None)?;
+        let created_at = now_rfc3339(self.clock.as_ref());
+        self.commit(|doc| Self::insert(doc, &new, None, created_at, true))
+    }
+
+    /// A user by id, else by sign-in name (the API, the CLI and the tools
+    /// take either).
+    pub fn find(&self, id_or_name: &str) -> Option<User> {
+        let doc = self.read();
+        doc.user(id_or_name)
+            .or_else(|| doc.users.iter().find(|u| u.name == id_or_name))
+            .cloned()
+    }
+
+    /// How many users hold `role`.
+    pub fn holders(&self, role: &str) -> usize {
+        self.read()
+            .users
+            .iter()
+            .filter(|u| u.roles.iter().any(|r| r == role))
+            .count()
+    }
+
+    /// Enabled users with the `admin` role.
+    pub fn enabled_admins(&self) -> usize {
+        self.read().enabled_admins()
+    }
+
+    // ── Invitations ─────────────────────────────────────────────────
+
+    fn now_ts(&self) -> i64 {
+        self.clock.wall().timestamp()
+    }
+
+    /// Open invitations (expired ones do not count).
+    pub fn open_invitations(&self) -> usize {
+        let now = self.now_ts();
+        self.read()
+            .invitations
+            .iter()
+            .filter(|i| i.expires_at > now)
+            .count()
+    }
+
+    /// A user's open invitation, if they have one.
+    pub fn invitation(&self, user_id: &str) -> Option<InvitationInfo> {
+        let now = self.now_ts();
+        self.read()
+            .invitations
+            .iter()
+            .find(|i| i.user_id == user_id && i.expires_at > now)
+            .map(|i| InvitationInfo {
+                created_at: i.created_at,
+                expires_at: i.expires_at,
+                by: i.by.clone(),
+                reset: i.reset,
+            })
+    }
+
+    fn open_invitation(
+        doc: &mut Doc,
+        user_id: &str,
+        by: &str,
+        reset: bool,
+        now: i64,
+    ) -> Result<(String, i64), UsersError> {
+        doc.prune_invitations(now);
+        doc.invitations.retain(|i| i.user_id != user_id);
+        if doc.invitations.len() >= MAX_OPEN_INVITATIONS {
+            return Err(UsersError::Full(format!(
+                "at most {MAX_OPEN_INVITATIONS} invitations are open at once: wait for some to be accepted or to expire"
+            )));
+        }
+        let token = new_invitation_token();
+        let expires_at = now + INVITATION_TTL_SECS;
+        doc.invitations.push(Invitation {
+            hash: invitation_hash(&token),
+            user_id: user_id.to_string(),
+            created_at: now,
+            expires_at,
+            by: crate::logging::printable(by, 64).to_string(),
+            reset,
+        });
+        Ok((token, expires_at))
+    }
+
+    /// Invite a new user: created invited (and disabled) with a one-time
+    /// invitation. The token is in the answer only.
+    pub fn invite_new(&self, new: NewUser, by: &str) -> Result<NewInvitation, UsersError> {
+        Self::check_new(&new, None)?;
+        let created_at = now_rfc3339(self.clock.as_ref());
+        let now = self.now_ts();
+        self.commit(|doc| {
+            // The cap first, so a refused invitation leaves no user behind.
+            doc.prune_invitations(now);
+            if doc.invitations.len() >= MAX_OPEN_INVITATIONS {
+                return Err(UsersError::Full(format!(
+                    "at most {MAX_OPEN_INVITATIONS} invitations are open at once: wait for some to be accepted or to expire"
+                )));
+            }
+            let user = Self::insert(doc, &new, None, created_at, true)?;
+            let (token, expires_at) = Self::open_invitation(doc, &user.id, by, false, now)?;
+            Ok(NewInvitation {
+                token,
+                expires_at,
+                user,
+            })
+        })
+    }
+
+    /// A new invitation for an existing user: a reset for a user who joined
+    /// (their old password works until it is accepted), a fresh link for
+    /// one still invited. Replaces their open invitation. Refused for a
+    /// disabled user who joined (enable them first).
+    pub fn invite(&self, id: &str, by: &str) -> Result<NewInvitation, UsersError> {
+        let now = self.now_ts();
+        self.commit(|doc| {
+            let user = doc.user(id).cloned().ok_or(UsersError::NotFound)?;
+            if user.disabled && !user.pending {
+                return Err(UsersError::Refused(
+                    "disabled",
+                    format!(
+                        "{} is disabled: enable the user before sending a new invitation",
+                        user.name
+                    ),
+                ));
+            }
+            let (token, expires_at) = Self::open_invitation(doc, id, by, !user.pending, now)?;
+            Ok(NewInvitation {
+                token,
+                expires_at,
+                user,
+            })
+        })
+    }
+
+    /// The user an invitation token would let join, if it is open (the
+    /// join route checks before it hashes a password).
+    pub fn invitation_user(&self, token: &str) -> Option<User> {
+        if !is_invitation_token(token) {
+            return None;
+        }
+        let hash = invitation_hash(token);
+        let now = self.now_ts();
+        let doc = self.read();
+        let inv = doc
+            .invitations
+            .iter()
+            .find(|i| i.hash == hash && i.expires_at > now)?;
+        let user = doc.user(&inv.user_id)?;
+        (!user.disabled || user.pending).then(|| user.clone())
+    }
+
+    /// Accept an invitation: one use. The password hash goes to the store
+    /// (user one's goes to the sign-in settings, which the caller writes:
+    /// `Accepted::first_admin`); a pending user is enabled; the user's
+    /// generation moves on (every older session ends). `NotFound` for a
+    /// token that is not open (unknown, used, replaced, expired, or a user
+    /// disabled since).
+    pub fn accept_invitation(
+        &self,
+        token: &str,
+        password_hash: String,
+    ) -> Result<Accepted, UsersError> {
+        if !is_invitation_token(token) || !crate::login::valid_hash(&password_hash) {
+            return Err(UsersError::NotFound);
+        }
+        let hash = invitation_hash(token);
+        let now = self.now_ts();
+        self.commit(|doc| {
+            doc.prune_invitations(now);
+            let pos = doc
+                .invitations
+                .iter()
+                .position(|i| i.hash == hash)
+                .ok_or(UsersError::NotFound)?;
+            let inv = doc.invitations.remove(pos);
+            let first_admin = doc.first_admin.as_deref() == Some(inv.user_id.as_str());
+            let user = doc.user_mut(&inv.user_id)?;
+            if user.disabled && !user.pending {
+                return Err(UsersError::NotFound);
+            }
+            if user.pending {
+                user.pending = false;
+                user.disabled = false;
+            }
+            user.generation = user.generation.saturating_add(1);
+            let user = user.clone();
+            if !first_admin {
+                doc.password_hashes.insert(user.id.clone(), password_hash);
+            }
+            Ok(Accepted {
+                user,
+                first_admin,
+                reset: inv.reset,
+            })
+        })
+    }
+
+    /// A user's own new password (`/me/password`; never user one's, which
+    /// the sign-in settings keep): stored, and every session of theirs
+    /// ends (their generation moves on). Answers the user.
+    pub fn set_password(&self, id: &str, password_hash: String) -> Result<User, UsersError> {
+        if !crate::login::valid_hash(&password_hash) {
+            return Err(UsersError::Invalid(vec![
+                "password: not an argon2 hash".into()
+            ]));
+        }
+        self.commit(|doc| {
+            if doc.first_admin.as_deref() == Some(id) {
+                return Err(UsersError::Refused(
+                    FIRST_ADMIN,
+                    "the first admin's password is the instance's sign-in setting".into(),
+                ));
+            }
+            let user = doc.user_mut(id)?;
+            user.generation = user.generation.saturating_add(1);
+            let user = user.clone();
+            doc.password_hashes.insert(id.to_string(), password_hash);
+            Ok(user)
+        })
+    }
+
+    /// Change a user: display name, email, roles, disabled. The guard rails
+    /// apply (the last enabled admin stays; an invited user joins through
+    /// the invitation, never by being enabled). Disabling ends the user's
+    /// sessions (their generation moves on) and drops their invitation.
+    pub fn update(&self, id: &str, patch: UserPatch) -> Result<User, UsersError> {
+        let mut problems = Vec::new();
+        if let Some(d) = &patch.display_name {
+            if let Err(e) = valid_display_name(d) {
+                problems.push(e);
+            }
+        }
+        if let Some(Some(e)) = &patch.email {
+            if let Err(e) = valid_email(e) {
+                problems.push(e);
+            }
         }
         if !problems.is_empty() {
             return Err(UsersError::Invalid(problems));
         }
-        let created_at = now_rfc3339(self.clock.as_ref());
         self.commit(|doc| {
-            doc.check_roles(&new.roles).map_err(UsersError::Invalid)?;
-            if doc.name_taken(&new.name, None) {
-                return Err(UsersError::Conflict(format!(
-                    "a user named {} exists",
-                    new.name
-                )));
+            if let Some(roles) = &patch.roles {
+                doc.check_roles(roles).map_err(UsersError::Invalid)?;
             }
-            if doc.users.len() >= MAX_USERS {
-                return Err(UsersError::Full(format!(
-                    "an instance keeps at most {MAX_USERS} users"
-                )));
+            let user = doc.user_mut(id)?;
+            if patch.disabled == Some(false) && user.pending {
+                return Err(UsersError::Refused(
+                    PENDING,
+                    format!(
+                        "{} has not accepted the invitation yet: they join through it (a new link: POST /_rustybin/users/{}/invite)",
+                        user.name, user.id
+                    ),
+                ));
             }
-            let user = User {
-                id: new_id(),
-                display_name: new.display_name.clone().unwrap_or_else(|| new.name.clone()),
-                name: new.name.clone(),
-                email: new.email.clone(),
-                roles: new.roles.clone(),
-                disabled: new.disabled,
-                source: new.source,
-                created_at,
-                last_sign_in: None,
-                generation: FIRST_GENERATION,
-            };
-            if let Some(h) = password_hash {
-                doc.password_hashes.insert(user.id.clone(), h);
+            if let Some(d) = &patch.display_name {
+                user.display_name = d.clone();
             }
-            doc.users.push(user.clone());
+            if let Some(e) = &patch.email {
+                user.email = e.clone();
+            }
+            if let Some(r) = &patch.roles {
+                user.roles = r.clone();
+            }
+            let mut dropped = false;
+            if let Some(disabled) = patch.disabled {
+                if disabled && !user.disabled {
+                    user.generation = user.generation.saturating_add(1);
+                }
+                if disabled {
+                    // An invited user disabled is a disabled user: the
+                    // invitation goes, and a new link (once enabled) is a
+                    // reset.
+                    dropped = true;
+                    user.pending = false;
+                }
+                user.disabled = disabled;
+            }
+            let user = user.clone();
+            if dropped {
+                doc.invitations.retain(|i| i.user_id != id);
+            }
+            Ok(user)
+        })
+    }
+
+    /// Delete a user (never user one: disable it instead), with their
+    /// password and invitation. The last enabled admin stays.
+    pub fn delete(&self, id: &str) -> Result<User, UsersError> {
+        self.commit(|doc| {
+            if doc.first_admin.as_deref() == Some(id) {
+                return Err(UsersError::Refused(
+                    FIRST_ADMIN,
+                    "the first admin signs in with the instance's sign-in settings and cannot be deleted: disable it instead".into(),
+                ));
+            }
+            let pos = doc
+                .users
+                .iter()
+                .position(|u| u.id == id)
+                .ok_or(UsersError::NotFound)?;
+            let user = doc.users.remove(pos);
+            doc.password_hashes.remove(id);
+            doc.invitations.retain(|i| i.user_id != id);
             Ok(user)
         })
     }
@@ -727,14 +1249,13 @@ impl Users {
     /// disabling also moves their generation on, so enabling them again
     /// does not bring an old token back.
     pub fn set_disabled(&self, id: &str, disabled: bool) -> Result<User, UsersError> {
-        self.commit(|doc| {
-            let user = doc.user_mut(id)?;
-            if disabled && !user.disabled {
-                user.generation = user.generation.saturating_add(1);
-            }
-            user.disabled = disabled;
-            Ok(user.clone())
-        })
+        self.update(
+            id,
+            UserPatch {
+                disabled: Some(disabled),
+                ..UserPatch::default()
+            },
+        )
     }
 
     pub fn set_display_name(&self, id: &str, display_name: &str) -> Result<User, UsersError> {
@@ -794,11 +1315,16 @@ impl Users {
             if !doc.roles.iter().any(|r| r.name == name) {
                 return Err(UsersError::NotFound);
             }
-            if let Some(u) = doc.users.iter().find(|u| u.roles.iter().any(|r| r == name)) {
-                return Err(UsersError::Conflict(format!(
-                    "the role is held by {}",
-                    u.name
-                )));
+            let holders = doc
+                .users
+                .iter()
+                .filter(|u| u.roles.iter().any(|r| r == name))
+                .count();
+            if holders > 0 {
+                return Err(UsersError::Refused(
+                    ROLE_IN_USE,
+                    format!("the role is held by {holders} user(s): give them another role first"),
+                ));
             }
             doc.roles.retain(|r| r.name != name);
             Ok(())

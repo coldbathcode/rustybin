@@ -262,7 +262,7 @@ fn custom_roles_are_validated_capped_and_marked() {
         .expect("user");
     assert!(matches!(
         users.delete_role("role-1"),
-        Err(UsersError::Conflict(_))
+        Err(UsersError::Refused(users::ROLE_IN_USE, _))
     ));
     assert!(matches!(
         users.delete_role("viewer"),
@@ -553,6 +553,12 @@ async fn a_role_change_and_a_disable_apply_on_the_next_request() {
     let state = test_state_with(password_config());
     let app = test_app_with(state.clone());
     let first = state.users.first_admin().expect("user one");
+    // Another admin, so user one may be demoted and disabled (the guard
+    // rails keep one enabled admin).
+    state
+        .users
+        .add(NewUser::new("second-admin", &["admin"]), None)
+        .expect("user");
     let t = token(&app, DEFAULT_USER, DEFAULT_PASSWORD).await;
     assert_eq!(
         call(&app, "DELETE", "/_rustybin/requests", Some(&t))
@@ -707,6 +713,11 @@ async fn a_03_token_still_signs_in_as_user_one() {
     let state = test_state_with(password_config());
     let app = test_app_with(state.clone());
     let first = state.users.first_admin().expect("user one");
+    // Another admin, so user one may be demoted (the guard rails keep one).
+    state
+        .users
+        .add(NewUser::new("second-admin", &["admin"]), None)
+        .expect("user");
     let old = token_03(&state.config, DEFAULT_USER);
     assert_eq!(
         call(&app, "DELETE", "/_rustybin/requests", Some(&old))

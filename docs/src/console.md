@@ -50,6 +50,13 @@ Details: [Control-plane security](concepts/control-plane-security.md#user-name-a
 {{#include ../examples/concepts/login.hurl:login}}
 ```
 
+Your name in the top bar opens the **account menu**: **My account** (your profile,
+your permissions, your password with the current one, your sessions with End and
+**Sign out everywhere**), the sign-in settings and **Sign out**. An invitation link,
+`/ui/#/join/<token>`, opens the join page instead of the console: it takes the token
+out of the address bar at once, asks for a password twice and signs the new user in
+([users and roles](users.md)).
+
 `RUSTYBIN_CONSOLE_TITLE` (up to 80 characters) is shown as a badge in the header and
 in the browser tab title; `RUSTYBIN_CONSOLE_BACKLINK` (an `http://` or `https://`
 URL, anything else is ignored with a warning) adds a "Back to ..." link to the
@@ -210,7 +217,8 @@ secrets](configuration.md#state-directory-settings-and-secrets).
 | Tab | Cards |
 |---|---|
 | General | **Console**: the title and back link everyone sees. **Mock edits**: `mocks.require_revision` ([conflict protection](mocks/index.md#two-people-editing-one-mock)). **This browser**: the settings below, kept in the browser. A link to **AI agents**, where the command and JSON for `claude mcp add` and other clients now live. |
-| Sign-in | **Sign-in**: the control-auth mode, the user name and where it comes from, whether the password is the default, a stored hash or the environment's, who is signed in. **Change the password**: the user name and a new password, the current password required (`PUT /_rustybin/password`); every other session ends and this one continues with a fresh token. **Sessions** (password mode): the sign-in tokens issued since the last restart with their address and times, End for each, and **Sign out everywhere**. See [User name and password](concepts/control-plane-security.md#user-name-and-password). |
+| Sign-in | **Sign-in**: the control-auth mode, the first admin's user name and where it comes from, whether the password is the default, a stored hash or the environment's, who is signed in. **Change the password**: the first admin's user name and a new password, the current password required (`PUT /_rustybin/password`); their other sessions end and this one continues with a fresh token. **Sessions** (password mode): the sign-in tokens issued since the last restart with their user, address and times, End for each, and **Sign out everywhere**. See [User name and password](concepts/control-plane-security.md#user-name-and-password). |
+| Users and roles | **Users**: each user's roles, status (active, invited, disabled), last sign-in and sessions, with **Roles**, **Disable** / **Enable**, **Reset** (**New link** while invited) and delete. **Invite a user**: a sign-in name, display name, email and roles; the answer is the link to copy, shown once. **Roles**: the permission matrix of every role, privileged roles marked, how many users hold each, edit and delete for custom ones. **A custom role**: a name, a description and its permissions. See [Users and roles](users.md). |
 | AI | **AI assist**: on or why not, **Test the key**, **Use the built-in mock LLM**, the caps, the curated models of every provider with tier and price and **Use** / **Fast** buttons. **Provider and keys**: the `assist.*` settings (provider, model, fast model, compatible base URL, one secret key per provider). **Usage since start** and the privacy note. See [Bring your own AI](ai-assist.md). |
 | Network | **Outbound connections**: the allowlist and the loopback switch (`egress.allow`, `egress.allow_loopback`). **Policy as the instance sees it**: the merged list, the always-refused addresses, each feature's own rule, and the last 100 decisions with a refresh. **Leads webhook**: the bearer token (a secret). See [Outbound connections](configuration.md#outbound-connections). |
 | Portal | **Dev portal**: on or off and why, its URL with **Preview the portal**, who may read it, the base URL testers use, whether changes persist. **Branding and access**: the `portal.*` settings. **Items**: every publishable item by kind (mock APIs, MCP servers, the mock LLM, agents, the HTTP tools, the registry) with its state, why a published item is hidden, its views this week, **Publish** / **Edit** (the metadata dialog) and checkboxes to publish or unpublish several. **Insights**: views over 7 and 30 days, downloads, Try it calls. See [Dev portal](portal.md). |
@@ -235,7 +243,10 @@ sign-in token; the others across visits):
 |---|---|
 | `GET /_rustybin/status` | Name, version, commit, instance id, hostname, uptime and start time, health, public mode, `admin_token_configured`, `control_auth`, `default_password` and the sign-in user, `hosted_mode`, console title and back link, `/identity` request count, inspector counters (stored, capacity, total captured) and ports |
 | `POST /_rustybin/login`, `POST /_rustybin/logout`, `GET /_rustybin/session` | The sign-in (never behind control auth), the sign-out and "who am I" of the password mode |
-| `GET`, `DELETE /_rustybin/sessions`, `DELETE /_rustybin/sessions/{id}`, `PUT /_rustybin/password` | The Sign-in tab (admin): the sessions, sign out everywhere, end one, change the user name and password |
+| `GET`, `DELETE /_rustybin/sessions`, `DELETE /_rustybin/sessions/{id}`, `PUT /_rustybin/password` | The Sign-in tab: the sessions, sign out everywhere, end one, change the first admin's user name and password |
+| `GET`, `POST /_rustybin/users`, `PATCH`, `DELETE /_rustybin/users/{id}`, `POST /_rustybin/users/{id}/invite`, `GET`, `PUT`, `DELETE /_rustybin/roles*` | Management, Users and roles |
+| `GET`, `PATCH /_rustybin/me`, `PUT /_rustybin/me/password`, `GET`, `DELETE /_rustybin/me/sessions*` | My account (the account menu) |
+| `POST /_rustybin/join` | The page an invitation link opens (`#/join/<token>`, never behind control auth) |
 | `GET /_rustybin/assist`, `POST /_rustybin/assist/run`, `POST /_rustybin/assist/test`, `GET /_rustybin/assist/usage` | The assist bar and drawer (the status, the streamed tasks), and the AI tab's test and usage (admin) |
 | `GET /_rustybin/catalog` | The route catalogue as JSON: categories with counts, and every endpoint with methods, category, summary, description and runnable examples |
 | `GET`, `PATCH /_rustybin/settings`, `DELETE /_rustybin/settings/{key}` | The instance settings of the Management view (admin): every registered key with its value, source, lock state and schema; secrets as `{set, hint}` |

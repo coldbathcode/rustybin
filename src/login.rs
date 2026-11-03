@@ -64,6 +64,13 @@ pub const LOGOUT_PATH: &str = "/_rustybin/logout";
 pub const SESSION_PATH: &str = "/_rustybin/session";
 pub const SESSIONS_PATH: &str = "/_rustybin/sessions";
 pub const PASSWORD_PATH: &str = "/_rustybin/password";
+/// Your own password (the 0.3 `PASSWORD_PATH` is its alias).
+pub const ME_PASSWORD_PATH: &str = "/_rustybin/me/password";
+/// Accept an invitation (open, rate limited).
+pub const JOIN_PATH: &str = "/_rustybin/join";
+/// What the sign-in throttle counts invitation attempts under (never a
+/// user name: the parentheses are not allowed in one).
+const JOIN_KEY: &str = "(invitation)";
 
 /// The user name and password out of the box.
 pub const DEFAULT_USER: &str = "rustybin";
@@ -104,9 +111,10 @@ pub fn enabled(config: &Config) -> bool {
     config.control_auth == ControlAuth::Password && !config.shared_mode
 }
 
-/// Control-plane paths that need no credentials (the sign-in itself).
+/// Control-plane paths that need no credentials (the sign-in itself and
+/// accepting an invitation).
 pub fn is_public_path(path: &str) -> bool {
-    path == LOGIN_PATH
+    path == LOGIN_PATH || path == JOIN_PATH
 }
 
 /// The user name that signs in: the `console.user` setting (stored, else
@@ -698,6 +706,31 @@ impl Tokens {
         }
     }
 
+    /// The listed sessions of one user, newest first.
+    pub fn sessions_of(&self, user_id: &str) -> Vec<Value> {
+        self.sessions()
+            .into_iter()
+            .filter(|s| s["user_id"] == user_id)
+            .collect()
+    }
+
+    /// Forget one user's listed sessions (their tokens are refused by their
+    /// generation, which the caller moved on). Answers how many there were.
+    pub fn forget_user(&self, user_id: &str) -> usize {
+        let mut issued = lock(&self.issued);
+        let before = issued.len();
+        issued.retain(|s| s.user_id != user_id);
+        before - issued.len()
+    }
+
+    /// End one listed session when it is `user_id`'s. `false` otherwise.
+    pub fn end_of(&self, user_id: &str, jti: &str) -> bool {
+        let theirs = lock(&self.issued)
+            .iter()
+            .any(|s| s.jti == jti && s.user_id == user_id);
+        theirs && self.end(jti)
+    }
+
     /// The listed sessions, newest first.
     pub fn sessions(&self) -> Vec<Value> {
         self.prune();
@@ -1001,6 +1034,32 @@ fn presented_resolved(
         return None;
     }
     verify_resolved(token, config).ok()
+}
+
+/// The session id (`jti`) of the sign-in token a request presents.
+pub fn current_session(headers: &HeaderMap, config: &Config) -> Option<String> {
+    presented_claims(headers, config)
+        .and_then(|c| c.get("jti").and_then(Value::as_str).map(str::to_string))
+}
+
+/// Mint a token for `account` and list its session. `None` when it could
+/// not be signed.
+fn issue(
+    config: &Config,
+    account: &crate::rbac::User,
+    ip: Option<IpAddr>,
+) -> Option<(String, Value)> {
+    let (token, claims) = mint(config, account)?;
+    config.console_tokens.record(Issued {
+        jti: claims["jti"].as_str().unwrap_or("").to_string(),
+        user: account.name.clone(),
+        user_id: account.id.clone(),
+        issued_at: claims["iat"].as_i64().unwrap_or(0),
+        expires_at: claims["exp"].as_i64().unwrap_or(0),
+        ip,
+        last_used: claims["iat"].as_i64().unwrap_or(0),
+    });
+    Some((token, claims))
 }
 
 /// The sign-in name a sign-in token carries: `rb_user`, or the `sub` of a
@@ -1405,11 +1464,35 @@ struct PasswordBody {
     username: Option<String>,
 }
 
+/// `PUT /_rustybin/password` (0.3): the caller's own password, as `PUT
+/// /_rustybin/me/password`; a caller who is not a user (the admin token, a
+/// control JWT) changes the first admin's, which needs `users.manage`.
 async fn password_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     extensions: Extensions,
     body: Result<Json<PasswordBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    change_password(state, headers, extensions, body, false).await
+}
+
+/// `PUT /_rustybin/me/password`: the caller's own password, with the
+/// current one.
+async fn me_password_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    body: Result<Json<PasswordBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    change_password(state, headers, extensions, body, true).await
+}
+
+async fn change_password(
+    state: AppState,
+    headers: HeaderMap,
+    extensions: Extensions,
+    body: Result<Json<PasswordBody>, axum::extract::rejection::JsonRejection>,
+    me: bool,
 ) -> Response {
     let config = &state.config;
     if !enabled(config) {
@@ -1425,7 +1508,142 @@ async fn password_handler(
             )
         }
     };
-    let ip = client_ip(&headers, &extensions, config);
+    let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
+    match caller.user_id() {
+        Some(id) if !state.users.is_first_admin(id) => {
+            let id = id.to_string();
+            own_password(&state, &id, &headers, &extensions, body).await
+        }
+        Some(_) => first_admin_password(&state, &headers, &extensions, body).await,
+        None if me => error(
+            StatusCode::BAD_REQUEST,
+            "this credential is not a user's (the admin token or a control JWT): it has no password of its own",
+            "not_a_user",
+        ),
+        None => match crate::rbac::require(&caller, crate::rbac::Permission::UsersManage) {
+            Ok(()) => first_admin_password(&state, &headers, &extensions, body).await,
+            Err(resp) => resp,
+        },
+    }
+}
+
+/// A user's own password (not user one's): the current one checked, the
+/// new one stored in the user store, every other session of theirs ended
+/// and a fresh token answered.
+async fn own_password(
+    state: &AppState,
+    id: &str,
+    headers: &HeaderMap,
+    extensions: &Extensions,
+    body: PasswordBody,
+) -> Response {
+    let config = &state.config;
+    let Some(user) = state.users.get(id) else {
+        return error(StatusCode::UNAUTHORIZED, "signed out", "revoked");
+    };
+    let ip = client_ip(headers, extensions, config);
+    let tokens = &config.console_tokens;
+    if let Err(wait) = tokens.check(ip, &user.name) {
+        return rate_limited(wait);
+    }
+    let current_ok = if body.current_password.chars().count() > MAX_PASSWORD_CHARS * 4 {
+        false
+    } else {
+        match check_user_password(state, &user, &body.current_password).await {
+            Some(ok) => ok,
+            None => {
+                tokens.abandoned(ip, &user.name);
+                return busy();
+            }
+        }
+    };
+    if !current_ok {
+        tokens.failed(ip, &user.name);
+        audit("change_password", &user.name, ip, "wrong_current_password");
+        return error(
+            StatusCode::FORBIDDEN,
+            "the current password is wrong",
+            "invalid_credentials",
+        );
+    }
+    tokens.succeeded(ip, &user.name);
+    if body
+        .username
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|u| !u.is_empty() && u != user.name)
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "user name: only the first admin's sign-in name changes here (console.user); other users keep the name they were invited with",
+            "invalid_user",
+        );
+    }
+    if let Err(e) = valid_new_password(&body.new_password) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            &format!("new password: {e}"),
+            "invalid_password",
+        );
+    }
+    let Some(hash) = hash_off_runtime(tokens, &body.new_password).await else {
+        return busy();
+    };
+    let listed = tokens.sessions_of(id).len();
+    let user = match state.users.set_password(id, hash) {
+        Ok(u) => u,
+        Err(e) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("the password was not saved: {e}"),
+                "io",
+            )
+        }
+    };
+    tokens.forget_user(id);
+    audit("change_password", &user.name, ip, "ok");
+    let mut out = json!({
+        "changed": true,
+        "user": user.name,
+        "signed_out": listed,
+        "default_password": default_password(state),
+    });
+    if let Some((token, claims)) = issue(config, &user, ip) {
+        out["token"] = json!(token);
+        out["expires_at"] = json!(rfc3339(claims["exp"].as_i64().unwrap_or(0)));
+    }
+    let mut resp = Json(out).into_response();
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp
+}
+
+/// Hash a new password on the blocking pool behind a hash permit. `None`
+/// when every permit is taken or the hash failed.
+async fn hash_off_runtime(tokens: &Tokens, plain: &str) -> Option<String> {
+    let permit = tokens.hash_permit()?;
+    let plain = plain.to_string();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        hash_password(&plain)
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+}
+
+/// The first admin's password (and user name): the sign-in settings, as in
+/// 0.4. Every session ends (the settings rotate the instance's generation,
+/// which the management server's OAuth tokens carry too); the caller gets
+/// a fresh token when it signed in with one.
+async fn first_admin_password(
+    state: &AppState,
+    headers: &HeaderMap,
+    extensions: &Extensions,
+    body: PasswordBody,
+) -> Response {
+    let config = &state.config;
+    let ip = client_ip(headers, extensions, config);
     let tokens = &config.console_tokens;
     let current_user = effective_user(&state.settings);
     if let Err(wait) = tokens.check(ip, &current_user) {
@@ -1434,7 +1652,7 @@ async fn password_handler(
     let current_ok = if body.current_password.chars().count() > MAX_PASSWORD_CHARS * 4 {
         false
     } else {
-        match check_credentials(&state, &current_user, &body.current_password).await {
+        match check_credentials(state, &current_user, &body.current_password).await {
             Some(ok) => ok,
             None => {
                 tokens.abandoned(ip, &current_user);
@@ -1506,11 +1724,12 @@ async fn password_handler(
     }
     let mut secrets = BTreeMap::new();
     secrets.insert(HASH_KEY.to_string(), Some(hash));
-    let who = crate::settings::principal(&headers, config);
-    // The store signs every session out with the change: count them, and
-    // see whether the caller signed in with one, first.
+    let who = crate::settings::principal(headers, config);
+    // The store signs every session out with the change (the first admin's
+    // sign-in is the instance's): count them, and see whether the caller
+    // signed in with one, first.
     let listed = tokens.listed();
-    let had_session = presented_claims(&headers, config).is_some();
+    let had_session = presented_claims(headers, config).is_some();
     if let Err(e) = state.settings.update_sign_in(values, secrets, &who) {
         return match e {
             crate::settings::UpdateError::Locked(keys) => (
@@ -1543,9 +1762,9 @@ async fn password_handler(
         "changed": true,
         "user": user,
         "signed_out": ended,
-        "default_password": default_password(&state),
+        "default_password": default_password(state),
     });
-    let account = first_admin(&state);
+    let account = first_admin(state);
     if let Some(account) = account.filter(|_| had_session) {
         if let Some((token, claims)) = mint(config, &account) {
             tokens.record(Issued {
@@ -1572,6 +1791,148 @@ async fn password_handler(
     resp
 }
 
+// ── Invitations ─────────────────────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+struct JoinBody {
+    #[serde(default)]
+    token: String,
+    #[serde(default)]
+    password: String,
+}
+
+fn invalid_invitation() -> Response {
+    error(
+        StatusCode::UNAUTHORIZED,
+        "this invitation is not valid: it was used, it expired, or a newer one replaced it. Ask for a new link",
+        "invalid_invitation",
+    )
+}
+
+/// `POST /_rustybin/join`: accept an invitation with the new password (the
+/// 0.3 rules). Open and rate limited like the sign-in (per address, and
+/// every address together); the token is checked before the password is
+/// hashed, used once, and never logged. Answers a sign-in token: the person
+/// is signed in.
+async fn join_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    body: Result<Json<JoinBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let config = &state.config;
+    if !enabled(config) {
+        return not_found(config);
+    }
+    let Json(body) = match body {
+        Ok(b) => b,
+        Err(e) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "expected {{ \"token\": \"rbi_...\", \"password\": \"...\" }}: {}",
+                    e.body_text()
+                ),
+                "invalid_body",
+            )
+        }
+    };
+    let ip = client_ip(&headers, &extensions, config);
+    warn_untrusted_proxy(&headers, config);
+    let tokens = &config.console_tokens;
+    if let Err(wait) = tokens.check(ip, JOIN_KEY) {
+        audit("join", "", ip, "rate_limited");
+        return rate_limited(wait);
+    }
+    if body.password.chars().count() > MAX_PASSWORD_CHARS * 4 {
+        tokens.abandoned(ip, JOIN_KEY);
+        return error(
+            StatusCode::BAD_REQUEST,
+            &format!("password: at most {MAX_PASSWORD_CHARS} characters"),
+            "invalid_password",
+        );
+    }
+    if let Err(e) = valid_new_password(&body.password) {
+        tokens.abandoned(ip, JOIN_KEY);
+        return error(
+            StatusCode::BAD_REQUEST,
+            &format!("password: {e}"),
+            "invalid_password",
+        );
+    }
+    let Some(invited) = state.users.invitation_user(&body.token) else {
+        tokens.failed(ip, JOIN_KEY);
+        audit("join", "", ip, "invalid_invitation");
+        return invalid_invitation();
+    };
+    let Some(hash) = hash_off_runtime(tokens, &body.password).await else {
+        tokens.abandoned(ip, JOIN_KEY);
+        return busy();
+    };
+    let accepted = match state.users.accept_invitation(&body.token, hash.clone()) {
+        Ok(a) => a,
+        Err(crate::rbac::UsersError::NotFound) => {
+            tokens.failed(ip, JOIN_KEY);
+            audit("join", &invited.name, ip, "invalid_invitation");
+            return invalid_invitation();
+        }
+        Err(e) => {
+            tokens.abandoned(ip, JOIN_KEY);
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("the invitation could not be accepted: {e}"),
+                "io",
+            );
+        }
+    };
+    // User one's password is the instance's sign-in setting.
+    if accepted.first_admin {
+        let mut secrets = BTreeMap::new();
+        secrets.insert(HASH_KEY.to_string(), Some(hash));
+        if let Err(e) = state
+            .settings
+            .update_sign_in(BTreeMap::new(), secrets, "invitation")
+        {
+            tokens.abandoned(ip, JOIN_KEY);
+            return error(
+                StatusCode::CONFLICT,
+                &format!("the first admin's password could not be saved ({e:?}): ask for a new link once the sign-in settings can change"),
+                "locked",
+            );
+        }
+    }
+    tokens.succeeded(ip, JOIN_KEY);
+    tokens.forget_user(&accepted.user.id);
+    let account = state
+        .users
+        .get(&accepted.user.id)
+        .unwrap_or(accepted.user.clone());
+    audit(
+        if accepted.reset { "reset" } else { "join" },
+        &account.name,
+        ip,
+        "ok",
+    );
+    let Some((token, claims)) = issue(config, &account, ip) else {
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not sign the token: sign in with the new password",
+            "server_error",
+        );
+    };
+    if let Err(e) = state.users.note_sign_in(&account.id) {
+        tracing::warn!(target: "rustybin::auth", error = %e, "the sign-in time could not be saved");
+    }
+    let mut out = token_body(&token, &claims, &account, &state);
+    out["joined"] = json!(true);
+    out["reset"] = json!(accepted.reset);
+    out["display_name"] = json!(account.display_name);
+    let mut resp = Json(out).into_response();
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp
+}
+
 // ── Router, catalogue, OpenAPI ──────────────────────────────────────
 
 pub fn router(_state: &AppState) -> Router<AppState> {
@@ -1582,6 +1943,8 @@ pub fn router(_state: &AppState) -> Router<AppState> {
         .route(SESSIONS_PATH, get(sessions_handler).delete(end_all_handler))
         .route("/_rustybin/sessions/{id}", delete(end_session_handler))
         .route(PASSWORD_PATH, put(password_handler))
+        .route(ME_PASSWORD_PATH, put(me_password_handler))
+        .route(JOIN_PATH, post(join_handler))
 }
 
 pub fn catalog() -> Vec<Endpoint> {
@@ -1653,17 +2016,54 @@ pub fn catalog() -> Vec<Endpoint> {
             PASSWORD_PATH,
             &["PUT"],
             category::CONTROL,
-            "Change the console user name and password (admin, current password required)",
+            "Change your own password (0.3's route, an alias of PUT /_rustybin/me/password); the first admin's also takes a new user name",
         )
-.permission(crate::rbac::Permission::UsersManage)
+        .authenticated(&[])
         .description(
-            "Stores an argon2id hash as the secret console.password_hash (and the user name as \
-             console.user), ends every other session and answers a fresh token for the caller. \
-             409 when RUSTYBIN_SETTINGS_LOCK holds the sign-in settings.",
+            "For the caller, with the current password. The first admin's password is the \
+             secret console.password_hash (and its user name console.user, 409 when \
+             RUSTYBIN_SETTINGS_LOCK holds them); other users' is in the user store. A caller \
+             who is not a user (the admin token, a control JWT) changes the first admin's, \
+             which needs users.manage. Ends the user's other sessions and answers a fresh \
+             token.",
         )
         .example(
             Example::new("Change the password", "PUT", PASSWORD_PATH)
                 .json(r#"{"current_password":"rustybin","new_password":"a-longer-secret"}"#)
+                .expect_status(404),
+        ),
+        Endpoint::new(
+            ME_PASSWORD_PATH,
+            &["PUT"],
+            category::CONTROL,
+            "Change your own password (the current one required)",
+        )
+        .authenticated(&[])
+        .description(
+            "Any signed-in user: 8 to 256 characters, not the default. Ends your other \
+             sessions and answers a fresh token. 400 not_a_user for the admin token or a \
+             control JWT.",
+        )
+        .example(
+            Example::new("Change my password", "PUT", ME_PASSWORD_PATH)
+                .json(r#"{"current_password":"rustybin","new_password":"a-longer-secret"}"#)
+                .expect_status(404),
+        ),
+        Endpoint::new(
+            JOIN_PATH,
+            &["POST"],
+            category::CONTROL,
+            "Accept an invitation: the link's token and your new password, for a sign-in token",
+        )
+        .open()
+        .description(
+            "Never behind control-plane auth; rate limited like the sign-in (5 failures per \
+             address and minute, 100 from every address together). The token works once, for \
+             72 hours; a reset's ends the user's other sessions.",
+        )
+        .example(
+            Example::post("Join", JOIN_PATH)
+                .json(r#"{"token":"rbi_0000000000000000000000000000000000000000000","password":"a-longer-secret"}"#)
                 .expect_status(404),
         ),
     ]
@@ -1717,7 +2117,7 @@ pub fn openapi_paths() -> Value {
                     "properties": { "username": { "type": "string" }, "password": { "type": "string" } }
                 } } } },
                 "responses": {
-                    "200": { "description": "Signed in", "content": { "application/json": { "schema": token_schema } } },
+                    "200": { "description": "Signed in", "content": { "application/json": { "schema": token_schema.clone() } } },
                     "401": { "description": "Wrong user name or password (reason invalid_credentials)" },
                     "404": not_found,
                     "429": { "description": "Too many failed attempts from this address (Retry-After)" }
@@ -1814,6 +2214,59 @@ pub fn openapi_paths() -> Value {
                     "403": { "description": "The current password is wrong" },
                     "404": not_found,
                     "409": { "description": "RUSTYBIN_SETTINGS_LOCK holds the sign-in settings" }
+                }
+            }
+        },
+        ME_PASSWORD_PATH: {
+            "put": {
+                "tags": ["Control Plane"],
+                "summary": "Change my password",
+                "description": "The caller's own password, with the current one: 8 to 256 characters, not the default. The first admin's is stored in the sign-in settings (console.password_hash), anyone else's in the user store. The caller's other sessions end and a fresh token is answered. 400 not_a_user for a credential that is not a user's.",
+                "operationId": "changeMyPassword",
+                "requestBody": { "required": true, "content": { "application/json": { "schema": {
+                    "type": "object",
+                    "required": ["current_password", "new_password"],
+                    "properties": {
+                        "current_password": { "type": "string" },
+                        "new_password": { "type": "string", "minLength": 8, "maxLength": 256 }
+                    }
+                } } } },
+                "responses": {
+                    "200": { "description": "Changed", "content": { "application/json": { "schema": { "type": "object", "properties": {
+                        "changed": { "type": "boolean" },
+                        "user": { "type": "string" },
+                        "signed_out": { "type": "integer" },
+                        "token": { "type": "string" },
+                        "expires_at": { "type": "string", "format": "date-time" }
+                    } } } } },
+                    "400": { "description": "The new password breaks a rule, or not a user" },
+                    "403": { "description": "The current password is wrong" },
+                    "404": not_found,
+                    "429": { "description": "Too many wrong current passwords" }
+                }
+            }
+        },
+        JOIN_PATH: {
+            "post": {
+                "tags": ["Control Plane"],
+                "summary": "Accept an invitation",
+                "description": "The token of an invitation link (/ui/#/join/<token>) and the new password (8 to 256 characters, not the default). One use, 72 hours. Answers a sign-in token for the user, so the person is signed in. Never behind control-plane auth; rate limited per client address (5 failures a minute) and for every address together.",
+                "operationId": "acceptInvitation",
+                "security": [],
+                "requestBody": { "required": true, "content": { "application/json": { "schema": {
+                    "type": "object",
+                    "required": ["token", "password"],
+                    "properties": {
+                        "token": { "type": "string", "description": "rbi_ plus 43 base64url characters" },
+                        "password": { "type": "string", "minLength": 8, "maxLength": 256 }
+                    }
+                } } } },
+                "responses": {
+                    "200": { "description": "Joined and signed in", "content": { "application/json": { "schema": token_schema } } },
+                    "400": { "description": "The password breaks a rule (the invitation is not used)" },
+                    "401": { "description": "Not a valid invitation (reason invalid_invitation)" },
+                    "404": not_found,
+                    "429": { "description": "Too many attempts from this address (Retry-After)" }
                 }
             }
         }

@@ -343,15 +343,29 @@ pub async fn reset_flaky(ctx: &CallCtx, access: &Access, args: &Value) -> Value 
     )
 }
 
-/// `list_sessions` (admin): the console's sign-in sessions since the last
-/// restart (the password sign-in must be on).
-pub fn list_sessions(ctx: &CallCtx, _access: &Access) -> Value {
+/// `list_sessions`: the console's sign-in sessions since the last restart
+/// (the password sign-in must be on), or one user's.
+pub fn list_sessions(ctx: &CallCtx, _access: &Access, args: &Value) -> Value {
     let config = &ctx.app.config;
     if !crate::login::enabled(config) {
         return err(format!(
             "the console sign-in is off (control auth {}): there are no sign-in sessions",
             config.control_auth.as_str()
         ));
+    }
+    if let Some(user) = arg_str(args, "user").filter(|u| !u.is_empty()) {
+        return match crate::rbac::service::user_sessions(&ctx.app, user) {
+            Ok(v) => ok(
+                ctx,
+                format!(
+                    "{} sign-in session(s) of {}",
+                    v["count"],
+                    v["user"].as_str().unwrap_or(user)
+                ),
+                v,
+            ),
+            Err(e) => super::tools::service_error(&e),
+        };
     }
     let sessions = config.console_tokens.sessions();
     let summary = format!(
@@ -372,15 +386,35 @@ pub fn list_sessions(ctx: &CallCtx, _access: &Access) -> Value {
     )
 }
 
-/// `end_session` (admin): end one sign-in session by id, or every one
-/// (`all`, confirmed: it signs everyone out, the caller's own console too).
-pub async fn end_session(ctx: &CallCtx, _access: &Access, args: &Value, params: &Value) -> Value {
+/// `end_session`: end one sign-in session by id, every session of one user
+/// (`user`, confirmed) or every one (`all`, confirmed: it signs everyone
+/// out, the caller's own console too).
+pub async fn end_session(ctx: &CallCtx, access: &Access, args: &Value, params: &Value) -> Value {
     let config = &ctx.app.config;
     if !crate::login::enabled(config) {
         return err(format!(
             "the console sign-in is off (control auth {}): there are no sign-in sessions",
             config.control_auth.as_str()
         ));
+    }
+    if let Some(user) = arg_str(args, "user").filter(|u| !u.is_empty()) {
+        let action = format!("sign {user} out everywhere: every token they hold is refused");
+        if let super::tools::Confirm::Answer(v) =
+            super::tools::confirm(ctx, "end_session", args, params, &action).await
+        {
+            return v;
+        }
+        return match crate::rbac::service::end_user_sessions(&ctx.app, &access.resolved, user) {
+            Ok(v) => ok(
+                ctx,
+                format!(
+                    "Signed {user} out everywhere: {} session(s) ended",
+                    v["ended"]
+                ),
+                v,
+            ),
+            Err(e) => super::tools::service_error(&e),
+        };
     }
     let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
     if all {

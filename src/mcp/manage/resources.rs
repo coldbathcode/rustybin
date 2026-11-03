@@ -19,7 +19,7 @@ pub const RESOURCES: &[(&str, &str, &str, &str, &str)] = &[
         SCHEMA_URI,
         "config.schema.json",
         "rustybin.yaml JSON Schema",
-        "The schema of rustybin.yaml version 2: the whole instance (instance, settings, secrets as references, mocks, registry, portal, harness, agents, health). The mocks sections are the settings arguments of create_mock, update_mock and set_operation. Also GET /_rustybin/config/schema.",
+        "The schema of rustybin.yaml version 2: the whole instance (instance, settings, secrets as references, mocks, registry, portal, harness, tests, test schedules, agents, roles, users without passwords, health). The mocks sections are the settings arguments of create_mock, update_mock and set_operation. Also GET /_rustybin/config/schema.",
         "application/schema+json",
     ),
     (

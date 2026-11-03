@@ -83,8 +83,25 @@ another host; a profile's token goes only to its own URL. The command line warns
 sends a token over plain `http://` to another host, and it follows no redirects.
 
 `rustybin whoami` says who the credential is; `rustybin logout` revokes the token and
-forgets it; `rustybin password change` takes the current and a new password (two lines of
-stdin with `--stdin`) and keeps the fresh token the instance answers with.
+forgets it; `rustybin passwd` changes your own password (the current and a new one, two
+lines of stdin with `--stdin`) and keeps the fresh token the instance answers with
+(`rustybin password change` is the 0.3 command, which also renames the first admin).
+`rustybin me` shows your account, `me update` your display name or email, `me
+sessions` where you are signed in.
+
+## Users and roles
+
+```bash
+{{#include ../examples/cli/cli.sh:users}}
+```
+
+`rustybin users invite NAME --role R` prints the invitation link once: send it to the
+person, who sets their own password ([users and roles](users.md)). `users update`
+changes roles (`--role`, repeatable or comma separated, replaces them), the display
+name or the email; `users disable` (asks first), `enable`, `delete` (asks first),
+`users sessions NAME` (`--end` signs them out everywhere) and `users invite NAME
+--reset` (a new link, a password reset). `rustybin roles list | show | save | delete`
+manage custom roles (`--permission`, repeatable or comma separated).
 
 ## Nouns and verbs
 
@@ -94,7 +111,8 @@ stdin with `--stdin`) and keeps the fresh token the instance answers with.
 
 Nouns mirror the control API: `mocks`, `requests`, `bins`, `tests`, `scenario`,
 `checkpoint`, `agents`, `ai`, `mcp`, `registry`, `portal`, `config`, `git`, `harness`,
-`settings`, `sessions`, `visits`, `visit`, `keys`, `egress`, `instance`, `profiles`. `rustybin help <noun>` lists the verbs, `--help` on any
+`settings`, `sessions`, `users`, `roles`, `me`, `visits`, `visit`, `keys`, `egress`,
+`instance`, `profiles`. `rustybin help <noun>` lists the verbs, `--help` on any
 command its flags and an example. Verbs that remove or replace something (`delete`,
 `clear`, `revoke`, `end-all`, `apply --prune`, `git resolve`) ask first; `--yes` answers
 for a script, and without a terminal they refuse rather than wait.
@@ -143,7 +161,8 @@ verbs: `source <(rustybin completion bash)` in `.bashrc`, or save the fish one u
 ## What the command line does not do
 
 The management MCP endpoint is for agents (`rustybin mcp-stdio` bridges a stdio client
-to it); the agent sign-in is a browser flow; the harness cluster's node-to-node routes
+to it); the agent sign-in and an invitation link (`POST /_rustybin/join`) are browser
+flows; the harness cluster's node-to-node routes
 are the nodes' business; a request bin's capture URLs are for the thing under test.
 Everything else on the control plane has a verb, and a test keeps it so: a route that
 lands without a command fails the build.

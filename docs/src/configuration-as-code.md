@@ -43,6 +43,15 @@ test_schedules:                     # saved tests on a schedule, a webhook for f
 agents:
   default_ceiling: traffic
   rules: [{ match: { name: "ci-*" }, ceiling: read-only }]
+roles:                              # custom roles (the five built-in ones never change)
+  - name: catalog-reader
+    description: Reads mocks and traffic
+    permissions: [mocks.read, traffic.read]
+users:                              # never a password: a new user is invited
+  - name: alice
+    display_name: Alice Doe
+    email: alice@example.com
+    roles: [editor, catalog-reader]
 health:
   initial: healthy                  # the /health toggle
 ```
@@ -59,6 +68,8 @@ health:
 | `tests` | The [saved tests](saved-tests.md), with `{{variables}}` for credentials (never values); a test that fails validation is a problem and is kept, never pruned | the saved tests (`<state>/tests.json`) |
 | `test_schedules` | The [test schedules](saved-tests.md#schedules), without their status (a replaced schedule keeps its own); one that fails validation is a problem and is kept, never pruned | the schedules (`<state>/test-schedules.json`) |
 | `agents` | The default ceiling and the rules of [AI agents](agent-mcp.md#managing-agents) | the agents policy |
+| `roles` | The [custom roles](users.md#roles): name, description, permissions | the user store; a prune never deletes a role somebody holds |
+| `users` | The [users](users.md) (password sign-in only): name, display name, email, roles, `disabled`; never a password or a hash (a document with one does not load the section). A user the document creates is invited, and the apply answers the link (`results.users.invitations`) | the user store, with the API's rules: nobody changes their own roles, a caller grants only what it holds; a prune never deletes the first admin, the applying user or the last enabled admin |
 | `health` | `initial`: `healthy` or `unhealthy` | the `/health` toggle |
 
 Two rules make a document safe to apply:

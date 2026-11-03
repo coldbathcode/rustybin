@@ -81,8 +81,16 @@ permission, see `src/control_auth.rs` and `src/rbac/` below) are built. Rules st
 its permission in the catalogue or `every_control_route_declares_a_permission` fails; a tool declares one or
 `every_tool_declares_a_permission` fails; a permission no route, tool or listed body check uses fails
 `every_permission_is_used`; who may call what is compared with 0.4 in `src/rbac/access_table.rs` (a change of reach
-is a deliberate row of `DELIBERATE`); a `403` names the missing permission (`reason: permission_required`), never
-what the caller holds.
+is a deliberate row of `DELIBERATE`, a route new since 0.4 goes in `NEW_SINCE_0_4`); a `403` names the missing
+permission (`reason: permission_required`), never what the caller holds. Step 09 (users and roles on every surface,
+invitations; user docs `docs/src/users.md`) is built: `src/rbac/api.rs` and `service.rs`, `/_rustybin/join` and
+`/me/password` in `src/login.rs`, `src/mcp/manage/users.rs`, `ui/views/manage/users.js`, `ui/views/account.js`, the
+join page in `ui/app.js`, `users:` and `roles:` in `rustybin.yaml`. Rules it left: a password or a hash is never a
+tool input or output (`every_tool_is_fully_defined` refuses keys containing `password` or `hash`), never in a
+document, a log line or a list; an invitation token is answered once, by the call that made it; nobody grants or
+manages more than they hold (`rbac::service`); a document from git changes display names and emails only
+(`configdoc::REPOSITORY_REFUSED_SECTIONS`); ending a user goes through `rbac::service::ended_user` (step 12 revokes
+the user's agents there).
 
 ## The whole instance as code, and source control (built)
 
@@ -304,11 +312,22 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   the environment); other users' hashes live in the store. Sign-in tokens: `sub` the user id, `rb_user`, `rb_gen`,
   `rb_ugen`; an older token (0.3 and 0.4, `sub: "user:<name>"`) is user one. A new permission goes in the table of
   `permission.rs` (and its test), never a yes/no admin check. The scopes keep their 0.4 reach: `console` is the
-  viewer role plus `traffic.read`, `assist.use`, `mcp.inspect`; `harness` every `harness.*`.
+  viewer role plus `traffic.read`, `assist.use`, `mcp.inspect`; `harness` every `harness.*`. Step 09: `users.rs` also
+  keeps the invitations (`rbi_` plus 32 random bytes, stored as a SHA-256 in `users.json`, 72 h, at most 100 open,
+  one per user; `pending` users are invited and disabled until they accept) and the guard rails inside every
+  change (`Users::commit` refuses a change that leaves no enabled admin; user one is never deleted; a role in use is
+  never deleted; `UsersError::Refused(reason, message)`); `service.rs` the logic the routes, tools and documents
+  share (`ServiceError` answers; no own role changes; the caller grants and manages only within its permissions;
+  `ended_user`, the hook of step 12); `api.rs` `/_rustybin/users*`, `/roles*` (every mode), `/me`, `/me/sessions*`
+  (users exist only with the password sign-in: `404` otherwise). Changing user one's sign-in settings still rotates
+  the instance's generation (every session and the OAuth tokens, as in 0.4); another user's password change moves
+  that user's generation only.
 - `src/login.rs`: the console sign-in (`RUSTYBIN_CONTROL_AUTH=password`, the default): `RUSTYBIN_CONSOLE_USER`,
   `RUSTYBIN_CONSOLE_PASSWORD` or `_PASSWORD_HASH` (argon2id), the settings `console.user` and the secret
   `console.password_hash`, `POST /_rustybin/login` (open) minting HS256 control tokens (the OAuth key's `console`
-  subkey, scope `admin`, 12 h, `rb_use: "console"`, `jti`, `rb_gen`), `logout`, `session`, `sessions*`, `password`.
+  subkey, scope `admin`, 12 h, `rb_use: "console"`, `jti`, `rb_gen`), `logout`, `session`, `sessions*`, `password`
+  (the caller's own; a caller who is not a user changes user one's with `users.manage`), `me/password` and `join`
+  (open, the sign-in's throttle under the key `(invitation)`, the token checked before the password is hashed).
   `Tokens` (generation, revoked ids, listed sessions, failed attempts per address; all bounded) lives in
   `Config.console_tokens` because every credential check takes `&Config`; `control_auth::verify_jwt_claims` calls
   `login::verify` for sign-in tokens, so every caller accepts them. Public mode with the default password refuses

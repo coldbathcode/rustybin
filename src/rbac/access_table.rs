@@ -118,6 +118,24 @@ pub(crate) const OLD_ADMIN_ONLY: &[(&str, &str)] = &[
     ("PUT", "/_rustybin/password"),
 ];
 
+/// Routes that did not exist in 0.4 (access control step 09 on): there is
+/// no 0.4 answer to keep, so the comparison skips them and their
+/// declaration is the truth (`every_control_route_declares_a_permission`
+/// and `the_route_check_enforces_the_declarations` still cover them).
+pub(crate) const NEW_SINCE_0_4: &[&str] = &[
+    "/_rustybin/users",
+    "/_rustybin/users/{id}",
+    "/_rustybin/users/{id}/invite",
+    "/_rustybin/users/{id}/sessions",
+    "/_rustybin/roles",
+    "/_rustybin/roles/{name}",
+    "/_rustybin/me",
+    "/_rustybin/me/password",
+    "/_rustybin/me/sessions",
+    "/_rustybin/me/sessions/{id}",
+    "/_rustybin/join",
+];
+
 /// The harness mutations an open control plane guarded with the admin
 /// token (with control auth on, the `harness` scope was enough).
 pub(crate) const OLD_OPEN_ADMIN_ONLY: &[(&str, &str)] = &[
@@ -324,6 +342,38 @@ pub(crate) fn new_allows(col: Col, ep: &Endpoint, method: &Method) -> bool {
 /// Every difference from 0.4, and why. `true`: the caller may call it
 /// now and could not before; `false`: the reverse.
 pub(crate) const DELIBERATE: &[(Col, &str, &str, bool, &str)] = &[
+    // Step 09: the 0.3 password route is the caller's own password. Any
+    // signed-in caller reaches it; one who is not a user (these columns'
+    // control JWTs, nobody on an open control plane) changes the first
+    // admin's only with users.manage, a body check.
+    (
+        Col::Console,
+        "PUT",
+        "/_rustybin/password",
+        true,
+        "your own password: a caller who is not a user still needs users.manage (a body check)",
+    ),
+    (
+        Col::Inspector,
+        "PUT",
+        "/_rustybin/password",
+        true,
+        "your own password: a caller who is not a user still needs users.manage (a body check)",
+    ),
+    (
+        Col::Harness,
+        "PUT",
+        "/_rustybin/password",
+        true,
+        "your own password: a caller who is not a user still needs users.manage (a body check)",
+    ),
+    (
+        Col::Anonymous,
+        "PUT",
+        "/_rustybin/password",
+        true,
+        "your own password: a caller who is not a user still needs users.manage (a body check)",
+    ),
     // The viewer role's reads (`*.read`): the console scope is the viewer
     // role plus its 0.4 extras, and the viewer reads what 0.4 kept for admin.
     (
@@ -633,7 +683,10 @@ pub(crate) const DELIBERATE: &[(Col, &str, &str, bool, &str)] = &[
 fn the_old_scopes_reach_what_they_reached() {
     let mut found = Vec::new();
     let mut compared = 0;
-    for ep in catalog::all().iter().filter(|e| e.is_control()) {
+    for ep in catalog::all()
+        .iter()
+        .filter(|e| e.is_control() && !NEW_SINCE_0_4.contains(&e.path))
+    {
         for m in ep.expanded_methods() {
             let method: Method = m.parse().expect("method");
             for col in Col::ALL {
@@ -678,6 +731,16 @@ fn the_old_lists_name_catalogue_routes() {
     for (_, m, p, _, why) in DELIBERATE {
         assert!(catalog::control_route(p).is_some(), "{m} {p}");
         assert!(!why.is_empty());
+    }
+    for p in NEW_SINCE_0_4 {
+        assert!(
+            catalog::control_route(p).is_some(),
+            "{p} is not a control route"
+        );
+        assert!(
+            !OLD_ADMIN_ONLY.iter().any(|(_, o)| o == p),
+            "{p} existed in 0.4"
+        );
     }
 }
 

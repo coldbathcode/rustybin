@@ -452,6 +452,8 @@ fn a_document_carries_the_tests_and_prunes_only_what_it_does_not_name() {
         principal: "test".into(),
         base: None,
         untrusted: false,
+        caller: None,
+        base_url: None,
     };
     let r = crate::configdoc::apply(&state, file, &opts);
     assert_eq!(r["results"]["tests"]["deleted"], json!(["gone"]), "{r:#}");

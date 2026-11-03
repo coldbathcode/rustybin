@@ -184,6 +184,8 @@ p { margin: 0 0 8px; }
 .banner { max-width: 1480px; margin: 0 auto; padding: 14px 26px 0; }
 .banner:empty { display: none; }
 .signed-in { max-width: 220px; }
+#account-menu { flex-shrink: 0; }
+#account-menu .menu-pop { min-width: 220px; }
 
 /* ── AI assist: the bar, the drawer, apply cards, markdown ─────────── */
 .assist-host { display: flex; align-items: center; min-width: 0; }

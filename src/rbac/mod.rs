@@ -22,9 +22,11 @@
 //! handler whose need depends on the body adds [`require`]. [`grant_of`]
 //! still names the 0.3 scopes a set amounts to (answers and logs).
 
+pub mod api;
 pub mod need;
 pub mod permission;
 pub mod role;
+pub mod service;
 pub mod users;
 
 use std::collections::BTreeSet;
@@ -446,3 +448,5 @@ pub(crate) fn scope_may(scope: &str, method: &str, path: &str) -> bool {
 mod access_table;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod users_tests;

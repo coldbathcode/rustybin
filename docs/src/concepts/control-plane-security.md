@@ -23,8 +23,9 @@ RUSTYBIN_CONTROL_AUTH=open rustybin              # a laptop or a lab: no sign-in
 
 Always reachable without credentials, in every mode:
 
-- `GET /_rustybin/ready`, the readiness probe (see below), and
-  `POST /_rustybin/login`, the sign-in itself;
+- `GET /_rustybin/ready`, the readiness probe (see below),
+  `POST /_rustybin/login`, the sign-in itself, and `POST /_rustybin/join`, where an
+  [invitation](../users.md) sets a new user's password;
 - the data plane, including `GET /` (liveness) and `/health` (the demo toggle);
 - the console's static files under `/ui/`. They are the same open-source files for
   every instance and carry no instance data: a browser must be able to load them to
@@ -60,10 +61,11 @@ same lock in `jwt` mode, as a hosted platform runs it:
 Every control-plane route names the permission it needs, per method (`GET
 /_rustybin/mocks` is `mocks.read`, `POST` is `mocks.write`), and one check makes the
 decision before the route's handler runs; a few routes are open (the readiness probe,
-the sign-in, the OAuth sign-in endpoints, the harness cluster's node routes, which
-check their own credential) and a few need only a signed-in caller (`GET
-/_rustybin/session`, sign-out, the management MCP server, whose tools check their own
-permission, the OAuth consent API and a self-service visit's own routes). The
+the sign-in, an invitation's join, the OAuth sign-in endpoints, the harness cluster's
+node routes, which check their own credential) and a few need only a signed-in caller
+(`GET /_rustybin/session`, sign-out, your own account under `/_rustybin/me` and your
+own password, the management MCP server, whose tools check their own permission, the
+OAuth consent API and a self-service visit's own routes). The
 [route catalogue](catalogue.md), the [CLI reference](../cli.md) (the **Needs** column)
 and the [agent tool tables](../agent-mcp.md#tools) list what each one needs.
 
@@ -105,7 +107,9 @@ route's:
 | A settings change (`PATCH /_rustybin/settings`, `DELETE /_rustybin/settings/{key}`, a document's `settings:`) of `egress.*`, `proxy.*`, `agents.*`, `console.*`, `sso.*`, `assist.provider` or `assist.base_url` | `settings.security` |
 | A settings change of a `portal.*` setting | `portal.settings` |
 | A settings change that sets or clears a secret, a document with `secrets:` | `secrets.write` |
-| A document (`POST /_rustybin/config/apply`) with `settings:` or `instance:`; with `agents:` | `settings.write`; `agents.manage` |
+| A document (`POST /_rustybin/config/apply`, the `apply_config` tool) with `settings:` or `instance:`; with `agents:`; with `users:` or `roles:` | `settings.write`; `agents.manage`; `users.manage` |
+| `PUT /_rustybin/password` by a caller who is not a user (the admin token, a control JWT): the first admin's password | `users.manage` |
+| Inviting a user, giving roles, saving a custom role; changing, disabling, deleting or resetting a user | every permission of the roles given (or of the user's roles): nobody grants or manages more than they hold ([users and roles](../users.md#the-guard-rails)) |
 | The MCP relay and checks: a saved connection's credentials, or a method that acts on a server on another host (`tools/call`) | `mcp.connections` |
 | `GET /_rustybin/checkpoints?from=git` and a restore from the repository | `git.read` |
 | The `/health` toggles and `POST /flaky/reset?scope=all` (data plane) | `settings.write` |
@@ -126,18 +130,25 @@ as `Authorization: Bearer`, and captures redact it.
 | `RUSTYBIN_CONSOLE_PASSWORD` | `rustybin` | The password in the clear, for a first deployment |
 | `RUSTYBIN_CONSOLE_PASSWORD_HASH` | unset | An argon2id PHC string (`$argon2id$v=19$...`), preferred for deployments; wins over the plain password. Seeds the secret `console.password_hash` |
 
-A password changed in the console (**Management, Sign-in**, the current password
-required) or through `PUT /_rustybin/password` is stored as an argon2id hash in the
+These are the first admin's (user one, the 0.3 console user). Every other user is
+[invited](../users.md) and keeps an argon2id hash of their own in the user store,
+which they change themselves (**My account**, `PUT /_rustybin/me/password`,
+`rustybin passwd`, the current password required); nobody else ever sees or types it.
+The first admin's password changed in the console (**My account** or **Management,
+Sign-in**, the current password required) or through `PUT /_rustybin/me/password` or
+the 0.3 `PUT /_rustybin/password` is stored as an argon2id hash in the
 [settings store](#settings-and-secrets-at-rest) (the secret `console.password_hash`)
 and wins over the environment, unless `RUSTYBIN_SETTINGS_LOCK` makes the
-environment authoritative. The change ends every other session; the caller gets a
-fresh token. The settings API changes `console.user` and `console.password_hash` only
+environment authoritative. The change ends every session, as in 0.4 (and the
+management server's OAuth tokens, which act for no user yet); the caller gets a fresh
+token. Another user's password change ends only their own other sessions. The settings API changes `console.user` and `console.password_hash` only
 with the current password (`current_password` in the `PATCH /_rustybin/settings`
 body; `403` with `reason: current_password_required` or `invalid_credentials`
 otherwise), so a stolen sign-in token or an agent cannot lock the owner out or keep
 its access; the management MCP server and documents never change them. Any change
-of the user name or the password signs every session out. Forgot it?
-`DELETE /_rustybin/settings/console.password_hash` with the admin token
+of the first admin's user name or password signs every session out. Forgot it?
+Another admin sends a new invitation (`POST /_rustybin/users/{id}/invite`, a reset),
+or `DELETE /_rustybin/settings/console.password_hash` with the admin token
 (`RUSTYBIN_ADMIN_TOKEN` itself) goes back to the environment's password or the
 default.
 
@@ -175,7 +186,9 @@ tokens). `GET /_rustybin/sessions` (admin) lists the sign-in tokens issued since
 last restart (at most 256: user, address, issue, last use and expiry times),
 `DELETE /_rustybin/sessions/{id}` ends one, and `DELETE /_rustybin/sessions` signs out
 everywhere by rotating the token generation every token carries, the caller's
-included. `GET /_rustybin/session` describes the credential a request presents
+included. One user's sessions: `GET` and `DELETE /_rustybin/users/{id}/sessions`
+(`users.read`, `users.manage`); your own: `/_rustybin/me/sessions` (any signed-in
+user). `GET /_rustybin/session` describes the credential a request presents
 (`obtained`: `password`, `admin_token`, `control_jwt` or `api_key`), which is how
 the console shows who is signed in: for a sign-in token the user (`user`, the sign-in
 name, `user_id`, `display_name`), and for every credential the `roles` and
@@ -254,7 +267,10 @@ and `portal_reader`. A sign-in token carries the user id (`sub`), the sign-in na
 and its permissions are resolved from the user at every request, so a role change or
 a disable applies to the next one. The admin token is every permission and never a
 user (break glass); an open control plane is every permission, as before. Every
-route and tool checks one of them (see [Permissions](#permissions)).
+route and tool checks one of them (see [Permissions](#permissions)). An admin
+invites, changes, disables and removes users, and manages custom roles, from the
+console, the CLI, an agent or `rustybin.yaml`: [Users and roles](../users.md). A
+disabled user's sign-in gets the answer of a wrong password.
 
 **Upgrading from 0.4.** Nothing to do: on the first start the console user (the
 `console.user` and `console.password_hash` settings, or `RUSTYBIN_CONSOLE_USER` and

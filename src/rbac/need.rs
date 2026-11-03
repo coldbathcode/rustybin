@@ -123,6 +123,10 @@ pub const BODY_CHECKS: &[(Permission, &str)] = &[
         Permission::AgentsManage,
         "a document with agents:",
     ),
+    (
+        Permission::UsersManage,
+        "a document with users: or roles:; PUT /_rustybin/password by a caller who is not a user (the first admin's password)",
+    ),
 ];
 
 /// Permissions no route, tool or check uses yet, and the step that will.

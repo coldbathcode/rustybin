@@ -1211,6 +1211,14 @@ const OLD_RIGHTS: &[(&str, &str, bool)] = &[
     ("run_test_schedule", "admin", false),
     ("get_mock_revision", "read", true),
     ("list_repository_checkpoints", "admin", true),
+    // Access control 3 (new since 0.4): what 0.4 would have called admin tools.
+    ("list_users", "admin", true),
+    ("invite_user", "admin", false),
+    ("update_user", "admin", false),
+    ("delete_user", "admin", false),
+    ("list_roles", "admin", true),
+    ("save_role", "admin", false),
+    ("delete_role", "admin", false),
 ];
 
 /// The 0.4 ceilings, by right: `read-only` a read-only tool that is not a

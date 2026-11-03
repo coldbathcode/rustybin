@@ -36,6 +36,8 @@ const VIEWS = [
   { id: 'tokens', title: 'Token lab', icon: 'token', load: () => import('./views/tokens.js') },
   // Reached from an agent's sign-in (/_rustybin/oauth/authorize), never from the navigation.
   { id: 'authorize', title: 'Sign in an AI agent', icon: 'shield', hidden: true, load: () => import('./views/authorize.js') },
+  // The account menu's My account.
+  { id: 'account', title: 'My account', icon: 'user', hidden: true, load: () => import('./views/account.js') },
 ];
 
 const app = document.getElementById('app');
@@ -227,8 +229,17 @@ function renderActions() {
   actions.appendChild(wrap);
   if (auth.required() && auth.getToken()) {
     const who = auth.user() || (auth.signedInWithPassword() ? 'signed in' : 'token');
-    actions.appendChild(h('button', { class: 'btn sm ghost signed-in hide-sm', type: 'button', id: 'signed-in', title: signedInTitle(), onclick: () => { location.hash = '#/manage/signin'; } },
-      icon('user'), h('span', { class: 'ellipsis' }, who), h('span', { class: 'muted', id: 'signed-in-expiry' }, expiryText())));
+    // The account menu: My account (a user's own profile, password and
+    // sessions), the sign-in settings, sign out.
+    const menu = h('details', { class: 'menu hide-sm', id: 'account-menu' },
+      h('summary', { class: 'btn sm ghost signed-in', id: 'signed-in', title: signedInTitle(), 'aria-label': 'Account menu' },
+        icon('user'), h('span', { class: 'ellipsis' }, who), h('span', { class: 'muted', id: 'signed-in-expiry' }, expiryText())),
+      h('div', { class: 'menu-pop', role: 'menu' },
+        auth.signedInWithPassword() ? h('a', { href: '#/account', id: 'account-link', role: 'menuitem' }, icon('user'), 'My account') : null,
+        h('a', { href: '#/manage/signin', role: 'menuitem' }, icon('lock'), 'Sign-in and sessions'),
+        h('button', { type: 'button', class: 'danger', id: 'menu-sign-out', role: 'menuitem', onclick: () => auth.signOut(SERVER) }, icon('x'), 'Sign out')));
+    menu.addEventListener('click', (e) => { if (e.target.closest('a')) menu.open = false; });
+    actions.appendChild(menu);
   }
   actions.appendChild(h('button', { class: 'btn ghost icon', type: 'button', id: 'settings-btn', 'aria-label': 'Console settings', title: 'Console settings', onclick: openSettings }, icon('settings')));
   const themeBtn = h('button', { class: 'btn ghost icon', type: 'button', id: 'theme-btn' });
@@ -251,7 +262,7 @@ function expiryText() {
 function signedInTitle() {
   const who = auth.user();
   const at = auth.expiresAt();
-  return (who ? 'Signed in as ' + who : 'Signed in with a control token') + (at ? ', expires ' + new Date(at).toLocaleString() : '') + '. Opens Management, Sign-in.';
+  return (who ? 'Signed in as ' + who : 'Signed in with a control token') + (at ? ', expires ' + new Date(at).toLocaleString() : '') + '. Opens the account menu.';
 }
 
 function refreshSignedIn() {
@@ -293,6 +304,75 @@ function handleCallback() {
     try { sessionStorage.setItem('rustybin.oauth.callback', params); } catch { /* ignore */ }
     location.replace(location.pathname.replace(/callback\/?$/, '') + '#/tokens');
   });
+  return true;
+}
+
+// ── An invitation (#/join/<token>): set your password and join ──
+
+/**
+ * The page an invitation link opens: the token leaves the address bar at
+ * once (it stays in memory only), the person chooses a password (the 0.3
+ * rules) and POST /_rustybin/join signs them in. Shown instead of the
+ * console, whatever is stored in this tab.
+ */
+function handleJoin() {
+  const m = /^#\/join\/([A-Za-z0-9_-]+)$/.exec(location.hash || '');
+  if (!m) return false;
+  const token = m[1];
+  try { history.replaceState(null, '', location.pathname + location.search + '#/join'); } catch { /* ignore */ }
+  const password = input({ type: 'password', id: 'join-password', autocomplete: 'new-password', placeholder: 'at least 8 characters', 'aria-label': 'Password' });
+  const confirm = input({ type: 'password', id: 'join-confirm', autocomplete: 'new-password', 'aria-label': 'Confirm the password' });
+  const err = h('div');
+  const submit = h('button', { class: 'btn primary', type: 'submit', id: 'join-submit' }, 'Set the password and sign in');
+  const form = h('form', { class: 'stack', id: 'join-form' },
+    field('Password', password, 'Only you ever see it: 8 to 256 characters, not the default.'),
+    field('Confirm', confirm),
+    err,
+    h('div', { class: 'row' }, h('span', { class: 'grow' }), submit));
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (password.value !== confirm.value) { replace(err, notice('err', 'The password and its confirmation differ.')); return; }
+    if (password.value.length < 8) { replace(err, notice('err', 'The password needs at least 8 characters.')); return; }
+    submit.disabled = true;
+    replace(err);
+    let resp = null;
+    let json = null;
+    try {
+      resp = await fetch(SERVER + '/_rustybin/join', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ token, password: password.value }),
+        credentials: 'omit',
+        cache: 'no-store',
+      });
+      try { json = await resp.json(); } catch { json = null; }
+    } catch {
+      replace(err, notice('err', 'Rustybin could not be reached: try again.'));
+      submit.disabled = false;
+      return;
+    }
+    if (resp.ok && json && json.token) {
+      auth.setToken(json.token, false);
+      try { history.replaceState(null, '', location.pathname + location.search + '#/account'); } catch { location.hash = '#/account'; }
+      location.reload();
+      return;
+    }
+    submit.disabled = false;
+    const reason = json && json.reason;
+    const text = reason === 'invalid_invitation'
+      ? 'This invitation is not valid any more: it was used, it expired, or a newer one replaced it. Ask for a new link.'
+      : reason === 'rate_limited' ? 'Too many attempts: wait a moment and try again.' : ((json && json.error) || ('The invitation failed (' + resp.status + ').'));
+    replace(err, notice('err', text));
+  });
+  const body = h('div', { class: 'stack' },
+    h('div', { class: 'row nowrap' }, icon('user'), h('h1', { id: 'join-title' }, 'Join this Rustybin')),
+    h('p', null, 'You were invited to sign in to this instance. Choose your password: the link works once, and nobody else ever sees it.'),
+    form);
+  document.body.appendChild(h('div', { class: 'signin', id: 'join', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'join-title' },
+    h('section', { class: 'card signin-card' }, h('div', { class: 'card-body' }, body))));
+  app.setAttribute('aria-hidden', 'true');
+  document.title = 'Join | ' + (auth.consoleTitle ? auth.consoleTitle + ' | ' : '') + 'Rustybin console';
+  password.focus();
   return true;
 }
 
@@ -476,6 +556,7 @@ async function loadInstance() {
 
 function start() {
   if (handleCallback()) return;
+  if (handleJoin()) return;
   auth.consumeFragment();
   visit.consumeFragment();
   const menu = document.getElementById('menu-btn');

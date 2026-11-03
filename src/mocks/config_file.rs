@@ -28,7 +28,8 @@
 //! the whole instance: `instance:` (the title and console user), `settings:`
 //! (non-secret settings by dotted key), `secrets:` (references, never
 //! values), `harness:` (saved scenarios), `tests:` (saved tests), `test_schedules:`
-//! (saved tests on a schedule) and `health:` (the initial
+//! (saved tests on a schedule), `users:` and `roles:` (who signs in and the
+//! custom roles; never a password or a hash) and `health:` (the initial
 //! state); see `crate::configdoc`, which exports, diffs and applies such
 //! documents. Version 1 files still load (they are version 2 documents with
 //! the mocks sections only).
@@ -76,6 +77,8 @@ pub const SECTIONS: &[&str] = &[
     "tests",
     "test_schedules",
     "agents",
+    "roles",
+    "users",
     "health",
 ];
 
@@ -110,6 +113,12 @@ pub struct MocksFile {
     pub test_schedules: Option<Vec<crate::replay::schedule::Schedule>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents: Option<crate::mcp::manage::agents::FileSection>,
+    /// Custom roles (`crate::rbac::role`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<crate::rbac::CustomRole>>,
+    /// The users who sign in (never a password or a hash).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub users: Option<Vec<crate::configdoc::UserDoc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<crate::configdoc::HealthSection>,
     /// The names of `mocks` entries that did not parse ([`parse_lenient`]):
@@ -156,6 +165,12 @@ impl MocksFile {
         }
         if self.agents.is_some() {
             out.push("agents");
+        }
+        if self.roles.is_some() {
+            out.push("roles");
+        }
+        if self.users.is_some() {
+            out.push("users");
         }
         if self.health.is_some() {
             out.push("health");
@@ -285,6 +300,8 @@ pub fn parse_lenient(text: &str) -> Result<(MocksFile, Vec<Failed>), String> {
     let tests = section(&mut top, "tests", &mut failed);
     let test_schedules = section(&mut top, "test_schedules", &mut failed);
     let agents = section(&mut top, "agents", &mut failed);
+    let roles = section(&mut top, "roles", &mut failed);
+    let users = section(&mut top, "users", &mut failed);
     let health = section(&mut top, "health", &mut failed);
     failed.extend(top.keys().map(|k| Failed {
         name: None,
@@ -327,6 +344,8 @@ pub fn parse_lenient(text: &str) -> Result<(MocksFile, Vec<Failed>), String> {
             tests,
             test_schedules,
             agents,
+            roles,
+            users,
             health,
             unparsed_mocks,
         },
@@ -736,6 +755,8 @@ pub fn json_schema() -> Value {
         "tests": crate::replay::schema(),
         "test_schedules": crate::replay::schedule::schema(),
         "agents": agents,
+        "roles": crate::configdoc::roles_schema(),
+        "users": crate::configdoc::users_schema(),
         "health": crate::configdoc::health_schema()
     }));
     if let Value::Object(m) = &mut root {
@@ -747,7 +768,7 @@ pub fn json_schema() -> Value {
             "title".into(),
             json!("Rustybin configuration file (rustybin.yaml)"),
         );
-        m.insert("description".into(), json!("The whole instance as one document (version 2): the instance, its settings and secret references, mocks, registry entries, portal items, saved scenarios, agent rules and health. A version 1 file holds the mocks sections only."));
+        m.insert("description".into(), json!("The whole instance as one document (version 2): the instance, its settings and secret references, mocks, registry entries, portal items, saved scenarios, agent rules, custom roles, users (never a password) and health. A version 1 file holds the mocks sections only."));
     }
     root
 }

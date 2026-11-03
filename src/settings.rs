@@ -1223,6 +1223,10 @@ impl Settings {
             }
         }
         if hash_changed || user_after != *user_before {
+            // Every session, as in 0.4: the management server's OAuth
+            // tokens carry only the instance's generation (they act for no
+            // user until agents do, testing-2 step 12), and a changed first
+            // admin's password must end them.
             self.console_tokens.rotate();
             tracing::info!(
                 target: "rustybin::auth",

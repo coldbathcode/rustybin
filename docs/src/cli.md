@@ -152,14 +152,88 @@ rustybin sessions end-all --yes
 
 ## password
 
-Change the console user name and password
+Change the first admin's user name and password (0.3; rustybin passwd changes yours)
 
 | Command | What it does | Calls | Needs |
 |---|---|---|---|
-| `rustybin password change [--user U] [--stdin]` | Change the console password (and user name): the current and the new one prompted, or two lines of stdin. Flags: `--user` value, `--stdin`. | `PUT /_rustybin/password` | `users.manage` |
+| `rustybin password change [--user U] [--stdin]` | Change your password (the first admin's also takes a new user name): the current and the new one prompted, or two lines of stdin. Flags: `--user` value, `--stdin`. | `PUT /_rustybin/password` | signed in |
 
 ```bash
 rustybin password change --stdin < passwords.txt
+```
+
+## users
+
+Users: invite, change roles, disable, delete (the password sign-in)
+
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin users list` | The users: roles, status (active, invited, disabled), last sign-in. | `GET /_rustybin/users` | `users.read` |
+| `rustybin users invite <name> --role R [--display-name D] [--email E] [--reset]` | Invite a user: the answer is a link to send them (shown once), where they set their own password. --reset sends a user who exists a new link (a password reset). Flags: `--role` value, `--display-name` value, `--email` value, `--reset`. | `POST /_rustybin/users`, `POST /_rustybin/users/{id}/invite` | `users.manage` |
+| `rustybin users show <user>` | One user (an id or a sign-in name): roles, permissions, status, the open invitation. | `GET /_rustybin/users/{id}` | `users.read` |
+| `rustybin users update <user> [--role R] [--display-name D] [--email E]` | Change a user's roles (--role replaces them; repeatable), display name or email (--email "" clears it). Flags: `--role` value, `--display-name` value, `--email` value. | `PATCH /_rustybin/users/{id}` | `users.manage` |
+| `rustybin users disable <user>` | Disable a user: their sessions end and their sign-in is refused. | `PATCH /_rustybin/users/{id}` | `users.manage` |
+| `rustybin users enable <user>` | Enable a disabled user again (an invited one joins through the invitation). | `PATCH /_rustybin/users/{id}` | `users.manage` |
+| `rustybin users sessions <user> [--end]` | A user's sign-in sessions; --end signs them out everywhere. Flags: `--end`. | `GET /_rustybin/users/{id}/sessions`, `DELETE /_rustybin/users/{id}/sessions` | `users.read`, `users.manage` |
+| `rustybin users delete <user>` | Delete a user (never the last enabled admin, never the first admin). | `DELETE /_rustybin/users/{id}` | `users.manage` |
+
+```bash
+rustybin users list
+rustybin users invite alice --role editor --display-name "Alice Doe"
+rustybin users show alice
+rustybin users update alice --role tester
+rustybin users disable alice --yes
+rustybin users enable alice
+rustybin users sessions alice
+rustybin users delete alice --yes
+```
+
+## roles
+
+Roles: the built-in ones and custom roles with their permissions
+
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin roles list` | The roles with their permissions, whether they are privileged and how many users hold them. | `GET /_rustybin/roles` | `users.read` |
+| `rustybin roles show <name>` | One role: its permissions and who holds it. | `GET /_rustybin/roles/{name}` | `users.read` |
+| `rustybin roles save <name> --permission P [--description D]` | Create or change a custom role (--permission repeatable, or comma separated). Flags: `--permission` value, `--description` value. | `PUT /_rustybin/roles/{name}`, `POST /_rustybin/roles` | `users.manage` |
+| `rustybin roles delete <name>` | Delete a custom role nobody holds. | `DELETE /_rustybin/roles/{name}` | `users.manage` |
+
+```bash
+rustybin roles list
+rustybin roles show editor
+rustybin roles save catalog-reader --permission mocks.read,traffic.read --description "Reads mocks and traffic"
+rustybin roles delete catalog-reader --yes
+```
+
+## me
+
+Your own account: who you are, display name, email, sessions
+
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin me` | Your own account: user, display name, email, roles, permissions. | `GET /_rustybin/me` | signed in |
+| `rustybin me update [--display-name D] [--email E]` | Change your display name or email (--email "" clears it). Flags: `--display-name` value, `--email` value. | `PATCH /_rustybin/me` | signed in |
+| `rustybin me sessions [--end-all]` | Your sign-in sessions; --end-all signs you out everywhere (this profile too). Flags: `--end-all`. | `GET /_rustybin/me/sessions`, `DELETE /_rustybin/me/sessions` | signed in |
+| `rustybin me end-session <id>` | End one of your sign-in sessions. | `DELETE /_rustybin/me/sessions/{id}` | signed in |
+
+```bash
+rustybin me
+rustybin me update --display-name "Ops on call"
+rustybin me sessions
+rustybin me end-session 3f2a
+```
+
+## passwd
+
+Change your own password
+
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin passwd [--stdin]` | Change your own password: the current and the new one prompted, or two lines of stdin. Your other sessions end; the profile keeps a fresh token. Flags: `--stdin`. | `PUT /_rustybin/me/password` | signed in |
+
+```bash
+rustybin passwd --stdin < passwords.txt
 ```
 
 ## mocks

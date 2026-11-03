@@ -8,7 +8,7 @@ use serde_json::{json, Map, Value};
 use super::access::{Access, ToolNeed};
 use super::{
     agents, assist, checkpoints, config, harness, inspect, instance, mocks, portal, registry,
-    replay, scenarios, settings, testing, traffic, visits,
+    replay, scenarios, settings, testing, traffic, users, visits,
 };
 use crate::mcp::core::{self, CallCtx};
 use crate::mcp::protocol::{RpcError, Version};
@@ -574,9 +574,12 @@ pub static TOOLS: &[ToolDef] = &[
     tool!("restore_agent", "Restore an agent", "Undo a revocation (never of an agent of the caller's own credential). Admin.", ToolNeed::Perm(Permission::AgentsManage), ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "id": { "type": "string" } }), &["id"])),
     tool!("end_agent_sessions", "End an agent's sessions", "Close the agent's handshake-era MCP sessions without revoking it (never of an agent of the caller's own credential). Admin.", ToolNeed::Perm(Permission::AgentsManage), ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "id": { "type": "string" } }), &["id"])),
     // ── Sign-in sessions ──
-    tool!("list_sessions", "Sign-in sessions", "The console's sign-in sessions since the last restart (user, issued, expiry, last seen), when the password sign-in is on. The password itself is changed only in the console, with rustybin password change, or through the environment. Admin.", ToolNeed::Perm(Permission::UsersRead), ro=true, destructive=false, idem=true, confirm=false, no_args),
-    tool!("end_session", "End a sign-in session", "End one console sign-in session by id, or with all true sign out everywhere (every token issued so far is refused, the user's own console included; destructive: confirmed). Admin.", ToolNeed::Perm(Permission::UsersManage), ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+    tool!("list_sessions", "Sign-in sessions", "The console's sign-in sessions since the last restart (user, issued, expiry, last seen), when the password sign-in is on; user (an id or a sign-in name) lists one user's. A password is changed only by its owner: in the console, with rustybin passwd, or through the environment for the first admin.", ToolNeed::Perm(Permission::UsersRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "user": { "type": "string", "description": "Only this user's sessions (a user id or sign-in name)" }
+    }), &[])),
+    tool!("end_session", "End a sign-in session", "End one console sign-in session by id; user (an id or a sign-in name) signs one user out everywhere; all true signs everyone out (every token issued so far is refused, the user's own console included). A user or all: destructive, confirmed.", ToolNeed::Perm(Permission::UsersManage), ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
         "id": { "type": "string" },
+        "user": { "type": "string", "description": "Sign this user out everywhere (a user id or sign-in name)" },
         "all": { "type": "boolean", "default": false },
         "confirm": confirm_prop()
     }), &[])),
@@ -700,6 +703,42 @@ pub static TOOLS: &[ToolDef] = &[
     }), &["name", "revision"])),
     // Testing workflows 2: checkpoints in the configuration repository.
     tool!("list_repository_checkpoints", "The repository's checkpoints", "The checkpoints committed to the configuration repository (<git.path>/checkpoints/ at the working copy's HEAD: git_pull first): name, saved_at, the mocks each holds, health, bytes, or why one cannot be restored (over the size cap, not a valid checkpoint). restore_checkpoint with from: git restores one. Admin.", ToolNeed::Perm(Permission::GitRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({}), &[])),
+    // Access control 3: users and roles (password sign-in for users; roles in every mode).
+    tool!("list_users", "Users", "The users who sign in to this instance (password sign-in): name, display name, email, roles, status (active, invited, disabled), last sign-in, open invitation (never its link), sessions; user (an id or a sign-in name) for one with its permissions.", ToolNeed::Perm(Permission::UsersRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "user": { "type": "string", "description": "One user: an id (usr_...) or a sign-in name" }
+    }), &[])),
+    tool!("invite_user", "Invite a user", "Create a user, invited (disabled until they accept), and answer the one-time link <instance>/ui/#/join/<token> (72 hours, shown once, never stored): send it to the person, who opens it and sets their own password. Nobody else ever sees or types a password. reset: true sends a user who exists a new link instead (a password reset: their password works until they accept). Roles: the caller grants only roles whose permissions it holds. Confirmed.", ToolNeed::Perm(Permission::UsersManage), ro=false, destructive=false, idem=false, confirm=true, || obj(json!({
+        "name": { "type": "string", "description": "The sign-in name (letters, digits and . _ @ -, at most 64)" },
+        "display_name": { "type": "string" },
+        "email": { "type": "string" },
+        "roles": { "type": "array", "items": { "type": "string" }, "description": "Role names (list_roles): at least one for a new user" },
+        "reset": { "type": "boolean", "default": false, "description": "A new link for a user who exists (a password reset)" },
+        "confirm": confirm_prop()
+    }), &["name"])),
+    tool!("update_user", "Change a user", "Change a user's roles, display name, email (null clears it) or disabled. Disabling ends their sessions. Guard rails: the last enabled admin is never disabled or demoted; nobody changes their own roles; an invited user joins through the invitation, never by being enabled. Confirmed when it grants a privileged role (users.manage or settings.security).", ToolNeed::Perm(Permission::UsersManage), ro=false, destructive=false, idem=true, confirm=true, || obj(json!({
+        "user": { "type": "string", "description": "A user id or sign-in name" },
+        "roles": { "type": "array", "items": { "type": "string" } },
+        "display_name": { "type": "string" },
+        "email": { "type": ["string", "null"] },
+        "disabled": { "type": "boolean" },
+        "confirm": confirm_prop()
+    }), &["user"])),
+    tool!("delete_user", "Delete a user", "Delete a user: they can no longer sign in and their sessions end. Never the last enabled admin, never the first admin (disable it instead). Destructive: confirmed.", ToolNeed::Perm(Permission::UsersManage), ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+        "user": { "type": "string", "description": "A user id or sign-in name" },
+        "confirm": confirm_prop()
+    }), &["user"])),
+    tool!("list_roles", "Roles", "The roles (the five built-in ones, then custom ones), each with its permissions, whether it is privileged and how many users hold it, plus the permission table (name, group, summary); name for one role and who holds it. Every mode: a control JWT's rb_roles may name a custom role.", ToolNeed::Perm(Permission::UsersRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "name": { "type": "string" }
+    }), &[])),
+    tool!("save_role", "Save a custom role", "Create or change a custom role: a name (1 to 40 lower case letters, digits, _ and -, not a built-in one), a description and its permissions (list_roles has the table). At most 50. The caller saves only roles within its own permissions. Confirmed when the role is privileged (users.manage or settings.security).", ToolNeed::Perm(Permission::UsersManage), ro=false, destructive=false, idem=true, confirm=true, || obj(json!({
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "permissions": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "confirm": confirm_prop()
+    }), &["name", "permissions"])),
+    tool!("delete_role", "Delete a custom role", "Delete a custom role nobody holds (a role in use is refused, so no one's access changes; built-in roles never).", ToolNeed::Perm(Permission::UsersManage), ro=false, destructive=false, idem=true, confirm=false, || obj(json!({
+        "name": { "type": "string" }
+    }), &["name"])),
 ];
 
 /// The tools the caller may use.
@@ -1167,8 +1206,16 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         "restore_agent" => agents::tools::restore_agent(ctx, access, &agent.id, &args),
         "end_agent_sessions" => agents::tools::end_agent_sessions(ctx, access, &agent.id, &args),
         // Sign-in sessions
-        "list_sessions" => instance::list_sessions(ctx, access),
+        "list_sessions" => instance::list_sessions(ctx, access, &args),
         "end_session" => instance::end_session(ctx, access, &args, params).await,
+        // Users and roles
+        "list_users" => users::list_users(ctx, &args),
+        "invite_user" => users::invite_user(ctx, access, &args, params).await,
+        "update_user" => users::update_user(ctx, access, &args, params).await,
+        "delete_user" => users::delete_user(ctx, access, &args, params).await,
+        "list_roles" => users::list_roles(ctx, &args),
+        "save_role" => users::save_role(ctx, access, &args, params).await,
+        "delete_role" => users::delete_role(ctx, access, &args),
         _ => return Err(RpcError::invalid_params(format!("Unknown tool: {name}"))),
     };
     let outcome = if result.get("isError").and_then(Value::as_bool) == Some(true) {

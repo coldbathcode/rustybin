@@ -516,6 +516,7 @@ async fn every_command_runs_against_an_instance() {
             ("logout", "")
                 | ("sessions", "end-all")
                 | ("password", "change")
+                | ("passwd", "")
                 | ("profiles", "remove")
         ) {
             continue; // exercised below, in order
@@ -673,6 +674,51 @@ async fn every_command_runs_against_an_instance() {
         .await;
     assert_eq!(code, 0, "{out}");
     assert_eq!(inst.json(&["whoami"]).await["user"], json!("rustybin"));
+    // Your own password, and back; the profile keeps the fresh token.
+    let (code, out) = inst
+        .run(Some("rustybin-2\nrustybin-2b\n"), &["passwd", "--stdin"])
+        .await;
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = inst
+        .run(Some("rustybin-2b\nrustybin-2\n"), &["passwd", "--stdin"])
+        .await;
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(inst.json(&["me"]).await["name"], json!("rustybin"));
+    // A user invited, joined through the link, then seen as active.
+    let invited = inst
+        .json(&["users", "invite", "bob", "--role", "viewer,tester"])
+        .await;
+    let url = invited["invitation"]["url"]
+        .as_str()
+        .expect("url")
+        .to_string();
+    assert!(
+        url.starts_with(&format!("{}/ui/#/join/rbi_", inst.url)),
+        "{url}"
+    );
+    let (code, out) = inst
+        .run(None, &["users", "invite", "bob", "--role", "viewer"])
+        .await;
+    assert_eq!(code, 1, "a second invitation of a name is refused: {out}");
+    let token = url.rsplit('/').next().expect("token").to_string();
+    let joined: Value = reqwest::Client::new()
+        .post(format!("{}/_rustybin/join", inst.url))
+        .json(&json!({ "token": token, "password": "bob-secret-1" }))
+        .send()
+        .await
+        .expect("join")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(joined["user"], json!("bob"), "{joined}");
+    let bob = inst.json(&["users", "show", "bob"]).await;
+    assert_eq!(bob["status"], json!("active"));
+    assert_eq!(bob["roles"], json!(["viewer", "tester"]));
+    let (code, text) = inst.run(None, &["users", "list"]).await;
+    assert_eq!(code, 0);
+    assert!(text.contains("bob") && text.contains("active"), "{text}");
+    let (code, _) = inst.run(None, &["users", "delete", "bob", "--yes"]).await;
+    assert_eq!(code, 0);
     // Sign out everywhere, then the profile's token is refused; a fresh login works.
     let (code, _) = inst.run(None, &["sessions", "end-all", "--yes"]).await;
     assert_eq!(code, 0);

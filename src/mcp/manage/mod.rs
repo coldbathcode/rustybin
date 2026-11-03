@@ -34,6 +34,7 @@ pub mod stdio;
 pub mod testing;
 pub mod tools;
 pub mod traffic;
+pub mod users;
 pub mod visits;
 
 use std::sync::Arc;
