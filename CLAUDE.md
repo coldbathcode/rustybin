@@ -258,7 +258,7 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   `<state>/tests.json`, 200 tests, 64 KiB each), `request_from_capture` (secret-looking headers and query values
   become `{{NAME}}` variables, never values); `run.rs` the runner (in process through `state.router` with the
   caller's session, or the test's gateway under `Purpose::Replay`; 200 requests, 60 s; variables from the run or
-  `RUSTYBIN_TEST_*` only; JUnit); `hurl.rs` the export; `history.rs` the kept runs (`<state>/test-runs/`, 200 runs and 30 days, never a variable's value; `run_and_keep` with a trigger label from `X-Rustybin-Client`, `mcp` or `schedule:<name>`). Variables are `{{name}}`, not `${VAR}` (a file load
+  `RUSTYBIN_TEST_*` only; JUnit); `hurl.rs` the export; `history.rs` the kept runs (`<state>/test-runs/`, 200 runs and 30 days, never a variable's value; `run_and_keep` with a trigger label from `X-Rustybin-Client`, `mcp` or `schedule:<name>`); `schedule.rs` the schedules (`Tests.schedules`, 20, `every` or `at` UTC, the scheduler and notice tasks in `server.rs`, skipped while the harness sends load, failure notices under `Purpose::Notify` with the `notify.webhook_token` secret, `test_schedules:` of `rustybin.yaml`). Variables are `{{name}}`, not `${VAR}` (a file load
   expands `${VAR}` across the whole document).
 - `src/scenarios/`: guided gateway scenarios (`/_rustybin/scenarios*`, `rustybin scenario`, the
   `*_gateway_scenario` tools, the console's Gateway scenarios view). `catalog.rs` is the one table (what each

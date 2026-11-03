@@ -350,7 +350,7 @@ pub static TOOLS: &[ToolDef] = &[
     }), &[])),
     tool!("check_egress", "Outbound policy", "The outbound connection policy (the allowlist, the loopback switch, each feature's rule, the last decisions) and, with url, whether that URL would be allowed for a purpose before DNS, with the reasons when not. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "url": { "type": "string", "description": "An http(s) URL to check" },
-        "purpose": { "type": "string", "enum": ["assist", "mcp_relay", "registry", "git", "a2a_push", "leads", "key_registry"], "default": "mcp_relay" }
+        "purpose": { "type": "string", "enum": ["assist", "mcp_relay", "registry", "git", "a2a_push", "leads", "key_registry", "scenario", "replay", "notify"], "default": "mcp_relay" }
     }), &[])),
     // ── AI assist ──
     tool!("assist_status", "AI assist status", "Whether AI assist is on, the provider and models, the caps, each provider's key state ({set, hint}: never a value), the tasks and the usage total. Keys are set by the operator in the console or the CLI, never here.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
@@ -661,6 +661,30 @@ pub static TOOLS: &[ToolDef] = &[
     tool!("clear_test_runs", "Clear the test run history", "Forget every kept run of the saved tests (the tests themselves stay). Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
         "confirm": confirm_prop()
     }), &[])),
+    // Testing workflows 2: saved tests on a schedule.
+    tool!("list_test_schedules", "Test schedules", "The saved tests on a schedule (at most 20), or one by name: when each runs (every 5m to 24h, or at HH:MM UTC), what (names, a prefix, or every saved test), on or off, its webhook, and its status: running, next_due, last_result (passed, failed or skipped, with last_detail), last_run_id (get_test_run reads it), runs, skipped, last_notice (pending, retrying, delivered, failed, refused or dropped) and the recent outcomes. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "name": { "type": "string", "description": "Only this schedule" }
+    }), &[])),
+    tool!("save_test_schedule", "Save a test schedule", "Save or replace a schedule of saved tests (a replaced one keeps its status): name, every (5m to 24h, at multiples since the Unix epoch) or at (HH:MM, UTC), names or prefix (neither: every saved test), enabled, webhook (a failing run posts a JSON summary there under the egress purpose notify, which the operator allows; a credential goes in the notify.webhook_token setting, never the URL) and notify_recovery (one more notice when a run passes after a failure). Variables come from RUSTYBIN_TEST_* on the instance only. A scheduled run is skipped while the harness sends load. Asks the user to confirm a new webhook. Admin.", Right::Admin, ro=false, destructive=false, idem=true, confirm=true, || obj(json!({
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "every": { "type": "string", "description": "5m to 24h: 15m, 2h" },
+        "at": { "type": "string", "description": "HH:MM, UTC: 02:30" },
+        "names": { "type": "array", "items": { "type": "string" }, "description": "The tests to run" },
+        "prefix": { "type": "string", "description": "The tests whose name starts with this" },
+        "enabled": { "type": "boolean", "default": true },
+        "webhook": { "type": "string", "description": "An http(s) URL for the failure notices" },
+        "notify_recovery": { "type": "boolean", "default": false },
+        "confirm": confirm_prop()
+    }), &["name"])),
+    tool!("delete_test_schedule", "Delete a test schedule", "Delete a schedule (its waiting notices too; the tests and the history stay). Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+        "name": { "type": "string" },
+        "confirm": confirm_prop()
+    }), &["name"])),
+    tool!("run_test_schedule", "Run a test schedule now", "Run a schedule's tests now, as the scheduler would: trigger schedule:<name>, kept in the history (answers the run_id and the change; what the tests saw under untrusted_results), its notice queued when it fails; its next time stays. Refused while another run of the saved tests goes or the harness sends load. Asks first when its tests go through a gateway or change state, or a failure would post its webhook. Admin.", Right::Admin, ro=false, destructive=false, idem=false, confirm=true, || obj(json!({
+        "name": { "type": "string" },
+        "confirm": confirm_prop()
+    }), &["name"])),
 ];
 
 /// The tools the caller may use.
@@ -993,6 +1017,10 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         "list_test_runs" => replay::list_test_runs(ctx, &args),
         "get_test_run" => replay::get_test_run(ctx, &args),
         "clear_test_runs" => replay::clear_test_runs(ctx, &args, params).await,
+        "list_test_schedules" => replay::list_test_schedules(ctx, &args),
+        "save_test_schedule" => replay::save_test_schedule(ctx, &args, params).await,
+        "delete_test_schedule" => replay::delete_test_schedule(ctx, &args, params).await,
+        "run_test_schedule" => replay::run_test_schedule(ctx, &args, params).await,
         // Gateway scenarios
         "list_gateway_scenarios" => scenarios::list_gateway_scenarios(ctx, access),
         "start_gateway_scenario" => scenarios::start_gateway_scenario(ctx, access, &args).await,

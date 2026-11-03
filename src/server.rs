@@ -463,6 +463,19 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
         optional_tasks.push(("git auto", task));
     }
 
+    // Saved tests on a schedule: the scheduler, and the delivery of the
+    // failure notices to the schedules' webhooks.
+    let scheduler = tokio::spawn(crate::replay::schedule::scheduler_loop(
+        state.clone(),
+        wait_for(shutdown.subscribe()),
+    ));
+    optional_tasks.push(("test schedules", scheduler));
+    let notices = tokio::spawn(crate::replay::schedule::notice_loop(
+        state.clone(),
+        wait_for(shutdown.subscribe()),
+    ));
+    optional_tasks.push(("test schedule notices", notices));
+
     // Plan usage persistence (RUSTYBIN_USAGE_FILE); returns at once when off.
     let persist = tokio::spawn(
         state

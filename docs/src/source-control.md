@@ -50,7 +50,8 @@ Nothing more:
   by a pulled document: a different value is a problem and the setting is kept as it
   is (prune leaves them alone too; the same value is quiet, so an export round-trips).
   A test in the document may name a gateway only when its saved copy already names
-  that one.
+  that one, and a test schedule a webhook only when its saved copy already names that
+  one.
 - **Not the sign-in.** In password mode a document never changes the console's user
   name or password hash (a change is a problem), and pruning never removes them, so a
   document without them cannot bring back the default password; a public instance

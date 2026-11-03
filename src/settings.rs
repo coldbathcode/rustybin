@@ -380,6 +380,11 @@ pub fn groups() -> Vec<Group> {
             title: "Leads webhook",
             description: "The webhook that receives the email leads of self-service mocks.",
         },
+        Group {
+            id: "notify",
+            title: "Test schedule notices",
+            description: "What the webhooks of scheduled saved tests receive with a failing run: the bearer token and the address its link starts with. Allow each webhook's host in the outbound connections (purpose notify).",
+        },
     ]
 }
 
@@ -422,6 +427,7 @@ pub fn specs() -> Vec<Spec> {
     all.extend(crate::mcp::manage::agents::specs());
     all.extend(crate::portal::specs());
     all.extend(crate::mocks::leads::specs());
+    all.extend(crate::replay::schedule::specs());
     all.extend(crate::mocks::specs());
     all.extend(crate::sourcecontrol::specs());
     all

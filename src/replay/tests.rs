@@ -10,6 +10,8 @@ use crate::test_support::{test_app_with, test_state_with};
 
 /// The history of runs.
 mod history_runs;
+/// Saved tests on a schedule.
+mod schedules;
 
 const SPEC: &str = r#"{"openapi":"3.0.3","info":{"title":"Orders","version":"1"},"paths":{"/orders/{id}":{"get":{"operationId":"getOrder","parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"integer"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"example":{"id":1,"total":9.5}}}}}}}}}"#;
 

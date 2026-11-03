@@ -1745,6 +1745,9 @@ const COVERAGE: &[(&str, Cover)] = &[
     ("/_rustybin/tests/export", Tool("list_tests")),
     ("/_rustybin/tests/runs", Tool("list_test_runs")),
     ("/_rustybin/tests/runs/{id}", Tool("get_test_run")),
+    ("/_rustybin/tests/schedules", Tool("list_test_schedules")),
+    ("/_rustybin/tests/schedules/{name}", Tool("save_test_schedule")),
+    ("/_rustybin/tests/schedules/{name}/run", Tool("run_test_schedule")),
     ("/_rustybin/scenarios/{id}/runs", Tool("start_gateway_scenario")),
     ("/_rustybin/scenarios/{id}/runs/{run}", Tool("get_gateway_scenario_run")),
     ("/_rustybin/scenarios/{id}/runs/{run}/check", Tool("check_gateway_scenario")),
@@ -3478,6 +3481,99 @@ async fn a_tool_run_is_kept_and_read_back_from_the_history() {
     let r = tool(&app, &[], "clear_test_runs", json!({ "confirm": true })).await;
     assert!(!is_error(&r), "{r}");
     assert!(state.saved_tests.history.is_empty());
+}
+
+#[tokio::test]
+async fn test_schedule_tools_save_list_run_and_delete() {
+    let state = test_state_with(open_config());
+    let app = test_app_with(state.clone());
+    state
+        .saved_tests
+        .put(
+            crate::replay::SavedTest {
+                name: "ok".into(),
+                description: None,
+                request: crate::replay::TestRequest {
+                    method: "GET".into(),
+                    path: "/status/200".into(),
+                    headers: Default::default(),
+                    body: None,
+                },
+                gateway: None,
+                assert: vec![crate::replay::Assertion::status(200)],
+            },
+            false,
+        )
+        .expect("put");
+    let r = tool(
+        &app,
+        &[],
+        "save_test_schedule",
+        json!({ "name": "nightly", "every": "1m" }),
+    )
+    .await;
+    assert!(is_error(&r) && text_of(&r).contains("5m to 24h"), "{r}");
+    let r = tool(
+        &app,
+        &[],
+        "save_test_schedule",
+        json!({ "name": "nightly", "every": "15m", "names": ["ok"] }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    // A new webhook asks first.
+    let hooked =
+        json!({ "name": "nightly", "every": "15m", "webhook": "https://hooks.example.com/x" });
+    let r = tool(&app, &[], "save_test_schedule", hooked.clone()).await;
+    assert!(is_error(&r), "{r}");
+    assert!(state
+        .saved_tests
+        .schedules
+        .get("nightly")
+        .and_then(|s| s.webhook)
+        .is_none());
+    let mut confirmed = hooked;
+    confirmed["confirm"] = json!(true);
+    let r = tool(&app, &[], "save_test_schedule", confirmed).await;
+    assert!(!is_error(&r), "{r}");
+    let r = tool(&app, &[], "list_test_schedules", json!({})).await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["schedules"][0]["name"], "nightly");
+    assert!(text_of(&r).contains("every 15m"), "{r}");
+    // Running it may post the webhook: asked first.
+    let r = tool(&app, &[], "run_test_schedule", json!({ "name": "nightly" })).await;
+    assert!(is_error(&r), "{r}");
+    let r = tool(
+        &app,
+        &[],
+        "run_test_schedule",
+        json!({ "name": "nightly", "confirm": true }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["trigger"], "schedule:nightly", "{r}");
+    assert!(
+        r["structuredContent"]["untrusted_results"].is_array(),
+        "{r}"
+    );
+    let r = tool(
+        &app,
+        &[],
+        "delete_test_schedule",
+        json!({ "name": "nightly" }),
+    )
+    .await;
+    assert!(is_error(&r), "{r}");
+    assert_eq!(state.saved_tests.schedules.len(), 1);
+    let r = tool(
+        &app,
+        &[],
+        "delete_test_schedule",
+        json!({ "name": "nightly", "confirm": true }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    assert!(state.saved_tests.schedules.is_empty());
 }
 
 #[tokio::test]

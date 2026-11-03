@@ -1216,11 +1216,34 @@ def run_theme(browser, theme):
         assert dl.value.suggested_filename == f"rustybin-tests-{run_id}.xml", dl.value.suggested_filename
         shot(page, theme, "16c-saved-tests")
         assert_icons_sized(page, "saved tests")
+        # A schedule of that test: saved from the form, run now (kept in the
+        # history as schedule:<name>), turned off, deleted.
+        sched = f"e2e-schedule-{theme}"
+        page.fill("#schedule-name", sched)
+        page.select_option("#schedule-when", "every")
+        page.fill("#schedule-value", "1h")
+        page.select_option("#schedule-select", "names")
+        page.fill("#schedule-tests", name)
+        page.click("#schedule-save")
+        srow = page.locator(f"tr[data-schedule='{sched}']")
+        srow.wait_for()
+        expect(srow).to_contain_text("every 1h")
+        expect(srow).to_contain_text("tests " + name)
+        page.click(f"[data-run-schedule='{sched}']")
+        expect(srow).to_contain_text("passed")
+        expect(page.locator("#tests-history-table tr[data-run]").first).to_contain_text("schedule:" + sched)
+        page.uncheck(f"[data-toggle-schedule='{sched}']")
+        expect(srow).to_contain_text("off")
+        shot(page, theme, "16d-test-schedules")
+        assert_icons_sized(page, "test schedules")
+        page.once("dialog", lambda d: d.accept())
+        page.click(f"[data-delete-schedule='{sched}']")
+        expect(page.locator(f"tr[data-schedule='{sched}']")).to_have_count(0)
         page.once("dialog", lambda d: d.accept())
         page.click(f"[data-delete='{name}']")
         expect(page.locator(f"tr[data-test='{name}']")).to_have_count(0)
 
-    step("saved tests: save from live traffic, run, export, delete", saved_tests)
+    step("saved tests: save from live traffic, run, export, schedule, delete", saved_tests)
 
     def checkpoints():
         # Save a checkpoint, flip health, preview and restore it (health

@@ -753,6 +753,19 @@ impl Harness {
         self.runs().into_iter().find(|r| r.is_active())
     }
 
+    /// Load is going out from this node: a run of its own, one being
+    /// prepared, or a run of a cluster it leads (scheduled saved tests are
+    /// skipped meanwhile).
+    pub fn load_running(&self) -> bool {
+        self.active_run().is_some()
+            || self.starting.load(std::sync::atomic::Ordering::SeqCst)
+            || self
+                .coordinator
+                .list()
+                .iter()
+                .any(|c| c.active_run().is_some())
+    }
+
     /// The kill switch: stop every run now. Returns the ids stopped.
     pub fn stop_all(&self) -> Vec<String> {
         // Runs check the switch on their next tick; it clears once they

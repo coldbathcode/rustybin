@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **Saved tests on a schedule, with a failure notice**: a [schedule](saved-tests.md#schedules)
+  runs saved tests (every one, `names` or a `prefix`) `every` 5m to 24h or `at` a time of
+  day (UTC), without anyone at the console; each run is in the history as
+  `schedule:<name>`. A run never overlaps another run of the saved tests, and one due
+  while the harness sends load is skipped and counted. A failing run posts one JSON
+  notice to the schedule's `webhook` (and a recovery one more with `notify_recovery`)
+  under the new egress purpose `notify`, which has no default; a refusal is reported in
+  the status and never retried, a failed delivery is tried 4 times. The secret
+  `notify.webhook_token` (`RUSTYBIN_NOTIFY_WEBHOOK_TOKEN`) is its bearer token,
+  `notify.base_url` (`RUSTYBIN_NOTIFY_BASE_URL`) makes its link absolute. At most 20
+  schedules. `GET`, `POST /_rustybin/tests/schedules`, `GET`, `PUT`, `DELETE
+  /_rustybin/tests/schedules/{name}`, `POST /_rustybin/tests/schedules/{name}/run`;
+  `rustybin tests schedules | schedule-show | schedule-save | schedule-run |
+  schedule-delete`; the tools `list_test_schedules`, `save_test_schedule`,
+  `delete_test_schedule`, `run_test_schedule`; a Schedules card on the console's Saved
+  tests view; `test_schedules:` in `rustybin.yaml` (a pulled document cannot name a new
+  webhook). A test can no longer be named `schedules`.
 - **Two more [gateway scenarios](gateway-scenarios.md)**: `circuit_breaker` (the
   gateway stops forwarding to a failing upstream, then lets a trial through after the
   half-open time you give as `half_open_ms`) and `request_size_limit` (a body over the

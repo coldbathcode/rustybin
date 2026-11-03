@@ -52,6 +52,14 @@ portal:
     tags:
     - payments
 tests: []
+test_schedules:
+- name: nightly
+  description: Every order test
+  prefix: order
+  at: 02:30
+  enabled: true
+  webhook: https://hooks.example.com/rustybin
+  notify_recovery: true
 agents:
   default_ceiling: traffic
   rules:

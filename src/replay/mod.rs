@@ -5,11 +5,13 @@
 //! (`tests:`). Credentials are never saved: a captured secret-looking header
 //! or query value becomes a `{{name}}` variable the run fills (from the run's
 //! `variables`, else a `RUSTYBIN_TEST_*` environment variable). Every run
-//! is kept in the history ([`history`], `/_rustybin/tests/runs*`).
+//! is kept in the history ([`history`], `/_rustybin/tests/runs*`), and
+//! tests run on a schedule ([`schedule`], `/_rustybin/tests/schedules*`).
 
 pub mod history;
 pub mod hurl;
 pub mod run;
+pub mod schedule;
 #[cfg(test)]
 mod tests;
 
@@ -156,9 +158,10 @@ impl Assertion {
     }
 }
 
-/// A name a test may have (`run`, `runs` and `export` are routes).
+/// A name a test may have (`run`, `runs`, `schedules` and `export` are
+/// routes).
 pub fn valid_name(name: &str) -> bool {
-    !matches!(name, "run" | "runs" | "export")
+    !matches!(name, "run" | "runs" | "schedules" | "export")
         && !name.is_empty()
         && name.len() <= MAX_NAME
         && name
@@ -171,7 +174,7 @@ impl SavedTest {
     pub fn validate(&self) -> Result<(), String> {
         if !valid_name(&self.name) {
             return Err(format!(
-                "name {:?}: 1 to {MAX_NAME} letters, digits, . _ - (not run, runs or export)",
+                "name {:?}: 1 to {MAX_NAME} letters, digits, . _ - (not run, runs, schedules or export)",
                 self.name
             ));
         }
@@ -297,6 +300,8 @@ pub struct Tests {
     running: Arc<AtomicBool>,
     /// Every run, kept ([`history::History`]).
     pub history: history::History,
+    /// The tests on a schedule ([`schedule::Schedules`]).
+    pub schedules: schedule::Schedules,
 }
 
 /// Held while a run goes; the next one may start once it is dropped.
@@ -385,6 +390,7 @@ impl Tests {
             save_lock: Mutex::new(()),
             running: Arc::new(AtomicBool::new(false)),
             history: history::History::new(state_dir),
+            schedules: schedule::Schedules::new(state_dir),
         }
     }
 
@@ -1067,13 +1073,24 @@ pub fn router(_state: &AppState) -> Router<AppState> {
         .route(RUN_ONE_PATH, get(run_one_handler))
         .route(EXPORT_PATH, get(export_handler))
         .route(
+            schedule::LIST_PATH,
+            get(schedule::list_handler).post(schedule::create_handler),
+        )
+        .route(
+            schedule::ONE_PATH,
+            get(schedule::get_handler)
+                .put(schedule::put_handler)
+                .delete(schedule::delete_handler),
+        )
+        .route(schedule::RUN_PATH, post(schedule::run_handler))
+        .route(
             ONE_PATH,
             get(get_handler).put(put_handler).delete(delete_handler),
         )
 }
 
 pub fn catalog() -> Vec<Endpoint> {
-    vec![
+    let mut out = vec![
         Endpoint::new(
             LIST_PATH,
             &["GET", "POST"],
@@ -1119,10 +1136,20 @@ pub fn catalog() -> Vec<Endpoint> {
             "The saved tests as a Hurl file, assertions included, for CI",
         )
         .example(Example::get("Export as Hurl", EXPORT_PATH)),
-    ]
+    ];
+    out.extend(schedule::catalog());
+    out
 }
 
 pub fn openapi_paths() -> Value {
+    let mut paths = tests_openapi_paths();
+    if let (Value::Object(m), Value::Object(more)) = (&mut paths, schedule::openapi_paths()) {
+        m.extend(more);
+    }
+    paths
+}
+
+fn tests_openapi_paths() -> Value {
     let obj = json!({ "application/json": { "schema": { "type": "object" } } });
     let name =
         json!({ "name": "name", "in": "path", "required": true, "schema": { "type": "string" } });

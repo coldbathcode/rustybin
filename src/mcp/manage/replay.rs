@@ -334,3 +334,203 @@ pub async fn clear_test_runs(ctx: &CallCtx, args: &Value, params: &Value) -> Val
         json!({ "cleared": cleared }),
     )
 }
+
+// ── Schedules ───────────────────────────────────────────────────────
+
+/// A schedule in a line: when, what, on or off, the last outcome.
+fn schedule_line(v: &Value) -> String {
+    let when = match (v["every"].as_str(), v["at"].as_str()) {
+        (Some(e), _) => format!("every {e}"),
+        (_, Some(a)) => format!("at {a} UTC"),
+        _ => String::new(),
+    };
+    let on = if v["enabled"] == json!(false) {
+        "off"
+    } else {
+        "on"
+    };
+    let st = &v["status"];
+    let last = st["last_result"].as_str().unwrap_or("not run yet");
+    let next = st["next_due"].as_str().unwrap_or("-");
+    format!(
+        "{} ({when}, {}, {on}; last: {last}; next: {next})",
+        v["name"].as_str().unwrap_or(""),
+        v["selection"].as_str().unwrap_or("")
+    )
+}
+
+/// `list_test_schedules`: every schedule with its status, or one by name.
+pub fn list_test_schedules(ctx: &CallCtx, args: &Value) -> Value {
+    let store = &ctx.app.saved_tests.schedules;
+    if let Some(name) = arg_str(args, "name") {
+        return match store.view_of(name) {
+            Some(v) => ok(ctx, format!("Test schedule {}", schedule_line(&v)), v),
+            None => err(format!("no test schedule named {name:?}")),
+        };
+    }
+    let all = store.views();
+    let lines: Vec<String> = all.iter().map(schedule_line).collect();
+    ok(
+        ctx,
+        format!(
+            "{} test schedule(s){}{}",
+            all.len(),
+            if lines.is_empty() { "" } else { ": " },
+            lines.join("; ")
+        ),
+        json!({
+            "schedules": all,
+            "max_schedules": replay::schedule::MAX_SCHEDULES,
+            "pending_notices": store.pending_notices(),
+        }),
+    )
+}
+
+/// `save_test_schedule`: save or replace a schedule; asks first when it
+/// points its notices at a webhook it did not have.
+pub async fn save_test_schedule(ctx: &CallCtx, args: &Value, params: &Value) -> Value {
+    let name = match need_str(args, "name") {
+        Ok(n) => n.to_string(),
+        Err(e) => return e,
+    };
+    let mut body = args.clone();
+    if let Value::Object(m) = &mut body {
+        m.remove("confirm");
+    }
+    let schedule = match replay::schedule::schedule_from_value(&name, body) {
+        Ok(s) => s,
+        Err(e) => return err(format!("invalid arguments: {e}")),
+    };
+    if let Err(e) = schedule.validate() {
+        return err(e);
+    }
+    let store = &ctx.app.saved_tests.schedules;
+    let old_hook = store.get(&name).and_then(|s| s.webhook);
+    if let Some(hook) = schedule
+        .webhook
+        .as_deref()
+        .filter(|h| old_hook.as_deref() != Some(*h))
+    {
+        let action = format!(
+            "post the notices of the test schedule {name} to {}",
+            crate::egress::url_origin(hook)
+        );
+        if let Confirm::Answer(v) = confirm(ctx, "save_test_schedule", args, params, &action).await
+        {
+            return v;
+        }
+    }
+    match store.put(schedule, true) {
+        Ok(v) => ok(ctx, format!("Saved test schedule {}", schedule_line(&v)), v),
+        Err(e) => err(e.message()),
+    }
+}
+
+/// `delete_test_schedule` (confirmed).
+pub async fn delete_test_schedule(ctx: &CallCtx, args: &Value, params: &Value) -> Value {
+    let name = match need_str(args, "name") {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    if ctx.app.saved_tests.schedules.get(name).is_none() {
+        return err(format!("no test schedule named {name:?}"));
+    }
+    if let Confirm::Answer(v) = confirm(
+        ctx,
+        "delete_test_schedule",
+        args,
+        params,
+        &format!("delete the test schedule {name} (the tests and their history stay)"),
+    )
+    .await
+    {
+        return v;
+    }
+    match ctx.app.saved_tests.schedules.delete(name) {
+        Ok(true) => ok(
+            ctx,
+            format!("Deleted test schedule {name}"),
+            json!({ "deleted": name }),
+        ),
+        Ok(false) => err(format!("no test schedule named {name:?}")),
+        Err(e) => err(e.message()),
+    }
+}
+
+/// `run_test_schedule`: run a schedule now, as the scheduler would; asks
+/// first when its tests go through a gateway or change state, or a failure
+/// would post its webhook.
+pub async fn run_test_schedule(ctx: &CallCtx, args: &Value, params: &Value) -> Value {
+    let name = match need_str(args, "name") {
+        Ok(n) => n.to_string(),
+        Err(e) => return e,
+    };
+    let Some(schedule) = ctx.app.saved_tests.schedules.get(&name) else {
+        return err(format!("no test schedule named {name:?}"));
+    };
+    let tests = ctx.app.saved_tests.list();
+    let selected: Vec<&replay::SavedTest> = tests
+        .iter()
+        .filter(|t| match (&schedule.prefix, schedule.names.is_empty()) {
+            (Some(p), _) => t.name.starts_with(p.as_str()),
+            (None, true) => true,
+            (None, false) => schedule.names.contains(&t.name),
+        })
+        .collect();
+    let mut what = Vec::new();
+    let gateways: Vec<String> = selected
+        .iter()
+        .filter_map(|t| t.gateway.as_deref().map(crate::egress::url_origin))
+        .collect();
+    if !gateways.is_empty() {
+        what.push(format!(
+            "send saved test requests through {}",
+            gateways.join(", ")
+        ));
+    }
+    if selected.iter().any(|t| {
+        !SAFE_METHODS
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(t.request.method.trim()))
+    }) {
+        what.push("replay requests that change state".to_string());
+    }
+    if let Some(h) = &schedule.webhook {
+        what.push(format!(
+            "post a notice to {} if it fails",
+            crate::egress::url_origin(h)
+        ));
+    }
+    if !what.is_empty() {
+        let action = format!("run the test schedule {name}: {}", what.join(" and "));
+        if let Confirm::Answer(v) = confirm(ctx, "run_test_schedule", args, params, &action).await {
+            return v;
+        }
+    }
+    match replay::schedule::run_now(&ctx.app, &name).await {
+        Ok(replay::schedule::Ran::Kept(kept)) => {
+            let mut v = run_value(&kept, None);
+            v["schedule"] = json!(ctx.app.saved_tests.schedules.view_of(&name));
+            ok(
+                ctx,
+                format!(
+                    "Ran test schedule {name}: {} Kept as run {}.",
+                    run_summary(&kept),
+                    kept.id
+                ),
+                v,
+            )
+        }
+        Ok(replay::schedule::Ran::Skipped(reason)) => ok(
+            ctx,
+            format!("Test schedule {name} skipped: {reason}"),
+            json!({
+                "result": "skipped",
+                "detail": reason,
+                "schedule": ctx.app.saved_tests.schedules.view_of(&name),
+            }),
+        ),
+        Ok(replay::schedule::Ran::Failed(m)) => err(m),
+        Err((_, m)) => err(m),
+    }
+}

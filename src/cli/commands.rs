@@ -251,6 +251,11 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("tests", "runs", "[--limit N] [--cursor C]", "The history of test runs, newest first: when, the trigger, who, the counts, what changed since the previous run.", &[Flag::value("--limit", "Runs a page (20, at most 100)"), Flag::value("--cursor", "The next_cursor of the page before")], [("GET", "/_rustybin/tests/runs")], false, "tests runs --limit 5"),
     cmd!("tests", "run-show", "<id> [--junit]", "One kept run: each test's result and failures, the change since the previous run; --junit prints its JUnit XML.", &[Flag::switch("--junit", "Print the JUnit XML report")], [("GET", "/_rustybin/tests/runs/{id}")], false, "tests run-show 20261103T101500000Z-abc123 --junit"),
     cmd!("tests", "runs-clear", "", "Forget every kept test run (the tests stay).", NO_FLAGS, [("DELETE", "/_rustybin/tests/runs")], true, "tests runs-clear --yes"),
+    cmd!("tests", "schedules", "", "The saved tests on a schedule: when, what, on or off, the last result, the next time, the last notice.", NO_FLAGS, [("GET", "/_rustybin/tests/schedules")], false, "tests schedules"),
+    cmd!("tests", "schedule-show", "<name>", "One test schedule with its status and recent outcomes.", NO_FLAGS, [("GET", "/_rustybin/tests/schedules/{name}")], false, "tests schedule-show nightly"),
+    cmd!("tests", "schedule-save", "<name> (--every D | --at HH:MM) [--names a,b | --prefix P] [--webhook U] [--notify-recovery] [--disabled]", "Save or replace a test schedule: every 5m to 24h, or at HH:MM UTC; every saved test unless --names or --prefix.", &[Flag::value("--every", "Run every 5m to 24h (15m, 2h)"), Flag::value("--at", "Run once a day at HH:MM, UTC"), Flag::value("--names", "Only these tests, comma separated"), Flag::value("--prefix", "Only the tests whose name starts with this"), Flag::value("--webhook", "Post a JSON summary of a failing run here (allow its host: egress purpose notify)"), Flag::switch("--notify-recovery", "One more notice when a run passes after a failure"), Flag::switch("--disabled", "Saved, but off"), Flag::value("--description", "What it is for")], [("PUT", "/_rustybin/tests/schedules/{name}")], false, "tests schedule-save nightly --every 1h --prefix order"),
+    cmd!("tests", "schedule-run", "<name>", "Run a test schedule now, as the scheduler would (kept in the history); exits 1 when it fails.", NO_FLAGS, [("POST", "/_rustybin/tests/schedules/{name}/run")], false, "tests schedule-run nightly"),
+    cmd!("tests", "schedule-delete", "<name>", "Delete a test schedule (the tests and the history stay).", NO_FLAGS, [("DELETE", "/_rustybin/tests/schedules/{name}")], true, "tests schedule-delete nightly --yes"),
     cmd!("scenario", "list", "", "The gateway scenarios (retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits) and your runs.", NO_FLAGS, [("GET", "/_rustybin/scenarios")], false, "scenario list"),
     cmd!("scenario", "start", "<scenario>", "Prepare a run: its upstream and the steps to configure on the gateway.", NO_FLAGS, [("POST", "/_rustybin/scenarios/{id}/runs")], false, "scenario start caching"),
     cmd!("scenario", "show", "<scenario> <run>", "A run: the setup, what it created, the last verdict.", NO_FLAGS, [("GET", "/_rustybin/scenarios/{id}/runs/{run}")], false, "scenario show caching 1a2b3c4d"),
@@ -1494,6 +1499,20 @@ async fn tests(ctx: &mut Ctx, verb: &str) -> Result<()> {
         "run" => tests_run(ctx).await,
         "runs" => tests_runs(ctx).await,
         "runs-clear" => delete(ctx, "/_rustybin/tests/runs", &[]).await,
+        "schedules" => tests_schedules(ctx).await,
+        "schedule-show" | "schedule-save" | "schedule-run" | "schedule-delete" => {
+            let name = ctx
+                .args
+                .arg(0, "a schedule name (rustybin tests schedules)")?
+                .to_string();
+            let path = format!("/_rustybin/tests/schedules/{}", enc(&name));
+            match verb {
+                "schedule-show" => get(ctx, &path, &[]).await,
+                "schedule-delete" => delete(ctx, &path, &[]).await,
+                "schedule-save" => tests_schedule_save(ctx, &name, &path).await,
+                _ => tests_schedule_run(ctx, &path).await,
+            }
+        }
         "run-show" => {
             let id = ctx
                 .args
@@ -1593,6 +1612,111 @@ async fn tests_runs(ctx: &mut Ctx) -> Result<()> {
         out["next_cursor"] = v["next_cursor"].clone();
     }
     ctx.emit(&out);
+    Ok(())
+}
+
+/// `rustybin tests schedules`: one row a schedule (or JSON).
+async fn tests_schedules(ctx: &mut Ctx) -> Result<()> {
+    let v = ctx
+        .client()?
+        .get("/_rustybin/tests/schedules", &[])
+        .await?
+        .value();
+    if ctx.json {
+        ctx.emit(&v);
+        return Ok(());
+    }
+    let rows: Vec<Value> = v["schedules"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|s| {
+            let st = &s["status"];
+            let when = match (s["every"].as_str(), s["at"].as_str()) {
+                (Some(e), _) => format!("every {e}"),
+                (_, Some(a)) => format!("at {a} UTC"),
+                _ => String::new(),
+            };
+            json!({
+                "name": s["name"],
+                "when": when,
+                "tests": s["selection"],
+                "enabled": s["enabled"],
+                "next_due": st["next_due"],
+                "last_result": st["last_result"],
+                "last_run_id": st["last_run_id"],
+                "last_notice": st["last_notice"]["result"],
+            })
+        })
+        .collect();
+    ctx.emit(&json!({ "schedules": rows }));
+    Ok(())
+}
+
+/// `rustybin tests schedule-save <name>`: the whole schedule from flags.
+async fn tests_schedule_save(ctx: &mut Ctx, name: &str, path: &str) -> Result<()> {
+    let mut body = json!({ "name": name, "enabled": !ctx.args.has("--disabled") });
+    match (ctx.args.value("--every"), ctx.args.value("--at")) {
+        (Some(e), None) => body["every"] = json!(e),
+        (None, Some(a)) => body["at"] = json!(a),
+        _ => {
+            return Err(Fail::Usage(
+                "one of --every (5m to 24h) or --at (HH:MM, UTC)".into(),
+            ))
+        }
+    }
+    if let Some(names) = list_flag(&ctx.args, "--names") {
+        body["names"] = json!(names);
+    }
+    for (flag, key) in [
+        ("--prefix", "prefix"),
+        ("--webhook", "webhook"),
+        ("--description", "description"),
+    ] {
+        if let Some(v) = ctx.args.value(flag) {
+            body[key] = json!(v);
+        }
+    }
+    if ctx.args.has("--notify-recovery") {
+        body["notify_recovery"] = json!(true);
+    }
+    let reply = ctx.client()?.put(path, Body::Json(body)).await?;
+    emit_reply(ctx, &reply);
+    Ok(())
+}
+
+/// `rustybin tests schedule-run <name>`: the result in a few lines (or
+/// JSON); exit 1 when the run failed.
+async fn tests_schedule_run(ctx: &mut Ctx, path: &str) -> Result<()> {
+    let v = ctx
+        .client()?
+        .send(Method::POST, &format!("{path}/run"), &[], Body::None)
+        .await?
+        .ok()?
+        .value();
+    if ctx.json {
+        ctx.emit(&v);
+    } else {
+        let run = &v["run"];
+        let failing: Vec<&str> = run["results"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|r| r["passed"] != json!(true))
+            .filter_map(|r| r["name"].as_str())
+            .collect();
+        let mut out = json!({ "result": v["result"], "run_id": run["run_id"] });
+        if !failing.is_empty() {
+            out["failing"] = json!(failing.join(", "));
+        }
+        if v["detail"].is_string() {
+            out["detail"] = v["detail"].clone();
+        }
+        ctx.emit(&out);
+    }
+    if v["result"] == json!("failed") {
+        return Err(Fail::Failed("the scheduled run failed (see above)".into()));
+    }
     Ok(())
 }
 

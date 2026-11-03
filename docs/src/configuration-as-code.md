@@ -35,6 +35,11 @@ tests:                              # saved tests: a request and its assertions
   - name: order-1
     request: { path: /mock/orders/orders/1, headers: { x-api-key: "{{X_API_KEY}}" } }
     assert: [{ status: 200 }, { json: $.id, equals: 1 }]
+test_schedules:                     # saved tests on a schedule, a webhook for failures
+  - name: nightly
+    at: "02:30"                     # or every: 15m (5m to 24h)
+    prefix: order-                  # or names: [order-1], or neither: every test
+    webhook: https://hooks.example.com/rustybin
 agents:
   default_ceiling: traffic
   rules: [{ match: { name: "ci-*" }, ceiling: read-only }]
@@ -52,6 +57,7 @@ health:
 | `portal` | `items`: what the [dev portal](portal.md) publishes | the portal (a mock the item names must exist; a `mock:` item of a visitor is skipped) |
 | `harness` | `scenarios`: the [saved scenarios](harness.md), inline, validated against the node's caps | the harness (a problem when harness mode is off) |
 | `tests` | The [saved tests](saved-tests.md), with `{{variables}}` for credentials (never values); a test that fails validation is a problem and is kept, never pruned | the saved tests (`<state>/tests.json`) |
+| `test_schedules` | The [test schedules](saved-tests.md#schedules), without their status (a replaced schedule keeps its own); one that fails validation is a problem and is kept, never pruned | the schedules (`<state>/test-schedules.json`) |
 | `agents` | The default ceiling and the rules of [AI agents](agent-mcp.md#managing-agents) | the agents policy |
 | `health` | `initial`: `healthy` or `unhealthy` | the `/health` toggle |
 
@@ -62,7 +68,7 @@ Two rules make a document safe to apply:
   nothing), so an export is the whole instance.
 - **With `prune`, a present section is the whole truth for its part of the
   instance.** API-created mocks, published portal items, published registry entries,
-  saved scenarios, saved tests and stored settings or secrets that the section does not name are
+  saved scenarios, saved tests, test schedules and stored settings or secrets that the section does not name are
   removed. Without `prune`, applying only adds and updates. The `git.*` settings are
   never exported nor pruned: where an instance keeps its configuration is the
   deployment's business. A mock the document names but cannot load (an entry that
@@ -124,13 +130,14 @@ A dry run answers the same and changes nothing. It validates with the apply's ru
 setting kinds and checks, locked settings, secret references, every mock compiled, the
 portal's metadata, and the instance's capacities, so a document the apply would refuse
 has `ok: false` in its preview too. An apply is not one transaction: sections are applied
-in order (settings, secrets, mocks, registry, portal, harness, tests, agents, health),
+in order (settings, secrets, mocks, registry, portal, harness, tests, test schedules,
+agents, health),
 and an entry that fails is reported while the others go ahead, so preview first. An
 apply (and its dry run) runs on the compile pool, as mock edits do: when the pool stays
 busy the answer is `503` with `Retry-After`.
 
 A document pulled from a repository is applied with stricter rules (it cannot repoint
-outbound requests, the sign-in or a test's gateway); [Source
+outbound requests, the sign-in, a test's gateway or a schedule's webhook); [Source
 control](source-control.md#what-a-repository-writer-can-do) lists them.
 
 ```hurl

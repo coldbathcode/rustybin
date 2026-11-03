@@ -354,6 +354,11 @@ Saved tests: captured requests with assertions, run here, through a gateway or i
 | `rustybin tests runs [--limit N] [--cursor C]` | The history of test runs, newest first: when, the trigger, who, the counts, what changed since the previous run. Flags: `--limit` value, `--cursor` value. | `GET /_rustybin/tests/runs` |
 | `rustybin tests run-show <id> [--junit]` | One kept run: each test's result and failures, the change since the previous run; --junit prints its JUnit XML. Flags: `--junit`. | `GET /_rustybin/tests/runs/{id}` |
 | `rustybin tests runs-clear` | Forget every kept test run (the tests stay). | `DELETE /_rustybin/tests/runs` |
+| `rustybin tests schedules` | The saved tests on a schedule: when, what, on or off, the last result, the next time, the last notice. | `GET /_rustybin/tests/schedules` |
+| `rustybin tests schedule-show <name>` | One test schedule with its status and recent outcomes. | `GET /_rustybin/tests/schedules/{name}` |
+| `rustybin tests schedule-save <name> (--every D \| --at HH:MM) [--names a,b \| --prefix P] [--webhook U] [--notify-recovery] [--disabled]` | Save or replace a test schedule: every 5m to 24h, or at HH:MM UTC; every saved test unless --names or --prefix. Flags: `--every` value, `--at` value, `--names` value, `--prefix` value, `--webhook` value, `--notify-recovery`, `--disabled`, `--description` value. | `PUT /_rustybin/tests/schedules/{name}` |
+| `rustybin tests schedule-run <name>` | Run a test schedule now, as the scheduler would (kept in the history); exits 1 when it fails. | `POST /_rustybin/tests/schedules/{name}/run` |
+| `rustybin tests schedule-delete <name>` | Delete a test schedule (the tests and the history stay). | `DELETE /_rustybin/tests/schedules/{name}` |
 
 ```bash
 rustybin tests list
@@ -366,6 +371,11 @@ rustybin tests export
 rustybin tests runs --limit 5
 rustybin tests run-show 20261103T101500000Z-abc123 --junit
 rustybin tests runs-clear --yes
+rustybin tests schedules
+rustybin tests schedule-show nightly
+rustybin tests schedule-save nightly --every 1h --prefix order
+rustybin tests schedule-run nightly
+rustybin tests schedule-delete nightly --yes
 ```
 
 ## scenario

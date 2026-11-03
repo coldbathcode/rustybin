@@ -75,6 +75,24 @@ fn state_with_everything() -> AppState {
     }));
     assert!(problems.is_empty(), "{problems:?}");
     state.mocks.set_file_agents(policy);
+    state
+        .saved_tests
+        .schedules
+        .put(
+            crate::replay::schedule::Schedule {
+                name: "nightly".into(),
+                description: Some("Every order test".into()),
+                names: Vec::new(),
+                prefix: Some("order".into()),
+                every: None,
+                at: Some("02:30".into()),
+                enabled: true,
+                webhook: Some("https://hooks.example.com/rustybin".into()),
+                notify_recovery: true,
+            },
+            false,
+        )
+        .expect("schedule");
     state.health.set(false);
     state
 }

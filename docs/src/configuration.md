@@ -195,7 +195,8 @@ the `assist.*` settings of [AI assist](ai-assist.md) (the provider keys are secr
 `assist.job.<task>` the model per job), `proxy.client_ip_header`, `egress.allow`,
 `egress.allow_loopback`, `agents.default_ceiling`, `registry.scenario`,
 `registry.saved`, the `portal.*` settings of the [dev portal](#dev-portal), the secret
-`leads.webhook_token`, `mocks.require_revision` (no variable; `false` by default: when
+`leads.webhook_token`, the [test schedule notices](saved-tests.md#the-failure-notice)' secret
+`notify.webhook_token` and `notify.base_url`, `mocks.require_revision` (no variable; `false` by default: when
 on, every mock edit must name the draft revision it was made from, else `428`, see
 [two people editing one mock](mocks/index.md#two-people-editing-one-mock)) and the
 `git.*` settings of [source control](#source-control), including the secret `git.token`.
@@ -238,6 +239,7 @@ under a **purpose** with its own rule, on only when the feature is configured:
 | `mcp_relay` | No default: name the MCP servers the [inspector](mcp/inspector.md) may relay to and run checks against in `RUSTYBIN_EGRESS_ALLOW`. This instance's own MCP servers are relayed in process and need no entry. |
 | `replay` | No default: name the gateways [saved tests](saved-tests.md) run through in `RUSTYBIN_EGRESS_ALLOW`. Tests without a gateway run in process and need no entry. |
 | `scenario` | No default: name the gateway a [gateway scenario](gateway-scenarios.md) checks through in `RUSTYBIN_EGRESS_ALLOW` (`RUSTYBIN_EGRESS_ALLOW_LOOPBACK=true` for a gateway on the same machine). |
+| `notify` | No default: name the webhooks of [test schedules](saved-tests.md#the-failure-notice) in `RUSTYBIN_EGRESS_ALLOW`. A refused notice is reported in the schedule's status and never retried. |
 
 ```hurl
 {{#include ../examples/concepts/settings.hurl:egress}}
@@ -676,7 +678,8 @@ validate` checks a scenario offline, `rustybin harness report` renders a saved r
 ## Command line and saved tests
 
 The [`rustybin` command line](cli-guide.md) and `rustybin mcp-stdio` read these on the
-machine they run on, not on the instance; `RUSTYBIN_TEST_*` is read by the instance.
+machine they run on, not on the instance; `RUSTYBIN_TEST_*` and `RUSTYBIN_NOTIFY_*` are
+read by the instance.
 
 | Variable | Used by |
 |---|---|
@@ -686,7 +689,9 @@ machine they run on, not on the instance; `RUSTYBIN_TEST_*` is read by the insta
 | `RUSTYBIN_CONFIG_HOME` | Where `profiles.json` lives (else `$XDG_CONFIG_HOME/rustybin`, else `~/.config/rustybin`). |
 | `RUSTYBIN_MOCK_TOKEN` | A self-service manage token, when there is no `--mock-token`. |
 | `RUSTYBIN_MCP_URL` | `rustybin mcp-stdio`'s `--server` ([Management MCP](agent-mcp.md)). |
-| `RUSTYBIN_TEST_<NAME>` | On the instance: the value of a [saved test](saved-tests.md)'s `{{NAME}}` variable when the run does not pass it (only that prefix is ever read). |
+| `RUSTYBIN_TEST_<NAME>` | On the instance: the value of a [saved test](saved-tests.md)'s `{{NAME}}` variable when the run does not pass it (only that prefix is ever read; a [scheduled run](saved-tests.md#schedules) reads nothing else). |
+| `RUSTYBIN_NOTIFY_WEBHOOK_TOKEN` | On the instance: sent as `Authorization: Bearer` with every [test schedule notice](saved-tests.md#the-failure-notice). Seeds the secret setting `notify.webhook_token` (changeable in the console's Management, Network tab). Never exposed. |
+| `RUSTYBIN_NOTIFY_BASE_URL` | On the instance: the address people open it at (`https://mocks.example.com`); a notice's `run_url` is it plus `/_rustybin/tests/runs/<id>`. Seeds `notify.base_url`; unset, notices carry `run_path` only. |
 
 ## Development only
 

@@ -27,7 +27,8 @@
 //! Version 2 (`docs/plans/next/step-09-config-and-source-control.md`) adds
 //! the whole instance: `instance:` (the title and console user), `settings:`
 //! (non-secret settings by dotted key), `secrets:` (references, never
-//! values), `harness:` (saved scenarios), `tests:` (saved tests) and `health:` (the initial
+//! values), `harness:` (saved scenarios), `tests:` (saved tests), `test_schedules:`
+//! (saved tests on a schedule) and `health:` (the initial
 //! state); see `crate::configdoc`, which exports, diffs and applies such
 //! documents. Version 1 files still load (they are version 2 documents with
 //! the mocks sections only).
@@ -65,7 +66,16 @@ pub const CURRENT_VERSION: u32 = 2;
 
 /// The sections of a document, in file order.
 pub const SECTIONS: &[&str] = &[
-    "instance", "settings", "secrets", "mocks", "registry", "portal", "harness", "tests", "agents",
+    "instance",
+    "settings",
+    "secrets",
+    "mocks",
+    "registry",
+    "portal",
+    "harness",
+    "tests",
+    "test_schedules",
+    "agents",
     "health",
 ];
 
@@ -95,6 +105,9 @@ pub struct MocksFile {
     /// Saved tests (`crate::replay`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tests: Option<Vec<crate::replay::SavedTest>>,
+    /// Saved tests on a schedule (`crate::replay::schedule`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_schedules: Option<Vec<crate::replay::schedule::Schedule>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents: Option<crate::mcp::manage::agents::FileSection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -137,6 +150,9 @@ impl MocksFile {
         }
         if self.tests.is_some() {
             out.push("tests");
+        }
+        if self.test_schedules.is_some() {
+            out.push("test_schedules");
         }
         if self.agents.is_some() {
             out.push("agents");
@@ -267,6 +283,7 @@ pub fn parse_lenient(text: &str) -> Result<(MocksFile, Vec<Failed>), String> {
     let portal = section(&mut top, "portal", &mut failed);
     let harness = section(&mut top, "harness", &mut failed);
     let tests = section(&mut top, "tests", &mut failed);
+    let test_schedules = section(&mut top, "test_schedules", &mut failed);
     let agents = section(&mut top, "agents", &mut failed);
     let health = section(&mut top, "health", &mut failed);
     failed.extend(top.keys().map(|k| Failed {
@@ -308,6 +325,7 @@ pub fn parse_lenient(text: &str) -> Result<(MocksFile, Vec<Failed>), String> {
             portal,
             harness,
             tests,
+            test_schedules,
             agents,
             health,
             unparsed_mocks,
@@ -716,6 +734,7 @@ pub fn json_schema() -> Value {
         "portal": portal,
         "harness": crate::configdoc::harness_schema(),
         "tests": crate::replay::schema(),
+        "test_schedules": crate::replay::schedule::schema(),
         "agents": agents,
         "health": crate::configdoc::health_schema()
     }));

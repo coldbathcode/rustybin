@@ -237,6 +237,12 @@ pub struct Config {
     /// `RUSTYBIN_PORTAL_BASE_URL`: the URL the portal's snippets and Try it
     /// use (a gateway in front of this instance). Seeds `portal.base_url`.
     pub portal_base_url: Option<String>,
+    /// `RUSTYBIN_NOTIFY_WEBHOOK_TOKEN`: the bearer token of the test
+    /// schedules' webhooks. Seeds the secret `notify.webhook_token`.
+    pub notify_webhook_token: Option<String>,
+    /// `RUSTYBIN_NOTIFY_BASE_URL`: the address a notice's link starts with.
+    /// Seeds `notify.base_url`.
+    pub notify_base_url: Option<String>,
     /// `RUSTYBIN_PORTAL_VISITORS`: visitors of a self-service instance may
     /// publish their own mocks. Seeds `portal.visitors`.
     pub portal_visitors: bool,
@@ -1086,6 +1092,21 @@ impl Config {
                 None => None,
             },
             portal_visitors: parse_bool_or(&get, "RUSTYBIN_PORTAL_VISITORS", false, &mut warnings),
+            notify_webhook_token: get("RUSTYBIN_NOTIFY_WEBHOOK_TOKEN")
+                .filter(|v| !v.trim().is_empty()),
+            notify_base_url: match get("RUSTYBIN_NOTIFY_BASE_URL") {
+                Some(v) if v.trim().is_empty() => None,
+                Some(v) => match crate::settings::Kind::Url.validate(&Value::String(v.clone())) {
+                    Ok(Value::String(url)) => Some(url.trim_end_matches('/').to_string()),
+                    _ => {
+                        warnings.push(format!(
+                            "RUSTYBIN_NOTIFY_BASE_URL={v:?} is not an http(s) URL; ignored"
+                        ));
+                        None
+                    }
+                },
+                None => None,
+            },
             a2a_push_allowlist,
             a2a_push_allow_all,
             harness,
@@ -1180,6 +1201,8 @@ impl Config {
             portal_auth: None,
             portal_base_url: None,
             portal_visitors: false,
+            notify_webhook_token: None,
+            notify_base_url: None,
             a2a_push_allowlist: Vec::new(),
             a2a_push_allow_all: false,
             harness: HarnessConfig::default(),

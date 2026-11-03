@@ -530,6 +530,10 @@ server and a gateway's JWT validation:
 | `list_test_runs` | admin | The [history of runs](saved-tests.md#history), newest first (`limit`, `cursor`): when, the trigger, who, the counts, the failing tests, newly failing and newly passing |
 | `get_test_run` | admin | One kept run by id: each test's result and failures under `untrusted_results`, JUnit with `format: junit` |
 | `clear_test_runs` | admin | Forget every kept run, the tests stay (confirmed) |
+| `list_test_schedules` | admin | The [test schedules](saved-tests.md#schedules), or one by name, with their status: next time, last result and run, skipped runs, the last notice |
+| `save_test_schedule` | admin | Save or replace a schedule: `every` or `at`, `names` or `prefix`, `enabled`, `webhook`, `notify_recovery` (confirmed when it names a new webhook) |
+| `delete_test_schedule` | admin | Delete a schedule, the tests and the history stay (confirmed) |
+| `run_test_schedule` | admin | Run a schedule now, kept in the history as `schedule:<name>` (confirmed when its tests go through a gateway or change state, or it has a webhook) |
 | `list_gateway_scenarios` / `get_gateway_scenario_run` | read | The [gateway scenarios](gateway-scenarios.md) and the caller's runs with their last verdicts; the credential-injection key is shown to admin callers only (`key_hidden`) |
 | `start_gateway_scenario` | admin | Prepare a run: its upstream and the steps to configure on the gateway |
 | `check_gateway_scenario` | admin | Send the run's test traffic through the gateway (egress purpose `scenario`) and compare what the client got with what reached the upstream, with the scenario's test parameters (`limit`, `half_open_ms`, `size_limit`) (confirmed) |

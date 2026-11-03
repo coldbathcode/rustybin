@@ -510,6 +510,8 @@ function networkPanel(doc, reload, error) {
     el.appendChild(card('Behind a proxy', { hint: 'which header names the client (RUSTYBIN_TRUST_FORWARD)' }, proxy.el));
     const leads = settingsForm(doc, 'leads', { saveLabel: 'Save leads webhook settings', onSaved: reload });
     el.appendChild(card('Leads webhook', { hint: 'self-service mocks' }, leads.el));
+    const notify = settingsForm(doc, 'notify', { saveLabel: 'Save notice settings', onSaved: reload });
+    el.appendChild(card('Test schedule notices', { hint: 'the webhooks of scheduled saved tests (purpose notify)', actions: h('a', { class: 'btn sm', href: '#/tests' }, 'Open the schedules') }, notify.el));
     const registry = settingsForm(doc, 'registry', { saveLabel: 'Save registry settings', onSaved: reload });
     el.appendChild(card('MCP registry', { hint: 'the mock registry\'s scenario, registries to browse', actions: h('a', { class: 'btn sm', href: '#/registry' }, 'Open the registry view') }, registry.el));
   } else {

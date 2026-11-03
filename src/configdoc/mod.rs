@@ -122,6 +122,7 @@ pub struct Extra {
     pub secrets: Option<BTreeMap<String, Option<String>>>,
     pub harness: Option<HarnessSection>,
     pub tests: Option<Vec<crate::replay::SavedTest>>,
+    pub test_schedules: Option<Vec<crate::replay::schedule::Schedule>>,
     pub health: Option<HealthSection>,
 }
 
@@ -134,6 +135,7 @@ impl Extra {
             secrets: file.secrets.take(),
             harness: file.harness.take(),
             tests: file.tests.take(),
+            test_schedules: file.test_schedules.take(),
             health: file.health.take(),
         }
     }
@@ -144,6 +146,7 @@ impl Extra {
             && self.secrets.is_none()
             && self.harness.is_none()
             && self.tests.is_none()
+            && self.test_schedules.is_none()
             && self.health.is_none()
     }
 
@@ -156,6 +159,7 @@ impl Extra {
             secrets: self.secrets,
             harness: self.harness,
             tests: self.tests,
+            test_schedules: self.test_schedules,
             health: self.health,
             ..MocksFile::default()
         }
@@ -338,6 +342,7 @@ pub fn export(state: &AppState, secrets: SecretsMode, bundle: bool) -> Export {
                 .collect(),
         }),
         tests: Some(state.saved_tests.list()),
+        test_schedules: Some(state.saved_tests.schedules.list()),
         agents: Some(agents_section(&state.mocks.file_agents())),
         health: Some(HealthSection {
             initial: if state.health.is_healthy() {
@@ -885,6 +890,17 @@ pub fn diff(before: &MocksFile, after: &MocksFile, base: Option<&Path>) -> Vec<C
             a.iter().map(|t| (t.name.clone(), t)).collect();
         map_changes(&mut out, "tests", &b, &a, |_| String::new());
     }
+    if let Some(a) = &after.test_schedules {
+        let b: BTreeMap<String, &crate::replay::schedule::Schedule> = before
+            .test_schedules
+            .iter()
+            .flatten()
+            .map(|s| (s.name.clone(), s))
+            .collect();
+        let a: BTreeMap<String, &crate::replay::schedule::Schedule> =
+            a.iter().map(|s| (s.name.clone(), s)).collect();
+        map_changes(&mut out, "test_schedules", &b, &a, |_| String::new());
+    }
     if let Some(a) = &after.agents {
         let b = before.agents.clone().unwrap_or_default();
         value_change(
@@ -1211,6 +1227,10 @@ pub fn apply(state: &AppState, file: MocksFile, opts: &ApplyOptions) -> Value {
     );
     put("tests", apply_tests(state, file.tests, opts, &mut problems));
     put(
+        "test_schedules",
+        apply_test_schedules(state, file.test_schedules, opts, &mut problems),
+    );
+    put(
         "agents",
         apply_agents(state, file.agents, opts, &mut problems),
     );
@@ -1265,6 +1285,7 @@ pub fn apply_extra(state: &AppState, extra: Extra, principal: &str) -> Vec<Strin
     apply_secrets(state, &file, &opts, &mut problems);
     apply_harness(state, file.harness, &opts, &mut problems);
     apply_tests(state, file.tests, &opts, &mut problems);
+    apply_test_schedules(state, file.test_schedules, &opts, &mut problems);
     apply_health(state, file.health, &opts, &mut problems);
     problems
 }
@@ -1929,6 +1950,81 @@ fn apply_tests(
         match store.put(t, true) {
             Ok(_) => saved.push(name),
             Err(e) => problems.push(format!("tests.{name}: {}", e.message())),
+        }
+    }
+    Some(json!({ "saved": saved, "deleted": deleted }))
+}
+
+/// `test_schedules:`: each valid schedule saved (replacing one of its
+/// name, whose status it keeps); with `prune`, schedules the document does
+/// not name are deleted. One that fails validation is reported and kept,
+/// never pruned. A document from the repository never points a schedule's
+/// notices at a new webhook.
+fn apply_test_schedules(
+    state: &AppState,
+    section: Option<Vec<crate::replay::schedule::Schedule>>,
+    opts: &ApplyOptions,
+    problems: &mut Vec<String>,
+) -> Option<Value> {
+    use crate::replay::schedule::MAX_SCHEDULES;
+    let section = section?;
+    let store = &state.saved_tests.schedules;
+    let named: BTreeSet<String> = section.iter().map(|s| s.name.clone()).collect();
+    let mut valid = Vec::new();
+    for s in section {
+        if opts.untrusted
+            && s.webhook.is_some()
+            && store.get(&s.name).and_then(|old| old.webhook) != s.webhook
+        {
+            problems.push(format!(
+                "test_schedules.{}: a document from the repository cannot point a schedule's notices at a new webhook (save it through the API, the console or the CLI): skipped",
+                s.name
+            ));
+            continue;
+        }
+        match s.validate() {
+            Ok(()) => valid.push(s),
+            Err(e) => problems.push(format!("test_schedules.{}: {e} (skipped)", s.name)),
+        }
+    }
+    let delete: Vec<String> = if opts.prune {
+        store
+            .list()
+            .into_iter()
+            .map(|s| s.name)
+            .filter(|n| !named.contains(n))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let save: Vec<String> = valid.iter().map(|s| s.name.clone()).collect();
+    if opts.dry_run {
+        let existing = store.list();
+        let new = save
+            .iter()
+            .filter(|n| !existing.iter().any(|s| &s.name == *n))
+            .count();
+        if existing.len() + new > MAX_SCHEDULES + delete.len() {
+            problems.push(format!(
+                "test_schedules: an instance keeps at most {MAX_SCHEDULES} schedules"
+            ));
+        }
+        return Some(json!({ "save": save, "delete": delete }));
+    }
+    let mut deleted: Vec<String> = Vec::new();
+    for n in delete {
+        match store.delete(&n) {
+            Ok(true) => deleted.push(n),
+            Ok(false) => {}
+            Err(e) => problems.push(format!("test_schedules.{n}: {}", e.message())),
+        }
+    }
+    let mut saved = Vec::new();
+    for s in valid {
+        let name = s.name.clone();
+        match store.put(s, true) {
+            Ok(_) => saved.push(name),
+            Err(e) => problems.push(format!("test_schedules.{name}: {}", e.message())),
         }
     }
     Some(json!({ "saved": saved, "deleted": deleted }))

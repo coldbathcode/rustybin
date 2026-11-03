@@ -46,7 +46,7 @@ API key.
 {{#include ../examples/tests/saved-tests.hurl:save_written}}
 ```
 
-A test has a `name` (letters, digits, `.`, `_`, `-`; not `run`, `runs` or `export`), a
+A test has a `name` (letters, digits, `.`, `_`, `-`; not `run`, `runs`, `schedules` or `export`), a
 `request` (`method`, `path` with the query, `headers`, `body`), an optional
 `gateway` and its assertions. Each assertion checks one thing:
 
@@ -135,13 +135,140 @@ kept run. `DELETE /_rustybin/tests/runs` forgets every run (the tests stay):
 {{#include ../examples/tests/saved-tests.hurl:clear_history}}
 ```
 
-The `trigger` is `console`, `cli`, `mcp` or `api` (a later release adds
-`schedule:<name>`). The console and the CLI say which they are with the header
+The `trigger` is `console`, `cli`, `mcp`, `api` or `schedule:<name>` (a run of a
+[schedule](#schedules), whose principal is `scheduler`). The console and the CLI say which they are with the header
 `X-Rustybin-Client: console` or `cli`; a run through the management MCP is `mcp`;
 anything else is `api`. It is a label for people and is never trusted for anything:
 who ran it is the `principal` (`jwt:<subject>`, `admin-token`, `key:<id>`, `open`, or
 on the management MCP the caller's name there), never a credential. The history is
 admin only, as the tests are.
+
+## Schedules
+
+A schedule runs saved tests without anyone at the console: every N minutes, or once a
+day at a time (UTC). Each run is kept in the [history](#history) with the trigger
+`schedule:<name>` and the principal `scheduler`, and a failing run can post a notice
+to a webhook.
+
+```hurl
+{{#include ../examples/tests/schedules.hurl:setup}}
+```
+
+```hurl
+{{#include ../examples/tests/schedules.hurl:create}}
+```
+
+A schedule has a `name` (the saved tests' rules), exactly one of `every` (`5m` to
+`24h`, with `s`, `m` or `h`) and `at` (`HH:MM`, UTC), the tests it runs (`names`, or a
+name `prefix`, or neither for every saved test), `enabled` (`true` unless you turn it
+off), an optional `webhook` and `notify_recovery`. `every` runs at each multiple of
+the interval since the Unix epoch (`15m` runs at :00, :15, :30 and :45; `1h` on the
+hour), so the times do not move when the instance restarts. A time missed while the
+instance was down is not caught up: the schedule runs at its next time. At most 20
+schedules, in `<state>/test-schedules.json` (in memory without a state directory).
+
+```hurl
+{{#include ../examples/tests/schedules.hurl:invalid}}
+```
+
+`POST /_rustybin/tests/schedules` creates one (`409` when the name is taken);
+`PUT /_rustybin/tests/schedules/{name}` saves or replaces one (a replaced schedule
+keeps its status); `GET` reads one, `DELETE` removes it (the tests and their history
+stay). `POST /_rustybin/tests/schedules/{name}/run` runs it now, as the scheduler
+would, and leaves its next time as it is:
+
+```hurl
+{{#include ../examples/tests/schedules.hurl:run_now}}
+```
+
+`GET /_rustybin/tests/schedules` lists them with their status: `running`, `next_due`,
+`last_result` (`passed`, `failed` or `skipped`) with `last_at` and `last_detail`,
+`last_run_id` (read it with `GET /_rustybin/tests/runs/{id}`), `runs`, `skipped`,
+`last_notice` and the last ten outcomes (`recent`):
+
+```hurl
+{{#include ../examples/tests/schedules.hurl:list}}
+```
+
+**One run at a time.** A run of a schedule never overlaps its previous run, nor any
+other run of the saved tests: when the console, the CLI or an agent is running tests,
+a due run waits (it is tried again every second until the other run ends). A run that
+falls due while the [harness](harness.md) sends load from this instance (a run, or a
+cluster run it leads) is **skipped**: the status counts it under `skipped`, with
+`last_result: skipped` and the reason, and the schedule runs again at its next time.
+A schedule whose tests are all gone is skipped too. A run by hand is refused with
+`409` in both cases.
+
+**Variables come from the instance only.** A scheduled run fills `{{NAME}}` from the
+instance's `RUSTYBIN_TEST_<NAME>` environment variables, and a test whose variable has
+none does not run (an error in the run, as in a manual run). A schedule never holds a
+credential nor a variable's value.
+
+### The failure notice
+
+With a `webhook`, a failing run (a test failed or could not run) posts one JSON notice;
+a run that passes after a failing one posts one more when `notify_recovery` is on.
+Nothing is posted for a run that passes after a pass.
+
+```hurl
+{{#include ../examples/tests/schedules.hurl:webhook}}
+```
+
+```json
+{
+  "event": "test_schedule.failed",
+  "schedule": "daily",
+  "selection": "tests sched-fails",
+  "run_id": "20261103T023000123Z-ab12cd",
+  "ran_at": "2026-11-03T02:30:00Z",
+  "passed": false,
+  "total": 1,
+  "failed": 1,
+  "errors": 0,
+  "failing": ["sched-fails"],
+  "failing_more": 0,
+  "newly_failing": ["sched-fails"],
+  "detail": null,
+  "run_path": "/_rustybin/tests/runs/20261103T023000123Z-ab12cd",
+  "run_url": "https://mocks.example.com/_rustybin/tests/runs/20261103T023000123Z-ab12cd"
+}
+```
+
+The event is `test_schedule.failed` or `test_schedule.recovered`. A notice names the
+failing tests (at most 50, `failing_more` counts the rest), never what a test saw nor
+a variable. `run_url` is set when the `notify.base_url` setting (or
+`RUSTYBIN_NOTIFY_BASE_URL`) gives the address people open the instance at; else
+there is `run_path` only. When the receiver needs a credential, set the secret
+`notify.webhook_token` (or `RUSTYBIN_NOTIFY_WEBHOOK_TOKEN`): it is sent as
+`Authorization: Bearer` to every schedule's webhook. The URL itself takes no
+credential (no user and password, no query string) and is part of `rustybin.yaml`.
+
+Notices go out under the [egress policy](configuration.md#outbound-connections)'s
+purpose `notify`, which has **no default**: add each webhook's host to
+`RUSTYBIN_EGRESS_ALLOW` (or the `egress.allow` setting). A refused notice is not
+retried: the status says `refused` with the reason. A delivery that fails (no answer,
+a status other than 2xx) is tried 4 times, 15 seconds, then 1 and 4 minutes apart,
+then reported `failed`. At most 50 notices wait at once (a notice beyond that is
+`dropped`), they are kept in memory only, and deleting a schedule drops its waiting
+notices. `last_notice.result` is `pending`, `retrying`, `delivered`, `failed`,
+`refused` or `dropped`.
+
+```hurl
+{{#include ../examples/tests/schedules.hurl:failing_run}}
+```
+
+```hurl
+{{#include ../examples/tests/schedules.hurl:refused}}
+```
+
+```hurl
+{{#include ../examples/tests/schedules.hurl:delete}}
+```
+
+**Several replicas.** A schedule runs on the instance that holds it. Replicas that
+load the same `rustybin.yaml` (or pull the same repository) each run every schedule,
+and each posts its own notices; there is no election of one runner. Keep the
+schedules on one instance, or give each replica its own document.
 
 ## In CI without an instance's console
 
@@ -168,8 +295,8 @@ exits `1` when a test fails.
 
 | Surface | Where |
 |---|---|
-| API | `GET`, `POST /_rustybin/tests`, `GET`, `PUT`, `DELETE /_rustybin/tests/{name}`, `POST /_rustybin/tests/run` (`?format=junit`), `GET /_rustybin/tests/export`; the history: `GET`, `DELETE /_rustybin/tests/runs`, `GET /_rustybin/tests/runs/{id}` (`?format=junit`) |
-| Console | **Live traffic**: **Save as test** on an entry; **Saved tests**: the list, **Run all** with variables, a test's run, the failures and the change since the previous run, **Export as Hurl**, delete; **History**: every run, a run's detail, its JUnit download, **Clear history** |
-| CLI | `rustybin tests list`, `show`, `save`, `put`, `delete`, `run`, `export` (`run --junit`, `--var NAME=value`, `--var NAME=-` or `NAME=@file` for a credential); the history: `tests runs` (`--limit`, `--cursor`), `tests run-show <id>` (`--junit`), `tests runs-clear` ([reference](cli.md#tests)) |
-| Management MCP | `list_tests` (one, all, or `format: hurl`), `save_test`, `delete_test` (confirmed), `run_tests` (confirmed when a test goes through a gateway or sends a method other than `GET`, `HEAD` or `OPTIONS`; one run at a time; variables only from `RUSTYBIN_TEST_*`; answers the `run_id` and the change), `list_test_runs`, `get_test_run` (results under `untrusted_results`, JUnit with `format: junit`), `clear_test_runs` (confirmed) ([agent page](agent-mcp.md)) |
-| `rustybin.yaml` | `tests:`, a list of tests as above ([instance as code](configuration-as-code.md)); the history is not configuration and is never exported |
+| API | `GET`, `POST /_rustybin/tests`, `GET`, `PUT`, `DELETE /_rustybin/tests/{name}`, `POST /_rustybin/tests/run` (`?format=junit`), `GET /_rustybin/tests/export`; the history: `GET`, `DELETE /_rustybin/tests/runs`, `GET /_rustybin/tests/runs/{id}` (`?format=junit`); schedules: `GET`, `POST /_rustybin/tests/schedules`, `GET`, `PUT`, `DELETE /_rustybin/tests/schedules/{name}`, `POST /_rustybin/tests/schedules/{name}/run` |
+| Console | **Live traffic**: **Save as test** on an entry; **Saved tests**: the list, **Run all** with variables, a test's run, the failures and the change since the previous run, **Export as Hurl**, delete; **History**: every run, a run's detail, its JUnit download, **Clear history**; **Schedules**: the list with each one's next time, last run and last notice, on or off, **Run now**, edit, delete (confirmed), and the form; the notice settings under **Management**, **Network** |
+| CLI | `rustybin tests list`, `show`, `save`, `put`, `delete`, `run`, `export` (`run --junit`, `--var NAME=value`, `--var NAME=-` or `NAME=@file` for a credential); the history: `tests runs` (`--limit`, `--cursor`), `tests run-show <id>` (`--junit`), `tests runs-clear`; schedules: `tests schedules`, `schedule-show <name>`, `schedule-save <name> --every 15m` (or `--at 02:30`, `--names`, `--prefix`, `--webhook`, `--notify-recovery`, `--disabled`), `schedule-run <name>` (exits `1` when it fails), `schedule-delete <name>` ([reference](cli.md#tests)) |
+| Management MCP | `list_tests` (one, all, or `format: hurl`), `save_test`, `delete_test` (confirmed), `run_tests` (confirmed when a test goes through a gateway or sends a method other than `GET`, `HEAD` or `OPTIONS`; one run at a time; variables only from `RUSTYBIN_TEST_*`; answers the `run_id` and the change), `list_test_runs`, `get_test_run` (results under `untrusted_results`, JUnit with `format: junit`), `clear_test_runs` (confirmed); `list_test_schedules`, `save_test_schedule` (confirmed when it names a new webhook), `delete_test_schedule` (confirmed), `run_test_schedule` (confirmed when its tests go through a gateway or change state, or it has a webhook) ([agent page](agent-mcp.md)) |
+| `rustybin.yaml` | `tests:`, a list of tests as above, and `test_schedules:`, a list of schedules (without their status) ([instance as code](configuration-as-code.md)); the history is not configuration and is never exported |
