@@ -50,7 +50,7 @@ stream.
 ## Build notes: the audit log (2026-11-03)
 
 The audit part of this step (Goal, Model, Surfaces, Tests) is built; the security pass is
-separate and still to come.
+separate: its build notes follow (areas A and B).
 
 - **Where it is.** `src/audit.rs` (the model, the store `AppState.audit`, the file writer, the
   filters, the route layer, the `audit.*` settings, the routes), `src/audit/tests.rs` (9 tests),

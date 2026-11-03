@@ -116,7 +116,7 @@ caller's `route_need`, `replay::visible` / `admit_for` / `select_for`, `checkpoi
 a move needs the write permission in both (`projects::check_move`); a project's roles never count as an instance admin;
 a document from git never changes members, prunes a project or moves a resource; a new kind of project resource is
 counted in `project_api::resources` (deletion and `move_to`). Step 14's audit log (user docs `docs/src/audit-log.md`;
-the security pass of step 14 is separate and still to come) is built: `src/audit.rs` (see below), `list_audit` in
+the security pass of step 14, 33 findings fixed, has its build notes in the step file) is built: `src/audit.rs` (see below), `list_audit` in
 `src/mcp/manage/audit.rs`, `rustybin audit list | tail`, `ui/views/manage/audit.js`, the `audit.*` settings. Rules it
 left: a new mutating control route or management tool is an entry without code (`audit::layer`, the route layer
 outside `check_route`, and `tools::call`; `every_mutating_route_and_tool_writes_one_entry` walks the catalogue and

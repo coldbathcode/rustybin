@@ -78,7 +78,7 @@ The marker a session looks for is the first row that is not done.
 | [11](step-11-projects.md) | Access control 5: projects, roles on part of an instance | 09 | done 2026-11-03 |
 | [12](step-12-agents-for-users.md) | Access control 6: agents act for a user | 09 | done 2026-11-03 |
 | [13](step-13-portal-access.md) | Access control 7: open and closed APIs on the portal | 09 | done 2026-11-03 |
-| [14](step-14-audit-log.md) | Access control 8: the audit log and a security pass | 07 to 13 | audit log built 2026-11-03; the security pass to come |
+| [14](step-14-audit-log.md) | Access control 8: the audit log and a security pass | 07 to 13 | done 2026-11-03 (the audit log; the security pass: 33 findings from four reviews, all reproduced and fixed) |
 | [15](step-15-release.md) | Docs and release 0.5.0 (access control) | all | |
 
 Steps 01 to 06 and 07 to 14 are independent tracks; a testing step built after step 08 declares
