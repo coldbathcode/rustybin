@@ -1,6 +1,6 @@
 //! Guided gateway scenarios: pick an outcome (retries, rate limiting,
 //! credential injection, timeouts, caching, circuit breakers, request size
-//! limits), and a run prepares the upstream
+//! limits, CORS, header transformation), and a run prepares the upstream
 //! the test needs (a mock, or a `/flaky` route), says how to point the
 //! gateway at it, sends test traffic through the gateway and compares what
 //! the client got with what reached the upstream (the inspector's captures,
@@ -16,6 +16,11 @@
 //! rights that share a session key with the starter (one address behind a
 //! NAT, a console-scope token) see the run without it. Test traffic goes
 //! through the egress policy under `Purpose::Scenario`.
+//!
+//! The mock of a `cors` run skips the instance's own CORS layer
+//! ([`own_cors`]): its preflights reach the mock (and the inspector), and
+//! its only CORS answer is the one the check asked for (`upstream_cors`),
+//! so what the client sees comes from the gateway or from that answer.
 
 pub mod catalog;
 #[cfg(test)]
@@ -57,6 +62,9 @@ const REACHED_LOOKS: u32 = 5;
 const REACHED_SPACING: Duration = Duration::from_millis(50);
 /// The time between the trials of a `circuit_breaker` check.
 const TRIAL_SPACING: Duration = Duration::from_millis(250);
+/// The most headers of an answer a check keeps, and of each value.
+const MAX_ANSWER_HEADERS: usize = 64;
+const MAX_ANSWER_HEADER_LEN: usize = 512;
 /// The header that ties an upstream request to the check request.
 pub const SESSION_HEADER: &str = "x-rustybin-session";
 /// Random bytes of a run id (96 bits).
@@ -87,6 +95,9 @@ struct Run {
     checks: u32,
     checking: bool,
     last: Option<Value>,
+    /// `cors`: the origin the run's mock answers CORS for (the last
+    /// check's `allowed_origin` with `upstream_cors: true`), else none.
+    cors_answer: Option<String>,
 }
 
 impl Run {
@@ -120,6 +131,7 @@ impl Run {
             "checks": self.checks,
             "checking": self.checking,
             "last_check": self.last,
+            "upstream_answers_cors": self.cors_answer.is_some(),
         })
     }
 
@@ -166,6 +178,15 @@ impl Scenarios {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// The mock `name` belongs to a live `cors` run: `Some` with the origin
+    /// it answers CORS for, if any.
+    fn cors_mock(&self, name: &str) -> Option<Option<String>> {
+        self.runs()
+            .iter()
+            .find(|r| r.scenario.id == "cors" && r.mock.as_deref() == Some(name))
+            .map(|r| r.cors_answer.clone())
     }
 }
 
@@ -284,6 +305,7 @@ pub async fn start(
         checks: 0,
         checking: false,
         last: None,
+        cors_answer: None,
     };
     // The starter is admin (checked above): the answer holds the key.
     let view = run.view(true);
@@ -304,19 +326,28 @@ pub async fn start(
 
 /// What a check takes.
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CheckBody {
     /// The URL the gateway serves the route at.
     pub gateway_url: String,
-    /// `rate_limiting`: the limit set on the gateway.
-    #[serde(default)]
-    pub limit: Option<u32>,
-    /// `circuit_breaker`: the gateway's half-open time, in milliseconds.
-    #[serde(default)]
-    pub half_open_ms: Option<u64>,
-    /// `request_size_limit`: the gateway's body limit, in bytes.
-    #[serde(default)]
-    pub size_limit: Option<u64>,
+    /// The test parameters by name ([`catalog::PARAMS`]); any other field
+    /// is refused by [`Scenario::params_of`].
+    #[serde(flatten)]
+    pub params: serde_json::Map<String, Value>,
+}
+
+impl CheckBody {
+    pub fn new(gateway_url: impl Into<String>) -> Self {
+        Self {
+            gateway_url: gateway_url.into(),
+            params: serde_json::Map::new(),
+        }
+    }
+
+    /// With one test parameter.
+    pub fn with(mut self, name: &str, value: impl Into<Value>) -> Self {
+        self.params.insert(name.to_string(), value.into());
+        self
+    }
 }
 
 /// Clears a run's `checking` flag however the check ends (a dropped
@@ -351,14 +382,7 @@ pub async fn check(
             .iter_mut()
             .find(|r| r.id == run && r.scenario.id == scenario && r.owner == owner)
             .ok_or_else(|| not_found(scenario, run))?;
-        let params = r
-            .scenario
-            .params_of(
-                body.limit.map(u64::from),
-                body.half_open_ms,
-                body.size_limit,
-            )
-            .map_err(bad)?;
+        let params = r.scenario.params_of(&body.params).map_err(bad)?;
         // The body under the limit must fit this instance's own limit.
         if r.scenario.id == "request_size_limit"
             && params.size_limit / 2 > state.config.body_limit as u64
@@ -382,6 +406,9 @@ pub async fn check(
         }
         r.checking = true;
         r.checks += 1;
+        if r.scenario.id == "cors" {
+            r.cors_answer = params.upstream_cors.then(|| params.allowed_origin.clone());
+        }
         (
             r.scenario,
             r.checks,
@@ -415,8 +442,11 @@ pub async fn check(
             let sizes = [params.size_limit / 2, params.size_limit * 2];
             for (n, size) in sizes.into_iter().enumerate() {
                 let size = size as usize;
-                let body = Bytes::from(vec![b'x'; size]);
-                let mut s = send_one(&client, &target, n, &session(n), Some(body)).await;
+                let out = Out {
+                    body: Some(Bytes::from(vec![b'x'; size])),
+                    ..Out::default()
+                };
+                let mut s = send_one(&client, &target, n, &session(n), out).await;
                 s.bytes = Some(size);
                 sent.push(s);
             }
@@ -425,7 +455,7 @@ pub async fn check(
             // Until the gateway answers one on its own (nothing upstream).
             let mut opened_at = None;
             for n in 0..catalog::MAX_BREAKER_REQUESTS {
-                let s = send_one(&client, &target, n, &session(n), None).await;
+                let s = send_one(&client, &target, n, &session(n), Out::default()).await;
                 let answered = Instant::now();
                 let failed = s.status == 0;
                 sent.push(s);
@@ -446,7 +476,7 @@ pub async fn check(
                     if i > 0 {
                         tokio::time::sleep(TRIAL_SPACING).await;
                     }
-                    let mut s = send_one(&client, &target, n, &session(n), None).await;
+                    let mut s = send_one(&client, &target, n, &session(n), Out::default()).await;
                     s.trial = true;
                     let failed = s.status == 0;
                     sent.push(s);
@@ -456,9 +486,42 @@ pub async fn check(
                 }
             }
         }
+        "cors" => {
+            // A preflight from each origin, then a GET from the allowed one.
+            let requests = [
+                (catalog::PREFLIGHT_ALLOWED, &params.allowed_origin, true),
+                (catalog::PREFLIGHT_REFUSED, &params.refused_origin, true),
+                (catalog::SIMPLE_ALLOWED, &params.allowed_origin, false),
+            ];
+            for (n, (label, origin, preflight)) in requests.into_iter().enumerate() {
+                let mut headers = vec![("origin".to_string(), origin.clone())];
+                if preflight {
+                    headers.push(("access-control-request-method".into(), "GET".into()));
+                }
+                let out = Out {
+                    method: preflight.then_some(reqwest::Method::OPTIONS),
+                    headers,
+                    ..Out::default()
+                };
+                let mut s = send_one(&client, &target, n, &session(n), out).await;
+                s.label = Some(label);
+                sent.push(s);
+            }
+        }
+        "header_transformation" => {
+            // The header the gateway removes, with a value of this check.
+            let marker = format!("scn-{}", random_hex(6));
+            let out = Out {
+                headers: vec![(params.remove_request_header.clone(), marker.clone())],
+                ..Out::default()
+            };
+            let mut s = send_one(&client, &target, 0, &session(0), out).await;
+            s.marker = Some(marker);
+            sent.push(s);
+        }
         _ => {
             for n in 0..sc.requests(params.limit) {
-                sent.push(send_one(&client, &target, n, &session(n), None).await);
+                sent.push(send_one(&client, &target, n, &session(n), Out::default()).await);
             }
         }
     }
@@ -469,6 +532,15 @@ pub async fn check(
             let mut caps = state.inspector.for_session(&format!("{prefix}{}", s.n), 50);
             caps.sort_by_key(|c| c.seq);
             s.upstream = caps.iter().map(|c| c.status).collect();
+            s.upstream_headers = caps
+                .iter()
+                .map(|c| {
+                    c.headers
+                        .iter()
+                        .map(|h| (h.name.clone(), h.value.clone()))
+                        .collect()
+                })
+                .collect();
         }
         sent.iter().map(|s| s.upstream.len()).sum::<usize>()
     };
@@ -514,23 +586,36 @@ pub async fn check(
     Ok(verdict)
 }
 
-/// Send one request of a check (a GET, or a POST of `body`) and read (and
-/// drop) at most [`MAX_BODY`] of the answer.
+/// One request of a check: a GET, a POST of `body`, or `method`; with
+/// `headers` (checked names and values) besides the session.
+#[derive(Default)]
+struct Out {
+    method: Option<reqwest::Method>,
+    headers: Vec<(String, String)>,
+    body: Option<Bytes>,
+}
+
+/// Send one request of a check and read (and drop) at most [`MAX_BODY`]
+/// of the answer; at most [`MAX_ANSWER_HEADERS`] of its headers are kept.
 async fn send_one(
     client: &reqwest::Client,
     target: &str,
     n: usize,
     session: &str,
-    body: Option<Bytes>,
+    out: Out,
 ) -> Sent {
     let t = Instant::now();
-    let req = match body {
-        Some(b) => client
+    let mut req = match (out.method, out.body) {
+        (Some(m), _) => client.request(m, target),
+        (None, Some(b)) => client
             .post(target)
             .header("content-type", "application/octet-stream")
             .body(b),
-        None => client.get(target),
+        (None, None) => client.get(target),
     };
+    for (k, v) in &out.headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
     let r = req.header(SESSION_HEADER, session).send().await;
     let mut s = Sent {
         n,
@@ -539,6 +624,20 @@ async fn send_one(
     match r {
         Ok(mut resp) => {
             s.status = resp.status().as_u16();
+            s.answer = resp
+                .headers()
+                .iter()
+                .take(MAX_ANSWER_HEADERS)
+                .filter_map(|(k, v)| {
+                    let v: String = v
+                        .to_str()
+                        .ok()?
+                        .chars()
+                        .take(MAX_ANSWER_HEADER_LEN)
+                        .collect();
+                    Some((k.as_str().to_string(), v))
+                })
+                .collect();
             let mut read = 0usize;
             while let Ok(Some(chunk)) = resp.chunk().await {
                 read += chunk.len();
@@ -616,6 +715,104 @@ pub fn end(state: &AppState, owner: &str, scenario: &str, run: &str) -> Result<V
     }
     tracing::info!(scenario = r.scenario.id, run, "gateway scenario ended");
     Ok(json!({ "ended": run, "scenario": r.scenario.id, "removed": removed }))
+}
+
+/// An `OPTIONS` request to a `cors` run's mock, held past the instance's
+/// CORS layer (which answers every `OPTIONS` itself) by [`own_cors`] as a
+/// `GET`, and put back by [`restore_preflight`].
+#[derive(Clone)]
+struct HeldOptions;
+
+/// The state of [`own_cors`]: `hold` when the instance has a CORS layer
+/// (`RUSTYBIN_CORS_ORIGINS` is not `off`) to hold requests past.
+#[derive(Clone)]
+pub struct OwnCors {
+    pub state: AppState,
+    pub hold: bool,
+}
+
+/// Outside the instance's own CORS layer (`build_app`): for a request to
+/// the mock of a live `cors` run, that layer neither answers the preflight
+/// (an `OPTIONS` passes it as a `GET` marked [`HeldOptions`], so the
+/// request reaches the mock and the inspector) nor leaves CORS headers on
+/// the answer, so no CORS answer of the instance hides the gateway's. With
+/// `upstream_cors` (the run's last check) the mock's answers carry CORS for
+/// the allowed origin. Everything else goes on unchanged.
+pub async fn own_cors(
+    State(OwnCors { state, hold }): State<OwnCors>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    use axum::http::header;
+    let name = req
+        .uri()
+        .path()
+        .strip_prefix("/mock/")
+        .and_then(|rest| rest.split('/').next())
+        .filter(|n| n.starts_with("scn-"));
+    let Some(answer) = name.and_then(|n| state.scenarios.cors_mock(n)) else {
+        return next.run(req).await;
+    };
+    let options = req.method() == axum::http::Method::OPTIONS;
+    let preflight = options
+        && req
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_REQUEST_METHOD);
+    if options && hold {
+        *req.method_mut() = axum::http::Method::GET;
+        req.extensions_mut().insert(HeldOptions);
+    }
+    let requested = req
+        .headers()
+        .get(header::ACCESS_CONTROL_REQUEST_HEADERS)
+        .cloned();
+    let mut resp = next.run(req).await;
+    // The instance's CORS answer goes (the mock answers none of its own).
+    let h = resp.headers_mut();
+    let cors: Vec<_> = h
+        .keys()
+        .filter(|k| k.as_str().starts_with("access-control-"))
+        .cloned()
+        .collect();
+    for k in cors {
+        h.remove(k);
+    }
+    h.remove(header::VARY);
+    let Some(origin) = answer else {
+        return resp;
+    };
+    let Ok(value) = axum::http::HeaderValue::from_str(&origin) else {
+        return resp;
+    };
+    let h = resp.headers_mut();
+    h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
+    h.append(header::VARY, axum::http::HeaderValue::from_static("origin"));
+    if preflight {
+        h.insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            axum::http::HeaderValue::from_static("GET, HEAD, OPTIONS"),
+        );
+        if let Some(r) = requested {
+            h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, r);
+        }
+        h.insert(
+            header::ACCESS_CONTROL_MAX_AGE,
+            axum::http::HeaderValue::from_static("600"),
+        );
+    }
+    resp
+}
+
+/// Inside the instance's CORS layer: put back the `OPTIONS` [`own_cors`]
+/// held, so the mock and the inspector see the request as sent.
+pub async fn restore_preflight(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if req.extensions_mut().remove::<HeldOptions>().is_some() {
+        *req.method_mut() = axum::http::Method::OPTIONS;
+    }
+    next.run(req).await
 }
 
 // ── Routes ──────────────────────────────────────────────────────────
@@ -718,7 +915,7 @@ pub fn catalog() -> Vec<Endpoint> {
             LIST_PATH,
             &["GET"],
             category::CONTROL,
-            "Gateway scenarios (retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits) and the caller's runs",
+            "Gateway scenarios (retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits, CORS, header transformation) and the caller's runs",
         )
         .example(Example::get("Scenarios", LIST_PATH)),
         Endpoint::new(

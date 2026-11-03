@@ -19,6 +19,15 @@
   `delete_test_schedule`, `run_test_schedule`; a Schedules card on the console's Saved
   tests view; `test_schedules:` in `rustybin.yaml` (a pulled document cannot name a new
   webhook). A test can no longer be named `schedules`.
+- **CORS and header transformation [gateway scenarios](gateway-scenarios.md)**: `cors`
+  (preflights from the `allowed_origin` and `refused_origin` you give, then a `GET`: the
+  allowed preflight is answered with CORS by the gateway, or by the upstream with
+  `upstream_cors: true`, the refused one gets none) and `header_transformation` (the
+  request header the gateway adds reaches the upstream, the one it removes does not,
+  the response header it adds is on the answer). Test parameters now also take origins,
+  header names and booleans; the CLI adds a flag for each (`--allowed-origin`,
+  `--upstream-cors`, `--add-request-header` and the rest), and an unknown parameter is
+  refused with the list. A `cors` run's mock gets no CORS from the instance itself.
 - **Two more [gateway scenarios](gateway-scenarios.md)**: `circuit_breaker` (the
   gateway stops forwarding to a failing upstream, then lets a trial through after the
   half-open time you give as `half_open_ms`) and `request_size_limit` (a body over the

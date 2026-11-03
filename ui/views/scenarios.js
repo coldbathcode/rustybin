@@ -1,11 +1,12 @@
 // Gateway scenarios: pick an outcome (retries, rate limiting, credential
-// injection, timeouts, caching, circuit breakers, request size limits),
-// prepare its upstream, follow the steps on the gateway, check through it
-// and clean up. GET /_rustybin/scenarios; the run routes are admin. A run's
-// test parameters (limit, half_open_ms, size_limit) are fields from its
-// `parameters`. The same on every surface: rustybin scenario, the
-// *_gateway_scenario tools.
-import { h, replace, clear, card, field, input, notice, icon, badge, spinner, toast, fmtTime } from '../lib/dom.js';
+// injection, timeouts, caching, circuit breakers, request size limits,
+// CORS, header transformation), prepare its upstream, follow the steps on
+// the gateway, check through it and clean up. GET /_rustybin/scenarios; the
+// run routes are admin. A run's test parameters (limit, half_open_ms,
+// size_limit, the origins, upstream_cors, the header names) are fields
+// from its `parameters`, by type. The same on every surface: rustybin
+// scenario, the *_gateway_scenario tools.
+import { h, replace, clear, card, field, input, checkbox, notice, icon, badge, spinner, toast, fmtTime } from '../lib/dom.js';
 import { copyableCode } from '../lib/format.js';
 import { getJson, send, SERVER } from '../lib/http.js';
 
@@ -69,15 +70,31 @@ export default {
       const verdictEl = h('div', { class: 'scenario-verdict' }, run.last_check ? verdictView(run.last_check) : null);
       const gw = input({ id: 'gateway-' + run.id, placeholder: 'https://gateway.example.com/my-route', value: gateways.get(run.id) || '' });
       gw.addEventListener('input', () => gateways.set(run.id, gw.value));
-      const params = (run.parameters || []).map((p) => ({
-        name: p.name,
-        label: p.label || p.name,
-        el: input({ id: `${p.name.replace(/_/g, '-')}-${run.id}`, type: 'number', min: p.minimum, max: p.maximum, placeholder: String(p.default), title: p.description }),
-      }));
+      // One field per parameter, by its type: a number, a checkbox or text.
+      const params = (run.parameters || []).map((p) => {
+        const id = `${p.name.replace(/_/g, '-')}-${run.id}`;
+        const label = p.label || p.name;
+        if (p.type === 'boolean') {
+          const cb = checkbox(label, !!p.default);
+          cb.input.id = id;
+          cb.input.title = p.description;
+          return { name: p.name, type: p.type, el: cb.input, view: cb.el };
+        }
+        const el = p.type === 'integer'
+          ? input({ id, type: 'number', min: p.minimum, max: p.maximum, placeholder: String(p.default), title: p.description })
+          : input({ id, maxlength: p.maxLength, placeholder: p.default === undefined ? 'any' : String(p.default), title: p.description });
+        return { name: p.name, type: p.type, el, view: field(label, el) };
+      });
       const checkBtn = h('button', { class: 'btn primary', type: 'button', id: 'check-' + run.id }, icon('send'), 'Check through the gateway');
       checkBtn.onclick = async () => {
         const body = { gateway_url: gw.value.trim() };
-        for (const p of params) if (p.el.value) body[p.name] = Number(p.el.value);
+        for (const p of params) {
+          if (p.type === 'boolean') {
+            if (p.el.checked) body[p.name] = true;
+          } else if (p.el.value.trim()) {
+            body[p.name] = p.type === 'integer' ? Number(p.el.value) : p.el.value.trim();
+          }
+        }
         checkBtn.disabled = true;
         replace(verdictEl, spinner('Sending the test requests through the gateway'));
         try {
@@ -103,7 +120,7 @@ export default {
         h('p', { class: 'small' }, 'Upstream for the gateway route:'),
         copyableCode(run.upstream),
         h('ol', { class: 'small' }, ...run.setup.map((s) => h('li', null, s))),
-        h('div', { class: 'row' }, field('Gateway URL of the route', gw), ...params.map((p) => field(p.label, p.el))),
+        h('div', { class: 'row' }, field('Gateway URL of the route', gw), ...params.map((p) => p.view)),
         h('div', { class: 'row' }, checkBtn),
         verdictEl);
       el.setAttribute('data-run', run.id);

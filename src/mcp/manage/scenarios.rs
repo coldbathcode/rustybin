@@ -5,7 +5,7 @@
 use serde_json::{json, Value};
 
 use super::access::{Access, Right};
-use super::tools::{arg_u64, confirm, err, need_str, ok, Confirm};
+use super::tools::{confirm, err, need_str, ok, Confirm};
 use crate::mcp::core::CallCtx;
 use crate::scenarios::{self, CheckBody};
 
@@ -95,12 +95,13 @@ pub async fn check_gateway_scenario(ctx: &CallCtx, args: &Value, params: &Value)
     {
         return v;
     }
-    let body = CheckBody {
-        gateway_url: gateway.to_string(),
-        limit: arg_u64(args, "limit").map(|l| l.min(u32::MAX as u64) as u32),
-        half_open_ms: arg_u64(args, "half_open_ms"),
-        size_limit: arg_u64(args, "size_limit"),
-    };
+    // Every test parameter by name, checked by the scenario as on the API.
+    let mut body = CheckBody::new(gateway);
+    for p in crate::scenarios::catalog::PARAMS {
+        if let Some(v) = args.get(p.name).filter(|v| !v.is_null()) {
+            body = body.with(p.name, v.clone());
+        }
+    }
     match scenarios::check(&ctx.app, &owner(ctx), id, run, body).await {
         Ok(v) => {
             let lines = v["expectations"]

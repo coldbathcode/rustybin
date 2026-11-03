@@ -14,9 +14,10 @@ use super::*;
 use crate::config::Config;
 use crate::test_support::{body_json, test_app_with, test_state_with};
 
-/// A stand-in gateway: forwards to one upstream and, when told, retries a
-/// 503 once, limits requests, adds a header, times out, caches GETs, opens
-/// a circuit breaker or refuses large bodies.
+/// A stand-in gateway: forwards to one upstream (request and response
+/// headers included) and, when told, retries a 503 once, limits requests,
+/// adds a header, times out, caches GETs, opens a circuit breaker, refuses
+/// large bodies, answers CORS or transforms headers.
 #[derive(Default)]
 struct Gw {
     upstream: String,
@@ -29,11 +30,33 @@ struct Gw {
     breaker: Option<(u32, Duration)>,
     /// Refuse bodies larger than this with 413.
     max_body: Option<usize>,
+    /// CORS for one origin.
+    cors: Option<Cors>,
+    /// A request header removed before the upstream.
+    remove: Option<&'static str>,
+    /// A response header added on the way back.
+    add_response: Option<(&'static str, &'static str)>,
     count: AtomicU32,
     cached: Mutex<HashMap<String, (u16, bytes::Bytes)>>,
     circuit: Mutex<Circuit>,
     client: reqwest::Client,
 }
+
+/// The gateway's CORS policy: the one origin it allows; preflights it
+/// answers itself, or lets through to the upstream.
+struct Cors {
+    origin: String,
+    answer_preflights: bool,
+}
+
+/// Headers a proxy never forwards as they are.
+const HOP: &[&str] = &[
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+];
 
 /// The breaker's state: failures in a row, when it opened, and whether a
 /// trial request is out.
@@ -77,7 +100,37 @@ async fn gw(State(g): State<Arc<Gw>>, req: Request) -> Response {
         }
     }
     let method = req.method().clone();
-    let session = req.headers().get(SESSION_HEADER).cloned();
+    let origin = req
+        .headers()
+        .get("origin")
+        .and_then(|o| o.to_str().ok())
+        .map(str::to_string);
+    let allowed = |c: &Cors| origin.as_deref() == Some(c.origin.as_str());
+    let preflight = method == axum::http::Method::OPTIONS
+        && req.headers().contains_key("access-control-request-method");
+    if let Some(c) = g.cors.as_ref().filter(|c| preflight && c.answer_preflights) {
+        // Answered here: CORS headers for the allowed origin only.
+        let mut resp = StatusCode::NO_CONTENT.into_response();
+        if allowed(c) {
+            let h = resp.headers_mut();
+            h.insert(
+                "access-control-allow-origin",
+                HeaderValue::from_str(&c.origin).expect("origin"),
+            );
+            h.insert(
+                "access-control-allow-methods",
+                HeaderValue::from_static("GET, POST"),
+            );
+        }
+        return resp;
+    }
+    let mut headers = req.headers().clone();
+    for h in HOP {
+        headers.remove(*h);
+    }
+    if let Some(r) = g.remove {
+        headers.remove(r);
+    }
     let body = axum::body::to_bytes(req.into_body(), 4 << 20)
         .await
         .unwrap_or_default();
@@ -85,10 +138,11 @@ async fn gw(State(g): State<Arc<Gw>>, req: Request) -> Response {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
     let send = || {
-        let mut r = g.client.request(method.clone(), &url).body(body.clone());
-        if let Some(s) = &session {
-            r = r.header(SESSION_HEADER, s.clone());
-        }
+        let mut r = g
+            .client
+            .request(method.clone(), &url)
+            .headers(headers.clone())
+            .body(body.clone());
         if let Some((k, v)) = &g.add {
             r = r.header(*k, v);
         }
@@ -119,6 +173,10 @@ async fn gw(State(g): State<Arc<Gw>>, req: Request) -> Response {
     match resp {
         Ok(r) => {
             let status = r.status().as_u16();
+            let mut back = r.headers().clone();
+            for h in HOP {
+                back.remove(*h);
+            }
             let body = r.bytes().await.unwrap_or_default();
             if g.cache && status == 200 {
                 g.cached
@@ -126,7 +184,22 @@ async fn gw(State(g): State<Arc<Gw>>, req: Request) -> Response {
                     .expect("lock")
                     .insert(url, (status, body.clone()));
             }
-            (StatusCode::from_u16(status).expect("status"), body).into_response()
+            if let Some(c) = g.cors.as_ref().filter(|c| c.answer_preflights) {
+                // The gateway's CORS answer, never the upstream's.
+                back.remove("access-control-allow-origin");
+                if allowed(c) {
+                    back.insert(
+                        "access-control-allow-origin",
+                        HeaderValue::from_str(&c.origin).expect("origin"),
+                    );
+                }
+            }
+            if let Some((k, v)) = g.add_response {
+                back.insert(k, HeaderValue::from_static(v));
+            }
+            let mut resp = (StatusCode::from_u16(status).expect("status"), body).into_response();
+            resp.headers_mut().extend(back);
+            resp
         }
         Err(e) if e.is_timeout() => StatusCode::GATEWAY_TIMEOUT.into_response(),
         Err(_) => StatusCode::BAD_GATEWAY.into_response(),
@@ -188,20 +261,19 @@ const SIZE_LIMIT: u64 = 1024;
 
 async fn check_via(state: &AppState, run: &Value, gateway: &str) -> Value {
     let id = run["scenario"].as_str().expect("scenario");
-    check(
-        state,
-        "me",
-        id,
-        run["id"].as_str().expect("id"),
-        CheckBody {
-            gateway_url: gateway.to_string(),
-            half_open_ms: (id == "circuit_breaker").then_some(HALF_OPEN_MS),
-            size_limit: (id == "request_size_limit").then_some(SIZE_LIMIT),
-            ..CheckBody::default()
-        },
-    )
-    .await
-    .expect("check")
+    let body = match id {
+        "circuit_breaker" => CheckBody::new(gateway).with("half_open_ms", HALF_OPEN_MS),
+        "request_size_limit" => CheckBody::new(gateway).with("size_limit", SIZE_LIMIT),
+        _ => CheckBody::new(gateway),
+    };
+    check_with(state, run, body).await
+}
+
+async fn check_with(state: &AppState, run: &Value, body: CheckBody) -> Value {
+    let id = run["scenario"].as_str().expect("scenario");
+    check(state, "me", id, run["id"].as_str().expect("id"), body)
+        .await
+        .expect("check")
 }
 
 fn failed(verdict: &Value) -> Vec<String> {
@@ -229,6 +301,17 @@ fn behaving(id: &str, upstream: &str, key: Option<&str>) -> Gw {
         "caching" => g.cache = true,
         "circuit_breaker" => g.breaker = Some((3, Duration::from_millis(HALF_OPEN_MS))),
         "request_size_limit" => g.max_body = Some(SIZE_LIMIT as usize),
+        "cors" => {
+            g.cors = Some(Cors {
+                origin: catalog::DEFAULT_ALLOWED_ORIGIN.into(),
+                answer_preflights: true,
+            })
+        }
+        "header_transformation" => {
+            g.add = Some((catalog::DEFAULT_ADD_REQUEST_HEADER, "added".into()));
+            g.remove = Some(catalog::DEFAULT_REMOVE_REQUEST_HEADER);
+            g.add_response = Some((catalog::DEFAULT_ADD_RESPONSE_HEADER, "yes"));
+        }
         _ => {}
     }
     g
@@ -284,7 +367,16 @@ async fn a_gateway_without_the_feature_fails_with_the_expectation_named() {
             "request_size_limit",
             "The body over the limit never reached the upstream",
         ),
+        (
+            "cors",
+            "The preflight from the allowed origin got CORS headers",
+        ),
+        (
+            "header_transformation",
+            "The added request header reached the upstream",
+        ),
     ];
+    assert_eq!(expected.len(), SCENARIOS.len(), "a scenario without a case");
     for (id, name) in expected {
         let run = run_of(&state, &base, id).await;
         let upstream = run["upstream"].as_str().expect("upstream").to_string();
@@ -424,10 +516,7 @@ async fn mutations_are_admin_only_and_the_egress_policy_applies() {
         "me",
         "retries",
         run["id"].as_str().expect("id"),
-        CheckBody {
-            gateway_url: "http://127.0.0.1:9/gw".into(),
-            ..CheckBody::default()
-        },
+        CheckBody::new("http://127.0.0.1:9/gw"),
     )
     .await;
     match r {
@@ -443,11 +532,7 @@ async fn mutations_are_admin_only_and_the_egress_policy_applies() {
         "me",
         "retries",
         run["id"].as_str().expect("id"),
-        CheckBody {
-            gateway_url: "http://127.0.0.1:9/gw".into(),
-            limit: Some(3),
-            ..CheckBody::default()
-        },
+        CheckBody::new("http://127.0.0.1:9/gw").with("limit", 3),
     )
     .await;
     assert!(matches!(bad, Err(Refused(StatusCode::BAD_REQUEST, _))));
@@ -538,11 +623,15 @@ async fn test_parameters_are_bounded_and_belong_to_their_scenario() {
         Err(Refused(status, m)) => panic!("refused with {status}: {m}"),
         Ok(v) => panic!("checked: {v}"),
     };
-    let body = |half_open_ms, size_limit| CheckBody {
-        gateway_url: "http://127.0.0.1:9/gw".into(),
-        half_open_ms,
-        size_limit,
-        ..CheckBody::default()
+    let body = |half_open_ms: Option<u64>, size_limit: Option<u64>| {
+        let mut b = CheckBody::new("http://127.0.0.1:9/gw");
+        if let Some(v) = half_open_ms {
+            b = b.with("half_open_ms", v);
+        }
+        if let Some(v) = size_limit {
+            b = b.with("size_limit", v);
+        }
+        b
     };
     for v in [0, 99, 60_001] {
         let m = refused(check(&state, "me", "circuit_breaker", &b, body(Some(v), None)).await);
@@ -623,4 +712,375 @@ async fn a_breaker_check_waits_the_half_open_time_and_names_the_trial() {
     )
     .expect("end");
     assert_eq!(out["removed"][0]["kind"], "flaky_counters", "{out}");
+}
+
+fn label<'a>(v: &'a Value, label: &str) -> &'a Value {
+    v["requests"]
+        .as_array()
+        .expect("requests")
+        .iter()
+        .find(|r| r["label"] == label)
+        .expect("request")
+}
+
+#[tokio::test]
+async fn a_cors_check_sees_the_preflights_and_what_reached_the_upstream() {
+    let (_server, state, base) = instance(config()).await;
+    let run = run_of(&state, &base, "cors").await;
+    let upstream = run["upstream"].as_str().expect("upstream").to_string();
+    let gateway = start_gw(behaving("cors", &upstream, None)).await;
+    let v = check_via(&state, &run, &gateway).await;
+    assert_eq!(v["passed"], true, "{v:#}");
+    // The gateway answered both preflights; the GET reached the upstream.
+    let ups = |l: &str| label(&v, l)["upstream"].as_array().expect("u").len();
+    assert_eq!(ups(catalog::PREFLIGHT_ALLOWED), 0, "{v:#}");
+    assert_eq!(ups(catalog::PREFLIGHT_REFUSED), 0, "{v:#}");
+    assert_eq!(ups(catalog::SIMPLE_ALLOWED), 1, "{v:#}");
+    // The instance's own CORS layer does not answer for the run's mock: a
+    // preflight sent straight to it reaches the mock and has no CORS.
+    let client = reqwest::Client::new();
+    let r = client
+        .request(reqwest::Method::OPTIONS, format!("{upstream}/cors"))
+        .header("origin", "https://somewhere.example.org")
+        .header("access-control-request-method", "GET")
+        .send()
+        .await
+        .expect("preflight");
+    assert_eq!(r.status(), 204);
+    assert!(r.headers().get("access-control-allow-origin").is_none());
+    // Any other mock keeps the instance's CORS.
+    let r = client
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("{base}/mock/petstore/pets"),
+        )
+        .header("origin", "https://somewhere.example.org")
+        .header("access-control-request-method", "GET")
+        .send()
+        .await
+        .expect("preflight");
+    assert!(r.headers().get("access-control-allow-origin").is_some());
+
+    // The upstream answers CORS: a gateway that lets everything through
+    // passes, one that answers preflights itself does not.
+    let body = || CheckBody::new(gateway.clone()).with("upstream_cors", true);
+    let plain = start_gw(Gw {
+        upstream: upstream.clone(),
+        ..Gw::default()
+    })
+    .await;
+    let v = check_with(
+        &state,
+        &run,
+        CheckBody::new(plain.clone()).with("upstream_cors", true),
+    )
+    .await;
+    assert_eq!(v["passed"], true, "{v:#}");
+    assert_eq!(
+        label(&v, catalog::PREFLIGHT_ALLOWED)["upstream"],
+        json!([204]),
+        "{v:#}"
+    );
+    let shown = get_run(&state, "me", "cors", run["id"].as_str().expect("id"), true).expect("run");
+    assert_eq!(shown["upstream_answers_cors"], true, "{shown}");
+    let v = check_with(&state, &run, body()).await;
+    assert_eq!(v["passed"], false, "{v:#}");
+    assert_eq!(
+        failed(&v),
+        ["The preflight reached the upstream, which answers CORS"],
+        "{v:#}"
+    );
+    // Back to upstream_cors: false, the mock answers no CORS again.
+    let v = check_with(&state, &run, CheckBody::new(plain)).await;
+    assert!(
+        failed(&v)
+            .iter()
+            .any(|f| f == "The preflight from the allowed origin got CORS headers"),
+        "{v:#}"
+    );
+    // The gateway's CORS values are described, never echoed.
+    assert!(!v.to_string().contains("GET, HEAD, OPTIONS"), "{v}");
+    end(&state, "me", "cors", run["id"].as_str().expect("id")).expect("end");
+}
+
+#[tokio::test]
+async fn a_cors_run_works_with_the_instance_cors_off() {
+    let mut c = config();
+    c.cors_allow_origins = Vec::new();
+    let (_server, state, base) = instance(c).await;
+    let run = run_of(&state, &base, "cors").await;
+    let upstream = run["upstream"].as_str().expect("upstream").to_string();
+    let gateway = start_gw(behaving("cors", &upstream, None)).await;
+    let v = check_via(&state, &run, &gateway).await;
+    assert_eq!(v["passed"], true, "{v:#}");
+    let plain = start_gw(Gw {
+        upstream: upstream.clone(),
+        ..Gw::default()
+    })
+    .await;
+    let v = check_with(
+        &state,
+        &run,
+        CheckBody::new(plain.clone()).with("upstream_cors", true),
+    )
+    .await;
+    assert_eq!(v["passed"], true, "{v:#}");
+    let v = check_with(&state, &run, CheckBody::new(upstream.clone())).await;
+    assert!(
+        failed(&v)
+            .iter()
+            .any(|f| f == "The preflight from the allowed origin got CORS headers"),
+        "{v:#}"
+    );
+    end(&state, "me", "cors", run["id"].as_str().expect("id")).expect("end");
+}
+
+#[tokio::test]
+async fn cors_and_header_checks_take_their_parameters() {
+    let (_server, state, base) = instance(config()).await;
+    // Origins are normalised: the check sends the origin as a browser does.
+    let run = run_of(&state, &base, "cors").await;
+    let upstream = run["upstream"].as_str().expect("upstream").to_string();
+    let gateway = start_gw(Gw {
+        upstream: upstream.clone(),
+        cors: Some(Cors {
+            origin: "http://localhost:3000".into(),
+            answer_preflights: true,
+        }),
+        ..Gw::default()
+    })
+    .await;
+    let v = check_with(
+        &state,
+        &run,
+        CheckBody::new(gateway.clone())
+            .with("allowed_origin", "HTTP://LocalHost:3000")
+            .with("refused_origin", "http://localhost:3001"),
+    )
+    .await;
+    assert_eq!(v["passed"], true, "{v:#}");
+    // With the defaults the gateway refuses the allowed origin.
+    let v = check_via(&state, &run, &gateway).await;
+    assert!(
+        failed(&v)
+            .iter()
+            .any(|f| f == "The preflight from the allowed origin got CORS headers"),
+        "{v:#}"
+    );
+    end(&state, "me", "cors", run["id"].as_str().expect("id")).expect("end");
+
+    let run = run_of(&state, &base, "header_transformation").await;
+    let upstream = run["upstream"].as_str().expect("upstream").to_string();
+    let gateway = start_gw(Gw {
+        upstream: upstream.clone(),
+        add: Some(("X-Team", "blue".into())),
+        remove: Some("x-debug"),
+        add_response: Some(("X-Served-By", "gw-1")),
+        ..Gw::default()
+    })
+    .await;
+    let body = |value: &str| {
+        CheckBody::new(gateway.clone())
+            .with("add_request_header", "X-Team")
+            .with("add_request_value", value)
+            .with("remove_request_header", "X-Debug")
+            .with("add_response_header", "x-served-by")
+    };
+    let v = check_with(&state, &run, body("blue")).await;
+    assert_eq!(v["passed"], true, "{v:#}");
+    let v = check_with(&state, &run, body("red")).await;
+    assert_eq!(
+        failed(&v),
+        ["The added request header reached the upstream"],
+        "{v:#}"
+    );
+    // The header the client sent for removal, through a pass-through proxy.
+    let plain = start_gw(Gw {
+        upstream,
+        ..Gw::default()
+    })
+    .await;
+    let v = check_with(
+        &state,
+        &run,
+        CheckBody::new(plain).with("remove_request_header", "X-Debug"),
+    )
+    .await;
+    let removed = v["expectations"]
+        .as_array()
+        .expect("e")
+        .iter()
+        .find(|e| e["name"] == "The removed request header did not reach the upstream")
+        .expect("removed")
+        .clone();
+    assert_eq!(removed["ok"], false, "{v:#}");
+    assert_eq!(
+        removed["seen"], "present with the value the client sent",
+        "{v:#}"
+    );
+    end(
+        &state,
+        "me",
+        "header_transformation",
+        run["id"].as_str().expect("id"),
+    )
+    .expect("end");
+}
+
+#[tokio::test]
+async fn origins_and_header_names_are_validated() {
+    let state = test_state_with(config());
+    let cors = run_of(&state, "http://127.0.0.1:9", "cors").await;
+    let hdr = run_of(&state, "http://127.0.0.1:9", "header_transformation").await;
+    let refused = |id: &'static str, run: &Value, name: &str, value: Value| {
+        let state = state.clone();
+        let run = run["id"].as_str().expect("id").to_string();
+        let body = CheckBody::new("http://127.0.0.1:9/gw").with(name, value);
+        async move {
+            match check(&state, "me", id, &run, body).await {
+                Err(Refused(StatusCode::BAD_REQUEST, m)) => m,
+                Err(Refused(status, m)) => panic!("refused with {status}: {m}"),
+                Ok(v) => panic!("checked: {v}"),
+            }
+        }
+    };
+    for bad in [
+        json!("app.example.com"),
+        json!("https://app.example.com/path"),
+        json!("https://app.example.com/"),
+        json!("ftp://app.example.com"),
+        json!("https://user@app.example.com"),
+        json!("https://app.example.com?q=1"),
+        json!(format!("https://{}.example.com", "a".repeat(200))),
+        json!(42),
+    ] {
+        let m = refused("cors", &cors, "allowed_origin", bad.clone()).await;
+        assert!(m.starts_with("allowed_origin: "), "{bad}: {m}");
+    }
+    let m = refused(
+        "cors",
+        &cors,
+        "refused_origin",
+        json!("https://app.example.com"),
+    )
+    .await;
+    assert!(m.contains("another origin than allowed_origin"), "{m}");
+    let m = refused("cors", &cors, "upstream_cors", json!("yes")).await;
+    assert!(m.contains("upstream_cors: true or false"), "{m}");
+    for bad in [
+        json!("bad header"),
+        json!(""),
+        json!("Host"),
+        json!("X-Rustybin-Session"),
+        json!("Access-Control-Allow-Origin"),
+        json!("x".repeat(65)),
+        json!(true),
+    ] {
+        let m = refused(
+            "header_transformation",
+            &hdr,
+            "add_response_header",
+            bad.clone(),
+        )
+        .await;
+        assert!(m.starts_with("add_response_header: "), "{bad}: {m}");
+    }
+    for bad in [
+        json!("a\nb"),
+        json!(""),
+        json!(" padded"),
+        json!("v".repeat(201)),
+    ] {
+        let m = refused(
+            "header_transformation",
+            &hdr,
+            "add_request_value",
+            bad.clone(),
+        )
+        .await;
+        assert!(m.starts_with("add_request_value: "), "{bad}: {m}");
+    }
+    let m = refused(
+        "header_transformation",
+        &hdr,
+        "remove_request_header",
+        json!(catalog::DEFAULT_ADD_REQUEST_HEADER),
+    )
+    .await;
+    assert!(m.contains("another header than add_request_header"), "{m}");
+    let m = refused(
+        "header_transformation",
+        &hdr,
+        "allowed_origin",
+        json!("https://a.example.com"),
+    )
+    .await;
+    assert!(m.contains("allowed_origin applies to cors only"), "{m}");
+    let m = refused("cors", &cors, "nope", json!(1)).await;
+    assert!(m.contains("unknown test parameter \"nope\""), "{m}");
+    // Nothing was counted, and the listing describes the new parameters.
+    for (id, run) in [("cors", &cors), ("header_transformation", &hdr)] {
+        let shown = get_run(&state, "me", id, run["id"].as_str().expect("id"), true).expect("run");
+        assert_eq!(shown["checks"], 0, "{shown}");
+    }
+    let listed = list(&state, "me", true);
+    let params = |id: &str| {
+        listed["scenarios"]
+            .as_array()
+            .expect("scenarios")
+            .iter()
+            .find(|s| s["id"] == id)
+            .map(|s| s["parameters"].clone())
+            .expect("scenario")
+    };
+    let p = params("cors");
+    assert_eq!(p[0]["name"], "allowed_origin");
+    assert_eq!(p[0]["type"], "string");
+    assert_eq!(p[0]["format"], "origin");
+    assert_eq!(p[2]["type"], "boolean");
+    assert_eq!(p[2]["default"], false);
+    let p = params("header_transformation");
+    assert_eq!(p.as_array().map(Vec::len), Some(4));
+    assert_eq!(p[1]["name"], "add_request_value");
+    assert!(p[1].get("default").is_none(), "{p}");
+}
+
+#[test]
+fn every_test_parameter_has_a_cli_flag_and_a_tool_property() {
+    let check = crate::cli::commands::COMMANDS
+        .iter()
+        .find(|c| c.noun == "scenario" && c.verb == "check")
+        .expect("scenario check");
+    let tool = crate::mcp::manage::tools::TOOLS
+        .iter()
+        .find(|t| t.name == "check_gateway_scenario")
+        .map(|t| (t.input_schema)())
+        .expect("check_gateway_scenario");
+    for p in catalog::PARAMS {
+        let flag = format!("--{}", p.name.replace('_', "-"));
+        let f = check
+            .flags
+            .iter()
+            .find(|f| f.name == flag)
+            .unwrap_or_else(|| panic!("no {flag} on scenario check"));
+        assert_eq!(
+            f.value,
+            !matches!(p.kind, catalog::Kind::Bool { .. }),
+            "{flag}: a switch for a boolean, a value otherwise"
+        );
+        assert!(check.usage.contains(&flag), "{flag} not in the usage");
+        assert!(
+            tool["properties"].get(p.name).is_some(),
+            "{} not in the tool schema",
+            p.name
+        );
+        // Every scenario parameter belongs to a scenario.
+        assert!(
+            SCENARIOS
+                .iter()
+                .any(|s| s.params.iter().any(|q| q.name == p.name)),
+            "{} belongs to no scenario",
+            p.name
+        );
+    }
 }

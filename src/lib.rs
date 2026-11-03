@@ -239,10 +239,20 @@ pub fn build_app(state: AppState) -> Router {
         ));
     }
 
-    if let Some(cors) = cors_layer(
+    let cors = cors_layer(
         &config.cors_allow_origins,
         config.limits.active() || state.keys.shared(),
-    ) {
+    );
+    let own_cors = scenarios::OwnCors {
+        state: state.clone(),
+        hold: cors.is_some(),
+    };
+    if let Some(cors) = cors {
+        // The mock of a gateway scenario's `cors` run gets no CORS from
+        // this instance, so the gateway's is what a check sees:
+        // `scenarios::own_cors` (outside both CORS layers) holds its
+        // `OPTIONS` requests past them, `restore_preflight` puts them back.
+        router = router.layer(middleware::from_fn(scenarios::restore_preflight));
         router = router.layer(cors);
         // The control plane answers cross-origin only to the origins
         // RUSTYBIN_CORS_ORIGINS names (never to `*`): a web page the
@@ -253,6 +263,11 @@ pub fn build_app(state: AppState) -> Router {
             control_cors,
         ));
     }
+    // A `cors` run's mock answers CORS only as its last check asked.
+    router = router.layer(middleware::from_fn_with_state(
+        own_cors,
+        scenarios::own_cors,
+    ));
 
     // A client-only harness node with RUSTYBIN_HARNESS_DATA_PLANE=off serves
     // only the liveness root, the control plane, the console and the
@@ -324,8 +339,9 @@ pub fn build_app(state: AppState) -> Router {
 
 /// CORS for browser clients (the UI, docs, demos). `None` disables the layer
 /// (`RUSTYBIN_CORS_ORIGINS=off`) so a gateway's own CORS handling can be shown.
-/// Preflights are answered here only when they carry
-/// `Access-Control-Request-Method`; a plain `OPTIONS` still reaches the route.
+/// Every `OPTIONS` is answered here as a preflight (tower-http's `CorsLayer`
+/// does not look for `Access-Control-Request-Method`); the mock of a gateway
+/// scenario's `cors` run is the exception (`scenarios::own_cors`).
 fn cors_layer(origins: &[String], plan_headers: bool) -> Option<CorsLayer> {
     if origins.is_empty() {
         return None;

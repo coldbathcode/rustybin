@@ -536,7 +536,7 @@ server and a gateway's JWT validation:
 | `run_test_schedule` | admin | Run a schedule now, kept in the history as `schedule:<name>` (confirmed when its tests go through a gateway or change state, or it has a webhook) |
 | `list_gateway_scenarios` / `get_gateway_scenario_run` | read | The [gateway scenarios](gateway-scenarios.md) and the caller's runs with their last verdicts; the credential-injection key is shown to admin callers only (`key_hidden`) |
 | `start_gateway_scenario` | admin | Prepare a run: its upstream and the steps to configure on the gateway |
-| `check_gateway_scenario` | admin | Send the run's test traffic through the gateway (egress purpose `scenario`) and compare what the client got with what reached the upstream, with the scenario's test parameters (`limit`, `half_open_ms`, `size_limit`) (confirmed) |
+| `check_gateway_scenario` | admin | Send the run's test traffic through the gateway (egress purpose `scenario`) and compare what the client got with what reached the upstream, with the scenario's test parameters (`limit`, `half_open_ms`, `size_limit`, `allowed_origin`, `refused_origin`, `upstream_cors`, `add_request_header`, `add_request_value`, `remove_request_header`, `add_response_header`) (confirmed) |
 | `end_gateway_scenario` | admin | Remove what the run created, nothing else (confirmed) |
 | `list_checkpoints` | read | The [checkpoints](checkpoints.md), or one with the mocks it holds |
 | `save_checkpoint` | admin | Save the instance's API mocks (with their data) and the health toggle; `replace` overwrites one of that name; at most 20 |

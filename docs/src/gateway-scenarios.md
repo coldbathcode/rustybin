@@ -15,6 +15,8 @@ No gateway product is assumed: the steps are written for any gateway.
 | `caching` | Repeated GETs come from the gateway's cache: only the first reaches the upstream | a mock whose `GET /catalog` answers `Cache-Control: public, max-age=300` |
 | `circuit_breaker` | The gateway stops forwarding to an upstream that keeps failing and answers on its own, then lets a trial request through after the half-open time | `/flaky/after/0` (answers `503` to every request) |
 | `request_size_limit` | The gateway refuses a body over the limit with `413` before the upstream sees it, and forwards one under it | a mock with `POST /upload` (any body) |
+| `cors` | The gateway answers a CORS preflight from an allowed origin (and not from another), and a request from the allowed origin gets `Access-Control-Allow-Origin` | a mock with `GET /cors` and `OPTIONS /cors` that answers no CORS of its own (unless you say the upstream answers CORS) |
+| `header_transformation` | The gateway adds a request header on the way to the upstream, removes one the client sent, and adds a response header on the way back | a mock with `GET /headers` |
 
 What to turn on at the gateway for the two resilience scenarios:
 
@@ -32,6 +34,35 @@ What to turn on at the gateway for the two resilience scenarios:
   in kilobytes or megabytes, either 1000 or 1024 to the unit, still falls between
   them). The body under the limit must also fit this instance's own
   `RUSTYBIN_BODY_LIMIT`.
+
+What to turn on at the gateway for the two HTTP scenarios:
+
+- **`cors`**: a CORS policy on the route that allows one origin and the `GET` method,
+  allows no other origin, and answers preflight requests at the gateway. Give the check
+  the origin you allowed (`allowed_origin`, default `https://app.example.com`) and one
+  you did not (`refused_origin`, default `https://elsewhere.example.net`), each written
+  as a browser sends it, `scheme://host[:port]`. The check sends an `OPTIONS` preflight
+  (`Origin` and `Access-Control-Request-Method: GET`) from each origin, then a `GET`
+  from the allowed one. A pass needs the allowed preflight answered `2xx` with
+  `Access-Control-Allow-Origin` (that origin or `*`) and `Access-Control-Allow-Methods`
+  with `GET`, without reaching the upstream; no `Access-Control-Allow-Origin` for the
+  refused origin; and `Access-Control-Allow-Origin` on the `GET`. When the gateway
+  should only let preflights through and the upstream answers CORS, check with
+  `upstream_cors: true`: the run's mock then answers CORS for `allowed_origin`, and the
+  allowed preflight must reach it. The run's mock never gets this instance's own CORS
+  (`RUSTYBIN_CORS_ORIGINS`), so what the check sees comes from the gateway, or from the
+  mock when you asked for it.
+- **`header_transformation`**: request and response header rules on the route: add a
+  request header to every request it forwards, remove one the client sends, and add a
+  response header to every answer. Give the check the names you used
+  (`add_request_header`, default `X-Gateway-Added`; `remove_request_header`, default
+  `X-Client-Internal`; `add_response_header`, default `X-Gateway-Response`) and, when
+  the value matters, `add_request_value`. The check sends a `GET /headers` with the
+  header to remove (a value made for the check), then reads the
+  [request inspector](concepts/inspector.md)'s capture of what reached the upstream and
+  the answer. Name headers neither side sets on its own: `Host`, `Content-Type`,
+  `Origin`, `X-Request-Id`, `X-Rustybin-*` and `Access-Control-*`, among others, are
+  refused.
 
 ## How a run works
 
@@ -97,15 +128,39 @@ on the same machine). Until then the check is refused with the reason:
 The rate limiting check sends twice the limit you give it (`limit`, default 5, at
 most 20); wait for the gateway's window to pass before checking again.
 
-Each scenario lists its test parameters under `parameters` (name, bounds, default),
-and a run repeats them: the console shows a field for each, the CLI has `--limit`,
-`--half-open-ms` and `--size-limit`, the `check_gateway_scenario` tool takes them by
-name. A parameter out of its bounds, or given to a scenario that does not take it, is
-refused with the bounds before anything is sent:
+Each scenario lists its test parameters under `parameters` (name, type, bounds,
+default), and a run repeats them: the console shows a field for each, the CLI has a
+flag for each (`--limit`, `--half-open-ms`, `--size-limit`, `--allowed-origin`,
+`--refused-origin`, `--upstream-cors`, `--add-request-header`, `--add-request-value`,
+`--remove-request-header`, `--add-response-header`), the `check_gateway_scenario`
+tool takes them by name.
+
+| Parameter | Scenario | Type and bounds | Default |
+|---|---|---|---|
+| `limit` | `rate_limiting` | integer, 1 to 20 | 5 |
+| `half_open_ms` | `circuit_breaker` | integer, 100 to 60000 | 10000 |
+| `size_limit` | `request_size_limit` | integer, 16 to 1048576 | 1048576 |
+| `allowed_origin` | `cors` | an origin `scheme://host[:port]`, http or https, at most 200 characters | `https://app.example.com` |
+| `refused_origin` | `cors` | an origin, another than `allowed_origin` | `https://elsewhere.example.net` |
+| `upstream_cors` | `cors` | `true` or `false` | `false` |
+| `add_request_header` | `header_transformation` | a header name, at most 64 characters | `X-Gateway-Added` |
+| `add_request_value` | `header_transformation` | visible characters, at most 200 (optional) | any value |
+| `remove_request_header` | `header_transformation` | a header name, another than `add_request_header` | `X-Client-Internal` |
+| `add_response_header` | `header_transformation` | a header name | `X-Gateway-Response` |
+
+A parameter out of its bounds or of the wrong type, an unknown one, or one given to a
+scenario that does not take it, is refused with the bounds before anything is sent:
 
 ```hurl
 {{#include ../examples/scenarios/scenarios.hurl:parameters}}
 ```
+
+```hurl
+{{#include ../examples/scenarios/scenarios.hurl:origins}}
+```
+
+A verdict describes the headers the gateway answered (present, absent, the allowed
+origin, `*`, another origin) rather than repeating their values.
 
 ## Who sees a run
 

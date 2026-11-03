@@ -256,10 +256,10 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("tests", "schedule-save", "<name> (--every D | --at HH:MM) [--names a,b | --prefix P] [--webhook U] [--notify-recovery] [--disabled]", "Save or replace a test schedule: every 5m to 24h, or at HH:MM UTC; every saved test unless --names or --prefix.", &[Flag::value("--every", "Run every 5m to 24h (15m, 2h)"), Flag::value("--at", "Run once a day at HH:MM, UTC"), Flag::value("--names", "Only these tests, comma separated"), Flag::value("--prefix", "Only the tests whose name starts with this"), Flag::value("--webhook", "Post a JSON summary of a failing run here (allow its host: egress purpose notify)"), Flag::switch("--notify-recovery", "One more notice when a run passes after a failure"), Flag::switch("--disabled", "Saved, but off"), Flag::value("--description", "What it is for")], [("PUT", "/_rustybin/tests/schedules/{name}")], false, "tests schedule-save nightly --every 1h --prefix order"),
     cmd!("tests", "schedule-run", "<name>", "Run a test schedule now, as the scheduler would (kept in the history); exits 1 when it fails.", NO_FLAGS, [("POST", "/_rustybin/tests/schedules/{name}/run")], false, "tests schedule-run nightly"),
     cmd!("tests", "schedule-delete", "<name>", "Delete a test schedule (the tests and the history stay).", NO_FLAGS, [("DELETE", "/_rustybin/tests/schedules/{name}")], true, "tests schedule-delete nightly --yes"),
-    cmd!("scenario", "list", "", "The gateway scenarios (retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits) and your runs.", NO_FLAGS, [("GET", "/_rustybin/scenarios")], false, "scenario list"),
+    cmd!("scenario", "list", "", "The gateway scenarios (retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits, CORS, header transformation) and your runs.", NO_FLAGS, [("GET", "/_rustybin/scenarios")], false, "scenario list"),
     cmd!("scenario", "start", "<scenario>", "Prepare a run: its upstream and the steps to configure on the gateway.", NO_FLAGS, [("POST", "/_rustybin/scenarios/{id}/runs")], false, "scenario start caching"),
     cmd!("scenario", "show", "<scenario> <run>", "A run: the setup, what it created, the last verdict.", NO_FLAGS, [("GET", "/_rustybin/scenarios/{id}/runs/{run}")], false, "scenario show caching 1a2b3c4d"),
-    cmd!("scenario", "check", "<scenario> <run> --gateway U [--limit N] [--half-open-ms MS] [--size-limit BYTES]", "Send the run's test requests through the gateway and compare what the client got with what reached the upstream; exits 1 when an expectation fails.", &[Flag::value("--gateway", "The URL the gateway serves the route at"), Flag::value("--limit", "rate_limiting: the limit set on the gateway"), Flag::value("--half-open-ms", "circuit_breaker: the gateway's half-open time in milliseconds"), Flag::value("--size-limit", "request_size_limit: the gateway's body limit in bytes")], [("POST", "/_rustybin/scenarios/{id}/runs/{run}/check")], false, "scenario check caching 1a2b3c4d --gateway http://localhost:8000/catalog-api"),
+    cmd!("scenario", "check", "<scenario> <run> --gateway U [--limit N] [--half-open-ms MS] [--size-limit BYTES] [--allowed-origin O] [--refused-origin O] [--upstream-cors] [--add-request-header H] [--add-request-value V] [--remove-request-header H] [--add-response-header H]", "Send the run's test requests through the gateway and compare what the client got with what reached the upstream; exits 1 when an expectation fails.", &[Flag::value("--gateway", "The URL the gateway serves the route at"), Flag::value("--limit", "rate_limiting: the limit set on the gateway"), Flag::value("--half-open-ms", "circuit_breaker: the gateway's half-open time in milliseconds"), Flag::value("--size-limit", "request_size_limit: the gateway's body limit in bytes"), Flag::value("--allowed-origin", "cors: an origin the gateway allows (scheme://host[:port])"), Flag::value("--refused-origin", "cors: an origin the gateway refuses"), Flag::switch("--upstream-cors", "cors: the gateway lets preflights through and the upstream answers CORS"), Flag::value("--add-request-header", "header_transformation: the request header the gateway adds"), Flag::value("--add-request-value", "header_transformation: the value it adds (optional)"), Flag::value("--remove-request-header", "header_transformation: the request header the gateway removes"), Flag::value("--add-response-header", "header_transformation: the response header the gateway adds")], [("POST", "/_rustybin/scenarios/{id}/runs/{run}/check")], false, "scenario check caching 1a2b3c4d --gateway http://localhost:8000/catalog-api"),
     cmd!("scenario", "end", "<scenario> <run>", "End a run: remove the mock and counters it created, nothing else.", NO_FLAGS, [("DELETE", "/_rustybin/scenarios/{id}/runs/{run}")], true, "scenario end caching 1a2b3c4d --yes"),
     cmd!("bins", "list", "", "Your request bins.", NO_FLAGS, [("GET", "/bin")], false, "bins list"),
     cmd!("bins", "create", "[--status N] [--body B] [--delay-ms N]", "A new bin, with the answer it gives.", &[Flag::value("--status", "The status the bin answers"), Flag::value("--body", "The body it answers: a file or inline JSON"), Flag::value("--delay-ms", "A delay before the answer")], [("POST", "/bin")], false, "bins create --status 202"),
@@ -1894,15 +1894,29 @@ async fn scenario(ctx: &mut Ctx, verb: &str) -> Result<()> {
                 })?
                 .to_string();
             let mut body = json!({ "gateway_url": gateway });
-            for (flag, key) in [
-                ("--limit", "limit"),
-                ("--half-open-ms", "half_open_ms"),
-                ("--size-limit", "size_limit"),
-            ] {
-                if let Some(l) = ctx.args.value(flag) {
-                    body[key] = json!(l
-                        .parse::<u64>()
-                        .map_err(|_| Fail::Usage(format!("{flag} needs a number")))?);
+            // Every test parameter as --its-name (the instance checks the
+            // values and which scenario takes them).
+            use crate::scenarios::catalog::{Kind, PARAMS};
+            for p in PARAMS {
+                let flag = format!("--{}", p.name.replace('_', "-"));
+                match p.kind {
+                    Kind::Bool { .. } => {
+                        if ctx.args.has(&flag) {
+                            body[p.name] = json!(true);
+                        }
+                    }
+                    Kind::Integer { .. } => {
+                        if let Some(l) = ctx.args.value(&flag) {
+                            body[p.name] = json!(l
+                                .parse::<u64>()
+                                .map_err(|_| Fail::Usage(format!("{flag} needs a number")))?);
+                        }
+                    }
+                    _ => {
+                        if let Some(v) = ctx.args.value(&flag) {
+                            body[p.name] = json!(v);
+                        }
+                    }
                 }
             }
             let v = ctx

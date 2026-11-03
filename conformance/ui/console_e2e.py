@@ -1145,7 +1145,7 @@ def run_theme(browser, theme):
         # refused with the reason; Clean up removes the mock.
         page.goto(BASE + "/ui/#/scenarios")
         page.wait_for_selector("[data-scenario='caching']")
-        expect(page.locator("#scenario-catalog [data-scenario]")).to_have_count(7)
+        expect(page.locator("#scenario-catalog [data-scenario]")).to_have_count(9)
         page.click("#scenario-start-caching")
         run = page.locator("[data-run]").first
         run.wait_for()
@@ -1177,6 +1177,23 @@ def run_theme(browser, theme):
         page.fill("#half-open-ms-" + run_id, "50")
         page.click("#check-" + run_id)
         expect(run.locator(".notice.err")).to_contain_text("half_open_ms: 100 to 60000")
+        page.once("dialog", lambda d: d.accept())
+        page.click("#end-" + run_id)
+        expect(page.locator(f"[data-run='{run_id}']")).to_have_count(0)
+        # A CORS run has text fields for the origins and a checkbox for
+        # upstream_cors; an origin with a path is refused.
+        page.click("#scenario-start-cors")
+        run = page.locator("[data-run]").first
+        run.wait_for()
+        run_id = run.get_attribute("data-run")
+        expect(page.locator("#allowed-origin-" + run_id)).to_have_attribute(
+            "placeholder", "https://app.example.com")
+        expect(page.locator("#upstream-cors-" + run_id)).to_have_attribute("type", "checkbox")
+        page.fill("#gateway-" + run_id, "http://127.0.0.1:9/gateway")
+        page.fill("#allowed-origin-" + run_id, "https://app.example.com/login")
+        page.check("#upstream-cors-" + run_id)
+        page.click("#check-" + run_id)
+        expect(run.locator(".notice.err")).to_contain_text("allowed_origin: not an origin")
         page.once("dialog", lambda d: d.accept())
         page.click("#end-" + run_id)
         expect(page.locator(f"[data-run='{run_id}']")).to_have_count(0)

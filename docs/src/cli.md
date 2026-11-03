@@ -384,10 +384,10 @@ Guided gateway scenarios: prepare the upstream, check through the gateway, clean
 
 | Command | What it does | Calls |
 |---|---|---|
-| `rustybin scenario list` | The gateway scenarios (retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits) and your runs. | `GET /_rustybin/scenarios` |
+| `rustybin scenario list` | The gateway scenarios (retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits, CORS, header transformation) and your runs. | `GET /_rustybin/scenarios` |
 | `rustybin scenario start <scenario>` | Prepare a run: its upstream and the steps to configure on the gateway. | `POST /_rustybin/scenarios/{id}/runs` |
 | `rustybin scenario show <scenario> <run>` | A run: the setup, what it created, the last verdict. | `GET /_rustybin/scenarios/{id}/runs/{run}` |
-| `rustybin scenario check <scenario> <run> --gateway U [--limit N] [--half-open-ms MS] [--size-limit BYTES]` | Send the run's test requests through the gateway and compare what the client got with what reached the upstream; exits 1 when an expectation fails. Flags: `--gateway` value, `--limit` value, `--half-open-ms` value, `--size-limit` value. | `POST /_rustybin/scenarios/{id}/runs/{run}/check` |
+| `rustybin scenario check <scenario> <run> --gateway U [--limit N] [--half-open-ms MS] [--size-limit BYTES] [--allowed-origin O] [--refused-origin O] [--upstream-cors] [--add-request-header H] [--add-request-value V] [--remove-request-header H] [--add-response-header H]` | Send the run's test requests through the gateway and compare what the client got with what reached the upstream; exits 1 when an expectation fails. Flags: `--gateway` value, `--limit` value, `--half-open-ms` value, `--size-limit` value, `--allowed-origin` value, `--refused-origin` value, `--upstream-cors`, `--add-request-header` value, `--add-request-value` value, `--remove-request-header` value, `--add-response-header` value. | `POST /_rustybin/scenarios/{id}/runs/{run}/check` |
 | `rustybin scenario end <scenario> <run>` | End a run: remove the mock and counters it created, nothing else. | `DELETE /_rustybin/scenarios/{id}/runs/{run}` |
 
 ```bash

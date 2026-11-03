@@ -1,13 +1,14 @@
 # Gateway scenarios (docs/src/gateway-scenarios.md): the catalogue, a caching
 # run prepared, read, a check the egress policy refuses (the docs instance
 # allows no gateway host), and the run ended; then a request size limit run
-# whose check is refused for a test parameter out of its bounds.
+# whose check is refused for a test parameter out of its bounds, and a CORS
+# run whose check is refused for an origin that is not one.
 
 # ANCHOR: list
 GET {{base_url}}/_rustybin/scenarios
 HTTP 200
 [Asserts]
-jsonpath "$.scenarios" count == 7
+jsonpath "$.scenarios" count == 9
 jsonpath "$.scenarios[*].id" contains "caching"
 # ANCHOR_END: list
 
@@ -70,5 +71,30 @@ jsonpath "$.error" contains "size_limit: 16 to 1048576"
 # ANCHOR_END: parameters
 
 DELETE {{base_url}}/_rustybin/scenarios/request_size_limit/runs/{{size_run}}
+Authorization: Bearer {{admin_token}}
+HTTP 200
+
+# ANCHOR: origins
+POST {{base_url}}/_rustybin/scenarios/cors/runs
+Authorization: Bearer {{admin_token}}
+HTTP 201
+[Captures]
+cors_run: jsonpath "$.id"
+[Asserts]
+jsonpath "$.request_path" == "/cors"
+jsonpath "$.parameters[*].name" contains "allowed_origin"
+jsonpath "$.parameters[2].name" == "upstream_cors"
+jsonpath "$.parameters[2].type" == "boolean"
+
+POST {{base_url}}/_rustybin/scenarios/cors/runs/{{cors_run}}/check
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{"gateway_url": "http://127.0.0.1:9/web-api", "allowed_origin": "https://app.example.com/login"}
+HTTP 400
+[Asserts]
+jsonpath "$.error" contains "allowed_origin: not an origin scheme://host[:port]"
+# ANCHOR_END: origins
+
+DELETE {{base_url}}/_rustybin/scenarios/cors/runs/{{cors_run}}
 Authorization: Bearer {{admin_token}}
 HTTP 200
