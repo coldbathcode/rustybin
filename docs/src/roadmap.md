@@ -5,13 +5,17 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-**Access control**, for 0.5.0 (planned 2026-11-02, not started): several users with roles
-made of named permissions (built-in and custom), invitations, single sign-on with any
-OpenID Connect provider, projects so teams share an instance, agents that act for a user,
-APIs on the dev portal that are open or closed behind a portal sign-in, and an audit log.
-`docs/plans/testing-2/master-plan.md` in the repository.
+Nothing is planned yet beyond the list under consideration below.
 
 ## Recently built
+
+- [Rustybin 0.5, access control](changelog.md#050-2026-11-03-access-control)
+  (2026-11-03): [users and invitations](users.md), roles made of named permissions,
+  [single sign-on](sso.md) with any OpenID Connect provider, [projects](projects.md)
+  so teams share an instance, [AI agents that act for a user](agent-mcp.md#agents-act-for-a-user),
+  [open and closed APIs](portal.md#open-and-closed-items) on the dev portal, and an
+  [audit log](audit-log.md); a security review of the whole build fixed before the
+  release.
 
 - [Rustybin 0.4, testing workflows](changelog.md#040-2026-11-03-testing-workflows)
   (2026-11-03): a [history of saved-test runs](saved-tests.md#history), saved tests

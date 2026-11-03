@@ -1,6 +1,44 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 (2026-11-03): access control
+
+Several people on one instance, each with the roles they need: users with roles
+made of named permissions (built-in and custom), invitations instead of shared
+passwords, single sign-on with any OpenID Connect provider, projects so teams share
+an instance, AI agents that act for a user and never above them, APIs on the dev
+portal that are open or closed behind a portal sign-in, and an audit log of who did
+what. A security review of the whole access-control build closed 33 findings before
+the release
+([the plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/testing-2/master-plan.md),
+steps 07 to 15).
+
+**Upgrading from 0.4** (nothing to do for most instances; what an operator or a
+script may notice):
+
+- The console user becomes the first user, with the `admin` role, at the first
+  start; its password stays where it was. Sign-in tokens from 0.4 keep working as
+  that user until they expire.
+- The old control scopes keep their 0.4 reach as roles (`console`, `inspector`,
+  `harness`, `admin`); a control JWT may also carry `rb_roles` and `rb_perms`.
+- A refusal is `403 {"error", "reason": "permission_required", "permission"}` naming
+  what is missing (was `insufficient_scope`); the CLI prints it and exits `3`.
+- One admin's password change ends that admin's sessions and agents only, no longer
+  everyone's; `DELETE /_rustybin/sessions` (sign out everyone) needs every
+  permission.
+- Every published portal item stays open. `portal.auth=password` now asks for a
+  portal sign-in by a user holding `portal.read` (the `portal_reader` role gives
+  only that) instead of keeping a console token. A mock closes only behind
+  credentials of its own: a mock closed behind the default `demo-key` answers `403
+  closed_unsecured` until it is secured again (`secure: true`).
+- Single sign-on links a user created ahead only through an email the provider
+  verified.
+- The `git.*` settings need `git.write`; `update_settings` needs what `PATCH
+  /_rustybin/settings` needs; an `editor`'s export carries no users, roles or
+  projects; a `/_rustybin/*` route missing from the catalogue answers `403`.
+- The management MCP server has 137 tools for an admin (118 without the harness
+  ones); clients that read only the first `tools/list` page use `?page_size=200`.
+
+The entries below are each step's, with their own behaviour changes.
 
 - Users, roles and permissions, the model (access control, step 07 of the
   [plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/testing-2/master-plan.md)):
