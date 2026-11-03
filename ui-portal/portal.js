@@ -3,9 +3,14 @@
 // public spec of each mock and api/items/<id>/collections/<format> for
 // downloads; it reports views and Try it calls to api/events. It reuses the
 // console's DOM helpers, formatters and stylesheet (../ui/) but none of its
-// control-plane code: the only credential it holds is the one portal.auth
-// asks for (the console sign-in in password mode, an API key in key mode),
-// kept in this tab. Routes: #/ (home), #/k/<kind>, #/i/<item id>.
+// control-plane code. The portal sign-in (api/login) sets an HttpOnly
+// cookie this page never reads; api/session says who is signed in. A
+// closed item is read by everyone and used (Try it, the demo credentials,
+// collections, connection snippets) only by a signed-in reader: the
+// catalogue answers it locked otherwise. Key mode keeps an API key in this
+// tab; an instance without the password sign-in asks for a control token
+// instead (kept in this tab, sent as a bearer). Routes: #/ (home),
+// #/k/<kind>, #/i/<item id>, #/signin, #/join/<token>.
 import { h, icon, replace, clear, notice, toast, badge, card, spinner, empty, copyButton, methodBadge, statusBadge, field, input, textarea, select, kvgrid, fmtMs } from '../ui/lib/dom.js';
 import { codeBlock, copyableCode, bodyView, headersTable } from '../ui/lib/format.js';
 import { renderMarkdown } from '../ui/lib/markdown.js';
@@ -28,6 +33,10 @@ const searchEl = document.getElementById('search');
 const footEl = document.getElementById('foot');
 let catalog = null;
 let etag = null;
+/** GET api/session: {signed_in, user, display_name, reader, signin}. */
+let session = { signed_in: false, reader: false, signin: SIGNIN };
+/** Where the sign-in returns to. */
+let returnTo = '#/';
 
 // ── Storage (every access may throw in a locked-down browser) ──────
 
@@ -74,8 +83,33 @@ function topActions() {
     paint();
   });
   paint();
-  const signOut = credential() ? h('button', { class: 'btn sm ghost', type: 'button', id: 'portal-sign-out', onclick: () => { save('session', CRED_KEY, null); catalog = null; route(); topActions(); } }, 'Sign out') : null;
-  replace(actions, signOut, theme);
+  let who = null;
+  let signButton = null;
+  if (session.signed_in) {
+    who = h('span', { class: 'small muted portal-inline', id: 'portal-signed-in', title: session.user || '' }, icon('user'), session.display_name || session.user || 'signed in');
+    signButton = h('button', { class: 'btn sm ghost', type: 'button', id: 'portal-sign-out', onclick: signOut }, 'Sign out');
+  } else if (credential()) {
+    signButton = h('button', { class: 'btn sm ghost', type: 'button', id: 'portal-sign-out', onclick: () => { save('session', CRED_KEY, null); catalog = null; route(); topActions(); } }, 'Sign out');
+  } else if (SIGNIN) {
+    signButton = h('a', { class: 'btn sm', href: '#/signin', id: 'portal-sign-in-btn', onclick: () => { if (!/^#\/(signin|join)/.test(location.hash)) returnTo = location.hash || '#/'; } }, icon('lock'), 'Sign in');
+  }
+  replace(actions, who, signButton, theme);
+}
+
+async function loadSession() {
+  try {
+    const r = await fetch('api/session', { credentials: 'same-origin', cache: 'no-store' });
+    if (r.ok) session = await r.json();
+  } catch { /* the portal answers without it */ }
+}
+
+async function signOut() {
+  try { await fetch('api/logout', { method: 'POST', credentials: 'same-origin' }); } catch { /* the cookie expires anyway */ }
+  session = { signed_in: false, reader: false, signin: SIGNIN };
+  catalog = null;
+  etag = null;
+  topActions();
+  route();
 }
 
 function brand(portal) {
@@ -103,6 +137,18 @@ function footer(portal) {
 function credential() {
   if (AUTH === 'open') return null;
   try { return JSON.parse(load('session', CRED_KEY) || 'null'); } catch { return null; }
+}
+
+/** A closed item this visitor may not use yet. */
+function isLocked(it) {
+  return !!(it && it.locked);
+}
+
+/** The line a locked page shows, with the way to sign in. */
+function lockedNotice(what) {
+  return notice('warn', h('div', { class: 'row', id: 'portal-locked', style: { flexWrap: 'wrap' } }, h('span', { class: 'grow' }, h('strong', null, 'Closed: '),
+    what + (SIGNIN ? ' after you sign in.' : ' for holders of a portal login.')),
+  SIGNIN ? h('a', { class: 'btn sm', href: '#/signin', 'data-signin': '1', onclick: () => { returnTo = location.hash || '#/'; } }, 'Sign in') : null));
 }
 
 /** Headers for the portal's own API (api/*). */
@@ -157,41 +203,51 @@ async function loadCatalog() {
 
 // ── Sign-in ────────────────────────────────────────────────────────
 
-function signinView(info) {
+function signinView() {
   const err = h('div');
-  const isKey = AUTH === 'key';
+  const isKey = AUTH === 'key' && !location.hash.startsWith('#/signin');
+  const usePassword = SIGNIN && !isKey;
   const user = input({ id: 'portal-user', autocomplete: 'username', 'aria-label': 'User name' });
   const pass = input({ id: 'portal-password', type: 'password', autocomplete: 'current-password', 'aria-label': 'Password' });
   const secret = input({ id: 'portal-secret', type: 'password', autocomplete: 'off', 'aria-label': isKey ? 'API key' : 'Token' });
-  const usePassword = !isKey && SIGNIN;
   const fields = usePassword
     ? [field('User name', user), field('Password', pass)]
     : [field(isKey ? 'API key' : 'Control token', secret, isKey ? 'An API key of this instance (sent as ' + KEY_HEADER + ').' : 'The admin token or a control token.')];
+  const submit = h('button', { class: 'btn primary', type: 'submit', id: 'portal-sign-in' }, usePassword ? 'Sign in' : 'Open the portal');
   const form = h('form', { class: 'stack' }, ...fields, err,
-    h('div', { class: 'row' }, h('span', { class: 'grow' }), h('button', { class: 'btn primary', type: 'submit', id: 'portal-sign-in' }, 'Open the portal')));
+    h('div', { class: 'row' }, h('span', { class: 'grow' }), submit));
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     replace(err);
     if (usePassword) {
       let r;
+      submit.disabled = true;
       try {
-        r = await fetch('../_rustybin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: user.value.trim(), password: pass.value }), credentials: 'same-origin' });
+        r = await fetch('api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: user.value.trim(), password: pass.value }), credentials: 'same-origin', cache: 'no-store' });
       } catch (ex) {
+        submit.disabled = false;
         replace(err, notice('err', 'The sign-in failed: ' + ex.message));
         return;
       }
+      submit.disabled = false;
       let body = {};
       try { body = await r.json(); } catch { body = {}; }
-      if (!r.ok || !body.token) {
-        replace(err, notice('err', body.error || ('The sign-in failed (' + r.status + ')')));
+      if (!r.ok) {
+        replace(err, notice('err', body.reason === 'rate_limited' ? 'Too many attempts: wait a moment and try again.' : (body.error || ('The sign-in failed (' + r.status + ')'))));
         return;
       }
-      save('session', CRED_KEY, JSON.stringify({ kind: 'bearer', value: body.token }));
-    } else {
-      const v = secret.value.trim();
-      if (!v) { replace(err, notice('err', isKey ? 'Enter an API key.' : 'Enter a token.')); return; }
-      save('session', CRED_KEY, JSON.stringify({ kind: isKey ? 'key' : 'bearer', value: v }));
+      await loadSession();
+      catalog = null;
+      etag = null;
+      topActions();
+      const back = returnTo && !/^#\/(signin|join)/.test(returnTo) ? returnTo : '#/';
+      returnTo = '#/';
+      if (location.hash === back) route(); else location.hash = back;
+      return;
     }
+    const v = secret.value.trim();
+    if (!v) { replace(err, notice('err', isKey ? 'Enter an API key.' : 'Enter a token.')); return; }
+    save('session', CRED_KEY, JSON.stringify({ kind: isKey ? 'key' : 'bearer', value: v }));
     const res = await loadCatalog();
     if (!res.ok) {
       save('session', CRED_KEY, null);
@@ -199,13 +255,60 @@ function signinView(info) {
       return;
     }
     topActions();
-    route();
+    if (location.hash.startsWith('#/signin')) location.hash = '#/'; else route();
   });
-  return h('div', { class: 'signin-portal' }, card(meta('title') || 'API portal', { hint: isKey ? 'API key required' : 'sign-in required' },
+  const alt = isKey && SIGNIN ? h('p', { class: 'small muted', style: { margin: 0 } }, 'Have a portal login? ', h('a', { href: '#/signin' }, 'Sign in with your user name')) : null;
+  return h('div', { class: 'signin-portal', id: 'portal-signin' }, card(meta('title') || 'API portal', { hint: isKey ? 'API key required' : 'sign in' },
     h('p', { class: 'muted small', style: { marginTop: 0 } }, isKey
       ? 'This portal is for holders of an API key of this instance.'
-      : usePassword ? 'Sign in with the user name and password of this instance.' : 'This portal needs a control-plane token of this instance.'),
-    info && info.error ? null : null,
+      : usePassword ? 'Sign in with your portal login (a user name and password) to try the closed APIs, see their credentials and download their collections.' : 'This portal needs a control-plane token of this instance.'),
+    form, alt));
+}
+
+/** #/join/<token>: an invitation to the portal; the token leaves the address bar at once. */
+function joinView(token) {
+  try { history.replaceState(null, '', location.pathname + location.search + '#/join'); } catch { /* ignore */ }
+  const password = input({ type: 'password', id: 'portal-join-password', autocomplete: 'new-password', placeholder: 'at least 8 characters', 'aria-label': 'Password' });
+  const confirm = input({ type: 'password', id: 'portal-join-confirm', autocomplete: 'new-password', 'aria-label': 'Confirm the password' });
+  const err = h('div');
+  const submit = h('button', { class: 'btn primary', type: 'submit', id: 'portal-join-submit' }, 'Set the password and sign in');
+  const form = h('form', { class: 'stack' },
+    field('Password', password, 'Only you ever see it: 8 to 256 characters.'),
+    field('Confirm', confirm), err,
+    h('div', { class: 'row' }, h('span', { class: 'grow' }), submit));
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!token) { replace(err, notice('err', 'This link has no invitation in it: open the link you were sent again.')); return; }
+    if (password.value !== confirm.value) { replace(err, notice('err', 'The password and its confirmation differ.')); return; }
+    if (password.value.length < 8) { replace(err, notice('err', 'The password needs at least 8 characters.')); return; }
+    submit.disabled = true;
+    replace(err);
+    let r;
+    let body = {};
+    try {
+      r = await fetch('../_rustybin/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, password: password.value, portal: true }), credentials: 'same-origin', cache: 'no-store' });
+      try { body = await r.json(); } catch { body = {}; }
+    } catch {
+      submit.disabled = false;
+      replace(err, notice('err', 'The portal could not be reached: try again.'));
+      return;
+    }
+    submit.disabled = false;
+    if (!r.ok) {
+      replace(err, notice('err', body.reason === 'invalid_invitation'
+        ? 'This invitation is not valid any more: it was used, it expired, or a newer one replaced it. Ask for a new link.'
+        : body.reason === 'rate_limited' ? 'Too many attempts: wait a moment and try again.' : (body.error || ('The invitation failed (' + r.status + ').'))));
+      return;
+    }
+    token = null;
+    await loadSession();
+    catalog = null;
+    etag = null;
+    topActions();
+    location.hash = '#/';
+  });
+  return h('div', { class: 'signin-portal', id: 'portal-join' }, card('Join ' + (meta('title') || 'the API portal'), { hint: 'invitation' },
+    h('p', { class: 'muted small', style: { marginTop: 0 } }, 'You were invited to this portal. Choose your password: the link works once, and nobody else ever sees it.'),
     form));
 }
 
@@ -217,6 +320,7 @@ function kindBadge(kind) {
 
 function itemBadges(it) {
   const out = [kindBadge(it.kind)];
+  if (it.access === 'closed') out.push(h('span', { class: 'badge ' + (isLocked(it) ? 'warn' : 'ok'), title: isLocked(it) ? 'Closed: sign in to use it' : 'Closed: you are signed in', 'data-access': 'closed' }, icon('lock'), isLocked(it) ? 'closed' : 'unlocked'));
   if (it.new) out.push(badge('new', 'ok'));
   if (it.visitor) out.push(badge('visitor', 'warn'));
   if (it.kind === 'api' && it.detail && it.detail.state === 'off') out.push(badge('switched off', 'err'));
@@ -272,7 +376,8 @@ function tryPanel(opts) {
   const body = textarea({ rows: opts.body ? Math.min(14, String(opts.body).split('\n').length + 1) : 3, 'aria-label': 'Body', placeholder: 'Request body' });
   body.value = opts.body || '';
   const out = h('div', { class: 'try-result', 'aria-live': 'polite' });
-  const sendBtn = h('button', { class: 'btn primary', type: 'submit' }, icon('send'), 'Send');
+  const sendBtn = h('button', { class: 'btn primary', type: 'submit', disabled: !!opts.locked, title: opts.locked ? 'Sign in to try this API' : '' }, icon(opts.locked ? 'lock' : 'send'), opts.locked ? 'Sign in to try this API' : 'Send');
+  if (opts.locked) out.appendChild(h('p', { class: 'muted small', style: { margin: 0 } }, 'Sign in to try this API: the request carries a placeholder for the credential until then.'));
   const form = h('form', { class: 'try' },
     h('div', { class: 'url-line' }, methodSel, url, sendBtn),
     h('details', { class: 'disclosure' }, h('summary', null, 'Headers and body'),
@@ -280,6 +385,7 @@ function tryPanel(opts) {
     out);
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (opts.locked) return;
     const method = methodSel.value;
     const headers = new Headers();
     for (const [k, v] of parseHeaderLines(hdrs.value)) {
@@ -369,18 +475,25 @@ function itemView(id) {
         h('div', { class: 'row', style: { flexWrap: 'wrap', gap: '6px', marginTop: '8px' } }, ...itemBadges(it)),
         it.summary ? renderMarkdown(it.summary) : null,
         it.contact ? h('p', { class: 'small muted' }, 'Contact: ', it.contact) : null)));
+  const lockedLine = isLocked(it) ? lockedNotice('Read everything here; Try it, the credentials' + (it.kind === 'api' ? ', the collections' : '') + ' and the connection snippets unlock') : null;
   const body = it.kind === 'api' ? apiPage(it)
     : it.kind === 'mcp' ? mcpPage(it)
       : it.kind === 'llm' ? llmPage(it)
         : it.kind === 'agent' ? agentPage(it)
           : it.kind === 'tools' ? toolsPage(it)
             : it.kind === 'registry' ? registryPage(it) : h('div');
-  return h('div', { class: 'stack' }, head, body);
+  return h('div', { class: 'stack' }, head, lockedLine, body);
 }
 
 function securityCard(d) {
   const s = d.security || {};
   if (!s.enabled) return card('Authentication', {}, h('p', { class: 'small', style: { margin: 0 } }, 'None: every operation answers without credentials.'));
+  if (s.locked) {
+    const schemes = (s.schemes || []).map((sc) => h('li', null, h('strong', null, sc.name || sc.type), sc.hint ? ': ' + sc.hint : ''));
+    return card('Authentication', { hint: 'mocked: demo credentials only' }, h('div', { class: 'stack-sm', id: 'portal-credentials-locked' },
+      schemes.length ? h('ul', { style: { margin: 0, paddingLeft: '18px' } }, ...schemes) : h('p', { class: 'small', style: { margin: 0 } }, 'Mode: ' + s.mode),
+      h('p', { class: 'muted small portal-inline', style: { margin: 0 } }, icon('lock'), ' Sign in to see the demo credentials: calls without them are refused.')));
+  }
   const rows = [];
   for (const sc of s.schemes || []) {
     rows.push(h('li', null, h('strong', null, sc.name || sc.type), sc.hint ? ': ' + sc.hint : ''));
@@ -397,7 +510,7 @@ function securityCard(d) {
   }
   creds.push(['JWTs', h('span', null, 'from the built-in identity provider: ', h('span', { class: 'mono' }, 'POST ' + d.token_url))]);
   return card('Authentication', { hint: 'mocked: demo credentials only' },
-    h('div', { class: 'stack-sm' },
+    h('div', { class: 'stack-sm', id: 'portal-credentials' },
       rows.length ? h('ul', { style: { margin: 0, paddingLeft: '18px' } }, ...rows) : h('p', { class: 'small', style: { margin: 0 } }, 'Mode: ' + s.mode),
       kvgrid(creds),
       d.credentials ? h('p', { class: 'muted small', style: { margin: 0 } }, 'The examples below already carry working demo credentials.')
@@ -445,7 +558,7 @@ function operationsCard(it) {
           built = true;
           det.appendChild(h('div', { class: 'op-body' },
             op.description ? renderMarkdown(op.description) : null,
-            tryPanel({ item: it.id, method: op.sample.method, base: d.base_url, path: op.sample.path, headers: op.sample.headers, body: op.sample.body }),
+            tryPanel({ item: it.id, method: op.sample.method, base: d.base_url, path: op.sample.path, headers: op.sample.headers, body: op.sample.body, locked: isLocked(it) }),
             snippet('curl', op.curl)));
         });
         return det;
@@ -469,12 +582,18 @@ function apiPage(it) {
   el.appendChild(securityCard(d));
   el.appendChild(operationsCard(it));
   el.appendChild(card('Downloads', { hint: 'collections with every operation' },
-    h('div', { class: 'downloads' }, ...(d.downloads || []).map((x) => {
-      const b = h('button', { class: 'btn sm', type: 'button', 'data-format': x.format }, icon('download'), FORMAT_LABELS[x.format] || x.format);
-      b.addEventListener('click', () => download(it, x.format, x.file, b));
-      return b;
-    }))));
-  if (d.mcp) {
+    isLocked(it) ? h('p', { class: 'muted small portal-inline', style: { margin: 0 }, id: 'portal-downloads-locked' }, icon('lock'), ' Sign in to download the collections: they carry the credentials.')
+      : h('div', { class: 'downloads' }, ...(d.downloads || []).map((x) => {
+        const b = h('button', { class: 'btn sm', type: 'button', 'data-format': x.format }, icon('download'), FORMAT_LABELS[x.format] || x.format);
+        b.addEventListener('click', () => download(it, x.format, x.file, b));
+        return b;
+      }))));
+  if (d.mcp && d.mcp.locked) {
+    el.appendChild(card('MCP server', { hint: d.mcp.tools.length + ' tools, one per operation' },
+      h('div', { class: 'stack-sm' },
+        h('p', { class: 'muted small portal-inline', style: { margin: 0 } }, icon('lock'), ' Sign in for the connection details.'),
+        toolTable(d.mcp.tools.map((t) => ({ name: t.name, description: t.description, extra: t.method + ' ' + t.path }))))));
+  } else if (d.mcp) {
     el.appendChild(card('MCP server', { hint: d.mcp.tools.length + ' tools, one per operation' },
       h('div', { class: 'stack-sm' },
         kvgrid([['URL', h('span', { class: 'mono break' }, d.mcp.url)]]),
@@ -505,12 +624,21 @@ function mcpPage(it) {
     h('summary', null, h('span', { class: 'path' }, t.name), h('span', { class: 'sum' }, t.title || '')),
     h('div', { class: 'op-body' }, t.description ? h('p', { class: 'small', style: { margin: 0 } }, t.description) : null,
       codeBlock(JSON.stringify(t.inputSchema || {}, null, 2), 'json', 'short')))));
+  const authRow = ['Authentication', auth.kind === 'none' ? 'none' : h('span', null, h('strong', null, auth.kind === 'oauth' ? 'OAuth 2.1' : 'API key'), auth.hint ? ': ' + auth.hint : '')];
+  if (d.locked) {
+    return h('div', { class: 'stack' },
+      card('Connect', { hint: d.transport === 'sse' ? 'legacy HTTP+SSE transport' : 'Streamable HTTP' },
+        h('div', { class: 'stack-sm' }, kvgrid([['URL', h('span', { class: 'mono break' }, d.url)], authRow]),
+          h('p', { class: 'muted small portal-inline', style: { margin: 0 } }, icon('lock'), ' Sign in for the connection snippets.'))),
+      card('Tools', { hint: tools.length + ' tools' }, toolTable(tools)),
+      tools.length ? card('Input schemas', {}, schemaList) : null);
+  }
   return h('div', { class: 'stack' },
     card('Connect', { hint: d.transport === 'sse' ? 'legacy HTTP+SSE transport' : 'Streamable HTTP' },
       h('div', { class: 'stack-sm' },
         kvgrid([
           ['URL', h('span', { class: 'row nowrap' }, h('span', { class: 'mono break' }, d.url), copyButton(d.url, { icon: true, title: 'Copy the URL' }))],
-          ['Authentication', auth.kind === 'none' ? 'none' : h('span', null, h('strong', null, auth.kind === 'oauth' ? 'OAuth 2.1' : 'API key'), auth.hint ? ': ' + auth.hint : '')],
+          authRow,
         ]),
         snippet('Claude Code', d.claude),
         snippet('mcpServers JSON', JSON.stringify(d.json, null, 2), 'json'),
@@ -527,7 +655,7 @@ function llmPage(it) {
       h('summary', null, h('strong', null, p.title), h('span', { class: 'path' }, p.base_url)),
       h('div', { class: 'op-body' },
         h('div', { class: 'small' }, 'Routes below the base URL: ', ...p.routes.map((r, i) => h('span', null, i ? ', ' : '', h('code', null, r)))),
-        tryPanel({ item: it.id, method: 'POST', base, path: p.sample.path, headers: p.sample.headers, body: p.sample.body }),
+        tryPanel({ item: it.id, method: 'POST', base, path: p.sample.path, headers: p.sample.headers, body: p.sample.body, locked: isLocked(it) }),
         snippet('curl', p.curl)))))),
     card('Shaping the answers', { hint: 'request headers' }, h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
       h('thead', null, h('tr', null, h('th', null, 'Header'), h('th', null, 'Effect'))),
@@ -550,7 +678,7 @@ function agentPage(it) {
       h('div', { class: 'small' }, s.description),
       s.examples && s.examples.length ? h('div', { class: 'small muted' }, 'Try: ', s.examples.map((x) => '"' + x + '"').join(', ')) : null)))),
     card('Send a message', {}, h('div', { class: 'stack-sm' },
-      tryPanel({ item: it.id, method: 'POST', base, path: d.sample.path, headers: d.sample.headers, body: d.sample.body }),
+      tryPanel({ item: it.id, method: 'POST', base, path: d.sample.path, headers: d.sample.headers, body: d.sample.body, locked: isLocked(it) }),
       snippet('curl', d.curl))));
 }
 
@@ -569,9 +697,11 @@ function toolsPage(it) {
         const ex = (ep.examples || [])[0];
         det.appendChild(h('div', { class: 'op-body' },
           ep.description ? h('p', { class: 'small', style: { margin: 0 } }, ep.description) : null,
-          ex && ep.protocol === 'http'
-            ? tryPanel({ item: it.id, method: ex.method, base, path: ex.path, headers: (ex.headers || []).concat(ex.auth && ex.auth.type === 'bearer' ? [{ name: 'Authorization', value: 'Bearer ' + ex.auth.token }] : []), body: ex.body || '' })
-            : h('p', { class: 'muted small', style: { margin: 0 } }, ep.protocol === 'websocket' ? 'A WebSocket: connect with a WebSocket client.' : 'Open it with a client that reads ' + ep.protocol + '.'),
+          isLocked(it) && ep.protocol === 'http'
+            ? tryPanel({ item: it.id, method: (ep.methods || ['GET'])[0] === 'ANY' ? 'GET' : (ep.methods || ['GET'])[0], base, path: ep.path, headers: [], body: '', locked: true })
+            : ex && ep.protocol === 'http'
+              ? tryPanel({ item: it.id, method: ex.method, base, path: ex.path, headers: (ex.headers || []).concat(ex.auth && ex.auth.type === 'bearer' ? [{ name: 'Authorization', value: 'Bearer ' + ex.auth.token }] : []), body: ex.body || '' })
+              : h('p', { class: 'muted small', style: { margin: 0 } }, ep.protocol === 'websocket' ? 'A WebSocket: connect with a WebSocket client.' : 'Open it with a client that reads ' + ep.protocol + '.'),
           (ep.examples || []).length > 1 ? h('div', { class: 'small muted' }, 'More examples: ', ep.examples.slice(1).map((x) => x.method + ' ' + x.path).join(', ')) : null));
       });
       return det;
@@ -588,13 +718,15 @@ function registryPage(it) {
         ['Servers', h('a', { href: d.servers_url, target: '_blank', rel: 'noopener' }, d.servers_url)],
         ['Scenario', d.scenario],
       ]),
-      tryPanel({ item: it.id, method: 'GET', base, path: d.servers_url.slice(base.length) + '?limit=10', headers: [], body: '' }),
+      tryPanel({ item: it.id, method: 'GET', base, path: d.servers_url.slice(base.length) + '?limit=10', headers: [], body: '', locked: isLocked(it) }),
       snippet('curl', d.curl))));
 }
 
 // ── Router ─────────────────────────────────────────────────────────
 
 let routing = 0;
+/** The token of a #/join/<token> link (it leaves the address bar at once). */
+let pendingJoin = null;
 async function route() {
   const token = ++routing;
   const hash = location.hash.replace(/^#\/?/, '');
@@ -602,6 +734,12 @@ async function route() {
   // A malformed escape (a stray %) routes with the text as it is.
   let arg = rest.join('/');
   try { arg = decodeURIComponent(arg); } catch { /* keep it raw */ }
+  if (section === 'join') { replace(viewEl, joinView(arg || pendingJoin)); pendingJoin = null; return; }
+  if (section === 'signin') {
+    if (session.signed_in) { location.hash = returnTo || '#/'; return; }
+    replace(viewEl, signinView());
+    return;
+  }
   if (!catalog) {
     replace(viewEl, spinner('Loading the portal'));
     let res;
@@ -612,7 +750,11 @@ async function route() {
     }
     if (token !== routing) return;
     if (!res.ok) {
-      if (res.signin) { replace(viewEl, signinView(res.body)); return; }
+      if (res.signin) { replace(viewEl, signinView()); return; }
+      if (res.status === 403 && res.body && res.body.permission === 'portal.read') {
+        replace(viewEl, notice('err', 'This account does not read this portal. ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); signOut(); } }, 'Sign out')));
+        return;
+      }
       replace(viewEl, notice('err', (res.body && res.body.error) || ('The portal answered ' + res.status), res.body && res.body.hint ? ' ' + res.body.hint : ''));
       return;
     }
@@ -631,8 +773,15 @@ async function route() {
 
 applyTheme();
 brand(null);
-topActions();
 footer(null);
+{
+  const m = /^#\/join\/([A-Za-z0-9_-]+)$/.exec(location.hash || '');
+  if (m) {
+    pendingJoin = m[1];
+    try { history.replaceState(null, '', location.pathname + location.search + '#/join'); } catch { /* ignore */ }
+  }
+}
+topActions();
 document.getElementById('search-form').addEventListener('submit', (e) => {
   e.preventDefault();
   if (location.hash && location.hash !== '#/') location.hash = '#/';
@@ -645,4 +794,4 @@ searchEl.addEventListener('input', () => {
   replace(viewEl, homeView(searchEl.value.trim()));
 });
 window.addEventListener('hashchange', route);
-route();
+loadSession().then(() => { topActions(); route(); });

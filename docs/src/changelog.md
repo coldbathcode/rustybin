@@ -71,6 +71,38 @@
   changes the first admin's); a disabled user's sign-in answers as a wrong password; the `apply_config` tool now checks what
   a document's sections need (`settings:`, `secrets:`, `agents:`, `users:`, `roles:`)
   as the REST route did; `list_sessions` and `end_session` take `user`.
+- Open and closed APIs on the dev portal (access control, step 13;
+  [Dev portal](portal.md#open-and-closed-items)). Each published item is `open` (the
+  default) or `closed` (`access` on `PUT /_rustybin/portal/items/{id}`, in `GET
+  /_rustybin/portal`, `portal.items` of `rustybin.yaml`). A closed item is read by
+  everyone (docs, operations, schemas, spec, reference); Try it, the demo
+  credentials, the collections and the MCP connection snippets unlock for a reader:
+  a user holding the new `portal.read` permission (every built-in role; the
+  `portal_reader` role holds nothing else) signed in to the portal, or a bearer
+  control credential that resolves it. The catalogue answers a closed item to anyone
+  else with `locked: true` and placeholders for the credentials; its collections
+  answer `401`. A mock closes only with its mocked security on (`409 security_off`
+  otherwise; `secure: true`, the console's **Turn on security and close**, turns it
+  on and deploys it), so a call without the credentials is refused by the mock. The
+  portal sign-in: `POST /portal/api/login`, `/logout`, `GET /portal/api/session`,
+  the `rustybin_portal` cookie (`HttpOnly`, `SameSite=Strict`, `Secure` behind HTTPS,
+  `Path=/portal`, 12 hours, its own signing subkey), accepted under `/portal` only;
+  the throttle is the console sign-in's. An invitation of a `portal_reader` links to
+  `/portal/#/join/<token>`. The console's publish dialog (Open or Closed), the lock
+  and the reader count in **Management, Portal**, **Invite a portal reader**; the
+  portal's **Sign in**, lock, disabled Try it, **Sign out** and join page;
+  `publish_portal_item` takes `access` and `secure`; `rustybin portal publish
+  --access closed [--secure]`. A document from the repository may close an item,
+  never open one.
+
+  **Behaviour changes**: `portal.auth=password` now asks for the portal sign-in (the
+  0.3 screen that kept a console token in the tab is gone; on an instance without the
+  password sign-in the portal still takes a control token) and lets in only
+  credentials that hold `portal.read`: a control JWT with the `inspector` or
+  `harness` scope alone no longer reads such a portal; with it, the reference page
+  needs the sign-in too. A console sign-in (and an invitation) of an account whose
+  only permission is `portal.read` answers `portal_only` with the portal's cookie,
+  and the console sends the person to the portal.
 
 ## 0.4.0 (2026-11-03): testing workflows
 

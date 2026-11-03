@@ -98,6 +98,7 @@ fn metadata_is_cleaned_and_bounded() {
         contact: Some("\u{1b}[31mteam@example.com".into()),
         order: Some(5),
         credentials: Some(false),
+        access: Some(Access::Closed),
     })
     .expect("valid");
     assert_eq!(meta.title.as_deref(), Some("Orders API"));
@@ -882,6 +883,7 @@ async fn hidden_until_deployed_and_config_file_items() {
         contact: None,
         order: None,
         credentials: None,
+        access: None,
     }]);
     let (status, _, catalog) = call(&app, "GET", "/portal/api/catalog", &[], None).await;
     assert_eq!(status, StatusCode::OK);

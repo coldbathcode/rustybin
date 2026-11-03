@@ -357,7 +357,7 @@ The [dev portal](portal.md) at `/portal`. Each variable seeds a setting of the
 | Variable | Default | Description |
 |---|---|---|
 | `RUSTYBIN_PORTAL` | `auto` | `auto`: `/portal` is on once an item is published; `on`; `off` (`/portal` answers `404`). Seeds `portal.enabled`; an invalid value warns. |
-| `RUSTYBIN_PORTAL_AUTH` | `open` | Who may read the portal's data: `open`, `password` (the console sign-in or any control-plane credential), `key` (an API key of the key registry). Seeds `portal.auth`; an invalid value warns. |
+| `RUSTYBIN_PORTAL_AUTH` | `open` | Who may read the portal's data: `open` (each item's `access` decides: a closed one is read by everyone and used by portal readers only), `password` (the whole portal behind the portal sign-in, or a bearer control credential holding `portal.read`; every item closed), `key` (an API key of the key registry reads the open items; a closed one still needs the sign-in). Seeds `portal.auth`; an invalid value warns. |
 | `RUSTYBIN_PORTAL_BASE_URL` | unset | The URL testers call when a gateway sits in front of the instance (`https://gateway.example.com/rustybin`): snippets, collections and Try it use it. Unset: the URL the portal was opened with. Seeds `portal.base_url`. |
 | `RUSTYBIN_PORTAL_VISITORS` | `false` | On a self-service instance, visitors may publish their own mocks. Seeds `portal.visitors`. |
 

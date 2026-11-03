@@ -1002,6 +1002,7 @@ fn every_permission_is_used() {
         ("src/configdoc/mod.rs", "P::AgentsManage"),
         ("src/health.rs", "Permission::SettingsWrite"),
         ("src/flaky.rs", "Permission::SettingsWrite"),
+        ("src/portal/session.rs", "Permission::PortalRead"),
     ] {
         assert!(src(file).contains(needle), "{file} checks {needle}");
     }

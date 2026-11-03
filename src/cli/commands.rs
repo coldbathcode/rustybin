@@ -363,8 +363,8 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("registry", "validate", "<file>", "Validate a server.json against the schema and the semantic checks.", NO_FLAGS, [("POST", "/_rustybin/registry/validate")], false, "registry validate server.json"),
     cmd!("registry", "browse", "[--registry U] [--search S] [--cursor C]", "Browse a registry (the official one by default) through the instance.", &[Flag::value("--registry", "The registry base URL"), Flag::value("--search", "A search term"), Flag::value("--cursor", "The next page")], [("GET", "/_rustybin/registry/browse")], false, "registry browse --search weather"),
     // ── Portal ──
-    cmd!("portal", "status", "", "The portal: on or off, items, who may read it.", NO_FLAGS, [("GET", "/_rustybin/portal")], false, "portal status"),
-    cmd!("portal", "publish", "<id>", "Publish an item: mock:NAME, mcp:SERVER, llm, a2a:AGENT, tools or registry.", &[Flag::value("--title", "A title"), Flag::value("--summary", "A summary (Markdown)"), Flag::value("--tags", "Tags, comma separated"), Flag::value("--contact", "A contact"), Flag::value("--order", "Lower comes first"), Flag::switch("--no-credentials", "Hide a mock's demo credentials")], [("PUT", "/_rustybin/portal/items/{id}")], false, "portal publish mock:orders --title \"Orders API\" --tags payments"),
+    cmd!("portal", "status", "", "The portal: on or off, who may read it, how many users read closed items, each item and its access (open or closed).", NO_FLAGS, [("GET", "/_rustybin/portal")], false, "portal status"),
+    cmd!("portal", "publish", "<id> [--access open|closed] [--secure]", "Publish an item: mock:NAME, mcp:SERVER, llm, a2a:AGENT, tools or registry, open or closed (a closed mock needs its mocked security on; --secure turns it on).", &[Flag::value("--title", "A title"), Flag::value("--summary", "A summary (Markdown)"), Flag::value("--tags", "Tags, comma separated"), Flag::value("--contact", "A contact"), Flag::value("--order", "Lower comes first"), Flag::switch("--no-credentials", "Hide a mock's demo credentials"), Flag::value("--access", "open (default) or closed: everyone reads a closed item, only portal readers use it"), Flag::switch("--secure", "With --access closed on a mock without mocked security: turn it on and deploy, then close")], [("PUT", "/_rustybin/portal/items/{id}")], false, "portal publish mock:orders --title \"Orders API\" --tags payments"),
     cmd!("portal", "unpublish", "<id>", "Remove an item from the portal.", NO_FLAGS, [("DELETE", "/_rustybin/portal/items/{id}")], true, "portal unpublish mock:orders --yes"),
     cmd!("portal", "insights", "", "Views, downloads and Try it calls.", NO_FLAGS, [("GET", "/_rustybin/portal/insights")], false, "portal insights"),
     cmd!("portal", "branding", "", "The portal.* settings.", NO_FLAGS, [("GET", "/_rustybin/settings")], false, "portal branding"),
@@ -2768,6 +2768,15 @@ async fn portal(ctx: &mut Ctx, verb: &str) -> Result<()> {
             }
             if ctx.args.has("--no-credentials") {
                 meta.insert("credentials".into(), json!(false));
+            }
+            if let Some(a) = ctx.args.value("--access") {
+                if a != "open" && a != "closed" {
+                    return Err(Fail::Usage("--access is open or closed".into()));
+                }
+                meta.insert("access".into(), json!(a));
+            }
+            if ctx.args.has("--secure") {
+                meta.insert("secure".into(), json!(true));
             }
             let reply = ctx
                 .client()?

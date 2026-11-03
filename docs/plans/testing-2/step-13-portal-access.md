@@ -116,3 +116,82 @@ disabled hides closed items on the next request; `portal.auth=password` closes e
 five-surface parity tests; the document round trip and the untrusted refusal; the portal
 conformance in Playwright (a closed API read signed out, Try it locked, sign in, the
 credentials and Try it appear, sign out).
+
+## Build notes (2026-11-03)
+
+- **Where it is.** The model in `src/portal/mod.rs` (`Access`, `closed`, `mock_secured`; `access` on `Published`,
+  `Meta` and `FileItem`, unset keeps what the item had), the locked catalogue in `src/portal/items.rs` (`Ctx.reader`,
+  `locked` passed into each kind's detail so the entry is built without the credentials), the sign-in in
+  `src/portal/session.rs`, the routes and the 409 in `src/portal/api.rs` (`gate` answers whether the caller reads
+  closed items; `check_closable`, `secure_mock`, `publish_secured`), the shared sign-in check in `src/login.rs`
+  (`check_sign_in`, used by `/_rustybin/login` and `/portal/api/login`; `portal_only`), the subkey in
+  `src/control_oauth.rs` (`portal_secret`), the portal invitation link in `src/rbac/service.rs`
+  (`invitation_link_for`), the document rules in `src/configdoc/mod.rs` (`apply_portal`, the export). Tests:
+  `src/portal/access_tests.rs` (the planted credentials test first, then every route signed out and in, the cookie on
+  every catalogue route, a role removed or a user disabled, the 409 and `secure`, `portal.auth`, a console sign-in by
+  a reader, the shared throttle, documents), `portal_tools_open_and_close_items` in the management tests,
+  `docs/examples/portal/portal.hurl` (anchors `close`, `locked`, `reader`, `security_off`) and
+  `docs/examples/portal/access.hurl` (the password instance: invite, join, sign in and out), `run_portal_access` in
+  `conformance/ui/console_e2e.py`.
+- **What a locked entry leaves out**, by kind: a mock's demo credentials (`reveal` false, so the samples and curl
+  lines carry the placeholders `<api-key>`, `Basic <base64 user:password>`, `<token>`; the security summary also
+  drops the Basic user names), its collection links and its MCP connection (`url`, `claude`, `json`; the tools stay,
+  they are docs); an MCP server's `claude`, `json` and inspector link (the URL, auth and tools stay); the tools item's
+  examples (they carry demo Basic users and tokens). The LLM, the agents and the registry carry no credential: Try it
+  is locked for them in the portal, and their endpoints stay callable, as the plan says. The answer carries `access`
+  and `locked` per item and `portal.reader` and `portal.signin`; a reader's answer is `private, no-cache`, and every
+  catalogue answer has `Vary: Cookie, Authorization, X-Rustybin-Admin-Token, X-Rustybin-Key` (the cache key holds
+  the reader flag).
+- **Decision: a portal_reader's console sign-in still gets its token.** The plan says the person is told and sent
+  to the portal. `/_rustybin/login` (and an invitation accepted on the console's join page) answers the usual token
+  plus `portal_only: true` and `portal_url`, and sets the portal's cookie when the portal is on; the console revokes
+  the token at once and goes to the portal, signed in. Refusing the token instead was tried and dropped: it would
+  have taken `/_rustybin/me` and `rustybin passwd` from portal readers (step 09's "`/me` for every role"). The token
+  grants nothing else (the reader holds only `portal.read`).
+- **Decision: joining from the portal.** The portal's join page posts `portal: true` to `POST /_rustybin/join`: the
+  answer sets the portal's cookie and carries no console token. The invitation link is
+  `/portal/#/join/<token>` for a user whose permissions are exactly `portal.read` (any role mix that resolves so),
+  else the console's.
+- **Decision: the session answer** is `{signed_in, via, user, display_name, reader, signin}` (200 signed out too,
+  with `signed_in: false`), not an empty body, so the SPA and the Hurl examples read one shape. `via` says `cookie`
+  or `bearer`.
+- **Decision: what a session is.** The portal's sessions are not listed with the console's (Management, Sign-in);
+  "sign out everywhere" ends them (they carry the sign-in generation), and so do a disabled user and a moved user
+  generation; `POST /portal/api/logout` puts the session id on the sign-in denylist. The audience is the control
+  audience; the subkey (`portal`) and `rb_use: "portal"` keep it apart from console and OAuth tokens (the console's
+  `is_console_token` and the OAuth verifier both refuse it).
+- **Decision: `secure: true` on the PUT** (and `secure` on `publish_portal_item`, `--secure` on the CLI) is the
+  server side of **Turn on security and close**, so it is one call with one permission check: it needs the mock's
+  manage rights (`mocks.write`, listed in `BODY_CHECKS`), is refused while the mock has a draft that is not deployed
+  (deploying it would put other changes live), sets the mode the spec declares (`spec`) or `api_key` when it declares
+  none (a mock with a mode of its own, such as `basic`, keeps it), and deploys through the compile pool. Closing
+  checks the live revision: on, and in `spec` mode with an operation that declares a requirement. A shared-mode
+  instance or one with `RUSTYBIN_REQUIRE_KEY` closes a mock on its keys alone. If the security is turned off later the
+  item stays closed and `GET /_rustybin/portal` answers a `warning` for it (no 409 then: the plan was silent).
+- **Decision: documents.** An entry closing a mock without mocked security is reported and skipped (the mocks section
+  is applied first, so a document may turn the security on and close in one go). A pulled document's `access: open`
+  on a closed item is reported and the item stays closed; its other metadata applies. Not refused: a pulled document
+  pruning (unpublishing) a closed item, or publishing an item it did not have before as open (both 0.3 behaviour; the
+  first hides, the second was always allowed). A `RUSTYBIN_CONFIG_FILE` item that closes a mock without security is
+  not refused at load (the file loader has no portal rule today); the control view's warning covers it.
+- **Decision: `portal.auth=password`** answers `401` signed out (the home page asks to sign in), lets in readers only
+  (a signed-in user without `portal.read` gets `403 permission_required: portal.read`), and gates the reference page
+  too (a page load carries the cookie now). Without the password sign-in (jwt or token mode) the portal still offers
+  the 0.3 token form, kept in the tab and sent as a bearer: the "0.3 screen that stored a console token" is gone in
+  password mode only, where the portal sign-in replaces it.
+- **Who can call what.** No new control route (the three new routes are under `/portal`, which declares nothing and
+  is not in `NEW_SINCE_0_4`); no `DELIBERATE` row. `portal.read` leaves `RESERVED`: it is listed in `BODY_CHECKS`
+  (checked in `src/portal/session.rs`). Deliberate changes outside the control plane: with `portal.auth=password` a
+  control JWT with only the `inspector` or `harness` scope no longer reads the portal (it holds no `portal.read`; every
+  built-in role and the `console` and `admin` scopes do), and the reference page needs a reader there; a Try it
+  event or a collection of a closed item answers `401` (or `403` signed in without `portal.read`).
+- **Console.** The publish dialog's Access radios (`#portal-access-open`, `#portal-access-closed`) with the sentence
+  on what closed covers, which endpoints stay callable, and **Turn on security and close** for a mock whose `secured`
+  is false; Management, Portal shows a `closed` badge per item, the closed count and the readers (`readers` in `GET
+  /_rustybin/portal`: enabled users holding `portal.read`, and those whose login opens only the portal); Users and
+  roles has **Invite a portal reader**. The portal: **Sign in** in the header (`#/signin`), the lock badge on closed
+  cards, a notice on the page, the Try it button disabled with "Sign in to try this API", the signed-in name and
+  **Sign out**, `#/join/<token>` (the token leaves the address bar at once).
+- **Left for later.** A reader count per item and portal sessions in the sessions list (step 14's audit log is the
+  place for who read what); a portal page to change one's own password (portal readers keep `rustybin passwd` and
+  `/_rustybin/me/password` with the console token their sign-in still answers).

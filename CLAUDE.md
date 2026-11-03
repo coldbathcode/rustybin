@@ -457,7 +457,16 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   `AppState.portal`: items, insights, the catalogue cache, `<state>/portal.json`), `items.rs` (candidates, published
   entries, `hidden_reason`, the catalogue each kind's page reads), `insights.rs` (bounded counters), `api.rs` (the
   SPA from `ui-portal/`, `/portal/api/catalog`, `/events`, collections, `/portal/reference/{id}`, the control routes
-  `/_rustybin/portal*`; `portal.auth` checked in `gate`). The portal SPA imports the console's `dom.js`, `format.js`,
+  `/_rustybin/portal*`; `portal.auth` checked in `gate`), `session.rs` (the portal sign-in, access control step 13:
+  `/portal/api/login`, `/logout`, `/session`, the `rustybin_portal` cookie, an HS256 token on the OAuth key's
+  `portal` subkey with `rb_use: "portal"`, accepted under `/portal` only; `can_read_closed` is a session or a bearer
+  control credential holding `portal.read`; the throttle is `login::check_sign_in`'s). Each item is `open` or
+  `closed` (`portal::Access` on `Published`, `Meta`, `FileItem`): a closed item's catalogue entry is built locked
+  (no credential, collection link or connection snippet) for anyone but a reader, never stripped afterwards; a mock
+  closes only when `portal::mock_secured` (else `409 security_off`; `secure: true` turns it on through
+  `api::secure_mock`); a pulled document may close, never open. A new kind of item or a new detail field that
+  carries a credential must be left out of the locked entry (`access_tests::the_locked_catalogue_holds_no_credential`
+  plants one of each). The portal SPA imports the console's `dom.js`, `format.js`,
   `markdown.js` and stylesheet from `../ui/`; never its auth or http code. `/portal/*` is a control path (no
   capture, no faults) and exempt from the key layer. The console side is `ui/lib/portal.js` (publish dialog) and
   the Portal tab of `ui/views/manage.js`.

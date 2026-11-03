@@ -3,7 +3,11 @@
 //! with what the portal needs to render its page. Snippets use the portal's
 //! base URL (`portal.base_url`, else the URL the portal was opened with);
 //! demo credentials appear only when the item says so, and never a secret of
-//! the instance.
+//! the instance. A closed item answers a caller who is not a reader with
+//! `locked: true` and its docs only: no demo credentials (placeholders in
+//! the samples and curl lines), no collection links, no MCP connection
+//! snippets, no examples carrying credentials. That entry is built without
+//! them, never stripped afterwards.
 
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -288,6 +292,7 @@ pub fn entries(state: &AppState) -> Vec<Entry> {
                 contact: meta.contact,
                 order: meta.order.unwrap_or(0),
                 credentials: meta.credentials.unwrap_or(true),
+                access: meta.access.unwrap_or_default(),
                 published_at: loaded_at,
                 updated_at: loaded_at,
                 by: "file".into(),
@@ -346,6 +351,9 @@ pub struct Ctx {
     /// The base is a configured gateway URL.
     pub gateway: bool,
     pub links: Links,
+    /// The caller reads closed items (a portal session or a bearer
+    /// credential with `portal.read`).
+    pub reader: bool,
 }
 
 impl Ctx {
@@ -372,8 +380,9 @@ fn kind_rank(kind: &str) -> usize {
 /// A fingerprint of everything the catalogue depends on (the cache key).
 pub fn fingerprint(state: &AppState, ctx: &Ctx) -> String {
     let mut fp = format!(
-        "{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}",
         state.portal.generation(),
+        ctx.reader,
         ctx.base,
         state.mocks.file_portal().1.timestamp_micros(),
         super::branding(&state.settings),
@@ -438,6 +447,8 @@ pub fn catalog_json(state: &AppState, ctx: &Ctx) -> Value {
     portal["auth"] = json!(super::auth_mode(&state.settings).as_str());
     portal["base_url"] = json!(ctx.base);
     portal["gateway"] = json!(ctx.gateway);
+    portal["reader"] = json!(ctx.reader);
+    portal["signin"] = json!(super::session::enabled(&state.config));
     portal["version"] = json!(env!("CARGO_PKG_VERSION"));
     json!({
         "portal": portal,
@@ -452,16 +463,18 @@ pub fn catalog_json(state: &AppState, ctx: &Ctx) -> Value {
 fn item_json(state: &AppState, e: &Entry, ctx: &Ctx, now: DateTime<Utc>) -> Option<Value> {
     let cand = candidate(state, &e.id)?;
     let p = &e.published;
+    let closed = super::closed(&state.settings, p.access);
+    let locked = closed && !ctx.reader;
     let (detail, changed) = match &e.id {
         ItemId::Mock(name) => {
             let s = state.mocks.get(name)?;
             let changed = s.updated_at.max(p.updated_at);
-            (mock_detail(state, &s, p, ctx)?, changed)
+            (mock_detail(state, &s, p, ctx, locked)?, changed)
         }
-        ItemId::Mcp(key) => (mcp_detail(key, ctx), p.updated_at),
+        ItemId::Mcp(key) => (mcp_detail(key, ctx, locked), p.updated_at),
         ItemId::Llm => (llm_detail(ctx), p.updated_at),
         ItemId::Agent(a) => (agent_detail(a, ctx)?, p.updated_at),
-        ItemId::Tools => (tools_detail(), p.updated_at),
+        ItemId::Tools => (tools_detail(locked), p.updated_at),
         ItemId::Registry => (registry_detail(state, ctx), p.updated_at),
     };
     let new = (now - changed).num_days() < NEW_DAYS;
@@ -476,6 +489,8 @@ fn item_json(state: &AppState, e: &Entry, ctx: &Ctx, now: DateTime<Utc>) -> Opti
         "published_at": p.published_at.to_rfc3339(),
         "changed_at": changed.to_rfc3339(),
         "new": new,
+        "access": if closed { "closed" } else { "open" },
+        "locked": locked,
         "detail": detail,
     }))
 }
@@ -502,10 +517,16 @@ fn pairs(v: &[(String, String)]) -> Vec<Value> {
         .collect()
 }
 
-fn mock_detail(state: &AppState, s: &Snapshot, p: &Published, ctx: &Ctx) -> Option<Value> {
+fn mock_detail(
+    state: &AppState,
+    s: &Snapshot,
+    p: &Published,
+    ctx: &Ctx,
+    locked: bool,
+) -> Option<Value> {
     let c = s.live.as_ref()?;
     let base = ctx.mock_base(&s.owner, &s.name);
-    let reveal = p.credentials;
+    let reveal = p.credentials && !locked;
     let coverage = checks::coverage(c);
     let operations: Vec<Value> = c
         .spec
@@ -564,16 +585,27 @@ fn mock_detail(state: &AppState, s: &Snapshot, p: &Published, ctx: &Ctx) -> Opti
         let url = format!("{base}/_rustybin/mcp");
         let tools = c.mcp_tools();
         let server = format!("{}-mock", s.name);
+        let tools: Vec<Value> = tools
+            .tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "name": t.name,
+                    "title": t.title,
+                    "description": t.description,
+                    "method": t.method,
+                    "path": t.path,
+                    "read_only": t.read_only,
+                })
+            })
+            .collect();
+        if locked {
+            // The tools are docs; the connection is for readers.
+            return json!({ "tools": tools, "locked": true });
+        }
         json!({
             "url": url,
-            "tools": tools.tools.iter().map(|t| json!({
-                "name": t.name,
-                "title": t.title,
-                "description": t.description,
-                "method": t.method,
-                "path": t.path,
-                "read_only": t.read_only,
-            })).collect::<Vec<_>>(),
+            "tools": tools,
             "claude": format!("claude mcp add --transport http {server} {url}"),
             "json": json!({ "mcpServers": { server: { "type": "http", "url": url } } }),
         })
@@ -585,6 +617,7 @@ fn mock_detail(state: &AppState, s: &Snapshot, p: &Published, ctx: &Ctx) -> Opti
         .then(|| json!({ "search_url": format!("{}/mcp-registry/v0.1/servers?search={}", ctx.base, s.name) }));
     let downloads: Vec<Value> = crate::mocks::collections::FORMATS
         .iter()
+        .filter(|_| !locked)
         .map(|(f, _, ext)| {
             json!({
                 "format": f,
@@ -604,7 +637,7 @@ fn mock_detail(state: &AppState, s: &Snapshot, p: &Published, ctx: &Ctx) -> Opti
         "spec_url": format!("{base}/_rustybin/openapi.json"),
         "spec_yaml_url": format!("{base}/_rustybin/openapi.yaml"),
         "reference_path": format!("/portal/reference/mock:{}", s.name),
-        "security": c.credentials_summary(reveal),
+        "security": security_summary(c, reveal, locked),
         "credentials": reveal,
         "token_url": format!("{}/oauth/token", ctx.base),
         "coverage": { "operations": coverage.operations, "with_examples": coverage.with_examples },
@@ -615,7 +648,20 @@ fn mock_detail(state: &AppState, s: &Snapshot, p: &Published, ctx: &Ctx) -> Opti
     }))
 }
 
-fn mcp_detail(key: &str, ctx: &Ctx) -> Value {
+/// What a mock's page says about authentication. Locked: the scheme and
+/// the mode only, never a key, a user name or a token.
+fn security_summary(c: &crate::mocks::compile::Compiled, reveal: bool, locked: bool) -> Value {
+    let mut v = c.credentials_summary(reveal);
+    if locked {
+        v["api_key"]["keys"] = json!([]);
+        v["basic"]["users"] = json!([]);
+        v["bearer"]["tokens"] = json!([]);
+        v["locked"] = json!(true);
+    }
+    v
+}
+
+fn mcp_detail(key: &str, ctx: &Ctx, locked: bool) -> Value {
     let (key, path, title, _) = MCP_SERVERS
         .iter()
         .find(|(k, ..)| *k == key)
@@ -655,6 +701,19 @@ fn mcp_detail(key: &str, ctx: &Ctx) -> Value {
     } else {
         ""
     };
+    if locked {
+        // Docs (the tools, their schemas, the auth it expects), no
+        // connection snippets.
+        return json!({
+            "path": path,
+            "url": url,
+            "title": title,
+            "transport": transport,
+            "auth": auth,
+            "tools": tools,
+            "locked": true,
+        });
+    }
     let mut server_json = json!({ "type": transport, "url": url });
     if key == "apikey" {
         server_json["headers"] = json!({ "X-API-Key": "demo-key" });
@@ -734,16 +793,27 @@ fn agent_detail(id: &str, ctx: &Ctx) -> Option<Value> {
     }))
 }
 
-fn tools_detail() -> Value {
+fn tools_detail(locked: bool) -> Value {
     let groups = crate::catalog::grouped();
     let categories: Vec<Value> = groups
         .iter()
         .filter(|(name, _)| TOOL_CATEGORIES.contains(name))
         .map(|(name, eps)| {
-            json!({
-                "name": name,
-                "endpoints": eps.iter().map(|ep| crate::ui::endpoint_json(ep)).collect::<Vec<_>>(),
-            })
+            let endpoints: Vec<Value> = eps
+                .iter()
+                .map(|ep| {
+                    let mut v = crate::ui::endpoint_json(ep);
+                    if locked {
+                        // The examples carry demo credentials (Basic users,
+                        // tokens, keys): for readers.
+                        if let Value::Object(m) = &mut v {
+                            m.remove("examples");
+                        }
+                    }
+                    v
+                })
+                .collect();
+            json!({ "name": name, "endpoints": endpoints })
         })
         .collect();
     json!({ "categories": categories })

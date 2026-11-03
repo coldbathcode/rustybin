@@ -582,6 +582,10 @@ function portalPanel(doc, reload, error) {
         ['Mode', mode],
         ['Who may read it', st.auth === 'open' ? 'anyone who reaches it' : st.auth === 'password' ? 'signed-in users (the console sign-in or any control credential)' : 'holders of an API key'],
         ['Base URL for testers', st.base_url ? h('span', { class: 'mono' }, st.base_url) : 'the URL the portal is opened with'],
+        ['Closed items', h('span', { id: 'portal-closed-count' }, (st.counts.closed || 0) + ' closed' + (st.auth === 'password' ? ' (portal.auth password closes every item)' : ''))],
+        ['Readers', h('span', { id: 'portal-readers' }, st.readers
+          ? st.readers.users + ' user(s) read closed items, ' + st.readers.portal_only + ' with a portal-only login (Users and roles: Invite a portal reader)'
+          : 'portal logins need the password sign-in; a bearer control credential with portal.read reads closed items')],
         ['Visitors may publish', st.visitors ? 'yes (self-service visitors, their own mocks)' : 'no'],
         ['Saved', st.persisted ? 'in the state directory (portal.json)' : 'in memory: publishing is lost on a restart (set RUSTYBIN_STATE_DIR)'],
       ]));
@@ -621,13 +625,17 @@ function portalPanel(doc, reload, error) {
           const state = !p ? badge('not published', '')
             : it.hidden ? h('span', null, badge('hidden', 'warn'), h('div', { class: 'tiny muted' }, it.hidden))
               : badge(p.source === 'file' ? 'published (file)' : 'published', 'ok');
+          const lock = p && p.access === 'closed'
+            ? h('span', { class: 'badge warn', 'data-closed': it.id, title: 'Closed: read by everyone, used only by signed-in portal readers' }, icon('lock'), 'closed')
+            : null;
+          const warning = it.warning ? h('div', { class: 'tiny', style: { color: 'var(--warn, inherit)' } }, it.warning) : null;
           const edit = h('button', { class: 'btn sm', type: 'button', 'data-portal-item': it.id }, p ? 'Edit' : 'Publish');
           edit.addEventListener('click', () => portal.openPublishDialog(it, { onDone: () => load() }));
           return h('tr', { 'data-item': it.id },
             h('td', null, cb),
             h('td', null, h('div', null, (p && p.title) || it.title), h('div', { class: 'tiny muted mono' }, it.id + (it.kind === 'api' && it.state !== 'live' ? ' (' + it.state + ')' : '')),
               p && p.visitor ? badge('visitor', 'outline') : null),
-            h('td', null, state),
+            h('td', null, h('div', { class: 'row', style: { gap: '4px', flexWrap: 'wrap' } }, state, lock), warning),
             h('td', { class: 'mono small' }, it.insights ? String(it.insights.views_7d) : ''),
             h('td', { class: 'right' }, edit));
         })))));

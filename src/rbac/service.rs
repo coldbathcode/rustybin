@@ -30,6 +30,9 @@ use crate::state::AppState;
 
 /// The console page an invitation link opens.
 pub const JOIN_PAGE: &str = "/ui/#/join/";
+/// The page an invitation of an account that opens only the API portal
+/// opens.
+pub const PORTAL_JOIN_PAGE: &str = "/portal/#/join/";
 
 /// The answer of a store refusal.
 pub fn store_error(e: UsersError) -> ServiceError {
@@ -166,11 +169,29 @@ pub fn invitation_link(base_url: &str, token: &str) -> String {
     format!("{}{JOIN_PAGE}{token}", base_url.trim_end_matches('/'))
 }
 
+/// The link an invitation of `user` opens: the API portal's join page
+/// (`<base>/portal/#/join/<token>`) for an account whose roles hold nothing
+/// but `portal.read` (a tester never sees the console), else the console's.
+pub fn invitation_link_for(state: &AppState, user: &User, base_url: &str, token: &str) -> String {
+    let portal_only = state
+        .users
+        .resolve(&user.id)
+        .is_some_and(|r| r.permissions.has(Permission::PortalRead) && r.permissions.len() == 1);
+    if portal_only {
+        format!(
+            "{}{PORTAL_JOIN_PAGE}{token}",
+            base_url.trim_end_matches('/')
+        )
+    } else {
+        invitation_link(base_url, token)
+    }
+}
+
 fn invitation_answer(state: &AppState, inv: &NewInvitation, base_url: &str) -> Value {
     json!({
         "user": user_view(state, &inv.user),
         "invitation": {
-            "url": invitation_link(base_url, &inv.token),
+            "url": invitation_link_for(state, &inv.user, base_url, &inv.token),
             "token": inv.token,
             "expires_at": users::rfc3339(inv.expires_at),
             "reset": !inv.user.pending,

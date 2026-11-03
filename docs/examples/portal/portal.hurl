@@ -1,6 +1,6 @@
 # The dev portal (docs/src/portal.md): off until something is published,
-# publish items, the catalogue testers read, a download, the counters, the
-# portal behind a credential, unpublish. Runs against the open instance of
+# publish items, the catalogue testers read, a download, the counters, a
+# closed item, the portal behind a credential, unpublish. Runs against the open instance of
 # docs/examples/run.sh, whose admin token guards changes; the plan instance
 # has nothing published.
 
@@ -115,6 +115,111 @@ HTTP 200
 jsonpath "$.items[?(@.id == 'mock:inventory')].views_7d" == 1
 jsonpath "$.items[?(@.id == 'mock:inventory')].downloads.hurl" == 1
 # ANCHOR_END: insights
+
+# ANCHOR: close
+# Closed: everyone reads it, only portal readers use it.
+PUT {{base_url}}/_rustybin/portal/items/mock:inventory
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{ "access": "closed" }
+HTTP 200
+[Asserts]
+jsonpath "$.published.access" == "closed"
+jsonpath "$.secured" == true
+# ANCHOR_END: close
+
+# ANCHOR: locked
+GET {{base_url}}/portal/api/catalog
+HTTP 200
+[Asserts]
+jsonpath "$.items[0].id" == "mock:inventory"
+jsonpath "$.items[0].access" == "closed"
+jsonpath "$.items[0].locked" == true
+jsonpath "$.items[0].detail.operations[?(@.id == 'getItem')].curl" contains "x-api-key: <api-key>"
+jsonpath "$.items[0].detail.downloads" count == 0
+body not contains "docs-inventory-key"
+
+GET {{base_url}}/portal/api/items/mock:inventory/collections/hurl
+HTTP 401
+[Asserts]
+jsonpath "$.reason" == "signin_required"
+
+# The calls need the credentials too.
+GET {{base_url}}/mock/inventory/items/SKU-1
+HTTP 401
+# ANCHOR_END: locked
+
+# ANCHOR: reader
+# A script keeps a header: a bearer control credential with portal.read.
+GET {{base_url}}/portal/api/catalog
+Authorization: Bearer {{admin_token}}
+HTTP 200
+[Asserts]
+jsonpath "$.portal.reader" == true
+jsonpath "$.items[0].locked" == false
+body contains "docs-inventory-key"
+
+GET {{base_url}}/portal/api/items/mock:inventory/collections/hurl
+Authorization: Bearer {{admin_token}}
+HTTP 200
+# ANCHOR_END: reader
+
+# ANCHOR: security_off
+POST {{base_url}}/_rustybin/mocks
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{
+  "name": "docs-open-api",
+  "deploy": true,
+  "spec": {
+    "openapi": "3.0.3",
+    "info": {"title": "Quotes", "version": "1.0"},
+    "paths": {"/quotes": {"get": {"operationId": "listQuotes",
+      "responses": {"200": {"description": "Quotes", "content": {"application/json": {"example": [{"id": 1}]}}}}}}}
+  }
+}
+HTTP 201
+
+# No mocked security: closing it is refused, naming the fix.
+PUT {{base_url}}/_rustybin/portal/items/mock:docs-open-api
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{ "access": "closed" }
+HTTP 409
+[Asserts]
+jsonpath "$.reason" == "security_off"
+
+# secure: true turns it on (api_key: the spec declares none), deploys it and closes it.
+PUT {{base_url}}/_rustybin/portal/items/mock:docs-open-api
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{ "access": "closed", "secure": true }
+HTTP 201
+[Asserts]
+jsonpath "$.secured_now" == true
+jsonpath "$.published.access" == "closed"
+
+GET {{base_url}}/mock/docs-open-api/quotes
+HTTP 401
+
+GET {{base_url}}/mock/docs-open-api/quotes
+x-api-key: demo-key
+HTTP 200
+# ANCHOR_END: security_off
+
+DELETE {{base_url}}/_rustybin/portal/items/mock:docs-open-api
+Authorization: Bearer {{admin_token}}
+HTTP 200
+
+DELETE {{base_url}}/_rustybin/mocks/docs-open-api
+Authorization: Bearer {{admin_token}}
+HTTP 200
+
+PUT {{base_url}}/_rustybin/portal/items/mock:inventory
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{ "access": "open" }
+HTTP 200
 
 # ANCHOR: password
 PATCH {{base_url}}/_rustybin/settings

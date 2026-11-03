@@ -100,3 +100,5 @@ body { background: var(--bg); }
   .portal-search { order: 3; max-width: none; flex-basis: 100%; }
   .hero h1 { font-size: 22px; }
 }
+/* Icons inline with a line of text (closed items, the signed-in name). */
+.portal-inline svg { width: 14px; height: 14px; flex: none; vertical-align: -2px; margin-right: 2px; }

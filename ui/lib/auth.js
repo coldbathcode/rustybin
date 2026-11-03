@@ -195,7 +195,11 @@ export function setToken(t, remember) {
 /**
  * Sign in with a user name and password (password mode): POST
  * /_rustybin/login on `server`. Resolves {ok, status, reason, retryAfter,
- * message}; on success the token is in use.
+ * message}; on success the token is in use. An account that opens only the
+ * API portal (`portal_only`) is not signed in to the console: the answer
+ * set the portal's cookie (Path=/portal, so the request keeps
+ * same-origin credentials), its console token is revoked at once, and the
+ * result says where to go (`portalUrl`).
  */
 export async function signIn(server, username, password, remember) {
   let resp;
@@ -204,7 +208,7 @@ export async function signIn(server, username, password, remember) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ username, password }),
-      credentials: 'omit',
+      credentials: 'same-origin',
       cache: 'no-store',
     });
   } catch {
@@ -212,6 +216,12 @@ export async function signIn(server, username, password, remember) {
   }
   let json = null;
   try { json = await resp.json(); } catch { json = null; }
+  if (resp.ok && json && json.portal_only) {
+    if (json.token) {
+      fetch(server + '/_rustybin/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + json.token }, credentials: 'omit', keepalive: true }).catch(() => {});
+    }
+    return { ok: false, status: resp.status, reason: 'portal_only', portalUrl: server + (json.portal_url || '/portal/'), portalSignedIn: !!json.portal_signed_in, message: 'This account opens the API portal, not the console.' };
+  }
   if (resp.ok && json && json.token) {
     setToken(json.token, !!remember);
     return { ok: true, status: resp.status, json };

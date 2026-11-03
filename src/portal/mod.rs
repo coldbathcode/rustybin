@@ -21,10 +21,20 @@
 //!   Try it use), the branding and `portal.visitors`.
 //! - Insights ([`insights`]): bounded counters per item (views per day for 30
 //!   days, downloads by format, Try it calls), no visitor identifiers.
+//! - Access ([`Access`]): each item is `open` or `closed`. A closed item is
+//!   read by everyone (docs, operations, schemas, spec) but used only by a
+//!   reader: a user holding `portal.read` signed in to the portal
+//!   ([`session`], the `rustybin_portal` cookie, accepted under `/portal`
+//!   only) or a bearer control credential that resolves it. A closed mock
+//!   has its mocked security on, so a call without the credentials the
+//!   portal hands to a reader is refused by the mock.
 
+#[cfg(test)]
+mod access_tests;
 pub mod api;
 pub mod insights;
 pub mod items;
+pub mod session;
 #[cfg(test)]
 mod tests;
 
@@ -110,7 +120,7 @@ pub fn specs() -> Vec<Spec> {
             "portal.auth",
             "portal",
             "Who may read the portal",
-            "open: anyone who reaches /portal; password: the console sign-in (or any control-plane credential); key: an API key of the key registry (shared mode). The page itself always loads; its data needs the credential.",
+            "open: anyone who reaches /portal, each item's access (open or closed) decides; password: the whole portal behind the portal sign-in (a user with portal.read, or a bearer control credential that holds it), every item treated as closed; key: an API key of the key registry (shared mode) reads the open items, a closed item still needs the sign-in. The page itself always loads.",
             Kind::Choice { options: AUTH_OPTIONS },
             json!("open"),
         )
@@ -188,6 +198,50 @@ impl AuthMode {
             Self::Key => "key",
         }
     }
+}
+
+/// An item's access: who may use it on the portal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Access {
+    /// Anyone who reaches the portal reads and uses it (0.3's only kind).
+    #[default]
+    Open,
+    /// Read by everyone, used (Try it, credentials, collections, connection
+    /// snippets) only by a reader.
+    Closed,
+}
+
+impl Access {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        *self == Self::Open
+    }
+}
+
+/// Is `access` (with `portal.auth`) closed? `password` closes every item.
+pub fn closed(settings: &Settings, access: Access) -> bool {
+    access == Access::Closed || auth_mode(settings) == AuthMode::Password
+}
+
+/// Does a mock's live revision refuse a call without credentials? Mocked
+/// security on, and in `spec` mode with an operation that declares a
+/// requirement. A shared-mode instance (or one that requires an API key)
+/// refuses every data-plane call without a key, so it counts too.
+pub fn mock_secured(config: &crate::config::Config, c: &crate::mocks::compile::Compiled) -> bool {
+    if config.shared_mode || config.require_key {
+        return true;
+    }
+    let sec = &c.settings.security;
+    sec.enabled
+        && (sec.mode != crate::mocks::model::SecurityMode::Spec
+            || c.spec.operations.iter().any(|o| !o.security.is_empty()))
 }
 
 pub fn auth_mode(settings: &Settings) -> AuthMode {
@@ -338,6 +392,9 @@ pub struct Published {
     /// Show the demo credentials a mock accepts (mocks only).
     #[serde(default = "default_true")]
     pub credentials: bool,
+    /// Open (default) or closed.
+    #[serde(default, skip_serializing_if = "Access::is_open")]
+    pub access: Access,
     pub published_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// Who published it (`admin-token`, `jwt:<sub>`, `open`, `v:1a2b3c4d`,
@@ -376,6 +433,10 @@ pub struct Meta {
     pub order: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials: Option<bool>,
+    /// `open` or `closed` (unset keeps what the item had, `open` for a new
+    /// one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<Access>,
 }
 
 /// One entry of the `portal.items` section of `rustybin.yaml`.
@@ -395,6 +456,9 @@ pub struct FileItem {
     pub order: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials: Option<bool>,
+    /// `closed`: read by everyone, used only by a reader (default `open`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<Access>,
 }
 
 impl FileItem {
@@ -406,6 +470,7 @@ impl FileItem {
             contact: self.contact.clone(),
             order: self.order,
             credentials: self.credentials,
+            access: self.access,
         }
     }
 }
@@ -506,6 +571,7 @@ pub fn clean_meta(meta: &Meta) -> Result<Meta, String> {
         contact: clean_text(&meta.contact, MAX_CONTACT, "the contact", false)?,
         order: meta.order,
         credentials: meta.credentials,
+        access: meta.access,
     })
 }
 
@@ -656,6 +722,7 @@ impl Portal {
                 contact: None,
                 order: 0,
                 credentials: true,
+                access: Access::Open,
                 published_at: now,
                 updated_at: now,
                 by: by.clone(),
@@ -668,6 +735,7 @@ impl Portal {
                 contact: meta.contact.or(base.contact),
                 order: meta.order.unwrap_or(base.order),
                 credentials: meta.credentials.unwrap_or(base.credentials),
+                access: meta.access.unwrap_or(base.access),
                 published_at: base.published_at,
                 updated_at: now,
                 by,

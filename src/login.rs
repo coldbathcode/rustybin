@@ -566,7 +566,7 @@ impl Tokens {
         self.hashing.clone().try_acquire_owned().ok()
     }
 
-    fn now(&self) -> i64 {
+    pub(crate) fn now(&self) -> i64 {
         self.clock.wall().timestamp()
     }
 
@@ -1166,6 +1166,127 @@ fn first_admin(state: &AppState) -> Option<crate::rbac::User> {
     state.users.first_admin()
 }
 
+/// Check a sign-in: the throttle (per address bucket and user name, and
+/// every address together), the user store (user one through the sign-in
+/// settings), the password, a disabled user answered as a wrong password.
+/// The answers are the console sign-in's, whichever route asks: the
+/// console's (`POST /_rustybin/login`) and the portal's (`POST
+/// /portal/api/login`) share the throttle and the audit target (`event`
+/// names the route). `Ok` is the user and the client's address.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn check_sign_in(
+    state: &AppState,
+    headers: &HeaderMap,
+    extensions: &Extensions,
+    username: &str,
+    password: &str,
+    event: &str,
+) -> Result<(crate::rbac::User, Option<IpAddr>), Response> {
+    let config = &state.config;
+    let ip = client_ip(headers, extensions, config);
+    warn_untrusted_proxy(headers, config);
+    let tokens = &config.console_tokens;
+    let tried = username;
+    if let Err(wait) = tokens.check(ip, tried) {
+        audit(event, username, ip, "rate_limited");
+        return Err(rate_limited(wait));
+    }
+    if username.chars().count() > MAX_USER_CHARS
+        || password.chars().count() > MAX_PASSWORD_CHARS * 4
+    {
+        tokens.failed(ip, tried);
+        audit(event, username, ip, "invalid_credentials");
+        return Err(error(
+            StatusCode::UNAUTHORIZED,
+            "invalid user name or password",
+            "invalid_credentials",
+        ));
+    }
+    // User one signs in with the sign-in settings (the 0.3 console user);
+    // anyone else with their own password in the user store. A name nobody
+    // has still checks the settings' password, so the answer takes as long.
+    let first = constant_time_eq(tried, &effective_user(&state.settings));
+    let other = if first {
+        None
+    } else {
+        state
+            .users
+            .find_by_name(tried)
+            .filter(|u| !state.users.is_first_admin(&u.id))
+    };
+    let checked = match &other {
+        Some(u) => check_user_password(state, u, password).await,
+        None => check_credentials(state, username, password).await,
+    };
+    let Some(ok) = checked else {
+        tokens.abandoned(ip, tried);
+        return Err(busy());
+    };
+    let account = if !ok {
+        None
+    } else if first {
+        first_admin(state)
+    } else {
+        other
+    };
+    // A disabled user gets the answer of a wrong password.
+    let Some(account) = account.filter(|u| !u.disabled) else {
+        tokens.failed(ip, tried);
+        audit(event, username, ip, "invalid_credentials");
+        return Err(error(
+            StatusCode::UNAUTHORIZED,
+            "invalid user name or password",
+            "invalid_credentials",
+        ));
+    };
+    tokens.succeeded(ip, tried);
+    Ok((account, ip))
+}
+
+/// Does `user` hold `portal.read` and nothing else? Such an account opens
+/// the API portal, not the console.
+pub fn portal_only(state: &AppState, user: &crate::rbac::User) -> bool {
+    state.users.resolve(&user.id).is_some_and(|r| {
+        r.permissions.has(crate::rbac::Permission::PortalRead) && r.permissions.len() == 1
+    })
+}
+
+/// The answer to a console sign-in (or invitation) of a portal-only
+/// account, or an invitation accepted on the portal's page: `body` plus
+/// `portal_only`, where to go, and the portal session cookie when the
+/// portal is on.
+fn portal_only_answer(
+    state: &AppState,
+    headers: &HeaderMap,
+    extensions: &Extensions,
+    uri: &axum::http::Uri,
+    account: &crate::rbac::User,
+    status: StatusCode,
+    mut body: Value,
+) -> Response {
+    if body.get("portal_only").is_none() {
+        body["portal_only"] = json!(true);
+    }
+    body["portal_url"] = json!("/portal/");
+    body["user"] = json!(account.name);
+    body["display_name"] = json!(account.display_name);
+    let cookie = if crate::portal::active(state) {
+        crate::portal::session::issue_cookie(state, headers, extensions, uri, account)
+    } else {
+        body["hint"] =
+            json!("the API portal is off on this instance: ask its operator to publish something");
+        None
+    };
+    body["portal_signed_in"] = json!(cookie.is_some());
+    let mut resp = (status, Json(body)).into_response();
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if let Some(c) = cookie {
+        resp.headers_mut().insert(header::SET_COOKIE, c);
+    }
+    resp
+}
+
 // ── Handlers ────────────────────────────────────────────────────────
 
 #[derive(Deserialize, Default)]
@@ -1180,6 +1301,7 @@ async fn login_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     extensions: Extensions,
+    uri: axum::http::Uri,
     body: Result<Json<LoginBody>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     let config = &state.config;
@@ -1199,63 +1321,20 @@ async fn login_handler(
             )
         }
     };
-    let ip = client_ip(&headers, &extensions, config);
-    warn_untrusted_proxy(&headers, config);
-    let tokens = &config.console_tokens;
-    let tried = body.username.as_str();
-    if let Err(wait) = tokens.check(ip, tried) {
-        audit("login", &body.username, ip, "rate_limited");
-        return rate_limited(wait);
-    }
-    if body.username.chars().count() > MAX_USER_CHARS
-        || body.password.chars().count() > MAX_PASSWORD_CHARS * 4
+    let (account, ip) = match check_sign_in(
+        &state,
+        &headers,
+        &extensions,
+        &body.username,
+        &body.password,
+        "login",
+    )
+    .await
     {
-        tokens.failed(ip, tried);
-        audit("login", &body.username, ip, "invalid_credentials");
-        return error(
-            StatusCode::UNAUTHORIZED,
-            "invalid user name or password",
-            "invalid_credentials",
-        );
-    }
-    // User one signs in with the sign-in settings (the 0.3 console user);
-    // anyone else with their own password in the user store. A name nobody
-    // has still checks the settings' password, so the answer takes as long.
-    let first = constant_time_eq(tried, &effective_user(&state.settings));
-    let other = if first {
-        None
-    } else {
-        state
-            .users
-            .find_by_name(tried)
-            .filter(|u| !state.users.is_first_admin(&u.id))
+        Ok(a) => a,
+        Err(resp) => return resp,
     };
-    let checked = match &other {
-        Some(u) => check_user_password(&state, u, &body.password).await,
-        None => check_credentials(&state, &body.username, &body.password).await,
-    };
-    let Some(ok) = checked else {
-        tokens.abandoned(ip, tried);
-        return busy();
-    };
-    let account = if !ok {
-        None
-    } else if first {
-        first_admin(&state)
-    } else {
-        other
-    };
-    // A disabled user gets the answer of a wrong password.
-    let Some(account) = account.filter(|u| !u.disabled) else {
-        tokens.failed(ip, tried);
-        audit("login", &body.username, ip, "invalid_credentials");
-        return error(
-            StatusCode::UNAUTHORIZED,
-            "invalid user name or password",
-            "invalid_credentials",
-        );
-    };
-    tokens.succeeded(ip, tried);
+    let tokens = &config.console_tokens;
     let user = account.name.clone();
     let Some((token, claims)) = mint(config, &account) else {
         return error(
@@ -1277,7 +1356,22 @@ async fn login_handler(
         tracing::warn!(target: "rustybin::auth", error = %e, "the sign-in time could not be saved");
     }
     audit("login", &user, ip, "ok");
-    let mut resp = Json(token_body(&token, &claims, &account, &state)).into_response();
+    let body = token_body(&token, &claims, &account, &state);
+    // An account that opens only the API portal: the console sends it
+    // there, signed in to the portal too (the token still serves its own
+    // account, /_rustybin/me, and nothing else).
+    if portal_only(&state, &account) {
+        return portal_only_answer(
+            &state,
+            &headers,
+            &extensions,
+            &uri,
+            &account,
+            StatusCode::OK,
+            body,
+        );
+    }
+    let mut resp = Json(body).into_response();
     resp.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     resp
@@ -1799,6 +1893,10 @@ struct JoinBody {
     token: String,
     #[serde(default)]
     password: String,
+    /// Joined from the API portal's page (`/portal/#/join/<token>`): the
+    /// answer signs in to the portal (its cookie) instead of the console.
+    #[serde(default)]
+    portal: bool,
 }
 
 fn invalid_invitation() -> Response {
@@ -1813,11 +1911,14 @@ fn invalid_invitation() -> Response {
 /// 0.3 rules). Open and rate limited like the sign-in (per address, and
 /// every address together); the token is checked before the password is
 /// hashed, used once, and never logged. Answers a sign-in token: the person
-/// is signed in.
+/// is signed in. A join from the portal's page (`portal: true`) signs in to
+/// the portal instead (its cookie, no console token); an account that opens
+/// only the API portal gets the portal's cookie too, and `portal_only`.
 async fn join_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     extensions: Extensions,
+    uri: axum::http::Uri,
     body: Result<Json<JoinBody>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     let config = &state.config;
@@ -1913,6 +2014,25 @@ async fn join_handler(
         ip,
         "ok",
     );
+    if body.portal {
+        if let Err(e) = state.users.note_sign_in(&account.id) {
+            tracing::warn!(target: "rustybin::auth", error = %e, "the sign-in time could not be saved");
+        }
+        audit("join", &account.name, ip, "portal");
+        return portal_only_answer(
+            &state,
+            &headers,
+            &extensions,
+            &uri,
+            &account,
+            StatusCode::OK,
+            json!({
+                "joined": true,
+                "reset": accepted.reset,
+                "portal_only": portal_only(&state, &account),
+            }),
+        );
+    }
     let Some((token, claims)) = issue(config, &account, ip) else {
         return error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1927,6 +2047,17 @@ async fn join_handler(
     out["joined"] = json!(true);
     out["reset"] = json!(accepted.reset);
     out["display_name"] = json!(account.display_name);
+    if portal_only(&state, &account) {
+        return portal_only_answer(
+            &state,
+            &headers,
+            &extensions,
+            &uri,
+            &account,
+            StatusCode::OK,
+            out,
+        );
+    }
     let mut resp = Json(out).into_response();
     resp.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));

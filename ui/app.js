@@ -342,13 +342,20 @@ function handleJoin() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({ token, password: password.value }),
-        credentials: 'omit',
+        credentials: 'same-origin',
         cache: 'no-store',
       });
       try { json = await resp.json(); } catch { json = null; }
     } catch {
       replace(err, notice('err', 'Rustybin could not be reached: try again.'));
       submit.disabled = false;
+      return;
+    }
+    if (resp.ok && json && json.portal_only) {
+      // A portal reader joined from an old console link: signed in to the
+      // portal (its cookie); the console token is not kept.
+      if (json.token) fetch(SERVER + '/_rustybin/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + json.token }, credentials: 'omit', keepalive: true }).catch(() => {});
+      location.href = SERVER + (json.portal_url || '/portal/');
       return;
     }
     if (resp.ok && json && json.token) {
@@ -472,6 +479,15 @@ function renderSignIn() {
     const r = await auth.signIn(SERVER, u, p, remember.input.checked);
     submit.disabled = false;
     if (r.ok) return; // the token event verifies and resumes
+    if (r.reason === 'portal_only') {
+      // A portal reader: the login opens the API portal, nothing here.
+      replace(err, notice('ok', h('span', { id: 'signin-portal-only' }, 'This account opens the API portal, not the console. ',
+        r.portalSignedIn ? 'Taking you there, signed in.' : 'Open the portal and sign in there.'),
+      ' ', h('a', { href: r.portalUrl, id: 'signin-portal-link' }, 'Open the API portal')));
+      passwordInput.value = '';
+      if (r.portalSignedIn) setTimeout(() => { location.href = r.portalUrl; }, 1200);
+      return;
+    }
     const text = r.reason === 'rate_limited' && r.retryAfter ? 'Too many failed attempts: try again in ' + fmtDuration(r.retryAfter) + '.' : (REASONS[r.reason] || r.message);
     replace(err, notice('err', text));
     passwordInput.value = '';

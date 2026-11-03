@@ -179,6 +179,13 @@ impl OAuthKey {
     pub(crate) fn console_secret(&self) -> [u8; 32] {
         self.mac("console", b"")
     }
+
+    /// The subkey signing the API portal's session cookie
+    /// (`crate::portal::session`): the same instance key, its own label, so
+    /// a portal session is never a console or an OAuth token.
+    pub(crate) fn portal_secret(&self) -> [u8; 32] {
+        self.mac("portal", b"")
+    }
 }
 
 // ── Modes ───────────────────────────────────────────────────────────

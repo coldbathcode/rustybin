@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use super::access::Access;
 use super::tools::{arg_bool, arg_str, confirm, err, need_str, ok, service_error, Confirm};
 use crate::mcp::core::CallCtx;
-use crate::portal::{self, api as portal_api, AuthMode, Meta};
+use crate::portal::{self, api as portal_api, Access as ItemAccess, AuthMode, Meta};
 
 /// `list_portal_items`: the portal's settings, every item the caller may
 /// publish (mocks, MCP servers, the LLM, agents, the tools, the registry)
@@ -59,6 +59,12 @@ fn meta_from(args: &Value) -> Result<Meta, Value> {
         contact: arg_str(args, "contact").map(str::to_string),
         order: args.get("order").and_then(Value::as_i64),
         credentials: arg_bool(args, "credentials"),
+        access: match arg_str(args, "access") {
+            None => None,
+            Some("open") => Some(ItemAccess::Open),
+            Some("closed") => Some(ItemAccess::Closed),
+            Some(other) => return Err(err(format!("access is open or closed, not {other:?}"))),
+        },
     })
 }
 
@@ -91,14 +97,26 @@ pub async fn publish_portal_item(
             return v;
         }
     }
+    let secure = arg_bool(args, "secure").unwrap_or(false);
     let svc = access.svc(state);
-    match portal_api::publish_item(state, &svc, &access.principal(), id, meta) {
-        Ok((view, created)) => {
+    match portal_api::publish_secured(state, &svc, &access.principal(), id, meta, secure).await {
+        Ok((view, created, secured)) => {
             let hidden = view["hidden"].as_str().map(str::to_string);
+            let closed = view["published"]["access"] == "closed";
             let summary = format!(
-                "{} {id} on the portal ({}/portal/){}{}",
+                "{} {id} on the portal ({}/portal/){}{}{}{}",
                 if created { "Published" } else { "Updated" },
                 access.links.base_url(),
+                if closed {
+                    ", closed: read by everyone, used only by portal readers"
+                } else {
+                    ""
+                },
+                if secured {
+                    "; the mock's mocked security was turned on and deployed"
+                } else {
+                    ""
+                },
                 if portal::active(state) {
                     ""
                 } else {

@@ -2447,6 +2447,160 @@ def run_users(browser):
     ctx.close()
 
 
+def run_portal_access(browser):
+    """Open and closed APIs on the dev portal (access control step 13) on the
+    password instance: the admin closes the sample mock from the publish
+    dialog (Turn on security and close) and invites a portal reader; the
+    portal signed out shows the closed API with a lock and Try it locked;
+    the reader joins from the link, the credentials and Try it appear; Sign
+    out locks it again; Sign in from the header; a console sign-in of the
+    reader lands on the portal."""
+    base = os.environ["RUSTYBIN_PASSWORD_URL"].rstrip("/")
+    print(f"portal access: {base}")
+    ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+    page = ctx.new_page()
+    page.set_default_timeout(TIMEOUT)
+    page.on("pageerror", lambda e: console_errors.append(f"[portal access] uncaught: {e}"))
+    held = {}
+    reader_password = "rita-secret-k3Qx"
+    item = base + "/portal/#/i/" + urllib.parse.quote("mock:petstore", safe="")
+
+    def close_and_invite():
+        page.goto(base + "/ui/#/manage/portal")
+        page.wait_for_selector("#signin")
+        page.fill("#signin-user", "rustybin")
+        page.fill("#signin-password", "rustybin")
+        page.get_by_role("button", name="Sign in", exact=True).click()
+        page.wait_for_selector("[data-portal-item='mock:petstore']")
+        page.locator("[data-portal-item='mock:petstore']").click()
+        page.wait_for_selector("#portal-access-open")
+        expect(page.locator("#portal-access-open")).to_be_checked()
+        page.check("#portal-access-closed")
+        expect(page.locator("#portal-access-note")).to_contain_text("no mocked security")
+        expect(page.locator("#portal-publish")).to_have_text("Turn on security and close")
+        shot(page, "password", "50-portal-close-dialog")
+        page.locator("#portal-publish").click()
+        page.wait_for_selector("[data-closed='mock:petstore']")
+        expect(page.locator("#portal-closed-count")).to_contain_text("1 closed")
+        expect(page.locator("#portal-readers")).to_contain_text("read closed items")
+        shot(page, "password", "51-management-portal-closed")
+        assert_icons_sized(page, "the portal tab with a closed item")
+        # A call without the credentials is refused now.
+        req = urllib.request.Request(base + "/mock/petstore/v1/pets", data=b'{"name":"Rex"}', headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            urllib.request.urlopen(req, timeout=10)
+            raise AssertionError("the closed mock answered without credentials")
+        except urllib.error.HTTPError as e:
+            assert e.code == 401, e.code
+        # Invite a portal reader: the link opens the portal.
+        page.goto(base + "/ui/#/manage/users")
+        page.wait_for_selector("#invite-name")
+        page.fill("#invite-name", "rita")
+        page.fill("#invite-display", "Rita Reader")
+        page.wait_for_selector("#invite-role-portal_reader")
+        page.locator("#invite-portal-reader").click()
+        page.wait_for_selector("#invite-link")
+        link = page.input_value("#invite-link")
+        assert "/portal/#/join/rbi_" in link, link
+        held["link"] = link
+        expect(page.locator("[data-user=rita]")).to_contain_text("portal_reader")
+
+    step("portal access: close the sample mock and invite a portal reader", close_and_invite)
+
+    ctx2 = browser.new_context(viewport={"width": 1280, "height": 900})
+    p2 = ctx2.new_page()
+    p2.set_default_timeout(TIMEOUT)
+    p2.on("pageerror", lambda e: console_errors.append(f"[portal access, reader] uncaught: {e}"))
+
+    def locked_page():
+        p2.goto(item)
+        p2.wait_for_selector("#portal-locked")
+        expect(p2.locator("[data-access=closed]").first).to_contain_text("closed")
+        p2.wait_for_selector("#portal-credentials-locked")
+        p2.wait_for_selector("#portal-downloads-locked")
+        assert "demo-key" not in p2.content(), "the demo key shows signed out"
+        op = p2.locator("details.op[data-op=createPet]")
+        op.locator("summary").click()
+        send = op.locator(".try button[type=submit]")
+        expect(send).to_be_disabled()
+        expect(send).to_have_text("Sign in to try this API")
+        expect(op).to_contain_text("<api-key>")
+        expect(p2.locator("#portal-sign-in-btn")).to_be_visible()
+        shot(p2, "password", "52-portal-closed-signed-out")
+        assert_icons_sized(p2, "the closed portal page")
+
+    step("portal access: a closed API signed out, Try it locked", locked_page)
+
+    def join_and_use():
+        p2.goto(held["link"])
+        p2.wait_for_selector("#portal-join")
+        assert "rbi_" not in p2.url, "the token stayed in the address bar"
+        p2.fill("#portal-join-password", reader_password)
+        p2.fill("#portal-join-confirm", reader_password)
+        shot(p2, "password", "53-portal-join")
+        p2.locator("#portal-join-submit").click()
+        p2.wait_for_selector("#portal-signed-in")
+        expect(p2.locator("#portal-signed-in")).to_contain_text("Rita Reader")
+        p2.goto(item)
+        p2.wait_for_selector("#portal-credentials")
+        expect(p2.locator("#portal-credentials")).to_contain_text("demo-key")
+        expect(p2.locator("#portal-locked")).to_have_count(0)
+        expect(p2.locator("button[data-format='hurl']")).to_have_count(1)
+        op = p2.locator("details.op[data-op=createPet]")
+        op.locator("summary").click()
+        send = op.locator(".try button[type=submit]")
+        expect(send).to_be_enabled()
+        send.click()
+        badge = op.locator(".try-result .badge").first
+        badge.wait_for()
+        assert "401" not in badge.inner_text(), badge.inner_text()
+        shot(p2, "password", "54-portal-closed-signed-in")
+        assert_icons_sized(p2, "the unlocked portal page")
+
+    step("portal access: the reader joins, the credentials and Try it appear", join_and_use)
+
+    def sign_out_and_in():
+        p2.locator("#portal-sign-out").click()
+        p2.wait_for_selector("#portal-sign-in-btn")
+        p2.wait_for_selector("#portal-locked")
+        expect(p2.locator("#portal-credentials-locked")).to_have_count(1)
+        p2.locator("#portal-sign-in-btn").click()
+        p2.wait_for_selector("#portal-signin")
+        p2.fill("#portal-user", "rita")
+        p2.fill("#portal-password", "wrong-password-1")
+        p2.locator("#portal-sign-in").click()
+        p2.wait_for_selector("#portal-signin .notice.err")
+        p2.fill("#portal-password", reader_password)
+        p2.locator("#portal-sign-in").click()
+        p2.wait_for_selector("#portal-credentials")
+        expect(p2.locator("#portal-signed-in")).to_contain_text("Rita Reader")
+        p2.locator("#portal-sign-out").click()
+        p2.wait_for_selector("#portal-sign-in-btn")
+
+    step("portal access: sign out locks it, Sign in unlocks it", sign_out_and_in)
+
+    def console_sign_in_of_a_reader():
+        ctx3 = browser.new_context(viewport={"width": 1280, "height": 860})
+        try:
+            p3 = ctx3.new_page()
+            p3.set_default_timeout(TIMEOUT)
+            p3.on("pageerror", lambda e: console_errors.append(f"[portal access, console] uncaught: {e}"))
+            p3.goto(base + "/ui/")
+            p3.wait_for_selector("#signin")
+            p3.fill("#signin-user", "rita")
+            p3.fill("#signin-password", reader_password)
+            p3.get_by_role("button", name="Sign in", exact=True).click()
+            p3.wait_for_selector("#signin-portal-only")
+            p3.wait_for_url("**/portal/**")
+            p3.wait_for_selector("#portal-signed-in")
+        finally:
+            ctx3.close()
+
+    step("portal access: a console sign-in of a portal reader lands on the portal", console_sign_in_of_a_reader)
+    ctx2.close()
+    ctx.close()
+
+
 def main():
     print(f"console e2e against {BASE}")
     with sync_playwright() as p:
@@ -2463,6 +2617,7 @@ def main():
         if os.environ.get("RUSTYBIN_PASSWORD_URL"):
             run_password(browser)
             run_users(browser)
+            run_portal_access(browser)
         browser.close()
     for e in console_errors:
         failures.append("console: " + e)

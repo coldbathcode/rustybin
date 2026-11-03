@@ -797,6 +797,9 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | POST | `/portal/api/events` | Count a portal view or Try it call (no identifiers stored) |
 | GET | `/portal/api/items/{id}/collections/{format}` | A published mock as a collection (Postman, Hurl, curl, .http, k6, Bruno, Insomnia) |
 | GET | `/portal/reference/{id}` | A published mock's spec in the API reference viewer |
+| POST | `/portal/api/login` | Dev portal sign-in: a user name and password for the portal's session cookie |
+| POST | `/portal/api/logout` | Dev portal sign-out: end the session and clear its cookie |
+| GET | `/portal/api/session` | Who is signed in to the portal, and whether they read closed items |
 | GET | `/ui` | Web console (redirects to /ui/) |
 | GET | `/ui/` | Web console entry page |
 | GET | `/ui/{*path}` | Console assets; extension-less paths fall back to index.html |

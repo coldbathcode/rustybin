@@ -113,6 +113,8 @@ route's:
 | The MCP relay and checks: a saved connection's credentials, or a method that acts on a server on another host (`tools/call`) | `mcp.connections` |
 | `GET /_rustybin/checkpoints?from=git` and a restore from the repository | `git.read` |
 | The `/health` toggles and `POST /flaky/reset?scope=all` (data plane) | `settings.write` |
+| `PUT /_rustybin/portal/items/{id}` with `secure: true` (turns on a mock's mocked security to close it) | `mocks.write` |
+| A closed portal item's credentials, Try it, collections and connection snippets (`/portal/api/*`), and the whole portal with `portal.auth=password` | `portal.read`, from the [portal sign-in](../portal.md#portal-logins) or a bearer control credential |
 
 ## User name and password
 

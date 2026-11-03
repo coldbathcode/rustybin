@@ -25,7 +25,10 @@ environment, as before.
 ## Invite someone
 
 `POST /_rustybin/users` (`users.manage`) creates the user, **invited** (disabled
-until they accept), and answers the link `https://<host>/ui/#/join/<token>` once:
+until they accept), and answers the link `https://<host>/ui/#/join/<token>` once (for
+a user whose only role is `portal_reader`, the [API portal's](portal.md#portal-logins)
+join page, `https://<host>/portal/#/join/<token>`, so a tester never sees the
+console):
 
 ```hurl
 {{#include ../examples/concepts/users.hurl:invite}}
@@ -169,6 +172,9 @@ roles' permission matrix with the privileged roles marked; a form for custom rol
 The account menu (your name in the top bar) opens **My account**: your profile, your
 permissions, your password and your sessions. The link of an invitation opens the
 console's join page, which takes the token out of the address bar at once.
+**Invite a portal reader** invites with the `portal_reader` role alone: the link opens
+the [API portal](portal.md#portal-logins), and a console sign-in with that login is
+sent there.
 
 ## Limits
 

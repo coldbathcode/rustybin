@@ -473,8 +473,8 @@ pub static TOOLS: &[ToolDef] = &[
         "confirm": confirm_prop()
     }), &["name"])),
     // ── Dev portal ──
-    tool!("list_portal_items", "Portal items", "The dev portal: on or off, who may read it (auth), the branding, every item that can be published (mocks, MCP servers, the LLM, agents, the tools, the registry) with its published metadata, whether it is hidden and why, and its insights.", ToolNeed::Perm(Permission::InstanceRead), ro=true, destructive=false, idem=true, confirm=false, no_args),
-    tool!("publish_portal_item", "Publish to the portal", "Publish an item to the dev portal with its metadata (or update the metadata of a published one): mock:<name>, mcp:<server>, llm, a2a:<agent>, tools or registry. Mocks need manage rights, the rest admin. When the portal is on and open to anyone the item becomes public at once, so the user confirms.", ToolNeed::Owner(Permission::PortalPublish), ro=false, destructive=false, idem=true, confirm=true, || obj(json!({
+    tool!("list_portal_items", "Portal items", "The dev portal: on or off, who may read it (auth), how many users read closed items, the branding, every item that can be published (mocks, MCP servers, the LLM, agents, the tools, the registry) with its published metadata (access open or closed), whether it is hidden and why, and its insights.", ToolNeed::Perm(Permission::InstanceRead), ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("publish_portal_item", "Publish to the portal", "Publish an item to the dev portal with its metadata (or update the metadata of a published one): mock:<name>, mcp:<server>, llm, a2a:<agent>, tools or registry, open or closed (access). Mocks need manage rights, the rest admin. When the portal is on and open to anyone the item becomes public at once, so the user confirms.", ToolNeed::Owner(Permission::PortalPublish), ro=false, destructive=false, idem=true, confirm=true, || obj(json!({
         "id": { "type": "string", "description": "mock:<name>, mcp:<server>, llm, a2a:<agent>, tools or registry" },
         "title": { "type": "string" },
         "summary": { "type": "string", "description": "A paragraph in Markdown" },
@@ -482,6 +482,8 @@ pub static TOOLS: &[ToolDef] = &[
         "contact": { "type": "string" },
         "order": { "type": "integer", "description": "Lower comes first" },
         "credentials": { "type": "boolean", "description": "Show a mock's demo credentials (default true)" },
+        "access": { "type": "string", "enum": ["open", "closed"], "description": "open (default): anyone uses it; closed: everyone reads the docs, only portal readers (portal.read) get Try it, the credentials, collections and connection snippets. A mock closes only with its mocked security on" },
+        "secure": { "type": "boolean", "description": "With access closed on a mock without mocked security: turn it on (the mode the spec declares, else api_key) and deploy, then close (needs mocks.write)" },
         "confirm": confirm_prop()
     }), &["id"])),
     tool!("unpublish_portal_item", "Unpublish from the portal", "Remove an item from the dev portal (its metadata goes with it).", ToolNeed::Owner(Permission::PortalPublish), ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "id": { "type": "string" } }), &["id"])),

@@ -1,6 +1,8 @@
 // Management, Users and roles (access control): the users with their roles,
 // status and last sign-in; Invite answers a one-time link to copy (shown
-// once: the person opens it and sets their own password); a user's roles,
+// once: the person opens it and sets their own password; Invite a portal
+// reader gives the portal_reader role alone, whose link opens the API
+// portal's join page, never the console); a user's roles,
 // disable and enable, a new link (a password reset), delete. The roles with
 // the permission matrix, privileged roles marked; custom roles saved and
 // deleted. GET /_rustybin/users and /roles need users.read, changes
@@ -66,13 +68,20 @@ export function usersPanel() {
   const email = input({ id: 'invite-email', type: 'email', placeholder: 'alice@example.com' });
   const inviteRoles = h('div', { id: 'invite-roles' });
   const inviteBtn = perms.guard(h('button', { class: 'btn primary', type: 'submit', id: 'invite-submit' }, icon('plus'), 'Invite'), 'users.manage');
+  // A tester's login: the portal_reader role alone, the portal's join link.
+  const readerBtn = perms.guard(h('button', { class: 'btn', type: 'button', id: 'invite-portal-reader', title: 'The portal_reader role alone: the link opens the API portal, and the login opens nothing in the console' }, icon('lock'), 'Invite a portal reader'), 'users.manage');
+  readerBtn.addEventListener('click', () => {
+    for (const i of inviteRoles.querySelectorAll('input[name=role]')) i.checked = i.value === 'portal_reader';
+    if (typeof inviteForm.requestSubmit === 'function') inviteForm.requestSubmit(inviteBtn);
+    else inviteBtn.click();
+  });
   const inviteForm = h('form', { class: 'stack', 'aria-label': 'Invite a user' },
     h('div', { class: 'row', style: { gap: '12px', flexWrap: 'wrap' } },
       field('Sign-in name', name, 'Letters, digits and . _ @ -'),
       field('Display name', display),
       field('Email', email, 'Optional, never logged')),
     field('Roles', inviteRoles, 'You grant only roles whose permissions you hold.'),
-    h('div', { class: 'row' }, h('span', { class: 'grow muted small' }, 'The user is created invited and joins through the link.'), inviteBtn));
+    h('div', { class: 'row' }, h('span', { class: 'grow muted small' }, 'The user is created invited and joins through the link. A portal reader reads the API portal\'s closed items and nothing in the console.'), readerBtn, inviteBtn));
   inviteForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const chosen = checkedRoles(inviteRoles);

@@ -1,6 +1,7 @@
 // The dev portal from the console: the publish dialog (title, summary,
-// tags, contact, order, demo credentials; "Write with AI" runs the
-// summarise_for_portal task for a mock) and the calls behind it
+// tags, contact, order, demo credentials, Open or Closed with "Turn on
+// security and close" for a mock without mocked security; "Write with AI"
+// runs the summarise_for_portal task for a mock) and the calls behind it
 // (GET /_rustybin/portal, PUT and DELETE /_rustybin/portal/items/{id}).
 // Used by a mock's page and by Management, Portal.
 import { h, replace, icon, notice, toast, input, textarea, field, checkbox } from './dom.js';
@@ -49,6 +50,35 @@ export function openPublishDialog(item, opts = {}) {
   const contact = input({ value: p.contact || '', placeholder: 'team@example.com or a URL', 'aria-label': 'Portal contact', maxlength: 200 });
   const order = input({ type: 'number', value: String(p.order || 0), min: -1000, max: 1000, step: 1, 'aria-label': 'Portal order', class: 'input mono', style: { width: '110px' } });
   const creds = checkbox('Show the demo credentials the mock accepts', p.credentials !== false);
+  // Open or closed: closed items are read by everyone and used only by
+  // signed-in portal readers (portal.read).
+  const wasClosed = p.access === 'closed';
+  const radio = (value, label) => h('label', { class: 'row nowrap small' },
+    h('input', { type: 'radio', name: 'portal-access', value, id: 'portal-access-' + value, checked: (value === 'closed') === wasClosed }), label);
+  const openR = radio('open', 'Open');
+  const closedR = radio('closed', 'Closed');
+  const isClosed = () => closedR.querySelector('input').checked;
+  const needsSecurity = () => item.kind === 'api' && item.secured === false && isClosed();
+  const accessNote = h('div', { id: 'portal-access-note' });
+  const STAY_SECURED = { 'mcp:protected': true, 'mcp:apikey': true };
+  const paintAccess = () => {
+    if (!isClosed()) { replace(accessNote, h('p', { class: 'muted small', style: { margin: 0 } }, 'Open: anyone who reaches the portal reads and uses it.')); }
+    else {
+      const what = h('p', { class: 'muted small', style: { margin: 0 } }, 'Closed: everyone reads the docs; only signed-in portal readers (the portal.read permission, the portal_reader role) get Try it, the demo credentials, the collections and the connection snippets.');
+      let extra = null;
+      if (item.kind === 'api' && item.secured === false) {
+        extra = notice('warn', 'This mock has no mocked security on: closed, its calls would still answer without credentials. ', h('strong', null, 'Turn on security and close'), ' turns it on (the mode the spec declares, else api_key), deploys it and closes the entry.');
+      } else if (item.kind !== 'api') {
+        extra = h('p', { class: 'small', style: { margin: 0 } }, STAY_SECURED[item.id]
+          ? 'This endpoint already refuses a call without its credentials.'
+          : 'This endpoint stays callable without credentials: closing hides its credentials and connection snippets on the portal.');
+      }
+      replace(accessNote, what, extra);
+    }
+    if (typeof syncPublish === 'function') syncPublish();
+  };
+  for (const r of [openR, closedR]) r.querySelector('input').addEventListener('change', paintAccess);
+  let syncPublish = null;
   const err = h('div');
   const aiOut = h('div');
   const body = h('div', { class: 'wizard-body stack' });
@@ -86,8 +116,14 @@ export function openPublishDialog(item, opts = {}) {
       field('Order', order, 'Lower comes first.')),
     field('Contact', contact, 'Who testers ask about it (optional).'),
     item.kind === 'api' ? creds.el : null,
+    field('Access', h('div', { class: 'stack-sm' }, h('div', { class: 'row', style: { gap: '16px' }, role: 'radiogroup', 'aria-label': 'Access' }, openR, closedR), accessNote)),
     err);
   const publishBtn = perms.guard(h('button', { class: 'btn primary', type: 'button', id: 'portal-publish' }, icon('upload'), p.published_at ? 'Save' : 'Publish'), 'portal.publish');
+  syncPublish = () => {
+    const label = needsSecurity() ? 'Turn on security and close' : (p.published_at ? 'Save' : 'Publish');
+    replace(publishBtn, icon(needsSecurity() ? 'lock' : 'upload'), label);
+  };
+  paintAccess();
   const unpublishBtn = p.published_at && p.source !== 'file' ? perms.guard(h('button', { class: 'btn danger', type: 'button', id: 'portal-unpublish' }, 'Unpublish'), 'portal.publish') : null;
   publishBtn.addEventListener('click', async () => {
     const meta = {
@@ -98,12 +134,14 @@ export function openPublishDialog(item, opts = {}) {
       order: Number(order.value) || 0,
     };
     if (item.kind === 'api') meta.credentials = creds.input.checked;
+    meta.access = isClosed() ? 'closed' : 'open';
+    if (needsSecurity()) meta.secure = true;
     publishBtn.disabled = true;
     const r = await publish(item.id, meta);
     publishBtn.disabled = false;
     if (!r.ok) { replace(err, notice('err', errorOf(r))); return; }
     dlg.close();
-    toast((r.status === 201 ? 'Published ' : 'Updated ') + item.title + (r.json && r.json.hidden ? ' (hidden: ' + r.json.hidden + ')' : ''));
+    toast((r.status === 201 ? 'Published ' : 'Updated ') + item.title + (meta.access === 'closed' ? ', closed' : '') + (r.json && r.json.secured_now ? ' (its mocked security is on now)' : '') + (r.json && r.json.hidden ? ' (hidden: ' + r.json.hidden + ')' : ''));
     if (opts.onDone) opts.onDone(r.json);
   });
   if (unpublishBtn) {

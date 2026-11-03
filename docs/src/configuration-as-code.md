@@ -28,7 +28,7 @@ mocks:                              # as in a version 1 file
 registry:
   servers: [...]                    # server.json documents of the mock MCP registry
 portal:
-  items: [{ id: "mock:orders", title: Orders API, tags: [payments] }]
+  items: [{ id: "mock:orders", title: Orders API, tags: [payments], access: closed }]
 harness:
   scenarios: [{ name: smoke, scenario: { ... } }]   # saved scenarios (harness mode)
 tests:                              # saved tests: a request and its assertions

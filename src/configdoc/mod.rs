@@ -583,6 +583,7 @@ fn portal_items(state: &AppState) -> Vec<crate::portal::FileItem> {
             contact: p.contact,
             order: (p.order != 0).then_some(p.order),
             credentials: (!p.credentials).then_some(false),
+            access: (p.access == crate::portal::Access::Closed).then_some(p.access),
         });
     }
     items
@@ -1848,6 +1849,39 @@ fn apply_portal(
                 continue;
             }
         };
+        let mut item = item;
+        let current = published.get(&item.id).map(|p| p.access);
+        // A document from the repository may close an item, never open a
+        // closed one: the entry is reported and the item stays closed.
+        if opts.untrusted
+            && current == Some(crate::portal::Access::Closed)
+            && item.access == Some(crate::portal::Access::Open)
+        {
+            problems.push(format!(
+                "portal.items.{}: a document from the repository may close an item but not open a closed one (it stays closed)",
+                item.id
+            ));
+            item.access = Some(crate::portal::Access::Closed);
+        }
+        // A closed mock has its mocked security on (the mocks section of
+        // this document has been applied by now).
+        let closing = item.access.or(current).unwrap_or_default() == crate::portal::Access::Closed;
+        if closing {
+            if let Ok(crate::portal::ItemId::Mock(name)) = crate::portal::ItemId::parse(&item.id) {
+                let secured = state
+                    .mocks
+                    .get(&name)
+                    .and_then(|s| s.live.clone())
+                    .is_some_and(|l| crate::portal::mock_secured(&state.config, &l));
+                if !secured {
+                    problems.push(format!(
+                        "portal.items.{}: closed, but the mock has no mocked security (turn on mocks[].security first) (skipped)",
+                        item.id
+                    ));
+                    continue;
+                }
+            }
+        }
         publish.push((item, owner));
     }
     let named: BTreeSet<&str> = publish.iter().map(|(i, _)| i.id.as_str()).collect();

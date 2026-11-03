@@ -37,6 +37,8 @@ Portal**, one item or several at once), from `rustybin.yaml`, or with the API:
 | `contact` | Who testers ask about it |
 | `order` | Lower comes first within its kind (-1000 to 1000) |
 | `credentials` | A mock only: show the demo credentials it accepts (default `true`). Mocked security keys gate a mock, not anything real; turn this off when testers should ask for one |
+| `access` | `open` (default) or `closed`: see [open and closed items](#open-and-closed-items) |
+| `secure` | Not stored: with `access: closed` on a mock without mocked security, turn its security on and deploy it first (needs `mocks.write`) |
 
 A second `PUT` updates the entry (it keeps its publish time); `DELETE` removes it.
 Publishing a mock needs the rights to change it, everything else needs admin. A mock
@@ -73,9 +75,15 @@ portal:
       title: Orders
       summary: Create and track orders. Use the **demo-key** API key.
       tags: [commerce]
+      access: closed
     - id: mcp:main
     - id: llm
 ```
+
+A document [pulled from git](source-control.md) may close an item but never open a
+closed one: that entry is reported in `problems` and the item stays closed. An entry
+that closes a mock without mocked security is reported and skipped (turn the mock's
+`security` on in the same document: the mocks section is applied first).
 
 The branding and access settings below are included under `settings` in the
 [version 2 instance document](configuration-as-code.md), alongside published items.
@@ -99,20 +107,132 @@ With nothing published the portal is off:
 {{#include ../examples/portal/portal.hurl:off}}
 ```
 
-**Who may read it.** `open` serves everyone who reaches `/portal`. `password` asks for
-the console sign-in (the portal's sign-in screen posts to `/_rustybin/login`; any
-control-plane credential works, such as the admin token or a control JWT). `key` asks
-for an API key of the [key registry](concepts/shared-mode.md), which Try it then sends
-with every call (`X-Rustybin-Key`), as shared-mode mocks require. The page itself
-always loads (it holds no data); the catalogue and the downloads need the credential:
+**Who may read it.** `portal.auth` is the switch for the whole portal; each item's
+`access` sits on top of it:
+
+| `portal.auth` | Signed out | A portal reader |
+|---|---|---|
+| `open` (default) | Reads every item; uses the open ones, a closed one is locked | Uses everything |
+| `password` | The home page asks to sign in (`401`); every item counts as closed | Uses everything |
+| `key` | An API key of the [key registry](concepts/shared-mode.md) reads the open items, which Try it then sends with every call (`X-Rustybin-Key`); a closed one is locked until the sign-in | Uses everything |
+
+A **portal reader** is a user holding `portal.read` signed in to the portal (below),
+or a request with a bearer control credential that resolves `portal.read` (the admin
+token, a control JWT, a console sign-in token), for scripts that download
+collections. The page itself always loads (it holds no data):
 
 ```hurl
 {{#include ../examples/portal/portal.hurl:password}}
 ```
 
-The full API reference page of a mock (`/portal/reference/mock:<name>`) is not behind
-`portal.auth`: a page load carries no header, and it shows the mock's spec, which is
-public at `/mock/<name>/_rustybin/openapi.json` anyway.
+The full API reference page of a mock (`/portal/reference/mock:<name>`) is read by
+everyone in `open` and `key` mode, closed item or not: it shows the mock's spec, which
+is public at `/mock/<name>/_rustybin/openapi.json` anyway and holds no credential.
+With `portal.auth=password` it needs a reader (the page load carries the portal's
+cookie).
+
+### Open and closed items
+
+Each published item is **open** or **closed**. A closed item is read by everyone who
+reaches the portal (its docs, operations, schemas, spec and reference) but used only by
+a reader: Try it, the demo credentials, the snippets and collections that carry them
+and the MCP connection details unlock after the sign-in. The calls themselves need
+the credentials too: a mock closes only with its **mocked security on** (the mode the
+spec declares, or `api_key` when it declares none), so a call without the credentials
+the portal hands to a signed-in reader is refused by the mock. On a
+[shared-mode](concepts/shared-mode.md) instance (or with `RUSTYBIN_REQUIRE_KEY`) every
+call already needs an API key, so a mock closes on the keys alone.
+
+```hurl
+{{#include ../examples/portal/portal.hurl:close}}
+```
+
+Signed out, the catalogue answers a closed item with `locked: true` and without the
+demo credentials (the curl lines show a placeholder such as `<api-key>`), the
+collection links and the MCP connection snippets; the collections answer `401`; a
+view is counted for everyone, a Try it only for readers:
+
+```hurl
+{{#include ../examples/portal/portal.hurl:locked}}
+```
+
+```hurl
+{{#include ../examples/portal/portal.hurl:reader}}
+```
+
+Closing a mock without mocked security is refused with `409` naming the fix;
+`secure: true` (the console's **Turn on security and close**) turns it on, deploys it
+and closes the entry in one step. It is refused while the mock has a draft that is not
+deployed (deploying it would put other changes live). If the security is turned off
+later, the item stays closed and `GET /_rustybin/portal` warns that its calls answer
+without credentials.
+
+```hurl
+{{#include ../examples/portal/portal.hurl:security_off}}
+```
+
+The other kinds of item (`mcp:*`, `llm`, `a2a:*`, `tools`, `registry`) are built-in
+endpoints: closing one hides its credentials and connection snippets (and the tools'
+examples), but the endpoints stay callable, except `mcp:protected` and `mcp:apikey`,
+which already refuse a call without their credentials. The publish dialog says which.
+
+### Portal logins
+
+A tester gets a login that opens the portal and nothing in the console: invite them
+with the `portal_reader` role (Management, **Users and roles**, **Invite a portal
+reader**; `rustybin users invite <name> --role portal_reader`; the `invite_user` tool;
+`users:` of `rustybin.yaml`). The invitation links to the portal's join page,
+`/portal/#/join/<token>`, where they choose a password and land on the portal signed
+in. Every built-in role holds `portal.read`, so any user reads closed items; a
+`portal_reader` holds nothing else. See [users and roles](users.md).
+
+```hurl
+{{#include ../examples/portal/access.hurl:close}}
+```
+
+```hurl
+{{#include ../examples/portal/access.hurl:invite_reader}}
+```
+
+```hurl
+{{#include ../examples/portal/access.hurl:join}}
+```
+
+The **Sign in** button in the portal's header posts the user name and password to
+`/portal/api/login`, which checks them exactly as the console sign-in does (the same
+throttle, shared with `/_rustybin/login`: 5 failures per address and user name a
+minute, 100 from every address together; a disabled user answered as a wrong
+password) and sets the `rustybin_portal` cookie: `HttpOnly`, `SameSite=Strict`,
+`Secure` behind HTTPS, `Path=/portal`, 12 hours. It is accepted under `/portal` only,
+never by the control plane, the data plane or `/_rustybin/mcp`. Permissions are
+resolved at every request, so a role removed or a user disabled loses the closed items
+on the next one; **Sign out** (`POST /portal/api/logout`) ends the session, and so do
+"sign out everywhere" and disabling the user. `GET /portal/api/session` says who is
+signed in.
+
+```hurl
+{{#include ../examples/portal/access.hurl:signed_out}}
+```
+
+```hurl
+{{#include ../examples/portal/access.hurl:signed_in}}
+```
+
+```hurl
+{{#include ../examples/portal/access.hurl:logout}}
+```
+
+```hurl
+{{#include ../examples/portal/access.hurl:portal_login}}
+```
+
+A `portal_reader` who signs in to the console is told the account opens the API portal
+and sent there, signed in (`/_rustybin/login` answers `portal_only` and sets the
+portal's cookie; the console does not keep its token):
+
+```hurl
+{{#include ../examples/portal/access.hurl:console_login}}
+```
 
 ### Insights
 
@@ -180,12 +300,16 @@ calls are reported to `/portal/api/events`:
 | `POST /portal/api/events` | `{item, event: "view" \| "try"}` |
 | `GET /portal/api/items/{id}/collections/{format}` | A published mock as a collection |
 | `GET /portal/reference/{id}` | A published mock's spec in the API reference viewer (pinned and sandboxed like `/docs`, the spec inlined) |
+| `POST /portal/api/login`, `POST /portal/api/logout`, `GET /portal/api/session` | The portal sign-in: the `rustybin_portal` cookie |
 | `GET /_rustybin/portal` | The console's view: settings, every publishable item, why a published one is hidden, its counters |
-| `PUT`, `DELETE /_rustybin/portal/items/{id}` | Publish or update, unpublish |
+| `PUT`, `DELETE /_rustybin/portal/items/{id}` | Publish or update (with `access`, and `secure` to turn a mock's security on to close it), unpublish |
 | `GET /_rustybin/portal/insights` | The counters |
 
 `/portal/*` is never captured by the inspector, ignores fault-injection headers, and is
-exempt from the key layer (the portal checks `portal.auth` itself).
+exempt from the key layer (the portal checks `portal.auth` and each item's access
+itself). `GET /_rustybin/portal` answers each item's `access`, whether a mock is
+`secured`, the number of `closed` items and the `readers` (enabled users holding
+`portal.read`, and those whose login opens only the portal).
 
 ```hurl
 {{#include ../examples/portal/portal.hurl:items}}
@@ -197,9 +321,9 @@ The same job from the API, the console, the command line, an agent and the confi
 
 | Surface | Where |
 |---|---|
-| API | `GET /_rustybin/portal`, `PUT`, `DELETE /_rustybin/portal/items/{id}`, `GET /_rustybin/portal/insights`; what testers read: `/portal`, `/portal/api/catalog`, `/portal/api/items/{id}/collections/{format}`, `/portal/reference/{id}` |
-| Console | **Management, Portal** (status, branding, items, insights, Preview), **Publish to portal** on a mock's page |
-| CLI | `rustybin portal status \| publish <id> \| unpublish <id> \| insights \| branding \| open` ([reference](cli.md#portal)) |
-| Management MCP | `list_portal_items`, `publish_portal_item`, `unpublish_portal_item`, `set_portal_branding`, `get_portal_insights`; the prompt `publish_portal`; the resource `rustybin://portal/catalog` ([agent page](agent-mcp.md)) |
-| `rustybin.yaml` | `portal.items` (the published items with their metadata), `settings: portal.*` ([the whole instance as code](configuration-as-code.md)) |
+| API | `GET /_rustybin/portal`, `PUT` (with `access` and `secure`), `DELETE /_rustybin/portal/items/{id}`, `GET /_rustybin/portal/insights`; what testers read: `/portal`, `/portal/api/catalog`, `/portal/api/items/{id}/collections/{format}`, `/portal/reference/{id}`, the sign-in `/portal/api/login`, `/logout`, `/session` |
+| Console | **Management, Portal** (status, branding, items with a lock on closed ones, the reader count, insights, Preview), **Publish to portal** on a mock's page (Open or Closed, **Turn on security and close**), **Management, Users and roles**, **Invite a portal reader**; the portal itself: **Sign in**, the lock, **Sign out**, the join page |
+| CLI | `rustybin portal status \| publish <id> [--access open\|closed] [--secure] \| unpublish <id> \| insights \| branding \| open`, `rustybin users invite <name> --role portal_reader` ([reference](cli.md#portal)) |
+| Management MCP | `list_portal_items` (each item's `access`), `publish_portal_item` (`access`, `secure`), `unpublish_portal_item`, `set_portal_branding`, `get_portal_insights`, `invite_user` with the `portal_reader` role; the prompt `publish_portal`; the resource `rustybin://portal/catalog` ([agent page](agent-mcp.md)) |
+| `rustybin.yaml` | `portal.items` (the published items with their metadata and `access`; a pulled document may close, never open), `settings: portal.*` ([the whole instance as code](configuration-as-code.md)) |
 | Environment | `RUSTYBIN_PORTAL`, `RUSTYBIN_PORTAL_AUTH`, `RUSTYBIN_PORTAL_BASE_URL`, `RUSTYBIN_PORTAL_VISITORS` ([configuration](configuration.md#dev-portal)) |

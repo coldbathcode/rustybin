@@ -127,16 +127,19 @@ pub const BODY_CHECKS: &[(Permission, &str)] = &[
         Permission::UsersManage,
         "a document with users: or roles:; PUT /_rustybin/password by a caller who is not a user (the first admin's password)",
     ),
+    (
+        Permission::PortalRead,
+        "the API portal's closed items: their credentials, Try it, collections and connection snippets (/portal/api/*), and the whole portal with portal.auth=password; a portal session or a bearer control credential",
+    ),
+    (
+        Permission::MocksWrite,
+        "PUT /_rustybin/portal/items/{id} with secure: true (turns on a mock's mocked security to close it)",
+    ),
 ];
 
 /// Permissions no route, tool or check uses yet, and the step that will.
-pub const RESERVED: &[(Permission, &str)] = &[
-    (
-        Permission::PortalRead,
-        "the API portal's closed items (testing-2 step 13)",
-    ),
-    (Permission::AuditRead, "the audit log (testing-2 step 14)"),
-];
+pub const RESERVED: &[(Permission, &str)] =
+    &[(Permission::AuditRead, "the audit log (testing-2 step 14)")];
 
 /// The body of a refusal: what is missing, never what the caller holds.
 pub fn refusal_body(p: Permission, message: Option<&str>) -> Value {

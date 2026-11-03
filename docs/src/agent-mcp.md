@@ -434,8 +434,8 @@ never tool inputs and never returned: the operator sets them in the console or w
 
 | Tool | Permission | |
 |---|---|---|
-| `list_portal_items` | `instance.read` | The [portal](portal.md)'s state and branding, every item that can be published with its metadata, whether it is hidden and why, its insights |
-| `publish_portal_item` | `portal.publish` or owner | Publish an item (`mock:<name>`, `mcp:<server>`, `llm`, `a2a:<agent>`, `tools`, `registry`) with a title, summary, tags, contact, order and the credentials switch; confirmed when the portal is on and open to anyone |
+| `list_portal_items` | `instance.read` | The [portal](portal.md)'s state and branding, the readers of closed items, every item that can be published with its metadata (its `access`, open or closed, and whether a mock is `secured`), whether it is hidden and why, its insights |
+| `publish_portal_item` | `portal.publish` or owner | Publish an item (`mock:<name>`, `mcp:<server>`, `llm`, `a2a:<agent>`, `tools`, `registry`) with a title, summary, tags, contact, order, the credentials switch and `access` (`open` or `closed`; `secure: true` turns a mock's mocked security on to close it); confirmed when the portal is on and open to anyone |
 | `unpublish_portal_item` | `portal.publish` or owner | Remove an item |
 | `set_portal_branding` | `portal.settings` | The `portal.*` settings: `enabled`, `title`, `intro`, `contact`, `auth`, `base_url`, `visitors` |
 | `get_portal_insights` | `instance.read` | Views, downloads and Try it calls per item |

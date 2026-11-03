@@ -4040,3 +4040,50 @@ async fn apply_config_checks_what_its_sections_need() {
     .await;
     assert!(text_of(&r).contains("secrets.write"), "{}", text_of(&r));
 }
+
+/// Step 13: `publish_portal_item` takes `access` (and `secure` for a mock
+/// without mocked security); `list_portal_items` answers it.
+#[tokio::test]
+async fn portal_tools_open_and_close_items() {
+    let app = app_with(ai_config());
+    let r = tool(
+        &app,
+        &[],
+        "publish_portal_item",
+        json!({ "id": "mock:petstore", "access": "closed" }),
+    )
+    .await;
+    assert!(is_error(&r), "a mock without mocked security: {r}");
+    assert!(text_of(&r).contains("secure"), "{}", text_of(&r));
+    let r = tool(
+        &app,
+        &[],
+        "publish_portal_item",
+        json!({ "id": "mock:petstore", "access": "ajar" }),
+    )
+    .await;
+    assert!(is_error(&r) && text_of(&r).contains("open or closed"));
+    let r = tool(
+        &app,
+        &[],
+        "publish_portal_item",
+        json!({ "id": "mock:petstore", "access": "closed", "secure": true }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["published"]["access"], "closed");
+    assert!(
+        text_of(&r).contains("security was turned on"),
+        "{}",
+        text_of(&r)
+    );
+    let r = tool(&app, &[], "list_portal_items", json!({})).await;
+    let pet = r["structuredContent"]["items"]
+        .as_array()
+        .and_then(|a| a.iter().find(|i| i["id"] == "mock:petstore"))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(pet["published"]["access"], "closed");
+    assert_eq!(pet["secured"], true);
+    assert_eq!(r["structuredContent"]["counts"]["closed"], 1);
+}
