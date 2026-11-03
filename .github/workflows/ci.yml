@@ -138,7 +138,9 @@ jobs:
 
   docs:
     name: docs (mdBook + tested examples)
-    runs-on: ubuntu-latest
+    # Pinned: the hurl release binary links libxml2.so.2, which newer runner
+    # images no longer ship.
+    runs-on: ubuntu-24.04
     env:
       MDBOOK_VERSION: 0.4.52
       HURL_VERSION: 8.0.1
