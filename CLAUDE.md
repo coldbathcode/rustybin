@@ -60,6 +60,14 @@ read, recompile and write); a new management tool goes at the end of `TOOLS` (`t
 client, test and example follows `nextCursor`); test traffic and replays go out under `Purpose::Scenario` and
 `Purpose::Replay`.
 
+## Rustybin 0.3.1, the 0.3 review (released 2026-11-03)
+
+[docs/plans/review-0.3/master-plan.md](docs/plans/review-0.3/master-plan.md): a full review of 0.3.0, 89 findings, all
+fixed in eight steps with build notes; `v0.3.1` tagged, the signed image's digest is in the changelog, and the release
+carries Linux and macOS binaries (`.github/workflows/release-binaries.yml`). The next milestone is
+[docs/plans/testing-2/master-plan.md](docs/plans/testing-2/master-plan.md) (testing workflows and access control,
+0.4.0), built only when the user says go.
+
 ## The whole instance as code, and source control (built)
 
 Step 09 of the 0.2 plan (user docs `docs/src/configuration-as-code.md`, `docs/src/source-control.md`). `rustybin.yaml`

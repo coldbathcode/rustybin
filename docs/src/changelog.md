@@ -113,6 +113,13 @@ the [threat model](concepts/public-instances.md) says what each kind of caller c
   clears the tab's data, consent redirects refuse script schemes.
 - The image workflow keeps `latest` on main's newest build.
 
+`cargo` version 0.3.1, the tag `v0.3.1`, the signed multi-arch image
+`ghcr.io/coldbathcode/rustybin:0.3.1`, digest
+`sha256:079a0a8a6808db5cdc72e43c59c5f3d7bae7ebe1ae26823d2036209427bd6601` (verify it with the
+cosign command of the [quick start](quick-start.md#docker); the
+[release](https://github.com/coldbathcode/rustybin/releases/tag/v0.3.1) carries the same
+values, and the Linux and macOS binaries).
+
 ## 0.3.0 (2026-11-02): reliability and testing workflows
 
 The correctness work the hardening review queued, then the workflows that turn an
