@@ -361,7 +361,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "Example coverage of a mock: which operations lack an example for their success responses",
         )
-.permission(crate::rbac::Permission::MocksRead).self_service()
+.permission(crate::rbac::Permission::MocksRead).self_service().project_scoped()
         .example(Example::get("Coverage of the sample mock", "/_rustybin/mocks/petstore/coverage")),
         Endpoint::new(
             "/_rustybin/mocks/ai/spec",
@@ -369,7 +369,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "AI: an OpenAPI document from a plain description, checked, nothing created",
         )
-.permission(crate::rbac::Permission::AssistJobs).self_service()
+.permission(crate::rbac::Permission::AssistJobs).self_service().project_scoped()
         .example(
             Example::post("Describe an API", "/_rustybin/mocks/ai/spec")
                 .json(r#"{"description":"A notes API: notes with a title and a body","openapi_version":"3.1.0","stream":false}"#)
@@ -381,7 +381,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "AI (or the generator): examples for the operations that lack them, stored in the draft with apply",
         )
-.permission(crate::rbac::Permission::AssistJobs).self_service()
+.permission(crate::rbac::Permission::AssistJobs).self_service().project_scoped()
         .example(
             Example::post("Generated examples for the sample mock", "/_rustybin/mocks/petstore/ai/examples")
                 .json(r#"{"source":"generated","per_response":1,"stream":false}"#)
@@ -393,7 +393,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "AI: edit the spec with an instruction, as a diff; apply saves the draft",
         )
-.permission(crate::rbac::Permission::AssistJobs).self_service()
+.permission(crate::rbac::Permission::AssistJobs).self_service().project_scoped()
         .example(
             Example::post("Edit the sample mock", "/_rustybin/mocks/petstore/ai/edit")
                 .json(r#"{"instruction":"add a 404 response to every operation","stream":false}"#)
@@ -463,7 +463,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "List mocks (GET) or create one from a spec (POST, admin)",
         )
-.permission_for(&["GET"], crate::rbac::Permission::MocksRead).permission_for(&["POST"], crate::rbac::Permission::MocksWrite).self_service()
+.permission_for(&["GET"], crate::rbac::Permission::MocksRead).permission_for(&["POST"], crate::rbac::Permission::MocksWrite).self_service().project_scoped()
         .description(
             "POST {spec (text or object), name?, enabled?, deploy? (default true), force?, \
              strip_server_prefix?, responses?, security?, operations?, mcp?}. The name defaults to a slug of \
@@ -477,7 +477,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "Preview a spec: operations, security schemes, warnings, suggested name",
         )
-.permission(crate::rbac::Permission::MocksRead).self_service()
+.permission(crate::rbac::Permission::MocksRead).self_service().project_scoped()
         .description("Body: {\"spec\": ...} as JSON, or the spec itself (JSON or YAML). Creates nothing.")
         .example(Example::post("Preview a spec", "/_rustybin/mocks/import").json(SMALL_SPEC)),
         Endpoint::new(
@@ -509,7 +509,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "Every mock (except the sample) as a rustybin.yaml document",
         )
-.permission(crate::rbac::Permission::MocksRead).self_service()
+.permission(crate::rbac::Permission::MocksRead).self_service().project_scoped()
         .example(Example::get("Export all mocks", "/_rustybin/mocks/export")),
         Endpoint::new(
             "/_rustybin/mocks/config.schema.json",
@@ -609,7 +609,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "A mock's details (GET), edit its draft (PATCH) or delete it",
         )
-.permission_for(&["GET"], crate::rbac::Permission::MocksRead).permission_for(&["PATCH"], crate::rbac::Permission::MocksWrite).permission_for(&["DELETE"], crate::rbac::Permission::MocksDelete).self_service()
+.permission_for(&["GET"], crate::rbac::Permission::MocksRead).permission_for(&["PATCH"], crate::rbac::Permission::MocksWrite).permission_for(&["DELETE"], crate::rbac::Permission::MocksDelete).self_service().project_scoped()
         .description(
             "PATCH {name?, spec?, strip_server_prefix?, responses?, security?, operations?, mcp?, deploy?, \
              force?} replaces the given sections of the draft; deploy publishes it.",
@@ -622,7 +622,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "Switch a mock on",
         )
-.permission(crate::rbac::Permission::MocksWrite).self_service()
+.permission(crate::rbac::Permission::MocksWrite).self_service().project_scoped()
         .example(Example::post("Switch on", "/_rustybin/mocks/missing/enable").expect_status(404)),
         Endpoint::new(
             "/_rustybin/mocks/{name}/disable",
@@ -630,7 +630,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "Switch a mock off (its URL answers 503, config and history are kept)",
         )
-.permission(crate::rbac::Permission::MocksWrite).self_service()
+.permission(crate::rbac::Permission::MocksWrite).self_service().project_scoped()
         .example(Example::post("Switch off", "/_rustybin/mocks/missing/disable").expect_status(404)),
         Endpoint::new(
             "/_rustybin/mocks/{name}/deploy",
@@ -638,7 +638,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "Publish the draft after the deploy checks (?force=true ignores errors)",
         )
-.permission(crate::rbac::Permission::MocksWrite).self_service()
+.permission(crate::rbac::Permission::MocksWrite).self_service().project_scoped()
         .example(Example::post("Deploy", "/_rustybin/mocks/missing/deploy").expect_status(404)),
         Endpoint::new(
             "/_rustybin/mocks/{name}/rollback",
@@ -646,7 +646,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "Make a previous revision live again (body {revision} optional)",
         )
-.permission(crate::rbac::Permission::MocksWrite).self_service()
+.permission(crate::rbac::Permission::MocksWrite).self_service().project_scoped()
         .example(Example::post("Roll back", "/_rustybin/mocks/missing/rollback").expect_status(404)),
         Endpoint::new(
             "/_rustybin/mocks/{name}/report",
@@ -654,7 +654,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "Deploy-check report of the draft: a valid request and response per operation",
         )
-.permission(crate::rbac::Permission::MocksRead).self_service()
+.permission(crate::rbac::Permission::MocksRead).self_service().project_scoped()
         .example(Example::get("Sample mock report", "/_rustybin/mocks/petstore/report")),
         Endpoint::new(
             "/_rustybin/mocks/{name}/export",
@@ -662,7 +662,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "One mock as a rustybin.yaml document",
         )
-.permission(crate::rbac::Permission::MocksRead).self_service()
+.permission(crate::rbac::Permission::MocksRead).self_service().project_scoped()
         .example(Example::get("Export the sample", "/_rustybin/mocks/petstore/export")),
         Endpoint::new(
             "/_rustybin/mocks/{name}/spec",
@@ -670,7 +670,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "The spec as uploaded (the draft's, JSON or YAML as written)",
         )
-.permission(crate::rbac::Permission::MocksRead).self_service()
+.permission(crate::rbac::Permission::MocksRead).self_service().project_scoped()
         .example(Example::get("Sample spec source", "/_rustybin/mocks/petstore/spec")),
         Endpoint::new(
             "/_rustybin/mocks/{name}/revisions/{revision}",
@@ -678,7 +678,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "A kept revision (the draft, the live one, the deployed history, an earlier draft): its spec and settings, and what the draft changed since",
         )
-.permission(crate::rbac::Permission::MocksRead).self_service()
+.permission(crate::rbac::Permission::MocksRead).self_service().project_scoped()
         .example(Example::get("A revision no longer kept", "/_rustybin/mocks/petstore/revisions/1").expect_status(404)),
         Endpoint::new(
             "/_rustybin/mocks/{name}/duplicate",
@@ -686,7 +686,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "Copy a mock under a new name (body {name} optional; default <name>-copy)",
         )
-.permission(crate::rbac::Permission::MocksWrite).self_service()
+.permission(crate::rbac::Permission::MocksWrite).self_service().project_scoped()
         .example(Example::post("Duplicate", "/_rustybin/mocks/missing/duplicate").expect_status(404)),
         Endpoint::new(
             "/_rustybin/mocks/{name}/state",
@@ -694,7 +694,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "Items stored by a mock in stateful mode (DELETE resets them)",
         )
-.permission_for(&["GET"], crate::rbac::Permission::MocksRead).permission_for(&["DELETE"], crate::rbac::Permission::MocksData).self_service()
+.permission_for(&["GET"], crate::rbac::Permission::MocksRead).permission_for(&["DELETE"], crate::rbac::Permission::MocksData).self_service().project_scoped()
         .example(Example::get("Sample mock state", "/_rustybin/mocks/petstore/state")),
         Endpoint::new(
             "/_rustybin/mocks/{name}/collections/{format}",
@@ -702,7 +702,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "The mock's operations as a collection: postman, hurl, curl, http, k6, bruno or insomnia (?base_url=)",
         )
-.permission(crate::rbac::Permission::MocksRead).self_service()
+.permission(crate::rbac::Permission::MocksRead).self_service().project_scoped()
         .example(Example::get("Sample as Hurl", "/_rustybin/mocks/petstore/collections/hurl")),
         Endpoint::new(
             "/_rustybin/mocks/{name}/operations/{op}",
@@ -710,7 +710,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "One operation (schemas inlined, settings, sample request) or set its settings (PUT)",
         )
-.permission_for(&["GET"], crate::rbac::Permission::MocksRead).permission_for(&["PUT"], crate::rbac::Permission::MocksWrite).self_service()
+.permission_for(&["GET"], crate::rbac::Permission::MocksRead).permission_for(&["PUT"], crate::rbac::Permission::MocksWrite).self_service().project_scoped()
         .description(
             "PUT {respond?, rules?, mode?, delay_ms?, public?} replaces the operation's settings in \
              the draft (null clears them).",
@@ -722,7 +722,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "Generate a valid request and response (?status=, ?mode=, ?example=, ?seed=)",
         )
-.permission(crate::rbac::Permission::MocksRead).self_service()
+.permission(crate::rbac::Permission::MocksRead).self_service().project_scoped()
         .example(Example::get(
             "Generated 200 for getPetById",
             "/_rustybin/mocks/petstore/operations/getPetById/sample?mode=generated",
@@ -733,7 +733,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "Validate a response (or request) body against the operation's schema",
         )
-.permission(crate::rbac::Permission::MocksRead).self_service()
+.permission(crate::rbac::Permission::MocksRead).self_service().project_scoped()
         .description("Body: {kind?: response|request, status?, body}. Returns the issues with JSON pointers.")
         .example(
             Example::post("Validate a pet", "/_rustybin/mocks/petstore/operations/getPetById/validate")
@@ -745,7 +745,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "Which rule would answer a captured call (body {rules?, request?})",
         )
-.permission(crate::rbac::Permission::MocksRead).self_service()
+.permission(crate::rbac::Permission::MocksRead).self_service().project_scoped()
         .description(
             "Rules default to the operation's rules in the draft, the request to its latest captured \
              call. Returns each rule's conditions with the value seen and the winner.",
@@ -760,7 +760,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "Requests a mock received, newest first (DELETE clears them)",
         )
-.permission_for(&["GET"], crate::rbac::Permission::TrafficRead).permission_for(&["DELETE"], crate::rbac::Permission::MocksData).self_service()
+.permission_for(&["GET"], crate::rbac::Permission::TrafficRead).permission_for(&["DELETE"], crate::rbac::Permission::MocksData).self_service().project_scoped()
         .example(Example::get("Sample mock traffic", "/_rustybin/mocks/petstore/requests")),
         Endpoint::new(
             "/_rustybin/mocks/{name}/requests/stream",
@@ -768,7 +768,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "Live feed of a mock's requests (SSE)",
         )
-.permission(crate::rbac::Permission::TrafficRead).self_service()
+.permission(crate::rbac::Permission::TrafficRead).self_service().project_scoped()
         .sse()
         .example(
             Example::get("Stream sample mock traffic", "/_rustybin/mocks/petstore/requests/stream")
@@ -780,7 +780,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::MOCKS,
             "One captured request by sequence number",
         )
-.permission(crate::rbac::Permission::TrafficRead).self_service()
+.permission(crate::rbac::Permission::TrafficRead).self_service().project_scoped()
         .example(Example::get("First captured request", "/_rustybin/mocks/missing/requests/1").expect_status(404)),
     ]
 }
@@ -866,7 +866,8 @@ pub fn openapi_paths() -> Value {
                     "responses": { "type": "object" },
                     "security": { "type": "object" },
                     "operations": { "type": "object" },
-                    "mcp": { "type": "object", "description": "{enabled, exclude}: the mock's MCP server" }
+                    "mcp": { "type": "object", "description": "{enabled, exclude}: the mock's MCP server" },
+                    "project": { "type": "string", "description": "The project it belongs to (mocks.write there); absent: the instance's, or the one project the caller works in" }
                 }
             })),
         );
@@ -910,7 +911,10 @@ pub fn openapi_paths() -> Value {
         "/mock/{name}/_rustybin/openapi.json": { "get": simple("getMockSpec", "Deployed spec (JSON)", json!([name])) },
         "/mock/{name}/_rustybin/openapi.yaml": { "get": simple("getMockSpecYaml", "Deployed spec (YAML)", json!([name])) },
         "/_rustybin/mocks": {
-            "get": simple("listMocks", "List mocks", json!([])),
+            "get": simple("listMocks", "List mocks", json!([
+                { "name": "owner", "in": "query", "required": false, "description": "all: every visitor's mocks too (admin)", "schema": { "type": "string" } },
+                { "name": "project", "in": "query", "required": false, "description": "One project's mocks (instance: the instance's without one)", "schema": { "type": "string" } }
+            ])),
             "post": create
         },
         "/_rustybin/mocks/import": { "post": with_body(simple("previewMockSpec", "Preview a spec", json!([])), json!({ "type": "object", "properties": { "spec": {} } })) },
@@ -920,7 +924,9 @@ pub fn openapi_paths() -> Value {
         "/_rustybin/mocks/config.schema.json": { "get": simple("getMocksConfigSchema", "JSON Schema of rustybin.yaml", json!([])) },
         "/_rustybin/mocks/{name}": {
             "get": simple("getMock", "Mock details", json!([name])),
-            "patch": with_body(admin("updateMock", "Edit the draft", json!([name])), json!({ "type": "object" })),
+            "patch": with_body(admin("updateMock", "Edit the draft", json!([name])), json!({ "type": "object", "properties": {
+                "project": { "type": ["string", "null"], "description": "Move the mock to this project (null or instance: the instance's); mocks.write in both" }
+            } })),
             "delete": admin("deleteMock", "Delete a mock", json!([name]))
         },
         "/_rustybin/mocks/{name}/enable": { "post": admin("enableMock", "Switch on", json!([name])) },

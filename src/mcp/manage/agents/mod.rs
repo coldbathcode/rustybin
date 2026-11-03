@@ -844,7 +844,11 @@ impl Policy {
         match def.permission {
             ToolNeed::Own(_) => true,
             ToolNeed::Visitor => false,
-            ToolNeed::Perm(p) | ToolNeed::Owner(p) => o.permissions.has(p),
+            ToolNeed::Perm(p) => o.permissions.has(p),
+            // Held in a project counts: the service checks each resource's.
+            ToolNeed::Owner(p) | ToolNeed::Project(p) => {
+                o.permissions.has(p) || o.projects.values().any(|g| g.permissions.has(p))
+            }
         }
     }
 

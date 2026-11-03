@@ -1229,6 +1229,10 @@ const OLD_RIGHTS: &[(&str, &str, bool)] = &[
     ("delete_role", "admin", false),
     // Single sign-on (step 10): as 0.4 had admin read settings tools.
     ("test_sso", "admin", true),
+    // Projects (step 11): listing as a read tool, the changes as admin.
+    ("list_projects", "read", true),
+    ("save_project", "admin", false),
+    ("delete_project", "admin", false),
 ];
 
 /// The 0.4 ceilings, by right: `read-only` a read-only tool that is not a

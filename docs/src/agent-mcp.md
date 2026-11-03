@@ -564,11 +564,23 @@ The token for an https remote is the secret `git.token`: an agent cannot set it.
 | `save_role` | `users.manage` | Create or change a custom role (confirmed when it is privileged) |
 | `delete_role` | `users.manage` | Delete a custom role nobody holds |
 | `test_sso` | `settings.write` | [Single sign-on](sso.md): its status, and the identity provider's discovery document and keys fetched now, the redirect URI to register, the role map's unknown roles. The `sso.*` settings change with `update_settings` |
+| `list_projects` | `instance.read` | The [projects](projects.md) the caller may see: the caller's roles there, what each holds, the members (with `users.read`); `name` for one |
+| `save_project` | `users.manage` | Create or change a project: description and members (`{user, roles}`, the whole list); confirmed when it gives a privileged role |
+| `delete_project` | `users.manage` | Delete a project (confirmed); one that holds mocks, saved tests or checkpoints needs `move_to` (another project, or `instance`) |
 
 No tool takes or returns a password or a hash: a person joins through the link
 `invite_user` answers and sets their own password in the browser, and changes it in
 the console or with `rustybin passwd`. A caller grants only roles whose permissions it
 holds, and manages only users whose permissions it holds.
+
+The tools on mocks, saved tests and checkpoints take a [project](projects.md) into
+account: `list_mocks`, `list_tests` and `list_checkpoints` take `project` as a filter,
+`create_mock`, `save_test` and `save_checkpoint` the project to create in,
+`update_mock` a `project` to move the mock to (`mocks.write` in both), and
+`invite_user` `projects` (roles in projects). A member of a project sees these tools
+when they hold the permission there; the call checks it on each resource, and another
+project's resource answers as if it did not exist.
+
 
 ### Traffic
 

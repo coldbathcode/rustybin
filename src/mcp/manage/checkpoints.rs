@@ -8,16 +8,22 @@ use super::tools::{arg_bool, arg_str, confirm, err, need_str, ok, Confirm};
 use crate::checkpoints;
 use crate::mcp::core::CallCtx;
 
-/// `list_checkpoints`: every checkpoint, or one by name.
-pub fn list_checkpoints(ctx: &CallCtx, args: &Value) -> Value {
-    let store = &ctx.app.checkpoints;
+/// `list_checkpoints`: the checkpoints the caller may see (of one project
+/// with `project`), or one by name.
+pub fn list_checkpoints(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
+    let caller = &access.resolved;
     if let Some(name) = arg_str(args, "name") {
-        return match store.summary(name) {
-            Some(v) => ok(ctx, format!("Checkpoint {name}"), v),
-            None => err(format!("no checkpoint named {name:?}")),
+        return match checkpoints::summary_for(&ctx.app, caller, name) {
+            Ok(v) => ok(ctx, format!("Checkpoint {name}"), v),
+            Err(e) => err(e.message()),
         };
     }
-    let list = store.list();
+    let filter = match crate::rbac::projects::Filter::parse(arg_str(args, "project")) {
+        Ok(f) => f,
+        Err(e) => return err(e),
+    };
+    let v = checkpoints::list_for(&ctx.app, caller, &filter);
+    let list = v["checkpoints"].as_array().cloned().unwrap_or_default();
     let names: Vec<&str> = list.iter().filter_map(|c| c["name"].as_str()).collect();
     ok(
         ctx,
@@ -26,25 +32,31 @@ pub fn list_checkpoints(ctx: &CallCtx, args: &Value) -> Value {
     )
 }
 
-/// `save_checkpoint`.
-pub async fn save_checkpoint(ctx: &CallCtx, args: &Value) -> Value {
+/// `save_checkpoint` (`project`: that project's mocks only).
+pub async fn save_checkpoint(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     let name = match need_str(args, "name") {
         Ok(n) => n.to_string(),
         Err(e) => return e,
     };
     let replace = arg_bool(args, "replace").unwrap_or(false);
+    let project = arg_str(args, "project").map(str::to_string);
     let state = ctx.app.clone();
+    let caller = access.resolved.clone();
     let n = name.clone();
-    match tokio::task::spawn_blocking(move || checkpoints::save(&state, &n, replace)).await {
+    let saved = tokio::task::spawn_blocking(move || {
+        checkpoints::save_for(&state, &caller, &n, replace, project.as_deref())
+    })
+    .await;
+    match saved {
         Ok(Ok(v)) => {
             let count = v["mocks"].as_array().map(Vec::len).unwrap_or(0);
-            ok(
-                ctx,
-                format!("Saved checkpoint {name} ({count} mock(s) and the health toggle)"),
-                v,
-            )
+            let what = match v["project"].as_str() {
+                Some(p) => format!("{count} mock(s) of the project {p}"),
+                None => format!("{count} mock(s) and the health toggle"),
+            };
+            ok(ctx, format!("Saved checkpoint {name} ({what})"), v)
         }
-        Ok(Err(e)) => err(e.1),
+        Ok(Err(e)) => err(e.message()),
         Err(_) => err("the save did not finish"),
     }
 }
@@ -147,7 +159,12 @@ pub async fn list_repository_checkpoints(ctx: &CallCtx) -> Value {
 }
 
 /// `delete_checkpoint` (confirmed).
-pub async fn delete_checkpoint(ctx: &CallCtx, args: &Value, params: &Value) -> Value {
+pub async fn delete_checkpoint(
+    ctx: &CallCtx,
+    access: &Access,
+    args: &Value,
+    params: &Value,
+) -> Value {
     let name = match need_str(args, "name") {
         Ok(n) => n,
         Err(e) => return e,
@@ -163,13 +180,8 @@ pub async fn delete_checkpoint(ctx: &CallCtx, args: &Value, params: &Value) -> V
     {
         return v;
     }
-    if ctx.app.checkpoints.delete(name) {
-        ok(
-            ctx,
-            format!("Deleted checkpoint {name}"),
-            json!({ "deleted": name }),
-        )
-    } else {
-        err(format!("no checkpoint named {name:?}"))
+    match checkpoints::delete_for(&ctx.app, &access.resolved, name) {
+        Ok(v) => ok(ctx, format!("Deleted checkpoint {name}"), v),
+        Err(e) => err(e.message()),
     }
 }

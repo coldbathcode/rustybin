@@ -170,6 +170,35 @@
   `PATCH /_rustybin/users/{id}` refuses `roles` for a single sign-on user (409
   `sso_user`) and takes `pinned_roles`; an invitation, a reset or a password change
   for one is refused (409 `sso_user`).
+- Projects: roles on part of an instance (access control, step 11;
+  [Projects](projects.md)): a project (at most 100) groups mocks, saved tests and
+  checkpoints (a mock's portal item follows its mock), and a user's roles in a
+  project apply to its resources on top of their instance roles (the union rule; a
+  user with a role in a project also holds `instance.read`). Another project's
+  resource answers `404` and lists leave it out; instance-wide things need instance
+  roles; a move between projects needs the write permission in both; a project is
+  deleted only when empty or with `move_to` (another project or `instance`); the
+  last enabled admin is counted instance-wide. New routes `GET /_rustybin/projects`
+  and `GET`, `PUT`, `DELETE /_rustybin/projects/{name}`; `project` on the mock,
+  saved test and checkpoint routes that create, `?project=` on those that list,
+  `projects` on invitations, the users' answers and the session. A project's
+  checkpoint keeps and restores that project's mocks only. `sso.role_map` entries may
+  name a project (`{group, project, roles}`, kept as `group=project:role`). Console:
+  the **Project** picker in the top bar, a mock's **Project** (move it), **Management,
+  Users and roles**: the **Projects** card and each user's project roles. CLI:
+  `rustybin projects list | show | save | delete --move-to`, `mocks move`,
+  `--project` on the commands that list and create, `users invite --project
+  P=role`. Management MCP: `list_projects`, `save_project`, `delete_project` (136
+  tools for an admin), `project` on the tools that list and create. `rustybin.yaml`:
+  `projects:` with members by user name, `project:` on mocks and tests; a pulled
+  document never changes members, prunes a project nor moves a resource. An agent
+  acting for a user follows the user's project roles.
+
+  **Behaviour changes**: none for a caller with instance roles only (resources
+  without a project are the instance's, as before). `GET /_rustybin/tests/runs`
+  answers `total` as the runs the caller may see; the management tools on mocks,
+  saved tests and checkpoints are listed for a member of a project who holds their
+  permission there.
 
 ## 0.4.0 (2026-11-03): testing workflows
 

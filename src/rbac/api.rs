@@ -160,12 +160,28 @@ pub fn invite_of(body: &Value) -> Result<Invite, String> {
         Some(Value::Bool(b)) => *b,
         Some(_) => return Err("sso: expected true or false".into()),
     };
+    let mut projects = Vec::new();
+    match obj.get("projects") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(items)) => {
+            for i in items {
+                let project = i
+                    .get("project")
+                    .and_then(Value::as_str)
+                    .ok_or("projects: each entry is {\"project\", \"roles\"}")?;
+                let roles = string_list(i.get("roles"), "projects.roles")?.unwrap_or_default();
+                projects.push((project.to_string(), roles));
+            }
+        }
+        Some(_) => return Err("projects: a list of {\"project\", \"roles\"}".into()),
+    }
     Ok(Invite {
         name,
         display_name: opt("display_name")?,
         email: opt("email")?,
         roles: string_list(obj.get("roles"), "roles")?.unwrap_or_default(),
         sso,
+        projects,
     })
 }
 
@@ -620,7 +636,11 @@ pub fn openapi_paths() -> Value {
                 "reset": { "type": "boolean" }
             } },
             "sessions": { "type": "integer", "description": "Sign-in sessions listed for the user" },
-            "first_admin": { "type": "boolean", "description": "User one: the console user of the sign-in settings" }
+            "first_admin": { "type": "boolean", "description": "User one: the console user of the sign-in settings" },
+            "projects": { "type": "array", "description": "The user's roles in projects (sso: given by a single sign-on group)", "items": { "type": "object", "properties": {
+                "project": { "type": "string" }, "roles": { "type": "array", "items": { "type": "string" } }, "sso": { "type": "boolean" }
+            } } }
+
         }
     });
     let invitation = json!({
@@ -675,11 +695,14 @@ pub fn openapi_paths() -> Value {
             "post": {
                 "tags": ["Control Plane"], "summary": "Invite a user", "operationId": "inviteUser",
                 "description": "Creates the user, invited (disabled until they accept), and answers the one-time link (72 hours, shown once, kept only as a SHA-256). The person opens it and sets their own password: nobody else ever sees or types it.",
-                "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["name", "roles"], "properties": {
+                "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["name"], "properties": {
                     "name": { "type": "string", "description": "The sign-in name: letters, digits and . _ @ -, at most 64" },
                     "display_name": { "type": "string" },
                     "email": { "type": "string" },
-                    "roles": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+                    "roles": { "type": "array", "items": { "type": "string" }, "description": "Instance roles: at least one, unless projects gives roles in a project" },
+                    "projects": { "type": "array", "description": "Roles in projects (step 11)", "items": { "type": "object", "required": ["project", "roles"], "properties": {
+                        "project": { "type": "string" }, "roles": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+                    } } }
                 } } } } },
                 "responses": { "201": { "description": "Invited", "content": { "application/json": { "schema": invitation.clone() } } }, "400": { "description": "Invalid" }, "404": not_found.clone(), "409": guard.clone() }
             }

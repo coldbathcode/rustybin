@@ -1407,3 +1407,20 @@ async fn the_demo_provider_signs_in_a_second_instance() {
     assert_eq!(alice.sso.unwrap().issuer, issuer);
     idp.shutdown();
 }
+
+/// A role map entry may name a project (step 11): the object form
+/// `{group, project, roles}` is kept as `group=project:role`, and the check
+/// takes a `project:role` token.
+#[test]
+fn role_map_objects_name_a_project() {
+    let v = normalize_role_map(&json!([
+        { "group": "pay-team", "project": "payments", "roles": ["editor", "tester"] },
+        { "group": "all", "roles": "viewer" }
+    ]));
+    assert_eq!(
+        v,
+        json!(["pay-team=payments:editor payments:tester", "all=viewer"])
+    );
+    assert!(check_role_map(&v).is_ok());
+    assert!(check_role_map(&json!(["g=Bad:editor"])).is_err());
+}

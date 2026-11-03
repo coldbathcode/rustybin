@@ -79,6 +79,7 @@ pub const SECTIONS: &[&str] = &[
     "agents",
     "roles",
     "users",
+    "projects",
     "health",
 ];
 
@@ -119,6 +120,9 @@ pub struct MocksFile {
     /// The users who sign in (never a password or a hash).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub users: Option<Vec<crate::configdoc::UserDoc>>,
+    /// Projects and their members by user name (step 11).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projects: Option<Vec<crate::configdoc::ProjectDoc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<crate::configdoc::HealthSection>,
     /// The names of `mocks` entries that did not parse ([`parse_lenient`]):
@@ -172,6 +176,9 @@ impl MocksFile {
         if self.users.is_some() {
             out.push("users");
         }
+        if self.projects.is_some() {
+            out.push("projects");
+        }
         if self.health.is_some() {
             out.push("health");
         }
@@ -211,6 +218,9 @@ pub struct MockDoc {
     pub operations: BTreeMap<String, OperationSettings>,
     #[serde(default, skip_serializing_if = "McpSettings::is_default")]
     pub mcp: McpSettings,
+    /// The project the mock belongs to (absent: the instance's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 impl MockDoc {
@@ -302,6 +312,7 @@ pub fn parse_lenient(text: &str) -> Result<(MocksFile, Vec<Failed>), String> {
     let agents = section(&mut top, "agents", &mut failed);
     let roles = section(&mut top, "roles", &mut failed);
     let users = section(&mut top, "users", &mut failed);
+    let projects = section(&mut top, "projects", &mut failed);
     let health = section(&mut top, "health", &mut failed);
     failed.extend(top.keys().map(|k| Failed {
         name: None,
@@ -346,6 +357,7 @@ pub fn parse_lenient(text: &str) -> Result<(MocksFile, Vec<Failed>), String> {
             agents,
             roles,
             users,
+            projects,
             health,
             unparsed_mocks,
         },
@@ -464,6 +476,7 @@ pub fn definitions(
                 name: doc.name,
                 source,
                 enabled: doc.enabled,
+                project: doc.project,
             }),
             Err(e) => errors.push(json!({ "name": doc.name, "error": e })),
         }
@@ -565,6 +578,7 @@ pub fn load_dir(dir: &Path, max_spec: u64) -> Result<Loaded, String> {
                 source,
                 settings: MockSettings::default(),
                 enabled: true,
+                project: None,
             }),
             Err(e) => {
                 out.problems.push(e.clone());
@@ -610,6 +624,9 @@ pub fn export(snapshots: &[Snapshot], reveal: bool) -> String {
                     "mcp".into(),
                     serde_json::to_value(&settings.mcp).unwrap_or(Value::Null),
                 );
+            }
+            if let Some(p) = &s.project {
+                doc.insert("project".into(), json!(p));
             }
             doc.insert("spec_inline".into(), c.spec.root.clone());
             Value::Object(doc)
@@ -690,7 +707,8 @@ pub fn json_schema() -> Value {
         "mcp": object(json!({
             "enabled": { "type": "boolean", "default": true, "description": "Serve the mock's MCP server at /mock/{name}/_rustybin/mcp" },
             "exclude": { "type": "array", "items": { "type": "string" }, "description": "operationIds that are not tools" }
-        }))
+        })),
+        "project": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$", "description": "The project the mock belongs to (absent: the instance's)" }
     }));
     if let Value::Object(m) = &mut mock {
         m.insert("required".into(), json!(["name"]));
@@ -757,6 +775,7 @@ pub fn json_schema() -> Value {
         "agents": agents,
         "roles": crate::configdoc::roles_schema(),
         "users": crate::configdoc::users_schema(),
+        "projects": crate::configdoc::projects_schema(),
         "health": crate::configdoc::health_schema()
     }));
     if let Value::Object(m) = &mut root {
@@ -768,7 +787,7 @@ pub fn json_schema() -> Value {
             "title".into(),
             json!("Rustybin configuration file (rustybin.yaml)"),
         );
-        m.insert("description".into(), json!("The whole instance as one document (version 2): the instance, its settings and secret references, mocks, registry entries, portal items, saved scenarios, agent rules, custom roles, users (never a password) and health. A version 1 file holds the mocks sections only."));
+        m.insert("description".into(), json!("The whole instance as one document (version 2): the instance, its settings and secret references, mocks, registry entries, portal items, saved scenarios, agent rules, custom roles, users (never a password), projects and health. A version 1 file holds the mocks sections only."));
     }
     root
 }

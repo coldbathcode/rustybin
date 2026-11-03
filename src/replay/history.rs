@@ -79,8 +79,55 @@ pub struct TestRun {
     pub selection: Vec<String>,
     #[serde(default)]
     pub change: Change,
+    /// The projects of the tests it ran (step 11).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<String>,
+    /// A test of the instance's (without a project) ran; every run kept
+    /// before projects says so.
+    #[serde(default = "instance_default")]
+    pub instance: bool,
     #[serde(flatten)]
     pub report: Report,
+}
+
+fn instance_default() -> bool {
+    true
+}
+
+/// Whose tests a run ran: the projects, and whether the instance's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Scope {
+    pub projects: Vec<String>,
+    pub instance: bool,
+}
+
+impl Scope {
+    /// The instance's tests only (every run before projects).
+    pub fn instance() -> Self {
+        Self {
+            projects: Vec::new(),
+            instance: true,
+        }
+    }
+
+    /// The scope of the tests run.
+    pub fn of(tests: &[super::SavedTest]) -> Self {
+        let mut projects: Vec<String> = Vec::new();
+        let mut instance = false;
+        for t in tests {
+            match &t.project {
+                Some(p) if !projects.contains(p) => projects.push(p.clone()),
+                Some(_) => {}
+                None => instance = true,
+            }
+        }
+        // An empty selection ran nothing of anyone's: the instance's.
+        if tests.is_empty() {
+            instance = true;
+        }
+        projects.sort();
+        Self { projects, instance }
+    }
 }
 
 impl TestRun {
@@ -108,6 +155,7 @@ struct Kept {
     ran_at: String,
     change: Change,
     outcomes: Vec<(String, bool)>,
+    scope: Scope,
     /// The whole run, when it is not (or could not be) in a file.
     full: Option<Arc<TestRun>>,
 }
@@ -128,6 +176,10 @@ impl Kept {
             ran_at: r.ran_at.clone(),
             change: run.change.clone(),
             outcomes: run.outcomes(),
+            scope: Scope {
+                projects: run.projects.clone(),
+                instance: run.instance,
+            },
             full: full.then(|| Arc::new(run.clone())),
         }
     }
@@ -371,6 +423,26 @@ impl History {
         report: Report,
         now: DateTime<Utc>,
     ) -> TestRun {
+        self.record_in(
+            trigger,
+            principal,
+            selection,
+            report,
+            Scope::instance(),
+            now,
+        )
+    }
+
+    /// [`Self::record`] of a run of `scope`'s tests.
+    pub fn record_in(
+        &self,
+        trigger: &str,
+        principal: &str,
+        selection: Vec<String>,
+        report: Report,
+        scope: Scope,
+        now: DateTime<Utc>,
+    ) -> TestRun {
         let _order = self.order.lock().unwrap_or_else(|e| e.into_inner());
         let mut run = TestRun {
             id: new_id(now),
@@ -378,6 +450,8 @@ impl History {
             principal: label(principal),
             selection,
             change: Change::default(),
+            projects: scope.projects,
+            instance: scope.instance,
             report,
         };
         run.change = Self::change_for(&self.lock(), &run.outcomes());
@@ -405,10 +479,21 @@ impl History {
     /// A page, newest first: `cursor` is the id of the last run of the
     /// previous page.
     pub fn page(&self, limit: usize, cursor: Option<&str>) -> Page {
+        self.page_where(limit, cursor, |_| true)
+    }
+
+    /// [`Self::page`] of the runs whose scope `visible` accepts (step 11: a
+    /// member of a project sees the runs of its tests).
+    pub fn page_where(
+        &self,
+        limit: usize,
+        cursor: Option<&str>,
+        visible: impl Fn(&Scope) -> bool,
+    ) -> Page {
         self.prune(Utc::now());
         let limit = limit.clamp(1, MAX_PAGE);
         let runs = self.lock();
-        let newest_first: Vec<&Kept> = runs.iter().rev().collect();
+        let newest_first: Vec<&Kept> = runs.iter().rev().filter(|k| visible(&k.scope)).collect();
         let after: &[&Kept] = match cursor {
             // Past the cursor's run; one gone since (pruned) by its time.
             Some(c) => match newest_first.iter().position(|k| k.id == c) {
@@ -430,7 +515,7 @@ impl History {
         Page {
             runs: page,
             next_cursor,
-            total: runs.len(),
+            total: newest_first.len(),
         }
     }
 

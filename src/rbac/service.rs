@@ -127,6 +127,19 @@ fn within(caller: &Resolved, perms: PermSet) -> SvcResult<()> {
     }
 }
 
+/// The caller holds, in each project, what the user's roles there grant
+/// (managing a user means managing their project roles too).
+fn within_bindings(state: &AppState, caller: &Resolved, user_id: &str) -> SvcResult<()> {
+    for b in state.users.bindings(user_id) {
+        let perms = roles_permissions(state, &b.roles);
+        let missing = perms.iter().find(|p| !caller.has_in(*p, Some(&b.project)));
+        if let Some(p) = missing {
+            return Err(ServiceError::permission(caller, p));
+        }
+    }
+    Ok(())
+}
+
 fn find(state: &AppState, id_or_name: &str) -> SvcResult<User> {
     state.users.find(id_or_name).ok_or_else(|| {
         ServiceError::with_body(
@@ -160,6 +173,15 @@ pub fn user_view(state: &AppState, u: &User) -> Value {
         m.insert(
             "first_admin".into(),
             json!(state.users.is_first_admin(&u.id)),
+        );
+        m.insert(
+            "projects".into(),
+            json!(state
+                .users
+                .bindings(&u.id)
+                .iter()
+                .map(|b| b.view())
+                .collect::<Vec<_>>()),
         );
     }
     v
@@ -263,6 +285,9 @@ pub struct Invite {
     /// A single sign-on user, created ahead of their first sign-in (no
     /// invitation, no password; `roles` are pinned on them).
     pub sso: bool,
+    /// Roles in projects (step 11): `(project, roles)`. With some, the
+    /// instance roles may be empty (the user sees those projects only).
+    pub projects: Vec<(String, Vec<String>)>,
 }
 
 /// `POST /_rustybin/users`: create the user, invited, and answer the
@@ -275,12 +300,49 @@ pub fn invite_user(
     source: Source,
 ) -> SvcResult<Value> {
     require_sign_in(state)?;
-    if invite.roles.is_empty() {
+    if invite.roles.is_empty() && invite.projects.is_empty() {
         return Err(refused(
             StatusCode::BAD_REQUEST,
             "invalid",
-            "roles: give the user at least one role (GET /_rustybin/roles lists them)",
+            "roles: give the user at least one role, or roles in a project (GET /_rustybin/roles lists them)",
         ));
+    }
+    for (project, roles) in &invite.projects {
+        if !state.users.project_exists(project) {
+            return Err(refused(
+                StatusCode::BAD_REQUEST,
+                "invalid",
+                format!(
+                    "projects: {} is not a project",
+                    crate::logging::printable(project, 64)
+                ),
+            ));
+        }
+        if roles.is_empty() {
+            return Err(refused(
+                StatusCode::BAD_REQUEST,
+                "invalid",
+                "projects: each project needs at least one role",
+            ));
+        }
+        if let Some(unknown) = roles
+            .iter()
+            .find(|r| state.users.role_permissions(r).is_none())
+        {
+            return Err(refused(
+                StatusCode::BAD_REQUEST,
+                "invalid",
+                format!(
+                    "projects: {} is not a role",
+                    crate::logging::printable(unknown, 64)
+                ),
+            ));
+        }
+        let perms = roles_permissions(state, roles);
+        let missing = perms.iter().find(|p| !caller.has_in(*p, Some(project)));
+        if let Some(p) = missing {
+            return Err(ServiceError::permission(caller, p));
+        }
     }
     if let Some(unknown) = invite
         .roles
@@ -298,6 +360,14 @@ pub fn invite_user(
     }
     within(caller, roles_permissions(state, &invite.roles))?;
     let sso = invite.sso;
+    let bindings = invite.projects.clone();
+    if sso && invite.roles.is_empty() {
+        return Err(refused(
+            StatusCode::BAD_REQUEST,
+            "invalid",
+            "roles: a single sign-on user created ahead needs at least one pinned role (their groups give project roles at sign-in)",
+        ));
+    }
     let new = NewUser {
         name: invite.name.trim().to_string(),
         display_name: invite.display_name.filter(|d| !d.trim().is_empty()),
@@ -309,6 +379,7 @@ pub fn invite_user(
     let name = new.name.clone();
     if sso {
         let user = state.users.add_sso(new).map_err(store_error)?;
+        bind_new(state, &user.id, &bindings)?;
         audit("add_sso_user", caller, &name, "ok");
         return Ok(json!({
             "user": user_view(state, &user),
@@ -320,8 +391,21 @@ pub fn invite_user(
         .users
         .invite_new(new, &principal_name(caller))
         .map_err(store_error)?;
+    bind_new(state, &inv.user.id, &bindings)?;
     audit("invite", caller, &name, "ok");
     Ok(invitation_answer(state, &inv, base_url))
+}
+
+/// A new user's project roles; on a failure the user goes again (nothing
+/// half made).
+fn bind_new(state: &AppState, user_id: &str, bindings: &[(String, Vec<String>)]) -> SvcResult<()> {
+    for (project, roles) in bindings {
+        if let Err(e) = state.users.set_binding(project, user_id, roles.clone()) {
+            let _ = state.users.delete(user_id);
+            return Err(store_error(e));
+        }
+    }
+    Ok(())
 }
 
 /// `POST /_rustybin/users/{id}/invite`: a new link (a reset for a user who
@@ -335,6 +419,7 @@ pub fn reinvite_user(
     require_sign_in(state)?;
     let u = find(state, id)?;
     within(caller, roles_permissions(state, &u.roles))?;
+    within_bindings(state, caller, &u.id)?;
     if state.users.is_first_admin(&u.id) && state.settings.locked() {
         return Err(refused(
             StatusCode::CONFLICT,
@@ -389,16 +474,17 @@ pub fn update_user(
                 "nobody changes their own roles: ask another user who manages users",
             ));
         }
-        if roles.is_empty() {
+        if roles.is_empty() && state.users.bindings(&u.id).is_empty() {
             return Err(refused(
                 StatusCode::BAD_REQUEST,
                 "invalid",
-                "roles: a user holds at least one role (disable the user instead)",
+                "roles: a user holds at least one role, or roles in a project (disable the user instead)",
             ));
         }
         within(caller, roles_permissions(state, roles))?;
     }
     within(caller, roles_permissions(state, &u.roles))?;
+    within_bindings(state, caller, &u.id)?;
     let disabling = patch.disabled == Some(true) && !u.disabled;
     let updated = state.users.update(&u.id, patch).map_err(store_error)?;
     let mut revoked = 0;
@@ -420,6 +506,7 @@ pub fn delete_user(state: &AppState, caller: &Resolved, id: &str) -> SvcResult<V
     require_sign_in(state)?;
     let u = find(state, id)?;
     within(caller, roles_permissions(state, &u.roles))?;
+    within_bindings(state, caller, &u.id)?;
     let gone = state.users.delete(&u.id).map_err(store_error)?;
     let (ended, agents) = removed_user(state, caller, &gone.id);
     audit("delete", caller, &gone.name, "ok");
@@ -441,7 +528,9 @@ pub fn end_user_sessions(state: &AppState, caller: &Resolved, id: &str) -> SvcRe
     require_sign_in(state)?;
     let u = find(state, id)?;
     within(caller, roles_permissions(state, &u.roles))?;
+    within_bindings(state, caller, &u.id)?;
     state.users.rotate_generation(&u.id).map_err(store_error)?;
+
     let ended = ended_user(state, &u.id);
     audit("sign_out_user", caller, &u.name, "ok");
     Ok(

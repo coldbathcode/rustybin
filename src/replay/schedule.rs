@@ -931,6 +931,7 @@ async fn execute(state: &AppState, s: &Schedule) -> Ran {
     let body = RunBody {
         names,
         variables: BTreeMap::new(),
+        project: None,
     };
     // A session of the schedule's own for the in-process requests.
     let session = format!("schedule-{}", s.name);

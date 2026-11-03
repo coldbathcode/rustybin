@@ -42,6 +42,7 @@ fn test_of(name: &str, path: &str, status: u16) -> SavedTest {
         },
         gateway: None,
         assert: vec![Assertion::status(status)],
+        project: None,
     }
 }
 

@@ -24,6 +24,7 @@ pub mod inspect;
 pub mod instance;
 pub mod mocks;
 pub mod portal;
+pub mod projects;
 pub mod prompts;
 pub mod registry;
 pub mod replay;

@@ -8,6 +8,7 @@ import * as visit from '../../lib/visit.js';
 import { comeBack, isComeBack, startWithEmail } from './visit.js';
 import { describeTab } from './ai.js';
 import * as assist from '../../lib/assist.js';
+import * as projects from '../../lib/projects.js';
 
 const STEPS = ['Spec', 'Review', 'Behaviour'];
 const MODES = [
@@ -265,7 +266,11 @@ export function openWizard(opts = {}) {
         responses: { mode: st.mode, seed: 1, delay_ms: 0, validate_requests: st.validate, disabled_status: 503 },
         security: { enabled: st.secure, mode: p.declares_security ? 'spec' : 'api_key' },
       };
+      // The project the top bar shows (step 11); else the server decides.
+      const project = projects.forNew();
+      if (project && !opts.visitor) payload.project = project;
       const r = await api('POST', '', payload, { timeout: 60000 });
+
       draftBtn.disabled = deployBtn.disabled = false;
       if (!dlg.open) return;
       if (r.status === 201 && r.json) {

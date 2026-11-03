@@ -139,6 +139,8 @@ pub(crate) const NEW_SINCE_0_4: &[&str] = &[
     "/_rustybin/sso/callback",
     "/_rustybin/sso/token",
     "/_rustybin/sso/test",
+    "/_rustybin/projects",
+    "/_rustybin/projects/{name}",
 ];
 
 /// The harness mutations an open control plane guarded with the admin

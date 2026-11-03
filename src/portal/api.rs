@@ -867,6 +867,7 @@ pub async fn secure_mock(svc: &Svc, name: &str) -> Result<bool, ServiceError> {
         sec.api_key.keys = crate::mocks::model::ApiKeySettings::default().keys;
     }
     let body = crate::mocks::service::PatchBody {
+        project: None,
         expected_revision: Some(snap.draft.revision),
         name: None,
         spec: None,
@@ -1103,6 +1104,7 @@ pub fn catalog() -> Vec<Endpoint> {
         )
         .permission(crate::rbac::Permission::PortalPublish)
         .self_service()
+        .project_scoped()
         .description(
             "Ids: mock:<name>, mcp:<server>, llm, a2a:<agent>, tools, registry. A mock needs \
              manage rights (visitors only with portal.visitors), everything else admin. Body: \

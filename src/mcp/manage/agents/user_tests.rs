@@ -190,7 +190,7 @@ fn expected(perms: PermSet, ceiling: &Ceiling, role: Option<PermSet>) -> Vec<Str
         .iter()
         .filter(|d| match d.permission {
             ToolNeed::Perm(Permission::VisitsOperate) | ToolNeed::Visitor => false,
-            ToolNeed::Perm(p) | ToolNeed::Owner(p) => perms.has(p),
+            ToolNeed::Perm(p) | ToolNeed::Owner(p) | ToolNeed::Project(p) => perms.has(p),
             ToolNeed::Own(_) => true,
         })
         .filter(|d| ceiling.allows_with(d, role))

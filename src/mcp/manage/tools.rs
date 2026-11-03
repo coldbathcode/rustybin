@@ -7,8 +7,8 @@ use serde_json::{json, Map, Value};
 
 use super::access::{Access, ToolNeed};
 use super::{
-    agents, assist, checkpoints, config, harness, inspect, instance, mocks, portal, registry,
-    replay, scenarios, settings, testing, traffic, users, visits,
+    agents, assist, checkpoints, config, harness, inspect, instance, mocks, portal, projects,
+    registry, replay, scenarios, settings, testing, traffic, users, visits,
 };
 use crate::mcp::core::{self, CallCtx};
 use crate::mcp::protocol::{RpcError, Version};
@@ -129,14 +129,15 @@ pub static TOOLS: &[ToolDef] = &[
         "session": { "type": "string", "description": "The X-Rustybin-Session whose counters to reset (default: the session try_request uses)" }
     }), &[])),
     // ── Mocks ──
-    tool!("list_mocks", "List mocks", "The OpenAPI mocks the caller may see: name, URL, state (live, off, draft), security, calls, owner. Filter by text or state.", ToolNeed::Perm(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+    tool!("list_mocks", "List mocks", "The OpenAPI mocks the caller may see: name, URL, state (live, off, draft), security, calls, owner. Filter by text or state.", ToolNeed::Project(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "query": { "type": "string", "description": "Text to look for in names, titles and URLs" },
         "state": { "type": "string", "enum": ["live", "off", "draft"] },
-        "all": { "type": "boolean", "description": "Admin: include every visitor's mocks" }
+        "all": { "type": "boolean", "description": "Admin: include every visitor's mocks" },
+        "project": project_prop("Only this project's mocks (instance: the instance's without a project)")
     }), &[])),
-    tool!("get_mock", "Mock detail", "One mock in full: operations with hit counts, settings (secrets redacted unless the caller may change it), deploy report, revisions, undeployed draft changes, URLs.", ToolNeed::Perm(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "name": name_prop() }), &["name"])),
-    tool!("preview_spec", "Preview a spec", "Parse an OpenAPI spec without creating anything: title, operations, security schemes, warnings and the deploy checks. Use it before create_mock to show the user what they would get.", ToolNeed::Perm(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "spec": spec_prop() }), &["spec"])),
-    tool!("get_mock_spec", "Mock spec", "The spec as uploaded (the draft's), to edit and send back with update_mock; or, with served true, the OpenAPI document the mock serves (with its server URL and mocked security).", ToolNeed::Perm(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+    tool!("get_mock", "Mock detail", "One mock in full: operations with hit counts, settings (secrets redacted unless the caller may change it), deploy report, revisions, undeployed draft changes, URLs.", ToolNeed::Project(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "name": name_prop() }), &["name"])),
+    tool!("preview_spec", "Preview a spec", "Parse an OpenAPI spec without creating anything: title, operations, security schemes, warnings and the deploy checks. Use it before create_mock to show the user what they would get.", ToolNeed::Project(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "spec": spec_prop() }), &["spec"])),
+    tool!("get_mock_spec", "Mock spec", "The spec as uploaded (the draft's), to edit and send back with update_mock; or, with served true, the OpenAPI document the mock serves (with its server URL and mocked security).", ToolNeed::Project(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "name": name_prop(),
         "served": { "type": "boolean", "description": "Return the served openapi.json instead of the uploaded text" }
     }), &["name"])),
@@ -147,6 +148,7 @@ pub static TOOLS: &[ToolDef] = &[
         props.insert("deploy".into(), json!({ "type": "boolean", "default": true }));
         props.insert("force".into(), json!({ "type": "boolean", "description": "Deploy despite check errors (only after the user accepted them)" }));
         props.insert("enabled".into(), json!({ "type": "boolean", "default": true }));
+        props.insert("project".into(), project_prop("The project it belongs to (mocks.write there); absent: the instance's, or the one project the caller works in"));
         obj(Value::Object(props), &["spec"])
     }),
     tool!("update_mock", "Update a mock", "Replace the draft's spec and/or settings (responses, security, operations, mcp, strip_server_prefix) or rename it; deploy true publishes the draft (force to ignore check errors). Settings given replace the whole section; use set_operation for one operation.", ToolNeed::Owner(Permission::MocksWrite), ro=false, destructive=false, idem=false, confirm=false, || {
@@ -157,6 +159,7 @@ pub static TOOLS: &[ToolDef] = &[
         props.insert("expected_revision".into(), json!({ "type": "integer", "description": "The draft_revision of the mock as get_mock answered it: always pass it, so a change made meanwhile is refused (409, with what changed) instead of overwritten" }));
         props.insert("deploy".into(), json!({ "type": "boolean" }));
         props.insert("force".into(), json!({ "type": "boolean" }));
+        props.insert("project".into(), json!({ "type": ["string", "null"], "description": "Move the mock to this project (null or instance: the instance's); needs mocks.write in both" }));
         obj(Value::Object(props), &["name"])
     }),
     tool!("set_operation", "Set an operation", "Replace one operation's settings in the draft: respond (status, body, headers, delay_ms), rules (conditions on path, query, headers, body with their own respond), mode, public (skip mocked security). clear true removes them. Deploy afterwards with deploy_mock.", ToolNeed::Owner(Permission::MocksWrite), ro=false, destructive=false, idem=true, confirm=false, || obj(json!({
@@ -166,19 +169,19 @@ pub static TOOLS: &[ToolDef] = &[
         "clear": { "type": "boolean", "description": "Remove the operation's settings" },
         "expected_revision": { "type": "integer", "description": "The draft_revision of the mock (get_mock): always pass it, so a change made meanwhile is refused instead of overwritten" }
     }), &["name", "operation"])),
-    tool!("test_rules", "Test rules", "Which rule would answer a captured call of an operation (the latest, or request seq): every rule's conditions explained. Pass rules to try new ones without saving.", ToolNeed::Perm(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+    tool!("test_rules", "Test rules", "Which rule would answer a captured call of an operation (the latest, or request seq): every rule's conditions explained. Pass rules to try new ones without saving.", ToolNeed::Project(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "name": name_prop(),
         "operation": { "type": "string" },
         "rules": { "type": "array", "items": { "type": "object" } },
         "request": { "type": "integer", "description": "Captured request number (default: the latest call of the operation)" }
     }), &["name", "operation"])),
-    tool!("check_mock", "Check a mock", "The draft's deploy report: a valid request and response per operation, errors and warnings.", ToolNeed::Perm(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "name": name_prop() }), &["name"])),
+    tool!("check_mock", "Check a mock", "The draft's deploy report: a valid request and response per operation, errors and warnings.", ToolNeed::Project(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "name": name_prop() }), &["name"])),
     tool!("deploy_mock", "Deploy a mock", "Publish the draft as the live revision. Fails on check errors unless force is true (only after the user accepted them). expected_revision deploys only that draft revision (409, with what changed, when the draft moved on).", ToolNeed::Owner(Permission::MocksWrite), ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "name": name_prop(), "force": { "type": "boolean" }, "expected_revision": { "type": "integer", "description": "The draft_revision of the mock as get_mock answered it: pass it, so a draft changed meanwhile is refused instead of published" } }), &["name"])),
     tool!("rollback_mock", "Roll back a mock", "Make an earlier revision live again (the previous one, or revision N). Destructive: confirmed.", ToolNeed::Owner(Permission::MocksWrite), ro=false, destructive=true, idem=false, confirm=true, || obj(json!({ "name": name_prop(), "revision": { "type": "integer" }, "confirm": confirm_prop() }), &["name"])),
     tool!("set_mock_enabled", "Switch a mock on or off", "Switch a mock on or off (off answers 503).", ToolNeed::Owner(Permission::MocksWrite), ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "name": name_prop(), "enabled": { "type": "boolean" } }), &["name", "enabled"])),
     tool!("duplicate_mock", "Duplicate a mock", "Copy a mock under a new name (deployed when the source is).", ToolNeed::Owner(Permission::MocksWrite), ro=false, destructive=false, idem=false, confirm=false, || obj(json!({ "name": name_prop(), "new_name": { "type": "string" } }), &["name"])),
     tool!("delete_mock", "Delete a mock", "Delete a mock, its revisions, stored data and captured traffic. Destructive: confirmed.", ToolNeed::Owner(Permission::MocksDelete), ro=false, destructive=true, idem=true, confirm=true, || obj(json!({ "name": name_prop(), "confirm": confirm_prop() }), &["name"])),
-    tool!("sample_request", "Sample request", "A valid request for an operation (curl and parts: method, URL, headers, body) and the response the mock would send for a status, example or mode.", ToolNeed::Perm(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+    tool!("sample_request", "Sample request", "A valid request for an operation (curl and parts: method, URL, headers, body) and the response the mock would send for a status, example or mode.", ToolNeed::Project(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "name": name_prop(),
         "operation": { "type": "string" },
         "status": { "type": "integer" },
@@ -186,21 +189,21 @@ pub static TOOLS: &[ToolDef] = &[
         "mode": { "type": "string", "enum": ["examples", "generated", "static", "stateful"] },
         "seed": { "type": "integer" }
     }), &["name", "operation"])),
-    tool!("validate_payload", "Validate a payload", "Check a request or response body against an operation's schema: which fields break the spec (for example after a gateway transformation).", ToolNeed::Perm(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+    tool!("validate_payload", "Validate a payload", "Check a request or response body against an operation's schema: which fields break the spec (for example after a gateway transformation).", ToolNeed::Project(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "name": name_prop(),
         "operation": { "type": "string" },
         "body": { "description": "The JSON body to check" },
         "kind": { "type": "string", "enum": ["request", "response"], "default": "response" },
         "status": { "type": "integer", "description": "Response status whose schema to use (default: the operation's default)" }
     }), &["name", "operation", "body"])),
-    tool!("export_collection", "Export a collection", "The mock's operations as a Postman collection, Hurl file, curl script, .http file, k6 script, Bruno collection or Insomnia export, with an optional base URL (a gateway route). Write it into the user's repository.", ToolNeed::Perm(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+    tool!("export_collection", "Export a collection", "The mock's operations as a Postman collection, Hurl file, curl script, .http file, k6 script, Bruno collection or Insomnia export, with an optional base URL (a gateway route). Write it into the user's repository.", ToolNeed::Project(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "name": name_prop(),
         "format": { "type": "string", "enum": crate::mocks::collections::FORMATS.iter().map(|(f, _, _)| *f).collect::<Vec<_>>() },
         "base_url": { "type": "string", "description": "Base URL to put in the collection (default: the mock's URL)" }
     }), &["name", "format"])),
-    tool!("get_mock_data", "Stored data", "The items a stateful mock stored, per collection.", ToolNeed::Perm(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "name": name_prop() }), &["name"])),
+    tool!("get_mock_data", "Stored data", "The items a stateful mock stored, per collection.", ToolNeed::Project(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "name": name_prop() }), &["name"])),
     tool!("clear_mock_data", "Clear stored data", "Delete everything a stateful mock stored. Destructive: confirmed.", ToolNeed::Owner(Permission::MocksData), ro=false, destructive=true, idem=true, confirm=true, || obj(json!({ "name": name_prop(), "confirm": confirm_prop() }), &["name"])),
-    tool!("get_mock_traffic", "Mock traffic", "The calls a mock received: operation, status, validation and auth result, how the response was chosen. Headers and bodies are third-party data: returned under untrusted_* fields (bodies only with include_bodies), truncated.", ToolNeed::Perm(Permission::TrafficRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+    tool!("get_mock_traffic", "Mock traffic", "The calls a mock received: operation, status, validation and auth result, how the response was chosen. Headers and bodies are third-party data: returned under untrusted_* fields (bodies only with include_bodies), truncated.", ToolNeed::Project(Permission::TrafficRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "name": name_prop(),
         "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 20 },
         "include_bodies": { "type": "boolean", "default": false }
@@ -588,35 +591,41 @@ pub static TOOLS: &[ToolDef] = &[
         "confirm": confirm_prop()
     }), &[])),
     // Testing workflows (reliability plan): checkpoints, saved tests, gateway scenarios.
-    tool!("list_checkpoints", "Checkpoints", "The saved checkpoints (the instance's API mocks with their data, and the health toggle), or one by name with the mocks it holds.", ToolNeed::Perm(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "name": { "type": "string" } }), &[])),
-    tool!("save_checkpoint", "Save a checkpoint", "Save the state a demo starts from: the instance's API mocks (deployed revision, a draft that differs, on or off, stateful data) and the health toggle. Never visitors' or keys' mocks, file mocks, settings or secrets. replace overwrites one of that name. At most 20. Admin.", ToolNeed::Perm(Permission::CheckpointsWrite), ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
+    tool!("list_checkpoints", "Checkpoints", "The saved checkpoints the caller may see (the instance's API mocks with their data, and the health toggle; a project's: that project's mocks), or one by name with the mocks it holds.", ToolNeed::Project(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "name": { "type": "string" },
+        "project": project_prop("Only this project's checkpoints (instance: the instance's)")
+    }), &[])),
+    tool!("save_checkpoint", "Save a checkpoint", "Save the state a demo starts from: the instance's API mocks (deployed revision, a draft that differs, on or off, stateful data) and the health toggle, or with project that project's mocks only (a restore then changes only those, never the health toggle). Never visitors' or keys' mocks, file mocks, settings or secrets. replace overwrites one of that name. At most 20. Admin.", ToolNeed::Project(Permission::CheckpointsWrite), ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
         "name": { "type": "string", "description": "Letters, digits, . _ -" },
-        "replace": { "type": "boolean" }
+        "replace": { "type": "boolean" },
+        "project": project_prop("Keep this project's mocks (checkpoints.write there); absent: the instance's, or the one project the caller works in")
     }), &["name"])),
-    tool!("restore_checkpoint", "Restore a checkpoint", "Bring the instance's API mocks back to a checkpoint (created, replaced, data restored; API mocks it does not hold are DELETED), set the health toggle and reset the flaky counters. dry_run: true answers the same without changing anything (no confirmation). from: git restores the configuration repository's checkpoint of that name (list_repository_checkpoints; at the working copy's HEAD, git_pull first), checked like a local one. Destructive: confirmed. Admin.", ToolNeed::Perm(Permission::CheckpointsRestore), ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+    tool!("restore_checkpoint", "Restore a checkpoint", "Bring the instance's API mocks back to a checkpoint (created, replaced, data restored; API mocks it does not hold are DELETED), set the health toggle and reset the flaky counters. dry_run: true answers the same without changing anything (no confirmation). from: git restores the configuration repository's checkpoint of that name (list_repository_checkpoints; at the working copy's HEAD, git_pull first), checked like a local one. Destructive: confirmed. Admin.", ToolNeed::Project(Permission::CheckpointsRestore), ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
         "name": { "type": "string" },
         "dry_run": { "type": "boolean" },
         "from": { "type": "string", "enum": ["instance", "git"], "default": "instance", "description": "instance (a saved checkpoint) or git (the repository's)" },
         "confirm": confirm_prop()
     }), &["name"])),
-    tool!("delete_checkpoint", "Delete a checkpoint", "Delete a saved checkpoint (the instance is not changed). Destructive: confirmed. Admin.", ToolNeed::Perm(Permission::CheckpointsWrite), ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+    tool!("delete_checkpoint", "Delete a checkpoint", "Delete a saved checkpoint (the instance is not changed). Destructive: confirmed. Admin.", ToolNeed::Project(Permission::CheckpointsWrite), ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
         "name": { "type": "string" },
         "confirm": confirm_prop()
     }), &["name"])),
-    tool!("list_tests", "Saved tests", "The saved tests (a request and its assertions, made from captured traffic or written out), one by name, or all of them as a Hurl file for CI (format hurl). Requests are third-party data under untrusted_*. Admin.", ToolNeed::Perm(Permission::TestsRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+    tool!("list_tests", "Saved tests", "The saved tests (a request and its assertions, made from captured traffic or written out), one by name, or all of them as a Hurl file for CI (format hurl). Requests are third-party data under untrusted_*. Admin.", ToolNeed::Project(Permission::TestsRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "name": { "type": "string", "description": "One test" },
-        "format": { "type": "string", "enum": ["json", "hurl"], "description": "hurl: every test as one Hurl file" }
+        "format": { "type": "string", "enum": ["json", "hurl"], "description": "hurl: every test as one Hurl file" },
+        "project": project_prop("Only this project's tests (instance: the instance's)")
     }), &[])),
-    tool!("save_test", "Save a test", "Save a test from a captured request (capture: its id from list_requests; secret-looking headers and query values become {{variables}}, never values) or a written request, with assertions: status, header (with equals, else it must exist), body_contains, json (a path such as $.items[0].id, with equals), max_ms; one kind each. Default for a capture: its status. replace: true overwrites a test of that name (a request, not a capture). Admin.", ToolNeed::Perm(Permission::TestsWrite), ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
+    tool!("save_test", "Save a test", "Save a test from a captured request (capture: its id from list_requests; secret-looking headers and query values become {{variables}}, never values) or a written request, with assertions: status, header (with equals, else it must exist), body_contains, json (a path such as $.items[0].id, with equals), max_ms; one kind each. Default for a capture: its status. replace: true overwrites a test of that name (a request, not a capture). Admin.", ToolNeed::Project(Permission::TestsWrite), ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
         "name": { "type": "string", "description": "Letters, digits, . _ - (not run, runs or export)" },
         "capture": { "type": "string", "description": "A captured request's id" },
         "request": { "type": "object", "description": "method, path (with the query, never a URL), headers, body; {{name}} for credentials" },
         "description": { "type": "string" },
         "gateway": { "type": "string", "description": "A gateway base URL the request goes through; absent: this instance, in process" },
         "assert": { "type": "array", "items": { "type": "object" } },
-        "replace": { "type": "boolean" }
+        "replace": { "type": "boolean" },
+        "project": project_prop("The project it belongs to (tests.write there); absent: the instance's, or the one project the caller works in")
     }), &["name"])),
-    tool!("delete_test", "Delete a test", "Delete a saved test. Destructive: confirmed. Admin.", ToolNeed::Perm(Permission::TestsWrite), ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+    tool!("delete_test", "Delete a test", "Delete a saved test. Destructive: confirmed. Admin.", ToolNeed::Project(Permission::TestsWrite), ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
         "name": { "type": "string" },
         "confirm": confirm_prop()
     }), &["name"])),
@@ -624,7 +633,7 @@ pub static TOOLS: &[ToolDef] = &[
         name: "run_tests",
         title: "Run saved tests",
         description: "Run every saved test or names: in process against this instance, or through each test's gateway (egress purpose replay; SENDS TRAFFIC OUT). A run with a gateway test, or with a test that sends a method other than GET, HEAD or OPTIONS (it may change state), asks the user to confirm, or needs \"confirm\": true set only after the user agreed. One run at a time: another run in progress is an error. Variables come from the instance's RUSTYBIN_TEST_* environment. Answers the counts and each test's failures (expected, seen) under untrusted_results; format junit adds the JUnit XML. Admin.",
-        permission: ToolNeed::Perm(Permission::TestsRun),
+        permission: ToolNeed::Project(Permission::TestsRun),
         read_only: false,
         destructive: false,
         idempotent: true,
@@ -633,6 +642,7 @@ pub static TOOLS: &[ToolDef] = &[
         input_schema: || obj(json!({
             "names": { "type": "array", "items": { "type": "string" } },
             "format": { "type": "string", "enum": ["json", "junit"] },
+            "project": project_prop("Only this project's tests (a member of projects runs the tests it may run)"),
             "confirm": confirm_prop()
         }), &[]),
     },
@@ -665,11 +675,11 @@ pub static TOOLS: &[ToolDef] = &[
         obj(props, &["scenario", "run"])
     }),
     // Testing workflows 2: the history of saved-test runs.
-    tool!("list_test_runs", "Test run history", "The kept runs of the saved tests (console, CLI, API, MCP), newest first: id, when, trigger, principal, the counts, the failing tests and the change since the previous run (newly failing, newly passing). Pages of limit (20, at most 100); cursor is the next_cursor of the page before. At most 200 runs and 30 days. Admin.", ToolNeed::Perm(Permission::TestsRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+    tool!("list_test_runs", "Test run history", "The kept runs of the saved tests (console, CLI, API, MCP), newest first: id, when, trigger, principal, the counts, the failing tests and the change since the previous run (newly failing, newly passing). Pages of limit (20, at most 100); cursor is the next_cursor of the page before. At most 200 runs and 30 days. Admin.", ToolNeed::Project(Permission::TestsRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "limit": { "type": "integer", "minimum": 1, "maximum": crate::replay::history::MAX_PAGE },
         "cursor": { "type": "string", "description": "next_cursor of the page before" }
     }), &[])),
-    tool!("get_test_run", "Get a test run", "One kept run of the saved tests by id (from list_test_runs or run_tests): the counts, the change since the previous run, and each test's result and failures (expected, seen) under untrusted_results; format junit adds the JUnit XML. Admin.", ToolNeed::Perm(Permission::TestsRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+    tool!("get_test_run", "Get a test run", "One kept run of the saved tests by id (from list_test_runs or run_tests): the counts, the change since the previous run, and each test's result and failures (expected, seen) under untrusted_results; format junit adds the JUnit XML. Admin.", ToolNeed::Project(Permission::TestsRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "id": { "type": "string" },
         "format": { "type": "string", "enum": ["json", "junit"] }
     }), &["id"])),
@@ -701,7 +711,7 @@ pub static TOOLS: &[ToolDef] = &[
         "confirm": confirm_prop()
     }), &["name"])),
     // Testing workflows 2: a compare view for a stale edit.
-    tool!("get_mock_revision", "Mock revision", "A revision the mock still keeps (the draft, the live one, the last deployed ones and as many drafts replaced before they were deployed): its spec as uploaded (spec.text), its settings (secrets redacted unless the caller may change the mock) and changes_to_draft, what the current draft changes since. After a 409 rustybin_stale_revision, read its expected_revision here and compare with get_mock to see what the other change did, then make the edit again with the current draft_revision. Not kept: an error.", ToolNeed::Perm(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+    tool!("get_mock_revision", "Mock revision", "A revision the mock still keeps (the draft, the live one, the last deployed ones and as many drafts replaced before they were deployed): its spec as uploaded (spec.text), its settings (secrets redacted unless the caller may change the mock) and changes_to_draft, what the current draft changes since. After a 409 rustybin_stale_revision, read its expected_revision here and compare with get_mock to see what the other change did, then make the edit again with the current draft_revision. Not kept: an error.", ToolNeed::Project(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "name": name_prop(),
         "revision": { "type": "integer", "minimum": 0, "description": "The revision number (draft_revision, live_revision, get_mock's revisions, or a 409's expected_revision)" }
     }), &["name", "revision"])),
@@ -718,6 +728,9 @@ pub static TOOLS: &[ToolDef] = &[
         "roles": { "type": "array", "items": { "type": "string" }, "description": "Role names (list_roles): at least one for a new user (for a single sign-on user, the roles pinned on top of its groups')" },
         "reset": { "type": "boolean", "default": false, "description": "A new link for a user who exists (a password reset)" },
         "sso": { "type": "boolean", "default": false, "description": "A single sign-on user, added ahead of their first sign-in (sso.provision off): no link, no password; the first sign-in links them by name" },
+        "projects": { "type": "array", "description": "Roles in projects; with some, roles may be empty (the user sees those projects only)", "items": { "type": "object", "required": ["project", "roles"], "additionalProperties": false, "properties": {
+            "project": { "type": "string" }, "roles": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+        } } },
         "confirm": confirm_prop()
     }), &["name"])),
     tool!("update_user", "Change a user", "Change a user's roles, display name, email (null clears it) or disabled; a single sign-on user's pinned_roles (their other roles come from the provider's groups at every sign-in). Disabling ends their sessions. Guard rails: the last enabled admin is never disabled or demoted; nobody changes their own roles; an invited user joins through the invitation, never by being enabled. Confirmed when it grants a privileged role (users.manage or settings.security).", ToolNeed::Perm(Permission::UsersManage), ro=false, destructive=false, idem=true, confirm=true, || obj(json!({
@@ -747,7 +760,29 @@ pub static TOOLS: &[ToolDef] = &[
     }), &["name"])),
     // Access control 4: single sign-on with OpenID Connect.
     tool!("test_sso", "Test single sign-on", "Single sign-on's status (enabled, ready, the button's name, whether the password sign-in works) and the identity provider read now: its discovery document and keys through the outbound policy (purpose sso), the redirect URI to register at the provider, the role map and the roles it names that do not exist. The sso.* settings change with update_settings (settings.security); the client secret is never an input nor returned. Fetches from the provider only.", ToolNeed::Perm(Permission::SettingsWrite), ro=true, destructive=false, idem=true, confirm=false, no_args),
+    // Access control 5: projects, roles on part of an instance.
+    tool!("list_projects", "Projects", "The projects the caller may see (the ones it is in; every one with users.read or the instance-wide mocks.read): name, description, the caller's roles and permissions there, what each holds (mocks, saved tests, checkpoints) and, with users.read, the members; name for one. A user's roles in a project apply to its resources on top of their instance roles.", ToolNeed::Perm(Permission::InstanceRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "name": { "type": "string", "description": "One project" }
+    }), &[])),
+    tool!("save_project", "Save a project", "Create or change a project (at most 100): a name (the mock name rules, never instance), a description and the members, {user (an id or sign-in name), roles}: the whole list, replacing what it has. Nobody changes their own roles in a project, and the caller gives or takes only roles whose permissions it holds there. Confirmed when it gives a privileged role (users.manage or settings.security).", ToolNeed::Perm(Permission::UsersManage), ro=false, destructive=false, idem=true, confirm=true, || obj(json!({
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "members": { "type": "array", "description": "The whole member list", "items": { "type": "object", "required": ["user", "roles"], "additionalProperties": false, "properties": {
+            "user": { "type": "string" }, "roles": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+        } } },
+        "confirm": confirm_prop()
+    }), &["name"])),
+    tool!("delete_project", "Delete a project", "Delete a project and its members' roles in it. A project that holds mocks, saved tests or checkpoints is refused unless move_to names where they go (another project, or instance; the move needs the write permission of each kind in both). Destructive: confirmed.", ToolNeed::Perm(Permission::UsersManage), ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+        "name": { "type": "string" },
+        "move_to": { "type": "string", "description": "Where its resources go: another project, or instance" },
+        "confirm": confirm_prop()
+    }), &["name"])),
 ];
+
+/// The `project` property of a tool that creates or lists.
+fn project_prop(description: &str) -> Value {
+    json!({ "type": "string", "description": description })
+}
 
 /// The tools the caller may use.
 pub fn list(access: &Access) -> Vec<&'static ToolDef> {
@@ -1063,6 +1098,10 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
             .record_call(&agent.id, def.name, "denied", None);
         return Ok(err(message));
     }
+    if let ToolNeed::Project(p) | ToolNeed::Owner(p) = def.permission {
+        // Checked again on each resource, in its project (step 11).
+        let _ = access.tool_need.set(p);
+    }
     ctx.log("debug", json!({ "event": "tools/call", "tool": name }))
         .await;
     let result = match def.name {
@@ -1070,18 +1109,18 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         "get_instance" => instance::get_instance(ctx, access),
         "diagnose_instance" => instance::diagnose_instance(ctx).await,
         // Checkpoints
-        "list_checkpoints" => checkpoints::list_checkpoints(ctx, &args),
-        "save_checkpoint" => checkpoints::save_checkpoint(ctx, &args).await,
+        "list_checkpoints" => checkpoints::list_checkpoints(ctx, access, &args),
+        "save_checkpoint" => checkpoints::save_checkpoint(ctx, access, &args).await,
         "restore_checkpoint" => checkpoints::restore_checkpoint(ctx, access, &args, params).await,
-        "delete_checkpoint" => checkpoints::delete_checkpoint(ctx, &args, params).await,
+        "delete_checkpoint" => checkpoints::delete_checkpoint(ctx, access, &args, params).await,
         "list_repository_checkpoints" => checkpoints::list_repository_checkpoints(ctx).await,
         // Saved tests
-        "list_tests" => replay::list_tests(ctx, &args),
+        "list_tests" => replay::list_tests(ctx, access, &args),
         "save_test" => replay::save_test(ctx, access, &args),
-        "delete_test" => replay::delete_test(ctx, &args, params).await,
+        "delete_test" => replay::delete_test(ctx, access, &args, params).await,
         "run_tests" => replay::run_tests(ctx, access, &args, params).await,
-        "list_test_runs" => replay::list_test_runs(ctx, &args),
-        "get_test_run" => replay::get_test_run(ctx, &args),
+        "list_test_runs" => replay::list_test_runs(ctx, access, &args),
+        "get_test_run" => replay::get_test_run(ctx, access, &args),
         "clear_test_runs" => replay::clear_test_runs(ctx, &args, params).await,
         "list_test_schedules" => replay::list_test_schedules(ctx, &args),
         "save_test_schedule" => replay::save_test_schedule(ctx, &args, params).await,
@@ -1226,6 +1265,11 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         "delete_role" => users::delete_role(ctx, access, &args),
         // Single sign-on
         "test_sso" => settings::test_sso(ctx, access, &args).await,
+        // Projects
+        "list_projects" => projects::list_projects(ctx, access, &args),
+        "save_project" => projects::save_project(ctx, access, &args, params).await,
+        "delete_project" => projects::delete_project(ctx, access, &args, params).await,
+
         _ => return Err(RpcError::invalid_params(format!("Unknown tool: {name}"))),
     };
     let outcome = if result.get("isError").and_then(Value::as_bool) == Some(true) {

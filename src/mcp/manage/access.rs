@@ -33,13 +33,19 @@ pub enum ToolNeed {
     Own(Permission),
     /// The caller's own self-service visit (its manage token).
     Visitor,
+    /// A permission of the caller, in the instance or in a project (step
+    /// 11): the tool is listed when the caller holds it somewhere, and the
+    /// service checks it on each resource, in the resource's project.
+    Project(Permission),
 }
 
 impl ToolNeed {
     /// The permission, unless this is the visitor rule.
     pub fn permission(self) -> Option<Permission> {
         match self {
-            ToolNeed::Perm(p) | ToolNeed::Owner(p) | ToolNeed::Own(p) => Some(p),
+            ToolNeed::Perm(p) | ToolNeed::Owner(p) | ToolNeed::Own(p) | ToolNeed::Project(p) => {
+                Some(p)
+            }
             ToolNeed::Visitor => None,
         }
     }
@@ -47,13 +53,44 @@ impl ToolNeed {
     /// How the docs' tool tables write it.
     pub fn label(self) -> String {
         match self {
-            ToolNeed::Perm(p) => p.name().to_string(),
+            ToolNeed::Perm(p) | ToolNeed::Project(p) => p.name().to_string(),
             ToolNeed::Owner(p) => format!("{} (or the mock's owner)", p.name()),
             ToolNeed::Own(p) => format!("{} (or your own agents)", p.name()),
             ToolNeed::Visitor => "a visit's manage token".to_string(),
         }
     }
 }
+
+/// The tools whose resources may belong to a project (step 11), declared
+/// [`ToolNeed::Project`]: listed for a caller holding the permission in
+/// some project, the service checks it on each mock, test or checkpoint
+/// (beside them, the [`ToolNeed::Owner`] mock changes do the same).
+/// `every_tool_declares_a_permission` keeps the list and the declarations
+/// in step; `project_members_see_and_change_their_project_only` calls them.
+pub const PROJECT_TOOLS: &[&str] = &[
+    "list_mocks",
+    "get_mock",
+    "preview_spec",
+    "get_mock_spec",
+    "test_rules",
+    "check_mock",
+    "sample_request",
+    "validate_payload",
+    "export_collection",
+    "get_mock_data",
+    "get_mock_traffic",
+    "get_mock_revision",
+    "list_checkpoints",
+    "save_checkpoint",
+    "restore_checkpoint",
+    "delete_checkpoint",
+    "list_tests",
+    "save_test",
+    "delete_test",
+    "run_tests",
+    "list_test_runs",
+    "get_test_run",
+];
 
 /// Request headers forwarded into in-process requests (`try_request`,
 /// bins, the flaky reset), so a caller tests as who they are. Only the API
@@ -86,6 +123,10 @@ pub struct Access {
     pub token: Option<(String, i64)>,
     /// `User-Agent` says the stdio bridge (`rustybin mcp-stdio`).
     pub stdio: bool,
+    /// The permission of the tool being called, when its resources may
+    /// belong to a project: the service checks it on each one (as a
+    /// project-scoped route's).
+    pub tool_need: std::sync::OnceLock<Permission>,
     /// Public mode without keys: the instance.
     pub public_mode: bool,
     pub self_service: bool,
@@ -204,6 +245,7 @@ impl Access {
             credential,
             token,
             stdio,
+            tool_need: std::sync::OnceLock::new(),
             caller,
             grant,
             resolved,
@@ -220,9 +262,13 @@ impl Access {
 
     /// The service for this caller.
     pub fn svc(&self, state: &AppState) -> Svc {
+        let mut caller = self.caller.clone();
+        if caller.route_need.is_none() {
+            caller.route_need = self.tool_need.get().copied();
+        }
         Svc {
             state: state.clone(),
-            caller: self.caller.clone(),
+            caller,
             links: self.links.clone(),
         }
     }
@@ -240,11 +286,13 @@ impl Access {
                 self.self_service && self.has(Permission::VisitsOperate)
             }
             ToolNeed::Perm(p) => self.has(p),
+            ToolNeed::Project(p) => self.resolved.has_somewhere(p),
             // On a self-service instance (or for a key) anyone without the
             // permission may change their own mocks (the first creation
-            // starts a visit); an authenticated caller is held to it.
+            // starts a visit); an authenticated caller is held to it. A
+            // member of a project changes that project's mocks.
             ToolNeed::Owner(p) => {
-                self.has(p)
+                self.resolved.has_somewhere(p)
                     || (self.grant.is_none()
                         && (!self.caller.owners.is_empty() || self.self_service))
             }
@@ -269,7 +317,7 @@ impl Access {
             ToolNeed::Perm(Permission::VisitsOperate) if !self.self_service => {
                 "self-service mocks are off on this instance".into()
             }
-            ToolNeed::Perm(p) | ToolNeed::Owner(p) | ToolNeed::Own(p) => {
+            ToolNeed::Perm(p) | ToolNeed::Owner(p) | ToolNeed::Own(p) | ToolNeed::Project(p) => {
                 let (_, message) = crate::rbac::need::refusal_of(&self.resolved, p);
                 let mut out = format!(
                     "permission_required: {}. {}",

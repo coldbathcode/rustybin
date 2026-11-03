@@ -169,7 +169,7 @@ Users: invite, change roles, disable, delete (the password sign-in)
 | Command | What it does | Calls | Needs |
 |---|---|---|---|
 | `rustybin users list` | The users: roles, status (active, invited, disabled), last sign-in. | `GET /_rustybin/users` | `users.read` |
-| `rustybin users invite <name> --role R [--display-name D] [--email E] [--reset] [--sso]` | Invite a user: the answer is a link to send them (shown once), where they set their own password. --reset sends a user who exists a new link (a password reset); --sso adds a single sign-on user instead (no link). Flags: `--role` value, `--display-name` value, `--email` value, `--reset`, `--sso`. | `POST /_rustybin/users`, `POST /_rustybin/users/{id}/invite` | `users.manage` |
+| `rustybin users invite <name> --role R [--display-name D] [--email E] [--reset] [--sso]` | Invite a user: the answer is a link to send them (shown once), where they set their own password. --reset sends a user who exists a new link (a password reset); --sso adds a single sign-on user instead (no link). Flags: `--role` value, `--display-name` value, `--email` value, `--reset`, `--sso`, `--project` value. | `POST /_rustybin/users`, `POST /_rustybin/users/{id}/invite` | `users.manage` |
 | `rustybin users show <user>` | One user (an id or a sign-in name): roles, permissions, status, the open invitation. | `GET /_rustybin/users/{id}` | `users.read` |
 | `rustybin users update <user> [--role R] [--pin-role R] [--display-name D] [--email E]` | Change a user's roles (--role replaces them; repeatable), a single sign-on user's pinned roles (--pin-role), display name or email (--email "" clears it). Flags: `--role` value, `--display-name` value, `--email` value, `--pin-role` value. | `PATCH /_rustybin/users/{id}` | `users.manage` |
 | `rustybin users disable <user>` | Disable a user: their sessions end and their sign-in is refused. | `PATCH /_rustybin/users/{id}` | `users.manage` |
@@ -204,6 +204,24 @@ rustybin roles list
 rustybin roles show editor
 rustybin roles save catalog-reader --permission mocks.read,traffic.read --description "Reads mocks and traffic"
 rustybin roles delete catalog-reader --yes
+```
+
+## projects
+
+Projects: roles on part of the instance (mocks, saved tests, checkpoints)
+
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin projects list` | The projects you may see, your roles in each and what each holds. | `GET /_rustybin/projects` | signed in |
+| `rustybin projects show <name>` | One project: its members (with users.read), your roles, its mocks, saved tests and checkpoints. | `GET /_rustybin/projects/{name}` | signed in |
+| `rustybin projects save <name> [--description D] [--member USER=role+role]...` | Create or change a project; --member (repeatable) replaces the members. Flags: `--description` value, `--member` value, `--no-members`. | `PUT /_rustybin/projects/{name}` | `users.manage` |
+| `rustybin projects delete <name> [--move-to P]` | Delete a project; one that holds resources needs --move-to (another project, or instance). Flags: `--move-to` value. | `DELETE /_rustybin/projects/{name}` | `users.manage` |
+
+```bash
+rustybin projects list
+rustybin projects show payments
+rustybin projects save payments --description "The payments team"
+rustybin projects delete payments --move-to instance --yes
 ```
 
 ## me
@@ -256,9 +274,10 @@ OpenAPI mocks on the instance (rustybin mock ... works offline)
 
 | Command | What it does | Calls | Needs |
 |---|---|---|---|
-| `rustybin mocks list [--all]` | The mocks with their state and traffic. Flags: `--all`. | `GET /_rustybin/mocks` | `mocks.read` |
+| `rustybin mocks list [--all] [--project P]` | The mocks with their state and traffic. Flags: `--all`, `--project` value. | `GET /_rustybin/mocks` | `mocks.read` |
 | `rustybin mocks get <name>` | One mock: settings, operations, the deploy report. | `GET /_rustybin/mocks/{name}` | `mocks.read` |
-| `rustybin mocks create <name> --spec FILE` | Create a mock from an OpenAPI file (YAML or JSON). Flags: `--spec` value, `--mode` value, `--disabled`, `--no-deploy`, `--strip-server-prefix`. | `POST /_rustybin/mocks` | `mocks.write` |
+| `rustybin mocks create <name> --spec FILE [--project P]` | Create a mock from an OpenAPI file (YAML or JSON). Flags: `--spec` value, `--mode` value, `--disabled`, `--no-deploy`, `--strip-server-prefix`, `--project` value. | `POST /_rustybin/mocks` | `mocks.write` |
+| `rustybin mocks move <name> --project P` | Move a mock to another project (instance: the instance's); needs mocks.write in both. Flags: `--project` value. | `PATCH /_rustybin/mocks/{name}` | `mocks.write` |
 | `rustybin mocks import --spec FILE` | Preview a spec: title, operations, the checks, the suggested name. Flags: `--spec` value. | `POST /_rustybin/mocks/import` | `mocks.read` |
 | `rustybin mocks update <name> [--spec FILE] [--mode M] [--settings JSON]` | Change a mock's spec or settings (the draft, deployed unless --no-deploy). Flags: `--spec` value, `--mode` value, `--settings` value, `--no-deploy`, `--force`, `--expect-revision` value. | `PATCH /_rustybin/mocks/{name}` | `mocks.write` |
 | `rustybin mocks deploy <name> [--force] [--expect-revision N]` | Deploy the draft. Flags: `--force`, `--expect-revision` value. | `POST /_rustybin/mocks/{name}/deploy` | `mocks.write` |
@@ -295,6 +314,7 @@ OpenAPI mocks on the instance (rustybin mock ... works offline)
 rustybin mocks list
 rustybin mocks get petstore
 rustybin mocks create orders --spec orders.yaml --mode generated
+rustybin mocks move orders --project instance
 rustybin mocks import --spec orders.yaml
 rustybin mocks update orders --mode stateful
 rustybin mocks deploy orders
@@ -414,9 +434,9 @@ Checkpoints: the instance's API mocks and health, saved and restored
 
 | Command | What it does | Calls | Needs |
 |---|---|---|---|
-| `rustybin checkpoint list [--from-git]` | The checkpoints and the mocks each holds; --from-git lists the configuration repository's (after git pull). Flags: `--from-git`. | `GET /_rustybin/checkpoints` | `mocks.read` |
+| `rustybin checkpoint list [--from-git] [--project P]` | The checkpoints and the mocks each holds; --from-git lists the configuration repository's (after git pull). Flags: `--from-git`, `--project` value. | `GET /_rustybin/checkpoints` | `mocks.read` |
 | `rustybin checkpoint show <name>` | One checkpoint. | `GET /_rustybin/checkpoints/{name}` | `mocks.read` |
-| `rustybin checkpoint save <name> [--replace]` | Save the instance's API mocks (with their data) and the health toggle. Flags: `--replace`. | `POST /_rustybin/checkpoints` | `checkpoints.write` |
+| `rustybin checkpoint save <name> [--replace] [--project P]` | Save the instance's API mocks (with their data) and the health toggle; --project keeps one project's mocks only. Flags: `--replace`, `--project` value. | `POST /_rustybin/checkpoints` | `checkpoints.write` |
 | `rustybin checkpoint restore <name> [--dry-run] [--from-git]` | Bring the API mocks, their data and health back (other API mocks are deleted, flaky counters reset); --dry-run says what would change, --from-git restores the configuration repository's checkpoint. Flags: `--dry-run`, `--from-git`. | `POST /_rustybin/checkpoints/{name}/restore` | `checkpoints.restore` |
 | `rustybin checkpoint delete <name>` | Delete a checkpoint (the instance is not changed). | `DELETE /_rustybin/checkpoints/{name}` | `checkpoints.write` |
 
@@ -434,12 +454,12 @@ Saved tests: captured requests with assertions, run here, through a gateway or i
 
 | Command | What it does | Calls | Needs |
 |---|---|---|---|
-| `rustybin tests list` | The saved tests and the variables each uses. | `GET /_rustybin/tests` | `tests.read` |
+| `rustybin tests list [--project P]` | The saved tests and the variables each uses. Flags: `--project` value. | `GET /_rustybin/tests` | `tests.read` |
 | `rustybin tests show <name>` | One saved test. | `GET /_rustybin/tests/{name}` | `tests.read` |
-| `rustybin tests save <name> --capture ID [--gateway U] [--description D]` | Save a captured request as a test (its status asserted; credentials become {{variables}}). Flags: `--capture` value, `--gateway` value, `--description` value. | `POST /_rustybin/tests` | `tests.write` |
+| `rustybin tests save <name> --capture ID [--gateway U] [--description D] [--project P]` | Save a captured request as a test (its status asserted; credentials become {{variables}}). Flags: `--capture` value, `--gateway` value, `--description` value, `--project` value. | `POST /_rustybin/tests` | `tests.write` |
 | `rustybin tests put <name> --file F` | Save or replace a test from a file (JSON or YAML: request, gateway, assert). Flags: `--file` value. | `PUT /_rustybin/tests/{name}` | `tests.write` |
 | `rustybin tests delete <name>` | Delete a saved test. | `DELETE /_rustybin/tests/{name}` | `tests.write` |
-| `rustybin tests run [--names a,b] [--var NAME=value]... [--junit]` | Run saved tests (all by default); exits 1 when one fails. --junit prints JUnit XML for CI. Flags: `--names` value, `--var` value, `--junit`. | `POST /_rustybin/tests/run` | `tests.run` |
+| `rustybin tests run [--names a,b] [--project P] [--var NAME=value]... [--junit]` | Run saved tests (all by default); exits 1 when one fails. --junit prints JUnit XML for CI. Flags: `--names` value, `--var` value, `--junit`, `--project` value. | `POST /_rustybin/tests/run` | `tests.run` |
 | `rustybin tests export` | Every saved test as one Hurl file (hurl --test --variable base_url=...). | `GET /_rustybin/tests/export` | `tests.read` |
 | `rustybin tests runs [--limit N] [--cursor C]` | The history of test runs, newest first: when, the trigger, who, the counts, what changed since the previous run. Flags: `--limit` value, `--cursor` value. | `GET /_rustybin/tests/runs` | `tests.read` |
 | `rustybin tests run-show <id> [--junit]` | One kept run: each test's result and failures, the change since the previous run; --junit prints its JUnit XML. Flags: `--junit`. | `GET /_rustybin/tests/runs/{id}` | `tests.read` |

@@ -31,8 +31,11 @@ use crate::mocks::store::{Origin, Snapshot};
 use crate::state::AppState;
 
 pub mod api;
+pub mod projects;
 #[cfg(test)]
 mod tests;
+
+pub use projects::{schema as projects_schema, ProjectDoc};
 
 /// Most changes a diff lists (the rest is counted).
 pub const MAX_CHANGES: usize = 500;
@@ -83,7 +86,15 @@ pub fn repository_refused(key: &str) -> bool {
 /// (the sections rule beside [`REPOSITORY_REFUSED`]'s settings): whoever
 /// can push would otherwise make themselves admin. Each such entry is
 /// reported in `problems` and kept as it is.
-pub const REPOSITORY_REFUSED_SECTIONS: [(&str, &str); 2] = [
+pub const REPOSITORY_REFUSED_SECTIONS: [(&str, &str); 4] = [
+    (
+        "projects",
+        "a change of a project's members, a prune of projects (a new project and descriptions apply)",
+    ),
+    (
+        "mocks, tests",
+        "a move of an existing mock or saved test to another project (project:)",
+    ),
     (
         "users",
         "a new user, a change of a user's roles or of disabled, a prune of users (display names and emails apply)",
@@ -196,6 +207,7 @@ pub struct Extra {
     pub test_schedules: Option<Vec<crate::replay::schedule::Schedule>>,
     pub roles: Option<Vec<crate::rbac::CustomRole>>,
     pub users: Option<Vec<UserDoc>>,
+    pub projects: Option<Vec<ProjectDoc>>,
     pub health: Option<HealthSection>,
 }
 
@@ -211,6 +223,7 @@ impl Extra {
             test_schedules: file.test_schedules.take(),
             roles: file.roles.take(),
             users: file.users.take(),
+            projects: file.projects.take(),
             health: file.health.take(),
         }
     }
@@ -224,6 +237,7 @@ impl Extra {
             && self.test_schedules.is_none()
             && self.roles.is_none()
             && self.users.is_none()
+            && self.projects.is_none()
             && self.health.is_none()
     }
 
@@ -239,6 +253,7 @@ impl Extra {
             test_schedules: self.test_schedules,
             roles: self.roles,
             users: self.users,
+            projects: self.projects,
             health: self.health,
             ..MocksFile::default()
         }
@@ -467,6 +482,7 @@ pub fn export(state: &AppState, secrets: SecretsMode, bundle: bool) -> Export {
         // no `users:` (an apply there leaves them alone).
         users: crate::login::enabled(&state.config)
             .then(|| state.users.list().iter().map(UserDoc::of).collect()),
+        projects: projects::export(state),
         health: Some(HealthSection {
             initial: if state.health.is_healthy() {
                 "healthy".into()
@@ -496,6 +512,7 @@ fn mock_doc(s: &Snapshot, reveal: bool, bundle: bool) -> (MockDoc, Option<SpecFi
         },
         operations: settings.operations.clone(),
         mcp: settings.mcp.clone(),
+        project: s.project.clone(),
     };
     if bundle {
         let source: &str = &c.source;
@@ -1073,6 +1090,16 @@ pub fn diff(before: &MocksFile, after: &MocksFile, base: Option<&Path>) -> Vec<C
         let a: BTreeMap<String, &UserDoc> = a.iter().map(|u| (u.name.clone(), u)).collect();
         map_changes(&mut out, "users", &b, &a, |_| String::new());
     }
+    if let Some(a) = &after.projects {
+        let b: BTreeMap<String, &ProjectDoc> = before
+            .projects
+            .iter()
+            .flatten()
+            .map(|p| (p.name.clone(), p))
+            .collect();
+        let a: BTreeMap<String, &ProjectDoc> = a.iter().map(|p| (p.name.clone(), p)).collect();
+        map_changes(&mut out, "projects", &b, &a, |_| String::new());
+    }
     if let Some(a) = &after.health {
         let b = before.health.as_ref().map(|h| h.initial.as_str());
         value_change(&mut out, "health", "initial", b, Some(a.initial.as_str()));
@@ -1368,9 +1395,26 @@ pub fn apply(state: &AppState, file: MocksFile, opts: &ApplyOptions) -> Value {
         apply_settings(state, &file, opts, &mut problems),
     );
     put("secrets", apply_secrets(state, &file, opts, &mut problems));
+    // Projects first, so mocks and tests find the ones the document creates;
+    // their members after the users.
+    let mut projects_result = json!({});
+    let known_projects = projects::ensure(
+        state,
+        file.projects.as_ref(),
+        opts,
+        &mut problems,
+        &mut projects_result,
+    );
     put(
         "mocks",
-        apply_mocks(state, file.mocks, &file.unparsed_mocks, opts, &mut problems),
+        apply_mocks(
+            state,
+            file.mocks,
+            &file.unparsed_mocks,
+            &known_projects,
+            opts,
+            &mut problems,
+        ),
     );
     put(
         "registry",
@@ -1384,7 +1428,10 @@ pub fn apply(state: &AppState, file: MocksFile, opts: &ApplyOptions) -> Value {
         "harness",
         apply_harness(state, file.harness, opts, &mut problems),
     );
-    put("tests", apply_tests(state, file.tests, opts, &mut problems));
+    put(
+        "tests",
+        apply_tests(state, file.tests, &known_projects, opts, &mut problems),
+    );
     put(
         "test_schedules",
         apply_test_schedules(state, file.test_schedules, opts, &mut problems),
@@ -1400,7 +1447,13 @@ pub fn apply(state: &AppState, file: MocksFile, opts: &ApplyOptions) -> Value {
     // Roles first (users may hold new ones), the prune of roles after the
     // users (a role the document takes from them goes too).
     let mut roles_result = apply_roles(state, roles, opts, &mut problems);
-    let users_result = apply_users(state, file.users, opts, &mut problems);
+    let users_result = apply_users(
+        state,
+        file.users,
+        file.projects.as_ref(),
+        opts,
+        &mut problems,
+    );
     if let (Some(named), Some(Value::Object(r))) = (named_roles, roles_result.as_mut()) {
         let pruned = prune_roles(state, &named, opts, &mut problems);
         r.insert(
@@ -1410,6 +1463,16 @@ pub fn apply(state: &AppState, file: MocksFile, opts: &ApplyOptions) -> Value {
     }
     put("roles", roles_result);
     put("users", users_result);
+    if file.projects.is_some() {
+        projects::members(
+            state,
+            file.projects,
+            opts,
+            &mut problems,
+            &mut projects_result,
+        );
+        put("projects", Some(projects_result));
+    }
     put(
         "health",
         apply_health(state, file.health, opts, &mut problems),
@@ -1462,10 +1525,31 @@ pub fn apply_extra(state: &AppState, extra: Extra, principal: &str) -> Vec<Strin
     apply_settings(state, &file, &opts, &mut problems);
     apply_secrets(state, &file, &opts, &mut problems);
     apply_harness(state, file.harness, &opts, &mut problems);
-    apply_tests(state, file.tests, &opts, &mut problems);
+    let mut projects_result = json!({});
+    let known_projects = projects::ensure(
+        state,
+        file.projects.as_ref(),
+        &opts,
+        &mut problems,
+        &mut projects_result,
+    );
+    apply_tests(state, file.tests, &known_projects, &opts, &mut problems);
     apply_test_schedules(state, file.test_schedules, &opts, &mut problems);
     apply_roles(state, file.roles, &opts, &mut problems);
-    apply_users(state, file.users, &opts, &mut problems);
+    apply_users(
+        state,
+        file.users,
+        file.projects.as_ref(),
+        &opts,
+        &mut problems,
+    );
+    projects::members(
+        state,
+        file.projects,
+        &opts,
+        &mut problems,
+        &mut projects_result,
+    );
     apply_health(state, file.health, &opts, &mut problems);
     problems
 }
@@ -1684,6 +1768,7 @@ fn apply_mocks(
     state: &AppState,
     mocks: Option<Vec<MockDoc>>,
     unparsed: &[String],
+    known_projects: &BTreeSet<String>,
     opts: &ApplyOptions,
     problems: &mut Vec<String>,
 ) -> Option<Value> {
@@ -1708,6 +1793,19 @@ fn apply_mocks(
         }
         named.push(doc.name.clone());
         let mut doc = doc;
+        let existing = state
+            .mocks
+            .get(&doc.name)
+            .filter(|s| !s.owner.is_visitor())
+            .map(|s| s.project);
+        doc.project = projects::project_gate(
+            &format!("mocks.{}", doc.name),
+            doc.project.take(),
+            existing,
+            known_projects,
+            opts,
+            problems,
+        );
         if let (Some(path), Some(base)) = (doc.spec.clone(), opts.base.as_deref()) {
             match contained_path(base, &path) {
                 Ok(full) => doc.spec = Some(full.display().to_string()),
@@ -2098,6 +2196,7 @@ fn apply_harness(
 fn apply_tests(
     state: &AppState,
     section: Option<Vec<crate::replay::SavedTest>>,
+    known_projects: &BTreeSet<String>,
     opts: &ApplyOptions,
     problems: &mut Vec<String>,
 ) -> Option<Value> {
@@ -2105,7 +2204,16 @@ fn apply_tests(
     let store = &state.saved_tests;
     let named: BTreeSet<String> = section.iter().map(|t| t.name.clone()).collect();
     let mut valid = Vec::new();
-    for t in section {
+    for mut t in section {
+        let existing = store.get(&t.name).map(|old| old.project);
+        t.project = projects::project_gate(
+            &format!("tests.{}", t.name),
+            t.project.take(),
+            existing,
+            known_projects,
+            opts,
+            problems,
+        );
         // A test from the repository goes to this instance, or through the
         // gateway its saved copy already names: a pulled document never
         // points requests (and the run's variables) at a new host.
@@ -2428,6 +2536,7 @@ fn prune_roles(
 fn apply_users(
     state: &AppState,
     section: Option<Vec<UserDoc>>,
+    projects_section: Option<&Vec<ProjectDoc>>,
     opts: &ApplyOptions,
     problems: &mut Vec<String>,
 ) -> Option<Value> {
@@ -2465,6 +2574,19 @@ fn apply_users(
                 email: doc.email.clone(),
                 roles: doc.roles.clone(),
                 sso: doc.sso,
+                // Its roles in the projects the document names it in (those
+                // that exist), so a user of a project only is invited too.
+                projects: projects_section
+                    .into_iter()
+                    .flatten()
+                    .filter(|p| state.users.project_exists(&p.name))
+                    .filter_map(|p| {
+                        p.members
+                            .iter()
+                            .find(|m| m.user == doc.name)
+                            .map(|m| (p.name.clone(), m.roles.clone()))
+                    })
+                    .collect(),
             };
             let missing = doc
                 .roles
@@ -2808,9 +2930,10 @@ pub fn sections_need(
     if file.agents.is_some() {
         needs.push(P::AgentsManage);
     }
-    if file.users.is_some() || file.roles.is_some() {
+    if file.users.is_some() || file.roles.is_some() || file.projects.is_some() {
         needs.push(P::UsersManage);
     }
+
     needs.into_iter().find(|p| !caller.has(*p))
 }
 

@@ -40,6 +40,10 @@ pub struct RunBody {
     /// `{{name}}` values (else `RUSTYBIN_TEST_*` environment variables).
     #[serde(default)]
     pub variables: BTreeMap<String, String>,
+    /// Only this project's tests (`instance`: the instance's); a member of
+    /// projects runs the tests it may run.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

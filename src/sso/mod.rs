@@ -172,8 +172,18 @@ fn valid_role_name(r: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
+/// One role of a role map entry: `role` (an instance role) or
+/// `project:role` (a role in that project, step 11).
+fn valid_role_token(t: &str) -> bool {
+    match t.split_once(':') {
+        Some((project, role)) => crate::mocks::model::valid_name(project) && valid_role_name(role),
+        None => valid_role_name(t),
+    }
+}
+
 /// One entry of the role map: `group=role role` (the last `=` splits, so
-/// a group name may hold one; roles are separated by spaces or `+`).
+/// a group name may hold one; roles are separated by spaces or `+`). A
+/// role written `project:role` is a role in that project.
 pub fn parse_role_map_entry(entry: &str) -> Result<(String, Vec<String>), String> {
     let (group, roles) = entry
         .rsplit_once('=')
@@ -190,7 +200,7 @@ pub fn parse_role_map_entry(entry: &str) -> Result<(String, Vec<String>), String
     if roles.is_empty() {
         return Err(format!("{entry:?}: no role after ="));
     }
-    if let Some(bad) = roles.iter().find(|r| !valid_role_name(r)) {
+    if let Some(bad) = roles.iter().find(|r| !valid_role_token(r)) {
         return Err(format!("{entry:?}: {bad:?} is not a role name"));
     }
     Ok((group.to_string(), roles))
@@ -206,7 +216,8 @@ fn check_role_map(v: &Value) -> Result<(), String> {
 }
 
 /// A role map given as `{group, roles}` objects (a document, the API)
-/// becomes the `group=role role` strings the setting keeps.
+/// becomes the `group=role role` strings the setting keeps; `{group,
+/// project, roles}` becomes `group=project:role project:role`.
 fn normalize_role_map(v: &Value) -> Value {
     match v {
         Value::Array(items) => Value::Array(
@@ -215,14 +226,26 @@ fn normalize_role_map(v: &Value) -> Value {
                 .map(|i| match i {
                     Value::Object(o) => {
                         let group = o.get("group").and_then(Value::as_str).unwrap_or("");
-                        let roles = match o.get("roles") {
+                        let list: Vec<String> = match o.get("roles") {
                             Some(Value::Array(r)) => r
                                 .iter()
                                 .filter_map(Value::as_str)
+                                .map(str::to_string)
+                                .collect(),
+                            Some(Value::String(s)) => s
+                                .split([',', ' '])
+                                .filter(|r| !r.is_empty())
+                                .map(str::to_string)
+                                .collect(),
+                            _ => Vec::new(),
+                        };
+                        let roles = match o.get("project").and_then(Value::as_str) {
+                            Some(p) if !p.is_empty() => list
+                                .iter()
+                                .map(|r| format!("{p}:{r}"))
                                 .collect::<Vec<_>>()
                                 .join(" "),
-                            Some(Value::String(s)) => s.replace(',', " "),
-                            _ => String::new(),
+                            _ => list.join(" "),
                         };
                         Value::String(format!("{group}={roles}"))
                     }
@@ -741,19 +764,58 @@ pub fn map_roles(
             roles.push(r.clone());
         }
     };
+    let mut in_projects = false;
     for (group, mapped) in &setup.role_map {
         if groups.iter().any(|g| g == group) {
             for r in mapped {
-                add(r, &mut roles);
+                if r.contains(':') {
+                    in_projects = true;
+                } else {
+                    add(r, &mut roles);
+                }
             }
         }
     }
-    if roles.is_empty() {
+    if roles.is_empty() && !in_projects {
         for r in &setup.default_roles {
             add(r, &mut roles);
         }
     }
     (roles, unknown)
+}
+
+/// The roles a person's groups give in projects (`project:role` entries
+/// of the role map): projects and roles the instance has only. Also
+/// answers what the map names that does not exist (`project:role`).
+pub fn map_project_roles(
+    setup: &Setup,
+    groups: &[String],
+    known_role: impl Fn(&str) -> bool,
+    known_project: impl Fn(&str) -> bool,
+) -> (BTreeMap<String, Vec<String>>, Vec<String>) {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut unknown: Vec<String> = Vec::new();
+    for (group, mapped) in &setup.role_map {
+        if !groups.iter().any(|g| g == group) {
+            continue;
+        }
+        for t in mapped {
+            let Some((project, role)) = t.split_once(':') else {
+                continue;
+            };
+            if !known_project(project) || !known_role(role) {
+                if !unknown.contains(t) {
+                    unknown.push(t.clone());
+                }
+                continue;
+            }
+            let roles = out.entry(project.to_string()).or_default();
+            if !roles.iter().any(|r| r == role) {
+                roles.push(role.to_string());
+            }
+        }
+    }
+    (out, unknown)
 }
 
 /// Is the email at an allowed domain? `Err` with the reason otherwise.
@@ -1122,9 +1184,16 @@ impl Sso {
                 "the ID token names nobody this instance can call a user",
             )));
         };
-        let (mapped, unknown) = map_roles(&setup, &person.groups, |r| {
+        let (mapped, mut unknown) = map_roles(&setup, &person.groups, |r| {
             users.role_permissions(r).is_some()
         });
+        let (mapped_projects, unknown_in_projects) = map_project_roles(
+            &setup,
+            &person.groups,
+            |r| users.role_permissions(r).is_some(),
+            |p| users.project_exists(p),
+        );
+        unknown.extend(unknown_in_projects);
         if !unknown.is_empty() {
             tracing::warn!(target: "rustybin::sso", roles = %unknown.join(","), "the role map or the default roles name roles this instance does not have: ignored");
         }
@@ -1135,6 +1204,7 @@ impl Sso {
             display_name: person.display_name.clone(),
             email: person.email.clone(),
             mapped_roles: mapped,
+            mapped_projects,
         };
         let user = users
             .sso_sign_in(&ident, setup.provision)
@@ -1216,7 +1286,13 @@ impl Sso {
             .flat_map(|(_, r)| r)
             .chain(&setup.default_roles)
         {
-            if users.role_permissions(r).is_none() && !unknown.contains(r) {
+            let known = match r.split_once(':') {
+                Some((p, role)) => {
+                    users.project_exists(p) && users.role_permissions(role).is_some()
+                }
+                None => users.role_permissions(r).is_some(),
+            };
+            if !known && !unknown.contains(r) {
                 unknown.push(r.clone());
             }
         }

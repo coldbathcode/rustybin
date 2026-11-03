@@ -10,6 +10,8 @@ import { mountDetail } from './mocks/detail.js';
 import { visitBar } from './mocks/visit.js';
 import { agentPanel } from '../lib/agent.js';
 import * as portal from '../lib/portal.js';
+import * as projects from '../lib/projects.js';
+import * as perms from '../lib/perms.js';
 
 const FILTERS = [['all', 'All'], ['on', 'On'], ['off', 'Off'], ['secured', 'Secured'], ['draft', 'Draft changes']];
 
@@ -25,7 +27,8 @@ function mountList(root) {
   // Self-service (public instances): visitors create and change their own
   // mocks; the instance's stay read-only for them.
   let visitor = false;
-  const canChange = (m) => !readOnly || !!m.yours;
+  // The answer says per mock (a project's roles count, step 11).
+  const canChange = (m) => (typeof m.can_manage === 'boolean' ? m.can_manage : !readOnly || !!m.yours);
   // Bulk selection (names), kept across the periodic refresh.
   const selected = new Set();
   const bulkEl = h('div', { class: 'bulk-bar row', role: 'region', 'aria-label': 'Bulk actions' });
@@ -48,7 +51,7 @@ function mountList(root) {
       h('div', { class: 'grow' }, h('h1', null, 'Mock APIs'),
         h('p', null, 'Upload an OpenAPI spec and get a mock of the API at its own URL: realistic responses, mocked security, request validation and live traffic. Point a gateway at it to demo the real thing before the backend exists.')),
       h('div', { class: 'row' },
-        readOnly ? null : h('button', { class: 'btn', type: 'button', onclick: () => yamlIn.click(), title: 'Apply a rustybin.yaml document (creates or updates mocks)' }, icon('upload'), 'Import YAML'),
+        readOnly || !perms.can('config.apply') ? null : h('button', { class: 'btn', type: 'button', onclick: () => yamlIn.click(), title: 'Apply a rustybin.yaml document (creates or updates mocks)' }, icon('upload'), 'Import YAML'),
         h('button', { class: 'btn', type: 'button', onclick: exportAll, title: 'Every mock (except the sample) as rustybin.yaml' }, icon('download'), 'Export all'),
         newBtn,
         yamlIn)),
@@ -86,8 +89,9 @@ function mountList(root) {
   }
 
   async function load() {
-    const r = await api('GET', '');
+    const r = await api('GET', projects.query());
     if (!alive) return;
+
     if (!r.ok || !r.json) {
       replace(listEl, notice('err', errorText(r, 'Loading the mocks'), ' ', h('button', { class: 'btn sm', type: 'button', onclick: load }, 'Retry')));
       return;
@@ -265,6 +269,7 @@ function mountList(root) {
           m.has_draft_changes && !m.load_error ? h('span', { class: 'dot warn', title: 'Draft changes not deployed', 'aria-label': 'draft changes' }) : null,
           m.load_error ? badge(h('span', { title: m.load_error }, icon('alert'), ' load error'), 'err') : null,
           m.origin === 'sample' ? badge('sample', 'outline') : m.origin === 'file' ? badge('file', 'outline') : null,
+          m.project ? badge('project ' + m.project, 'violet') : null,
           m.owner_fingerprint ? badge(h('span', { title: 'Visitor mock (owner ' + m.owner_fingerprint + ')' }, 'visitor'), 'outline') : null,
           published.has(m.name) ? h('span', { class: 'badge ok', title: 'Published on the dev portal' }, icon('globe'), ' portal') : null),
         h('div', { class: 'row nowrap', style: { gap: '4px' } }, h('code', { class: 'tiny muted ellipsis' }, m.url), copyButton(m.url, { icon: true, title: 'Copy the URL of ' + m.name, toast: 'Mock URL copied' })),

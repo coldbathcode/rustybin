@@ -43,6 +43,9 @@ pub struct Caller {
     /// that the address shares one, so a new header per request starts
     /// nothing new.
     pub ledger: String,
+    /// What the route (or the tool) declares, checked again on each mock in
+    /// a project (step 11): `None` outside a project-scoped route.
+    pub route_need: Option<crate::rbac::Permission>,
 }
 
 impl Caller {
@@ -74,13 +77,54 @@ impl Caller {
         })
     }
 
+    /// May the caller see the mock? A visitor's mock: its owner and whoever
+    /// manages the instance's mocks. An instance mock in a project: who
+    /// holds `mocks.read` there (an instance role or a role in the
+    /// project). An instance mock without one: who holds `mocks.read`, and
+    /// as in 0.4 every caller without project bindings that reached the
+    /// handler (a visitor on a self-service demo reads the instance's
+    /// mocks).
     pub fn can_read(&self, s: &Snapshot) -> bool {
-        !s.owner.is_visitor() || self.admin || self.owns(&s.owner)
+        if s.owner.is_visitor() {
+            return self.admin || self.owns(&s.owner);
+        }
+        let read = crate::rbac::Permission::MocksRead;
+        match s.project.as_deref() {
+            Some(p) => self.resolved.has_in(read, Some(p)),
+            None => self.resolved.has(read) || !self.resolved.has_projects(),
+        }
     }
 
-    /// May the caller see the mock's secrets? Admin, or its owner.
+    /// May the caller use `p` on an instance mock (its project's roles
+    /// count)?
+    pub fn may(&self, p: crate::rbac::Permission, s: &Snapshot) -> bool {
+        self.resolved.has_in(p, s.project.as_deref())
+    }
+
+    /// May the caller change the mock? A visitor's: its owner or a manager
+    /// of the instance's mocks; an instance mock: `mocks.write` in the
+    /// instance or the mock's project.
+    pub fn can_manage(&self, s: &Snapshot) -> bool {
+        if s.owner.is_visitor() {
+            self.admin || self.owns(&s.owner)
+        } else {
+            self.may(crate::rbac::Permission::MocksWrite, s)
+        }
+    }
+
+    /// Does the caller change some mocks as a member of the team (the
+    /// instance's or a project's `mocks.write`), never as a visitor?
+    pub fn writes_somewhere(&self) -> bool {
+        self.resolved
+            .has_somewhere(crate::rbac::Permission::MocksWrite)
+    }
+
+    /// May the caller see the mock's secrets? Who may change it as the
+    /// instance's (admin, or `mocks.write` in its project), or its owner.
     pub fn reveals(&self, s: &Snapshot) -> bool {
-        self.admin || (s.owner.is_visitor() && self.owns(&s.owner))
+        self.admin
+            || (s.owner.is_visitor() && self.owns(&s.owner))
+            || (!s.owner.is_visitor() && self.may(crate::rbac::Permission::MocksWrite, s))
     }
 }
 
@@ -107,6 +151,9 @@ pub fn caller(state: &AppState, headers: &HeaderMap, extensions: &Extensions) ->
     let session = crate::session::session_key(headers, ip);
     Caller {
         admin,
+        route_need: extensions
+            .get::<crate::control_auth::RouteNeed>()
+            .map(|n| n.0),
         owners,
         ledger: match ip {
             Some(ip) => format!("ip:{ip}/{session}"),

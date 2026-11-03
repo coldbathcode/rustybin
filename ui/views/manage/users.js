@@ -67,6 +67,7 @@ export function usersPanel() {
   const display = input({ id: 'invite-display', placeholder: 'Alice Doe', maxlength: 100 });
   const email = input({ id: 'invite-email', type: 'email', placeholder: 'alice@example.com' });
   const inviteRoles = h('div', { id: 'invite-roles' });
+  const inviteProjects = h('textarea', { class: 'input mono', id: 'invite-projects', rows: 2, placeholder: 'payments=editor' });
   const ssoBox = h('input', { type: 'checkbox', id: 'invite-sso' });
   const ssoField = h('label', { class: 'row small', style: { gap: '6px' } }, ssoBox,
     'Single sign-on user: no link and no password (with sso.provision off, add people here before their first sign-in; the roles are pinned on top of their groups\')');
@@ -84,18 +85,21 @@ export function usersPanel() {
       field('Display name', display),
       field('Email', email, 'Optional, never logged')),
     field('Roles', inviteRoles, 'You grant only roles whose permissions you hold.'),
+    field('Roles in projects', inviteProjects, 'One project per line: payments=editor (with some, the instance roles may be left empty: the user sees those projects only).'),
     ssoField,
     h('div', { class: 'row' }, h('span', { class: 'grow muted small' }, 'The user is created invited and joins through the link. A portal reader reads the API portal\'s closed items and nothing in the console.'), readerBtn, inviteBtn));
   inviteForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const chosen = checkedRoles(inviteRoles);
-    if (!name.value.trim() || !chosen.length) {
-      replace(resultEl, notice('err', 'Give a sign-in name and at least one role.'));
+    const inProjects = parseBindings(inviteProjects.value, 'project');
+    if (!name.value.trim() || (!chosen.length && !inProjects.length)) {
+      replace(resultEl, notice('err', 'Give a sign-in name and at least one role (or roles in a project).'));
       return;
     }
     inviteBtn.disabled = true;
     try {
       const body = { name: name.value.trim(), roles: chosen };
+      if (inProjects.length) body.projects = inProjects;
       if (display.value.trim()) body.display_name = display.value.trim();
       if (email.value.trim()) body.email = email.value.trim();
       if (ssoBox.checked) body.sso = true;
@@ -103,7 +107,7 @@ export function usersPanel() {
       if (v.invitation) replace(resultEl, linkView(v));
       else replace(resultEl, notice('ok', icon('check'), v.user.name + ' signs in with single sign-on: no link to send.'));
       ssoBox.checked = false;
-      name.value = ''; display.value = ''; email.value = '';
+      name.value = ''; display.value = ''; email.value = ''; inviteProjects.value = '';
       loadUsers();
     } catch (err) {
       replace(resultEl, notice('err', 'The invitation failed: ' + err.message));
@@ -148,7 +152,9 @@ export function usersPanel() {
       h('td', null, h('div', { class: 'mono' }, u.name), u.display_name !== u.name ? h('div', { class: 'small muted' }, u.display_name) : null,
         u.first_admin ? h('div', null, badge('first admin', 'info')) : null,
         u.source === 'sso' ? h('div', null, badge('single sign-on', 'violet')) : null),
-      h('td', null, h('div', { class: 'row', style: { gap: '4px', flexWrap: 'wrap' } }, u.roles.map((r) => badge(r, roles.find((x) => x.name === r && x.privileged) ? 'warn' : '')))),
+      h('td', null, h('div', { class: 'row', style: { gap: '4px', flexWrap: 'wrap' } }, u.roles.map((r) => badge(r, roles.find((x) => x.name === r && x.privileged) ? 'warn' : ''))),
+        (u.projects || []).length ? h('div', { class: 'row user-bindings', style: { gap: '4px', flexWrap: 'wrap', marginTop: '4px' } },
+          u.projects.map((b) => h('span', { class: 'badge violet', 'data-binding': b.project, title: b.sso ? 'From a single sign-on group' : 'A member of the project' }, b.project + ': ' + b.roles.join(' ')))) : null),
       h('td', null, badge(u.status, STATUS[u.status] || ''), u.invitation ? h('div', { class: 'tiny muted' }, 'link until ' + when(u.invitation.expires_at)) : null),
       h('td', { class: 'small', title: u.last_sign_in || '' }, u.last_sign_in ? when(u.last_sign_in) : 'never'),
       h('td', { class: 'small' }, String(u.sessions)),
@@ -264,12 +270,90 @@ export function usersPanel() {
     }
   }
 
-  for (const c of [name, display, email, roleName, roleDesc]) if (!perms.can('users.manage')) c.disabled = true;
+  // ── Projects: roles on part of the instance (step 11) ──
+  const projectsEl = h('div', { id: 'projects-list' }, spinner('Loading the projects'));
+  const projName = input({ id: 'project-name', placeholder: 'payments', maxlength: 40 });
+  const projDesc = input({ id: 'project-description', placeholder: 'The payments team', maxlength: 200 });
+  const projMembers = h('textarea', { class: 'input mono', id: 'project-members', rows: 4, placeholder: 'alice=editor\nbob=viewer tester' });
+  const projSave = perms.guard(h('button', { class: 'btn primary', type: 'submit', id: 'project-save' }, 'Save project'), 'users.manage');
+  const projForm = h('form', { class: 'stack', 'aria-label': 'A project' },
+    h('div', { class: 'row', style: { gap: '12px', flexWrap: 'wrap' } },
+      field('Name', projName, 'The mock name rules: lower case letters, digits and -'),
+      field('Description', projDesc)),
+    field('Members', projMembers, 'One per line: user=role role (the whole list). Their roles apply to the project\'s mocks, saved tests and checkpoints, on top of their instance roles.'),
+    h('div', { class: 'row' }, h('span', { class: 'grow' }), projSave));
+  projForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const n = projName.value.trim();
+    if (!n) { replace(resultEl, notice('err', 'Give the project a name.')); return; }
+    try {
+      const v = await call('PUT', '/_rustybin/projects/' + encodeURIComponent(n), { description: projDesc.value, members: parseBindings(projMembers.value, 'user') });
+      toast((v.created ? 'Created' : 'Saved') + ' project ' + v.name);
+      projName.value = ''; projDesc.value = ''; projMembers.value = '';
+      loadProjects();
+      loadUsers();
+    } catch (err) {
+      replace(resultEl, notice('err', 'The project was not saved: ' + err.message));
+    }
+  });
+
+  function projectRow(p) {
+    const held = p.resources || {};
+    const count = (k) => (held[k] || []).length;
+    return h('tr', { 'data-project': p.name },
+      h('td', null, h('div', { class: 'mono' }, p.name), p.description ? h('div', { class: 'small muted' }, p.description) : null),
+      h('td', { class: 'small' }, (p.members || []).map((m) => h('div', { class: 'mono' }, (m.user || m.user_id) + ': ' + m.roles.join(' ')))),
+      h('td', { class: 'small' }, count('mocks') + ' mock(s), ' + count('tests') + ' test(s), ' + count('checkpoints') + ' checkpoint(s)'),
+      h('td', null, h('div', { class: 'row nowrap' },
+        h('button', { class: 'btn sm ghost', type: 'button', title: 'Edit', 'aria-label': 'Edit ' + p.name, onclick: () => {
+          projName.value = p.name; projDesc.value = p.description || '';
+          projMembers.value = (p.members || []).map((m) => (m.user || m.user_id) + '=' + m.roles.join(' ')).join('\n');
+          projName.focus();
+        } }, icon('edit')),
+        perms.guard(h('button', { class: 'btn sm ghost', type: 'button', title: 'Delete', 'aria-label': 'Delete project ' + p.name, 'data-delete-project': p.name, onclick: async () => {
+          const holds = count('mocks') + count('tests') + count('checkpoints') > 0;
+          let q = '';
+          if (holds) {
+            const to = window.prompt('The project ' + p.name + ' holds resources: where do they go? (another project, or instance)', 'instance');
+            if (!to) return;
+            q = '?move_to=' + encodeURIComponent(to);
+          } else if (!window.confirm('Delete the project ' + p.name + '? Its members lose their roles there.')) return;
+          try { await call('DELETE', '/_rustybin/projects/' + encodeURIComponent(p.name) + q); toast('Project ' + p.name + ' deleted'); loadProjects(); loadUsers(); } catch (err) { replace(resultEl, notice('err', err.message)); }
+        } }, icon('trash')), 'users.manage'))));
+  }
+
+  async function loadProjects() {
+    try {
+      const d = await getJson('/_rustybin/projects', { session: false });
+      replace(projectsEl,
+        h('p', { class: 'muted small' }, d.count + ' project(s) of ' + d.capacity + '.'),
+        d.projects.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'table', id: 'projects-table' },
+          h('thead', null, h('tr', null, h('th', null, 'Project'), h('th', null, 'Members'), h('th', null, 'Holds'), h('th', null, ''))),
+          h('tbody', null, d.projects.map(projectRow)))) : null);
+    } catch (e) {
+      replace(projectsEl, notice('err', 'The projects could not be loaded: ' + (e && e.message ? e.message : e)));
+    }
+  }
+
+  for (const c of [name, display, email, roleName, roleDesc, inviteProjects, projName, projDesc, projMembers]) if (!perms.can('users.manage')) c.disabled = true;
   el.append(
-    card('Users', { hint: 'who signs in, with which roles', actions: h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { loadUsers(); loadRoles(); } }, icon('refresh'), 'Refresh') }, usersEl),
+    card('Users', { hint: 'who signs in, with which roles', actions: h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { loadUsers(); loadRoles(); loadProjects(); } }, icon('refresh'), 'Refresh') }, usersEl),
     card('Invite a user', { hint: 'a one-time link, 72 hours' }, inviteForm, resultEl),
+    card('Projects', { hint: 'roles on part of the instance' }, projectsEl, projForm),
     card('Roles', { hint: 'what each role may do' }, rolesEl),
     card('A custom role', { hint: 'create or change' }, roleForm));
   loadRoles().then(loadUsers);
+  loadProjects();
   return el;
 }
+
+/** `name=role role` lines as [{key: name, roles}] (`key` is project or user). */
+function parseBindings(text, key) {
+  return String(text || '').split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
+    const i = l.lastIndexOf('=');
+    const who = i < 0 ? l : l.slice(0, i).trim();
+    const roles = i < 0 ? [] : l.slice(i + 1).split(/[\s,+]+/).filter(Boolean);
+    return { [key]: who, roles };
+  });
+}
+

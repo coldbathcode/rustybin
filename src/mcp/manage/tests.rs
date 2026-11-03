@@ -1726,6 +1726,8 @@ const COVERAGE: &[(&str, Cover)] = &[
     ("/_rustybin/users/{id}/sessions", Tool("end_session")),
     ("/_rustybin/roles", Tool("list_roles")),
     ("/_rustybin/roles/{name}", Tool("save_role")),
+    ("/_rustybin/projects", Tool("list_projects")),
+    ("/_rustybin/projects/{name}", Tool("save_project")),
     ("/_rustybin/mcp", Excluded("this server")),
     ("/_rustybin/mcp-servers", Tool("list_mcp_servers")),
     ("/_rustybin/mcp-relay", Tool("mcp_call")),
@@ -3509,6 +3511,7 @@ async fn run_tests_asks_before_replaying_a_request_that_changes_state() {
         },
         gateway: None,
         assert: vec![crate::replay::Assertion::status(200)],
+        project: None,
     };
     state
         .saved_tests
@@ -3553,6 +3556,7 @@ async fn a_tool_run_is_kept_and_read_back_from_the_history() {
         },
         gateway: None,
         assert: vec![crate::replay::Assertion::status(200)],
+        project: None,
     };
     state.saved_tests.put(t.clone(), false).expect("put");
     let r = tool(&app, &[], "run_tests", json!({})).await;
@@ -3616,6 +3620,7 @@ async fn test_schedule_tools_save_list_run_and_delete() {
                 },
                 gateway: None,
                 assert: vec![crate::replay::Assertion::status(200)],
+                project: None,
             },
             false,
         )
@@ -3777,7 +3782,7 @@ async fn mcp_checks_and_calls_have_a_concurrency_cap() {
 fn doc_label(need: super::access::ToolNeed) -> String {
     use super::access::ToolNeed;
     match need {
-        ToolNeed::Perm(p) => format!("`{}`", p.name()),
+        ToolNeed::Perm(p) | ToolNeed::Project(p) => format!("`{}`", p.name()),
         ToolNeed::Owner(p) => format!("`{}` or owner", p.name()),
         ToolNeed::Own(p) => format!("`{}` or your own", p.name()),
         ToolNeed::Visitor => "the visit".into(),
@@ -3789,7 +3794,14 @@ fn doc_label(need: super::access::ToolNeed) -> String {
 /// only for the visit's own tools), and the docs' tool tables say the same.
 #[test]
 fn every_tool_declares_a_permission() {
-    use super::access::ToolNeed;
+    use super::access::{ToolNeed, PROJECT_TOOLS};
+    for name in PROJECT_TOOLS {
+        let t = super::tools::find(name).expect("a project tool exists");
+        assert!(
+            matches!(t.permission, ToolNeed::Project(_)),
+            "{name}: a project tool declares ToolNeed::Project"
+        );
+    }
     use crate::rbac::Permission as P;
     let owner_ok = [
         P::MocksWrite,
@@ -3816,8 +3828,16 @@ fn every_tool_declares_a_permission() {
                 "{}: only the agents tools take the own-agents rule",
                 t.name
             ),
+            ToolNeed::Project(p) => assert!(
+                PROJECT_TOOLS.contains(&t.name),
+                "{}: {} in a project, but not a tool of PROJECT_TOOLS (whose service checks each resource's project)",
+                t.name,
+                p.name()
+            ),
+
             ToolNeed::Perm(_) => {}
         }
+
         // A read-only tool never needs a write permission.
         if let Some(p) = t.permission.permission() {
             if t.read_only {
@@ -3889,7 +3909,7 @@ async fn users_and_roles_tools_invite_confirm_and_never_carry_a_password() {
     let headers: [(&str, &str); 1] = [("authorization", "Bearer admin-09")];
     // The admin's tool list counts the step 09 and 10 tools (and the docs say so).
     let names = tool_names(&app, &headers).await;
-    assert_eq!(names.len(), 133, "docs/src/coding-agents.md counts 133");
+    assert_eq!(names.len(), 136, "docs/src/coding-agents.md counts 136");
     for t in [
         "list_users",
         "invite_user",

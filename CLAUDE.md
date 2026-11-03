@@ -102,7 +102,21 @@ change moves the first admin's generation only; a user's own agents need no `age
 invitation or a reset (the store refuses: `SSO_USER`) and its `roles` come from the provider's groups at every
 sign-in (admins pin extra ones with `pinned_roles`); an identity never takes over a password account; a document from
 git never changes an `sso.*` setting (`configdoc::REPOSITORY_REFUSED_PREFIXES`); the password sign-in can be off only
-while single sign-on is set up (`sso::password_sign_in`).
+while single sign-on is set up (`sso::password_sign_in`). Step 11 (projects, roles on part of an instance; user docs
+`docs/src/projects.md`) is built: `src/rbac/projects.rs` (the model, a child of `users.rs`, projects kept in
+`users.json`), `src/rbac/project_api.rs` (service and `/_rustybin/projects*`), `Resolved.projects` with `has_in`,
+`has_somewhere`, `capped`, the catalogue's `.project_scoped()` and `control_auth::RouteNeed`, `ToolNeed::Project`,
+`src/mcp/manage/projects.rs`, `src/configdoc/projects.rs`, `ui/lib/projects.js` (the top bar's picker). Rules it left:
+a resource without a project is the instance's (a caller with instance roles only meets exactly the 0.4 to 0.5 checks);
+a route whose resources may be a project's is `.project_scoped()` and listed in `rbac::need::PROJECT_ROUTES` (the route
+check lets in `has_somewhere`, the handler checks `has_in` on each resource: `Svc::readable` / `manageable` with the
+caller's `route_need`, `replay::visible` / `admit_for` / `select_for`, `checkpoints::visible`), and
+`every_project_route_checks_each_resource` calls each one as another project's member; a tool of those is
+`ToolNeed::Project` and in `access::PROJECT_TOOLS`; another project's unreadable resource is `404`, lists leave it out;
+a move needs the write permission in both (`projects::check_move`); a project's roles never count as an instance admin;
+a document from git never changes members, prunes a project or moves a resource; a new kind of project resource is
+counted in `project_api::resources` (deletion and `move_to`).
+
 
 ## The whole instance as code, and source control (built)
 
@@ -329,7 +343,11 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   the environment); other users' hashes live in the store. Sign-in tokens: `sub` the user id, `rb_user`, `rb_gen`,
   `rb_ugen`; an older token (0.3 and 0.4, `sub: "user:<name>"`) is user one. A new permission goes in the table of
   `permission.rs` (and its test), never a yes/no admin check. The scopes keep their 0.4 reach: `console` is the
-  viewer role plus `traffic.read`, `assist.use`, `mcp.inspect`; `harness` every `harness.*`. Step 09: `users.rs` also
+  viewer role plus `traffic.read`, `assist.use`, `mcp.inspect`; `harness` every `harness.*`. Step 11: `projects.rs`
+  (`#[path]` child of `users.rs`, so it reaches the private `Doc`: `Project` with `Member {user, roles}` in
+  `users.json`, at most 100, the bindings and SSO-mapped project roles, `ProjectGrant` per project in the resolution,
+  `Filter` for `?project=`, `target` and `check_move`), `project_api.rs` (the service and routes, `resources`, the
+  delete with `move_to`), `need::PROJECT_ROUTES`, tests in `project_tests.rs`. Step 09: `users.rs` also
   keeps the invitations (`rbi_` plus 32 random bytes, stored as a SHA-256 in `users.json`, 72 h, at most 100 open,
   one per user; `pending` users are invited and disabled until they accept) and the guard rails inside every
   change (`Users::commit` refuses a change that leaves no enabled admin; user one is never deleted; a role in use is

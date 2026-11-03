@@ -258,6 +258,10 @@ pub struct Endpoint {
     /// a visitor or an API key without the permission reaches the handler,
     /// which lets it read and change only its own mocks.
     pub self_service: bool,
+    /// The route's resources may belong to a project (step 11): a caller
+    /// holding the permission in some project reaches the handler, which
+    /// checks each resource (`rbac::need::PROJECT_ROUTES`).
+    pub project: bool,
 }
 
 /// Methods documented for `ANY` routes.
@@ -280,6 +284,7 @@ impl Endpoint {
             protocol: Protocol::Http,
             needs: Vec::new(),
             self_service: false,
+            project: false,
         }
     }
 
@@ -320,6 +325,12 @@ impl Endpoint {
     /// The per-mock rules of self-service apply (see [`Self::self_service`]).
     pub fn self_service(mut self) -> Self {
         self.self_service = true;
+        self
+    }
+
+    /// The route's resources may belong to a project (see [`Self::project`]).
+    pub fn project_scoped(mut self) -> Self {
+        self.project = true;
         self
     }
 
@@ -407,6 +418,7 @@ const SOURCES: &[fn() -> Vec<Endpoint>] = &[
     crate::control_oauth::catalog,
     crate::login::catalog,
     crate::rbac::api::catalog,
+    crate::rbac::project_api::catalog,
     crate::sso::api::catalog,
     crate::assist::catalog,
     crate::echo::catalog,

@@ -72,6 +72,7 @@ health:
 | `agents` | The default ceiling and the rules of [AI agents](agent-mcp.md#managing-agents) | the agents policy |
 | `roles` | The [custom roles](users.md#roles): name, description, permissions | the user store; a prune never deletes a role somebody holds |
 | `users` | The [users](users.md) (password sign-in only): name, display name, email, roles, `disabled`; never a password or a hash (a document with one does not load the section). A user the document creates is invited, and the apply answers the link (`results.users.invitations`); `sso: true` is a [single sign-on](sso.md) user (no link; `roles` are the pinned ones, the provider's groups give the rest), and a document never changes how an existing user signs in | the user store, with the API's rules: nobody changes their own roles, a caller grants only what it holds; a prune never deletes the first admin, the applying user or the last enabled admin |
+| `projects` | The [projects](projects.md): name, description and `members` (`{user, roles}`, the user by sign-in name); written by an export only when the instance has projects. A mock or a saved test names its project with `project:` | the user store, before the mocks (so `project:` finds a project the document creates) and, for the members, after the users; a prune deletes only a project that holds nothing |
 | `health` | `initial`: `healthy` or `unhealthy` | the `/health` toggle |
 
 Two rules make a document safe to apply:
@@ -107,9 +108,38 @@ MCP resource `rustybin://config.schema.json`):
 {{#include ../examples/config/config.hurl:schema}}
 ```
 
+### Projects
+
+```yaml
+projects:
+  - name: payments
+    description: The payments team
+    members:
+      - { user: pia, roles: [editor] }
+mocks:
+  - name: payments-api
+    project: payments
+    spec: specs/payments-api.yaml
+tests:
+  - name: list-payments
+    project: payments
+    request: { path: /mock/payments-api/payments }
+    assert: [{ status: 200 }]
+```
+
+`projects:` needs `users.manage` (a member's roles are a grant), and the rules of
+`PUT /_rustybin/projects/{name}` hold: the applying caller gives only roles it holds
+in the project and never changes its own. A `project:` naming a project the instance
+does not have (nor the document creates) is a problem, and the resource stays where
+it is (a new one is the instance's). A document from the configuration repository
+creates projects and changes their descriptions, but never changes their members,
+never prunes a project and never moves an existing mock or test to another project
+(each is reported in `problems` and kept as it is).
+
 ## Export
 
-`GET /_rustybin/config/export` (admin) answers the instance as YAML. `?format=json`
+`GET /_rustybin/config/export` (admin)
+ answers the instance as YAML. `?format=json`
 gives the same document as JSON; `?secrets=omit` leaves the `secrets` section out and
 redacts the mocks' demo credentials.
 

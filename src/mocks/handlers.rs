@@ -793,6 +793,8 @@ fn parse_optional<T: serde::de::DeserializeOwned + Default>(
 pub struct ListOwnerQuery {
     /// `all` (admin): every visitor's mocks too.
     owner: Option<String>,
+    /// One project's mocks (`instance`: the instance's without one).
+    project: Option<String>,
 }
 
 pub async fn list(
@@ -801,9 +803,11 @@ pub async fn list(
     headers: HeaderMap,
     extensions: Extensions,
     uri: Uri,
-) -> Response {
+) -> Result<Response, ServiceError> {
+    let filter = crate::rbac::projects::Filter::parse(q.project.as_deref())
+        .map_err(ServiceError::bad_request)?;
     let s = svc(&state, &headers, &extensions, &uri);
-    Json(s.list(q.owner.as_deref() == Some("all"))).into_response()
+    Ok(Json(s.list_in(q.owner.as_deref() == Some("all"), &filter)).into_response())
 }
 
 /// Body of `POST /_rustybin/mocks/import`: `{"spec": ...}`, the spec object
@@ -846,7 +850,7 @@ pub async fn create(
 ) -> Result<Response, ServiceError> {
     let s = svc(&state, &headers, &extensions, &uri);
     // The refusal answers before the body is parsed, as before.
-    if !s.caller.admin && state.mocks.visits().is_none() {
+    if !s.caller.writes_somewhere() && state.mocks.visits().is_none() {
         s.need(crate::rbac::Permission::MocksWrite)?;
     }
     let req: CreateBody = parse_body(&body)?;

@@ -428,6 +428,17 @@ fn resolve_token(
         },
         roles: r.roles.clone(),
         permissions: both(r.permissions, scoped.permissions),
+        // The user's roles in projects, within the token's scope too.
+        projects: r
+            .projects
+            .iter()
+            .map(|(name, g)| {
+                let mut g = g.clone();
+                g.permissions = both(g.permissions, scoped.permissions);
+                (name.clone(), g)
+            })
+            .filter(|(_, g)| !g.permissions.is_empty())
+            .collect(),
     })
 }
 

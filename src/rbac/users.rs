@@ -55,6 +55,9 @@ use super::permission::PermSet;
 use super::role::{self, BuiltIn, CustomRole, MAX_CUSTOM_ROLES};
 use crate::limits::{Clock, SystemClock};
 
+#[path = "projects.rs"]
+pub mod projects;
+
 /// The file under the state directory.
 pub const USERS_FILE: &str = "users.json";
 /// Users an instance keeps.
@@ -144,6 +147,10 @@ pub struct SsoLink {
     /// map, else the default roles).
     #[serde(default)]
     pub mapped_roles: Vec<String>,
+    /// The roles the groups gave in projects (`group=project:role` entries
+    /// of the role map) at the last sign-in.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mapped_projects: BTreeMap<String, Vec<String>>,
 }
 
 /// What a verified sign-in at the provider says about the person
@@ -159,6 +166,9 @@ pub struct SsoIdentity {
     /// The roles the groups map to (known roles only), else the default
     /// roles; may be empty.
     pub mapped_roles: Vec<String>,
+    /// The roles the groups map to in projects (projects that exist,
+    /// known roles only).
+    pub mapped_projects: BTreeMap<String, Vec<String>>,
 }
 
 /// The roles of `a` then those of `b` not in `a`.
@@ -394,6 +404,8 @@ struct Doc {
     password_hashes: BTreeMap<String, String>,
     /// Open invitations (the SHA-256 of their tokens).
     invitations: Vec<Invitation>,
+    /// Projects and their bindings (step 11).
+    projects: Vec<projects::Project>,
 }
 
 /// A new user.
@@ -456,6 +468,8 @@ pub struct Resolution {
     /// The user's roles that exist (an unknown one counts for nothing).
     pub roles: Vec<String>,
     pub permissions: PermSet,
+    /// What the user holds in each project they are bound to.
+    pub projects: BTreeMap<String, projects::ProjectGrant>,
 }
 
 struct Cached {
@@ -661,6 +675,11 @@ impl Users {
                     doc.password_hashes.retain(|id, _| ids.contains(id));
                     doc.invitations.retain(|i| ids.contains(&i.user_id));
                     doc.invitations.truncate(MAX_OPEN_INVITATIONS);
+                    doc.projects.truncate(projects::MAX_PROJECTS);
+                    for p in &mut doc.projects {
+                        p.members.retain(|m| ids.contains(&m.user));
+                        p.members.truncate(projects::MAX_MEMBERS);
+                    }
                     *store.doc.get_mut().unwrap_or_else(|e| e.into_inner()) = doc;
                     store.path = Some(path);
                 }
@@ -829,10 +848,15 @@ impl Users {
                     None => super::note_unknown("role", r),
                 }
             }
+            let projects = doc.grants_of(&user.id);
+            if !projects.is_empty() {
+                permissions = permissions.union(PermSet::of(projects::BINDING_INSTANCE));
+            }
             Arc::new(Resolution {
                 user,
                 roles,
                 permissions,
+                projects,
             })
         };
         let mut cache = lock(&self.cache);
@@ -1114,6 +1138,12 @@ impl Users {
                     }
                 },
             };
+            let uid = doc.users[pos].id.clone();
+            let bound = !ident.mapped_projects.is_empty()
+                || doc
+                    .projects
+                    .iter()
+                    .any(|p| p.members.iter().any(|m| m.user == uid));
             let user = &mut doc.users[pos];
             if user.disabled {
                 return Err(UsersError::Refused(
@@ -1122,7 +1152,7 @@ impl Users {
                 ));
             }
             let roles = union_roles(&ident.mapped_roles, &user.pinned_roles);
-            if roles.is_empty() {
+            if roles.is_empty() && !bound {
                 return Err(UsersError::Refused(
                     SSO_NO_ROLE,
                     format!("none of {}'s groups maps to a role (sso.role_map) and sso.default_roles is empty", user.name),
@@ -1133,6 +1163,7 @@ impl Users {
                 issuer: ident.issuer.clone(),
                 subject: ident.subject.clone(),
                 mapped_roles: ident.mapped_roles.clone(),
+                mapped_projects: ident.mapped_projects.clone(),
             });
             if let Some(d) = &display_name {
                 user.display_name = d.clone();
@@ -1156,12 +1187,19 @@ impl Users {
             .cloned()
     }
 
-    /// How many users hold `role`.
+    /// How many users hold `role` (as an instance role or in a project).
     pub fn holders(&self, role: &str) -> usize {
-        self.read()
-            .users
+        let doc = self.read();
+        doc.users
             .iter()
-            .filter(|u| u.roles.iter().any(|r| r == role))
+            .filter(|u| {
+                u.roles.iter().any(|r| r == role)
+                    || doc.projects.iter().any(|p| {
+                        p.members
+                            .iter()
+                            .any(|m| m.user == u.id && m.roles.iter().any(|r| r == role))
+                    })
+            })
             .count()
     }
 
@@ -1497,6 +1535,9 @@ impl Users {
             let user = doc.users.remove(pos);
             doc.password_hashes.remove(id);
             doc.invitations.retain(|i| i.user_id != id);
+            for p in &mut doc.projects {
+                p.members.retain(|m| m.user != id);
+            }
             Ok(user)
         })
     }
@@ -1586,7 +1627,8 @@ impl Users {
                 .users
                 .iter()
                 .filter(|u| u.roles.iter().any(|r| r == name))
-                .count();
+                .count()
+                + doc.binding_holders(name);
             if holders > 0 {
                 return Err(UsersError::Refused(
                     ROLE_IN_USE,

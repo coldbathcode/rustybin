@@ -25,6 +25,7 @@
 pub mod api;
 pub mod need;
 pub mod permission;
+pub mod project_api;
 pub mod role;
 pub mod service;
 pub mod users;
@@ -37,6 +38,7 @@ use serde_json::{json, Value};
 pub use need::{forbidden, refuse, require, Need};
 pub use permission::{Group, PermSet, Permission};
 pub use role::{BuiltIn, CustomRole};
+pub use users::projects::{self, Binding, Member, Project, ProjectGrant};
 pub use users::{NewUser, Source, SsoIdentity, SsoLink, User, Users, UsersError};
 
 use crate::control_auth::Grant;
@@ -72,7 +74,12 @@ pub struct Resolved {
     pub principal: Principal,
     /// The roles the permissions come from (known ones only).
     pub roles: Vec<String>,
+    /// The instance permissions: they apply to every resource.
     pub permissions: PermSet,
+    /// What the caller holds in each project it is bound to (step 11):
+    /// they apply to that project's resources only, on top of
+    /// `permissions`. Empty for every credential that is not a user.
+    pub projects: std::collections::BTreeMap<String, ProjectGrant>,
 }
 
 impl Resolved {
@@ -82,6 +89,7 @@ impl Resolved {
             principal: Principal::AdminToken,
             roles: vec![BuiltIn::Admin.name().to_string()],
             permissions: PermSet::all(),
+            projects: Default::default(),
         }
     }
 
@@ -91,6 +99,7 @@ impl Resolved {
             principal: Principal::Open,
             roles: vec![BuiltIn::Admin.name().to_string()],
             permissions: PermSet::all(),
+            projects: Default::default(),
         }
     }
 
@@ -107,6 +116,7 @@ impl Resolved {
             },
             roles: Vec::new(),
             permissions: need::anonymous(),
+            projects: Default::default(),
         }
     }
 
@@ -116,11 +126,63 @@ impl Resolved {
             principal: Principal::Key { id: id.to_string() },
             roles: Vec::new(),
             permissions: need::anonymous(),
+            projects: Default::default(),
         }
     }
 
+    /// Does the caller hold `p` instance-wide (every resource)?
     pub fn has(&self, p: Permission) -> bool {
         self.permissions.has(p)
+    }
+
+    /// May the caller use `p` on a resource of `project` (`None`: the
+    /// instance's)? Its instance permissions, or its roles in that project.
+    pub fn has_in(&self, p: Permission, project: Option<&str>) -> bool {
+        self.has(p)
+            || project
+                .and_then(|n| self.projects.get(n))
+                .is_some_and(|g| g.permissions.has(p))
+    }
+
+    /// Does the caller hold `p` instance-wide or in some project? (The
+    /// route check of a route whose handler checks each resource.)
+    pub fn has_somewhere(&self, p: Permission) -> bool {
+        self.has(p) || self.projects.values().any(|g| g.permissions.has(p))
+    }
+
+    /// Is the caller bound to a project? A caller with bindings sees the
+    /// instance's resources only through its instance roles; one without
+    /// keeps the 0.4 rules.
+    pub fn has_projects(&self) -> bool {
+        !self.projects.is_empty()
+    }
+
+    /// The projects where the caller holds `p` (`None`: instance-wide, so
+    /// every project and the instance's resources).
+    pub fn projects_with(&self, p: Permission) -> Option<Vec<String>> {
+        if self.has(p) {
+            return None;
+        }
+        Some(
+            self.projects
+                .iter()
+                .filter(|(_, g)| g.permissions.has(p))
+                .map(|(n, _)| n.clone())
+                .collect(),
+        )
+    }
+
+    /// The caller capped at `ceiling` in the instance and in every project
+    /// (an agent acting for a user never exceeds its limits anywhere).
+    pub fn capped(mut self, ceiling: PermSet) -> Self {
+        let cap =
+            |set: PermSet| PermSet::of(&set.iter().filter(|p| ceiling.has(*p)).collect::<Vec<_>>());
+        self.permissions = cap(self.permissions);
+        for g in self.projects.values_mut() {
+            g.permissions = cap(g.permissions);
+        }
+        self.projects.retain(|_, g| !g.permissions.is_empty());
+        self
     }
 
     /// The 0.3 grant these permissions amount to.
@@ -145,11 +207,19 @@ impl Resolved {
             } => (Some(id.as_str()), Some(display_name.as_str())),
             _ => (None, None),
         };
+        let projects: Vec<Value> = self
+            .projects
+            .iter()
+            .map(|(name, g)| {
+                json!({ "project": name, "roles": g.roles, "permissions": g.permissions.names() })
+            })
+            .collect();
         json!({
             "user_id": id,
             "display_name": display,
             "roles": self.roles,
             "permissions": self.permissions.names(),
+            "projects": projects,
         })
     }
 }
@@ -281,6 +351,7 @@ pub fn from_jwt_claims(claims: &Value, users: &Users) -> Resolved {
         },
         roles,
         permissions: perms,
+        projects: Default::default(),
     }
 }
 
@@ -326,6 +397,7 @@ pub fn from_sign_in(
         },
         roles: r.roles.clone(),
         permissions: r.permissions,
+        projects: r.projects.clone(),
     })
 }
 

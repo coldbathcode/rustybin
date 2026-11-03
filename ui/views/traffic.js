@@ -8,6 +8,7 @@ import * as assist from '../lib/assist.js';
 import * as traffic from '../lib/traffic.js';
 import * as settings from '../lib/settings.js';
 import * as auth from '../lib/auth.js';
+import * as projects from '../lib/projects.js';
 
 const LIST_LIMIT = 400;
 const SKIP_CURL_HEADERS = new Set(['host', 'content-length', 'connection', 'accept-encoding', 'x-request-id']);
@@ -237,7 +238,7 @@ export default {
         if (!name) return;
         const headers = { 'Content-Type': 'application/json' };
         if (e.session) headers['X-Rustybin-Session'] = e.session;
-        const r = await send({ control: true, admin: true, session: false, method: 'POST', url: SERVER + '/_rustybin/tests', headers, body: JSON.stringify({ name, capture: e.id }) });
+        const r = await send({ control: true, admin: true, session: false, method: 'POST', url: SERVER + '/_rustybin/tests', headers, body: JSON.stringify({ name, capture: e.id, project: projects.forNew() }) });
         if (!r.ok) { toast('Not saved: ' + ((r.json && r.json.error) || r.error || r.status), 'err'); return; }
         const vars = (r.json.introduced_variables || []);
         toast(`Saved test ${name}` + (vars.length ? ` (credentials became the variables ${vars.join(', ')})` : '') + ': see Saved tests');

@@ -15,6 +15,8 @@ import { coverageBanner, openEditDialog, openExamplesDialog } from './ai.js';
 import * as assist from '../../lib/assist.js';
 import * as settings from '../../lib/settings.js';
 import * as portal from '../../lib/portal.js';
+import * as projects from '../../lib/projects.js';
+import * as perms from '../../lib/perms.js';
 
 const enc = encodeURIComponent;
 const TABS = [['operations', 'Operations'], ['try', 'Try it'], ['data', 'Data'], ['security', 'Security'], ['mcp', 'MCP server'], ['settings', 'Settings'], ['traffic', 'Traffic'], ['report', 'Deploy report']];
@@ -568,8 +570,30 @@ export function mountDetail(root, name, sub) {
         } else replace(specMsg, notice('err', errorText(rr, 'Replacing the spec')));
       });
       const d = detail;
+      // The project (step 11): moving needs mocks.write here and there.
+      const visitorOwned = d.owner === 'visit' || d.owner === 'key';
+      const targets = projects.all().filter((p) => perms.canIn('mocks.write', p.name)).map((p) => [p.name, p.name]);
+      if (perms.canIn('mocks.write', null)) targets.unshift([projects.INSTANCE, 'The instance (no project)']);
+      const projectSel = select(targets.length ? targets : [[d.project || projects.INSTANCE, d.project || 'The instance (no project)']], d.project || projects.INSTANCE, { 'aria-label': 'Project', id: 'mock-project' });
+      const moveMsg = h('span', { class: 'hint' }, 'Who may change it: the instance\'s editors, and the project\'s.');
+      const moveBtn = h('button', { class: 'btn', type: 'button', id: 'mock-move' }, 'Move');
+      moveBtn.addEventListener('click', async () => {
+        const to = projectSel.value === projects.INSTANCE ? null : projectSel.value;
+        if ((to || null) === (d.project || null)) { moveMsg.textContent = 'It is there already.'; return; }
+        moveBtn.disabled = true;
+        const rr = await api('PATCH', '/' + enc(name), { project: to });
+        moveBtn.disabled = false;
+        if (report(rr, to ? `Moved to the project ${to}` : 'Moved to the instance', 'Moving')) refresh();
+        else { moveMsg.textContent = errorText(rr); moveMsg.classList.add('err-text'); }
+      });
+      const projectCard = visitorOwned || (!projects.all().length && !d.project) ? null : card('Project', null, h('div', { class: 'stack-sm' },
+        h('p', { class: 'small', style: { margin: 0 } }, d.project ? h('span', null, 'In the project ', h('strong', { id: 'mock-project-name' }, d.project), '.') : 'The instance\'s (no project).'),
+        readOnly || targets.length < 2 ? null : h('div', { class: 'row nowrap' }, h('div', { class: 'grow' }, projectSel), moveBtn),
+        moveMsg));
       replace(el,
         card('Behaviour', { hint: 'saved to the draft' }, form),
+        projectCard,
+
         h('div', { class: 'grid grid-2' },
           readOnly || detail.yours ? null : card('Name', null, h('div', { class: 'stack-sm' }, h('div', { class: 'row nowrap' }, h('div', { class: 'grow' }, nameIn), renameBtn), nameMsg)),
           card('About', null, kvgrid([

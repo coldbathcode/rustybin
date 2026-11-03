@@ -114,6 +114,15 @@ user's next one:
   permission missing.
 - An invited user joins through the invitation, never by being enabled (`409
   invited`).
+- In a [project](projects.md) the same rules hold for a user's roles there, and the
+  last enabled admin is counted instance-wide: a project's `admin` role never keeps
+  nor replaces one. A custom role that a project's member holds is in use too.
+
+Roles in projects: `POST /_rustybin/users` takes `projects` (`[{project, roles}]`);
+with some, the instance roles may be empty and the user sees those projects only.
+Each user's answer lists their `projects` (`sso: true` for roles a single sign-on
+group gives). See [Projects](projects.md).
+
 
 ```hurl
 {{#include ../examples/concepts/users.hurl:guard_rails}}

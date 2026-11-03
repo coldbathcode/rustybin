@@ -152,6 +152,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     control_oauth::router,
     login::router,
     rbac::api::router,
+    rbac::project_api::router,
     sso::api::router,
     assist::router,
     settings::router,

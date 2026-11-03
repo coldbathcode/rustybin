@@ -42,6 +42,9 @@ struct Saved {
     /// Absent in files written before self-service: an instance mock.
     #[serde(default, skip_serializing_if = "is_instance")]
     owner: Owner,
+    /// The project (step 11); absent: the instance's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project: Option<String>,
 }
 
 fn is_instance(o: &Owner) -> bool {
@@ -86,6 +89,7 @@ pub fn save(dir: &Path, snap: &Snapshot) {
         live,
         live_is_draft,
         owner: snap.owner.clone(),
+        project: snap.project.clone(),
     };
     let text = match serde_json::to_vec_pretty(&saved) {
         Ok(t) => t,
@@ -191,6 +195,7 @@ fn restore(store: &MockStore, saved: Saved, dir: &Path) -> Result<String, String
     }
     let draft = store.compile_for(&draft_source, saved.draft.settings, visitor)?;
     let owner = saved.owner;
+    let project = saved.project;
     match saved.live {
         Some(live) => {
             let source = live.source.unwrap_or_else(|| draft_source.clone());
@@ -209,6 +214,9 @@ fn restore(store: &MockStore, saved: Saved, dir: &Path) -> Result<String, String
                 .restore_undeployed(&name, draft, saved.origin, owner, saved.enabled)
                 .map_err(|e| e.message())?;
         }
+    }
+    if let Some(p) = project.filter(|p| crate::mocks::model::valid_name(p)) {
+        let _ = store.set_project_quietly(&name, Some(p));
     }
     Ok(name)
 }

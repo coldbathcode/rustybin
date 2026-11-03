@@ -55,6 +55,9 @@ pub struct KeptMock {
     pub draft: Option<Rev>,
     #[serde(default)]
     pub state: StateCopy,
+    /// The mock's project when it was kept (step 11).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -63,6 +66,11 @@ pub struct Checkpoint {
     pub saved_at: String,
     pub healthy: bool,
     pub mocks: Vec<KeptMock>,
+    /// A project's checkpoint (step 11) keeps that project's mocks only and
+    /// a restore changes only those (never the health toggle); `None`: the
+    /// instance's, every API mock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 impl Checkpoint {
@@ -73,6 +81,7 @@ impl Checkpoint {
             "healthy": self.healthy,
             "mocks": self.mocks.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
             "bytes": bytes,
+            "project": self.project,
         })
     }
 }
@@ -99,6 +108,7 @@ fn kept(s: &Snapshot) -> KeptMock {
         draft: (live.as_ref() != Some(&draft)).then_some(draft),
         live,
         state: s.state.copy(),
+        project: s.project.clone(),
     }
 }
 
@@ -145,6 +155,13 @@ pub fn parse_untrusted(
             cp.mocks.len(),
             limits.max_mocks
         ));
+    }
+    let project_ok = |p: &Option<String>| {
+        p.as_deref()
+            .is_none_or(|p| crate::rbac::projects::check_name(p).is_ok())
+    };
+    if !project_ok(&cp.project) || !cp.mocks.iter().all(|m| project_ok(&m.project)) {
+        return Err(format!("{file}: a project is not a project name"));
     }
     let mut seen = std::collections::BTreeSet::new();
     for m in &cp.mocks {
@@ -299,6 +316,15 @@ impl Checkpoints {
         self.lock().get(name).map(|i| i.cp.summary(i.bytes))
     }
 
+    /// The names of the checkpoints of `project`.
+    pub fn names_in(&self, project: &str) -> Vec<String> {
+        self.lock()
+            .values()
+            .filter(|i| i.cp.project.as_deref() == Some(project))
+            .map(|i| i.cp.name.clone())
+            .collect()
+    }
+
     fn put(&self, cp: Checkpoint, replace: bool) -> Result<Value, Refused> {
         let bytes = serde_json::to_vec(&cp)
             .map_err(|e| Refused::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -370,6 +396,23 @@ impl Checkpoints {
 
 /// Save the instance's mocks and health under `name`.
 pub fn save(state: &AppState, name: &str, replace: bool) -> Result<Value, Refused> {
+    save_in(state, name, replace, None)
+}
+
+/// Does checkpoint `cp` cover the mock: an API mock of the instance, of
+/// the checkpoint's project when it is a project's?
+fn in_scope(project: Option<&str>, s: &Snapshot) -> bool {
+    covered(s) && project.is_none_or(|p| s.project.as_deref() == Some(p))
+}
+
+/// Save under `name` the mocks of `project` (`None`: every API mock of the
+/// instance) and the health toggle.
+pub fn save_in(
+    state: &AppState,
+    name: &str,
+    replace: bool,
+    project: Option<String>,
+) -> Result<Value, Refused> {
     if !valid_name(name) {
         return Err(Refused::new(
             StatusCode::BAD_REQUEST,
@@ -382,7 +425,7 @@ pub fn save(state: &AppState, name: &str, replace: bool) -> Result<Value, Refuse
         .mocks
         .list()
         .iter()
-        .filter(|s| covered(s))
+        .filter(|s| in_scope(project.as_deref(), s))
         .map(kept)
         .collect();
     let cp = Checkpoint {
@@ -390,6 +433,7 @@ pub fn save(state: &AppState, name: &str, replace: bool) -> Result<Value, Refuse
         saved_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         healthy: state.health.is_healthy(),
         mocks,
+        project,
     };
     let v = state.checkpoints.put(cp, replace)?;
     tracing::info!(checkpoint = name, "checkpoint saved");
@@ -433,8 +477,23 @@ pub fn restore_checkpoint(
         Vec::new(),
         Vec::new(),
     );
+    let scope = cp.project.as_deref();
+    // Where a mock the restore makes goes: the project of a project's
+    // checkpoint, else the project it had when it was kept.
+    let home = |m: &KeptMock| cp.project.clone().or_else(|| m.project.clone());
     for m in &cp.mocks {
         let existing = current.get(&m.name);
+        if let Some(s) = existing.filter(|s| covered(s) && !in_scope(scope, s)) {
+            problems.push(format!(
+                "{}: now in {}, left as it is",
+                m.name,
+                match &s.project {
+                    Some(p) => format!("the project {p}"),
+                    None => "the instance's mocks".into(),
+                }
+            ));
+            continue;
+        }
         if let Some(s) = existing.filter(|s| !covered(s)) {
             problems.push(format!(
                 "{}: now a {} mock, left as it is",
@@ -448,16 +507,31 @@ pub fn restore_checkpoint(
             continue;
         }
         let now = existing.map(kept);
+        let want_project = home(m);
         match &now {
-            Some(k) if k == m => {
+            Some(k)
+                if k.live == m.live
+                    && k.draft == m.draft
+                    && k.enabled == m.enabled
+                    && k.state == m.state
+                    && k.project == want_project =>
+            {
                 unchanged.push(m.name.clone());
                 continue;
             }
             Some(k) if k.live == m.live && k.draft == m.draft && k.enabled == m.enabled => {
-                data.push(m.name.clone());
+                if k.state != m.state {
+                    data.push(m.name.clone());
+                }
+                if k.project != want_project {
+                    replaced.push(m.name.clone());
+                }
                 if !dry_run {
                     if let Some(s) = existing {
                         s.state.restore(&m.state);
+                    }
+                    if k.project != want_project {
+                        let _ = store.set_project(&m.name, want_project.clone());
                     }
                 }
                 continue;
@@ -497,6 +571,7 @@ pub fn restore_checkpoint(
         match made {
             Ok(s) => {
                 s.state.restore(&m.state);
+                let _ = store.set_project_quietly(&m.name, want_project.clone());
                 store.persist(&m.name);
                 if now.is_some() {
                     replaced.push(m.name.clone());
@@ -508,7 +583,7 @@ pub fn restore_checkpoint(
         }
     }
     for (n, s) in &current {
-        if covered(s) && !cp.mocks.iter().any(|m| &m.name == n) {
+        if in_scope(scope, s) && !cp.mocks.iter().any(|m| &m.name == n) {
             if !dry_run {
                 store.delete(n);
             }
@@ -516,7 +591,16 @@ pub fn restore_checkpoint(
         }
     }
     let health_before = state.health.is_healthy();
-    let flaky = if dry_run {
+    // A project's checkpoint changes that project's mocks only: never the
+    // instance's health toggle nor its flaky counters.
+    let healthy_after = if scope.is_some() {
+        health_before
+    } else {
+        cp.healthy
+    };
+    let flaky = if scope.is_some() {
+        0
+    } else if dry_run {
         state.flaky.len()
     } else {
         state.health.set(cp.healthy);
@@ -533,9 +617,10 @@ pub fn restore_checkpoint(
     }
     let changed =
         !(created.is_empty() && replaced.is_empty() && data.is_empty() && deleted.is_empty())
-            || health_before != cp.healthy;
+            || health_before != healthy_after;
     Ok(json!({
         "checkpoint": name,
+        "project": cp.project,
         "dry_run": dry_run,
         "changed": changed,
         "mocks": {
@@ -545,7 +630,8 @@ pub fn restore_checkpoint(
             "unchanged": unchanged,
             "deleted": deleted,
         },
-        "health": { "before": if health_before { "healthy" } else { "unhealthy" }, "after": if cp.healthy { "healthy" } else { "unhealthy" } },
+        "health": { "before": if health_before { "healthy" } else { "unhealthy" }, "after": if healthy_after { "healthy" } else { "unhealthy" } },
+
         "flaky_counters_reset": flaky,
         "problems": problems,
     }))
@@ -563,6 +649,10 @@ pub struct SaveBody {
     pub name: String,
     #[serde(default)]
     pub replace: bool,
+    /// The project whose mocks it keeps (absent: the instance's, or the
+    /// one project the caller works in).
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 /// Where a checkpoint is read from: this instance's store, or the commit
@@ -590,6 +680,9 @@ impl Source {
 struct FromQuery {
     #[serde(default)]
     from: Option<String>,
+    /// `?project=`: one project's checkpoints (`instance`: the instance's).
+    #[serde(default)]
+    project: Option<String>,
 }
 
 impl From<crate::sourcecontrol::GitError> for Refused {
@@ -650,9 +743,15 @@ pub async fn restore_from_git(svc: Svc, name: String, dry_run: bool) -> Result<V
     let (bytes, head) = svc.state.git.repository_checkpoint(&name).await?;
     let limits = svc.state.mocks.limits();
     svc.compiling(move |s| {
-        let cp = parse_untrusted(&bytes, &name, &limits)
+        let mut cp = parse_untrusted(&bytes, &name, &limits)
             .map_err(|e| ServiceError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
         drop(bytes);
+        // A checkpoint from the repository never moves a mock between
+        // projects (whoever pushes would choose who edits it): each mock
+        // keeps the project it has, a new one goes to the checkpoint's.
+        for m in &mut cp.mocks {
+            m.project = s.state.mocks.get(&m.name).and_then(|x| x.project);
+        }
         let mut v =
             restore_checkpoint(&s.state, &cp, dry_run).map_err(|r| ServiceError::new(r.0, r.1))?;
         v["from"] = json!("git");
@@ -686,15 +785,141 @@ async fn list_handler(
         }
         Ok(Source::Instance) => {}
     }
-    Json(json!({
-        "checkpoints": state.checkpoints.list(),
-        "max_checkpoints": MAX_CHECKPOINTS,
-        "scope": "the instance's API mocks (deployed revision, draft, on or off, stateful data) and the health toggle; a restore also resets the flaky counters. Never visitors' or keys' mocks, file mocks, settings or secrets.",
-    }))
-    .into_response()
+    let filter = match crate::rbac::projects::Filter::parse(q.project.as_deref()) {
+        Ok(f) => f,
+        Err(e) => return Refused::new(StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
+    Json(list_for(&state, &caller, &filter)).into_response()
 }
 
-async fn save_handler(State(state): State<AppState>, body: Bytes) -> Response {
+// ── Who may see and change which checkpoint (step 11) ───────────────
+
+/// A checkpoint of `project` is seen by who reads mocks there (`None`: the
+/// instance's, instance-wide `mocks.read`).
+fn visible(caller: &crate::rbac::Resolved, project: Option<&str>) -> bool {
+    caller.has_in(crate::rbac::Permission::MocksRead, project)
+}
+
+fn not_found(name: &str) -> ServiceError {
+    ServiceError::not_found(format!("no checkpoint named {name:?}"))
+}
+
+/// The checkpoints the caller may see, optionally of one project
+/// (`GET /_rustybin/checkpoints`, `list_checkpoints`).
+pub fn list_for(
+    state: &AppState,
+    caller: &crate::rbac::Resolved,
+    filter: &Option<crate::rbac::projects::Filter>,
+) -> Value {
+    let list: Vec<Value> = state
+        .checkpoints
+        .list()
+        .into_iter()
+        .filter(|c| {
+            let p = c["project"].as_str();
+            visible(caller, p) && crate::rbac::projects::passes(filter, p)
+        })
+        .collect();
+    json!({
+        "checkpoints": list,
+        "max_checkpoints": MAX_CHECKPOINTS,
+        "scope": "the instance's API mocks (deployed revision, draft, on or off, stateful data) and the health toggle; a restore also resets the flaky counters. A project's checkpoint holds and restores that project's mocks only. Never visitors' or keys' mocks, file mocks, settings or secrets.",
+    })
+}
+
+/// One checkpoint's summary, `404` when the caller may not see it.
+pub fn summary_for(
+    state: &AppState,
+    caller: &crate::rbac::Resolved,
+    name: &str,
+) -> Result<Value, ServiceError> {
+    match state.checkpoints.get(name) {
+        Some(cp) if visible(caller, cp.project.as_deref()) => state
+            .checkpoints
+            .summary(name)
+            .ok_or_else(|| not_found(name)),
+        _ => Err(not_found(name)),
+    }
+}
+
+/// Save a checkpoint for the caller: of the project named (or the one the
+/// caller works in, see `rbac::projects::target`), `checkpoints.write`
+/// there; replacing one needs the same on the one replaced. Blocking.
+pub fn save_for(
+    state: &AppState,
+    caller: &crate::rbac::Resolved,
+    name: &str,
+    replace: bool,
+    project: Option<&str>,
+) -> Result<Value, ServiceError> {
+    let write = crate::rbac::Permission::CheckpointsWrite;
+    let project = crate::rbac::projects::target(&state.users, caller, write, project)?;
+    if let Some(old) = state.checkpoints.get(name) {
+        if !visible(caller, old.project.as_deref()) {
+            return Err(ServiceError::new(
+                StatusCode::CONFLICT,
+                format!("the name {name:?} is taken: pick another"),
+            ));
+        }
+        if replace && !caller.has_in(write, old.project.as_deref()) {
+            return Err(ServiceError::permission(caller, write));
+        }
+    }
+    save_in(state, name, replace, project).map_err(|r| ServiceError::new(r.0, r.1))
+}
+
+/// Delete a checkpoint (`checkpoints.write` in its project).
+pub fn delete_for(
+    state: &AppState,
+    caller: &crate::rbac::Resolved,
+    name: &str,
+) -> Result<Value, ServiceError> {
+    let Some(cp) = state
+        .checkpoints
+        .get(name)
+        .filter(|cp| visible(caller, cp.project.as_deref()))
+    else {
+        return Err(not_found(name));
+    };
+    let write = crate::rbac::Permission::CheckpointsWrite;
+    if !caller.has_in(write, cp.project.as_deref()) {
+        return Err(ServiceError::permission(caller, write));
+    }
+    if state.checkpoints.delete(name) {
+        Ok(json!({ "deleted": name }))
+    } else {
+        Err(not_found(name))
+    }
+}
+
+/// Move the checkpoints of `from` to `to` (a project deleted with
+/// `move_to`). Answers the names moved.
+pub fn move_project(state: &AppState, from: &str, to: Option<&str>) -> Vec<String> {
+    let mut moved = Vec::new();
+    for name in state.checkpoints.names_in(from) {
+        if let Some(cp) = state.checkpoints.get(&name) {
+            let mut cp = (*cp).clone();
+            cp.project = to.map(str::to_string);
+            for m in &mut cp.mocks {
+                if m.project.as_deref() == Some(from) {
+                    m.project = to.map(str::to_string);
+                }
+            }
+            if state.checkpoints.put(cp, true).is_ok() {
+                moved.push(name);
+            }
+        }
+    }
+    moved
+}
+
+async fn save_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    body: Bytes,
+) -> Response {
     let body: SaveBody = match serde_json::from_slice(&body) {
         Ok(b) => b,
         Err(e) => {
@@ -702,8 +927,19 @@ async fn save_handler(State(state): State<AppState>, body: Bytes) -> Response {
                 .into_response()
         }
     };
+    let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
     let s = state.clone();
-    match tokio::task::spawn_blocking(move || save(&s, &body.name, body.replace)).await {
+    let saved = tokio::task::spawn_blocking(move || {
+        save_for(
+            &s,
+            &caller,
+            &body.name,
+            body.replace,
+            body.project.as_deref(),
+        )
+    })
+    .await;
+    match saved {
         Ok(Ok(v)) => (StatusCode::CREATED, Json(v)).into_response(),
         Ok(Err(e)) => e.into_response(),
         Err(_) => Refused::new(StatusCode::INTERNAL_SERVER_ERROR, "the save did not finish")
@@ -711,26 +947,29 @@ async fn save_handler(State(state): State<AppState>, body: Bytes) -> Response {
     }
 }
 
-async fn get_handler(State(state): State<AppState>, UrlPath(name): UrlPath<String>) -> Response {
-    match state.checkpoints.summary(&name) {
-        Some(v) => Json(v).into_response(),
-        None => Refused::new(
-            StatusCode::NOT_FOUND,
-            format!("no checkpoint named {name:?}"),
-        )
-        .into_response(),
+async fn get_handler(
+    State(state): State<AppState>,
+    UrlPath(name): UrlPath<String>,
+    headers: HeaderMap,
+    extensions: Extensions,
+) -> Response {
+    let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
+    match summary_for(&state, &caller, &name) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
-async fn delete_handler(State(state): State<AppState>, UrlPath(name): UrlPath<String>) -> Response {
-    if state.checkpoints.delete(&name) {
-        Json(json!({ "deleted": name })).into_response()
-    } else {
-        Refused::new(
-            StatusCode::NOT_FOUND,
-            format!("no checkpoint named {name:?}"),
-        )
-        .into_response()
+async fn delete_handler(
+    State(state): State<AppState>,
+    UrlPath(name): UrlPath<String>,
+    headers: HeaderMap,
+    extensions: Extensions,
+) -> Response {
+    let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
+    match delete_for(&state, &caller, &name) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -742,9 +981,19 @@ struct RestoreQuery {
     from: Option<String>,
 }
 
-/// Restore through the service's compile pool (specs are compiled).
+/// Restore through the service's compile pool (specs are compiled):
+/// `checkpoints.restore` in the checkpoint's project (`404` when the caller
+/// may not see it).
 pub async fn restore_with(svc: Svc, name: String, dry_run: bool) -> Result<Value, Refused> {
-    svc.need(crate::rbac::Permission::CheckpointsRestore)?;
+    let caller = svc.caller.resolved.clone();
+    let project = match svc.state.checkpoints.get(&name) {
+        Some(cp) if visible(&caller, cp.project.as_deref()) => cp.project.clone(),
+        _ => return Err(Refused::from(not_found(&name))),
+    };
+    let restore_p = crate::rbac::Permission::CheckpointsRestore;
+    if !caller.has_in(restore_p, project.as_deref()) {
+        return Err(Refused::from(ServiceError::permission(&caller, restore_p)));
+    }
     svc.compiling(move |s| {
         restore(&s.state, &name, dry_run).map_err(|r| ServiceError::new(r.0, r.1))
     })
@@ -790,7 +1039,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Checkpoints of the instance's API mocks and health: list them (?from=git: the configuration repository's, admin), or save one (admin)",
         )
-.permission_for(&["GET"], crate::rbac::Permission::MocksRead).permission_for(&["POST"], crate::rbac::Permission::CheckpointsWrite)
+.permission_for(&["GET"], crate::rbac::Permission::MocksRead).permission_for(&["POST"], crate::rbac::Permission::CheckpointsWrite).project_scoped()
         .example(Example::get("Checkpoints", LIST_PATH))
         .example(
             Example::get("The repository's checkpoints", "/_rustybin/checkpoints?from=git")
@@ -802,7 +1051,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "A checkpoint: what it holds; DELETE removes it (admin)",
         )
-.permission_for(&["GET"], crate::rbac::Permission::MocksRead).permission_for(&["DELETE"], crate::rbac::Permission::CheckpointsWrite)
+.permission_for(&["GET"], crate::rbac::Permission::MocksRead).permission_for(&["DELETE"], crate::rbac::Permission::CheckpointsWrite).project_scoped()
         .example(Example::get("A checkpoint", "/_rustybin/checkpoints/demo-start").expect_status(404)),
         Endpoint::new(
             RESTORE_PATH,
@@ -810,7 +1059,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Restore a checkpoint: mocks, their data and health back, flaky counters reset; ?dry_run=true says what would change, ?from=git restores the configuration repository's (admin)",
         )
-.permission(crate::rbac::Permission::CheckpointsRestore)
+.permission(crate::rbac::Permission::CheckpointsRestore).project_scoped()
         .example(Example::post("Preview a restore", "/_rustybin/checkpoints/demo-start/restore?dry_run=true").expect_status(404)),
     ]
 }
@@ -824,7 +1073,8 @@ pub fn openapi_paths() -> Value {
             "get": {
                 "tags": ["Control Plane"], "summary": "Checkpoints", "operationId": "listCheckpoints",
                 "description": "This instance's checkpoints; from=git lists the configuration repository's instead (the files under <git.path>/checkpoints/ at the working copy's HEAD, after a pull; admin), each read within the 16 MiB cap and checked, or listed with the reason it cannot be restored.",
-                "parameters": [{ "name": "from", "in": "query", "required": false, "schema": { "type": "string", "enum": ["instance", "git"], "default": "instance" } }],
+                "parameters": [{ "name": "from", "in": "query", "required": false, "schema": { "type": "string", "enum": ["instance", "git"], "default": "instance" } },
+                    { "name": "project", "in": "query", "required": false, "description": "One project's checkpoints (instance: the instance's)", "schema": { "type": "string" } }],
                 "responses": { "200": { "description": "The checkpoints and their scope", "content": obj }, "409": { "description": "from=git: source control is not configured or connected" } }
             },
             "post": {
@@ -832,7 +1082,8 @@ pub fn openapi_paths() -> Value {
                 "description": "Saves the instance's API mocks (deployed revision, a draft that differs, on or off, stateful data) and the health toggle. Never visitors' or keys' mocks, file mocks, settings or secrets. At most 20.",
                 "requestBody": { "required": true, "content": { "application/json": { "schema": {
                     "type": "object", "required": ["name"], "additionalProperties": false,
-                    "properties": { "name": { "type": "string" }, "replace": { "type": "boolean" } }
+                    "properties": { "name": { "type": "string" }, "replace": { "type": "boolean" }, "project": { "type": "string", "description": "Keep this project's mocks only (a restore changes only those, never the health toggle); absent: the instance's API mocks, or the one project the caller works in" } }
+
                 } } } },
                 "responses": { "201": { "description": "Saved", "content": obj }, "409": { "description": "A checkpoint of that name exists" } }
             }

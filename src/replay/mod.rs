@@ -58,6 +58,9 @@ pub struct SavedTest {
     pub gateway: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assert: Vec<Assertion>,
+    /// The project the test belongs to (step 11); absent: the instance's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -177,6 +180,9 @@ impl SavedTest {
                 "name {:?}: 1 to {MAX_NAME} letters, digits, . _ - (not run, runs, schedules or export)",
                 self.name
             ));
+        }
+        if let Some(p) = &self.project {
+            crate::rbac::projects::check_name(p)?;
         }
         let r = &self.request;
         if !METHODS.contains(&r.method.as_str()) {
@@ -698,11 +704,16 @@ pub struct SaveBody {
     /// Default for a capture: its status.
     #[serde(default)]
     pub assert: Option<Vec<Assertion>>,
+    /// The project the test belongs to (step 11).
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
-/// Save a new test (admin, checked by the caller of this function).
+/// Save a new test: `tests.write` in its project (the one named, else the
+/// instance's, else the caller's one project).
 pub fn save(
     state: &AppState,
+    caller: &Resolved,
     body: SaveBody,
     session: &str,
     key_id: Option<&str>,
@@ -737,7 +748,15 @@ pub fn save(
         request,
         gateway: body.gateway,
         assert,
+        project: body.project,
     };
+    if state.saved_tests.get(&test.name).is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            StoreError::Exists(test.name).message(),
+        ));
+    }
+    let test = admit_for(state, caller, test).map_err(|e| (e.status, e.message()))?;
     let mut v = state
         .saved_tests
         .put(test, false)
@@ -746,6 +765,172 @@ pub fn save(
         v["introduced_variables"] = json!(introduced);
     }
     Ok(v)
+}
+
+// ── Projects (step 11) ──────────────────────────────────────────────
+
+use crate::mocks::service::ServiceError;
+use crate::rbac::{Permission as Perm, Resolved};
+
+/// May the caller see a test (`tests.read` in its project, or
+/// instance-wide)?
+pub fn visible(caller: &Resolved, t: &SavedTest) -> bool {
+    caller.has_in(Perm::TestsRead, t.project.as_deref())
+}
+
+fn no_test(name: &str) -> ServiceError {
+    ServiceError::not_found(format!("no test named {name:?}"))
+}
+
+/// The tests the caller may see, optionally of one project.
+pub fn tests_for(
+    state: &AppState,
+    caller: &Resolved,
+    filter: &Option<crate::rbac::projects::Filter>,
+) -> Vec<SavedTest> {
+    state
+        .saved_tests
+        .list()
+        .into_iter()
+        .filter(|t| {
+            visible(caller, t) && crate::rbac::projects::passes(filter, t.project.as_deref())
+        })
+        .collect()
+}
+
+/// The views of [`tests_for`].
+pub fn views_for(
+    state: &AppState,
+    caller: &Resolved,
+    filter: &Option<crate::rbac::projects::Filter>,
+) -> Vec<Value> {
+    tests_for(state, caller, filter)
+        .iter()
+        .filter_map(|t| state.saved_tests.view_of(&t.name))
+        .collect()
+}
+
+/// One test's view, `404` when the caller may not see it.
+pub fn view_for(state: &AppState, caller: &Resolved, name: &str) -> Result<Value, ServiceError> {
+    match state.saved_tests.get(name) {
+        Some(t) if visible(caller, &t) => {
+            state.saved_tests.view_of(name).ok_or_else(|| no_test(name))
+        }
+        _ => Err(no_test(name)),
+    }
+}
+
+/// Where a test the caller saves goes, and may it replace the one of that
+/// name: `tests.write` in the test's project (the one named, else the
+/// caller's one project), and on the one it replaces (a move needs both).
+/// Answers the test with its project set.
+pub fn admit_for(
+    state: &AppState,
+    caller: &Resolved,
+    mut test: SavedTest,
+) -> Result<SavedTest, ServiceError> {
+    let write = Perm::TestsWrite;
+    let old = state.saved_tests.get(&test.name);
+    test.project = match (&old, test.project.as_deref()) {
+        // A replace that names no project keeps the old one's.
+        (Some(o), None) => o.project.clone(),
+        _ => crate::rbac::projects::target(&state.users, caller, write, test.project.as_deref())?,
+    };
+    if let Some(o) = &old {
+        if !visible(caller, o) {
+            return Err(ServiceError::new(
+                StatusCode::CONFLICT,
+                format!("the name {:?} is taken: pick another", test.name),
+            ));
+        }
+        crate::rbac::projects::check_move(
+            &state.users,
+            caller,
+            write,
+            o.project.as_deref(),
+            test.project.as_deref(),
+        )?;
+    }
+    Ok(test)
+}
+
+/// Delete a test (`tests.write` in its project).
+pub fn delete_for(state: &AppState, caller: &Resolved, name: &str) -> Result<Value, ServiceError> {
+    let Some(t) = state.saved_tests.get(name).filter(|t| visible(caller, t)) else {
+        return Err(no_test(name));
+    };
+    if !caller.has_in(Perm::TestsWrite, t.project.as_deref()) {
+        return Err(ServiceError::permission(caller, Perm::TestsWrite));
+    }
+    match state.saved_tests.delete(name) {
+        Ok(true) => Ok(json!({ "deleted": name })),
+        Ok(false) => Err(no_test(name)),
+        Err(e) => Err(ServiceError::new(e.status(), e.message())),
+    }
+}
+
+/// Narrow a run to what the caller may run: the names asked for must be
+/// tests it sees (`404`) and runs (`tests.run` in their project, `403`);
+/// without names, every test it may run (of `project` when given). A caller
+/// with the instance-wide permission and no `project` runs as before.
+pub fn select_for(
+    state: &AppState,
+    caller: &Resolved,
+    body: &mut run::RunBody,
+) -> Result<(), ServiceError> {
+    let filter = crate::rbac::projects::Filter::parse(body.project.as_deref())
+        .map_err(ServiceError::bad_request)?;
+    if filter.is_none() && caller.has(Perm::TestsRun) {
+        return Ok(());
+    }
+    let all = state.saved_tests.list();
+    if body.names.is_empty() {
+        let names: Vec<String> = all
+            .iter()
+            .filter(|t| {
+                caller.has_in(Perm::TestsRun, t.project.as_deref())
+                    && crate::rbac::projects::passes(&filter, t.project.as_deref())
+            })
+            .map(|t| t.name.clone())
+            .collect();
+        if names.is_empty() {
+            return Err(ServiceError::not_found(
+                "no saved test you may run here (in this project)",
+            ));
+        }
+        body.names = names;
+        return Ok(());
+    }
+    for n in &body.names {
+        let Some(t) = all
+            .iter()
+            .find(|t| &t.name == n)
+            .filter(|t| visible(caller, t))
+        else {
+            return Err(no_test(n));
+        };
+        if !crate::rbac::projects::passes(&filter, t.project.as_deref()) {
+            return Err(ServiceError::bad_request(format!(
+                "the test {n:?} is not in that project"
+            )));
+        }
+        if !caller.has_in(Perm::TestsRun, t.project.as_deref()) {
+            return Err(ServiceError::permission(caller, Perm::TestsRun));
+        }
+    }
+    Ok(())
+}
+
+/// May the caller see a kept run? Instance-wide `tests.read`, or
+/// `tests.read` in every project of its tests (and the run ran none of the
+/// instance's).
+pub fn run_visible(caller: &Resolved, scope: &history::Scope) -> bool {
+    caller.has(Perm::TestsRead)
+        || (!scope.instance
+            && scope
+                .projects
+                .iter()
+                .all(|p| caller.has_in(Perm::TestsRead, Some(p))))
 }
 
 // ── A run, kept ─────────────────────────────────────────────────────
@@ -768,14 +953,25 @@ pub async fn run_and_keep(
         .filter(|(_, v)| !v.is_empty())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    let ran: Vec<SavedTest> = state
+        .saved_tests
+        .list()
+        .into_iter()
+        .filter(|t| body.names.is_empty() || body.names.contains(&t.name))
+        .collect();
+    let scope = history::Scope::of(&ran);
     let mut report = run::run(state, session, body).await?;
     for r in &mut report.results {
         run::scrub(r, &given);
     }
-    Ok(state
-        .saved_tests
-        .history
-        .record(trigger, principal, selection, report))
+    Ok(state.saved_tests.history.record_in(
+        trigger,
+        principal,
+        selection,
+        report,
+        scope,
+        chrono::Utc::now(),
+    ))
 }
 
 /// The answer of a run: the report, its id in the history and the change
@@ -819,10 +1015,41 @@ fn refuse(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({ "error": message.into() }))).into_response()
 }
 
-/// Every read is admin: a test may hold a captured request's body.
-async fn list_handler(State(state): State<AppState>) -> Response {
+#[derive(Deserialize)]
+struct ProjectQuery {
+    #[serde(default)]
+    project: Option<String>,
+}
+
+#[allow(clippy::result_large_err)]
+fn filter_of(q: &ProjectQuery) -> Result<Option<crate::rbac::projects::Filter>, Response> {
+    crate::rbac::projects::Filter::parse(q.project.as_deref())
+        .map_err(|e| refuse(StatusCode::BAD_REQUEST, e))
+}
+
+fn caller(
+    state: &AppState,
+    headers: &HeaderMap,
+    extensions: &axum::http::Extensions,
+) -> Arc<Resolved> {
+    crate::control_auth::caller_of(state, headers, extensions)
+}
+
+/// Every read needs `tests.read` (a test may hold a captured request's
+/// body), in the test's project.
+async fn list_handler(
+    State(state): State<AppState>,
+    Query(q): Query<ProjectQuery>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
+) -> Response {
+    let filter = match filter_of(&q) {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+    let c = caller(&state, &headers, &extensions);
     Json(json!({
-        "tests": state.saved_tests.views(),
+        "tests": views_for(&state, &c, &filter),
         "max_tests": MAX_TESTS,
     }))
     .into_response()
@@ -832,6 +1059,8 @@ async fn save_handler(
     State(state): State<AppState>,
     Session(session): Session,
     key: Option<axum::Extension<crate::keys::KeyContext>>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
     body: Bytes,
 ) -> Response {
     let body: SaveBody = match serde_json::from_slice(&body) {
@@ -841,16 +1070,29 @@ async fn save_handler(
     let key_id = key
         .filter(|k| k.shared && k.control)
         .map(|axum::Extension(k)| k.key.id.to_string());
-    match save(&state, body, &session, key_id.as_deref()) {
+    let c = caller(&state, &headers, &extensions);
+    // The permission refusal with its body (the save answers a message).
+    if let Err(e) =
+        crate::rbac::projects::target(&state.users, &c, Perm::TestsWrite, body.project.as_deref())
+    {
+        return e.into_response();
+    }
+    match save(&state, &c, body, &session, key_id.as_deref()) {
         Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
         Err((s, m)) => refuse(s, m),
     }
 }
 
-async fn get_handler(State(state): State<AppState>, Path(name): Path<String>) -> Response {
-    match state.saved_tests.view_of(&name) {
-        Some(v) => Json(v).into_response(),
-        None => refuse(StatusCode::NOT_FOUND, format!("no test named {name:?}")),
+async fn get_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
+) -> Response {
+    let c = caller(&state, &headers, &extensions);
+    match view_for(&state, &c, &name) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -875,6 +1117,8 @@ pub fn test_from_value(name: &str, mut v: Value) -> Result<SavedTest, String> {
 async fn put_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
     body: Bytes,
 ) -> Response {
     let v: Value = match serde_json::from_slice(&body) {
@@ -885,17 +1129,27 @@ async fn put_handler(
         Ok(t) => t,
         Err(e) => return refuse(StatusCode::BAD_REQUEST, e),
     };
+    let c = caller(&state, &headers, &extensions);
+    let test = match admit_for(&state, &c, test) {
+        Ok(t) => t,
+        Err(e) => return e.into_response(),
+    };
     match state.saved_tests.put(test, true) {
         Ok(v) => Json(v).into_response(),
         Err(e) => refuse(e.status(), e.message()),
     }
 }
 
-async fn delete_handler(State(state): State<AppState>, Path(name): Path<String>) -> Response {
-    match state.saved_tests.delete(&name) {
-        Ok(true) => Json(json!({ "deleted": name })).into_response(),
-        Ok(false) => refuse(StatusCode::NOT_FOUND, format!("no test named {name:?}")),
-        Err(e) => refuse(e.status(), e.message()),
+async fn delete_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
+) -> Response {
+    let c = caller(&state, &headers, &extensions);
+    match delete_for(&state, &c, &name) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -931,9 +1185,10 @@ async fn run_handler(
     Query(q): Query<FormatQuery>,
     key: Option<axum::Extension<crate::keys::KeyContext>>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     body: Bytes,
 ) -> Response {
-    let body: run::RunBody = if body.is_empty() {
+    let mut body: run::RunBody = if body.is_empty() {
         run::RunBody::default()
     } else {
         match serde_json::from_slice(&body) {
@@ -945,6 +1200,9 @@ async fn run_handler(
         Ok(j) => j,
         Err(m) => return refuse(StatusCode::BAD_REQUEST, m),
     };
+    if let Err(e) = select_for(&state, &caller(&state, &headers, &extensions), &mut body) {
+        return e.into_response();
+    }
     let Some(_running) = state.saved_tests.begin_run() else {
         return refuse(StatusCode::CONFLICT, RUN_BUSY);
     };
@@ -967,14 +1225,28 @@ struct PageQuery {
 
 /// `GET /_rustybin/tests/runs`: newest first, `limit` (20, at most 100)
 /// and `cursor` (the `next_cursor` of the page before).
-async fn runs_handler(State(state): State<AppState>, Query(q): Query<PageQuery>) -> Response {
-    Json(runs_page(&state, q.limit, q.cursor.as_deref())).into_response()
+async fn runs_handler(
+    State(state): State<AppState>,
+    Query(q): Query<PageQuery>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
+) -> Response {
+    let c = caller(&state, &headers, &extensions);
+    Json(runs_page(&state, &c, q.limit, q.cursor.as_deref())).into_response()
 }
 
-/// A page of the history as the API and the tools answer it.
-pub fn runs_page(state: &AppState, limit: Option<usize>, cursor: Option<&str>) -> Value {
+/// A page of the history as the API and the tools answer it: the runs the
+/// caller may see.
+pub fn runs_page(
+    state: &AppState,
+    caller: &Resolved,
+    limit: Option<usize>,
+    cursor: Option<&str>,
+) -> Value {
     let h = &state.saved_tests.history;
-    let p = h.page(limit.unwrap_or(history::DEFAULT_PAGE), cursor);
+    let p = h.page_where(limit.unwrap_or(history::DEFAULT_PAGE), cursor, |s| {
+        run_visible(caller, s)
+    });
     json!({
         "runs": p.runs,
         "next_cursor": p.next_cursor,
@@ -984,7 +1256,16 @@ pub fn runs_page(state: &AppState, limit: Option<usize>, cursor: Option<&str>) -
     })
 }
 
-async fn clear_runs_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn clear_runs_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
+) -> Response {
+    // Every run, everyone's: the instance-wide permission (the route is
+    // project-scoped for its GET).
+    if let Err(r) = crate::rbac::require(&caller(&state, &headers, &extensions), Perm::TestsWrite) {
+        return r;
+    }
     let n = state.saved_tests.history.clear();
     tracing::info!(
         principal = %crate::settings::principal(&headers, &state.config),
@@ -993,16 +1274,31 @@ async fn clear_runs_handler(State(state): State<AppState>, headers: HeaderMap) -
     Json(json!({ "cleared": n })).into_response()
 }
 
+/// One kept run, if the caller may see it.
+pub fn run_for(state: &AppState, caller: &Resolved, id: &str) -> Option<history::TestRun> {
+    state.saved_tests.history.get(id).filter(|r| {
+        run_visible(
+            caller,
+            &history::Scope {
+                projects: r.projects.clone(),
+                instance: r.instance,
+            },
+        )
+    })
+}
+
 async fn run_one_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(q): Query<FormatQuery>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
 ) -> Response {
     let junit = match junit_wanted(&q) {
         Ok(j) => j,
         Err(m) => return refuse(StatusCode::BAD_REQUEST, m),
     };
-    match state.saved_tests.history.get(&id) {
+    match run_for(&state, &caller(&state, &headers, &extensions), &id) {
         Some(run) if junit => junit_response(&run),
         Some(run) => Json(run_view(&run)).into_response(),
         None if history::valid_id(&id) => {
@@ -1012,10 +1308,20 @@ async fn run_one_handler(
     }
 }
 
-async fn export_handler(State(state): State<AppState>) -> Response {
+async fn export_handler(
+    State(state): State<AppState>,
+    Query(q): Query<ProjectQuery>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
+) -> Response {
+    let filter = match filter_of(&q) {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+    let c = caller(&state, &headers, &extensions);
     (
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        hurl::export(&state.saved_tests.list()),
+        hurl::export(&tests_for(&state, &c, &filter)),
     )
         .into_response()
 }
@@ -1052,7 +1358,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Saved tests: list them, or save one from a captured request or a written one (admin)",
         )
-.permission_for(&["GET"], crate::rbac::Permission::TestsRead).permission_for(&["POST"], crate::rbac::Permission::TestsWrite)
+.permission_for(&["GET"], crate::rbac::Permission::TestsRead).permission_for(&["POST"], crate::rbac::Permission::TestsWrite).project_scoped()
         .example(Example::get("Saved tests", LIST_PATH)),
         Endpoint::new(
             ONE_PATH,
@@ -1060,7 +1366,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "A saved test: read, replace or delete it (admin)",
         )
-.permission_for(&["GET"], crate::rbac::Permission::TestsRead).permission_for(&["PUT", "DELETE"], crate::rbac::Permission::TestsWrite)
+.permission_for(&["GET"], crate::rbac::Permission::TestsRead).permission_for(&["PUT", "DELETE"], crate::rbac::Permission::TestsWrite).project_scoped()
         .example(Example::get("A saved test", "/_rustybin/tests/pet-1").expect_status(404)),
         Endpoint::new(
             RUN_PATH,
@@ -1068,7 +1374,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "Run saved tests in process or through their gateway; JSON or JUnit (?format=junit) (admin)",
         )
-.permission(crate::rbac::Permission::TestsRun)
+.permission(crate::rbac::Permission::TestsRun).project_scoped()
         .example(Example::post("Run every test", RUN_PATH).json("{}")),
         Endpoint::new(
             RUNS_PATH,
@@ -1076,7 +1382,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "The history of saved-test runs, newest first (limit, cursor); DELETE forgets every run (admin)",
         )
-.permission_for(&["GET"], crate::rbac::Permission::TestsRead).permission_for(&["DELETE"], crate::rbac::Permission::TestsWrite)
+.permission_for(&["GET"], crate::rbac::Permission::TestsRead).permission_for(&["DELETE"], crate::rbac::Permission::TestsWrite).project_scoped()
         .example(Example::get("Test run history", RUNS_PATH)),
         Endpoint::new(
             RUN_ONE_PATH,
@@ -1084,7 +1390,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "One kept test run: each test's result, the change since the previous run; JSON or JUnit (?format=junit) (admin)",
         )
-.permission(crate::rbac::Permission::TestsRead)
+.permission(crate::rbac::Permission::TestsRead).project_scoped()
         .example(
             Example::get("A test run", "/_rustybin/tests/runs/20261103T101500000Z-abc123")
                 .expect_status(404),
@@ -1095,7 +1401,7 @@ pub fn catalog() -> Vec<Endpoint> {
             category::CONTROL,
             "The saved tests as a Hurl file, assertions included, for CI",
         )
-.permission(crate::rbac::Permission::TestsRead)
+.permission(crate::rbac::Permission::TestsRead).project_scoped()
         .example(Example::get("Export as Hurl", EXPORT_PATH)),
     ];
     out.extend(schedule::catalog());
@@ -1119,11 +1425,12 @@ fn tests_openapi_paths() -> Value {
             "get": {
                 "tags": ["Control Plane"], "summary": "Saved tests",
                 "operationId": "listSavedTests",
+                "parameters": [{ "name": "project", "in": "query", "required": false, "description": "One project's tests (instance: the instance's)", "schema": { "type": "string" } }],
                 "responses": { "200": { "description": "The tests with the variables each uses", "content": obj } }
             },
             "post": {
                 "tags": ["Control Plane"], "summary": "Save a test (admin)",
-                "description": "From a captured request (capture: its inspector id; secret-looking headers and query values become {{variables}}) or a written request, with assertions (default for a capture: its status). At most 200 tests, 64 KiB each.",
+                "description": "From a captured request (capture: its inspector id; secret-looking headers and query values become {{variables}}) or a written request, with assertions (default for a capture: its status). project: the project it belongs to (tests.write there). At most 200 tests, 64 KiB each.",
                 "operationId": "saveTest",
                 "requestBody": { "required": true, "content": obj },
                 "responses": { "201": { "description": "The saved test", "content": obj }, "400": { "description": "Invalid test" }, "404": { "description": "No such capture you may read" }, "409": { "description": "A test of that name exists" } }

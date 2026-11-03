@@ -2452,6 +2452,139 @@ def run_users(browser):
     ctx.close()
 
 
+def run_projects(browser):
+    """Projects (access control step 11) on the password instance: two
+    users in two projects. pia, an editor of pay with no instance role, sees
+    pay's mock only and edits it; carl, an instance viewer and an editor of
+    ops, sees pay's mock read-only and edits ops's; the picker filters."""
+    base = os.environ["RUSTYBIN_PASSWORD_URL"].rstrip("/")
+    print(f"projects: {base}")
+
+    def api(method, path, token=None, body=None):
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = "Bearer " + token
+        req = urllib.request.Request(base + path, method=method, headers=headers,
+                                     data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                raw = r.read()
+                return r.status, json.loads(raw) if raw else None
+        except urllib.error.HTTPError as e:
+            raw = e.read()
+            return e.code, json.loads(raw) if raw else None
+
+    held = {}
+
+    def setup():
+        status, v = api("POST", "/_rustybin/login", body={"username": "rustybin", "password": "rustybin"})
+        assert status == 200, (status, v)
+        admin = v["token"]
+        for p in ["pay", "ops"]:
+            status, v = api("PUT", "/_rustybin/projects/" + p, admin, {"description": "The " + p + " team"})
+            assert status in (200, 201), (status, v)
+        for name, roles, projects in [("e2e-pia", [], [{"project": "pay", "roles": ["editor"]}]),
+                                      ("e2e-carl", ["viewer"], [{"project": "ops", "roles": ["editor"]}])]:
+            status, v = api("POST", "/_rustybin/users", admin, {"name": name, "roles": roles, "projects": projects})
+            assert status == 201, (status, v)
+            status, v = api("POST", "/_rustybin/join", body={"token": v["invitation"]["token"], "password": name + "-secret-k3Qx"})
+            assert status == 200, (status, v)
+        for mock, project in [("pay-api", "pay"), ("ops-api", "ops")]:
+            status, v = api("POST", "/_rustybin/mocks", admin, {"name": mock, "spec": SMALL_SPEC, "project": project})
+            assert status == 201, (status, v)
+        held["admin"] = admin
+
+    step("projects: two projects, a member of each, a mock in each", setup)
+
+    def sign_in(page, user):
+        page.goto(base + "/ui/#/mocks")
+        page.wait_for_selector("#signin")
+        page.fill("#signin-user", user)
+        page.fill("#signin-password", user + "-secret-k3Qx")
+        page.get_by_role("button", name="Sign in", exact=True).click()
+
+    ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+    page = ctx.new_page()
+    page.set_default_timeout(TIMEOUT)
+    page.on("pageerror", lambda e: console_errors.append(f"[projects, pia] uncaught: {e}"))
+
+    def pia_edits_her_project():
+        sign_in(page, "e2e-pia")
+        page.locator(".mock-row", has_text="pay-api").wait_for()
+        expect(page.locator(".mock-row", has_text="ops-api")).to_have_count(0)
+        expect(page.locator(".mock-row", has_text="petstore")).to_have_count(0)
+        expect(page.locator(".mock-row", has_text="pay-api")).to_contain_text("project pay")
+        expect(page.locator("#project-picker")).to_have_count(1)
+        expect(page.get_by_role("button", name="New mock")).to_have_count(1)
+        shot(page, "password", "60-projects-member-list")
+        page.evaluate("location.hash = '#/mocks/pay-api/settings'")
+        page.wait_for_selector("#mock-project-name")
+        expect(page.locator("#mock-project-name")).to_have_text("pay")
+        page.get_by_role("button", name="Save to draft").click()
+        page.locator(".toast", has_text="Saved to the draft").wait_for()
+        # Another project's mock is not found.
+        page.evaluate("location.hash = '#/mocks/ops-api'")
+        page.get_by_text("This mock does not exist").wait_for()
+
+    step("projects: a member edits her project's mock and sees nothing else", pia_edits_her_project)
+
+    ctx2 = browser.new_context(viewport={"width": 1280, "height": 900})
+    p2 = ctx2.new_page()
+    p2.set_default_timeout(TIMEOUT)
+    p2.on("pageerror", lambda e: console_errors.append(f"[projects, carl] uncaught: {e}"))
+
+    def carl_reads_others():
+        sign_in(p2, "e2e-carl")
+        p2.locator(".mock-row", has_text="ops-api").wait_for()
+        p2.locator(".mock-row", has_text="pay-api").wait_for()
+        # pay's mock read-only, ops's editable.
+        p2.evaluate("location.hash = '#/mocks/pay-api/settings'")
+        p2.wait_for_selector("#mock-project-name")
+        expect(p2.get_by_role("button", name="Save to draft")).to_have_count(0)
+        expect(p2.get_by_role("button", name="Delete mock")).to_have_count(0)
+        p2.evaluate("location.hash = '#/mocks/ops-api/settings'")
+        p2.wait_for_selector("#mock-project-name")
+        expect(p2.locator("#mock-project-name")).to_have_text("ops")
+        expect(p2.get_by_role("button", name="Save to draft")).to_have_count(1)
+        shot(p2, "password", "61-projects-other-member")
+        # The picker filters the list to one project.
+        p2.evaluate("location.hash = '#/mocks'")
+        p2.locator(".mock-row", has_text="pay-api").wait_for()
+        p2.select_option("#project-picker", "ops")
+        p2.locator(".mock-row", has_text="ops-api").wait_for()
+        expect(p2.locator(".mock-row", has_text="pay-api")).to_have_count(0)
+        p2.select_option("#project-picker", "")
+
+    step("projects: an instance viewer reads another project read-only, the picker filters", carl_reads_others)
+
+    admin_ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+    ap = admin_ctx.new_page()
+    ap.set_default_timeout(TIMEOUT)
+
+    def admin_sees_bindings_and_cleans_up():
+        ap.goto(base + "/ui/#/manage/users")
+        ap.wait_for_selector("#signin")
+        ap.fill("#signin-user", "rustybin")
+        ap.fill("#signin-password", "rustybin")
+        ap.get_by_role("button", name="Sign in", exact=True).click()
+        ap.wait_for_selector("#projects-table")
+        expect(ap.locator("[data-project=pay]")).to_contain_text("e2e-pia: editor")
+        expect(ap.locator("[data-user=e2e-carl] [data-binding=ops]")).to_contain_text("ops: editor")
+        shot(ap, "password", "62-projects-users-and-roles")
+        for mock in ["pay-api", "ops-api"]:
+            api("DELETE", "/_rustybin/mocks/" + mock, held["admin"])
+        for p in ["pay", "ops"]:
+            status, v = api("DELETE", "/_rustybin/projects/" + p, held["admin"])
+            assert status == 200, (status, v)
+        for u in ["e2e-pia", "e2e-carl"]:
+            api("DELETE", "/_rustybin/users/" + u, held["admin"])
+
+    step("projects: Users and roles shows the bindings; clean up", admin_sees_bindings_and_cleans_up)
+    admin_ctx.close()
+    ctx2.close()
+    ctx.close()
+
+
 def run_agents_for_users(browser):
     """AI agents act for a user (access control step 12) on the password
     instance: the admin sees whose agent it is (the Owner column and its
@@ -2835,6 +2968,7 @@ def main():
         if os.environ.get("RUSTYBIN_PASSWORD_URL"):
             run_password(browser)
             run_users(browser)
+            run_projects(browser)
             run_agents_for_users(browser)
             run_portal_access(browser)
         if os.environ.get("RUSTYBIN_SSO_URL"):

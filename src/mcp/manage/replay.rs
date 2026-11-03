@@ -11,28 +11,34 @@ use super::tools::{arg_bool, arg_str, confirm, err, need_str, ok, Confirm};
 use crate::mcp::core::CallCtx;
 use crate::replay::{self, history, run, SaveBody};
 
-/// `list_tests`: every saved test, one by name, or the Hurl export.
-pub fn list_tests(ctx: &CallCtx, args: &Value) -> Value {
-    let store = &ctx.app.saved_tests;
+/// `list_tests`: the saved tests the caller may see (of one project with
+/// `project`), one by name, or the Hurl export.
+pub fn list_tests(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
+    let caller = &access.resolved;
+    let filter = match crate::rbac::projects::Filter::parse(arg_str(args, "project")) {
+        Ok(f) => f,
+        Err(e) => return err(e),
+    };
     if arg_str(args, "format") == Some("hurl") {
-        let text = replay::hurl::export(&store.list());
+        let tests = replay::tests_for(&ctx.app, caller, &filter);
+        let text = replay::hurl::export(&tests);
         return ok(
             ctx,
-            format!("{} saved test(s) as Hurl (in untrusted_hurl)", store.len()),
+            format!("{} saved test(s) as Hurl (in untrusted_hurl)", tests.len()),
             json!({ "untrusted_hurl": text }),
         );
     }
     if let Some(name) = arg_str(args, "name") {
-        return match store.view_of(name) {
-            Some(v) => ok(
+        return match replay::view_for(&ctx.app, caller, name) {
+            Ok(v) => ok(
                 ctx,
                 format!("Saved test {name}"),
                 json!({ "untrusted_test": v }),
             ),
-            None => err(format!("no test named {name:?}")),
+            Err(e) => err(e.message()),
         };
     }
-    let tests = store.views();
+    let tests = replay::views_for(&ctx.app, caller, &filter);
     let names: Vec<&str> = tests.iter().filter_map(|t| t["name"].as_str()).collect();
     ok(
         ctx,
@@ -63,6 +69,10 @@ pub fn save_test(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
             Ok(t) => t,
             Err(e) => return err(e),
         };
+        let test = match replay::admit_for(&ctx.app, &access.resolved, test) {
+            Ok(t) => t,
+            Err(e) => return err(e.message()),
+        };
         return match ctx.app.saved_tests.put(test, true) {
             Ok(v) => ok(
                 ctx,
@@ -79,6 +89,7 @@ pub fn save_test(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     let name = body.name.clone();
     match replay::save(
         &ctx.app,
+        &access.resolved,
         body,
         &access.test_session(),
         access.key_id.as_deref(),
@@ -109,7 +120,7 @@ pub fn save_test(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
 }
 
 /// `delete_test` (confirmed).
-pub async fn delete_test(ctx: &CallCtx, args: &Value, params: &Value) -> Value {
+pub async fn delete_test(ctx: &CallCtx, access: &Access, args: &Value, params: &Value) -> Value {
     let name = match need_str(args, "name") {
         Ok(n) => n,
         Err(e) => return e,
@@ -125,13 +136,8 @@ pub async fn delete_test(ctx: &CallCtx, args: &Value, params: &Value) -> Value {
     {
         return v;
     }
-    match ctx.app.saved_tests.delete(name) {
-        Ok(true) => ok(
-            ctx,
-            format!("Deleted test {name}"),
-            json!({ "deleted": name }),
-        ),
-        Ok(false) => err(format!("no test named {name:?}")),
+    match replay::delete_for(&ctx.app, &access.resolved, name) {
+        Ok(v) => ok(ctx, format!("Deleted test {name}"), v),
         Err(e) => err(e.message()),
     }
 }
@@ -154,6 +160,15 @@ pub async fn run_tests(ctx: &CallCtx, access: &Access, args: &Value, params: &Va
                 .collect()
         })
         .unwrap_or_default();
+    let mut body = run::RunBody {
+        names,
+        variables: Default::default(),
+        project: arg_str(args, "project").map(str::to_string),
+    };
+    if let Err(e) = replay::select_for(&ctx.app, &access.resolved, &mut body) {
+        return err(e.message());
+    }
+    let names = body.names.clone();
     let selected: Vec<replay::SavedTest> = ctx
         .app
         .saved_tests
@@ -196,10 +211,6 @@ pub async fn run_tests(ctx: &CallCtx, access: &Access, args: &Value, params: &Va
     }
     let Some(_running) = ctx.app.saved_tests.begin_run() else {
         return err(replay::RUN_BUSY);
-    };
-    let body = run::RunBody {
-        names,
-        variables: Default::default(),
     };
     match replay::run_and_keep(
         &ctx.app,
@@ -268,13 +279,14 @@ fn run_value(kept: &history::TestRun, format: Option<&str>) -> Value {
     v
 }
 
-/// `list_test_runs`: the history, newest first.
-pub fn list_test_runs(ctx: &CallCtx, args: &Value) -> Value {
+/// `list_test_runs`: the history, newest first (the runs the caller may
+/// see).
+pub fn list_test_runs(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     let limit = args
         .get("limit")
         .and_then(Value::as_u64)
         .map(|n| n as usize);
-    let v = replay::runs_page(&ctx.app, limit, arg_str(args, "cursor"));
+    let v = replay::runs_page(&ctx.app, &access.resolved, limit, arg_str(args, "cursor"));
     let n = v["runs"].as_array().map(Vec::len).unwrap_or(0);
     let failed = v["runs"]
         .as_array()
@@ -298,12 +310,12 @@ pub fn list_test_runs(ctx: &CallCtx, args: &Value) -> Value {
 }
 
 /// `get_test_run`: one kept run, whole (JUnit with `format: junit`).
-pub fn get_test_run(ctx: &CallCtx, args: &Value) -> Value {
+pub fn get_test_run(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     let id = match need_str(args, "id") {
         Ok(n) => n,
         Err(e) => return e,
     };
-    match ctx.app.saved_tests.history.get(id) {
+    match replay::run_for(&ctx.app, &access.resolved, id) {
         Some(kept) => ok(
             ctx,
             format!("Test run {}: {}", kept.id, run_summary(&kept)),

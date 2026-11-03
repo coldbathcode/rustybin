@@ -75,7 +75,7 @@ The marker a session looks for is the first row that is not done.
 | [08](step-08-permissions-everywhere.md) | Access control 2: every route and tool checks a permission | 07 | done 2026-11-03 |
 | [09](step-09-users-everywhere.md) | Access control 3: users and roles on every surface, invitations | 08 | done 2026-11-03 |
 | [10](step-10-single-sign-on.md) | Access control 4: single sign-on with OpenID Connect | 09 | done 2026-11-03 |
-| [11](step-11-projects.md) | Access control 5: projects, roles on part of an instance | 09 | |
+| [11](step-11-projects.md) | Access control 5: projects, roles on part of an instance | 09 | done 2026-11-03 |
 | [12](step-12-agents-for-users.md) | Access control 6: agents act for a user | 09 | done 2026-11-03 |
 | [13](step-13-portal-access.md) | Access control 7: open and closed APIs on the portal | 09 | done 2026-11-03 |
 | [14](step-14-audit-log.md) | Access control 8: the audit log and a security pass | 07 to 13 | |

@@ -61,6 +61,11 @@ Nothing more:
   name or password hash (a change is a problem), and pruning never removes them, so a
   document without them cannot bring back the default password; a public instance
   refuses to clear the hash at all.
+- **Not who works in a project.** A pulled `projects:` section creates projects and
+  changes their descriptions, never their members, and never prunes a project; a
+  mock or saved test that exists is never moved to another project (`project:`),
+  and a checkpoint from the repository never moves a mock between projects. Each is
+  a problem, kept as it is ([Projects](projects.md)).
 - **Not other people's mocks.** A prune deletes only the instance's own mocks: never a
   visitor's, an API key's or a running [gateway scenario](gateway-scenarios.md)'s, and
   never a mock the document names but could not read (an entry with a typo included).

@@ -7,6 +7,7 @@
 import { h, replace, card, input, checkbox, notice, toast, icon, badge, spinner, fmtTime } from '../../lib/dom.js';
 import { SERVER, getJson, send } from '../../lib/http.js';
 import * as perms from '../../lib/perms.js';
+import * as projects from '../../lib/projects.js';
 
 const BASE = '/_rustybin/checkpoints';
 
@@ -41,7 +42,7 @@ export function checkpointsPanel() {
 
   async function load() {
     try {
-      const d = await getJson(BASE, { session: false });
+      const d = await getJson(BASE + projects.query(), { session: false });
       if (!d.checkpoints.length) {
         replace(listEl, h('p', { class: 'muted' }, 'No checkpoints yet.'));
         return;
@@ -119,7 +120,7 @@ export function checkpointsPanel() {
   saveBtn.onclick = async () => {
     const n = name.value.trim();
     if (!n) { toast('Give the checkpoint a name', 'err'); return; }
-    const r = await send({ control: true, admin: true, session: false, method: 'POST', url: SERVER + BASE, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: n, replace: replaceBox.input.checked }) });
+    const r = await send({ control: true, admin: true, session: false, method: 'POST', url: SERVER + BASE, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: n, replace: replaceBox.input.checked, project: projects.forNew() }) });
     if (!r.ok) { toast('Not saved: ' + ((r.json && r.json.error) || r.error || r.status), 'err'); return; }
     toast(`Saved ${n} (${r.json.mocks.length} mock(s))`);
     load();

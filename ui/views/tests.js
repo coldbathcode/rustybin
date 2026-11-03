@@ -11,6 +11,7 @@
 import { h, replace, card, notice, icon, badge, spinner, toast, methodBadge, fmtTime } from '../lib/dom.js';
 import { getJson, send, SERVER } from '../lib/http.js';
 import * as perms from '../lib/perms.js';
+import * as projects from '../lib/projects.js';
 
 const BASE = '/_rustybin/tests';
 
@@ -106,7 +107,7 @@ export default {
     async function load() {
       let d;
       try {
-        d = await getJson(BASE, { admin: true, session: false });
+        d = await getJson(BASE + projects.query(), { admin: true, session: false });
       } catch (e) {
         replace(listEl, notice('err', 'The tests could not be loaded: ' + e.message));
         return;
@@ -140,7 +141,7 @@ export default {
       replace(resultEl, spinner('Running'));
       try {
         // The header labels the run's trigger in the history (never trusted).
-        const r = await call('POST', BASE + '/run', { names: names || [], variables: parseVars(vars.value) }, { 'X-Rustybin-Client': 'console' });
+        const r = await call('POST', BASE + '/run', { names: names || [], variables: parseVars(vars.value), project: projects.forNew() }, { 'X-Rustybin-Client': 'console' });
         for (const t of r.results) last.set(t.name, t);
         replace(resultEl, report(r));
         await load();

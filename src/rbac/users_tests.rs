@@ -746,6 +746,7 @@ fn opts(
             },
             roles: r.roles.clone(),
             permissions: r.permissions,
+            projects: Default::default(),
         })
     });
     crate::configdoc::ApplyOptions {
@@ -866,6 +867,7 @@ fn a_document_carries_users_and_roles_round_trip_prune_and_untrusted() {
         principal: super::Principal::Open,
         roles: vec!["editor".into()],
         permissions: BuiltIn::Editor.permissions(),
+        projects: Default::default(),
     };
     let doc = crate::mocks::config_file::parse("version: 2\nroles: []\n").expect("doc");
     assert_eq!(

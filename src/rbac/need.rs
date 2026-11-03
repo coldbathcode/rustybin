@@ -141,6 +141,52 @@ pub const BODY_CHECKS: &[(Permission, &str)] = &[
     ),
 ];
 
+/// The routes whose resources may belong to a project (step 11): the
+/// catalogue marks them `.project_scoped()`, the route check lets in a
+/// caller who holds the permission in some project, and the handler checks
+/// it again on each resource, in the resource's project (another project's
+/// resource the caller may not read is `404`, a list leaves it out).
+/// `every_project_route_checks_each_resource` calls each one as a member of
+/// another project.
+pub const PROJECT_ROUTES: &[&str] = &[
+    "/_rustybin/mocks",
+    "/_rustybin/mocks/import",
+    "/_rustybin/mocks/export",
+    "/_rustybin/mocks/ai/spec",
+    "/_rustybin/mocks/{name}",
+    "/_rustybin/mocks/{name}/coverage",
+    "/_rustybin/mocks/{name}/ai/examples",
+    "/_rustybin/mocks/{name}/ai/edit",
+    "/_rustybin/mocks/{name}/enable",
+    "/_rustybin/mocks/{name}/disable",
+    "/_rustybin/mocks/{name}/deploy",
+    "/_rustybin/mocks/{name}/rollback",
+    "/_rustybin/mocks/{name}/report",
+    "/_rustybin/mocks/{name}/export",
+    "/_rustybin/mocks/{name}/spec",
+    "/_rustybin/mocks/{name}/revisions/{revision}",
+    "/_rustybin/mocks/{name}/duplicate",
+    "/_rustybin/mocks/{name}/state",
+    "/_rustybin/mocks/{name}/collections/{format}",
+    "/_rustybin/mocks/{name}/operations/{op}",
+    "/_rustybin/mocks/{name}/operations/{op}/sample",
+    "/_rustybin/mocks/{name}/operations/{op}/validate",
+    "/_rustybin/mocks/{name}/operations/{op}/rules/test",
+    "/_rustybin/mocks/{name}/requests",
+    "/_rustybin/mocks/{name}/requests/stream",
+    "/_rustybin/mocks/{name}/requests/{n}",
+    "/_rustybin/tests",
+    "/_rustybin/tests/{name}",
+    "/_rustybin/tests/run",
+    "/_rustybin/tests/runs",
+    "/_rustybin/tests/runs/{id}",
+    "/_rustybin/tests/export",
+    "/_rustybin/checkpoints",
+    "/_rustybin/checkpoints/{name}",
+    "/_rustybin/checkpoints/{name}/restore",
+    "/_rustybin/portal/items/{id}",
+];
+
 /// Permissions no route, tool or check uses yet, and the step that will.
 pub const RESERVED: &[(Permission, &str)] =
     &[(Permission::AuditRead, "the audit log (testing-2 step 14)")];

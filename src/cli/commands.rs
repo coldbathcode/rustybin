@@ -103,6 +103,10 @@ pub const NOUNS: &[(&str, &str)] = &[
         "Roles: the built-in ones and custom roles with their permissions",
     ),
     (
+        "projects",
+        "Projects: roles on part of the instance (mocks, saved tests, checkpoints)",
+    ),
+    (
         "me",
         "Your own account: who you are, display name, email, sessions",
     ),
@@ -165,7 +169,16 @@ const USER_FLAGS_INVITE: &[Flag] = &[
         "--sso",
         "A single sign-on user, added ahead of their first sign-in: no link, no password (--role pins roles)",
     ),
+    Flag::value(
+        "--project",
+        "Roles in a project: PROJECT=role+role (repeatable; with one, --role may be left out)",
+    ),
 ];
+const PROJECT_FLAG: Flag = Flag::value(
+    "--project",
+    "A project's only (instance: the instance's, without a project)",
+);
+const PROJECT_FLAGS: &[Flag] = &[PROJECT_FLAG];
 const USER_FLAGS_UPDATE: &[Flag] = &[
     Flag::value(
         "--role",
@@ -251,15 +264,20 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("roles", "show", "<name>", "One role: its permissions and who holds it.", NO_FLAGS, [("GET", "/_rustybin/roles/{name}")], false, "roles show editor"),
     cmd!("roles", "save", "<name> --permission P [--description D]", "Create or change a custom role (--permission repeatable, or comma separated).", &[Flag::value("--permission", "A permission (repeatable, or comma separated; rustybin roles list shows them)"), Flag::value("--description", "What the role is for")], [("PUT", "/_rustybin/roles/{name}"), ("POST", "/_rustybin/roles")], false, "roles save catalog-reader --permission mocks.read,traffic.read --description \"Reads mocks and traffic\""),
     cmd!("roles", "delete", "<name>", "Delete a custom role nobody holds.", NO_FLAGS, [("DELETE", "/_rustybin/roles/{name}")], true, "roles delete catalog-reader --yes"),
+    cmd!("projects", "list", "", "The projects you may see, your roles in each and what each holds.", NO_FLAGS, [("GET", "/_rustybin/projects")], false, "projects list"),
+    cmd!("projects", "show", "<name>", "One project: its members (with users.read), your roles, its mocks, saved tests and checkpoints.", NO_FLAGS, [("GET", "/_rustybin/projects/{name}")], false, "projects show payments"),
+    cmd!("projects", "save", "<name> [--description D] [--member USER=role+role]...", "Create or change a project; --member (repeatable) replaces the members.", &[Flag::value("--description", "What the project is for"), Flag::value("--member", "A member: USER=role+role (repeatable; the whole list)"), Flag::switch("--no-members", "Remove every member")], [("PUT", "/_rustybin/projects/{name}")], false, "projects save payments --description \"The payments team\""),
+    cmd!("projects", "delete", "<name> [--move-to P]", "Delete a project; one that holds resources needs --move-to (another project, or instance).", &[Flag::value("--move-to", "Where its mocks, saved tests and checkpoints go: a project, or instance")], [("DELETE", "/_rustybin/projects/{name}")], true, "projects delete payments --move-to instance --yes"),
     cmd!("me", "", "", "Your own account: user, display name, email, roles, permissions.", NO_FLAGS, [("GET", "/_rustybin/me")], false, "me"),
     cmd!("me", "update", "[--display-name D] [--email E]", "Change your display name or email (--email \"\" clears it).", &[Flag::value("--display-name", "Your display name"), Flag::value("--email", "Your email address")], [("PATCH", "/_rustybin/me")], false, "me update --display-name \"Ops on call\""),
     cmd!("me", "sessions", "[--end-all]", "Your sign-in sessions; --end-all signs you out everywhere (this profile too).", &[Flag::switch("--end-all", "Sign yourself out everywhere")], [("GET", "/_rustybin/me/sessions"), ("DELETE", "/_rustybin/me/sessions")], false, "me sessions"),
     cmd!("me", "end-session", "<id>", "End one of your sign-in sessions.", NO_FLAGS, [("DELETE", "/_rustybin/me/sessions/{id}")], false, "me end-session 3f2a"),
     cmd!("passwd", "", "[--stdin]", "Change your own password: the current and the new one prompted, or two lines of stdin. Your other sessions end; the profile keeps a fresh token.", &[Flag::switch("--stdin", "Read the current and the new password from two lines of stdin")], [("PUT", "/_rustybin/me/password")], false, "passwd --stdin < passwords.txt"),
     // ── Mocks ──
-    cmd!("mocks", "list", "[--all]", "The mocks with their state and traffic.", &[Flag::switch("--all", "Every visitor's mocks too (admin)")], [("GET", "/_rustybin/mocks")], false, "mocks list"),
+    cmd!("mocks", "list", "[--all] [--project P]", "The mocks with their state and traffic.", &[Flag::switch("--all", "Every visitor's mocks too (admin)"), PROJECT_FLAG], [("GET", "/_rustybin/mocks")], false, "mocks list"),
     cmd!("mocks", "get", "<name>", "One mock: settings, operations, the deploy report.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}")], false, "mocks get petstore"),
-    cmd!("mocks", "create", "<name> --spec FILE", "Create a mock from an OpenAPI file (YAML or JSON).", &[Flag::value("--spec", "The OpenAPI document"), Flag::value("--mode", "examples, generated, static or stateful"), Flag::switch("--disabled", "Create it switched off"), Flag::switch("--no-deploy", "Keep it as a draft"), Flag::switch("--strip-server-prefix", "Serve the paths without the spec's server prefix")], [("POST", "/_rustybin/mocks")], false, "mocks create orders --spec orders.yaml --mode generated"),
+    cmd!("mocks", "create", "<name> --spec FILE [--project P]", "Create a mock from an OpenAPI file (YAML or JSON).", &[Flag::value("--spec", "The OpenAPI document"), Flag::value("--mode", "examples, generated, static or stateful"), Flag::switch("--disabled", "Create it switched off"), Flag::switch("--no-deploy", "Keep it as a draft"), Flag::switch("--strip-server-prefix", "Serve the paths without the spec's server prefix"), Flag::value("--project", "The project it belongs to (default: the instance's, or your one project)")], [("POST", "/_rustybin/mocks")], false, "mocks create orders --spec orders.yaml --mode generated"),
+    cmd!("mocks", "move", "<name> --project P", "Move a mock to another project (instance: the instance's); needs mocks.write in both.", &[Flag::value("--project", "The project it goes to, or instance")], [("PATCH", "/_rustybin/mocks/{name}")], false, "mocks move orders --project instance"),
     cmd!("mocks", "import", "--spec FILE", "Preview a spec: title, operations, the checks, the suggested name.", &[Flag::value("--spec", "The OpenAPI document")], [("POST", "/_rustybin/mocks/import")], false, "mocks import --spec orders.yaml"),
     cmd!("mocks", "update", "<name> [--spec FILE] [--mode M] [--settings JSON]", "Change a mock's spec or settings (the draft, deployed unless --no-deploy).", &[Flag::value("--spec", "A new OpenAPI document"), Flag::value("--mode", "examples, generated, static or stateful"), Flag::value("--settings", "Settings as JSON or a file: responses, security, operations, mcp, strip_server_prefix"), Flag::switch("--no-deploy", "Change the draft only"), Flag::switch("--force", "Deploy even when the checks report errors"), Flag::value("--expect-revision", "Refuse (409) unless the draft is still this revision (default: the one read just before)")], [("PATCH", "/_rustybin/mocks/{name}")], false, "mocks update orders --mode stateful"),
     cmd!("mocks", "deploy", "<name> [--force] [--expect-revision N]", "Deploy the draft.", &[Flag::switch("--force", "Deploy despite check errors"), Flag::value("--expect-revision", "Refuse (409) unless the draft is still this revision (default: deploy the draft as it is)")], [("POST", "/_rustybin/mocks/{name}/deploy")], false, "mocks deploy orders"),
@@ -307,17 +325,17 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("requests", "get", "<id>", "One captured request.", NO_FLAGS, [("GET", "/_rustybin/requests/{id}")], false, "requests get 42"),
     cmd!("requests", "tail", "", "Follow the requests as they arrive.", TAIL_FLAGS, [("GET", "/_rustybin/requests/stream")], false, "requests tail --max 5"),
     cmd!("requests", "clear", "", "Forget the captured requests.", NO_FLAGS, [("DELETE", "/_rustybin/requests")], true, "requests clear --yes"),
-    cmd!("checkpoint", "list", "[--from-git]", "The checkpoints and the mocks each holds; --from-git lists the configuration repository's (after git pull).", &[Flag::switch("--from-git", "The repository's checkpoints, at the working copy's HEAD")], [("GET", "/_rustybin/checkpoints")], false, "checkpoint list"),
+    cmd!("checkpoint", "list", "[--from-git] [--project P]", "The checkpoints and the mocks each holds; --from-git lists the configuration repository's (after git pull).", &[Flag::switch("--from-git", "The repository's checkpoints, at the working copy's HEAD"), PROJECT_FLAG], [("GET", "/_rustybin/checkpoints")], false, "checkpoint list"),
     cmd!("checkpoint", "show", "<name>", "One checkpoint.", NO_FLAGS, [("GET", "/_rustybin/checkpoints/{name}")], false, "checkpoint show demo-start"),
-    cmd!("checkpoint", "save", "<name> [--replace]", "Save the instance's API mocks (with their data) and the health toggle.", &[Flag::switch("--replace", "Overwrite a checkpoint of that name")], [("POST", "/_rustybin/checkpoints")], false, "checkpoint save demo-start"),
+    cmd!("checkpoint", "save", "<name> [--replace] [--project P]", "Save the instance's API mocks (with their data) and the health toggle; --project keeps one project's mocks only.", &[Flag::switch("--replace", "Overwrite a checkpoint of that name"), Flag::value("--project", "Keep this project's mocks only (a restore changes only those)")], [("POST", "/_rustybin/checkpoints")], false, "checkpoint save demo-start"),
     cmd!("checkpoint", "restore", "<name> [--dry-run] [--from-git]", "Bring the API mocks, their data and health back (other API mocks are deleted, flaky counters reset); --dry-run says what would change, --from-git restores the configuration repository's checkpoint.", &[Flag::switch("--dry-run", "Only say what a restore would change"), Flag::switch("--from-git", "The repository's checkpoint of that name (git pull first)")],[("POST", "/_rustybin/checkpoints/{name}/restore")], true, "checkpoint restore demo-start --yes"),
     cmd!("checkpoint", "delete", "<name>", "Delete a checkpoint (the instance is not changed).", NO_FLAGS, [("DELETE", "/_rustybin/checkpoints/{name}")], true, "checkpoint delete demo-start --yes"),
-    cmd!("tests", "list", "", "The saved tests and the variables each uses.", NO_FLAGS, [("GET", "/_rustybin/tests")], false, "tests list"),
+    cmd!("tests", "list", "[--project P]", "The saved tests and the variables each uses.", PROJECT_FLAGS, [("GET", "/_rustybin/tests")], false, "tests list"),
     cmd!("tests", "show", "<name>", "One saved test.", NO_FLAGS, [("GET", "/_rustybin/tests/{name}")], false, "tests show order-1"),
-    cmd!("tests", "save", "<name> --capture ID [--gateway U] [--description D]", "Save a captured request as a test (its status asserted; credentials become {{variables}}).", &[Flag::value("--capture", "The captured request's id (rustybin requests list)"), Flag::value("--gateway", "Send it through this gateway base URL"), Flag::value("--description", "What it checks")], [("POST", "/_rustybin/tests")], false, "tests save order-1 --capture 0123456789abcdef"),
+    cmd!("tests", "save", "<name> --capture ID [--gateway U] [--description D] [--project P]", "Save a captured request as a test (its status asserted; credentials become {{variables}}).", &[Flag::value("--capture", "The captured request's id (rustybin requests list)"), Flag::value("--gateway", "Send it through this gateway base URL"), Flag::value("--description", "What it checks"), Flag::value("--project", "The project it belongs to (default: the instance's, or your one project)")], [("POST", "/_rustybin/tests")], false, "tests save order-1 --capture 0123456789abcdef"),
     cmd!("tests", "put", "<name> --file F", "Save or replace a test from a file (JSON or YAML: request, gateway, assert).", &[Flag::value("--file", "The test: a file, - for stdin, or inline JSON")], [("PUT", "/_rustybin/tests/{name}")], false, r#"tests put order-1 --file '{"request":{"path":"/status/200"},"assert":[{"status":200}]}'"#),
     cmd!("tests", "delete", "<name>", "Delete a saved test.", NO_FLAGS, [("DELETE", "/_rustybin/tests/{name}")], true, "tests delete order-1 --yes"),
-    cmd!("tests", "run", "[--names a,b] [--var NAME=value]... [--junit]", "Run saved tests (all by default); exits 1 when one fails. --junit prints JUnit XML for CI.", &[Flag::value("--names", "Only these tests, comma separated"), Flag::value("--var", "A {{variable}}: NAME=value, or NAME=- (stdin) or NAME=@file for a credential (repeat it)"), Flag::switch("--junit", "Print the JUnit XML report")], [("POST", "/_rustybin/tests/run")], false, "tests run --junit"),
+    cmd!("tests", "run", "[--names a,b] [--project P] [--var NAME=value]... [--junit]", "Run saved tests (all by default); exits 1 when one fails. --junit prints JUnit XML for CI.", &[Flag::value("--names", "Only these tests, comma separated"), Flag::value("--var", "A {{variable}}: NAME=value, or NAME=- (stdin) or NAME=@file for a credential (repeat it)"), Flag::switch("--junit", "Print the JUnit XML report"), PROJECT_FLAG], [("POST", "/_rustybin/tests/run")], false, "tests run --junit"),
     cmd!("tests", "export", "", "Every saved test as one Hurl file (hurl --test --variable base_url=...).", NO_FLAGS, [("GET", "/_rustybin/tests/export")], false, "tests export"),
     cmd!("tests", "runs", "[--limit N] [--cursor C]", "The history of test runs, newest first: when, the trigger, who, the counts, what changed since the previous run.", &[Flag::value("--limit", "Runs a page (20, at most 100)"), Flag::value("--cursor", "The next_cursor of the page before")], [("GET", "/_rustybin/tests/runs")], false, "tests runs --limit 5"),
     cmd!("tests", "run-show", "<id> [--junit]", "One kept run: each test's result and failures, the change since the previous run; --junit prints its JUnit XML.", &[Flag::switch("--junit", "Print the JUnit XML report")], [("GET", "/_rustybin/tests/runs/{id}")], false, "tests run-show 20261103T101500000Z-abc123 --junit"),
@@ -683,6 +701,7 @@ pub async fn dispatch(ctx: &mut Ctx) -> Result<()> {
         "sso" => sso(ctx, cmd.verb).await,
         "users" => users(ctx, cmd.verb).await,
         "roles" => roles(ctx, cmd.verb).await,
+        "projects" => projects(ctx, cmd.verb).await,
         "me" => me(ctx, cmd.verb).await,
         "mocks" => mocks(ctx, cmd.verb).await,
         "visits" => visits(ctx, cmd.verb).await,
@@ -1371,12 +1390,20 @@ async fn users(ctx: &mut Ctx, verb: &str) -> Result<()> {
         }
         "invite" => {
             let roles = names_of(ctx, "--role");
-            if roles.is_empty() {
+            let projects = project_roles(ctx, "--project")?;
+            if roles.is_empty() && projects.is_empty() {
                 return Err(Fail::Usage(
-                    "--role is required (rustybin roles list shows them)".into(),
+                    "--role (or --project P=role) is required (rustybin roles list shows them)"
+                        .into(),
                 ));
             }
             let mut body = json!({ "name": user, "roles": roles });
+            if !projects.is_empty() {
+                body["projects"] = json!(projects
+                    .iter()
+                    .map(|(p, r)| json!({ "project": p, "roles": r }))
+                    .collect::<Vec<_>>());
+            }
             if ctx.args.has("--sso") {
                 body["sso"] = json!(true);
             }
@@ -1490,6 +1517,109 @@ async fn roles(ctx: &mut Ctx, verb: &str) -> Result<()> {
     }
 }
 
+/// `NAME=role+role` values of a repeatable flag (`--project`, `--member`).
+fn project_roles(ctx: &Ctx, flag: &str) -> Result<Vec<(String, Vec<String>)>> {
+    let mut out = Vec::new();
+    for v in ctx.args.values(flag) {
+        let (name, roles) = v
+            .split_once('=')
+            .ok_or_else(|| Fail::Usage(format!("{flag} {v}: NAME=role+role")))?;
+        let roles: Vec<String> = roles
+            .split(['+', ',', ' '])
+            .filter(|r| !r.is_empty())
+            .map(str::to_string)
+            .collect();
+        if name.trim().is_empty() || roles.is_empty() {
+            return Err(Fail::Usage(format!("{flag} {v}: NAME=role+role")));
+        }
+        out.push((name.trim().to_string(), roles));
+    }
+    Ok(out)
+}
+
+/// The `--project` filter as a query.
+fn project_query(ctx: &Ctx) -> Vec<(&'static str, String)> {
+    ctx.args
+        .value("--project")
+        .map(|p| vec![("project", p.to_string())])
+        .unwrap_or_default()
+}
+
+async fn projects(ctx: &mut Ctx, verb: &str) -> Result<()> {
+    if verb == "list" {
+        let v = ctx
+            .client()?
+            .get("/_rustybin/projects", &[])
+            .await?
+            .ok()?
+            .value();
+        if ctx.json {
+            ctx.emit(&v);
+        } else {
+            let join = |v: &Value| {
+                v.as_array()
+                    .map(|r| {
+                        r.iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default()
+            };
+            let rows: Vec<Value> = v["projects"]
+                .as_array()
+                .map(|l| {
+                    l.iter()
+                        .map(|p| {
+                            json!({
+                                "name": p["name"],
+                                "your_roles": join(&p["your_roles"]),
+                                "members": p["member_count"],
+                                "mocks": p["resources"]["mocks"].as_array().map(Vec::len).unwrap_or(0),
+                                "tests": p["resources"]["tests"].as_array().map(Vec::len).unwrap_or(0),
+                                "checkpoints": p["resources"]["checkpoints"].as_array().map(Vec::len).unwrap_or(0),
+                                "description": p["description"],
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            ctx.emit(&json!({ "count": v["count"], "projects": rows }));
+        }
+        return Ok(());
+    }
+    let name = ctx.args.arg(0, "a project name")?.to_string();
+    let path = format!("/_rustybin/projects/{}", enc(&name));
+    match verb {
+        "show" => get(ctx, &path, &[]).await,
+        "save" => {
+            let mut body = json!({});
+            if let Some(d) = ctx.args.value("--description") {
+                body["description"] = json!(d);
+            }
+            let members = project_roles(ctx, "--member")?;
+            if !members.is_empty() || ctx.args.has("--no-members") {
+                body["members"] = json!(members
+                    .iter()
+                    .map(|(u, r)| json!({ "user": u, "roles": r }))
+                    .collect::<Vec<_>>());
+            }
+            let reply = ctx.client()?.put(&path, Body::Json(body)).await?.ok()?;
+            emit_reply(ctx, &reply);
+            Ok(())
+        }
+        "delete" => {
+            let query: Vec<(&str, String)> = ctx
+                .args
+                .value("--move-to")
+                .map(|m| vec![("move_to", m.to_string())])
+                .unwrap_or_default();
+            delete(ctx, &path, &query).await
+        }
+        _ => Err(Fail::Usage(format!("projects {verb}: not implemented"))),
+    }
+}
+
 async fn me(ctx: &mut Ctx, verb: &str) -> Result<()> {
     match verb {
         "" => get(ctx, "/_rustybin/me", &[]).await,
@@ -1565,11 +1695,12 @@ async fn mocks(ctx: &mut Ctx, verb: &str) -> Result<()> {
     let need_name = |ctx: &Ctx| ctx.args.arg(0, "a mock name").map(|_| ());
     match verb {
         "list" => {
-            let query = if ctx.args.has("--all") {
+            let mut query = if ctx.args.has("--all") {
                 vec![("owner", "all".to_string())]
             } else {
                 Vec::new()
             };
+            query.extend(project_query(ctx));
             let v = ctx.client()?.get("/_rustybin/mocks", &query).await?.value();
             if ctx.json {
                 ctx.emit(&v);
@@ -1584,6 +1715,20 @@ async fn mocks(ctx: &mut Ctx, verb: &str) -> Result<()> {
                     .unwrap_or_default();
                 ctx.emit(&json!({ "mocks": rows, "load_errors": v["load_errors"] }));
             }
+            Ok(())
+        }
+        "move" => {
+            need_name(ctx)?;
+            let to = ctx
+                .args
+                .value("--project")
+                .ok_or_else(|| Fail::Usage("--project: a project, or instance".into()))?
+                .to_string();
+            let reply = ctx
+                .client()?
+                .patch(&base, Body::Json(json!({ "project": to })))
+                .await?;
+            emit_reply(ctx, &reply);
             Ok(())
         }
         "get" => {
@@ -1605,6 +1750,9 @@ async fn mocks(ctx: &mut Ctx, verb: &str) -> Result<()> {
             body.insert("deploy".into(), json!(!ctx.args.has("--no-deploy")));
             if ctx.args.has("--strip-server-prefix") {
                 body.insert("strip_server_prefix".into(), json!(true));
+            }
+            if let Some(p) = ctx.args.value("--project") {
+                body.insert("project".into(), json!(p));
             }
             for (k, v) in mock_settings_body(ctx)? {
                 body.insert(k, v);
@@ -2057,11 +2205,12 @@ async fn bins(ctx: &mut Ctx, verb: &str) -> Result<()> {
 async fn checkpoint(ctx: &mut Ctx, verb: &str) -> Result<()> {
     let from_git = ctx.args.has("--from-git");
     if verb == "list" {
-        let query: Vec<(&str, String)> = if from_git {
+        let mut query: Vec<(&str, String)> = if from_git {
             vec![("from", "git".to_string())]
         } else {
             Vec::new()
         };
+        query.extend(project_query(ctx));
         return get(ctx, "/_rustybin/checkpoints", &query).await;
     }
     let name = ctx.args.arg(0, "a checkpoint name")?.to_string();
@@ -2070,7 +2219,10 @@ async fn checkpoint(ctx: &mut Ctx, verb: &str) -> Result<()> {
         "show" => get(ctx, &path, &[]).await,
         "delete" => delete(ctx, &path, &[]).await,
         "save" => {
-            let body = json!({ "name": name, "replace": ctx.args.has("--replace") });
+            let mut body = json!({ "name": name, "replace": ctx.args.has("--replace") });
+            if let Some(p) = ctx.args.value("--project") {
+                body["project"] = json!(p);
+            }
             post(ctx, "/_rustybin/checkpoints", Body::Json(body)).await
         }
         "restore" => {
@@ -2097,7 +2249,10 @@ async fn checkpoint(ctx: &mut Ctx, verb: &str) -> Result<()> {
 
 async fn tests(ctx: &mut Ctx, verb: &str) -> Result<()> {
     match verb {
-        "list" => get(ctx, "/_rustybin/tests", &[]).await,
+        "list" => {
+            let query = project_query(ctx);
+            get(ctx, "/_rustybin/tests", &query).await
+        }
         "export" => get(ctx, "/_rustybin/tests/export", &[]).await,
         "run" => tests_run(ctx).await,
         "runs" => tests_runs(ctx).await,
@@ -2150,6 +2305,9 @@ async fn tests(ctx: &mut Ctx, verb: &str) -> Result<()> {
                     }
                     if let Some(d) = ctx.args.value("--description") {
                         body["description"] = json!(d);
+                    }
+                    if let Some(p) = ctx.args.value("--project") {
+                        body["project"] = json!(p);
                     }
                     post(ctx, "/_rustybin/tests", Body::Json(body)).await
                 }
@@ -2327,6 +2485,9 @@ async fn tests_schedule_run(ctx: &mut Ctx, path: &str) -> Result<()> {
 /// test fails or cannot run.
 async fn tests_run(ctx: &mut Ctx) -> Result<()> {
     let mut body = json!({});
+    if let Some(p) = ctx.args.value("--project") {
+        body["project"] = json!(p);
+    }
     if let Some(names) = list_flag(&ctx.args, "--names") {
         body["names"] = json!(names);
     }

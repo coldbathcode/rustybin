@@ -60,7 +60,11 @@ pub fn list_mocks(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     let all = arg_bool(args, "all").unwrap_or(false);
     let query = arg_str(args, "query").map(str::to_lowercase);
     let state_filter = arg_str(args, "state");
-    let mut listing = s.list(all);
+    let filter = match crate::rbac::projects::Filter::parse(arg_str(args, "project")) {
+        Ok(f) => f,
+        Err(e) => return err(e),
+    };
+    let mut listing = s.list_in(all, &filter);
     let mocks: Vec<Value> = listing["mocks"]
         .as_array()
         .cloned()
@@ -290,6 +294,7 @@ pub async fn create_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value 
     };
     let body = CreateBody {
         name: arg_str(args, "name").map(str::to_string),
+        project: arg_str(args, "project").map(str::to_string),
         spec,
         enabled: arg_bool(args, "enabled"),
         deploy: arg_bool(args, "deploy"),
@@ -335,6 +340,7 @@ pub async fn update_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value 
         },
     };
     let body = PatchBody {
+        project: args.get("project").map(|v| v.as_str().map(str::to_string)),
         expected_revision: arg_u64(args, "expected_revision"),
         name: arg_str(args, "rename").map(str::to_string),
         spec,

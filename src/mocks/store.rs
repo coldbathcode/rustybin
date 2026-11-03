@@ -175,6 +175,8 @@ struct Entry {
     /// Why the last reload of this file mock failed (its last good
     /// revision, if any, keeps answering).
     load_error: Option<String>,
+    /// The project the mock belongs to (step 11); `None`: the instance's.
+    project: Option<String>,
 }
 
 impl Entry {
@@ -241,6 +243,8 @@ pub struct Snapshot {
     /// checkpoint.
     pub scratch: bool,
     pub load_error: Option<String>,
+    /// The project the mock belongs to; `None`: the instance's.
+    pub project: Option<String>,
 }
 
 impl Snapshot {
@@ -297,6 +301,7 @@ impl Snapshot {
             "updated_at": self.updated_at.to_rfc3339(),
             "expires_at": self.expires_at.map(|e| e.to_rfc3339()),
             "load_error": self.load_error,
+            "project": self.project,
         })
     }
 }
@@ -317,6 +322,8 @@ pub struct Definition {
     pub source: String,
     pub settings: MockSettings,
     pub enabled: bool,
+    /// The project the mock belongs to (`None`: the instance's).
+    pub project: Option<String>,
 }
 
 #[derive(Clone)]
@@ -704,8 +711,76 @@ impl MockStore {
         deploy: bool,
         force: bool,
     ) -> Result<Snapshot, StoreError> {
-        let r = self.create_inner(name, compiled, origin, owner, enabled, deploy, force);
+        let r = self.create_inner(name, compiled, origin, owner, enabled, deploy, force, None);
         self.saved(r)
+    }
+
+    /// [`Self::create_owned`] in a project (an instance mock only).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_in(
+        &self,
+        name: &str,
+        compiled: Compiled,
+        origin: Origin,
+        owner: Owner,
+        enabled: bool,
+        deploy: bool,
+        force: bool,
+        project: Option<String>,
+    ) -> Result<Snapshot, StoreError> {
+        let project = project.filter(|_| !owner.is_visitor());
+        let r = self.create_inner(
+            name, compiled, origin, owner, enabled, deploy, force, project,
+        );
+        self.saved(r)
+    }
+
+    /// Move a mock to `project` (`None`: the instance's). Visitors' mocks
+    /// stay where they are. Saved.
+    pub fn set_project(&self, name: &str, project: Option<String>) -> Result<Snapshot, StoreError> {
+        let r = self.set_project_inner(name, project, true);
+        self.saved(r)
+    }
+
+    /// [`Self::set_project`] without touching the saved copy (a restore
+    /// from it).
+    pub fn set_project_quietly(
+        &self,
+        name: &str,
+        project: Option<String>,
+    ) -> Result<Snapshot, StoreError> {
+        self.set_project_inner(name, project, false)
+    }
+
+    fn set_project_inner(
+        &self,
+        name: &str,
+        project: Option<String>,
+        touch: bool,
+    ) -> Result<Snapshot, StoreError> {
+        let mut map = self.write();
+        let e = map
+            .get_mut(name)
+            .ok_or_else(|| StoreError::NotFound(name.to_string()))?;
+        if e.owner.is_visitor() {
+            return Err(StoreError::Invalid(
+                "a self-service mock belongs to its visit, never to a project".into(),
+            ));
+        }
+        e.project = project;
+        if touch {
+            e.updated_at = Utc::now();
+        }
+        Ok(snapshot(name, e))
+    }
+
+    /// The names of the mocks of `project`.
+    pub fn in_project(&self, project: &str) -> Vec<String> {
+        self.read()
+            .iter()
+            .filter(|(_, e)| e.project.as_deref() == Some(project) && self.live_entry(e))
+            .map(|(n, _)| n.clone())
+            .collect()
     }
 
     /// A mock that lives at most `ttl` and is never saved (a gateway
@@ -799,6 +874,7 @@ impl MockStore {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn create_inner(
         &self,
         name: &str,
@@ -808,11 +884,13 @@ impl MockStore {
         enabled: bool,
         deploy: bool,
         force: bool,
+        project: Option<String>,
     ) -> Result<Snapshot, StoreError> {
         Self::check_new(name, &compiled, deploy, force)?;
         let mut map = self.write();
         self.admit(&map, name, &owner, false)?;
-        let entry = self.new_entry(compiled, origin, owner, enabled, deploy);
+        let mut entry = self.new_entry(compiled, origin, owner, enabled, deploy);
+        entry.project = project;
         let snap = snapshot(name, &entry);
         map.insert(name.to_string(), entry);
         Ok(snap)
@@ -924,6 +1002,7 @@ impl MockStore {
             expires,
             scratch: false,
             load_error: None,
+            project: None,
         }
     }
 
@@ -1241,7 +1320,7 @@ impl MockStore {
             Origin::Sample | Origin::File => Origin::Api,
             o => o,
         };
-        self.create_owned(
+        self.create_in(
             new_name,
             compiled,
             origin,
@@ -1249,6 +1328,7 @@ impl MockStore {
             true,
             source.live.is_some(),
             true,
+            source.project.clone(),
         )
     }
 
@@ -1352,7 +1432,7 @@ impl MockStore {
         owner: Owner,
         enabled: bool,
     ) -> Result<Snapshot, StoreError> {
-        let snap = self.create_inner(name, live, origin, owner, enabled, true, true)?;
+        let snap = self.create_inner(name, live, origin, owner, enabled, true, true, None)?;
         match draft {
             Some(d) => self.set_draft_inner(name, Some(d), None, None),
             None => Ok(snap),
@@ -1368,7 +1448,7 @@ impl MockStore {
         owner: Owner,
         enabled: bool,
     ) -> Result<Snapshot, StoreError> {
-        self.create_inner(name, draft, origin, owner, enabled, false, false)
+        self.create_inner(name, draft, origin, owner, enabled, false, false, None)
     }
 
     fn set_load_error(&self, name: &str, error: Option<&str>) {
@@ -1395,7 +1475,16 @@ impl MockStore {
                 return;
             };
             if self
-                .create_inner(name, compiled, origin, Owner::Instance, false, false, false)
+                .create_inner(
+                    name,
+                    compiled,
+                    origin,
+                    Owner::Instance,
+                    false,
+                    false,
+                    false,
+                    None,
+                )
                 .is_err()
             {
                 return;
@@ -1441,6 +1530,12 @@ impl MockStore {
                     || super::spec::parse_document(&def.source).ok().as_ref()
                         == Some(&s.draft.spec.root)
             });
+            let moved = existing
+                .as_ref()
+                .is_some_and(|s| !s.owner.is_visitor() && s.project != def.project);
+            if moved {
+                let _ = self.set_project(&def.name, def.project.clone());
+            }
             if let Some(s) = &existing {
                 let same = same_spec
                     && s.draft.settings == def.settings.clone().normalised()
@@ -1449,6 +1544,8 @@ impl MockStore {
                     self.set_load_error(&def.name, None);
                     if s.enabled != def.enabled {
                         let _ = self.set_enabled(&def.name, def.enabled);
+                        report.updated.push(def.name);
+                    } else if moved {
                         report.updated.push(def.name);
                     } else {
                         report.unchanged.push(def.name);
@@ -1474,7 +1571,16 @@ impl MockStore {
                     .replace_deployed(&def.name, compiled, def.enabled, s.draft.revision)
                     .map(|_| report.updated.push(def.name.clone())),
                 None => self
-                    .create(&def.name, compiled, origin, def.enabled, true, true)
+                    .create_in(
+                        &def.name,
+                        compiled,
+                        origin,
+                        Owner::Instance,
+                        def.enabled,
+                        true,
+                        true,
+                        def.project.clone(),
+                    )
                     .map(|_| report.created.push(def.name.clone())),
             };
             if result.is_ok() {
@@ -1525,6 +1631,7 @@ fn snapshot(name: &str, e: &Entry) -> Snapshot {
         expires_at: e.expires.map(|(_, at)| at),
         scratch: e.scratch,
         load_error: e.load_error.clone(),
+        project: e.project.clone(),
     }
 }
 
@@ -1640,6 +1747,7 @@ mod tests {
             source: SPEC.into(),
             settings: MockSettings::default(),
             enabled,
+            project: None,
         };
         let r = s.apply(vec![def("a", true), def("b", true)], Origin::File, None);
         assert_eq!(r.created, vec!["a", "b"]);
@@ -1653,6 +1761,7 @@ mod tests {
             source: "nope".into(),
             settings: MockSettings::default(),
             enabled: true,
+            project: None,
         };
         let r = s.apply(vec![broken], Origin::File, None);
         assert_eq!(r.errors.len(), 1);
@@ -1785,6 +1894,7 @@ mod tests {
                         source: SPEC.into(),
                         settings,
                         enabled: false,
+                        project: None,
                     }],
                     Origin::File,
                     None,

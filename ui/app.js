@@ -9,6 +9,7 @@ import * as auth from './lib/auth.js';
 import * as visit from './lib/visit.js';
 import * as assist from './lib/assist.js';
 import * as perms from './lib/perms.js';
+import * as projects from './lib/projects.js';
 import { SERVER, getJson, send, trimBase } from './lib/http.js';
 import { deliverCallback } from './lib/oauthpopup.js';
 
@@ -223,6 +224,8 @@ function renderActions() {
   else assistBarEl = assist.mountBar(barHost);
   const gw = settings.get('gatewayUrl');
   const session = settings.get('session');
+  const picker = projectPicker();
+  if (picker) actions.appendChild(picker);
   const wrap = h('span', { class: 'row nowrap topbar-field hide-sm' });
   if (gw) wrap.appendChild(chip('Gateway', trimBase(gw).replace(/^https?:\/\//, ''), 'Gateway base URL used by "via gateway" requests'));
   wrap.appendChild(chip('Session', session || 'none', 'X-Rustybin-Session sent with console requests'));
@@ -246,6 +249,28 @@ function renderActions() {
   themeBtn.addEventListener('click', () => settings.set('theme', effectiveTheme() === 'dark' ? 'light' : 'dark'));
   actions.appendChild(themeBtn);
   applyTheme();
+}
+
+/**
+ * The project picker (step 11): shown when the caller sees projects. It
+ * filters the mocks, saved tests and checkpoints, and new ones go to the
+ * project chosen; the view is mounted again on a change.
+ */
+function projectPicker() {
+  const list = projects.all();
+  if (!list.length) return null;
+  const cur = projects.current();
+  const sel = h('select', { class: 'select sm', id: 'project-picker', 'aria-label': 'Project', title: 'The project the console shows: mocks, saved tests and checkpoints of it, and new ones go to it' },
+    h('option', { value: '' }, 'All projects'),
+    perms.can('mocks.read', true) ? h('option', { value: projects.INSTANCE }, 'The instance (no project)') : null,
+    ...list.map((p) => h('option', { value: p.name }, p.name + (p.your_roles && p.your_roles.length ? ' (' + p.your_roles.join(', ') + ')' : ''))));
+  sel.value = cur;
+  sel.addEventListener('change', () => {
+    projects.setCurrent(sel.value);
+    currentId = null;
+    route();
+  });
+  return h('label', { class: 'row nowrap topbar-field project-picker' }, h('span', { class: 'muted small' }, 'Project'), sel);
 }
 
 function openSettings() {
@@ -599,10 +624,13 @@ async function loadInstance() {
   }
   // What the caller may do (GET /_rustybin/session): a view whose controls
   // depend on it is mounted again when it changes.
+  const projectsChanged = await projects.load();
   if (await perms.load() && currentId !== null) {
     currentId = null;
     route();
   }
+  if (projectsChanged) renderActions();
+
   renderMeta();
   renderBanner();
   refreshSignedIn();

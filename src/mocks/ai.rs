@@ -64,7 +64,12 @@ fn parse_body<T: serde::de::DeserializeOwned>(body: &Bytes) -> Result<T, Service
 /// May the caller use the instance's AI on mocks? The operator always; a
 /// self-service visitor with `RUSTYBIN_ASSIST_VISITORS`.
 pub fn ai_allowed(s: &Svc) -> SvcResult<()> {
-    if s.caller.resolved.has(crate::rbac::Permission::AssistJobs) {
+    // Held in a project counts here: the mock's own project is checked
+    // when it is read (the route's permission, step 11).
+    if s.caller
+        .resolved
+        .has_somewhere(crate::rbac::Permission::AssistJobs)
+    {
         return Ok(());
     }
     if s.state.mocks.visits().is_some() {
@@ -679,6 +684,7 @@ pub async fn edit_work(
         let body = PatchBody {
             // The draft the model edited: a change made meanwhile is never
             // overwritten (409, with what changed).
+            project: None,
             expected_revision: Some(snap.draft.revision),
             name: None,
             spec: Some(json!(text)),

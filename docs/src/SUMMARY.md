@@ -58,6 +58,7 @@
 - [Checkpoints](checkpoints.md)
 - [Users and roles](users.md)
 - [Single sign-on](sso.md)
+- [Projects](projects.md)
 - [Security and operations](concepts/control-plane-security.md)
 - [Public instances: the threat model](concepts/public-instances.md)
 - [Request ids, CORS and control plane](concepts/control-plane.md)

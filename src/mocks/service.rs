@@ -236,11 +236,26 @@ pub struct CreateBody {
     pub security: Option<SecuritySettings>,
     pub operations: Option<BTreeMap<String, OperationSettings>>,
     pub mcp: Option<McpSettings>,
+    /// The project the mock goes to (step 11): `mocks.write` there; absent:
+    /// the instance's, or the one project the caller works in.
+    pub project: Option<String>,
+}
+
+/// A field that may be absent (`None`), `null` (`Some(None)`) or a value.
+fn double_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(d).map(Some)
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PatchBody {
+    /// Move the mock to this project (`null` or `instance`: the
+    /// instance's): `mocks.write` in both.
+    #[serde(default, deserialize_with = "double_option")]
+    pub project: Option<Option<String>>,
     /// The draft revision the edit was made from (else `If-Match`).
     pub expected_revision: Option<u64>,
     pub name: Option<String>,
@@ -252,6 +267,20 @@ pub struct PatchBody {
     pub mcp: Option<McpSettings>,
     pub deploy: Option<bool>,
     pub force: Option<bool>,
+}
+
+impl PatchBody {
+    /// Nothing but a move (the project was taken out): no draft change.
+    fn is_only_a_move(&self) -> bool {
+        self.name.is_none()
+            && self.spec.is_none()
+            && self.strip_server_prefix.is_none()
+            && self.responses.is_none()
+            && self.security.is_none()
+            && self.operations.is_none()
+            && self.mcp.is_none()
+            && self.deploy.is_none()
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -709,7 +738,9 @@ impl Svc {
         T: Send + 'static,
         F: FnOnce(&Svc) -> SvcResult<T> + Send + 'static,
     {
-        if !self.caller.admin && !self.store().allow_visitor_compile(&self.compile_key()) {
+        if !self.caller.writes_somewhere()
+            && !self.store().allow_visitor_compile(&self.compile_key())
+        {
             return Err(ServiceError::retry(
                 StatusCode::TOO_MANY_REQUESTS,
                 format!(
@@ -773,30 +804,51 @@ impl Svc {
         self.caller.need(p)
     }
 
-    /// The mock, if the caller may read it (`404` otherwise).
+    /// The mock, if the caller may read it (`404` otherwise). On a
+    /// project-scoped route the route's permission is checked again on the
+    /// mock's project (step 11), for a mock in a project or a caller bound
+    /// to projects (`403` naming it).
     pub fn readable(&self, name: &str) -> SvcResult<Snapshot> {
         match self.store().get(name) {
-            Some(s) if self.caller.can_read(&s) => Ok(s),
+            Some(s) if self.caller.can_read(&s) => {
+                self.route_need_on(&s)?;
+                Ok(s)
+            }
             _ => Err(ServiceError::not_found(format!("mock {name:?} not found"))),
         }
     }
 
-    /// The mock, if the caller may change it: admin for instance mocks (with
-    /// the admin guard's own answer), admin or the owner for visitor mocks
-    /// (`404` for anyone else).
+    /// The route's (or tool's) permission on the mock's project.
+    fn route_need_on(&self, s: &Snapshot) -> SvcResult<()> {
+        let Some(p) = self.caller.route_need else {
+            return Ok(());
+        };
+        let scoped = s.project.is_some() || self.caller.resolved.has_projects();
+        if !s.owner.is_visitor() && scoped && !self.caller.may(p, s) {
+            return Err(ServiceError::permission(&self.caller.resolved, p));
+        }
+        Ok(())
+    }
+
+    /// The mock, if the caller may change it: `mocks.write` in the instance
+    /// or the mock's project for instance mocks (with the permission
+    /// refusal), admin or the owner for visitor mocks (`404` for anyone
+    /// else).
     pub fn manageable(&self, name: &str) -> SvcResult<Snapshot> {
         match self.readable(name) {
             Ok(s) => {
-                if !s.owner.is_visitor() && !self.caller.admin {
-                    self.need(crate::rbac::Permission::MocksWrite)?;
+                let write = crate::rbac::Permission::MocksWrite;
+                if !s.owner.is_visitor() && !self.caller.may(write, &s) {
+                    return Err(ServiceError::permission(&self.caller.resolved, write));
                 }
                 Ok(s)
             }
             // Without self-service an unknown name answers as before: the
-            // admin guard first. With it, unknown and other people's mocks
+            // permission first (a member of a project gets the 404 of a mock
+            // it may not read). With it, unknown and other people's mocks
             // are 404.
             Err(not_found) => {
-                if self.store().visits().is_none() {
+                if self.store().visits().is_none() && !self.caller.writes_somewhere() {
                     self.need(crate::rbac::Permission::MocksWrite)?;
                 }
                 Err(not_found)
@@ -817,6 +869,13 @@ impl Svc {
 
     /// `GET /_rustybin/mocks`. `all` (admin): every visitor's mocks too.
     pub fn list(&self, all: bool) -> Value {
+        self.list_in(all, &None)
+    }
+
+    /// [`Self::list`], optionally of one project (`?project=`; `instance`:
+    /// the instance's mocks without one). Only the mocks the caller may
+    /// read (step 11: another project's are not listed).
+    pub fn list_in(&self, all: bool, filter: &Option<crate::rbac::projects::Filter>) -> Value {
         let c = &self.caller;
         let all = c.admin && all;
         let host = self.links.host();
@@ -827,6 +886,12 @@ impl Svc {
             // Admins see their own and the instance's mocks unless they ask
             // for every visitor's.
             .filter(|s| !s.owner.is_visitor() || c.owns(&s.owner) || all)
+            .filter(|s| s.owner.is_visitor() || c.can_read(s))
+            .filter(|s| {
+                filter.is_none()
+                    || (!s.owner.is_visitor()
+                        && crate::rbac::projects::passes(filter, s.project.as_deref()))
+            })
             .map(|s| {
                 let mut v = s.summary();
                 let root = self.links.mock_base(&s.owner, &s.name);
@@ -836,6 +901,7 @@ impl Svc {
                         json!(format!("{root}{}", s.draft.path_prefix())),
                     );
                     m.insert("yours".into(), json!(c.owns(&s.owner)));
+                    m.insert("can_manage".into(), json!(c.can_manage(s)));
                     if c.admin && s.owner.is_visitor() {
                         m.insert("owner_fingerprint".into(), json!(s.owner.fingerprint()));
                     }
@@ -996,7 +1062,21 @@ impl Svc {
     /// their visit, the manage token (once).
     pub fn create(&self, req: CreateBody) -> SvcResult<Value> {
         let c = &self.caller;
-        let visitor = !c.admin;
+        // A mock of a project (named, or the one project a member works in)
+        // is the instance's, made by a member of the team: never a
+        // visitor's.
+        let in_project = req.project.is_some() || (!c.admin && c.writes_somewhere());
+        let project = if in_project {
+            crate::rbac::projects::target(
+                &self.state.users,
+                &c.resolved,
+                crate::rbac::Permission::MocksWrite,
+                req.project.as_deref(),
+            )?
+        } else {
+            None
+        };
+        let visitor = !c.admin && !in_project;
         if visitor && self.store().visits().is_none() {
             self.need(crate::rbac::Permission::MocksWrite)?;
         }
@@ -1049,7 +1129,7 @@ impl Svc {
                 },
             )
         };
-        let created = self.store().create_owned(
+        let created = self.store().create_in(
             &name,
             compiled,
             Origin::Api,
@@ -1057,10 +1137,11 @@ impl Svc {
             req.enabled.unwrap_or(true),
             deploy,
             force,
+            project,
         );
         match created {
             Ok(s) => {
-                let mut out = self.detail_of(&s, c.admin || visitor);
+                let mut out = self.detail_of(&s, c.reveals(&s) || visitor);
                 if let Value::Object(m) = &mut out {
                     m.insert("yours".into(), json!(visitor));
                     if let Some((token, _)) = &owner.started {
@@ -1118,10 +1199,7 @@ impl Svc {
         let mut out = self.detail_of(&s, c.reveals(&s));
         if let Value::Object(m) = &mut out {
             m.insert("yours".into(), json!(c.owns(&s.owner)));
-            m.insert(
-                "can_manage".into(),
-                json!(c.admin || (s.owner.is_visitor() && c.owns(&s.owner))),
-            );
+            m.insert("can_manage".into(), json!(c.can_manage(&s)));
         }
         Ok(out)
     }
@@ -1163,7 +1241,14 @@ impl Svc {
         err
     }
 
-    pub fn update(&self, name: &str, req: PatchBody) -> SvcResult<Value> {
+    pub fn update(&self, name: &str, mut req: PatchBody) -> SvcResult<Value> {
+        if let Some(to) = req.project.take() {
+            self.move_to(name, to)?;
+            if req.is_only_a_move() {
+                let s = self.readable(name)?;
+                return Ok(self.detail_of(&s, self.caller.reveals(&s)));
+            }
+        }
         self.check_revision_given(req.expected_revision)?;
         let edit = self.store().edit_lock();
         let mut attempt = 0;
@@ -1259,6 +1344,32 @@ impl Svc {
         }
     }
 
+    /// Move a mock to another project (`None`: the instance's): `mocks.write`
+    /// in both (step 11). A visitor's mock never moves.
+    pub fn move_to(&self, name: &str, to: Option<String>) -> SvcResult<Snapshot> {
+        let to = to.filter(|t| t != crate::rbac::projects::INSTANCE && !t.is_empty());
+        if let Some(t) = &to {
+            crate::rbac::projects::check_name(t).map_err(ServiceError::bad_request)?;
+        }
+        let current = self.manageable(name)?;
+        if current.project == to {
+            return Ok(current);
+        }
+        if current.owner.is_visitor() {
+            return Err(ServiceError::bad_request(
+                "a self-service mock belongs to its visit, never to a project",
+            ));
+        }
+        crate::rbac::projects::check_move(
+            &self.state.users,
+            &self.caller.resolved,
+            crate::rbac::Permission::MocksWrite,
+            current.project.as_deref(),
+            to.as_deref(),
+        )?;
+        Ok(self.store().set_project(name, to)?)
+    }
+
     /// `DELETE /_rustybin/mocks/{name}`.
     pub fn delete(&self, name: &str) -> SvcResult<Value> {
         self.manageable(name)?;
@@ -1338,6 +1449,7 @@ impl Svc {
                 s.origin != Origin::Sample
                     && !s.scratch
                     && (!s.owner.is_visitor() || c.owns(&s.owner))
+                    && (s.owner.is_visitor() || c.can_read(s))
             })
             .collect();
         config_file::export(&all, reveal)
@@ -1881,6 +1993,10 @@ mod compile_pool_tests {
         let state = test_state();
         let mut svc = admin_svc(&state);
         svc.caller.admin = false;
+        svc.caller.resolved = std::sync::Arc::new(crate::rbac::Resolved {
+            permissions: crate::rbac::PermSet::EMPTY,
+            ..(*svc.caller.resolved).clone()
+        });
         svc.caller.owners = vec![crate::mocks::visits::Owner::Visit("v-1".into())];
         for _ in 0..super::super::store::VISITOR_COMPILES_PER_MINUTE {
             let s = Svc {

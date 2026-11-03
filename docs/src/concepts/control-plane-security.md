@@ -90,7 +90,7 @@ Who holds which permissions:
 
 | Caller | Permissions |
 |---|---|
-| A user (the sign-in) | its roles' (`viewer`, `tester`, `editor`, `admin`, `portal_reader`, custom roles) |
+| A user (the sign-in) | its roles' (`viewer`, `tester`, `editor`, `admin`, `portal_reader`, custom roles); on the resources of a [project](../projects.md), its roles there too (and `instance.read` when it has any) |
 | The admin token | every one (break glass, never a user) |
 | A control JWT | its `scope` as roles, plus `rb_roles` and `rb_perms` (see [jwt mode](#signed-access-tokens-jwt-mode)) |
 | Nobody, on an open control plane without an admin token (outside public mode) | every one, as before |
@@ -109,7 +109,9 @@ route's:
 | A settings change (`PATCH /_rustybin/settings`, `DELETE /_rustybin/settings/{key}`, a document's `settings:`) of `egress.*`, `proxy.*`, `agents.*`, `console.*`, `sso.*`, `assist.provider` or `assist.base_url` | `settings.security` |
 | A settings change of a `portal.*` setting | `portal.settings` |
 | A settings change that sets or clears a secret, a document with `secrets:` | `secrets.write` |
-| A document (`POST /_rustybin/config/apply`, the `apply_config` tool) with `settings:` or `instance:`; with `agents:`; with `users:` or `roles:` | `settings.write`; `agents.manage`; `users.manage` |
+| A document (`POST /_rustybin/config/apply`, the `apply_config` tool) with `settings:` or `instance:`; with `agents:`; with `users:`, `roles:` or `projects:` | `settings.write`; `agents.manage`; `users.manage` |
+| A project's members (`PUT /_rustybin/projects/{name}`, a document's `projects:`), deleting a project | every permission of the roles given or taken, in that project; a move of its resources (`move_to`) the write permission of each kind in both |
+
 | `PUT /_rustybin/password` by a caller who is not a user (the admin token, a control JWT): the first admin's password | `users.manage` |
 | `GET /_rustybin/agents*` (and `list_agents`, `get_agent`) of AI agents that are not the caller's own | `agents.read` (a user sees their own [agents](../agent-mcp.md#agents-act-for-a-user) without it) |
 | Changing, revoking, restoring or ending the sessions of an AI agent that is not the caller's own | `agents.manage` (a user limits, revokes and ends the sessions of their own without it, and restores one they revoked) |
@@ -119,6 +121,13 @@ route's:
 | The `/health` toggles and `POST /flaky/reset?scope=all` (data plane) | `settings.write` |
 | `PUT /_rustybin/portal/items/{id}` with `secure: true` (turns on a mock's mocked security to close it) | `mocks.write` |
 | A closed portal item's credentials, Try it, collections and connection snippets (`/portal/api/*`), and the whole portal with `portal.auth=password` | `portal.read`, from the [portal sign-in](../portal.md#portal-logins) or a bearer control credential |
+
+**Projects.** The routes of mocks, saved tests, checkpoints and portal items are
+**project-scoped** ([projects](../projects.md)): the route check lets in a caller
+holding the permission in some project, and the handler checks it again on each
+resource, in the resource's project. Another project's resource the caller may not
+read answers `404`, and a list leaves it out; a caller with instance roles only meets
+exactly the checks above.
 
 ## User name and password
 

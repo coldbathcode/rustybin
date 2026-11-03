@@ -166,6 +166,12 @@ impl ControlAuthorized {
 #[derive(Clone, Debug)]
 pub struct ControlCaller(pub Arc<Resolved>);
 
+/// The permission a project-scoped route declares for the request's method
+/// (step 11): the service checks it again on each resource, in the
+/// resource's project.
+#[derive(Clone, Copy, Debug)]
+pub struct RouteNeed(pub crate::rbac::Permission);
+
 /// The caller of a request: what [`check_route`] or [`enforce`] resolved,
 /// else (an open control plane, a data-plane route) the presented admin
 /// token, an API key in shared mode, or nobody ([`Resolved::anonymous`]).
@@ -555,11 +561,16 @@ pub async fn check_route(State(state): State<AppState>, mut req: Request, next: 
                 .into_response()
         }
         Some(Need::Perm(p))
-            if !caller.has(p) && !(endpoint.self_service && state.mocks.visits().is_some()) =>
+            if !caller.has(p)
+                && !(endpoint.project && caller.has_somewhere(p))
+                && !(endpoint.self_service && state.mocks.visits().is_some()) =>
         {
             return crate::rbac::refuse(&caller, p);
         }
         _ => {}
+    }
+    if let (true, Some(Need::Perm(p))) = (endpoint.project, need) {
+        req.extensions_mut().insert(RouteNeed(p));
     }
     req.extensions_mut().insert(ControlCaller(caller));
     next.run(req).await

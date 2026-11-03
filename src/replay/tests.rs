@@ -296,6 +296,7 @@ async fn a_gateway_run_is_refused_until_the_egress_policy_allows_it() {
         },
         gateway: Some(gateway.clone()),
         assert: vec![Assertion::status(200)],
+        project: None,
     };
     for (allowed, passed) in [(false, false), (true, true)] {
         let mut c = Config::for_tests();
@@ -330,6 +331,7 @@ fn tests_are_validated_and_bounded() {
         },
         gateway: None,
         assert: vec![],
+        project: None,
     };
     for bad in ["run", "export", "", "a b"] {
         assert!(store.put(t(bad), false).is_err(), "{bad}");
@@ -402,6 +404,7 @@ fn saved_tests_survive_a_restart() {
         },
         gateway: None,
         assert: vec![Assertion::status(200)],
+        project: None,
     };
     a.put(t.clone(), false).expect("put");
     let b = Tests::new(Some(dir.path()));
@@ -430,6 +433,7 @@ fn a_document_carries_the_tests_and_prunes_only_what_it_does_not_name() {
         },
         gateway: None,
         assert: vec![Assertion::status(200)],
+        project: None,
     };
     for n in ["keep", "gone", "broken"] {
         state.saved_tests.put(t(n, "/echo"), false).expect("put");
@@ -495,6 +499,7 @@ async fn a_run_never_shows_or_captures_a_filled_secret() {
             body_contains: Some("never there".into()),
             ..Assertion::default()
         }],
+        project: None,
     };
     state.saved_tests.put(test, false).expect("put");
     let r = run::run(
@@ -503,6 +508,7 @@ async fn a_run_never_shows_or_captures_a_filled_secret() {
         run::RunBody {
             names: vec![],
             variables: [("API_KEY".to_string(), "sk-live-secret-42".to_string())].into(),
+            project: None,
         },
     )
     .await
@@ -537,6 +543,7 @@ fn a_literal_credential_is_never_saved() {
         },
         gateway: None,
         assert: vec![],
+        project: None,
     };
     assert!(store.put(t.clone(), false).is_err());
     t.request
@@ -613,6 +620,7 @@ fn plain_test(name: &str) -> SavedTest {
         },
         gateway: None,
         assert: vec![Assertion::status(200)],
+        project: None,
     }
 }
 

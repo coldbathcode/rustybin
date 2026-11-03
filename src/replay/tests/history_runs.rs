@@ -308,6 +308,7 @@ async fn a_kept_run_never_holds_a_variable_value() {
             body_contains: Some("never there".into()),
             ..Assertion::default()
         }],
+        project: None,
     };
     state.saved_tests.put(test, false).expect("put");
     let secret = "sk-live-planted-7781";

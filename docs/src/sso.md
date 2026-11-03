@@ -41,7 +41,10 @@ admin token stays the break glass.
 ```
 
 The role map takes `{group, roles}` objects too (an API call, `rustybin.yaml`); it
-keeps them as `group=role role` strings. A group name with a comma (an LDAP DN) is
+keeps them as `group=role role` strings. A role written `project:role`, or an object
+`{group, project, roles}`, is a role in that [project](projects.md) (a group that
+gives roles in projects only takes no default roles; a project the instance does not
+have is ignored and `test` lists it among the unknown roles). A group name with a comma (an LDAP DN) is
 given that way rather than in the comma separated variable:
 
 ```hurl
