@@ -3,8 +3,9 @@
 Planned 2026-11-02, after 0.3.0, from the first candidate under consideration in
 `docs/src/roadmap.md` and the build notes of the reliability plan; access control (steps 07 to 14)
 added the same day after 0.3.1, at the owner's request; open and closed APIs on the portal (step
-13) added on 2026-11-03. Built only when the owner says go, one step
-at a time, each pushed as it lands. One release, 0.4.0, at the end.
+13) added on 2026-11-03. Two releases (decided 2026-11-03, the owner left the timing to the build): 0.4.0 after
+step 06 (the testing workflows), 0.5.0 after step 15 (access control). Built only when the owner says go, one step
+at a time, each pushed as it lands.
 
 ## 1. What this milestone is
 
@@ -69,6 +70,7 @@ The marker a session looks for is the first row that is not done.
 | [04](step-04-scenarios-http.md) | Scenarios: CORS and header transformation | | |
 | [05](step-05-checkpoints-in-git.md) | Checkpoints in the configuration repository | | |
 | [06](step-06-conflict-compare.md) | A compare view for a stale edit | | |
+| 06r | Release 0.4.0: the testing workflows (the step 15 recipe for steps 01 to 06) | 01 to 06 | |
 | [07](step-07-users-and-roles.md) | Access control 1: users, roles and permissions (the model) | | |
 | [08](step-08-permissions-everywhere.md) | Access control 2: every route and tool checks a permission | 07 | |
 | [09](step-09-users-everywhere.md) | Access control 3: users and roles on every surface, invitations | 08 | |
@@ -77,7 +79,7 @@ The marker a session looks for is the first row that is not done.
 | [12](step-12-agents-for-users.md) | Access control 6: agents act for a user | 09 | |
 | [13](step-13-portal-access.md) | Access control 7: open and closed APIs on the portal | 09 | |
 | [14](step-14-audit-log.md) | Access control 8: the audit log and a security pass | 07 to 13 | |
-| [15](step-15-release.md) | Docs and release 0.4.0 | all | |
+| [15](step-15-release.md) | Docs and release 0.5.0 (access control) | all | |
 
 Steps 01 to 06 and 07 to 14 are independent tracks; a testing step built after step 08 declares
 its routes' permissions as it lands, one built before is covered by step 08's sweep. Steps 10, 11,
@@ -106,15 +108,14 @@ Add the step's build notes, set the row to done with the date, push.
   pulled document (anyone who can push to the repository would otherwise make themselves admin).
   The alternative is a setting that trusts the repository for users; say if a team manages its
   users as code.
-- **Projects in 0.4.0** (step 11): the largest access-control step. It can move to a later release
+- **Projects in 0.5.0** (step 11): the largest access-control step. It can move to a later release
   without blocking the others; say if one team per instance is enough for now.
-- **One release or two**: everything ships as 0.4.0 at the end. Releasing the testing workflows
-  first (0.4.0 after step 06) and access control as 0.5.0 is the other way; say before step 07 is
-  built.
+- **One release or two**, decided 2026-11-03: two. 0.4.0 ships the testing workflows after step
+  06; 0.5.0 ships access control after step 15.
 - **Closed APIs on the portal** (step 13), decided 2026-11-03: a signed-out visitor sees a closed
   API with a lock; its docs and calls are seen but not used until the reader signs in and gets
   the credentials (Try it, demo credentials and collections locked; a closed mock has its mocked
   security on, so a call without the credentials is refused); no 0.3.x point release, it ships
-  with 0.4.0.
+  with access control (0.5.0).
 - **The audit log's home** (step 14): files in the state directory with retention. A webhook or a
   syslog target for a central log is not in the plan; say if one is needed.

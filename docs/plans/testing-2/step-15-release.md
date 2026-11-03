@@ -1,9 +1,9 @@
-# Step 15: Docs and release 0.4.0
+# Step 15: Docs and release 0.5.0
 
 ## Goal
 
 The book covers every new workflow and the access control (pages updated, "On every surface"
-tables, tested Hurl examples), the changelog has a `0.4.0` entry, the roadmap moves the milestone
+tables, tested Hurl examples), the changelog has a `0.5.0` entry, the roadmap moves the milestone
 to "Recently built", and the release follows the 0.2.0 recipe (tag, signed image, GitHub release
 with the binaries, digest commit) once the owner says go.
 
