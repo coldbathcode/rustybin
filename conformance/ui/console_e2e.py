@@ -1202,6 +1202,18 @@ def run_theme(browser, theme):
         with page.expect_download() as dl:
             page.click("#tests-export")
         assert dl.value.suggested_filename == "rustybin-tests.hurl", dl.value.suggested_filename
+        # The run is in the history, triggered from the console; its detail
+        # and its JUnit report.
+        first = page.locator("#tests-history-table tr[data-run]").first
+        first.wait_for()
+        expect(first).to_contain_text("console")
+        run_id = first.get_attribute("data-run")
+        page.click(f"[data-show-run='{run_id}']")
+        expect(page.locator("#tests-run-detail")).to_contain_text("Run " + run_id)
+        expect(page.locator(f"#tests-run-detail tr[data-run-result='{name}']")).to_have_count(1)
+        with page.expect_download() as dl:
+            page.click(f"[data-junit-run='{run_id}']")
+        assert dl.value.suggested_filename == f"rustybin-tests-{run_id}.xml", dl.value.suggested_filename
         shot(page, theme, "16c-saved-tests")
         assert_icons_sized(page, "saved tests")
         page.once("dialog", lambda d: d.accept())

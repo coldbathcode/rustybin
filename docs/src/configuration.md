@@ -126,7 +126,7 @@ applied through the API or a repository), `repo/` (the [source control](source-c
 working copy), `repo.key` (the deploy key), `control-oauth.key` (the signing key of
 sign-in and OAuth tokens, unless `RUSTYBIN_CONTROL_OAUTH_KEY` is set), `sessions.json`
 (listed and revoked console sessions), `tests.json` (the [saved tests](saved-tests.md)),
-`checkpoints/` (the [checkpoints](checkpoints.md)) and `agents.json`, `portal.json`,
+`test-runs/` (the [history of their runs](saved-tests.md#history)), `checkpoints/` (the [checkpoints](checkpoints.md)) and `agents.json`, `portal.json`,
 `mcp-inspector.json`.
 
 ## Source control

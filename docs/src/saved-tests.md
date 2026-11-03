@@ -46,7 +46,7 @@ API key.
 {{#include ../examples/tests/saved-tests.hurl:save_written}}
 ```
 
-A test has a `name` (letters, digits, `.`, `_`, `-`; not `run` or `export`), a
+A test has a `name` (letters, digits, `.`, `_`, `-`; not `run`, `runs` or `export`), a
 `request` (`method`, `path` with the query, `headers`, `body`), an optional
 `gateway` and its assertions. Each assertion checks one thing:
 
@@ -93,6 +93,56 @@ A run sends at most 200 requests in 60 seconds. Gateway runs go through the
 [egress policy](configuration.md#outbound-connections) under the purpose `replay`, which has
 no default: add each gateway's host to `RUSTYBIN_EGRESS_ALLOW`.
 
+## History
+
+Every run is kept, whichever surface started it: its `run_id` (in the run's answer,
+and in the `X-Rustybin-Test-Run` header of a JUnit answer), when it ran, its
+`trigger`, the caller's `principal`, the tests asked for (`selection`, empty for
+every test), the counts and each test's result with its failures. A run's answer and
+its kept copy also say what changed since the previous run of the same tests (else the
+previous run): the tests that passed there and fail now (`newly_failing`), and the
+other way (`newly_passing`).
+
+```hurl
+{{#include ../examples/tests/saved-tests.hurl:change}}
+```
+
+`GET /_rustybin/tests/runs` lists them newest first, 20 a page (`limit`, at most 100);
+`next_cursor` is the `cursor` of the next page:
+
+```hurl
+{{#include ../examples/tests/saved-tests.hurl:history}}
+```
+
+`GET /_rustybin/tests/runs/{id}` is one run, whole, and `?format=junit` its JUnit
+report, so a CI job can fetch the report of a run it did not start:
+
+```hurl
+{{#include ../examples/tests/saved-tests.hurl:run_detail}}
+```
+
+```hurl
+{{#include ../examples/tests/saved-tests.hurl:run_junit}}
+```
+
+The history keeps the last 200 runs for 30 days, one file each in
+`<state>/test-runs/`, and reads them back after a restart; without a state directory
+it keeps the last 50 in memory. Variables given to a run are never kept: a value is
+replaced by its `{{NAME}}` wherever a result would repeat it, in the answer and in the
+kept run. `DELETE /_rustybin/tests/runs` forgets every run (the tests stay):
+
+```hurl
+{{#include ../examples/tests/saved-tests.hurl:clear_history}}
+```
+
+The `trigger` is `console`, `cli`, `mcp` or `api` (a later release adds
+`schedule:<name>`). The console and the CLI say which they are with the header
+`X-Rustybin-Client: console` or `cli`; a run through the management MCP is `mcp`;
+anything else is `api`. It is a label for people and is never trusted for anything:
+who ran it is the `principal` (`jwt:<subject>`, `admin-token`, `key:<id>`, `open`, or
+on the management MCP the caller's name there), never a credential. The history is
+admin only, as the tests are.
+
 ## In CI without an instance's console
 
 `GET /_rustybin/tests/export` is every test as one Hurl file, assertions included.
@@ -118,8 +168,8 @@ exits `1` when a test fails.
 
 | Surface | Where |
 |---|---|
-| API | `GET`, `POST /_rustybin/tests`, `GET`, `PUT`, `DELETE /_rustybin/tests/{name}`, `POST /_rustybin/tests/run` (`?format=junit`), `GET /_rustybin/tests/export` |
-| Console | **Live traffic**: **Save as test** on an entry; **Saved tests**: the list, **Run all** with variables, a test's run, the failures, **Export as Hurl**, delete |
-| CLI | `rustybin tests list`, `show`, `save`, `put`, `delete`, `run`, `export` (`run --junit`, `--var NAME=value`, `--var NAME=-` or `NAME=@file` for a credential) ([reference](cli.md#tests)) |
-| Management MCP | `list_tests` (one, all, or `format: hurl`), `save_test`, `delete_test` (confirmed), `run_tests` (confirmed when a test goes through a gateway or sends a method other than `GET`, `HEAD` or `OPTIONS`; one run at a time; variables only from `RUSTYBIN_TEST_*`) ([agent page](agent-mcp.md)) |
-| `rustybin.yaml` | `tests:`, a list of tests as above ([instance as code](configuration-as-code.md)) |
+| API | `GET`, `POST /_rustybin/tests`, `GET`, `PUT`, `DELETE /_rustybin/tests/{name}`, `POST /_rustybin/tests/run` (`?format=junit`), `GET /_rustybin/tests/export`; the history: `GET`, `DELETE /_rustybin/tests/runs`, `GET /_rustybin/tests/runs/{id}` (`?format=junit`) |
+| Console | **Live traffic**: **Save as test** on an entry; **Saved tests**: the list, **Run all** with variables, a test's run, the failures and the change since the previous run, **Export as Hurl**, delete; **History**: every run, a run's detail, its JUnit download, **Clear history** |
+| CLI | `rustybin tests list`, `show`, `save`, `put`, `delete`, `run`, `export` (`run --junit`, `--var NAME=value`, `--var NAME=-` or `NAME=@file` for a credential); the history: `tests runs` (`--limit`, `--cursor`), `tests run-show <id>` (`--junit`), `tests runs-clear` ([reference](cli.md#tests)) |
+| Management MCP | `list_tests` (one, all, or `format: hurl`), `save_test`, `delete_test` (confirmed), `run_tests` (confirmed when a test goes through a gateway or sends a method other than `GET`, `HEAD` or `OPTIONS`; one run at a time; variables only from `RUSTYBIN_TEST_*`; answers the `run_id` and the change), `list_test_runs`, `get_test_run` (results under `untrusted_results`, JUnit with `format: junit`), `clear_test_runs` (confirmed) ([agent page](agent-mcp.md)) |
+| `rustybin.yaml` | `tests:`, a list of tests as above ([instance as code](configuration-as-code.md)); the history is not configuration and is never exported |

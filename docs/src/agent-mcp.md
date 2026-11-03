@@ -526,7 +526,10 @@ server and a gateway's JWT validation:
 | `list_tests` | admin | The [saved tests](saved-tests.md), one by name, or all of them as a Hurl file (`format: hurl`); requests are under `untrusted_*` |
 | `save_test` | admin | A test from a captured request (`capture`: its id) or a written one, with assertions; secret-looking headers and query values must be `{{variables}}` |
 | `delete_test` | admin | Delete a saved test (confirmed) |
-| `run_tests` | admin | Run every saved test or the ones named, in process or through each test's gateway; confirmed when a test goes through a gateway or sends a method other than `GET`, `HEAD` or `OPTIONS`; one run at a time. Results under `untrusted_results`, JUnit with `format: junit` |
+| `run_tests` | admin | Run every saved test or the ones named, in process or through each test's gateway; confirmed when a test goes through a gateway or sends a method other than `GET`, `HEAD` or `OPTIONS`; one run at a time. Results under `untrusted_results`, JUnit with `format: junit`; answers the kept run's `run_id` and the change since the previous run |
+| `list_test_runs` | admin | The [history of runs](saved-tests.md#history), newest first (`limit`, `cursor`): when, the trigger, who, the counts, the failing tests, newly failing and newly passing |
+| `get_test_run` | admin | One kept run by id: each test's result and failures under `untrusted_results`, JUnit with `format: junit` |
+| `clear_test_runs` | admin | Forget every kept run, the tests stay (confirmed) |
 | `list_gateway_scenarios` / `get_gateway_scenario_run` | read | The [gateway scenarios](gateway-scenarios.md) and the caller's runs with their last verdicts; the credential-injection key is shown to admin callers only (`key_hidden`) |
 | `start_gateway_scenario` | admin | Prepare a run: its upstream and the steps to configure on the gateway |
 | `check_gateway_scenario` | admin | Send the run's test traffic through the gateway (egress purpose `scenario`) and compare what the client got with what reached the upstream, with the scenario's test parameters (`limit`, `half_open_ms`, `size_limit`) (confirmed) |

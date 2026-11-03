@@ -1743,6 +1743,8 @@ const COVERAGE: &[(&str, Cover)] = &[
     ("/_rustybin/tests/{name}", Tool("list_tests")),
     ("/_rustybin/tests/run", Tool("run_tests")),
     ("/_rustybin/tests/export", Tool("list_tests")),
+    ("/_rustybin/tests/runs", Tool("list_test_runs")),
+    ("/_rustybin/tests/runs/{id}", Tool("get_test_run")),
     ("/_rustybin/scenarios/{id}/runs", Tool("start_gateway_scenario")),
     ("/_rustybin/scenarios/{id}/runs/{run}", Tool("get_gateway_scenario_run")),
     ("/_rustybin/scenarios/{id}/runs/{run}/check", Tool("check_gateway_scenario")),
@@ -3416,6 +3418,66 @@ async fn run_tests_asks_before_replaying_a_request_that_changes_state() {
         "{r}"
     );
     drop(held);
+}
+
+#[tokio::test]
+async fn a_tool_run_is_kept_and_read_back_from_the_history() {
+    let state = test_state_with(open_config());
+    let app = test_app_with(state.clone());
+    let mut t = crate::replay::SavedTest {
+        name: "fails".into(),
+        description: None,
+        request: crate::replay::TestRequest {
+            method: "GET".into(),
+            path: "/status/200".into(),
+            headers: Default::default(),
+            body: None,
+        },
+        gateway: None,
+        assert: vec![crate::replay::Assertion::status(200)],
+    };
+    state.saved_tests.put(t.clone(), false).expect("put");
+    let r = tool(&app, &[], "run_tests", json!({})).await;
+    assert!(!is_error(&r), "{r}");
+    t.assert = vec![crate::replay::Assertion::status(201)];
+    state.saved_tests.put(t, true).expect("put");
+    let r = tool(&app, &[], "run_tests", json!({})).await;
+    assert!(!is_error(&r), "{r}");
+    let sc = &r["structuredContent"];
+    assert_eq!(sc["trigger"], "mcp", "{r}");
+    assert_eq!(sc["change"]["newly_failing"], json!(["fails"]), "{r}");
+    assert!(text_of(&r).contains("Newly failing"), "{r}");
+    let id = sc["run_id"].as_str().expect("run_id").to_string();
+    let r = tool(&app, &[], "list_test_runs", json!({ "limit": 1 })).await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["runs"][0]["id"], json!(id), "{r}");
+    assert!(r["structuredContent"]["next_cursor"].is_string(), "{r}");
+    let r = tool(
+        &app,
+        &[],
+        "get_test_run",
+        json!({ "id": id, "format": "junit" }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    let sc = &r["structuredContent"];
+    assert_eq!(
+        sc["untrusted_results"][0]["failures"][0]["seen"], "200",
+        "{r}"
+    );
+    assert!(sc["untrusted_junit"]
+        .as_str()
+        .unwrap_or("")
+        .contains("<failure"));
+    // What the tests saw never reaches the text summary.
+    assert!(!text_of(&r).contains("saw 200"), "{r}");
+    // Clearing asks first.
+    let r = tool(&app, &[], "clear_test_runs", json!({})).await;
+    assert!(is_error(&r), "{r}");
+    assert_eq!(state.saved_tests.history.len(), 2);
+    let r = tool(&app, &[], "clear_test_runs", json!({ "confirm": true })).await;
+    assert!(!is_error(&r), "{r}");
+    assert!(state.saved_tests.history.is_empty());
 }
 
 #[tokio::test]

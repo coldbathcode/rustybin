@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use super::access::Access;
 use super::tools::{arg_bool, arg_str, confirm, err, need_str, ok, Confirm};
 use crate::mcp::core::CallCtx;
-use crate::replay::{self, run, SaveBody};
+use crate::replay::{self, history, run, SaveBody};
 
 /// `list_tests`: every saved test, one by name, or the Hurl export.
 pub fn list_tests(ctx: &CallCtx, args: &Value) -> Value {
@@ -201,35 +201,136 @@ pub async fn run_tests(ctx: &CallCtx, access: &Access, args: &Value, params: &Va
         names,
         variables: Default::default(),
     };
-    match run::run(&ctx.app, &access.test_session(), body).await {
-        Ok(r) => {
-            let failing: Vec<&str> = r
-                .results
-                .iter()
-                .filter(|t| !t.passed)
-                .map(|t| t.name.as_str())
-                .collect();
-            let summary = if r.passed {
-                format!("All {} test(s) passed.", r.total)
-            } else {
-                format!(
-                    "{} of {} test(s) failed and {} could not run: {}. The details are in untrusted_results.",
-                    r.failed,
-                    r.total,
-                    r.errors,
-                    failing.join(", ")
-                )
-            };
-            let mut v = json!({
-                "passed": r.passed, "total": r.total, "failed": r.failed, "errors": r.errors,
-                "duration_ms": r.duration_ms, "ran_at": r.ran_at,
-                "untrusted_results": r.results,
-            });
-            if arg_str(args, "format") == Some("junit") {
-                v["untrusted_junit"] = json!(run::junit(&r));
-            }
-            ok(ctx, summary, v)
+    match replay::run_and_keep(
+        &ctx.app,
+        &access.test_session(),
+        body,
+        "mcp",
+        &access.principal(),
+    )
+    .await
+    {
+        Ok(kept) => {
+            let summary = format!("{} Kept as run {}.", run_summary(&kept), kept.id);
+            ok(ctx, summary, run_value(&kept, arg_str(args, "format")))
         }
         Err((_, m)) => err(m),
     }
+}
+
+/// A run in a line: the counts, the failing tests and the change.
+fn run_summary(kept: &history::TestRun) -> String {
+    let r = &kept.report;
+    let failing: Vec<&str> = r
+        .results
+        .iter()
+        .filter(|t| !t.passed)
+        .map(|t| t.name.as_str())
+        .collect();
+    let mut s = if r.passed {
+        format!("All {} test(s) passed.", r.total)
+    } else {
+        format!(
+            "{} of {} test(s) failed and {} could not run: {}. The details are in untrusted_results.",
+            r.failed,
+            r.total,
+            r.errors,
+            failing.join(", ")
+        )
+    };
+    let c = &kept.change;
+    if !c.newly_failing.is_empty() {
+        s.push_str(&format!(
+            " Newly failing since the previous run: {}.",
+            c.newly_failing.join(", ")
+        ));
+    }
+    if !c.newly_passing.is_empty() {
+        s.push_str(&format!(" Newly passing: {}.", c.newly_passing.join(", ")));
+    }
+    s
+}
+
+/// A run as the tools answer it: what the tests saw under `untrusted_*`.
+fn run_value(kept: &history::TestRun, format: Option<&str>) -> Value {
+    let r = &kept.report;
+    let mut v = json!({
+        "run_id": kept.id, "trigger": kept.trigger, "principal": kept.principal,
+        "selection": kept.selection,
+        "passed": r.passed, "total": r.total, "failed": r.failed, "errors": r.errors,
+        "duration_ms": r.duration_ms, "ran_at": r.ran_at,
+        "change": kept.change,
+        "untrusted_results": r.results,
+    });
+    if format == Some("junit") {
+        v["untrusted_junit"] = json!(run::junit(r));
+    }
+    v
+}
+
+/// `list_test_runs`: the history, newest first.
+pub fn list_test_runs(ctx: &CallCtx, args: &Value) -> Value {
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|n| n as usize);
+    let v = replay::runs_page(&ctx.app, limit, arg_str(args, "cursor"));
+    let n = v["runs"].as_array().map(Vec::len).unwrap_or(0);
+    let failed = v["runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["passed"] != json!(true))
+        .count();
+    let more = if v["next_cursor"].is_string() {
+        " More with cursor next_cursor."
+    } else {
+        ""
+    };
+    ok(
+        ctx,
+        format!(
+            "{n} of {} kept test run(s), newest first; {failed} of them did not pass.{more}",
+            v["total"]
+        ),
+        v,
+    )
+}
+
+/// `get_test_run`: one kept run, whole (JUnit with `format: junit`).
+pub fn get_test_run(ctx: &CallCtx, args: &Value) -> Value {
+    let id = match need_str(args, "id") {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    match ctx.app.saved_tests.history.get(id) {
+        Some(kept) => ok(
+            ctx,
+            format!("Test run {}: {}", kept.id, run_summary(&kept)),
+            run_value(&kept, arg_str(args, "format")),
+        ),
+        None => err(format!("no test run {id:?}: list_test_runs names them")),
+    }
+}
+
+/// `clear_test_runs` (confirmed): forget every kept run.
+pub async fn clear_test_runs(ctx: &CallCtx, args: &Value, params: &Value) -> Value {
+    let n = ctx.app.saved_tests.history.len();
+    if let Confirm::Answer(v) = confirm(
+        ctx,
+        "clear_test_runs",
+        args,
+        params,
+        &format!("forget the {n} kept test run(s)"),
+    )
+    .await
+    {
+        return v;
+    }
+    let cleared = ctx.app.saved_tests.history.clear();
+    ok(
+        ctx,
+        format!("Forgot {cleared} test run(s)"),
+        json!({ "cleared": cleared }),
+    )
 }

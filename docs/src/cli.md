@@ -351,6 +351,9 @@ Saved tests: captured requests with assertions, run here, through a gateway or i
 | `rustybin tests delete <name>` | Delete a saved test. | `DELETE /_rustybin/tests/{name}` |
 | `rustybin tests run [--names a,b] [--var NAME=value]... [--junit]` | Run saved tests (all by default); exits 1 when one fails. --junit prints JUnit XML for CI. Flags: `--names` value, `--var` value, `--junit`. | `POST /_rustybin/tests/run` |
 | `rustybin tests export` | Every saved test as one Hurl file (hurl --test --variable base_url=...). | `GET /_rustybin/tests/export` |
+| `rustybin tests runs [--limit N] [--cursor C]` | The history of test runs, newest first: when, the trigger, who, the counts, what changed since the previous run. Flags: `--limit` value, `--cursor` value. | `GET /_rustybin/tests/runs` |
+| `rustybin tests run-show <id> [--junit]` | One kept run: each test's result and failures, the change since the previous run; --junit prints its JUnit XML. Flags: `--junit`. | `GET /_rustybin/tests/runs/{id}` |
+| `rustybin tests runs-clear` | Forget every kept test run (the tests stay). | `DELETE /_rustybin/tests/runs` |
 
 ```bash
 rustybin tests list
@@ -360,6 +363,9 @@ rustybin tests put order-1 --file '{"request":{"path":"/status/200"},"assert":[{
 rustybin tests delete order-1 --yes
 rustybin tests run --junit
 rustybin tests export
+rustybin tests runs --limit 5
+rustybin tests run-show 20261103T101500000Z-abc123 --junit
+rustybin tests runs-clear --yes
 ```
 
 ## scenario

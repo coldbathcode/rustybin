@@ -757,6 +757,8 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET POST | `/_rustybin/tests` | Saved tests: list them, or save one from a captured request or a written one (admin) |
 | GET PUT DELETE | `/_rustybin/tests/{name}` | A saved test: read, replace or delete it (admin) |
 | POST | `/_rustybin/tests/run` | Run saved tests in process or through their gateway; JSON or JUnit (?format=junit) (admin) |
+| GET DELETE | `/_rustybin/tests/runs` | The history of saved-test runs, newest first (limit, cursor); DELETE forgets every run (admin) |
+| GET | `/_rustybin/tests/runs/{id}` | One kept test run: each test's result, the change since the previous run; JSON or JUnit (?format=junit) (admin) |
 | GET | `/_rustybin/tests/export` | The saved tests as a Hurl file, assertions included, for CI |
 | GET POST | `/_rustybin/checkpoints` | Checkpoints of the instance's API mocks and health: list them, or save one (admin) |
 | GET DELETE | `/_rustybin/checkpoints/{name}` | A checkpoint: what it holds; DELETE removes it (admin) |

@@ -42,31 +42,31 @@ pub struct RunBody {
     pub variables: BTreeMap<String, String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Failure {
     pub assertion: String,
     pub expected: String,
     pub seen: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TestResult {
     pub name: String,
     /// `direct` or the gateway's origin.
     pub target: String,
     pub passed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ms: Option<u64>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failures: Vec<Failure>,
     /// The request could not be made (a missing variable, a refusal).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Report {
     pub passed: bool,
     pub total: usize,
@@ -435,7 +435,7 @@ fn judge(a: &Assertion, ans: &Answer) -> Option<Failure> {
 }
 
 /// Replace every filled variable value in a result with `{{NAME}}`.
-fn scrub(result: &mut TestResult, filled: &[(String, String)]) {
+pub(crate) fn scrub(result: &mut TestResult, filled: &[(String, String)]) {
     if filled.is_empty() {
         return;
     }

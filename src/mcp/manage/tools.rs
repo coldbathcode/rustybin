@@ -593,7 +593,7 @@ pub static TOOLS: &[ToolDef] = &[
         "format": { "type": "string", "enum": ["json", "hurl"], "description": "hurl: every test as one Hurl file" }
     }), &[])),
     tool!("save_test", "Save a test", "Save a test from a captured request (capture: its id from list_requests; secret-looking headers and query values become {{variables}}, never values) or a written request, with assertions: status, header (with equals, else it must exist), body_contains, json (a path such as $.items[0].id, with equals), max_ms; one kind each. Default for a capture: its status. replace: true overwrites a test of that name (a request, not a capture). Admin.", Right::Admin, ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
-        "name": { "type": "string", "description": "Letters, digits, . _ - (not run or export)" },
+        "name": { "type": "string", "description": "Letters, digits, . _ - (not run, runs or export)" },
         "capture": { "type": "string", "description": "A captured request's id" },
         "request": { "type": "object", "description": "method, path (with the query, never a URL), headers, body; {{name}} for credentials" },
         "description": { "type": "string" },
@@ -649,6 +649,18 @@ pub static TOOLS: &[ToolDef] = &[
         props["confirm"] = confirm_prop();
         obj(props, &["scenario", "run"])
     }),
+    // Testing workflows 2: the history of saved-test runs.
+    tool!("list_test_runs", "Test run history", "The kept runs of the saved tests (console, CLI, API, MCP), newest first: id, when, trigger, principal, the counts, the failing tests and the change since the previous run (newly failing, newly passing). Pages of limit (20, at most 100); cursor is the next_cursor of the page before. At most 200 runs and 30 days. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "limit": { "type": "integer", "minimum": 1, "maximum": crate::replay::history::MAX_PAGE },
+        "cursor": { "type": "string", "description": "next_cursor of the page before" }
+    }), &[])),
+    tool!("get_test_run", "Get a test run", "One kept run of the saved tests by id (from list_test_runs or run_tests): the counts, the change since the previous run, and each test's result and failures (expected, seen) under untrusted_results; format junit adds the JUnit XML. Admin.", Right::Admin, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "id": { "type": "string" },
+        "format": { "type": "string", "enum": ["json", "junit"] }
+    }), &["id"])),
+    tool!("clear_test_runs", "Clear the test run history", "Forget every kept run of the saved tests (the tests themselves stay). Destructive: confirmed. Admin.", Right::Admin, ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+        "confirm": confirm_prop()
+    }), &[])),
 ];
 
 /// The tools the caller may use.
@@ -978,6 +990,9 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         "save_test" => replay::save_test(ctx, access, &args),
         "delete_test" => replay::delete_test(ctx, &args, params).await,
         "run_tests" => replay::run_tests(ctx, access, &args, params).await,
+        "list_test_runs" => replay::list_test_runs(ctx, &args),
+        "get_test_run" => replay::get_test_run(ctx, &args),
+        "clear_test_runs" => replay::clear_test_runs(ctx, &args, params).await,
         // Gateway scenarios
         "list_gateway_scenarios" => scenarios::list_gateway_scenarios(ctx, access),
         "start_gateway_scenario" => scenarios::start_gateway_scenario(ctx, access, &args).await,

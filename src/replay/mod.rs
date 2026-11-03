@@ -4,8 +4,10 @@
 //! exported as Hurl). Kept in `<state>/tests.json` and in `rustybin.yaml`
 //! (`tests:`). Credentials are never saved: a captured secret-looking header
 //! or query value becomes a `{{name}}` variable the run fills (from the run's
-//! `variables`, else a `RUSTYBIN_TEST_*` environment variable).
+//! `variables`, else a `RUSTYBIN_TEST_*` environment variable). Every run
+//! is kept in the history ([`history`], `/_rustybin/tests/runs*`).
 
+pub mod history;
 pub mod hurl;
 pub mod run;
 #[cfg(test)]
@@ -154,9 +156,9 @@ impl Assertion {
     }
 }
 
-/// A name a test may have (`run` and `export` are routes).
+/// A name a test may have (`run`, `runs` and `export` are routes).
 pub fn valid_name(name: &str) -> bool {
-    !matches!(name, "run" | "export")
+    !matches!(name, "run" | "runs" | "export")
         && !name.is_empty()
         && name.len() <= MAX_NAME
         && name
@@ -169,7 +171,7 @@ impl SavedTest {
     pub fn validate(&self) -> Result<(), String> {
         if !valid_name(&self.name) {
             return Err(format!(
-                "name {:?}: 1 to {MAX_NAME} letters, digits, . _ - (not run or export)",
+                "name {:?}: 1 to {MAX_NAME} letters, digits, . _ - (not run, runs or export)",
                 self.name
             ));
         }
@@ -293,6 +295,8 @@ pub struct Tests {
     save_lock: Mutex<()>,
     /// A run is going: one at a time ([`Tests::begin_run`]).
     running: Arc<AtomicBool>,
+    /// Every run, kept ([`history::History`]).
+    pub history: history::History,
 }
 
 /// Held while a run goes; the next one may start once it is dropped.
@@ -380,6 +384,7 @@ impl Tests {
             items: Mutex::new(items),
             save_lock: Mutex::new(()),
             running: Arc::new(AtomicBool::new(false)),
+            history: history::History::new(state_dir),
         }
     }
 
@@ -503,6 +508,7 @@ const DROPPED: &[&str] = &[
     "trailer",
     "proxy-connection",
     "x-rustybin-session",
+    "x-rustybin-client",
     "x-request-id",
     "x-forwarded-for",
     "x-forwarded-host",
@@ -736,9 +742,69 @@ pub fn save(
     Ok(v)
 }
 
+// ── A run, kept ─────────────────────────────────────────────────────
+
+/// Run the tests and keep the run in the history (every surface runs
+/// through here). The values of the run's variables are replaced by their
+/// `{{NAME}}` wherever the report would repeat them, so neither the answer
+/// nor the kept run holds one. The caller holds the run guard.
+pub async fn run_and_keep(
+    state: &AppState,
+    session: &str,
+    body: run::RunBody,
+    trigger: &str,
+    principal: &str,
+) -> Result<history::TestRun, (StatusCode, String)> {
+    let selection = body.names.clone();
+    let given: Vec<(String, String)> = body
+        .variables
+        .iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let mut report = run::run(state, session, body).await?;
+    for r in &mut report.results {
+        run::scrub(r, &given);
+    }
+    Ok(state
+        .saved_tests
+        .history
+        .record(trigger, principal, selection, report))
+}
+
+/// The answer of a run: the report, its id in the history and the change
+/// since the previous run.
+pub fn run_view(run: &history::TestRun) -> Value {
+    let mut v = serde_json::to_value(&run.report).unwrap_or(Value::Null);
+    if let Value::Object(m) = &mut v {
+        m.insert("run_id".into(), json!(run.id));
+        m.insert("trigger".into(), json!(run.trigger));
+        m.insert("principal".into(), json!(run.principal));
+        m.insert("selection".into(), json!(run.selection));
+        m.insert("change".into(), json!(run.change));
+    }
+    v
+}
+
+/// The caller of a REST run, for the history: never a credential.
+fn rest_principal(
+    state: &AppState,
+    headers: &HeaderMap,
+    key: Option<&crate::keys::KeyContext>,
+) -> String {
+    match key.filter(|k| k.shared && k.control) {
+        Some(k) => format!("key:{}", k.key.id),
+        None => crate::settings::principal(headers, &state.config),
+    }
+}
+
 // ── Routes ──────────────────────────────────────────────────────────
 
 pub const LIST_PATH: &str = "/_rustybin/tests";
+pub const RUNS_PATH: &str = "/_rustybin/tests/runs";
+const RUN_ONE_PATH: &str = "/_rustybin/tests/runs/{id}";
+/// The header a JUnit answer of a run names the kept run in.
+pub const RUN_ID_HEADER: &str = "x-rustybin-test-run";
 const ONE_PATH: &str = "/_rustybin/tests/{name}";
 pub const RUN_PATH: &str = "/_rustybin/tests/run";
 pub const EXPORT_PATH: &str = "/_rustybin/tests/export";
@@ -858,10 +924,31 @@ struct FormatQuery {
     format: Option<String>,
 }
 
+fn junit_wanted(q: &FormatQuery) -> Result<bool, String> {
+    match q.format.as_deref() {
+        None | Some("json") => Ok(false),
+        Some("junit") => Ok(true),
+        Some(f) => Err(format!("format {f:?}: json or junit")),
+    }
+}
+
+fn junit_response(run: &history::TestRun) -> Response {
+    let mut resp = (
+        [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
+        run::junit(&run.report),
+    )
+        .into_response();
+    if let Ok(v) = HeaderValue::from_str(&run.id) {
+        resp.headers_mut().insert(RUN_ID_HEADER, v);
+    }
+    resp
+}
+
 async fn run_handler(
     State(state): State<AppState>,
     Session(session): Session,
     Query(q): Query<FormatQuery>,
+    key: Option<axum::Extension<crate::keys::KeyContext>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -876,27 +963,88 @@ async fn run_handler(
             Err(e) => return refuse(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
         }
     };
-    let junit = match q.format.as_deref() {
-        None | Some("json") => false,
-        Some("junit") => true,
-        Some(f) => {
-            return refuse(
-                StatusCode::BAD_REQUEST,
-                format!("format {f:?}: json or junit"),
-            )
-        }
+    let junit = match junit_wanted(&q) {
+        Ok(j) => j,
+        Err(m) => return refuse(StatusCode::BAD_REQUEST, m),
     };
     let Some(_running) = state.saved_tests.begin_run() else {
         return refuse(StatusCode::CONFLICT, RUN_BUSY);
     };
-    match run::run(&state, &session, body).await {
-        Ok(report) if junit => (
-            [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
-            run::junit(&report),
-        )
-            .into_response(),
-        Ok(report) => Json(report).into_response(),
+    let trigger = history::trigger_from_headers(&headers);
+    let principal = rest_principal(&state, &headers, key.as_ref().map(|k| &k.0));
+    match run_and_keep(&state, &session, body, trigger, &principal).await {
+        Ok(run) if junit => junit_response(&run),
+        Ok(run) => Json(run_view(&run)).into_response(),
         Err((s, m)) => refuse(s, m),
+    }
+}
+
+#[derive(Deserialize)]
+struct PageQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+/// `GET /_rustybin/tests/runs`: newest first, `limit` (20, at most 100)
+/// and `cursor` (the `next_cursor` of the page before).
+async fn runs_handler(
+    State(state): State<AppState>,
+    Query(q): Query<PageQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
+        return r;
+    }
+    Json(runs_page(&state, q.limit, q.cursor.as_deref())).into_response()
+}
+
+/// A page of the history as the API and the tools answer it.
+pub fn runs_page(state: &AppState, limit: Option<usize>, cursor: Option<&str>) -> Value {
+    let h = &state.saved_tests.history;
+    let p = h.page(limit.unwrap_or(history::DEFAULT_PAGE), cursor);
+    json!({
+        "runs": p.runs,
+        "next_cursor": p.next_cursor,
+        "total": p.total,
+        "max_runs": h.cap(),
+        "max_age_days": history::MAX_AGE_DAYS,
+    })
+}
+
+async fn clear_runs_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
+        return r;
+    }
+    let n = state.saved_tests.history.clear();
+    tracing::info!(
+        principal = %crate::settings::principal(&headers, &state.config),
+        "test run history cleared"
+    );
+    Json(json!({ "cleared": n })).into_response()
+}
+
+async fn run_one_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<FormatQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = crate::admin::require_admin(&headers, &state.config) {
+        return r;
+    }
+    let junit = match junit_wanted(&q) {
+        Ok(j) => j,
+        Err(m) => return refuse(StatusCode::BAD_REQUEST, m),
+    };
+    match state.saved_tests.history.get(&id) {
+        Some(run) if junit => junit_response(&run),
+        Some(run) => Json(run_view(&run)).into_response(),
+        None if history::valid_id(&id) => {
+            refuse(StatusCode::NOT_FOUND, format!("no test run {id:?}"))
+        }
+        None => refuse(StatusCode::NOT_FOUND, "no such test run"),
     }
 }
 
@@ -915,6 +1063,8 @@ pub fn router(_state: &AppState) -> Router<AppState> {
     Router::new()
         .route(LIST_PATH, get(list_handler).post(save_handler))
         .route(RUN_PATH, post(run_handler))
+        .route(RUNS_PATH, get(runs_handler).delete(clear_runs_handler))
+        .route(RUN_ONE_PATH, get(run_one_handler))
         .route(EXPORT_PATH, get(export_handler))
         .route(
             ONE_PATH,
@@ -945,6 +1095,23 @@ pub fn catalog() -> Vec<Endpoint> {
             "Run saved tests in process or through their gateway; JSON or JUnit (?format=junit) (admin)",
         )
         .example(Example::post("Run every test", RUN_PATH).json("{}")),
+        Endpoint::new(
+            RUNS_PATH,
+            &["GET", "DELETE"],
+            category::CONTROL,
+            "The history of saved-test runs, newest first (limit, cursor); DELETE forgets every run (admin)",
+        )
+        .example(Example::get("Test run history", RUNS_PATH)),
+        Endpoint::new(
+            RUN_ONE_PATH,
+            &["GET"],
+            category::CONTROL,
+            "One kept test run: each test's result, the change since the previous run; JSON or JUnit (?format=junit) (admin)",
+        )
+        .example(
+            Example::get("A test run", "/_rustybin/tests/runs/20261103T101500000Z-abc123")
+                .expect_status(404),
+        ),
         Endpoint::new(
             EXPORT_PATH,
             &["GET"],
@@ -994,7 +1161,7 @@ pub fn openapi_paths() -> Value {
         },
         RUN_PATH: { "post": {
             "tags": ["Control Plane"], "summary": "Run saved tests (admin)",
-            "description": "Every test, or names; variables fill {{name}} references (else RUSTYBIN_TEST_* environment variables). Tests without a gateway run in process with the caller's session; gateway tests go through the egress policy (purpose replay). At most 200 requests and 60 seconds a run; one run at a time (409 while another goes).",
+            "description": "Every test, or names; variables fill {{name}} references (else RUSTYBIN_TEST_* environment variables). Tests without a gateway run in process with the caller's session; gateway tests go through the egress policy (purpose replay). At most 200 requests and 60 seconds a run; one run at a time (409 while another goes). Every run is kept in the history: the answer has its run_id (the X-Rustybin-Test-Run header with JUnit) and the change since the previous run. X-Rustybin-Client (console or cli) labels the run's trigger, else api.",
             "operationId": "runSavedTests",
             "parameters": [{ "name": "format", "in": "query", "required": false, "schema": { "type": "string", "enum": ["json", "junit"] } }],
             "requestBody": { "required": false, "content": { "application/json": { "schema": {
@@ -1009,6 +1176,33 @@ pub fn openapi_paths() -> Value {
                 "403": { "description": "The egress policy refused a gateway" },
                 "404": { "description": "No such test" },
                 "409": { "description": "Another run is going" }
+            }
+        } },
+        RUNS_PATH: {
+            "get": {
+                "tags": ["Control Plane"], "summary": "The history of test runs (admin)",
+                "description": "Every run of the saved tests (console, CLI, API, MCP), newest first: id, ran_at, trigger, principal (never a credential), the counts, the failing tests and the change since the previous run. At most 200 runs and 30 days (50 in memory without a state directory). Variables given to a run are never kept.",
+                "operationId": "listTestRuns",
+                "parameters": [
+                    { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": history::MAX_PAGE, "default": history::DEFAULT_PAGE } },
+                    { "name": "cursor", "in": "query", "required": false, "schema": { "type": "string" }, "description": "The next_cursor of the page before" }
+                ],
+                "responses": { "200": { "description": "A page: runs, next_cursor, total", "content": obj } }
+            },
+            "delete": {
+                "tags": ["Control Plane"], "summary": "Forget every test run (admin)", "operationId": "clearTestRuns",
+                "responses": { "200": { "description": "cleared: the number of runs forgotten", "content": obj } }
+            }
+        },
+        RUN_ONE_PATH: { "get": {
+            "tags": ["Control Plane"], "summary": "A kept test run (admin)", "operationId": "getTestRun",
+            "parameters": [
+                { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+                { "name": "format", "in": "query", "required": false, "schema": { "type": "string", "enum": ["json", "junit"] } }
+            ],
+            "responses": {
+                "200": { "description": "The run: the report, run_id, trigger, principal, selection, change (JSON, or JUnit XML)", "content": { "application/json": { "schema": { "type": "object" } }, "application/xml": { "schema": { "type": "string" } } } },
+                "404": { "description": "No such run" }
             }
         } },
         EXPORT_PATH: { "get": {

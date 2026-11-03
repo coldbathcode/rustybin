@@ -122,7 +122,12 @@ impl Client {
         query: &[(&str, String)],
         body: Body,
     ) -> reqwest::RequestBuilder {
-        let mut req = self.http.request(method, self.url(path));
+        // A label for the instance (the test run history's trigger), never
+        // a credential nor trusted for anything.
+        let mut req = self
+            .http
+            .request(method, self.url(path))
+            .header("X-Rustybin-Client", "cli");
         if !query.is_empty() {
             req = req.query(query);
         }

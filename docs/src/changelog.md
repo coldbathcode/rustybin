@@ -8,6 +8,16 @@
   `size_limit` you give is answered `413` and never reaches the upstream). Every
   scenario lists its test parameters with their bounds under `parameters`; the console
   shows a field for each, the CLI adds `--half-open-ms` and `--size-limit`.
+- **A history of saved-test runs**: every run of the [saved tests](saved-tests.md#history)
+  (console, CLI, API, management MCP) is kept with its trigger, the caller (never a
+  credential), each test's result and what changed since the previous run (newly
+  failing, newly passing); the last 200 for 30 days in `<state>/test-runs/` (50 in
+  memory without a state directory), never a variable's value. `POST
+  /_rustybin/tests/run` answers `run_id` and `change`; `GET`, `DELETE
+  /_rustybin/tests/runs`, `GET /_rustybin/tests/runs/{id}` (`?format=junit`);
+  `rustybin tests runs | run-show | runs-clear`; the tools `list_test_runs`,
+  `get_test_run`, `clear_test_runs`; the console's Saved tests view has a History
+  card. A test can no longer be named `runs`.
 - **Every tool on one page**: `?page_size=200` on the management MCP URL (it was
   accepted before) now also works with OAuth sign-in, whose resource check ignores the
   query. The new [Connect your coding agent](coding-agents.md) page uses it for the

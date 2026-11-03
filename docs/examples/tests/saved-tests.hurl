@@ -43,10 +43,45 @@ POST {{base_url}}/_rustybin/tests/run
 Authorization: Bearer {{admin_token}}
 {"variables": {"X_API_KEY": "docs-secret-value"}}
 HTTP 200
+[Captures]
+run_id: jsonpath "$.run_id"
 [Asserts]
 jsonpath "$.passed" == true
 jsonpath "$.total" == 2
+jsonpath "$.trigger" == "api"
+body not contains "docs-secret-value"
 # ANCHOR_END: run
+
+# ANCHOR: history
+GET {{base_url}}/_rustybin/tests/runs?limit=5
+Authorization: Bearer {{admin_token}}
+HTTP 200
+[Asserts]
+jsonpath "$.runs[0].id" == "{{run_id}}"
+jsonpath "$.runs[0].passed" == true
+jsonpath "$.runs[0].failing" count == 0
+jsonpath "$.max_age_days" == 30
+# ANCHOR_END: history
+
+# ANCHOR: run_detail
+GET {{base_url}}/_rustybin/tests/runs/{{run_id}}
+Authorization: Bearer {{admin_token}}
+HTTP 200
+[Asserts]
+jsonpath "$.run_id" == "{{run_id}}"
+jsonpath "$.results" count == 2
+jsonpath "$.change.newly_failing" exists
+body not contains "docs-secret-value"
+# ANCHOR_END: run_detail
+
+# ANCHOR: run_junit
+GET {{base_url}}/_rustybin/tests/runs/{{run_id}}?format=junit
+Authorization: Bearer {{admin_token}}
+HTTP 200
+[Asserts]
+header "Content-Type" startsWith "application/xml"
+xpath "string(//testsuite/@tests)" == "2"
+# ANCHOR_END: run_junit
 
 # ANCHOR: missing_variable
 POST {{base_url}}/_rustybin/tests/run
@@ -57,6 +92,18 @@ HTTP 200
 jsonpath "$.passed" == false
 jsonpath "$.results[0].error" contains "needs the variable X_API_KEY"
 # ANCHOR_END: missing_variable
+
+# ANCHOR: change
+# The same test again, now with its variable: it passes where it failed.
+POST {{base_url}}/_rustybin/tests/run
+Authorization: Bearer {{admin_token}}
+{"names": ["orders-page-2"], "variables": {"X_API_KEY": "docs-secret-value"}}
+HTTP 200
+[Asserts]
+jsonpath "$.passed" == true
+jsonpath "$.change.newly_passing" includes "orders-page-2"
+jsonpath "$.change.newly_failing" count == 0
+# ANCHOR_END: change
 
 # ANCHOR: junit
 POST {{base_url}}/_rustybin/tests/run?format=junit
@@ -89,3 +136,11 @@ DELETE {{base_url}}/_rustybin/tests/created-order
 Authorization: Bearer {{admin_token}}
 HTTP 200
 # ANCHOR_END: delete
+
+# ANCHOR: clear_history
+DELETE {{base_url}}/_rustybin/tests/runs
+Authorization: Bearer {{admin_token}}
+HTTP 200
+[Asserts]
+jsonpath "$.cleared" isInteger
+# ANCHOR_END: clear_history

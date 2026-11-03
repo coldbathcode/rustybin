@@ -248,6 +248,9 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("tests", "delete", "<name>", "Delete a saved test.", NO_FLAGS, [("DELETE", "/_rustybin/tests/{name}")], true, "tests delete order-1 --yes"),
     cmd!("tests", "run", "[--names a,b] [--var NAME=value]... [--junit]", "Run saved tests (all by default); exits 1 when one fails. --junit prints JUnit XML for CI.", &[Flag::value("--names", "Only these tests, comma separated"), Flag::value("--var", "A {{variable}}: NAME=value, or NAME=- (stdin) or NAME=@file for a credential (repeat it)"), Flag::switch("--junit", "Print the JUnit XML report")], [("POST", "/_rustybin/tests/run")], false, "tests run --junit"),
     cmd!("tests", "export", "", "Every saved test as one Hurl file (hurl --test --variable base_url=...).", NO_FLAGS, [("GET", "/_rustybin/tests/export")], false, "tests export"),
+    cmd!("tests", "runs", "[--limit N] [--cursor C]", "The history of test runs, newest first: when, the trigger, who, the counts, what changed since the previous run.", &[Flag::value("--limit", "Runs a page (20, at most 100)"), Flag::value("--cursor", "The next_cursor of the page before")], [("GET", "/_rustybin/tests/runs")], false, "tests runs --limit 5"),
+    cmd!("tests", "run-show", "<id> [--junit]", "One kept run: each test's result and failures, the change since the previous run; --junit prints its JUnit XML.", &[Flag::switch("--junit", "Print the JUnit XML report")], [("GET", "/_rustybin/tests/runs/{id}")], false, "tests run-show 20261103T101500000Z-abc123 --junit"),
+    cmd!("tests", "runs-clear", "", "Forget every kept test run (the tests stay).", NO_FLAGS, [("DELETE", "/_rustybin/tests/runs")], true, "tests runs-clear --yes"),
     cmd!("scenario", "list", "", "The gateway scenarios (retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits) and your runs.", NO_FLAGS, [("GET", "/_rustybin/scenarios")], false, "scenario list"),
     cmd!("scenario", "start", "<scenario>", "Prepare a run: its upstream and the steps to configure on the gateway.", NO_FLAGS, [("POST", "/_rustybin/scenarios/{id}/runs")], false, "scenario start caching"),
     cmd!("scenario", "show", "<scenario> <run>", "A run: the setup, what it created, the last verdict.", NO_FLAGS, [("GET", "/_rustybin/scenarios/{id}/runs/{run}")], false, "scenario show caching 1a2b3c4d"),
@@ -1489,6 +1492,24 @@ async fn tests(ctx: &mut Ctx, verb: &str) -> Result<()> {
         "list" => get(ctx, "/_rustybin/tests", &[]).await,
         "export" => get(ctx, "/_rustybin/tests/export", &[]).await,
         "run" => tests_run(ctx).await,
+        "runs" => tests_runs(ctx).await,
+        "runs-clear" => delete(ctx, "/_rustybin/tests/runs", &[]).await,
+        "run-show" => {
+            let id = ctx
+                .args
+                .arg(0, "a run id (rustybin tests runs)")?
+                .to_string();
+            let path = format!("/_rustybin/tests/runs/{}", enc(&id));
+            if ctx.args.has("--junit") {
+                let reply = ctx
+                    .client()?
+                    .get(&path, &[("format", "junit".to_string())])
+                    .await?;
+                ctx.raw(&reply.text);
+                return Ok(());
+            }
+            get(ctx, &path, &[]).await
+        }
         _ => {
             let name = ctx.args.arg(0, "a test name")?.to_string();
             let path = format!("/_rustybin/tests/{}", enc(&name));
@@ -1527,6 +1548,52 @@ async fn tests(ctx: &mut Ctx, verb: &str) -> Result<()> {
             }
         }
     }
+}
+
+/// `rustybin tests runs`: the history as a table (or JSON), newest first.
+async fn tests_runs(ctx: &mut Ctx) -> Result<()> {
+    let query = q(&ctx.args, &[("--limit", "limit"), ("--cursor", "cursor")]);
+    let v = ctx
+        .client()?
+        .get("/_rustybin/tests/runs", &query)
+        .await?
+        .value();
+    if ctx.json {
+        ctx.emit(&v);
+        return Ok(());
+    }
+    let names = |a: &Value| -> String {
+        a.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let rows: Vec<Value> = v["runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|r| {
+            json!({
+                "id": r["id"],
+                "ran_at": r["ran_at"],
+                "trigger": r["trigger"],
+                "principal": r["principal"],
+                "passed": r["passed"],
+                "total": r["total"],
+                "failing": names(&r["failing"]),
+                "newly_failing": names(&r["change"]["newly_failing"]),
+                "newly_passing": names(&r["change"]["newly_passing"]),
+            })
+        })
+        .collect();
+    let mut out = json!({ "total": v["total"], "runs": rows });
+    if v["next_cursor"].is_string() {
+        out["next_cursor"] = v["next_cursor"].clone();
+    }
+    ctx.emit(&out);
+    Ok(())
 }
 
 /// `rustybin tests run`: a table (or JSON, or JUnit XML); exit 1 when a
@@ -1622,7 +1689,14 @@ async fn tests_run(ctx: &mut Ctx) -> Result<()> {
                     })
                 })
                 .collect();
-            ctx.emit(&json!({ "passed": v["passed"], "results": rows }));
+            let mut out = json!({ "passed": v["passed"], "run_id": v["run_id"], "results": rows });
+            let change = &v["change"];
+            for k in ["newly_failing", "newly_passing"] {
+                if change[k].as_array().is_some_and(|a| !a.is_empty()) {
+                    out[k] = change[k].clone();
+                }
+            }
+            ctx.emit(&out);
         }
         v["passed"] == true
     };
