@@ -94,11 +94,15 @@ pub fn get_settings(ctx: &CallCtx, _access: &Access, args: &Value) -> Value {
 
 /// Setting groups whose change widens what the instance reaches or who may
 /// sign in: the outbound policy, the agents' ceilings, the console sign-in
-/// git and single sign-on. A change there is confirmed by the user.
-pub const SENSITIVE_PREFIXES: &[&str] = &["egress.", "agents.", "console.", "git.", "sso."];
+/// git, single sign-on and the trusted proxy header (plus the AI provider
+/// and base URL). A change there is confirmed by the user, after the
+/// permission check.
+pub const SENSITIVE_PREFIXES: &[&str] =
+    &["egress.", "agents.", "console.", "git.", "sso.", "proxy."];
 
 fn sensitive(key: &str) -> bool {
     SENSITIVE_PREFIXES.iter().any(|p| key.starts_with(p))
+        || crate::settings::SECURITY_KEYS.contains(&key)
 }
 
 /// `update_settings` (admin): set values and/or forget stored ones. Secrets
@@ -146,6 +150,20 @@ pub async fn update_settings(
             }
             Some(_) => {}
         }
+    }
+    // The permissions the keys and the values need, exactly as PATCH
+    // /_rustybin/settings checks them (a confirmation is no permission).
+    let keys = values
+        .keys()
+        .chain(unset.iter())
+        .map(|k| (k.as_str(), false));
+    if let Some(p) = crate::settings::keys_need(&access.resolved, settings, keys)
+        .or_else(|| crate::settings::values_need(&access.resolved, &ctx.app.users, &values))
+    {
+        return err(format!(
+            "permission_required: {}. Changing these settings needs it, as PATCH /_rustybin/settings does (a role that grants it, or the admin token).",
+            p.name()
+        ));
     }
     let mut touched: Vec<&str> = values
         .keys()

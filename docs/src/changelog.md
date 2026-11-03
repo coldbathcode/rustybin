@@ -200,6 +200,54 @@
   saved tests and checkpoints are listed for a member of a project who holds their
   permission there.
 
+- Security pass (area A): sign-in, invitations, single sign-on, the model and its
+  enforcement (step 14 of the
+  [plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/testing-2/master-plan.md);
+  every finding and its test in
+  [the step's build notes](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/testing-2/step-14-audit-log.md)).
+
+  **Behaviour changes**:
+  - Single sign-on links a user added ahead only through the email the provider
+    verified (`email_verified: true`), never by a matching name; give such users
+    their email. A new user's name comes from the email only when it is verified.
+    The refusals about a name (`name_taken`, `other_identity`, `not_provisioned`,
+    and a user added ahead without the verified email) reach the browser as one
+    reason, `not_linked`; the detail is logged.
+  - The agent tokens of the built-in OAuth server acting for a single sign-on user
+    (access and refresh) are refused twelve hours after the person last signed in
+    through the provider, until they sign in again.
+  - Under an `https` issuer the discovery document's endpoints must be `https`.
+  - A full table of single sign-on starts drops the oldest of the busiest address
+    instead of refusing (`busy`).
+  - `rustybin login --sso` answers only the callback carrying its own `cli_state`
+    and prints what comes back without control characters.
+  - Every password sign-in runs one argon2id verify under the hash permits, a dummy
+    one without a hash, so a name nobody has can answer `429 busy` like a real one.
+  - The brute-force brake counts per user name (20 failures a minute from every
+    address together, was 100 for every sign-in together); invitations and single
+    sign-on have lanes of their own.
+  - Listed sessions: at most 16 per user (a sign-in past them ends the user's oldest
+    session, whose token is refused) and 4096 in all (was 256 in all).
+  - A first admin's reset link is refused with `409 locked` before it is used while
+    `RUSTYBIN_SETTINGS_LOCK` holds the sign-in (the link stays valid).
+  - `update_settings` needs what `PATCH /_rustybin/settings` needs for each key, and
+    confirms `proxy.*`, `assist.provider` and `assist.base_url` changes too.
+  - The `git.*` settings need `git.write` on top of `settings.write`.
+  - `sso.role_map` and `sso.default_roles` may name only roles whose permissions the
+    setter holds (in a project for `project:role`), on every surface.
+  - `DELETE /_rustybin/sessions/{id}` (and `end_session` with an id) needs every
+    permission of the session's user; `DELETE /_rustybin/sessions` (and `end_session`
+    with `all`) needs every permission.
+  - `GET /_rustybin/config/export` and `export_config` leave out `users:`, `roles:`
+    and `projects:` for a caller without `users.read` (the `editor` role).
+  - On a self-service instance a user or a control JWT is held to each route's
+    permission (only a visitor, an API key or a caller sending a manage token gets
+    the visitor rules), and a visitor reads the instance's mocks but needs the
+    route's permission for their traffic, data, deletion or publication.
+  - A document from the repository gives no role a permission it did not grant and
+    creates no role that single sign-on names.
+  - A `/_rustybin/*` route the catalogue does not know is refused (`403`).
+
 ## 0.4.0 (2026-11-03): testing workflows
 
 Saved tests run without anyone at the console and keep their history, four more

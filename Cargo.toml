@@ -101,6 +101,14 @@ opt-level = 3
 [profile.dev.package.rsa]
 opt-level = 3
 
+# Every password sign-in runs one argon2id verify (a dummy one when there is
+# no hash), so tests that sign in stay fast.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
 # Keep debug builds lean: line tables for our crate, no debuginfo for deps.
 [profile.dev]
 debug = "line-tables-only"

@@ -682,13 +682,15 @@ async fn provisioning_off_admits_only_users_added_ahead() {
     let (state, app) = instance(&fake).await;
     set(&state, json!({ "sso.provision": false }));
     let back = sign_in(&app, &fake, |i, n| sign_rs256(&base_claims(i, n))).await;
-    assert_eq!(refusal_of(&back), "not_provisioned");
+    assert_eq!(refusal_of(&back), "not_linked");
     assert!(state.users.find_by_name("alice").is_none());
     // An admin adds alice as a single sign-on user: no link.
     let mut r = req(
         "POST",
         "/_rustybin/users",
-        Some(json!({ "name": "alice", "roles": ["viewer"], "sso": true })),
+        Some(
+            json!({ "name": "alice", "email": "alice@example.com", "roles": ["viewer"], "sso": true }),
+        ),
     );
     r.headers_mut()
         .insert("x-rustybin-admin-token", ADMIN_TOKEN.parse().unwrap());
@@ -711,7 +713,7 @@ async fn provisioning_off_admits_only_users_added_ahead() {
         sign_rs256(&c)
     })
     .await;
-    assert_eq!(refusal_of(&back), "other_identity");
+    assert_eq!(refusal_of(&back), "not_linked");
     // Nor a password user's name.
     let back = sign_in(&app, &fake, |i, n| {
         let mut c = base_claims(i, n);
@@ -720,7 +722,7 @@ async fn provisioning_off_admits_only_users_added_ahead() {
         sign_rs256(&c)
     })
     .await;
-    assert_eq!(refusal_of(&back), "name_taken");
+    assert_eq!(refusal_of(&back), "not_linked");
 }
 
 #[tokio::test]
@@ -1423,4 +1425,188 @@ fn role_map_objects_name_a_project() {
     );
     assert!(check_role_map(&v).is_ok());
     assert!(check_role_map(&json!(["g=Bad:editor"])).is_err());
+}
+
+// ── Step 14, the security pass (area A) ─────────────────────────────
+
+/// Create a single sign-on user ahead through the API (the admin token).
+async fn add_ahead(app: &Router, body: Value) {
+    let mut r = req("POST", "/_rustybin/users", Some(body));
+    r.headers_mut()
+        .insert("x-rustybin-admin-token", ADMIN_TOKEN.parse().unwrap());
+    let resp = app.clone().oneshot(r).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+/// The base claims with `changes` applied (`null` removes a claim).
+fn claims_with(issuer: &str, nonce: &str, changes: &Value) -> Value {
+    let mut c = base_claims(issuer, nonce);
+    for (k, v) in changes.as_object().unwrap() {
+        if v.is_null() {
+            c.as_object_mut().unwrap().remove(k);
+        } else {
+            c[k] = v.clone();
+        }
+    }
+    c
+}
+
+/// Finding A1: a name the provider lets people choose, or an unverified
+/// email, never links a user created ahead (and its pinned roles); the
+/// verified email does, whatever the name.
+#[tokio::test]
+async fn a_name_alone_never_links_a_user_created_ahead() {
+    let fake = fake_provider().await;
+    let (state, app) = instance(&fake).await;
+    set(&state, json!({ "sso.provision": false }));
+    add_ahead(
+        &app,
+        json!({ "name": "bob", "email": "bob@corp.example", "roles": ["admin"], "sso": true }),
+    )
+    .await;
+    // The attacker's chosen name with another email; the right email
+    // unverified; the email without the claim; the name sanitised from
+    // `bob!`.
+    for changes in [
+        json!({ "sub": "evil", "preferred_username": "bob", "email": "evil@corp.example", "email_verified": false }),
+        json!({ "sub": "evil", "preferred_username": "bob", "email": "bob@corp.example", "email_verified": false }),
+        json!({ "sub": "evil", "preferred_username": "bob", "email": "bob@corp.example", "email_verified": null }),
+        json!({ "sub": "evil", "preferred_username": "bob!", "email": null, "email_verified": null }),
+    ] {
+        let back = sign_in(&app, &fake, |i, n| sign_rs256(&claims_with(i, n, &changes))).await;
+        assert_eq!(refusal_of(&back), "not_linked", "{changes}");
+    }
+    let bob = state.users.find_by_name("bob").unwrap();
+    assert!(bob.sso.is_none(), "never linked: {:?}", bob.sso);
+    // Bob himself: the provider vouches for the email (another name).
+    let changes = json!({ "sub": "bob-subject", "preferred_username": "bob.smith", "email": "Bob@corp.example", "email_verified": true });
+    let back = sign_in(&app, &fake, |i, n| sign_rs256(&claims_with(i, n, &changes))).await;
+    let (s, body) = redeem(&app, code_of(&back), VERIFIER).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["user"], "bob");
+    let bob = state.users.find_by_name("bob").unwrap();
+    let link = bob.sso.expect("linked");
+    assert_eq!(link.subject, "bob-subject");
+    assert!(link.vouched_at.is_some());
+    // A new user's name comes from the email only when it is verified.
+    let unverified = Person {
+        subject: "s-1".into(),
+        name: None,
+        display_name: None,
+        email: Some("carol@corp.example".into()),
+        email_verified: None,
+        groups: Vec::new(),
+    };
+    assert_eq!(sign_in_name(&unverified).as_deref(), Some("s-1"));
+    let verified = Person {
+        email_verified: Some(true),
+        ..unverified
+    };
+    assert_eq!(
+        sign_in_name(&verified).as_deref(),
+        Some("carol@corp.example")
+    );
+}
+
+/// Finding A10: whether a password account or nobody has the name, the
+/// browser gets one reason.
+#[tokio::test]
+async fn account_refusals_tell_nothing_about_the_name() {
+    let fake = fake_provider().await;
+    let (state, app) = instance(&fake).await;
+    set(&state, json!({ "sso.provision": false }));
+    for name in ["rustybin", "nobody-here"] {
+        let changes = json!({ "sub": format!("sub-{name}"), "preferred_username": name });
+        let back = sign_in(&app, &fake, |i, n| sign_rs256(&claims_with(i, n, &changes))).await;
+        assert_eq!(refusal_of(&back), "not_linked", "{name}");
+    }
+}
+
+/// Finding A9: under an https issuer every endpoint of the discovery
+/// document is https; a loopback http issuer keeps http.
+#[test]
+fn discovery_endpoints_are_https_under_an_https_issuer() {
+    let doc = |token: &str| {
+        json!({
+            "issuer": "https://idp.example",
+            "authorization_endpoint": "https://idp.example/authorize",
+            "token_endpoint": token,
+            "jwks_uri": "https://idp.example/jwks",
+        })
+    };
+    let Err(e) = provider::parse_discovery(&doc("http://idp.example/token"), "https://idp.example")
+    else {
+        panic!("an http token endpoint under an https issuer");
+    };
+    assert!(e.contains("token_endpoint"), "{e}");
+    assert!(
+        provider::parse_discovery(&doc("https://idp.example/token"), "https://idp.example").is_ok()
+    );
+    let local = json!({
+        "issuer": "http://127.0.0.1:9",
+        "authorization_endpoint": "http://127.0.0.1:9/authorize",
+        "token_endpoint": "http://127.0.0.1:9/token",
+        "jwks_uri": "http://127.0.0.1:9/jwks",
+    });
+    assert!(provider::parse_discovery(&local, "http://127.0.0.1:9").is_ok());
+}
+
+/// Finding A5: a full table of sign-ins under way drops the oldest of the
+/// busiest address; a start from a new address is never refused.
+#[tokio::test]
+async fn a_full_sign_in_table_drops_the_busiest_address_first() {
+    let fake = fake_provider().await;
+    let (state, _app) = instance(&fake).await;
+    let challenge = challenge_of(VERIFIER);
+    let cb = "http://rustybin.test/_rustybin/sso/callback";
+    let busy = |a: u16| IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, a, 0, 0, 0, 0, 1));
+    // 26 addresses (distinct /64s) start ten each: more than the table.
+    for a in 0..26u16 {
+        for _ in 0..MAX_PENDING_PER_ADDRESS {
+            let _ = state
+                .sso
+                .begin(ReturnTo::Console, &challenge, cb, Some(busy(a)))
+                .await;
+        }
+    }
+    assert!(state.sso.pending_count() <= MAX_PENDING);
+    let person: IpAddr = "203.0.113.9".parse().unwrap();
+    let url = state
+        .sso
+        .begin(ReturnTo::Console, &challenge, cb, Some(person))
+        .await
+        .expect("a new address still starts");
+    let mine = query_of(&url)["state"].clone();
+    // More starts from the busy addresses push out theirs, not this one.
+    for a in 0..26u16 {
+        let _ = state
+            .sso
+            .begin(ReturnTo::Console, &challenge, cb, Some(busy(a)))
+            .await;
+    }
+    assert!(state.sso.pending_count() <= MAX_PENDING);
+    assert!(lock(&state.sso.pending).contains_key(&mine));
+}
+
+/// Finding A3 (the store's side): a single sign-on vouches for a person
+/// for a sign-in token's life.
+#[tokio::test]
+async fn a_single_sign_on_vouches_for_twelve_hours() {
+    let fake = fake_provider().await;
+    let clock = Arc::new(crate::limits::ManualClock::new(chrono::Utc::now()));
+    let mut c = config();
+    c.users = Arc::new(crate::rbac::Users::with_clock(clock.clone()));
+    let state = AppState::for_tests_with_clock(c, clock.clone());
+    let issuer = fake.lock().unwrap().issuer.clone();
+    configure(&state, &issuer);
+    let app = test_app_with(state.clone());
+    let back = sign_in(&app, &fake, |i, n| sign_rs256(&base_claims(i, n))).await;
+    let (s, body) = redeem(&app, code_of(&back), VERIFIER).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let alice = state.users.find_by_name("alice").unwrap();
+    assert!(state.users.sso_vouched(&alice));
+    clock.advance(std::time::Duration::from_secs(13 * 3600));
+    assert!(!state.users.sso_vouched(&alice));
+    let first = state.users.first_admin().unwrap();
+    assert!(state.users.sso_vouched(&first), "a password user");
 }

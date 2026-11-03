@@ -818,16 +818,24 @@ impl Svc {
         }
     }
 
-    /// The route's (or tool's) permission on the mock's project.
+    /// The route's (or tool's) permission on an instance mock: in the
+    /// mock's project, or the instance's. A visitor's mock answers to the
+    /// visitor rules instead; reading an instance mock outside projects
+    /// stays open to whoever reached the handler (a visitor on a
+    /// self-service demo reads the instance's mocks, as in 0.4), but its
+    /// traffic, data, deletion or publication need their permission.
     fn route_need_on(&self, s: &Snapshot) -> SvcResult<()> {
         let Some(p) = self.caller.route_need else {
             return Ok(());
         };
-        let scoped = s.project.is_some() || self.caller.resolved.has_projects();
-        if !s.owner.is_visitor() && scoped && !self.caller.may(p, s) {
-            return Err(ServiceError::permission(&self.caller.resolved, p));
+        if s.owner.is_visitor() || self.caller.may(p, s) {
+            return Ok(());
         }
-        Ok(())
+        let scoped = s.project.is_some() || self.caller.resolved.has_projects();
+        if !scoped && p == crate::rbac::Permission::MocksRead {
+            return Ok(());
+        }
+        Err(ServiceError::permission(&self.caller.resolved, p))
     }
 
     /// The mock, if the caller may change it: `mocks.write` in the instance

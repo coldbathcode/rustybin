@@ -106,9 +106,14 @@ sign-in. The provider's tokens (access, refresh, ID) are never kept.
 
 A refusal goes back to the sign-in screen with its reason: `expired` (the sign-in
 took over ten minutes), `denied` (the provider refused), `provider_error`,
-`invalid_id_token`, `domain_not_allowed`, `email_unverified`, `not_provisioned`,
-`name_taken`, `other_identity`, `disabled`, `no_role`, `last_admin`,
-`rate_limited`.
+`invalid_id_token`, `domain_not_allowed`, `email_unverified`, `not_linked`,
+`disabled`, `no_role`, `last_admin`,
+`rate_limited`. `not_linked` stands for every refusal that is about the name: a
+password user has it, another identity of the provider is linked to it, a user
+added ahead has it without the verified email, or nobody has it while
+`sso.provision` is off. The browser (and so a person choosing their name at the
+provider) learns nothing about the instance's users; the detail is in the log
+(`rustybin::sso`).
 
 ## Users from single sign-on
 
@@ -139,12 +144,22 @@ a later sign-in finds them whatever name the provider gives.
   says. The guard rails of [users](users.md) apply: the provider cannot drop the
   last enabled admin (the sign-in is refused with `last_admin`).
 - **An identity never takes over a password account**: a provider user whose name
-  is a password user's is refused (`name_taken`), and another subject of the same
-  provider with a linked user's name too (`other_identity`).
+  is a password user's is refused, and another subject of the same provider with a
+  linked user's name too (both `not_linked`).
 - **Added ahead** (`sso.provision` off): `POST /_rustybin/users` with `"sso": true`
   (`rustybin users invite <name> --sso --role viewer`, the `invite_user` tool with
   `sso: true`, the console's Invite with **Single sign-on user**) creates the user
-  with no link; the roles given are pinned; their first sign-in links them by name.
+  with no link; the roles given are pinned. Give the user their email: the first
+  sign-in links them only when the provider vouches for that email
+  (`email_verified: true` in the ID token; a user without an email whose name is the
+  address counts), whatever name the provider sends. A matching name alone never
+  links (a provider may let people choose their user name, or leave an email
+  unverified), and a new user's name comes from the email only when it is verified.
+- **The provider vouches for twelve hours**: a sign-in token lives twelve hours, and
+  the agent tokens of the built-in OAuth server acting for a single sign-on user
+  (access and refresh) are refused once the person last signed in through the
+  provider more than twelve hours ago, until they sign in again. A person removed at
+  the provider keeps no agent past it.
 
 ## Only single sign-on
 
@@ -192,9 +207,19 @@ sign-on user's.
   verifier whose challenge started the sign-in, so a code that leaks from the
   address bar is useless.
 - **Bounds**: at most 256 sign-ins under way (10 per client address), each for ten
-  minutes; at most 256 one-time codes, each for two minutes. The callback and the
-  code exchange are throttled like the password sign-in (5 failures per client
-  address and minute, 100 from every address together).
+  minutes: a full table drops the oldest sign-in of the address with the most under
+  way, so filling it never refuses a person's start. At most 256 one-time codes,
+  each for two minutes. The callback and the code exchange are throttled like the
+  password sign-in (5 failures per client address and minute, 20 from every address
+  together in a lane of their own: failed callbacks never hold back a password
+  sign-in).
+- **Discovery**: under an `https` issuer the authorization, token and keys endpoints
+  must be `https` too (`http` only under a loopback `http` issuer): the client
+  secret, the code and the keys never travel in the clear.
+- **The command line's listener** answers only the callback that carries its own
+  random `cli_state` (kept in `return_to`'s query): a page that finds the port
+  cannot end `rustybin login --sso` with a forged answer, and what comes back is
+  printed without control characters.
 - **The client secret** is a secret setting: sealed at rest, shown as `{set,
   hint}`, never a tool input nor returned.
 - **From git**: a document [from the repository](source-control.md) never changes

@@ -4180,3 +4180,154 @@ async fn test_sso_reads_the_providers_discovery_and_keys() {
     );
     server.shutdown();
 }
+
+// ── Step 14, the security pass (area A) ─────────────────────────────
+
+fn perms_bearer(perms: &[&str]) -> String {
+    let token = crate::test_support::sign_control_jwt(
+        &json!({
+            "aud": "test-instance",
+            "exp": chrono::Utc::now().timestamp() + 600,
+            "rb_perms": perms,
+        }),
+        false,
+    );
+    format!("Bearer {token}")
+}
+
+/// Finding M1: `update_settings` needs what `PATCH /_rustybin/settings`
+/// needs for each key (a confirmation is no permission).
+#[tokio::test]
+async fn update_settings_tool_needs_settings_security() {
+    let app = app_with(jwt_config());
+    let bearer = perms_bearer(&["settings.read", "settings.write"]);
+    let headers: [(&str, &str); 1] = [("authorization", &bearer)];
+    for (key, value, missing) in [
+        (
+            "egress.allow",
+            json!(["attacker.example"]),
+            "settings.security",
+        ),
+        ("egress.allow_loopback", json!(true), "settings.security"),
+        (
+            "proxy.client_ip_header",
+            json!("X-Forwarded-For"),
+            "settings.security",
+        ),
+        ("sso.default_roles", json!(["admin"]), "settings.security"),
+        ("portal.title", json!("Ours"), "portal.settings"),
+        (
+            "assist.base_url",
+            json!("https://llm.example/v1"),
+            "settings.security",
+        ),
+        (
+            "git.remote",
+            json!("https://attacker.example/x.git"),
+            "git.write",
+        ),
+    ] {
+        let r = tool(
+            &app,
+            &headers,
+            "update_settings",
+            json!({ "values": { key: value }, "confirm": true }),
+        )
+        .await;
+        assert!(is_error(&r), "{key}: {r}");
+        assert!(
+            text_of(&r).contains(&format!("permission_required: {missing}")),
+            "{key}: {}",
+            text_of(&r)
+        );
+    }
+    // The role map grants only what the caller holds.
+    let bearer = perms_bearer(&["settings.read", "settings.write", "settings.security"]);
+    let headers: [(&str, &str); 1] = [("authorization", &bearer)];
+    let r = tool(
+        &app,
+        &headers,
+        "update_settings",
+        json!({ "values": { "sso.role_map": ["x=admin"] }, "confirm": true }),
+    )
+    .await;
+    assert!(text_of(&r).contains("permission_required"), "{r}");
+}
+
+/// Finding M1, the parity: every key `PATCH /_rustybin/settings` refuses
+/// to a caller holding `settings.write` only, the tool refuses, naming the
+/// same permission, and the other way round.
+#[tokio::test]
+async fn update_settings_refuses_every_key_rest_refuses() {
+    let state = test_state_with(jwt_config());
+    let app = test_app_with(state.clone());
+    let bearer = perms_bearer(&["settings.read", "settings.write"]);
+    let headers: [(&str, &str); 1] = [("authorization", &bearer)];
+    let keys: Vec<(String, Value)> = state
+        .settings
+        .specs()
+        .iter()
+        .filter(|s| !s.secret)
+        .map(|s| (s.key.to_string(), state.settings.get(s.key).0))
+        .collect();
+    assert!(keys.len() > 30, "{}", keys.len());
+    for (key, value) in keys {
+        let req = Request::builder()
+            .method("PATCH")
+            .uri("/_rustybin/settings")
+            .header("authorization", &bearer)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "values": { key.as_str(): value } }).to_string(),
+            ))
+            .expect("request");
+        let resp = app.clone().oneshot(req).await.expect("response");
+        let status = resp.status();
+        let v = body_json(resp).await;
+        let rest = (status == StatusCode::FORBIDDEN).then(|| v["permission"].clone());
+        let r = tool(
+            &app,
+            &headers,
+            "update_settings",
+            json!({ "values": { key.as_str(): value }, "confirm": true }),
+        )
+        .await;
+        let text = text_of(&r);
+        match rest {
+            Some(p) => assert!(
+                text.contains(&format!(
+                    "permission_required: {}",
+                    p.as_str().unwrap_or("?")
+                )),
+                "{key}: REST refused {p}, the tool said {text}"
+            ),
+            None => assert!(
+                !text.contains("permission_required"),
+                "{key}: REST let it through ({status}), the tool said {text}"
+            ),
+        }
+    }
+}
+
+/// Finding M4: `export_config` without `users.read` carries no users,
+/// roles or projects.
+#[tokio::test]
+async fn export_config_without_users_read_has_no_users() {
+    let app = app_with(jwt_config());
+    let bearer = perms_bearer(&["config.export", "mocks.read"]);
+    let headers: [(&str, &str); 1] = [("authorization", &bearer)];
+    let r = tool(&app, &headers, "export_config", json!({ "format": "json" })).await;
+    assert!(!is_error(&r), "{r}");
+    let doc = &r["structuredContent"]["document"];
+    assert!(doc.is_object(), "{r}");
+    for key in ["users", "roles", "projects"] {
+        assert!(doc.get(key).is_none(), "{key}: {doc}");
+    }
+    let bearer = perms_bearer(&["config.export", "mocks.read", "users.read"]);
+    let headers: [(&str, &str); 1] = [("authorization", &bearer)];
+    let r = tool(&app, &headers, "export_config", json!({ "format": "json" })).await;
+    assert!(
+        r["structuredContent"]["document"].get("roles").is_some(),
+        "{r}"
+    );
+}

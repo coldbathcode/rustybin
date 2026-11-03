@@ -57,6 +57,13 @@ Nothing more:
   password sign-in) is kept as it is: a pusher would otherwise repoint the issuer
   or map their own group to `admin` ([Single sign-on](sso.md)). A different value is
   a problem, and prune leaves them alone.
+- **Not wider roles.** A pulled `roles:` section never defines, changes or prunes a
+  privileged role (one granting `users.manage` or `settings.security`), never gives
+  an existing role a permission it did not grant (any permission: its holders would
+  gain it), and never creates a role that `sso.role_map` or `sso.default_roles`
+  names (the provider's groups would give it at the next sign-in). A role may
+  narrow, and a new role nothing names is created (nobody holds it until someone
+  with `users.manage` assigns it). Each refusal is a problem, the role kept as it is.
 - **Not the sign-in.** In password mode a document never changes the console's user
   name or password hash (a change is a problem), and pruning never removes them, so a
   document without them cannot bring back the default password; a public instance
@@ -83,7 +90,9 @@ read.
 ## Connect a repository
 
 The `git.*` settings (**Management, Source control**, or `PATCH /_rustybin/settings`;
-seeded by the `RUSTYBIN_CONFIG_GIT*` variables):
+seeded by the `RUSTYBIN_CONFIG_GIT*` variables). Changing one needs `git.write` on
+top of `settings.write` (the remote and the automatic mode decide where the whole
+instance is pushed and what a pull applies), and `secrets.write` for `git.token`:
 
 | Setting | Variable | Default | Meaning |
 |---|---|---|---|

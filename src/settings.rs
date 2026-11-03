@@ -893,6 +893,12 @@ impl Settings {
         self.locked
     }
 
+    /// May a stored value of `key` be written (a known key that
+    /// `RUSTYBIN_SETTINGS_LOCK` does not hold)?
+    pub fn writable(&self, key: &str) -> bool {
+        self.spec(key).is_some_and(|s| self.stored_wins(s))
+    }
+
     pub fn key_source(&self) -> KeySource {
         self.secrets.source()
     }
@@ -1518,8 +1524,10 @@ pub const SECURITY_KEYS: &[&str] = &["assist.provider", "assist.base_url"];
 
 /// What changing `key` needs on top of the route's `settings.write`:
 /// `settings.security` for a security group, `portal.settings` for a portal
-/// setting, `secrets.write` for a secret (`secret`: the change sets or
-/// clears a secret value).
+/// setting, `git.write` for source control (the remote and the automatic
+/// mode decide where the whole instance is pushed and what a pull applies),
+/// `secrets.write` for a secret (`secret`: the change sets or clears a
+/// secret value).
 pub fn extra_permissions(key: &str, secret: bool) -> Vec<crate::rbac::Permission> {
     use crate::rbac::Permission as P;
     let mut out = Vec::new();
@@ -1529,28 +1537,62 @@ pub fn extra_permissions(key: &str, secret: bool) -> Vec<crate::rbac::Permission
     if key.starts_with("portal.") {
         out.push(P::PortalSettings);
     }
+    if key.starts_with("git.") {
+        out.push(P::GitWrite);
+    }
     if secret {
         out.push(P::SecretsWrite);
     }
     out
 }
 
+/// The first permission a settings change needs that the caller lacks:
+/// what every key needs ([`extra_permissions`]). The one check of the
+/// REST route, the `update_settings` tool and a document's `settings:`.
+pub fn keys_need<'a>(
+    caller: &crate::rbac::Resolved,
+    settings: &Settings,
+    keys: impl IntoIterator<Item = (&'a str, bool)>,
+) -> Option<crate::rbac::Permission> {
+    for (key, secret) in keys {
+        let secret = secret || settings.spec(key).is_some_and(|s| s.secret);
+        if let Some(p) = extra_permissions(key, secret)
+            .into_iter()
+            .find(|p| !caller.has(*p))
+        {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// The first permission the values of a settings change grant that the
+/// caller lacks: a single sign-on role map or default roles naming a role
+/// whose permissions the caller does not hold (nobody grants more than
+/// they hold, through the provider's groups included).
+pub fn values_need(
+    caller: &crate::rbac::Resolved,
+    users: &crate::rbac::Users,
+    values: &BTreeMap<String, Value>,
+) -> Option<crate::rbac::Permission> {
+    values
+        .iter()
+        .find_map(|(k, v)| crate::sso::grants_need(caller, users, k, v))
+}
+
 /// The body check of a settings change: `Ok` when the caller holds what
-/// every key needs ([`extra_permissions`]), else the refusal naming the
-/// first permission missing.
+/// every key needs ([`keys_need`]), else the refusal naming the first
+/// permission missing.
 #[allow(clippy::result_large_err)]
 pub fn check_keys<'a>(
     caller: &crate::rbac::Resolved,
     settings: &Settings,
     keys: impl IntoIterator<Item = (&'a str, bool)>,
 ) -> Result<(), Response> {
-    for (key, secret) in keys {
-        let secret = secret || settings.spec(key).is_some_and(|s| s.secret);
-        for p in extra_permissions(key, secret) {
-            crate::rbac::require(caller, p)?;
-        }
+    match keys_need(caller, settings, keys) {
+        Some(p) => Err(crate::rbac::refuse(caller, p)),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn refusal(e: UpdateError) -> Response {
@@ -1699,6 +1741,9 @@ async fn patch_settings(
             .chain(patch.secrets.keys().map(|k| (k.as_str(), true))),
     ) {
         return resp;
+    }
+    if let Some(p) = values_need(&caller, &state.users, &patch.values) {
+        return crate::rbac::refuse(&caller, p);
     }
     let who = principal(&headers, &state.config);
     let sign_in = crate::login::enabled(&state.config) && touches_sign_in(&patch);

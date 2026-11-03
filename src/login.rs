@@ -30,7 +30,8 @@
 //! tokens), the issued sessions (bounded, for Management, Sign-in) and the
 //! failed attempts per client address (an IPv6 /64) and user name (5 per
 //! minute, then 429 with `Retry-After`, exponential up to 10 minutes), plus
-//! a budget of failures from every address together. Every attempt is
+//! a budget of failures at each user name from every address together
+//! (invitations and single sign-on are lanes of their own). Every attempt is
 //! audited on the `rustybin::auth` target with the user name (control
 //! characters escaped), the address and the outcome, never the password.
 
@@ -85,14 +86,22 @@ pub const MAX_REVOKED: usize = 4096;
 /// Revoked token subjects (an AI agent's OAuth client, see
 /// `crate::mcp::manage::agents`).
 pub const MAX_REVOKED_SUBJECTS: usize = 1024;
-pub const MAX_SESSIONS: usize = 256;
+/// Listed sessions of every user together (a backstop: the per-user cap
+/// binds first).
+pub const MAX_SESSIONS: usize = 4096;
+/// Listed sessions of one user: a sign-in past it ends the user's oldest
+/// session (its token is refused from then on), so a session is never live
+/// without being listed, and nobody's sign-ins push another user's out.
+pub const MAX_SESSIONS_PER_USER: usize = 16;
 pub const MAX_ATTEMPT_ADDRESSES: usize = 1024;
 /// Failed attempts per address and user name and window before they wait.
 pub const FAILURES_PER_WINDOW: u32 = 5;
-/// Failed attempts from every address together per window before every
-/// sign-in waits for the window's end: rotating addresses buys no more
-/// guesses than this.
-pub const GLOBAL_FAILURES_PER_WINDOW: u32 = 100;
+/// Failed attempts at one user name from every address together per
+/// window before sign-ins as that name wait for the window's end: rotating
+/// addresses buys no more guesses at a name than this, and failures at
+/// other names (or junk invitation tokens and single sign-on callbacks,
+/// each a lane of their own) never hold anyone else back.
+pub const NAME_FAILURES_PER_WINDOW: u32 = 20;
 pub const WINDOW_SECS: u64 = 60;
 pub const FIRST_BLOCK_SECS: u64 = 60;
 pub const MAX_BLOCK_SECS: u64 = 600;
@@ -313,33 +322,63 @@ pub fn valid_new_password(plain: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A hash nobody's password matches, verified where there is no hash to
+/// check (an unknown name, an invited user, user one's plain password from
+/// the environment or the default): every sign-in runs exactly one argon2id
+/// verify under a hash permit, so neither the time nor a `busy` answer
+/// tells a real user from a name nobody has. Made once per process, with
+/// the parameters every stored hash uses.
+fn dummy_hash() -> &'static str {
+    static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DUMMY.get_or_init(|| {
+        hash_password("rustybin-no-such-user").unwrap_or_else(|_| {
+            "$argon2id$v=19$m=19456,t=2,p=1$cnVzdHliaW5kdW1teQ$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string()
+        })
+    })
+}
+
+/// Verify `plain` against `hash` (the dummy one when `None`) off the async
+/// runtime, under a hash permit. `None`: every permit is taken.
+async fn verify_with_permit(state: &AppState, hash: Option<String>, plain: &str) -> Option<bool> {
+    let permit = state.config.console_tokens.hash_permit()?;
+    let plain = plain.to_string();
+    Some(
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            match hash {
+                Some(h) => verify_hash(&h, &plain),
+                None => {
+                    let _ = verify_hash(dummy_hash(), &plain);
+                    false
+                }
+            }
+        })
+        .await
+        .unwrap_or(false),
+    )
+}
+
 /// Do `user` and `password` sign in? The stored or seeded hash wins, else the
 /// plain password from the environment, else the default. Both the user name
-/// and the password are always checked (constant-time comparison, the hash
-/// off the async runtime), whatever the outcome. `None`: every hash permit is
-/// taken (`HASH_PERMITS`), try again in a moment.
+/// and the password are always checked (constant-time comparison, one argon2id
+/// verify off the async runtime: the dummy one without a hash), whatever the
+/// outcome. `None`: every hash permit is taken (`HASH_PERMITS`), try again in
+/// a moment.
 pub async fn check_credentials(state: &AppState, user: &str, password: &str) -> Option<bool> {
     let user_ok = constant_time_eq(user, &effective_user(&state.settings));
     let password_ok = match state.settings.secret(HASH_KEY) {
-        Some(hash) => {
-            let permit = state.config.console_tokens.hash_permit()?;
-            let hash = hash.clone();
-            let plain = password.to_string();
-            tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                verify_hash(&hash, &plain)
-            })
-            .await
-            .unwrap_or(false)
+        Some(hash) => verify_with_permit(state, Some(hash.to_string()), password).await?,
+        None => {
+            verify_with_permit(state, None, password).await?;
+            constant_time_eq(
+                password,
+                state
+                    .config
+                    .console_password
+                    .as_deref()
+                    .unwrap_or(DEFAULT_PASSWORD),
+            )
         }
-        None => constant_time_eq(
-            password,
-            state
-                .config
-                .console_password
-                .as_deref()
-                .unwrap_or(DEFAULT_PASSWORD),
-        ),
     };
     Some(user_ok & password_ok)
 }
@@ -368,9 +407,37 @@ struct Issued {
     user: String,
     user_id: String,
     issued_at: i64,
+    /// When it was issued, in milliseconds (the `rb_ms` claim): unique
+    /// and increasing, the order the per-user floor follows.
+    issued_ms: i64,
     expires_at: i64,
     ip: Option<IpAddr>,
     last_used: i64,
+}
+
+impl Issued {
+    fn of(claims: &Value, user: &str, user_id: &str, ip: Option<IpAddr>) -> Self {
+        let iat = claims["iat"].as_i64().unwrap_or(0);
+        Self {
+            jti: claims["jti"].as_str().unwrap_or("").to_string(),
+            user: user.to_string(),
+            user_id: user_id.to_string(),
+            issued_at: iat,
+            issued_ms: token_ms(claims),
+            expires_at: claims["exp"].as_i64().unwrap_or(0),
+            ip,
+            last_used: iat,
+        }
+    }
+}
+
+/// When a sign-in token was issued, in milliseconds: `rb_ms`, else `iat`
+/// (a token from before 0.5).
+fn token_ms(claims: &Value) -> i64 {
+    claims
+        .get("rb_ms")
+        .and_then(Value::as_i64)
+        .unwrap_or_else(|| claims["iat"].as_i64().unwrap_or(0).saturating_mul(1000))
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -399,13 +466,23 @@ pub struct Tokens {
     /// load.
     agent_revoked: Mutex<BTreeMap<String, i64>>,
     issued: Mutex<VecDeque<Issued>>,
+    /// Per user: sign-in tokens issued before this time (milliseconds) are
+    /// refused, their sessions ended when the user went past
+    /// [`MAX_SESSIONS_PER_USER`]. A floor, not a list: however many times
+    /// a user signs in, it takes one entry and never pushes out anyone
+    /// else's revocation. Dropped once every token under it expired.
+    floors: Mutex<HashMap<String, i64>>,
+    /// The last `rb_ms` handed out (unique and increasing).
+    last_ms: std::sync::atomic::AtomicI64,
     /// Failed attempts per client address (an IPv6 /64) and user name: one
     /// client behind a shared address (a proxy without
     /// `RUSTYBIN_TRUST_FORWARD`) typing another name does not lock the
     /// real user out.
     attempts: Mutex<HashMap<AttemptKey, Attempt>>,
-    /// Failures from every address in the current window.
-    global: Mutex<GlobalWindow>,
+    /// Failures from every address in the current window, per user name
+    /// tried (lower case; the invitation and single sign-on lanes are names
+    /// no user can have). At most [`MAX_ATTEMPT_ADDRESSES`] names.
+    global: Mutex<HashMap<String, GlobalWindow>>,
     /// One writer of `sessions.json` at a time, the snapshot taken under it:
     /// a slower save never overwrites a newer one (a revocation is never lost).
     saving: Mutex<()>,
@@ -420,23 +497,22 @@ pub struct Tokens {
 /// the user name tried (lower case, at most 64 characters).
 type AttemptKey = (IpAddr, String);
 
-/// Failures from every address in one window.
+/// Failures at one name from every address in one window.
 #[derive(Clone, Copy, Debug, Default)]
 struct GlobalWindow {
     start: Duration,
     failures: u32,
 }
 
+fn name_lane(user: &str) -> String {
+    user.chars()
+        .take(MAX_USER_CHARS)
+        .collect::<String>()
+        .to_lowercase()
+}
+
 fn attempt_key(ip: Option<IpAddr>, user: &str) -> Option<AttemptKey> {
-    ip.map(|ip| {
-        (
-            crate::session::address_bucket(ip),
-            user.chars()
-                .take(MAX_USER_CHARS)
-                .collect::<String>()
-                .to_lowercase(),
-        )
-    })
+    ip.map(|ip| (crate::session::address_bucket(ip), name_lane(user)))
 }
 
 /// Password hashes (sign-in, password change) computed at once.
@@ -453,7 +529,11 @@ struct SessionsDoc {
     revoked: BTreeMap<String, i64>,
     revoked_subjects: BTreeMap<String, i64>,
     agent_revoked: BTreeMap<String, i64>,
+    floors: BTreeMap<String, i64>,
 }
+
+/// Users with a session floor at most (more than the user store holds).
+const MAX_FLOORS: usize = 1024;
 
 impl std::fmt::Debug for Tokens {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -494,8 +574,10 @@ impl Tokens {
             revoked_subjects: Mutex::new(BTreeMap::new()),
             agent_revoked: Mutex::new(BTreeMap::new()),
             issued: Mutex::new(VecDeque::new()),
+            floors: Mutex::new(HashMap::new()),
+            last_ms: std::sync::atomic::AtomicI64::new(0),
             attempts: Mutex::new(HashMap::new()),
-            global: Mutex::new(GlobalWindow::default()),
+            global: Mutex::new(HashMap::new()),
             saving: Mutex::new(()),
             hashing: Arc::new(tokio::sync::Semaphore::new(HASH_PERMITS)),
             file: None,
@@ -531,6 +613,12 @@ impl Tokens {
                     *lock(&t.revoked) = live(doc.revoked, MAX_REVOKED);
                     *lock(&t.revoked_subjects) = live(doc.revoked_subjects, MAX_REVOKED_SUBJECTS);
                     *lock(&t.agent_revoked) = live(doc.agent_revoked, MAX_REVOKED);
+                    *lock(&t.floors) = doc
+                        .floors
+                        .into_iter()
+                        .filter(|(_, f)| floor_live(*f, now))
+                        .take(MAX_FLOORS)
+                        .collect();
                 }
                 Err(e) => {
                     tracing::warn!(target: "rustybin::auth", file = %path.display(), error = %e, "the sign-in state could not be read: every earlier token is signed out");
@@ -552,6 +640,10 @@ impl Tokens {
             revoked: lock(&self.revoked).clone(),
             revoked_subjects: lock(&self.revoked_subjects).clone(),
             agent_revoked: lock(&self.agent_revoked).clone(),
+            floors: lock(&self.floors)
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect(),
         };
         let Ok(text) = serde_json::to_vec_pretty(&doc) else {
             return;
@@ -602,16 +694,94 @@ impl Tokens {
         lock(&self.revoked).retain(|_, exp| *exp > now);
         lock(&self.agent_revoked).retain(|_, exp| *exp > now);
         lock(&self.issued).retain(|s| s.expires_at > now);
+        lock(&self.floors).retain(|_, f| floor_live(*f, now));
     }
 
-    /// Record a freshly issued token.
+    /// A unique, increasing issue time in milliseconds for a new token.
+    fn next_ms(&self) -> i64 {
+        let now = self.clock.wall().timestamp_millis();
+        let mut last = self.last_ms.load(Ordering::Relaxed);
+        loop {
+            let next = now.max(last.saturating_add(1));
+            match self.last_ms.compare_exchange_weak(
+                last,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return next,
+                Err(seen) => last = seen,
+            }
+        }
+    }
+
+    /// Record a freshly issued token. Past [`MAX_SESSIONS_PER_USER`] the
+    /// user's oldest session ends; past [`MAX_SESSIONS`] the oldest of the
+    /// user with the most. An ended session's token is refused through the
+    /// user's floor, so nothing stays live unlisted.
     fn record(&self, issued: Issued) {
         self.prune();
-        let mut list = lock(&self.issued);
-        list.push_back(issued);
-        while list.len() > MAX_SESSIONS {
-            list.pop_front();
+        let mut ended: Vec<Issued> = Vec::new();
+        {
+            let mut list = lock(&self.issued);
+            let uid = issued.user_id.clone();
+            list.push_back(issued);
+            if list.iter().filter(|s| s.user_id == uid).count() > MAX_SESSIONS_PER_USER {
+                if let Some(e) = list
+                    .iter()
+                    .position(|s| s.user_id == uid)
+                    .and_then(|p| list.remove(p))
+                {
+                    ended.push(e);
+                }
+            }
+            while list.len() > MAX_SESSIONS {
+                let mut counts: HashMap<&str, usize> = HashMap::new();
+                for s in list.iter() {
+                    *counts.entry(s.user_id.as_str()).or_default() += 1;
+                }
+                let busiest = counts
+                    .into_iter()
+                    .max_by_key(|(_, n)| *n)
+                    .map(|(u, _)| u.to_string());
+                match busiest
+                    .and_then(|u| list.iter().position(|s| s.user_id == u))
+                    .and_then(|p| list.remove(p))
+                {
+                    Some(e) => ended.push(e),
+                    None => break,
+                }
+            }
         }
+        if ended.is_empty() {
+            return;
+        }
+        {
+            let mut floors = lock(&self.floors);
+            for e in &ended {
+                let f = floors.entry(e.user_id.clone()).or_insert(0);
+                *f = (*f).max(e.issued_ms.saturating_add(1));
+            }
+            while floors.len() > MAX_FLOORS {
+                let Some(k) = floors
+                    .iter()
+                    .min_by_key(|(_, f)| **f)
+                    .map(|(k, _)| k.clone())
+                else {
+                    break;
+                };
+                floors.remove(&k);
+            }
+        }
+        self.save();
+    }
+
+    /// Was this sign-in token of `user_id` ended by the per-user cap (issued
+    /// before the user's floor)?
+    fn below_floor(&self, user_id: &str, claims: &Value) -> bool {
+        lock(&self.floors)
+            .get(user_id)
+            .is_some_and(|f| token_ms(claims) < *f)
     }
 
     /// Revoke a token id until `expires_at`.
@@ -723,6 +893,14 @@ impl Tokens {
         before - issued.len()
     }
 
+    /// The user id a listed session belongs to.
+    pub fn session_user(&self, jti: &str) -> Option<String> {
+        lock(&self.issued)
+            .iter()
+            .find(|s| s.jti == jti)
+            .map(|s| s.user_id.clone())
+    }
+
     /// End one listed session when it is `user_id`'s. `false` otherwise.
     pub fn end_of(&self, user_id: &str, jti: &str) -> bool {
         let theirs = lock(&self.issued)
@@ -752,17 +930,15 @@ impl Tokens {
     }
 
     /// May `ip` try to sign in as `user`? `Err(seconds)` while it waits
-    /// (the address and name, or every sign-in once the window's failures
-    /// from all addresses reach [`GLOBAL_FAILURES_PER_WINDOW`]). An allowed
+    /// (the address and name, or the name from every address once the
+    /// window's failures at it reach [`NAME_FAILURES_PER_WINDOW`]). An allowed
     /// attempt counts as pending until `failed` or `succeeded` settles it,
     /// so parallel guesses are refused once the window's allowance is taken.
     pub fn check(&self, ip: Option<IpAddr>, user: &str) -> Result<(), u64> {
         let now = self.clock.mono();
-        {
-            let g = lock(&self.global);
+        if let Some(g) = lock(&self.global).get(&name_lane(user)) {
             let elapsed = now.saturating_sub(g.start);
-            if elapsed <= Duration::from_secs(WINDOW_SECS)
-                && g.failures >= GLOBAL_FAILURES_PER_WINDOW
+            if elapsed <= Duration::from_secs(WINDOW_SECS) && g.failures >= NAME_FAILURES_PER_WINDOW
             {
                 return Err(Duration::from_secs(WINDOW_SECS)
                     .saturating_sub(elapsed)
@@ -812,6 +988,23 @@ impl Tokens {
         }
     }
 
+    /// Make room for a name: windows that ended go, else the name with the
+    /// fewest failures (junk names never push out the count of a name
+    /// under attack).
+    fn evict_names(global: &mut HashMap<String, GlobalWindow>, now: Duration) {
+        let window = Duration::from_secs(WINDOW_SECS);
+        global.retain(|_, g| now.saturating_sub(g.start) <= window);
+        if global.len() >= MAX_ATTEMPT_ADDRESSES {
+            if let Some(k) = global
+                .iter()
+                .min_by_key(|(_, g)| (g.failures, g.start))
+                .map(|(k, _)| k.clone())
+            {
+                global.remove(&k);
+            }
+        }
+    }
+
     /// Settle a pending attempt that did not run (the hash pool was full).
     pub fn abandoned(&self, ip: Option<IpAddr>, user: &str) {
         let Some(key) = attempt_key(ip, user) else {
@@ -826,7 +1019,12 @@ impl Tokens {
     pub fn failed(&self, ip: Option<IpAddr>, user: &str) {
         let now = self.clock.mono();
         {
-            let mut g = lock(&self.global);
+            let mut global = lock(&self.global);
+            let lane = name_lane(user);
+            if !global.contains_key(&lane) && global.len() >= MAX_ATTEMPT_ADDRESSES {
+                Self::evict_names(&mut global, now);
+            }
+            let g = global.entry(lane).or_default();
             if now.saturating_sub(g.start) > Duration::from_secs(WINDOW_SECS) {
                 g.start = now;
                 g.failures = 0;
@@ -863,6 +1061,11 @@ impl Tokens {
             lock(&self.attempts).remove(&key);
         }
     }
+}
+
+/// Can a token under a floor of `floor_ms` still be live at `now`?
+fn floor_live(floor_ms: i64, now: i64) -> bool {
+    floor_ms / 1000 + TOKEN_TTL_SECS + LEEWAY_SECS as i64 > now
 }
 
 /// Insert into a bounded map of expiries, dropping the entry that expires
@@ -930,6 +1133,7 @@ fn mint(config: &Config, user: &crate::rbac::User) -> Option<(String, Value)> {
         "rb_use": TOKEN_USE,
         "rb_gen": tokens.generation(),
         "rb_ugen": user.generation,
+        "rb_ms": tokens.next_ms(),
     });
     let mut claims = claims;
     if user.is_sso() {
@@ -1022,6 +1226,12 @@ pub fn verify_resolved(
         return Err(JwtError::Revoked);
     }
     let resolved = crate::rbac::from_sign_in(&claims, &config.users)?;
+    if resolved
+        .user_id()
+        .is_some_and(|id| tokens.below_floor(id, &claims))
+    {
+        return Err(JwtError::Revoked);
+    }
     tokens.touch(jti);
     Ok((claims, resolved))
 }
@@ -1056,15 +1266,9 @@ fn issue(
     ip: Option<IpAddr>,
 ) -> Option<(String, Value)> {
     let (token, claims) = mint(config, account)?;
-    config.console_tokens.record(Issued {
-        jti: claims["jti"].as_str().unwrap_or("").to_string(),
-        user: account.name.clone(),
-        user_id: account.id.clone(),
-        issued_at: claims["iat"].as_i64().unwrap_or(0),
-        expires_at: claims["exp"].as_i64().unwrap_or(0),
-        ip,
-        last_used: claims["iat"].as_i64().unwrap_or(0),
-    });
+    config
+        .console_tokens
+        .record(Issued::of(&claims, &account.name, &account.id, ip));
     Some((token, claims))
 }
 
@@ -1172,25 +1376,15 @@ fn token_body(token: &str, claims: &Value, user: &crate::rbac::User, state: &App
 
 /// Check the password of a user who is not user one: their own hash in the
 /// user store. Without one (an invitation not accepted yet) it is refused
-/// after the same work as a real check. `None`: every hash permit is taken.
+/// after the same work as a real check (the dummy verify). `None`: every
+/// hash permit is taken.
 async fn check_user_password(
     state: &AppState,
     user: &crate::rbac::User,
     password: &str,
 ) -> Option<bool> {
-    let Some(hash) = state.users.password_hash(&user.id) else {
-        return check_credentials(state, "", password).await.map(|_| false);
-    };
-    let permit = state.config.console_tokens.hash_permit()?;
-    let plain = password.to_string();
-    Some(
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            verify_hash(&hash, &plain)
-        })
-        .await
-        .unwrap_or(false),
-    )
+    let hash = state.users.password_hash(&user.id);
+    verify_with_permit(state, hash, password).await
 }
 
 /// User one (the first admin), created now if startup could not.
@@ -1203,7 +1397,7 @@ fn first_admin(state: &AppState) -> Option<crate::rbac::User> {
 }
 
 /// Check a sign-in: the throttle (per address bucket and user name, and
-/// every address together), the user store (user one through the sign-in
+/// per user name from every address together), the user store (user one through the sign-in
 /// settings), the password, a disabled user answered as a wrong password.
 /// The answers are the console sign-in's, whichever route asks: the
 /// console's (`POST /_rustybin/login`) and the portal's (`POST
@@ -1384,15 +1578,7 @@ async fn login_handler(
             "server_error",
         );
     };
-    tokens.record(Issued {
-        jti: claims["jti"].as_str().unwrap_or("").to_string(),
-        user: user.clone(),
-        user_id: account.id.clone(),
-        issued_at: claims["iat"].as_i64().unwrap_or(0),
-        expires_at: claims["exp"].as_i64().unwrap_or(0),
-        ip,
-        last_used: claims["iat"].as_i64().unwrap_or(0),
-    });
+    tokens.record(Issued::of(&claims, &user, &account.id, ip));
     if let Err(e) = state.users.note_sign_in(&account.id) {
         tracing::warn!(target: "rustybin::auth", error = %e, "the sign-in time could not be saved");
     }
@@ -1564,34 +1750,41 @@ async fn sessions_handler(State(state): State<AppState>, headers: HeaderMap) -> 
     .into_response()
 }
 
+/// `DELETE /_rustybin/sessions/{id}`: the caller holds what the session's
+/// user holds (`crate::rbac::service::end_session`).
 async fn end_session_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
     RoutePath(id): RoutePath<String>,
 ) -> Response {
     let config = &state.config;
     if !enabled(config) {
         return not_found(config);
     }
-    let ended = config.console_tokens.end(&id);
-    if ended {
-        audit("end_session", "", None, "ok");
+    let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
+    match crate::rbac::service::end_session(&state, &caller, &id) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => e.into_response(),
     }
-    Json(json!({ "ended": ended, "id": id })).into_response()
 }
 
-async fn end_all_handler(State(state): State<AppState>) -> Response {
+/// `DELETE /_rustybin/sessions`: sign out everywhere, for a caller holding
+/// every permission (`crate::rbac::service::end_all_sessions`).
+async fn end_all_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+) -> Response {
     let config = &state.config;
     if !enabled(config) {
         return not_found(config);
     }
-    let n = config.console_tokens.rotate();
-    audit("sign_out_everywhere", "", None, "ok");
-    Json(json!({
-        "ended": n,
-        "generation": config.console_tokens.generation(),
-        "note": "every sign-in token issued before now is refused, this one included",
-    }))
-    .into_response()
+    let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
+    match crate::rbac::service::end_all_sessions(&state, &caller) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => e.into_response(),
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -1922,15 +2115,7 @@ async fn first_admin_password(
     let account = first_admin(state);
     if let Some(account) = account.filter(|_| had_session) {
         if let Some((token, claims)) = mint(config, &account) {
-            tokens.record(Issued {
-                jti: claims["jti"].as_str().unwrap_or("").to_string(),
-                user: user.clone(),
-                user_id: account.id.clone(),
-                issued_at: claims["iat"].as_i64().unwrap_or(0),
-                expires_at: claims["exp"].as_i64().unwrap_or(0),
-                ip,
-                last_used: claims["iat"].as_i64().unwrap_or(0),
-            });
+            tokens.record(Issued::of(&claims, &user, &account.id, ip));
             if let Value::Object(m) = &mut out {
                 m.insert("token".into(), json!(token));
                 m.insert(
@@ -1960,6 +2145,14 @@ struct JoinBody {
     portal: bool,
 }
 
+fn locked_first_admin() -> Response {
+    error(
+        StatusCode::CONFLICT,
+        "the first admin's password is held by RUSTYBIN_SETTINGS_LOCK (the environment is authoritative): the link stays valid for when the sign-in settings can change",
+        "locked",
+    )
+}
+
 fn invalid_invitation() -> Response {
     error(
         StatusCode::UNAUTHORIZED,
@@ -1970,7 +2163,7 @@ fn invalid_invitation() -> Response {
 
 /// `POST /_rustybin/join`: accept an invitation with the new password (the
 /// 0.3 rules). Open and rate limited like the sign-in (per address, and
-/// every address together); the token is checked before the password is
+/// every address together in the invitations' own lane); the token is checked before the password is
 /// hashed, used once, and never logged. Answers a sign-in token: the person
 /// is signed in. A join from the portal's page (`portal: true`) signs in to
 /// the portal instead (its cookie, no console token); an account that opens
@@ -2030,6 +2223,13 @@ async fn join_handler(
         audit("join", "", ip, "invalid_invitation");
         return invalid_invitation();
     };
+    // User one's password is a sign-in setting: when the settings lock
+    // holds it, the link is refused before it is used (it stays valid, and
+    // nobody is signed out for nothing).
+    if state.users.is_first_admin(&invited.id) && !state.settings.writable(HASH_KEY) {
+        tokens.abandoned(ip, JOIN_KEY);
+        return locked_first_admin();
+    }
     let Some(hash) = hash_off_runtime(tokens, &body.password).await else {
         tokens.abandoned(ip, JOIN_KEY);
         return busy();
@@ -2155,8 +2355,8 @@ pub fn catalog() -> Vec<Endpoint> {
             "Never behind control-plane auth. Answers a 12 hour control token for the user \
              (the first admin is the console user of the sign-in settings) that every \
              control-plane route, the management MCP server and the admin guard accept, with \
-             the user's roles resolved at every request. 5 failed attempts per client address and user name and minute (100 \
-             from every address together), then 429 with Retry-After. \
+             the user's roles resolved at every request. 5 failed attempts per client address and user name and minute (20 \
+             at one user name from every address together), then 429 with Retry-After. \
              404 unless RUSTYBIN_CONTROL_AUTH=password (the default).",
         )
         .example(
@@ -2253,7 +2453,7 @@ pub fn catalog() -> Vec<Endpoint> {
         .open()
         .description(
             "Never behind control-plane auth; rate limited like the sign-in (5 failures per \
-             address and minute, 100 from every address together). The token works once, for \
+             address and minute, 20 from every address together in a lane of their own). The token works once, for \
              72 hours; a reset's ends the user's other sessions.",
         )
         .example(
@@ -2347,7 +2547,7 @@ pub fn openapi_paths() -> Value {
             "get": {
                 "tags": ["Control Plane"],
                 "summary": "Sign-in sessions",
-                "description": "The sign-in tokens issued since the last restart or sign-out-everywhere (at most 256, newest first): id, user, user_id, issue, expiry and last use times, client address. Admin.",
+                "description": "The sign-in tokens issued since the last restart or sign-out-everywhere (at most 16 per user and 4096 in all, newest first; a sign-in past a user's 16 ends their oldest session): id, user, user_id, issue, expiry and last use times, client address. Admin.",
                 "operationId": "listConsoleSessions",
                 "responses": {
                     "200": { "description": "Sessions", "content": { "application/json": { "schema": { "type": "object", "properties": {
@@ -2362,7 +2562,7 @@ pub fn openapi_paths() -> Value {
             "delete": {
                 "tags": ["Control Plane"],
                 "summary": "Sign out everywhere",
-                "description": "Rotates the token generation: every sign-in token issued before now is refused, the caller's included. Admin.",
+                "description": "Rotates the token generation: every sign-in token issued before now is refused, the caller's included, and every OAuth and agent token. Needs every permission (the admin role or the admin token).",
                 "operationId": "endAllConsoleSessions",
                 "responses": {
                     "200": { "description": "Done", "content": { "application/json": { "schema": { "type": "object", "properties": { "ended": { "type": "integer" }, "generation": { "type": "integer" } } } } } },
@@ -2374,6 +2574,7 @@ pub fn openapi_paths() -> Value {
             "delete": {
                 "tags": ["Control Plane"],
                 "summary": "End a sign-in session",
+                "description": "Needs users.manage plus every permission the session's user holds (in the instance and in their projects), as for any change to that user.",
                 "operationId": "endConsoleSession",
                 "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
                 "responses": {
@@ -2445,7 +2646,7 @@ pub fn openapi_paths() -> Value {
             "post": {
                 "tags": ["Control Plane"],
                 "summary": "Accept an invitation",
-                "description": "The token of an invitation link (/ui/#/join/<token>) and the new password (8 to 256 characters, not the default). One use, 72 hours. Answers a sign-in token for the user, so the person is signed in. Never behind control-plane auth; rate limited per client address (5 failures a minute) and for every address together.",
+                "description": "The token of an invitation link (/ui/#/join/<token>) and the new password (8 to 256 characters, not the default). One use, 72 hours. Answers a sign-in token for the user, so the person is signed in. Never behind control-plane auth; rate limited per client address (5 failures a minute) and for every address together (20 a minute, the invitations' own lane: failures here never hold back a sign-in).",
                 "operationId": "acceptInvitation",
                 "security": [],
                 "requestBody": { "required": true, "content": { "application/json": { "schema": {

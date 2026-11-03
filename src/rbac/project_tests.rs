@@ -938,6 +938,7 @@ fn sso_groups_give_roles_in_projects() {
                 name: "pia".into(),
                 display_name: None,
                 email: None,
+                email_verified: false,
                 mapped_roles: Vec::new(),
                 mapped_projects: mapped,
             },

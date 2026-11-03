@@ -151,7 +151,19 @@ pub struct SsoLink {
     /// of the role map) at the last sign-in.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mapped_projects: BTreeMap<String, Vec<String>>,
+    /// When the provider last vouched for the person (a verified single
+    /// sign-on, Unix seconds): OAuth tokens acting for the user stop
+    /// working [`SSO_VOUCH_SECS`] after it, so a person removed at the
+    /// provider loses the instance within a sign-in token's life.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vouched_at: Option<i64>,
 }
+
+/// How long a single sign-on vouches for a person: the life of a console
+/// sign-in token. Past it, tokens of the built-in OAuth server acting for
+/// a single sign-on user (an agent's access and refresh tokens) are
+/// refused until the person signs in through the provider again.
+pub const SSO_VOUCH_SECS: i64 = crate::login::TOKEN_TTL_SECS;
 
 /// What a verified sign-in at the provider says about the person
 /// (`crate::sso`): the store links, creates or updates the user from it.
@@ -163,6 +175,9 @@ pub struct SsoIdentity {
     pub name: String,
     pub display_name: Option<String>,
     pub email: Option<String>,
+    /// The provider says the email is verified (`email_verified: true`):
+    /// only then does the email link a user created ahead.
+    pub email_verified: bool,
     /// The roles the groups map to (known roles only), else the default
     /// roles; may be empty.
     pub mapped_roles: Vec<String>,
@@ -387,6 +402,10 @@ pub const NOT_SSO: &str = "not_sso";
 pub const SSO_NAME_TAKEN: &str = "name_taken";
 pub const SSO_OTHER_IDENTITY: &str = "other_identity";
 pub const SSO_NOT_PROVISIONED: &str = "not_provisioned";
+/// A single sign-on user created ahead has the name, and the provider did
+/// not vouch for their email: an identity links a user created ahead only
+/// through a verified email equal to the user's.
+pub const SSO_NOT_LINKED: &str = "not_linked";
 pub const SSO_DISABLED: &str = "disabled";
 pub const SSO_NO_ROLE: &str = "no_role";
 
@@ -1067,26 +1086,36 @@ impl Users {
     }
 
     /// A verified single sign-on (`crate::sso`): the user linked to the
-    /// identity (issuer and subject), else a single sign-on user of that
-    /// name not linked to this issuer yet (created ahead, or linked to an
-    /// issuer the instance no longer uses), else a new user when
-    /// `provision` is on. Their roles become the mapped roles plus the
-    /// pinned ones, their display name and email follow the provider, and
-    /// the sign-in time is noted. Refused ([`UsersError::Refused`]): a
+    /// identity (issuer and subject), else a single sign-on user not linked
+    /// to this issuer yet (created ahead, or linked to an issuer the
+    /// instance no longer uses) whose email is the one the provider
+    /// verified (`email_verified: true`; a user without an email whose name
+    /// is that address counts), else a new user when `provision` is on.
+    /// A name alone never links: a provider that lets people choose their
+    /// user name, or leaves the email unverified, cannot take over a user
+    /// created ahead. Their roles become the mapped roles plus the pinned
+    /// ones, their display name and email follow the provider, and the
+    /// sign-in time is noted (and when the provider vouched,
+    /// [`SsoLink::vouched_at`]). Refused ([`UsersError::Refused`]): a
     /// password user has the name ([`SSO_NAME_TAKEN`]: an identity never
     /// takes over a password account), another identity of the same issuer
-    /// is linked to it ([`SSO_OTHER_IDENTITY`]), nobody to link and
-    /// provisioning off ([`SSO_NOT_PROVISIONED`]), the user is disabled
-    /// ([`SSO_DISABLED`]), no role at all ([`SSO_NO_ROLE`]), and the guard
-    /// rail ([`LAST_ADMIN`]: the provider dropped the last admin's group).
-    /// A refusal changes nothing.
+    /// is linked to it ([`SSO_OTHER_IDENTITY`]), a user created ahead has
+    /// the name without a verified email of theirs ([`SSO_NOT_LINKED`]),
+    /// nobody to link and provisioning off ([`SSO_NOT_PROVISIONED`]), the
+    /// user is disabled ([`SSO_DISABLED`]), no role at all
+    /// ([`SSO_NO_ROLE`]), and the guard rail ([`LAST_ADMIN`]: the provider
+    /// dropped the last admin's group). A refusal changes nothing. The
+    /// first four reach the browser as one reason (`crate::sso`), so a
+    /// name the provider lets people choose tells nothing about the users.
     pub fn sso_sign_in(&self, ident: &SsoIdentity, provision: bool) -> Result<User, UsersError> {
         let now = now_rfc3339(self.clock.as_ref());
+        let vouched_at = self.now_ts();
         let display_name = ident
             .display_name
             .clone()
             .filter(|d| valid_display_name(d).is_ok());
         let email = ident.email.clone().filter(|e| valid_email(e).is_ok());
+        let verified = email.clone().filter(|_| ident.email_verified);
         let printable = crate::logging::printable(&ident.name, 64).to_string();
         self.commit(|doc| {
             let linked = doc.users.iter().position(|u| {
@@ -1094,7 +1123,20 @@ impl Users {
                     .as_ref()
                     .is_some_and(|l| l.issuer == ident.issuer && l.subject == ident.subject)
             });
-            let pos = match linked {
+            // A user created ahead (or linked to another issuer) whose email
+            // is the verified one.
+            let by_email = || {
+                let e = verified.as_deref()?;
+                doc.users.iter().position(|u| {
+                    u.is_sso()
+                        && !u.sso.as_ref().is_some_and(|l| l.issuer == ident.issuer)
+                        && match &u.email {
+                            Some(m) => m.eq_ignore_ascii_case(e),
+                            None => u.name.eq_ignore_ascii_case(e),
+                        }
+                })
+            };
+            let pos = match linked.or_else(by_email) {
                 Some(p) => p,
                 None => match doc
                     .users
@@ -1115,7 +1157,13 @@ impl Users {
                                 format!("another identity of the provider signs in as {printable}"),
                             ));
                         }
-                        p
+                        return Err(UsersError::Refused(
+                            SSO_NOT_LINKED,
+                            format!(
+                                "{printable} is a single sign-on user created ahead: only a sign-in whose verified email is theirs links to it (the provider sent {})",
+                                if verified.is_some() { "another email" } else { "no verified email" }
+                            ),
+                        ));
                     }
                     None => {
                         if !provision {
@@ -1164,6 +1212,7 @@ impl Users {
                 subject: ident.subject.clone(),
                 mapped_roles: ident.mapped_roles.clone(),
                 mapped_projects: ident.mapped_projects.clone(),
+                vouched_at: Some(vouched_at),
             });
             if let Some(d) = &display_name {
                 user.display_name = d.clone();
@@ -1212,6 +1261,20 @@ impl Users {
 
     fn now_ts(&self) -> i64 {
         self.clock.wall().timestamp()
+    }
+
+    /// Does the provider still vouch for `user`? Always for a password
+    /// user; for a single sign-on user, a verified sign-in at the provider
+    /// less than [`SSO_VOUCH_SECS`] ago ([`SsoLink::vouched_at`]).
+    pub fn sso_vouched(&self, user: &User) -> bool {
+        if !user.is_sso() {
+            return true;
+        }
+        let now = self.now_ts();
+        user.sso
+            .as_ref()
+            .and_then(|l| l.vouched_at)
+            .is_some_and(|at| now.saturating_sub(at) < SSO_VOUCH_SECS)
     }
 
     /// Open invitations (expired ones do not count).

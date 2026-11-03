@@ -388,7 +388,9 @@ fn sign(claims: &Value, config: &Config) -> Option<String> {
 /// user: with the password sign-in it is the first admin's (0.4 consents
 /// were the console user's), elsewhere nobody's. `Err` when that user is
 /// gone, disabled, or signed out everywhere since (their generation moved
-/// past the token's `rb_ugen`), as a sign-in token would be.
+/// past the token's `rb_ugen`), as a sign-in token would be, and for a
+/// single sign-on user when the provider last vouched for them more than
+/// a sign-in token's life ago (`crate::rbac::users::SSO_VOUCH_SECS`).
 fn token_user(claims: &Value, config: &Config) -> Result<Option<String>, &'static str> {
     let id = match claims.get("rb_uid") {
         Some(Value::String(id)) => id.clone(),
@@ -403,6 +405,12 @@ fn token_user(claims: &Value, config: &Config) -> Result<Option<String>, &'stati
         .unwrap_or(crate::rbac::users::FIRST_GENERATION);
     if user.disabled || user.generation != ugen {
         return Err("signed_out");
+    }
+    // A single sign-on user: the provider vouched for them within a
+    // sign-in token's life (a person removed at the provider keeps no
+    // agent past it, refresh tokens included).
+    if !config.users.sso_vouched(&user) {
+        return Err("sso_sign_in_needed");
     }
     Ok(Some(id))
 }

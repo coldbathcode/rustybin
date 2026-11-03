@@ -678,3 +678,26 @@ async fn the_control_plane_answers_cross_origin_only_to_listed_origins() {
         Some("*")
     );
 }
+
+/// Finding M8: a control route the catalogue does not know (registered
+/// through a constant, which the route scan misses) is refused for every
+/// credential, the admin token included: the route layer fails closed.
+#[tokio::test]
+async fn an_uncatalogued_control_route_is_refused() {
+    const UNCATALOGUED: &str = "/_rustybin/not-in-the-catalogue";
+    let state = test_state_with(token_config());
+    let router = Router::new()
+        .route(UNCATALOGUED, axum::routing::get(|| async { "ran" }))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            check_route,
+        ))
+        .with_state(state);
+    let resp = router
+        .oneshot(bearer_request("GET", UNCATALOGUED, Some("admin-secret")))
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let v = body_json(resp).await;
+    assert_eq!(v["reason"], "permission_required", "{v}");
+}

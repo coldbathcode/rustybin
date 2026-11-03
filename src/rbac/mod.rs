@@ -519,6 +519,8 @@ pub(crate) fn scope_may(scope: &str, method: &str, path: &str) -> bool {
 #[cfg(test)]
 mod access_table;
 #[cfg(test)]
+mod security_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod users_tests;

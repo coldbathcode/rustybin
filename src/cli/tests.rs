@@ -1036,3 +1036,34 @@ async fn login_sso_takes_the_browser_back_on_a_loopback_address() {
     provider.shutdown();
     inst.server.shutdown();
 }
+
+/// Finding A7: the loopback listener answers only the callback carrying
+/// its own `cli_state`: a page that finds the port and sends `?error=x`
+/// first neither ends the sign-in nor wins over the real callback.
+#[tokio::test]
+async fn the_loopback_listener_waits_for_its_own_callback() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let waiting =
+        tokio::spawn(async move { commands::loopback_answer(listener, "the-state").await });
+    let get = |target: &'static str| async move {
+        let mut s = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        s.write_all(format!("GET {target} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
+            .await
+            .expect("write");
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out).await;
+        out
+    };
+    let forged = get("/callback?error=x&error_description=%1b%5b2J").await;
+    assert!(forged.starts_with("HTTP/1.1 400"), "{forged}");
+    let wrong = get("/callback?cli_state=guess&code=rbs_x").await;
+    assert!(wrong.starts_with("HTTP/1.1 400"), "{wrong}");
+    let real = get("/callback?cli_state=the-state&code=rbs_real").await;
+    assert!(real.starts_with("HTTP/1.1 200"), "{real}");
+    let query = waiting.await.expect("join").expect("query");
+    assert!(query.contains("code=rbs_real"), "{query}");
+}

@@ -501,7 +501,7 @@ never tool inputs and never returned: the operator sets them in the console or w
 | Tool | Permission | |
 |---|---|---|
 | `get_settings` | `settings.read` | Every [instance setting](configuration.md#state-directory-settings-and-secrets) with its value, source and lock state, or one group or key; secrets show `{set, hint}` |
-| `update_settings` | `settings.write` | Set values (`null` forgets a stored one) and unset stored values; secrets are refused, and so is the console sign-in in password mode (it changes only with its current password); a change of `egress.*`, `agents.*`, `console.*`, `git.*` or `sso.*` is confirmed by the user |
+| `update_settings` | `settings.write` | Set values (`null` forgets a stored one) and unset stored values; secrets are refused, and so is the console sign-in in password mode (it changes only with its current password); each key needs what `PATCH /_rustybin/settings` needs for it (`settings.security` for the security groups, `portal.settings`, `git.write` for `git.*`, the permissions of the roles a `sso.role_map` or `sso.default_roles` names); a change of `egress.*`, `agents.*`, `console.*`, `git.*`, `sso.*`, `proxy.*`, `assist.provider` or `assist.base_url` is then confirmed by the user |
 | `check_egress` | `settings.read` | The [outbound policy](configuration.md#outbound-connections) and, with `url` and `purpose`, whether that URL would be allowed before DNS and why not |
 
 ### MCP inspector and registry
@@ -836,7 +836,8 @@ too: `mcp_call` and `run_mcp_checks` to another host, `browse_registry`, `git_pu
 runs. `invite_user` always asks (its answer is a link that signs a person in),
 `update_user` when it grants a privileged role and `save_role` when the role is
 privileged. `update_settings` asks when it changes a key under `egress.`, `agents.`,
-`console.` or `git.`. When
+`console.`, `git.`, `sso.` or `proxy.`, or `assist.provider` or `assist.base_url`
+(after the permission check: a confirmation is never a permission). When
 the client supports elicitation, the server asks the user directly ("Delete the mock
 orders-api and its traffic?"). Without it the call needs `"confirm": true`, which the
 tool descriptions tell the model to set only after the user agreed:

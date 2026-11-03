@@ -201,7 +201,7 @@ in. Every built-in role holds `portal.read`, so any user reads closed items; a
 The **Sign in** button in the portal's header posts the user name and password to
 `/portal/api/login`, which checks them exactly as the console sign-in does (the same
 throttle, shared with `/_rustybin/login`: 5 failures per address and user name a
-minute, 100 from every address together; a disabled user answered as a wrong
+minute, 20 at one user name from every address together; a disabled user answered as a wrong
 password) and sets the `rustybin_portal` cookie: `HttpOnly`, `SameSite=Strict`,
 `Secure` behind HTTPS, `Path=/portal`, 12 hours. It is accepted under `/portal` only,
 never by the control plane, the data plane or `/_rustybin/mcp`. Permissions are

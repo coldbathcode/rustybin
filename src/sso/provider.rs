@@ -146,7 +146,11 @@ pub async fn post_form(
     Ok((status, json))
 }
 
-fn url_field(doc: &Value, key: &str) -> Result<String, String> {
+/// An endpoint of the discovery document: an http(s) URL, `https` when
+/// the issuer is (`http` only under a loopback `http` issuer, which
+/// `sso.issuer` allows for local providers): the client secret, the code
+/// and the keys never travel in the clear.
+fn url_field(doc: &Value, key: &str, https_only: bool) -> Result<String, String> {
     let s = doc
         .get(key)
         .and_then(Value::as_str)
@@ -154,6 +158,12 @@ fn url_field(doc: &Value, key: &str) -> Result<String, String> {
     let parsed = reqwest::Url::parse(s).map_err(|e| format!("{key}: not a URL ({e})"))?;
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return Err(format!("{key}: not an http(s) URL"));
+    }
+    if https_only && parsed.scheme() != "https" {
+        return Err(format!(
+            "{key}: must be https like the issuer (the provider named {})",
+            crate::egress::url_origin(s)
+        ));
     }
     Ok(s.to_string())
 }
@@ -185,11 +195,12 @@ pub fn parse_discovery(doc: &Value, expected_issuer: &str) -> Result<Discovery, 
             .unwrap_or_default()
     };
     let methods = strings("token_endpoint_auth_methods_supported");
+    let https_only = reqwest::Url::parse(expected_issuer).map_or(true, |u| u.scheme() != "http");
     Ok(Discovery {
         issuer: issuer.to_string(),
-        authorization_endpoint: url_field(doc, "authorization_endpoint")?,
-        token_endpoint: url_field(doc, "token_endpoint")?,
-        jwks_uri: url_field(doc, "jwks_uri")?,
+        authorization_endpoint: url_field(doc, "authorization_endpoint", https_only)?,
+        token_endpoint: url_field(doc, "token_endpoint", https_only)?,
+        jwks_uri: url_field(doc, "jwks_uri", https_only)?,
         algorithms: strings("id_token_signing_alg_values_supported"),
         secret_in_form: !methods.is_empty()
             && !methods.iter().any(|m| m == "client_secret_basic")

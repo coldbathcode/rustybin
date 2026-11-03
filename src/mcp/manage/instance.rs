@@ -424,28 +424,26 @@ pub async fn end_session(ctx: &CallCtx, access: &Access, args: &Value, params: &
         {
             return v;
         }
-        let n = config.console_tokens.rotate();
-        return ok(
-            ctx,
-            format!(
-                "Signed out everywhere: {n} session(s) ended (generation {})",
-                config.console_tokens.generation()
+        return match crate::rbac::service::end_all_sessions(&ctx.app, &access.resolved) {
+            Ok(v) => ok(
+                ctx,
+                format!(
+                    "Signed out everywhere: {} session(s) ended (generation {})",
+                    v["ended"], v["generation"]
+                ),
+                v,
             ),
-            json!({ "ended": n, "generation": config.console_tokens.generation(), "note": "every sign-in token issued before now is refused" }),
-        );
+            Err(e) => super::tools::service_error(&e),
+        };
     }
     let Some(id) = arg_str(args, "id").filter(|i| !i.is_empty()) else {
         return err("give the session id (list_sessions), or all true");
     };
-    let ended = config.console_tokens.end(id);
-    if !ended {
-        return err(format!("no session {id:?} (list_sessions shows them)"));
+    match crate::rbac::service::end_session(&ctx.app, &access.resolved, id) {
+        Ok(v) if v["ended"] == json!(true) => ok(ctx, format!("Ended session {id}"), v),
+        Ok(_) => err(format!("no session {id:?} (list_sessions shows them)")),
+        Err(e) => super::tools::service_error(&e),
     }
-    ok(
-        ctx,
-        format!("Ended session {id}"),
-        json!({ "ended": true, "id": id }),
-    )
 }
 
 /// `reload_mocks` (admin): reload the file-defined mocks

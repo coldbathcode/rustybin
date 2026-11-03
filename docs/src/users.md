@@ -47,8 +47,9 @@ is open, never its link:
 
 The person opens the link, chooses a password (8 to 256 characters, not the
 default) and is signed in. The page is `POST /_rustybin/join`, open like the sign-in
-and rate limited the same way (5 failures per client address and minute, 100 from
-every address together):
+and rate limited the same way (5 failures per client address and minute, 20 from
+every address together in the invitations' own lane, so junk tokens never hold back
+a sign-in):
 
 ```hurl
 {{#include ../examples/concepts/users.hurl:join}}
@@ -108,10 +109,12 @@ user's next one:
 - A custom role somebody holds is not deleted (`409 role_in_use`); a built-in role
   never changes (`400 built_in`).
 - **Nobody grants more than they hold**: a caller gives a user only roles whose
-  permissions it holds, manages (changes, disables, deletes, resets) only users whose
-  permissions it holds, and saves only roles within its own. An admin holds every
-  permission; this binds a custom role with `users.manage`. The `403` names the first
-  permission missing.
+  permissions it holds, manages (changes, disables, deletes, resets, ends a session
+  of) only users whose permissions it holds, and saves only roles within its own. An
+  admin holds every permission; this binds a custom role with `users.manage`. The
+  `403` names the first permission missing. Signing everyone out (`DELETE
+  /_rustybin/sessions`) needs every permission, and mapping a provider's group to a
+  role (`sso.role_map`, `sso.default_roles`) needs the role's permissions.
 - An invited user joins through the invitation, never by being enabled (`409
   invited`).
 - In a [project](projects.md) the same rules hold for a user's roles there, and the
@@ -132,14 +135,18 @@ group gives). See [Projects](projects.md).
 
 A forgotten password is a new invitation: `POST /_rustybin/users/{id}/invite`
 answers a new link (a reset) that replaces the open one. The old password works
-until the link is accepted; accepting it ends the user's sessions.
+until the link is accepted; accepting it ends the user's sessions. The first
+admin's password is a sign-in setting: while `RUSTYBIN_SETTINGS_LOCK` holds it, their
+reset link is refused (`409 locked`) before it is used, so the link stays valid and
+nobody is signed out.
 
 ```hurl
 {{#include ../examples/concepts/users.hurl:reset}}
 ```
 
 `GET /_rustybin/users/{id}/sessions` lists a user's sessions, `DELETE` signs them out
-everywhere:
+everywhere. A user has at most 16 listed sessions: a sign-in past them ends the
+user's oldest, so one user signing in again and again never pushes out another's:
 
 ```hurl
 {{#include ../examples/concepts/users.hurl:sessions}}

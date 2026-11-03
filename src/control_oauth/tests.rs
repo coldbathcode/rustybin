@@ -1027,3 +1027,72 @@ async fn a_query_on_the_mcp_url_names_the_same_resource() {
 
 // Agents act for a user (testing-2 step 12).
 mod users;
+
+/// Finding A3: the OAuth tokens acting for a single sign-on user (an
+/// agent's access and refresh tokens) stop working once the provider
+/// last vouched for the person more than a sign-in token's life ago.
+#[tokio::test]
+async fn an_sso_users_oauth_tokens_need_a_recent_sso_sign_in() {
+    let clock = std::sync::Arc::new(crate::limits::ManualClock::new(chrono::Utc::now()));
+    let mut c = Config::for_tests();
+    c.control_auth = ControlAuth::Password;
+    c.users = std::sync::Arc::new(crate::rbac::Users::with_clock(clock.clone()));
+    let state = test_state_with(c);
+    let config = state.config.clone();
+    let user = config
+        .users
+        .sso_sign_in(
+            &crate::rbac::SsoIdentity {
+                issuer: "https://idp.example".into(),
+                subject: "s-admin".into(),
+                name: "sso-admin".into(),
+                display_name: None,
+                email: None,
+                email_verified: false,
+                mapped_roles: vec!["admin".into()],
+                mapped_projects: Default::default(),
+            },
+            true,
+        )
+        .expect("signed in");
+    let resource = format!("{BASE}{MANAGE_PATH}");
+    let tokens = issue(
+        "client-1",
+        &["admin"],
+        &resource,
+        &format!("{BASE}{ISSUER_PATH}"),
+        Some(&user.id),
+        &config,
+    )
+    .expect("issued");
+    let refresh = tokens["refresh_token"].as_str().expect("refresh");
+    let access = tokens["access_token"].as_str().expect("access");
+    assert!(verify(refresh, &resource, "refresh", &config).is_ok());
+    clock.advance(std::time::Duration::from_secs(13 * 3600));
+    assert_eq!(
+        verify(refresh, &resource, "refresh", &config).err(),
+        Some("sso_sign_in_needed")
+    );
+    assert_eq!(
+        verify(access, &resource, "access", &config).err(),
+        Some("sso_sign_in_needed")
+    );
+    // A new single sign-on vouches again.
+    config
+        .users
+        .sso_sign_in(
+            &crate::rbac::SsoIdentity {
+                issuer: "https://idp.example".into(),
+                subject: "s-admin".into(),
+                name: "sso-admin".into(),
+                display_name: None,
+                email: None,
+                email_verified: false,
+                mapped_roles: vec!["admin".into()],
+                mapped_projects: Default::default(),
+            },
+            true,
+        )
+        .expect("signed in again");
+    assert!(verify(refresh, &resource, "refresh", &config).is_ok());
+}

@@ -5,7 +5,7 @@
 //! token) and `POST /_rustybin/sso/test` (discovery and the keys, fetched
 //! now). All but the test are open: they are how one signs in. The
 //! callback and the token are throttled like the password sign-in (per
-//! client address, and every address together); a start is limited by the
+//! client address, and every address together in a lane of their own); a start is limited by the
 //! sign-ins under way per address. Everything answers `404` outside the
 //! password sign-in (`RUSTYBIN_CONTROL_AUTH=password`), where users live.
 
@@ -408,7 +408,7 @@ pub fn catalog() -> Vec<Endpoint> {
              the ID token (issuer, audience, expiry, nonce; RS256 or ES256), maps the groups \
              to roles, links or creates the user and sends the browser back with a one-time \
              code (two minutes). Throttled like the sign-in: 5 failures per client address \
-             and minute, 100 from every address together.",
+             and minute, 20 from every address together in the single sign-on lane (failures here never hold back a password sign-in).",
         )
         .example(
             Example::get("The provider's redirect", "/_rustybin/sso/callback?code=x&state=y")
@@ -496,7 +496,7 @@ pub fn openapi_paths() -> Value {
             "get": {
                 "tags": ["Control Plane"],
                 "summary": "Single sign-on callback",
-                "description": "The provider's redirect (register it as the client's redirect URI). The code is exchanged at the token endpoint, the ID token verified (issuer, audience, expiry, nonce; RS256 or ES256), the groups mapped to roles, the user linked or created, and the browser sent back to return_to with a one-time code (the console's #/sso/<code>, or ?code= on the loopback address). The provider's tokens are never kept. Open; throttled per client address like the sign-in. Refusal reasons: expired, denied, provider_error, invalid_id_token, domain_not_allowed, email_unverified, not_provisioned, name_taken, other_identity, disabled, no_role, last_admin, rate_limited, busy.",
+                "description": "The provider's redirect (register it as the client's redirect URI). The code is exchanged at the token endpoint, the ID token verified (issuer, audience, expiry, nonce; RS256 or ES256), the groups mapped to roles, the user linked or created, and the browser sent back to return_to with a one-time code (the console's #/sso/<code>, or ?code= on the loopback address). The provider's tokens are never kept. Open; throttled per client address like the sign-in. Refusal reasons: expired, denied, provider_error, invalid_id_token, domain_not_allowed, email_unverified, not_linked (no user this sign-in may use: a password account or another identity has the name, a user created ahead without the verified email, or none with sso.provision off; one reason for all, the detail is in the log), disabled, no_role, last_admin, rate_limited, busy.",
                 "operationId": "ssoCallback",
                 "security": [],
                 "parameters": [

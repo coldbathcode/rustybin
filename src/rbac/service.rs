@@ -538,6 +538,47 @@ pub fn end_user_sessions(state: &AppState, caller: &Resolved, id: &str) -> SvcRe
     )
 }
 
+/// `DELETE /_rustybin/sessions/{id}` (and `end_session` with an id): end
+/// one listed session. As for any change to its user, the caller holds
+/// what the user's roles grant, in the instance and in their projects.
+/// `ended: false` for a session that is not listed.
+pub fn end_session(state: &AppState, caller: &Resolved, id: &str) -> SvcResult<Value> {
+    require_sign_in(state)?;
+    let tokens = &state.config.console_tokens;
+    let Some(user_id) = tokens.session_user(id) else {
+        return Ok(json!({ "ended": false, "id": id }));
+    };
+    let name = match state.users.get(&user_id) {
+        Some(u) => {
+            within(caller, roles_permissions(state, &u.roles))?;
+            within_bindings(state, caller, &u.id)?;
+            u.name
+        }
+        None => String::new(),
+    };
+    let ended = tokens.end(id);
+    if ended {
+        audit("end_session", caller, &name, "ok");
+    }
+    Ok(json!({ "ended": ended, "id": id }))
+}
+
+/// `DELETE /_rustybin/sessions` (and `end_session` with `all`): sign out
+/// everywhere. It ends every user's sign-in and every OAuth and agent
+/// token, so the caller holds every permission.
+pub fn end_all_sessions(state: &AppState, caller: &Resolved) -> SvcResult<Value> {
+    require_sign_in(state)?;
+    within(caller, PermSet::all())?;
+    let tokens = &state.config.console_tokens;
+    let n = tokens.rotate();
+    audit("sign_out_everywhere", caller, "", "ok");
+    Ok(json!({
+        "ended": n,
+        "generation": tokens.generation(),
+        "note": "every sign-in token issued before now is refused, this one included",
+    }))
+}
+
 // ── Roles ───────────────────────────────────────────────────────────
 
 fn role_view(state: &AppState, name: &str) -> Option<Value> {

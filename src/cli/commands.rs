@@ -864,14 +864,19 @@ async fn sso_login(ctx: &mut Ctx, url: &str) -> Result<(String, Option<String>, 
         .local_addr()
         .map_err(|e| Fail::Failed(e.to_string()))?
         .port();
-    let return_to = format!("http://127.0.0.1:{port}/callback");
-    let verifier = {
+    let random = || {
         use base64::Engine;
         use rand::RngCore;
         let mut b = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut b);
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
     };
+    // The listener answers only the callback that carries this value (the
+    // instance keeps return_to's query and adds the code): a page that
+    // finds the port cannot end the sign-in with a forged answer.
+    let cli_state = random();
+    let return_to = format!("http://127.0.0.1:{port}/callback?cli_state={cli_state}");
+    let verifier = random();
     let start = format!(
         "{}/_rustybin/sso/start?return_to={}&challenge={}",
         url.trim_end_matches('/'),
@@ -897,21 +902,30 @@ async fn sso_login(ctx: &mut Ctx, url: &str) -> Result<(String, Option<String>, 
         .and_then(|w| w.parse::<u64>().ok())
         .unwrap_or(300)
         .clamp(1, 3600);
-    let query = tokio::time::timeout(Duration::from_secs(wait), loopback_answer(listener))
-        .await
-        .map_err(|_| Fail::Failed(format!("the browser did not come back in {wait} s")))?
-        .map_err(|e| Fail::Failed(format!("the loopback listener failed: {e}")))?;
+    let query = tokio::time::timeout(
+        Duration::from_secs(wait),
+        loopback_answer(listener, &cli_state),
+    )
+    .await
+    .map_err(|_| Fail::Failed(format!("the browser did not come back in {wait} s")))?
+    .map_err(|e| Fail::Failed(format!("the loopback listener failed: {e}")))?;
     let pairs: std::collections::BTreeMap<String, String> =
         form_urlencoded::parse(query.as_bytes())
             .into_owned()
             .collect();
     if let Some(reason) = pairs.get("error") {
+        // Printable only: what comes back through the browser never sends
+        // the terminal an escape sequence.
         return Err(Fail::Auth(format!(
-            "{url}: single sign-on refused ({reason}): {}",
-            pairs
-                .get("error_description")
-                .map(String::as_str)
-                .unwrap_or("")
+            "{url}: single sign-on refused ({}): {}",
+            crate::logging::printable(reason, 80),
+            crate::logging::printable(
+                pairs
+                    .get("error_description")
+                    .map(String::as_str)
+                    .unwrap_or(""),
+                400
+            )
         )));
     }
     let code = pairs
@@ -966,9 +980,14 @@ fn open_browser(url: &str) {
 }
 
 /// Wait for the browser on the loopback listener: the query of the first
-/// `GET /callback`, answered with a page that says what happened (other
-/// requests, a favicon say, get a 404).
-async fn loopback_answer(listener: tokio::net::TcpListener) -> std::io::Result<String> {
+/// `GET /callback` whose `cli_state` is `expected`, answered with a page
+/// that says what happened. Other requests (a favicon, a callback without
+/// the value: another page or local user guessing the port) get an error
+/// and the listener keeps waiting.
+pub(crate) async fn loopback_answer(
+    listener: tokio::net::TcpListener,
+    expected: &str,
+) -> std::io::Result<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     loop {
         let (mut stream, _) = listener.accept().await?;
@@ -998,6 +1017,16 @@ async fn loopback_answer(listener: tokio::net::TcpListener) -> std::io::Result<S
             continue;
         };
         let query = rest.strip_prefix('?').unwrap_or("").to_string();
+        let carries = form_urlencoded::parse(query.as_bytes())
+            .any(|(k, v)| k == "cli_state" && crate::control_auth::constant_time_eq(&v, expected));
+        if !carries {
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+            continue;
+        }
         let failed = query.split('&').any(|p| p.starts_with("error="));
         let body = if failed {
             "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Rustybin</title></head><body><h1>The sign-in was refused</h1><p>The command line says why. You can close this window.</p></body></html>"

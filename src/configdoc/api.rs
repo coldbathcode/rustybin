@@ -34,7 +34,13 @@ pub struct ExportQuery {
     secrets: Option<String>,
 }
 
-async fn export(State(state): State<AppState>, Query(q): Query<ExportQuery>) -> Response {
+async fn export(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
+    Query(q): Query<ExportQuery>,
+) -> Response {
+    let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
     let secrets = match q.secrets.as_deref() {
         None => SecretsMode::Refs,
         Some(s) => match SecretsMode::parse(s) {
@@ -44,7 +50,7 @@ async fn export(State(state): State<AppState>, Query(q): Query<ExportQuery>) -> 
     };
     match q.format.as_deref().unwrap_or("yaml") {
         "yaml" => {
-            let export = super::export(&state, secrets, false);
+            let export = super::export_for(&state, &caller, secrets, false);
             (
                 [(header::CONTENT_TYPE, "application/yaml; charset=utf-8")],
                 export.yaml(),
@@ -52,11 +58,11 @@ async fn export(State(state): State<AppState>, Query(q): Query<ExportQuery>) -> 
                 .into_response()
         }
         "json" => {
-            let export = super::export(&state, secrets, false);
+            let export = super::export_for(&state, &caller, secrets, false);
             Json(serde_json::to_value(&export.file).unwrap_or(Value::Null)).into_response()
         }
         "bundle" => {
-            let export = super::export(&state, secrets, true);
+            let export = super::export_for(&state, &caller, secrets, true);
             (
                 [
                     (header::CONTENT_TYPE, "application/gzip"),
@@ -107,7 +113,7 @@ async fn apply(
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
     let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
-    if let Err(resp) = super::check_sections(&caller, &state.settings, &file) {
+    if let Err(resp) = super::check_sections(&caller, &state.settings, &state.users, &file) {
         return resp;
     }
     let opts = ApplyOptions {

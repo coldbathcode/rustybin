@@ -974,14 +974,17 @@ fn tokens_are_bounded() {
     // Expired entries are not revoked (and are pruned).
     tokens.revoke("old", chrono::Utc::now().timestamp() - 1);
     assert!(!tokens.is_revoked("old"));
-    // Sessions: a bounded list, newest first; ending one revokes it.
+    // Sessions: a bounded list, newest first; ending one revokes it. Many
+    // users (each under the per-user cap): past the cap the busiest user's
+    // oldest goes.
     let tokens = Tokens::new();
     for i in 0..(MAX_SESSIONS + 10) {
         tokens.record(Issued {
             jti: format!("s-{i}"),
             user: "u".into(),
-            user_id: "usr_0123456789abcdef".into(),
+            user_id: format!("usr_{:016}", i % 512),
             issued_at: 0,
+            issued_ms: i as i64,
             expires_at: far,
             ip: None,
             last_used: 0,
@@ -1116,10 +1119,10 @@ fn an_ipv6_host_rotating_in_its_slash_64_is_one_address() {
 }
 
 #[test]
-fn failures_from_every_address_share_a_budget() {
+fn failures_at_a_name_from_every_address_share_a_budget() {
     let clock = Arc::new(ManualClock::new(chrono::Utc::now()));
     let tokens = Tokens::with_clock(clock.clone());
-    for i in 0..GLOBAL_FAILURES_PER_WINDOW {
+    for i in 0..NAME_FAILURES_PER_WINDOW {
         let ip = Some(IpAddr::from([198, 51, (i >> 8) as u8, (i & 255) as u8]));
         assert!(tokens.check(ip, DEFAULT_USER).is_ok(), "attempt {i}");
         tokens.failed(ip, DEFAULT_USER);
@@ -1128,10 +1131,180 @@ fn failures_from_every_address_share_a_budget() {
     let fresh = Some("203.0.113.200".parse().expect("ip"));
     let wait = tokens
         .check(fresh, DEFAULT_USER)
-        .expect_err("global budget");
+        .expect_err("the name's budget");
     assert!((1..=WINDOW_SECS).contains(&wait), "{wait}");
+    // Another name is not held back.
+    assert!(tokens.check(fresh, "someone-else").is_ok());
     clock.advance(Duration::from_secs(WINDOW_SECS + 1));
     assert!(tokens.check(fresh, DEFAULT_USER).is_ok());
+}
+
+/// Finding A4: failures at other names, junk invitation tokens and junk
+/// single sign-on callbacks never lock user one out.
+#[test]
+fn failures_at_other_names_never_lock_user_one_out() {
+    let tokens = Tokens::new();
+    let attacker = Some("198.51.100.7".parse().expect("ip"));
+    for i in 0..100 {
+        let name = format!("guess-{i}");
+        assert!(tokens.check(attacker, &name).is_ok(), "attempt {i}");
+        tokens.failed(attacker, &name);
+    }
+    for lane in [JOIN_KEY, "(sso)"] {
+        for i in 0..100u8 {
+            let ip = Some(IpAddr::from([192, 0, 2, i]));
+            if tokens.check(ip, lane).is_ok() {
+                tokens.failed(ip, lane);
+            }
+        }
+    }
+    let admin = Some("203.0.113.1".parse().expect("ip"));
+    assert!(tokens.check(admin, DEFAULT_USER).is_ok());
+    // Junk names never push out the count of a name under attack.
+    let tokens = Tokens::new();
+    for i in 0..NAME_FAILURES_PER_WINDOW {
+        let ip = Some(IpAddr::from([198, 18, 0, i as u8]));
+        tokens.failed(ip, DEFAULT_USER);
+    }
+    for i in 0..(MAX_ATTEMPT_ADDRESSES + 10) {
+        tokens.failed(attacker, &format!("junk-{i}"));
+    }
+    assert!(lock(&tokens.global).len() <= MAX_ATTEMPT_ADDRESSES);
+    assert!(tokens.check(admin, DEFAULT_USER).is_err());
+}
+
+/// Finding A4 end to end: a hundred failed sign-ins under other names
+/// from one client, then user one signs in from another.
+#[tokio::test]
+async fn one_client_guessing_names_never_blocks_user_one() {
+    let state = test_state_with(password_config());
+    let tokens = &state.config.console_tokens;
+    let attacker = Some("198.51.100.8".parse().expect("ip"));
+    for i in 0..100 {
+        let name = format!("nobody-{i}");
+        if tokens.check(attacker, &name).is_ok() {
+            tokens.failed(attacker, &name);
+        }
+    }
+    let app = test_app_with(state.clone());
+    let (status, body) = login(&app, DEFAULT_USER, DEFAULT_PASSWORD).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// Finding A2: a name nobody has takes a hash permit and runs one argon2
+/// verify like a real user's sign-in (with every permit taken both are
+/// `busy`, where an unknown name used to answer 401 at once).
+#[tokio::test]
+async fn an_unknown_name_takes_a_hash_permit_like_a_real_user() {
+    let state = test_state_with(password_config());
+    let app = test_app_with(state.clone());
+    let held: Vec<_> = (0..HASH_PERMITS)
+        .filter_map(|_| state.config.console_tokens.hash_permit())
+        .collect();
+    assert_eq!(held.len(), HASH_PERMITS);
+    for user in ["no-such-user", DEFAULT_USER] {
+        let (status, body) = login(&app, user, "wrong-password").await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{user}: {body}");
+        assert_eq!(body["reason"], "busy");
+    }
+    drop(held);
+    let (status, _) = login(&app, "no-such-user", "wrong-password").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// Finding A6: one user signing in again and again ends only their own
+/// oldest sessions (refused from then on), never another user's listing.
+#[tokio::test]
+async fn one_user_signing_in_never_pushes_another_out_of_the_list() {
+    let state = test_state_with(password_config());
+    let app = test_app_with(state.clone());
+    let hash = hash_password("bee-secret-1").expect("hash");
+    state
+        .users
+        .add(crate::rbac::NewUser::new("bee", &["viewer"]), Some(hash))
+        .expect("bee");
+    let admin = token_for(&app).await;
+    let admin_jti = verify(&admin, &state.config).expect("valid")["jti"]
+        .as_str()
+        .expect("jti")
+        .to_string();
+    let mut bees = Vec::new();
+    for _ in 0..(MAX_SESSIONS_PER_USER + 4) {
+        bees.push(token_for_user(&app, "bee", "bee-secret-1").await);
+    }
+    let tokens = &state.config.console_tokens;
+    assert!(
+        tokens.sessions().iter().any(|s| s["id"] == admin_jti),
+        "user one's session is still listed"
+    );
+    let bee = state.users.find_by_name("bee").expect("bee");
+    assert_eq!(tokens.sessions_of(&bee.id).len(), MAX_SESSIONS_PER_USER);
+    // The bee's oldest are ended, not merely unlisted; the newest work.
+    assert!(verify(&bees[0], &state.config).is_err());
+    assert!(verify(&bees[3], &state.config).is_err());
+    assert!(verify(&bees[4], &state.config).is_ok());
+    assert!(verify(bees.last().expect("last"), &state.config).is_ok());
+    // A flood of another user's sessions (the review's 256 sign-ins, and
+    // more) never pushes user one's out of the list.
+    let far = chrono::Utc::now().timestamp() + 3600;
+    for i in 0..(MAX_SESSIONS + 10) {
+        tokens.record(Issued {
+            jti: format!("flood-{i}"),
+            user: "flood".into(),
+            user_id: "usr_flood".into(),
+            issued_at: 0,
+            issued_ms: i as i64,
+            expires_at: far,
+            ip: None,
+            last_used: 0,
+        });
+    }
+    assert!(tokens.sessions().iter().any(|s| s["id"] == admin_jti));
+    assert_eq!(tokens.sessions_of("usr_flood").len(), MAX_SESSIONS_PER_USER);
+    // User one's session can still be ended.
+    let (status, v) = with_token(
+        &app,
+        "DELETE",
+        &format!("/_rustybin/sessions/{admin_jti}"),
+        &admin,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["ended"], true);
+    assert!(verify(&admin, &state.config).is_err());
+}
+
+/// Finding A8: with the settings lock holding the sign-in, a reset link of
+/// user one is refused before it is used: the link stays valid and
+/// nobody is signed out.
+#[tokio::test]
+async fn a_locked_first_admin_reset_keeps_the_link() {
+    let mut c = password_config();
+    c.settings_lock = true;
+    let state = test_state_with(c);
+    let app = test_app_with(state.clone());
+    let admin = token_for(&app).await;
+    let first = state.users.first_admin().expect("user one");
+    let reset = state.users.invite(&first.id, "test").expect("reset link");
+    let generation = state.users.get(&first.id).expect("user one").generation;
+    let resp = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/_rustybin/join",
+            &json!({ "token": reset.token, "password": "a-longer-secret" }),
+        ))
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert_eq!(body_json(resp).await["reason"], "locked");
+    assert!(state.users.invitation_user(&reset.token).is_some());
+    assert_eq!(
+        state.users.get(&first.id).expect("user one").generation,
+        generation
+    );
+    assert!(verify(&admin, &state.config).is_ok());
 }
 
 #[test]

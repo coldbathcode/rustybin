@@ -520,9 +520,15 @@ pub async fn enforce(State(state): State<AppState>, mut req: Request, next: Next
 /// refusal when the caller lacks the permission; the handler runs only
 /// when it holds it. A route whose need is undeclared is refused (the
 /// parity test `every_control_route_declares_a_permission` keeps that from
-/// happening). On a self-service instance the routes that say so let a
-/// caller without the permission through to the per-mock rules (a visitor
-/// or an API key manages its own mocks only).
+/// happening), and so is a control route the catalogue does not know
+/// (fail closed: a route registered outside the catalogue never runs for
+/// any credential). On a self-service instance the routes that say so let
+/// a visitor without the permission through to the per-mock rules (a
+/// visitor or an API key manages its own mocks only): a caller acting as a
+/// visitor (no credential, an API key, or a visit's manage token). Anyone
+/// else (a user, a control JWT) is held to the permission, and the route's
+/// permission goes on to the per-mock rules, which hold it on the
+/// instance's mocks.
 pub async fn check_route(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let Some(template) = req
         .extensions()
@@ -533,7 +539,15 @@ pub async fn check_route(State(state): State<AppState>, mut req: Request, next: 
         return next.run(req).await;
     };
     let Some(endpoint) = crate::catalog::control_route(template) else {
-        return next.run(req).await;
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "this route is not in the catalogue, so it declares no permission",
+                "reason": "permission_required",
+                "permission": null,
+            })),
+        )
+            .into_response();
     };
     // A method the route does not have: the router answers 405.
     let method = match req.method().as_str() {
@@ -563,17 +577,33 @@ pub async fn check_route(State(state): State<AppState>, mut req: Request, next: 
         Some(Need::Perm(p))
             if !caller.has(p)
                 && !(endpoint.project && caller.has_somewhere(p))
-                && !(endpoint.self_service && state.mocks.visits().is_some()) =>
+                && !(endpoint.self_service
+                    && state.mocks.visits().is_some()
+                    && acts_as_visitor(&caller, req.headers())) =>
         {
             return crate::rbac::refuse(&caller, p);
         }
         _ => {}
     }
-    if let (true, Some(Need::Perm(p))) = (endpoint.project, need) {
-        req.extensions_mut().insert(RouteNeed(p));
+    // The per-mock rules hold the route's permission again on the mock: its
+    // project's roles for a project route, the instance's for a visitor let
+    // through above.
+    if let Some(Need::Perm(p)) = need {
+        if endpoint.project || (endpoint.self_service && !caller.has(p)) {
+            req.extensions_mut().insert(RouteNeed(p));
+        }
     }
     req.extensions_mut().insert(ControlCaller(caller));
     next.run(req).await
+}
+
+/// Does the caller act as a self-service visitor: no credential, an API
+/// key, or a visit's manage token (`X-Rustybin-Mock-Token`)?
+fn acts_as_visitor(caller: &Resolved, headers: &HeaderMap) -> bool {
+    matches!(
+        caller.principal,
+        crate::rbac::Principal::Anonymous { .. } | crate::rbac::Principal::Key { .. }
+    ) || headers.contains_key(crate::mocks::visits::TOKEN_HEADER)
 }
 
 #[cfg(test)]

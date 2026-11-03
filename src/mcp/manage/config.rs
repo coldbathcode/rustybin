@@ -57,7 +57,7 @@ pub fn export_config(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     if !matches!(format, "yaml" | "json") {
         return err("format must be yaml or json (the bundle is GET /_rustybin/config/export?format=bundle or `rustybin config export --format bundle`)");
     }
-    let export = configdoc::export(&ctx.app, secrets, false);
+    let export = configdoc::export_for(&ctx.app, &access.resolved, secrets, false);
     let sections = export.file.sections();
     let mocks = export.file.mocks.as_ref().map(|m| m.len()).unwrap_or(0);
     let mut structured = json!({
@@ -175,7 +175,9 @@ pub async fn apply_config(ctx: &CallCtx, access: &Access, args: &Value, params: 
     let prune = arg_bool(args, "prune").unwrap_or(false);
     // What the document's sections need beyond config.apply, as the REST
     // route checks it.
-    if let Some(p) = configdoc::sections_need(&access.resolved, &ctx.app.settings, &file) {
+    if let Some(p) =
+        configdoc::sections_need(&access.resolved, &ctx.app.settings, &ctx.app.users, &file)
+    {
         return err(format!(
             "permission_required: {}: the document's sections need it (settings:, instance:, secrets:, agents:, users:, roles:)",
             p.name()

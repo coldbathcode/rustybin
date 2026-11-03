@@ -100,7 +100,12 @@ Who holds which permissions:
 
 On a self-service instance a visitor or an API key without `mocks.write` still
 reaches the mock routes and manages its own mocks there; the instance's mocks stay
-the operator's. A few checks depend on the request itself and are made on top of the
+the operator's: a visitor reads them, and their traffic, stateful data, deletion or
+publication need the route's permission. A user or a control JWT is never let
+through as a visitor: they are held to each route's permission (sending a visit's
+manage token makes them a visitor, with a visitor's reach). A control route the
+catalogue does not know is refused (`403`) for every credential, the admin token
+included. A few checks depend on the request itself and are made on top of the
 route's:
 
 | Request | Also needs |
@@ -108,10 +113,15 @@ route's:
 | `DELETE /_rustybin/requests` without `?session=` (everyone's captures) | `traffic.clear` (one session's need only `traffic.read`) |
 | A settings change (`PATCH /_rustybin/settings`, `DELETE /_rustybin/settings/{key}`, a document's `settings:`) of `egress.*`, `proxy.*`, `agents.*`, `console.*`, `sso.*`, `assist.provider` or `assist.base_url` | `settings.security` |
 | A settings change of a `portal.*` setting | `portal.settings` |
+| A settings change of a `git.*` setting (the remote and the automatic mode decide where the whole instance is pushed and what a pull applies) | `git.write` |
+| A settings change (or a document's `settings:`) of `sso.role_map` or `sso.default_roles` | every permission of each role named (in its project for `project:role`): nobody grants more than they hold, through the provider's groups included |
 | A settings change that sets or clears a secret, a document with `secrets:` | `secrets.write` |
 | A document (`POST /_rustybin/config/apply`, the `apply_config` tool) with `settings:` or `instance:`; with `agents:`; with `users:`, `roles:` or `projects:` | `settings.write`; `agents.manage`; `users.manage` |
 | A project's members (`PUT /_rustybin/projects/{name}`, a document's `projects:`), deleting a project | every permission of the roles given or taken, in that project; a move of its resources (`move_to`) the write permission of each kind in both |
 
+| `DELETE /_rustybin/sessions/{id}` (and `end_session` with an id) | every permission of the session's user, in the instance and in their projects, as for any change to that user |
+| `DELETE /_rustybin/sessions` (and `end_session` with `all`): sign out everywhere, every OAuth and agent token too | every permission (the `admin` role, the admin token) |
+| `GET /_rustybin/config/export` (and `export_config`) | without `users.read` the document carries no `users:`, `roles:` nor `projects:` |
 | `PUT /_rustybin/password` by a caller who is not a user (the admin token, a control JWT): the first admin's password | `users.manage` |
 | `GET /_rustybin/agents*` (and `list_agents`, `get_agent`) of AI agents that are not the caller's own | `agents.read` (a user sees their own [agents](../agent-mcp.md#agents-act-for-a-user) without it) |
 | Changing, revoking, restoring or ending the sessions of an AI agent that is not the caller's own | `agents.manage` (a user limits, revokes and ends the sessions of their own without it, and restores one they revoked) |
@@ -202,10 +212,13 @@ default.
 **Sessions.** `POST /_rustybin/logout` revokes the presented token for the rest of
 its life (a bounded denylist of session ids, at most 4096, expiring with the
 tokens). `GET /_rustybin/sessions` (admin) lists the sign-in tokens issued since the
-last restart (at most 256: user, address, issue, last use and expiry times),
-`DELETE /_rustybin/sessions/{id}` ends one, and `DELETE /_rustybin/sessions` signs out
-everywhere by rotating the token generation every token carries, the caller's
-included. One user's sessions: `GET` and `DELETE /_rustybin/users/{id}/sessions`
+last restart (user, address, issue, last use and expiry times; at most 16 per user
+and 4096 in all: a sign-in past a user's 16 ends that user's oldest session, whose
+token is refused from then on, so no session is live without being listed and
+nobody's sign-ins push out another user's), `DELETE /_rustybin/sessions/{id}` ends
+one (the caller holds what the session's user holds), and `DELETE
+/_rustybin/sessions` signs out everywhere by rotating the token generation every
+token carries, the caller's included (every permission). One user's sessions: `GET` and `DELETE /_rustybin/users/{id}/sessions`
 (`users.read`, `users.manage`); your own: `/_rustybin/me/sessions` (any signed-in
 user). `GET /_rustybin/session` describes the credential a request presents
 (`obtained`: `password`, `admin_token`, `control_jwt` or `api_key`), which is how
@@ -234,13 +247,19 @@ permission).
 within a minute, and they wait: `429` with `Retry-After`, a minute the first time,
 doubling up to ten minutes. An IPv6 address counts by its /64, so rotating inside it
 gains nothing, and a client trying other user names behind a shared address does not
-lock the real user out. Past 100 failures in a minute from every address together,
-every sign-in waits for the minute's end. Attempts count as they start, so five
-guesses sent in parallel take the whole allowance. Every attempt is logged on the
+lock the real user out. Past 20 failures at one user name in a minute from every
+address together, sign-ins as that name wait for the minute's end; failures at other
+names never hold anyone back, and junk invitation tokens and single sign-on
+callbacks have lanes of their own, so no client locks user one out by guessing
+elsewhere. Attempts count as they start, so five guesses sent in parallel take the
+whole allowance. Every attempt is logged on the
 `rustybin::auth` target with the user name (control characters escaped), the address
 and the outcome, never the password. Passwords are compared in
 constant time; hashes are verified off the request threads, at most four at once
-(`429` with `reason: busy` beyond). The address is the TCP peer, or with
+(`429` with `reason: busy` beyond). Every sign-in runs exactly one argon2id verify
+under that limit, a dummy one when there is no hash to check (a name nobody has, an
+invited user, user one's password from the environment), so neither the time nor a
+`busy` answer tells a real user from an unknown name. The address is the TCP peer, or with
 `RUSTYBIN_TRUST_FORWARD` the one header named by `proxy.client_ip_header`
 (`RUSTYBIN_TRUST_FORWARD_HEADER`): `fly`, `forwarded`, `x-forwarded-for` (its
 rightmost outside hop) or `x-real-ip`. The default, `any`, takes the first usable of
@@ -303,6 +322,13 @@ single sign-on and the admin token (`POST /_rustybin/login` and `/join` answer
 `403 password_sign_in_off`), and only while single sign-on is set up; keep
 `RUSTYBIN_ADMIN_TOKEN` as the break glass. Every `sso.*` setting needs
 `settings.security`, and a document pulled from the repository never changes one.
+A user added ahead links only through the email the provider verified
+(`email_verified: true`), never through a name the provider lets people choose, and
+the browser learns only `not_linked` whatever the name matched. The provider vouches
+for a person for twelve hours (a sign-in token's life): past it the agent tokens of
+the built-in OAuth server acting for a single sign-on user, refresh tokens included,
+are refused until the person signs in through the provider again. Under an `https`
+issuer every endpoint of the discovery document must be `https`.
 
 **Upgrading from 0.4.** Nothing to do: on the first start the console user (the
 `console.user` and `console.password_hash` settings, or `RUSTYBIN_CONSOLE_USER` and

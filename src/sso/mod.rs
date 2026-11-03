@@ -26,8 +26,9 @@
 //!   cached for an hour; a key id the cache does not know fetches the keys
 //!   once more.
 //! - **State** is bounded: sign-ins under way ([`MAX_PENDING`], ten
-//!   minutes, [`MAX_PENDING_PER_ADDRESS`] per client address) and one-time
-//!   codes ([`MAX_HANDOFFS`], two minutes).
+//!   minutes, [`MAX_PENDING_PER_ADDRESS`] per client address; a full table
+//!   drops the oldest sign-in of the busiest address, never refuses a
+//!   start) and one-time codes ([`MAX_HANDOFFS`], two minutes).
 
 pub mod api;
 pub mod provider;
@@ -255,6 +256,64 @@ fn normalize_role_map(v: &Value) -> Value {
         ),
         other => other.clone(),
     }
+}
+
+/// What setting `key` to `value` grants that the caller does not hold: a
+/// role map or default roles naming a role (in the instance, or in a
+/// project for `project:role`) with a permission the caller lacks there.
+/// Unknown roles grant nothing. `None` for any other key.
+pub fn grants_need(
+    caller: &crate::rbac::Resolved,
+    users: &crate::rbac::Users,
+    key: &str,
+    value: &Value,
+) -> Option<crate::rbac::Permission> {
+    let list = |v: &Value| -> Vec<String> {
+        match v {
+            Value::Array(items) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect(),
+            Value::String(s) => s.split(',').map(|t| t.trim().to_string()).collect(),
+            _ => Vec::new(),
+        }
+    };
+    let tokens: Vec<String> = match key {
+        ROLE_MAP => list(&normalize_role_map(value))
+            .iter()
+            .filter_map(|e| parse_role_map_entry(e).ok())
+            .flat_map(|(_, roles)| roles)
+            .collect(),
+        DEFAULT_ROLES => list(value),
+        _ => return None,
+    };
+    for t in &tokens {
+        let (project, role) = match t.split_once(':') {
+            Some((p, r)) => (Some(p), r),
+            None => (None, t.as_str()),
+        };
+        let Some(perms) = users.role_permissions(role) else {
+            continue;
+        };
+        let missing = perms.iter().find(|p| !caller.has_in(*p, project));
+        if missing.is_some() {
+            return missing;
+        }
+    }
+    None
+}
+
+/// Do the role map or the default roles name `role` (in the instance or
+/// in a project), whether single sign-on is on or not?
+pub fn names_role(settings: &Settings, role: &str) -> bool {
+    let in_map = settings
+        .list(ROLE_MAP)
+        .iter()
+        .filter_map(|e| parse_role_map_entry(e).ok())
+        .flat_map(|(_, roles)| roles)
+        .any(|t| t.rsplit(':').next() == Some(role));
+    in_map || settings.list(DEFAULT_ROLES).iter().any(|r| r == role)
 }
 
 fn check_roles_list(v: &Value) -> Result<(), String> {
@@ -720,16 +779,18 @@ pub fn person_of(claims: &Value, groups_claim: &str) -> Person {
     }
 }
 
-/// The sign-in name a new user gets: `preferred_username`, else the email,
-/// else the subject, made to fit the user name rules (letters, digits and
-/// `. _ @ -`, at most 64).
+/// The sign-in name a new user gets: `preferred_username`, else the email
+/// when the provider verified it (`email_verified: true`), else the
+/// subject, made to fit the user name rules (letters, digits and `. _ @
+/// -`, at most 64).
 pub fn sign_in_name(p: &Person) -> Option<String> {
-    for candidate in [&p.name, &p.email].into_iter().flatten() {
+    let email = p.email.as_ref().filter(|_| p.email_verified == Some(true));
+    for candidate in [p.name.as_ref(), email].into_iter().flatten() {
         if crate::login::valid_user(candidate).is_ok() {
             return Some(candidate.clone());
         }
     }
-    let raw = p.name.as_ref().or(p.email.as_ref()).unwrap_or(&p.subject);
+    let raw = p.name.as_ref().or(email).unwrap_or(&p.subject);
     let clean: String = raw
         .chars()
         .map(|c| {
@@ -816,6 +877,61 @@ pub fn map_project_roles(
         }
     }
     (out, unknown)
+}
+
+/// Refused when the address (an IPv6 /64) has
+/// [`MAX_PENDING_PER_ADDRESS`] sign-ins under way.
+fn per_address(pending: &HashMap<String, Pending>, bucket: Option<IpAddr>) -> Result<(), Refusal> {
+    if bucket.is_some()
+        && pending.values().filter(|p| p.address == bucket).count() >= MAX_PENDING_PER_ADDRESS
+    {
+        return Err(Refusal::new(
+            "rate_limited",
+            "too many sign-ins under way from this address: finish one, or wait ten minutes",
+        ));
+    }
+    Ok(())
+}
+
+/// Make room in a full table: the oldest sign-in of the address with the
+/// most under way goes. Whoever fills the table from a few addresses
+/// pushes out their own sign-ins first, never a person's single one, so a
+/// full table never refuses a start.
+fn evict_one(pending: &mut HashMap<String, Pending>) {
+    let mut counts: HashMap<Option<IpAddr>, usize> = HashMap::new();
+    for p in pending.values() {
+        *counts.entry(p.address).or_default() += 1;
+    }
+    let most = counts.values().copied().max().unwrap_or(0);
+    let victim = pending
+        .iter()
+        .filter(|(_, p)| counts.get(&p.address).copied() == Some(most))
+        .min_by_key(|(_, p)| p.at)
+        .map(|(k, _)| k.clone());
+    if let Some(k) = victim {
+        pending.remove(&k);
+    }
+}
+
+/// The one reason the browser gets when the identity matches no user it
+/// may use ([`is_account_refusal`]).
+pub const NOT_LINKED: &str = "not_linked";
+const NOT_LINKED_MESSAGE: &str = "this sign-in matches no user it may use here: ask an admin to add you (a user created ahead links through the email the provider verified)";
+
+/// The store's refusals that say something about the users of a name
+/// (a password account has it, another identity, a user created ahead,
+/// nobody): all answered as [`NOT_LINKED`].
+fn is_account_refusal(reason: &str) -> bool {
+    use crate::rbac::users::{
+        SSO_NAME_TAKEN, SSO_NOT_LINKED, SSO_NOT_PROVISIONED, SSO_OTHER_IDENTITY,
+    };
+    [
+        SSO_NAME_TAKEN,
+        SSO_OTHER_IDENTITY,
+        SSO_NOT_LINKED,
+        SSO_NOT_PROVISIONED,
+    ]
+    .contains(&reason)
 }
 
 /// Is the email at an allowed domain? `Err` with the reason otherwise.
@@ -1009,24 +1125,7 @@ impl Sso {
         }
         let bucket = address.map(crate::session::address_bucket);
         self.prune();
-        {
-            let pending = lock(&self.pending);
-            if pending.len() >= MAX_PENDING {
-                return Err(Refusal::new(
-                    "busy",
-                    "too many sign-ins are under way: try again in a few minutes",
-                ));
-            }
-            if bucket.is_some()
-                && pending.values().filter(|p| p.address == bucket).count()
-                    >= MAX_PENDING_PER_ADDRESS
-            {
-                return Err(Refusal::new(
-                    "rate_limited",
-                    "too many sign-ins under way from this address: finish one, or wait ten minutes",
-                ));
-            }
-        }
+        per_address(&lock(&self.pending), bucket)?;
         let d = self
             .discovery(&setup, false)
             .await
@@ -1046,11 +1145,11 @@ impl Sso {
             .append_pair("code_challenge", &challenge_of(&verifier))
             .append_pair("code_challenge_method", "S256");
         let mut pending = lock(&self.pending);
+        // Checked again: other starts from the address may have landed
+        // while discovery was fetched.
+        per_address(&pending, bucket)?;
         if pending.len() >= MAX_PENDING {
-            return Err(Refusal::new(
-                "busy",
-                "too many sign-ins are under way: try again in a few minutes",
-            ));
+            evict_one(&mut pending);
         }
         pending.insert(
             state,
@@ -1203,12 +1302,21 @@ impl Sso {
             name,
             display_name: person.display_name.clone(),
             email: person.email.clone(),
+            email_verified: person.email_verified == Some(true),
             mapped_roles: mapped,
             mapped_projects,
         };
         let user = users
             .sso_sign_in(&ident, setup.provision)
             .map_err(|e| match e {
+                crate::rbac::UsersError::Refused(reason, m) if is_account_refusal(reason) => {
+                    // The detail stays in the log: the browser (and a name
+                    // the provider lets people choose) learns only that no
+                    // user may be used, never whether a password account or
+                    // another identity has the name.
+                    tracing::info!(target: "rustybin::sso", reason, detail = %m, "single sign-on refused");
+                    fail(Refusal::new(NOT_LINKED, NOT_LINKED_MESSAGE))
+                }
                 crate::rbac::UsersError::Refused(reason, m) => fail(Refusal::new(reason, m)),
                 other => fail(Refusal::new("server_error", other.to_string())),
             })?;

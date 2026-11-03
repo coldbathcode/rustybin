@@ -871,7 +871,7 @@ fn a_document_carries_users_and_roles_round_trip_prune_and_untrusted() {
     };
     let doc = crate::mocks::config_file::parse("version: 2\nroles: []\n").expect("doc");
     assert_eq!(
-        crate::configdoc::sections_need(&editor, &b.settings, &doc),
+        crate::configdoc::sections_need(&editor, &b.settings, &b.users, &doc),
         Some(super::Permission::UsersManage)
     );
 }

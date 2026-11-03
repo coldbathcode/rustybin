@@ -101,7 +101,7 @@ pub const REPOSITORY_REFUSED_SECTIONS: [(&str, &str); 4] = [
     ),
     (
         "roles",
-        "a privileged role (granting users.manage or settings.security) defined, changed or pruned",
+        "a privileged role (granting users.manage or settings.security) defined, changed or pruned, a permission added to a role, a new role that single sign-on names",
     ),
 ];
 const USER_KEY: &str = crate::login::USER_KEY;
@@ -493,6 +493,25 @@ pub fn export(state: &AppState, secrets: SecretsMode, bundle: bool) -> Export {
         unparsed_mocks: Vec::new(),
     };
     Export { file, specs }
+}
+
+/// [`export`] for a caller: without `users.read` the document carries no
+/// `users:`, `roles:` nor `projects:` (the user directory and who is in
+/// which project, which `GET /_rustybin/users` withholds too). An absent
+/// section is left alone when the document is applied.
+pub fn export_for(
+    state: &AppState,
+    caller: &crate::rbac::Resolved,
+    secrets: SecretsMode,
+    bundle: bool,
+) -> Export {
+    let mut export = export(state, secrets, bundle);
+    if !caller.has(crate::rbac::Permission::UsersRead) {
+        export.file.users = None;
+        export.file.roles = None;
+        export.file.projects = None;
+    }
+    export
 }
 
 fn mock_doc(s: &Snapshot, reveal: bool, bundle: bool) -> (MockDoc, Option<SpecFile>) {
@@ -2401,7 +2420,12 @@ fn applier(opts: &ApplyOptions) -> std::sync::Arc<crate::rbac::Resolved> {
 /// after `users:` ([`prune_roles`]), so a role the document takes from its
 /// users goes too. A caller saves only roles within its permissions. A
 /// document from the repository never defines or changes a privileged role
-/// (one granting `users.manage` or `settings.security`): such an entry is
+/// (one granting `users.manage` or `settings.security`), never gives an
+/// existing role a permission it did not grant (any permission: its
+/// holders would gain it), and creates a role only when single sign-on
+/// does not name it (`sso.role_map`, `sso.default_roles`: the provider's
+/// groups would give it at the next sign-in; otherwise nobody holds a new
+/// role until someone with `users.manage` assigns it). Such an entry is
 /// reported and the role kept as it is.
 fn apply_roles(
     state: &AppState,
@@ -2436,6 +2460,32 @@ fn apply_roles(
             ));
             refused.push(r.name.clone());
             continue;
+        }
+        if opts.untrusted {
+            let gained = old.and_then(|o| {
+                let before = o.permission_set();
+                r.permission_set().iter().find(|p| !before.has(*p))
+            });
+            if let Some(p) = gained {
+                problems.push(format!(
+                    "roles.{}: a document from the repository cannot give a role a permission it did not grant ({}): kept as it is",
+                    r.name,
+                    p.name()
+                ));
+                refused.push(r.name.clone());
+                continue;
+            }
+            if old.is_none()
+                && !r.permission_set().is_empty()
+                && crate::sso::names_role(&state.settings, &r.name)
+            {
+                problems.push(format!(
+                    "roles.{}: a document from the repository cannot create a role single sign-on gives (sso.role_map, sso.default_roles): create it through the API, the console or the CLI",
+                    r.name
+                ));
+                refused.push(r.name.clone());
+                continue;
+            }
         }
         if let Err(e) = crate::rbac::role::validate_custom(&r) {
             problems.push(format!("roles.{}: {} (skipped)", r.name, e.join("; ")));
@@ -2886,9 +2936,10 @@ pub fn load_applied(state: &AppState) {
 pub fn check_sections(
     caller: &crate::rbac::Resolved,
     settings: &crate::settings::Settings,
+    users: &crate::rbac::Users,
     file: &MocksFile,
 ) -> Result<(), axum::response::Response> {
-    match sections_need(caller, settings, file) {
+    match sections_need(caller, settings, users, file) {
         Some(p) => Err(crate::rbac::refuse(caller, p)),
         None => Ok(()),
     }
@@ -2896,10 +2947,13 @@ pub fn check_sections(
 
 /// The first permission [`check_sections`] finds missing, if any (the
 /// `apply_config` tool answers it as a tool error). `users:` and `roles:`
-/// need `users.manage`.
+/// need `users.manage`; a single sign-on role map or default roles under
+/// `settings:` need what the roles they name grant
+/// (`crate::settings::values_need`).
 pub fn sections_need(
     caller: &crate::rbac::Resolved,
     settings: &crate::settings::Settings,
+    users: &crate::rbac::Users,
     file: &MocksFile,
 ) -> Option<crate::rbac::Permission> {
     use crate::rbac::Permission as P;
@@ -2915,6 +2969,7 @@ pub fn sections_need(
         for k in values.keys() {
             needs.extend(key_needs(k));
         }
+        needs.extend(crate::settings::values_need(caller, users, values));
     }
     if let Some(i) = &file.instance {
         if i.title.is_some() {
