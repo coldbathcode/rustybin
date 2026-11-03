@@ -1,6 +1,7 @@
 // The dev portal from the console: the publish dialog (title, summary,
 // tags, contact, order, demo credentials, Open or Closed with "Turn on
-// security and close" for a mock without mocked security; "Write with AI"
+// security and close" for a mock that cannot be closed as it is (security
+// off, the demo credentials, tokens anyone can get); "Write with AI"
 // runs the summarise_for_portal task for a mock) and the calls behind it
 // (GET /_rustybin/portal, PUT and DELETE /_rustybin/portal/items/{id}).
 // Used by a mock's page and by Management, Portal.
@@ -60,18 +61,20 @@ export function openPublishDialog(item, opts = {}) {
   const isClosed = () => closedR.querySelector('input').checked;
   const needsSecurity = () => item.kind === 'api' && item.secured === false && isClosed();
   const accessNote = h('div', { id: 'portal-access-note' });
-  const STAY_SECURED = { 'mcp:protected': true, 'mcp:apikey': true };
   const paintAccess = () => {
     if (!isClosed()) { replace(accessNote, h('p', { class: 'muted small', style: { margin: 0 } }, 'Open: anyone who reaches the portal reads and uses it.')); }
     else {
       const what = h('p', { class: 'muted small', style: { margin: 0 } }, 'Closed: everyone reads the docs; only signed-in portal readers (the portal.read permission, the portal_reader role) get Try it, the demo credentials, the collections and the connection snippets.');
       let extra = null;
       if (item.kind === 'api' && item.secured === false) {
-        extra = notice('warn', 'This mock has no mocked security on: closed, its calls would still answer without credentials. ', h('strong', null, 'Turn on security and close'), ' turns it on (the mode the spec declares, else api_key), deploys it and closes the entry.');
+        // Why it cannot be closed as it is, and what the button does.
+        const why = item.closable && item.closable.why ? String(item.closable.why) : 'its mocked security is off';
+        extra = h('div', { class: 'stack-sm', id: 'portal-closable' },
+          notice('warn', 'Closed as it is, this mock would still answer callers who never signed in to the portal: ' + why + '. ',
+            h('strong', null, 'Turn on security and close'), ' turns its security on with credentials of its own (a random API key in place of the demo ones, or the mode the spec declares when that is enough), deploys it and closes the entry.'),
+          h('p', { class: 'muted small', style: { margin: 0 } }, 'A closed mock needs an API key (api_key mode) or a Basic user (basic mode) of its own on every operation. JWT and bearer modes, OAuth and OpenID Connect schemes and mutual TLS cannot be closed: anyone gets a token from the built-in identity provider, whose demo client is public, or the downloadable demo client certificate.'));
       } else if (item.kind !== 'api') {
-        extra = h('p', { class: 'small', style: { margin: 0 } }, STAY_SECURED[item.id]
-          ? 'This endpoint already refuses a call without its credentials.'
-          : 'This endpoint stays callable without credentials: closing hides its credentials and connection snippets on the portal.');
+        extra = h('p', { class: 'small', style: { margin: 0 }, id: 'portal-closable' }, 'This endpoint stays callable without the portal sign-in: closing only hides its credentials and connection snippets on the portal.');
       }
       replace(accessNote, what, extra);
     }
@@ -141,7 +144,7 @@ export function openPublishDialog(item, opts = {}) {
     publishBtn.disabled = false;
     if (!r.ok) { replace(err, notice('err', errorOf(r))); return; }
     dlg.close();
-    toast((r.status === 201 ? 'Published ' : 'Updated ') + item.title + (meta.access === 'closed' ? ', closed' : '') + (r.json && r.json.secured_now ? ' (its mocked security is on now)' : '') + (r.json && r.json.hidden ? ' (hidden: ' + r.json.hidden + ')' : ''));
+    toast((r.status === 201 ? 'Published ' : 'Updated ') + item.title + (meta.access === 'closed' ? ', closed' : '') + (r.json && r.json.secured_now ? ' (its mocked security is on now, with credentials of its own)' : '') + (r.json && r.json.note && meta.access === 'closed' ? ' (the endpoint stays callable)' : '') + (r.json && r.json.hidden ? ' (hidden: ' + r.json.hidden + ')' : ''));
     if (opts.onDone) opts.onDone(r.json);
   });
   if (unpublishBtn) {

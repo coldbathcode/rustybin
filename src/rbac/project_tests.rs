@@ -1034,3 +1034,240 @@ async fn an_agent_acting_for_a_member_follows_their_bindings() {
         roles: Vec::new(),
     };
 }
+
+// ── The security pass (step 14, area B) ─────────────────────────────
+
+/// A project's name cannot be probed: an unknown project and one the
+/// caller may not use answer alike (a move, a creation), and a checkpoint's
+/// restore never names the project a mock is in now.
+#[tokio::test]
+async fn a_project_name_cannot_be_probed() {
+    let f = fixture().await;
+    f.state
+        .users
+        .save_project("payments-secret", None, None)
+        .expect("project");
+    let mv = |to: &str| json!({ "project": to });
+    let (s1, v1) = send(
+        &f.app,
+        "PATCH",
+        "/_rustybin/mocks/ma",
+        &f.alice,
+        Some(mv("payments-secret")),
+    )
+    .await;
+    let (s2, v2) = send(
+        &f.app,
+        "PATCH",
+        "/_rustybin/mocks/ma",
+        &f.alice,
+        Some(mv("payments-nothing")),
+    )
+    .await;
+    assert_eq!(s1, StatusCode::FORBIDDEN, "{v1}");
+    assert_eq!(
+        (s1, &v1),
+        (s2, &v2),
+        "an unknown project answers like an unwritable one"
+    );
+    let create = |p: &str| json!({ "name": "probe", "spec": SPEC, "project": p });
+    let (s1, v1) = send(
+        &f.app,
+        "POST",
+        "/_rustybin/mocks",
+        &f.alice,
+        Some(create("payments-secret")),
+    )
+    .await;
+    let (s2, v2) = send(
+        &f.app,
+        "POST",
+        "/_rustybin/mocks",
+        &f.alice,
+        Some(create("payments-nothing")),
+    )
+    .await;
+    assert_eq!(s1, StatusCode::FORBIDDEN, "{v1}");
+    assert_eq!((s1, &v1), (s2, &v2));
+    // Who holds the permission on the whole instance still hears the name is unknown.
+    let (s, v) = send(
+        &f.app,
+        "PATCH",
+        "/_rustybin/mocks/ma",
+        &admin(),
+        Some(mv("payments-nothing")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(v["reason"], json!("unknown_project"));
+    // a's checkpoint keeps ma; ma moves to the secret project; alice restores.
+    let (s, v) = send(
+        &f.app,
+        "PATCH",
+        "/_rustybin/mocks/ma",
+        &admin(),
+        Some(mv("payments-secret")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, v) = send(
+        &f.app,
+        "POST",
+        "/_rustybin/checkpoints/ca/restore",
+        &f.alice,
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let text = v.to_string();
+    assert!(text.contains("now in another project"), "{text}");
+    assert!(!text.contains("payments-secret"), "{text}");
+}
+
+/// A project's resources (mock, test and checkpoint names) go only to who
+/// may read them there: `users.read` sees the project, not its contents.
+#[tokio::test]
+async fn project_resources_are_listed_only_to_who_reads_them() {
+    let f = fixture().await;
+    let (s, v) = send(
+        &f.app,
+        "PUT",
+        "/_rustybin/roles/user-admin",
+        &admin(),
+        Some(json!({ "permissions": ["users.read"] })),
+    )
+    .await;
+    assert!(s.is_success(), "{v}");
+    add_user(&f.state, "carol", &["user-admin"]);
+    let carol = sign_in(&f.app, "carol").await;
+    let (s, v) = send(&f.app, "GET", "/_rustybin/projects", &carol, None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let projects = v["projects"].as_array().cloned().unwrap_or_default();
+    assert!(projects.len() >= 2, "{v}");
+    for p in &projects {
+        let r = &p["resources"];
+        assert_eq!(r["mocks"], json!([]), "{p}");
+        assert_eq!(r["tests"], json!([]), "{p}");
+        assert_eq!(r["checkpoints"], json!([]), "{p}");
+    }
+    // A member who reads the project still sees its names.
+    let (_, v) = send(&f.app, "GET", "/_rustybin/projects/a", &f.alice, None).await;
+    assert_eq!(v["resources"]["mocks"], json!(["ma"]), "{v}");
+    assert_eq!(v["resources"]["tests"], json!(["ta"]), "{v}");
+}
+
+/// The load errors of saved and file mocks name any mock: only who manages
+/// the instance's mocks gets them.
+#[tokio::test]
+async fn load_errors_go_to_instance_mock_writers_only() {
+    let f = fixture().await;
+    f.state
+        .mocks
+        .record_load_error("saved mock secret-ledger.json: unreadable".into());
+    let (_, v) = send(&f.app, "GET", "/_rustybin/mocks", &f.alice, None).await;
+    assert_eq!(v["load_errors"], json!([]), "{v}");
+    let (_, v) = send(&f.app, "GET", "/_rustybin/mocks", &admin(), None).await;
+    assert!(
+        v["load_errors"].to_string().contains("secret-ledger"),
+        "{v}"
+    );
+}
+
+/// The AI spec job's prompt lists only the mock names the caller may read
+/// (it is answered in `sent`, and goes to the provider).
+#[tokio::test]
+async fn the_ai_spec_prompt_names_only_mocks_the_caller_may_read() {
+    let mut c = password_config();
+    c.assist_provider = Some("mock".into());
+    let state = test_state_with(c);
+    let app = test_app_with(state.clone());
+    for p in ["a", "b"] {
+        state.users.save_project(p, None, None).expect("project");
+    }
+    let alice = add_user(&state, "alice", &[]);
+    bind(&state, "a", &alice, &["editor"]);
+    for (mock, project) in [
+        ("visible-alpha", Some("a")),
+        ("ledger-secret-b", Some("b")),
+        ("instance-secret", None),
+    ] {
+        let mut body = json!({ "name": mock, "spec": SPEC });
+        if let Some(p) = project {
+            body["project"] = json!(p);
+        }
+        let (s, v) = send(&app, "POST", "/_rustybin/mocks", &admin(), Some(body)).await;
+        assert_eq!(s, StatusCode::CREATED, "{v}");
+    }
+    let token = sign_in(&app, "alice").await;
+    let (s, v) = send(
+        &app,
+        "POST",
+        "/_rustybin/mocks/ai/spec",
+        &token,
+        Some(json!({ "description": "A small shop selling mugs." })),
+    )
+    .await;
+    assert!(s.is_success(), "{v}");
+    let sent = v["sent"].to_string();
+    assert!(sent.contains("visible-alpha"), "{sent}");
+    assert!(!sent.contains("ledger-secret-b"), "{sent}");
+    assert!(!sent.contains("instance-secret"), "{sent}");
+}
+
+/// A live traffic stream checks its caller again at every event: removed
+/// from the project, the member gets nothing more and the stream ends.
+#[tokio::test]
+async fn a_traffic_stream_ends_when_its_caller_loses_the_project() {
+    use http_body_util::BodyExt;
+    let f = fixture().await;
+    let alice = f.state.users.find("alice").expect("alice").id;
+    let resp = send_raw(
+        &f.app,
+        "GET",
+        "/_rustybin/mocks/ma/requests/stream",
+        &f.alice,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut body = resp.into_body();
+    let traffic = |tag: &str| {
+        Request::builder()
+            .uri(format!("/mock/ma/a?tag={tag}"))
+            .body(Body::empty())
+            .expect("request")
+    };
+    // While a member: the event arrives.
+    let _ = f
+        .app
+        .clone()
+        .oneshot(traffic("first"))
+        .await
+        .expect("response");
+    let mut text = String::new();
+    while !text.contains("first") {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), body.frame())
+            .await
+            .expect("frame in time")
+            .expect("frame")
+            .expect("ok frame");
+        if let Ok(data) = frame.into_data() {
+            text.push_str(&String::from_utf8_lossy(&data));
+        }
+    }
+    // Removed from a: the next request is never sent, the stream ends.
+    bind(&f.state, "a", &alice, &[]);
+    let _ = f
+        .app
+        .clone()
+        .oneshot(traffic("second"))
+        .await
+        .expect("response");
+    let rest = tokio::time::timeout(std::time::Duration::from_secs(5), body.collect())
+        .await
+        .expect("the stream ends")
+        .expect("body")
+        .to_bytes();
+    let rest = String::from_utf8_lossy(&rest);
+    assert!(!rest.contains("second"), "{rest}");
+}

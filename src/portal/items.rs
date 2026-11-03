@@ -639,7 +639,7 @@ fn mock_detail(
         "reference_path": format!("/portal/reference/mock:{}", s.name),
         "security": security_summary(c, reveal, locked),
         "credentials": reveal,
-        "token_url": format!("{}/oauth/token", ctx.base),
+        "token_url": (!locked).then(|| format!("{}/oauth/token", ctx.base)),
         "coverage": { "operations": coverage.operations, "with_examples": coverage.with_examples },
         "operations": operations,
         "downloads": downloads,
@@ -702,8 +702,12 @@ fn mcp_detail(key: &str, ctx: &Ctx, locked: bool) -> Value {
         ""
     };
     if locked {
-        // Docs (the tools, their schemas, the auth it expects), no
-        // connection snippets.
+        // Docs (the tools, their schemas, the kind of auth), no connection
+        // snippets and no hint at how to get through.
+        let mut auth = auth;
+        if let Some(m) = auth.as_object_mut() {
+            m.remove("hint");
+        }
         return json!({
             "path": path,
             "url": url,

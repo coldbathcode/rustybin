@@ -928,7 +928,13 @@ impl Svc {
         let mut out = json!({
             "count": mocks.len(),
             "mocks": mocks,
-            "load_errors": self.store().load_errors(),
+            // Paths and names of any mock, so only for whoever manages the
+            // instance's mocks.
+            "load_errors": if c.resolved.has(crate::rbac::Permission::MocksWrite) {
+                self.store().load_errors()
+            } else {
+                Vec::new()
+            },
             "persistent": self.store().persist_dir().is_some(),
             "host_domain": self.config().mocks_host,
             "limits": limits_json(self.store()),
@@ -1519,8 +1525,16 @@ impl Svc {
         for d in &defs {
             // Compiled like the apply compiles it: the preview reports the
             // same errors.
-            if let Err(e) = self.store().compile(&d.source, d.settings.clone()) {
-                errors.push(json!({ "name": d.name, "error": e }));
+            let c = match self.store().compile(&d.source, d.settings.clone()) {
+                Ok(c) => c,
+                Err(e) => {
+                    errors.push(json!({ "name": d.name, "error": e }));
+                    continue;
+                }
+            };
+            // A mock behind a closed portal item keeps its credentials.
+            if let Some(why) = self.store().refuses_live(&d.name, &c) {
+                errors.push(json!({ "name": d.name, "error": why }));
                 continue;
             }
             if self.store().get(&d.name).is_some() {

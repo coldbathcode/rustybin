@@ -390,6 +390,21 @@ pub(crate) async fn serve(
         auth: None,
     };
 
+    // Behind a closed portal item, a revision a caller without the portal's
+    // credentials would get through (recreated, loaded from a file, closed
+    // before 0.5) answers nothing until it is secured.
+    if crate::portal::mock_item_closed(&state.portal, store, &name, &live.owner) {
+        if let Some(u) = crate::portal::unclosable(crate::portal::keyed(&state.config), c) {
+            let mut resp = problem(
+                403,
+                "this mock is closed on the dev portal, but its mocked security would let a call through without the credentials the portal hands to readers: it answers nothing until it is secured (or the item is opened)",
+                json!({ "mock": name, "reason": "closed_unsecured", "why": u.message }),
+            );
+            add_mock_headers(&mut resp, &name, None);
+            return record(resp, outcome("closed_unsecured"), None);
+        }
+    }
+
     if !live.enabled {
         let mut resp = problem(
             c.settings.responses.disabled_status,
@@ -1262,25 +1277,31 @@ pub async fn stream(
         None => Vec::new(),
     };
     backlog.reverse();
-    let store = state.mocks.clone();
     let stream = async_stream::stream! {
         let mut sent = last_seen.unwrap_or(0);
         for entry in backlog {
             sent = entry.seq;
             yield Ok::<Event, Infallible>(capture_event(&entry));
         }
-        let mut check = tokio::time::interval(Duration::from_secs(30));
+        let mut check = tokio::time::interval(STREAM_RECHECK);
         loop {
             tokio::select! {
                 _ = check.tick() => {
-                    // End the stream when the mock is deleted.
-                    if store.get(&name).is_none() {
+                    // End the stream when the mock is deleted, or the caller
+                    // may no longer read its traffic.
+                    if !still_readable(&state, &headers, &extensions, &uri, &name) {
                         break;
                     }
                 }
                 item = rx.recv() => match item {
                     Ok(entry) => {
                         if entry.seq > sent {
+                            // Each event is checked again: a user removed
+                            // from the project, disabled or signed out, or
+                            // the mock moved, gets nothing more.
+                            if !still_readable(&state, &headers, &extensions, &uri, &name) {
+                                break;
+                            }
                             sent = entry.seq;
                             yield Ok(capture_event(&entry));
                         }
@@ -1294,6 +1315,46 @@ pub async fn stream(
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+/// How often an open traffic stream checks that its caller still reads the
+/// mock (beside every event it sends).
+const STREAM_RECHECK: Duration = Duration::from_secs(5);
+
+/// May the caller of a traffic stream still read mock `name`'s traffic? The
+/// request's credentials are verified again (a sign-out, a revoked token or
+/// a disabled user fails) and resolved as they are now (roles, projects),
+/// then the mock is checked as at the stream's start, plus the route's
+/// permission on the mock's project.
+fn still_readable(
+    state: &AppState,
+    headers: &HeaderMap,
+    extensions: &Extensions,
+    uri: &Uri,
+    name: &str,
+) -> bool {
+    let mut ext = extensions.clone();
+    if extensions
+        .get::<crate::control_auth::ControlAuthorized>()
+        .is_some()
+    {
+        match crate::control_auth::authenticate(headers, &state.config) {
+            Ok(r) => {
+                let r = Arc::new(r);
+                ext.insert(crate::control_auth::ControlAuthorized(r.clone()));
+                ext.insert(crate::control_auth::ControlCaller(r));
+            }
+            Err(_) => return false,
+        }
+    }
+    let s = svc(state, headers, &ext, uri);
+    // The route's own check (as `control_auth::check_route` made it), then
+    // the mock's (its project's permission included).
+    let p = crate::rbac::Permission::TrafficRead;
+    let route = s.caller.resolved.has(p)
+        || s.caller.resolved.has_somewhere(p)
+        || state.mocks.visits().is_some();
+    route && s.readable(name).is_ok()
 }
 
 fn capture_event(entry: &MockCapture) -> Event {

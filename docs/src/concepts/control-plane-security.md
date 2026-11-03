@@ -129,7 +129,7 @@ route's:
 | The MCP relay and checks: a saved connection's credentials, or a method that acts on a server on another host (`tools/call`) | `mcp.connections` |
 | `GET /_rustybin/checkpoints?from=git` and a restore from the repository | `git.read` |
 | The `/health` toggles and `POST /flaky/reset?scope=all` (data plane) | `settings.write` |
-| `PUT /_rustybin/portal/items/{id}` with `secure: true` (turns on a mock's mocked security to close it) | `mocks.write` |
+| `PUT /_rustybin/portal/items/{id}` with `secure: true` (turns on a mock's mocked security, with random credentials in place of the defaults, to close it) | `mocks.write` |
 | A closed portal item's credentials, Try it, collections and connection snippets (`/portal/api/*`), and the whole portal with `portal.auth=password` | `portal.read`, from the [portal sign-in](../portal.md#portal-logins) or a bearer control credential |
 
 **Projects.** The routes of mocks, saved tests, checkpoints and portal items are
@@ -137,7 +137,18 @@ route's:
 holding the permission in some project, and the handler checks it again on each
 resource, in the resource's project. Another project's resource the caller may not
 read answers `404`, and a list leaves it out; a caller with instance roles only meets
-exactly the checks above.
+exactly the checks above. A project name the caller may not use answers like one that
+does not exist (`403`), a project's resource names are listed only to who reads them
+there, and a live traffic stream checks its caller again at every event.
+
+**A closed portal item is closed on the data plane too.** A mock closes only when
+every call needs an API key or a Basic user of its own: never the documented defaults,
+nor a JWT of the built-in identity provider (its demo client is public) or the demo
+client certificate (it is downloadable). While the item is closed no path (an edit, a
+deploy, a rollback, a document, a file reload, a checkpoint restore) puts a revision
+live that a caller without the portal's credentials gets through, and a mock that has
+one anyway (recreated under the same name, loaded from a file) answers every call `403
+closed_unsecured` until it is secured ([dev portal](../portal.md#open-and-closed-items)).
 
 ## User name and password
 

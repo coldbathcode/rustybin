@@ -230,18 +230,261 @@ pub fn closed(settings: &Settings, access: Access) -> bool {
     access == Access::Closed || auth_mode(settings) == AuthMode::Password
 }
 
-/// Does a mock's live revision refuse a call without credentials? Mocked
-/// security on, and in `spec` mode with an operation that declares a
-/// requirement. A shared-mode instance (or one that requires an API key)
-/// refuses every data-plane call without a key, so it counts too.
+/// Does a mock's live revision refuse every call that lacks credentials
+/// only the portal hands out (what a closed item needs)? See
+/// [`unclosable`].
 pub fn mock_secured(config: &crate::config::Config, c: &crate::mocks::compile::Compiled) -> bool {
-    if config.shared_mode || config.require_key {
-        return true;
+    unclosable(keyed(config), c).is_none()
+}
+
+/// Does the instance refuse every data-plane call without an API key of
+/// its registry (shared mode, or `RUSTYBIN_REQUIRE_KEY`)?
+pub fn keyed(config: &crate::config::Config) -> bool {
+    config.shared_mode || config.require_key
+}
+
+/// Why a mock cannot back a closed item: a call could get through without
+/// the credentials the portal hands to a reader.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unclosable {
+    /// `security_off`, `default_credentials`, `obtainable_credentials` or
+    /// `open_operations` (no operation is protected).
+    pub reason: &'static str,
+    pub message: String,
+}
+
+/// At most this many operations are named in a refusal.
+const NAMED_OPERATIONS: usize = 5;
+
+/// Why the mocked security of `c` lets a caller who never signed in to the
+/// portal through, or `None` when it does not. A protected call must need
+/// a credential that only the mock's settings hold and that is not one of
+/// the documented defaults: an API key or a Basic user. Tokens are not
+/// such a credential (the built-in identity provider's demo client is
+/// public, so anyone mints a JWT the mock accepts), nor is a client
+/// certificate (the demo CA's client certificate is downloadable). The
+/// operations declared public (marked `public` in the mock's settings, or
+/// in `spec` mode without a requirement) answer anyone by design and are
+/// left out; at least one operation must be protected. An instance that
+/// refuses every data-plane call without a key of its registry (`keyed`)
+/// is closable as it is.
+pub fn unclosable(keyed: bool, c: &crate::mocks::compile::Compiled) -> Option<Unclosable> {
+    unclosable_with(keyed, &c.spec, &c.settings)
+}
+
+/// [`unclosable`] of a spec with `settings` (before they are compiled).
+pub fn unclosable_with(
+    keyed: bool,
+    spec: &crate::mocks::spec::ParsedSpec,
+    settings: &crate::mocks::model::MockSettings,
+) -> Option<Unclosable> {
+    use crate::mocks::model::SecurityMode;
+    if keyed {
+        return None;
     }
-    let sec = &c.settings.security;
-    sec.enabled
-        && (sec.mode != crate::mocks::model::SecurityMode::Spec
-            || c.spec.operations.iter().any(|o| !o.security.is_empty()))
+    let sec = &settings.security;
+    if !sec.enabled {
+        return Some(Unclosable {
+            reason: "security_off",
+            message: "its mocked security is off, so every call answers without credentials".into(),
+        });
+    }
+    // The operations a credential protects.
+    let protected: Vec<&crate::mocks::spec::Operation> = spec
+        .operations
+        .iter()
+        .filter(|o| !settings.operations.get(&o.id).is_some_and(|s| s.public))
+        .filter(|o| sec.mode != SecurityMode::Spec || !o.security.is_empty())
+        .collect();
+    if protected.is_empty() {
+        return Some(Unclosable {
+            reason: "open_operations",
+            message: "no operation needs credentials (each is public, or declares no security requirement)".into(),
+        });
+    }
+    match sec.mode {
+        SecurityMode::ApiKey => default_key(sec).map(|why| Unclosable {
+            reason: "default_credentials",
+            message: why,
+        }),
+        SecurityMode::Basic => default_user(sec).map(|why| Unclosable {
+            reason: "default_credentials",
+            message: why,
+        }),
+        SecurityMode::Bearer | SecurityMode::Jwt => Some(Unclosable {
+            reason: "obtainable_credentials",
+            message: format!(
+                "its {} mode accepts a JWT from the built-in identity provider, whose demo client is public: use the api_key or basic mode",
+                sec.mode.as_str()
+            ),
+        }),
+        SecurityMode::Spec => spec_unclosable(spec, sec, &protected),
+    }
+}
+
+fn named(ops: &[&str]) -> String {
+    let mut s = ops
+        .iter()
+        .take(NAMED_OPERATIONS)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if ops.len() > NAMED_OPERATIONS {
+        s.push_str(&format!(" and {} more", ops.len() - NAMED_OPERATIONS));
+    }
+    s
+}
+
+fn default_key(sec: &crate::mocks::model::SecuritySettings) -> Option<String> {
+    let defaults = crate::mocks::model::ApiKeySettings::default().keys;
+    sec.api_key
+        .keys
+        .iter()
+        .find(|k| defaults.contains(k))
+        .map(|k| format!("it accepts the default API key {k}, which the docs print"))
+}
+
+fn default_user(sec: &crate::mocks::model::SecuritySettings) -> Option<String> {
+    let defaults = crate::mocks::model::BasicSettings::default().users;
+    sec.basic
+        .users
+        .iter()
+        .find(|(u, p)| defaults.get(*u) == Some(*p))
+        .map(|(u, _)| {
+            format!("it accepts the default Basic user {u} with its default password, which the docs print")
+        })
+}
+
+/// Why a caller without the portal's credentials satisfies `scheme` of
+/// `c`'s spec, or `None` when they cannot.
+fn scheme_obtainable(
+    spec: &crate::mocks::spec::ParsedSpec,
+    sec: &crate::mocks::model::SecuritySettings,
+    scheme: &str,
+) -> Option<String> {
+    use crate::mocks::spec::SchemeKind;
+    match spec.scheme(scheme).map(|s| &s.kind) {
+        None => Some(format!(
+            "the scheme {scheme} is not defined, so nothing is checked"
+        )),
+        Some(SchemeKind::ApiKey { .. }) => default_key(sec),
+        Some(SchemeKind::Basic) => default_user(sec),
+        Some(SchemeKind::Bearer { .. })
+        | Some(SchemeKind::OAuth2 { .. })
+        | Some(SchemeKind::OpenIdConnect) => Some(format!(
+            "the scheme {scheme} accepts a JWT from the built-in identity provider, whose demo client is public"
+        )),
+        Some(SchemeKind::MutualTls) => Some(format!(
+            "the scheme {scheme} accepts the demo client certificate, which anyone can download"
+        )),
+        Some(SchemeKind::Unsupported { .. }) => {
+            Some(format!("the scheme {scheme} is not checked by the mock"))
+        }
+    }
+}
+
+/// `spec` mode: every alternative of each protected operation's
+/// requirement needs a scheme a caller cannot satisfy on their own.
+fn spec_unclosable(
+    spec: &crate::mocks::spec::ParsedSpec,
+    sec: &crate::mocks::model::SecuritySettings,
+    protected: &[&crate::mocks::spec::Operation],
+) -> Option<Unclosable> {
+    let mut through: Vec<&str> = Vec::new();
+    let mut why: Option<String> = None;
+    for op in protected {
+        // An alternative is satisfiable when each of its schemes is (an
+        // empty one, optional security, always is).
+        let passes = op.security.iter().find_map(|alt| {
+            let reasons = alt
+                .iter()
+                .map(|(s, _)| scheme_obtainable(spec, sec, s))
+                .collect::<Option<Vec<String>>>()?;
+            Some(
+                reasons
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| "an empty requirement lets every call through".into()),
+            )
+        });
+        if let Some(r) = passes {
+            through.push(op.id.as_str());
+            why.get_or_insert(r);
+        }
+    }
+    let why = why?;
+    let reason = if why.contains("default") {
+        "default_credentials"
+    } else {
+        "obtainable_credentials"
+    };
+    Some(Unclosable {
+        reason,
+        message: format!(
+            "{why} ({}): use the api_key or basic mode, or require an API key or Basic scheme with values of your own on each operation",
+            named(&through)
+        ),
+    })
+}
+
+/// Is mock `name` (of `owner`) behind a closed item? The config file's
+/// entry first, as the catalogue reads them; an entry of another owner's
+/// mock is hidden and closes nothing.
+pub fn mock_item_closed(
+    portal: &Portal,
+    store: &crate::mocks::store::MockStore,
+    name: &str,
+    owner: &Owner,
+) -> bool {
+    let key = format!("mock:{name}");
+    if let Some(access) = store.file_portal_access(&key) {
+        return access == Access::Closed && owner == &Owner::Instance;
+    }
+    portal.item_access(&key).is_some_and(|(access, o)| {
+        access == Access::Closed && o.as_ref().unwrap_or(&Owner::Instance) == owner
+    })
+}
+
+/// The mock store's check before a revision goes live (a deploy, a
+/// rollback, a document or file apply, a checkpoint restore): a mock behind
+/// a closed item keeps a revision that refuses a caller without the
+/// portal's credentials.
+pub fn live_guard(portal: Arc<Portal>, keyed: bool) -> crate::mocks::store::LiveGuard {
+    Arc::new(move |store, name, owner, c| {
+        if !mock_item_closed(&portal, store, name, owner) {
+            return None;
+        }
+        let u = unclosable(keyed, c)?;
+        Some(format!(
+            "mock {name:?} is closed on the dev portal and this revision cannot be: {} (open or unpublish the item first, or keep credentials of your own)",
+            u.message
+        ))
+    })
+}
+
+/// The closed mock items whose live revision would let a caller without
+/// the portal's credentials through (the mock refuses every call until it
+/// is secured): a problem line each, for a config file load.
+pub fn closed_problems(state: &AppState) -> Vec<String> {
+    let keyed = keyed(&state.config);
+    items::entries(state)
+        .into_iter()
+        .filter(|e| e.published.access == Access::Closed)
+        .filter_map(|e| {
+            let ItemId::Mock(name) = &e.id else {
+                return None;
+            };
+            let s = state.mocks.get(name)?;
+            if !mock_item_closed(&state.portal, &state.mocks, name, &s.owner) {
+                return None;
+            }
+            let u = unclosable(keyed, s.live.as_deref()?)?;
+            Some(format!(
+                "portal item {}: closed, but {}: the mock refuses every call until it is secured",
+                e.key, u.message
+            ))
+        })
+        .collect()
 }
 
 pub fn auth_mode(settings: &Settings) -> AuthMode {
@@ -696,6 +939,22 @@ impl Portal {
 
     pub fn get(&self, id: &str) -> Option<Published> {
         self.items.read().ok().and_then(|m| m.get(id).cloned())
+    }
+
+    /// The access and owner of a published item (no copy of the rest).
+    pub fn item_access(&self, id: &str) -> Option<(Access, Option<Owner>)> {
+        self.items
+            .read()
+            .ok()
+            .and_then(|m| m.get(id).map(|p| (p.access, p.owner.clone())))
+    }
+
+    /// Is there room for `id` (published already, or below [`MAX_ITEMS`])?
+    pub fn has_room(&self, id: &str) -> bool {
+        self.items
+            .read()
+            .map(|m| m.contains_key(id) || m.len() < MAX_ITEMS)
+            .unwrap_or(false)
     }
 
     /// Publish (or update) `id` with `meta` on top of what it had.

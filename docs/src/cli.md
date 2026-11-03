@@ -619,7 +619,7 @@ The dev portal
 | Command | What it does | Calls | Needs |
 |---|---|---|---|
 | `rustybin portal status` | The portal: on or off, who may read it, how many users read closed items, each item and its access (open or closed). | `GET /_rustybin/portal` | `instance.read` |
-| `rustybin portal publish <id> [--access open\|closed] [--secure]` | Publish an item: mock:NAME, mcp:SERVER, llm, a2a:AGENT, tools or registry, open or closed (a closed mock needs its mocked security on; --secure turns it on). Flags: `--title` value, `--summary` value, `--tags` value, `--contact` value, `--order` value, `--no-credentials`, `--access` value, `--secure`. | `PUT /_rustybin/portal/items/{id}` | `portal.publish` |
+| `rustybin portal publish <id> [--access open\|closed] [--secure]` | Publish an item: mock:NAME, mcp:SERVER, llm, a2a:AGENT, tools or registry, open or closed (a closed mock needs an API key or Basic user of its own on every call; --secure sets random ones). Flags: `--title` value, `--summary` value, `--tags` value, `--contact` value, `--order` value, `--no-credentials`, `--access` value, `--secure`. | `PUT /_rustybin/portal/items/{id}` | `portal.publish` |
 | `rustybin portal unpublish <id>` | Remove an item from the portal. | `DELETE /_rustybin/portal/items/{id}` | `portal.publish` |
 | `rustybin portal insights` | Views, downloads and Try it calls. | `GET /_rustybin/portal/insights` | `instance.read` |
 | `rustybin portal branding` | The portal.* settings. | `GET /_rustybin/settings` | `settings.read` |

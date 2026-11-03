@@ -215,6 +215,7 @@ pub struct LiveMock {
     pub state: MockState,
     /// A self-service mock: restricted responses, the mocks domain only.
     pub visitor: bool,
+    pub owner: Owner,
 }
 
 pub enum Lookup {
@@ -326,6 +327,14 @@ pub struct Definition {
     pub project: Option<String>,
 }
 
+/// A check before a revision of a mock goes live (`store`, the mock's name
+/// and owner, the revision): `Some(reason)` refuses it with
+/// [`StoreError::Conflict`]. The dev portal's: a mock behind a closed item
+/// keeps a revision that refuses a caller without the portal's
+/// credentials (`crate::portal::live_guard`).
+pub type LiveGuard =
+    Arc<dyn Fn(&MockStore, &str, &Owner, &Compiled) -> Option<String> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct MockStore {
     inner: Arc<RwLock<BTreeMap<String, Entry>>>,
@@ -356,6 +365,8 @@ pub struct MockStore {
     edit_lock: Arc<std::sync::Mutex<()>>,
     /// Recent compiles per visitor (rate limit), bounded by `MAX_RECOMPILE_KEYS`.
     recompiles: Arc<std::sync::Mutex<std::collections::HashMap<String, VecDeque<Instant>>>>,
+    /// The check before a revision goes live ([`LiveGuard`]), set once.
+    live_guard: Arc<std::sync::OnceLock<LiveGuard>>,
 }
 
 /// Compiles that run at once on the blocking pool.
@@ -418,6 +429,40 @@ impl MockStore {
             persist_lock: Arc::new(std::sync::Mutex::new(())),
             edit_lock: Arc::new(std::sync::Mutex::new(())),
             recompiles: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            live_guard: Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+
+    /// Install the check before a revision goes live (once; later calls are
+    /// ignored).
+    pub fn set_live_guard(&self, guard: LiveGuard) {
+        let _ = self.live_guard.set(guard);
+    }
+
+    /// Why `c` could not replace the live revision of the existing mock
+    /// `name` ([`LiveGuard`]), for a preview that must validate as the apply
+    /// does. `None` for an unknown name (a new mock is not checked).
+    pub fn refuses_live(&self, name: &str, c: &Compiled) -> Option<String> {
+        let owner = {
+            let map = self.read();
+            let e = map.get(name)?;
+            // What is live already is not a change (an apply leaves it).
+            if e.live
+                .as_ref()
+                .is_some_and(|l| l.source == c.source && l.settings == c.settings)
+            {
+                return None;
+            }
+            e.owner.clone()
+        };
+        self.live_guard.get().and_then(|g| g(self, name, &owner, c))
+    }
+
+    /// [`LiveGuard`]: `Err` when `c` may not go live for mock `name`.
+    fn check_live(&self, name: &str, owner: &Owner, c: &Compiled) -> Result<(), StoreError> {
+        match self.live_guard.get().and_then(|g| g(self, name, owner, c)) {
+            Some(reason) => Err(StoreError::Conflict(reason)),
+            None => Ok(()),
         }
     }
 
@@ -460,6 +505,17 @@ impl MockStore {
         if slot.0 != items {
             *slot = (items, Utc::now());
         }
+    }
+
+    /// The access of the config file's portal item `id`, if it lists one.
+    pub fn file_portal_access(&self, id: &str) -> Option<crate::portal::Access> {
+        self.file_portal
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .0
+            .iter()
+            .find(|i| i.id == id)
+            .map(|i| i.access.unwrap_or_default())
     }
 
     /// The portal items of the config file and when they were loaded.
@@ -1020,6 +1076,7 @@ impl MockStore {
                 capture: e.capture.clone(),
                 state: e.state.clone(),
                 visitor: e.owner.is_visitor(),
+                owner: e.owner.clone(),
             }),
         }
     }
@@ -1246,6 +1303,7 @@ impl MockStore {
         {
             return Ok(snapshot(name, e));
         }
+        self.check_live(name, &e.owner, &e.draft)?;
         if let Some(prev) = e.live.take() {
             e.history.push_back(prev);
             while e.history.len() > self.limits.revisions {
@@ -1274,6 +1332,9 @@ impl MockStore {
             None => e.history.len().checked_sub(1),
         }
         .ok_or_else(|| StoreError::Invalid("no such revision to roll back to".into()))?;
+        if let Some(target) = e.history.get(idx) {
+            self.check_live(name, &e.owner, target)?;
+        }
         let Some(target) = e.history.remove(idx) else {
             return Err(StoreError::Invalid(
                 "no such revision to roll back to".into(),
@@ -1365,6 +1426,7 @@ impl MockStore {
                     current: e.draft.revision,
                 }),
                 Some(e) => {
+                    self.check_live(name, &e.owner, &compiled)?;
                     if compiled.source != e.draft.source {
                         e.load_error = None;
                     }
@@ -1410,6 +1472,9 @@ impl MockStore {
         };
         Self::check_new(name, &first, deploy, true)?;
         let owner = Owner::Instance;
+        if deploy {
+            self.check_live(name, &owner, &first)?;
+        }
         let mut map = self.write();
         self.admit(&map, name, &owner, true)?;
         let mut entry = self.new_entry(first, Origin::Api, owner, enabled, deploy);

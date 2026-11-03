@@ -2798,7 +2798,8 @@ def run_agents_for_users(browser):
 def run_portal_access(browser):
     """Open and closed APIs on the dev portal (access control step 13) on the
     password instance: the admin closes the sample mock from the publish
-    dialog (Turn on security and close) and invites a portal reader; the
+    dialog (Turn on security and close: a random API key in place of
+    demo-key) and invites a portal reader; the
     portal signed out shows the closed API with a lock and Try it locked;
     the reader joins from the link, the credentials and Try it appear; Sign
     out locks it again; Sign in from the header; a console sign-in of the
@@ -2824,7 +2825,8 @@ def run_portal_access(browser):
         page.wait_for_selector("#portal-access-open")
         expect(page.locator("#portal-access-open")).to_be_checked()
         page.check("#portal-access-closed")
-        expect(page.locator("#portal-access-note")).to_contain_text("no mocked security")
+        expect(page.locator("#portal-access-note")).to_contain_text("would still answer callers who never signed in")
+        expect(page.locator("#portal-closable")).to_contain_text("JWT and bearer modes")
         expect(page.locator("#portal-publish")).to_have_text("Turn on security and close")
         shot(page, "password", "50-portal-close-dialog")
         page.locator("#portal-publish").click()
@@ -2891,7 +2893,9 @@ def run_portal_access(browser):
         expect(p2.locator("#portal-signed-in")).to_contain_text("Rita Reader")
         p2.goto(item)
         p2.wait_for_selector("#portal-credentials")
-        expect(p2.locator("#portal-credentials")).to_contain_text("demo-key")
+        # Turn on security and close gave it a random key of its own.
+        expect(p2.locator("#portal-credentials")).to_contain_text(re.compile(r"key-[0-9a-f]{32}"))
+        assert "demo-key" not in p2.locator("#portal-credentials").inner_text(), "the demo key closes nothing"
         expect(p2.locator("#portal-locked")).to_have_count(0)
         expect(p2.locator("button[data-format='hurl']")).to_have_count(1)
         op = p2.locator("details.op[data-op=createPet]")

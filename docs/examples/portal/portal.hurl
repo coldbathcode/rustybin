@@ -189,7 +189,8 @@ HTTP 409
 [Asserts]
 jsonpath "$.reason" == "security_off"
 
-# secure: true turns it on (api_key: the spec declares none), deploys it and closes it.
+# secure: true turns it on (api_key: the spec declares none) with a random
+# key in place of demo-key, deploys it and closes it.
 PUT {{base_url}}/_rustybin/portal/items/mock:docs-open-api
 Authorization: Bearer {{admin_token}}
 Content-Type: application/json
@@ -202,16 +203,70 @@ jsonpath "$.published.access" == "closed"
 GET {{base_url}}/mock/docs-open-api/quotes
 HTTP 401
 
+# The documented default key opens nothing.
 GET {{base_url}}/mock/docs-open-api/quotes
 x-api-key: demo-key
+HTTP 401
+
+# The key it has now is what a signed-in reader gets.
+GET {{base_url}}/_rustybin/mocks/docs-open-api
+Authorization: Bearer {{admin_token}}
 HTTP 200
+[Captures]
+key: jsonpath "$.settings.security.api_key.keys[0]"
+
+GET {{base_url}}/mock/docs-open-api/quotes
+x-api-key: {{key}}
+HTTP 200
+
+# While the item is closed, its security stays on.
+PATCH {{base_url}}/_rustybin/mocks/docs-open-api
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{ "security": { "enabled": false }, "deploy": true }
+HTTP 409
+[Asserts]
+jsonpath "$.error" contains "closed on the dev portal"
 # ANCHOR_END: security_off
+
+# ANCHOR: obtainable
+# A token anyone can mint closes nothing: the built-in identity provider's
+# demo client is public.
+POST {{base_url}}/_rustybin/mocks
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{
+  "name": "docs-jwt-api",
+  "deploy": true,
+  "security": { "enabled": true, "mode": "jwt" },
+  "spec": {
+    "openapi": "3.0.3",
+    "info": {"title": "Tokens", "version": "1.0"},
+    "paths": {"/things": {"get": {"operationId": "listThings",
+      "responses": {"200": {"description": "Things", "content": {"application/json": {"example": [{"id": 1}]}}}}}}}
+  }
+}
+HTTP 201
+
+PUT {{base_url}}/_rustybin/portal/items/mock:docs-jwt-api
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{ "access": "closed" }
+HTTP 409
+[Asserts]
+jsonpath "$.reason" == "obtainable_credentials"
+jsonpath "$.closable_modes" count == 2
+# ANCHOR_END: obtainable
 
 DELETE {{base_url}}/_rustybin/portal/items/mock:docs-open-api
 Authorization: Bearer {{admin_token}}
 HTTP 200
 
 DELETE {{base_url}}/_rustybin/mocks/docs-open-api
+Authorization: Bearer {{admin_token}}
+HTTP 200
+
+DELETE {{base_url}}/_rustybin/mocks/docs-jwt-api
 Authorization: Bearer {{admin_token}}
 HTTP 200
 

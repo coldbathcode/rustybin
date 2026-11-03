@@ -486,7 +486,7 @@ pub static TOOLS: &[ToolDef] = &[
         "order": { "type": "integer", "description": "Lower comes first" },
         "credentials": { "type": "boolean", "description": "Show a mock's demo credentials (default true)" },
         "access": { "type": "string", "enum": ["open", "closed"], "description": "open (default): anyone uses it; closed: everyone reads the docs, only portal readers (portal.read) get Try it, the credentials, collections and connection snippets. A mock closes only with its mocked security on" },
-        "secure": { "type": "boolean", "description": "With access closed on a mock without mocked security: turn it on (the mode the spec declares, else api_key) and deploy, then close (needs mocks.write)" },
+        "secure": { "type": "boolean", "description": "With access closed on a mock that cannot be closed as it is: turn its security on with random credentials in place of the defaults (api_key mode unless the spec's or basic mode closes it) and deploy, then close (needs mocks.write)" },
         "confirm": confirm_prop()
     }), &["id"])),
     tool!("unpublish_portal_item", "Unpublish from the portal", "Remove an item from the dev portal (its metadata goes with it).", ToolNeed::Owner(Permission::PortalPublish), ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "id": { "type": "string" } }), &["id"])),

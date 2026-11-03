@@ -324,3 +324,236 @@ async fn a_compromised_first_admins_agent_token_dies_on_the_password_change() {
         StatusCode::UNAUTHORIZED
     );
 }
+
+/// The OAuth agent of the user `name` (its id), after one call.
+async fn oauth_agent_of(app: &Router, owner_id: &str) -> String {
+    let resp = send(
+        app,
+        "GET",
+        &format!("/_rustybin/agents?owner={owner_id}"),
+        &[("authorization", &format!("Bearer {ADMIN}"))],
+        None,
+    )
+    .await;
+    let list = body_json(resp).await;
+    list["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|a| a["credential"]["via"] == "oauth")
+        .and_then(|a| a["id"].as_str())
+        .unwrap_or_else(|| panic!("{list}"))
+        .to_string()
+}
+
+/// Registration is open and the client id follows from the metadata, so
+/// two users share a client: revoking one user's agent refuses that user's
+/// tokens only.
+#[tokio::test]
+async fn revoking_one_users_oauth_agent_leaves_another_users_tokens_alone() {
+    let state = test_state_with(password_config());
+    let mut ids = Vec::new();
+    for name in ["alice", "bob"] {
+        let hash = crate::login::hash_password(&format!("{name}-secret-1")).expect("hash");
+        ids.push(
+            state
+                .users
+                .add(NewUser::new(name, &["editor"]), Some(hash))
+                .expect("user")
+                .id,
+        );
+    }
+    let app = test_app_with(state.clone());
+    let alice = sign_in_user(&app, "alice", "alice-secret-1").await;
+    let bob = sign_in_user(&app, "bob", "bob-secret-1").await;
+    let (alice_client, alice_tokens) = sign_in(&app, &alice, Some("admin")).await;
+    let (bob_client, bob_tokens) = sign_in(&app, &bob, Some("admin")).await;
+    assert_eq!(
+        alice_client, bob_client,
+        "the same metadata, the same client"
+    );
+    let alice_access = alice_tokens["access_token"].as_str().expect("access");
+    let bob_access = bob_tokens["access_token"].as_str().expect("access");
+    for t in [alice_access, bob_access] {
+        let resp = mcp(&app, Some(t), "tools/list", json!({})).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    // Bob revokes his own agent.
+    let agent = oauth_agent_of(&app, &ids[1]).await;
+    let resp = send(
+        &app,
+        "POST",
+        &format!("/_rustybin/agents/{agent}/revoke"),
+        &[("authorization", &format!("Bearer {bob}"))],
+        None,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = mcp(&app, Some(bob_access), "tools/list", json!({})).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "his tokens are refused"
+    );
+    let (status, _) = refresh(
+        &app,
+        &bob_client,
+        bob_tokens["refresh_token"].as_str().expect("refresh"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Alice's tokens of the same client still work.
+    let resp = mcp(&app, Some(alice_access), "tools/list", json!({})).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "another user's agent is untouched"
+    );
+    let (status, v) = refresh(
+        &app,
+        &alice_client,
+        alice_tokens["refresh_token"].as_str().expect("refresh"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    // Disabling Bob revokes his agents, never hers.
+    state.users.set_disabled(&ids[1], true).expect("disable");
+    state
+        .agents
+        .revoke_owned(&ids[1], "test", &state.config.console_tokens);
+    let resp = mcp(&app, Some(alice_access), "tools/list", json!({})).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// The consent page shows what the agent gets in the approver's projects,
+/// and a member of a project only can grant a scope that gives them
+/// something there.
+#[tokio::test]
+async fn consent_shows_and_counts_the_approvers_project_grants() {
+    let state = test_state_with(password_config());
+    state
+        .users
+        .save_project("shop", None, None)
+        .expect("project");
+    let hash = crate::login::hash_password("erin-secret-1").expect("hash");
+    let erin = state
+        .users
+        .add(NewUser::new("erin", &[]), Some(hash))
+        .expect("user")
+        .id;
+    state
+        .users
+        .set_binding("shop", &erin, vec!["editor".into()])
+        .expect("binding");
+    let app = test_app_with(state.clone());
+    let token = sign_in_user(&app, "erin", "erin-secret-1").await;
+    let (_, id) = start(&app, Some("admin inspector")).await;
+    let (status, req) = consent(&app, &id, &token).await;
+    assert_eq!(status, StatusCode::OK, "{req}");
+    let grantable = req["scopes_grantable"].to_string();
+    assert!(grantable.contains("admin"), "{req}");
+    assert!(
+        grantable.contains("inspector"),
+        "traffic.read in the project: {req}"
+    );
+    let projects = &req["grants"][0]["projects"];
+    assert_eq!(projects[0]["project"], "shop", "{req}");
+    let perms = projects[0]["permissions"].to_string();
+    assert!(perms.contains("mocks.write"), "{req}");
+    assert_eq!(req["projects"][0]["project"], "shop", "{req}");
+    // Approved, the agent holds them in the project.
+    let (status, ans) = answer(
+        &app,
+        &id,
+        &token,
+        json!({ "decision": "approve", "scope": "admin" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ans}");
+}
+
+async fn tool_call(app: &Router, token: &str, name: &str, args: Value) -> Value {
+    let resp = mcp(
+        app,
+        Some(token),
+        "tools/call",
+        json!({ "name": name, "arguments": args }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    body_json(resp).await["result"].clone()
+}
+
+/// An OAuth agent of a user (another credential than their sign-in) cannot
+/// undo the operator's revocation of the user's sign-in agent by revoking
+/// it again and restoring it.
+#[tokio::test]
+async fn an_oauth_agent_cannot_undo_an_operator_revocation_through_the_tools() {
+    let state = test_state_with(password_config());
+    let hash = crate::login::hash_password("bob-secret-1").expect("hash");
+    let bob_id = state
+        .users
+        .add(NewUser::new("bob", &["editor"]), Some(hash))
+        .expect("user")
+        .id;
+    let app = test_app_with(state.clone());
+    let bob = sign_in_user(&app, "bob", "bob-secret-1").await;
+    // His sign-in agent, revoked by the operator.
+    let resp = mcp(&app, Some(&bob), "tools/list", json!({})).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list = body_json(
+        send(
+            &app,
+            "GET",
+            &format!("/_rustybin/agents?owner={bob_id}"),
+            &[("authorization", &format!("Bearer {ADMIN}"))],
+            None,
+        )
+        .await,
+    )
+    .await;
+    let signin = list["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|a| a["credential"]["via"] == "sign-in")
+        .and_then(|a| a["id"].as_str())
+        .unwrap_or_else(|| panic!("{list}"))
+        .to_string();
+    let resp = send(
+        &app,
+        "POST",
+        &format!("/_rustybin/agents/{signin}/revoke"),
+        &[("authorization", &format!("Bearer {ADMIN}"))],
+        None,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    // His OAuth agent tries to bring it back.
+    let fresh = sign_in_user(&app, "bob", "bob-secret-1").await;
+    let (_, tokens) = sign_in(&app, &fresh, Some("admin")).await;
+    let access = tokens["access_token"].as_str().expect("access");
+    let r = tool_call(
+        &app,
+        access,
+        "revoke_agent",
+        json!({ "id": signin, "confirm": true }),
+    )
+    .await;
+    assert_ne!(r["isError"], true, "{r}");
+    let r = tool_call(&app, access, "restore_agent", json!({ "id": signin })).await;
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(r.to_string().contains("agents.manage"), "{r}");
+    let one = body_json(
+        send(
+            &app,
+            "GET",
+            &format!("/_rustybin/agents/{signin}"),
+            &[("authorization", &format!("Bearer {ADMIN}"))],
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(one["revoked"]["by_owner"], false, "{one}");
+}

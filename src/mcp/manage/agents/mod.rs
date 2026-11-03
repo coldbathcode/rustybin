@@ -344,6 +344,21 @@ impl Credential {
         }
     }
 
+    /// What a revocation of this agent refuses on the built-in OAuth
+    /// server: the client's subject for this user's tokens only (an OAuth
+    /// client is shared by every user who registers the same metadata), or
+    /// the subject itself for an agent that acts for nobody.
+    pub fn revocation_subject(&self) -> Option<String> {
+        match self {
+            Self::Oauth { sub } => Some(crate::control_oauth::revocation_subject(sub, None)),
+            Self::User {
+                id,
+                client: Some(sub),
+            } => Some(crate::control_oauth::revocation_subject(sub, Some(id))),
+            _ => None,
+        }
+    }
+
     /// Does a rule's `match.credential` name this credential? `user` is
     /// any user's agent; `console` one on a sign-in token (as in 0.4);
     /// `oauth` one on a token of the built-in OAuth server, a user's or
@@ -1419,8 +1434,8 @@ impl Agents {
                 continue;
             }
             r.calls.retain(|t, _| TOOLS.iter().any(|d| d.name == t));
-            if let (Some(_), Some(sub)) = (&r.revoked, r.credential.oauth_subject()) {
-                tokens.revoke_subject(sub, now + crate::control_oauth::REFRESH_TTL_SECS);
+            if let (Some(_), Some(sub)) = (&r.revoked, r.credential.revocation_subject()) {
+                tokens.revoke_subject(&sub, now + crate::control_oauth::REFRESH_TTL_SECS);
             }
             // The token ids revoked with the agent, refused again after a
             // restart and never cleared by a sign out everywhere.
@@ -1971,8 +1986,8 @@ impl Agents {
             for jti in r.revoked_tokens.drain(..) {
                 tokens.unrevoke(&jti);
             }
-            if let Some(sub) = r.credential.oauth_subject() {
-                tokens.restore_subject(sub);
+            if let Some(sub) = r.credential.revocation_subject() {
+                tokens.restore_subject(&sub);
             }
             json!({ "id": r.id, "restored": was })
         };
@@ -2056,11 +2071,16 @@ fn revoke_record(
     by_user: Option<&str>,
     tokens: &crate::login::Tokens,
 ) -> Value {
-    r.revoked = Some(Revocation {
-        at: now,
-        by: clean(by, 64),
-        by_user: by_user.map(str::to_string),
-    });
+    // A second revoke never changes the first (who, when): an agent the
+    // operator revoked stays theirs to restore.
+    let already = r.revoked.is_some();
+    if !already {
+        r.revoked = Some(Revocation {
+            at: now,
+            by: clean(by, 64),
+            by_user: by_user.map(str::to_string),
+        });
+    }
     let ended = end_sessions(r);
     let mut revoked = 0;
     if r.credential.revocable() {
@@ -2074,15 +2094,16 @@ fn revoke_record(
             }
         }
     }
-    if let Some(sub) = r.credential.oauth_subject() {
+    if let Some(sub) = r.credential.revocation_subject() {
         tokens.revoke_subject(
-            sub,
+            &sub,
             now.timestamp() + crate::control_oauth::REFRESH_TTL_SECS,
         );
     }
     json!({
         "id": r.id,
         "revoked": true,
+        "already_revoked": already,
         "sessions_ended": ended,
         "tokens_revoked": revoked,
         "credential": r.credential.kind(),

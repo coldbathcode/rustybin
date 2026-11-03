@@ -245,3 +245,92 @@ carries no users, roles or projects; on a self-service instance a user or contro
 JWT without a route's permission is refused where 0.4 let it through, and a visitor
 no longer reads an instance mock's traffic or data; `update_settings` needs what
 REST needs.
+
+## Security pass build notes (area B)
+
+The portal's closed items, projects and agents: fifteen findings of two read-only
+reviews of `1e55519`, each shown first by a test that failed on that commit (the
+reversed fix was run against every test below), then fixed with the test kept. Nothing
+was deferred.
+
+The portal's closed items (`src/portal/access_tests.rs`):
+
+1. A closed mock callable signed out through the built-in identity provider: fixed
+   (`a_closed_mock_cannot_rest_on_tokens_anyone_can_mint`). `portal::unclosable` is
+   the one rule: every protected operation needs an API key or a Basic user of its
+   own; `jwt` and `bearer` modes, OAuth 2, OpenID Connect, bearer and `mutualTLS`
+   schemes, the defaults, and a mock with no protected operation are refused with a
+   `reason`; a locked mock entry carries no `token_url`.
+2. "Turn on security and close" behind the default credentials: fixed
+   (`default_credentials_never_close_a_mock_and_secure_replaces_them`, and
+   `closing_a_mock_needs_its_security_and_secure_turns_it_on` updated): `secure: true`
+   replaces `demo-key`, `demo` / `demo` and `demo-token` with random values and falls
+   back to `api_key` when the spec's mode cannot close the mock.
+3. `portal.auth` and `portal.base_url` from a pulled document: fixed
+   (`a_pulled_document_never_changes_portal_auth_or_base_url`): both in
+   `REPOSITORY_REFUSED` (refused rather than "tighten only", the simpler rule).
+4. Security switched off under a closed item: fixed
+   (`security_cannot_be_switched_off_under_a_closed_item`,
+   `a_config_file_closing_an_unsecured_mock_is_reported_and_refused`). One check in
+   the store, `MockStore::set_live_guard` with `portal::live_guard`, before any
+   revision goes live (deploy, rollback, a document's or file's replace, a
+   checkpoint's restore): `409` naming why; the documents' previews ask the same
+   check (`MockStore::refuses_live`), so a preview validates as the apply. A mock created under a closed item's name
+   (delete and recreate) and the file load are not refused (nothing is lost); the
+   data plane answers `403 closed_unsecured` until it is secured, and the file load
+   reports `portal::closed_problems` among the load errors.
+5. A closed `mcp:apikey` / `mcp:protected` item hinting how to call it: fixed
+   (`a_closed_mcp_server_has_no_hint_and_says_it_stays_callable`): no `auth.hint` in a
+   locked entry; every non-mock item's view has a `note` that its endpoint stays
+   callable, and the publish dialog says so for every such item (it used to claim
+   those two refuse calls).
+6. `secure: true` changing the mock before a refused publish: fixed
+   (`a_refused_secure_publish_leaves_the_mock_as_it_was`): `clean_meta` and
+   `Portal::has_room` before `secure_mock`.
+7. Portal sign-outs evicting console sign-outs: fixed
+   (`portal_sign_outs_never_evict_console_sign_outs`): `Tokens::revoke_portal`, its
+   own map of 4096, persisted with the others. (The old code had no separate list, so
+   the test is written against the new call; the reviewer's loop through `revoke` is
+   what it replaces.)
+
+Projects and agents (`src/rbac/project_tests.rs`, `src/mcp/manage/agents/user_tests.rs`,
+`src/control_oauth/tests/users.rs`):
+
+1. Undoing an operator's revocation by revoking first: fixed
+   (`a_user_cannot_restore_an_agent_the_operator_revoked_by_revoking_it_first`,
+   `an_oauth_agent_cannot_undo_an_operator_revocation_through_the_tools`): a second
+   revoke keeps the first `Revocation` (still ends sessions and revokes the tokens)
+   and answers `already_revoked`. A sibling sign-in agent of the same user was
+   already refused (revocation follows the credential), so the tool case uses an
+   OAuth agent of the user.
+2. One OAuth agent's revocation refusing the client for every user: fixed
+   (`revoking_one_users_oauth_agent_leaves_another_users_tokens_alone`):
+   `Credential::revocation_subject` and `control_oauth::revocation_subject` key the
+   refused subject by `sub` and `rb_uid` (`client:<fp>#user:<id>`); tokens that act
+   for nobody keep the bare subject.
+3. The AI spec route's avoid-names: fixed
+   (`the_ai_spec_prompt_names_only_mocks_the_caller_may_read`): only `can_read` names.
+4. A live traffic stream outliving the caller's access: fixed
+   (`a_traffic_stream_ends_when_its_caller_loses_the_project`): `still_readable`
+   re-authenticates the request's credentials and re-resolves the caller at every
+   event and every 5 s (was 30 s), then the route's and the mock's checks.
+5. Consent without project grants: fixed
+   (`consent_shows_and_counts_the_approvers_project_grants`): `projects` per grant and
+   for the request, `may_grant` counts project permissions; the console's consent page
+   lists them per project.
+6. Project names probed through errors: fixed (`a_project_name_cannot_be_probed`):
+   an unknown project answers the permission refusal unless the caller holds it on the
+   whole instance; the checkpoint problem line says "now in another project".
+7. `project_view` resource names: fixed
+   (`project_resources_are_listed_only_to_who_reads_them`): mocks and checkpoints
+   need `mocks.read` in the project, tests `tests.read`.
+8. Load errors to every project member: fixed
+   (`load_errors_go_to_instance_mock_writers_only`): only instance-wide `mocks.write`.
+
+Decisions taken (the safest reasonable default each): operations declared public
+(marked `public`, or in `spec` mode without a requirement) stay open under a closed
+item, as step 13 documented (a health check beside a keyed API), but a mock needs at
+least one protected operation; a mock recreated under a closed item is created and refused
+on the data plane rather than refused at creation; `portal.auth` is refused outright in
+a pulled document, not allowed to tighten; checkpoints' names in `project_view` follow
+`mocks.read`; a stream re-check that cannot re-authenticate ends the stream.

@@ -95,7 +95,18 @@ fn project_view(state: &AppState, caller: &Resolved, p: &Project) -> Value {
     let mine = caller.projects.get(&p.name);
     v["your_roles"] = json!(mine.map(|g| g.roles.clone()).unwrap_or_default());
     v["your_permissions"] = json!(mine.map(|g| g.permissions.names()).unwrap_or_default());
-    v["resources"] = resources(state, &p.name).view();
+    // The names of what the caller may read in the project only: seeing a
+    // project (a member, `users.read`) is not reading its mocks or tests.
+    let mut held = resources(state, &p.name);
+    let may = |perm| caller.has_in(perm, Some(&p.name));
+    if !may(Permission::MocksRead) {
+        held.mocks.clear();
+        held.checkpoints.clear();
+    }
+    if !may(Permission::TestsRead) {
+        held.tests.clear();
+    }
+    v["resources"] = held.view();
     v
 }
 

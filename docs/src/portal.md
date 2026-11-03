@@ -38,7 +38,7 @@ Portal**, one item or several at once), from `rustybin.yaml`, or with the API:
 | `order` | Lower comes first within its kind (-1000 to 1000) |
 | `credentials` | A mock only: show the demo credentials it accepts (default `true`). Mocked security keys gate a mock, not anything real; turn this off when testers should ask for one |
 | `access` | `open` (default) or `closed`: see [open and closed items](#open-and-closed-items) |
-| `secure` | Not stored: with `access: closed` on a mock without mocked security, turn its security on and deploy it first (needs `mocks.write`) |
+| `secure` | Not stored: with `access: closed` on a mock that cannot be closed as it is, turn its security on with credentials of its own (random ones in place of the defaults) and deploy it first (needs `mocks.write`) |
 
 A second `PUT` updates the entry (it keeps its publish time); `DELETE` removes it.
 Publishing a mock needs the rights to change it, everything else needs admin. A mock
@@ -73,7 +73,7 @@ portal:
   items:
     - id: mock:orders
       title: Orders
-      summary: Create and track orders. Use the **demo-key** API key.
+      summary: Create and track orders with the API key the portal shows you.
       tags: [commerce]
       access: closed
     - id: mcp:main
@@ -81,9 +81,13 @@ portal:
 ```
 
 A document [pulled from git](source-control.md) may close an item but never open a
-closed one: that entry is reported in `problems` and the item stays closed. An entry
-that closes a mock without mocked security is reported and skipped (turn the mock's
-`security` on in the same document: the mocks section is applied first).
+closed one: that entry is reported in `problems` and the item stays closed. Nor does it
+change `portal.auth` or `portal.base_url` (who reads the portal, and where Try it sends
+a tester's key): those settings are reported and kept. An entry that closes a mock
+which cannot be closed (see below) is reported and skipped (give the mock's `security`
+credentials of its own in the same document: the mocks section is applied first). A
+config file (`RUSTYBIN_CONFIG_FILE`) that closes such a mock is reported at load, in the
+mocks' load errors, and the mock refuses every call until it is secured.
 
 The branding and access settings below are included under `settings` in the
 [version 2 instance document](configuration-as-code.md), alongside published items.
@@ -137,11 +141,26 @@ Each published item is **open** or **closed**. A closed item is read by everyone
 reaches the portal (its docs, operations, schemas, spec and reference) but used only by
 a reader: Try it, the demo credentials, the snippets and collections that carry them
 and the MCP connection details unlock after the sign-in. The calls themselves need
-the credentials too: a mock closes only with its **mocked security on** (the mode the
-spec declares, or `api_key` when it declares none), so a call without the credentials
-the portal hands to a signed-in reader is refused by the mock. On a
-[shared-mode](concepts/shared-mode.md) instance (or with `RUSTYBIN_REQUIRE_KEY`) every
-call already needs an API key, so a mock closes on the keys alone.
+the credentials too: a mock closes only when **every operation needs a credential of its
+own** that only the portal hands out, so a call from someone who never signed in is
+refused by the mock:
+
+| The mock's mocked security | Closes? |
+|---|---|
+| Off | No (`security_off`) |
+| `api_key` mode, keys of its own | Yes |
+| `basic` mode, users of its own | Yes |
+| `api_key` with `demo-key`, `basic` with `demo` / `demo` (the documented defaults) | No (`default_credentials`) |
+| `jwt` or `bearer` mode | No (`obtainable_credentials`): the built-in identity provider's demo client is public, so anyone mints a JWT the mock accepts |
+| `spec` mode | Only when each alternative of every requirement includes an API key or Basic scheme with values of its own; OAuth 2, OpenID Connect and bearer schemes take a JWT anyone mints, `mutualTLS` the downloadable demo client certificate (`obtainable_credentials`) |
+| Every operation public (marked `public`, or in `spec` mode without a requirement) | No (`open_operations`) |
+
+Operations declared public (marked `public` in the mock's operation settings, or in
+`spec` mode without a security requirement) answer anyone by design, closed or not: a
+health check stays open while the rest of the API needs the key.
+
+On a [shared-mode](concepts/shared-mode.md) instance (or with `RUSTYBIN_REQUIRE_KEY`)
+every call already needs an API key of the registry, so a mock closes on the keys alone.
 
 ```hurl
 {{#include ../examples/portal/portal.hurl:close}}
@@ -160,21 +179,39 @@ view is counted for everyone, a Try it only for readers:
 {{#include ../examples/portal/portal.hurl:reader}}
 ```
 
-Closing a mock without mocked security is refused with `409` naming the fix;
-`secure: true` (the console's **Turn on security and close**) turns it on, deploys it
-and closes the entry in one step. It is refused while the mock has a draft that is not
-deployed (deploying it would put other changes live). If the security is turned off
-later, the item stays closed and `GET /_rustybin/portal` warns that its calls answer
-without credentials.
+Closing a mock that cannot be closed is refused with `409`: `reason` (above), the
+`error` naming why and the fix, and `closable_modes` (`api_key`, `basic`). `secure: true`
+(the console's **Turn on security and close**) turns its security on, replaces every
+default credential (`demo-key`, `demo` / `demo`, `demo-token`) with a random one,
+keeps the mode the spec declares (or `basic`) when that closes it and uses `api_key`
+otherwise, deploys it and closes the entry in one step; a signed-in reader then gets
+the new credentials on the portal. Everything that could refuse the publish (the
+metadata, a full portal, the config file) is checked first, so a refused publish
+changes nothing. It is refused while the mock has a draft that is not deployed
+(deploying it would put other changes live), and when every operation is public.
+
+While the item is closed the mock keeps such a revision: a deploy, rollback, document
+(trusted or pulled), file reload or checkpoint restore that would turn its security off
+or put the default credentials back is refused with `409` (the document's `problems`
+say so). A mock deleted and created again under the same name finds its item still
+closed: until it is secured it answers every call `403` (`closed_unsecured`), and
+`GET /_rustybin/portal` warns about it. Closed items from before this rule (a mock
+closed behind `demo-key`) do the same: send `secure: true` again.
 
 ```hurl
 {{#include ../examples/portal/portal.hurl:security_off}}
 ```
 
+```hurl
+{{#include ../examples/portal/portal.hurl:obtainable}}
+```
+
 The other kinds of item (`mcp:*`, `llm`, `a2a:*`, `tools`, `registry`) are built-in
 endpoints: closing one hides its credentials and connection snippets (and the tools'
-examples), but the endpoints stay callable, except `mcp:protected` and `mcp:apikey`,
-which already refuse a call without their credentials. The publish dialog says which.
+examples, and any hint at how to get through), but the endpoints stay callable without
+the portal sign-in, `mcp:apikey` (any non-empty key unless the operator set one) and
+`mcp:protected` (a token from the built-in identity provider) included. The publish
+answer's `note` and the publish dialog say so.
 
 ### Portal logins
 
@@ -206,8 +243,10 @@ password) and sets the `rustybin_portal` cookie: `HttpOnly`, `SameSite=Strict`,
 `Secure` behind HTTPS, `Path=/portal`, 12 hours. It is accepted under `/portal` only,
 never by the control plane, the data plane or `/_rustybin/mcp`. Permissions are
 resolved at every request, so a role removed or a user disabled loses the closed items
-on the next one; **Sign out** (`POST /portal/api/logout`) ends the session, and so do
-"sign out everywhere" and disabling the user. `GET /portal/api/session` says who is
+on the next one; **Sign out** (`POST /portal/api/logout`) ends the session (portal
+sign-outs are kept in a list of their own, so a loop of portal sign-ins and sign-outs
+never pushes out a console sign-out), and so do "sign out everywhere" and disabling the
+user. `GET /portal/api/session` says who is
 signed in.
 
 ```hurl
@@ -308,7 +347,9 @@ calls are reported to `/portal/api/events`:
 `/portal/*` is never captured by the inspector, ignores fault-injection headers, and is
 exempt from the key layer (the portal checks `portal.auth` and each item's access
 itself). `GET /_rustybin/portal` answers each item's `access`, whether a mock is
-`secured`, the number of `closed` items and the `readers` (enabled users holding
+`secured` (it can be closed; else `closable` says why, and `warning` when it is closed
+all the same), a `note` on the other kinds of item (closing hides, the endpoint stays
+callable), the number of `closed` items and the `readers` (enabled users holding
 `portal.read`, and those whose login opens only the portal).
 
 ```hurl

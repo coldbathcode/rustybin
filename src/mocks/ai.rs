@@ -284,7 +284,16 @@ pub async fn spec_work(
     tx: Progress,
 ) -> Result<Value, Value> {
     ai_allowed(&s).map_err(|e| service_json(&e))?;
-    let taken: Vec<String> = state.mocks.list().iter().map(|m| m.name.clone()).collect();
+    // The names the caller may read only: the prompt (answered in `sent`,
+    // and sent to the provider) never lists another project's or visitor's
+    // mocks. The name the answer suggests is checked for clashes later.
+    let taken: Vec<String> = state
+        .mocks
+        .list()
+        .iter()
+        .filter(|m| s.caller.can_read(m))
+        .map(|m| m.name.clone())
+        .collect();
     let mut inputs = json!({
         "description": req.description,
         "openapi_version": req.openapi_version.unwrap_or_else(|| "3.1.0".to_string()),

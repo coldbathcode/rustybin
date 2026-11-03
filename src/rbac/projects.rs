@@ -475,7 +475,14 @@ pub fn target(
         }
         Some(name) => {
             if !users.project_exists(name) {
-                return Err(unknown_project(name));
+                // Only a caller who holds `p` on the whole instance learns
+                // that the name is unknown: anyone else gets the refusal a
+                // project they may not use gets, so names cannot be probed.
+                return Err(if caller.has(p) {
+                    unknown_project(name)
+                } else {
+                    ServiceError::permission(caller, p)
+                });
             }
             if caller.has_in(p, Some(name)) {
                 Ok(Some(name.to_string()))
@@ -497,7 +504,13 @@ pub fn check_move(
 ) -> Result<(), crate::mocks::service::ServiceError> {
     if let Some(t) = to {
         if !users.project_exists(t) {
-            return Err(unknown_project(t));
+            // As in `target`: the same refusal as a project the caller may
+            // not use, unless they hold `p` on the whole instance.
+            return Err(if caller.has(p) {
+                unknown_project(t)
+            } else {
+                crate::mocks::service::ServiceError::permission(caller, p)
+            });
         }
     }
     for side in [from, to] {

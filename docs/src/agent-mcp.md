@@ -297,7 +297,12 @@ takes away.
 **Revoke** refuses every call of the agent (a tool error saying it was revoked), ends
 its sessions (their next request answers `403`), and revokes its tokens for their
 remaining life: the console sign-in tokens and OAuth access tokens it used, and an
-OAuth client's refresh tokens. **Restore** undoes all of it. The admin token cannot be
+OAuth client's refresh tokens. An OAuth client is shared by every user who registers
+the same metadata (registration is open and the client id follows from it), so the
+revocation of a user's OAuth agent refuses that user's tokens of the client only,
+never another user's. Revoking an agent that is revoked already changes nothing: who
+revoked it, and when, stay (the answer says `already_revoked`). **Restore** undoes all
+of it. The admin token cannot be
 revoked per agent (rotate `RUSTYBIN_ADMIN_TOKEN`; meanwhile every agent on the admin
 token is refused, whatever name it sends); API keys are revoked in the key registry. If you gave an agent your own
 console token, revoking it signs your console out too. **End sessions** closes the
@@ -365,7 +370,9 @@ names the credential).
 and up hold it), changing them `agents.manage`. Without them a user sees their own
 agents, limits them (rights that only take tools away: a change that would let a tool
 through again is refused), revokes them, ends their sessions, and restores one they
-revoked themselves; one the operator revoked is the operator's to restore.
+revoked themselves; one the operator revoked (or that was revoked when their user was
+disabled) is the operator's to restore, and revoking it again first does not make it
+theirs.
 
 ```hurl
 {{#include ../examples/agent/agents_for_users.hurl:role_ceiling}}
@@ -376,7 +383,10 @@ revoked themselves; one the operator revoked is the operator's to restore.
 ```
 
 **The consent page** lists what the agent will hold: the approving user's permissions
-within the scope chosen, never more.
+within the scope chosen, never more, and under `projects` (per scope in `grants`, and
+for the whole request) what it holds in each of the user's projects, there only. A
+user who holds something in a project only may grant a scope that gives them
+something there.
 
 ```hurl
 {{#include ../examples/agent/agents_for_users.hurl:consent}}

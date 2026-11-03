@@ -52,6 +52,9 @@ Nothing more:
   A test in the document may name a gateway only when its saved copy already names
   that one, and a test schedule a webhook only when its saved copy already names that
   one.
+- **Not who reads the portal.** `portal.auth` (a pull would open every item of a
+  `password` portal) and `portal.base_url` (where Try it sends a tester's API key) are
+  kept as they are, as above; the portal's items may be closed by a pull, never opened.
 - **Not single sign-on.** Every `sso.*` setting (the issuer, the client, the role
   map, the default roles, the groups claim, the allowed domains, provisioning, the
   password sign-in) is kept as it is: a pusher would otherwise repoint the issuer

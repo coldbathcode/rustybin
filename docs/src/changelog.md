@@ -270,6 +270,50 @@
     creates no role that single sign-on names.
   - A `/_rustybin/*` route the catalogue does not know is refused (`403`).
 
+- Security pass (area B: the portal's closed items, projects and agents; step 14 of
+  the [plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/testing-2/step-14-audit-log.md#security-pass-build-notes-area-b)).
+  **Behaviour changes**:
+  - a mock closes on the portal only when every call needs an API key or a Basic user
+    of its own: closing is refused (`409`, `reason` `default_credentials`,
+    `obtainable_credentials` or `open_operations` beside `security_off`, with
+    `closable_modes`) for the documented defaults (`demo-key`, `demo` / `demo`), the
+    `jwt` and `bearer` modes and OAuth 2, OpenID Connect, bearer and `mutualTLS`
+    schemes (anyone mints a JWT from the built-in identity provider, whose demo client
+    is public, or downloads the demo client certificate), and a mock whose every
+    operation is public (operations declared public, marked so or without a
+    requirement in `spec` mode, stay open by design);
+  - `secure: true` ("Turn on security and close") replaces every default credential
+    with a random one and uses `api_key` mode unless the spec's mode (or `basic`)
+    closes the mock; metadata and capacity are checked before it changes the mock;
+  - while an item is closed, no edit, deploy, rollback, document (trusted or pulled),
+    file reload or checkpoint restore turns the mock's security off or puts the
+    defaults back (`409`, a problem line); a mock that has such a revision anyway
+    (recreated under the same name, loaded from a file, closed before this release
+    behind `demo-key`) answers every call `403 closed_unsecured` until it is secured
+    (send `secure: true` again), and a config file load reports it;
+  - a document pulled from git never changes `portal.auth` nor `portal.base_url`;
+  - a closed `mcp:*` (and every other non-mock) item drops the hint at how to get
+    through, the publish answer has a `note` that its endpoint stays callable, and a
+    locked mock entry carries no `token_url`;
+  - portal sign-outs have their own bounded list, so they never push out console
+    sign-outs;
+  - a second revoke of an AI agent keeps the first revocation (who, when); the answer
+    says `already_revoked`;
+  - revoking a user's OAuth agent refuses that user's tokens of the client only, never
+    another user's who registered the same client metadata (user disabled or deleted
+    too);
+  - the AI spec job lists only the mock names the caller may read as taken;
+  - a mock's live traffic stream checks its caller again at every event and every 5
+    seconds, and ends when they may no longer read it;
+  - the OAuth consent shows (`projects`, per scope and for the request) and counts the
+    approver's project grants;
+  - naming an unknown project answers like a project the caller may not use (`403`)
+    unless they hold the permission on the whole instance, and a checkpoint restore
+    says "now in another project";
+  - `GET /_rustybin/projects` lists a project's resource names only to who reads them
+    there, and `GET /_rustybin/mocks` answers `load_errors` only to holders of
+    instance-wide `mocks.write`.
+
 ## 0.4.0 (2026-11-03): testing workflows
 
 Saved tests run without anyone at the console and keep their history, four more

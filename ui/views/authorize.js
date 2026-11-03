@@ -101,18 +101,25 @@ export default {
       // What the agent will hold for the scope chosen: the approver's
       // permissions within it (a user's agent never holds more than its user).
       const grants = new Map((Array.isArray(req.grants) ? req.grants : []).map((g) => [g.scope, Array.isArray(g.permissions) ? g.permissions.map(String) : []]));
+      // And in each of the approver's projects (only that project's resources).
+      const projectGrants = new Map((Array.isArray(req.grants) ? req.grants : []).map((g) => [g.scope, Array.isArray(g.projects) ? g.projects : []]));
       const approver = req.approver || {};
       const holds = h('div', { id: 'authorize-permissions', class: 'stack-sm' });
       const drawHolds = () => {
         const list = choice ? grants.get(choice[0]) || [] : [];
+        const inProjects = choice ? projectGrants.get(choice[0]) || [] : [];
+        const pills = (perms) => h('ul', { class: 'pill-list', style: { margin: 0, padding: 0, listStyle: 'none' } }, perms.map((p) => h('li', { 'data-permission': p }, badge(p, 'outline'))));
         replace(holds,
           h('h3', { style: { margin: 0 } }, 'The agent will hold'),
           h('p', { class: 'small muted', style: { margin: 0 } }, req.acts_for_user
             ? ['It acts for you (', h('strong', null, String(approver.display_name || approver.name || '')), '): your permissions within this access, checked again at every call, so it never does more than you may. Disabling or removing your account ends it.']
             : 'This console signed in with a credential that is no user (' + String(approver.name || '') + '): the agent holds what this access allows of it.'),
           list.length
-            ? h('ul', { class: 'pill-list', style: { margin: 0, padding: 0, listStyle: 'none' } }, list.map((p) => h('li', { 'data-permission': p }, badge(p, 'outline'))))
-            : h('p', { class: 'small muted', style: { margin: 0 } }, 'Nothing.'));
+            ? pills(list)
+            : h('p', { class: 'small muted', style: { margin: 0 } }, inProjects.length ? 'Nothing on the whole instance.' : 'Nothing.'),
+          inProjects.map((g) => h('div', { class: 'stack-sm', 'data-project': String(g.project || '') },
+            h('p', { class: 'small', style: { margin: 0 } }, 'In the project ', h('strong', null, String(g.project || '')), ' (its resources only):'),
+            pills(Array.isArray(g.permissions) ? g.permissions.map(String) : []))));
       };
       const cards = h('div', { class: 'radio-cards', role: 'radiogroup', 'aria-labelledby': 'authorize-access' });
       for (const [value, label, text] of CHOICES) {

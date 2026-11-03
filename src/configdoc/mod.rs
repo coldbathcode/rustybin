@@ -60,12 +60,16 @@ pub const SKIPPED_GROUPS: [&str; 1] = ["git"];
 /// header it trusts for client addresses. An operator sets them through the
 /// API, the console or the environment; a pull that carries a different
 /// value is reported and kept as it is, and a prune leaves them alone.
-pub const REPOSITORY_REFUSED: [&str; 5] = [
+pub const REPOSITORY_REFUSED: [&str; 7] = [
     "egress.allow",
     "egress.allow_loopback",
     "assist.provider",
     "assist.base_url",
     "proxy.client_ip_header",
+    // Who reads the portal (a pull would open every item of a `password`
+    // portal) and where Try it sends a tester's key.
+    "portal.auth",
+    "portal.base_url",
 ];
 /// Setting groups a document from the repository never changes (prefixes,
 /// beside [`REPOSITORY_REFUSED`]'s keys): single sign-on decides who signs
@@ -1867,8 +1871,16 @@ fn apply_mocks(
         for d in &defs {
             // Compiled as the apply would, so a spec that does not compile
             // is a problem of the preview too.
-            if let Err(e) = state.mocks.compile(&d.source, d.settings.clone()) {
-                problems.push(format!("mocks.{}: {e}", d.name));
+            let c = match state.mocks.compile(&d.source, d.settings.clone()) {
+                Ok(c) => c,
+                Err(e) => {
+                    problems.push(format!("mocks.{}: {e}", d.name));
+                    continue;
+                }
+            };
+            // A mock behind a closed portal item keeps its credentials.
+            if let Some(why) = state.mocks.refuses_live(&d.name, &c) {
+                problems.push(format!("mocks.{}: {why}", d.name));
                 continue;
             }
             if state.mocks.get(&d.name).is_some() {
@@ -2028,14 +2040,14 @@ fn apply_portal(
         let closing = item.access.or(current).unwrap_or_default() == crate::portal::Access::Closed;
         if closing {
             if let Ok(crate::portal::ItemId::Mock(name)) = crate::portal::ItemId::parse(&item.id) {
-                let secured = state
-                    .mocks
-                    .get(&name)
-                    .and_then(|s| s.live.clone())
-                    .is_some_and(|l| crate::portal::mock_secured(&state.config, &l));
-                if !secured {
+                let why = match state.mocks.get(&name).and_then(|s| s.live.clone()) {
+                    None => Some("the mock is not deployed".to_string()),
+                    Some(l) => crate::portal::unclosable(crate::portal::keyed(&state.config), &l)
+                        .map(|u| u.message),
+                };
+                if let Some(why) = why {
                     problems.push(format!(
-                        "portal.items.{}: closed, but the mock has no mocked security (turn on mocks[].security first) (skipped)",
+                        "portal.items.{}: closed, but {why} (give mocks[].security credentials of its own first) (skipped)",
                         item.id
                     ));
                     continue;

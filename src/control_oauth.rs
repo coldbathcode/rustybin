@@ -502,13 +502,26 @@ fn verify(
     let tokens = &config.console_tokens;
     let str_claim = |k: &str| data.claims.get(k).and_then(Value::as_str);
     if str_claim("jti").is_some_and(|j| tokens.is_revoked(j))
-        || str_claim("sub").is_some_and(|s| tokens.is_subject_revoked(s))
+        || str_claim("sub")
+            .is_some_and(|s| tokens.is_subject_revoked(&revocation_subject(s, str_claim("rb_uid"))))
     {
         return Err("revoked");
     }
     // The user it acts for: there, enabled, of the same generation.
     let user = token_user(&data.claims, config)?;
     Ok((data.claims, user))
+}
+
+/// What a revoked AI agent's OAuth tokens are refused under: the client's
+/// subject with the user the tokens act for (a client registered with the
+/// same metadata is shared by every user, and revoking one user's agent
+/// must not sign the others out), or the subject alone for tokens that act
+/// for nobody.
+pub fn revocation_subject(sub: &str, user: Option<&str>) -> String {
+    match user {
+        Some(u) => format!("{sub}#user:{u}"),
+        None => sub.to_string(),
+    }
 }
 
 /// A token response for `scopes`, acting for `user` (a user id, or `None`
@@ -1242,7 +1255,13 @@ fn approver_resolved(extensions: &Extensions) -> Option<Arc<crate::rbac::Resolve
 /// is no user grants the scopes its grant covers, as in 0.4.
 fn may_grant(approver: &crate::rbac::Resolved, scope: &str) -> bool {
     if approver.user_id().is_some() {
-        !both(approver.permissions, scope_permissions(&[scope])).is_empty()
+        // What they hold in a project counts too: the agent holds it there.
+        let within = scope_permissions(&[scope]);
+        !both(approver.permissions, within).is_empty()
+            || approver
+                .projects
+                .values()
+                .any(|g| !both(g.permissions, within).is_empty())
     } else {
         grant_allows(&approver.grant(), scope)
     }
@@ -1252,6 +1271,22 @@ fn may_grant(approver: &crate::rbac::Resolved, scope: &str) -> bool {
 /// permissions within the scopes.
 fn consent_permissions(approver: &crate::rbac::Resolved, scopes: &[&str]) -> crate::rbac::PermSet {
     both(approver.permissions, scope_permissions(scopes))
+}
+
+/// What an agent approved with `scopes` will hold in each of the
+/// approver's projects (on top of [`consent_permissions`]): the project's
+/// permissions within the scopes, projects where that is nothing left out.
+fn consent_projects(approver: &crate::rbac::Resolved, scopes: &[&str]) -> Vec<Value> {
+    let within = scope_permissions(scopes);
+    approver
+        .projects
+        .iter()
+        .filter_map(|(name, g)| {
+            let held = both(g.permissions, within);
+            (!held.is_empty())
+                .then(|| json!({ "project": name, "roles": g.roles, "permissions": held.names() }))
+        })
+        .collect()
 }
 
 /// The approver as the consent page shows them.
@@ -1311,6 +1346,7 @@ async fn request_get_handler(
             json!({
                 "scope": s,
                 "permissions": consent_permissions(&approver, &[s]).names(),
+                "projects": consent_projects(&approver, &[s]),
             })
         })
         .collect();
@@ -1328,6 +1364,7 @@ async fn request_get_handler(
             "acts_for_user": approver.user_id().is_some(),
             "grants": grants,
             "permissions": consent_permissions(&approver, &grantable).names(),
+            "projects": consent_projects(&approver, &grantable),
             "expires_in": (expires_at - now()).max(0),
         }))
         .into_response(),

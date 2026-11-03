@@ -123,7 +123,7 @@ pub fn verify(token: &str, config: &Config) -> Result<(Value, Resolved), JwtErro
         return Err(JwtError::Revoked);
     }
     let jti = claims.get("jti").and_then(Value::as_str).unwrap_or("");
-    if jti.is_empty() || tokens.is_revoked(jti) {
+    if jti.is_empty() || tokens.is_revoked(jti) || tokens.is_portal_revoked(jti) {
         return Err(JwtError::Revoked);
     }
     let resolved = crate::rbac::from_sign_in(&claims, &config.users)?;
@@ -333,7 +333,7 @@ pub(super) async fn logout_handler(
         Some((claims, r)) => {
             let jti = claims["jti"].as_str().unwrap_or("");
             let exp = claims["exp"].as_i64().unwrap_or(0);
-            state.config.console_tokens.revoke(jti, exp);
+            state.config.console_tokens.revoke_portal(jti, exp);
             audit("portal_logout", &names(&r).0.unwrap_or_default(), "ok");
             true
         }

@@ -83,6 +83,8 @@ pub const HASH_KEY: &str = "console.password_hash";
 pub const TOKEN_TTL_SECS: i64 = 12 * 3600;
 /// Bounds.
 pub const MAX_REVOKED: usize = 4096;
+/// Portal sessions signed out (kept apart from the console's).
+pub const MAX_PORTAL_REVOKED: usize = 4096;
 /// Revoked token subjects (an AI agent's OAuth client, see
 /// `crate::mcp::manage::agents`).
 pub const MAX_REVOKED_SUBJECTS: usize = 1024;
@@ -465,6 +467,10 @@ pub struct Tokens {
     /// out everywhere never clears them; rebuilt from the agents' records at
     /// load.
     agent_revoked: Mutex<BTreeMap<String, i64>>,
+    /// Token ids of portal sessions signed out (`/portal/api/logout`): kept
+    /// apart, so a portal reader signing in and out in a loop never evicts
+    /// a console sign-out.
+    portal_revoked: Mutex<BTreeMap<String, i64>>,
     issued: Mutex<VecDeque<Issued>>,
     /// Per user: sign-in tokens issued before this time (milliseconds) are
     /// refused, their sessions ended when the user went past
@@ -530,6 +536,7 @@ struct SessionsDoc {
     revoked_subjects: BTreeMap<String, i64>,
     agent_revoked: BTreeMap<String, i64>,
     floors: BTreeMap<String, i64>,
+    portal_revoked: BTreeMap<String, i64>,
 }
 
 /// Users with a session floor at most (more than the user store holds).
@@ -573,6 +580,7 @@ impl Tokens {
             revoked: Mutex::new(BTreeMap::new()),
             revoked_subjects: Mutex::new(BTreeMap::new()),
             agent_revoked: Mutex::new(BTreeMap::new()),
+            portal_revoked: Mutex::new(BTreeMap::new()),
             issued: Mutex::new(VecDeque::new()),
             floors: Mutex::new(HashMap::new()),
             last_ms: std::sync::atomic::AtomicI64::new(0),
@@ -619,6 +627,7 @@ impl Tokens {
                         .filter(|(_, f)| floor_live(*f, now))
                         .take(MAX_FLOORS)
                         .collect();
+                    *lock(&t.portal_revoked) = live(doc.portal_revoked, MAX_PORTAL_REVOKED);
                 }
                 Err(e) => {
                     tracing::warn!(target: "rustybin::auth", file = %path.display(), error = %e, "the sign-in state could not be read: every earlier token is signed out");
@@ -644,6 +653,7 @@ impl Tokens {
                 .iter()
                 .map(|(k, v)| (k.clone(), *v))
                 .collect(),
+            portal_revoked: lock(&self.portal_revoked).clone(),
         };
         let Ok(text) = serde_json::to_vec_pretty(&doc) else {
             return;
@@ -673,6 +683,7 @@ impl Tokens {
     pub fn rotate(&self) -> usize {
         self.generation.fetch_add(1, Ordering::Relaxed);
         lock(&self.revoked).clear();
+        lock(&self.portal_revoked).clear();
         let n = {
             let mut issued = lock(&self.issued);
             let n = issued.len();
@@ -693,6 +704,7 @@ impl Tokens {
         let now = self.now();
         lock(&self.revoked).retain(|_, exp| *exp > now);
         lock(&self.agent_revoked).retain(|_, exp| *exp > now);
+        lock(&self.portal_revoked).retain(|_, exp| *exp > now);
         lock(&self.issued).retain(|s| s.expires_at > now);
         lock(&self.floors).retain(|_, f| floor_live(*f, now));
     }
@@ -790,6 +802,27 @@ impl Tokens {
         lock(&self.issued).retain(|s| s.jti != jti);
         insert_bounded(&mut lock(&self.revoked), jti, expires_at, MAX_REVOKED);
         self.save();
+    }
+
+    /// Revoke a portal session's token id until `expires_at` (its own
+    /// bounded list: see `portal_revoked`).
+    pub fn revoke_portal(&self, jti: &str, expires_at: i64) {
+        self.prune();
+        insert_bounded(
+            &mut lock(&self.portal_revoked),
+            jti,
+            expires_at,
+            MAX_PORTAL_REVOKED,
+        );
+        self.save();
+    }
+
+    /// Is a portal session's token id signed out?
+    pub fn is_portal_revoked(&self, jti: &str) -> bool {
+        let now = self.now();
+        lock(&self.portal_revoked)
+            .get(jti)
+            .is_some_and(|exp| *exp > now)
     }
 
     /// Revoke a token id with an AI agent: kept apart from sign-outs, so a

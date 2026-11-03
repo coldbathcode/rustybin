@@ -18,7 +18,15 @@ top of their [instance roles](users.md).
   need instance roles. A user with a role in a project also holds `instance.read`,
   so the console's status and catalogue load.
 - **Another project's resource** a user may not read answers `404`, as other
-  visitors' mocks do, and every list leaves it out.
+  visitors' mocks do, and every list leaves it out. Nor do project names leak: naming
+  a project that does not exist answers like naming one the caller may not use
+  (`403 permission_required`; only a caller who holds the permission on the whole
+  instance hears `400 unknown_project`), and a checkpoint's restore says a mock is
+  "now in another project" without naming it. `GET /_rustybin/projects` lists a
+  project's `resources` (mock, test and checkpoint names) only to who reads them there
+  (`mocks.read`, `tests.read`): `users.read` sees the project and its members, not its
+  contents. The mocks' load errors (which name any mock) go to who holds `mocks.write`
+  on the whole instance only.
 - **Moving** a mock or a saved test to another project needs the write permission
   (`mocks.write`, `tests.write`) in both.
 - **The guard rails** stay instance-wide: a project's `admin` role never counts as
@@ -107,7 +115,14 @@ group that gives roles in a project only takes no default roles. See
 
 An [agent acting for a user](agent-mcp.md#agents-act-for-a-user) follows the user's
 project roles at every call, within its own ceiling: it lists the tools the user
-holds somewhere, and each call checks the resource's project.
+holds somewhere, and each call checks the resource's project. The OAuth consent page
+shows what the agent will hold in each of the user's projects, and a member of a
+project only may grant a scope that gives them something there. A live traffic stream
+(`GET /_rustybin/mocks/{name}/requests/stream`) checks its caller again at every event
+and every few seconds: removed from the project, disabled or signed out, the caller
+gets nothing more and the stream ends. The AI spec job (`POST
+/_rustybin/mocks/ai/spec`) tells the model which mock names are taken from the names
+the caller may read only.
 
 ## On every surface
 

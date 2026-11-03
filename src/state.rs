@@ -180,6 +180,12 @@ impl AppState {
             crate::mocks::new_store_with(&config, clock.clone(), metrics.clone(), egress.clone());
         let health = Arc::new(HealthState::new());
         let portal = Arc::new(crate::portal::Portal::new(&settings));
+        // A mock behind a closed portal item never goes live with a revision
+        // a caller without the portal's credentials gets through.
+        mocks.set_live_guard(crate::portal::live_guard(
+            portal.clone(),
+            crate::portal::keyed(&config),
+        ));
         let agents = Arc::new(crate::mcp::manage::agents::Agents::new(
             &settings,
             &config.console_tokens,

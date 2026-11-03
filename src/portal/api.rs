@@ -600,17 +600,28 @@ fn item_view(
     });
     // A mock: does a call without credentials get refused (what closing
     // needs), and is a closed one still so?
-    if let Ok(ItemId::Mock(name)) = ItemId::parse(&c.id) {
-        if let Some(s) = state.mocks.get(&name) {
-            let secured = s
-                .live
-                .as_ref()
-                .is_some_and(|l| super::mock_secured(&state.config, l));
-            v["secured"] = json!(secured);
-            if !secured && entry.is_some_and(|e| e.published.access == Access::Closed) {
-                v["warning"] = json!("closed, but the mock's mocked security is off: its calls answer without credentials (turn it on, or open the item)");
+    let closed = entry.is_some_and(|e| e.published.access == Access::Closed);
+    match ItemId::parse(&c.id) {
+        Ok(ItemId::Mock(name)) => {
+            if let Some(s) = state.mocks.get(&name) {
+                let why = s
+                    .live
+                    .as_ref()
+                    .and_then(|l| super::unclosable(super::keyed(&state.config), l));
+                v["secured"] = json!(s.live.is_some() && why.is_none());
+                if let Some(u) = &why {
+                    v["closable"] = json!({ "ok": false, "reason": u.reason, "why": u.message });
+                    if closed {
+                        v["warning"] = json!(format!("closed, but {}: the mock refuses every call until it is secured (send secure: true, or open the item)", u.message));
+                    }
+                }
             }
         }
+        // Closing hides; it does not make the endpoint refuse calls.
+        Ok(_) => {
+            v["note"] = json!("closing hides the credentials and connection snippets on the portal: the endpoint itself stays callable without the portal sign-in");
+        }
+        Err(_) => {}
     }
     v
 }
@@ -801,10 +812,7 @@ pub fn publish_item(
         .portal
         .publish(&key, meta, by.clone(), owner, Utc::now())
         .map_err(|e| match e {
-            PublishError::Full => ServiceError::new(
-                StatusCode::CONFLICT,
-                format!("the portal holds at most {} items", super::MAX_ITEMS),
-            ),
+            PublishError::Full => full(),
             PublishError::Io(e) => ServiceError::new(StatusCode::INTERNAL_SERVER_ERROR, e),
         })?;
     tracing::info!(target: "rustybin::portal", item = %key, by = %by, created, "item published");
@@ -815,35 +823,80 @@ pub fn publish_item(
     Ok((view, created))
 }
 
-/// May `id` be closed? A mock only with its mocked security on (a call
-/// without the credentials is refused by the mock); `409` names the fix.
+/// May `id` be closed? A mock only when a call without credentials the
+/// portal alone hands out is refused by the mock ([`super::unclosable`]:
+/// its mocked security on, an API key or Basic user of its own on every
+/// operation, never the defaults nor a token the built-in identity
+/// provider mints for anyone); `409` names the reason and the fix.
 fn check_closable(state: &AppState, id: &ItemId) -> Result<(), ServiceError> {
     let ItemId::Mock(name) = id else {
         return Ok(());
     };
-    let secured = state
-        .mocks
-        .get(name)
-        .and_then(|s| s.live.clone())
-        .is_some_and(|l| super::mock_secured(&state.config, &l));
-    if secured {
+    let live = state.mocks.get(name).and_then(|s| s.live.clone());
+    let Some(live) = live else {
+        return Err(ServiceError::new(
+            StatusCode::CONFLICT,
+            format!("mock {name:?} is not deployed: deploy it before closing its entry"),
+        ));
+    };
+    let Some(u) = super::unclosable(super::keyed(&state.config), &live) else {
         return Ok(());
-    }
+    };
     Err(ServiceError::with_body(
         StatusCode::CONFLICT,
         json!({
-            "error": format!("mock {name:?} has no mocked security, so a closed entry would still answer every call without credentials: turn its security on first (or send secure: true to turn it on and close it in one step)"),
-            "reason": "security_off",
+            "error": format!("mock {name:?} cannot be closed: {}, so a closed entry would still answer callers who never signed in to the portal. Send secure: true to turn its security on with credentials of its own (an API key) and close it in one step", u.message),
+            "reason": u.reason,
             "fix": { "secure": true },
+            "closable_modes": ["api_key", "basic"],
         }),
     ))
 }
 
-/// Turn on the mocked security of mock `name` and deploy it, for `secure:
-/// true` (the console's "Turn on security and close"): the mode the spec
-/// declares, else `api_key` (a mock with a mode of its own keeps it).
-/// Refused when the mock has a draft that is not deployed (deploying it
-/// would put other changes live). A mock already secured is left alone.
+/// A credential nobody can guess: 32 hexadecimal characters.
+fn random_secret(prefix: &str) -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut b);
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{prefix}{hex}")
+}
+
+/// `sec` with every default credential (`demo-key`, `demo` / `demo`,
+/// `demo-token`) replaced by a random one, and an API key added when it
+/// has none.
+fn without_defaults(
+    mut sec: crate::mocks::model::SecuritySettings,
+) -> crate::mocks::model::SecuritySettings {
+    use crate::mocks::model::{ApiKeySettings, BasicSettings, BearerSettings};
+    let keys = ApiKeySettings::default().keys;
+    for k in sec.api_key.keys.iter_mut().filter(|k| keys.contains(k)) {
+        *k = random_secret("key-");
+    }
+    if sec.api_key.keys.is_empty() {
+        sec.api_key.keys.push(random_secret("key-"));
+    }
+    let users = BasicSettings::default().users;
+    for (u, p) in sec.basic.users.iter_mut() {
+        if users.get(u) == Some(p) {
+            *p = random_secret("");
+        }
+    }
+    let tokens = BearerSettings::default().tokens;
+    for t in sec.bearer.tokens.iter_mut().filter(|t| tokens.contains(t)) {
+        *t = random_secret("token-");
+    }
+    sec
+}
+
+/// Turn on the mocked security of mock `name` so it can be closed, and
+/// deploy it, for `secure: true` (the console's "Turn on security and
+/// close"): every default credential replaced by a random one, and the
+/// mode the spec declares (or `basic` when that is the mode) when it can
+/// be closed so, else `api_key`. Refused when the mock has a draft that is
+/// not deployed (deploying it would put other changes live), and when no
+/// mode can close it (every operation marked public). A mock that can be
+/// closed already is left alone.
 pub async fn secure_mock(svc: &Svc, name: &str) -> Result<bool, ServiceError> {
     use crate::mocks::model::SecurityMode;
     let snap = svc.manageable(name)?;
@@ -853,7 +906,8 @@ pub async fn secure_mock(svc: &Svc, name: &str) -> Result<bool, ServiceError> {
             format!("mock {name:?} is not deployed"),
         ));
     };
-    if super::mock_secured(&svc.state.config, &live) {
+    let keyed = super::keyed(&svc.state.config);
+    if super::unclosable(keyed, &live).is_none() {
         return Ok(false);
     }
     if snap.draft.revision != live.revision {
@@ -862,16 +916,37 @@ pub async fn secure_mock(svc: &Svc, name: &str) -> Result<bool, ServiceError> {
             format!("mock {name:?} has a draft that is not deployed (revision {}): deploy or discard it first, then turn the security on", snap.draft.revision),
         ));
     }
-    let mut sec = live.settings.security.clone();
+    let was = &live.settings.security;
+    let mut sec = without_defaults(was.clone());
     sec.enabled = true;
     let declares = live.spec.operations.iter().any(|o| !o.security.is_empty());
-    if declares {
-        sec.mode = SecurityMode::Spec;
-    } else if sec.mode == SecurityMode::Spec {
+    if !was.enabled {
+        sec.mode = if declares {
+            SecurityMode::Spec
+        } else if was.mode == SecurityMode::Basic {
+            SecurityMode::Basic
+        } else {
+            SecurityMode::ApiKey
+        };
+    }
+    // The mode chosen closes it, or the API key does.
+    let why = |sec: &crate::mocks::model::SecuritySettings| {
+        let mut settings = live.settings.clone();
+        settings.security = sec.clone();
+        super::unclosable_with(keyed, &live.spec, &settings)
+    };
+    if why(&sec).is_some() {
         sec.mode = SecurityMode::ApiKey;
     }
-    if sec.api_key.keys.is_empty() {
-        sec.api_key.keys = crate::mocks::model::ApiKeySettings::default().keys;
+    if let Some(u) = why(&sec) {
+        let why = u.message;
+        return Err(ServiceError::with_body(
+            StatusCode::CONFLICT,
+            json!({
+                "error": format!("mock {name:?} cannot be closed even with its security on: {why}"),
+                "reason": "open_operations",
+            }),
+        ));
     }
     let body = crate::mocks::service::PatchBody {
         project: None,
@@ -890,12 +965,14 @@ pub async fn secure_mock(svc: &Svc, name: &str) -> Result<bool, ServiceError> {
     svc.clone()
         .compiling(move |svc| svc.update(&owned, body))
         .await?;
-    tracing::info!(target: "rustybin::portal", mock = %name, "mocked security turned on to close the item");
+    tracing::info!(target: "rustybin::portal", mock = %name, "mocked security turned on, with credentials of its own, to close the item");
     Ok(true)
 }
 
 /// [`publish_item`], after turning on a mock's security when `secure` asks
-/// for it (only when the entry is to be closed).
+/// for it (only when the entry is to be closed). Everything that can refuse
+/// the publish (the caller's rights, the config file, the metadata, the
+/// portal's capacity) is checked before the mock changes.
 pub async fn publish_secured(
     state: &AppState,
     svc: &Svc,
@@ -919,13 +996,25 @@ pub async fn publish_secured(
         }
         // The caller may publish it before anything changes.
         authorize_item(state, &id, svc, principal)?;
-        if file_defined(state, &id.as_string()) {
-            return Err(conflict_file(&id.as_string()));
+        let key = id.as_string();
+        if file_defined(state, &key) {
+            return Err(conflict_file(&key));
+        }
+        super::clean_meta(&meta).map_err(ServiceError::bad_request)?;
+        if !state.portal.has_room(&key) {
+            return Err(full());
         }
         secured = secure_mock(svc, name).await?;
     }
     let (view, created) = publish_item(state, svc, principal, raw_id, meta)?;
     Ok((view, created, secured))
+}
+
+fn full() -> ServiceError {
+    ServiceError::new(
+        StatusCode::CONFLICT,
+        format!("the portal holds at most {} items", super::MAX_ITEMS),
+    )
 }
 
 /// Remove `id` from the portal as `svc`'s caller.
@@ -1117,8 +1206,13 @@ pub fn catalog() -> Vec<Endpoint> {
              manage rights (visitors only with portal.visitors), everything else admin. Body: \
              title, summary (Markdown), tags, contact, order, credentials (show a mock's demo \
              credentials), access (open, or closed: everyone reads it, only portal readers use \
-             it). A mock closes only with its mocked security on (409 security_off otherwise); \
-             secure: true turns it on and deploys it first (needs mocks.write).",
+             it). A mock closes only when every call needs an API key or Basic user of its own \
+             (409 security_off, default_credentials, obtainable_credentials or open_operations \
+             otherwise: JWTs of the built-in identity provider and the demo client certificate \
+             are anyone's); secure: true turns its security on with random credentials in place \
+             of the defaults (api_key mode unless the spec's or basic mode closes it) and deploys \
+             it first (needs mocks.write). Closing any other item hides its snippets only: the \
+             answer's note says its endpoint stays callable.",
         )
         .example(
             Example::new("Publish the mock LLM", "PUT", "/_rustybin/portal/items/llm")
@@ -1271,7 +1365,7 @@ pub fn openapi_paths() -> Value {
         "order": { "type": "integer", "minimum": -1000, "maximum": 1000 },
         "credentials": { "type": "boolean", "description": "Show a mock's demo credentials (default true)" },
         "access": { "type": "string", "enum": ["open", "closed"], "description": "open (default): anyone uses it; closed: everyone reads it, only portal readers (portal.read) use it" },
-        "secure": { "type": "boolean", "description": "With access closed on a mock without mocked security: turn it on and deploy it first (needs mocks.write)" }
+        "secure": { "type": "boolean", "description": "With access closed on a mock that cannot be closed as it is: turn its security on with random credentials in place of the defaults (api_key mode unless the spec's or basic mode closes it) and deploy it first (needs mocks.write)" }
     } });
     json!({
         "/_rustybin/portal": { "get": {
@@ -1286,7 +1380,7 @@ pub fn openapi_paths() -> Value {
                 "responses": {
                     "200": { "description": "Updated" }, "201": { "description": "Published" },
                     "400": { "description": "Invalid id or metadata" }, "403": { "description": "Not allowed" },
-                    "404": { "description": "Unknown mock" }, "409": { "description": "Defined in the config file, the portal is full, a mock closed without mocked security (security_off), or a draft not deployed (secure)" }
+                    "404": { "description": "Unknown mock" }, "409": { "description": "Defined in the config file, the portal is full, a mock that cannot be closed (security_off, default_credentials, obtainable_credentials, open_operations), or a draft not deployed (secure)" }
                 }
             },
             "delete": {

@@ -226,6 +226,10 @@ pub fn reload_files(state: &AppState) -> (ApplyReport, Vec<String>) {
     for (name, error) in &failed {
         store.mark_failed(name, Origin::File, error);
     }
+    // A closed portal item over a mock a caller without the portal's
+    // credentials would get through: the mock refuses its calls, and the
+    // load says why.
+    problems.extend(crate::portal::closed_problems(state));
     store.clear_load_errors();
     for p in &problems {
         tracing::warn!("mocks: {p}");

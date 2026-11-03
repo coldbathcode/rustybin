@@ -136,7 +136,8 @@ async fn portal_login(app: &Router, user: &str) -> (Answer, Option<String>) {
 }
 
 /// A spec whose operations need an API key in a header, one in the query,
-/// one in a cookie, Basic and a bearer token.
+/// one in a cookie, Basic and a bearer token (with the header key: a token
+/// alone is no credential a closed item can rest on).
 const PLANTED_SPEC: &str = r#"{
   "openapi": "3.0.3",
   "info": { "title": "Planted", "version": "1" },
@@ -152,7 +153,7 @@ const PLANTED_SPEC: &str = r#"{
     "/q": { "get": { "operationId": "q", "security": [{ "qk": [] }], "responses": { "200": { "description": "ok" } } } },
     "/c": { "get": { "operationId": "c", "security": [{ "ck": [] }], "responses": { "200": { "description": "ok" } } } },
     "/b": { "get": { "operationId": "b", "security": [{ "basic": [] }], "responses": { "200": { "description": "ok" } } } },
-    "/t": { "post": { "operationId": "t", "security": [{ "bearer": [] }], "requestBody": { "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "200": { "description": "ok" } } } }
+    "/t": { "post": { "operationId": "t", "security": [{ "hk": [], "bearer": [] }], "requestBody": { "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "200": { "description": "ok" } } } }
   }
 }"#;
 
@@ -689,6 +690,7 @@ async fn closing_a_mock_needs_its_security_and_secure_turns_it_on() {
     assert_eq!(a.status, StatusCode::CONFLICT, "{}", a.text);
     assert_eq!(a.body["reason"], "security_off");
     assert_eq!(a.body["fix"]["secure"], true);
+    assert_eq!(a.body["closable_modes"], json!(["api_key", "basic"]));
     let pet = || Some(json!({ "name": "Rex", "status": "available" }));
     let a = call(&app, "POST", "/mock/petstore/v1/pets", &[], pet()).await;
     assert!(a.status.is_success(), "still open: {}", a.text);
@@ -723,6 +725,8 @@ async fn closing_a_mock_needs_its_security_and_secure_turns_it_on() {
     assert_eq!(a.body["secured"], true);
     let a = call(&app, "POST", "/mock/petstore/v1/pets", &[], pet()).await;
     assert_eq!(a.status, StatusCode::UNAUTHORIZED, "{}", a.text);
+    // The spec's bearer alternative takes a token anyone mints, so the mock
+    // is closed in api_key mode, behind a random key (never demo-key).
     let a = call(
         &app,
         "POST",
@@ -731,12 +735,31 @@ async fn closing_a_mock_needs_its_security_and_secure_turns_it_on() {
         pet(),
     )
     .await;
+    assert_eq!(a.status, StatusCode::UNAUTHORIZED, "{}", a.text);
+    let detail = as_admin(&app, "GET", "/_rustybin/mocks/petstore", None).await;
+    let sec = &detail.body["live"]["settings"]["security"];
+    let sec = if sec.is_null() {
+        &detail.body["settings"]["security"]
+    } else {
+        sec
+    };
+    assert_eq!(sec["mode"], "api_key", "{}", detail.text);
+    let key = sec["api_key"]["keys"][0].as_str().unwrap_or("").to_string();
+    assert!(key.len() >= 32 && key != "demo-key", "{key}");
+    let a = call(
+        &app,
+        "POST",
+        "/mock/petstore/v1/pets",
+        &[("x-api-key", &key)],
+        pet(),
+    )
+    .await;
     assert!(a.status.is_success(), "{}", a.text);
     // The control view says closed, and counts it.
     let a = as_admin(&app, "GET", CONTROL_PATH, None).await;
     assert_eq!(a.body["counts"]["closed"], 1);
     assert!(a.body["readers"]["users"].as_u64().is_some());
-    // Turning the security off again leaves the item closed, with a warning.
+    // Turning the security off again is refused while the item is closed.
     let a = as_admin(
         &app,
         "PATCH",
@@ -744,15 +767,10 @@ async fn closing_a_mock_needs_its_security_and_secure_turns_it_on() {
         Some(json!({ "security": { "enabled": false }, "deploy": true })),
     )
     .await;
-    assert_eq!(a.status, StatusCode::OK, "{}", a.text);
-    let a = as_admin(&app, "GET", CONTROL_PATH, None).await;
-    let pet = a.body["items"]
-        .as_array()
-        .and_then(|i| i.iter().find(|x| x["id"] == "mock:petstore"))
-        .cloned()
-        .unwrap_or_default();
-    assert_eq!(pet["published"]["access"], "closed");
-    assert!(pet["warning"].is_string(), "{pet}");
+    assert_eq!(a.status, StatusCode::CONFLICT, "{}", a.text);
+    assert!(a.text.contains("closed on the dev portal"), "{}", a.text);
+    let a = call(&app, "POST", "/mock/petstore/v1/pets", &[], pet()).await;
+    assert_eq!(a.status, StatusCode::UNAUTHORIZED, "{}", a.text);
     // Opening is always allowed.
     let a = as_admin(
         &app,
@@ -1032,5 +1050,548 @@ async fn documents_carry_access_and_a_pulled_one_never_opens() {
     .expect("parse");
     let out = configdoc::apply(&state, file, &opts(false));
     assert!(state.portal.get("mock:petstore").is_none());
-    assert!(out.to_string().contains("no mocked security"), "{out}");
+    assert!(out.to_string().contains("mocked security is off"), "{out}");
+}
+
+// ── The security pass (step 14, area B) ─────────────────────────────
+
+/// A spec with one operation and every scheme a caller can satisfy
+/// without the portal: an OAuth flow, OpenID Connect, a bearer token and
+/// mutual TLS (each operation needs one of them).
+const TOKEN_SPEC: &str = r#"{
+  "openapi": "3.0.3",
+  "info": { "title": "Tokens", "version": "1" },
+  "components": { "securitySchemes": {
+    "oauth": { "type": "oauth2", "flows": { "clientCredentials": { "tokenUrl": "/oauth/token", "scopes": {} } } },
+    "oidc": { "type": "openIdConnect", "openIdConnectUrl": "/.well-known/openid-configuration" },
+    "bearer": { "type": "http", "scheme": "bearer" },
+    "mtls": { "type": "mutualTLS" }
+  } },
+  "paths": {
+    "/o": { "get": { "operationId": "o", "security": [{ "oauth": [] }], "responses": { "200": { "description": "ok" } } } },
+    "/i": { "get": { "operationId": "i", "security": [{ "oidc": [] }], "responses": { "200": { "description": "ok" } } } },
+    "/b": { "get": { "operationId": "b", "security": [{ "bearer": [] }], "responses": { "200": { "description": "ok" } } } },
+    "/m": { "get": { "operationId": "m", "security": [{ "mtls": [] }], "responses": { "200": { "description": "ok" } } } }
+  }
+}"#;
+
+/// A token from the built-in identity provider's public demo client.
+async fn idp_token(app: &Router) -> String {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/oauth/token")
+        .header("host", "rustybin.test")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(
+            "grant_type=client_credentials&client_id=rustybin&client_secret=secret",
+        ))
+        .expect("request");
+    let resp = app.clone().oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: Value = serde_json::from_slice(&body_bytes(resp).await).expect("json");
+    v["access_token"].as_str().expect("token").to_string()
+}
+
+async fn create_mock(app: &Router, name: &str, spec: &str, security: Value) {
+    let a = as_admin(
+        app,
+        "POST",
+        "/_rustybin/mocks",
+        Some(json!({ "name": name, "spec": spec, "deploy": true, "security": security })),
+    )
+    .await;
+    assert_eq!(a.status, StatusCode::CREATED, "{}", a.text);
+}
+
+async fn close(app: &Router, id: &str, extra: Value) -> Answer {
+    let mut body = json!({ "access": "closed" });
+    if let (Some(b), Some(e)) = (body.as_object_mut(), extra.as_object()) {
+        b.extend(e.clone());
+    }
+    as_admin(
+        app,
+        "PUT",
+        &format!("/_rustybin/portal/items/{id}"),
+        Some(body),
+    )
+    .await
+}
+
+const PET_SPEC_OPEN: &str = r#"{"openapi":"3.0.3","info":{"title":"P","version":"1"},"paths":{"/p":{"get":{"operationId":"p","responses":{"200":{"description":"ok"}}}}}}"#;
+
+/// Finding 1: a mock whose credentials anyone can get without the portal
+/// sign-in (JWTs of the built-in identity provider, whose demo client is
+/// public; the downloadable demo client certificate) cannot be closed.
+#[tokio::test]
+async fn a_closed_mock_cannot_rest_on_tokens_anyone_can_mint() {
+    let (app, _) = setup(password_config());
+    // jwt and bearer modes: a signed-out caller's token is accepted.
+    for mode in ["jwt", "bearer"] {
+        let name = format!("tok-{mode}");
+        create_mock(
+            &app,
+            &name,
+            PET_SPEC_OPEN,
+            json!({ "enabled": true, "mode": mode, "bearer": { "tokens": ["own-token-1x9z7q"] } }),
+        )
+        .await;
+        let token = idp_token(&app).await;
+        let bearer = format!("Bearer {token}");
+        let a = call(
+            &app,
+            "GET",
+            &format!("/mock/{name}/p"),
+            &[("authorization", &bearer)],
+            None,
+        )
+        .await;
+        assert_eq!(
+            a.status,
+            StatusCode::OK,
+            "the token is accepted: {}",
+            a.text
+        );
+        let a = close(&app, &format!("mock:{name}"), json!({})).await;
+        assert_eq!(a.status, StatusCode::CONFLICT, "{mode}: {}", a.text);
+        assert_eq!(a.body["reason"], "obtainable_credentials", "{}", a.text);
+        assert!(a.text.contains("built-in identity provider"), "{}", a.text);
+    }
+    // spec mode with OAuth, OpenID Connect, bearer and mutual TLS schemes.
+    create_mock(
+        &app,
+        "tok-spec",
+        TOKEN_SPEC,
+        json!({ "enabled": true, "mode": "spec" }),
+    )
+    .await;
+    let a = close(&app, "mock:tok-spec", json!({})).await;
+    assert_eq!(a.status, StatusCode::CONFLICT, "{}", a.text);
+    assert_eq!(a.body["reason"], "obtainable_credentials");
+    // A spec with only the mutual TLS scheme: the demo certificate opens it.
+    let mtls_only = TOKEN_SPEC
+        .replace(
+            r#""security": [{ "oauth": [] }]"#,
+            r#""security": [{ "mtls": [] }]"#,
+        )
+        .replace(
+            r#""security": [{ "oidc": [] }]"#,
+            r#""security": [{ "mtls": [] }]"#,
+        )
+        .replace(
+            r#""security": [{ "bearer": [] }]"#,
+            r#""security": [{ "mtls": [] }]"#,
+        );
+    create_mock(
+        &app,
+        "tok-mtls",
+        &mtls_only,
+        json!({ "enabled": true, "mode": "spec" }),
+    )
+    .await;
+    let a = close(&app, "mock:tok-mtls", json!({})).await;
+    assert_eq!(a.status, StatusCode::CONFLICT, "{}", a.text);
+    assert!(a.text.contains("demo client certificate"), "{}", a.text);
+    // secure: true closes it behind an API key of its own: the token fails.
+    let a = close(&app, "mock:tok-jwt", json!({ "secure": true })).await;
+    assert_eq!(a.status, StatusCode::CREATED, "{}", a.text);
+    assert_eq!(a.body["secured_now"], true);
+    let token = idp_token(&app).await;
+    let bearer = format!("Bearer {token}");
+    let a = call(
+        &app,
+        "GET",
+        "/mock/tok-jwt/p",
+        &[("authorization", &bearer)],
+        None,
+    )
+    .await;
+    assert_eq!(a.status, StatusCode::UNAUTHORIZED, "{}", a.text);
+    // The locked entry hands no token URL.
+    let a = call(&app, "GET", CATALOG_PATH, &[], None).await;
+    assert!(
+        item(&a.body, "mock:tok-jwt")["detail"]["token_url"].is_null(),
+        "{}",
+        a.text
+    );
+}
+
+/// Finding 2: the default credentials close nothing, and `secure: true`
+/// replaces them with random ones.
+#[tokio::test]
+async fn default_credentials_never_close_a_mock_and_secure_replaces_them() {
+    let (app, _) = setup(password_config());
+    create_mock(
+        &app,
+        "dkey",
+        PET_SPEC_OPEN,
+        json!({ "enabled": true, "mode": "api_key" }),
+    )
+    .await;
+    let a = close(&app, "mock:dkey", json!({})).await;
+    assert_eq!(a.status, StatusCode::CONFLICT, "{}", a.text);
+    assert_eq!(a.body["reason"], "default_credentials");
+    assert!(a.text.contains("demo-key"), "{}", a.text);
+    create_mock(
+        &app,
+        "dbasic",
+        PET_SPEC_OPEN,
+        json!({ "enabled": true, "mode": "basic" }),
+    )
+    .await;
+    let a = close(&app, "mock:dbasic", json!({})).await;
+    assert_eq!(a.status, StatusCode::CONFLICT, "{}", a.text);
+    assert_eq!(a.body["reason"], "default_credentials");
+    // Every operation public: nothing to protect.
+    create_mock(&app, "allpub", PET_SPEC_OPEN, json!({ "enabled": true, "mode": "api_key", "api_key": { "header": "x-api-key", "keys": ["own-key-9q"] } })).await;
+    let a = as_admin(
+        &app,
+        "PUT",
+        "/_rustybin/mocks/allpub/operations/p",
+        Some(json!({ "public": true })),
+    )
+    .await;
+    assert!(a.status.is_success(), "{}", a.text);
+    let a = as_admin(&app, "POST", "/_rustybin/mocks/allpub/deploy", None).await;
+    assert!(a.status.is_success(), "{}", a.text);
+    let a = close(&app, "mock:allpub", json!({})).await;
+    assert_eq!(a.status, StatusCode::CONFLICT, "{}", a.text);
+    assert_eq!(a.body["reason"], "open_operations");
+    // Basic with a user of its own closes.
+    create_mock(&app, "obasic", PET_SPEC_OPEN, json!({ "enabled": true, "mode": "basic", "basic": { "users": { "reader": "own-pass-7k2" } } })).await;
+    let a = close(&app, "mock:obasic", json!({})).await;
+    assert_eq!(a.status, StatusCode::CREATED, "{}", a.text);
+    // The catalogue's own example: the defaults go, random ones come.
+    let a = close(&app, "mock:dkey", json!({ "secure": true })).await;
+    assert_eq!(a.status, StatusCode::CREATED, "{}", a.text);
+    assert_eq!(a.body["secured_now"], true);
+    let a = call(
+        &app,
+        "GET",
+        "/mock/dkey/p",
+        &[("x-api-key", "demo-key")],
+        None,
+    )
+    .await;
+    assert_eq!(a.status, StatusCode::UNAUTHORIZED, "{}", a.text);
+    let a = close(&app, "mock:dbasic", json!({ "secure": true })).await;
+    assert_eq!(a.status, StatusCode::CREATED, "{}", a.text);
+    let a = call(
+        &app,
+        "GET",
+        "/mock/dbasic/p",
+        &[(
+            "authorization",
+            &format!("Basic {}", basic_of("demo", "demo")),
+        )],
+        None,
+    )
+    .await;
+    assert_eq!(a.status, StatusCode::UNAUTHORIZED, "{}", a.text);
+    let d = as_admin(&app, "GET", "/_rustybin/mocks/dbasic", None).await;
+    assert_eq!(
+        d.body["settings"]["security"]["mode"], "basic",
+        "{}",
+        d.text
+    );
+    // A reader gets the new credentials on the portal.
+    let (k, v) = admin();
+    let reader = call(&app, "GET", CATALOG_PATH, &[(k, &v)], None).await;
+    let d = as_admin(&app, "GET", "/_rustybin/mocks/dkey", None).await;
+    let key = d.body["settings"]["security"]["api_key"]["keys"][0]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    assert!(key.starts_with("key-") && key.len() > 30, "{key}");
+    assert!(reader.text.contains(&key));
+}
+
+/// Finding 3: a document pulled from git never opens the portal nor moves
+/// where Try it sends a tester's key.
+#[tokio::test]
+async fn a_pulled_document_never_changes_portal_auth_or_base_url() {
+    use crate::configdoc::{self, ApplyOptions};
+    let (app, state) = setup(password_config());
+    let a = as_admin(
+        &app,
+        "PATCH",
+        "/_rustybin/settings",
+        Some(json!({ "values": { "portal.auth": "password" } })),
+    )
+    .await;
+    assert_eq!(a.status, StatusCode::OK, "{}", a.text);
+    let opts = |untrusted: bool| ApplyOptions {
+        prune: false,
+        dry_run: false,
+        principal: "test".into(),
+        base: None,
+        untrusted,
+        caller: None,
+        base_url: None,
+    };
+    let doc =
+        "version: 2\nsettings:\n  portal.auth: open\n  portal.base_url: https://evil.example\n";
+    let out = configdoc::apply(
+        &state,
+        crate::mocks::config_file::parse(doc).expect("parse"),
+        &opts(true),
+    );
+    assert_eq!(
+        state.settings.string("portal.auth").as_deref(),
+        Some("password"),
+        "{out}"
+    );
+    assert_eq!(state.settings.string("portal.base_url"), None, "{out}");
+    let text = out.to_string();
+    assert!(
+        text.contains("settings.portal.auth: a document from the repository cannot change it"),
+        "{text}"
+    );
+    assert!(
+        text.contains("settings.portal.base_url: a document from the repository cannot change it"),
+        "{text}"
+    );
+    // A trusted document (the operator's) still sets them.
+    configdoc::apply(
+        &state,
+        crate::mocks::config_file::parse(doc).expect("parse"),
+        &opts(false),
+    );
+    assert_eq!(
+        state.settings.string("portal.auth").as_deref(),
+        Some("open")
+    );
+}
+
+/// Finding 4: under a closed item the mock's security cannot be switched
+/// off (nor its credentials put back to the defaults) by any path, and a
+/// mock recreated without it refuses every call until it is secured.
+#[tokio::test]
+async fn security_cannot_be_switched_off_under_a_closed_item() {
+    use crate::configdoc::{self, ApplyOptions};
+    let (app, state) = setup(password_config());
+    plant_mock(&app).await;
+    let a = close(&app, "mock:planted", json!({})).await;
+    assert_eq!(a.status, StatusCode::CREATED, "{}", a.text);
+    let refused =
+        |a: &Answer| a.status == StatusCode::UNAUTHORIZED || a.status == StatusCode::FORBIDDEN;
+    // PATCH: off, or the default key.
+    for security in [
+        json!({ "enabled": false }),
+        json!({ "enabled": true, "mode": "api_key", "api_key": { "header": "x-api-key", "keys": ["demo-key"] } }),
+    ] {
+        let a = as_admin(
+            &app,
+            "PATCH",
+            "/_rustybin/mocks/planted",
+            Some(json!({ "security": security, "deploy": true })),
+        )
+        .await;
+        assert_eq!(a.status, StatusCode::CONFLICT, "{}", a.text);
+    }
+    // A draft may say so, its deploy may not.
+    let a = as_admin(
+        &app,
+        "PATCH",
+        "/_rustybin/mocks/planted",
+        Some(json!({ "security": { "enabled": false } })),
+    )
+    .await;
+    assert_eq!(a.status, StatusCode::OK, "{}", a.text);
+    let a = as_admin(&app, "POST", "/_rustybin/mocks/planted/deploy", None).await;
+    assert_eq!(a.status, StatusCode::CONFLICT, "{}", a.text);
+    let a = call(&app, "GET", "/mock/planted/h", &[], None).await;
+    assert!(refused(&a), "{}", a.text);
+    // Documents, untrusted and trusted.
+    let opts = |untrusted: bool| ApplyOptions {
+        prune: false,
+        dry_run: false,
+        principal: "test".into(),
+        base: None,
+        untrusted,
+        caller: None,
+        base_url: None,
+    };
+    let doc = format!(
+        "version: 2\nmocks:\n  - name: planted\n    spec_inline: {}\n    security:\n      enabled: false\n",
+        serde_json::to_string(PLANTED_SPEC).expect("spec")
+    );
+    // The preview says so as the apply does.
+    let mut preview = opts(true);
+    preview.dry_run = true;
+    let out = configdoc::apply(
+        &state,
+        crate::mocks::config_file::parse(&doc).expect("parse"),
+        &preview,
+    );
+    assert!(
+        out.to_string().contains("closed on the dev portal"),
+        "{out}"
+    );
+    for untrusted in [true, false] {
+        let out = configdoc::apply(
+            &state,
+            crate::mocks::config_file::parse(&doc).expect("parse"),
+            &opts(untrusted),
+        );
+        assert!(
+            out.to_string().contains("closed on the dev portal"),
+            "{out}"
+        );
+        let a = call(&app, "GET", "/mock/planted/h", &[], None).await;
+        assert!(refused(&a), "untrusted {untrusted}: {}", a.text);
+    }
+    // A rollback to a revision without security.
+    create_mock(&app, "rolled", PET_SPEC_OPEN, json!({ "enabled": false })).await;
+    let a = as_admin(&app, "PATCH", "/_rustybin/mocks/rolled", Some(json!({ "security": { "enabled": true, "mode": "api_key", "api_key": { "header": "x-api-key", "keys": ["own-key-55x"] } }, "deploy": true }))).await;
+    assert_eq!(a.status, StatusCode::OK, "{}", a.text);
+    let a = close(&app, "mock:rolled", json!({})).await;
+    assert_eq!(a.status, StatusCode::CREATED, "{}", a.text);
+    let a = as_admin(&app, "POST", "/_rustybin/mocks/rolled/rollback", None).await;
+    assert_eq!(a.status, StatusCode::CONFLICT, "{}", a.text);
+    let a = call(&app, "GET", "/mock/rolled/p", &[], None).await;
+    assert_eq!(a.status, StatusCode::UNAUTHORIZED, "{}", a.text);
+    // Deleted and recreated without security: the item stays closed, the
+    // mock refuses every call until it is secured.
+    let a = as_admin(&app, "DELETE", "/_rustybin/mocks/rolled", None).await;
+    assert!(a.status.is_success(), "{}", a.text);
+    create_mock(&app, "rolled", PET_SPEC_OPEN, json!({ "enabled": false })).await;
+    let a = call(&app, "GET", "/mock/rolled/p", &[], None).await;
+    assert_eq!(a.status, StatusCode::FORBIDDEN, "{}", a.text);
+    assert_eq!(a.body["reason"], "closed_unsecured", "{}", a.text);
+    let a = as_admin(&app, "GET", CONTROL_PATH, None).await;
+    let it = a.body["items"]
+        .as_array()
+        .and_then(|i| i.iter().find(|x| x["id"] == "mock:rolled"))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(it["published"]["access"], "closed");
+    assert!(
+        it["warning"]
+            .as_str()
+            .is_some_and(|w| w.contains("refuses every call")),
+        "{it}"
+    );
+    // Secured again (secure: true), it answers with its own key only.
+    let a = close(&app, "mock:rolled", json!({ "secure": true })).await;
+    assert_eq!(a.status, StatusCode::OK, "{}", a.text);
+    let a = call(&app, "GET", "/mock/rolled/p", &[], None).await;
+    assert_eq!(a.status, StatusCode::UNAUTHORIZED, "{}", a.text);
+}
+
+/// Finding 4, the config file: a closed `portal.items` entry over a mock
+/// without its own credentials is reported at load, and the mock refuses
+/// every call.
+#[tokio::test]
+async fn a_config_file_closing_an_unsecured_mock_is_reported_and_refused() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("rustybin.yaml");
+    std::fs::write(
+        &file,
+        "version: 2\nportal:\n  items:\n    - id: mock:petstore\n      access: closed\n",
+    )
+    .expect("write");
+    let mut c = password_config();
+    c.config_file = Some(file.to_string_lossy().into_owned());
+    let (app, state) = setup(c);
+    let (_, problems) = crate::mocks::reload_files(&state);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("portal item mock:petstore: closed")),
+        "{problems:?}"
+    );
+    assert!(state
+        .mocks
+        .load_errors()
+        .iter()
+        .any(|p| p.contains("mock:petstore")));
+    let a = call(&app, "GET", "/mock/petstore/v1/pets", &[], None).await;
+    assert_eq!(a.status, StatusCode::FORBIDDEN, "{}", a.text);
+    assert_eq!(a.body["reason"], "closed_unsecured");
+}
+
+/// Finding 5: a closed MCP server keeps no hint at how to get through, and
+/// the publish answer says the endpoint stays callable.
+#[tokio::test]
+async fn a_closed_mcp_server_has_no_hint_and_says_it_stays_callable() {
+    let (app, _) = setup(password_config());
+    for id in ["mcp:apikey", "mcp:protected"] {
+        let a = close(&app, id, json!({})).await;
+        assert_eq!(a.status, StatusCode::CREATED, "{}", a.text);
+        assert!(
+            a.body["note"]
+                .as_str()
+                .is_some_and(|n| n.contains("stays callable")),
+            "{}",
+            a.text
+        );
+    }
+    let a = call(&app, "GET", CATALOG_PATH, &[], None).await;
+    for id in ["mcp:apikey", "mcp:protected"] {
+        let it = item(&a.body, id);
+        assert_eq!(it["locked"], true);
+        assert!(it["detail"]["auth"]["hint"].is_null(), "{it}");
+        assert!(it["detail"]["auth"]["kind"].is_string(), "{it}");
+    }
+    assert!(!a.text.contains("any non-empty X-API-Key"), "{}", a.text);
+}
+
+/// Finding 6: `secure: true` changes nothing when the publish would be
+/// refused (bad metadata, a full portal).
+#[tokio::test]
+async fn a_refused_secure_publish_leaves_the_mock_as_it_was() {
+    let (app, state) = setup(password_config());
+    let enabled = |app: Router| async move {
+        as_admin(&app, "GET", "/_rustybin/mocks/petstore", None)
+            .await
+            .body["settings"]["security"]["enabled"]
+            .clone()
+    };
+    let long = "x".repeat(MAX_SUMMARY + 1);
+    let a = close(
+        &app,
+        "mock:petstore",
+        json!({ "secure": true, "summary": long }),
+    )
+    .await;
+    assert_eq!(a.status, StatusCode::BAD_REQUEST, "{}", a.text);
+    assert_eq!(enabled(app.clone()).await, json!(false));
+    for i in 0..MAX_ITEMS {
+        state
+            .portal
+            .publish(
+                &format!("mock:filler-{i}"),
+                Meta::default(),
+                "test".into(),
+                None,
+                chrono::Utc::now(),
+            )
+            .expect("publish");
+    }
+    let a = close(&app, "mock:petstore", json!({ "secure": true })).await;
+    assert_eq!(a.status, StatusCode::CONFLICT, "{}", a.text);
+    assert!(a.text.contains("at most"), "{}", a.text);
+    assert_eq!(enabled(app.clone()).await, json!(false));
+}
+
+/// Finding 7: portal sign-outs have their own bounded list, so a loop of
+/// portal sign-ins and sign-outs never evicts a console sign-out.
+#[test]
+fn portal_sign_outs_never_evict_console_sign_outs() {
+    let tokens = crate::login::Tokens::new();
+    let now = tokens.now();
+    // The console sign-out expires first: the eviction's first victim.
+    tokens.revoke("console-session", now + 60);
+    for i in 0..crate::login::MAX_PORTAL_REVOKED + 10 {
+        tokens.revoke_portal(&format!("portal-{i}"), now + 3600 + i as i64);
+    }
+    assert!(
+        tokens.is_revoked("console-session"),
+        "the console sign-out holds"
+    );
+    assert!(tokens.is_portal_revoked(&format!("portal-{}", crate::login::MAX_PORTAL_REVOKED + 9)));
+    assert!(
+        !tokens.is_revoked("portal-5"),
+        "portal sign-outs are kept apart"
+    );
 }

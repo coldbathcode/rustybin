@@ -1029,3 +1029,97 @@ fn agents_from_before_0_5_move_to_their_user() {
     assert_eq!(written["version"], DOC_VERSION);
     assert_eq!(again.agents.adopt_users(&again.users), 0);
 }
+
+/// A second revoke never changes the first: an agent the operator revoked
+/// stays the operator's to restore, whether its user revokes it again
+/// through the API or a sibling agent of the same user through the tools.
+#[tokio::test]
+async fn a_user_cannot_restore_an_agent_the_operator_revoked_by_revoking_it_first() {
+    let state = test_state_with(password_config());
+    state
+        .users
+        .save_role(crate::rbac::CustomRole {
+            name: "builder".into(),
+            description: String::new(),
+            permissions: vec!["instance.read".into(), "mocks.read".into()],
+        })
+        .expect("role");
+    let app = test_app_with(state.clone());
+    add_user(&state, "bob", &["builder"]);
+    let bob = sign_in(&app, "bob").await;
+    let bob_mcp = sign_in(&app, "bob").await;
+    tools(&app, &bob_mcp, "bob-agent").await;
+    let mine = agent_of(&app, "bob", "bob-agent").await;
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/_rustybin/agents/{mine}/revoke"),
+        &admin(),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, before) = send(
+        &app,
+        "GET",
+        &format!("/_rustybin/agents/{mine}"),
+        &admin(),
+        None,
+    )
+    .await;
+    // Through the API: revoke again, then restore.
+    let (status, v) = send(
+        &app,
+        "POST",
+        &format!("/_rustybin/agents/{mine}/revoke"),
+        &bob,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["already_revoked"], true, "{v}");
+    let (_, after) = send(
+        &app,
+        "GET",
+        &format!("/_rustybin/agents/{mine}"),
+        &admin(),
+        None,
+    )
+    .await;
+    assert_eq!(before["revoked"], after["revoked"], "who and when are kept");
+    assert_eq!(after["revoked"]["by_owner"], false, "{after}");
+    let (status, v) = send(
+        &app,
+        "POST",
+        &format!("/_rustybin/agents/{mine}/restore"),
+        &bob,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["permission"], "agents.manage");
+    // (Through the tools, from an OAuth agent of the same user:
+    // `control_oauth::tests::users`.)
+    let sibling = sign_in(&app, "bob").await;
+    // His own revocation he may still undo.
+    tools(&app, &sibling, "bob-third").await;
+    let third = agent_of(&app, "bob", "bob-third").await;
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/_rustybin/agents/{third}/revoke"),
+        &bob,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/_rustybin/agents/{third}/restore"),
+        &bob,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}

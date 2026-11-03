@@ -487,8 +487,9 @@ pub fn restore_checkpoint(
             problems.push(format!(
                 "{}: now in {}, left as it is",
                 m.name,
+                // Never the other project's name: the caller may not see it.
                 match &s.project {
-                    Some(p) => format!("the project {p}"),
+                    Some(_) => "another project".to_string(),
                     None => "the instance's mocks".into(),
                 }
             ));
