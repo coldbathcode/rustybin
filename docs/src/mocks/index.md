@@ -241,11 +241,51 @@ revision mandatory for every caller: an edit without one answers `428`.
 
 | Surface | Where |
 |---|---|
-| API | `If-Match` or `expected_revision` on `PATCH /_rustybin/mocks/{name}`, `PUT /_rustybin/mocks/{name}/operations/{op}` and `POST /_rustybin/mocks/{name}/deploy`; the `ETag` on the mock and its operations |
-| Console | Sent with every edit and deploy; a `409` says what changed and offers to reload |
-| CLI | `rustybin mocks update` and `mocks set-operation` with `--expect-revision N` (default: read just before); `mocks deploy --expect-revision N` (default: the draft as it is) |
-| Management MCP | `expected_revision` on `update_mock`, `set_operation` and `deploy_mock` |
-| `rustybin.yaml` | `settings: { mocks.require_revision: true }` |
+| API | `If-Match` or `expected_revision` on `PATCH /_rustybin/mocks/{name}`, `PUT /_rustybin/mocks/{name}/operations/{op}` and `POST /_rustybin/mocks/{name}/deploy`; the `ETag` on the mock and its operations; `GET /_rustybin/mocks/{name}/revisions/{revision}` |
+| Console | Sent with every edit and deploy; a refused edit opens the [compare view](#comparing-a-refused-edit) (Keep mine, Take theirs); a refused deploy says what changed and offers to reload |
+| CLI | `rustybin mocks update` and `mocks set-operation` with `--expect-revision N` (default: read just before); `mocks deploy --expect-revision N` (default: the draft as it is); `mocks revision NAME N` |
+| Management MCP | `expected_revision` on `update_mock`, `set_operation` and `deploy_mock`; `get_mock_revision` |
+| `rustybin.yaml` | `settings: { mocks.require_revision: true }` (kept revisions are not part of a document: they are the store's memory) |
+
+### Comparing a refused edit
+
+`GET /_rustybin/mocks/{name}/revisions/{revision}` answers a revision the store still
+keeps: the draft, the live revision, the last deployed ones (5, 2 in public mode) and
+as many drafts that were replaced before anyone deployed them. Drafts and deployed
+revisions share one numbering, so the `expected_revision` of a `409` is a revision
+you can read here (until it is pushed out). The answer holds the spec as uploaded
+(`spec.text`), the settings (secrets redacted unless you may change the mock),
+whether it is the draft or live, and `changes_to_draft`: the sections the current
+draft changes since, the same list as the `409`'s `changed`. A revision no longer kept
+is `404`, and so is another visitor's mock (it is read like the mock itself). Kept
+revisions live in memory: after a restart only the saved draft and live revision are
+there.
+
+```hurl
+{{#include ../../examples/mocks/mocks.hurl:compare}}
+```
+
+In the console a refused edit opens a compare dialog instead of a plain refusal. Per
+section (the spec, the responses, security, the MCP server, each operation's settings,
+rules and examples) it shows what the other change did, from the revision the edit was
+made from to the current draft, beside the edit that was refused, from the same
+revision, each as a line diff. A badge says what saving yours does to the section:
+your edit, their change stays, or changed on both sides (yours replaces theirs).
+**Keep mine** sends the refused edit again naming the current revision: the sections
+it sets replace theirs and the rest of their change stays (an operation editor's save
+touches that one operation only). **Take theirs** reloads the page with their version.
+**Close** (or Escape) keeps your form as it is, nothing saved. When the revision the
+edit was made from is no longer kept, each section shows the current draft changed
+into your edit. Every action is a button reached with Tab; the dialog keeps the focus
+until it closes.
+
+| Surface | Where |
+|---|---|
+| API | `GET /_rustybin/mocks/{name}/revisions/{revision}` |
+| Console | The compare dialog of a refused edit (Settings, an operation's editor, the security panel) |
+| CLI | `rustybin mocks revision orders 12` (a summary; `--json` the whole answer, `--spec` the spec only) |
+| Management MCP | `get_mock_revision` (`name`, `revision`), then `update_mock` or `set_operation` with the current `expected_revision` |
+| `rustybin.yaml` | Nothing: kept revisions are not configuration |
 
 ## On and off
 
@@ -370,6 +410,7 @@ compiled.
 | `POST /_rustybin/mocks/{name}/rollback` | Previous revision, or `{"revision": n}` (admin) |
 | `GET /_rustybin/mocks/{name}/report` | [Deploy checks](responses.md#deploy-checks) of the draft |
 | `GET /_rustybin/mocks/{name}/spec` | The draft's spec as uploaded (JSON or YAML as written) |
+| `GET /_rustybin/mocks/{name}/revisions/{revision}` | A [kept revision](#comparing-a-refused-edit): its spec, settings and what the draft changed since |
 | `POST /_rustybin/mocks/{name}/duplicate` | Copy the mock, `{"name": ...}` optional (default `<name>-copy`) (admin) |
 | `GET`, `DELETE /_rustybin/mocks/{name}/state` | The items of a [stateful](responses.md#stateful-mode) mock, or reset them (admin) |
 | `GET /_rustybin/mocks/{name}/coverage` | [Example coverage](ai.md#examples-and-the-alert-when-a-spec-has-none) of the draft and the live revision |
@@ -397,6 +438,6 @@ The same job from the API, the console, the command line, an agent and the confi
 | API | `/_rustybin/mocks*` ([above](#control-api)); the mocks themselves at `/mock/{name}/...` |
 | Console | **Mock APIs** (`/ui/#/mocks`): the wizard, a mock's settings, security, operations, traffic, data, MCP server and deploy report ([console](../console.md#mock-apis)) |
 | CLI | `rustybin mocks ...` for every route above ([reference](../cli.md#mocks)); `rustybin mock validate`, `init`, `sample` and `check-config` offline ([CLI](cli.md)) |
-| Management MCP | `list_mocks`, `get_mock`, `preview_spec`, `get_mock_spec`, `create_mock`, `update_mock`, `set_operation`, `test_rules`, `check_mock`, `deploy_mock`, `rollback_mock`, `set_mock_enabled`, `duplicate_mock`, `delete_mock`, `sample_request`, `validate_payload`, `export_collection`, `get_mock_data`, `clear_mock_data`, `get_mock_traffic`, `clear_traffic`, `reload_mocks`, `try_request`; the prompt `mock_an_api` ([agent page](../agent-mcp.md)) |
+| Management MCP | `list_mocks`, `get_mock`, `preview_spec`, `get_mock_spec`, `get_mock_revision`, `create_mock`, `update_mock`, `set_operation`, `test_rules`, `check_mock`, `deploy_mock`, `rollback_mock`, `set_mock_enabled`, `duplicate_mock`, `delete_mock`, `sample_request`, `validate_payload`, `export_collection`, `get_mock_data`, `clear_mock_data`, `get_mock_traffic`, `clear_traffic`, `reload_mocks`, `try_request`; the prompt `mock_an_api` ([agent page](../agent-mcp.md)) |
 | `rustybin.yaml` | `mocks:` ([mocks as code](config.md)), in a version 2 document with the rest of the instance ([the whole instance as code](../configuration-as-code.md)) |
 | Environment | `RUSTYBIN_CONFIG_FILE`, `RUSTYBIN_MOCKS_DIR`, `RUSTYBIN_MOCKS_SAMPLE`, `RUSTYBIN_MOCKS_HOST`, `RUSTYBIN_MOCKS_STATE_DIR` ([configuration](../configuration.md#openapi-mocks)) |

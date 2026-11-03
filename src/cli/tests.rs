@@ -577,6 +577,21 @@ async fn every_command_runs_against_an_instance() {
     let (code, text) = inst.run(None, &["mocks", "list"]).await;
     assert_eq!(code, 0);
     assert!(text.contains("name") && text.contains("orders"), "{text}");
+    // A kept revision: JSON, then the summary for people; one never kept is exit 1.
+    let rev = inst.json(&["mocks", "get", "orders"]).await["draft_revision"]
+        .as_u64()
+        .expect("rev")
+        .to_string();
+    let got = inst.json(&["mocks", "revision", "orders", &rev]).await;
+    assert_eq!(got["revision"].to_string(), rev);
+    assert!(got["spec"]["text"].is_string(), "{got}");
+    let (code, text) = inst.run(None, &["mocks", "revision", "orders", &rev]).await;
+    assert_eq!(code, 0);
+    assert!(text.contains(&format!("revision {rev}")), "{text}");
+    let (code, _) = inst.run(None, &["mocks", "revision", "orders", "1"]).await;
+    assert_eq!(code, 1);
+    let (code, _) = inst.run(None, &["mocks", "revision", "orders", "x"]).await;
+    assert_eq!(code, 2);
     let set = inst
         .json(&["settings", "set", "console.title", "From the CLI"])
         .await;

@@ -1144,18 +1144,13 @@ impl Svc {
         let StoreError::Stale { name, expected, .. } = &e else {
             return e.into();
         };
-        let since = self.store().get(name).map(|s| {
-            let old = s
-                .history
-                .iter()
-                .chain(s.live.iter())
-                .find(|c| c.revision == *expected)
-                .cloned();
-            match old {
-                Some(o) => json!(changes_between(&o, &s.draft)),
-                None => json!(format!("revision {expected} is no longer in the history")),
-            }
-        });
+        let since =
+            self.store()
+                .get(name)
+                .map(|s| match self.store().kept_revision(name, *expected) {
+                    Some(o) => json!(changes_between(&o, &s.draft)),
+                    None => json!(format!("revision {expected} is no longer in the history")),
+                });
         let mut err: ServiceError = e.into();
         if let (Some(v), Value::Object(m)) = (since, &mut err.body) {
             m.insert("changed".into(), v);
@@ -1581,6 +1576,70 @@ impl Svc {
                 "no such request (never received or already evicted)",
             )),
         }
+    }
+
+    /// `GET /_rustybin/mocks/{name}/revisions/{revision}`: a revision the
+    /// store still keeps (the draft, the live one, the deployed history, an
+    /// earlier draft), its spec as uploaded and its settings (secrets
+    /// redacted unless the caller may see them), and what the current draft
+    /// changes since. Read like the mock: other people's visitor mocks are
+    /// `404`, and so is a revision no longer kept.
+    pub fn revision(&self, name: &str, revision: u64) -> SvcResult<Value> {
+        let s = self.readable(name)?;
+        let c = self.store().kept_revision(name, revision).ok_or_else(|| {
+            ServiceError::not_found(format!(
+                "revision {revision} of mock {name:?} is no longer kept (the draft, the live revision and the last {} deployed and earlier drafts are)",
+                self.store().limits().revisions
+            ))
+        })?;
+        let reveal = self.caller.reveals(&s);
+        let text = c.source.to_string();
+        let format = if text.trim_start().starts_with('{') {
+            "json"
+        } else {
+            "yaml"
+        };
+        let mut settings = if reveal {
+            serde_json::to_value(&c.settings)
+        } else {
+            serde_json::to_value(c.settings.redacted())
+        }
+        .unwrap_or(Value::Null);
+        // Every section, the default MCP server too (left out when saved), so
+        // two revisions compare section by section.
+        if let Value::Object(m) = &mut settings {
+            if !m.contains_key("mcp") {
+                m.insert(
+                    "mcp".into(),
+                    serde_json::to_value(&c.settings.mcp).unwrap_or(Value::Null),
+                );
+            }
+        }
+        let operations: Vec<Value> = c
+            .spec
+            .operations
+            .iter()
+            .map(|op| json!({ "id": op.id, "method": op.method, "path": op.path }))
+            .collect();
+        Ok(json!({
+            "name": s.name,
+            "revision": c.revision,
+            "created_at": c.created_at.to_rfc3339(),
+            "draft": c.revision == s.draft.revision,
+            "live": s.live.as_ref().is_some_and(|l| l.revision == c.revision),
+            "current_draft_revision": s.draft.revision,
+            "changes_to_draft": changes_between(&c, &s.draft),
+            "spec": {
+                "format": format,
+                "openapi": c.spec.openapi,
+                "title": c.spec.title,
+                "version": c.spec.version,
+                "text": text,
+            },
+            "operations": operations,
+            "settings": settings,
+            "secrets_hidden": !reveal,
+        }))
     }
 
     /// `GET /_rustybin/mocks/{name}/spec`: the spec as uploaded (the

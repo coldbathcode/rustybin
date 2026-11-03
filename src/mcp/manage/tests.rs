@@ -297,6 +297,36 @@ async fn mock_round_trip_with_try_request_and_confirmed_delete() {
     )
     .await;
     assert!(r["structuredContent"]["spec"]["servers"].is_array());
+    // A kept revision: the deployed one, then one that is not kept.
+    let rev = tool(&app, &[], "get_mock", json!({ "name": "orders" })).await["structuredContent"]
+        ["draft_revision"]
+        .as_u64()
+        .expect("rev");
+    let r = tool(
+        &app,
+        &[],
+        "get_mock_revision",
+        json!({ "name": "orders", "revision": rev }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["revision"], rev);
+    assert_eq!(r["structuredContent"]["live"], true);
+    assert!(r["structuredContent"]["spec"]["text"]
+        .as_str()
+        .unwrap_or("")
+        .contains("getOrder"));
+    assert!(text_of(&r).contains(&format!("Revision {rev} of mock \"orders\"")));
+    let r = tool(
+        &app,
+        &[],
+        "get_mock_revision",
+        json!({ "name": "orders", "revision": 1 }),
+    )
+    .await;
+    assert!(is_error(&r), "{r}");
+    let r = tool(&app, &[], "get_mock_revision", json!({ "name": "orders" })).await;
+    assert!(is_error(&r), "{r}");
     let r = tool(
         &app,
         &[],
@@ -1686,6 +1716,7 @@ const COVERAGE: &[(&str, Cover)] = &[
     ("/_rustybin/mocks", Tool("list_mocks")),
     ("/_rustybin/mocks/{name}", Tool("get_mock")),
     ("/_rustybin/mocks/{name}/spec", Tool("get_mock_spec")),
+    ("/_rustybin/mocks/{name}/revisions/{revision}", Tool("get_mock_revision")),
     ("/_rustybin/mocks/{name}/deploy", Tool("deploy_mock")),
     ("/_rustybin/mocks/{name}/rollback", Tool("rollback_mock")),
     ("/_rustybin/mocks/{name}/enable", Tool("set_mock_enabled")),

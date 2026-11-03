@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **A compare view for a stale edit**: an edit the console makes from a revision someone
+  changed since (the `409 rustybin_stale_revision`) opens a
+  [compare dialog](mocks/index.md#comparing-a-refused-edit): per section (spec,
+  responses, security, MCP, each operation) what the other change did beside the
+  refused edit; Keep mine sends it again on the current revision, Take theirs reloads.
+  The new `GET /_rustybin/mocks/{name}/revisions/{revision}` (the `get_mock_revision`
+  tool, `rustybin mocks revision NAME N`) answers a kept revision's spec and settings
+  and what the draft changed since; the store now also keeps the drafts replaced before
+  they were deployed (as many as deployed revisions), so the `409`'s `changed` names
+  the sections for an undeployed base too.
 - **Saved tests on a schedule, with a failure notice**: a [schedule](saved-tests.md#schedules)
   runs saved tests (every one, `names` or a `prefix`) `every` 5m to 24h or `at` a time of
   day (UTC), without anyone at the console; each run is in the history as

@@ -414,3 +414,133 @@ async fn a_patch_with_deploy_publishes_the_revision_it_wrote() {
     assert_eq!(v["live_revision"], written, "{v}");
     assert_eq!(etag, Some(format!("\"{written}\"")));
 }
+
+// ── Kept revisions (testing workflows 2, step 06: the compare view) ──
+
+async fn get_revision(app: &Router, name: &str, rev: u64) -> (StatusCode, Value) {
+    let (s, _, v) = call(
+        app,
+        "GET",
+        &format!("/_rustybin/mocks/{name}/revisions/{rev}"),
+        None,
+        None,
+    )
+    .await;
+    (s, v)
+}
+
+#[tokio::test]
+async fn a_kept_revision_answers_its_spec_and_settings() {
+    let (_, app, live) = app().await;
+    // Two edits of the draft, neither deployed: the first is an earlier draft.
+    let (s, _, v) = call(
+        &app,
+        "PATCH",
+        "/_rustybin/mocks/orders",
+        None,
+        Some(json!({ "responses": { "mode": "generated" }, "deploy": false })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let first = v["draft_revision"].as_u64().expect("rev");
+    let (s, _, v) = call(
+        &app,
+        "PATCH",
+        "/_rustybin/mocks/orders",
+        None,
+        Some(json!({ "responses": { "mode": "generated", "seed": 3 }, "deploy": false })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let draft = v["draft_revision"].as_u64().expect("rev");
+
+    let (s, v) = get_revision(&app, "orders", first).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["name"], "orders");
+    assert_eq!(v["revision"], first);
+    assert_eq!(v["draft"], false);
+    assert_eq!(v["live"], false);
+    assert_eq!(v["current_draft_revision"], draft);
+    assert_eq!(v["settings"]["responses"]["mode"], "generated");
+    assert_ne!(v["settings"]["responses"]["seed"], 3, "{v}");
+    assert_eq!(v["changes_to_draft"], json!(["responses"]));
+    assert_eq!(v["spec"]["format"], "json");
+    assert!(
+        v["spec"]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("listOrders")),
+        "{v}"
+    );
+    assert_eq!(v["operations"][0]["id"], "listOrders");
+    // Every section is there, the default MCP server too.
+    assert_eq!(v["settings"]["mcp"]["enabled"], true, "{v}");
+
+    // The live revision and the draft are kept revisions too.
+    let (s, v) = get_revision(&app, "orders", live).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["live"], true);
+    assert_eq!(v["settings"]["responses"]["mode"], "examples");
+    let (_, v) = get_revision(&app, "orders", draft).await;
+    assert_eq!(v["draft"], true);
+    assert_eq!(v["changes_to_draft"], json!([]));
+
+    // An edit from the earlier draft is stale and says what changed since.
+    let (s, _, v) = call(
+        &app,
+        "PATCH",
+        "/_rustybin/mocks/orders",
+        Some(&format!("\"{first}\"")),
+        Some(json!({ "mcp": { "enabled": false } })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["changed"], json!(["responses"]), "{v}");
+
+    // Unknown revisions and unknown mocks are 404.
+    let (s, _) = get_revision(&app, "orders", 7).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = get_revision(&app, "nope", first).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_revision_gone_from_the_history_is_404() {
+    let (state, app, _) = app().await;
+    let keep = state.mocks.limits().revisions;
+    let mut seen = Vec::new();
+    for seed in 0..(keep as u64 + 2) {
+        let (s, _, v) = call(
+            &app,
+            "PATCH",
+            "/_rustybin/mocks/orders",
+            None,
+            Some(json!({ "responses": { "seed": seed + 1 }, "deploy": false })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        seen.push(v["draft_revision"].as_u64().expect("rev"));
+    }
+    // The oldest earlier drafts are evicted, the newest are kept.
+    let (s, v) = get_revision(&app, "orders", seen[0]).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
+    assert!(
+        v["error"].as_str().unwrap_or("").contains("no longer kept"),
+        "{v}"
+    );
+    let (s, v) = get_revision(&app, "orders", seen[seen.len() - 2]).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    // A stale edit from an evicted revision still answers 409, saying so.
+    let (s, _, v) = call(
+        &app,
+        "PATCH",
+        "/_rustybin/mocks/orders",
+        Some(&format!("\"{}\"", seen[0])),
+        Some(json!({ "mcp": { "enabled": false } })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert!(
+        v["changed"].as_str().unwrap_or("").contains("no longer"),
+        "{v}"
+    );
+}

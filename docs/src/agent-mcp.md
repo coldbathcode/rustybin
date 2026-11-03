@@ -364,6 +364,7 @@ demo).
 | `get_mock` | read | Operations with hit counts, settings (secrets redacted unless the caller may change the mock), deploy report, revisions, undeployed draft changes |
 | `preview_spec` | read | Parse a spec without creating anything: title, operations, security schemes, warnings, deploy checks |
 | `get_mock_spec` | read | The spec as uploaded, to edit and send back with `update_mock`; or with `served: true` the OpenAPI document the mock serves |
+| `get_mock_revision` | read | A [kept revision](mocks/index.md#comparing-a-refused-edit) (`name`, `revision`): its spec and settings and what the draft changed since; read a `409`'s `expected_revision` to see what the other change did |
 | `create_mock` | manage | From spec text or an object (JSON or YAML; Swagger 2.0 is converted) with optional name, responses, security and operations; deployed unless `deploy: false` |
 | `update_mock` | manage | Replace the draft's spec or settings, or rename it; `deploy: true` publishes the revision it wrote; `expected_revision` refuses a draft changed meanwhile (see [edit conflicts](mocks/index.md#two-people-editing-one-mock)) |
 | `set_operation` | manage | One operation's response override, [rules](mocks/responses.md), mode and public flag; takes `expected_revision` |

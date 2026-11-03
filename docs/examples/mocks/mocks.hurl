@@ -312,6 +312,41 @@ HTTP 409
 jsonpath "$.error" == "rustybin_stale_revision"
 # ANCHOR_END: conflict
 
+# ANCHOR: compare
+# What the other change did: the revision the refused edit was made from,
+# its spec and settings, and what the draft changed since.
+GET {{base_url}}/_rustybin/mocks/docs-orders/revisions/{{revision}}
+Authorization: Bearer {{admin_token}}
+HTTP 200
+[Asserts]
+jsonpath "$.revision" == {{revision}}
+jsonpath "$.draft" == false
+jsonpath "$.settings.responses.mode" != "generated"
+jsonpath "$.changes_to_draft" contains "responses"
+jsonpath "$.spec.text" contains "/orders"
+
+# Keep mine: the refused edit again, naming the current draft revision.
+GET {{base_url}}/_rustybin/mocks/docs-orders
+Authorization: Bearer {{admin_token}}
+HTTP 200
+[Captures]
+current: jsonpath "$.draft_revision"
+
+PUT {{base_url}}/_rustybin/mocks/docs-orders/operations/listOrders
+Authorization: Bearer {{admin_token}}
+If-Match: "{{current}}"
+Content-Type: application/json
+{"delay_ms": 100}
+HTTP 200
+[Asserts]
+jsonpath "$.settings.delay_ms" == 100
+
+# A revision no longer kept answers 404.
+GET {{base_url}}/_rustybin/mocks/docs-orders/revisions/1
+Authorization: Bearer {{admin_token}}
+HTTP 404
+# ANCHOR_END: compare
+
 # ANCHOR: switch
 POST {{base_url}}/_rustybin/mocks/docs-orders/disable
 Authorization: Bearer {{admin_token}}

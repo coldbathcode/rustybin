@@ -219,6 +219,57 @@ pub fn get_mock_spec(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     }
 }
 
+/// `get_mock_revision`.
+pub fn get_mock_revision(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
+    let name = match need_str(args, "name") {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let Some(revision) = arg_u64(args, "revision") else {
+        return err("revision is required: a revision number (draft_revision, live_revision, the revisions of get_mock, or the expected_revision of a 409)");
+    };
+    match svc(ctx, access).revision(name, revision) {
+        Ok(v) => {
+            let kind = match (v["draft"].as_bool(), v["live"].as_bool()) {
+                (Some(true), Some(true)) => "the draft, live",
+                (Some(true), _) => "the draft",
+                (_, Some(true)) => "live",
+                _ => "kept",
+            };
+            let changes: Vec<&str> = v["changes_to_draft"]
+                .as_array()
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            let since = if v["draft"] == true {
+                String::new()
+            } else if changes.is_empty() {
+                format!(
+                    "; the draft (revision {}) has the same definition",
+                    v["current_draft_revision"]
+                )
+            } else {
+                format!(
+                    "; the draft (revision {}) changed since: {}",
+                    v["current_draft_revision"],
+                    changes.join(", ")
+                )
+            };
+            ok(
+                ctx,
+                format!(
+                    "Revision {revision} of mock {name:?} ({kind}): {} {} (OpenAPI {}), {} operation(s){since}",
+                    v["spec"]["title"].as_str().unwrap_or(""),
+                    v["spec"]["version"].as_str().unwrap_or(""),
+                    v["spec"]["openapi"].as_str().unwrap_or("?"),
+                    v["operations"].as_array().map(|a| a.len()).unwrap_or(0)
+                ),
+                v,
+            )
+        }
+        Err(e) => service_error(&e),
+    }
+}
+
 fn settings_from<T: serde::de::DeserializeOwned>(
     args: &Value,
     key: &str,

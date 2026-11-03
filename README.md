@@ -629,6 +629,7 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET | `/_rustybin/mocks/{name}/report` | Deploy-check report of the draft: a valid request and response per operation |
 | GET | `/_rustybin/mocks/{name}/export` | One mock as a rustybin.yaml document |
 | GET | `/_rustybin/mocks/{name}/spec` | The spec as uploaded (the draft's, JSON or YAML as written) |
+| GET | `/_rustybin/mocks/{name}/revisions/{revision}` | A kept revision (the draft, the live one, the deployed history, an earlier draft): its spec and settings, and what the draft changed since |
 | POST | `/_rustybin/mocks/{name}/duplicate` | Copy a mock under a new name (body {name} optional; default <name>-copy) |
 | GET DELETE | `/_rustybin/mocks/{name}/state` | Items stored by a mock in stateful mode (DELETE resets them) |
 | GET | `/_rustybin/mocks/{name}/collections/{format}` | The mock's operations as a collection: postman, hurl, curl, http, k6, bruno or insomnia (?base_url=) |

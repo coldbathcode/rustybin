@@ -309,6 +309,10 @@ pub fn router(_state: &AppState) -> Router<AppState> {
         .route(ai::COVERAGE_PATH, get(ai::coverage))
         .route("/_rustybin/mocks/{name}/export", get(h::export_one))
         .route("/_rustybin/mocks/{name}/spec", get(h::spec_source))
+        .route(
+            "/_rustybin/mocks/{name}/revisions/{revision}",
+            get(h::revision),
+        )
         .route("/_rustybin/mocks/{name}/duplicate", post(h::duplicate))
         .route(
             "/_rustybin/mocks/{name}/state",
@@ -644,6 +648,13 @@ pub fn catalog() -> Vec<Endpoint> {
         )
         .example(Example::get("Sample spec source", "/_rustybin/mocks/petstore/spec")),
         Endpoint::new(
+            "/_rustybin/mocks/{name}/revisions/{revision}",
+            &["GET"],
+            category::MOCKS,
+            "A kept revision (the draft, the live one, the deployed history, an earlier draft): its spec and settings, and what the draft changed since",
+        )
+        .example(Example::get("A revision no longer kept", "/_rustybin/mocks/petstore/revisions/1").expect_status(404)),
+        Endpoint::new(
             "/_rustybin/mocks/{name}/duplicate",
             &["POST"],
             category::MOCKS,
@@ -917,6 +928,13 @@ pub fn openapi_paths() -> Value {
         } },
         "/_rustybin/mocks/{name}/export": { "get": simple("exportMock", "Export one mock", json!([name])) },
         "/_rustybin/mocks/{name}/spec": { "get": simple("getMockSpecSource", "The spec as uploaded", json!([name])) },
+        "/_rustybin/mocks/{name}/revisions/{revision}": { "get": {
+            "tags": tags, "summary": "A kept revision of a mock",
+            "description": "A revision the mock still keeps: the draft, the live revision, the last deployed ones (5, 2 in public mode) and as many drafts replaced before they were deployed. Its spec as uploaded, its settings (secrets redacted unless the caller may change the mock) and changes_to_draft, what the current draft changes since (the sections a 409 rustybin_stale_revision names). Read like the mock: another visitor's mock is 404.",
+            "operationId": "getMockRevision",
+            "parameters": [name, { "name": "revision", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 0 } }],
+            "responses": { "200": { "description": "{name, revision, created_at, draft, live, current_draft_revision, changes_to_draft, spec: {format, openapi, title, version, text}, operations, settings, secrets_hidden}" }, "400": { "description": "Not a revision number" }, "404": { "description": "No such mock, or the revision is no longer kept" } }
+        } },
         "/_rustybin/mocks/{name}/duplicate": { "post": with_body(admin("duplicateMock", "Copy a mock", json!([name])), json!({ "type": "object", "properties": { "name": { "type": "string" } } })) },
         "/_rustybin/mocks/{name}/state": {
             "get": simple("getMockState", "Stored items (stateful mode)", json!([name])),

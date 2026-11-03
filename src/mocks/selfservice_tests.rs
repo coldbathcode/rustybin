@@ -249,6 +249,38 @@ async fn visitors_own_their_mocks() {
 }
 
 #[tokio::test]
+async fn a_visitors_revisions_are_theirs_alone() {
+    let (app, _, _) = app_on(config(None));
+    let (_, a) = visitor_create(&app, "a", None, shop()).await;
+    let token_a = a["manage_token"].as_str().expect("token").to_string();
+    let name = a["name"].as_str().expect("name").to_string();
+    let rev = a["draft_revision"].as_u64().expect("rev");
+    let (_, b) = visitor_create(&app, "b", None, shop()).await;
+    let token_b = b["manage_token"].as_str().expect("token").to_string();
+    let uri = format!("/_rustybin/mocks/{name}/revisions/{rev}");
+    // The owner reads their own revision, secrets shown.
+    let (status, _, v) = call(
+        &app,
+        "GET",
+        &uri,
+        &[("x-rustybin-mock-token", &token_a)],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["revision"], rev);
+    assert_eq!(v["secrets_hidden"], false);
+    // Another visitor and an anonymous caller: it does not exist.
+    for headers in [vec![("x-rustybin-mock-token", token_b.as_str())], vec![]] {
+        let (status, _, _) = call(&app, "GET", &uri, &headers, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{headers:?}");
+    }
+    // The operator reads it.
+    let (status, _, _) = call(&app, "GET", &uri, &[ADMIN], None).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn visitor_responses_are_restricted() {
     let (app, _, _) = app_on(config(None));
     let (_, mock) = visitor_create(&app, "a", None, shop()).await;

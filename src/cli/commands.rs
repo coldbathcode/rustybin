@@ -201,6 +201,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("mocks", "check", "<name>", "The deploy report: a valid request and response per operation.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}/report")], false, "mocks check orders"),
     cmd!("mocks", "coverage", "<name>", "Which operations lack an example.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}/coverage")], false, "mocks coverage orders"),
     cmd!("mocks", "spec", "<name>", "The mock's OpenAPI document as stored.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}/spec")], false, "mocks spec orders > orders.yaml"),
+    cmd!("mocks", "revision", "<name> <revision>", "A kept revision: what changed since in the draft, its settings and spec (the whole answer with --json).", &[Flag::switch("--spec", "Print only the revision's spec as uploaded")], [("GET", "/_rustybin/mocks/{name}/revisions/{revision}")], false, "mocks revision orders 12"),
     cmd!("mocks", "export", "[name]", "One mock, or all, as a version 1 rustybin.yaml.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}/export"), ("GET", "/_rustybin/mocks/export")], false, "mocks export orders"),
     cmd!("mocks", "apply", "<file> [--prune]", "Apply a rustybin.yaml (spec files are read locally and inlined); --prune deletes API mocks it does not name.", &[Flag::switch("--prune", "Delete API-created mocks the file does not name")], [("POST", "/_rustybin/mocks/apply")], false, "mocks apply rustybin.yaml --prune --yes"),
     cmd!("mocks", "reload", "", "Reload the file-defined mocks (RUSTYBIN_CONFIG_FILE, RUSTYBIN_MOCKS_DIR).", NO_FLAGS, [("POST", "/_rustybin/mocks/reload")], false, "mocks reload"),
@@ -1150,6 +1151,52 @@ async fn mocks(ctx: &mut Ctx, verb: &str) -> Result<()> {
         "coverage" => {
             need_name(ctx)?;
             get(ctx, &format!("{base}/coverage"), &[]).await
+        }
+        "revision" => {
+            need_name(ctx)?;
+            let rev = ctx.args.arg(1, "a revision number")?.to_string();
+            let rev: u64 = rev
+                .parse()
+                .map_err(|_| Fail::Usage(format!("{rev:?}: a revision is a number")))?;
+            let v = ctx
+                .client()?
+                .get(&format!("{base}/revisions/{rev}"), &[])
+                .await?
+                .value();
+            if ctx.args.has("--spec") {
+                ctx.raw(v["spec"]["text"].as_str().unwrap_or(""));
+            } else if ctx.json {
+                ctx.emit(&v);
+            } else {
+                let kind = match (v["draft"] == json!(true), v["live"] == json!(true)) {
+                    (true, true) => "the draft, live",
+                    (true, false) => "the draft",
+                    (false, true) => "live",
+                    (false, false) => "kept",
+                };
+                let changes: Vec<&str> = v["changes_to_draft"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                ctx.say(&format!(
+                    "revision {rev} of {name} ({kind}), created {}",
+                    v["created_at"].as_str().unwrap_or("?")
+                ));
+                ctx.emit(&json!({
+                    "draft revision": v["current_draft_revision"],
+                    "changed in the draft since": if changes.is_empty() { json!("nothing") } else { json!(changes.join(", ")) },
+                    "spec": format!(
+                        "{} {} (OpenAPI {}, {}, {} operation(s); --spec prints it)",
+                        v["spec"]["title"].as_str().unwrap_or(""),
+                        v["spec"]["version"].as_str().unwrap_or(""),
+                        v["spec"]["openapi"].as_str().unwrap_or("?"),
+                        v["spec"]["format"].as_str().unwrap_or("?"),
+                        v["operations"].as_array().map(|a| a.len()).unwrap_or(0)
+                    ),
+                    "settings": v["settings"],
+                }));
+            }
+            Ok(())
         }
         "spec" => {
             need_name(ctx)?;

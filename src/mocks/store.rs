@@ -163,6 +163,9 @@ struct Entry {
     live: Option<Arc<Compiled>>,
     /// Previously live revisions, newest last.
     history: VecDeque<Arc<Compiled>>,
+    /// Drafts replaced before they were deployed, newest last (as many as
+    /// `history`): a stale edit's base can still be compared.
+    earlier: VecDeque<Arc<Compiled>>,
     capture: CaptureLog,
     state: MockState,
     expires: Option<(Instant, DateTime<Utc>)>,
@@ -172,6 +175,34 @@ struct Entry {
     /// Why the last reload of this file mock failed (its last good
     /// revision, if any, keeps answering).
     load_error: Option<String>,
+}
+
+impl Entry {
+    /// Keep the draft about to be replaced among the earlier drafts, unless
+    /// it is live or in the history already (bounded by `cap`).
+    fn keep_earlier_draft(&mut self, cap: usize) {
+        let d = &self.draft;
+        let kept = self.live.as_ref().is_some_and(|l| l.revision == d.revision)
+            || self.history.iter().any(|c| c.revision == d.revision)
+            || self.earlier.iter().any(|c| c.revision == d.revision);
+        if !kept {
+            self.earlier.push_back(d.clone());
+            while self.earlier.len() > cap {
+                self.earlier.pop_front();
+            }
+        }
+    }
+
+    /// A revision this mock still keeps: the draft, the live revision, a
+    /// previously live one or an earlier draft.
+    fn kept(&self, revision: u64) -> Option<Arc<Compiled>> {
+        std::iter::once(&self.draft)
+            .chain(self.live.iter())
+            .chain(self.history.iter())
+            .chain(self.earlier.iter())
+            .find(|c| c.revision == revision)
+            .cloned()
+    }
 }
 
 /// What a request handler needs from a mock.
@@ -887,6 +918,7 @@ impl MockStore {
             live: deploy.then(|| draft.clone()),
             draft,
             history: VecDeque::new(),
+            earlier: VecDeque::new(),
             capture: CaptureLog::new(self.limits.captures, self.limits.capture_bytes),
             state: MockState::new(self.limits.state_items, self.limits.state_bytes),
             expires,
@@ -934,6 +966,16 @@ impl MockStore {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// A revision of the mock the store still keeps (the draft, the live
+    /// revision, the history of deployed ones, the drafts replaced before
+    /// they were deployed), or `None` when it is gone.
+    pub fn kept_revision(&self, name: &str, revision: u64) -> Option<Arc<Compiled>> {
+        let map = self.read();
+        map.get(name)
+            .filter(|e| self.live_entry(e))
+            .and_then(|e| e.kept(revision))
     }
 
     /// Replace the draft with a new compiled revision (and optionally rename).
@@ -999,6 +1041,7 @@ impl MockStore {
             if c.source != entry.draft.source {
                 entry.load_error = None;
             }
+            entry.keep_earlier_draft(self.limits.revisions);
             entry.draft = Arc::new(c);
         }
         entry.updated_at = Utc::now();
@@ -1163,6 +1206,7 @@ impl MockStore {
                 e.history.pop_front();
             }
         }
+        e.keep_earlier_draft(self.limits.revisions);
         e.draft = target.clone();
         e.live = Some(target);
         e.updated_at = Utc::now();
@@ -1251,6 +1295,7 @@ impl MockStore {
                             e.history.pop_front();
                         }
                     }
+                    e.keep_earlier_draft(self.limits.revisions);
                     e.live = Some(draft.clone());
                     e.draft = draft;
                     e.enabled = enabled;

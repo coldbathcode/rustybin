@@ -182,6 +182,7 @@ OpenAPI mocks on the instance (rustybin mock ... works offline)
 | `rustybin mocks check <name>` | The deploy report: a valid request and response per operation. | `GET /_rustybin/mocks/{name}/report` |
 | `rustybin mocks coverage <name>` | Which operations lack an example. | `GET /_rustybin/mocks/{name}/coverage` |
 | `rustybin mocks spec <name>` | The mock's OpenAPI document as stored. | `GET /_rustybin/mocks/{name}/spec` |
+| `rustybin mocks revision <name> <revision>` | A kept revision: what changed since in the draft, its settings and spec (the whole answer with --json). Flags: `--spec`. | `GET /_rustybin/mocks/{name}/revisions/{revision}` |
 | `rustybin mocks export [name]` | One mock, or all, as a version 1 rustybin.yaml. | `GET /_rustybin/mocks/{name}/export`, `GET /_rustybin/mocks/export` |
 | `rustybin mocks apply <file> [--prune]` | Apply a rustybin.yaml (spec files are read locally and inlined); --prune deletes API mocks it does not name. Flags: `--prune`. | `POST /_rustybin/mocks/apply` |
 | `rustybin mocks reload` | Reload the file-defined mocks (RUSTYBIN_CONFIG_FILE, RUSTYBIN_MOCKS_DIR). | `POST /_rustybin/mocks/reload` |
@@ -217,6 +218,7 @@ rustybin mocks duplicate orders --name orders-v2
 rustybin mocks check orders
 rustybin mocks coverage orders
 rustybin mocks spec orders > orders.yaml
+rustybin mocks revision orders 12
 rustybin mocks export orders
 rustybin mocks apply rustybin.yaml --prune --yes
 rustybin mocks reload

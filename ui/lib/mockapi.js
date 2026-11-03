@@ -5,6 +5,7 @@ import { h, toast } from './dom.js';
 import { SERVER, send, getJson } from './http.js';
 import * as auth from './auth.js';
 import * as settings from './settings.js';
+import { compareStale, editOf } from './conflict.js';
 
 export const API = '/_rustybin/mocks';
 export const NAME_RE = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/;
@@ -13,6 +14,9 @@ export const RESERVED = ['import', 'export', 'apply', 'reload', 'visit', 'visits
 /**
  * Call the management API. `path` is relative to /_rustybin/mocks; objects are
  * sent as JSON, strings as is. Mutations carry the admin credentials.
+ * An edit refused as stale opens the compare view (`conflict.js`): with Keep
+ * mine the answer is the one of the edit made again on the current revision,
+ * else the 409.
  * `opts.revision`: the draft revision the caller's form was built from, sent
  * as `If-Match` so an edit never silently overwrites a change made since
  * (409 instead). Each editor keeps the revision it loaded and passes it;
@@ -33,7 +37,20 @@ export async function api(method, path, body, opts = {}) {
   }
   if (Number.isInteger(opts.revision)) headers.push(['If-Match', `"${opts.revision}"`]);
   const r = await send({ control: true, method, url: SERVER + API + path, headers, body: payload, session: false, admin: method !== 'GET', timeout: opts.timeout || 20000, signal: opts.signal });
-  if (r.status === 409 && r.json && r.json.error === 'rustybin_stale_revision') staleEdit(mockOf(path) || 'The mock', r.json);
+  if (r.status === 409 && r.json && r.json.error === 'rustybin_stale_revision') {
+    // An edit: the compare view, whose Keep mine answers instead of the 409.
+    const edit = (method === 'PATCH' || method === 'PUT') && typeof body !== 'string' ? editOf(method, path, body) : null;
+    if (edit) {
+      const again = await compareStale({
+        edit,
+        conflict: r.json,
+        get: (p) => api('GET', p),
+        resend: (revision) => api(method, path, body, { ...opts, revision }),
+      });
+      return again || r;
+    }
+    staleEdit(mockOf(path) || 'The mock', r.json);
+  }
   return r;
 }
 
@@ -50,7 +67,7 @@ function mockOf(path) {
   try { return decodeURIComponent(seg); } catch { return null; }
 }
 
-/** Someone changed the mock since this page read it: say what, offer a reload. */
+/** Someone changed the mock since this page read it (a deploy, not an edit): say what, offer a reload. */
 function staleEdit(name, j) {
   const changed = Array.isArray(j.changed) && j.changed.length ? j.changed.join(', ') : (typeof j.changed === 'string' ? j.changed : 'unknown');
   const msg = `${name} changed since you loaded it (revision ${j.expected_revision}, now ${j.current_revision}): ${changed}.\n\nReload it now? Cancel keeps your edit on screen (nothing was saved).`;

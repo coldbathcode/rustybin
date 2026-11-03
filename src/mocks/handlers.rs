@@ -1208,6 +1208,30 @@ pub async fn request_entry(
     Ok(Json(s.request_entry(&name, seq)?).into_response())
 }
 
+#[derive(Deserialize)]
+pub struct RevisionPath {
+    name: String,
+    revision: String,
+}
+
+/// `GET /_rustybin/mocks/{name}/revisions/{revision}`: a kept revision.
+pub async fn revision(
+    State(state): State<AppState>,
+    Path(RevisionPath { name, revision }): Path<RevisionPath>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    uri: Uri,
+) -> Result<Response, ServiceError> {
+    let s = svc(&state, &headers, &extensions, &uri);
+    // Access first (404 for mocks the caller may not see), then the number.
+    s.readable(&name)?;
+    let rev: u64 = revision
+        .trim()
+        .parse()
+        .map_err(|_| ServiceError::bad_request("revision must be a positive integer"))?;
+    Ok(Json(s.revision(&name, rev)?).into_response())
+}
+
 pub async fn stream(
     State(state): State<AppState>,
     Path(MockPath { name }): Path<MockPath>,

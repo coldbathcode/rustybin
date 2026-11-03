@@ -685,6 +685,11 @@ pub static TOOLS: &[ToolDef] = &[
         "name": { "type": "string" },
         "confirm": confirm_prop()
     }), &["name"])),
+    // Testing workflows 2: a compare view for a stale edit.
+    tool!("get_mock_revision", "Mock revision", "A revision the mock still keeps (the draft, the live one, the last deployed ones and as many drafts replaced before they were deployed): its spec as uploaded (spec.text), its settings (secrets redacted unless the caller may change the mock) and changes_to_draft, what the current draft changes since. After a 409 rustybin_stale_revision, read its expected_revision here and compare with get_mock to see what the other change did, then make the edit again with the current draft_revision. Not kept: an error.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "name": name_prop(),
+        "revision": { "type": "integer", "minimum": 0, "description": "The revision number (draft_revision, live_revision, get_mock's revisions, or a 409's expected_revision)" }
+    }), &["name", "revision"])),
 ];
 
 /// The tools the caller may use.
@@ -1038,6 +1043,7 @@ pub async fn call(ctx: &CallCtx, params: &Value) -> Result<Value, RpcError> {
         "get_mock" => mocks::get_mock(ctx, access, &args),
         "preview_spec" => mocks::preview_spec(ctx, access, &args).await,
         "get_mock_spec" => mocks::get_mock_spec(ctx, access, &args),
+        "get_mock_revision" => mocks::get_mock_revision(ctx, access, &args),
         "create_mock" => mocks::create_mock(ctx, access, &args).await,
         "update_mock" => mocks::update_mock(ctx, access, &args).await,
         "set_operation" => mocks::set_operation(ctx, access, &args).await,

@@ -322,7 +322,8 @@ def run_theme(browser, theme):
         page.locator(".data-col", has_text="Bella").wait_for()
         shot(page, theme, "20-mock-data")
         # Someone else edits the copy while its settings are open: the
-        # console's save is refused and says what changed; Cancel keeps it.
+        # console's save is refused and the compare view shows their change
+        # beside the refused edit; Close keeps the form, nothing saved.
         page.get_by_role("tab", name="Settings").click()
         page.get_by_label("Response mode").select_option("generated")
         req = urllib.request.Request(
@@ -330,13 +331,12 @@ def run_theme(browser, theme):
             data=json.dumps({"mcp": {"enabled": False}, "deploy": False}).encode(),
             headers={"Content-Type": "application/json"})
         urllib.request.urlopen(req, timeout=10).read()
-        messages = []
-        page.once("dialog", lambda d: (messages.append(d.message), d.dismiss()))
         page.get_by_role("button", name="Save to draft").click()
-        deadline = time.time() + 5
-        while not messages and time.time() < deadline:
-            page.wait_for_timeout(100)
-        assert messages and "changed since you loaded it" in messages[0] and "mcp" in messages[0], messages
+        compare = page.locator("#conflict-dialog")
+        compare.locator("[data-section='mcp']", has_text="their change stays").wait_for()
+        compare.locator("[data-section='responses']", has_text="your edit").wait_for()
+        compare.locator(".wizard-foot").get_by_role("button", name="Close").click()
+        expect(compare).to_have_count(0)
         with urllib.request.urlopen(BASE + f"/_rustybin/mocks/{copy}", timeout=10) as r:
             assert json.load(r)["settings"]["responses"]["mode"] == "stateful", "the stale save went through"
         # Wizard: paste a spec, review, create and deploy.
@@ -514,20 +514,48 @@ def run_theme(browser, theme):
         page.evaluate("Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })")
         try:
             _, before = api_json("GET", "/" + name)
-            status, _ = api_json("PATCH", "/" + name, {"responses": responses(42, 7)})
+            # Someone else changes the MCP server and an operation meanwhile.
+            status, _ = api_json("PATCH", "/" + name, {"mcp": {"enabled": False, "exclude": []}})
             assert status == 200, status
-            prompts = []
-            page.once("dialog", lambda d: (prompts.append(d.message), d.dismiss()))
+            status, _ = api_json("PUT", "/" + name + "/operations/getOrder", {"delay_ms": 25})
+            assert status == 200, status
             page.get_by_label("Seed").fill("5")
             page.get_by_role("button", name="Save to draft").click()
-            deadline = time.time() + 10
-            while not prompts and time.time() < deadline:
-                page.wait_for_timeout(100)
-            assert prompts and "changed since you loaded it" in prompts[0], prompts
+            # The compare view: their sections beside the refused edit, per section.
+            compare = page.locator("#conflict-dialog")
+            compare.locator("[data-section='responses']", has_text="your edit").wait_for()
+            compare.locator("[data-section='mcp']", has_text="their change stays").wait_for()
+            compare.locator("[data-section='operation getOrder']", has_text="their change stays").wait_for()
+            expect(compare.locator("[data-section='responses'] .d-add")).to_contain_text(['"seed": 5'])
+            expect(compare.locator("[data-section='mcp'] .d-del")).to_contain_text(['"enabled": true'])
             _, now = api_json("GET", "/" + name)
-            assert now["settings"]["responses"]["seed"] == 42 and now["settings"]["responses"]["delay_ms"] == 7, "the stale form overwrote the background change"
+            assert now["settings"]["responses"]["seed"] == 1, "the stale form overwrote the background change"
+            shot(page, theme, "21-mock-conflict-compare")
+            # Keyboard: Tab reaches Keep mine, Enter sends the edit again on the current revision.
+            keep = compare.get_by_role("button", name="Keep mine")
+            keep.focus()
+            page.keyboard.press("Enter")
+            expect(compare).to_have_count(0)
+            page.wait_for_selector("text=Saved to the draft")
+            _, now = api_json("GET", "/" + name)
+            assert now["settings"]["responses"]["seed"] == 5 and now["settings"]["responses"]["delay_ms"] == 3, now["settings"]["responses"]
+            assert now["settings"]["mcp"]["enabled"] is False, "Keep mine dropped their MCP change"
+            assert now["settings"]["operations"]["getOrder"]["delay_ms"] == 25, "Keep mine dropped their operation change"
+            # Take theirs reloads: the form then shows their responses.
+            page.get_by_label("Seed").wait_for()
+            status, _ = api_json("PATCH", "/" + name, {"responses": responses(42, 7)})
+            assert status == 200, status
+            page.get_by_label("Seed").fill("6")
+            page.get_by_role("button", name="Save to draft").click()
+            compare.locator("[data-section='responses']", has_text="yours replaces theirs").wait_for()
+            compare.get_by_role("button", name="Take theirs").click()
+            expect(page.get_by_label("Seed")).to_have_value("42")
+            page.evaluate("Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })")
+            _, before = api_json("GET", "/" + name)
+            status, _ = api_json("PATCH", "/" + name, {"responses": responses(43, 7)})
+            assert status == 200, status
             # Deploy names the draft the page showed: a newer one is asked about.
-            prompts.clear()
+            prompts = []
             page.once("dialog", lambda d: (prompts.append(d.message), d.dismiss()))
             page.locator(".mock-actions").get_by_role("button", name=re.compile("^Deploy")).click()
             deadline = time.time() + 10
@@ -538,10 +566,12 @@ def run_theme(browser, theme):
             _, after = api_json("GET", "/" + name)
             assert after["live_revision"] == before["live_revision"], "deployed a draft the page never showed"
         finally:
+            # A failed check must not leave the compare dialog over the next steps.
+            page.evaluate("document.querySelectorAll('dialog[open]').forEach((d) => d.close())")
             page.evaluate("delete document.hidden")
             api_json("DELETE", "/" + name)
 
-    step("mocks: stale edits answer 409 with the reload prompt, deploy names the shown draft", stale_edits)
+    step("mocks: a stale edit opens the compare view (Keep mine, Take theirs), deploy names the shown draft", stale_edits)
 
     def console_guards():
         # A malformed escape in the hash still routes (the portal's is in the dev portal step).

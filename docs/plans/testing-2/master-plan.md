@@ -69,7 +69,7 @@ The marker a session looks for is the first row that is not done.
 | [03](step-03-scenarios-resilience.md) | Scenarios: circuit breakers and request size limits | | done 2026-11-03 |
 | [04](step-04-scenarios-http.md) | Scenarios: CORS and header transformation | | done 2026-11-03 |
 | [05](step-05-checkpoints-in-git.md) | Checkpoints in the configuration repository | | |
-| [06](step-06-conflict-compare.md) | A compare view for a stale edit | | |
+| [06](step-06-conflict-compare.md) | A compare view for a stale edit | | done 2026-11-03 |
 | 06r | Release 0.4.0: the testing workflows (the step 15 recipe for steps 01 to 06) | 01 to 06 | |
 | [07](step-07-users-and-roles.md) | Access control 1: users, roles and permissions (the model) | | |
 | [08](step-08-permissions-everywhere.md) | Access control 2: every route and tool checks a permission | 07 | |

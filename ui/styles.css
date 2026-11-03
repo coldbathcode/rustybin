@@ -695,3 +695,6 @@ dialog.small-dialog { width: min(520px, calc(100vw - 24px)); }
   .rail { flex-direction: row; overflow-x: auto; position: static; }
   .rail button { white-space: nowrap; }
 }
+dialog.wizard.wide { width: min(1120px, calc(100vw - 24px)); }
+.conflict-section { border-top: 1px solid var(--border); padding-top: 10px; }
+.conflict-col .code { max-height: 280px; }
