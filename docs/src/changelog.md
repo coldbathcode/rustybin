@@ -164,6 +164,13 @@ steps 01 to 06; access control follows in 0.5.0).
   [CLI guide](cli-guide.md#install) says how to install. The docs site has its
   favicon, and page-view analytics when the site is configured for them.
 
+`cargo` version 0.4.0, the tag `v0.4.0`, the signed multi-arch image
+`ghcr.io/coldbathcode/rustybin:0.4.0`, digest
+`sha256:db4d1493d6121556d456463a5027530cc91e1a30c351427d8e182ecefeb1ea5e` (verify it with the
+cosign command of the [quick start](quick-start.md#docker); the
+[release](https://github.com/coldbathcode/rustybin/releases/tag/v0.4.0) carries the same
+values, and the Linux and macOS binaries).
+
 ## 0.3.1 (2026-11-02): the 0.3 review
 
 A full review of 0.3.0 by eight reviewers, 89 findings, all fixed in eight steps
