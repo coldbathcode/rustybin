@@ -227,6 +227,11 @@ pub fn report(state: &AppState) -> Value {
         },
     );
 
+    // The user store (password mode).
+    if let Some((status, message, fix)) = crate::rbac::diagnostics(state) {
+        checks.push(check("users", status, message, fix));
+    }
+
     // The harness engine.
     if let Some(h) = &state.harness {
         checks.push(match h.engine_problem() {

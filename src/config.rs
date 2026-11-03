@@ -110,6 +110,10 @@ pub struct Config {
     /// the generation, revoked ids, listed sessions, failed attempts. Not a
     /// setting; it lives here because every credential check takes `&Config`.
     pub console_tokens: std::sync::Arc<crate::login::Tokens>,
+    /// The user store (`crate::rbac::users`, `<state>/users.json`): users,
+    /// custom roles, per-user generations. Shared with `AppState.users`; it
+    /// lives here because every credential check takes `&Config`.
+    pub users: std::sync::Arc<crate::rbac::Users>,
     /// Ed25519 public key for control-plane JWTs (`RUSTYBIN_CONTROL_JWT_PUBLIC_KEY`).
     pub control_jwt_key: Option<[u8; 32]>,
     /// Required `aud` of control-plane JWTs (`RUSTYBIN_CONTROL_JWT_AUDIENCE`,
@@ -950,6 +954,7 @@ impl Config {
             console_tokens: std::sync::Arc::new(crate::login::Tokens::persistent(
                 state_dir.as_deref(),
             )),
+            users: std::sync::Arc::new(crate::rbac::Users::persistent(state_dir.as_deref())),
             control_jwt_key,
             control_jwt_audience,
             control_oauth,
@@ -1155,6 +1160,7 @@ impl Config {
             assist_max_output_tokens: crate::assist::DEFAULT_MAX_OUTPUT_TOKENS,
             assist_visitors: false,
             console_tokens: std::sync::Arc::new(crate::login::Tokens::new()),
+            users: std::sync::Arc::new(crate::rbac::Users::in_memory()),
             control_jwt_key: None,
             control_jwt_audience: "test-instance".to_string(),
             control_oauth: true,

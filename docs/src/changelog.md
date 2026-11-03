@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- Users, roles and permissions, the model (access control, step 07 of the
+  [plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/testing-2/master-plan.md)):
+  a user store (`<state>/users.json`), 38 named permissions, the built-in roles
+  `viewer`, `tester`, `editor`, `admin` and `portal_reader`, custom roles. On the
+  first start the console user becomes user one with the `admin` role (nothing to
+  do; its password stays in the sign-in settings and the environment). Sign-in
+  tokens carry the user id (`sub`), `rb_user`, `rb_gen` and `rb_ugen`, and resolve
+  their permissions from the user at every request; tokens issued before the upgrade
+  stay valid as user one. Control JWTs may carry `rb_roles` and `rb_perms` (unknown
+  names ignored). `GET /_rustybin/session` answers `user_id`, `display_name`, `roles`
+  and `permissions`; the sign-in answer and the sessions list carry `user_id`. What
+  each credential may do is unchanged until every route checks a permission (step
+  08). A new diagnostics check, `users`.
+
 ## 0.4.0 (2026-11-03): testing workflows
 
 Saved tests run without anyone at the console and keep their history, four more

@@ -61,6 +61,7 @@ pub mod openapi;
 pub mod orchestration;
 pub mod portal;
 pub mod random;
+pub mod rbac;
 pub mod redirects;
 pub mod replay;
 pub mod request_bin;

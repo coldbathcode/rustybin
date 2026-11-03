@@ -279,6 +279,19 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   reached the upstream) and `end` (only what the run created). A new scenario is a table row plus its `mock` and
   `evaluate` arms.
 - `src/control_oauth.rs`: OAuth sign-in to the management MCP server (`RUSTYBIN_CONTROL_OAUTH*`), see above.
+- `src/rbac/`: users, roles and permissions (access control step 07, the model). `permission.rs` (`Permission`: one
+  enum, a stable dotted name, a group and a summary each; `PermSet`, a bit set), `role.rs` (the built-in roles
+  `viewer`, `tester`, `editor`, `admin`, `portal_reader`, immutable; custom roles, at most 50, privileged when they
+  grant `users.manage` or `settings.security`), `users.rs` (`Users` in `AppState.users` and `Config.users`,
+  `<state>/users.json` 0600, at most 500; a change is made on a copy, written off the runtime one writer at a time,
+  and published only when the write succeeded; password hashes kept apart from `User`, never returned;
+  `resolve` cached a second per user and dropped at every change), `mod.rs` (`Resolved`: who, roles, permissions;
+  the old scopes as roles, `rb_roles` / `rb_perms` on control JWTs, unknown names logged once; `from_sign_in`;
+  `grant_of`, which still drives `Grant` so behaviour is the 0.4 one; `migrate`, the console user becomes user one
+  at startup). User one's name and password stay the sign-in settings' (`console.user`, `console.password_hash`,
+  the environment); other users' hashes live in the store. Sign-in tokens: `sub` the user id, `rb_user`, `rb_gen`,
+  `rb_ugen`; an older token (0.3 and 0.4, `sub: "user:<name>"`) is user one. A new permission goes in the table of
+  `permission.rs` (and its test), never a yes/no admin check.
 - `src/login.rs`: the console sign-in (`RUSTYBIN_CONTROL_AUTH=password`, the default): `RUSTYBIN_CONSOLE_USER`,
   `RUSTYBIN_CONSOLE_PASSWORD` or `_PASSWORD_HASH` (argon2id), the settings `console.user` and the secret
   `console.password_hash`, `POST /_rustybin/login` (open) minting HS256 control tokens (the OAuth key's `console`

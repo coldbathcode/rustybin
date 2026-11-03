@@ -52,9 +52,9 @@ fn operator(headers: &HeaderMap) -> String {
     };
     if crate::login::is_console_token(token) {
         if let Some(user) = crate::control_auth::unverified_claims(token)
-            .and_then(|c| c.get("sub").and_then(Value::as_str).map(str::to_string))
+            .and_then(|c| crate::login::user_of(&c).map(str::to_string))
         {
-            return format!("console:{}", user.strip_prefix("user:").unwrap_or(&user));
+            return format!("console:{user}");
         }
     }
     "admin".into()

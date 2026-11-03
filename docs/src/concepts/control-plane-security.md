@@ -122,7 +122,10 @@ last restart (at most 256: user, address, issue, last use and expiry times),
 everywhere by rotating the token generation every token carries, the caller's
 included. `GET /_rustybin/session` describes the credential a request presents
 (`obtained`: `password`, `admin_token`, `control_jwt` or `api_key`), which is how
-the console shows who is signed in.
+the console shows who is signed in: for a sign-in token the user (`user`, the sign-in
+name, `user_id`, `display_name`), and for every credential the `roles` and
+`permissions` resolved at that request (the admin token: the `admin` role, every
+permission).
 
 ```hurl
 {{#include ../../examples/concepts/login.hurl:sessions}}
@@ -186,6 +189,28 @@ an agent's revocation, and it ends the OAuth access and refresh tokens of the
 management server's sign-in too (they carry the generation). The list of sessions
 in Management, Sign-in starts empty after a restart.
 
+**Users, roles and permissions.** The sign-in signs in a *user* of the user store
+(`<state>/users.json`, mode 0600, at most 500 users; in memory without a state
+directory, which the startup log and [diagnostics](../troubleshooting.md) warn
+about). A user holds roles, and a role is a set of named permissions (`mocks.write`,
+`traffic.read`, ...): the built-in roles are `viewer`, `tester`, `editor`, `admin`
+and `portal_reader`. A sign-in token carries the user id (`sub`), the sign-in name
+(`rb_user`), the instance's token generation (`rb_gen`) and the user's (`rb_ugen`),
+and its permissions are resolved from the user at every request, so a role change or
+a disable applies to the next one. The admin token is every permission and never a
+user (break glass); an open control plane is every permission, as before. In this
+release the permissions still map onto the four scopes below for every check (the
+`admin` role is the `admin` scope, the others read the control plane), so nothing a
+credential may do has changed yet; per-permission checks on every route come next.
+
+**Upgrading from 0.4.** Nothing to do: on the first start the console user (the
+`console.user` and `console.password_hash` settings, or `RUSTYBIN_CONSOLE_USER` and
+`RUSTYBIN_CONSOLE_PASSWORD` / `_HASH`) becomes user one with the `admin` role. Its
+name and password stay where they were, so a downgrade still signs in, and the
+environment keeps seeding them on every start (a public instance with the default
+password still refuses to start). Sign-in tokens issued before the upgrade (no user
+id) stay valid as user one until they expire.
+
 **Migration from 0.1.** Instances that relied on an open control plane now ask for
 `rustybin` / `rustybin`. Keep the old behaviour with `RUSTYBIN_CONTROL_AUTH=open`,
 or set `RUSTYBIN_CONSOLE_PASSWORD`. `token` and `jwt` mode are unchanged. Platforms
@@ -201,7 +226,14 @@ the instance only needs the public key. A token must have:
 | header `alg` | `EdDSA` (Ed25519); any other algorithm is refused |
 | `aud` | equal to `RUSTYBIN_CONTROL_JWT_AUDIENCE` (default: `RUSTYBIN_INSTANCE_ID`), so a token for one instance does not open another. With neither set the instance id is a fresh UUID on every start, so tokens stop working after a restart: the server warns at startup |
 | `exp` | required; 30 seconds of clock skew are tolerated (also for `nbf` when present) |
-| `scope` | optional: a space separated string or an array; absent means `console` |
+| `scope` | optional: a space separated string or an array; absent means `console` (unless `rb_roles` or `rb_perms` is present) |
+| `rb_roles` | optional: role names (built-in or custom), a string or an array; their permissions join the scope's |
+| `rb_perms` | optional: permission names (`mocks.write`), a string or an array |
+
+Unknown role and permission names are ignored and logged once, never an error, so a
+platform can roll out a newer token format first. The scopes are roles too: `admin`
+is the `admin` role, `console` the `viewer` role, `inspector` is `traffic.read` alone
+and `harness` is `harness.read` and `harness.run`.
 
 | Scope | Grants |
 |---|---|

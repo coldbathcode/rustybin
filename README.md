@@ -733,7 +733,7 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | POST | `/_rustybin/oauth/token` | Management MCP sign-in: token endpoint (authorization code with PKCE, refresh token) |
 | POST | `/_rustybin/login` | Console sign-in: a user name and password for a control token (password mode) |
 | POST | `/_rustybin/logout` | Console sign-out: revoke the presented sign-in token |
-| GET | `/_rustybin/session` | Who the presented credential is: user, scopes, expiry, how it was obtained |
+| GET | `/_rustybin/session` | Who the presented credential is: user, roles, permissions, scopes, expiry, how it was obtained |
 | GET DELETE | `/_rustybin/sessions` | Sign-in sessions (admin): list them, or DELETE to sign out everywhere |
 | DELETE | `/_rustybin/sessions/{id}` | End one sign-in session (admin) |
 | PUT | `/_rustybin/password` | Change the console user name and password (admin, current password required) |

@@ -105,9 +105,13 @@ export function claims() {
   return parseClaims(token);
 }
 
-/** The signed-in user name of a sign-in token (claim sub "user:<name>"), or null. */
+/**
+ * The signed-in user name of a sign-in token (claim rb_user; a 0.3 token's
+ * sub "user:<name>"), or null.
+ */
 export function user() {
   const c = claims();
+  if (c && c.rb_use === 'console' && typeof c.rb_user === 'string') return c.rb_user;
   const sub = c && typeof c.sub === 'string' ? c.sub : '';
   return sub.startsWith('user:') ? sub.slice(5) : null;
 }

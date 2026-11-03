@@ -71,7 +71,7 @@ The marker a session looks for is the first row that is not done.
 | [05](step-05-checkpoints-in-git.md) | Checkpoints in the configuration repository | | done 2026-11-03 |
 | [06](step-06-conflict-compare.md) | A compare view for a stale edit | | done 2026-11-03 |
 | 06r | Release 0.4.0: the testing workflows (the step 15 recipe for steps 01 to 06) | 01 to 06 | |
-| [07](step-07-users-and-roles.md) | Access control 1: users, roles and permissions (the model) | | |
+| [07](step-07-users-and-roles.md) | Access control 1: users, roles and permissions (the model) | | done 2026-11-03 |
 | [08](step-08-permissions-everywhere.md) | Access control 2: every route and tool checks a permission | 07 | |
 | [09](step-09-users-everywhere.md) | Access control 3: users and roles on every surface, invitations | 08 | |
 | [10](step-10-single-sign-on.md) | Access control 4: single sign-on with OpenID Connect | 09 | |

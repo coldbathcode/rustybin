@@ -118,26 +118,11 @@ impl Grant {
     };
 
     /// Grants named by a `scope` claim (absent: `console`). Unknown scope
-    /// names grant nothing.
+    /// names grant nothing. Derived from the permissions the scopes map to
+    /// (`crate::rbac::from_scope_claim`), which give every 0.3 scope the
+    /// grant it had.
     pub fn from_scope_claim(claim: Option<&Value>) -> Self {
-        let names: Vec<String> = match claim {
-            None | Some(Value::Null) => vec!["console".to_string()],
-            Some(Value::String(s)) => s.split_whitespace().map(str::to_string).collect(),
-            Some(Value::Array(items)) => items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect(),
-            Some(_) => Vec::new(),
-        };
-        let has = |n: &str| names.iter().any(|s| s == n);
-        let admin = has("admin");
-        Grant {
-            admin,
-            console: admin || has("console"),
-            inspector: admin || has("console") || has("inspector"),
-            harness: admin || has("harness"),
-        }
+        crate::rbac::grant_of(crate::rbac::from_scope_claim(claim).1)
     }
 
     /// Names of the granted scopes (for responses and logs).
@@ -357,10 +342,20 @@ pub fn verify_jwt(token: &str, config: &Config) -> Result<Grant, JwtError> {
 /// sign-in token (HS256, `crate::login`) is verified here too, so every
 /// caller of this function accepts it.
 pub fn verify_jwt_claims(token: &str, config: &Config) -> Result<(Grant, Value), JwtError> {
+    verify_jwt_resolved(token, config).map(|(r, claims)| (r.grant(), claims))
+}
+
+/// Verify a control-plane JWT and resolve its roles and permissions
+/// (`crate::rbac`): a sign-in token from its user, at every call (a role
+/// change or a disable applies to the next request); a control JWT from
+/// its `scope`, `rb_roles` and `rb_perms`.
+pub fn verify_jwt_resolved(
+    token: &str,
+    config: &Config,
+) -> Result<(crate::rbac::Resolved, Value), JwtError> {
     match config.control_auth {
         ControlAuth::Password if crate::login::is_console_token(token) => {
-            let claims = crate::login::verify(token, config)?;
-            return Ok((Grant::from_scope_claim(claims.get("scope")), claims));
+            return crate::login::verify_resolved(token, config).map(|(c, r)| (r, c));
         }
         ControlAuth::Jwt | ControlAuth::Password => {}
         ControlAuth::Open | ControlAuth::Token => return Err(JwtError::NotAccepted),
@@ -398,33 +393,42 @@ pub fn verify_jwt_claims(token: &str, config: &Config) -> Result<(Grant, Value),
     {
         return Err(JwtError::Revoked);
     }
-    Ok((
-        Grant::from_scope_claim(data.claims.get("scope")),
-        data.claims,
-    ))
+    let resolved = crate::rbac::from_jwt_claims(&data.claims, &config.users);
+    Ok((resolved, data.claims))
 }
 
-/// The grant of a request's credentials, ignoring the mode's path rules:
-/// the admin token (when configured) grants everything, a valid JWT (in
-/// `jwt` mode) grants its scopes.
-pub fn credentials_grant(headers: &HeaderMap, config: &Config) -> Result<Grant, Option<JwtError>> {
+/// The roles and permissions of a request's credentials: the admin token
+/// (when configured) is every permission, a valid JWT resolves as
+/// [`verify_jwt_resolved`] says. `Err(None)`: no credential, or one that is
+/// not a token this instance accepts.
+pub fn credentials_resolved(
+    headers: &HeaderMap,
+    config: &Config,
+) -> Result<crate::rbac::Resolved, Option<JwtError>> {
     let Some(token) = presented_token(headers) else {
         return Err(None);
     };
     if let Some(expected) = config.admin_token.as_deref() {
         if constant_time_eq(token, expected) {
-            return Ok(Grant::ADMIN);
+            return Ok(crate::rbac::Resolved::admin_token());
         }
     }
     if token.matches('.').count() != 2 {
         // Not shaped like a JWT: a wrong admin token, most likely.
         return Err(None);
     }
-    match verify_jwt(token, config) {
-        Ok(grant) => Ok(grant),
+    match verify_jwt_resolved(token, config) {
+        Ok((r, _)) => Ok(r),
         Err(JwtError::NotAccepted) => Err(None),
         Err(e) => Err(Some(e)),
     }
+}
+
+/// The grant of a request's credentials, ignoring the mode's path rules:
+/// the admin token (when configured) grants everything, a valid JWT (in
+/// `jwt` mode) grants its scopes.
+pub fn credentials_grant(headers: &HeaderMap, config: &Config) -> Result<Grant, Option<JwtError>> {
+    credentials_resolved(headers, config).map(|r| r.grant())
 }
 
 fn unauthorized(config: &Config, message: &str, reason: &str) -> Response {

@@ -1,17 +1,23 @@
 //! Console sign-in with a user name and password
 //! (`RUSTYBIN_CONTROL_AUTH=password`, the default).
 //!
-//! `POST /_rustybin/login` checks the user name and password and answers a
-//! control token: an HS256 JWT signed with the instance key the OAuth
-//! sign-in uses ([`crate::control_oauth::OAuthKey`]), audience
-//! `RUSTYBIN_CONTROL_JWT_AUDIENCE`, scope `admin`, `rb_use: "console"`, 12
-//! hours, a `jti` and the token generation. The whole control plane, the
+//! `POST /_rustybin/login` looks the user up in the user store
+//! ([`crate::rbac::users`]), checks the password and answers a control
+//! token: an HS256 JWT signed with the instance key the OAuth sign-in uses
+//! ([`crate::control_oauth::OAuthKey`]), audience
+//! `RUSTYBIN_CONTROL_JWT_AUDIENCE`, `sub` the user id, `rb_user` the sign-in
+//! name, `rb_use: "console"`, 12 hours, a `jti`, the instance's token
+//! generation (`rb_gen`) and the user's (`rb_ugen`). Its permissions are
+//! the user's roles, resolved at every request ([`crate::rbac`]); a 0.3
+//! token (`sub: "user:<name>"`) is user one's. The whole control plane, the
 //! management MCP server and the data plane's admin guard accept it like any
 //! control JWT ([`crate::control_auth::verify_jwt`] calls [`verify`] for
 //! HS256 tokens in password mode), so nothing else in the credential model
 //! changes. `RUSTYBIN_ADMIN_TOKEN` and Ed25519 control JWTs keep working.
 //!
-//! Credentials: `RUSTYBIN_CONSOLE_USER` (default `rustybin`) and
+//! Credentials of user one (the first admin, the 0.3 console user; other
+//! users keep their own hash in the user store): `RUSTYBIN_CONSOLE_USER`
+//! (default `rustybin`) and
 //! `RUSTYBIN_CONSOLE_PASSWORD` (default `rustybin`) or
 //! `RUSTYBIN_CONSOLE_PASSWORD_HASH` (an argon2id PHC string). A password
 //! changed in the console is stored as a hash in the settings store
@@ -48,7 +54,7 @@ use serde_json::{json, Value};
 
 use crate::catalog::{category, Endpoint, Example};
 use crate::config::Config;
-use crate::control_auth::{constant_time_eq, presented_token, ControlAuth, Grant, JwtError};
+use crate::control_auth::{constant_time_eq, presented_token, ControlAuth, JwtError};
 use crate::limits::{Clock, SystemClock};
 use crate::settings::{Kind, Spec};
 use crate::state::AppState;
@@ -352,6 +358,7 @@ fn busy() -> Response {
 struct Issued {
     jti: String,
     user: String,
+    user_id: String,
     issued_at: i64,
     expires_at: i64,
     ip: Option<IpAddr>,
@@ -701,6 +708,7 @@ impl Tokens {
                 json!({
                     "id": s.jti,
                     "user": s.user,
+                    "user_id": s.user_id,
                     "issued_at": rfc3339(s.issued_at),
                     "expires_at": rfc3339(s.expires_at),
                     "last_used": rfc3339(s.last_used),
@@ -854,20 +862,41 @@ fn random_id() -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// Mint a token for `user`: the claims and the signed token.
-fn mint(config: &Config, user: &str) -> Option<(String, Value)> {
+/// The `scope` claim a sign-in token carries for a user's permissions:
+/// informational (every request resolves the user again), and what a 0.3
+/// binary would honour after a downgrade.
+fn scope_claim(perms: crate::rbac::PermSet) -> String {
+    let grant = crate::rbac::grant_of(perms);
+    if grant.admin {
+        "admin".to_string()
+    } else {
+        grant.scopes().join(" ")
+    }
+}
+
+/// Mint a token for `user`: the claims and the signed token. `sub` is the
+/// user id, `rb_user` the sign-in name, `rb_gen` the instance's generation
+/// and `rb_ugen` the user's.
+fn mint(config: &Config, user: &crate::rbac::User) -> Option<(String, Value)> {
     let tokens = &config.console_tokens;
+    let perms = config
+        .users
+        .resolve(&user.id)
+        .map(|r| r.permissions)
+        .unwrap_or_default();
     let iat = tokens.now();
     let claims = json!({
         "iss": "rustybin",
         "aud": config.control_jwt_audience,
-        "sub": format!("user:{user}"),
-        "scope": "admin",
+        "sub": user.id,
+        "rb_user": user.name,
+        "scope": scope_claim(perms),
         "iat": iat,
         "exp": iat + TOKEN_TTL_SECS,
         "jti": random_id(),
         "rb_use": TOKEN_USE,
         "rb_gen": tokens.generation(),
+        "rb_ugen": user.generation,
     });
     let mut header = Header::new(Algorithm::HS256);
     header.typ = Some("JWT".into());
@@ -905,9 +934,19 @@ pub fn is_console_token(token: &str) -> bool {
         .is_some_and(|claims| claims.get("rb_use").and_then(Value::as_str) == Some(TOKEN_USE))
 }
 
-/// Verify a sign-in token: signature, audience, expiry, use, generation and
-/// the denylist. Returns its claims.
+/// Verify a sign-in token: signature, audience, expiry, use, generation,
+/// the denylist and its user (there, enabled, of the user's generation).
+/// Returns its claims.
 pub fn verify(token: &str, config: &Config) -> Result<Value, JwtError> {
+    verify_resolved(token, config).map(|(claims, _)| claims)
+}
+
+/// [`verify`], with the user's roles and permissions resolved
+/// (`crate::rbac::from_sign_in`).
+pub fn verify_resolved(
+    token: &str,
+    config: &Config,
+) -> Result<(Value, crate::rbac::Resolved), JwtError> {
     let mut validation = Validation::new(Algorithm::HS256);
     validation.leeway = LEEWAY_SECS;
     validation.set_audience(&[config.control_jwt_audience.as_str()]);
@@ -943,24 +982,36 @@ pub fn verify(token: &str, config: &Config) -> Result<Value, JwtError> {
     if jti.is_empty() || tokens.is_revoked(jti) {
         return Err(JwtError::Revoked);
     }
+    let resolved = crate::rbac::from_sign_in(&claims, &config.users)?;
     tokens.touch(jti);
-    Ok(claims)
+    Ok((claims, resolved))
 }
 
 /// The verified claims of the sign-in token a request presents, if it does.
 fn presented_claims(headers: &HeaderMap, config: &Config) -> Option<Value> {
+    presented_resolved(headers, config).map(|(c, _)| c)
+}
+
+fn presented_resolved(
+    headers: &HeaderMap,
+    config: &Config,
+) -> Option<(Value, crate::rbac::Resolved)> {
     let token = presented_token(headers)?;
     if !is_console_token(token) {
         return None;
     }
-    verify(token, config).ok()
+    verify_resolved(token, config).ok()
 }
 
-fn user_of(claims: &Value) -> Option<&str> {
-    claims
-        .get("sub")
-        .and_then(Value::as_str)
-        .and_then(|s| s.strip_prefix("user:"))
+/// The sign-in name a sign-in token carries: `rb_user`, or the `sub` of a
+/// 0.3 token (`user:<name>`).
+pub fn user_of(claims: &Value) -> Option<&str> {
+    claims.get("rb_user").and_then(Value::as_str).or_else(|| {
+        claims
+            .get("sub")
+            .and_then(Value::as_str)
+            .and_then(|s| s.strip_prefix("user:"))
+    })
 }
 
 // ── Responses ───────────────────────────────────────────────────────
@@ -1020,17 +1071,55 @@ fn client_ip(headers: &HeaderMap, extensions: &Extensions, config: &Config) -> O
 }
 
 /// A token response body.
-fn token_body(token: &str, claims: &Value, state: &AppState) -> Value {
+fn token_body(token: &str, claims: &Value, user: &crate::rbac::User, state: &AppState) -> Value {
     let exp = claims.get("exp").and_then(Value::as_i64).unwrap_or(0);
+    let perms = state
+        .users
+        .resolve(&user.id)
+        .map(|r| r.permissions)
+        .unwrap_or_default();
     json!({
         "token": token,
         "token_type": "Bearer",
         "expires_in": TOKEN_TTL_SECS,
         "expires_at": rfc3339(exp),
-        "scopes": Grant::from_scope_claim(claims.get("scope")).scopes(),
-        "user": user_of(claims),
+        "scopes": crate::rbac::grant_of(perms).scopes(),
+        "user": user.name,
+        "user_id": user.id,
         "default_password": default_password(state),
     })
+}
+
+/// Check the password of a user who is not user one: their own hash in the
+/// user store. Without one (an invitation not accepted yet) it is refused
+/// after the same work as a real check. `None`: every hash permit is taken.
+async fn check_user_password(
+    state: &AppState,
+    user: &crate::rbac::User,
+    password: &str,
+) -> Option<bool> {
+    let Some(hash) = state.users.password_hash(&user.id) else {
+        return check_credentials(state, "", password).await.map(|_| false);
+    };
+    let permit = state.config.console_tokens.hash_permit()?;
+    let plain = password.to_string();
+    Some(
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            verify_hash(&hash, &plain)
+        })
+        .await
+        .unwrap_or(false),
+    )
+}
+
+/// User one (the first admin), created now if startup could not.
+fn first_admin(state: &AppState) -> Option<crate::rbac::User> {
+    if let Some(u) = state.users.first_admin() {
+        return Some(u);
+    }
+    crate::rbac::migrate(&state.config, &state.settings);
+    state.users.first_admin()
 }
 
 // ── Handlers ────────────────────────────────────────────────────────
@@ -1085,11 +1174,35 @@ async fn login_handler(
             "invalid_credentials",
         );
     }
-    let Some(ok) = check_credentials(&state, &body.username, &body.password).await else {
+    // User one signs in with the sign-in settings (the 0.3 console user);
+    // anyone else with their own password in the user store. A name nobody
+    // has still checks the settings' password, so the answer takes as long.
+    let first = constant_time_eq(tried, &effective_user(&state.settings));
+    let other = if first {
+        None
+    } else {
+        state
+            .users
+            .find_by_name(tried)
+            .filter(|u| !state.users.is_first_admin(&u.id))
+    };
+    let checked = match &other {
+        Some(u) => check_user_password(&state, u, &body.password).await,
+        None => check_credentials(&state, &body.username, &body.password).await,
+    };
+    let Some(ok) = checked else {
         tokens.abandoned(ip, tried);
         return busy();
     };
-    if !ok {
+    let account = if !ok {
+        None
+    } else if first {
+        first_admin(&state)
+    } else {
+        other
+    };
+    // A disabled user gets the answer of a wrong password.
+    let Some(account) = account.filter(|u| !u.disabled) else {
         tokens.failed(ip, tried);
         audit("login", &body.username, ip, "invalid_credentials");
         return error(
@@ -1097,10 +1210,10 @@ async fn login_handler(
             "invalid user name or password",
             "invalid_credentials",
         );
-    }
+    };
     tokens.succeeded(ip, tried);
-    let user = effective_user(&state.settings);
-    let Some((token, claims)) = mint(config, &user) else {
+    let user = account.name.clone();
+    let Some((token, claims)) = mint(config, &account) else {
         return error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "could not sign the token",
@@ -1110,13 +1223,17 @@ async fn login_handler(
     tokens.record(Issued {
         jti: claims["jti"].as_str().unwrap_or("").to_string(),
         user: user.clone(),
+        user_id: account.id.clone(),
         issued_at: claims["iat"].as_i64().unwrap_or(0),
         expires_at: claims["exp"].as_i64().unwrap_or(0),
         ip,
         last_used: claims["iat"].as_i64().unwrap_or(0),
     });
+    if let Err(e) = state.users.note_sign_in(&account.id) {
+        tracing::warn!(target: "rustybin::auth", error = %e, "the sign-in time could not be saved");
+    }
     audit("login", &user, ip, "ok");
-    let mut resp = Json(token_body(&token, &claims, &state)).into_response();
+    let mut resp = Json(token_body(&token, &claims, &account, &state)).into_response();
     resp.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     resp
@@ -1190,37 +1307,45 @@ async fn session_handler(State(state): State<AppState>, headers: HeaderMap) -> R
         }
     };
     if is_admin_token {
+        let resolved = crate::rbac::Resolved::admin_token();
         fill(
             &mut body,
-            json!({ "obtained": "admin_token", "scopes": Grant::ADMIN.scopes() }),
+            json!({ "obtained": "admin_token", "scopes": resolved.grant().scopes() }),
         );
+        fill(&mut body, resolved.session_fields());
         return Json(body).into_response();
     }
-    if let Some(claims) = presented_claims(&headers, config) {
+    if let Some((claims, resolved)) = presented_resolved(&headers, config) {
+        let name = match &resolved.principal {
+            crate::rbac::Principal::User { name, .. } => Some(name.as_str()),
+            _ => user_of(&claims),
+        };
         fill(
             &mut body,
             json!({
                 "obtained": "password",
-                "user": user_of(&claims),
-                "scopes": Grant::from_scope_claim(claims.get("scope")).scopes(),
+                "user": name,
+                "scopes": resolved.grant().scopes(),
                 "issued_at": rfc3339(claims["iat"].as_i64().unwrap_or(0)),
                 "expires_at": rfc3339(claims["exp"].as_i64().unwrap_or(0)),
                 "id": claims["jti"],
             }),
         );
+        fill(&mut body, resolved.session_fields());
         return Json(body).into_response();
     }
     if let Some(t) = token {
-        if let Ok((grant, claims)) = crate::control_auth::verify_jwt_claims(t, config) {
+        if let Ok((resolved, claims)) = crate::control_auth::verify_jwt_resolved(t, config) {
             fill(
                 &mut body,
                 json!({
                     "obtained": "control_jwt",
                     "sub": claims.get("sub"),
-                    "scopes": grant.scopes(),
+                    "scopes": resolved.grant().scopes(),
                     "expires_at": claims.get("exp").and_then(Value::as_i64).map(rfc3339),
                 }),
             );
+            fill(&mut body, resolved.session_fields());
             return Json(body).into_response();
         }
     }
@@ -1448,11 +1573,13 @@ async fn password_handler(
         "signed_out": ended,
         "default_password": default_password(&state),
     });
-    if had_session {
-        if let Some((token, claims)) = mint(config, &user) {
+    let account = first_admin(&state);
+    if let Some(account) = account.filter(|_| had_session) {
+        if let Some((token, claims)) = mint(config, &account) {
             tokens.record(Issued {
                 jti: claims["jti"].as_str().unwrap_or("").to_string(),
                 user: user.clone(),
+                user_id: account.id.clone(),
                 issued_at: claims["iat"].as_i64().unwrap_or(0),
                 expires_at: claims["exp"].as_i64().unwrap_or(0),
                 ip,
@@ -1494,9 +1621,10 @@ pub fn catalog() -> Vec<Endpoint> {
             "Console sign-in: a user name and password for a control token (password mode)",
         )
         .description(
-            "Never behind control-plane auth. Answers a 12 hour control token (scope admin) \
-             that every control-plane route, the management MCP server and the admin guard \
-             accept. 5 failed attempts per client address and user name and minute (100 \
+            "Never behind control-plane auth. Answers a 12 hour control token for the user \
+             (the first admin is the console user of the sign-in settings) that every \
+             control-plane route, the management MCP server and the admin guard accept, with \
+             the user's roles resolved at every request. 5 failed attempts per client address and user name and minute (100 \
              from every address together), then 429 with Retry-After. \
              404 unless RUSTYBIN_CONTROL_AUTH=password (the default).",
         )
@@ -1516,7 +1644,12 @@ pub fn catalog() -> Vec<Endpoint> {
             SESSION_PATH,
             &["GET"],
             category::CONTROL,
-            "Who the presented credential is: user, scopes, expiry, how it was obtained",
+            "Who the presented credential is: user, roles, permissions, scopes, expiry, how it was obtained",
+        )
+        .description(
+            "A sign-in token answers its user (user, user_id, display_name), resolved from the \
+             user store at every request; every credential answers its roles and permissions \
+             (the admin token: every permission).",
         )
         .example(Example::get("This session", SESSION_PATH).expect_status(404)),
         Endpoint::new(
@@ -1568,7 +1701,27 @@ pub fn openapi_paths() -> Value {
             "expires_at": { "type": "string", "format": "date-time" },
             "scopes": { "type": "array", "items": { "type": "string" } },
             "user": { "type": "string" },
+            "user_id": { "type": "string", "description": "The user's id in the user store (usr_ plus 16 hex)" },
             "default_password": { "type": "boolean", "description": "The instance still signs in with the default password" }
+        }
+    });
+    let session_schema = json!({
+        "type": "object",
+        "properties": {
+            "control_auth": { "type": "string" },
+            "obtained": { "type": "string", "enum": ["password", "admin_token", "control_jwt", "api_key"] },
+            "user": { "type": ["string", "null"], "description": "The sign-in name (sign-in tokens)" },
+            "user_id": { "type": ["string", "null"], "description": "The user's id (sign-in tokens): usr_ plus 16 hex" },
+            "display_name": { "type": ["string", "null"] },
+            "roles": { "type": "array", "items": { "type": "string" }, "description": "The roles the permissions come from (admin for the admin token; a control JWT's scopes as roles plus rb_roles)" },
+            "permissions": { "type": "array", "items": { "type": "string" }, "description": "The caller's permissions, resolved at this request (dotted names, mocks.write)" },
+            "scopes": { "type": "array", "items": { "type": "string" }, "description": "The 0.3 scopes these permissions amount to" },
+            "sub": { "type": "string", "description": "The sub claim of a control JWT" },
+            "id": { "type": "string", "description": "The session id of a sign-in token" },
+            "issued_at": { "type": "string", "format": "date-time" },
+            "expires_at": { "type": "string", "format": "date-time" },
+            "default_password": { "type": "boolean" },
+            "sign_in_user": { "type": ["string", "null"], "description": "The first admin's sign-in name (password mode)" }
         }
     });
     let not_found = json!({ "description": "Not in password mode (or shared mode)" });
@@ -1577,7 +1730,7 @@ pub fn openapi_paths() -> Value {
             "post": {
                 "tags": ["Control Plane"],
                 "summary": "Console sign-in",
-                "description": "Checks the user name and password (RUSTYBIN_CONSOLE_USER, RUSTYBIN_CONSOLE_PASSWORD or _HASH, the stored console.password_hash; rustybin / rustybin by default) and answers a 12 hour control token with the admin scope. Never behind control-plane auth. After 5 failed attempts from one client address within a minute the address waits (429, Retry-After, doubling up to 10 minutes).",
+                "description": "Looks the user up in the user store and checks the password: the first admin's is the sign-in settings' (RUSTYBIN_CONSOLE_USER, RUSTYBIN_CONSOLE_PASSWORD or _HASH, the stored console.password_hash; rustybin / rustybin by default). Answers a 12 hour control token whose permissions are the user's roles, resolved at every request (a disabled user is answered as a wrong password). Never behind control-plane auth. After 5 failed attempts from one client address within a minute the address waits (429, Retry-After, doubling up to 10 minutes).",
                 "operationId": "consoleLogin",
                 "security": [],
                 "requestBody": { "required": true, "content": { "application/json": { "schema": {
@@ -1609,10 +1762,10 @@ pub fn openapi_paths() -> Value {
             "get": {
                 "tags": ["Control Plane"],
                 "summary": "This session",
-                "description": "Describes the credential the request presents: obtained (password, admin_token, control_jwt, api_key), user, scopes, issue and expiry times, plus whether the instance still uses the default password.",
+                "description": "Describes the credential the request presents: obtained (password, admin_token, control_jwt, api_key), the user (user, user_id, display_name) of a sign-in token, the roles and permissions resolved at this request, scopes, issue and expiry times, plus whether the instance still uses the default password.",
                 "operationId": "getConsoleSession",
                 "responses": {
-                    "200": { "description": "The session", "content": { "application/json": { "schema": { "type": "object" } } } },
+                    "200": { "description": "The session", "content": { "application/json": { "schema": session_schema } } },
                     "404": { "description": "The control plane is open" }
                 }
             }
@@ -1621,7 +1774,7 @@ pub fn openapi_paths() -> Value {
             "get": {
                 "tags": ["Control Plane"],
                 "summary": "Sign-in sessions",
-                "description": "The sign-in tokens issued since the last restart or sign-out-everywhere (at most 256, newest first): id, user, issue, expiry and last use times, client address. Admin.",
+                "description": "The sign-in tokens issued since the last restart or sign-out-everywhere (at most 256, newest first): id, user, user_id, issue, expiry and last use times, client address. Admin.",
                 "operationId": "listConsoleSessions",
                 "responses": {
                     "200": { "description": "Sessions", "content": { "application/json": { "schema": { "type": "object", "properties": {

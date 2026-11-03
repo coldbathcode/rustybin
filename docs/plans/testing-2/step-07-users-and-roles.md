@@ -98,3 +98,60 @@ permission, name rules, the cap); the old scopes map to the roles above; `rb_rol
 claims, unknown names ignored; the migration from a 0.3 state directory and from the environment;
 a 0.3 token still signs in as user one; a role change and a disable apply on the next request; the
 store's cap, its file mode and a write that fails changes nothing.
+
+## Build notes (2026-11-03)
+
+- **Where it is.** `src/rbac/`: `permission.rs` (38 permissions, the table above in order, a bit set
+  `PermSet`), `role.rs` (the five built-in roles, custom role validation: lower case name of 1 to 40
+  characters starting with a letter, not a built-in name, at least one known permission, no repeats,
+  a description of at most 200 characters; privileged when it grants `users.manage` or
+  `settings.security`), `users.rs` (the store), `mod.rs` (`Resolved`, the scope mapping, the JWT
+  claims, `from_sign_in`, `grant_of`, `migrate`, the diagnostics check `users`), `tests.rs`.
+- **The store lives in `Config.users` too** (as `Tokens` does in `Config.console_tokens`): every
+  credential check takes `&Config`. `AppState.users` is the same `Arc`.
+- **Writes**: a change is made on a copy of the document, written (off the runtime, one writer at a
+  time, so the latest change wins) and published only when the write succeeded; a failed write
+  changes nothing and sets the diagnostics' `users` check to `fail`. A `users.json` that cannot be
+  read is never written over (the users stay in memory, `fail`). Password hashes are a map beside
+  the users in the file, so `User` has no hash field and cannot leak one through an answer or an
+  export.
+- **Deviation: user one's credentials stay in the sign-in settings.** User one's name and password
+  are still `console.user`, `console.password_hash` and the environment (unchanged precedence, the
+  settings lock, `PUT /_rustybin/password`, the `PATCH /_rustybin/settings` rules, the admin token
+  reset), and its record in the store follows the name. So a downgrade signs in, the environment
+  seeds user one on every start and the default password rule applies to it, with every 0.4 test
+  unchanged. "A later change goes to the user store" is left to step 09, whose `/me/password`
+  replaces `PUT /_rustybin/password`; other users' hashes are in the store already (`Users::add`).
+- **Migration** runs in `AppState::with_clock` (`rbac::migrate`) in password mode only (not shared
+  mode, not the other modes): the effective sign-in name becomes user one with `admin`, or user
+  one's name follows it. A rename through the sign-in settings follows into the store.
+- **Tokens**: `sub` the user id, `rb_user` the sign-in name (the console's "Signed in as" and the
+  agents' `Credential::Console`, which keeps an agent's identity across the upgrade), `rb_gen`,
+  `rb_ugen`, and `scope` from the user's grant (informational; what a 0.4 binary would honour after a
+  downgrade). A token without `rb_ugen` counts as generation 1. A 0.3 or 0.4 token (`sub: "user:<name>"`)
+  is user one, and follows user one's roles, disable and generation.
+- **Disable ends sessions**: `set_disabled(true)` also moves the user's generation on, so enabling the
+  user again does not revive an old token (step 09's guard rail, done in the model).
+- **Resolution cache**: a second per user, and dropped at every change of the store, so a role change
+  applies to the next request even inside the second; `Users::cache_misses` lets the test see the
+  cache without sleeping (a `ManualClock`).
+- **Grant from permissions**: `Grant::from_scope_claim` and every token's grant now come from
+  `rbac::grant_of(permissions)`; `the_old_scopes_keep_their_grants` compares it with the 0.4
+  implementation for every combination of the four scopes (and unknown ones, absent, null, junk).
+  `admin` is every permission, `console` the viewer's set, `inspector` `console` or `traffic.read`,
+  `harness` `admin` or `harness.read` plus `harness.run`. So a `tester` or an `editor` user reads the
+  control plane and mutates nothing until step 08, and a `portal_reader` is refused everywhere
+  (`/_rustybin/session` included).
+- **`rb_roles` / `rb_perms`**: a string or an array each; without a `scope` but with either, the token
+  is what they say (no `console` default). Unknown names are logged once (at most 256 names
+  remembered).
+- **The session answer** keeps `user` (the name, which the CLI reads) and adds `user_id`,
+  `display_name`, `roles` and `permissions`; the admin token answers the `admin` role and every
+  permission. The sign-in answer and the sessions list add `user_id`. Open mode still answers `404`.
+- **For step 08**: `control_auth::credentials_resolved` and `verify_jwt_resolved` answer a `Resolved`
+  (`has(Permission)`), the place to check a route's permission; `ControlAuthorized` still carries the
+  `Grant`. The session route should be reachable by any authenticated caller (an `inspector` token or
+  a `portal_reader` cannot read it today). An API key in shared mode answers no permissions yet. The
+  "unused permission" rule waits for the routes and tools to declare them; the table test lists all
+  38.
+

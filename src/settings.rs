@@ -718,6 +718,8 @@ pub struct Settings {
     /// The sign-in state: a change of the user name or the password signs
     /// every session out (the token generation rotates).
     console_tokens: Arc<crate::login::Tokens>,
+    /// The user store: user one's name follows `console.user`.
+    users: Arc<crate::rbac::Users>,
 }
 
 /// What a public instance answers to clearing the console password hash.
@@ -791,6 +793,7 @@ impl Settings {
                 && config.console_password_hash.is_none(),
             sign_in_guard: crate::login::enabled(config),
             console_tokens: config.console_tokens.clone(),
+            users: config.users.clone(),
         };
         store.check_secrets();
         store.sync();
@@ -1211,7 +1214,15 @@ impl Settings {
 
     /// Sign every session out when the sign-in changed.
     fn after_sign_in_change(&self, user_before: &Value, hash_changed: bool) {
-        if hash_changed || self.get(crate::login::USER_KEY).0 != *user_before {
+        let user_after = self.get(crate::login::USER_KEY).0;
+        if user_after != *user_before {
+            if let Some(name) = user_after.as_str() {
+                if let Err(e) = self.users.rename_first(name) {
+                    tracing::warn!(target: "rustybin::auth", error = %e, "the first admin's name could not follow console.user");
+                }
+            }
+        }
+        if hash_changed || user_after != *user_before {
             self.console_tokens.rotate();
             tracing::info!(
                 target: "rustybin::auth",

@@ -97,6 +97,9 @@ pub struct AppState {
     pub saved_tests: Arc<crate::replay::Tests>,
     /// Checkpoints (`crate::checkpoints`), `<state>/checkpoints/`.
     pub checkpoints: Arc<crate::checkpoints::Checkpoints>,
+    /// Users and custom roles (`crate::rbac::users`, `<state>/users.json`):
+    /// the same store as `Config.users`.
+    pub users: Arc<crate::rbac::Users>,
 }
 
 impl AppState {
@@ -148,6 +151,8 @@ impl AppState {
         );
         let metrics = Arc::new(Metrics::new());
         let settings = Arc::new(Settings::new(&config));
+        crate::rbac::migrate(&config, &settings);
+        let users = config.users.clone();
         let egress = Arc::new(Egress::new(&config, settings.clone()));
         let assist = Arc::new(Assist::new(
             &config,
@@ -219,6 +224,7 @@ impl AppState {
             scenarios: Arc::new(crate::scenarios::Scenarios::default()),
             saved_tests,
             checkpoints,
+            users,
         }
     }
 }

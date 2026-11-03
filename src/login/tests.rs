@@ -976,6 +976,7 @@ fn tokens_are_bounded() {
         tokens.record(Issued {
             jti: format!("s-{i}"),
             user: "u".into(),
+            user_id: "usr_0123456789abcdef".into(),
             issued_at: 0,
             expires_at: far,
             ip: None,

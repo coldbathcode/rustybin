@@ -45,6 +45,7 @@ jsonpath "$.token_type" == "Bearer"
 jsonpath "$.expires_in" == 43200
 jsonpath "$.scopes" contains "admin"
 jsonpath "$.user" == "rustybin"
+jsonpath "$.user_id" startsWith "usr_"
 jsonpath "$.default_password" == true
 # ANCHOR_END: login
 
@@ -67,6 +68,12 @@ HTTP 200
 [Asserts]
 jsonpath "$.obtained" == "password"
 jsonpath "$.user" == "rustybin"
+jsonpath "$.user_id" startsWith "usr_"
+jsonpath "$.display_name" == "rustybin"
+jsonpath "$.roles" count == 1
+jsonpath "$.roles[0]" == "admin"
+jsonpath "$.permissions" contains "mocks.write"
+jsonpath "$.permissions" count == 38
 jsonpath "$.scopes" contains "admin"
 jsonpath "$.expires_at" exists
 # ANCHOR_END: use_token

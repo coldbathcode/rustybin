@@ -33,6 +33,7 @@ rustybin doctor --profile prod
 | `egress_refusals` | outbound calls the egress policy refused in the last hour, by purpose |
 | `source_control` | the last git operation |
 | `default_password` | the console still accepts the default password |
+| `users` | (password mode) where the users live: `<state>/users.json`, in memory without a state directory (`warn`), or a file that could not be read or written (`fail`; an unreadable file is never written over) |
 | `harness` | load test mode with an engine problem |
 | `assist` | AI assist configured but not usable |
 

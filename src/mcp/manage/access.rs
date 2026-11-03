@@ -130,8 +130,12 @@ fn credential_of(
         let credential = if extensions.get::<crate::control_oauth::ViaOAuth>().is_some() {
             Credential::Oauth { sub }
         } else if c.get("rb_use").and_then(Value::as_str) == Some("console") {
+            // By the sign-in name (`rb_user`, or a 0.3 token's `user:<name>`),
+            // so an agent keeps its identity across the upgrade.
             Credential::Console {
-                user: sub.strip_prefix("user:").unwrap_or(&sub).to_string(),
+                user: crate::login::user_of(&c)
+                    .map(|u| clean(u, 128))
+                    .unwrap_or(sub),
             }
         } else {
             Credential::Jwt {
