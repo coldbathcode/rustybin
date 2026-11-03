@@ -15,7 +15,8 @@ use crate::config::Config;
 use crate::test_support::{body_json, test_app_with, test_state_with};
 
 /// A stand-in gateway: forwards to one upstream and, when told, retries a
-/// 503 once, limits requests, adds a header, times out or caches GETs.
+/// 503 once, limits requests, adds a header, times out, caches GETs, opens
+/// a circuit breaker or refuses large bodies.
 #[derive(Default)]
 struct Gw {
     upstream: String,
@@ -24,9 +25,23 @@ struct Gw {
     add: Option<(&'static str, String)>,
     timeout: Option<Duration>,
     cache: bool,
+    /// Open after this many failures in a row, for this long.
+    breaker: Option<(u32, Duration)>,
+    /// Refuse bodies larger than this with 413.
+    max_body: Option<usize>,
     count: AtomicU32,
     cached: Mutex<HashMap<String, (u16, bytes::Bytes)>>,
+    circuit: Mutex<Circuit>,
     client: reqwest::Client,
+}
+
+/// The breaker's state: failures in a row, when it opened, and whether a
+/// trial request is out.
+#[derive(Default)]
+struct Circuit {
+    failures: u32,
+    opened: Option<std::time::Instant>,
+    trial: bool,
 }
 
 async fn gw(State(g): State<Arc<Gw>>, req: Request) -> Response {
@@ -50,9 +65,27 @@ async fn gw(State(g): State<Arc<Gw>>, req: Request) -> Response {
             return (StatusCode::from_u16(s).expect("status"), b).into_response();
         }
     }
+    if let Some((_, half_open)) = g.breaker {
+        let mut c = g.circuit.lock().expect("lock");
+        if let Some(t) = c.opened {
+            // Open (or a trial out): answer on its own.
+            if c.trial || t.elapsed() < half_open {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+            // Half open: this request is the trial.
+            c.trial = true;
+        }
+    }
+    let method = req.method().clone();
     let session = req.headers().get(SESSION_HEADER).cloned();
+    let body = axum::body::to_bytes(req.into_body(), 4 << 20)
+        .await
+        .unwrap_or_default();
+    if g.max_body.is_some_and(|m| body.len() > m) {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
     let send = || {
-        let mut r = g.client.get(&url);
+        let mut r = g.client.request(method.clone(), &url).body(body.clone());
         if let Some(s) = &session {
             r = r.header(SESSION_HEADER, s.clone());
         }
@@ -67,6 +100,21 @@ async fn gw(State(g): State<Arc<Gw>>, req: Request) -> Response {
     let mut resp = send().await;
     if g.retry && matches!(&resp, Ok(r) if r.status() == 503) {
         resp = send().await;
+    }
+    if let Some((threshold, _)) = g.breaker {
+        let mut c = g.circuit.lock().expect("lock");
+        if matches!(&resp, Ok(r) if r.status().is_success()) {
+            *c = Circuit::default();
+        } else if c.trial {
+            // The trial failed: open again.
+            c.trial = false;
+            c.opened = Some(std::time::Instant::now());
+        } else {
+            c.failures += 1;
+            if c.failures >= threshold {
+                c.opened = Some(std::time::Instant::now());
+            }
+        }
     }
     match resp {
         Ok(r) => {
@@ -134,15 +182,22 @@ async fn run_of(state: &AppState, base: &str, id: &str) -> Value {
         .expect("start")
 }
 
+/// The stand-in gateway's half-open time and body limit.
+const HALF_OPEN_MS: u64 = 300;
+const SIZE_LIMIT: u64 = 1024;
+
 async fn check_via(state: &AppState, run: &Value, gateway: &str) -> Value {
+    let id = run["scenario"].as_str().expect("scenario");
     check(
         state,
         "me",
-        run["scenario"].as_str().expect("scenario"),
+        id,
         run["id"].as_str().expect("id"),
         CheckBody {
             gateway_url: gateway.to_string(),
-            limit: None,
+            half_open_ms: (id == "circuit_breaker").then_some(HALF_OPEN_MS),
+            size_limit: (id == "request_size_limit").then_some(SIZE_LIMIT),
+            ..CheckBody::default()
         },
     )
     .await
@@ -172,6 +227,8 @@ fn behaving(id: &str, upstream: &str, key: Option<&str>) -> Gw {
         }
         "timeouts" => g.timeout = Some(Duration::from_millis(150)),
         "caching" => g.cache = true,
+        "circuit_breaker" => g.breaker = Some((3, Duration::from_millis(HALF_OPEN_MS))),
+        "request_size_limit" => g.max_body = Some(SIZE_LIMIT as usize),
         _ => {}
     }
     g
@@ -219,6 +276,14 @@ async fn a_gateway_without_the_feature_fails_with_the_expectation_named() {
             "The gateway gave up before the upstream answered",
         ),
         ("caching", "Only the first request reached the upstream"),
+        (
+            "circuit_breaker",
+            "The gateway opened the circuit after upstream failures",
+        ),
+        (
+            "request_size_limit",
+            "The body over the limit never reached the upstream",
+        ),
     ];
     for (id, name) in expected {
         let run = run_of(&state, &base, id).await;
@@ -361,7 +426,7 @@ async fn mutations_are_admin_only_and_the_egress_policy_applies() {
         run["id"].as_str().expect("id"),
         CheckBody {
             gateway_url: "http://127.0.0.1:9/gw".into(),
-            limit: None,
+            ..CheckBody::default()
         },
     )
     .await;
@@ -381,6 +446,7 @@ async fn mutations_are_admin_only_and_the_egress_policy_applies() {
         CheckBody {
             gateway_url: "http://127.0.0.1:9/gw".into(),
             limit: Some(3),
+            ..CheckBody::default()
         },
     )
     .await;
@@ -458,4 +524,103 @@ async fn the_injected_credential_is_shown_to_admins_only() {
     assert!(!listed.to_string().contains(&key), "{listed}");
     assert!(list(&state, "me", true).to_string().contains(&key));
     end(&state, "me", "credential_injection", id).expect("end");
+}
+
+#[tokio::test]
+async fn test_parameters_are_bounded_and_belong_to_their_scenario() {
+    let state = test_state_with(config());
+    let breaker = run_of(&state, "http://127.0.0.1:9", "circuit_breaker").await;
+    let size = run_of(&state, "http://127.0.0.1:9", "request_size_limit").await;
+    let b = breaker["id"].as_str().expect("id").to_string();
+    let s = size["id"].as_str().expect("id").to_string();
+    let refused = |r: Result<Value, Refused>| match r {
+        Err(Refused(StatusCode::BAD_REQUEST, m)) => m,
+        Err(Refused(status, m)) => panic!("refused with {status}: {m}"),
+        Ok(v) => panic!("checked: {v}"),
+    };
+    let body = |half_open_ms, size_limit| CheckBody {
+        gateway_url: "http://127.0.0.1:9/gw".into(),
+        half_open_ms,
+        size_limit,
+        ..CheckBody::default()
+    };
+    for v in [0, 99, 60_001] {
+        let m = refused(check(&state, "me", "circuit_breaker", &b, body(Some(v), None)).await);
+        assert!(m.contains("half_open_ms: 100 to 60000"), "{m}");
+    }
+    for v in [0, 15, catalog::MAX_SIZE_LIMIT + 1] {
+        let m = refused(check(&state, "me", "request_size_limit", &s, body(None, Some(v))).await);
+        assert!(m.contains("size_limit: 16 to"), "{m}");
+    }
+    let m = refused(check(&state, "me", "circuit_breaker", &b, body(None, Some(1024))).await);
+    assert!(
+        m.contains("size_limit applies to request_size_limit only"),
+        "{m}"
+    );
+    let m = refused(
+        check(
+            &state,
+            "me",
+            "request_size_limit",
+            &s,
+            body(Some(500), None),
+        )
+        .await,
+    );
+    assert!(
+        m.contains("half_open_ms applies to circuit_breaker only"),
+        "{m}"
+    );
+    // A refused check is not counted.
+    let shown = get_run(&state, "me", "circuit_breaker", &b, true).expect("run");
+    assert_eq!(shown["checks"], 0, "{shown}");
+    // The listing and the run describe each parameter with its bounds.
+    let listed = list(&state, "me", true);
+    let p = listed["scenarios"]
+        .as_array()
+        .expect("scenarios")
+        .iter()
+        .find(|s| s["id"] == "circuit_breaker")
+        .map(|s| s["parameters"][0].clone())
+        .expect("circuit_breaker");
+    assert_eq!(p["name"], "half_open_ms");
+    assert_eq!(p["minimum"], 100);
+    assert_eq!(p["maximum"], 60_000);
+    assert_eq!(shown["parameters"][0]["name"], "half_open_ms", "{shown}");
+}
+
+#[tokio::test]
+async fn a_breaker_check_waits_the_half_open_time_and_names_the_trial() {
+    let (_server, state, base) = instance(config()).await;
+    let run = run_of(&state, &base, "circuit_breaker").await;
+    assert!(
+        run["upstream"]
+            .as_str()
+            .expect("upstream")
+            .ends_with("/flaky/after/0"),
+        "{run}"
+    );
+    let upstream = run["upstream"].as_str().expect("upstream").to_string();
+    let gateway = start_gw(behaving("circuit_breaker", &upstream, None)).await;
+    let t = std::time::Instant::now();
+    let v = check_via(&state, &run, &gateway).await;
+    assert!(t.elapsed() >= Duration::from_millis(HALF_OPEN_MS), "{v:#}");
+    assert_eq!(v["passed"], true, "{v:#}");
+    let requests = v["requests"].as_array().expect("requests");
+    // Three failures reach the upstream, the fourth is answered by the gateway,
+    // the trial reaches the upstream again.
+    let reached: Vec<bool> = requests
+        .iter()
+        .map(|r| !r["upstream"].as_array().expect("u").is_empty())
+        .collect();
+    assert_eq!(reached, [true, true, true, false, true], "{v:#}");
+    assert_eq!(requests[4]["trial"], true, "{v:#}");
+    let out = end(
+        &state,
+        "me",
+        "circuit_breaker",
+        run["id"].as_str().expect("id"),
+    )
+    .expect("end");
+    assert_eq!(out["removed"][0]["kind"], "flaky_counters", "{out}");
 }

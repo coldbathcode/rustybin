@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Two more [gateway scenarios](gateway-scenarios.md)**: `circuit_breaker` (the
+  gateway stops forwarding to a failing upstream, then lets a trial through after the
+  half-open time you give as `half_open_ms`) and `request_size_limit` (a body over the
+  `size_limit` you give is answered `413` and never reaches the upstream). Every
+  scenario lists its test parameters with their bounds under `parameters`; the console
+  shows a field for each, the CLI adds `--half-open-ms` and `--size-limit`.
 - **Every tool on one page**: `?page_size=200` on the management MCP URL (it was
   accepted before) now also works with OAuth sign-in, whose resource check ignores the
   query. The new [Connect your coding agent](coding-agents.md) page uses it for the

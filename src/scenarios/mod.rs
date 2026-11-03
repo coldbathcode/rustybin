@@ -1,5 +1,6 @@
 //! Guided gateway scenarios: pick an outcome (retries, rate limiting,
-//! credential injection, timeouts, caching), and a run prepares the upstream
+//! credential injection, timeouts, caching, circuit breakers, request size
+//! limits), and a run prepares the upstream
 //! the test needs (a mock, or a `/flaky` route), says how to point the
 //! gateway at it, sends test traffic through the gateway and compares what
 //! the client got with what reached the upstream (the inspector's captures,
@@ -50,6 +51,12 @@ pub const MAX_CHECKS: u32 = 100;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// The most of an answer's body read (and dropped).
 const MAX_BODY: usize = 64 * 1024;
+/// How often, and how far apart, a check looks for a request's upstream
+/// capture before it counts the request as answered by the gateway.
+const REACHED_LOOKS: u32 = 5;
+const REACHED_SPACING: Duration = Duration::from_millis(50);
+/// The time between the trials of a `circuit_breaker` check.
+const TRIAL_SPACING: Duration = Duration::from_millis(250);
 /// The header that ties an upstream request to the check request.
 pub const SESSION_HEADER: &str = "x-rustybin-session";
 /// Random bytes of a run id (96 bits).
@@ -106,7 +113,8 @@ impl Run {
             "expires_at": self.expires_at,
             "upstream": self.upstream,
             "request_path": self.scenario.request_path,
-            "setup": self.scenario.setup_for(&self.upstream, key),
+            "parameters": self.scenario.parameters(),
+            "setup":self.scenario.setup_for(&self.upstream, key),
             "key_hidden": self.key.is_some() && !reveal,
             "resources": resources,
             "checks": self.checks,
@@ -303,6 +311,12 @@ pub struct CheckBody {
     /// `rate_limiting`: the limit set on the gateway.
     #[serde(default)]
     pub limit: Option<u32>,
+    /// `circuit_breaker`: the gateway's half-open time, in milliseconds.
+    #[serde(default)]
+    pub half_open_ms: Option<u64>,
+    /// `request_size_limit`: the gateway's body limit, in bytes.
+    #[serde(default)]
+    pub size_limit: Option<u64>,
 }
 
 /// Clears a run's `checking` flag however the check ends (a dropped
@@ -331,12 +345,29 @@ pub async fn check(
     let bad = |m: String| Refused::new(StatusCode::BAD_REQUEST, m);
     let gateway = body.gateway_url.trim().trim_end_matches('/').to_string();
     crate::egress::parse_url(&gateway, false).map_err(|e| bad(format!("gateway_url: {e}")))?;
-    let (sc, k, upstream, prefix) = {
+    let (sc, k, upstream, prefix, params) = {
         let mut runs = state.scenarios.runs();
         let r = runs
             .iter_mut()
             .find(|r| r.id == run && r.scenario.id == scenario && r.owner == owner)
             .ok_or_else(|| not_found(scenario, run))?;
+        let params = r
+            .scenario
+            .params_of(
+                body.limit.map(u64::from),
+                body.half_open_ms,
+                body.size_limit,
+            )
+            .map_err(bad)?;
+        // The body under the limit must fit this instance's own limit.
+        if r.scenario.id == "request_size_limit"
+            && params.size_limit / 2 > state.config.body_limit as u64
+        {
+            return Err(bad(format!(
+                "size_limit: at most {} on this instance (twice RUSTYBIN_BODY_LIMIT: the body under the limit must reach the upstream)",
+                state.config.body_limit as u64 * 2
+            )));
+        }
         if r.checking {
             return Err(Refused::new(
                 StatusCode::CONFLICT,
@@ -351,20 +382,17 @@ pub async fn check(
         }
         r.checking = true;
         r.checks += 1;
-        (r.scenario, r.checks, r.upstream.clone(), r.session_prefix())
+        (
+            r.scenario,
+            r.checks,
+            r.upstream.clone(),
+            r.session_prefix(),
+            params,
+        )
     };
     let _checking = Checking {
         scenarios: state.scenarios.clone(),
         run: run.to_string(),
-    };
-    let limit = match (sc.id, body.limit) {
-        ("rate_limiting", None) => catalog::DEFAULT_LIMIT,
-        ("rate_limiting", Some(l)) if (1..=catalog::MAX_LIMIT).contains(&l) => l,
-        ("rate_limiting", Some(_)) => {
-            return Err(bad(format!("limit: 1 to {}", catalog::MAX_LIMIT)));
-        }
-        (_, Some(_)) => return Err(bad("limit applies to rate_limiting only".into())),
-        (_, None) => 0,
     };
     let target = format!("{gateway}{}", sc.request_path);
     let pinned = state
@@ -379,34 +407,60 @@ pub async fn check(
 
     // The run's secret prefix: only the requests of this check match it.
     let prefix = format!("{prefix}{k}-");
+    let session = |n: usize| format!("{prefix}{n}");
     let mut sent = Vec::new();
-    for n in 0..sc.requests(limit) {
-        let session = format!("{prefix}{n}");
-        let t = Instant::now();
-        let r = client
-            .get(&target)
-            .header(SESSION_HEADER, &session)
-            .send()
-            .await;
-        let mut s = Sent {
-            n,
-            ..Sent::default()
-        };
-        match r {
-            Ok(mut resp) => {
-                s.status = resp.status().as_u16();
-                let mut read = 0usize;
-                while let Ok(Some(chunk)) = resp.chunk().await {
-                    read += chunk.len();
-                    if read > MAX_BODY {
+    match sc.id {
+        "request_size_limit" => {
+            // A body half the limit, then one twice the limit.
+            let sizes = [params.size_limit / 2, params.size_limit * 2];
+            for (n, size) in sizes.into_iter().enumerate() {
+                let size = size as usize;
+                let body = Bytes::from(vec![b'x'; size]);
+                let mut s = send_one(&client, &target, n, &session(n), Some(body)).await;
+                s.bytes = Some(size);
+                sent.push(s);
+            }
+        }
+        "circuit_breaker" => {
+            // Until the gateway answers one on its own (nothing upstream).
+            let mut opened_at = None;
+            for n in 0..catalog::MAX_BREAKER_REQUESTS {
+                let s = send_one(&client, &target, n, &session(n), None).await;
+                let answered = Instant::now();
+                let failed = s.status == 0;
+                sent.push(s);
+                if failed {
+                    break;
+                }
+                if !reached_upstream(state, &session(n)).await {
+                    opened_at = (n > 0).then_some(answered);
+                    break;
+                }
+            }
+            if let Some(at) = opened_at {
+                // The half-open time, plus a little for the gateway's clock.
+                let ms = params.half_open_ms + params.half_open_ms / 10 + 100;
+                tokio::time::sleep_until((at + Duration::from_millis(ms)).into()).await;
+                for i in 0..catalog::BREAKER_TRIALS {
+                    let n = sent.len();
+                    if i > 0 {
+                        tokio::time::sleep(TRIAL_SPACING).await;
+                    }
+                    let mut s = send_one(&client, &target, n, &session(n), None).await;
+                    s.trial = true;
+                    let failed = s.status == 0;
+                    sent.push(s);
+                    if failed || reached_upstream(state, &session(n)).await {
                         break;
                     }
                 }
             }
-            Err(e) => s.error = Some(without_url(&e)),
         }
-        s.ms = t.elapsed().as_millis() as u64;
-        sent.push(s);
+        _ => {
+            for n in 0..sc.requests(params.limit) {
+                sent.push(send_one(&client, &target, n, &session(n), None).await);
+            }
+        }
     }
     // Upstream captures land as the upstream finishes: wait for them to
     // settle (the slow upstream of `timeouts` is not waited for).
@@ -429,7 +483,7 @@ pub async fn check(
             seen = now;
         }
     }
-    let expectations = sc.evaluate(&sent, limit);
+    let expectations = sc.evaluate(&sent, &params);
     let passed = !expectations.is_empty() && expectations.iter().all(|e| e.ok);
     let mut hints = Vec::new();
     if let Some(e) = sent.iter().find_map(|s| s.error.as_ref()) {
@@ -458,6 +512,59 @@ pub async fn check(
     }
     tracing::info!(scenario = sc.id, run, passed, "gateway scenario checked");
     Ok(verdict)
+}
+
+/// Send one request of a check (a GET, or a POST of `body`) and read (and
+/// drop) at most [`MAX_BODY`] of the answer.
+async fn send_one(
+    client: &reqwest::Client,
+    target: &str,
+    n: usize,
+    session: &str,
+    body: Option<Bytes>,
+) -> Sent {
+    let t = Instant::now();
+    let req = match body {
+        Some(b) => client
+            .post(target)
+            .header("content-type", "application/octet-stream")
+            .body(b),
+        None => client.get(target),
+    };
+    let r = req.header(SESSION_HEADER, session).send().await;
+    let mut s = Sent {
+        n,
+        ..Sent::default()
+    };
+    match r {
+        Ok(mut resp) => {
+            s.status = resp.status().as_u16();
+            let mut read = 0usize;
+            while let Ok(Some(chunk)) = resp.chunk().await {
+                read += chunk.len();
+                if read > MAX_BODY {
+                    break;
+                }
+            }
+        }
+        Err(e) => s.error = Some(without_url(&e)),
+    }
+    s.ms = t.elapsed().as_millis() as u64;
+    s
+}
+
+/// Did a request of a check reach the upstream? Its capture may land a
+/// moment after the gateway answered: look a few times.
+async fn reached_upstream(state: &AppState, session: &str) -> bool {
+    for i in 0..REACHED_LOOKS {
+        if !state.inspector.for_session(session, 1).is_empty() {
+            return true;
+        }
+        if i + 1 < REACHED_LOOKS {
+            tokio::time::sleep(REACHED_SPACING).await;
+        }
+    }
+    false
 }
 
 /// A transport error without the URL (the caller gave it; the text stays short).
@@ -611,7 +718,7 @@ pub fn catalog() -> Vec<Endpoint> {
             LIST_PATH,
             &["GET"],
             category::CONTROL,
-            "Gateway scenarios (retries, rate limiting, credential injection, timeouts, caching) and the caller's runs",
+            "Gateway scenarios (retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits) and the caller's runs",
         )
         .example(Example::get("Scenarios", LIST_PATH)),
         Endpoint::new(
@@ -649,6 +756,18 @@ pub fn catalog() -> Vec<Endpoint> {
             .skip_check("needs a run and a gateway"),
         ),
     ]
+}
+
+/// The properties of a check's body: the gateway URL and every test
+/// parameter.
+fn check_properties() -> Value {
+    let mut props = serde_json::Map::new();
+    props.insert(
+        "gateway_url".into(),
+        json!({ "type": "string", "description": "The URL the gateway serves the route at" }),
+    );
+    props.extend(catalog::param_properties());
+    Value::Object(props)
 }
 
 pub fn openapi_paths() -> Value {
@@ -691,10 +810,7 @@ pub fn openapi_paths() -> Value {
             "parameters": [id, run],
             "requestBody": { "required": true, "content": { "application/json": { "schema": {
                 "type": "object", "required": ["gateway_url"], "additionalProperties": false,
-                "properties": {
-                    "gateway_url": { "type": "string", "description": "The URL the gateway serves the route at" },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": catalog::MAX_LIMIT, "description": "rate_limiting: the limit set on the gateway" }
-                }
+                "properties": check_properties()
             } } } },
             "responses": { "200": { "description": "The verdict", "content": obj }, "400": { "description": "Invalid body" }, "403": { "description": "The egress policy refused the gateway URL" }, "404": { "description": "No such run in this session" }, "409": { "description": "A check is running" } }
         } }

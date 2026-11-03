@@ -98,6 +98,8 @@ pub async fn check_gateway_scenario(ctx: &CallCtx, args: &Value, params: &Value)
     let body = CheckBody {
         gateway_url: gateway.to_string(),
         limit: arg_u64(args, "limit").map(|l| l.min(u32::MAX as u64) as u32),
+        half_open_ms: arg_u64(args, "half_open_ms"),
+        size_limit: arg_u64(args, "size_limit"),
     };
     match scenarios::check(&ctx.app, &owner(ctx), id, run, body).await {
         Ok(v) => {

@@ -248,10 +248,10 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("tests", "delete", "<name>", "Delete a saved test.", NO_FLAGS, [("DELETE", "/_rustybin/tests/{name}")], true, "tests delete order-1 --yes"),
     cmd!("tests", "run", "[--names a,b] [--var NAME=value]... [--junit]", "Run saved tests (all by default); exits 1 when one fails. --junit prints JUnit XML for CI.", &[Flag::value("--names", "Only these tests, comma separated"), Flag::value("--var", "A {{variable}}: NAME=value, or NAME=- (stdin) or NAME=@file for a credential (repeat it)"), Flag::switch("--junit", "Print the JUnit XML report")], [("POST", "/_rustybin/tests/run")], false, "tests run --junit"),
     cmd!("tests", "export", "", "Every saved test as one Hurl file (hurl --test --variable base_url=...).", NO_FLAGS, [("GET", "/_rustybin/tests/export")], false, "tests export"),
-    cmd!("scenario", "list", "", "The gateway scenarios (retries, rate limiting, credential injection, timeouts, caching) and your runs.", NO_FLAGS, [("GET", "/_rustybin/scenarios")], false, "scenario list"),
+    cmd!("scenario", "list", "", "The gateway scenarios (retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits) and your runs.", NO_FLAGS, [("GET", "/_rustybin/scenarios")], false, "scenario list"),
     cmd!("scenario", "start", "<scenario>", "Prepare a run: its upstream and the steps to configure on the gateway.", NO_FLAGS, [("POST", "/_rustybin/scenarios/{id}/runs")], false, "scenario start caching"),
     cmd!("scenario", "show", "<scenario> <run>", "A run: the setup, what it created, the last verdict.", NO_FLAGS, [("GET", "/_rustybin/scenarios/{id}/runs/{run}")], false, "scenario show caching 1a2b3c4d"),
-    cmd!("scenario", "check", "<scenario> <run> --gateway U [--limit N]", "Send the run's test requests through the gateway and compare what the client got with what reached the upstream; exits 1 when an expectation fails.", &[Flag::value("--gateway", "The URL the gateway serves the route at"), Flag::value("--limit", "rate_limiting: the limit set on the gateway")], [("POST", "/_rustybin/scenarios/{id}/runs/{run}/check")], false, "scenario check caching 1a2b3c4d --gateway http://localhost:8000/catalog-api"),
+    cmd!("scenario", "check", "<scenario> <run> --gateway U [--limit N] [--half-open-ms MS] [--size-limit BYTES]", "Send the run's test requests through the gateway and compare what the client got with what reached the upstream; exits 1 when an expectation fails.", &[Flag::value("--gateway", "The URL the gateway serves the route at"), Flag::value("--limit", "rate_limiting: the limit set on the gateway"), Flag::value("--half-open-ms", "circuit_breaker: the gateway's half-open time in milliseconds"), Flag::value("--size-limit", "request_size_limit: the gateway's body limit in bytes")], [("POST", "/_rustybin/scenarios/{id}/runs/{run}/check")], false, "scenario check caching 1a2b3c4d --gateway http://localhost:8000/catalog-api"),
     cmd!("scenario", "end", "<scenario> <run>", "End a run: remove the mock and counters it created, nothing else.", NO_FLAGS, [("DELETE", "/_rustybin/scenarios/{id}/runs/{run}")], true, "scenario end caching 1a2b3c4d --yes"),
     cmd!("bins", "list", "", "Your request bins.", NO_FLAGS, [("GET", "/bin")], false, "bins list"),
     cmd!("bins", "create", "[--status N] [--body B] [--delay-ms N]", "A new bin, with the answer it gives.", &[Flag::value("--status", "The status the bin answers"), Flag::value("--body", "The body it answers: a file or inline JSON"), Flag::value("--delay-ms", "A delay before the answer")], [("POST", "/bin")], false, "bins create --status 202"),
@@ -1696,10 +1696,16 @@ async fn scenario(ctx: &mut Ctx, verb: &str) -> Result<()> {
                 })?
                 .to_string();
             let mut body = json!({ "gateway_url": gateway });
-            if let Some(l) = ctx.args.value("--limit") {
-                body["limit"] = json!(l
-                    .parse::<u32>()
-                    .map_err(|_| Fail::Usage("--limit needs a number".into()))?);
+            for (flag, key) in [
+                ("--limit", "limit"),
+                ("--half-open-ms", "half_open_ms"),
+                ("--size-limit", "size_limit"),
+            ] {
+                if let Some(l) = ctx.args.value(flag) {
+                    body[key] = json!(l
+                        .parse::<u64>()
+                        .map_err(|_| Fail::Usage(format!("{flag} needs a number")))?);
+                }
             }
             let v = ctx
                 .client()?

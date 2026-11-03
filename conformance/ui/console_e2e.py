@@ -1145,7 +1145,7 @@ def run_theme(browser, theme):
         # refused with the reason; Clean up removes the mock.
         page.goto(BASE + "/ui/#/scenarios")
         page.wait_for_selector("[data-scenario='caching']")
-        expect(page.locator("#scenario-catalog [data-scenario]")).to_have_count(5)
+        expect(page.locator("#scenario-catalog [data-scenario]")).to_have_count(7)
         page.click("#scenario-start-caching")
         run = page.locator("[data-run]").first
         run.wait_for()
@@ -1165,6 +1165,21 @@ def run_theme(browser, theme):
         expect(page.locator(f"[data-run='{run_id}']")).to_have_count(0)
         with urllib.request.urlopen(BASE + "/_rustybin/mocks", timeout=10) as r:
             assert not any(m["name"] == mock for m in json.load(r)["mocks"]), mock
+        # A circuit breaker run has its half-open field from the catalogue;
+        # a value out of its bounds is refused with them.
+        page.click("#scenario-start-circuit_breaker")
+        run = page.locator("[data-run]").first
+        run.wait_for()
+        run_id = run.get_attribute("data-run")
+        expect(run).to_contain_text("/flaky/after/0")
+        expect(run).to_contain_text("Half-open time on the gateway")
+        page.fill("#gateway-" + run_id, "http://127.0.0.1:9/gateway")
+        page.fill("#half-open-ms-" + run_id, "50")
+        page.click("#check-" + run_id)
+        expect(run.locator(".notice.err")).to_contain_text("half_open_ms: 100 to 60000")
+        page.once("dialog", lambda d: d.accept())
+        page.click("#end-" + run_id)
+        expect(page.locator(f"[data-run='{run_id}']")).to_have_count(0)
 
     step("gateway scenarios: prepare, a refused check, clean up", gateway_scenarios)
 

@@ -529,7 +529,7 @@ server and a gateway's JWT validation:
 | `run_tests` | admin | Run every saved test or the ones named, in process or through each test's gateway; confirmed when a test goes through a gateway or sends a method other than `GET`, `HEAD` or `OPTIONS`; one run at a time. Results under `untrusted_results`, JUnit with `format: junit` |
 | `list_gateway_scenarios` / `get_gateway_scenario_run` | read | The [gateway scenarios](gateway-scenarios.md) and the caller's runs with their last verdicts; the credential-injection key is shown to admin callers only (`key_hidden`) |
 | `start_gateway_scenario` | admin | Prepare a run: its upstream and the steps to configure on the gateway |
-| `check_gateway_scenario` | admin | Send the run's test traffic through the gateway (egress purpose `scenario`) and compare what the client got with what reached the upstream (confirmed) |
+| `check_gateway_scenario` | admin | Send the run's test traffic through the gateway (egress purpose `scenario`) and compare what the client got with what reached the upstream, with the scenario's test parameters (`limit`, `half_open_ms`, `size_limit`) (confirmed) |
 | `end_gateway_scenario` | admin | Remove what the run created, nothing else (confirmed) |
 | `list_checkpoints` | read | The [checkpoints](checkpoints.md), or one with the mocks it holds |
 | `save_checkpoint` | admin | Save the instance's API mocks (with their data) and the health toggle; `replace` overwrites one of that name; at most 20 |

@@ -66,7 +66,7 @@ The marker a session looks for is the first row that is not done.
 |---|---|---|---|
 | [01](step-01-run-history.md) | A history of saved-test runs | | |
 | [02](step-02-schedules.md) | Saved tests on a schedule, with a failure notice | 01 | |
-| [03](step-03-scenarios-resilience.md) | Scenarios: circuit breakers and request size limits | | |
+| [03](step-03-scenarios-resilience.md) | Scenarios: circuit breakers and request size limits | | done 2026-11-03 |
 | [04](step-04-scenarios-http.md) | Scenarios: CORS and header transformation | | |
 | [05](step-05-checkpoints-in-git.md) | Checkpoints in the configuration repository | | |
 | [06](step-06-conflict-compare.md) | A compare view for a stale edit | | |

@@ -621,8 +621,8 @@ pub static TOOLS: &[ToolDef] = &[
             "confirm": confirm_prop()
         }), &[]),
     },
-    tool!("list_gateway_scenarios", "Gateway scenarios", "The guided gateway scenarios (retries, rate limiting, credential injection, timeouts, caching): what each proves, the upstream it prepares, the steps on the gateway; and the caller's runs with their last verdicts.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
-    tool!("start_gateway_scenario", "Start a gateway scenario", "Prepare a scenario run: create its upstream (a mock that is never saved and ends with the run, or a /flaky route) and answer the steps to configure on the gateway, with the upstream URL. Then call check_gateway_scenario with the URL the gateway serves the route at. Admin.", Right::Admin, ro=false, destructive=false, idem=false, confirm=false, || obj(json!({ "scenario": { "type": "string", "description": "retries, rate_limiting, credential_injection, timeouts or caching" } }), &["scenario"])),
+    tool!("list_gateway_scenarios", "Gateway scenarios", "The guided gateway scenarios (retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits): what each proves, the test parameters a check takes, the upstream it prepares, the steps on the gateway; and the caller's runs with their last verdicts.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("start_gateway_scenario", "Start a gateway scenario", "Prepare a scenario run: create its upstream (a mock that is never saved and ends with the run, or a /flaky route) and answer the steps to configure on the gateway, with the upstream URL. Then call check_gateway_scenario with the URL the gateway serves the route at. Admin.", Right::Admin, ro=false, destructive=false, idem=false, confirm=false, || obj(json!({ "scenario": { "type": "string", "description": "retries, rate_limiting, credential_injection, timeouts, caching, circuit_breaker or request_size_limit" } }), &["scenario"])),
     tool!("get_gateway_scenario_run", "Get a scenario run", "One of the caller's scenario runs: the setup, what it created and the last verdict.", Right::Read, ro=true, destructive=false, idem=true, confirm=false, || obj(super::scenarios::run_props(), &["scenario", "run"])),
     ToolDef {
         name: "check_gateway_scenario",
@@ -637,7 +637,9 @@ pub static TOOLS: &[ToolDef] = &[
         input_schema: || {
             let mut props = super::scenarios::run_props();
             props["gateway_url"] = json!({ "type": "string", "description": "The URL the gateway serves the route at (no query string)" });
-            props["limit"] = json!({ "type": "integer", "minimum": 1, "maximum": crate::scenarios::catalog::MAX_LIMIT, "description": "rate_limiting only: the limit set on the gateway (default 5)" });
+            for (k, v) in crate::scenarios::catalog::param_properties() {
+                props[k] = v;
+            }
             props["confirm"] = confirm_prop();
             obj(props, &["scenario", "run", "gateway_url"])
         },

@@ -13,11 +13,30 @@ No gateway product is assumed: the steps are written for any gateway.
 | `credential_injection` | Clients send no credential; the gateway adds the upstream's own, and the upstream accepts every request | a mock that requires `X-Upstream-Key` with a key made for the run |
 | `timeouts` | The gateway stops waiting for a slow upstream and answers a gateway error before the upstream would have | a mock whose `GET /slow` answers after 3 seconds |
 | `caching` | Repeated GETs come from the gateway's cache: only the first reaches the upstream | a mock whose `GET /catalog` answers `Cache-Control: public, max-age=300` |
+| `circuit_breaker` | The gateway stops forwarding to an upstream that keeps failing and answers on its own, then lets a trial request through after the half-open time | `/flaky/after/0` (answers `503` to every request) |
+| `request_size_limit` | The gateway refuses a body over the limit with `413` before the upstream sees it, and forwards one under it | a mock with `POST /upload` (any body) |
+
+What to turn on at the gateway for the two resilience scenarios:
+
+- **`circuit_breaker`**: a circuit breaker on the route (often called passive health
+  checks or outlier detection on the upstream) that opens after a few failed requests
+  in a row, answers on its own while open, and lets a trial request through after a
+  half-open time. The check sends requests until one is answered without reaching the
+  upstream (at most 20), waits the half-open time you give it (`half_open_ms`, 100 to
+  60000, default 10000) plus a tenth, and sends up to three trials: a pass needs one
+  of them to reach the upstream. The upstream keeps failing, so the trial fails and
+  the circuit opens again: wait for it to close before checking again.
+- **`request_size_limit`**: a request body size limit on the route. Give the check the
+  limit in bytes (`size_limit`, 16 to 1048576, default 1048576): it sends
+  `POST /upload` with a body half that size, then one twice that size (so a limit set
+  in kilobytes or megabytes, either 1000 or 1024 to the unit, still falls between
+  them). The body under the limit must also fit this instance's own
+  `RUSTYBIN_BODY_LIMIT`.
 
 ## How a run works
 
 1. **Prepare.** Starting a run creates its upstream: a mock named `scn-<run>` (never
-   saved, exported, kept in a checkpoint nor pruned; it ends with the run) or, for `retries`, a `/flaky` route. The answer has
+   saved, exported, kept in a checkpoint nor pruned; it ends with the run) or, for `retries` and `circuit_breaker`, a `/flaky` route. The answer has
    the upstream URL and the steps for the gateway.
 2. **Configure the gateway.** Create a route whose upstream is that URL, turn on the
    feature, and let the route forward the `X-Rustybin-Session` request header. The
@@ -77,6 +96,16 @@ on the same machine). Until then the check is refused with the reason:
 
 The rate limiting check sends twice the limit you give it (`limit`, default 5, at
 most 20); wait for the gateway's window to pass before checking again.
+
+Each scenario lists its test parameters under `parameters` (name, bounds, default),
+and a run repeats them: the console shows a field for each, the CLI has `--limit`,
+`--half-open-ms` and `--size-limit`, the `check_gateway_scenario` tool takes them by
+name. A parameter out of its bounds, or given to a scenario that does not take it, is
+refused with the bounds before anything is sent:
+
+```hurl
+{{#include ../examples/scenarios/scenarios.hurl:parameters}}
+```
 
 ## Who sees a run
 
