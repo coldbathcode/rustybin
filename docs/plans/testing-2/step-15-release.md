@@ -21,8 +21,8 @@ with the binaries, digest commit) once the owner says go.
 - **Upgrading from 0.3**: the console user becomes the first admin, 0.3 tokens keep working until
   they expire, the old scopes map to roles, what a `403` now names, the CLI's exit code 3, and the portal: every
   published item stays open, `portal.auth=password` now asks for a portal sign-in (a user with
-  `portal.read`) instead of storing a console token, and a closed mock's spec leaves
-  `/mock/<name>/_rustybin/openapi.*`.
+  `portal.read`) instead of storing a console token, and closing a mock
+  turns on its mocked security.
 
 ## Release
 

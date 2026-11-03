@@ -111,13 +111,10 @@ Add the step's build notes, set the row to done with the date, push.
 - **One release or two**: everything ships as 0.4.0 at the end. Releasing the testing workflows
   first (0.4.0 after step 06) and access control as 0.5.0 is the other way; say before step 07 is
   built.
-- **Closed APIs on the portal** (step 13): a signed-out visitor sees a closed API in the list with a
-  lock (title and summary only); say if closed APIs should be hidden from them entirely. Closed
-  hides the documentation, spec and credentials, not the mock's traffic: the gateway still calls
-  the mock, protected by its mocked security, API keys or the gateway. Say if closed should also
-  refuse the mock's own calls from anyone not signed in (that would stop gateway tests that do not
-  carry a portal sign-in). The step needs users (07 to 09); a smaller version (the open and closed
-  field, the portal session, the single console user as the only reader) could ship sooner as a
-  0.3.x point release if it is wanted before access control.
+- **Closed APIs on the portal** (step 13), decided 2026-11-03: a signed-out visitor sees a closed
+  API with a lock; its docs and calls are seen but not used until the reader signs in and gets
+  the credentials (Try it, demo credentials and collections locked; a closed mock has its mocked
+  security on, so a call without the credentials is refused); no 0.3.x point release, it ships
+  with 0.4.0.
 - **The audit log's home** (step 14): files in the state directory with retention. A webhook or a
   syslog target for a central log is not in the plan; say if one is needed.
