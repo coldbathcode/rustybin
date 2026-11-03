@@ -70,7 +70,7 @@ carries Linux and macOS binaries (`.github/workflows/release-binaries.yml`).
 Steps 07 to 15 of [docs/plans/testing-2/master-plan.md](docs/plans/testing-2/master-plan.md) (users, roles and
 permissions, every route and tool checking a permission, invitations, single sign-on, projects, agents acting for a
 user, open and closed portal APIs, the audit log and a security pass of 33 findings, each with build notes), released
-as `v0.5.0`; the notes per step follow below.
+as `v0.5.0` (the signed image's digest is in the changelog); the notes per step follow below.
 
 ## Rustybin 0.4, testing workflows (built and released 2026-11-03)
 

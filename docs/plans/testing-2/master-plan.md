@@ -79,7 +79,7 @@ The marker a session looks for is the first row that is not done.
 | [12](step-12-agents-for-users.md) | Access control 6: agents act for a user | 09 | done 2026-11-03 |
 | [13](step-13-portal-access.md) | Access control 7: open and closed APIs on the portal | 09 | done 2026-11-03 |
 | [14](step-14-audit-log.md) | Access control 8: the audit log and a security pass | 07 to 13 | done 2026-11-03 (the audit log; the security pass: 33 findings from four reviews, all reproduced and fixed) |
-| [15](step-15-release.md) | Docs and release 0.5.0 (access control) | all | done 2026-11-03 (`v0.5.0`; the pages landed with each step, the changelog entry has the upgrade notes) |
+| [15](step-15-release.md) | Docs and release 0.5.0 (access control) | all | done 2026-11-03 (`v0.5.0`, image `sha256:70baf467a6be...`; the pages landed with each step, the changelog entry has the upgrade notes) |
 
 Steps 01 to 06 and 07 to 14 are independent tracks; a testing step built after step 08 declares
 its routes' permissions as it lands, one built before is covered by step 08's sweep. Steps 10, 11,

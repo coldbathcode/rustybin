@@ -40,6 +40,13 @@ script may notice):
 
 The entries below are each step's, with their own behaviour changes.
 
+`cargo` version 0.5.0, the tag `v0.5.0`, the signed multi-arch image
+`ghcr.io/coldbathcode/rustybin:0.5.0`, digest
+`sha256:70baf467a6be5faca3a85655719cb97045ffe610d0a4f63d12a697eef0470135` (verify it with the
+cosign command of the [quick start](quick-start.md#docker); the
+[release](https://github.com/coldbathcode/rustybin/releases/tag/v0.5.0) carries the same
+values, and the Linux and macOS binaries).
+
 - Users, roles and permissions, the model (access control, step 07 of the
   [plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/testing-2/master-plan.md)):
   a user store (`<state>/users.json`), 38 named permissions, the built-in roles
