@@ -836,7 +836,7 @@ pub fn get_mock_traffic(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
         Err(e) => return service_error(&e),
     };
     let limit = limit.min(ctx.app.mocks.limits().captures);
-    let entries = snap.capture.entries(limit);
+    let (entries, total) = snap.capture.visible(&s.traffic_scope(&snap), limit);
     let mut budget = Budget::new();
     let rows: Vec<Value> = entries
         .iter()
@@ -849,7 +849,7 @@ pub fn get_mock_traffic(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     }
     let summary = format!(
         "Mock {name:?} received {} call(s) in total; showing the latest {}{}. Outcomes: {}. Request content is under untrusted_* fields.",
-        snap.capture.total(),
+        total,
         rows.len(),
         if include_bodies { " with bodies" } else { " (metadata only; include_bodies for bodies)" },
         by_outcome
@@ -863,7 +863,7 @@ pub fn get_mock_traffic(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
         summary,
         json!({
             "mock": name,
-            "total": snap.capture.total(),
+            "total": total,
             "count": rows.len(),
             "by_outcome": by_outcome,
             "result_truncated": budget.truncated,

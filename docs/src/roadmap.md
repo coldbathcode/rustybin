@@ -5,7 +5,9 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-Nothing is planned yet beyond the list under consideration below.
+[The hosted demo](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/hosted-demo/master-plan.md):
+making a public self-service instance safe to run on the current release, and putting
+it online. The candidates under consideration below are not scheduled.
 
 ## Recently built
 

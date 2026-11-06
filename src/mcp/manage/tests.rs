@@ -942,6 +942,59 @@ fn self_service_config() -> Config {
 }
 
 #[tokio::test]
+async fn a_visitor_reads_only_its_own_calls_through_the_tools() {
+    let app = app_with(self_service_config());
+    let req = Request::builder()
+        .uri("/mock/petstore/v1/pets/1")
+        .header("x-rustybin-session", "visitor-a")
+        .header("authorization", "Bearer visitor-a-gateway-credential")
+        .body(Body::empty())
+        .expect("request");
+    let resp = app.clone().oneshot(req).await.expect("response");
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    let args = json!({ "name": "petstore", "include_bodies": true });
+    let b = [("x-rustybin-session", "visitor-b")];
+    let r = tool(&app, &b, "get_mock_traffic", args.clone()).await;
+    assert!(!is_error(&r), "{r}");
+    assert!(
+        !r.to_string().contains("visitor-a-gateway-credential"),
+        "{r}"
+    );
+    assert_eq!(r["structuredContent"]["total"], 0, "{r}");
+    assert_eq!(r["structuredContent"]["requests"], json!([]), "{r}");
+
+    let a = [("x-rustybin-session", "visitor-a")];
+    let r = tool(&app, &a, "get_mock_traffic", args.clone()).await;
+    assert_eq!(r["structuredContent"]["total"], 1, "{r}");
+
+    // A wait sees only the caller's own calls too.
+    let waiting = {
+        let app = app.clone();
+        tokio::spawn(async move {
+            let args = json!({ "mock": "petstore", "timeout_secs": 1 });
+            tool(
+                &app,
+                &[("x-rustybin-session", "visitor-b")],
+                "wait_for_requests",
+                args,
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let req = Request::builder()
+        .uri("/mock/petstore/v1/pets/2")
+        .header("x-rustybin-session", "visitor-a")
+        .header("authorization", "Bearer visitor-a-gateway-credential")
+        .body(Body::empty())
+        .expect("request");
+    app.clone().oneshot(req).await.expect("response");
+    let r = waiting.await.expect("join");
+    assert!(!r.to_string().contains("/pets/2"), "{r}");
+}
+
+#[tokio::test]
 async fn visitors_manage_only_their_own_mocks() {
     let app = app_with(self_service_config());
     // An anonymous visitor on a public instance: reads, plus creating a mock

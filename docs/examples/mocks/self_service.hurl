@@ -150,6 +150,27 @@ Authorization: Bearer {{admin_token}}
 HTTP 200
 # ANCHOR_END: ss_pause
 
+# ANCHOR: ss_own_traffic
+GET {{ss_url}}/mock/petstore/v1/pets/1
+X-Rustybin-Session: docs-visitor-c
+Authorization: Bearer a-credential-of-visitor-c
+HTTP 200
+
+GET {{ss_url}}/_rustybin/mocks/petstore/requests
+X-Rustybin-Session: docs-visitor-c
+HTTP 200
+[Asserts]
+jsonpath "$.total" == 1
+jsonpath "$.requests[0].path" == "/v1/pets/1"
+
+GET {{ss_url}}/_rustybin/mocks/petstore/requests
+X-Rustybin-Session: docs-visitor-d
+HTTP 200
+[Asserts]
+jsonpath "$.total" == 0
+jsonpath "$.requests" count == 0
+# ANCHOR_END: ss_own_traffic
+
 # ANCHOR: ss_end
 DELETE {{ss_url}}/_rustybin/mocks/visit
 X-Rustybin-Mock-Token: {{mock_token}}

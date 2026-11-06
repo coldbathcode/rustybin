@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+**Security**: on a public instance, or to an API key in shared mode, the captured
+requests of an instance mock (the built-in `petstore`, for example) were readable by
+any other caller, with the `Authorization` and `Cookie` headers and the query string
+the sender used. A caller without a credential now reads only its own session's calls
+and a key only its own, on the requests list, one request by number, the live feed,
+the rule tester and the `get_mock_traffic` and `wait_for_requests` tools; `total` then
+counts those calls. The operator, signed-in users and a visitor's own mocks are
+unchanged. An operator of a public instance on 0.5.0 or earlier should treat
+credentials sent to its instance mocks as seen.
+
 ## 0.5.0 (2026-11-03): access control
 
 Several people on one instance, each with the roles they need: users with roles

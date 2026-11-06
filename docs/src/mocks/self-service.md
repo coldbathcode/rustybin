@@ -227,6 +227,28 @@ Dropped headers and media types show up as warnings in the
 [deploy report](responses.md#deploy-checks); configured headers that would be
 dropped are refused when saving.
 
+## Whose traffic a caller reads
+
+A captured request holds what its sender presented, credentials included, so on a
+shared instance a mock that belongs to nobody in particular (the built-in `petstore`,
+any instance mock) shows each caller its own calls:
+
+- a caller without a credential on a public instance reads the calls of its own
+  session (`X-Rustybin-Session`, else its address);
+- an API key in shared mode reads its own calls;
+- the operator, and anyone signed in with `traffic.read`, reads all of them;
+- a visitor's own mock is read by its owner, who reads every call to it, whoever sent
+  it (a gateway in front of the mock, for example).
+
+This holds on every way in: the requests list, one request by number, the live feed,
+the rule tester and the `get_mock_traffic` and `wait_for_requests` tools. A call that
+comes through a gateway keeps your session only if the gateway forwards
+`X-Rustybin-Session`, and a call through a mock's own MCP server carries your address.
+
+```hurl
+{{#include ../../examples/mocks/self_service.hurl:ss_own_traffic}}
+```
+
 ## Limits
 
 | What | Default | Setting |

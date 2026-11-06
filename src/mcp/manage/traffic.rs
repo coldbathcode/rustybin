@@ -257,10 +257,12 @@ pub async fn wait_for_requests(ctx: &CallCtx, access: &Access, args: &Value) -> 
         let method = arg_str(args, "method").map(|m| m.to_ascii_uppercase());
         let prefix = arg_str(args, "path_prefix").map(str::to_string);
         let mut rx = snap.capture.subscribe();
+        let scope = s.traffic_scope(&snap);
         let matches = |c: &crate::mocks::capture::MockCapture| {
-            method
-                .as_deref()
-                .is_none_or(|m| c.method.eq_ignore_ascii_case(m))
+            scope.sees(c)
+                && method
+                    .as_deref()
+                    .is_none_or(|m| c.method.eq_ignore_ascii_case(m))
                 && prefix.as_deref().is_none_or(|p| c.path.starts_with(p))
         };
         let mut rows = Vec::new();

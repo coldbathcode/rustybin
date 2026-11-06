@@ -54,6 +54,9 @@ demo URL, a conference booth):
 
 - **Inspector**: only requests carrying `X-Rustybin-Session` are captured, and the
   inspector API only returns the entries of the `?session=` you ask for.
+- **Mock traffic**: the requests of an instance mock (the sample, for example) list
+  only the caller's own session for a caller without a credential; the operator
+  reads all of them ([details](../mocks/self-service.md#whose-traffic-a-caller-reads)).
 - **Mock LLM records**: `/ai/requests` only lists the caller's own session, and an
   IP-derived session cannot be claimed through `?session=` (nor, on any instance,
   through the `X-Rustybin-Session` header: an `ip:` value is ignored there).

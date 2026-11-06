@@ -6,6 +6,7 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
 use chrono::{DateTime, Utc};
+use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
@@ -813,4 +814,180 @@ async fn duplicates_and_generated_examples_compile_on_the_pool_with_the_allowanc
         out.to_string().contains("compiles per minute"),
         "{status}: {out}"
     );
+}
+
+// ── One visitor never reads another's traffic ───────────────────────
+
+const SECRET: &str = "visitor-a-gateway-credential";
+
+/// A public instance with the shared sample mock, called once by visitor
+/// `alice` with a credential a gateway would forward.
+async fn alice_called_the_sample() -> (Router, AppState) {
+    let mut c = config(None);
+    c.mocks_sample = true;
+    let (app, state, _) = app_on(c);
+    let auth = format!("Bearer {SECRET}");
+    let query = format!("/mock/petstore/v1/pets/1?api_key={SECRET}");
+    let (status, _, _) = call(
+        &app,
+        "GET",
+        &query,
+        &[("x-rustybin-session", "alice"), ("authorization", &auth)],
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{status}");
+    (app, state)
+}
+
+fn seqs(out: &Value) -> Vec<u64> {
+    out["requests"]
+        .as_array()
+        .map(|r| r.iter().filter_map(|e| e["seq"].as_u64()).collect())
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn a_visitor_reads_only_its_own_calls_of_an_instance_mock() {
+    let (app, _state) = alice_called_the_sample().await;
+    let list = "/_rustybin/mocks/petstore/requests";
+
+    // Another visitor: nothing of alice's, not even that she called.
+    let bob = [("x-rustybin-session", "bob")];
+    let (status, _, out) = call(&app, "GET", list, &bob, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!out.to_string().contains(SECRET), "{out}");
+    assert_eq!(seqs(&out), Vec::<u64>::new());
+    assert_eq!(out["total"], 0, "{out}");
+    let (status, _, out) = call(&app, "GET", &format!("{list}/1"), &bob, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{out}");
+    assert!(!out.to_string().contains(SECRET), "{out}");
+
+    // Nor through the rule tester, which quotes the values it saw.
+    let test = "/_rustybin/mocks/petstore/operations/getPetById/rules/test";
+    for body in [json!({"request": 1}), json!({})] {
+        let (status, _, out) = call(&app, "POST", test, &bob, Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{out}");
+        assert_eq!(out["request"], Value::Null, "{out}");
+        assert!(!out.to_string().contains(SECRET), "{out}");
+    }
+
+    // Alice reads her own call; so does the operator, everyone's.
+    let alice = [("x-rustybin-session", "alice")];
+    let (_, _, out) = call(&app, "GET", list, &alice, None).await;
+    assert_eq!(seqs(&out), vec![1], "{out}");
+    let (status, _, _) = call(&app, "GET", &format!("{list}/1"), &alice, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let admin = [("x-rustybin-admin-token", "admin-secret")];
+    let (_, _, out) = call(&app, "GET", list, &admin, None).await;
+    assert_eq!(seqs(&out), vec![1], "{out}");
+}
+
+#[tokio::test]
+async fn an_address_session_is_never_claimed_to_read_traffic() {
+    let (app, _state) = alice_called_the_sample().await;
+    // No session header: the caller's session is its address, and a header
+    // naming an address is ignored, so neither matches alice.
+    for headers in [
+        vec![],
+        vec![("x-rustybin-session", "ip:192.0.2.1")],
+        vec![("x-rustybin-session", "anonymous")],
+    ] {
+        let (_, _, out) = call(
+            &app,
+            "GET",
+            "/_rustybin/mocks/petstore/requests",
+            &headers,
+            None,
+        )
+        .await;
+        assert_eq!(seqs(&out), Vec::<u64>::new(), "{headers:?}: {out}");
+    }
+}
+
+#[tokio::test]
+async fn a_visitor_reads_all_the_traffic_of_its_own_mock() {
+    let (app, _, _) = app_on(config(None));
+    let (status, made) = visitor_create(&app, "alice", None, shop()).await;
+    assert_eq!(status, StatusCode::CREATED, "{made}");
+    let name = made["name"].as_str().expect("name");
+    let token = made["manage_token"].as_str().expect("token");
+    // A gateway's call, from another session: the owner still sees it.
+    let path = format!("/mock/{name}/orders/7");
+    call(&app, "GET", &path, &[("x-rustybin-session", "gw")], None).await;
+    let (_, _, out) = call(
+        &app,
+        "GET",
+        &format!("/_rustybin/mocks/{name}/requests"),
+        &[("x-rustybin-mock-token", token)],
+        None,
+    )
+    .await;
+    assert_eq!(seqs(&out).len(), 1, "{out}");
+}
+
+#[tokio::test]
+async fn a_traffic_stream_carries_only_the_callers_own_calls() {
+    let (app, _state) = alice_called_the_sample().await;
+    let open = |session: &'static str| {
+        let app = app.clone();
+        async move {
+            let req = Request::builder()
+                .uri("/_rustybin/mocks/petstore/requests/stream")
+                .header("host", "rustybin.test")
+                .header("x-rustybin-session", session)
+                .header("last-event-id", "0")
+                .body(Body::empty())
+                .expect("request");
+            let resp = app.oneshot(req).await.expect("response");
+            assert_eq!(resp.status(), StatusCode::OK);
+            let mut body = resp.into_body().into_data_stream();
+            let next = tokio::time::timeout(Duration::from_millis(300), body.next());
+            match next.await {
+                Ok(Some(Ok(bytes))) => String::from_utf8_lossy(&bytes).into_owned(),
+                _ => String::new(),
+            }
+        }
+    };
+    assert!(open("alice").await.contains(SECRET));
+    assert!(!open("bob").await.contains(SECRET));
+}
+
+#[tokio::test]
+async fn a_key_reads_only_its_own_calls_of_an_instance_mock() {
+    use crate::keys::tests::{doc, entry, shared_config, KEY_A, KEY_B};
+    let mut c = shared_config();
+    c.mocks_sample = true;
+    c.self_service = SelfServiceConfig {
+        enabled: true,
+        ..SelfServiceConfig::default()
+    };
+    let state = crate::test_support::test_state_with(c);
+    state
+        .keys
+        .load_bytes(
+            doc(vec![
+                entry("ka1", KEY_A, "starter", "active", json!({})),
+                entry("kb2", KEY_B, "free", "active", json!({})),
+            ])
+            .as_bytes(),
+        )
+        .expect("registry");
+    let app = test_app_with(state);
+    let auth = format!("Bearer {SECRET}");
+    let headers = [("x-rustybin-key", KEY_A), ("authorization", auth.as_str())];
+    let (status, _, _) = call(&app, "GET", "/mock/petstore/v1/pets/1", &headers, None).await;
+    assert!(status.is_success(), "{status}");
+    let list = "/_rustybin/mocks/petstore/requests";
+
+    let (status, _, out) = call(&app, "GET", list, &[("x-rustybin-key", KEY_B)], None).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(seqs(&out), Vec::<u64>::new(), "{out}");
+    // Naming the other key as a session claims nothing.
+    let b = [("x-rustybin-key", KEY_B), ("x-rustybin-session", "ka1")];
+    let (_, _, out) = call(&app, "GET", list, &b, None).await;
+    assert_eq!(seqs(&out), Vec::<u64>::new(), "{out}");
+
+    let (_, _, out) = call(&app, "GET", list, &[("x-rustybin-key", KEY_A)], None).await;
+    assert_eq!(seqs(&out), vec![1], "{out}");
 }

@@ -13,6 +13,35 @@ use crate::request_bin::BinHeader;
 /// Bytes of a response body kept in a capture.
 pub const MAX_RESPONSE_PREVIEW: usize = 8 * 1024;
 
+/// Who sent a captured request, as far as a public instance can tell. Two
+/// variants, never one prefixed string: a session name may hold a `:`, so
+/// a client could otherwise name itself after a key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Sender {
+    /// The session key: `X-Rustybin-Session`, else `ip:<client address>`.
+    Session(String),
+    /// The API key's id in shared mode.
+    Key(String),
+}
+
+/// Which of a mock's captures a caller reads. Every reader of a capture
+/// (the routes, the stream, the rule tester, the tools) goes through this:
+/// a capture holds the sender's credentials as a gateway forwarded them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TrafficScope {
+    All,
+    Own(Sender),
+}
+
+impl TrafficScope {
+    pub fn sees(&self, c: &MockCapture) -> bool {
+        match self {
+            TrafficScope::All => true,
+            TrafficScope::Own(sender) => c.sender.as_ref() == Some(sender),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct MockCapture {
     /// Sequence number in the mock, from 1.
@@ -57,6 +86,10 @@ pub struct MockCapture {
     /// The MCP tool that sent it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
+    /// Who sent it, for [`TrafficScope`]; never in an answer. `None` when
+    /// nothing identifies the sender: then only `All` reads it.
+    #[serde(skip)]
+    pub sender: Option<Sender>,
 }
 
 impl MockCapture {
@@ -196,6 +229,24 @@ impl CaptureLog {
             .collect()
     }
 
+    /// Newest first, at most `limit` of what `scope` sees, and how many it
+    /// sees in all (`All`: every request since the mock started; `Own`: the
+    /// caller's still in the ring, so other people's calls are not counted).
+    pub fn visible(&self, scope: &TrafficScope, limit: usize) -> (Vec<Arc<MockCapture>>, u64) {
+        if *scope == TrafficScope::All {
+            return (self.entries(limit), self.total());
+        }
+        let inner = self.lock();
+        let own: Vec<_> = inner
+            .entries
+            .iter()
+            .rev()
+            .filter(|e| scope.sees(e))
+            .collect();
+        let total = own.len() as u64;
+        (own.into_iter().take(limit).cloned().collect(), total)
+    }
+
     pub fn entry(&self, seq: u64) -> Option<Arc<MockCapture>> {
         self.lock().entries.iter().find(|e| e.seq == seq).cloned()
     }
@@ -276,6 +327,7 @@ mod tests {
             duration_ms: 0,
             channel: None,
             tool: None,
+            sender: None,
         }
     }
 

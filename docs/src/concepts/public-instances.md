@@ -20,7 +20,9 @@ provider, and on a self-service instance create mocks of their own.
   arrive within 30 seconds, and at most 16,384 connections are open at once.
 - **Cannot read another client's traffic.** Session keys derived from an address
   (`ip:...`) cannot be claimed through the session header; AI records are filtered by
-  session inside the lookup.
+  session inside the lookup; the captures of an instance mock show a caller without a
+  credential its own session's calls and an API key its own, on every route and tool
+  that reads them ([who reads what](../mocks/self-service.md#whose-traffic-a-caller-reads)).
 - **Cannot host active content on the console's origin.** Bins answer like a visitor's
   mock: HTML, scripts and SVG as `text/plain`, no cookies, a sandbox CSP and `nosniff`.
 - **Cannot exhaust shared budgets.** Visits and creations count per address and

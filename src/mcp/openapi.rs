@@ -637,6 +637,7 @@ async fn call(ctx: &CallCtx, target: &MockTarget, params: &Value) -> Result<Valu
         built.headers,
         built.body,
         Some(&tool.name),
+        None,
     );
     tokio::pin!(fut);
     // Slow answers (rule delays) report progress every second.

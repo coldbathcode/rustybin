@@ -17,7 +17,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::capture::OpStats;
+use super::capture::{MockCapture, OpStats, Sender, TrafficScope};
 use super::checks;
 use super::compile::{Compiled, RouteMatch};
 use super::config_file;
@@ -818,6 +818,31 @@ impl Svc {
             }
             _ => Err(ServiceError::not_found(format!("mock {name:?} not found"))),
         }
+    }
+
+    /// Which of the mock's captures the caller reads. A capture holds what
+    /// its sender presented, so on a shared instance a mock that is nobody's
+    /// in particular (the sample) shows a caller without a credential its
+    /// own session's calls, and an API key its own. Whoever holds a
+    /// credential of the instance reads all of them, and a visitor's mock
+    /// is read only by its owner, who reads all of them too.
+    pub fn traffic_scope(&self, s: &Snapshot) -> TrafficScope {
+        if s.owner.is_visitor() {
+            return TrafficScope::All;
+        }
+        match &self.caller.resolved.principal {
+            crate::rbac::Principal::Anonymous { .. } if self.state.config.public_mode => {
+                TrafficScope::Own(Sender::Session(self.caller.session.clone()))
+            }
+            crate::rbac::Principal::Key { id } => TrafficScope::Own(Sender::Key(id.clone())),
+            _ => TrafficScope::All,
+        }
+    }
+
+    /// One capture, if the caller reads it.
+    fn captured(&self, s: &Snapshot, seq: u64) -> Option<std::sync::Arc<MockCapture>> {
+        let scope = self.traffic_scope(s);
+        s.capture.entry(seq).filter(|e| scope.sees(e))
     }
 
     /// The route's (or tool's) permission on an instance mock: in the
@@ -1701,10 +1726,10 @@ impl Svc {
     pub fn requests(&self, name: &str, limit: Option<usize>) -> SvcResult<Value> {
         let s = self.readable(name)?;
         let limit = limit.unwrap_or(50).clamp(1, self.store().limits().captures);
-        let entries = s.capture.entries(limit);
+        let (entries, total) = s.capture.visible(&self.traffic_scope(&s), limit);
         Ok(json!({
             "mock": name,
-            "total": s.capture.total(),
+            "total": total,
             "count": entries.len(),
             "requests": entries,
         }))
@@ -1720,7 +1745,7 @@ impl Svc {
     /// `GET /_rustybin/mocks/{name}/requests/{n}`.
     pub fn request_entry(&self, name: &str, seq: u64) -> SvcResult<Value> {
         let s = self.readable(name)?;
-        match s.capture.entry(seq) {
+        match self.captured(&s, seq) {
             Some(e) => Ok(serde_json::to_value(e.as_ref()).unwrap_or(Value::Null)),
             None => Err(ServiceError::not_found(
                 "no such request (never received or already evicted)",
@@ -1848,10 +1873,11 @@ impl Svc {
             )));
         }
         let capture = match req.request {
-            Some(seq) => s.capture.entry(seq),
+            Some(seq) => self.captured(&s, seq),
             None => s
                 .capture
-                .entries(self.store().limits().captures)
+                .visible(&self.traffic_scope(&s), self.store().limits().captures)
+                .0
                 .into_iter()
                 .find(|e| e.operation.as_deref() == Some(operation.id.as_str())),
         };

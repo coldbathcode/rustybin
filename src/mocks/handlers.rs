@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
-use super::capture::{MockCapture, MAX_RESPONSE_PREVIEW};
+use super::capture::{MockCapture, Sender, MAX_RESPONSE_PREVIEW};
 use super::compile::{Compiled, RouteMatch};
 use super::config_file;
 use super::host;
@@ -99,6 +99,7 @@ pub async fn mock_root(
     ClientIp(ip): ClientIp,
     tls: Option<Extension<TlsConnectionInfo>>,
     via: Option<Extension<host::ViaMocksDomain>>,
+    key: Option<Extension<crate::keys::KeyContext>>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -115,6 +116,7 @@ pub async fn mock_root(
         headers,
         body,
         None,
+        shared_key(key.as_ref()),
     )
     .await
 }
@@ -126,6 +128,7 @@ pub async fn mock_sub(
     ClientIp(ip): ClientIp,
     tls: Option<Extension<TlsConnectionInfo>>,
     via: Option<Extension<host::ViaMocksDomain>>,
+    key: Option<Extension<crate::keys::KeyContext>>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -142,8 +145,14 @@ pub async fn mock_sub(
         headers,
         body,
         None,
+        shared_key(key.as_ref()),
     )
     .await
+}
+
+/// The API key's id in shared mode: the sender of what it calls.
+fn shared_key(key: Option<&Extension<crate::keys::KeyContext>>) -> Option<&str> {
+    key.filter(|k| k.0.shared).map(|k| &*k.0.key.id)
 }
 
 /// Everything a capture needs besides the outcome.
@@ -160,6 +169,8 @@ struct Incoming<'a> {
     mcp_tool: Option<&'a str>,
     /// `Authorization` carries a control credential (redacted in captures).
     control_authorization: bool,
+    /// The API key's id in shared mode.
+    key: Option<&'a str>,
 }
 
 struct Outcome<'a> {
@@ -244,7 +255,19 @@ fn capture_entry(
         duration_ms: inc.started.elapsed().as_millis() as u64,
         channel: inc.mcp_tool.map(|_| "mcp"),
         tool: inc.mcp_tool.map(str::to_string),
+        sender: sender_of(inc),
     }
+}
+
+/// Who sent the request: its API key, else its session. Nothing to go by
+/// (no header, no address) is nobody's, so no two such callers meet.
+fn sender_of(inc: &Incoming) -> Option<Sender> {
+    if let Some(key) = inc.key {
+        return Some(Sender::Key(key.to_string()));
+    }
+    crate::session::session_header(inc.headers)
+        .or_else(|| inc.ip.map(|ip| format!("ip:{ip}")))
+        .map(Sender::Session)
 }
 
 /// Count a mock request in `/_rustybin/metrics` (normal mode only: in public
@@ -288,6 +311,7 @@ pub(crate) async fn serve(
     headers: HeaderMap,
     body: Bytes,
     mcp_tool: Option<&str>,
+    key: Option<&str>,
 ) -> Response {
     let started = Instant::now();
     let store = &state.mocks;
@@ -316,6 +340,7 @@ pub(crate) async fn serve(
         max_body: store.limits().max_captured_body,
         mcp_tool,
         control_authorization: crate::keys::authorization_is_control(&headers, &state.config),
+        key,
     };
     let live = match store.lookup(&name) {
         Lookup::Missing => {
@@ -1258,10 +1283,12 @@ pub async fn stream(
     extensions: Extensions,
     uri: Uri,
 ) -> Response {
-    let s = match svc(&state, &headers, &extensions, &uri).readable(&name) {
+    let service = svc(&state, &headers, &extensions, &uri);
+    let s = match service.readable(&name) {
         Ok(s) => s,
         Err(e) => return e.into_response(),
     };
+    let scope = service.traffic_scope(&s);
     let mut rx = s.capture.subscribe();
     let last_seen: Option<u64> = headers
         .get("last-event-id")
@@ -1272,7 +1299,7 @@ pub async fn stream(
             .capture
             .entries(usize::MAX)
             .into_iter()
-            .filter(|r| r.seq > last)
+            .filter(|r| r.seq > last && scope.sees(r))
             .collect(),
         None => Vec::new(),
     };
@@ -1295,7 +1322,7 @@ pub async fn stream(
                 }
                 item = rx.recv() => match item {
                     Ok(entry) => {
-                        if entry.seq > sent {
+                        if entry.seq > sent && scope.sees(&entry) {
                             // Each event is checked again: a user removed
                             // from the project, disabled or signed out, or
                             // the mock moved, gets nothing more.

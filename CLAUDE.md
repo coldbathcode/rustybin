@@ -47,6 +47,14 @@ from git is applied with `ApplyOptions.untrusted`; every egress client resolves 
 YAML output is pinned by `tests/snapshots/export.yaml`. Section 8 of the master plan queues the next milestone
 (instance reliability and testing workflows).
 
+## The hosted demo (planned 2026-11-06, in progress)
+
+[docs/plans/hosted-demo/master-plan.md](docs/plans/hosted-demo/master-plan.md): making a public self-service instance
+safe on the current release and putting it online; section 4 is the build marker. Rules it left: every reader of a
+mock's captures goes through `Svc::traffic_scope` and `TrafficScope::sees` or `CaptureLog::visible` (a capture holds
+what its sender presented; `MockCapture.sender` is never in an answer); `capture::Sender` keeps sessions and keys apart
+(a session name may hold a `:`).
+
 ## Rustybin 0.3, reliability and testing workflows (built and released 2026-11-02)
 
 [docs/plans/reliability/master-plan.md](docs/plans/reliability/master-plan.md) (planned 2026-11-02 from section 8 of
