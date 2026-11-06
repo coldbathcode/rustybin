@@ -11,6 +11,11 @@ it online. The candidates under consideration below are not scheduled.
 
 ## Recently built
 
+- [Rustybin 0.5.1, safe for a public demo](changelog.md#051-2026-11-06-safe-for-a-public-demo)
+  (2026-11-06): no new features; a visitor reads only their own calls of a shared mock,
+  a spec's memory is bounded however it is written, and a public instance warns when a
+  client can name its own address.
+
 - [Rustybin 0.5, access control](changelog.md#050-2026-11-03-access-control)
   (2026-11-03): [users and invitations](users.md), roles made of named permissions,
   [single sign-on](sso.md) with any OpenID Connect provider, [projects](projects.md)

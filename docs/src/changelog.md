@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 (2026-11-06): safe for a public demo
+
+No new features: what running the public demo's configuration on 0.5.0 found, fixed
+([the plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/hosted-demo/master-plan.md),
+steps 01 to 03). Upgrade any instance in public mode: the first two entries below are
+open on 0.5.0 and earlier. Behind a proxy, also read the third.
 
 **Security**: on a public instance, or to an API key in shared mode, the captured
 requests of an instance mock (the built-in `petstore`, for example) were readable by
