@@ -133,7 +133,8 @@ nobody sees other sessions). The [web console](../console.md) shows the same dat
 Never limited, counted or decorated: `/` (the platform health check), the web console
 (`/ui/*`), `GET /_rustybin/usage`, `GET /_rustybin/status` (which the console
 polls every few seconds), `GET /_rustybin/ready` and `GET /_rustybin/metrics` (so
-monitoring scrapes never use up a quota or show up as traffic in the usage counters). Other control plane routes count like any other
+monitoring scrapes never use up a quota or show up as traffic in the usage counters; on a
+public instance metrics need `settings.read`). Other control plane routes count like any other
 request, but a request with the [admin token](sessions.md) is never rejected on them,
 so an administrator can always reach a busy instance.
 

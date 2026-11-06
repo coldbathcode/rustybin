@@ -180,6 +180,23 @@ struct Entry {
 }
 
 impl Entry {
+    /// What this mock's kept revisions hold in memory, each counted once.
+    fn weight(&self) -> usize {
+        let mut seen = Vec::new();
+        let mut total = 0;
+        let kept = std::iter::once(&self.draft)
+            .chain(self.live.iter())
+            .chain(self.history.iter())
+            .chain(self.earlier.iter());
+        for c in kept {
+            if !seen.contains(&c.revision) {
+                seen.push(c.revision);
+                total += c.weight;
+            }
+        }
+        total
+    }
+
     /// Keep the draft about to be replaced among the earlier drafts, unless
     /// it is live or in the history already (bounded by `cap`).
     fn keep_earlier_draft(&mut self, cap: usize) {
@@ -785,10 +802,41 @@ impl MockStore {
         project: Option<String>,
     ) -> Result<Snapshot, StoreError> {
         let project = project.filter(|_| !owner.is_visitor());
+        if owner.is_visitor() {
+            self.check_memory(&self.read(), &compiled)?;
+        }
         let r = self.create_inner(
             name, compiled, origin, owner, enabled, deploy, force, project,
         );
         self.saved(r)
+    }
+
+    /// May a visitor's `incoming` revision stay in memory? The caps count
+    /// mocks, and one mock may hold several revisions of very different
+    /// sizes: this is what keeps them all inside the instance's memory.
+    /// Saved mocks coming back at startup are not asked.
+    fn check_memory(
+        &self,
+        map: &BTreeMap<String, Entry>,
+        incoming: &Compiled,
+    ) -> Result<(), StoreError> {
+        let Some(visits) = &self.visits else {
+            return Ok(());
+        };
+        let budget = visits.config().max_memory_mb.saturating_mul(1024 * 1024);
+        let held: usize = map
+            .values()
+            .filter(|e| e.owner.is_visitor() && self.live_entry(e))
+            .map(Entry::weight)
+            .sum();
+        if held.saturating_add(incoming.weight) > budget {
+            return Err(StoreError::Full(
+                "the demo holds as much as it can in memory: try again later, or with a \
+                 smaller spec"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Move a mock to `project` (`None`: the instance's). Visitors' mocks
@@ -1167,6 +1215,11 @@ impl MockStore {
                 return Err(StoreError::Conflict(format!(
                     "a mock named {new_name:?} already exists"
                 )));
+            }
+        }
+        if let (Some(c), Some(e)) = (&compiled, map.get(name)) {
+            if e.owner.is_visitor() {
+                self.check_memory(&map, c)?;
             }
         }
         let mut entry = map

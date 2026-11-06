@@ -53,7 +53,11 @@ YAML output is pinned by `tests/snapshots/export.yaml`. Section 8 of the master 
 safe on the current release and putting it online; section 4 is the build marker. Rules it left: every reader of a
 mock's captures goes through `Svc::traffic_scope` and `TrafficScope::sees` or `CaptureLog::visible` (a capture holds
 what its sender presented; `MockCapture.sender` is never in an answer); `capture::Sender` keeps sessions and keys apart
-(a session name may hold a `:`).
+(a session name may hold a `:`); what a compiled revision keeps is bounded for the whole revision, never per schema (a
+`$ref` named by every operation multiplies: `mcp::VISITOR_TOOL_NODES` through `schema::inline_shared`,
+`checks::KEPT_SAMPLE_BYTES`), and a new thing kept on a `Compiled` belongs in `Compiled::memory_estimate`, which the
+visitors' budget (`RUSTYBIN_MOCKS_SELF_SERVICE_MAX_MB`, `MockStore::check_memory`) counts; a public instance's proxy sets
+one header and names it (`RUSTYBIN_TRUST_FORWARD_HEADER`), because `any` lets a client pick its own address.
 
 ## Rustybin 0.3, reliability and testing workflows (built and released 2026-11-02)
 
@@ -259,8 +263,7 @@ tokens bound to the `/_rustybin/mcp` URL, carrying the approving user, `rb_uid` 
 where the build differs). Visitors of a public instance create their own mocks with `RUSTYBIN_MOCKS_SELF_SERVICE`
 (off by default): a manage token per visit, 1 hour extendable to 3, then an email lead for up to 6 hours per UTC
 day, visitor mocks only on `RUSTYBIN_MOCKS_SELF_SERVICE_HOST` with restricted responses. What is left for the hosted
-demo is deployment, not code: DNS and TLS for `rustybin-mock.dev`, the env vars, a lead webhook and a privacy page
-(see `docs/src/mocks/self-service.md`). Candidates for later are in `docs/src/roadmap.md`. The OpenAPI mocks and
+demo was thought to be deployment, not code; see the hosted demo plan above. Candidates for later are in `docs/src/roadmap.md`. The OpenAPI mocks and
 hosted mocks plans in `docs/plans/` are complete; keep `docs/src/roadmap.md` current when new work is planned.
 
 ## Commands

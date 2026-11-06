@@ -135,7 +135,17 @@ pub struct SampleRequest {
     pub content_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<Value>,
+    /// A report left the generated body out (see [`KEPT_SAMPLE_BYTES`]);
+    /// [`sample_request`] makes it again.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub body_omitted: bool,
 }
+
+/// Bytes of generated request bodies one report keeps. The report stays on
+/// the revision and each body is a generated copy of a schema, so a `$ref`
+/// named by every operation multiplies (160 MiB from a 160 KiB document); the
+/// rest are left out, and the operation's detail generates its own.
+pub const KEPT_SAMPLE_BYTES: usize = 256 * 1024;
 
 /// The check of one response source.
 #[derive(Clone, Debug, Serialize)]
@@ -357,6 +367,7 @@ pub fn sample_request_variant(c: &Compiled, op: &Operation, variant: u64) -> Sam
         headers,
         content_type,
         body,
+        body_omitted: false,
     }
 }
 
@@ -936,11 +947,23 @@ pub fn run(c: &Compiled) -> Report {
             class: Some(NO_EXAMPLES),
         });
     }
+    let mut kept_sample_bytes = 0;
     let operations: Vec<OperationReport> = c
         .spec
         .operations
         .iter()
-        .map(|op| check_operation(c, op))
+        .map(|op| {
+            let mut report = check_operation(c, op);
+            let request = &mut report.request;
+            if let Some(body) = &request.body {
+                kept_sample_bytes += serde_json::to_vec(body).map_or(usize::MAX, |b| b.len());
+                if kept_sample_bytes > KEPT_SAMPLE_BYTES {
+                    request.body = None;
+                    request.body_omitted = true;
+                }
+            }
+            report
+        })
         .collect();
     let all_findings = findings
         .iter()
@@ -1243,5 +1266,39 @@ mod tests {
             0,
             "never inside an escape"
         );
+    }
+
+    #[test]
+    fn a_report_keeps_a_bounded_amount_of_generated_bodies() {
+        let properties: serde_json::Map<String, Value> = (0..2_000)
+            .map(|i| (format!("field{i}"), json!({ "type": "string" })))
+            .collect();
+        let paths: serde_json::Map<String, Value> = (0..100)
+            .map(|i| {
+                let op = json!({ "post": { "operationId": format!("op{i}"),
+                    "requestBody": { "required": true, "content": { "application/json": {
+                        "schema": { "$ref": "#/components/schemas/Wide" } } } },
+                    "responses": { "204": { "description": "ok" } } } });
+                (format!("/x{i}"), op)
+            })
+            .collect();
+        let doc = json!({
+            "openapi": "3.0.3", "info": {"title": "t", "version": "1"}, "paths": paths,
+            "components": { "schemas": { "Wide": { "type": "object", "properties": properties } } },
+        });
+        let c = compile(&doc.to_string(), MockSettings::default());
+        let kept: usize = c
+            .report
+            .operations
+            .iter()
+            .filter_map(|o| o.request.body.as_ref())
+            .map(|b| b.to_string().len())
+            .sum();
+        assert!(kept > 0 && kept <= KEPT_SAMPLE_BYTES, "kept {kept} bytes");
+        let last = c.report.operations.last().expect("operation");
+        assert!(last.request.body.is_none() && last.request.body_omitted);
+        // The operation's own sample is whole: only the report's copy went.
+        let op = c.spec.operations.last().expect("operation");
+        assert!(sample_request(&c, op).body.is_some());
     }
 }

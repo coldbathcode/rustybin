@@ -991,3 +991,62 @@ async fn a_key_reads_only_its_own_calls_of_an_instance_mock() {
     let (_, _, out) = call(&app, "GET", list, &[("x-rustybin-key", KEY_A)], None).await;
     assert_eq!(seqs(&out), vec![1], "{out}");
 }
+
+/// A document of about 100 KiB with thousands of small objects.
+fn heavy_spec(title: &str) -> Value {
+    let properties: serde_json::Map<String, Value> = (0..3_000)
+        .map(|i| (format!("p{i}"), json!({ "type": "string" })))
+        .collect();
+    json!({ "spec": {
+        "openapi": "3.0.3",
+        "info": { "title": title, "version": "1" },
+        "paths": { "/a": { "get": { "responses": { "200": { "description": "ok",
+            "content": { "application/json": { "schema": {
+                "type": "object", "properties": properties } } } } } } } },
+    }})
+}
+
+#[tokio::test]
+async fn visitors_share_a_memory_budget_however_few_mocks_they_hold() {
+    let mut c = config(None);
+    c.self_service.max_memory_mb = 24;
+    let (app, state, _) = app_on(c);
+    assert!(state.mocks.visits().is_some());
+    let mut made = Vec::new();
+    let refused = loop {
+        let session = format!("s{}", made.len());
+        let (status, out) = visitor_create(&app, &session, None, heavy_spec("heavy")).await;
+        if status != StatusCode::CREATED {
+            break (status, out);
+        }
+        made.push(out);
+        assert!(made.len() < 20, "the budget never refused a mock");
+    };
+    assert_eq!(refused.0, StatusCode::SERVICE_UNAVAILABLE, "{}", refused.1);
+    assert!(!made.is_empty(), "the budget refused the first mock");
+    // An edit is a new revision that stays with the old one: it counts too.
+    let name = made[0]["name"].as_str().expect("name");
+    let token = made[0]["manage_token"].as_str().expect("token");
+    let (status, _, out) = call(
+        &app,
+        "PATCH",
+        &format!("/_rustybin/mocks/{name}"),
+        &[("x-rustybin-mock-token", token)],
+        Some(heavy_spec("edited")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{out}");
+    // A visitor's small mock is not what the budget is for: deleting one
+    // makes room again.
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        &format!("/_rustybin/mocks/{name}"),
+        &[("x-rustybin-mock-token", token)],
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{status}");
+    let (status, out) = visitor_create(&app, "after", None, heavy_spec("heavy")).await;
+    assert_eq!(status, StatusCode::CREATED, "{out}");
+}

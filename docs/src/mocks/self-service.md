@@ -249,12 +249,31 @@ comes through a gateway keeps your session only if the gateway forwards
 {{#include ../../examples/mocks/self_service.hurl:ss_own_traffic}}
 ```
 
+## Behind a proxy
+
+Every limit here counts the client's address, so the instance must learn it from
+something a client cannot write. Behind a proxy, have the proxy set one header from the
+address it verified, and name that header. With Caddy:
+
+```text
+reverse_proxy rustybin:8080 {
+	header_up X-Real-IP {client_ip}
+}
+```
+
+and `RUSTYBIN_TRUST_FORWARD=true`, `RUSTYBIN_TRUST_FORWARD_HEADER=x-real-ip`. With only
+`RUSTYBIN_TRUST_FORWARD`, every forwarding header is believed, so a visitor who sends
+`Fly-Client-IP` or `Forwarded` chooses the address the limits count, and behind a CDN
+`X-Forwarded-For` ends in the CDN's address, which all its visitors would share. The
+instance warns at startup and `GET /_rustybin/diagnostics` reports `client_address`.
+
 ## Limits
 
 | What | Default | Setting |
 |---|---|---|
 | Mocks per visitor (or API key) | 3 | `RUSTYBIN_MOCKS_PER_OWNER` |
 | Visitor mocks on the instance | 200 | `RUSTYBIN_MOCKS_SELF_SERVICE_MAX` |
+| Memory all visitor mocks hold together | 192 MiB | `RUSTYBIN_MOCKS_SELF_SERVICE_MAX_MB` |
 | Running visits | twice the visitor mock cap | |
 | Creations per session per hour | 10 | `RUSTYBIN_MOCKS_CREATE_PER_HOUR` |
 | Creations on the instance per minute | 30 | |
@@ -269,6 +288,15 @@ visit has started (see [Limits](index.md#limits)).
 Spec size, operations, rules, revisions and captured calls follow the
 [public mode limits](../configuration.md#limits-that-are-not-configurable). A full
 instance never evicts someone else's mocks.
+
+The memory budget counts what each revision a visitor's mocks keep holds, measured from
+the document and not from its size on disk: a spec of a few hundred kilobytes can take
+tens of megabytes. Past the budget a new mock or an edit answers `503` until visits end.
+Set it to about a third of the memory you give the instance. A visitor mock's MCP tools
+also expand a limited amount of schema between them, and the deploy report keeps a
+limited amount of generated request bodies, so a large spec keeps every tool, with the
+last schemas marked as not expanded, and an operation's detail still shows its whole
+sample request.
 
 ## Operators
 

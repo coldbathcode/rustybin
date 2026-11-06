@@ -470,6 +470,9 @@ pub struct SelfServiceConfig {
     pub per_owner: usize,
     /// Visitor mocks on the instance (`RUSTYBIN_MOCKS_SELF_SERVICE_MAX`).
     pub max_mocks: usize,
+    /// Memory all visitor mocks may hold together, in MiB, every kept
+    /// revision counted (`RUSTYBIN_MOCKS_SELF_SERVICE_MAX_MB`).
+    pub max_memory_mb: usize,
     /// Creations per session key per hour (`RUSTYBIN_MOCKS_CREATE_PER_HOUR`).
     pub create_per_hour: u32,
     /// First period of a visit and each extension (`RUSTYBIN_MOCKS_VISIT_MINUTES`).
@@ -505,6 +508,7 @@ impl Default for SelfServiceConfig {
             home_url: None,
             per_owner: 3,
             max_mocks: 200,
+            max_memory_mb: 192,
             create_per_hour: 10,
             visit_minutes: 60,
             anon_hours: 3,
@@ -1561,6 +1565,13 @@ where
             warnings,
         )
         .clamp(1, 10_000),
+        max_memory_mb: parse_or(
+            get,
+            "RUSTYBIN_MOCKS_SELF_SERVICE_MAX_MB",
+            d.max_memory_mb,
+            warnings,
+        )
+        .clamp(1, 1_048_576),
         create_per_hour: parse_or(
             get,
             "RUSTYBIN_MOCKS_CREATE_PER_HOUR",

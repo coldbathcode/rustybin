@@ -882,6 +882,7 @@ async fn self_service_visitors_with_lead_delivery() {
     let mut c = config(&dir);
     c.body_limit = 64 * 1024;
     c.public_mode = true;
+    c.admin_token = Some("integration-operator".into());
     c.mocks_sample = false;
     c.self_service = rustybin::config::SelfServiceConfig {
         enabled: true,
@@ -951,7 +952,12 @@ async fn self_service_visitors_with_lead_delivery() {
     )
     .await;
     assert_eq!(resp.status, 200);
-    let metrics = get(addr, "/_rustybin/metrics").await.body;
+    // A public instance's metrics are the operator's.
+    assert_eq!(get(addr, "/_rustybin/metrics").await.status, 401);
+    let operator = [("authorization", "Bearer integration-operator")];
+    let metrics = request(addr, "GET", "/_rustybin/metrics", &operator, "")
+        .await
+        .body;
     assert!(
         metrics.contains("rustybin_mock_leads_total{result=\"delivered\"} 1"),
         "{metrics}"

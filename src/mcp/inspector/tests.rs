@@ -1060,3 +1060,52 @@ async fn the_console_scope_sends_only_list_methods_to_another_host() {
     let spec = build_run_spec(inspector, body("/mcp"), "t".into(), false).expect("spec");
     assert!(spec.call_tools);
 }
+
+#[tokio::test]
+async fn a_visitors_check_runs_are_answered_and_never_kept() {
+    let mut config = Config::for_tests();
+    config.public_mode = true;
+    config.admin_token = Some("operator-token".into());
+    config.mocks_sample = true;
+    let app = test_app_with(test_state_with(config));
+    let target = json!({ "target": "/mcp", "checks": ["connect"] });
+    // The visitor's own answer comes back...
+    let (status, report) = checks_call(&app, target.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert!(report["id"].is_string(), "{report}");
+    let id = report["id"].as_str().expect("id").to_string();
+    // ...and no visitor, that one included, finds it in the list.
+    let list = |token: Option<&str>| {
+        let mut r = Request::get(CHECKS_PATH);
+        if let Some(t) = token {
+            r = r.header("authorization", format!("Bearer {t}"));
+        }
+        r.body(Body::empty()).expect("req")
+    };
+    let resp = app.clone().oneshot(list(None)).await.expect("r");
+    assert_eq!(body_json(resp).await["runs"], json!([]));
+    let by_id = Request::get(format!("{CHECKS_PATH}/{id}"))
+        .body(Body::empty())
+        .expect("req");
+    let resp = app.clone().oneshot(by_id).await.expect("r");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    // The operator's run is kept for the operator, out of the visitors' sight.
+    let run = Request::post(CHECKS_PATH)
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer operator-token")
+        .body(Body::from(target.to_string()))
+        .expect("req");
+    let resp = app.clone().oneshot(run).await.expect("r");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = app
+        .clone()
+        .oneshot(list(Some("operator-token")))
+        .await
+        .expect("r");
+    assert_eq!(
+        body_json(resp).await["runs"].as_array().map(Vec::len),
+        Some(1)
+    );
+    let resp = app.clone().oneshot(list(None)).await.expect("r");
+    assert_eq!(body_json(resp).await["runs"], json!([]));
+}

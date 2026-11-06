@@ -112,6 +112,10 @@ pub const BODY_CHECKS: &[(Permission, &str)] = &[
         "a settings change of a portal.* setting",
     ),
     (
+        Permission::SettingsRead,
+        "GET /_rustybin/metrics on a public instance",
+    ),
+    (
         Permission::SecretsWrite,
         "a settings change that sets or clears a secret, a document with secrets:",
     ),

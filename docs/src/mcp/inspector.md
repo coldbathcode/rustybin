@@ -173,6 +173,13 @@ when running):
 {{#include ../../examples/mcp/inspector.hurl:junit}}
 ```
 
+A visitor of a public instance gets the answer and neither keeps a run nor reads the
+saved ones, because they are one list:
+
+```hurl
+{{#include ../../examples/mocks/self_service.hurl:ss_checks_not_kept}}
+```
+
 `GET /_rustybin/mcp-checks` lists the saved runs and `DELETE
 /_rustybin/mcp-checks/{id}` (admin) removes one. A report, an answer and an audit line
 show the target without its query string, which may hold a saved connection's API key

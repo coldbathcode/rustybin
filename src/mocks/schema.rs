@@ -1181,6 +1181,24 @@ pub fn inline(schema: &Value, root: &Value, direction: Direction) -> Value {
     inline_node(schema, root, direction, &mut stack, &mut budget)
 }
 
+/// [`inline`] spending `shared` too, a budget that spans several schemas: one
+/// `$ref` named by every operation of a small document expands once per
+/// operation, so a limit per schema does not bound the whole. Spent, it
+/// leaves the "not expanded" schema in place of the rest.
+pub fn inline_shared(
+    schema: &Value,
+    root: &Value,
+    direction: Direction,
+    shared: &mut usize,
+) -> Value {
+    let start = INLINE_NODES.min(*shared);
+    let mut budget = start;
+    let mut stack = Vec::new();
+    let out = inline_node(schema, root, direction, &mut stack, &mut budget);
+    *shared -= start - budget;
+    out
+}
+
 fn inline_node(
     schema: &Value,
     root: &Value,
@@ -1240,6 +1258,15 @@ fn inline_node(
             };
             let mut kept = Map::new();
             for (name, prop) in props {
+                if *budget == 0 {
+                    // One note for the rest of a wide object: a schema per
+                    // property left out would cost what the budget saves.
+                    out.insert(
+                        "description".into(),
+                        json!("Not every property expanded: the schema is too large to inline"),
+                    );
+                    break;
+                }
                 if key == "properties" && hidden(prop, root, direction) {
                     continue;
                 }

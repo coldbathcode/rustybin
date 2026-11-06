@@ -605,3 +605,25 @@ fn buckets_cover_1ms_to_60s_for_quantiles() {
     assert_eq!(bucket("60"), 2.0);
     assert_eq!(bucket("+Inf"), 3.0);
 }
+
+#[tokio::test]
+async fn a_public_instance_keeps_its_metrics_for_the_operator() {
+    let mut config = crate::config::Config::for_tests();
+    config.public_mode = true;
+    config.control_auth = crate::control_auth::ControlAuth::Open;
+    config.admin_token = Some("operator-token".into());
+    let app = test_app_with(crate::test_support::test_state_with(config));
+    let visitor = app
+        .clone()
+        .oneshot(get_request(METRICS_PATH))
+        .await
+        .expect("response");
+    assert_eq!(visitor.status(), 401);
+    let operator = HttpRequest::get(METRICS_PATH)
+        .header("authorization", "Bearer operator-token")
+        .body(axum::body::Body::empty())
+        .expect("request");
+    let resp = app.clone().oneshot(operator).await.expect("response");
+    assert_eq!(resp.status(), 200);
+    assert!(body_string(resp).await.contains("rustybin_requests_total"));
+}

@@ -525,7 +525,13 @@ inspector, so it is the right target for an orchestrator's readiness or health c
 ## Metrics
 
 `GET /_rustybin/metrics` serves Prometheus text (version 0.0.4), protected like the
-rest of the control plane (`console` scope or the admin token):
+rest of the control plane (`console` scope or the admin token). On a public instance
+it needs `settings.read`, so a visitor reads no totals of the others' use:
+
+```hurl
+{{#include ../../examples/mocks/self_service.hurl:ss_metrics_refused}}
+```
+
 
 | Series | Labels |
 |---|---|

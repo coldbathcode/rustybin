@@ -183,3 +183,24 @@ jsonpath "$.deleted" count == 1
 GET {{ss_url}}/orders/7
 Host: {{mock_name}}.mocks.example
 HTTP 404
+
+# ANCHOR: ss_metrics_refused
+# A visitor reads no totals of the others' use.
+GET {{ss_url}}/_rustybin/metrics
+X-Rustybin-Session: docs-visitor-metrics
+HTTP 401
+# ANCHOR_END: ss_metrics_refused
+
+# ANCHOR: ss_checks_not_kept
+# A visitor's check run is answered and stays out of the one saved list.
+POST {{ss_url}}/_rustybin/mcp-checks
+X-Rustybin-Session: docs-visitor-checks
+{"target": "/mcp", "checks": ["connect"]}
+HTTP 200
+[Captures]
+ss_run: jsonpath "$.id"
+
+GET {{ss_url}}/_rustybin/mcp-checks/{{ss_run}}
+X-Rustybin-Session: docs-visitor-checks
+HTTP 404
+# ANCHOR_END: ss_checks_not_kept

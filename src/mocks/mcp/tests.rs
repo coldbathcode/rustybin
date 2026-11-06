@@ -248,3 +248,85 @@ fn settings_round_trip_and_defaults() {
     };
     assert!(too_many.validate(&limits).is_err());
 }
+
+/// Many operations that all name one wide schema: a small document whose
+/// expansion is large (each tool holds its own copy).
+fn one_wide_schema_everywhere(operations: usize, width: usize) -> String {
+    let properties: serde_json::Map<String, Value> = (0..width)
+        .map(|i| (format!("p{i}"), json!({ "type": "integer" })))
+        .collect();
+    let wide = json!({ "$ref": "#/components/schemas/Wide" });
+    let paths: serde_json::Map<String, Value> = (0..operations)
+        .map(|i| {
+            let op = json!({ "post": {
+                "operationId": format!("op{i}"),
+                "requestBody": { "content": { "application/json": { "schema": wide } } },
+                "responses": { "200": { "description": "ok",
+                    "content": { "application/json": { "schema": wide } } } },
+            }});
+            (format!("/x{i}"), op)
+        })
+        .collect();
+    json!({
+        "openapi": "3.0.3",
+        "info": { "title": "wide", "version": "1" },
+        "paths": paths,
+        "components": { "schemas": { "Wide": { "type": "object", "properties": properties } } },
+    })
+    .to_string()
+}
+
+fn nodes_in(v: &Value) -> usize {
+    match v {
+        Value::Object(o) => 1 + o.values().map(nodes_in).sum::<usize>(),
+        Value::Array(a) => a.iter().map(nodes_in).sum(),
+        _ => 0,
+    }
+}
+
+fn visitor_compile(spec: &str) -> Compiled {
+    let limits = crate::mocks::compile::CompileLimits {
+        parse: crate::mocks::spec::ParseLimits {
+            max_bytes: 1024 * 1024,
+            max_operations: 500,
+        },
+        settings: crate::mocks::model::SettingsLimits {
+            max_delay_ms: 10_000,
+            max_body_bytes: 64 * 1024,
+            max_rules: 10,
+            visitor: true,
+        },
+    };
+    Compiled::build(
+        1,
+        std::sync::Arc::from(spec),
+        MockSettings::default(),
+        &limits,
+    )
+    .expect("compiles")
+}
+
+#[test]
+fn a_visitors_tools_expand_a_bounded_number_of_schema_nodes() {
+    // 1,000 properties in 100 operations, twice each: 200,000 nodes if every
+    // tool kept its own copy of the schema.
+    let c = visitor_compile(&one_wide_schema_everywhere(100, 1_000));
+    let set = c.mcp_tools();
+    assert_eq!(set.tools.len(), 100, "every operation stays a tool");
+    assert!(set.nodes <= VISITOR_TOOL_NODES, "spent {}", set.nodes);
+    let held: usize = set
+        .tools
+        .iter()
+        .map(|t| nodes_in(&t.input_schema) + t.output_schema.as_ref().map_or(0, nodes_in))
+        .sum();
+    assert!(held < 2 * VISITOR_TOOL_NODES, "held {held} nodes");
+    // The first tool keeps its schema, the last says what happened to it.
+    let first = set.tools.first().expect("tool");
+    assert!(first.input_schema["properties"]["body"]["properties"]["p0"].is_object());
+    let last = set.tools.last().expect("tool");
+    assert!(
+        last.input_schema.to_string().contains("Not expanded"),
+        "{}",
+        last.input_schema
+    );
+}

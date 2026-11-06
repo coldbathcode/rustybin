@@ -12,6 +12,28 @@ counts those calls. The operator, signed-in users and a visitor's own mocks are
 unchanged. An operator of a public instance on 0.5.0 or earlier should treat
 credentials sent to its instance mocks as seen.
 
+**Security**: one anonymous `POST /_rustybin/mocks` could take a self-service instance
+down. A 160 KiB spec whose operations all name one wide schema took about 645 MiB,
+because each MCP tool kept its own expansion of the schema and the deploy report its
+own generated body; two such specs, or about 100 large ordinary ones, ended a 512 MiB
+container. A visitor's tools now expand at most 32,000 schema nodes per revision
+(1,000,000 otherwise), a report keeps 256 KiB of generated bodies with `body_omitted`
+on the rest (an operation's detail still generates its whole sample), and all visitor
+mocks share a memory budget, `RUSTYBIN_MOCKS_SELF_SERVICE_MAX_MB` (192 MiB by default):
+past it a new mock or an edit answers `503`. The same spec now costs about 18 MiB.
+
+**Security**: a public instance with `RUSTYBIN_TRUST_FORWARD` and no
+`RUSTYBIN_TRUST_FORWARD_HEADER` believes every forwarding header, so a client could
+name its own address and step around the per-address limits. It now warns at startup and
+in `GET /_rustybin/diagnostics` (`client_address`). Nothing changes until you name your
+proxy's header: see [Behind a proxy](mocks/self-service.md#behind-a-proxy).
+
+**Changed on a public instance**: `GET /_rustybin/metrics` needs `settings.read` (set
+`RUSTYBIN_ADMIN_TOKEN` and scrape with it, or nobody reads them), and a visitor's `mcp-checks` runs are answered but not kept, nor are the saved runs shown to
+them (they were one list, so visitors saw each other's targets and could push them out).
+The console's Saved tests view says once that the tests are the operator's, in place of
+three errors.
+
 ## 0.5.0 (2026-11-03): access control
 
 Several people on one instance, each with the roles they need: users with roles

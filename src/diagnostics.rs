@@ -226,6 +226,34 @@ pub fn report(state: &AppState) -> Value {
         },
     );
 
+    // Whose address the limits and visits count, behind a proxy.
+    if config.public_mode && config.trust_forward {
+        checks.push(
+            if config.forward_header.get() == crate::session::ForwardHeader::Any {
+                check(
+                    "client_address",
+                    "warn",
+                    "a client can name its own address: with RUSTYBIN_TRUST_FORWARD every \
+                     forwarding header is believed, and the per-address limits count what it says",
+                    Some(
+                        "have your proxy set one header (X-Real-IP from its verified client \
+                         address) and name it with RUSTYBIN_TRUST_FORWARD_HEADER",
+                    ),
+                )
+            } else {
+                check(
+                    "client_address",
+                    "ok",
+                    format!(
+                        "the client address comes from {} alone",
+                        config.forward_header.get().as_str()
+                    ),
+                    None,
+                )
+            },
+        );
+    }
+
     // The user store (password mode).
     if let Some((status, message, fix)) = crate::rbac::diagnostics(state) {
         checks.push(check("users", status, message, fix));
@@ -340,6 +368,23 @@ mod tests {
             .and_then(|a| a.iter().find(|c| c["id"] == id))
             .and_then(|c| c["status"].as_str())
             .unwrap_or("missing")
+    }
+
+    #[test]
+    fn a_public_instance_that_believes_every_forwarding_header_is_warned() {
+        let mut c = Config::for_tests();
+        c.public_mode = true;
+        c.trust_forward = true;
+        let r = report(&test_state_with(c.clone()));
+        assert_eq!(status_of(&r, "client_address"), "warn", "{r}");
+        c.forward_header = std::sync::Arc::new(crate::session::TrustedHeader::new(
+            crate::session::ForwardHeader::XRealIp,
+        ));
+        let r = report(&test_state_with(c));
+        assert_eq!(status_of(&r, "client_address"), "ok", "{r}");
+        // Not behind a proxy, or not public: no such question.
+        let r = report(&test_state_with(Config::for_tests()));
+        assert_eq!(status_of(&r, "client_address"), "missing", "{r}");
     }
 
     #[test]

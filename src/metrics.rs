@@ -1121,8 +1121,19 @@ impl HttpBody for CountedBody {
 
 // ── Endpoint ────────────────────────────────────────────────────────
 
-async fn metrics_handler(State(metrics): State<Arc<Metrics>>) -> Response {
-    let mut resp = metrics.render().into_response();
+async fn metrics_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    extensions: axum::http::Extensions,
+) -> Response {
+    // What a public instance's visitors do, in sum, is its operator's to read.
+    if state.config.public_mode {
+        let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
+        if let Err(refused) = crate::rbac::require(&caller, crate::rbac::Permission::SettingsRead) {
+            return refused;
+        }
+    }
+    let mut resp = state.metrics.render().into_response();
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
@@ -1147,7 +1158,7 @@ pub fn catalog() -> Vec<Endpoint> {
     .description(
         "Text exposition format 0.0.4. Labels are bounded: the route label is the matched route \
          template, never the raw path. Protected like the rest of the control plane \
-         (RUSTYBIN_CONTROL_AUTH).",
+         (RUSTYBIN_CONTROL_AUTH); on a public instance it needs settings.read.",
     )
     .example(Example::get("Scrape the metrics", METRICS_PATH))]
 }

@@ -187,6 +187,17 @@ pub fn warn_untrusted_forwarding(state: &AppState) {
              run sets the client address"
         );
     }
+    if state.config.public_mode
+        && state.config.trust_forward
+        && state.config.forward_header.get() == crate::session::ForwardHeader::Any
+    {
+        tracing::warn!(
+            target: "rustybin::auth",
+            "RUSTYBIN_TRUST_FORWARD without RUSTYBIN_TRUST_FORWARD_HEADER: a client can name its \
+             own address with a forwarding header your proxy does not set, and every per-address \
+             limit counts what it says. Have the proxy set one header and name it"
+        );
+    }
 }
 
 /// Once per process: a sign-in arrived with a forwarding header the

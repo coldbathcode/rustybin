@@ -22,6 +22,14 @@ pub const MAX_NAME: usize = 64;
 pub const MAX_DESCRIPTION: usize = 1000;
 /// Longest tool title.
 pub const MAX_TITLE: usize = 120;
+/// Schema nodes the tools of one revision expand, all together. The tools
+/// stay on the revision, each with its own copy of the schemas it names, so a
+/// `$ref` shared by every operation multiplies: a 160 KiB document once took
+/// 485 MiB here. Past the budget a tool keeps working, with the rest of its
+/// schema marked as not expanded.
+pub const TOOL_NODES: usize = 1_000_000;
+/// [`TOOL_NODES`] for a self-service mock, whoever wrote it.
+pub const VISITOR_TOOL_NODES: usize = 32_000;
 /// The argument that carries the request body.
 pub const BODY_ARG: &str = "body";
 
@@ -44,6 +52,9 @@ pub struct ToolSet {
     pub tools: Vec<Tool>,
     /// Operations that are not tools, with the reason.
     pub skipped: Vec<Skipped>,
+    /// The schema nodes the tools expanded (see [`TOOL_NODES`]).
+    #[serde(skip)]
+    pub nodes: usize,
 }
 
 impl ToolSet {
@@ -237,6 +248,7 @@ fn tool_for(
     op: &Operation,
     credentials: &[(Location, String)],
     taken: &mut HashSet<String>,
+    nodes: &mut usize,
 ) -> Result<Tool, String> {
     if c.settings.mcp.exclude.iter().any(|e| e == &op.id) {
         return Err("excluded by the mock's settings (mcp.exclude)".into());
@@ -300,7 +312,7 @@ fn tool_for(
                 }
             }
             used.insert(name.clone());
-            let inlined = schema::inline(&p.schema, root, Direction::Request);
+            let inlined = schema::inline_shared(&p.schema, root, Direction::Request, nodes);
             let mut prop = with_description(inlined, arg_description(p, renamed));
             if let (Some(ex), Value::Object(o)) = (&p.example, &mut prop) {
                 o.entry("examples").or_insert_with(|| json!([ex]));
@@ -324,7 +336,7 @@ fn tool_for(
             .unwrap_or_else(|| "application/json".to_string());
         let schema = media
             .and_then(|m| m.schema.as_ref())
-            .map(|s| schema::inline(s, root, Direction::Request))
+            .map(|s| schema::inline_shared(s, root, Direction::Request, nodes))
             .unwrap_or_else(|| json!({}));
         properties.insert(
             BODY_ARG.into(),
@@ -345,7 +357,7 @@ fn tool_for(
         "additionalProperties": false,
     });
 
-    let (output_schema, output_body) = output_of(op, root);
+    let (output_schema, output_body) = output_of(op, root, nodes);
     let method = op.method.as_str();
     Ok(Tool {
         name: unique(sanitize_name(&op.id), taken),
@@ -372,7 +384,7 @@ fn tool_for(
 
 /// The output schema from the default 2xx response, when it is JSON with a
 /// schema.
-fn output_of(op: &Operation, root: &Value) -> (Option<Value>, Option<Value>) {
+fn output_of(op: &Operation, root: &Value, nodes: &mut usize) -> (Option<Value>, Option<Value>) {
     let status = op.default_status();
     let Some(def) = op.response_for(status) else {
         return (None, None);
@@ -385,7 +397,7 @@ fn output_of(op: &Operation, root: &Value) -> (Option<Value>, Option<Value>) {
     else {
         return (None, None);
     };
-    let body = schema::inline(schema, root, Direction::Response);
+    let body = schema::inline_shared(schema, root, Direction::Response, nodes);
     let output = json!({
         "type": "object",
         "properties": {
@@ -402,8 +414,14 @@ pub fn build(c: &Compiled) -> ToolSet {
     let credentials = credential_params(c);
     let mut taken = HashSet::new();
     let mut set = ToolSet::default();
+    let budget = if c.visitor {
+        VISITOR_TOOL_NODES
+    } else {
+        TOOL_NODES
+    };
+    let mut nodes = budget;
     for op in &c.spec.operations {
-        match tool_for(c, op, &credentials, &mut taken) {
+        match tool_for(c, op, &credentials, &mut taken, &mut nodes) {
             Ok(tool) => set.tools.push(tool),
             Err(reason) => set.skipped.push(Skipped {
                 operation: op.id.clone(),
@@ -411,6 +429,7 @@ pub fn build(c: &Compiled) -> ToolSet {
             }),
         }
     }
+    set.nodes = budget - nodes;
     set
 }
 

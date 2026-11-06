@@ -37,6 +37,13 @@ provider, and on a self-service instance create mocks of their own.
   (a page with the link otherwise), and token exchange takes only the provider's own
   RS256 tokens.
 
+- **Cannot exhaust the instance's memory with a document.** A spec's cost is measured,
+  not its size: one small document naming a schema from every operation used to expand
+  to hundreds of megabytes. A visitor's revision keeps a bounded amount of expanded
+  schema and generated bodies, and all visitor mocks share a memory budget.
+- **Cannot name its own address, when the proxy header is named.** Limits count the
+  client's address; see [Behind a proxy](../mocks/self-service.md#behind-a-proxy).
+
 ## A low-rights caller of the control plane
 
 A console-scope token, a shared-mode API key, a visitor's manage token, an AI agent with

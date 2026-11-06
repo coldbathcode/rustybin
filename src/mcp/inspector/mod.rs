@@ -362,10 +362,11 @@ async fn run_checks(
             who
         }
     };
-    let (save, format) = (req.save.unwrap_or(true), req.format.clone());
+    let format = req.format.clone();
     // Saved credentials and calls that act on a server elsewhere: `mcp.connections`.
-    let admin = crate::control_auth::open_caller(&headers, &state.config)
-        .has(crate::rbac::Permission::McpConnections);
+    let caller = crate::control_auth::open_caller(&headers, &state.config);
+    let admin = caller.has(crate::rbac::Permission::McpConnections);
+    let save = req.save.unwrap_or(true) && keeps_runs(&state.config, &caller);
     let spec = match build_run_spec(&inspector, req, principal, admin) {
         Ok(s) => s,
         Err((status, message, reason)) => return error(status, message, reason),
@@ -377,6 +378,14 @@ async fn run_checks(
         return junit_response(&report);
     }
     Json(report).into_response()
+}
+
+/// Does this caller read and keep saved check runs? The 50 saved runs are one
+/// list, so a visitor of a public instance runs checks and keeps the answer
+/// only: keeping theirs would show every visitor the others' targets, and let
+/// one push the others' runs out.
+pub fn keeps_runs(config: &crate::config::Config, caller: &crate::rbac::Resolved) -> bool {
+    !config.public_mode || caller.has(crate::rbac::Permission::McpConnections)
 }
 
 /// Run the checks, log the run and keep its report (unless `save` is
@@ -406,8 +415,18 @@ pub async fn run_and_save(
     Some(report)
 }
 
-async fn list_runs(Extension(inspector): Extension<Arc<Inspector>>) -> Response {
-    Json(json!({ "runs": inspector.store.runs(), "capacity": store::MAX_RUNS })).into_response()
+async fn list_runs(
+    State(state): State<AppState>,
+    Extension(inspector): Extension<Arc<Inspector>>,
+    headers: HeaderMap,
+) -> Response {
+    let caller = crate::control_auth::open_caller(&headers, &state.config);
+    let runs = if keeps_runs(&state.config, &caller) {
+        inspector.store.runs()
+    } else {
+        Vec::new()
+    };
+    Json(json!({ "runs": runs, "capacity": store::MAX_RUNS })).into_response()
 }
 
 #[derive(Deserialize, Default)]
@@ -416,12 +435,18 @@ struct FormatQuery {
 }
 
 async fn get_run(
+    State(state): State<AppState>,
     Extension(inspector): Extension<Arc<Inspector>>,
     headers: HeaderMap,
     Path(id): Path<String>,
     Query(q): Query<FormatQuery>,
 ) -> Response {
-    match inspector.store.run(&id) {
+    let caller = crate::control_auth::open_caller(&headers, &state.config);
+    let run = inspector
+        .store
+        .run(&id)
+        .filter(|_| keeps_runs(&state.config, &caller));
+    match run {
         Some(r) if wants_junit(&headers, q.format.as_deref()) => junit_response(&r),
         Some(r) => Json(r).into_response(),
         None => error(

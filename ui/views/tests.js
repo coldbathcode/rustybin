@@ -15,6 +15,12 @@ import * as projects from '../lib/projects.js';
 
 const BASE = '/_rustybin/tests';
 
+/** Why a card has nothing to show: refused is a fact of this caller, not a fault. */
+function couldNotLoad(what, e) {
+  if (/^40[13] /.test(e.message)) return notice('', 'Saved tests belong to the operator of this instance: sign in with rights to them to see them here.');
+  return notice('err', what + ' could not be loaded: ' + e.message);
+}
+
 function parseVars(text) {
   const out = {};
   for (const line of text.split('\n')) {
@@ -109,7 +115,7 @@ export default {
       try {
         d = await getJson(BASE + projects.query(), { admin: true, session: false });
       } catch (e) {
-        replace(listEl, notice('err', 'The tests could not be loaded: ' + e.message));
+        replace(listEl, couldNotLoad('The tests', e));
         return;
       }
       if (!alive) return;
@@ -177,7 +183,7 @@ export default {
         const q = more && cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
         d = await getJson(BASE + '/runs' + q, { admin: true, session: false });
       } catch (e) {
-        replace(historyEl, notice('err', 'The history could not be loaded: ' + e.message));
+        replace(historyEl, couldNotLoad('The history', e));
         return;
       }
       if (!alive) return;
@@ -302,7 +308,7 @@ export default {
       try {
         d = await getJson(BASE + '/schedules', { admin: true, session: false });
       } catch (e) {
-        replace(schedulesEl, notice('err', 'The schedules could not be loaded: ' + e.message));
+        replace(schedulesEl, couldNotLoad('The schedules', e));
         return;
       }
       if (!alive) return;

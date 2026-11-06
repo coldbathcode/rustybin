@@ -293,7 +293,8 @@ pub async fn run_mcp_checks(ctx: &CallCtx, access: &Access, args: &Value, params
         save: arg_bool(args, "save"),
         format: None,
     };
-    let save = body.save.unwrap_or(true);
+    let save =
+        body.save.unwrap_or(true) && inspector::keeps_runs(&ctx.app.config, &access.resolved);
     let spec = match inspector::build_run_spec(
         &ctx.app.mcp_inspector,
         body,
@@ -346,10 +347,11 @@ pub async fn run_mcp_checks(ctx: &CallCtx, access: &Access, args: &Value, params
 }
 
 /// `list_mcp_check_runs`: the saved check runs, or one in full.
-pub fn list_mcp_check_runs(ctx: &CallCtx, _access: &Access, args: &Value) -> Value {
+pub fn list_mcp_check_runs(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     let store = &ctx.app.mcp_inspector.store;
+    let reads = inspector::keeps_runs(&ctx.app.config, &access.resolved);
     if let Some(id) = arg_str(args, "id").filter(|i| !i.is_empty()) {
-        return match store.run(id) {
+        return match store.run(id).filter(|_| reads) {
             Some(r) => {
                 // A saved run quotes the server as the live one does: under
                 // untrusted_report, cut.
@@ -379,7 +381,7 @@ pub fn list_mcp_check_runs(ctx: &CallCtx, _access: &Access, args: &Value) -> Val
             None => err(format!("no saved run {id:?}")),
         };
     }
-    let runs = store.runs();
+    let runs = if reads { store.runs() } else { Vec::new() };
     ok(
         ctx,
         format!(

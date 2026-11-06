@@ -2,6 +2,7 @@
 //! route table + deploy-check report. Requests only ever read it.
 
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 use std::sync::{Arc, OnceLock};
 
 use super::checks::{self, Report};
@@ -33,6 +34,39 @@ pub struct Compiled {
     mcp_tools: OnceLock<Arc<ToolSet>>,
     /// The spec's `pattern`s, compiled with the revision.
     pub patterns: super::schema::PinnedPatterns,
+    /// What a visitor's revision holds in memory, roughly, in bytes (the
+    /// budget of `RUSTYBIN_MOCKS_SELF_SERVICE_MAX_MB`); `0` otherwise.
+    pub weight: usize,
+}
+
+/// What one JSON object costs in memory (its map, keys and everything the
+/// compile keeps of it), measured with a counting allocator on the document
+/// shapes in the build notes of the hosted demo's step 02.
+const OBJECT_BYTES: usize = 1_500;
+const ARRAY_BYTES: usize = 200;
+/// What one expanded tool schema node costs, measured the same way.
+const TOOL_NODE_BYTES: usize = 400;
+/// What one byte of the report as JSON costs as the report.
+const REPORT_BYTE_COST: usize = 16;
+
+/// The revision's own document, in memory.
+fn document_weight(root: &Value) -> usize {
+    let mut total = 0;
+    let mut stack = vec![root];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::Object(o) => {
+                total += OBJECT_BYTES;
+                stack.extend(o.values());
+            }
+            Value::Array(a) => {
+                total += ARRAY_BYTES;
+                stack.extend(a.iter());
+            }
+            _ => {}
+        }
+    }
+    total
 }
 
 /// One segment of a path template.
@@ -196,9 +230,23 @@ impl Compiled {
             visitor: limits.settings.visitor,
             mcp_tools: OnceLock::new(),
             patterns,
+            weight: 0,
         };
         compiled.report = checks::run(&compiled);
+        if compiled.visitor {
+            compiled.weight = compiled.memory_estimate();
+        }
         Ok(compiled)
+    }
+
+    /// The source, the document, the report and the tools (built here: a
+    /// mock's detail asks for them anyway, and they are bounded).
+    fn memory_estimate(&self) -> usize {
+        let report = serde_json::to_vec(&self.report).map_or(0, |r| r.len());
+        self.source.len()
+            + document_weight(&self.spec.root)
+            + report * REPORT_BYTE_COST
+            + self.mcp_tools().nodes * TOOL_NODE_BYTES
     }
 
     /// The MCP tools of this revision (one per operation; built once).
