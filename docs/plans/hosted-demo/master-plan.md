@@ -60,7 +60,7 @@ The marker a session looks for is the first row that is not done.
 | [01](step-01-traffic-isolation.md) | One visitor never reads another's traffic | | done 2026-11-06 |
 | [02](step-02-demo-limits.md) | The signed image under the demo's limits: read-only root, tmpfs, 512 MiB, arm64, a console load on the free plan | | done 2026-11-06 |
 | [03](step-03-anonymous-surface.md) | The rest of the anonymous surface: shared check runs, status and metrics | | done 2026-11-06 |
-| 04 | Release 0.5.1 (the release recipe of the last plans) | 01 to 03 | in progress 2026-11-06 |
+| 04 | Release 0.5.1 (the release recipe of the last plans; the digest is in the changelog) | 01 to 03 | done 2026-11-06 |
 | 05 | `rustybin-platform`: `RUSTYBIN_CONTROL_AUTH=open`, `RUSTYBIN_STATE_DIR`, `RUSTYBIN_TRUST_FORWARD_HEADER=x-real-ip` with `header_up X-Real-IP {client_ip}` on both demo sites of the Caddyfile, `hostname: demo`, the 0.5.1 digest | 04 | not started, owner |
 | 06 | Go live: register `rustybin-mock.dev`, DNS and TLS for both hosts, the lead webhook, a walk through the live demo | 05 | not started, owner |
 

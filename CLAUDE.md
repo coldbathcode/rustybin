@@ -50,7 +50,8 @@ YAML output is pinned by `tests/snapshots/export.yaml`. Section 8 of the master 
 ## The hosted demo (planned 2026-11-06, in progress)
 
 [docs/plans/hosted-demo/master-plan.md](docs/plans/hosted-demo/master-plan.md): making a public self-service instance
-safe on the current release and putting it online; section 4 is the build marker. Rules it left: every reader of a
+safe on the current release and putting it online; section 4 is the build marker; `v0.5.1` released (the signed image's
+digest is in the changelog), steps 05 and 06 are the owner's. Rules it left: every reader of a
 mock's captures goes through `Svc::traffic_scope` and `TrafficScope::sees` or `CaptureLog::visible` (a capture holds
 what its sender presented; `MockCapture.sender` is never in an answer); `capture::Sender` keeps sessions and keys apart
 (a session name may hold a `:`); what a compiled revision keeps is bounded for the whole revision, never per schema (a

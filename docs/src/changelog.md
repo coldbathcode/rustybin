@@ -39,6 +39,13 @@ them (they were one list, so visitors saw each other's targets and could push th
 The console's Saved tests view says once that the tests are the operator's, in place of
 three errors.
 
+`cargo` version 0.5.1, the tag `v0.5.1`, the signed multi-arch image
+`ghcr.io/coldbathcode/rustybin:0.5.1`, digest
+`sha256:25026bdff9bd84fa146187c410962b722e04bf9a422ea78781dfe95d4d9bb7b6` (verify it with the
+cosign command of the [quick start](quick-start.md#docker); the
+[release](https://github.com/coldbathcode/rustybin/releases/tag/v0.5.1) carries the same
+values, and the Linux and macOS binaries).
+
 ## 0.5.0 (2026-11-03): access control
 
 Several people on one instance, each with the roles they need: users with roles
