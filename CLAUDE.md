@@ -63,6 +63,18 @@ self-service instance with the password sign-in (`login::optional`) a caller wit
 route that declares `.authenticated()` stays closed to it unless it is also `.self_service()`; a caller without a credential
 reaches what it reaches on `open`, which `a_caller_without_a_credential_reaches_what_an_open_plane_gives` walks.
 
+## Rustybin 0.6, more from an instance (built 2026-11-07)
+
+[docs/plans/core-next/master-plan.md](docs/plans/core-next/master-plan.md): steps 01 to 10 of the roadmap's candidates;
+section 4 says why steps 11 to 13 wait for the owner. Rules it left: a dry check of the outbound policy is
+`Egress::dry_check` (never a copy); a feature that reaches out on a caller's word needs `mocks.write` or better and a
+`Purpose` with no default (`mocks/fetch.rs`), and `rustybin.yaml` never reaches out; a route a git host calls is open and
+its signature is the credential (`sourcecontrol::is_public_path`), off until its secret is set; a harness feature that
+can be an import stays one (`harness/import.rs` makes `source.requests`, so the engine and the safety checks are
+untouched), and what reads finished runs does so after the fact (`harness/otlp.rs`); a timing change is measured under
+the parallel suite, not alone; a Hurl body in an included example is bare JSON, never a fenced block, which closes the
+page's own fence.
+
 ## Rustybin 0.3, reliability and testing workflows (built and released 2026-11-02)
 
 [docs/plans/reliability/master-plan.md](docs/plans/reliability/master-plan.md) (planned 2026-11-02 from section 8 of

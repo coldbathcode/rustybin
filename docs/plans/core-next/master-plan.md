@@ -35,6 +35,29 @@ The marker a session looks for is the first row that is not done.
 | 08 | Harness: replay captured traffic or a HAR file (`harness/import.rs`: an import into `source.requests`, not a new source, so the engine and the safety checks are unchanged; credentials removed) | done 2026-11-07 |
 | 09 | MCP-level OAuth on a mock's own MCP server (`mcp.oauth`, through the same `auth::require_bearer_for` as `/mcp/protected`; not on a visitor's mock) | done 2026-11-07 |
 | 10 | Harness: OpenTelemetry export (`harness/otlp.rs`: metrics of finished runs as OTLP over HTTP with JSON, no new dependency; traces are not sent, a run has no spans) | done 2026-11-07 |
-| 11 | Source control: branches per environment, signed commits, merges | not started |
-| 12 | Agents: secrets with an out-of-band confirmation; an interactive sign-in from the CLI | not started |
-| 13 | Harness: scenario import, HTTP/3 targets, server-to-server chains | not started |
+| 11 | Source control: branches per environment, signed commits, merges | not built: owner decision, section 4 |
+| 12 | Agents: secrets with an out-of-band confirmation; an interactive sign-in from the CLI | not built: owner decision, section 4 |
+| 13 | Harness: scenario import, HTTP/3 targets, server-to-server chains | not built: owner decision, section 4 |
+
+Released as 0.6.0 after step 10.
+
+## 4. Why steps 11 to 13 stopped
+
+Each of these changes a rule the project set on purpose, or needs a call only the owner can make, so
+they wait for one rather than a guess:
+
+- **Merges inside the instance**: source control is "never a merge" by design; a diverged branch
+  answers `409` with the two ways out. Changing that decides who resolves a conflict and how a
+  repository writer stays limited. Branches per environment and signed commits are smaller, and
+  turn on what key signs and whether a document may name a branch.
+- **Secrets through an agent**: "a secret is never a tool input" is a hard rule, tested by
+  `every_tool_is_fully_defined`. An out-of-band confirmation is an exception to it, and what confirms
+  (a console prompt, a one-time link) is the design.
+- **An interactive agent sign-in from the CLI** and **OAuth for visitors and key holders**: the second
+  reopens what step 04b of the hosted demo closed on purpose.
+- **Server-to-server chains**: the harness plan holds them back until the safety model covers outbound
+  traffic from the server role.
+- **HTTP/3 targets**: a QUIC stack in the load engine, a new dependency with a large surface, for a
+  protocol few gateways under test speak.
+- **Scenario import from other tools**: which tools, and how much of each one's model, is a choice
+  of what to support for years.

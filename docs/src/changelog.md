@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.6.0 (2026-11-07): more from an instance
+
+[The plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/core-next/master-plan.md),
+steps 01 to 10, from the roadmap's candidates. Nothing to do when upgrading; three things are new
+and off until you turn them on.
+
+**New**:
+
+- [A spec from a URL](mocks/index.md#a-spec-from-a-url): `spec_url` on a create, `--spec-url`, and
+  **Or fetch it** in the new mock dialog. It needs `mocks.write` and a host named in
+  `RUSTYBIN_EGRESS_ALLOW` (purpose `spec_fetch`, no default), so never a visitor's.
+- [A push webhook](source-control.md#a-webhook-instead-of-polling) for source control:
+  `POST /_rustybin/git/webhook` pulls at once, signed, and answers `404` until
+  `git.webhook_secret` is set.
+- [OAuth on a mock's own MCP server](mocks/mcp.md#security): `mcp.oauth` answers `401` with protected
+  resource metadata, to try a client's sign-in.
+- [Stateful visitor mocks](mocks/self-service.md), behind
+  `RUSTYBIN_MOCKS_SELF_SERVICE_STATEFUL`, at most 50 items and 64 KiB per mock. Off by default.
+- For the harness: [a leader that steps aside](harness.md#failover) before maintenance with the run
+  still on; [a recording as a scenario's source](harness.md#replaying-a-recording), from a HAR file or
+  saved captures, without its credentials; and [a finished run's metrics](harness.md#opentelemetry) to
+  an OpenTelemetry collector.
+- `rustybin egress check <url>` and `GET /_rustybin/egress/check`: what the outbound policy would say
+  to a URL, without calling it. Also **Check a URL** on the Network tab.
+- Suggestions for the style of generated examples, and **Generate more** on an operation.
+
+**Changed**: `GET /_rustybin/mocks/export` writes a version 2 document with only the `mocks` section.
+It applies as before.
+
 ## 0.5.2 (2026-11-07): an operator's sign-in next to anonymous visitors
 
 **Changed**: `RUSTYBIN_MOCKS_SELF_SERVICE=true` now works with the password sign-in, where

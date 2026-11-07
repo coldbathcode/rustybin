@@ -11,6 +11,13 @@ it online. The candidates under consideration below are not scheduled.
 
 ## Recently built
 
+- [Rustybin 0.6, more from an instance](changelog.md#060-2026-11-07-more-from-an-instance)
+  (2026-11-07): [specs from a URL](mocks/index.md#a-spec-from-a-url), a
+  [push webhook](source-control.md#a-webhook-instead-of-polling), OAuth on a
+  [mock's MCP server](mocks/mcp.md#security), and for the harness a leader that
+  [steps aside](harness.md#failover), [recordings](harness.md#replaying-a-recording) as a
+  source and [OpenTelemetry](harness.md#opentelemetry).
+
 - [Rustybin 0.5.2, an operator's sign-in](changelog.md#052-2026-11-07-an-operators-sign-in-next-to-anonymous-visitors)
   (2026-11-07): [self-service next to the password sign-in](mocks/self-service.md#an-operator-who-signs-in),
   and a harness failover that keeps to its line of succession.
