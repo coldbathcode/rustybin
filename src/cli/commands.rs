@@ -485,6 +485,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("harness", "cluster", "<id>", "A cluster: nodes, leader, runs.", NO_FLAGS, [("GET", "/_rustybin/harness/clusters/{id}")], false, "harness cluster c-1"),
     cmd!("harness", "delete-cluster", "<id>", "Dissolve a cluster.", NO_FLAGS, [("DELETE", "/_rustybin/harness/clusters/{id}")], true, "harness delete-cluster c-1 --yes"),
     cmd!("harness", "leader", "<id>", "The cluster's leader.", NO_FLAGS, [("GET", "/_rustybin/harness/clusters/{id}/leader")], false, "harness leader c-1"),
+    cmd!("harness", "step-aside", "<id>", "Before maintenance: the leader hands the cluster to the first in the succession, with the run still on.", NO_FLAGS, [("POST", "/_rustybin/harness/clusters/{id}/leader/step-aside")], false, "harness step-aside perf-1"),
     cmd!("harness", "upstreams", "<id>", "The cluster's server nodes as the gateway reaches them.", NO_FLAGS, [("GET", "/_rustybin/harness/clusters/{id}/upstreams")], false, "harness upstreams c-1"),
     cmd!("harness", "cluster-runs", "<id>", "The cluster's runs.", NO_FLAGS, [("GET", "/_rustybin/harness/clusters/{id}/runs")], false, "harness cluster-runs c-1"),
     cmd!("harness", "cluster-run", "<id> <file>", "Create a cluster run from a scenario (start it with cluster-start).", NO_FLAGS, [("POST", "/_rustybin/harness/clusters/{id}/runs")], false, "harness cluster-run c-1 smoke.yaml"),
@@ -3808,6 +3809,10 @@ async fn harness(ctx: &mut Ctx, verb: &str) -> Result<()> {
         "delete-cluster" => {
             ctx.args.arg(0, "a cluster id")?;
             delete(ctx, &cluster, &[]).await
+        }
+        "step-aside" => {
+            ctx.args.arg(0, "a cluster id")?;
+            post(ctx, &format!("{cluster}/leader/step-aside"), Body::None).await
         }
         "leader" | "upstreams" => {
             ctx.args.arg(0, "a cluster id")?;

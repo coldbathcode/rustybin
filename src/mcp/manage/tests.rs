@@ -1745,6 +1745,7 @@ const COVERAGE: &[(&str, Cover)] = &[
     ("/_rustybin/harness/clusters", Tool("create_cluster")),
     ("/_rustybin/harness/clusters/{id}", Tool("list_cluster_nodes")),
     ("/_rustybin/harness/clusters/{id}/leader", Tool("get_leader")),
+    ("/_rustybin/harness/clusters/{id}/leader/step-aside", Tool("step_aside")),
     ("/_rustybin/harness/clusters/{id}/upstreams", Tool("export_upstreams")),
     ("/_rustybin/harness/clusters/{id}/runs", Tool("create_run")),
     ("/_rustybin/harness/clusters/{id}/runs/{run}", Tool("get_run")),
@@ -3966,7 +3967,7 @@ async fn users_and_roles_tools_invite_confirm_and_never_carry_a_password() {
     let headers: [(&str, &str); 1] = [("authorization", "Bearer admin-09")];
     // The admin's tool list counts the step 09 and 10 tools (and the docs say so).
     let names = tool_names(&app, &headers).await;
-    assert_eq!(names.len(), 137, "docs/src/coding-agents.md counts 137");
+    assert_eq!(names.len(), 138, "docs/src/coding-agents.md counts 138");
     for t in [
         "list_users",
         "invite_user",

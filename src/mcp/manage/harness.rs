@@ -850,6 +850,25 @@ pub fn cluster_report<'a>(
 
 /// `get_leader`: the cluster's leader as this node sees it. Every member
 /// answers (the leader too), so an agent can always find the leader.
+pub fn step_aside(ctx: &CallCtx, args: &Value) -> Value {
+    let h = match harness_of(ctx) {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
+    let c = match cluster_of(&h, args) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    match c.step_aside() {
+        Ok(successor) => ok(
+            ctx,
+            format!("{} steps aside: {successor} takes over", c.leader),
+            json!({ "cluster_id": c.id, "from": c.leader, "term": c.term, "successor": successor }),
+        ),
+        Err(e) => err(e),
+    }
+}
+
 pub fn get_leader(ctx: &CallCtx, args: &Value) -> Value {
     let h = match harness_of(ctx) {
         Ok(h) => h,

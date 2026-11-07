@@ -673,6 +673,7 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET POST | `/_rustybin/harness/clusters` | Clusters this node leads; POST {cluster_id?, min_nodes?, lease?, election_timeout?, join_token?} creates one |
 | GET DELETE | `/_rustybin/harness/clusters/{id}` | A cluster: members, roles, health, clock offsets, the current run |
 | GET | `/_rustybin/harness/clusters/{id}/upstreams` | The server nodes' advertised URLs, for the gateway's upstream pool |
+| POST | `/_rustybin/harness/clusters/{id}/leader/step-aside` | Before maintenance: the leader steps aside and the first in the succession takes over, with the run still on |
 | GET | `/_rustybin/harness/clusters/{id}/leader` | The leader, its term, the succession with work scores and the history of leader changes |
 | POST | `/_rustybin/harness/clusters/{id}/election/vote` | Node route: a candidate asks an eligible node for its vote (node credential) |
 | POST | `/_rustybin/harness/clusters/{id}/election/elected` | Node route: a new leader announces its term (node credential); an older leader steps down |

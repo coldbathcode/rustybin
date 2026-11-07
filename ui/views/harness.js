@@ -252,6 +252,11 @@ export default {
         parts.push(h('div', { class: 'stack-sm' },
           h('div', { class: 'row' }, h('strong', null, d.cluster_id), badge(`leader ${d.leader.node_id}, term ${d.term}`, 'violet'),
             d.quorum === false ? badge('no majority of the eligible nodes: leases not renewed', 'err') : null,
+            d.failover === 'available' ? h('button', { class: 'btn sm', type: 'button', id: 'harness-step-aside', onclick: async (e) => {
+              e.target.disabled = true;
+              const a = await send({ control: true, method: 'POST', url: `${SERVER}${PREFIX}/clusters/${encodeURIComponent(d.cluster_id)}/leader/step-aside`, timeout: 10000 });
+              toast(a.ok && a.json ? `Stepping aside: ${a.json.successor} takes over` : ((a.json && a.json.error) || `answered ${a.status}`), a.ok ? undefined : 'err');
+            } }, 'Step aside') : null,
             badge(`${d.alive.clients} client(s), ${d.alive.servers} server(s) alive`, 'outline'),
             d.current_run ? badge(`run ${d.current_run.run_id} ${d.current_run.state}`, d.current_run.state === 'finished' ? 'outline' : 'ok') : null,
             h('span', { class: 'grow' }),

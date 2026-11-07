@@ -1889,6 +1889,8 @@ pub struct Cluster {
     version: watch::Sender<u64>,
     /// A newer term exists: this node no longer leads (it steps down).
     stale: std::sync::atomic::AtomicBool,
+    /// When this leader was asked to step aside ([`Self::step_aside`]).
+    aside: Mutex<Option<Instant>>,
     /// A member's heartbeat claimed this newer term (0: none): the leader
     /// looks for that term's leader, and steps down only when it finds one
     /// that passes [`Cluster::check_new_leader`].
@@ -1902,6 +1904,12 @@ pub struct Cluster {
     /// The node is shutting down: heartbeats answer at once (no long poll
     /// holds the graceful shutdown up).
     closing: std::sync::atomic::AtomicBool,
+}
+
+/// Has a step aside asked at `asked` run out? Long enough for a first try
+/// and a retry of the election.
+pub(super) fn aside_expired(asked: Instant, election_timeout: Duration, now: Instant) -> bool {
+    now.duration_since(asked) > election_timeout * 4
 }
 
 impl std::fmt::Debug for Cluster {
@@ -2080,10 +2088,52 @@ impl Cluster {
         ids
     }
 
+    /// Step aside before maintenance: this leader answers as one that lost
+    /// its quorum, so no lease is renewed, the first in line stands by the
+    /// ordinary election, and the ticker's probe finds the new leader and
+    /// steps down. No protocol of its own. Answers the node expected to take
+    /// over, or why nobody can.
+    pub fn step_aside(&self) -> Result<String, String> {
+        let eligible = self.eligible();
+        if eligible.len() < 3 {
+            return Err(format!(
+                "nobody can take over: {}",
+                Self::failover_text(eligible.len())
+            ));
+        }
+        self.recompute_succession();
+        let successor = lock(&self.inner)
+            .succession
+            .first()
+            .map(|s| s.node_id.clone())
+            .ok_or("nobody can take over: no eligible node is alive")?;
+        *lock(&self.aside) = Some(Instant::now());
+        tracing::info!(target: "rustybin::harness", cluster = %self.id, term = self.term, successor, "harness: the leader steps aside");
+        Ok(successor)
+    }
+
+    /// Is this leader stepping aside? It ends by itself when nobody took
+    /// over in time, so a leader never goes on refusing its members.
+    pub fn stepping_aside(&self) -> bool {
+        let mut aside = lock(&self.aside);
+        match *aside {
+            Some(asked) if aside_expired(asked, self.election_timeout, Instant::now()) => {
+                *aside = None;
+                tracing::warn!(target: "rustybin::harness", cluster = %self.id, term = self.term, "harness: nobody took over: this node keeps leading");
+                false
+            }
+            Some(_) => true,
+            None => false,
+        }
+    }
+
     /// Whether this leader hears a majority of the eligible nodes within
     /// the election timeout. With fewer than three eligible nodes no other
     /// node can be elected, so it always has.
     pub fn has_quorum(&self) -> bool {
+        if self.stepping_aside() {
+            return false;
+        }
         let inner = lock(&self.inner);
         let eligible = Self::eligible_of(&inner, &self.leader);
         if eligible.len() < 3 {
@@ -2823,6 +2873,7 @@ impl Cluster {
             }),
             version,
             stale: std::sync::atomic::AtomicBool::new(false),
+            aside: Mutex::new(None),
             newer_claim: std::sync::atomic::AtomicU64::new(0),
             previous_leader: Some(snap.leader.node_id.clone()),
             promoted_at: Some(now),
@@ -2972,6 +3023,7 @@ impl Cluster {
             "term": self.term,
             "answered_by": self.leader,
             "quorum": self.has_quorum(),
+            "stepping_aside": self.stepping_aside(),
             "eligible": eligible,
             "failover": Self::failover_text(eligible.len()),
             "election_timeout_ms": self.election_timeout.as_millis() as u64,
@@ -3797,6 +3849,7 @@ impl Coordinator {
             }),
             version,
             stale: std::sync::atomic::AtomicBool::new(false),
+            aside: Mutex::new(None),
             newer_claim: std::sync::atomic::AtomicU64::new(0),
             previous_leader: None,
             promoted_at: None,

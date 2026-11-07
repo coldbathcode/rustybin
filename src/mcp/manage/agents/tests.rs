@@ -1235,6 +1235,8 @@ const OLD_RIGHTS: &[(&str, &str, bool)] = &[
     ("delete_project", "admin", false),
     // The audit log (step 14): an admin read tool, as 0.4 had them.
     ("list_audit", "admin", true),
+    // A cluster's leader steps aside: a harness change, as create_cluster.
+    ("step_aside", "harness", false),
 ];
 
 /// The 0.4 ceilings, by right: `read-only` a read-only tool that is not a

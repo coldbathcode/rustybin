@@ -890,6 +890,46 @@ pub async fn get_leader(State(state): State<AppState>, Path(id): Path<String>) -
     }
 }
 
+/// `POST /_rustybin/harness/clusters/{id}/leader/step-aside`: before
+/// maintenance, hand the cluster to the first in line. On a member, `409`
+/// names the leader to call.
+pub async fn step_aside(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let h = match harness(&state) {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+    if let Some(c) = h.coordinator.get(&id) {
+        return match c.step_aside() {
+            Ok(successor) => (
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "cluster_id": c.id,
+                    "from": c.leader,
+                    "term": c.term,
+                    "successor": successor,
+                    "timeout_ms": c.election_timeout.as_millis() as u64,
+                })),
+            )
+                .into_response(),
+            Err(e) => error(StatusCode::CONFLICT, e),
+        };
+    }
+    match h.membership().filter(|m| m.cluster_id == id) {
+        Some(m) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "this node is a member, not the leader, of the cluster",
+                "leader": m.leader(),
+            })),
+        )
+            .into_response(),
+        None => error(
+            StatusCode::NOT_FOUND,
+            format!("this node is not a member of cluster {id:?}"),
+        ),
+    }
+}
+
 /// `POST /_rustybin/harness/clusters/{id}/election/vote`: a candidate asks
 /// for this node's vote (its node credential as bearer).
 pub async fn node_vote(

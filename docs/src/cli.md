@@ -709,6 +709,7 @@ Load tests on the instance (--remote); validate, run and report work offline too
 | `rustybin harness cluster <id>` | A cluster: nodes, leader, runs. | `GET /_rustybin/harness/clusters/{id}` | `harness.read` |
 | `rustybin harness delete-cluster <id>` | Dissolve a cluster. | `DELETE /_rustybin/harness/clusters/{id}` | `harness.cluster` |
 | `rustybin harness leader <id>` | The cluster's leader. | `GET /_rustybin/harness/clusters/{id}/leader` | `harness.read` |
+| `rustybin harness step-aside <id>` | Before maintenance: the leader hands the cluster to the first in the succession, with the run still on. | `POST /_rustybin/harness/clusters/{id}/leader/step-aside` | `harness.cluster` |
 | `rustybin harness upstreams <id>` | The cluster's server nodes as the gateway reaches them. | `GET /_rustybin/harness/clusters/{id}/upstreams` | `harness.read` |
 | `rustybin harness cluster-runs <id>` | The cluster's runs. | `GET /_rustybin/harness/clusters/{id}/runs` | `harness.read` |
 | `rustybin harness cluster-run <id> <file>` | Create a cluster run from a scenario (start it with cluster-start). | `POST /_rustybin/harness/clusters/{id}/runs` | `harness.run` |
@@ -743,6 +744,7 @@ rustybin harness create-cluster --body '{"min_nodes": {"clients": 2}}'
 rustybin harness cluster c-1
 rustybin harness delete-cluster c-1 --yes
 rustybin harness leader c-1
+rustybin harness step-aside perf-1
 rustybin harness upstreams c-1
 rustybin harness cluster-runs c-1
 rustybin harness cluster-run c-1 smoke.yaml

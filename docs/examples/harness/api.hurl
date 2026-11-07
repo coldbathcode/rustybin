@@ -346,6 +346,15 @@ jsonpath "$.eligible" count == 1
 jsonpath "$.history[0].reason" == "created"
 # ANCHOR_END: cluster_leader
 
+# ANCHOR: cluster_step_aside
+# One eligible node: nobody can take over, so the leader stays.
+POST {{harness_url}}/_rustybin/harness/clusters/docs-cluster/leader/step-aside
+Authorization: Bearer {{admin_token}}
+HTTP 409
+[Asserts]
+jsonpath "$.error" contains "failover needs three"
+# ANCHOR_END: cluster_step_aside
+
 # ANCHOR: cluster_upstreams
 GET {{harness_url}}/_rustybin/harness/clusters/docs-cluster/upstreams
 HTTP 200

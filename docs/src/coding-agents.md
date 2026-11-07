@@ -441,7 +441,7 @@ rustybin agents rights <id> --ceiling manage --deny delete_mock,apply_config
 
 ## Tool limits
 
-With an admin credential the server has 137 tools, sent 100 to a `tools/list` page
+With an admin credential the server has 138 tools, sent 100 to a `tools/list` page
 with `nextCursor` for the rest. Clients differ in how many tools they take:
 
 | Client | Reads every `tools/list` page | Its own limit |

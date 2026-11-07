@@ -474,6 +474,18 @@ that cannot hear a majority stops renewing leases (the minority side of a partit
 sending), and one that finds the leader of a newer term steps down. A crashed leader that
 restarts is a new node: start it as a standby pointing at any eligible member to rejoin.
 
+To take the leader down for maintenance, ask it to step aside first, with
+`POST /_rustybin/harness/clusters/{id}/leader/step-aside` on the leader,
+`rustybin harness step-aside <id>`, the `step_aside` tool, or **Step aside** on the cluster
+card. It needs three or more eligible nodes. The leader stops renewing leases and the
+first in the succession takes over by the ordinary election, within the election
+timeout, so the run stays on and nothing is lost; the old leader follows the new one. If
+nobody takes over within four election timeouts it keeps leading.
+
+```hurl
+{{#include ../examples/harness/api.hurl:cluster_step_aside}}
+```
+
 A leader steps down only for a newer leader it can check: an announcement from a node it
 knows as eligible, at a term at most 16 ahead of its own, naming the control URL that node
 joined with; or, when a member's heartbeat claims a newer term, an eligible node that answers

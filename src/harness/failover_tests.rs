@@ -752,3 +752,80 @@ fn the_line_holds_whatever_the_heartbeats_phase() {
         );
     }
 }
+
+/// A leader asked to step aside before maintenance: the first in line takes
+/// over by the ordinary election, the run goes on, and nothing is lost.
+#[tokio::test]
+async fn a_leader_steps_aside_and_the_line_takes_over_with_the_run_on() {
+    let id = "fo-aside";
+    let (l, url) = lead(coordinator(), "fa-leader", id).await;
+    let standby = node_named(
+        eligible(
+            harness_config(&[Role::Coordinator], &[]),
+            LeaderPolicy::Prefer,
+        ),
+        "fa-standby",
+    )
+    .await;
+    let c1 = node_named(eligible(client_config(1000), LeaderPolicy::Auto), "fa-c1").await;
+    let s = node_named(harness_config(&[Role::Server], &[]), "fa-s").await;
+    for n in [&standby, &c1, &s] {
+        join(n, &url).await;
+    }
+    wait_for_alive(&l, id, 1, 1).await;
+    let mut sc = scenario(&s.base(), 100, "6s");
+    sc["scale"] = json!({ "virtual_clients": 20, "client_nodes": 1, "server_nodes": 1 });
+    let run_id = start(&l, id, sc).await;
+    let c1_run = local_run(&c1, &run_id).await;
+    let want = vec!["fa-standby".to_string(), "fa-c1".to_string()];
+    let until = Instant::now() + Duration::from_secs(6);
+    while Instant::now() < until && succession(&standby, id).await != want {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(succession(&standby, id).await, want);
+
+    let path = format!("/_rustybin/harness/clusters/{id}/leader/step-aside");
+    let (status, v) = send(&l.app, Method::POST, &path, None).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{v}");
+    assert_eq!(v["successor"], "fa-standby", "{v}");
+    wait_until("the standby leads", LEASE, || leads(&standby, id)).await;
+    wait_until("the old leader follows", LEASE, || !leads(&l, id)).await;
+    assert!(!leads(&c1, id));
+    assert!(c1_run.is_active(), "{:?}", c1_run.stop_reason());
+    let report = wait_for_cluster_report(&standby, id, &run_id).await;
+    assert_eq!(report["state"], "finished", "{report}");
+    assert_eq!(report["cluster"]["leader"], "fa-standby", "{report}");
+    assert_eq!(report["totals"]["lost"], 0, "{report}");
+}
+
+/// Nobody to take over: refused, and the leader keeps leading.
+#[tokio::test]
+async fn a_leader_with_no_line_stays() {
+    let id = "fo-alone";
+    let (l, url) = lead(coordinator(), "fb-leader", id).await;
+    let c1 = node_named(eligible(client_config(1000), LeaderPolicy::Auto), "fb-c1").await;
+    join(&c1, &url).await;
+    let path = format!("/_rustybin/harness/clusters/{id}/leader/step-aside");
+    let (status, v) = send(&l.app, Method::POST, &path, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{v}");
+    assert!(v["error"].as_str().expect("error").contains("three"), "{v}");
+    assert!(leads(&l, id));
+    // On a member: it does not lead, and says who does.
+    let (status, v) = send(&c1.app, Method::POST, &path, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["leader"]["node_id"], "fb-leader", "{v}");
+    let unknown = "/_rustybin/harness/clusters/nope/leader/step-aside";
+    let (status, _) = send(&l.app, Method::POST, unknown, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// Stepping aside ends by itself when nobody took over in time, so a leader
+/// is never left refusing its members.
+#[test]
+fn stepping_aside_expires() {
+    use super::cluster::aside_expired;
+    let e = Duration::from_millis(600);
+    let asked = Instant::now();
+    assert!(!aside_expired(asked, e, asked + e * 3));
+    assert!(aside_expired(asked, e, asked + e * 5));
+}

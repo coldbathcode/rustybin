@@ -1474,6 +1474,10 @@ pub fn router(_state: &AppState) -> Router<AppState> {
             get(api::get_leader),
         )
         .route(
+            "/_rustybin/harness/clusters/{id}/leader/step-aside",
+            post(api::step_aside),
+        )
+        .route(
             "/_rustybin/harness/clusters/{id}/election/vote",
             post(api::node_vote),
         )
@@ -1736,6 +1740,22 @@ pub fn catalog() -> Vec<Endpoint> {
 .permission(crate::rbac::Permission::HarnessRead)
         .example(
             Example::get("Upstreams", "/_rustybin/harness/clusters/perf-1/upstreams")
+                .expect_status(404),
+        ),
+        Endpoint::new(
+            "/_rustybin/harness/clusters/{id}/leader/step-aside",
+            &["POST"],
+            category::HARNESS,
+            "Before maintenance: the leader steps aside and the first in the succession takes over, with the run still on",
+        )
+        .permission(crate::rbac::Permission::HarnessCluster)
+        .description(
+            "Needs three or more eligible nodes. The leader stops renewing leases, the first in \
+             line stands by the ordinary election within the election timeout, and the leader \
+             follows it. If nobody takes over within four election timeouts it keeps leading.",
+        )
+        .example(
+            Example::post("Step aside", "/_rustybin/harness/clusters/perf-1/leader/step-aside")
                 .expect_status(404),
         ),
         Endpoint::new(
@@ -2240,6 +2260,16 @@ fn cluster_openapi_paths(tag: &Value, off: &Value, scenario_body: &Value) -> Val
                 "operationId": "getHarnessUpstreams",
                 "parameters": [path_param("id")],
                 "responses": { "200": { "description": "Advertised URLs", "content": { "application/json": { "schema": { "type": "array", "items": { "type": "string" } } } } }, "307": { "description": "This node is a member; the leader answers" }, "404": off }
+            }
+        },
+        "/_rustybin/harness/clusters/{id}/leader/step-aside": {
+            "post": {
+                "tags": tag,
+                "summary": "Hand the cluster to the first in line",
+                "description": "Before maintenance: the leader stops renewing leases and the first in the succession takes over by the ordinary election, with the run still on. 409 with fewer than three eligible nodes, or on a member (it names the leader).",
+                "operationId": "stepAsideHarnessLeader",
+                "parameters": [path_param("id")],
+                "responses": { "202": json_ok("Who is expected to take over"), "404": off, "409": { "description": "Nobody can take over, or this node does not lead" } }
             }
         },
         "/_rustybin/harness/clusters/{id}/leader": {
