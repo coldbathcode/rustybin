@@ -612,6 +612,7 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | POST | `/_rustybin/mocks/import` | Preview a spec: operations, security schemes, warnings, suggested name |
 | POST | `/_rustybin/mocks/apply` | Apply a rustybin.yaml document (create, update, ?prune=true deletes the rest) |
 | POST | `/_rustybin/mocks/reload` | Re-read RUSTYBIN_CONFIG_FILE and RUSTYBIN_MOCKS_DIR (also on SIGHUP) |
+| POST | `/_rustybin/mocks/import/fetch` | Fetch a spec from a URL on the server (egress purpose spec_fetch), at most the spec limit |
 | GET | `/_rustybin/mocks/export` | Every mock (except the sample) as a rustybin.yaml document |
 | GET | `/_rustybin/mocks/config.schema.json` | JSON Schema of rustybin.yaml (editor completion) |
 | GET POST DELETE | `/_rustybin/mocks/visit` | Self-service: the caller's visit (GET), start one (POST) or end it (DELETE) |

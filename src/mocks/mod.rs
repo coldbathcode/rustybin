@@ -20,6 +20,7 @@ pub mod cli;
 pub mod collections;
 pub mod compile;
 pub mod config_file;
+pub mod fetch;
 pub mod handlers;
 pub mod host;
 pub mod leads;
@@ -279,6 +280,7 @@ pub fn router(_state: &AppState) -> Router<AppState> {
         .route("/_rustybin/mocks/apply", post(h::apply))
         .route("/_rustybin/mocks/reload", post(h::reload))
         .route("/_rustybin/mocks/export", get(h::export_all))
+        .route("/_rustybin/mocks/import/fetch", post(h::import_fetch))
         .route("/_rustybin/mocks/config.schema.json", get(h::config_schema))
         .route(
             "/_rustybin/mocks/visit",
@@ -507,6 +509,18 @@ pub fn catalog() -> Vec<Endpoint> {
         )
 .permission(crate::rbac::Permission::ConfigApply).self_service()
         .example(Example::post("Reload mocks from disk", "/_rustybin/mocks/reload")),
+        Endpoint::new(
+            "/_rustybin/mocks/import/fetch",
+            &["POST"],
+            category::MOCKS,
+            "Fetch a spec from a URL on the server (egress purpose spec_fetch), at most the spec limit",
+        )
+        .permission(crate::rbac::Permission::MocksWrite)
+        .example(
+            Example::post("Fetch a spec", "/_rustybin/mocks/import/fetch")
+                .json(r#"{"url":"https://specs.example.com/orders.yaml"}"#)
+                .expect_status(403),
+        ),
         Endpoint::new(
             "/_rustybin/mocks/export",
             &["GET"],
@@ -925,6 +939,7 @@ pub fn openapi_paths() -> Value {
         "/_rustybin/mocks/apply": { "post": admin("applyMocks", "Apply a rustybin.yaml document", json!([{ "name": "prune", "in": "query", "schema": { "type": "boolean" } }])) },
         "/_rustybin/mocks/reload": { "post": admin("reloadMocks", "Reload file-defined mocks", json!([])) },
         "/_rustybin/mocks/export": { "get": simple("exportMocks", "Export mocks as YAML", json!([])) },
+        "/_rustybin/mocks/import/fetch": { "post": simple("fetchMockSpec", "Fetch a spec from a URL on the server", json!([])) },
         "/_rustybin/mocks/config.schema.json": { "get": simple("getMocksConfigSchema", "JSON Schema of rustybin.yaml", json!([])) },
         "/_rustybin/mocks/{name}": {
             "get": simple("getMock", "Mock details", json!([name])),

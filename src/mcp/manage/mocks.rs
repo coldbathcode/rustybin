@@ -288,14 +288,19 @@ fn settings_from<T: serde::de::DeserializeOwned>(
 
 /// `create_mock`.
 pub async fn create_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
-    let spec = match spec_arg(args) {
-        Ok(s) => s,
-        Err(e) => return e,
+    let spec_url = arg_str(args, "spec_url").map(str::to_string);
+    let spec = match (&spec_url, args.get("spec")) {
+        (Some(_), None) => Value::Null,
+        _ => match spec_arg(args) {
+            Ok(s) => s,
+            Err(e) => return e,
+        },
     };
-    let body = CreateBody {
+    let mut body = CreateBody {
         name: arg_str(args, "name").map(str::to_string),
         project: arg_str(args, "project").map(str::to_string),
         spec,
+        spec_url,
         enabled: arg_bool(args, "enabled"),
         deploy: arg_bool(args, "deploy"),
         force: arg_bool(args, "force"),
@@ -317,7 +322,11 @@ pub async fn create_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value 
             Err(e) => return e,
         },
     };
-    match svc(ctx, access).compiling(move |s| s.create(body)).await {
+    let s = svc(ctx, access);
+    if let Err(e) = s.fill_spec(&mut body).await {
+        return service_error(&e);
+    }
+    match s.compiling(move |s| s.create(body)).await {
         Ok(d) => {
             let summary = mock_summary(&d, "Created");
             ok(ctx, summary, d)

@@ -67,6 +67,22 @@ export function openWizard(opts = {}) {
   const fileIn = h('input', { type: 'file', accept: '.json,.yaml,.yml,application/json,application/yaml,text/yaml', hidden: true });
   fileIn.addEventListener('change', () => { if (fileIn.files[0]) loadFile(fileIn.files[0]); fileIn.value = ''; });
 
+  // Fetched on the server, under the outbound policy: never a visitor's.
+  const urlIn = input({ id: 'wizard-spec-url', placeholder: 'https://specs.example.com/orders.yaml', 'aria-label': 'Spec URL' });
+  async function fetchUrl() {
+    const url = urlIn.value.trim();
+    if (!url || st.busy) return;
+    replace(specErr, spinner('Fetching the spec'));
+    const r = await api('POST', '/import/fetch', { url });
+    if (!dlg.open) return;
+    if (!r.ok || !r.json) {
+      replace(specErr, notice('err', errorText(r, 'Fetching the spec')));
+      return;
+    }
+    paste.value = r.json.spec;
+    parse(r.json.spec);
+  }
+
   async function loadFile(file) {
     try {
       const text = await readFile(file, opts.maxBytes);
@@ -150,6 +166,9 @@ export function openWizard(opts = {}) {
     wireDrop(drop, loadFile);
     return h('div', { class: 'stack', style: { paddingTop: '12px' } }, drop, fileIn,
       h('div', { class: 'field' }, h('span', null, 'Or paste it'), paste, h('span', { class: 'hint' }, 'Pasting parses it right away.')),
+      opts.visitor ? null : h('div', { class: 'field' }, h('span', null, 'Or fetch it'),
+        h('div', { class: 'row nowrap' }, urlIn, h('button', { class: 'btn', type: 'button', id: 'wizard-fetch', onclick: fetchUrl }, 'Fetch')),
+        h('span', { class: 'hint' }, 'The instance fetches it: name the host in RUSTYBIN_EGRESS_ALLOW first.')),
       specErr,
       h('p', { class: 'small muted' }, 'No spec at hand? ', h('button', { class: 'linklike', type: 'button', onclick: useSample }, 'Use the Petstore sample'), '.'));
   }

@@ -893,8 +893,35 @@ pub async fn create(
     if !s.caller.writes_somewhere() && state.mocks.visits().is_none() {
         s.need(crate::rbac::Permission::MocksWrite)?;
     }
-    let req: CreateBody = parse_body(&body)?;
+    let mut req: CreateBody = parse_body(&body)?;
+    s.fill_spec(&mut req).await?;
     Ok(created(s.compiling(move |s| s.create(req)).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FetchBody {
+    url: Option<String>,
+}
+
+/// `POST /_rustybin/mocks/import/fetch`: the text at a URL, to look at before
+/// a create (the console's wizard; `spec_url` on a create does it in one).
+pub async fn import_fetch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    uri: Uri,
+    body: Bytes,
+) -> Result<Response, ServiceError> {
+    let s = svc(&state, &headers, &extensions, &uri);
+    let req: FetchBody = parse_body(&body)?;
+    let url = req
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .ok_or_else(|| ServiceError::bad_request("name the url of the spec"))?;
+    Ok(Json(s.fetch_spec(url).await?).into_response())
 }
 
 pub async fn get_one(

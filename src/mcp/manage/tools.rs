@@ -141,15 +141,16 @@ pub static TOOLS: &[ToolDef] = &[
         "name": name_prop(),
         "served": { "type": "boolean", "description": "Return the served openapi.json instead of the uploaded text" }
     }), &["name"])),
-    tool!("create_mock", "Create a mock", "Create an OpenAPI mock from a spec (JSON or YAML text, or the object; Swagger 2.0 is converted). Deployed at once unless deploy is false; deploy fails on check errors unless force is true (ask the user first). Optional name, responses, security, operations. On a self-service demo the name gets a suffix and the mock belongs to the caller's visit.", ToolNeed::Owner(Permission::MocksWrite), ro=false, destructive=false, idem=false, confirm=false, || {
+    tool!("create_mock", "Create a mock", "Create an OpenAPI mock from a spec (JSON or YAML text, or the object; Swagger 2.0 is converted), or from spec_url, which the instance fetches itself (the host must be in RUSTYBIN_EGRESS_ALLOW, purpose spec_fetch; check it with check_egress). Deployed at once unless deploy is false; deploy fails on check errors unless force is true (ask the user first). Optional name, responses, security, operations. On a self-service demo the name gets a suffix and the mock belongs to the caller's visit.", ToolNeed::Owner(Permission::MocksWrite), ro=false, destructive=false, idem=false, confirm=false, || {
         let mut props = settings_props();
         props.insert("spec".into(), spec_prop());
+        props.insert("spec_url".into(), json!({ "type": "string", "description": "Fetch the spec from this URL instead of sending it: for a link too long to carry. Never a visitor's." }));
         props.insert("name".into(), json!({ "type": "string", "description": "Mock name (a-z, 0-9, -; default: from the spec title)" }));
         props.insert("deploy".into(), json!({ "type": "boolean", "default": true }));
         props.insert("force".into(), json!({ "type": "boolean", "description": "Deploy despite check errors (only after the user accepted them)" }));
         props.insert("enabled".into(), json!({ "type": "boolean", "default": true }));
         props.insert("project".into(), project_prop("The project it belongs to (mocks.write there); absent: the instance's, or the one project the caller works in"));
-        obj(Value::Object(props), &["spec"])
+        obj(Value::Object(props), &[])
     }),
     tool!("update_mock", "Update a mock", "Replace the draft's spec and/or settings (responses, security, operations, mcp, strip_server_prefix) or rename it; deploy true publishes the draft (force to ignore check errors). Settings given replace the whole section; use set_operation for one operation.", ToolNeed::Owner(Permission::MocksWrite), ro=false, destructive=false, idem=false, confirm=false, || {
         let mut props = settings_props();
@@ -357,7 +358,7 @@ pub static TOOLS: &[ToolDef] = &[
     }), &[])),
     tool!("check_egress", "Outbound policy", "The outbound connection policy (the allowlist, the loopback switch, each feature's rule, the last decisions) and, with url, whether that URL would be allowed for a purpose before DNS, with the reasons when not. Admin.", ToolNeed::Perm(Permission::SettingsRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "url": { "type": "string", "description": "An http(s) URL to check" },
-        "purpose": { "type": "string", "enum": ["assist", "mcp_relay", "registry", "git", "a2a_push", "leads", "key_registry", "scenario", "replay", "notify"], "default": "mcp_relay" }
+        "purpose": { "type": "string", "enum": ["assist", "mcp_relay", "registry", "git", "a2a_push", "leads", "key_registry", "scenario", "replay", "notify", "spec_fetch", "sso"], "default": "mcp_relay" }
     }), &[])),
     // ── AI assist ──
     tool!("assist_status", "AI assist status", "Whether AI assist is on, the provider and models, the caps, each provider's key state ({set, hint}: never a value), the tasks and the usage total. Keys are set by the operator in the console or the CLI, never here.", ToolNeed::Perm(Permission::AssistUse), ro=true, destructive=false, idem=true, confirm=false, no_args),

@@ -278,7 +278,7 @@ OpenAPI mocks on the instance (rustybin mock ... works offline)
 |---|---|---|---|
 | `rustybin mocks list [--all] [--project P]` | The mocks with their state and traffic. Flags: `--all`, `--project` value. | `GET /_rustybin/mocks` | `mocks.read` |
 | `rustybin mocks get <name>` | One mock: settings, operations, the deploy report. | `GET /_rustybin/mocks/{name}` | `mocks.read` |
-| `rustybin mocks create <name> --spec FILE [--project P]` | Create a mock from an OpenAPI file (YAML or JSON). Flags: `--spec` value, `--mode` value, `--disabled`, `--no-deploy`, `--strip-server-prefix`, `--project` value. | `POST /_rustybin/mocks` | `mocks.write` |
+| `rustybin mocks create <name> (--spec FILE \| --spec-url URL) [--project P]` | Create a mock from an OpenAPI file (YAML or JSON), or from a URL the instance fetches itself. Flags: `--spec` value, `--spec-url` value, `--mode` value, `--disabled`, `--no-deploy`, `--strip-server-prefix`, `--project` value. | `POST /_rustybin/mocks` | `mocks.write` |
 | `rustybin mocks move <name> --project P` | Move a mock to another project (instance: the instance's); needs mocks.write in both. Flags: `--project` value. | `PATCH /_rustybin/mocks/{name}` | `mocks.write` |
 | `rustybin mocks import --spec FILE` | Preview a spec: title, operations, the checks, the suggested name. Flags: `--spec` value. | `POST /_rustybin/mocks/import` | `mocks.read` |
 | `rustybin mocks update <name> [--spec FILE] [--mode M] [--settings JSON]` | Change a mock's spec or settings (the draft, deployed unless --no-deploy). Flags: `--spec` value, `--mode` value, `--settings` value, `--no-deploy`, `--force`, `--expect-revision` value. | `PATCH /_rustybin/mocks/{name}` | `mocks.write` |

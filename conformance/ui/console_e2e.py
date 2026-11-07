@@ -261,6 +261,7 @@ def run_theme(browser, theme):
 
     def mocks():
         goto_view(page, "mocks")
+        spec_fetch_refused(page)
         row = page.locator(".mock-row", has_text="petstore")
         row.wait_for()
         row.locator(".mr-link").click()
@@ -3031,6 +3032,16 @@ def run_sso(browser):
     ctx.close()
 
 
+def spec_fetch_refused(page):
+    """The new mock dialog's fetch: the host is not listed, so it says so."""
+    page.get_by_role("button", name="New mock").click()
+    page.get_by_role("tab", name="Paste or upload").click()
+    page.fill("#wizard-spec-url", "https://specs.example.com/orders.yaml")
+    page.click("#wizard-fetch")
+    page.wait_for_selector("text=spec_fetch")
+    page.get_by_role("button", name="Close").click()
+
+
 def egress_dry_check(page):
     """The Network tab's dry check: a metadata address is refused whatever the list says."""
     page.fill("#egress-check-url", "http://169.254.169.254/")
@@ -3068,6 +3079,7 @@ def run_sign_in_optional(browser):
         page.get_by_role("button", name="Continue").click()
         page.wait_for_selector("text=random suffix")
         page.get_by_role("button", name="Next").click()
+        expect(page.locator("#wizard-spec-url")).to_have_count(0)
         page.get_by_role("button", name="Create and deploy").click()
         page.wait_for_selector("text=Your mock is live")
         state["name"] = page.locator("h1.mono").inner_text().strip()

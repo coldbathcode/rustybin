@@ -325,7 +325,7 @@ pub static COMMANDS: &[Cmd] = &[
     // ── Mocks ──
     cmd!("mocks", "list", "[--all] [--project P]", "The mocks with their state and traffic.", &[Flag::switch("--all", "Every visitor's mocks too (admin)"), PROJECT_FLAG], [("GET", "/_rustybin/mocks")], false, "mocks list"),
     cmd!("mocks", "get", "<name>", "One mock: settings, operations, the deploy report.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}")], false, "mocks get petstore"),
-    cmd!("mocks", "create", "<name> --spec FILE [--project P]", "Create a mock from an OpenAPI file (YAML or JSON).", &[Flag::value("--spec", "The OpenAPI document"), Flag::value("--mode", "examples, generated, static or stateful"), Flag::switch("--disabled", "Create it switched off"), Flag::switch("--no-deploy", "Keep it as a draft"), Flag::switch("--strip-server-prefix", "Serve the paths without the spec's server prefix"), Flag::value("--project", "The project it belongs to (default: the instance's, or your one project)")], [("POST", "/_rustybin/mocks")], false, "mocks create orders --spec orders.yaml --mode generated"),
+    cmd!("mocks", "create", "<name> (--spec FILE | --spec-url URL) [--project P]", "Create a mock from an OpenAPI file (YAML or JSON), or from a URL the instance fetches itself.", &[Flag::value("--spec", "The OpenAPI document"), Flag::value("--spec-url", "Where the instance fetches it (RUSTYBIN_EGRESS_ALLOW, purpose spec_fetch)"), Flag::value("--mode", "examples, generated, static or stateful"), Flag::switch("--disabled", "Create it switched off"), Flag::switch("--no-deploy", "Keep it as a draft"), Flag::switch("--strip-server-prefix", "Serve the paths without the spec's server prefix"), Flag::value("--project", "The project it belongs to (default: the instance's, or your one project)")], [("POST", "/_rustybin/mocks")], false, "mocks create orders --spec orders.yaml --mode generated"),
     cmd!("mocks", "move", "<name> --project P", "Move a mock to another project (instance: the instance's); needs mocks.write in both.", &[Flag::value("--project", "The project it goes to, or instance")], [("PATCH", "/_rustybin/mocks/{name}")], false, "mocks move orders --project instance"),
     cmd!("mocks", "import", "--spec FILE", "Preview a spec: title, operations, the checks, the suggested name.", &[Flag::value("--spec", "The OpenAPI document")], [("POST", "/_rustybin/mocks/import")], false, "mocks import --spec orders.yaml"),
     cmd!("mocks", "update", "<name> [--spec FILE] [--mode M] [--settings JSON]", "Change a mock's spec or settings (the draft, deployed unless --no-deploy).", &[Flag::value("--spec", "A new OpenAPI document"), Flag::value("--mode", "examples, generated, static or stateful"), Flag::value("--settings", "Settings as JSON or a file: responses, security, operations, mcp, strip_server_prefix"), Flag::switch("--no-deploy", "Change the draft only"), Flag::switch("--force", "Deploy even when the checks report errors"), Flag::value("--expect-revision", "Refuse (409) unless the draft is still this revision (default: the one read just before)")], [("PATCH", "/_rustybin/mocks/{name}")], false, "mocks update orders --mode stateful"),
@@ -511,6 +511,10 @@ pub static COMMANDS: &[Cmd] = &[
 /// Catalogue paths no command calls, each with its reason (the parity test
 /// reads it).
 pub const UNCOVERED: &[(&str, &str)] = &[
+    (
+        "/_rustybin/mocks/import/fetch",
+        "the console's wizard reads the text first; mocks create --spec-url does it in one call",
+    ),
     (
         "/_rustybin/sso/callback",
         "the identity provider sends the browser there (rustybin login --sso waits for its answer on a loopback address)",
@@ -1860,15 +1864,22 @@ async fn mocks(ctx: &mut Ctx, verb: &str) -> Result<()> {
         }
         "create" => {
             need_name(ctx)?;
-            let spec_path = ctx
-                .args
-                .value("--spec")
-                .ok_or_else(|| Fail::Usage("--spec FILE is required".into()))?
-                .to_string();
-            let spec = ctx.input(&spec_path)?;
             let mut body = Map::new();
             body.insert("name".into(), json!(name));
-            body.insert("spec".into(), json!(spec));
+            match (ctx.args.value("--spec"), ctx.args.value("--spec-url")) {
+                (Some(path), None) => {
+                    let path = path.to_string();
+                    body.insert("spec".into(), json!(ctx.input(&path)?));
+                }
+                (None, Some(url)) => {
+                    body.insert("spec_url".into(), json!(url));
+                }
+                _ => {
+                    return Err(Fail::Usage(
+                        "--spec FILE or --spec-url URL is required, one of them".into(),
+                    ))
+                }
+            }
             body.insert("enabled".into(), json!(!ctx.args.has("--disabled")));
             body.insert("deploy".into(), json!(!ctx.args.has("--no-deploy")));
             if ctx.args.has("--strip-server-prefix") {

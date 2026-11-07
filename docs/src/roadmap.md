@@ -74,8 +74,7 @@ From the build notes of the 0.2 and 0.3 steps and the harness plan, in no order:
 
 - **AI mocks**: a per-operation "Generate examples" with a persona picker in the
   operation editor (today the dialog is scoped to the operation without its own
-  preview); fetching a spec from a URL on the server for an agent (today the agent
-  sends the file's content).
+  preview).
 - **MCP inspector**: MCP-level OAuth on a mock's own MCP server (the endpoint
   answering `401` with protected resource metadata); client ID metadata documents.
 - **Source control**: merges and conflict resolution inside the instance (resolve

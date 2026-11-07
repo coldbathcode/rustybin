@@ -253,6 +253,7 @@ under a **purpose** with its own rule, on only when the feature is configured:
 | `replay` | No default: name the gateways [saved tests](saved-tests.md) run through in `RUSTYBIN_EGRESS_ALLOW`. Tests without a gateway run in process and need no entry. |
 | `scenario` | No default: name the gateway a [gateway scenario](gateway-scenarios.md) checks through in `RUSTYBIN_EGRESS_ALLOW` (`RUSTYBIN_EGRESS_ALLOW_LOOPBACK=true` for a gateway on the same machine). |
 | `notify` | No default: name the webhooks of [test schedules](saved-tests.md#the-failure-notice) in `RUSTYBIN_EGRESS_ALLOW`. A refused notice is reported in the schedule's status and never retried. |
+| `spec_fetch` | No default: name the hosts [specs are fetched from](mocks/index.md#a-spec-from-a-url) in `RUSTYBIN_EGRESS_ALLOW`. Never a visitor's. |
 | `sso` | The issuer's host once [single sign-on](sso.md) is set up (`sso.enabled`, `sso.issuer`, `sso.client_id`): discovery, the keys and the token endpoint. Keys or a token endpoint on another host need `RUSTYBIN_EGRESS_ALLOW`; a provider on the same machine `RUSTYBIN_EGRESS_ALLOW_LOOPBACK=true`. |
 
 ```hurl

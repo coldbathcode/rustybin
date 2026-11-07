@@ -227,7 +227,11 @@ pub struct Svc {
 #[serde(deny_unknown_fields)]
 pub struct CreateBody {
     pub name: Option<String>,
+    #[serde(default)]
     pub spec: Value,
+    /// Where to fetch the spec instead ([`Svc::fill_spec`]): never a visitor's.
+    #[serde(default)]
+    pub spec_url: Option<String>,
     pub enabled: Option<bool>,
     pub deploy: Option<bool>,
     pub force: Option<bool>,
@@ -733,6 +737,27 @@ impl Svc {
     /// caller without admin rights (a visitor, with a manage token or not)
     /// gets `VISITOR_COMPILES_PER_MINUTE` (429 past it), see
     /// [`Self::compile_key`].
+    /// Fetch `url` as a spec: `mocks.write`, instance-wide or in a project.
+    pub async fn fetch_spec(&self, url: &str) -> SvcResult<super::fetch::Fetched> {
+        if !self.caller.writes_somewhere() {
+            self.need(crate::rbac::Permission::MocksWrite)?;
+        }
+        let max = self.store().limits().max_spec_bytes;
+        super::fetch::fetch_spec(&self.state, url, max).await
+    }
+
+    /// A create that names `spec_url`: fetch it into `spec`.
+    pub async fn fill_spec(&self, req: &mut CreateBody) -> SvcResult<()> {
+        let Some(url) = req.spec_url.take() else {
+            return Ok(());
+        };
+        if !req.spec.is_null() {
+            return Err(ServiceError::bad_request("send spec or spec_url, not both"));
+        }
+        req.spec = Value::String(self.fetch_spec(&url).await?.spec);
+        Ok(())
+    }
+
     pub async fn compiling<T, F>(self, f: F) -> SvcResult<T>
     where
         T: Send + 'static,

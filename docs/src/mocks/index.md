@@ -94,6 +94,23 @@ curl http://localhost:8080/mock/orders/...
 
 See [CLI](cli.md) for every subcommand.
 
+## A spec from a URL
+
+A caller that holds a link rather than the file, an agent above all, can have the instance
+fetch it: `spec_url` on `POST /_rustybin/mocks` and on the `create_mock` tool,
+`rustybin mocks create orders --spec-url <url>`, and **Or fetch it** in the console's new mock
+dialog, which reads the text first through `POST /_rustybin/mocks/import/fetch`.
+
+The instance reaches out on the caller's word, so it needs `mocks.write`, which a visitor of a
+public instance never holds, and the host has to be in `RUSTYBIN_EGRESS_ALLOW`
+(purpose [`spec_fetch`](../configuration.md#outbound-connections), which has no default).
+Redirects are not followed, and at most the spec limit is read. A document in
+[`rustybin.yaml`](config.md) has no `spec_url`: applying a file never reaches out.
+
+```hurl
+{{#include ../../examples/mocks/spec_fetch.hurl:spec_fetch}}
+```
+
 ## The built-in sample
 
 Every instance starts with a `petstore` mock (`src/mocks/petstore.yaml`, OpenAPI
