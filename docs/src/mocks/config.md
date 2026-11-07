@@ -50,7 +50,7 @@ Here is the file the documentation's example server runs with (via
 ## Reference
 
 ```yaml
-version: 1                       # optional, must be 1
+version: 2                       # optional, 1 or 2
 mocks:
   - name: orders                 # required: a-z, 0-9 and '-', 1 to 40 characters
     spec: specs/orders.yaml      # a spec file, relative to this file (or absolute)

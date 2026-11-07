@@ -632,7 +632,7 @@ pub fn export(snapshots: &[Snapshot], reveal: bool) -> String {
             Value::Object(doc)
         })
         .collect();
-    let file = json!({ "version": 1, "mocks": mocks });
+    let file = json!({ "version": CURRENT_VERSION, "mocks": mocks });
     let body = serde_yaml::to_string(&file).unwrap_or_default();
     let note = if reveal {
         ""

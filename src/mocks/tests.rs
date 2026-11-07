@@ -421,6 +421,8 @@ async fn served_spec_export_and_apply() {
     let text = exported.as_str().expect("yaml").to_string();
     assert!(text.contains("name: o"), "{text}");
     assert!(!text.contains("name: petstore"));
+    // A version 2 document with one section: the others are left alone.
+    assert!(text.contains("version: 2"), "{text}");
 
     // The export applied onto the mock it came from changes nothing (same
     // spec, other formatting).

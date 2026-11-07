@@ -26,7 +26,7 @@ The marker a session looks for is the first row that is not done.
 | Step | Title | Status |
 |---|---|---|
 | 01 | `rustybin egress check <url>`: the dry check on every surface (`GET /_rustybin/egress/check`, `Egress::dry_check`) | done 2026-11-07 |
-| 02 | A mocks-only export at version 2 | not started |
+| 02 | A mocks-only export at version 2 | done 2026-11-07 |
 | 03 | Fetching a spec from a URL on the server, for an agent | not started |
 | 04 | Harness: a leader transfer on purpose, before maintenance | not started |
 | 05 | Stateful mode for visitor mocks, with tight caps | not started |

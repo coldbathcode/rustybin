@@ -292,7 +292,7 @@ OpenAPI mocks on the instance (rustybin mock ... works offline)
 | `rustybin mocks coverage <name>` | Which operations lack an example. | `GET /_rustybin/mocks/{name}/coverage` | `mocks.read` |
 | `rustybin mocks spec <name>` | The mock's OpenAPI document as stored. | `GET /_rustybin/mocks/{name}/spec` | `mocks.read` |
 | `rustybin mocks revision <name> <revision>` | A kept revision: what changed since in the draft, its settings and spec (the whole answer with --json). Flags: `--spec`. | `GET /_rustybin/mocks/{name}/revisions/{revision}` | `mocks.read` |
-| `rustybin mocks export [name]` | One mock, or all, as a version 1 rustybin.yaml. | `GET /_rustybin/mocks/{name}/export`, `GET /_rustybin/mocks/export` | `mocks.read` |
+| `rustybin mocks export [name]` | One mock, or all, as a rustybin.yaml with only the mocks section. | `GET /_rustybin/mocks/{name}/export`, `GET /_rustybin/mocks/export` | `mocks.read` |
 | `rustybin mocks apply <file> [--prune]` | Apply a rustybin.yaml (spec files are read locally and inlined); --prune deletes API mocks it does not name. Flags: `--prune`. | `POST /_rustybin/mocks/apply` | `config.apply` |
 | `rustybin mocks reload` | Reload the file-defined mocks (RUSTYBIN_CONFIG_FILE, RUSTYBIN_MOCKS_DIR). | `POST /_rustybin/mocks/reload` | `config.apply` |
 | `rustybin mocks schema` | The JSON Schema of rustybin.yaml. | `GET /_rustybin/mocks/config.schema.json` | `mocks.read` |

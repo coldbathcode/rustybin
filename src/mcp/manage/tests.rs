@@ -2656,7 +2656,7 @@ async fn config_tools_export_and_apply_version_2() {
     .await;
     assert_eq!(r["structuredContent"]["document"]["version"], 2);
     let r = tool(&app, &[], "export_config", json!({ "name": "petstore" })).await;
-    assert_eq!(r["structuredContent"]["version"], 1);
+    assert_eq!(r["structuredContent"]["version"], 2);
     assert!(r["structuredContent"]["yaml"]
         .as_str()
         .is_some_and(|y| y.contains("petstore")));
@@ -2738,7 +2738,7 @@ async fn config_tools_export_and_apply_version_2() {
     )
     .await;
     assert!(!is_error(&r), "{r}");
-    assert_eq!(r["structuredContent"]["version"], 1);
+    assert_eq!(r["structuredContent"]["version"], 2);
     assert!(text_of(&r).contains("admin rights"));
     let r = tool(
         &secured,

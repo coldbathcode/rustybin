@@ -80,9 +80,8 @@ From the build notes of the 0.2 and 0.3 steps and the harness plan, in no order:
   answering `401` with protected resource metadata); client ID metadata documents.
 - **Source control**: merges and conflict resolution inside the instance (resolve
   with either side, or in a pull request), branches per environment, signed commits,
-  webhooks that trigger a pull (`git.auto: pull` polls instead), `file:` references for
-  the harness section, and a mocks-only export at version 2 (`GET /_rustybin/mocks/export`
-  still writes version 1).
+  webhooks that trigger a pull (`git.auto: pull` polls instead) and `file:` references for
+  the harness section.
 - **The command line**: an interactive agent sign-in from the CLI.
 - **Agents**: setting a secret from an agent with an out-of-band confirmation (today
   the console, the CLI or the environment); OAuth sign-in for self-service visitors and

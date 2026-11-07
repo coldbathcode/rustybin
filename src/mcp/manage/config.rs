@@ -32,7 +32,7 @@ pub fn export_config(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
                         "; security secrets are redacted (placeholders) because the caller may not change this mock"
                     }
                 ),
-                json!({ "file_name": format!("{name}.rustybin.yaml"), "version": 1, "yaml": text }),
+                json!({ "file_name": format!("{name}.rustybin.yaml"), "version": crate::mocks::config_file::CURRENT_VERSION, "yaml": text }),
             ),
             Err(e) => service_error(&e),
         };
@@ -45,7 +45,7 @@ pub fn export_config(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
                 "rustybin.yaml (version 1: the mocks the caller may see, {} bytes); the whole instance (version 2) needs admin rights",
                 text.len()
             ),
-            json!({ "file_name": "rustybin.yaml", "version": 1, "yaml": text }),
+            json!({ "file_name": "rustybin.yaml", "version": crate::mocks::config_file::CURRENT_VERSION, "yaml": text }),
         );
     }
     let secrets = match arg_str(args, "secrets").unwrap_or("refs") {
