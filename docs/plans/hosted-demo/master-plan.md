@@ -62,7 +62,7 @@ The marker a session looks for is the first row that is not done.
 | [02](step-02-demo-limits.md) | The signed image under the demo's limits: read-only root, tmpfs, 512 MiB, arm64, a console load on the free plan | | done 2026-11-06 |
 | [03](step-03-anonymous-surface.md) | The rest of the anonymous surface: shared check runs, status and metrics | | done 2026-11-06 |
 | 04 | Release 0.5.1 (the release recipe of the last plans; the digest is in the changelog) | 01 to 03 | done 2026-11-06 |
-| [04b](step-04b-operator-sign-in.md) | The owner's sign-in on a self-service instance: `password` control auth with visitors still anonymous (section 6), released as 0.5.2 | 04 | built 2026-11-07, release in progress |
+| [04b](step-04b-operator-sign-in.md) | The owner's sign-in on a self-service instance: `password` control auth with visitors still anonymous (section 6), released as 0.5.2 | 04 | done 2026-11-07 |
 | 05 | `rustybin-platform`: `RUSTYBIN_CONTROL_AUTH=password`, `RUSTYBIN_CONSOLE_USER=oli`, `RUSTYBIN_CONSOLE_PASSWORD_HASH` from the VM's `.env`, `RUSTYBIN_STATE_DIR`, `RUSTYBIN_TRUST_FORWARD_HEADER=x-real-ip` with `header_up X-Real-IP {client_ip}` on both demo sites of the Caddyfile, `hostname: demo`, the 0.5.2 digest | 04b | not started, needs the owner's go |
 | 06 | Go live: `mocks_zone` set so the apex and wildcard of `rustybin-mock.dev` exist, DNS and TLS for both hosts, the lead webhook, signing in as `oli`, a walk through the live demo | 05 | not started, needs the owner's go |
 

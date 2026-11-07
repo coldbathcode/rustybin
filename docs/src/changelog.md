@@ -17,6 +17,13 @@ to stand for election in slots narrower than the gap between their heartbeats, s
 node could stand first and `RUSTYBIN_HARNESS_LEADER=prefer` meant little. The first in line
 stands as before, after the election timeout, and the next ones now wait half of it each.
 
+`cargo` version 0.5.2, the tag `v0.5.2`, the signed multi-arch image
+`ghcr.io/coldbathcode/rustybin:0.5.2`, digest
+`sha256:391f066e845ee0eb9030cc705b19fe2a068077533c0a1a88afbb0abc262ad2dd` (verify it with the
+cosign command of the [quick start](quick-start.md#docker); the
+[release](https://github.com/coldbathcode/rustybin/releases/tag/v0.5.2) carries the same
+values, and the Linux and macOS binaries).
+
 ## 0.5.1 (2026-11-06): safe for a public demo
 
 No new features: what running the public demo's configuration on 0.5.0 found, fixed
