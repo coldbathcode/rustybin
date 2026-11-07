@@ -108,7 +108,7 @@ tool name (the console shows an **MCP** badge):
 
 ## Security
 
-The MCP endpoint itself is open, like the mock's REST endpoints. Mocked security
+By default the MCP endpoint itself is open, like the mock's REST endpoints. Mocked security
 applies per tool: the MCP request's `Authorization` and `Cookie` headers, the header
 of the `api_key` mode and the headers and query parameters of the spec's `apiKey`
 schemes are passed into every call. Without a valid credential the call answers the
@@ -121,8 +121,20 @@ schemes are passed into every call. Without a valid credential the call answers 
 So a gateway in front of the MCP server can inject the credential (an API key, a
 token exchange) and the demo shows the tool failing without it and working through
 the gateway. The console's snippets include the mock's API key header when security
-is on. MCP-level OAuth for a mock (the endpoint answering `401` with protected
-resource metadata) is not built yet.
+is on.
+
+To try a client's sign-in against a mock, set `mcp.oauth: true` (the MCP tab's **Ask for an
+OAuth token**, or `settings` on any surface). The endpoint then answers `401` with protected
+resource metadata, as a real protected server does, at
+`/.well-known/oauth-protected-resource/mock/<name>/_rustybin/mcp`, and takes tokens from the
+built-in identity provider issued for that mock's own URL (`resource=<the MCP URL>`): a token for
+another mock or for `/mcp/protected` is refused. Use the instance's address, not a
+`<name>.<domain>` one, and it is not available on a visitor's mock, because the issuer is the
+instance's.
+
+```hurl
+{{#include ../../examples/mocks/mcp.hurl:oauth}}
+```
 
 ## Settings
 

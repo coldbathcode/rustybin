@@ -520,6 +520,7 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET | `/mcp/sse` | Legacy MCP HTTP+SSE transport (2024-11-05): event stream (SSE) |
 | POST | `/mcp/messages` | Legacy MCP HTTP+SSE transport (2024-11-05): message endpoint |
 | GET | `/.well-known/oauth-protected-resource` | OAuth Protected Resource Metadata (RFC 9728) for /mcp/protected |
+| GET | `/.well-known/oauth-protected-resource/mock/{name}/_rustybin/mcp` | OAuth Protected Resource Metadata (RFC 9728) of a mock whose MCP server asks for a token (mcp.oauth) |
 | GET | `/.well-known/oauth-protected-resource/mcp/protected` | OAuth Protected Resource Metadata (RFC 9728), path-suffixed form |
 
 ### A2A Agents

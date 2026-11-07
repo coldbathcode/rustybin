@@ -243,6 +243,7 @@ fn settings_round_trip_and_defaults() {
         mcp: McpSettings {
             enabled: true,
             exclude: vec!["x".into(); crate::mocks::model::MAX_MCP_EXCLUDE + 1],
+            oauth: false,
         },
         ..MockSettings::default()
     };

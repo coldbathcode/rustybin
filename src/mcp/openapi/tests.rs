@@ -790,3 +790,133 @@ async fn a_cookie_argument_cannot_add_another_cookie() {
     );
     assert!(!cookie.contains("; admin"), "{cookie}");
 }
+
+// ── OAuth on a mock's own MCP server ────────────────────────────────
+
+const SECURED_SPEC: &str = r#"{"openapi":"3.0.3","info":{"title":"S","version":"1"},"paths":{"/a":{"get":{"operationId":"a","responses":{"200":{"description":"ok"}}}}}}"#;
+
+fn token_for(aud: &str) -> String {
+    let jwt = crate::jwt_state::JwtState::shared_for_tests();
+    let now = chrono::Utc::now().timestamp();
+    let claims = json!({ "iss": "http://localhost", "sub": "alice", "aud": aud, "iat": now, "exp": now + 600 });
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+    header.kid = Some("rustybin-rs256-key".into());
+    jsonwebtoken::encode(&header, &claims, &jwt.rs256_encoding_key).expect("token")
+}
+
+async fn init(app: &Router, name: &str, token: Option<&str>) -> axum::http::Response<Body> {
+    let mut b = Request::builder()
+        .method("POST")
+        .uri(format!("/mock/{name}/_rustybin/mcp"))
+        .header("host", "localhost")
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream");
+    if let Some(t) = token {
+        b = b.header("authorization", format!("Bearer {t}"));
+    }
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } } });
+    app.clone()
+        .oneshot(b.body(Body::from(body.to_string())).expect("request"))
+        .await
+        .expect("response")
+}
+
+async fn with_oauth(app: &Router, name: &str, oauth: bool) {
+    let resp = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/_rustybin/mocks",
+            &json!({ "name": name, "spec": SECURED_SPEC, "mcp": { "oauth": oauth } }),
+        ))
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn a_mock_with_oauth_challenges_and_takes_only_its_own_audience() {
+    let app = test_app();
+    with_oauth(&app, "guarded", true).await;
+    let resp = init(&app, "guarded", None).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let challenge = resp.headers()["www-authenticate"]
+        .to_str()
+        .expect("text")
+        .to_string();
+    let metadata = "/.well-known/oauth-protected-resource/mock/guarded/_rustybin/mcp";
+    assert!(challenge.contains(metadata), "{challenge}");
+
+    // The metadata names this mock as the resource.
+    let req = Request::builder()
+        .uri(metadata)
+        .header("host", "localhost")
+        .body(Body::empty())
+        .expect("request");
+    let resp = app.clone().oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let text = body_string(resp).await;
+    let v: Value = serde_json::from_str(&text).expect("json");
+    let resource = v["resource"].as_str().expect("resource").to_string();
+    assert!(resource.ends_with("/mock/guarded/_rustybin/mcp"), "{v}");
+    assert_eq!(
+        v["authorization_servers"]
+            .as_array()
+            .expect("servers")
+            .len(),
+        1
+    );
+
+    // A token for another mock or for /mcp/protected is not one for this.
+    for wrong in [
+        "http://localhost/mock/other/_rustybin/mcp",
+        "http://localhost/mcp/protected",
+        "rustybin",
+    ] {
+        let resp = init(&app, "guarded", Some(&token_for(wrong))).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{wrong}");
+    }
+    let resp = init(&app, "guarded", Some("not-a-token")).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let resp = init(&app, "guarded", Some(&token_for(&resource))).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn without_oauth_nothing_changes_and_no_metadata_is_served() {
+    let app = test_app();
+    with_oauth(&app, "plain", false).await;
+    assert_eq!(init(&app, "plain", None).await.status(), StatusCode::OK);
+    for name in ["plain", "missing"] {
+        let req = Request::builder()
+            .uri(format!(
+                "/.well-known/oauth-protected-resource/mock/{name}/_rustybin/mcp"
+            ))
+            .header("host", "localhost")
+            .body(Body::empty())
+            .expect("request");
+        let resp = app.clone().oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn a_visitors_mock_has_no_oauth() {
+    let mut config = Config::for_tests();
+    config.public_mode = true;
+    config.self_service = SelfServiceConfig {
+        enabled: true,
+        ..SelfServiceConfig::default()
+    };
+    let app = test_app_with(test_state_with(config));
+    let resp = app
+        .oneshot(json_request(
+            "POST",
+            "/_rustybin/mocks",
+            &json!({ "spec": SECURED_SPEC, "mcp": { "oauth": true } }),
+        ))
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}

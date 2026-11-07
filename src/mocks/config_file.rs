@@ -706,6 +706,7 @@ pub fn json_schema() -> Value {
         },
         "mcp": object(json!({
             "enabled": { "type": "boolean", "default": true, "description": "Serve the mock's MCP server at /mock/{name}/_rustybin/mcp" },
+            "oauth": { "type": "boolean", "default": false, "description": "Ask for an OAuth bearer token: 401 with protected resource metadata, tokens from the built-in identity provider. Not for self-service mocks" },
             "exclude": { "type": "array", "items": { "type": "string" }, "description": "operationIds that are not tools" }
         })),
         "project": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$", "description": "The project the mock belongs to (absent: the instance's)" }

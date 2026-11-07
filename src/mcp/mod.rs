@@ -449,6 +449,10 @@ pub fn router_with(shared: Arc<Shared>) -> Router<AppState> {
         )
         .route("/.well-known/oauth-protected-resource", get(prm_handler))
         .route(
+            "/.well-known/oauth-protected-resource/mock/{name}/_rustybin/mcp",
+            get(openapi::oauth_metadata),
+        )
+        .route(
             "/.well-known/oauth-protected-resource/mcp/protected",
             get(prm_handler),
         )
@@ -642,6 +646,19 @@ pub fn catalog() -> Vec<Endpoint> {
         )
         .example(Example::get("Protected resource metadata", "/.well-known/oauth-protected-resource")),
         Endpoint::new(
+            "/.well-known/oauth-protected-resource/mock/{name}/_rustybin/mcp",
+            &["GET"],
+            category::MCP,
+            "OAuth Protected Resource Metadata (RFC 9728) of a mock whose MCP server asks for a token (mcp.oauth)",
+        )
+        .example(
+            Example::get(
+                "A mock without OAuth (404)",
+                "/.well-known/oauth-protected-resource/mock/petstore/_rustybin/mcp",
+            )
+            .expect_status(404),
+        ),
+        Endpoint::new(
             "/.well-known/oauth-protected-resource/mcp/protected",
             &["GET"],
             category::MCP,
@@ -780,6 +797,7 @@ pub fn openapi_paths() -> Value {
         } },
         "/.well-known/oauth-protected-resource": { "get": prm_root },
         "/.well-known/oauth-protected-resource/mcp/protected": { "get": prm_path },
+        "/.well-known/oauth-protected-resource/mock/{name}/_rustybin/mcp": { "get": { "tags": ["MCP"], "summary": "Protected resource metadata of a mock with mcp.oauth", "operationId": "getMockMcpResourceMetadata", "parameters": [{ "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "RFC 9728 metadata" }, "404": { "description": "No such mock, or it does not ask for a token" } } } },
     })
 }
 

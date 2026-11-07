@@ -175,3 +175,31 @@ Authorization: Bearer {{admin_token}}
 Content-Type: application/json
 {"mcp": {"enabled": true, "exclude": []}, "deploy": true}
 HTTP 200
+
+# ANCHOR: oauth
+# A mock that asks for a token answers as a protected server does.
+POST {{base_url}}/_rustybin/mocks
+X-Rustybin-Admin-Token: {{admin_token}}
+```json
+{"name": "docs-mcp-oauth", "mcp": {"oauth": true}, "spec": "{\"openapi\":\"3.0.3\",\"info\":{\"title\":\"G\",\"version\":\"1\"},\"paths\":{\"/a\":{\"get\":{\"operationId\":\"a\",\"responses\":{\"200\":{\"description\":\"ok\"}}}}}}"}
+```
+HTTP 201
+
+POST {{base_url}}/mock/docs-mcp-oauth/_rustybin/mcp
+Accept: application/json, text/event-stream
+```json
+{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "docs", "version": "1"}}}
+```
+HTTP 401
+[Asserts]
+header "WWW-Authenticate" contains "resource_metadata"
+
+GET {{base_url}}/.well-known/oauth-protected-resource/mock/docs-mcp-oauth/_rustybin/mcp
+HTTP 200
+[Asserts]
+jsonpath "$.resource" contains "/mock/docs-mcp-oauth/_rustybin/mcp"
+
+DELETE {{base_url}}/_rustybin/mocks/docs-mcp-oauth
+X-Rustybin-Admin-Token: {{admin_token}}
+HTTP 200
+# ANCHOR_END: oauth

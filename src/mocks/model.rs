@@ -324,6 +324,12 @@ pub struct McpSettings {
     /// operationIds that are not tools.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub exclude: Vec<String>,
+    /// Ask for an OAuth bearer token, as a real protected server does: `401`
+    /// with protected resource metadata, tokens from the built-in identity
+    /// provider for this mock's own URL. Never on a visitor's mock: the
+    /// issuer is the instance's.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub oauth: bool,
 }
 
 impl Default for McpSettings {
@@ -331,6 +337,7 @@ impl Default for McpSettings {
         Self {
             enabled: true,
             exclude: Vec::new(),
+            oauth: false,
         }
     }
 }
@@ -449,6 +456,9 @@ impl MockSettings {
     /// limits). Mismatches with the spec are deploy-check findings instead.
     pub fn validate(&self, limits: &SettingsLimits) -> Result<(), String> {
         let r = &self.responses;
+        if limits.visitor && self.mcp.oauth {
+            return Err("mcp.oauth is not available for self-service mocks".into());
+        }
         if !limits.stateful {
             let stateful = r.mode == ResponseMode::Stateful
                 || self

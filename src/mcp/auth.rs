@@ -84,11 +84,12 @@ fn challenge(params: &[(&str, &str)]) -> HeaderValue {
 
 /// 401 with the RFC 6750 / RFC 9728 challenge.
 pub fn unauthorized(base: &str, error: Option<(&str, &str)>) -> Response {
-    let metadata = metadata_url(base);
-    let mut params = vec![
-        ("resource_metadata", metadata.as_str()),
-        ("scope", BASE_SCOPE),
-    ];
+    unauthorized_at(&metadata_url(base), error)
+}
+
+/// [`unauthorized`] naming the metadata of another protected resource.
+pub fn unauthorized_at(metadata: &str, error: Option<(&str, &str)>) -> Response {
+    let mut params = vec![("resource_metadata", metadata), ("scope", BASE_SCOPE)];
     if let Some((code, desc)) = error {
         params.insert(0, ("error", code));
         params.push(("error_description", desc));
@@ -155,6 +156,23 @@ pub fn require_bearer(
     cfg: &McpConfig,
     jwt: &JwtState,
 ) -> Result<Value, Response> {
+    require_bearer_for(
+        headers,
+        &metadata_url(base),
+        &accepted_audiences(base, cfg),
+        jwt,
+    )
+}
+
+/// [`require_bearer`] for any protected resource: its metadata URL, and the
+/// audiences it takes (the first is named in the refusal).
+#[allow(clippy::result_large_err)]
+pub fn require_bearer_for(
+    headers: &HeaderMap,
+    metadata: &str,
+    expected: &[String],
+    jwt: &JwtState,
+) -> Result<Value, Response> {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -164,21 +182,20 @@ pub fn require_bearer(
         })
         .filter(|t| !t.is_empty());
     let Some(token) = token else {
-        return Err(unauthorized(base, None));
+        return Err(unauthorized_at(metadata, None));
     };
     let claims = jwt.verify_rs256(token).map_err(|e| {
-        unauthorized(
-            base,
+        unauthorized_at(
+            metadata,
             Some(("invalid_token", &format!("token validation failed: {e}"))),
         )
     })?;
-    let expected = accepted_audiences(base, cfg);
-    if !audience_matches(&claims, &expected) {
+    if !audience_matches(&claims, expected) {
         let desc = format!(
             "token audience does not include this resource ({}); request the token with resource={}",
             expected[0], expected[0]
         );
-        return Err(unauthorized(base, Some(("invalid_token", &desc))));
+        return Err(unauthorized_at(metadata, Some(("invalid_token", &desc))));
     }
     Ok(claims)
 }

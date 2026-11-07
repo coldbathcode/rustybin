@@ -72,8 +72,7 @@ it online. The candidates under consideration below are not scheduled.
 
 From the build notes of the 0.2 and 0.3 steps and the harness plan, in no order:
 
-- **MCP inspector**: MCP-level OAuth on a mock's own MCP server (the endpoint
-  answering `401` with protected resource metadata); client ID metadata documents.
+- **MCP inspector**: client ID metadata documents.
 - **Source control**: merges and conflict resolution inside the instance (resolve
   with either side, or in a pull request), branches per environment, signed commits,
   and `file:` references for the harness section.

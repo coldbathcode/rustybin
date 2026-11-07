@@ -68,7 +68,7 @@ fn settings_props() -> Map<String, Value> {
     m.insert("security".into(), json!({ "type": "object", "description": "Mocked security: enabled, mode (spec, api_key, basic, bearer, jwt, none) and the scheme's settings (keys, users, tokens, issuer, audience, scopes). Same shape as rustybin.yaml." }));
     m.insert("operations".into(), json!({ "type": "object", "description": "Per-operation settings keyed by operationId: respond (status, body, headers, delay_ms), rules, mode, public. Same shape as rustybin.yaml.", "additionalProperties": { "type": "object" } }));
     m.insert("strip_server_prefix".into(), json!({ "type": "boolean", "description": "Serve paths without the servers[0] path prefix (e.g. /v1)" }));
-    m.insert("mcp".into(), json!({ "type": "object", "description": "The mock's own MCP server at /mock/{name}/_rustybin/mcp (one tool per operation): enabled (default true) and exclude (operationIds that are not tools).", "properties": { "enabled": { "type": "boolean" }, "exclude": { "type": "array", "items": { "type": "string" } } }, "additionalProperties": false }));
+    m.insert("mcp".into(), json!({ "type": "object", "description": "The mock's own MCP server at /mock/{name}/_rustybin/mcp (one tool per operation): enabled (default true), exclude (operationIds that are not tools) and oauth (ask for a bearer token with protected resource metadata; not on a visitor's mock).", "properties": { "oauth": { "type": "boolean" }, "enabled": { "type": "boolean" }, "exclude": { "type": "array", "items": { "type": "string" } } }, "additionalProperties": false }));
     m
 }
 

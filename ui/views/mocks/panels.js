@@ -625,6 +625,8 @@ export function mcpPanel(ctx) {
         key ? 'The snippets send the API key; ' : '', 'bearer tools need a token, for example from the Security tab.') : null));
 
     const enabledBox = h('input', { type: 'checkbox', checked: cfg.enabled });
+    const oauthBox = h('input', { type: 'checkbox', id: 'mock-mcp-oauth', checked: !!cfg.oauth });
+    const visitorMock = d.owner === 'visit' || d.owner === 'key';
     const saveBtn = h('button', { class: 'btn primary', type: 'button' }, 'Save to draft');
     const reasons = new Map((m.skipped || []).filter((s) => !excluded.has(s.operation)).map((s) => [s.operation, s.reason]));
     const toolOf = new Map((m.tools || []).map((t) => [t.operation, t]));
@@ -646,13 +648,14 @@ export function mcpPanel(ctx) {
       h('tbody', null, ...rows));
     const form = h('fieldset', { class: 'plain stack-sm', disabled: !!ctx.readOnly },
       h('label', { class: 'check' }, enabledBox, 'Serve an MCP server for this mock'),
+      visitorMock ? null : h('label', { class: 'check' }, oauthBox, 'Ask for an OAuth token, as a protected server does'),
       h('div', { class: 'table-wrap' }, table),
       ctx.readOnly ? null : h('div', { class: 'row' }, h('span', { class: 'hint grow' }, 'Unticked operations are not tools (settings mcp.exclude). Deploy to publish the change.'), saveBtn));
     form.addEventListener('change', () => { dirty = true; });
     saveBtn.addEventListener('click', async () => {
       const exclude = boxes.filter(([, box, skipped]) => !skipped && !box.checked).map(([id]) => id);
       saveBtn.disabled = true;
-      const r = await api('PATCH', '/' + enc(ctx.name), { mcp: { enabled: enabledBox.checked, exclude } }, { revision: rev });
+      const r = await api('PATCH', '/' + enc(ctx.name), { mcp: { enabled: enabledBox.checked, exclude, oauth: oauthBox.checked } }, { revision: rev });
       saveBtn.disabled = false;
       if (report(r, 'Saved to the draft. Deploy to publish it.', 'Saving')) { dirty = false; ctx.refresh(); }
     });

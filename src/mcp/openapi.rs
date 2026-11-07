@@ -22,10 +22,11 @@ use std::time::{Duration, Instant};
 use axum::body::Bytes;
 use axum::extract::{Path, Request, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
-use axum::response::Response;
-use axum::Extension;
+use axum::response::{IntoResponse, Response};
+use axum::{Extension, Json};
 use serde_json::{json, Value};
 
+use super::auth;
 use super::core::{self, CallCtx};
 use super::protocol::{self, RpcError, Version};
 use super::tools::{text, tool_error};
@@ -156,6 +157,42 @@ fn not_found(message: &str, name: Option<&str>) -> Response {
 const NO_SERVER: &str = "no MCP server at this URL: the mock does not exist, is not deployed or \
                          switched off, or its MCP server is disabled";
 
+/// A mock's protected resource: its MCP URL, and where its metadata is.
+fn oauth_urls(base: &str, name: &str) -> (String, String) {
+    let path = format!("/mock/{name}/_rustybin/mcp");
+    (
+        format!("{base}{path}"),
+        format!("{base}/.well-known/oauth-protected-resource{path}"),
+    )
+}
+
+/// `GET /.well-known/oauth-protected-resource/mock/{name}/_rustybin/mcp`
+/// (RFC 9728): only for a mock that asks for OAuth, so names cannot be probed.
+pub async fn oauth_metadata(
+    State(app): State<AppState>,
+    Extension(sh): Extension<Arc<Shared>>,
+    Path(name): Path<String>,
+    parts: axum::http::request::Parts,
+) -> Response {
+    let oauth = match app.mocks.lookup(&name) {
+        Lookup::Ready(live) => live.compiled.settings.mcp.oauth && !live.visitor,
+        _ => false,
+    };
+    if !oauth {
+        return not_found(NO_SERVER, None);
+    }
+    let base = auth::base_url(&parts.headers, &parts.extensions, &parts.uri, &sh.cfg);
+    let (resource, _) = oauth_urls(&base, &name);
+    Json(json!({
+        "resource": resource,
+        "authorization_servers": [base],
+        "scopes_supported": auth::SCOPES_SUPPORTED,
+        "bearer_methods_supported": ["header"],
+        "resource_name": format!("The MCP server of the mock {name}"),
+    }))
+    .into_response()
+}
+
 /// `POST, GET, DELETE /mock/{name}/_rustybin/mcp`.
 pub async fn handler(
     State(app): State<AppState>,
@@ -194,6 +231,15 @@ pub async fn handler(
         } else {
             not_found(reason, Some(&name))
         };
+    }
+    if c.settings.mcp.oauth {
+        let base = auth::base_url(req.headers(), req.extensions(), req.uri(), &sh.cfg);
+        let (resource, metadata) = oauth_urls(&base, &name);
+        if let Err(refused) =
+            auth::require_bearer_for(req.headers(), &metadata, &[resource], &app.jwt)
+        {
+            return refused;
+        }
     }
     let (spec_server, idp_base) = handlers::served_bases(
         &c,
