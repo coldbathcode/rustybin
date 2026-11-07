@@ -6,9 +6,7 @@
 # A caller without a credential creates a mock as a visitor...
 POST {{signin_url}}/_rustybin/mocks
 X-Rustybin-Session: docs-sign-in-visitor
-```json
 {"spec": "{\"openapi\":\"3.0.3\",\"info\":{\"title\":\"Orders\",\"version\":\"1\"},\"paths\":{\"/orders\":{\"get\":{\"operationId\":\"list\",\"responses\":{\"200\":{\"description\":\"ok\"}}}}}}"}
-```
 HTTP 201
 [Captures]
 visitor_mock: jsonpath "$.name"
@@ -30,9 +28,7 @@ HTTP 401
 # ANCHOR: ssi_operator
 # The operator signs in...
 POST {{signin_url}}/_rustybin/login
-```json
 {"username": "operator", "password": "docs-operator-password"}
-```
 HTTP 200
 [Captures]
 operator_token: jsonpath "$.token"

@@ -429,12 +429,10 @@ jsonpath "$.stopped" count == 0
 # A recording as a scenario's source: the token is removed and named.
 POST {{harness_url}}/_rustybin/harness/import
 Authorization: Bearer {{admin_token}}
-```json
 {"log": {"entries": [
   {"request": {"method": "GET", "url": "https://api.example.com/orders?token=abc&page=2", "headers": []}, "response": {"status": 200}},
   {"request": {"method": "GET", "url": "https://api.example.com/orders?token=abc&page=2", "headers": []}, "response": {"status": 200}}
 ]}}
-```
 HTTP 200
 [Asserts]
 jsonpath "$.source.requests[0].path" == "/orders?page=2"
