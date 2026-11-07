@@ -523,6 +523,32 @@ function decisionsTable(policy) {
       h('td', null, x.allowed ? badge('allowed', 'ok') : h('div', null, badge('refused', 'err'), h('div', { class: 'small muted' }, x.reason))))))));
 }
 
+// GET /_rustybin/egress/check: a dry check, nothing is called.
+function egressCheck() {
+  const url = input({ id: 'egress-check-url', placeholder: 'https://api.example.com/', 'aria-label': 'URL to check' });
+  const purpose = input({ id: 'egress-check-purpose', placeholder: 'mcp_relay', 'aria-label': 'Purpose' });
+  const out = h('div', { id: 'egress-check-result' });
+  const form = h('form', { class: 'stack' },
+    field('URL', url),
+    field('Purpose', purpose, 'The feature that would call it, as in the table above. Empty: the MCP relay.'),
+    h('div', { class: 'row' }, h('button', { class: 'btn', type: 'submit' }, 'Check')),
+    out);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const q = new URLSearchParams({ url: url.value.trim() });
+    if (purpose.value.trim()) q.set('purpose', purpose.value.trim());
+    try {
+      const r = await getJson('/_rustybin/egress/check?' + q, { admin: true, session: false });
+      replace(out, r.allowed
+        ? notice('ok', (r.origin || r.url) + ' would be allowed for ' + r.purpose + '. Its addresses are checked again when a call is made.')
+        : notice('err', (r.origin || r.url) + ' would be refused for ' + r.purpose + ': ' + (r.reasons || []).join('; ')));
+    } catch (err) {
+      replace(out, loadError(err));
+    }
+  });
+  return form;
+}
+
 function networkPanel(doc, reload, error) {
   const el = h('div', { class: 'stack' });
   const policyEl = h('div', null, spinner('Reading the policy'));
@@ -551,6 +577,7 @@ function networkPanel(doc, reload, error) {
     el.appendChild(card('Outbound connections', { hint: 'what this instance may reach' }, form.el));
     loadPolicy();
     el.appendChild(card('Policy as the instance sees it', { hint: 'the merged list, each feature, the last 100 decisions' }, policyEl));
+    el.appendChild(card('Check a URL', { hint: 'what the policy would say, without calling it' }, egressCheck()));
     const proxy = settingsForm(doc, 'proxy', { saveLabel: 'Save proxy settings', onSaved: reload });
     el.appendChild(card('Behind a proxy', { hint: 'which header names the client (RUSTYBIN_TRUST_FORWARD)' }, proxy.el));
     const leads = settingsForm(doc, 'leads', { saveLabel: 'Save leads webhook settings', onSaved: reload });

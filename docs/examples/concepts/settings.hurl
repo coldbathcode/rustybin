@@ -92,3 +92,17 @@ X-Rustybin-Admin-Token: {{admin_token}}
 Content-Type: application/json
 { "values": { "egress.allow": null }, "secrets": { "leads.webhook_token": null } }
 HTTP 200
+
+# ANCHOR: egress_check
+# What the policy would say to a URL, without calling it. The address is
+# refused whatever the allowlist says.
+GET {{base_url}}/_rustybin/egress/check
+X-Rustybin-Admin-Token: {{admin_token}}
+[Query]
+url: http://169.254.169.254/latest/meta-data/
+purpose: git
+HTTP 200
+[Asserts]
+jsonpath "$.allowed" == false
+jsonpath "$.reasons[0]" exists
+# ANCHOR_END: egress_check

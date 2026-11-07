@@ -1720,6 +1720,7 @@ const COVERAGE: &[(&str, Cover)] = &[
     ("/_rustybin/config/apply", Tool("apply_config")),
     ("/_rustybin/config/schema", Resource(SCHEMA_URI)),
     ("/_rustybin/egress", Tool("check_egress")),
+    ("/_rustybin/egress/check", Tool("check_egress")),
     ("/_rustybin/git", Tool("git_status")),
     ("/_rustybin/git/history", Tool("git_status")),
     ("/_rustybin/git/init", Tool("git_init")),

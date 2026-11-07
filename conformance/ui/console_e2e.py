@@ -986,6 +986,7 @@ def run_theme(browser, theme):
         page.locator("[aria-label='egress.allow']").fill("")
         page.get_by_role("button", name="Save outbound settings").click()
         page.wait_for_selector("text=Saved egress.allow")
+        egress_dry_check(page)
         assert_icons_sized(page, "the management view")
 
     step("management: instance settings, a secret, the egress policy", management)
@@ -3028,6 +3029,14 @@ def run_sso(browser):
 
     step("sso: a person in no mapped group is refused with the reason", refused)
     ctx.close()
+
+
+def egress_dry_check(page):
+    """The Network tab's dry check: a metadata address is refused whatever the list says."""
+    page.fill("#egress-check-url", "http://169.254.169.254/")
+    page.get_by_role("button", name="Check", exact=True).click()
+    expect(page.locator("#egress-check-result")).to_contain_text("would be refused")
+    expect(page.locator("#egress-check-result")).to_contain_text("always refused")
 
 
 def run_sign_in_optional(browser):

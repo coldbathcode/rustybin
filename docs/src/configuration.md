@@ -215,6 +215,15 @@ cannot change meaning between the check and the connect), and the decision is
 logged on the `rustybin::egress` target and kept for `GET /_rustybin/egress` (the
 last 100, newest first, shown in the console's Management, Network tab).
 
+To ask before configuring a feature, check a URL without calling it:
+`GET /_rustybin/egress/check?url=...&purpose=git`, `rustybin egress check <url>
+--purpose git` (exit 1 when it would be refused), `check_egress` on the management MCP
+server, or **Check a URL** on the Network tab:
+
+```hurl
+{{#include ../examples/concepts/settings.hurl:egress_check}}
+```
+
 | Variable | Default | Description |
 |---|---|---|
 | `RUSTYBIN_EGRESS_ALLOW` | unset | Host names, `*.domain` wildcards, IP addresses and CIDRs, each with an optional `:port`, comma separated: what every outbound feature may reach, on top of each feature's own rule. Seeds the `egress.allow` setting. |

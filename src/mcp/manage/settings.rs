@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use super::access::Access;
 use super::tools::{arg_str, confirm, err, ok, Confirm};
-use crate::egress::{forbidden_address, parse_url, Purpose};
+use crate::egress::Purpose;
 use crate::mcp::core::CallCtx;
 use crate::settings::UpdateError;
 
@@ -216,10 +216,6 @@ pub async fn update_settings(
     )
 }
 
-fn purpose_of(name: &str) -> Option<Purpose> {
-    Purpose::ALL.iter().copied().find(|p| p.as_str() == name)
-}
-
 /// `check_egress` (admin): the outbound policy, and what it would say to a
 /// URL for a purpose (the allowlists, the loopback switch and the IP
 /// literal checks; the resolved addresses are checked when a call is made).
@@ -251,100 +247,32 @@ pub fn check_egress(ctx: &CallCtx, _access: &Access, args: &Value) -> Value {
             view,
         );
     };
-    let purpose = match arg_str(args, "purpose") {
-        None => Purpose::McpRelay,
-        Some(p) => match purpose_of(p) {
-            Some(p) => p,
-            None => {
-                return err(format!(
-                    "unknown purpose {p:?}: one of {}",
-                    Purpose::ALL
-                        .iter()
-                        .map(|p| p.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ))
-            }
-        },
+    let purpose = match crate::egress::purpose_named(arg_str(args, "purpose")) {
+        Ok(p) => p,
+        Err(e) => return err(e),
     };
-    let mut reasons: Vec<String> = Vec::new();
-    let target = match parse_url(url, true) {
-        Ok(t) => t,
-        Err(e) => {
-            return ok(
-                ctx,
-                format!("{url} would be refused for {}: {e}", purpose.as_str()),
-                json!({ "url": url, "purpose": purpose.as_str(), "allowed": false, "reasons": [e] }),
-            )
-        }
-    };
-    let rule = egress.rule(purpose);
-    let (global, _) = egress.allowlist();
-    let merged = global.merged(&rule.allow);
-    let unrestricted = rule.any && !ctx.app.config.public_mode;
-    let listed = merged.allows_host(&target.host, target.port)
-        || target
-            .ip
-            .is_some_and(|ip| merged.allows_ip(ip, target.port));
-    if !(unrestricted || listed) {
-        reasons.push(format!(
-            "{}:{} is not in the allowlist for purpose {} (RUSTYBIN_EGRESS_ALLOW, the egress.allow setting, or {})",
-            target.host,
-            target.port,
+    let check = egress.dry_check(url, purpose);
+    let shown = check["origin"].as_str().unwrap_or(url).to_string();
+    let summary = if check["allowed"] == json!(true) {
+        format!(
+            "{shown} would be allowed for {} (before DNS)",
+            purpose.as_str()
+        )
+    } else {
+        let reasons: Vec<&str> = check["reasons"]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        format!(
+            "{shown} would be refused for {}: {}",
             purpose.as_str(),
-            purpose.configured_by()
-        ));
-    }
-    if let Some(why) = target.ip.and_then(forbidden_address) {
-        reasons.push(format!("{} is always refused: {why}", target.host));
-    }
-    let loopback = target.ip.is_some_and(|ip| ip.is_loopback()) || target.host == "localhost";
-    if loopback && !(egress.loopback_allowed() || rule.loopback) {
-        reasons.push(
-            "loopback addresses need RUSTYBIN_EGRESS_ALLOW_LOOPBACK=true (the egress.allow_loopback setting)"
-                .into(),
-        );
-    }
-    let allowed = reasons.is_empty();
+            reasons.join("; ")
+        )
+    };
     if let Value::Object(m) = &mut view {
-        m.insert(
-            "check".into(),
-            json!({
-                "url": url,
-                "origin": target.origin(),
-                "purpose": purpose.as_str(),
-                "allowed": allowed,
-                "reasons": reasons,
-                "rule": { "any": rule.any, "loopback": rule.loopback, "allow": rule.allow.describe() },
-                "note": "A dry check of the policy: the addresses the host resolves to are checked again when a call is made (forbidden ranges, loopback).",
-            }),
-        );
+        m.insert("check".into(), check);
     }
-    ok(
-        ctx,
-        if allowed {
-            format!(
-                "{} would be allowed for {} (before DNS)",
-                target.origin(),
-                purpose.as_str()
-            )
-        } else {
-            format!(
-                "{} would be refused for {}: {}",
-                target.origin(),
-                purpose.as_str(),
-                view["check"]["reasons"]
-                    .as_array()
-                    .map(|a| a
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join("; "))
-                    .unwrap_or_default()
-            )
-        },
-        view,
-    )
+    ok(ctx, summary, view)
 }
 
 /// `test_sso`: single sign-on's status, and the provider's discovery

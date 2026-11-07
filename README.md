@@ -787,6 +787,7 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET POST | `/_rustybin/checkpoints` | Checkpoints of the instance's API mocks and health: list them (?from=git: the configuration repository's, admin), or save one (admin) |
 | GET DELETE | `/_rustybin/checkpoints/{name}` | A checkpoint: what it holds; DELETE removes it (admin) |
 | POST | `/_rustybin/checkpoints/{name}/restore` | Restore a checkpoint: mocks, their data and health back, flaky counters reset; ?dry_run=true says what would change, ?from=git restores the configuration repository's (admin) |
+| GET | `/_rustybin/egress/check` | What the outbound policy would say to a URL, without calling it |
 | GET | `/_rustybin/egress` | The outbound connection policy: the allowlist, each feature's rule and the last 100 decisions |
 | GET | `/_rustybin/metrics` | Prometheus metrics (requests by route template, latency, streams, egress, protocols, LLM tokens, requests and faults, limit rejections) |
 | GET | `/_rustybin/usage` | Plan, limits and current usage (requests, egress, in flight, streams) |

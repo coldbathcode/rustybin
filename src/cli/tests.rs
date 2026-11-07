@@ -1095,3 +1095,27 @@ async fn a_password_is_hashed_offline_and_the_hash_signs_in() {
         .await;
     assert_eq!(code, 2);
 }
+
+#[tokio::test]
+async fn the_dry_check_exits_one_when_the_policy_would_refuse() {
+    let inst = instance().await;
+    inst.login().await;
+    let (code, out) = inst
+        .run(None, &["egress", "check", "http://169.254.169.254/"])
+        .await;
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("always refused"), "{out}");
+    let (code, _) = inst.run(None, &["egress", "check"]).await;
+    assert_eq!(code, 2);
+    let (code, _) = inst
+        .run(None, &["egress", "check", "https://a.test/", "--purpose", "nope"])
+        .await;
+    assert_eq!(code, 1);
+    // A feature whose host is listed: allowed, and exit 0.
+    inst.json(&["settings", "set", "egress.allow", r#"["a.test"]"#])
+        .await;
+    let (code, out) = inst
+        .run(None, &["egress", "check", "https://a.test/", "--purpose", "git"])
+        .await;
+    assert_eq!(code, 0, "{out}");
+}

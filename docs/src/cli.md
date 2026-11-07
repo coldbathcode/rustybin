@@ -775,9 +775,11 @@ The outbound connection policy
 | Command | What it does | Calls | Needs |
 |---|---|---|---|
 | `rustybin egress show` | The outbound policy: the allowlist, each feature's rule, the last decisions. | `GET /_rustybin/egress` | `settings.read` |
+| `rustybin egress check <url> [--purpose P]` | What the outbound policy would say to a URL, without calling it. Exits 1 when it would refuse. Flags: `--purpose` value. | `GET /_rustybin/egress/check` | `settings.read` |
 
 ```bash
 rustybin egress show
+rustybin egress check https://api.example.com --purpose git
 ```
 
 ## audit

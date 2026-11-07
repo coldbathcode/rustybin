@@ -26,7 +26,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -932,6 +933,55 @@ impl Egress {
     }
 
     /// The global allowlist (`egress.allow`: stored, else `RUSTYBIN_EGRESS_ALLOW`).
+    /// What the policy would say to `url` for `purpose`, without calling it:
+    /// the allowlists, the loopback switch and the checks on an IP literal.
+    /// A name's addresses are checked again when a call is made.
+    pub fn dry_check(&self, url: &str, purpose: Purpose) -> Value {
+        let target = match parse_url(url, true) {
+            Ok(t) => t,
+            Err(e) => {
+                return json!({ "url": url, "purpose": purpose.as_str(), "allowed": false, "reasons": [e] })
+            }
+        };
+        let mut reasons: Vec<String> = Vec::new();
+        let rule = self.rule(purpose);
+        let (global, _) = self.allowlist();
+        let merged = global.merged(&rule.allow);
+        let unrestricted = rule.any && !self.public_mode;
+        let listed = merged.allows_host(&target.host, target.port)
+            || target
+                .ip
+                .is_some_and(|ip| merged.allows_ip(ip, target.port));
+        if !(unrestricted || listed) {
+            reasons.push(format!(
+                "{}:{} is not in the allowlist for purpose {} (RUSTYBIN_EGRESS_ALLOW, the egress.allow setting, or {})",
+                target.host,
+                target.port,
+                purpose.as_str(),
+                purpose.configured_by()
+            ));
+        }
+        if let Some(why) = target.ip.and_then(forbidden_address) {
+            reasons.push(format!("{} is always refused: {why}", target.host));
+        }
+        let loopback = target.ip.is_some_and(|ip| ip.is_loopback()) || target.host == "localhost";
+        if loopback && !(self.loopback_allowed() || rule.loopback) {
+            reasons.push(
+                "loopback addresses need RUSTYBIN_EGRESS_ALLOW_LOOPBACK=true (the egress.allow_loopback setting)"
+                    .into(),
+            );
+        }
+        json!({
+            "url": url,
+            "origin": target.origin(),
+            "purpose": purpose.as_str(),
+            "allowed": reasons.is_empty(),
+            "reasons": reasons,
+            "rule": { "any": rule.any, "loopback": rule.loopback, "allow": rule.allow.describe() },
+            "note": "A dry check of the policy: the addresses the host resolves to are checked again when a call is made (forbidden ranges, loopback).",
+        })
+    }
+
     pub fn allowlist(&self) -> (Allowlist, Vec<String>) {
         Allowlist::parse(&self.settings.list("egress.allow"))
     }
@@ -1193,12 +1243,65 @@ async fn egress_handler(State(state): State<AppState>) -> Response {
     Json(state.egress.view()).into_response()
 }
 
+#[derive(Deserialize)]
+struct CheckQuery {
+    url: Option<String>,
+    purpose: Option<String>,
+}
+
+/// The purpose a caller named, or the MCP relay's (the one a person most
+/// often has to open up by hand).
+pub fn purpose_named(name: Option<&str>) -> Result<Purpose, String> {
+    let Some(name) = name else {
+        return Ok(Purpose::McpRelay);
+    };
+    Purpose::ALL
+        .iter()
+        .copied()
+        .find(|p| p.as_str() == name)
+        .ok_or_else(|| {
+            let all: Vec<&str> = Purpose::ALL.iter().map(|p| p.as_str()).collect();
+            format!("unknown purpose {name:?}: one of {}", all.join(", "))
+        })
+}
+
+async fn check_handler(State(state): State<AppState>, Query(q): Query<CheckQuery>) -> Response {
+    let refuse =
+        |error: String| (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
+    let Some(url) = q.url.as_deref().map(str::trim).filter(|u| !u.is_empty()) else {
+        return refuse("name a url to check".into());
+    };
+    match purpose_named(q.purpose.as_deref()) {
+        Ok(purpose) => Json(state.egress.dry_check(url, purpose)).into_response(),
+        Err(error) => refuse(error),
+    }
+}
+
 pub fn router(_state: &AppState) -> Router<AppState> {
-    Router::new().route("/_rustybin/egress", get(egress_handler))
+    Router::new()
+        .route("/_rustybin/egress", get(egress_handler))
+        .route("/_rustybin/egress/check", get(check_handler))
 }
 
 pub fn catalog() -> Vec<Endpoint> {
-    vec![Endpoint::new(
+    vec![
+        Endpoint::new(
+            "/_rustybin/egress/check",
+            &["GET"],
+            category::CONTROL,
+            "What the outbound policy would say to a URL, without calling it",
+        )
+        .permission(crate::rbac::Permission::SettingsRead)
+        .description(
+            "`url` and `purpose` (a feature's name, `mcp_relay` by default). Answers `allowed`, the \
+             `reasons` for a refusal and the feature's rule. The addresses a name resolves to are \
+             checked again when a call is made.",
+        )
+        .example(Example::get(
+            "Could the relay reach this?",
+            "/_rustybin/egress/check?url=https://api.example.com/",
+        )),
+        Endpoint::new(
         "/_rustybin/egress",
         &["GET"],
         category::CONTROL,
@@ -1211,11 +1314,37 @@ pub fn catalog() -> Vec<Endpoint> {
          and unspecified addresses, this instance's control plane and (unless allowed) loopback \
          are always refused. Decisions carry the origin, the pinned addresses and the reason.",
     )
-    .example(Example::get("Egress policy", "/_rustybin/egress"))]
+    .example(Example::get("Egress policy", "/_rustybin/egress")),
+    ]
 }
 
 pub fn openapi_paths() -> Value {
     json!({
+        "/_rustybin/egress/check": {
+            "get": {
+                "tags": ["Control Plane"],
+                "summary": "Dry check of a URL against the outbound policy",
+                "description": "What the policy would say to `url` for `purpose`, without calling it. The addresses a name resolves to are checked again when a call is made.",
+                "operationId": "checkRustybinEgress",
+                "parameters": [
+                    { "name": "url", "in": "query", "required": true, "schema": { "type": "string" } },
+                    { "name": "purpose", "in": "query", "required": false, "schema": { "type": "string", "default": "mcp_relay" } }
+                ],
+                "responses": {
+                    "200": { "description": "The answer", "content": { "application/json": { "schema": {
+                        "type": "object",
+                        "properties": {
+                            "url": { "type": "string" }, "origin": { "type": "string" }, "purpose": { "type": "string" },
+                            "allowed": { "type": "boolean" },
+                            "reasons": { "type": "array", "items": { "type": "string" } },
+                            "rule": { "type": "object" }, "note": { "type": "string" }
+                        }
+                    } } } },
+                    "400": { "description": "No url, or an unknown purpose" },
+                    "401": { "description": "Admin token required" }
+                }
+            }
+        },
         "/_rustybin/egress": {
             "get": {
                 "tags": ["Control Plane"],
@@ -1484,6 +1613,63 @@ mod tests {
             v["purposes"].as_array().expect("purposes").len(),
             Purpose::ALL.len()
         );
+    }
+
+    #[tokio::test]
+    async fn the_dry_check_says_what_a_call_would_meet() {
+        let mut config = Config::for_tests();
+        config.admin_token = Some("adm".into());
+        config.egress_allow = vec!["*.example.com".into()];
+        let app = test_app_with(test_state_with(config));
+        let check = |query: &'static str, token: bool| {
+            let app = app.clone();
+            async move {
+                let mut req = get_request(&format!("/_rustybin/egress/check?{query}"));
+                if token {
+                    req.headers_mut().insert(
+                        "x-rustybin-admin-token",
+                        axum::http::HeaderValue::from_static("adm"),
+                    );
+                }
+                let resp = app.oneshot(req).await.expect("resp");
+                (resp.status().as_u16(), body_json(resp).await)
+            }
+        };
+        let (status, _) = check("url=https://api.example.com/", false).await;
+        assert_eq!(status, 401);
+
+        let (status, v) = check("url=https://api.example.com/v1&purpose=git", true).await;
+        assert_eq!(status, 200, "{v}");
+        assert_eq!(v["allowed"], true, "{v}");
+        assert_eq!(v["purpose"], "git");
+        assert_eq!(v["origin"], "https://api.example.com");
+
+        // The relay is the default purpose, as in `check_egress`.
+        let (status, v) = check("url=https://other.test/", true).await;
+        assert_eq!(status, 200, "{v}");
+        assert_eq!(v["allowed"], false);
+        assert_eq!(v["purpose"], "mcp_relay");
+        assert!(v["reasons"][0]
+            .as_str()
+            .expect("a reason")
+            .contains("allowlist"));
+
+        // A refusal the allowlist cannot lift, and one that names its switch.
+        let (_, v) = check("url=http://169.254.169.254/", true).await;
+        assert_eq!(v["allowed"], false);
+        assert!(v.to_string().contains("always refused"), "{v}");
+        let (_, v) = check("url=http://127.0.0.1:1/", true).await;
+        assert!(v.to_string().contains("loopback"), "{v}");
+
+        // Not a URL is an answer about the URL; a wrong purpose is the caller's.
+        let (status, v) = check("url=not%20a%20url", true).await;
+        assert_eq!(status, 200, "{v}");
+        assert_eq!(v["allowed"], false);
+        let (status, v) = check("url=https://a.example.com/&purpose=nope", true).await;
+        assert_eq!(status, 400, "{v}");
+        assert!(v["error"].as_str().expect("error").contains("git"), "{v}");
+        let (status, _) = check("purpose=git", true).await;
+        assert_eq!(status, 400);
     }
 
     /// The "verify first" finding: a name with a trailing dot must connect to

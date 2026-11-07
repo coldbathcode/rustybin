@@ -502,6 +502,7 @@ pub static COMMANDS: &[Cmd] = &[
     // ── Keys and egress ──
     cmd!("keys", "usage", "[--day D] [--after A] [--limit N]", "Per-key usage in shared mode.", &[Flag::value("--day", "A UTC day (YYYY-MM-DD)"), Flag::value("--after", "The page cursor"), Flag::value("--limit", "At most this many")], [("GET", "/_rustybin/keys/usage")], false, "keys usage --day 2026-10-30"),
     cmd!("egress", "show", "", "The outbound policy: the allowlist, each feature's rule, the last decisions.", NO_FLAGS, [("GET", "/_rustybin/egress")], false, "egress show"),
+    cmd!("egress", "check", "<url> [--purpose P]", "What the outbound policy would say to a URL, without calling it. Exits 1 when it would refuse.", &[Flag::value("--purpose", "The feature that would call it (default mcp_relay)")], [("GET", "/_rustybin/egress/check")], false, "egress check https://api.example.com --purpose git"),
     // ── The audit log ──
     cmd!("audit", "list", "[--actor A] [--action A] [--target T] [--since S] [--until U] [--result R] [--limit N] [--cursor C]", "The audit log, newest first: who did what and when, sign-ins and refusals (audit.read). --cursor pages back with the next_cursor printed last.", AUDIT_LIST_FLAGS, [("GET", "/_rustybin/audit")], false, "audit list --since 1h --result refused"),
     cmd!("audit", "tail", "[--actor A] [--action A] [--target T] [--result R]", "Follow the audit log: one line per new entry that matches (audit.read).", AUDIT_TAIL_FLAGS, [("GET", "/_rustybin/audit/stream")], false, "audit tail --action mocks --max 10"),
@@ -783,6 +784,7 @@ pub async fn dispatch(ctx: &mut Ctx) -> Result<()> {
             )
             .await
         }
+        "egress" if cmd.verb == "check" => egress_check(ctx).await,
         "egress" => get(ctx, "/_rustybin/egress", &[]).await,
         "audit" => audit(ctx, cmd.verb).await,
         other => Err(Fail::Usage(format!("{other}: not implemented"))),
@@ -1346,6 +1348,28 @@ async fn sessions(ctx: &mut Ctx, verb: &str) -> Result<()> {
         "end-all" => delete(ctx, "/_rustybin/sessions", &[]).await,
         _ => Err(Fail::Usage(format!("sessions {verb}: not implemented"))),
     }
+}
+
+/// `egress check`: the answer, and exit 1 when the policy would refuse.
+async fn egress_check(ctx: &mut Ctx) -> Result<()> {
+    let url = ctx
+        .args
+        .positional
+        .first()
+        .cloned()
+        .ok_or_else(|| Fail::Usage("name a url to check".into()))?;
+    let mut query = vec![("url", url)];
+    if let Some(p) = ctx.args.value("--purpose") {
+        query.push(("purpose", p.to_string()));
+    }
+    let reply = ctx.client()?.get("/_rustybin/egress/check", &query).await?;
+    let reply = reply.ok()?;
+    let v = reply.value();
+    ctx.emit(&v);
+    if v["allowed"] == json!(true) {
+        return Ok(());
+    }
+    Err(Fail::Failed("the outbound policy would refuse it".into()))
 }
 
 /// The hash of a password, on this machine: nothing is sent anywhere.

@@ -123,6 +123,7 @@ pub(crate) const OLD_ADMIN_ONLY: &[(&str, &str)] = &[
 /// declaration is the truth (`every_control_route_declares_a_permission`
 /// and `the_route_check_enforces_the_declarations` still cover them).
 pub(crate) const NEW_SINCE_0_4: &[&str] = &[
+    "/_rustybin/egress/check",
     "/_rustybin/users",
     "/_rustybin/users/{id}",
     "/_rustybin/users/{id}/invite",
