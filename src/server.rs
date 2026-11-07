@@ -468,6 +468,26 @@ pub async fn start_with_state(state: AppState) -> Result<RunningServer, Error> {
         optional_tasks.push(("git auto", task));
     }
 
+    // A finished load test run's metrics, to the OTLP collector when set.
+    if state.harness.is_some() {
+        let export = state.clone();
+        let rx = shutdown.subscribe();
+        let exporter = tokio::spawn(async move {
+            let stop = wait_for(rx);
+            tokio::pin!(stop);
+            let mut sent = crate::harness::otlp::Sent::default();
+            let mut tick = tokio::time::interval(crate::harness::otlp::EVERY);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = &mut stop => break,
+                    _ = tick.tick() => crate::harness::otlp::tick(&export, &mut sent).await,
+                }
+            }
+        });
+        optional_tasks.push(("load test export", exporter));
+    }
+
     // Saved tests on a schedule: the scheduler, and the delivery of the
     // failure notices to the schedules' webhooks.
     let scheduler = tokio::spawn(crate::replay::schedule::scheduler_loop(

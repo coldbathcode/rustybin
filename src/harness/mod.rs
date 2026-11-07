@@ -35,6 +35,7 @@ pub mod limit_test;
 pub mod live;
 pub mod member;
 pub mod mocksource;
+pub mod otlp;
 pub mod pattern;
 pub mod protocols;
 pub mod ratelimit;

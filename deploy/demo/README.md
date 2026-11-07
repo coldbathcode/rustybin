@@ -20,12 +20,10 @@ The secrets, never in this file. The hash is made on your own machine, so the pa
 neither a command line nor the instance:
 
 ```bash
-rustybin password hash | fly secrets import --app rustybin-demo   # see below
+HASH=$(rustybin password hash)   # prompts, prints the hash and nothing else
+printf "RUSTYBIN_CONSOLE_PASSWORD_HASH=%s\n" "$HASH" | fly secrets import --app rustybin-demo
 fly secrets set --app rustybin-demo RUSTYBIN_LEADS_SALT="$(openssl rand -hex 32)"
 ```
-
-`fly secrets import` reads `NAME=value` lines, so give it
-`RUSTYBIN_CONSOLE_PASSWORD_HASH='<the hash>'`, single quoted because the hash holds `$`.
 
 ## Deploy
 

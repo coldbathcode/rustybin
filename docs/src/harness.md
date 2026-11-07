@@ -365,6 +365,18 @@ turn, which exercises the gateway's health checks and circuit breakers. The buil
 
 The tables of every parameter are in [configuration](configuration.md#harness-mode).
 
+## OpenTelemetry
+
+Set `harness.otlp_endpoint` (Management, or `rustybin settings set`) to a collector's HTTP base URL
+and each finished run is sent to its `/v1/metrics`, as OTLP over HTTP with a JSON body: sent, completed,
+ok, transport errors, lost, the p50 and p99 latency, the achieved rate and whether the run passed,
+labelled with the run, the scenario and its state. The secret `harness.otlp_token` goes along as a
+bearer token when your collector wants one. A cluster's run is sent once, by the leader, merged.
+
+Only those numbers and names go out, never a target, a header or a body. A task sends them
+after a run has ended, so a slow collector cannot touch a run, and one that is down costs a
+warning in the log, since the report still holds everything.
+
 ## Replaying a recording
 
 A HAR file from a browser or a proxy, or the captures of `GET /_rustybin/requests`, can become a

@@ -358,7 +358,7 @@ pub static TOOLS: &[ToolDef] = &[
     }), &[])),
     tool!("check_egress", "Outbound policy", "The outbound connection policy (the allowlist, the loopback switch, each feature's rule, the last decisions) and, with url, whether that URL would be allowed for a purpose before DNS, with the reasons when not. Admin.", ToolNeed::Perm(Permission::SettingsRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "url": { "type": "string", "description": "An http(s) URL to check" },
-        "purpose": { "type": "string", "enum": ["assist", "mcp_relay", "registry", "git", "a2a_push", "leads", "key_registry", "scenario", "replay", "notify", "spec_fetch", "sso"], "default": "mcp_relay" }
+        "purpose": { "type": "string", "enum": ["assist", "mcp_relay", "registry", "git", "a2a_push", "leads", "key_registry", "scenario", "replay", "notify", "spec_fetch", "otlp", "sso"], "default": "mcp_relay" }
     }), &[])),
     // ── AI assist ──
     tool!("assist_status", "AI assist status", "Whether AI assist is on, the provider and models, the caps, each provider's key state ({set, hint}: never a value), the tasks and the usage total. Keys are set by the operator in the console or the CLI, never here.", ToolNeed::Perm(Permission::AssistUse), ro=true, destructive=false, idem=true, confirm=false, no_args),

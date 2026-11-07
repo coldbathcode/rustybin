@@ -705,13 +705,15 @@ pub enum Purpose {
     Notify,
     /// A spec fetched from a URL for a caller with `mocks.write`.
     SpecFetch,
+    /// A load test run's metrics, to the configured OTLP collector.
+    Otlp,
     /// Single sign-on: the identity provider's discovery document, keys
     /// and token endpoint (`crate::sso`).
     Sso,
 }
 
 impl Purpose {
-    pub const ALL: [Purpose; 12] = [
+    pub const ALL: [Purpose; 13] = [
         Purpose::Assist,
         Purpose::McpRelay,
         Purpose::Registry,
@@ -723,6 +725,7 @@ impl Purpose {
         Purpose::Replay,
         Purpose::Notify,
         Purpose::SpecFetch,
+        Purpose::Otlp,
         Purpose::Sso,
     ];
 
@@ -739,6 +742,7 @@ impl Purpose {
             Purpose::Replay => "replay",
             Purpose::Notify => "notify",
             Purpose::SpecFetch => "spec_fetch",
+            Purpose::Otlp => "otlp",
             Purpose::Sso => "sso",
         }
     }
@@ -757,6 +761,7 @@ impl Purpose {
             Purpose::Replay => "Saved tests through a gateway",
             Purpose::Notify => "Test schedule notices",
             Purpose::SpecFetch => "Specs fetched from a URL",
+            Purpose::Otlp => "OpenTelemetry collector",
             Purpose::Sso => "Single sign-on provider",
         }
     }
@@ -777,6 +782,7 @@ impl Purpose {
             Purpose::SpecFetch => {
                 "RUSTYBIN_EGRESS_ALLOW only (the hosts specs come from; no default)"
             }
+            Purpose::Otlp => "the host of harness.otlp_endpoint, once set",
             Purpose::Sso => "the issuer's host, once single sign-on is set up",
         }
     }
