@@ -295,6 +295,7 @@ fn visitor_compile(spec: &str) -> Compiled {
             max_body_bytes: 64 * 1024,
             max_rules: 10,
             visitor: true,
+            stateful: false,
         },
     };
     Compiled::build(

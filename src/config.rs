@@ -486,6 +486,10 @@ pub struct SelfServiceConfig {
     pub anon_visits_per_day: u32,
     /// Slug globs refused on create (`RUSTYBIN_MOCKS_BLOCKED_NAMES`).
     pub blocked_names: Vec<String>,
+    /// Visitors may use `stateful` mode, within tight caps
+    /// (`RUSTYBIN_MOCKS_SELF_SERVICE_STATEFUL`). Off: it stores what callers
+    /// send, the closest thing here to free file hosting.
+    pub stateful: bool,
     /// Where captured email addresses are posted (`RUSTYBIN_LEADS_WEBHOOK_URL`).
     pub leads_webhook_url: Option<String>,
     /// Bearer token for the webhook (`RUSTYBIN_LEADS_WEBHOOK_TOKEN`). Never exposed.
@@ -503,6 +507,7 @@ pub struct SelfServiceConfig {
 impl Default for SelfServiceConfig {
     fn default() -> Self {
         Self {
+            stateful: false,
             enabled: false,
             host: None,
             home_url: None,
@@ -1598,6 +1603,7 @@ where
                     .collect()
             })
             .unwrap_or_default(),
+        stateful: parse_bool_or(get, "RUSTYBIN_MOCKS_SELF_SERVICE_STATEFUL", false, warnings),
         leads_webhook_url: url("RUSTYBIN_LEADS_WEBHOOK_URL", warnings),
         leads_webhook_token: get("RUSTYBIN_LEADS_WEBHOOK_TOKEN"),
         leads_file: get("RUSTYBIN_LEADS_FILE").map(PathBuf::from),

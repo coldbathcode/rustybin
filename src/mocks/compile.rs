@@ -319,6 +319,7 @@ pub(crate) mod tests {
             max_body_bytes: 64 * 1024,
             max_rules: 20,
             visitor: false,
+            stateful: true,
         },
     };
 

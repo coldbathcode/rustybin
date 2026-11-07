@@ -918,13 +918,17 @@ impl Svc {
 
     fn detail_of(&self, s: &Snapshot, reveal: bool) -> Value {
         let root = self.links.mock_base(&s.owner, &s.name);
-        detail(
+        let mut v = detail(
             s,
             &root,
             self.links.host(),
             limits_json(self.store()),
             reveal,
-        )
+        );
+        if s.owner.is_visitor() {
+            v["visitor_stateful"] = json!(self.store().limits().visitor_stateful);
+        }
+        v
     }
 
     /// `GET /_rustybin/mocks`. `all` (admin): every visitor's mocks too.

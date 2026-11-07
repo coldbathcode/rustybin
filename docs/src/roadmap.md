@@ -92,8 +92,6 @@ From the build notes of the 0.2 and 0.3 steps and the harness plan, in no order:
 - **Self-service across replicas**: visits and visitor mocks live in memory on one
   instance today. A shared store would let a hosted demo run several replicas
   without routing each mock to one of them.
-- **Stateful mode for visitor mocks**, with tight caps on what a mock may store
-  (items, bytes, text only).
 - **A platform authorization server for hosted instances**: Rustybin already
   points its OAuth metadata at an external issuer (`RUSTYBIN_CONTROL_OAUTH_ISSUER`);
   the platform side that issues control tokens to agents is not built.

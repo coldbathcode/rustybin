@@ -347,8 +347,11 @@ pub struct SettingsLimits {
     pub max_delay_ms: u64,
     pub max_body_bytes: usize,
     pub max_rules: usize,
-    /// A self-service mock: no `stateful` mode, no reserved headers.
+    /// A self-service mock: no reserved headers.
     pub visitor: bool,
+    /// May it use `stateful` mode? A visitor's only where the operator said
+    /// so (`RUSTYBIN_MOCKS_SELF_SERVICE_STATEFUL`).
+    pub stateful: bool,
 }
 
 /// Mock names: `[a-z0-9-]`, 1 to 40 characters, no leading or trailing dash.
@@ -446,7 +449,7 @@ impl MockSettings {
     /// limits). Mismatches with the spec are deploy-check findings instead.
     pub fn validate(&self, limits: &SettingsLimits) -> Result<(), String> {
         let r = &self.responses;
-        if limits.visitor {
+        if !limits.stateful {
             let stateful = r.mode == ResponseMode::Stateful
                 || self
                     .operations
@@ -619,6 +622,7 @@ mod tests {
         max_body_bytes: 1024,
         max_rules: 2,
         visitor: false,
+        stateful: true,
     };
 
     #[test]

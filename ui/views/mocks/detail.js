@@ -468,7 +468,7 @@ export function mountDetail(root, name, sub) {
       renderList();
       editor = operationEditor({
         name, opId: id, readOnly: !!readOnly, mockMode: detail.settings.responses.mode,
-        visitor: detail.owner === 'visit' || detail.owner === 'key',
+        visitor: (detail.owner === 'visit' || detail.owner === 'key') && !detail.visitor_stateful,
         securityOn: detail.security.enabled, maxDelayMs: detail.limits && detail.limits.max_delay_ms,
         onSaved: () => refresh(),
         onGenerate: (op) => openExamplesDialog(aiCtx, assist.enabled() ? 'ai' : 'generated', [op]),
@@ -507,7 +507,7 @@ export function mountDetail(root, name, sub) {
       const s = detail.settings;
       const r = s.responses;
       const visitorMock = detail.owner === 'visit' || detail.owner === 'key';
-      const mode = select(MODES.filter(([v]) => !visitorMock || v !== 'stateful').map(([v, l]) => [v, l]), r.mode, { 'aria-label': 'Response mode' });
+      const mode = select(MODES.filter(([v]) => !visitorMock || detail.visitor_stateful || v !== 'stateful').map(([v, l]) => [v, l]), r.mode, { 'aria-label': 'Response mode' });
       const modeHint = h('span', { class: 'hint' });
       const showModeHint = () => { modeHint.textContent = ((MODES.find(([v]) => v === mode.value) || [])[2] || '') + ' Per operation overrides win.'; };
       mode.addEventListener('change', showModeHint);

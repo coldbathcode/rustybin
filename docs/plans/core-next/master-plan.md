@@ -29,7 +29,7 @@ The marker a session looks for is the first row that is not done.
 | 02 | A mocks-only export at version 2 | done 2026-11-07 |
 | 03 | Fetching a spec from a URL on the server, for an agent (`mocks/fetch.rs`, `Purpose::SpecFetch`; `rustybin.yaml` has no `spec_url` on purpose: applying a file never reaches out) | done 2026-11-07 |
 | 04 | Harness: a leader transfer on purpose, before maintenance (`Cluster::step_aside`: the leader answers as one without a quorum, so the ordinary election runs and no protocol is new) | done 2026-11-07 |
-| 05 | Stateful mode for visitor mocks, with tight caps | not started |
+| 05 | Stateful mode for visitor mocks, with tight caps (`RUSTYBIN_MOCKS_SELF_SERVICE_STATEFUL`, off by default: the owner's decision of 2026-10-18 stands unless they turn it on) | done 2026-11-07 |
 | 06 | Source control: webhooks that trigger a pull | not started |
 | 07 | AI mocks: Generate examples per operation, with a persona | not started |
 | 08 | Harness: replay captured traffic or a HAR file as a traffic source | not started |

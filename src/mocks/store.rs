@@ -25,9 +25,16 @@ use super::state::MockState;
 use super::visits::{Owner, Visits};
 use crate::config::Config;
 
+/// What a visitor's stateful mock may hold: enough to try a create and a
+/// read, too little to be file hosting.
+pub const VISITOR_STATE_ITEMS: usize = 50;
+pub const VISITOR_STATE_BYTES: usize = 64 * 1024;
+
 /// Capacity limits (lower in public mode).
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct MockLimits {
+    /// `RUSTYBIN_MOCKS_SELF_SERVICE_STATEFUL`: visitors may use `stateful`.
+    pub visitor_stateful: bool,
     pub max_mocks: usize,
     pub max_spec_bytes: usize,
     pub max_operations: usize,
@@ -49,6 +56,7 @@ impl MockLimits {
     pub fn for_config(config: &Config) -> Self {
         if config.public_mode {
             Self {
+                visitor_stateful: config.self_service.stateful,
                 max_mocks: 50,
                 max_spec_bytes: 256 * 1024,
                 max_operations: 200,
@@ -65,6 +73,7 @@ impl MockLimits {
             }
         } else {
             Self {
+                visitor_stateful: config.self_service.stateful,
                 max_mocks: 100,
                 max_spec_bytes: 1024 * 1024,
                 max_operations: 500,
@@ -98,6 +107,7 @@ impl MockLimits {
                 max_body_bytes: self.max_body_bytes,
                 max_rules: self.max_rules,
                 visitor,
+                stateful: !visitor || self.visitor_stateful,
             },
         }
     }
@@ -1079,6 +1089,7 @@ impl MockStore {
     ) -> Entry {
         let draft = Arc::new(compiled);
         let now = Utc::now();
+        let visitor_state = owner.is_visitor();
         // A visit's mocks end with the visit, not after the public-mode TTL.
         let ttl = match owner {
             Owner::Visit(_) => None,
@@ -1102,7 +1113,11 @@ impl MockStore {
             history: VecDeque::new(),
             earlier: VecDeque::new(),
             capture: CaptureLog::new(self.limits.captures, self.limits.capture_bytes),
-            state: MockState::new(self.limits.state_items, self.limits.state_bytes),
+            state: if visitor_state {
+                MockState::new(VISITOR_STATE_ITEMS, VISITOR_STATE_BYTES)
+            } else {
+                MockState::new(self.limits.state_items, self.limits.state_bytes)
+            },
             expires,
             scratch: false,
             load_error: None,

@@ -1051,6 +1051,91 @@ async fn visitors_share_a_memory_budget_however_few_mocks_they_hold() {
     assert_eq!(status, StatusCode::CREATED, "{out}");
 }
 
+/// Stateful visitor mocks: off unless the operator says so, and tight when on.
+mod stateful {
+    use super::*;
+
+    const NOTES: &str = r#"{"openapi":"3.0.3","info":{"title":"Notes","version":"1"},
+      "paths":{"/notes":{"get":{"operationId":"list","responses":{"200":{"description":"ok",
+        "content":{"application/json":{"schema":{"type":"array","items":{"type":"object"}}}}}}},
+        "post":{"operationId":"add","requestBody":{"content":{"application/json":{"schema":{"type":"object",
+          "properties":{"text":{"type":"string"}}}}}},
+          "responses":{"201":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}"#;
+
+    fn body() -> Value {
+        json!({ "spec": NOTES, "responses": { "mode": "stateful" } })
+    }
+
+    #[tokio::test]
+    async fn off_by_default() {
+        let (app, _, _) = app_on(config(None));
+        let (status, out) = visitor_create(&app, "s1", None, body()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{out}");
+        assert!(out.to_string().contains("stateful"), "{out}");
+        let (_, _, list) = call(
+            &app,
+            "GET",
+            "/_rustybin/mocks",
+            &[("x-rustybin-session", "s1")],
+            None,
+        )
+        .await;
+        assert_eq!(list["self_service"]["stateful"], false, "{list}");
+    }
+
+    #[tokio::test]
+    async fn on_it_keeps_what_a_visitor_sends_within_the_caps() {
+        let mut c = config(None);
+        c.self_service.stateful = true;
+        let (app, _, _) = app_on(c);
+        let (status, out) = visitor_create(&app, "s1", None, body()).await;
+        assert_eq!(status, StatusCode::CREATED, "{out}");
+        let name = out["name"].as_str().expect("a name").to_string();
+        assert_eq!(out["visitor_stateful"], true, "{out}");
+        let path = format!("/mock/{name}/notes");
+        let session = [("x-rustybin-session", "s1")];
+        let (status, _, v) = call(
+            &app,
+            "POST",
+            &path,
+            &session,
+            Some(json!({ "text": "hello" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{v}");
+        let (status, _, v) = call(&app, "GET", &path, &session, None).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        // After the items the spec seeds.
+        let last = v.as_array().and_then(|a| a.last()).expect("an item");
+        assert_eq!(last["text"], "hello", "{v}");
+
+        // One item over the byte cap is refused, whatever else is stored.
+        let big = "x".repeat(crate::mocks::store::VISITOR_STATE_BYTES + 1);
+        let (status, _, v) =
+            call(&app, "POST", &path, &session, Some(json!({ "text": big }))).await;
+        assert_eq!(status, StatusCode::INSUFFICIENT_STORAGE, "{v}");
+
+        // The count holds: the oldest make room.
+        for i in 0..crate::mocks::store::VISITOR_STATE_ITEMS + 10 {
+            let (status, _, v) = call(
+                &app,
+                "POST",
+                &path,
+                &session,
+                Some(json!({ "text": format!("n{i}") })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{v}");
+        }
+        let (_, _, v) = call(&app, "GET", &path, &session, None).await;
+        let kept = v.as_array().expect("a list").len();
+        assert!(
+            kept <= crate::mocks::store::VISITOR_STATE_ITEMS,
+            "{kept} items kept"
+        );
+    }
+}
+
 /// Self-service next to the password sign-in: the owner signs in, and a
 /// caller without a credential is a visitor, exactly as on an open control
 /// plane.

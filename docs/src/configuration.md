@@ -288,6 +288,7 @@ token. See [Self-service mocks](mocks/self-service.md).
 | `RUSTYBIN_MOCKS_PER_OWNER` | `3` | Mocks per visitor (or API key in shared mode). |
 | `RUSTYBIN_MOCKS_SELF_SERVICE_MAX` | `200` | Visitor mocks on the instance (on top of the instance's own). |
 | `RUSTYBIN_MOCKS_SELF_SERVICE_MAX_MB` | `192` | Memory all visitor mocks hold together, in MiB, every kept revision counted (an estimate from each document). Past it a new mock or an edit answers `503`. About a third of the instance's memory. |
+| `RUSTYBIN_MOCKS_SELF_SERVICE_STATEFUL` | `false` | Let visitors use `stateful` mode, at most 50 items and 64 KiB per mock. Off because it stores what callers send. |
 | `RUSTYBIN_MOCKS_CREATE_PER_HOUR` | `10` | Mocks a session may create per hour. |
 | `RUSTYBIN_MOCKS_VISIT_MINUTES` | `60` | First period of a visit and the length of each extension (1 to 1440). |
 | `RUSTYBIN_MOCKS_ANON_HOURS` | `3` | Visit time without an email address. |

@@ -94,8 +94,10 @@ its SHA-256. Every later call that manages the visitor's mocks sends it as
   and nobody can take a name someone else is using.
 - More mocks from the same token join the visit, up to three per visitor
   (`RUSTYBIN_MOCKS_PER_OWNER`).
-- `stateful` mode is not available to visitors: their mocks answer from the spec
-  only, never with data callers sent.
+- `stateful` mode is off for visitors: their mocks answer from the spec only, never
+  with data callers sent. It stores what callers send, the closest thing here to free file
+  hosting, so it takes `RUSTYBIN_MOCKS_SELF_SERVICE_STATEFUL=true`, and then a visitor's
+  mock keeps at most 50 items and 64 KiB, in memory, for as long as the mock lives.
 - Visitor mocks cannot be renamed.
 
 Anyone may call the mock's URL (that is the point). Everything else about it

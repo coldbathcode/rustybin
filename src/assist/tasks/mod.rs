@@ -49,6 +49,7 @@ pub fn compile_limits() -> CompileLimits {
             max_body_bytes: 256 * 1024,
             max_rules: MAX_RULES,
             visitor: false,
+            stateful: true,
         },
     }
 }

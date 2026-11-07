@@ -249,7 +249,7 @@ export function openWizard(opts = {}) {
     const p = st.preview;
     const result = h('div');
     const cards = h('div', { class: 'radio-cards', role: 'radiogroup', 'aria-label': 'Responses' });
-    for (const [value, label, text, recommended] of MODES.filter(([value]) => !opts.visitor || value !== 'stateful')) {
+    for (const [value, label, text, recommended] of MODES.filter(([value]) => !opts.visitor || opts.visitor.stateful || value !== 'stateful')) {
       const radio = h('input', { type: 'radio', name: 'wizard-mode', value, checked: st.mode === value, 'data-autofocus': st.mode === value ? true : null });
       radio.addEventListener('change', () => { st.mode = value; });
       cards.appendChild(h('label', { class: 'radio-card' }, radio,

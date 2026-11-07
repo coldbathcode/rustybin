@@ -292,6 +292,7 @@ pub fn info(config: &Config) -> Value {
         "enabled": cfg.enabled,
         "host": cfg.host,
         "per_owner": cfg.per_owner,
+        "stateful": cfg.stateful,
         "visit_minutes": cfg.visit_minutes,
         "anon_hours": cfg.anon_hours,
         "daily_hours": cfg.daily_hours,
