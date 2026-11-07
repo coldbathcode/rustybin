@@ -5,11 +5,12 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-[The hosted demo](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/hosted-demo/master-plan.md):
-making a public self-service instance safe to run on the current release, and putting
-it online. The candidates under consideration below are not scheduled.
+Nothing is scheduled. The candidates under consideration below are not planned yet.
 
 ## Recently built
+
+- [The hosted demo](https://demo.rustybin.dev) (2026-11-07): a public self-service instance
+  on the current release, with visitors' mocks at `<name>.rustybin-mock.dev`.
 
 - [Rustybin 0.6, more from an instance](changelog.md#060-2026-11-07-more-from-an-instance)
   (2026-11-07): [specs from a URL](mocks/index.md#a-spec-from-a-url), a

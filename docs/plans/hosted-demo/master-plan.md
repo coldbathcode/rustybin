@@ -63,15 +63,15 @@ The marker a session looks for is the first row that is not done.
 | [03](step-03-anonymous-surface.md) | The rest of the anonymous surface: shared check runs, status and metrics | | done 2026-11-06 |
 | 04 | Release 0.5.1 (the release recipe of the last plans; the digest is in the changelog) | 01 to 03 | done 2026-11-06 |
 | [04b](step-04b-operator-sign-in.md) | The owner's sign-in on a self-service instance: `password` control auth with visitors still anonymous (section 6), released as 0.5.2 | 04 | done 2026-11-07 |
-| 05 | The deploy configuration. Replaced 2026-11-07, when the owner said to leave `rustybin-platform` for now: `deploy/demo` holds the Fly app, pinned to the 0.6.0 digest, with `RUSTYBIN_TRUST_FORWARD_HEADER=fly` | 04b | done 2026-11-07 |
-| 06 | Go live: the app, volume and secrets of `deploy/demo/README.md`, DNS and TLS for `demo.rustybin.dev`, `rustybin-mock.dev` and its wildcard, signing in as `oli`, a walk through the live demo | 05, a host | blocked 2026-11-07: Fly answers "trial has ended" until the owner adds a card at https://fly.io/trial |
+| 05 | The deploy configuration. Replaced 2026-11-07, when the owner said to leave `rustybin-platform` for now and to use their Contabo VPS, not Fly: `deploy/demo` is its own compose project and Cloudflare Tunnel, pinned to the 0.6.0 digest, with Caddy setting `X-Real-IP` from `Cf-Connecting-Ip` and `RUSTYBIN_TRUST_FORWARD_HEADER=x-real-ip` | 04b | done 2026-11-07 |
+| 06 | Go live: DNS and TLS for `demo.rustybin.dev`, `rustybin-mock.dev` and its wildcard, signing in as `oli`, a walk through the live demo | 05 | done 2026-11-07 |
 
-The configuration of step 06 was rehearsed on 2026-11-07 with the signed 0.6.0 image: the environment
-of `deploy/demo/fly.toml`, 512 MiB, a throwaway password, `Fly-Client-IP` set by the caller. All 23
-checks passed: the operator's routes refused to a visitor, only `oli` signs in, a visitor's mock on
-its own host and hidden from another visitor, the bare domain redirecting, forwarding headers
-ignored, the mock and the session surviving a restart. What it cannot show is Fly itself: the volume's
-ownership (Fly's init source gives the mount point to the image's user), certificates and the edge.
+The live demo was walked on 2026-11-07 over its public URLs, with a browser sign-in as `oli`: the
+operator's routes refused to a visitor, a wrong password and another user name refused, every
+diagnostic ok, a visitor's mock on its own https host and hidden from another visitor, plain http
+redirected, the bare domain redirecting, forged client address headers ignored or refused by
+Cloudflare, the mock and the session surviving a restart. No lead webhook or file is set, so the
+email step is off and a visit ends after its anonymous hours.
 
 ## 5. How a session works
 

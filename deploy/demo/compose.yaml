@@ -1,0 +1,93 @@
+# The public demo on a VPS: visitors create mocks at demo.rustybin.dev without an
+# account, each served at <name>.rustybin-mock.dev, and only the operator signs in.
+# Deploy steps and the secrets it needs are in README.md here.
+#
+# Nothing is published on the host: the only way in is the Cloudflare Tunnel.
+# Rustybin and Caddy sit on an internal network with no route to the internet.
+# The host's own ports stay reachable from it, so the outbound policy still
+# matters: leave RUSTYBIN_EGRESS_ALLOW unset here.
+
+name: rustybin-demo
+
+x-hardened: &hardened
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: "3"}
+
+services:
+  rustybin:
+    <<: *hardened
+    # The signed release, pinned by digest: never `latest`.
+    image: ghcr.io/coldbathcode/rustybin@sha256:492000348f22ebb73cd6197de2a07ea6bfc9a363b606b33dcf25b535e29cceb3
+    hostname: demo
+    env_file: rustybin.env   # RUSTYBIN_CONSOLE_PASSWORD_HASH, RUSTYBIN_LEADS_SALT
+    environment:
+      RUSTYBIN_PUBLIC_MODE: "true"
+      RUSTYBIN_PLAN: free
+      RUSTYBIN_INSTANCE_ID: demo
+      RUSTYBIN_LOG_LEVEL: info
+      RUSTYBIN_HTTP_PORT: "8080"
+      RUSTYBIN_HTTPS_PORT: "0"
+      RUSTYBIN_GRPC_PORT: "0"
+      RUSTYBIN_INSPECTOR_CAPACITY: "200"
+      # Caddy sets this header from Cloudflare's and a client cannot: never leave it at `any`.
+      RUSTYBIN_TRUST_FORWARD: "true"
+      RUSTYBIN_TRUST_FORWARD_HEADER: x-real-ip
+      # Settings, sessions, the audit log and visitors' mocks survive a restart.
+      # /app/certs is the image's own writable directory, so a new volume is uid 10001's.
+      RUSTYBIN_STATE_DIR: /app/certs/state
+      RUSTYBIN_USAGE_FILE: /app/certs/usage.json
+      # Visitors need no account; the password sign-in is the operator's alone.
+      RUSTYBIN_CONSOLE_USER: oli
+      RUSTYBIN_MOCKS_SAMPLE: "true"
+      RUSTYBIN_MOCKS_SELF_SERVICE: "true"
+      RUSTYBIN_MOCKS_SELF_SERVICE_HOST: rustybin-mock.dev
+      RUSTYBIN_MOCKS_SELF_SERVICE_HOME: https://demo.rustybin.dev
+      RUSTYBIN_PRIVACY_URL: https://rustybin.dev/legal/privacy/
+    volumes:
+      - data:/app/certs
+    tmpfs:
+      - /tmp
+    networks: [inner]
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
+
+  caddy:
+    <<: *hardened
+    image: caddy:2.11.7-alpine
+    # The image's binary carries this file capability and will not start without it.
+    cap_add: [NET_BIND_SERVICE]
+    depends_on: [rustybin]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    tmpfs:
+      - /data
+      - /config
+    networks: [inner]
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 128
+
+  cloudflared:
+    <<: *hardened
+    image: cloudflare/cloudflared:2026.9.3
+    command: tunnel --no-autoupdate run
+    env_file: tunnel.env   # TUNNEL_TOKEN
+    depends_on: [caddy]
+    networks: [inner, outer]
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 128
+
+networks:
+  inner:
+    internal: true
+  outer: {}
+
+volumes:
+  data: {}
