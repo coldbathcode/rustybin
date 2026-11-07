@@ -1108,14 +1108,20 @@ async fn the_dry_check_exits_one_when_the_policy_would_refuse() {
     let (code, _) = inst.run(None, &["egress", "check"]).await;
     assert_eq!(code, 2);
     let (code, _) = inst
-        .run(None, &["egress", "check", "https://a.test/", "--purpose", "nope"])
+        .run(
+            None,
+            &["egress", "check", "https://a.test/", "--purpose", "nope"],
+        )
         .await;
     assert_eq!(code, 1);
     // A feature whose host is listed: allowed, and exit 0.
     inst.json(&["settings", "set", "egress.allow", r#"["a.test"]"#])
         .await;
     let (code, out) = inst
-        .run(None, &["egress", "check", "https://a.test/", "--purpose", "git"])
+        .run(
+            None,
+            &["egress", "check", "https://a.test/", "--purpose", "git"],
+        )
         .await;
     assert_eq!(code, 0, "{out}");
 }
