@@ -32,7 +32,7 @@ The marker a session looks for is the first row that is not done.
 | 05 | Stateful mode for visitor mocks, with tight caps (`RUSTYBIN_MOCKS_SELF_SERVICE_STATEFUL`, off by default: the owner's decision of 2026-10-18 stands unless they turn it on) | done 2026-11-07 |
 | 06 | Source control: webhooks that trigger a pull (`POST /_rustybin/git/webhook`, HMAC signed, off until `git.webhook_secret` is set) | done 2026-11-07 |
 | 07 | AI mocks: Generate examples per operation, with a persona (mostly built already: persona and scope were on every surface and the dialog previews; added suggestions and Generate more) | done 2026-11-07 |
-| 08 | Harness: replay captured traffic or a HAR file as a traffic source | not started |
+| 08 | Harness: replay captured traffic or a HAR file (`harness/import.rs`: an import into `source.requests`, not a new source, so the engine and the safety checks are unchanged; credentials removed) | done 2026-11-07 |
 | 09 | MCP-level OAuth on a mock's own MCP server | not started |
 | 10 | Harness: OpenTelemetry export | not started |
 | 11 | Source control: branches per environment, signed commits, merges | not started |

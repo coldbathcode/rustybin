@@ -365,6 +365,24 @@ turn, which exercises the gateway's health checks and circuit breakers. The buil
 
 The tables of every parameter are in [configuration](configuration.md#harness-mode).
 
+## Replaying a recording
+
+A HAR file from a browser or a proxy, or the captures of `GET /_rustybin/requests`, can become a
+scenario's source: `POST /_rustybin/harness/import`, `rustybin harness import <file>`, the
+`import_traffic` tool, or the file field of the console's builder. Identical requests turn into one
+template with their count as its weight, so the replay keeps the recording's mix. Nothing is sent:
+put the answer's `source` in a scenario, which then meets the same validation and allowlist as any
+other, and name your own target, since the recording's hosts are dropped.
+
+A recording holds credentials and a scenario gets shared, so a secret-looking header or query
+parameter is removed and named in `removed`, and an entry with a secret-looking field in its body
+is left out and counted in `skipped`. Add the credentials your target needs through an
+[identity](#traffic-from-mocks-identities-protocols-and-faults), never by hand into the file.
+
+```hurl
+{{#include ../examples/harness/api.hurl:harness_import}}
+```
+
 ## Live tuning
 
 `PATCH .../runs/<run>` changes a running run: `rate_multiplier` (0 to 10, the run or one

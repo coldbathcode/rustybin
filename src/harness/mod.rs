@@ -30,6 +30,7 @@ pub mod election;
 pub mod engine;
 pub mod faults;
 pub mod identity;
+pub mod import;
 pub mod limit_test;
 pub mod live;
 pub mod member;
@@ -1442,6 +1443,7 @@ pub fn router(_state: &AppState) -> Router<AppState> {
                 .delete(api::delete_scenario),
         )
         .route("/_rustybin/harness/preview", post(api::preview))
+        .route("/_rustybin/harness/import", post(api::import))
         .route("/_rustybin/harness/validate", post(api::validate))
         .route(
             "/_rustybin/harness/runs",
@@ -1592,6 +1594,24 @@ pub fn catalog() -> Vec<Endpoint> {
              second (coarser past an hour, at most 3600). Works with harness mode off.",
         )
         .example(Example::post("Preview", "/_rustybin/harness/preview").json(SMOKE_JSON)),
+        Endpoint::new(
+            "/_rustybin/harness/import",
+            &["POST"],
+            category::HARNESS,
+            "A recording (a HAR file, or the answer of GET /_rustybin/requests) as a scenario's source",
+        )
+        .permission(crate::rbac::Permission::HarnessRead)
+        .description(
+            "Identical requests become one template weighted by their count, so the mix is the \
+             recording's. Hosts are dropped. A secret-looking header or query parameter is removed \
+             and named in `removed`; an entry whose body has a secret-looking field is left out. \
+             Sends nothing. Works with harness mode off.",
+        )
+        .example(
+            Example::post("Import", "/_rustybin/harness/import").json(
+                r#"{"log":{"entries":[{"request":{"method":"GET","url":"https://api.example.com/orders","headers":[]},"response":{"status":200}}]}}"#,
+            ),
+        ),
         Endpoint::new(
             "/_rustybin/harness/validate",
             &["POST"],
@@ -2155,6 +2175,15 @@ fn live_openapi_paths(paths: &mut Value, tag: &Value, off: &Value, scenario_body
         "responses": { "200": json_ok("The run's controls after the change"), "400": { "description": "Refused (`problems`)" }, "409": { "description": "Finished" }, "307": { "description": "This node is a member; the leader answers" }, "404": off }
     });
     if let Value::Object(all) = paths {
+        all.insert("/_rustybin/harness/import".into(), json!({
+            "post": {
+                "tags": tag,
+                "summary": "A recording as a scenario's source",
+                "description": "A HAR file, or the answer of GET /_rustybin/requests, as weighted request templates. Secret-looking headers and query parameters are removed and named; entries with a secret-looking field in the body are left out. Sends nothing.",
+                "operationId": "importHarnessRecording",
+                "responses": { "200": json_ok("`source.requests`, `entries`, `skipped`, `removed`, `hosts`"), "400": { "description": "Not a recording, or nothing to replay" } }
+            }
+        }));
         all.insert("/_rustybin/harness/preview".into(), json!({
             "post": {
                 "tags": tag,

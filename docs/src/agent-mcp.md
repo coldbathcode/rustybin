@@ -689,6 +689,7 @@ is the `harness` or `admin` scope, or the admin token on an open control plane.
 | `stop_run` | `harness.run` | Stop a run early (it drains and reports); with `cluster_id`, on every client node |
 | `get_run_report` | `harness.read` | The final report as JSON, text or JUnit |
 | `harness_stop` | `harness.run` | The kill switch: all load on this node stops now (no confirmation) |
+| `import_traffic` | `harness.read` | A HAR file or saved captures as a scenario's source, without credentials; sends nothing |
 | `step_aside` | `harness.cluster` | Before maintenance: the leader hands the cluster to the first in the succession, with the run still on |
 | `create_cluster` / `list_cluster_nodes` / `export_upstreams` / `get_leader` | `harness.cluster` / `harness.read` | A cluster led by this node (the join token once), its members, the server nodes' URLs for the gateway's upstream pool, and who leads with the succession and the history of leader changes |
 

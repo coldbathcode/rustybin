@@ -498,6 +498,10 @@ async fn every_command_runs_against_an_instance() {
     write("key.txt", "sk-test-key-1234\n");
     write("passwords.txt", "rustybin\nrustybin-2\n");
     write(
+        "recording.har",
+        r#"{"log":{"entries":[{"request":{"method":"GET","url":"https://a.test/x","headers":[]},"response":{"status":200}}]}}"#,
+    );
+    write(
         "server.json",
         r#"{"$schema":"https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json","name":"io.example/orders","description":"Orders","version":"1.0.0","remotes":[{"type":"streamable-http","url":"https://mcp.example.com/orders"}]}"#,
     );
@@ -541,6 +545,7 @@ async fn every_command_runs_against_an_instance() {
                     "key.txt",
                     "server.json",
                     "smoke.yaml",
+                    "recording.har",
                     "mcp.xml",
                 ] {
                     if w == f {

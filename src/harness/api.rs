@@ -1141,6 +1141,31 @@ pub async fn patch_cluster_run(
     }
 }
 
+/// `POST /_rustybin/harness/import`: a recording (a HAR file, or the answer
+/// of `GET /_rustybin/requests`) as a scenario's `source`. Sends nothing and
+/// works with harness mode off.
+pub async fn import(body: Bytes) -> Response {
+    let doc: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return error(StatusCode::BAD_REQUEST, format!("not JSON: {e}")),
+    };
+    match super::import::import(&doc) {
+        Ok(i) => Json(import_view(&i)).into_response(),
+        Err(e) => error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+/// The answer of an import, on the API and the tool alike.
+pub fn import_view(i: &super::import::Imported) -> Value {
+    json!({
+        "source": { "requests": i.requests },
+        "entries": i.entries,
+        "skipped": i.skipped,
+        "removed": i.removed,
+        "hosts": i.hosts,
+    })
+}
+
 /// `POST /_rustybin/harness/preview`: the expected rate per second per layer
 /// and in total, without sending anything (works with harness mode off).
 pub async fn preview(State(state): State<AppState>, body: Bytes) -> Response {

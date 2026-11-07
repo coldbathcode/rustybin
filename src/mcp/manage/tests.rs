@@ -1737,6 +1737,7 @@ const COVERAGE: &[(&str, Cover)] = &[
     ("/_rustybin/harness/scenarios/{name}", Tool("get_scenario")),
     ("/_rustybin/harness/validate", Tool("validate_scenario")),
     ("/_rustybin/harness/preview", Tool("preview_scenario")),
+    ("/_rustybin/harness/import", Tool("import_traffic")),
     ("/_rustybin/harness/runs", Tool("create_run")),
     ("/_rustybin/harness/runs/{run}", Tool("get_run")),
     ("/_rustybin/harness/runs/{run}/stop", Tool("stop_run")),
@@ -3968,7 +3969,7 @@ async fn users_and_roles_tools_invite_confirm_and_never_carry_a_password() {
     let headers: [(&str, &str); 1] = [("authorization", "Bearer admin-09")];
     // The admin's tool list counts the step 09 and 10 tools (and the docs say so).
     let names = tool_names(&app, &headers).await;
-    assert_eq!(names.len(), 138, "docs/src/coding-agents.md counts 138");
+    assert_eq!(names.len(), 139, "docs/src/coding-agents.md counts 139");
     for t in [
         "list_users",
         "invite_user",

@@ -850,6 +850,26 @@ pub fn cluster_report<'a>(
 
 /// `get_leader`: the cluster's leader as this node sees it. Every member
 /// answers (the leader too), so an agent can always find the leader.
+/// `import_traffic`: a recording as a scenario's source, nothing sent.
+pub fn import_traffic(ctx: &CallCtx, args: &Value) -> Value {
+    let Some(recording) = args.get("recording") else {
+        return err("recording is required");
+    };
+    match crate::harness::import::import(recording) {
+        Ok(i) => ok(
+            ctx,
+            format!(
+                "{} request(s) from {} entries; {} name(s) removed",
+                i.requests.len(),
+                i.entries,
+                i.removed.len()
+            ),
+            crate::harness::api::import_view(&i),
+        ),
+        Err(e) => err(e),
+    }
+}
+
 pub fn step_aside(ctx: &CallCtx, args: &Value) -> Value {
     let h = match harness_of(ctx) {
         Ok(h) => h,

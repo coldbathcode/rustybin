@@ -696,6 +696,7 @@ Load tests on the instance (--remote); validate, run and report work offline too
 | `rustybin harness delete-scenario <name>` | Delete a saved scenario. | `DELETE /_rustybin/harness/scenarios/{name}` | `harness.run` |
 | `rustybin harness validate <file> --remote` | Validate a scenario on the instance (without --remote: offline, in this process). Flags: `--remote`. | `POST /_rustybin/harness/validate` | `harness.read` |
 | `rustybin harness preview <file>` | The run plan of a scenario: stages, requests, duration. | `POST /_rustybin/harness/preview` | `harness.read` |
+| `rustybin harness import <file>` | A recording (a HAR file, or saved GET /_rustybin/requests) as a scenario's source. Sends nothing. | `POST /_rustybin/harness/import` | `harness.read` |
 | `rustybin harness runs` | The runs on this node. | `GET /_rustybin/harness/runs` | `harness.read` |
 | `rustybin harness run <file> --remote [--wait]` | Start a run on the instance (without --remote: from this process); --wait follows it and prints the report. Flags: `--remote`, `--wait`, `--format` value. | `POST /_rustybin/harness/runs` | `harness.run` |
 | `rustybin harness show <run>` | One run: state, progress, the live controls. | `GET /_rustybin/harness/runs/{run}` | `harness.read` |
@@ -731,6 +732,7 @@ rustybin harness save-scenario my-smoke smoke.yaml
 rustybin harness delete-scenario my-smoke --yes
 rustybin harness validate smoke.yaml --remote
 rustybin harness preview smoke.yaml
+rustybin harness import recording.har
 rustybin harness runs
 rustybin harness run smoke.yaml --remote --wait
 rustybin harness show r-1

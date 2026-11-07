@@ -789,6 +789,9 @@ pub static TOOLS: &[ToolDef] = &[
         "cursor": { "type": "string", "description": "next_cursor of the previous page" },
         "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50 }
     }), &[])),
+    tool!("import_traffic", "Import a recording", "A recording (a HAR file, or the answer of GET /_rustybin/requests) as a scenario's source: weighted request templates with the mix of the recording. Secret-looking headers and query parameters are removed and named in removed; an entry with a secret-looking field in its body is left out. Sends nothing: put the result under source of a scenario.", ToolNeed::Perm(Permission::HarnessRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "recording": { "type": "object", "description": "The HAR document, or the answer of GET /_rustybin/requests" },
+    }), &["recording"])),
     tool!("step_aside", "Leader steps aside", "Before maintenance: the leader of a cluster hands it to the first in the succession, by the ordinary election, with the run still on. Needs three or more eligible nodes; call it on the leader. If nobody takes over in four election timeouts the leader keeps leading.", ToolNeed::Perm(Permission::HarnessCluster), ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
         "cluster_id": cluster_id_prop(),
     }), &["cluster_id"])),
@@ -1288,6 +1291,7 @@ async fn run_tool(
         "export_upstreams" => harness::export_upstreams(ctx, args),
         "get_leader" => harness::get_leader(ctx, args),
         "step_aside" => harness::step_aside(ctx, args),
+        "import_traffic" => harness::import_traffic(ctx, args),
         "list_patterns" => harness::list_patterns(ctx),
         "preview_scenario" => harness::preview_scenario(ctx, args),
         "save_scenario" => harness::save_scenario(ctx, args),

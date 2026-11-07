@@ -82,7 +82,7 @@ From the build notes of the 0.2 and 0.3 steps and the harness plan, in no order:
   the console, the CLI or the environment); OAuth sign-in for self-service visitors and
   shared-mode key holders.
 - **Harness follow-ups** (`docs/plans/harness.md`, open questions): OpenTelemetry export of the run's traces and metrics;
-  HTTP/3 targets; replaying captured traffic or a HAR file as a traffic source; scenario
+  HTTP/3 targets; scenario
   import from other tools' formats; server-to-server chains for multi-hop meshes (held
   back until the safety model covers outbound traffic from the server role).
 - **Self-service across replicas**: visits and visitor mocks live in memory on one

@@ -2183,6 +2183,13 @@ def run_harness(browser):
         shot(page, "harness", "41-harness-report")
 
     step("harness: validate, run and report", validate_and_run)
+
+    def replay_a_recording():
+        page.reload()
+        page.wait_for_selector("#harness-import", state="attached")
+        import_recording(page)
+
+    step("harness: a recording becomes the source, without its token", replay_a_recording)
     ctx.close()
 
 
@@ -3031,6 +3038,19 @@ def run_sso(browser):
 
     step("sso: a person in no mapped group is refused with the reason", refused)
     ctx.close()
+
+
+def import_recording(page):
+    """The builder's file field: the mix arrives, the token does not."""
+    har = {"log": {"entries": [
+        {"request": {"method": "GET", "url": "https://api.example.com/orders?token=abc123&page=2", "headers": []},
+         "response": {"status": 200}},
+    ]}}
+    page.set_input_files("#harness-import", files=[{
+        "name": "recording.har", "mimeType": "application/json", "buffer": json.dumps(har).encode(),
+    }])
+    expect(page.locator("#harness-yaml")).to_have_value(re.compile(r"/orders\?page=2"))
+    assert "abc123" not in page.locator("#harness-yaml").input_value()
 
 
 def spec_fetch_refused(page):
