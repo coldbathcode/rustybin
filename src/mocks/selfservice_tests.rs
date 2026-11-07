@@ -1050,3 +1050,193 @@ async fn visitors_share_a_memory_budget_however_few_mocks_they_hold() {
     let (status, out) = visitor_create(&app, "after", None, heavy_spec("heavy")).await;
     assert_eq!(status, StatusCode::CREATED, "{out}");
 }
+
+/// Self-service next to the password sign-in: the owner signs in, and a
+/// caller without a credential is a visitor, exactly as on an open control
+/// plane.
+mod sign_in {
+    use super::*;
+    use crate::control_auth::ControlAuth;
+
+    const USER: &str = "owner";
+    const PASSWORD: &str = "a-long-enough-password";
+
+    fn with_sign_in(host: Option<&str>) -> Config {
+        let mut c = config(host);
+        c.control_auth = ControlAuth::Password;
+        c.console_user = Some(USER.into());
+        c.console_password = Some(PASSWORD.into());
+        c
+    }
+
+    async fn signed_in(app: &Router) -> String {
+        let (status, _, v) = call(
+            app,
+            "POST",
+            "/_rustybin/login",
+            &[],
+            Some(json!({ "username": USER, "password": PASSWORD })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        format!("Bearer {}", v["token"].as_str().expect("a token"))
+    }
+
+    #[tokio::test]
+    async fn a_visitor_needs_no_sign_in_and_gets_nothing_more() {
+        let (app, _, _) = app_on(with_sign_in(None));
+        let (status, out) = visitor_create(&app, "s1", None, shop()).await;
+        assert_eq!(status, StatusCode::CREATED, "{out}");
+        assert!(out["manage_token"].is_string(), "{out}");
+
+        for (method, path) in [
+            ("GET", "/_rustybin/settings"),
+            ("GET", "/_rustybin/users"),
+            ("GET", "/_rustybin/audit"),
+            ("GET", "/_rustybin/metrics"),
+            ("GET", "/_rustybin/session"),
+            ("GET", "/_rustybin/sessions"),
+            ("GET", "/_rustybin/me"),
+            ("GET", "/_rustybin/projects"),
+            ("GET", "/_rustybin/mocks/visits"),
+        ] {
+            let (status, _, v) = call(&app, method, path, &[], None).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}: {v}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_owner_signs_in_and_holds_the_instance() {
+        let (app, _, _) = app_on(with_sign_in(None));
+        let (status, out) = visitor_create(&app, "s1", None, shop()).await;
+        assert_eq!(status, StatusCode::CREATED, "{out}");
+        let name = out["name"].as_str().expect("a name").to_string();
+
+        let bearer = signed_in(&app).await;
+        let auth = [("authorization", bearer.as_str())];
+        let (status, _, v) = call(&app, "GET", "/_rustybin/settings", &auth, None).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        let (status, _, v) = call(&app, "GET", "/_rustybin/session", &auth, None).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["user"], USER, "{v}");
+        // An operator: a visitor's mock is theirs to read and to end.
+        let path = format!("/_rustybin/mocks/{name}");
+        let (status, _, v) = call(&app, "GET", &path, &auth, None).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        let (status, _, v) = call(&app, "DELETE", &path, &auth, None).await;
+        assert!(status.is_success(), "{status}: {v}");
+    }
+
+    #[tokio::test]
+    async fn a_wrong_password_and_a_bad_token_are_refused() {
+        let (app, _, _) = app_on(with_sign_in(None));
+        let (status, _, v) = call(
+            &app,
+            "POST",
+            "/_rustybin/login",
+            &[],
+            Some(json!({ "username": USER, "password": "not-the-password" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{v}");
+        // A credential that fails is a refusal, never a fall back to a
+        // visitor: the console has to learn a session ended.
+        let bad = [("authorization", "Bearer not-a-token")];
+        for path in ["/_rustybin/mocks", "/_rustybin/settings"] {
+            let (status, _, v) = call(&app, "GET", path, &bad, None).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}: {v}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_visitor_cannot_use_the_oauth_sign_in() {
+        // No authorization server for strangers: as on an open control plane.
+        let (app, _, _) = app_on(with_sign_in(None));
+        let (status, _, v) = call(
+            &app,
+            "POST",
+            "/_rustybin/oauth/register",
+            &[],
+            Some(json!({ "redirect_uris": ["http://127.0.0.1:9/cb"] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{v}");
+    }
+
+    #[tokio::test]
+    async fn the_console_learns_the_sign_in_is_optional() {
+        let (app, _, _) = app_on(with_sign_in(None));
+        let (_, _, html) = call(&app, "GET", "/ui/", &[], None).await;
+        let html = html.as_str().expect("html").to_string();
+        assert!(html.contains("<meta name=\"rustybin-sign-in\" content=\"optional\">"));
+
+        let mut plain = with_sign_in(None);
+        plain.self_service.enabled = false;
+        let (app, _, _) = app_on(plain);
+        let (_, _, html) = call(&app, "GET", "/ui/", &[], None).await;
+        assert!(!html.as_str().expect("html").contains("rustybin-sign-in"));
+    }
+
+    /// The status of a call, the body left unread (a feed never ends).
+    async fn status_of(app: &Router, method: &str, uri: &str) -> StatusCode {
+        let mut b = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", "rustybin.test")
+            .header("x-rustybin-session", "walk");
+        let body = if method == "GET" || method == "HEAD" {
+            Body::empty()
+        } else {
+            b = b.header("content-type", "application/json");
+            Body::from("{}")
+        };
+        let req = b.body(body).expect("request");
+        app.clone().oneshot(req).await.expect("response").status()
+    }
+
+    /// What the sign-in itself adds: open on purpose, whatever `open` answers.
+    const SIGN_IN_ROUTES: &[&str] = &[
+        "/_rustybin/login",
+        "/_rustybin/join",
+        "/_rustybin/sso/status",
+        "/_rustybin/sso/start",
+        "/_rustybin/sso/callback",
+        "/_rustybin/sso/token",
+    ];
+
+    #[tokio::test]
+    async fn a_caller_without_a_credential_reaches_what_an_open_plane_gives() {
+        let (open, _, _) = app_on(config(None));
+        let (signed, _, _) = app_on(with_sign_in(None));
+        let mut compared = 0;
+        let mut differs = Vec::new();
+        for endpoint in crate::catalog::all() {
+            if !endpoint.is_control() || SIGN_IN_ROUTES.contains(&endpoint.path) {
+                continue;
+            }
+            let uri = endpoint
+                .path
+                .split('/')
+                .map(|s| if s.starts_with('{') { "zz1" } else { s })
+                .collect::<Vec<_>>()
+                .join("/");
+            for method in endpoint.expanded_methods() {
+                let on_open = status_of(&open, method, &uri).await;
+                let on_signed = status_of(&signed, method, &uri).await;
+                compared += 1;
+                // The same answer, or refused where open has no such thing.
+                let same = on_open == on_signed;
+                let closed = on_signed == StatusCode::UNAUTHORIZED && !on_open.is_success();
+                // An open plane answers a visitor an empty list here.
+                let no_projects = method == "GET" && endpoint.path == "/_rustybin/projects";
+                if !same && !closed && !no_projects {
+                    differs.push(format!(
+                        "{method} {uri}: {on_open} open, {on_signed} signed"
+                    ));
+                }
+            }
+        }
+        assert!(compared > 200, "only {compared} route and method pairs");
+        assert!(differs.is_empty(), "{}", differs.join("\n"));
+    }
+}

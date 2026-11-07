@@ -244,6 +244,9 @@ function renderActions() {
     menu.addEventListener('click', (e) => { if (e.target.closest('a')) menu.open = false; });
     actions.appendChild(menu);
   }
+  if (auth.signInOptional && !auth.getToken()) {
+    actions.appendChild(h('button', { class: 'btn sm ghost', type: 'button', id: 'sign-in-btn', onclick: () => auth.askSignIn() }, icon('lock'), 'Sign in'));
+  }
   actions.appendChild(h('button', { class: 'btn ghost icon', type: 'button', id: 'settings-btn', 'aria-label': 'Console settings', title: 'Console settings', onclick: openSettings }, icon('settings')));
   const themeBtn = h('button', { class: 'btn ghost icon', type: 'button', id: 'theme-btn' });
   themeBtn.addEventListener('click', () => settings.set('theme', effectiveTheme() === 'dark' ? 'light' : 'dark'));
@@ -505,7 +508,7 @@ function renderSignIn() {
   const submit = h('button', { class: 'btn primary', type: 'submit' }, 'Sign in');
   const passwordForm = h('form', { class: 'stack', id: 'signin-password-form' },
     field('User name', userInput),
-    field('Password', passwordInput, 'rustybin / rustybin out of the box, until it is changed under Management, Sign-in.'),
+    field('Password', passwordInput, auth.signInOptional ? undefined : 'rustybin / rustybin out of the box, until it is changed under Management, Sign-in.'),
     remember.el,
     err,
     h('div', { class: 'row' }, h('span', { class: 'grow' }), submit));
@@ -556,7 +559,9 @@ function renderSignIn() {
   const body = h('div', { class: 'stack' },
     h('div', { class: 'row nowrap' }, icon('shield'), h('h1', { id: 'signin-title' }, expired ? 'Session expired' : (password ? 'Sign in' : 'Sign in required'))),
     why ? notice(expired || reason === 'signed-out' ? 'warn' : 'err', why) : null,
-    password
+    auth.signInOptional
+      ? h('p', null, 'Only the operator of this instance signs in. Visitors create and call their own mocks without an account.')
+      : password
       ? h('p', null, 'This Rustybin instance protects its control plane and console with a user name and password. ',
         auth.backlink ? 'Open it again from your portal, or sign in below.' : 'Sign in below.')
       : h('p', null, 'This Rustybin instance protects its control plane and console data (RUSTYBIN_CONTROL_AUTH=' + auth.mode + '). ',
@@ -565,6 +570,7 @@ function renderSignIn() {
     password ? ssoBox : null,
     password ? passwordForm : tokenForm,
     password ? h('details', { class: 'disclosure', id: 'signin-token-details' }, h('summary', null, 'Use a token instead'), h('div', { style: { paddingTop: '8px' } }, tokenForm)) : null,
+    auth.signInOptional ? h('button', { class: 'btn', type: 'button', id: 'signin-visitor', onclick: () => auth.continueAsVisitor() }, 'Continue as a visitor') : null,
     h('p', { class: 'muted small' }, 'The data plane stays open: ', h('a', { href: SERVER + '/' }, 'endpoint list'), ', ', h('a', { href: SERVER + '/docs' }, 'OpenAPI docs'), '.'));
   const el = h('div', { class: 'signin', id: 'signin', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'signin-title' },
     h('section', { class: 'card signin-card' }, h('div', { class: 'card-body' }, body)));

@@ -112,7 +112,7 @@ impl Resolved {
         }
         Self {
             principal: Principal::Anonymous {
-                admin_token: config.admin_token.is_some(),
+                admin_token: config.admin_token.is_some() || crate::login::optional(config),
             },
             roles: Vec::new(),
             permissions: need::anonymous(),

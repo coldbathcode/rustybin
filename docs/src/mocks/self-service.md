@@ -27,11 +27,52 @@ rustybin
 
 Self-service needs public mode (outside it everyone may already manage mocks) and
 a control plane visitors can reach: `RUSTYBIN_CONTROL_AUTH=open`, set on purpose
-(the default, the [password sign-in](../concepts/control-plane-security.md#user-name-and-password),
-would lock visitors out; public mode still guards global changes with the admin
-token), or [shared mode](../concepts/shared-mode.md), where API keys own their
-mocks. With `password`, `token` or `jwt` control auth it is ignored with a warning.
+(public mode still guards global changes with the admin token), the
+[password sign-in](#an-operator-who-signs-in) for an operator who signs in, or
+[shared mode](../concepts/shared-mode.md), where API keys own their mocks. With
+`token` or `jwt` control auth it is ignored with a warning.
 Every setting is in [Configuration](../configuration.md#self-service-mocks).
+
+### An operator who signs in
+
+With the password sign-in, visitors stay anonymous and only the operator has an
+account:
+
+```bash
+RUSTYBIN_PUBLIC_MODE=true \
+RUSTYBIN_MOCKS_SELF_SERVICE=true \
+RUSTYBIN_MOCKS_SELF_SERVICE_HOST=rustybin-mock.dev \
+RUSTYBIN_CONSOLE_USER=operator \
+RUSTYBIN_CONSOLE_PASSWORD_HASH='$argon2id$v=19$...' \
+RUSTYBIN_PRIVACY_URL=https://example.com/privacy \
+rustybin
+```
+
+A caller without a credential is a visitor, exactly as on an open control plane, and
+holds nothing more. The console opens as a visitor's and has a **Sign in** button; the
+operator signs in there, with the [`rustybin` CLI](../cli-guide.md) or with
+`POST /_rustybin/login`, and then holds the whole instance:
+
+```hurl
+{{#include ../../examples/mocks/self_service_sign_in.hurl:ssi_visitor}}
+```
+
+```hurl
+{{#include ../../examples/mocks/self_service_sign_in.hurl:ssi_operator}}
+```
+
+Three things differ from an open control plane. A credential that fails is refused
+with `401`, never treated as a visitor, so a console learns its session ended.
+Routes that mean a signed-in caller (`/_rustybin/session`, `/_rustybin/me`,
+`/_rustybin/projects`) answer `401` to a visitor. And the
+[OAuth sign-in for agents](../agent-mcp.md#sign-in-with-oauth) is off, because a
+stranger's agent reaches `/_rustybin/mcp` as a visitor and nothing would ask it to
+sign in: give an agent a token instead.
+
+The password is the only thing between a stranger and the instance, and the sign-in
+throttles by address, so name your proxy's header as
+[Behind a proxy](#behind-a-proxy) says, and start with the hash (`rustybin password hash`) rather than
+the password. The default password refuses to start in public mode.
 
 The examples on this page run against a documentation instance with the mocks
 domain `mocks.example`, 10 minute periods (so Extend is open at once) and one
@@ -300,7 +341,7 @@ sample request.
 
 ## Operators
 
-With admin rights (`RUSTYBIN_ADMIN_TOKEN`):
+With admin rights (`RUSTYBIN_ADMIN_TOKEN`, or [signed in](#an-operator-who-signs-in)):
 
 ```hurl
 {{#include ../../examples/mocks/self_service.hurl:ss_operator}}

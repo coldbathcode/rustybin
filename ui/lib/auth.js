@@ -27,7 +27,16 @@ export const consoleTitle = meta('console-title');
 /** RUSTYBIN_CONSOLE_BACKLINK when it is an http(s) URL, or ''. */
 export const backlink = /^https?:\/\/[^\s"'<>`\\]+$/i.test(meta('console-backlink')) ? meta('console-backlink') : '';
 
+/**
+ * A self-service instance with a sign-in (RUSTYBIN_MOCKS_SELF_SERVICE next to
+ * the password): only the operator signs in. Without a token this console is
+ * a visitor's, as on an open control plane.
+ */
+export const signInOptional = meta('sign-in') === 'optional';
+
 let token = '';
+// The sign-in screen was asked for (see askSignIn).
+let wantSignIn = false;
 // Who the data this tab holds belongs to (see identityOf), '' before a sign-in.
 let identity = '';
 // Why the sign-in screen is shown ('' = not needed): missing | expired |
@@ -86,7 +95,20 @@ function emit(kind) {
 
 /** True when the server protects its control plane. */
 export function required() {
+  if (signInOptional && !token) return false;
   return mode === 'password' || mode === 'token' || mode === 'jwt';
+}
+
+/** Show the sign-in screen on an instance where signing in is optional. */
+export function askSignIn() {
+  wantSignIn = true;
+  reason = 'missing';
+  emit('required');
+}
+
+/** Leave the sign-in screen as a visitor: any token held is forgotten. */
+export function continueAsVisitor() {
+  setToken('', false);
 }
 
 /** True when the sign-in screen asks for a user name and password. */
@@ -152,6 +174,7 @@ export function scopes() {
 
 /** True when the console must show the sign-in screen. */
 export function needsSignIn() {
+  if (wantSignIn) return true;
   if (!required()) return false;
   return !token || reason !== '';
 }
@@ -177,6 +200,7 @@ function scheduleExpiry() {
  */
 export function setToken(t, remember) {
   token = String(t || '').trim();
+  wantSignIn = false;
   const next = identityOf(token);
   const changed = identity !== '' && next !== identity;
   if (token || changed) identity = next;

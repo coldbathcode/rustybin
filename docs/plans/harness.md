@@ -995,7 +995,8 @@ What phase 3b built, and where it differs from section 9.1:
 - **Timing**: the election timeout `E` is per cluster (`election_timeout` on create, default
   `RUSTYBIN_HARNESS_ELECTION_TIMEOUT`, always below the lease). Idle long polls last at most `E/3`,
   active nodes heartbeat every `min(lease/4, E/3)`, a heartbeat counts as unanswered after its wait plus
-  `E/2`. Position `k` stands at `E + k x E/6` after the last answer (the plan's 500 ms at `E` = 3 s).
+  `E/2`. Position `k` stands at `E + k x E/2` after its last answer (wider than the `E/3` between answers, or a
+  later node could stand first: `member::stand_after`, changed from `E/6` on 2026-11-07).
   Votes are counted as they arrive, so a silent voter never delays a won election; members look for the
   new leader by asking every node of the succession at once. In tests with a 2 s lease and `E` = 600 ms,
   the failover finishes well inside the lease, also when the old leader drops packets.

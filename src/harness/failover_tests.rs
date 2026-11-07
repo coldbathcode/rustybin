@@ -730,3 +730,25 @@ async fn a_member_cannot_depose_the_leader() {
         n.stop().await;
     }
 }
+
+/// A node counts its turn from its own last answer, and a node's answers
+/// come a heartbeat apart (at most `E/3`), so two nodes' clocks differ by up
+/// to that much: the slots of the line have to be wider, or a later node
+/// stands first. `prefer` then means nothing, and the conformance run's
+/// standby loses to a client now and then.
+#[test]
+fn the_line_holds_whatever_the_heartbeats_phase() {
+    for ms in [200, 600, 2_000, 3_000, 60_000] {
+        let e = std::time::Duration::from_millis(ms);
+        let spread = e / 3;
+        for k in 0..4 {
+            let gap = super::member::stand_after(e, k + 1) - super::member::stand_after(e, k);
+            assert!(gap > spread, "E {e:?}: position {k} is {gap:?} ahead");
+        }
+        assert_eq!(
+            super::member::stand_after(e, 0),
+            e,
+            "the first in line waits E"
+        );
+    }
+}

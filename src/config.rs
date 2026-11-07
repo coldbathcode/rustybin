@@ -890,7 +890,7 @@ impl Config {
         let self_service = parse_self_service(
             &get,
             public_mode,
-            shared_mode || control_auth == ControlAuth::Open,
+            shared_mode || matches!(control_auth, ControlAuth::Open | ControlAuth::Password),
             &mut warnings,
         );
         let mut harness = parse_harness(&get, hosted_mode, &mut warnings);
@@ -1484,7 +1484,8 @@ fn normalise_domain(raw: &str) -> Option<String> {
 }
 
 /// `RUSTYBIN_MOCKS_SELF_SERVICE` and its settings. `reachable`: visitors can
-/// reach the control plane (control auth `open`, or shared mode).
+/// reach the control plane (control auth `open` or `password`, where a caller
+/// without a credential is a visitor, or shared mode).
 fn parse_self_service<G>(
     get: &G,
     public_mode: bool,
@@ -1508,9 +1509,9 @@ where
         }
         (true, true, false) => {
             warnings.push(
-                "RUSTYBIN_MOCKS_SELF_SERVICE is ignored with RUSTYBIN_CONTROL_AUTH password, token \
-                 or jwt: visitors cannot reach the control plane; set RUSTYBIN_CONTROL_AUTH=open \
-                 on a self-service instance (public mode guards global changes with the admin token)"
+                "RUSTYBIN_MOCKS_SELF_SERVICE is ignored with RUSTYBIN_CONTROL_AUTH token or jwt: \
+                 visitors cannot reach the control plane; set RUSTYBIN_CONTROL_AUTH to password \
+                 (a sign-in for the operator) or open on a self-service instance"
                     .to_string(),
             );
             false
@@ -1989,15 +1990,16 @@ mod tests {
             ("RUSTYBIN_ADMIN_TOKEN", "t"),
         ]);
         assert!(!c.self_service.enabled);
-        assert!(w.iter().any(|w| w.contains("password, token or jwt")));
-        // The default (password) locks visitors out too: self-service asks
-        // for an open control plane on purpose.
+        assert!(w.iter().any(|w| w.contains("token or jwt")));
+        // The password sign-in (the default) leaves visitors the control
+        // plane: a caller without a credential is one.
         let (c, w) = load(&[
             ("RUSTYBIN_MOCKS_SELF_SERVICE", "true"),
             ("RUSTYBIN_PUBLIC_MODE", "true"),
+            ("RUSTYBIN_CONSOLE_PASSWORD", "a-long-enough-password"),
         ]);
-        assert!(!c.self_service.enabled);
-        assert!(w.iter().any(|w| w.contains("RUSTYBIN_CONTROL_AUTH=open")));
+        assert!(c.self_service.enabled, "{w:?}");
+        assert_eq!(c.control_auth, ControlAuth::Password);
         let (c, w) = load(&[
             ("RUSTYBIN_MOCKS_SELF_SERVICE", "true"),
             ("RUSTYBIN_PUBLIC_MODE", "true"),

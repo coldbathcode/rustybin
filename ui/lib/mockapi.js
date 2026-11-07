@@ -108,7 +108,7 @@ export function readOnlyReason() {
     if (sc === null || sc.includes('admin') || settings.get('adminToken')) return '';
     return 'Your control token is read-only (scope ' + sc.join(' ') + '): you can look at mocks and call them, but changing them needs a token with the admin scope.';
   }
-  if (settings.instance.publicMode && !settings.instance.adminTokenConfigured) {
+  if (settings.instance.publicMode && !settings.instance.adminTokenConfigured && !auth.signInOptional) {
     return 'This instance runs in public mode without an admin token: mocks can be used but not changed from here.';
   }
   return '';

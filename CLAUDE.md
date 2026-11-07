@@ -58,7 +58,10 @@ what its sender presented; `MockCapture.sender` is never in an answer); `capture
 `$ref` named by every operation multiplies: `mcp::VISITOR_TOOL_NODES` through `schema::inline_shared`,
 `checks::KEPT_SAMPLE_BYTES`), and a new thing kept on a `Compiled` belongs in `Compiled::memory_estimate`, which the
 visitors' budget (`RUSTYBIN_MOCKS_SELF_SERVICE_MAX_MB`, `MockStore::check_memory`) counts; a public instance's proxy sets
-one header and names it (`RUSTYBIN_TRUST_FORWARD_HEADER`), because `any` lets a client pick its own address.
+one header and names it (`RUSTYBIN_TRUST_FORWARD_HEADER`), because `any` lets a client pick its own address; on a
+self-service instance with the password sign-in (`login::optional`) a caller without a credential is a visitor, and a new
+route that declares `.authenticated()` stays closed to it unless it is also `.self_service()`; a caller without a credential
+reaches what it reaches on `open`, which `a_caller_without_a_credential_reaches_what_an_open_plane_gives` walks.
 
 ## Rustybin 0.3, reliability and testing workflows (built and released 2026-11-02)
 

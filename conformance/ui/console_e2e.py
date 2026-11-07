@@ -39,6 +39,8 @@ Environment:
                               targets 127.0.0.1): the Harness view, its schema-generated
                               builder (a control for every non-shorthand schema property,
                               the parity check of docs/plans/harness.md) and a short run
+    RUSTYBIN_SIGNIN_URL       base URL of a public instance with self-service mocks and a
+                              sign-in (with RUSTYBIN_SIGNIN_USER and RUSTYBIN_SIGNIN_PASSWORD)
     RUSTYBIN_PASSWORD_URL     base URL of an instance with the default control auth (the
                               password sign-in, rustybin / rustybin): the sign-in screen,
                               the default-password banner, Management, Sign-in (change the
@@ -3028,6 +3030,95 @@ def run_sso(browser):
     ctx.close()
 
 
+def run_sign_in_optional(browser):
+    """Self-service next to the sign-in: visitors need none, the operator signs in."""
+    base = os.environ["RUSTYBIN_SIGNIN_URL"].rstrip("/")
+    user = os.environ["RUSTYBIN_SIGNIN_USER"]
+    password = os.environ["RUSTYBIN_SIGNIN_PASSWORD"]
+    print(f"self-service with a sign-in: {base}")
+    ctx = browser.new_context(viewport={"width": 1280, "height": 860})
+    page = ctx.new_page()
+    page.set_default_timeout(TIMEOUT)
+
+    def on_console(msg):
+        # A visitor's reads of what is the operator's answer 401.
+        if msg.type == "error" and "Failed to load resource" not in msg.text:
+            console_errors.append(f"[sign-in optional] {msg.text}")
+
+    page.on("console", on_console)
+    page.on("pageerror", lambda e: console_errors.append(f"[sign-in optional] uncaught: {e}"))
+    state = {}
+
+    def visitor_needs_no_sign_in():
+        page.goto(base + "/ui/#/mocks")
+        page.wait_for_selector("text=Try it with your own API")
+        expect(page.locator("#signin")).to_have_count(0)
+        expect(page.locator("#sign-in-btn")).to_be_visible()
+        page.get_by_role("button", name="New mock").click()
+        page.get_by_label("OpenAPI document (JSON or YAML)").fill(SMALL_SPEC)
+        page.get_by_role("button", name="Continue").click()
+        page.wait_for_selector("text=random suffix")
+        page.get_by_role("button", name="Next").click()
+        page.get_by_role("button", name="Create and deploy").click()
+        page.wait_for_selector("text=Your mock is live")
+        state["name"] = page.locator("h1.mono").inner_text().strip()
+        shot(page, "sign-in-optional", "50-visitor")
+
+    step("sign-in optional: a visitor creates a mock without signing in", visitor_needs_no_sign_in)
+
+    def the_screen_can_be_left():
+        page.click("#sign-in-btn")
+        page.wait_for_selector("#signin")
+        expect(page.locator("#signin-title")).to_have_text("Sign in")
+        expect(page.get_by_text("rustybin / rustybin")).to_have_count(0)
+        shot(page, "sign-in-optional", "51-sign-in")
+        page.click("#signin-visitor")
+        expect(page.locator("#signin")).to_have_count(0)
+        expect(page.locator("#sign-in-btn")).to_be_visible()
+
+    step("sign-in optional: the sign-in screen can be left", the_screen_can_be_left)
+
+    def wrong_then_right():
+        page.click("#sign-in-btn")
+        page.fill("#signin-user", user)
+        page.fill("#signin-password", "not-the-password")
+        page.get_by_role("button", name="Sign in", exact=True).click()
+        page.wait_for_selector("#signin .notice")
+        page.fill("#signin-password", password)
+        page.get_by_role("button", name="Sign in", exact=True).click()
+        expect(page.locator("#signin")).to_have_count(0)
+        expect(page.locator("#signed-in")).to_contain_text(user)
+        expect(page.locator("#sign-in-btn")).to_have_count(0)
+        # The operator sees the visitor's mock and the instance's settings.
+        goto_view(page, "mocks")
+        page.wait_for_selector(f"text={state['name']}")
+        page.goto(base + "/ui/#/manage/signin")
+        page.wait_for_selector(f"text={user}")
+
+    step("sign-in optional: only the right password signs in", wrong_then_right)
+
+    def sign_out_is_a_visitor_again():
+        page.locator("#account-menu summary").click()
+        page.click("#menu-sign-out")
+        expect(page.locator("#sign-in-btn")).to_be_visible()
+        expect(page.locator("#signin")).to_have_count(0)
+        expect(page.locator("#signed-in")).to_have_count(0)
+
+    step("sign-in optional: signing out leaves a visitor", sign_out_is_a_visitor_again)
+
+    def a_bad_token_asks_again():
+        page.evaluate("sessionStorage.setItem('rustybin.console.controlToken', 'not-a-token')")
+        page.reload()
+        page.wait_for_selector("#signin")
+        page.click("#signin-visitor")
+        expect(page.locator("#signin")).to_have_count(0)
+        expect(page.locator("#sign-in-btn")).to_be_visible()
+        assert page.evaluate("sessionStorage.getItem('rustybin.console.controlToken')") is None
+
+    step("sign-in optional: a token that fails asks again", a_bad_token_asks_again)
+    ctx.close()
+
+
 def main():
     print(f"console e2e against {BASE}")
     with sync_playwright() as p:
@@ -3050,6 +3141,8 @@ def main():
             run_portal_access(browser)
         if os.environ.get("RUSTYBIN_SSO_URL"):
             run_sso(browser)
+        if os.environ.get("RUSTYBIN_SIGNIN_URL"):
+            run_sign_in_optional(browser)
         browser.close()
     for e in console_errors:
         failures.append("console: " + e)

@@ -122,6 +122,13 @@ pub fn enabled(config: &Config) -> bool {
     config.control_auth == ControlAuth::Password && !config.shared_mode
 }
 
+/// Is the sign-in optional? On a self-service instance a caller without a
+/// credential is a visitor, exactly as on an open control plane: only the
+/// operator signs in. A credential that fails is still refused.
+pub fn optional(config: &Config) -> bool {
+    enabled(config) && config.self_service.enabled
+}
+
 /// Control-plane paths that need no credentials (the sign-in itself and
 /// accepting an invitation).
 pub fn is_public_path(path: &str) -> bool {

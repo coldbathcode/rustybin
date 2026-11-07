@@ -22,7 +22,8 @@
 #                       of an eighth instance with the default control auth, the
 #                       password sign-in; +11 HTTP of a ninth, the password sign-in
 #                       with single sign-on through the first instance's demo
-#                       identity provider)
+#                       identity provider; +12 HTTP of a tenth, self-service next
+#                       to the password sign-in)
 #   REQUIRE_ALL_TOOLS=1 fail instead of skipping when grpcurl / websocat / jq are missing (CI)
 set -euo pipefail
 
@@ -40,6 +41,7 @@ SS_PORT=$((PORT + 8))
 HARNESS_PORT=$((PORT + 9))
 PASSWORD_PORT=$((PORT + 10))
 SSO_PORT=$((PORT + 11))
+SIGNIN_PORT=$((PORT + 12))
 SSO_ADMIN_TOKEN="docs-sso-admin-token"
 ADMIN_TOKEN="docs-admin-token"
 SECURED_AUDIENCE="docs-secured"
@@ -262,7 +264,26 @@ mkdir -p "$TMP/sso"
   RUSTYBIN_SSO_ROLE_MAP="admins=admin,users=viewer" \
   "$TMP/rustybin-docs-examples") &
 SSO_SERVER=$!
-ALL_SERVERS=("$SERVER" "$PLAN_SERVER" "$SECURED_SERVER" "$SHARED_SERVER" "$KEYED_SERVER" "$SS_SERVER" "$HARNESS_SERVER" "$PASSWORD_SERVER" "$SSO_SERVER")
+# A tenth, self-service next to the password sign-in
+# (docs/src/mocks/self-service.md): visitors need no account, the operator signs in.
+mkdir -p "$TMP/signin"
+(cd "$TMP/signin" && exec env \
+  RUSTYBIN_HTTP_PORT="$SIGNIN_PORT" \
+  RUSTYBIN_HTTPS_PORT=0 \
+  RUSTYBIN_GRPC_PORT=0 \
+  RUSTYBIN_HOST=127.0.0.1 \
+  RUSTYBIN_LOG_LEVEL=warn \
+  RUSTYBIN_INSTANCE_ID=docs-sign-in \
+  RUSTYBIN_TLS_CERT="$TMP/signin/server.crt" \
+  RUSTYBIN_TLS_KEY="$TMP/signin/server.key" \
+  RUSTYBIN_PUBLIC_MODE=true \
+  RUSTYBIN_MOCKS_SELF_SERVICE=true \
+  RUSTYBIN_CONSOLE_USER=operator \
+  RUSTYBIN_CONSOLE_PASSWORD=docs-operator-password \
+  RUSTYBIN_PRIVACY_URL=https://example.com/privacy \
+  "$TMP/rustybin-docs-examples") &
+SIGNIN_SERVER=$!
+ALL_SERVERS=("$SERVER" "$PLAN_SERVER" "$SECURED_SERVER" "$SHARED_SERVER" "$KEYED_SERVER" "$SS_SERVER" "$HARNESS_SERVER" "$PASSWORD_SERVER" "$SSO_SERVER" "$SIGNIN_SERVER")
 trap 'kill "${ALL_SERVERS[@]}" 2>/dev/null || true; wait "${ALL_SERVERS[@]}" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 
 BASE="http://127.0.0.1:$PORT"
@@ -271,10 +292,11 @@ SECURED_BASE="http://127.0.0.1:$SECURED_PORT"
 SHARED_BASE="http://127.0.0.1:$SHARED_PORT"
 KEYED_BASE="http://127.0.0.1:$KEYED_PORT"
 SS_BASE="http://127.0.0.1:$SS_PORT"
+SIGNIN_BASE="http://127.0.0.1:$SIGNIN_PORT"
 HARNESS_BASE="http://127.0.0.1:$HARNESS_PORT"
 PASSWORD_BASE="http://127.0.0.1:$PASSWORD_PORT"
 SSO_BASE="http://127.0.0.1:$SSO_PORT"
-for url in "$BASE" "$PLAN_BASE" "$SECURED_BASE" "$SHARED_BASE" "$KEYED_BASE" "$SS_BASE" "$HARNESS_BASE" "$PASSWORD_BASE" "$SSO_BASE"; do
+for url in "$BASE" "$PLAN_BASE" "$SECURED_BASE" "$SHARED_BASE" "$KEYED_BASE" "$SS_BASE" "$HARNESS_BASE" "$PASSWORD_BASE" "$SSO_BASE" "$SIGNIN_BASE"; do
   for _ in $(seq 1 100); do
     curl -fs -o /dev/null "$url/" && break
     sleep 0.1
@@ -337,6 +359,7 @@ if [[ ${#hurl_files[@]} -gt 0 ]]; then
     --variable "shared_url=$SHARED_BASE" \
     --variable "keyed_url=$KEYED_BASE" \
     --variable "ss_url=$SS_BASE" \
+    --variable "signin_url=$SIGNIN_BASE" \
     --variable "alpha_key=$ALPHA_KEY" \
     --variable "beta_key=$BETA_KEY" \
     --variable "revoked_key=$REVOKED_KEY" \

@@ -482,6 +482,11 @@ pub async fn enforce(State(state): State<AppState>, mut req: Request, next: Next
     if crate::harness::is_node_path(req.method(), req.uri().path()) {
         return next.run(req).await;
     }
+    // A visitor of a self-service instance with a sign-in: `check_route`
+    // holds them to what a caller without a credential may do.
+    if crate::login::optional(config) && presented_token(req.headers()).is_none() {
+        return next.run(req).await;
+    }
     // A token from the built-in OAuth server, on /_rustybin/mcp only.
     match crate::control_oauth::authorize_manage(&req, config) {
         Some(Ok(resolved)) => {
@@ -582,6 +587,20 @@ pub async fn check_route(State(state): State<AppState>, mut req: Request, next: 
                     && acts_as_visitor(&caller, req.headers())) =>
         {
             return crate::rbac::refuse(&caller, p);
+        }
+        // Past `enforce` without a credential only on a self-service instance
+        // with a sign-in: "signed in" then means it, but for a visit's own
+        // routes (the manage token) and the management MCP server (each tool
+        // checks its own need, and a visitor has tools).
+        Some(Need::Authenticated)
+            if crate::login::optional(&state.config)
+                && matches!(caller.principal, crate::rbac::Principal::Anonymous { .. })
+                && !endpoint.self_service
+                && endpoint.path != crate::mcp::manage::MANAGE_PATH =>
+        {
+            if let Err(refused) = authenticate(req.headers(), &state.config) {
+                return refused;
+            }
         }
         _ => {}
     }

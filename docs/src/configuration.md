@@ -272,7 +272,7 @@ token. See [Self-service mocks](mocks/self-service.md).
 
 | Variable | Default | Description |
 |---|---|---|
-| `RUSTYBIN_MOCKS_SELF_SERVICE` | `false` | Turn self-service on. Needs public mode (or shared mode) and control auth `open` (or shared mode); otherwise it is ignored with a warning. Off by default, also in public mode. |
+| `RUSTYBIN_MOCKS_SELF_SERVICE` | `false` | Turn self-service on. Needs public mode (or shared mode) and control auth `open` or `password` (or shared mode); otherwise it is ignored with a warning. With `password`, [only the operator signs in](mocks/self-service.md#an-operator-who-signs-in). Off by default, also in public mode. |
 | `RUSTYBIN_MOCKS_SELF_SERVICE_HOST` | unset | The mocks domain (a separate registrable domain, e.g. `rustybin-mock.dev`): visitor mocks answer as `<name>.<domain>` and the domain serves nothing else. Unset: they are served under `/mock/<name>` (a warning says this is for testing). |
 | `RUSTYBIN_MOCKS_SELF_SERVICE_HOME` | unset | Where the bare mocks domain redirects (else `404`). |
 | `RUSTYBIN_MOCKS_PER_OWNER` | `3` | Mocks per visitor (or API key in shared mode). |

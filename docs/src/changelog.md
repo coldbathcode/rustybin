@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.2 (2026-11-07): an operator's sign-in next to anonymous visitors
+
+**Changed**: `RUSTYBIN_MOCKS_SELF_SERVICE=true` now works with the password sign-in, where
+it was ignored with a warning: visitors stay anonymous and only the operator signs in. See
+[An operator who signs in](mocks/self-service.md#an-operator-who-signs-in). **Check this
+before upgrading**: an instance that has `RUSTYBIN_MOCKS_SELF_SERVICE=true` set, public
+mode and `password` control auth was locked and now takes visitors. Remove the variable to
+keep it locked. `token` and `jwt` still ignore it.
+
+**New**: `rustybin password hash` makes the argon2id hash for
+`RUSTYBIN_CONSOLE_PASSWORD_HASH` on your own machine.
+
+**Fixed**: a harness cluster's failover could pass over the standby. Nodes took their turn
+to stand for election in slots narrower than the gap between their heartbeats, so a later
+node could stand first and `RUSTYBIN_HARNESS_LEADER=prefer` meant little. The first in line
+stands as before, after the election timeout, and the next ones now wait half of it each.
+
 ## 0.5.1 (2026-11-06): safe for a public demo
 
 No new features: what running the public demo's configuration on 0.5.0 found, fixed

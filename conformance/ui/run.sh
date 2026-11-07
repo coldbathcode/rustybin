@@ -4,16 +4,17 @@
 # second instance on 18703 with RUSTYBIN_CONTROL_AUTH=jwt, a third on 18704
 # in public mode with self-service mocks, a fourth on 18705 in harness mode
 # (loop-through) and a fifth on 18706 with the default control auth (the
-# password sign-in) and a sixth on 18707 with single sign-on through the
-# first instance's demo identity provider, run the browser end-to-end check
-# of the web console (light and dark mode, the sign-in flows, visitors, the
-# harness builder, single sign-on), then stop the servers.
+# password sign-in), a sixth on 18707 with single sign-on through the
+# first instance's demo identity provider and a seventh on 18708 with
+# self-service mocks next to the operator's sign-in, run the browser
+# end-to-end check of the web console (light and dark mode, the sign-in flows,
+# visitors, the harness builder, single sign-on), then stop the servers.
 #
 # Usage: PYTHON=/path/to/venv/bin/python conformance/ui/run.sh
 # (the venv needs `pip install playwright pyjwt cryptography`; Chromium comes
 # from $PLAYWRIGHT_BROWSERS_PATH or `python -m playwright install chromium`).
 #
-# RUSTYBIN_UI_PORT moves the eight ports (default 18700).
+# RUSTYBIN_UI_PORT moves the nine ports (default 18700).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -25,6 +26,7 @@ SS_PORT=$((PORT + 4))
 HARNESS_PORT=$((PORT + 5))
 PASSWORD_PORT=$((PORT + 6))
 SSO_PORT=$((PORT + 7))
+SIGNIN_PORT=$((PORT + 8))
 export RUSTYBIN_URL="http://127.0.0.1:$PORT"
 export RUSTYBIN_JWT_URL="http://127.0.0.1:$JWT_PORT"
 export RUSTYBIN_SS_URL="http://127.0.0.1:$SS_PORT"
@@ -32,6 +34,9 @@ export RUSTYBIN_HARNESS_URL="http://127.0.0.1:$HARNESS_PORT"
 export RUSTYBIN_PASSWORD_URL="http://127.0.0.1:$PASSWORD_PORT"
 export RUSTYBIN_SSO_URL="http://127.0.0.1:$SSO_PORT"
 export RUSTYBIN_SSO_ADMIN_TOKEN="ui-sso-admin-token"
+export RUSTYBIN_SIGNIN_URL="http://127.0.0.1:$SIGNIN_PORT"
+export RUSTYBIN_SIGNIN_USER="operator"
+export RUSTYBIN_SIGNIN_PASSWORD="ui-operator-password"
 export SCREENSHOT_DIR="${SCREENSHOT_DIR:-$HERE/screenshots}"
 
 (cd "$ROOT" && cargo build --quiet)
@@ -99,9 +104,18 @@ mkdir -p "$TMP/sso"
   RUSTYBIN_SSO_PASSWORD_SIGN_IN=false \
   "$BIN") &
 SSO_SERVER=$!
-trap 'kill $SERVER $JWT_SERVER $SS_SERVER $HARNESS_SERVER $PASSWORD_SERVER $SSO_SERVER 2>/dev/null || true; rm -rf "$TMP"' EXIT
+# Self-service next to the sign-in: visitors need none, the operator signs in.
+mkdir -p "$TMP/signin"
+(cd "$TMP/signin" && exec env RUSTYBIN_HTTP_PORT="$SIGNIN_PORT" RUSTYBIN_HTTPS_PORT=0 RUSTYBIN_GRPC_PORT=0 \
+  RUSTYBIN_HOST=127.0.0.1 RUSTYBIN_LOG_LEVEL=warn \
+  RUSTYBIN_PUBLIC_MODE=true RUSTYBIN_MOCKS_SELF_SERVICE=true \
+  RUSTYBIN_CONSOLE_USER="$RUSTYBIN_SIGNIN_USER" RUSTYBIN_CONSOLE_PASSWORD="$RUSTYBIN_SIGNIN_PASSWORD" \
+  RUSTYBIN_PRIVACY_URL=https://example.com/privacy \
+  "$BIN") &
+SIGNIN_SERVER=$!
+trap 'kill $SERVER $JWT_SERVER $SS_SERVER $HARNESS_SERVER $PASSWORD_SERVER $SSO_SERVER $SIGNIN_SERVER 2>/dev/null || true; rm -rf "$TMP"' EXIT
 
-for url in "$RUSTYBIN_URL" "$RUSTYBIN_JWT_URL" "$RUSTYBIN_SS_URL" "$RUSTYBIN_HARNESS_URL" "$RUSTYBIN_PASSWORD_URL" "$RUSTYBIN_SSO_URL"; do
+for url in "$RUSTYBIN_URL" "$RUSTYBIN_JWT_URL" "$RUSTYBIN_SS_URL" "$RUSTYBIN_HARNESS_URL" "$RUSTYBIN_PASSWORD_URL" "$RUSTYBIN_SSO_URL" "$RUSTYBIN_SIGNIN_URL"; do
   for _ in $(seq 1 50); do
     curl -sf -o /dev/null "$url/" && break
     sleep 0.2

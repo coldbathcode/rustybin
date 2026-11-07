@@ -374,6 +374,14 @@ fn check_credential(
     }
 }
 
+/// When position `k` of the succession stands: this long after its own last
+/// answer from the leader. Each node counts from its own answer, and answers
+/// come up to `E/3` apart, so the slots are wider than that: else a later
+/// node stands first.
+pub(super) fn stand_after(election_timeout: Duration, k: u32) -> Duration {
+    election_timeout + election_timeout / 2 * k
+}
+
 impl Membership {
     fn new(
         h: &Arc<Harness>,
@@ -1314,8 +1322,8 @@ impl Membership {
     }
 
     /// Whether it is this node's turn to stand: eligible, holding the
-    /// cluster state, the leader silent for the election timeout plus
-    /// `k x E/6` for its position `k` in the succession.
+    /// cluster state, the leader silent for [`stand_after`] its position in
+    /// the succession.
     fn my_turn(&self, h: &Harness) -> bool {
         if !h.may_lead() {
             return false;
@@ -1338,7 +1346,7 @@ impl Membership {
         let Some(last) = st.last_ok else {
             return false;
         };
-        let at = last + e + e / 6 * k as u32;
+        let at = last + stand_after(e, k as u32);
         let now = Instant::now();
         now >= at && st.next_stand.is_none_or(|n| now >= n)
     }
@@ -1363,13 +1371,15 @@ impl Membership {
                 .saturating_add(1);
             st.voted = Some((term, self.node_id.clone()));
             let e = st.election_timeout;
-            // The next try, if this one fails: after everyone else's turn,
+            // The next try, if this one fails: after everyone else's slot,
             // plus up to E/2 at random, so two candidates that split the
-            // votes do not collide again on the next try.
+            // votes do not collide again on the next try. Counted from now,
+            // not from the leader's last answer: a try that came early (a
+            // busy node's heartbeat stalled) must not cost a further `E`.
             let jitter =
                 Duration::from_millis(rand::random::<u64>() % (e.as_millis() as u64 / 2).max(1));
             st.next_stand =
-                Some(Instant::now() + e + e / 6 * (snap.succession.len() as u32 + 1) + jitter);
+                Some(Instant::now() + e / 2 * (snap.succession.len() as u32 + 1) + jitter);
             (snap, term, credential, (e / 2).min(Duration::from_secs(2)))
         };
         let Some(state) = snap.state.as_ref() else {

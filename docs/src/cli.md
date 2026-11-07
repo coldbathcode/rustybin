@@ -157,9 +157,11 @@ Change the first admin's user name and password (0.3; rustybin passwd changes yo
 | Command | What it does | Calls | Needs |
 |---|---|---|---|
 | `rustybin password change [--user U] [--stdin]` | Change your password (the first admin's also takes a new user name): the current and the new one prompted, or two lines of stdin. Flags: `--user` value, `--stdin`. | `PUT /_rustybin/password` | signed in |
+| `rustybin password hash [--stdin]` | Hash a password for RUSTYBIN_CONSOLE_PASSWORD_HASH, offline: prompted, or the first line of stdin. Prints the argon2id hash and nothing else. Flags: `--stdin`. |  | (none) |
 
 ```bash
 rustybin password change --stdin < passwords.txt
+rustybin password hash --stdin
 ```
 
 ## users

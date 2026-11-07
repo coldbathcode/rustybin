@@ -17,7 +17,7 @@ RUSTYBIN_CONTROL_AUTH=open rustybin              # a laptop or a lab: no sign-in
 | `RUSTYBIN_CONTROL_AUTH` | Control plane (`/_rustybin/*`) accepts |
 |---|---|
 | `password` (default) | A token from the [sign-in](#user-name-and-password) with the console's user name and password, plus everything `jwt` mode accepts (the admin token, control JWTs when a key is configured). `jwt` is the default in [hosted mode](#hosted-mode), `open` in [shared mode](shared-mode.md), where API keys authenticate the control plane. |
-| `open` | Anyone. Single mutations still follow the [admin token rules](sessions.md). The default before 0.2; [self-service](../mocks/self-service.md) instances choose it on purpose. |
+| `open` | Anyone. Single mutations still follow the [admin token rules](sessions.md). The default before 0.2; [self-service](../mocks/self-service.md) instances may choose it on purpose. |
 | `token` | Only `RUSTYBIN_ADMIN_TOKEN`, as `Authorization: Bearer <token>` or `X-Rustybin-Admin-Token: <token>`. |
 | `jwt` | The admin token, or an Ed25519 (EdDSA) JWT signed by the key in `RUSTYBIN_CONTROL_JWT_PUBLIC_KEY`. |
 
@@ -96,7 +96,7 @@ Who holds which permissions:
 | Nobody, on an open control plane without an admin token (outside public mode) | every one, as before |
 | Nobody, on an open control plane with an admin token, or in public mode | the reads: `instance.read`, `mocks.read`, `traffic.read`, `harness.read`, `assist.use`, `mcp.inspect` |
 | An API key in [shared mode](shared-mode.md) | the same reads, inside the key layer's fence (its own requests, usage, status, the catalogue, the management server, and with self-service its own mocks) |
-| A [self-service](../mocks/self-service.md) visitor | the anonymous reads, and its own mocks through the visit's manage token |
+| A [self-service](../mocks/self-service.md) visitor | the anonymous reads, and its own mocks through the visit's manage token, in `open` mode and in `password` mode, where [only the operator signs in](../mocks/self-service.md#an-operator-who-signs-in) |
 
 On a self-service instance a visitor or an API key without `mocks.write` still
 reaches the mock routes and manages its own mocks there; the instance's mocks stay
@@ -165,6 +165,10 @@ as `Authorization: Bearer`, and captures redact it.
 | `RUSTYBIN_CONSOLE_USER` | `rustybin` | The setting `console.user`; a value saved in the console wins over the variable |
 | `RUSTYBIN_CONSOLE_PASSWORD` | `rustybin` | The password in the clear, for a first deployment |
 | `RUSTYBIN_CONSOLE_PASSWORD_HASH` | unset | An argon2id PHC string (`$argon2id$v=19$...`), preferred for deployments; wins over the plain password. Seeds the secret `console.password_hash` |
+
+`rustybin password hash` makes the hash on your own machine, with the password prompted
+or on the first line of stdin, so it never appears in a command line or reaches an
+instance. Single quote it in an `.env` file, because it holds `$`.
 
 These are the first admin's (user one, the 0.3 console user). Every other user is
 [invited](../users.md) and keeps an argon2id hash of their own in the user store,

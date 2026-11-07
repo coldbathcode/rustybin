@@ -299,6 +299,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("sessions", "end", "<id>", "End one session.", NO_FLAGS, [("DELETE", "/_rustybin/sessions/{id}")], false, "sessions end 3f2a"),
     cmd!("sessions", "end-all", "", "Sign out everywhere (every token issued so far).", NO_FLAGS, [("DELETE", "/_rustybin/sessions")], true, "sessions end-all --yes"),
     cmd!("password", "change", "[--user U] [--stdin]", "Change your password (the first admin's also takes a new user name): the current and the new one prompted, or two lines of stdin.", &[Flag::value("--user", "A new user name (the first admin only)"), Flag::switch("--stdin", "Read the current and the new password from two lines of stdin")], [("PUT", "/_rustybin/password")], false, "password change --stdin < passwords.txt"),
+    cmd!("password", "hash", "[--stdin]", "Hash a password for RUSTYBIN_CONSOLE_PASSWORD_HASH, offline: prompted, or the first line of stdin. Prints the argon2id hash and nothing else.", &[Flag::switch("--stdin", "Read the password from the first line of stdin")], [], false, "password hash --stdin"),
     // ── Users, roles, your account ──
     cmd!("users", "list", "", "The users: roles, status (active, invited, disabled), last sign-in.", NO_FLAGS, [("GET", "/_rustybin/users")], false, "users list"),
     cmd!("users", "invite", "<name> --role R [--display-name D] [--email E] [--reset] [--sso]", "Invite a user: the answer is a link to send them (shown once), where they set their own password. --reset sends a user who exists a new link (a password reset); --sso adds a single sign-on user instead (no link).", USER_FLAGS_INVITE, [("POST", "/_rustybin/users"), ("POST", "/_rustybin/users/{id}/invite")], false, "users invite alice --role editor --display-name \"Alice Doe\""),
@@ -747,6 +748,7 @@ pub async fn dispatch(ctx: &mut Ctx) -> Result<()> {
         "profiles" => profiles_cmd(ctx, cmd.verb),
         "settings" => settings(ctx, cmd.verb).await,
         "sessions" => sessions(ctx, cmd.verb).await,
+        "password" if cmd.verb == "hash" => password_hash(ctx),
         "password" => password(ctx, "/_rustybin/password").await,
         "passwd" => password(ctx, "/_rustybin/me/password").await,
         "sso" => sso(ctx, cmd.verb).await,
@@ -1344,6 +1346,22 @@ async fn sessions(ctx: &mut Ctx, verb: &str) -> Result<()> {
         "end-all" => delete(ctx, "/_rustybin/sessions", &[]).await,
         _ => Err(Fail::Usage(format!("sessions {verb}: not implemented"))),
     }
+}
+
+/// The hash of a password, on this machine: nothing is sent anywhere.
+fn password_hash(ctx: &mut Ctx) -> Result<()> {
+    let plain = ctx.secret("Password", ctx.args.has("--stdin"), 0)?;
+    let chars = plain.chars().count();
+    if !(crate::login::MIN_PASSWORD_CHARS..=crate::login::MAX_PASSWORD_CHARS).contains(&chars) {
+        return Err(Fail::Usage(format!(
+            "a password has {} to {} characters",
+            crate::login::MIN_PASSWORD_CHARS,
+            crate::login::MAX_PASSWORD_CHARS
+        )));
+    }
+    let hash = crate::login::hash_password(&plain).map_err(Fail::Usage)?;
+    ctx.raw(&hash);
+    Ok(())
 }
 
 async fn password(ctx: &mut Ctx, path: &str) -> Result<()> {

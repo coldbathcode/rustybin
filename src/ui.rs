@@ -198,6 +198,9 @@ pub fn console_meta(state: &AppState) -> String {
         ));
     };
     meta("control-auth", state.config.control_auth.as_str());
+    if crate::login::optional(&state.config) {
+        meta("sign-in", "optional");
+    }
     if let Some(title) = console_title(state) {
         meta("console-title", &title);
     }

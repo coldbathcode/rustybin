@@ -382,7 +382,12 @@ impl Instance {
             if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
                 watch.recv_timeout(COMMAND_TIMEOUT * 3)
             {
-                eprintln!("rustybin {watched}: blocked for {COMMAND_TIMEOUT:?} x 3, ending the test process");
+                // Straight to stderr: `eprintln!` here goes to the test's
+                // capture, which `exit` throws away with the reason.
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "rustybin {watched}: blocked for {COMMAND_TIMEOUT:?} x 3, ending the test process"
+                );
                 std::process::exit(101);
             }
         });
@@ -516,6 +521,7 @@ async fn every_command_runs_against_an_instance() {
             ("logout", "")
                 | ("sessions", "end-all")
                 | ("password", "change")
+                | ("password", "hash")
                 | ("passwd", "")
                 | ("profiles", "remove")
         ) {
@@ -663,7 +669,7 @@ async fn every_command_runs_against_an_instance() {
     assert!(inst.json(&["mocks", "get", "orders"]).await["name"] == json!("orders"));
     // The password changes and the profile keeps the fresh token.
     let (code, _) = inst
-        .run(None, &["password", "change", "--stdin", "--quiet"])
+        .run(Some(""), &["password", "change", "--stdin", "--quiet"])
         .await;
     assert_ne!(code, 3, "the canned stdin was not used");
     let (code, out) = inst
@@ -1066,4 +1072,26 @@ async fn the_loopback_listener_waits_for_its_own_callback() {
     assert!(real.starts_with("HTTP/1.1 200"), "{real}");
     let query = waiting.await.expect("join").expect("query");
     assert!(query.contains("code=rbs_real"), "{query}");
+}
+
+#[tokio::test]
+async fn a_password_is_hashed_offline_and_the_hash_signs_in() {
+    let inst = instance().await;
+    let (code, out) = inst
+        .run(
+            Some("a-long-enough-password\n"),
+            &["password", "hash", "--stdin"],
+        )
+        .await;
+    assert_eq!(code, 0, "{out}");
+    let hash = out.trim();
+    assert!(hash.starts_with("$argon2id$"), "{hash}");
+    assert_eq!(hash.lines().count(), 1, "the hash and nothing else");
+    assert!(!out.contains("a-long-enough-password"));
+    assert!(crate::login::verify_hash(hash, "a-long-enough-password"));
+    assert!(!crate::login::verify_hash(hash, "not-the-password"));
+    let (code, _) = inst
+        .run(Some("short\n"), &["password", "hash", "--stdin"])
+        .await;
+    assert_eq!(code, 2);
 }

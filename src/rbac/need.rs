@@ -238,8 +238,8 @@ pub fn refusal_of(caller: &Resolved, p: Permission) -> (StatusCode, Option<Strin
         super::Principal::Anonymous { admin_token: true } => (
             StatusCode::UNAUTHORIZED,
             Some(format!(
-                "this needs the {} permission: send the admin token as Authorization: Bearer \
-                 <token> or X-Rustybin-Admin-Token",
+                "this needs the {} permission: sign in, or send a control token as \
+                 Authorization: Bearer <token> (the admin token also as X-Rustybin-Admin-Token)",
                 p.name()
             )),
         ),

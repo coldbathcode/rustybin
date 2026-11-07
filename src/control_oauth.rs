@@ -192,7 +192,9 @@ impl OAuthKey {
 
 /// Is OAuth sign-in offered for `/_rustybin/mcp`? Only where the control
 /// plane asks for credentials, outside shared mode (keys authenticate
-/// there), unless `RUSTYBIN_CONTROL_OAUTH=off`.
+/// there) and a self-service instance (strangers reach `/_rustybin/mcp` as
+/// visitors, so nothing would ask them to sign in), unless
+/// `RUSTYBIN_CONTROL_OAUTH=off`.
 pub fn enabled(config: &Config) -> bool {
     config.control_oauth
         && matches!(
@@ -200,6 +202,7 @@ pub fn enabled(config: &Config) -> bool {
             ControlAuth::Token | ControlAuth::Jwt | ControlAuth::Password
         )
         && !config.shared_mode
+        && !crate::login::optional(config)
 }
 
 /// Does this instance run the built-in authorization server?

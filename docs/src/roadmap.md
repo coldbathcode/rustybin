@@ -11,6 +11,10 @@ it online. The candidates under consideration below are not scheduled.
 
 ## Recently built
 
+- [Rustybin 0.5.2, an operator's sign-in](changelog.md#052-2026-11-07-an-operators-sign-in-next-to-anonymous-visitors)
+  (2026-11-07): [self-service next to the password sign-in](mocks/self-service.md#an-operator-who-signs-in),
+  and a harness failover that keeps to its line of succession.
+
 - [Rustybin 0.5.1, safe for a public demo](changelog.md#051-2026-11-06-safe-for-a-public-demo)
   (2026-11-06): no new features; a visitor reads only their own calls of a shared mock,
   a spec's memory is bounded however it is written, and a public instance warns when a
