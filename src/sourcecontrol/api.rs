@@ -11,6 +11,7 @@
 //! - `GET`, `POST /_rustybin/git/key` `{replace}`: the deploy key.
 //! - `GET /_rustybin/git/history`: the last 50 commits.
 
+use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -28,6 +29,7 @@ pub const INIT_PATH: &str = "/_rustybin/git/init";
 pub const COMMIT_PATH: &str = "/_rustybin/git/commit";
 pub const PUSH_PATH: &str = "/_rustybin/git/push";
 pub const PULL_PATH: &str = "/_rustybin/git/pull";
+pub const WEBHOOK_PATH: &str = "/_rustybin/git/webhook";
 pub const RESOLVE_PATH: &str = "/_rustybin/git/resolve";
 pub const KEY_PATH: &str = "/_rustybin/git/key";
 pub const HISTORY_PATH: &str = "/_rustybin/git/history";
@@ -204,6 +206,63 @@ async fn history(State(state): State<AppState>) -> Response {
     )
 }
 
+/// Did the caller hold the secret? `X-Hub-Signature-256: sha256=<hex>` over
+/// the body (GitHub, Gitea, Forgejo, Bitbucket), or `X-Gitlab-Token`.
+fn signed(secret: &str, headers: &HeaderMap, body: &[u8]) -> bool {
+    use hmac::{Hmac, Mac};
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    if let Some(given) = header("x-hub-signature-256") {
+        let Ok(mut mac) = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()) else {
+            return false;
+        };
+        mac.update(body);
+        let want: String = mac
+            .finalize()
+            .into_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        return crate::control_auth::constant_time_eq(given, &format!("sha256={want}"));
+    }
+    header("x-gitlab-token").is_some_and(|t| crate::control_auth::constant_time_eq(t, secret))
+}
+
+/// `POST /_rustybin/git/webhook`: a push on the configured branch pulls and
+/// applies, as the automatic mode does, through the same checks. Open, since
+/// a git host holds no control credential: the signature is the credential.
+/// Off (`404`) until `git.webhook_secret` is set.
+async fn webhook(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    let Some(secret) = state.git.webhook_secret() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no webhook here: set git.webhook_secret" })),
+        )
+            .into_response();
+    };
+    if !signed(&secret, &headers, &body) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "the signature does not match" })),
+        )
+            .into_response();
+    }
+    let pushed = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|v| v["ref"].as_str().map(str::to_string));
+    let branch = format!("refs/heads/{}", state.git.branch());
+    if pushed.is_some_and(|r| r != branch) {
+        return Json(json!({ "pulled": false, "reason": "another branch" })).into_response();
+    }
+    if headers
+        .get("x-github-event")
+        .is_some_and(|e| e.as_bytes() == b"ping")
+    {
+        return Json(json!({ "pulled": false, "reason": "ping" })).into_response();
+    }
+    super::SourceControl::queue_pull(&state);
+    (StatusCode::ACCEPTED, Json(json!({ "queued": true }))).into_response()
+}
+
 pub fn router(_state: &AppState) -> Router<AppState> {
     Router::new()
         .route(GIT_PATH, get(status))
@@ -211,6 +270,7 @@ pub fn router(_state: &AppState) -> Router<AppState> {
         .route(COMMIT_PATH, post(commit))
         .route(PUSH_PATH, post(push))
         .route(PULL_PATH, post(pull))
+        .route(WEBHOOK_PATH, post(webhook))
         .route(RESOLVE_PATH, post(resolve))
         .route(KEY_PATH, get(get_key).post(generate_key))
         .route(HISTORY_PATH, get(history))
@@ -220,6 +280,15 @@ pub fn catalog() -> Vec<Endpoint> {
     // Without a state directory the operations answer 409 (not configured):
     // the examples say so.
     vec![
+        Endpoint::new(WEBHOOK_PATH, &["POST"], category::CONTROL, "A signed push from a git host: pull and apply at once")
+            .open()
+            .description(
+                "For a git host, which holds no control credential: the signature is the \
+                 credential (X-Hub-Signature-256 over the body, or X-Gitlab-Token). 404 until \
+                 git.webhook_secret is set. A push to another branch is ignored, and a burst \
+                 costs at most two pulls.",
+            )
+            .example(Example::post("A push", WEBHOOK_PATH).json("{}").expect_status(404)),
         Endpoint::new(GIT_PATH, &["GET"], category::CONTROL, "Source control status (admin)")
 .permission(crate::rbac::Permission::GitRead)
             .description(
@@ -315,6 +384,7 @@ pub fn openapi_paths() -> Value {
                     "description": "Local checkpoints written to <git.path>/checkpoints/<name>.json in this commit (mock data: an explicit commit only)" } } } } } },
             "responses": ok("{committed, files, checkpoints, head}") } },
         PUSH_PATH: { "post": { "tags": tags, "summary": "Push", "operationId": "gitPush", "responses": ok("{pushed, head}") } },
+        WEBHOOK_PATH: { "post": { "tags": tags, "summary": "A signed push from a git host", "operationId": "gitWebhook", "responses": { "202": { "description": "A pull is queued" }, "200": { "description": "Another branch, or a ping" }, "401": { "description": "The signature does not match" }, "404": { "description": "git.webhook_secret is not set" } } } },
         PULL_PATH: { "post": { "tags": tags, "summary": "Pull and apply", "operationId": "gitPull",
             "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": {
                 "apply": { "type": "boolean", "default": false }, "dry_run": { "type": "boolean", "default": false }, "prune": { "type": "boolean", "default": false } } } } } },

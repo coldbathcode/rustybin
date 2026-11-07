@@ -214,6 +214,7 @@ pub fn is_protected_path(path: &str) -> bool {
         && !crate::control_oauth::is_public_path(path)
         && !crate::login::is_public_path(path)
         && !crate::sso::is_public_path(path)
+        && !crate::sourcecontrol::is_public_path(path)
 }
 
 /// The token a request presents: `X-Rustybin-Admin-Token`, else

@@ -25,6 +25,7 @@
 use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -67,6 +68,13 @@ pub const PATH_KEY: &str = "git.path";
 pub const AUTH_KEY: &str = "git.auth";
 pub const USERNAME_KEY: &str = "git.username";
 pub const TOKEN_KEY: &str = "git.token";
+/// The shared secret of `POST /_rustybin/git/webhook`.
+pub const WEBHOOK_SECRET_KEY: &str = "git.webhook_secret";
+
+/// Paths that need no control credential: the webhook checks its signature.
+pub fn is_public_path(path: &str) -> bool {
+    path == api::WEBHOOK_PATH
+}
 pub const AUTHOR_KEY: &str = "git.author";
 pub const AUTO_KEY: &str = "git.auto";
 pub const PULL_EVERY_KEY: &str = "git.pull_every";
@@ -145,6 +153,15 @@ pub fn specs() -> Vec<Spec> {
         .env("RUSTYBIN_CONFIG_GIT_TOKEN", |c| {
             c.config_git_token.clone().map(Value::String)
         })
+        .secret(),
+        Spec::new(
+            WEBHOOK_SECRET_KEY,
+            "git",
+            "Webhook secret",
+            "The secret your git host signs push webhooks with: POST /_rustybin/git/webhook then pulls and applies at once. Without it the route answers 404.",
+            Kind::Text { max_len: 512 },
+            Value::Null,
+        )
         .secret(),
         Spec::new(
             AUTHOR_KEY,
@@ -519,6 +536,10 @@ pub struct SourceControl {
     pinned: Mutex<Option<(String, u16, Vec<std::net::SocketAddr>)>>,
     /// The largest spec a pull reads (the instance's mock limit).
     max_spec_bytes: usize,
+    /// A webhook's pull is running, and another push came during it.
+    webhook_busy: AtomicBool,
+    webhook_again: AtomicBool,
+    webhook_pulls: AtomicU64,
     /// The largest checkpoint read from the repository (a local
     /// checkpoint's cap; lowered by tests).
     max_checkpoint_bytes: std::sync::atomic::AtomicUsize,
@@ -527,6 +548,9 @@ pub struct SourceControl {
 impl SourceControl {
     pub fn new(config: &Config, settings: Arc<Settings>, egress: Arc<Egress>) -> Self {
         Self {
+            webhook_busy: AtomicBool::new(false),
+            webhook_again: AtomicBool::new(false),
+            webhook_pulls: AtomicU64::new(0),
             settings,
             egress,
             state_dir: config.state_dir.clone(),
@@ -2001,6 +2025,53 @@ impl SourceControl {
             }
             _ => {}
         }
+    }
+
+    /// The webhook's secret, when it is set.
+    pub fn webhook_secret(&self) -> Option<zeroize::Zeroizing<String>> {
+        self.settings
+            .secret(WEBHOOK_SECRET_KEY)
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Pulls a webhook started.
+    pub fn webhook_pulls(&self) -> u64 {
+        self.webhook_pulls.load(Ordering::Relaxed)
+    }
+
+    /// A signed push came: pull as the automatic mode does. A pull at a time:
+    /// a burst of pushes while one runs is one more pull after it, so a noisy
+    /// host costs at most two.
+    pub fn queue_pull(state: &AppState) {
+        let git = state.git.clone();
+        if git.webhook_busy.swap(true, Ordering::AcqRel) {
+            git.webhook_again.store(true, Ordering::Release);
+            return;
+        }
+        let state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                git.webhook_again.store(false, Ordering::Release);
+                git.webhook_pulls.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut l) = git.last_pull.lock() {
+                    *l = Some(Instant::now());
+                }
+                if let Err(e) = git.pull(&state, true, false, true, "webhook").await {
+                    git.warn_once(&format!("webhook pull: {}", e.message));
+                }
+                if git.webhook_again.load(Ordering::Acquire) {
+                    continue;
+                }
+                git.webhook_busy.store(false, Ordering::Release);
+                // A push between the check and the release found this pull
+                // busy and left its mark: take it back, or it is lost.
+                if !git.webhook_again.load(Ordering::Acquire)
+                    || git.webhook_busy.swap(true, Ordering::AcqRel)
+                {
+                    break;
+                }
+            }
+        });
     }
 
     fn warn_once(&self, message: &str) {

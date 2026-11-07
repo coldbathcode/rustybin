@@ -703,6 +703,7 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET | `/_rustybin/config/export` | The whole instance as rustybin.yaml (admin) |
 | POST | `/_rustybin/config/apply` | Apply a rustybin.yaml document (admin) |
 | GET | `/_rustybin/config/schema` | JSON Schema of rustybin.yaml (version 2) |
+| POST | `/_rustybin/git/webhook` | A signed push from a git host: pull and apply at once |
 | GET | `/_rustybin/git` | Source control status (admin) |
 | POST | `/_rustybin/git/init` | Connect the repository (admin) |
 | POST | `/_rustybin/git/commit` | Commit the instance's configuration (admin) |

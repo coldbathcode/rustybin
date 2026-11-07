@@ -814,3 +814,135 @@ fn a_remote_user_name_cannot_be_an_ssh_option() {
     }
     assert!(parse_remote("ssh://git@example.com/repo.git").is_ok());
 }
+
+// ── The webhook ─────────────────────────────────────────────────────
+
+fn sign(secret: &str, body: &[u8]) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).expect("key");
+    mac.update(body);
+    let hex: String = mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("sha256={hex}")
+}
+
+async fn hook(app: &axum::Router, headers: &[(&str, String)], body: &str) -> (StatusCode, Value) {
+    let mut b = axum::http::Request::builder()
+        .method("POST")
+        .uri("/_rustybin/git/webhook")
+        .header("host", "rustybin.test")
+        .header("content-type", "application/json");
+    for (k, v) in headers {
+        b = b.header(*k, v.as_str());
+    }
+    let req = b
+        .body(axum::body::Body::from(body.to_string()))
+        .expect("request");
+    let resp = app.clone().oneshot(req).await.expect("response");
+    let status = resp.status();
+    (status, body_json(resp).await)
+}
+
+fn set_secret(state: &AppState, secret: &str) {
+    let mut secrets = BTreeMap::new();
+    secrets.insert(WEBHOOK_SECRET_KEY.to_string(), Some(secret.to_string()));
+    state
+        .settings
+        .update(BTreeMap::new(), secrets, "test")
+        .expect("the secret");
+}
+
+#[tokio::test]
+async fn a_signed_push_pulls_and_nothing_else_does() {
+    if !git_installed() {
+        return;
+    }
+    let root = tempfile::tempdir().expect("tempdir");
+    let remote = bare_repo(root.path());
+    let a = instance(root.path(), "a", &remote);
+    let b = instance(root.path(), "b", &remote);
+    a.git.init("ann").await.expect("init a");
+    b.git.init("bob").await.expect("init b");
+    add_mock(&a, "orders");
+    let app_a = test_app_with(a.clone());
+    for (path, body) in [
+        ("/_rustybin/git/commit", json!({ "message": "first" })),
+        ("/_rustybin/git/push", json!({})),
+    ] {
+        let resp = app_a
+            .clone()
+            .oneshot(json_request("POST", path, &body))
+            .await
+            .expect(path);
+        assert_eq!(resp.status(), StatusCode::OK, "{path}");
+    }
+
+    let app = test_app_with(b.clone());
+    let body = r#"{"ref":"refs/heads/main"}"#;
+    // Off until a secret is set: the route does not exist for anyone.
+    let (status, _) = hook(&app, &[], body).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    set_secret(&b, "hook-secret-of-some-length");
+
+    // Unsigned, wrongly signed, or signed for another body.
+    let (status, _) = hook(&app, &[], body).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let wrong = sign("not-the-secret", body.as_bytes());
+    let (status, _) = hook(&app, &[("x-hub-signature-256", wrong)], body).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let other = sign("hook-secret-of-some-length", b"{}");
+    let (status, _) = hook(&app, &[("x-hub-signature-256", other)], body).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(b.mocks.get("orders").is_none(), "nothing was pulled");
+
+    // Another branch is none of this instance's business; a ping is answered.
+    let dev = r#"{"ref":"refs/heads/dev"}"#;
+    let good = sign("hook-secret-of-some-length", dev.as_bytes());
+    let (status, v) = hook(&app, &[("x-hub-signature-256", good)], dev).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["pulled"], false, "{v}");
+    assert!(b.mocks.get("orders").is_none());
+
+    let good = sign("hook-secret-of-some-length", body.as_bytes());
+    let (status, v) = hook(&app, &[("x-hub-signature-256", good)], body).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{v}");
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while b.mocks.get("orders").is_none() && std::time::Instant::now() < until {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        b.mocks.get("orders").is_some(),
+        "the push reached this instance"
+    );
+}
+
+#[tokio::test]
+async fn a_gitlab_token_works_and_a_burst_is_one_pull_at_a_time() {
+    if !git_installed() {
+        return;
+    }
+    let root = tempfile::tempdir().expect("tempdir");
+    let remote = bare_repo(root.path());
+    let b = instance(root.path(), "b", &remote);
+    set_secret(&b, "hook-secret-of-some-length");
+    let app = test_app_with(b.clone());
+    let body = "{}";
+    let (status, _) = hook(&app, &[("x-gitlab-token", "wrong".to_string())], body).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let token = [("x-gitlab-token", "hook-secret-of-some-length".to_string())];
+    let mut accepted = 0;
+    for _ in 0..50 {
+        let (status, _) = hook(&app, &token, body).await;
+        accepted += usize::from(status == StatusCode::ACCEPTED);
+    }
+    assert_eq!(accepted, 50, "a burst is answered");
+    assert!(
+        b.git.webhook_pulls() <= 2 + 1,
+        "{} pulls",
+        b.git.webhook_pulls()
+    );
+}

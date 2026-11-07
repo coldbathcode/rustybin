@@ -264,11 +264,28 @@ The whole flow against a bare repository in a temporary directory:
 {{#include ../examples/config/source-control.sh:start_instance}}
 ```
 
+## A webhook instead of polling
+
+`git.auto: pull` asks the remote every few minutes. To pull the moment someone pushes, set the
+secret `git.webhook_secret` (Management, Source control, or `rustybin settings set-secret`) and
+point your git host's push webhook at `https://<instance>/_rustybin/git/webhook` with the same
+secret. The host signs each call (`X-Hub-Signature-256` for GitHub, Gitea, Forgejo and
+Bitbucket, `X-Gitlab-Token` for GitLab), and the signature is the credential, so the instance
+has to be reachable from the host but no control token is given out.
+
+A signed push to the configured branch pulls and applies as the automatic mode does, with
+everything [a repository writer can do](#what-a-repository-writer-can-do) limited the same way.
+A push to another branch is ignored, a burst costs at most two pulls, and a call without
+the right signature does nothing. Without the secret the route answers `404`:
+
+```hurl
+{{#include ../examples/config/git_webhook.hurl:git_webhook}}
+```
+
 ## Not in this version
 
 Merges and conflict resolution inside the instance (resolve with either side, or in a
-pull request), branches per environment, signed commits, and webhooks that trigger a
-pull (set `git.auto: pull` instead).
+pull request), branches per environment, and signed commits.
 
 ## On every surface
 

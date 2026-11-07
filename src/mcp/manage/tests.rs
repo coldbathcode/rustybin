@@ -1728,6 +1728,7 @@ const COVERAGE: &[(&str, Cover)] = &[
     ("/_rustybin/git/commit", Tool("git_commit")),
     ("/_rustybin/git/push", Tool("git_push")),
     ("/_rustybin/git/pull", Tool("git_pull")),
+    ("/_rustybin/git/webhook", Excluded("a git host calls it, signed; git_pull pulls by hand")),
     ("/_rustybin/git/resolve", Tool("git_resolve")),
     ("/_rustybin/git/key", Tool("git_deploy_key")),
     ("/_rustybin/harness", Tool("harness_status")),

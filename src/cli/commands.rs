@@ -513,6 +513,10 @@ pub static COMMANDS: &[Cmd] = &[
 /// reads it).
 pub const UNCOVERED: &[(&str, &str)] = &[
     (
+        "/_rustybin/git/webhook",
+        "a git host calls it, signed; rustybin git pull pulls by hand",
+    ),
+    (
         "/_rustybin/mocks/import/fetch",
         "the console's wizard reads the text first; mocks create --spec-url does it in one call",
     ),

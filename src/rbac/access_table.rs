@@ -124,6 +124,7 @@ pub(crate) const OLD_ADMIN_ONLY: &[(&str, &str)] = &[
 /// and `the_route_check_enforces_the_declarations` still cover them).
 pub(crate) const NEW_SINCE_0_4: &[&str] = &[
     "/_rustybin/egress/check",
+    "/_rustybin/git/webhook",
     "/_rustybin/harness/clusters/{id}/leader/step-aside",
     "/_rustybin/mocks/import/fetch",
     "/_rustybin/users",
