@@ -10,6 +10,10 @@
 	@plain header X-Forwarded-Proto http
 	redir @plain https://{host}{uri} 308
 
+	# The bare mock domain serves nothing of its own.
+	@bare host rustybin-mock.dev
+	redir @bare https://demo.rustybin.dev 302
+
 	reverse_proxy rustybin:8080 {
 		header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
 		header_up X-Forwarded-Proto https

@@ -1,6 +1,6 @@
-# The public demo on a VPS: visitors create mocks at demo.rustybin.dev without an
-# account, each served at <name>.rustybin-mock.dev, and only the operator signs in.
-# Deploy steps and the secrets it needs are in README.md here.
+# The demo on a VPS, locked: the console at demo.rustybin.dev needs the operator's
+# sign-in and nobody else has an account. The operator's mocks are served at
+# <name>.rustybin-mock.dev. Deploy steps and the secrets are in README.md here.
 #
 # Nothing is published on the host: the only way in is the Cloudflare Tunnel.
 # Rustybin and Caddy sit on an internal network with no route to the internet.
@@ -41,12 +41,11 @@ services:
       # /app/certs is the image's own writable directory, so a new volume is uid 10001's.
       RUSTYBIN_STATE_DIR: /app/certs/state
       RUSTYBIN_USAGE_FILE: /app/certs/usage.json
-      # Visitors need no account; the password sign-in is the operator's alone.
+      # The password sign-in is the only way in. RUSTYBIN_MOCKS_SELF_SERVICE stays
+      # unset: with it, a caller without a credential is a visitor, not refused.
       RUSTYBIN_CONSOLE_USER: oli
       RUSTYBIN_MOCKS_SAMPLE: "true"
-      RUSTYBIN_MOCKS_SELF_SERVICE: "true"
-      RUSTYBIN_MOCKS_SELF_SERVICE_HOST: rustybin-mock.dev
-      RUSTYBIN_MOCKS_SELF_SERVICE_HOME: https://demo.rustybin.dev
+      RUSTYBIN_MOCKS_HOST: rustybin-mock.dev
       RUSTYBIN_PRIVACY_URL: https://rustybin.dev/legal/privacy/
     volumes:
       - data:/app/certs

@@ -66,7 +66,14 @@ The marker a session looks for is the first row that is not done.
 | 05 | The deploy configuration. Replaced 2026-11-07, when the owner said to leave `rustybin-platform` for now and to use their Contabo VPS, not Fly: `deploy/demo` is its own compose project and Cloudflare Tunnel, pinned to the 0.6.0 digest, with Caddy setting `X-Real-IP` from `Cf-Connecting-Ip` and `RUSTYBIN_TRUST_FORWARD_HEADER=x-real-ip` | 04b | done 2026-11-07 |
 | 06 | Go live: DNS and TLS for `demo.rustybin.dev`, `rustybin-mock.dev` and its wildcard, signing in as `oli`, a walk through the live demo | 05 | done 2026-11-07 |
 
-The live demo was walked on 2026-11-07 over its public URLs, with a browser sign-in as `oli`: the
+The owner then asked for it to be locked (2026-11-07, "lock it down so only I can sign in with my
+username oli"), so it runs without self-service: every control route refuses a caller without a
+credential, `oli` is the only user, there are no visitors, and `RUSTYBIN_MOCKS_HOST` serves the
+owner's mocks at `<name>.rustybin-mock.dev`. The data plane stays open, and public mode stays on, so
+a mock expires after 24 hours. Section 1's open demo waits for the owner; `deploy/demo/README.md` says
+how to turn visitors on.
+
+Before that, the open demo was walked on 2026-11-07 over its public URLs, with a browser sign-in as `oli`: the
 operator's routes refused to a visitor, a wrong password and another user name refused, every
 diagnostic ok, a visitor's mock on its own https host and hidden from another visitor, plain http
 redirected, the bare domain redirecting, forged client address headers ignored or refused by

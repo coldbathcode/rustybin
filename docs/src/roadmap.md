@@ -9,8 +9,8 @@ Nothing is scheduled. The candidates under consideration below are not planned y
 
 ## Recently built
 
-- [The hosted demo](https://demo.rustybin.dev) (2026-11-07): a public self-service instance
-  on the current release, with visitors' mocks at `<name>.rustybin-mock.dev`.
+- [The hosted demo](https://demo.rustybin.dev) (2026-11-07): an instance on the current release,
+  private for now, with its mocks at `<name>.rustybin-mock.dev`.
 
 - [Rustybin 0.6, more from an instance](changelog.md#060-2026-11-07-more-from-an-instance)
   (2026-11-07): [specs from a URL](mocks/index.md#a-spec-from-a-url), a

@@ -1,11 +1,17 @@
-# The public demo on a VPS
+# The demo on a VPS
 
-Visitors create mocks at `demo.rustybin.dev` without an account, each served at
-`<name>.rustybin-mock.dev`, and only the operator signs in. The bare `rustybin-mock.dev`
-redirects to the demo. `compose.yaml` here pins the signed release by digest.
+Locked: the console at `demo.rustybin.dev` needs the operator's sign-in, and nobody else has an
+account. There are no visitors. The operator's mocks are served at `<name>.rustybin-mock.dev`, and the
+bare `rustybin-mock.dev` redirects to the console. `compose.yaml` here pins the signed release by
+digest.
 
-The console stays on `rustybin.dev` and visitors' mocks on their own registrable domain, so what
-a visitor serves never shares a site with the console.
+The sign-in guards the console and the control plane. The data plane is open, as on every instance:
+the landing page, the built-in test endpoints such as `/ip`, and any mock, unless the mock turns on
+its own security. Public mode stays on for that reason, so a mock expires after 24 hours.
+
+To open it to visitors, set `RUSTYBIN_MOCKS_SELF_SERVICE`, `_HOST` and `_HOME`
+([An operator who signs in](../../docs/src/mocks/self-service.md#an-operator-who-signs-in)) in place
+of `RUSTYBIN_MOCKS_HOST`.
 
 ```
 visitor -> Cloudflare -> tunnel (cloudflared) -> Caddy -> Rustybin
@@ -55,7 +61,8 @@ To upgrade, change the digest and run `docker compose up -d` again. To take the 
 ## Check it
 
 - `https://demo.rustybin.dev/_rustybin/diagnostics` signed in: `client_address` and `state_dir` are ok.
-- A mock made without signing in answers at `https://<name>.rustybin-mock.dev/`.
-- `GET /_rustybin/settings` without a credential answers `401`.
+- A mock made signed in answers at `https://<name>.rustybin-mock.dev/`.
+- Without a credential, `GET /_rustybin/settings`, `/status`, `/config` and `/mocks` answer `401`, and
+  so does `POST /_rustybin/mocks`.
 - `GET /ip` with `X-Real-IP: 1.2.3.4` still names your own address, and with `Cf-Connecting-Ip` set
   Cloudflare itself answers `403`.
