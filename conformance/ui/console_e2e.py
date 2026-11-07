@@ -419,6 +419,7 @@ def run_theme(browser, theme):
         page.wait_for_selector("text=1 of 1 operation has no example")
         page.locator("#coverage-generate-values").click()
         page.wait_for_selector("#examples-dialog")
+        assert page.locator("#examples-personas option").count() >= 3
         page.locator("#examples-run").click()
         page.wait_for_selector("#examples-preview")
         shot(page, theme, "18-mock-examples")

@@ -179,6 +179,15 @@ export function coverageBanner(ctx) {
 
 // ── Generate examples dialog ───────────────────────────────────────
 
+// Suggestions for the style of the data: any text works.
+const PERSONAS = [
+  'realistic data for a demo',
+  'a small online shop',
+  'a bank, with formal names',
+  'edge cases: empty, long and unusual values',
+  'minimal data, the required fields only',
+];
+
 function modal(title, id) {
   const dlg = h('dialog', { class: 'wizard', id, 'aria-labelledby': id + '-title' });
   const body = h('div', { class: 'wizard-body stack' });
@@ -199,7 +208,8 @@ function modal(title, id) {
 export function openExamplesDialog(ctx, source, only) {
   const { dlg, body, foot } = modal(source === 'ai' ? 'Generate examples with AI' : 'Use generated values', 'examples-dialog');
   const d = ctx.detail();
-  const persona = input({ value: 'realistic data for a demo', 'aria-label': 'Persona', id: 'examples-persona', placeholder: 'realistic retail data, edge cases, ...' });
+  const persona = input({ value: 'realistic data for a demo', 'aria-label': 'Persona', id: 'examples-persona', placeholder: 'realistic retail data, edge cases, ...', list: 'examples-personas' });
+  const personas = h('datalist', { id: 'examples-personas' }, ...PERSONAS.map((p) => h('option', { value: p })));
   const per = select([['1', '1 per response'], ['2', '2 per response'], ['3', '3 per response']], '1', { 'aria-label': 'Examples per response', id: 'examples-per' });
   const out = h('div');
   const targets = only || ((d.coverage && d.coverage.without) || []).map((o) => o.id);
@@ -244,7 +254,8 @@ export function openExamplesDialog(ctx, source, only) {
   body.append(
     notice('', h('div', { class: 'grow' }, `${plural(targets.length, 'operation')} ${targets.length === 1 ? 'needs' : 'need'} examples: `, h('span', { class: 'mono small' }, targets.slice(0, 12).join(', ') + (targets.length > 12 ? ', ...' : '')), '.',
       source === 'ai' ? ' The configured model writes them from the response schemas; each one is validated before it is shown.' : ' The deterministic generator fills them from the schemas (the same values the mock serves today, now stored and editable).')),
-    source === 'ai' ? field('Style of the data', persona) : null,
+    source === 'ai' ? field('Style of the data', persona, 'Pick one or write your own.') : null,
+    personas,
     field('How many', per),
     out);
   foot.append(h('span', { class: 'muted small' }, 'Saved examples appear in the draft with a badge; deploy to serve them.'), h('span', { class: 'grow' }),

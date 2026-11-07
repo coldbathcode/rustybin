@@ -66,7 +66,9 @@ in the spec or stored. An operation whose success responses have no body needs n
 
 **Generate with AI** runs the task `examples_for_operations` on the operations that
 lack examples (or the ones you name), ten per call, with a persona ("realistic
-support tickets", "edge cases") and one to three examples per response. Every example
+support tickets", "edge cases"; the dialog suggests a few, and any text works) and one to
+three examples per response. From an operation's editor, **Generate examples** and
+**Generate more** run it on that operation alone. Every example
 is validated against its response schema; the failures go back to the model per
 operation. The dialog previews them per operation; **Save to draft** stores them in
 the draft as `operations.<id>.examples.<status>` with `source: ai`:

@@ -218,6 +218,9 @@ export function operationEditor(opts) {
       preview(previewEl, 'examples');
       const storedList = storedExamplesList(data.settings && data.settings.examples, status);
       if (storedList) detail.appendChild(storedList);
+      if (opts2.length && !opts.readOnly) {
+        detail.appendChild(h('button', { class: 'btn sm', type: 'button', id: 'op-generate-more', onclick: () => opts.onGenerate && opts.onGenerate(opts.opId) }, icon('ai'), 'Generate more'));
+      }
     } else if (source === 'generated') {
       const previewEl = h('div');
       detail.append(h('p', { class: 'small muted', style: { margin: 0 } }, 'Data generated from the response schema with the mock\'s seed: the same request gets the same data.'), previewEl);
