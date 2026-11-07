@@ -51,7 +51,7 @@ YAML output is pinned by `tests/snapshots/export.yaml`. Section 8 of the master 
 
 [docs/plans/hosted-demo/master-plan.md](docs/plans/hosted-demo/master-plan.md): making a public self-service instance
 safe on the current release and putting it online; section 4 is the build marker; `v0.5.1` released (the signed image's
-digest is in the changelog), steps 05 and 06 are the owner's. Rules it left: every reader of a
+digest is in the changelog); the demo now deploys from `deploy/demo` on Fly, not through `rustybin-platform`, and waits for a host. Rules it left: every reader of a
 mock's captures goes through `Svc::traffic_scope` and `TrafficScope::sees` or `CaptureLog::visible` (a capture holds
 what its sender presented; `MockCapture.sender` is never in an answer); `capture::Sender` keeps sessions and keys apart
 (a session name may hold a `:`); what a compiled revision keeps is bounded for the whole revision, never per schema (a
@@ -63,10 +63,10 @@ self-service instance with the password sign-in (`login::optional`) a caller wit
 route that declares `.authenticated()` stays closed to it unless it is also `.self_service()`; a caller without a credential
 reaches what it reaches on `open`, which `a_caller_without_a_credential_reaches_what_an_open_plane_gives` walks.
 
-## Rustybin 0.6, more from an instance (built 2026-11-07)
+## Rustybin 0.6, more from an instance (built and released 2026-11-07)
 
-[docs/plans/core-next/master-plan.md](docs/plans/core-next/master-plan.md): steps 01 to 10 of the roadmap's candidates;
-section 4 says why steps 11 to 13 wait for the owner. Rules it left: a dry check of the outbound policy is
+[docs/plans/core-next/master-plan.md](docs/plans/core-next/master-plan.md): steps 01 to 10 of the roadmap's candidates,
+released as `v0.6.0` (the signed image's digest is in the changelog); section 4 says why steps 11 to 13 wait for the owner. Rules it left: a dry check of the outbound policy is
 `Egress::dry_check` (never a copy); a feature that reaches out on a caller's word needs `mocks.write` or better and a
 `Purpose` with no default (`mocks/fetch.rs`), and `rustybin.yaml` never reaches out; a route a git host calls is open and
 its signature is the credential (`sourcecontrol::is_public_path`), off until its secret is set; a harness feature that

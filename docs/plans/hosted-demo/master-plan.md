@@ -63,8 +63,15 @@ The marker a session looks for is the first row that is not done.
 | [03](step-03-anonymous-surface.md) | The rest of the anonymous surface: shared check runs, status and metrics | | done 2026-11-06 |
 | 04 | Release 0.5.1 (the release recipe of the last plans; the digest is in the changelog) | 01 to 03 | done 2026-11-06 |
 | [04b](step-04b-operator-sign-in.md) | The owner's sign-in on a self-service instance: `password` control auth with visitors still anonymous (section 6), released as 0.5.2 | 04 | done 2026-11-07 |
-| 05 | `rustybin-platform`: `RUSTYBIN_CONTROL_AUTH=password`, `RUSTYBIN_CONSOLE_USER=oli`, `RUSTYBIN_CONSOLE_PASSWORD_HASH` from the VM's `.env`, `RUSTYBIN_STATE_DIR`, `RUSTYBIN_TRUST_FORWARD_HEADER=x-real-ip` with `header_up X-Real-IP {client_ip}` on both demo sites of the Caddyfile, `hostname: demo`, the 0.5.2 digest | 04b | not started, needs the owner's go |
-| 06 | Go live: `mocks_zone` set so the apex and wildcard of `rustybin-mock.dev` exist, DNS and TLS for both hosts, the lead webhook, signing in as `oli`, a walk through the live demo | 05 | not started, needs the owner's go |
+| 05 | The deploy configuration. Replaced 2026-11-07, when the owner said to leave `rustybin-platform` for now: `deploy/demo` holds the Fly app, pinned to the 0.6.0 digest, with `RUSTYBIN_TRUST_FORWARD_HEADER=fly` | 04b | done 2026-11-07 |
+| 06 | Go live: the app, volume and secrets of `deploy/demo/README.md`, DNS and TLS for `demo.rustybin.dev`, `rustybin-mock.dev` and its wildcard, signing in as `oli`, a walk through the live demo | 05, a host | blocked 2026-11-07: Fly answers "trial has ended" until the owner adds a card at https://fly.io/trial |
+
+The configuration of step 06 was rehearsed on 2026-11-07 with the signed 0.6.0 image: the environment
+of `deploy/demo/fly.toml`, 512 MiB, a throwaway password, `Fly-Client-IP` set by the caller. All 23
+checks passed: the operator's routes refused to a visitor, only `oli` signs in, a visitor's mock on
+its own host and hidden from another visitor, the bare domain redirecting, forwarding headers
+ignored, the mock and the session surviving a restart. What it cannot show is Fly itself: the volume's
+ownership (Fly's init source gives the mount point to the image's user), certificates and the edge.
 
 ## 5. How a session works
 

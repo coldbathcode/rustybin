@@ -47,6 +47,8 @@ fly certs add '*.rustybin-mock.dev' --app rustybin-demo   # asks for a DNS chall
 
 ## Check it
 
-- `https://demo.rustybin.dev/_rustybin/diagnostics` signed in: `client_address` is ok.
+- `https://demo.rustybin.dev/_rustybin/diagnostics` signed in: `client_address` and `state_dir` are
+  ok. The image runs as uid 10001: Fly gives it the volume's mount point, a plain Docker volume at
+  `/data` stays root's, and then every state file is kept in memory only.
 - A mock made without signing in answers at `https://<name>.rustybin-mock.dev/`.
 - `GET /_rustybin/settings` without a credential answers `401`.

@@ -29,6 +29,13 @@ and off until you turn them on.
 **Changed**: `GET /_rustybin/mocks/export` writes a version 2 document with only the `mocks` section.
 It applies as before.
 
+`cargo` version 0.6.0, the tag `v0.6.0`, the signed multi-arch image
+`ghcr.io/coldbathcode/rustybin:0.6.0`, digest
+`sha256:492000348f22ebb73cd6197de2a07ea6bfc9a363b606b33dcf25b535e29cceb3` (verify it with the
+cosign command of the [quick start](quick-start.md#docker); the
+[release](https://github.com/coldbathcode/rustybin/releases/tag/v0.6.0) carries the same
+values, and the Linux and macOS binaries).
+
 ## 0.5.2 (2026-11-07): an operator's sign-in next to anonymous visitors
 
 **Changed**: `RUSTYBIN_MOCKS_SELF_SERVICE=true` now works with the password sign-in, where

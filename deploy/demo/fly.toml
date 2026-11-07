@@ -8,7 +8,7 @@ app = "rustybin-demo"
 primary_region = "lhr"
 
 [build]
-  image = "ghcr.io/coldbathcode/rustybin@sha256:391f066e845ee0eb9030cc705b19fe2a068077533c0a1a88afbb0abc262ad2dd"
+  image = "ghcr.io/coldbathcode/rustybin@sha256:492000348f22ebb73cd6197de2a07ea6bfc9a363b606b33dcf25b535e29cceb3"
 
 [env]
   RUSTYBIN_PUBLIC_MODE = "true"
