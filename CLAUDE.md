@@ -82,6 +82,12 @@ The owner said "build it all out" on 2026-11-09; section 5 of
 (the one that keeps the rule it touches), each step file has build notes, and the changelog's "Unreleased"
 section lists what is new. A release waits for the owner's word.
 
+Steps 14 to 26 of the same plan (planned 2026-11-09, section 6: the order, a table of decisions for the owner
+with a recommendation each, one step file each) are everything left: the 0.7.0 release of steps 11 to 13, the
+follow-ups the build notes named, the roadmap's remaining candidates, a 0.8.0 release and the demo. None is
+built; the marker is the first row of section 3 that is not done, and steps 14, 25 and 26 are the owner's to
+start.
+
 Step 11 (source control; `docs/plans/core-next/step-11-source-control.md`):
 `src/sourcecontrol/branches.rs` (a diverged branch: `divergence`, the previews, `pull_request`; the
 remote's branches, switching and starting one) and `signing.rs` (signed commits). Rules it left:

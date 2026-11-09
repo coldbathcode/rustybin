@@ -38,6 +38,19 @@ The marker a session looks for is the first row that is not done.
 | [11](step-11-source-control.md) | Source control: branches per environment, signed commits, a divergence resolved by naming a side or through a pull request, `file:` references for the harness section | done 2026-11-09 |
 | [12](step-12-agent-secrets-and-sign-in.md) | Agents: secrets with an out-of-band confirmation; an interactive sign-in from the CLI | done 2026-11-09 |
 | [13](step-13-harness-follow-ups.md) | Harness: scenario import, HTTP/3 targets, server-to-server chains | done 2026-11-09 |
+| [14](step-14-release-0-7.md) | Release 0.7.0: steps 11 to 13 pushed, tagged, the signed image and its digest | the owner's to start, section 6 |
+| [15](step-15-client-id-metadata-documents.md) | MCP inspector: client ID metadata documents (and whether the control plane accepts one) | planned 2026-11-09; part B: owner decision, section 6 |
+| [16](step-16-chain-metrics.md) | Harness: a Prometheus series for chain calls | planned 2026-11-09 |
+| [17](step-17-secret-request-follow-ups.md) | Secret requests: a count outside Management, a note on a decline, a user sees their own agents' requests | planned 2026-11-09 |
+| [18](step-18-import-variables.md) | Harness: variables given to a scenario import | planned 2026-11-09 |
+| [19](step-19-verified-pulls.md) | Source control: pulled commits verified against allowed signers | planned 2026-11-09: owner decision, section 6 |
+| [20](step-20-pull-request-api.md) | Source control: a pull request opened through the git host | planned 2026-11-09: owner decision, section 6 |
+| [21](step-21-chain-over-http3.md) | Harness: a chain hop over HTTP/3 | planned 2026-11-09 |
+| [22](step-22-http3-image.md) | An image with HTTP/3 | planned 2026-11-09: owner decision, section 6 |
+| [23](step-23-visitor-oauth.md) | OAuth sign-in for visitors and key holders | waits for the owner, section 6 |
+| [24](step-24-self-service-replicas.md) | Self-service across replicas | waits for the owner, section 6 |
+| [25](step-25-release-0-8.md) | Release 0.8.0: whichever of 15 to 24 are built | the owner's to start, section 6 |
+| [26](step-26-open-the-demo.md) | The demo on the current release, and open to visitors | the owner's to start, section 6 |
 
 Released as 0.6.0 after step 10. Steps 11 to 13 are built and merged, and are released when the owner says so.
 
@@ -115,3 +128,63 @@ written first, then tests, code and docs; merged into `main` on 2026-11-09 with 
 on the merge. Each step file's build notes say where the build differs from these choices and what
 was left out (step 11: no verification of pulled commits' signatures; step 13: no image with
 `harness-http3`).
+
+## 6. Steps 14 to 26: everything that is left (planned 2026-11-09)
+
+After steps 11 to 13 the owner asked what else there is to build, then for a plan of all of it in
+this file. The steps come from three places: what `docs/src/roadmap.md` still has under
+consideration, what the build notes of steps 11 to 13 list as not built, and what is built but not
+yet released or deployed. Nothing here is built until the owner says go, a step at a time or
+several at once; a step is built whole, under the five-surface rule, and pushed as it lands.
+
+### Order
+
+| Group | Steps | Why here |
+|---|---|---|
+| Ship what is built | 14 | Three steps sit on `main` unreleased; everything later builds on them |
+| Small, no decision | 15 (part A), 16, 17, 18, 21 | Each finishes something a built step left, in a day or less |
+| Medium, a decision each | 15 (part B), 19, 20, 22 | Each is ready to build once its row below is answered |
+| Large, waiting | 23, 24 | Each reopens a decision made on purpose; the recommendation is not now |
+| Ship and deploy | 25, 26 | A release of what was built, then the demo |
+
+Steps 16, 17, 18 and 21 touch different modules and can be built side by side as steps 11 to 13
+were (one agent and one worktree each; give each its own `RUSTYBIN_DOCS_PORT` and
+`RUSTYBIN_UI_PORT`, expect conflicts only at the ends of the shared tables). Step 15 changes the
+OAuth walk of the console and is better alone. Step 21 comes before step 22, so an image with HTTP/3
+has chains over it. Steps 19 and 20 both change `src/sourcecontrol/` and go one after the other.
+
+### Decisions for the owner
+
+| Step | The question | Recommended |
+|---|---|---|
+| 14 | Push `main` and release steps 11 to 13 as 0.7.0? | Yes, before anything else is built on top |
+| 15 B | May the control plane fetch a client's metadata document, a call out for a caller who has not signed in? | Build it off by default, under an egress purpose with no default allowlist; leave the mock authorization server without a fetch |
+| 19 | How are a git host's own commits treated when pulls are verified? | SSH signatures only; a merge commit passes unsigned only when it is exactly the merge of two verified parents; squash and rebase merges by the host are refused and the docs say so |
+| 20 | Which git hosts get a pull request through their API? | The two largest public hosts and their self-hosted variants first, behind one trait; others when asked |
+| 22 | Does a published image carry a QUIC stack? | A second image tagged `<version>-http3`; the default image, which a public instance runs, stays without |
+| 23 | An authorization server open to strangers on a self-service instance? | Not now: step 04b of the hosted demo closed it on purpose and the demo has no visitors |
+| 24 | More than one replica for visitors? | Not until one instance is measurably full; if built, a compose spike first and PostgreSQL behind a cargo feature |
+| 25 | Release 0.8.0 when the built steps are in? | Yes, one release for the group |
+| 26 | Move the demo to the current release, and open it to visitors? Email leads on or off? | Move it after step 14; opening and its date are the owner's alone |
+
+A row answered no closes its step: the row of section 3 says so with the date, and the roadmap keeps
+the line under consideration with the reason.
+
+### Left out
+
+- **A platform authorization server for hosted instances**: the platform side, in
+  `rustybin-platform`, not this repository (section 2).
+- From the build notes, too small or too speculative to be steps: deleting a remote branch and
+  listing local ones (step 11), a body or headers on a chain's onward call (step 13), a latency
+  histogram per hop in Prometheus (the report has it). Each goes into a step above if that step
+  finds it needs it.
+
+### How a session works
+
+As before: read this file, the step file and CLAUDE.md; a failing test first where the behaviour
+exists to fail (steps 11 to 13 mostly wrote tests with the code, and step 13 then removed each
+protection to see its test fail: do the first, or at least the second); then the code on every
+surface, then the docs with a tested example per route; fmt, clippy on both toolchains and with each
+feature, the full suite, `scripts/check-no-dashes.sh`, the docs examples, the include and link
+checks and, when the console changed, `conformance/ui`. Add the step's build notes and its "For the
+merge" text, set the row to done with the date, push.

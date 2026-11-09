@@ -5,7 +5,14 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-Nothing is scheduled. The candidates under consideration below are not planned yet.
+Planned on 2026-11-09 and waiting for a go, in
+[the plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/core-next/master-plan.md)
+(steps 14 to 26): a release of what is built and not released yet; then client ID metadata
+documents for the MCP inspector, a Prometheus series for chain calls, three additions to secret
+requests, variables for a scenario import and a chain hop over HTTP/3; then, each after a
+decision, verified pulls, a pull request through the git host and an image with HTTP/3. The two
+largest candidates below (OAuth for visitors, self-service across replicas) are planned too and
+recommended against for now.
 
 ## Recently built
 
@@ -86,7 +93,8 @@ Nothing is scheduled. The candidates under consideration below are not planned y
 
 ## Under consideration
 
-From the build notes of the 0.2 and 0.3 steps and the harness plan, in no order:
+From the build notes of the earlier steps and the harness plan, in no order; each has a step in
+the plan named under "Next", except the platform authorization server:
 
 - **MCP inspector**: client ID metadata documents.
 - **Source control**: verifying the signatures of pulled commits against allowed
