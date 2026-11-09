@@ -20,6 +20,10 @@ default = []
 # Shared quota store for shared mode (RUSTYBIN_QUOTA_STORE=postgres://...).
 # Off by default: the default build, its MSRV and its dependency set do not change.
 quota-postgres = ["dep:tokio-postgres", "dep:tokio-postgres-rustls"]
+# HTTP/3 targets for harness mode (`targets[].http: h3`). Off by default: the
+# default build gains no QUIC stack; without the feature a scenario that asks
+# for HTTP/3 is refused at validation with a message naming it.
+harness-http3 = ["dep:quinn", "dep:h3", "dep:h3-quinn"]
 
 [dependencies]
 axum = { version = "0.8", features = ["ws", "macros", "http2"] }
@@ -78,6 +82,12 @@ hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1", "
 tokio-rustls = "0.26"
 hdrhistogram = { version = "7.5", default-features = false }
 libc = "0.2"
+# HTTP/3 targets (cargo feature `harness-http3`, docs/plans/core-next/step-13):
+# QUIC on the tokio runtime with the aws-lc-rs provider the crate already
+# uses (no ring, no platform verifier), and the hyperium HTTP/3 layer.
+quinn = { version = "0.11", optional = true, default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
+h3 = { version = "0.0.8", optional = true }
+h3-quinn = { version = "0.0.10", optional = true }
 # Settings store (docs/plans/next/step-01-foundations.md): secrets at rest.
 chacha20poly1305 = "0.10"
 zeroize = "1"

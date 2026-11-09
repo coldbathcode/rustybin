@@ -510,6 +510,33 @@ the leader) to rejoin the cluster. The node routes
 `.../election/elected`) authenticate with the join token and the node credential
 instead of the control-plane credentials.
 
+A scenario's `targets` are the gateways (or gateway nodes) the load goes to, each a URL
+or an object:
+
+| `targets[]` | Default | Description |
+|---|---|---|
+| `url` | required | `http` or `https`, without query or fragment; its path leads every request. Allowed by `RUSTYBIN_HARNESS_TARGETS` on every client node, never a control plane path. |
+| `weight` | `1` | The share of the requests this target gets (1 to 1000). |
+| `host` | the URL's host | The `Host` header and TLS server name to send instead. |
+| `http` | `auto` | `auto` (ALPN on TLS, HTTP/1.1 on plain connections), `h1`, `h2` (TLS only), `h2c` (prior knowledge on plain connections) or `h3` (HTTP/3 over QUIC, `https` only). |
+| `insecure` | `false` | Skip TLS certificate verification (a demo gateway with a self-signed certificate). |
+
+**HTTP/3 targets.** `http: h3` needs a build with the cargo feature `harness-http3`
+(`cargo build --release --features harness-http3`, or the image built with
+`--build-arg CARGO_FEATURES="quota-postgres harness-http3"`); the default binary and the
+published image have no QUIC stack, and refuse the scenario at validation with a message
+that names the feature. `GET /_rustybin/harness` says `http3: true` on a build that has
+it. An HTTP/3 target goes through the same fences as any other: the allowlist entry's
+port is the UDP port, the name is resolved once and QUIC connects to those pinned
+addresses only (no `Alt-Svc`, no redirect, no move to an address the server prefers),
+forbidden addresses are refused, target verification runs over HTTP/3, the kill switch
+stops it, and TLS is verified unless `insecure`. Requests carry the marker and answers
+are classed and reported as over HTTP/1 and 2. HTTP/3 carries the plain HTTP sources
+(`request`, `requests`, `mock`): the protocol sources, the faults `connection_churn` and
+`http2`, and `identities.source_addresses` are refused with an `h3` target. A target
+keeps 8 QUIC connections, round robin over its pinned addresses, and requests are
+streams on them.
+
 Each layer's `pattern` says how hard it pushes over time, as a rate (open model) or
 a number of users (closed model):
 

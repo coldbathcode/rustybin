@@ -177,6 +177,17 @@ pub enum HttpVersion {
     H2,
     /// HTTP/2 with prior knowledge on a plain connection.
     H2c,
+    /// HTTP/3 over QUIC (TLS only). Needs a build with the cargo feature
+    /// `harness-http3`; a build without it refuses the scenario.
+    H3,
+}
+
+/// The cargo feature that gives the load client HTTP/3.
+pub const HTTP3_FEATURE: &str = "harness-http3";
+
+/// Whether this build can send HTTP/3 (the cargo feature `harness-http3`).
+pub const fn http3_built() -> bool {
+    cfg!(feature = "harness-http3")
 }
 
 impl HttpVersion {
@@ -186,6 +197,7 @@ impl HttpVersion {
             HttpVersion::H1 => "h1",
             HttpVersion::H2 => "h2",
             HttpVersion::H2c => "h2c",
+            HttpVersion::H3 => "h3",
         }
     }
 }
@@ -1207,6 +1219,18 @@ impl Scenario {
                             "targets[{i}].http: h2c is for plain connections (use h2 with https)"
                         ));
                     }
+                    if t.http == HttpVersion::H3 {
+                        if !http3_built() {
+                            p.push(format!(
+                                "targets[{i}].http: h3 needs a build with the cargo feature {HTTP3_FEATURE} (cargo build --features {HTTP3_FEATURE}); this build has no QUIC stack"
+                            ));
+                        }
+                        if !parsed.tls() {
+                            p.push(format!(
+                                "targets[{i}].http: h3 needs an https target (HTTP/3 is always TLS)"
+                            ));
+                        }
+                    }
                     prefixes.push(parsed.path);
                 }
                 Err(e) => {
@@ -1282,6 +1306,7 @@ impl Scenario {
         } else if self.layers.len() > MAX_LAYERS {
             p.push(format!("layers: at most {MAX_LAYERS}"));
         }
+        let http3 = self.targets.iter().any(|t| t.http == HttpVersion::H3);
         let mut names = Vec::new();
         for (i, layer) in self.layers.iter().enumerate() {
             let here = format!("layers[{i}]");
@@ -1307,6 +1332,27 @@ impl Scenario {
             let templates = layer.source.templates();
             let protocol = super::protocols::protocol_of(&layer.source);
             super::protocols::validate(&layer.source, &format!("{here}.source"), &mut p);
+            // What HTTP/3 carries here: the plain HTTP sources, from the
+            // node's own addresses.
+            if http3 {
+                if let Ok(pr) = protocol {
+                    if pr != super::protocols::Protocol::Http {
+                        p.push(format!(
+                            "{here}.source.{}: not sent over HTTP/3 (a target with http: h3 takes request, requests and mock sources)",
+                            pr.as_str()
+                        ));
+                    }
+                }
+                if layer
+                    .identities
+                    .as_ref()
+                    .is_some_and(|ids| !ids.source_addresses.is_empty())
+                {
+                    p.push(format!(
+                        "{here}.identities.source_addresses: not with an HTTP/3 target"
+                    ));
+                }
+            }
             if protocol.is_ok_and(|pr| pr != super::protocols::Protocol::Http) {
                 if protocol == Ok(super::protocols::Protocol::Websocket)
                     && self
@@ -1479,6 +1525,15 @@ impl Scenario {
                     .any(|l| l.identities.as_ref().is_some_and(|i| i.jwt.is_some()))
             {
                 p.push("faults.client.expired_tokens: needs a layer with identities.jwt (the tokens to expire)".into());
+            }
+            if http3 {
+                let client = f.client();
+                if client.connection_churn.is_some_and(|v| v > 0.0) {
+                    p.push("faults.client.connection_churn: not with an HTTP/3 target (QUIC streams share a connection)".into());
+                }
+                if client.http2.is_some() {
+                    p.push("faults.client.http2: not with an HTTP/3 target (the protocol mix is HTTP/1.1 and HTTP/2)".into());
+                }
             }
         }
         let t = &self.thresholds;
@@ -2295,7 +2350,7 @@ pub fn schema(caps: &Caps) -> Value {
                     "url": json!({ "type": "string", "description": "The target URL (http or https), without query or fragment.", "maxLength": 2048, "format": "uri" }),
                     "weight": integer("Share of the requests this target gets.", 1, 1000),
                     "host": string("Host header and TLS server name to send instead of the URL's host.", 253),
-                    "http": enumeration("Protocol: auto (ALPN on TLS, HTTP/1.1 on plain), h1, h2 (TLS only), h2c (prior knowledge on plain connections).", &["auto", "h1", "h2", "h2c"], "auto"),
+                    "http": enumeration("Protocol: auto (ALPN on TLS, HTTP/1.1 on plain), h1, h2 (TLS only), h2c (prior knowledge on plain connections), h3 (HTTP/3 over QUIC, https only, the plain HTTP sources; needs a build with the cargo feature harness-http3, else the scenario is refused).", &["auto", "h1", "h2", "h2c", "h3"], "auto"),
                     "insecure": prop("boolean", "Skip TLS certificate verification (demo gateways with self-signed certificates).")
                 },
                 "required": ["url"],
@@ -2932,6 +2987,52 @@ mod tests {
         }
         assert!(problems.is_empty(), "{problems:#?}");
         assert_eq!(root["x-caps"]["max_rate"], 50_000);
+    }
+
+    /// Core next step 13: `http: h3` is a parameter of every build (model,
+    /// schema), and a build without the cargo feature refuses it at
+    /// validation with a message that names the feature.
+    #[test]
+    fn h3_is_in_the_schema_and_refused_without_the_feature() {
+        let root = schema(&Caps::default());
+        let http = &root["properties"]["targets"]["items"]["oneOf"][1]["properties"]["http"];
+        assert!(
+            http["enum"]
+                .as_array()
+                .is_some_and(|e| e.contains(&json!("h3"))),
+            "{http}"
+        );
+        assert!(http["description"]
+            .as_str()
+            .is_some_and(|d| d.contains(HTTP3_FEATURE)));
+        let mut s = Scenario::parse(
+            "name: q\ntargets: [{ url: 'https://gw.example:4433', http: h3 }]\nsource: { request: { path: / } }\npattern: { type: constant, rate: 1, for: 1s }\n",
+        )
+        .expect("parses in every build");
+        s.normalise();
+        assert_eq!(s.targets[0].http, HttpVersion::H3);
+        assert_eq!(
+            serde_json::to_value(&s).unwrap()["targets"][0]["http"],
+            "h3"
+        );
+        let problems = s.validate(&Caps::default());
+        if http3_built() {
+            assert!(problems.is_empty(), "{problems:#?}");
+        } else {
+            assert_eq!(problems.len(), 1, "{problems:#?}");
+            assert!(
+                problems[0].starts_with(
+                    "targets[0].http: h3 needs a build with the cargo feature harness-http3"
+                ),
+                "{problems:#?}"
+            );
+        }
+        // Whatever the build: HTTP/3 is TLS.
+        s.targets[0].url = "http://gw.example:4433".into();
+        assert!(s
+            .validate(&Caps::default())
+            .iter()
+            .any(|p| p.contains("h3 needs an https target")));
     }
 
     #[test]

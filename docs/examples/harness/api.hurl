@@ -500,3 +500,38 @@ Content-Type: text/plain
 HTTP 400
 [Asserts]
 jsonpath "$.error" contains "never run or translated"
+
+# ANCHOR: harness_http3
+# Whether this build sends HTTP/3 (the cargo feature harness-http3).
+GET {{harness_url}}/_rustybin/harness
+HTTP 200
+[Asserts]
+jsonpath "$.http3" isBoolean
+
+# The parameter is known to every build; one without the feature answers
+# valid: false with a problem that names the feature. HTTP/3 is always TLS.
+POST {{harness_url}}/_rustybin/harness/validate
+Content-Type: application/json
+{
+  "name": "over-quic",
+  "targets": [{"url": "https://gateway.internal:8443", "http": "h3"}],
+  "source": {"request": {"path": "/status/200"}},
+  "pattern": {"type": "constant", "rate": 50, "for": "10s"}
+}
+HTTP 200
+[Asserts]
+jsonpath "$.scenario.targets[0].http" == "h3"
+
+POST {{harness_url}}/_rustybin/harness/validate
+Content-Type: application/json
+{
+  "name": "plain",
+  "targets": [{"url": "http://gateway.internal:8080", "http": "h3"}],
+  "source": {"request": {"path": "/status/200"}},
+  "pattern": {"type": "constant", "rate": 50, "for": "10s"}
+}
+HTTP 200
+[Asserts]
+jsonpath "$.valid" == false
+jsonpath "$.problems[*]" includes "targets[0].http: h3 needs an https target (HTTP/3 is always TLS)"
+# ANCHOR_END: harness_http3

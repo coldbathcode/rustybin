@@ -365,6 +365,40 @@ turn, which exercises the gateway's health checks and circuit breakers. The buil
 
 The tables of every parameter are in [configuration](configuration.md#harness-mode).
 
+## HTTP/3 targets
+
+A target with `http: h3` is sent to over HTTP/3 (QUIC), for a gateway that terminates it:
+
+```yaml
+targets:
+  - url: https://gateway.internal:8443
+    http: h3
+```
+
+It needs a build with the cargo feature `harness-http3` (`cargo build --release --features
+harness-http3`, or the image built with `--build-arg CARGO_FEATURES="quota-postgres
+harness-http3"`). The default binary and the published image carry no QUIC stack: they know
+the parameter (it is in the schema, the console form and the tools' schemas in every build)
+and refuse the scenario at validation with a message that names the feature. `GET
+/_rustybin/harness` answers `http3: true` on a build that has it.
+
+Nothing about where load may go changes with the protocol. The allowlist entry's port is the
+UDP port; the name is resolved once and QUIC connects to those pinned addresses only, with no
+`Alt-Svc`, no redirect, and no move to another address a server asks for; forbidden addresses
+are refused; with `RUSTYBIN_HARNESS_VERIFY_TARGETS` the target is verified over HTTP/3 (the
+TCP port of the same number may be another service); the kill switch stops it; TLS is
+verified unless the target says `insecure`. Every request carries the marker, and the report
+classes the answers (`upstream`, `gateway`, `transport` with its kinds) and measures the
+overhead as over HTTP/1 and 2.
+
+HTTP/3 carries the plain HTTP sources (`request`, `requests`, a `mock`). The protocol
+sources, the faults `connection_churn` and `http2`, and `identities.source_addresses` are
+refused with an `h3` target, by name.
+
+```hurl
+{{#include ../examples/harness/api.hurl:harness_http3}}
+```
+
 ## OpenTelemetry
 
 Set `harness.otlp_endpoint` (Management, or `rustybin settings set`) to a collector's HTTP base URL

@@ -29,6 +29,8 @@ pub mod correlate;
 pub mod election;
 pub mod engine;
 pub mod faults;
+#[cfg(feature = "harness-http3")]
+pub mod http3;
 pub mod identity;
 pub mod import;
 pub mod limit_test;
@@ -818,6 +820,8 @@ impl Harness {
             "allowlist": self.allowlist.describe(),
             "allowlist_warnings": self.allowlist_warnings,
             "verify_targets": self.config.verify_targets,
+            // Whether this build sends HTTP/3 (the cargo feature).
+            "http3": scenario::http3_built(),
             "active_run": active.map(|r| r.summary()),
             "runs": self.runs().len(),
             "kill_switch": self.kill.is_set(),
@@ -1161,7 +1165,23 @@ impl Harness {
             .map_err(|e| format!("verification request: {e}"))?;
         let client = target.client.clone();
         let url = target.target.url.clone();
+        // An HTTP/3 target is verified over HTTP/3: the TCP port of the
+        // same number may be another service.
+        #[cfg(feature = "harness-http3")]
+        let h3 = target.h3.clone();
         let fut = async move {
+            #[cfg(feature = "harness-http3")]
+            if let Some(h3) = h3 {
+                let answer = h3
+                    .request_on_engine(req, true)
+                    .await
+                    .map_err(|kind| format!("{url}: verification request failed: {kind}"))?;
+                let status = axum::http::StatusCode::from_u16(answer.status)
+                    .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
+                let mut body = answer.kept.unwrap_or_default();
+                body.truncate(4096);
+                return Ok((status, bytes::Bytes::from(body)));
+            }
             let resp = client
                 .request(req)
                 .await
