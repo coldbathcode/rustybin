@@ -685,13 +685,16 @@ set](#a-secret-at-an-agents-request); `assist_status` shows `{set, hint}`.
 | `export_config` | `mocks.read` | [`rustybin.yaml`](configuration-as-code.md) version 2 for an admin (the whole instance, secrets as references), the mocks the caller may see (version 1) for others, or one mock with `name`; `format` yaml or json |
 | `diff_config` | `config.apply` | What applying a document would change, section by section (a dry run) |
 | `apply_config` | `config.apply` | Apply a version 1 or 2 document; `dry_run` reports only; `prune` (confirmed) makes a present section the whole truth |
-| `git_status` | `git.read` | The [repository](source-control.md), the working copy, the drift, ahead and behind (`fetch: true`), the timeline and the last commits |
+| `git_status` | `git.read` | The [repository](source-control.md), the working copy, the drift, ahead and behind (`fetch: true`), `untrusted_divergence` when the branch has diverged (the commits of each side, what each way out would change), whether commits are signed, the timeline and the last commits |
 | `git_init` | `git.write` | Clone the remote (`git.remote`, `git.branch` settings) or start an empty working copy |
 | `git_commit` | `git.write` | Export the instance into the working copy and commit with a message; `checkpoints` names local [checkpoints](checkpoints.md#in-the-configuration-repository) to commit next to the document (never by the automatic mode) |
 | `git_push` | `git.write` | Push the branch; confirmed, since the configuration leaves the host |
 | `git_pull` | `git.write` | Fetch and fast-forward; `apply: true` applies the repository's document (confirmed unless `dry_run`) |
-| `git_resolve` | `git.write` | After a diverged branch: the instance's copy wins or the repository's (confirmed) |
+| `git_resolve` | `git.write` | The ways out of a [diverged branch](source-control.md#a-diverged-branch) (`git_status` shows `untrusted_divergence`: what differs): `with: instance` (this instance's copy, committed on top of the remote, never a forced push), `repository` (the repository's document applied here) or `pull_request` (this instance's side to a new `branch` for a pull request at the git host, nothing applied). Confirmed; `dry_run: true` previews without asking |
 | `git_deploy_key` | `git.write` | The deploy key's public half; `generate: true` makes one, `replace: true` (confirmed) replaces it |
+| `git_branches` | `git.read` | The remote's [branches](source-control.md#branches) (`untrusted_branches`: the names are the repository's) and the one the instance is on |
+| `git_switch_branch` | `git.write` | A branch per environment: move the instance to another branch of the remote (`dry_run: true` answers what applying its document would change), or start one from the instance with `create: true` (committed and pushed). Confirmed unless `dry_run` |
+| `git_signing_key` | `git.write` | [Signed commits](source-control.md#signed-commits): the signing key's public half and fingerprint to register at the git host; `generate: true` makes one, `replace: true` (confirmed) replaces it. The private half is never an input or an output |
 
 The token for an https remote is the secret `git.token`: an agent cannot set it (it can [ask for it to be set](#a-secret-at-an-agents-request)).
 
@@ -976,7 +979,8 @@ Tools that destroy something carry the MCP `destructiveHint` annotation (reads c
 `readOnlyHint`) and ask before acting: `rollback_mock`, `delete_mock`,
 `clear_mock_data`, `clear_traffic`, `apply_config` with `prune`, `clear_requests`,
 `end_visit`, `pause_self_service`, `revoke_agent`, `unpublish_registry_server`,
-`git_resolve`, `git_deploy_key` with `replace`, `end_session` with `all` or `user`,
+`git_resolve` and `git_switch_branch` (not their dry runs), `git_deploy_key` and
+`git_signing_key` with `replace`, `end_session` with `all` or `user`,
 `delete_user`,
 `delete_test`, `restore_checkpoint` (not its dry run), `delete_checkpoint` and
 `end_gateway_scenario`. Tools that reach outside the instance or publish something ask

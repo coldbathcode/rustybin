@@ -2,7 +2,9 @@
 # Source control (docs/src/source-control.md) against a bare repository in a
 # temporary directory: an instance with a state directory commits and pushes
 # its configuration, a second instance starts from the repository
-# (RUSTYBIN_CONFIG_GIT) and holds the same mock. Run through
+# (RUSTYBIN_CONFIG_GIT) and holds the same mock; then a diverged branch and its
+# ways out (a side, a pull request), a branch per environment and signed
+# commits. Run through
 # docs/examples/run.sh, which exports RUSTYBIN_BIN and BASE.
 set -euo pipefail
 BIN="${RUSTYBIN_BIN:-$(command -v rustybin || true)}"
@@ -193,4 +195,148 @@ expect "$out" '"resolved":"instance"'
 expect "$(git -C config.git ls-tree -r --name-only main)" 'rustybin/specs/invoices.json'
 out=$(curl -s -H "Authorization: Bearer $ADMIN" "$A/_rustybin/git")
 expect "$out" '"behind":0'
+
+# Diverged again, and this time nobody's copy should simply win: the first
+# instance commits a third mock while someone pushes to the repository.
+curl -s -o /dev/null -X POST "$A/_rustybin/mocks" -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"name":"payments","spec":{"openapi":"3.0.3","info":{"title":"Payments","version":"1"},"paths":{"/payments":{"get":{"operationId":"listPayments","responses":{"200":{"description":"ok"}}}}}}}'
+curl -s -o /dev/null -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"message": "Add the payments mock"}' "$A/_rustybin/git/commit"
+git -C elsewhere pull --quiet origin main
+echo "more notes" >> elsewhere/README.md
+git -C elsewhere -c user.name=someone -c user.email=someone@example.invalid commit --quiet -am "More notes"
+git -C elsewhere push --quiet origin main
+
+out=$(
+# ANCHOR: what_differs
+# The status of a diverged branch says what differs: the commits of each
+# side and what each way out would change, section by section.
+curl -s -H "Authorization: Bearer $ADMIN" "$A/_rustybin/git?fetch=true"
+# ANCHOR_END: what_differs
+)
+expect "$out" '"divergence":{"ahead":1,"behind":1'
+expect "$out" '"options":\["instance","repository","pull_request"\]'
+expect "$out" 'Add the payments mock'
+expect "$out" 'More notes'
+
+out=$(
+# ANCHOR: resolve_preview
+# A preview of a way out changes nothing: here, what taking the repository's
+# copy would do to this instance (the payments mock would go).
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"with": "repository", "dry_run": true}' "$A/_rustybin/git/resolve"
+# ANCHOR_END: resolve_preview
+)
+echo "$out"
+expect "$out" '"would_resolve":"repository"'
+expect "$out" '"would_delete":\["payments"\]'
+expect "$(curl -s "$A/_rustybin/mocks/payments")" '"name":"payments"'
+
+out=$(
+# ANCHOR: pull_request
+# Neither side wins here: this instance's side goes to a new branch, and a
+# person opens a pull request from it at the git host. Nothing is applied.
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"with": "pull_request", "branch": "review/payments"}' "$A/_rustybin/git/resolve"
+# ANCHOR_END: pull_request
+)
+echo "$out"
+expect "$out" '"resolved":"pull_request"'
+expect "$out" '"branch":"review/payments"'
+expect "$out" '"base":"main"'
+expect "$(git -C config.git log -1 --format=%s review/payments)" 'Add the payments mock'
+expect "$(git -C config.git log -1 --format=%s main)" 'More notes'
+
+# The person merges the pull request at the host (a merge commit).
+git -C elsewhere fetch --quiet origin
+git -C elsewhere -c user.name=someone -c user.email=someone@example.invalid merge --quiet --no-ff \
+  -m "Merge review/payments" origin/review/payments
+git -C elsewhere push --quiet origin main
+out=$(
+# ANCHOR: after_merge
+# The merge holds this instance's commits, so an ordinary pull fast-forwards.
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"apply": true, "prune": true}' "$A/_rustybin/git/pull"
+# ANCHOR_END: after_merge
+)
+echo "$out"
+expect "$out" '"fast_forwarded":true'
+expect "$out" '"ahead":0'
+expect "$(curl -s "$A/_rustybin/mocks/payments")" '"name":"payments"'
+
+# A branch per environment. The first instance becomes staging: a new branch
+# from what it holds.
+curl -s -o /dev/null -X PATCH -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"values": {"console.title": "Staging"}}' "$A/_rustybin/settings"
+out=$(
+# ANCHOR: branch_start
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"branch": "staging", "create": true, "message": "Start staging"}' "$A/_rustybin/git/branch"
+# ANCHOR_END: branch_start
+)
+echo "$out"
+expect "$out" '"created":true'
+expect "$out" '"branch":"staging"'
+expect "$(git -C config.git log -1 --format=%s staging)" 'Start staging'
+out=$(
+# ANCHOR: branches
+curl -s -H "Authorization: Bearer $ADMIN" "$A/_rustybin/git/branches"
+# ANCHOR_END: branches
+)
+echo "$out"
+expect "$out" '"branch":"staging"'
+expect "$out" '"name":"main"'
+expect "$out" '"name":"review/payments"'
+
+out=$(
+# ANCHOR: switch_preview
+# The second instance is on main. What would moving it to staging change?
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"branch": "staging", "dry_run": true, "prune": true}' "$B/_rustybin/git/branch"
+# ANCHOR_END: switch_preview
+)
+echo "$out"
+expect "$out" '"dry_run":true'
+expect "$out" 'instance.title: set to'
+expect "$(curl -s -H "Authorization: Bearer $ADMIN" "$B/_rustybin/git")" '"branch":"main"'
+out=$(
+# ANCHOR: switch
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"branch": "staging", "prune": true}' "$B/_rustybin/git/branch"
+# ANCHOR_END: switch
+)
+echo "$out"
+expect "$out" '"switched":true'
+expect "$out" '"from":"main"'
+out=$(curl -s -H "Authorization: Bearer $ADMIN" "$B/_rustybin/git")
+expect "$out" '"branch":"staging"'
+expect "$(curl -s "$B/_rustybin/mocks/payments")" '"name":"payments"'
+
+# Signed commits: a signing key of its own, then git.sign.
+out=$(
+# ANCHOR: signing_key
+# Generate the signing key: the answer is its public half and fingerprint,
+# to register at the git host as a signing key. Then turn signing on.
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{}' "$A/_rustybin/git/signing-key"
+curl -s -X PATCH -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"values": {"git.sign": true}}' "$A/_rustybin/settings" >/dev/null
+# ANCHOR_END: signing_key
+)
+echo "$out"
+expect "$out" '"public":"ssh-ed25519 '
+expect "$out" '"fingerprint":"SHA256:'
+curl -s -o /dev/null -X PATCH -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"values": {"console.title": "Staging, signed"}}' "$A/_rustybin/settings"
+out=$(
+# ANCHOR: signed_commit
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"message": "A signed commit"}' "$A/_rustybin/git/commit"
+# ANCHOR_END: signed_commit
+)
+echo "$out"
+expect "$out" '"signed":true'
+expect "$(git -C state-a/repo cat-file commit HEAD)" 'BEGIN SSH SIGNATURE'
+out=$(curl -s -H "Authorization: Bearer $ADMIN" "$A/_rustybin/git")
+expect "$out" '"signing":{"enabled":true,"key_set":true'
 echo "ok"

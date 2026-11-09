@@ -76,8 +76,12 @@ pub const REPOSITORY_REFUSED: [&str; 7] = [
 /// in and with which roles (the issuer, the role map, the default roles,
 /// provisioning, the password sign-in), so a pusher must not repoint the
 /// issuer or map their own group to `admin`; the audit log's retention
-/// (`audit.*`), so a pusher cannot shorten the record of what they did.
-pub const REPOSITORY_REFUSED_PREFIXES: [&str; 2] = ["sso.", "audit."];
+/// (`audit.*`), so a pusher cannot shorten the record of what they did;
+/// source control itself (`git.*`: the remote, the branch, the automatic
+/// mode, commit signing), so a pusher cannot move an instance to another
+/// branch or remote. The `git` group is never exported either
+/// ([`SKIPPED_GROUPS`]), so only a hand-written document names one.
+pub const REPOSITORY_REFUSED_PREFIXES: [&str; 3] = ["sso.", "audit.", "git."];
 
 /// Does a document from the repository leave this setting alone?
 pub fn repository_refused(key: &str) -> bool {
@@ -134,7 +138,7 @@ pub struct ConsoleSection {
     pub user: Option<String>,
 }
 
-/// `harness:`: the saved scenarios, inline.
+/// `harness:`: the saved scenarios, inline or as files next to the document.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessSection {
@@ -142,12 +146,61 @@ pub struct HarnessSection {
     pub scenarios: Vec<ScenarioDoc>,
 }
 
-/// One saved scenario.
+/// One saved scenario: `scenario` (inline) or `file` (a path next to the
+/// document, read like a mock's `spec:`), never both.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScenarioDoc {
     pub name: String,
-    pub scenario: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenario: Option<Value>,
+    /// Path of the scenario file (YAML or JSON), relative to the document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+}
+
+/// A scenario file's text as a value: YAML or JSON, an object.
+pub fn parse_scenario_file(path: &str, text: &str) -> Result<Value, String> {
+    if text.len() > crate::harness::scenario::MAX_SCENARIO_BYTES {
+        return Err(format!(
+            "file {path}: larger than {} bytes",
+            crate::harness::scenario::MAX_SCENARIO_BYTES
+        ));
+    }
+    let value: Value =
+        serde_yaml::from_str(text).map_err(|e| format!("file {path}: not YAML or JSON: {e}"))?;
+    if !value.is_object() {
+        return Err(format!("file {path}: the scenario must be an object"));
+    }
+    Ok(value)
+}
+
+/// The scenario of a document entry as a value: inline, or read next to the
+/// document when `base` is known (a working copy or a commit's files: the
+/// path stays inside it, as a `spec:` file's does).
+pub fn scenario_value(doc: &ScenarioDoc, base: Option<&Path>) -> Result<Value, String> {
+    match (&doc.scenario, &doc.file) {
+        (Some(_), Some(_)) => Err("set either scenario or file, not both".into()),
+        (None, None) => Err("scenario (inline) or file (a path) is required".into()),
+        (Some(v), None) => Ok(v.clone()),
+        (None, Some(path)) => {
+            let Some(base) = base else {
+                return Err(format!(
+                    "file {path}: scenario files are only read from local files and the repository: send scenario inline"
+                ));
+            };
+            let full = contained_path(base, "file", path)?;
+            let meta = std::fs::metadata(&full).map_err(|e| format!("file {path}: {e}"))?;
+            if meta.len() > crate::harness::scenario::MAX_SCENARIO_BYTES as u64 {
+                return Err(format!(
+                    "file {path}: larger than {} bytes",
+                    crate::harness::scenario::MAX_SCENARIO_BYTES
+                ));
+            }
+            let text = std::fs::read_to_string(&full).map_err(|e| format!("file {path}: {e}"))?;
+            parse_scenario_file(path, &text)
+        }
+    }
 }
 
 /// One entry of `users:`: who signs in, never a password or a hash (an
@@ -314,10 +367,12 @@ pub fn harness_schema() -> Value {
         "description": "Saved harness scenarios (applied when harness mode is on)",
         "properties": {
             "scenarios": { "type": "array", "maxItems": crate::harness::saved::MAX_SAVED, "items": {
-                "type": "object", "additionalProperties": false, "required": ["name", "scenario"],
+                "type": "object", "additionalProperties": false, "required": ["name"],
+                "oneOf": [{ "required": ["scenario"] }, { "required": ["file"] }],
                 "properties": {
                     "name": { "type": "string", "maxLength": 64, "description": "Letters, digits, . _ - only" },
-                    "scenario": { "type": "object", "description": "A scenario (GET /_rustybin/harness/schema)" }
+                    "scenario": { "type": "object", "description": "A scenario (GET /_rustybin/harness/schema), inline" },
+                    "file": { "type": "string", "maxLength": 512, "description": "A scenario file (YAML or JSON) next to the document, as a mock's spec: relative to a file given to RUSTYBIN_CONFIG_FILE, inside the repository for a document from git (no .., no link); a document sent to the API carries scenario instead" }
                 }
             } }
         }
@@ -472,10 +527,11 @@ pub fn export(state: &AppState, secrets: SecretsMode, bundle: bool) -> Export {
                     name: s.name,
                     // API keys and OAuth client secrets as references: the
                     // apply takes them back from the saved scenario.
-                    scenario: crate::harness::report::redact_scenario_with(
+                    scenario: Some(crate::harness::report::redact_scenario_with(
                         &serde_json::to_value(&s.scenario).unwrap_or(Value::Null),
                         SECRET_STORED,
-                    ),
+                    )),
+                    file: None,
                 })
                 .collect(),
         }),
@@ -866,10 +922,11 @@ fn short(v: &Value) -> String {
     }
 }
 
-/// A `spec:` file of a document read from a working copy: a relative path
-/// to a plain file that stays inside `base` (no absolute path, no `..`, no
-/// symbolic link), so the repository cannot read the host's files.
-fn contained_path(base: &Path, path: &str) -> Result<PathBuf, String> {
+/// A file a document read from a working copy names (`what`: a mock's
+/// `spec`, a scenario's `file`): a relative path to a plain file that stays
+/// inside `base` (no absolute path, no `..`, no symbolic link), so the
+/// repository cannot read the host's files.
+fn contained_path(base: &Path, what: &str, path: &str) -> Result<PathBuf, String> {
     let p = Path::new(path);
     if p.is_absolute()
         || p.components().any(|c| {
@@ -880,23 +937,23 @@ fn contained_path(base: &Path, path: &str) -> Result<PathBuf, String> {
         })
     {
         return Err(format!(
-            "spec {path}: a path inside the repository (relative, without ..)"
+            "{what} {path}: a path inside the repository (relative, without ..)"
         ));
     }
     let full = base.join(p);
     match std::fs::symlink_metadata(&full) {
         Ok(m) if m.file_type().is_symlink() => {
-            return Err(format!("spec {path}: a symbolic link, refused"))
+            return Err(format!("{what} {path}: a symbolic link, refused"))
         }
-        Ok(m) if !m.is_file() => return Err(format!("spec {path}: not a file")),
+        Ok(m) if !m.is_file() => return Err(format!("{what} {path}: not a file")),
         Ok(_) => {}
-        Err(e) => return Err(format!("spec {path}: {e}")),
+        Err(e) => return Err(format!("{what} {path}: {e}")),
     }
     let (Ok(real), Ok(root)) = (std::fs::canonicalize(&full), std::fs::canonicalize(base)) else {
-        return Err(format!("spec {path}: cannot be resolved"));
+        return Err(format!("{what} {path}: cannot be resolved"));
     };
     if !real.starts_with(&root) {
-        return Err(format!("spec {path}: outside the repository, refused"));
+        return Err(format!("{what} {path}: outside the repository, refused"));
     }
     Ok(real)
 }
@@ -1036,18 +1093,37 @@ pub fn diff(before: &MocksFile, after: &MocksFile, base: Option<&Path>) -> Vec<C
         map_changes(&mut out, "portal", &b, &a, |_| String::new());
     }
     if let Some(a) = &after.harness {
-        let b: BTreeMap<String, &Value> = before
+        // A scenario in a file is compared by what the file holds; one that
+        // cannot be read compares as its error (a change that names why).
+        let value = |s: &ScenarioDoc| {
+            scenario_value(s, base).unwrap_or_else(|e| json!({ "unreadable": e }))
+        };
+        let b: BTreeMap<String, Value> = before
             .harness
             .iter()
             .flat_map(|h| &h.scenarios)
-            .map(|s| (s.name.clone(), &s.scenario))
+            .map(|s| (s.name.clone(), value(s)))
             .collect();
-        let a: BTreeMap<String, &Value> = a
+        let unreadable: Vec<(String, String)> = a
             .scenarios
             .iter()
-            .map(|s| (s.name.clone(), &s.scenario))
+            .filter_map(|s| scenario_value(s, base).err().map(|e| (s.name.clone(), e)))
+            .collect();
+        let a: BTreeMap<String, Value> = a
+            .scenarios
+            .iter()
+            .map(|s| (s.name.clone(), value(s)))
             .collect();
         map_changes(&mut out, "harness", &b, &a, |_| String::new());
+        for (name, e) in unreadable {
+            match out
+                .iter_mut()
+                .find(|c| c.section == "harness" && c.key == name)
+            {
+                Some(c) => c.detail = e,
+                None => out.push(Change::new("harness", name, "changed", e)),
+            }
+        }
     }
     if let Some(a) = &after.tests {
         let b: BTreeMap<String, &crate::replay::SavedTest> = before
@@ -1229,7 +1305,7 @@ fn spec_value(doc: &MockDoc, base: Option<&Path>) -> Result<Value, String> {
             let Some(base) = base else {
                 return Err(format!("spec {path} is a file: not readable here"));
             };
-            let full = contained_path(base, path)?;
+            let full = contained_path(base, "spec", path)?;
             let text = std::fs::read_to_string(&full).map_err(|e| format!("spec {path}: {e}"))?;
             crate::mocks::spec::parse_document(&text)
         }
@@ -1706,6 +1782,14 @@ fn apply_secrets(
                 ));
                 continue;
             }
+            // Source control's own secrets (the token, the webhook secret,
+            // the signing key) are never a repository writer's to set or clear.
+            Some(spec) if opts.untrusted && SKIPPED_GROUPS.contains(&spec.group) => {
+                problems.push(format!(
+                    "secrets.{k}: a document from the repository cannot change it (set it through the API, the console or the environment): kept as it is"
+                ));
+                continue;
+            }
             Some(_) => {}
         }
         match v.as_deref().map(str::trim) {
@@ -1843,7 +1927,7 @@ fn apply_mocks(
             problems,
         );
         if let (Some(path), Some(base)) = (doc.spec.clone(), opts.base.as_deref()) {
-            match contained_path(base, &path) {
+            match contained_path(base, "spec", &path) {
                 Ok(full) => doc.spec = Some(full.display().to_string()),
                 Err(e) => {
                     problems.push(format!("mocks.{}: {e} (skipped)", doc.name));
@@ -2159,7 +2243,15 @@ fn apply_harness(
         let saved = saved_scenario
             .as_ref()
             .and_then(|s| serde_json::to_value(s).ok());
-        let mut value = doc.scenario.clone();
+        // Inline, or the file next to the document (never outside it).
+        let given = match scenario_value(&doc, opts.base.as_deref()) {
+            Ok(v) => v,
+            Err(e) => {
+                problems.push(format!("harness.scenarios.{}: {e} (skipped)", doc.name));
+                continue;
+            }
+        };
+        let mut value = given.clone();
         if let Err(path) = fill_stored(&mut value, saved.as_ref(), "") {
             problems.push(format!(
                 "harness.scenarios.{}: {path} is secret:stored, and no saved scenario of that name holds it (skipped)",
@@ -2167,16 +2259,21 @@ fn apply_harness(
             ));
             continue;
         }
-        let scenario = match crate::harness::scenario::Scenario::from_value(&value) {
+        let mut scenario = match crate::harness::scenario::Scenario::from_value(&value) {
             Ok(s) => s,
             Err(e) => {
                 problems.push(format!("harness.scenarios.{}: {e} (skipped)", doc.name));
                 continue;
             }
         };
+        // A scenario a person wrote (a file, or inline) may use the
+        // shorthand (`target`, a top-level source and pattern): folded as
+        // every other way of saving one folds it. An exported one is
+        // already in that form.
+        scenario.normalise();
         // A stored secret goes only where it went before: the same target
         // hosts as the saved scenario it came from.
-        if value != doc.scenario
+        if value != given
             && saved_scenario
                 .as_ref()
                 .is_none_or(|old| target_hosts(old) != target_hosts(&scenario))

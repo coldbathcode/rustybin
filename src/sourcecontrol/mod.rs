@@ -17,10 +17,15 @@
 //! (`rustybin.yaml` plus `specs/`), push and pull move it; pull applies the
 //! repository's document through `crate::configdoc` (a dry run shows the
 //! diff first). The instance never merges: a pull that is not a fast
-//! forward reports the conflict and the two ways out (the instance's copy
-//! wins, or the repository's). `git.auto` keeps the two in sync: push every
-//! change (checked every 30 s) or pull at an interval. At startup
-//! `RUSTYBIN_CONFIG_GIT` clones and applies before the instance serves.
+//! forward reports the conflict, what differs and the ways out, each a
+//! call a person makes (the instance's copy wins, the repository's wins,
+//! or the instance's side goes to a new branch for a pull request on the
+//! host: `branches.rs`). `git.auto` keeps the two in sync: push every
+//! change (checked every 30 s) or pull at an interval, and never resolves
+//! a divergence. At startup `RUSTYBIN_CONFIG_GIT` clones and applies
+//! before the instance serves. Branches per environment are in
+//! `branches.rs` (the branch stays the `git.branch` setting), signed
+//! commits in `signing.rs`.
 
 use std::collections::VecDeque;
 use std::net::IpAddr;
@@ -40,9 +45,14 @@ use crate::settings::{Kind, Settings, Spec};
 use crate::state::AppState;
 
 pub mod api;
+pub mod branches;
 pub mod checkpoints;
+pub mod signing;
 #[cfg(test)]
 mod tests;
+
+pub use branches::BranchRequest;
+pub use signing::{SIGNING_KEY_FILE, SIGNING_KEY_KEY, SIGN_KEY};
 
 /// Most operations kept in the timeline.
 pub const MAX_TIMELINE: usize = 50;
@@ -194,6 +204,25 @@ pub fn specs() -> Vec<Spec> {
             json!("5m"),
         )
         .check(check_interval),
+        Spec::new(
+            SIGN_KEY,
+            "git",
+            "Sign commits",
+            "Sign every commit this instance makes with the signing key below (an SSH signature; git 2.34 or later). Off by default. With it on and no usable key a commit is refused, never made unsigned.",
+            Kind::Bool,
+            json!(false),
+        ),
+        Spec::new(
+            SIGNING_KEY_KEY,
+            "git",
+            "Signing key",
+            "The private key commits are signed with: an OpenSSH key without a passphrase (paste it whole, or generate one below). Never the deploy key, never shown again; its public key and fingerprint are shown to register at the git host as a signing key.",
+            Kind::Text { max_len: 4096 },
+            Value::Null,
+        )
+        .secret()
+        .normalize(signing::one_line)
+        .check(signing::check_key),
     ]
 }
 
@@ -469,6 +498,9 @@ pub struct GitError {
     pub message: String,
     /// Extra fields of the answer (a conflict's ahead and behind).
     pub extra: Value,
+    /// A diverged branch: the caller's answer adds what differs
+    /// ([`SourceControl::explain`]).
+    pub diverged: bool,
 }
 
 impl GitError {
@@ -477,6 +509,7 @@ impl GitError {
             status,
             message: message.into(),
             extra: Value::Null,
+            diverged: false,
         }
     }
 
@@ -543,6 +576,9 @@ pub struct SourceControl {
     /// The largest checkpoint read from the repository (a local
     /// checkpoint's cap; lowered by tests).
     max_checkpoint_bytes: std::sync::atomic::AtomicUsize,
+    /// Ahead and behind of the configured branch as last counted (for the
+    /// diagnostics: a diverged branch waits for a person).
+    last_sync: Mutex<Option<(String, u64, u64)>>,
 }
 
 impl SourceControl {
@@ -565,7 +601,28 @@ impl SourceControl {
             last_pull: Mutex::new(None),
             git_version: OnceLock::new(),
             auto_warned: Mutex::new(None),
+            last_sync: Mutex::new(None),
         }
+    }
+
+    /// The branch is level with the remote (a push went through, a side
+    /// was taken): nothing has diverged any more.
+    fn synced(&self, branch: &str) {
+        if let Ok(mut last) = self.last_sync.lock() {
+            *last = Some((branch.to_string(), 0, 0));
+        }
+    }
+
+    /// The configured branch as last counted against the remote, when it
+    /// has diverged: `(commits here, commits there)`.
+    pub fn diverged(&self) -> Option<(u64, u64)> {
+        let branch = self.branch();
+        self.last_sync
+            .lock()
+            .ok()
+            .and_then(|l| l.clone())
+            .filter(|(b, ahead, behind)| *b == branch && *ahead > 0 && *behind > 0)
+            .map(|(_, ahead, behind)| (ahead, behind))
     }
 
     /// The working copy (`<state>/repo`).
@@ -995,21 +1052,24 @@ impl SourceControl {
         cmd
     }
 
+    /// A git command's output for an answer or a log line: the token
+    /// removed, cut to a bounded length.
+    fn scrub(&self, bytes: &[u8]) -> String {
+        let mut text = String::from_utf8_lossy(bytes).to_string();
+        if let Some(t) = self.settings.secret(TOKEN_KEY) {
+            if t.len() >= 8 {
+                text = text.replace(t.as_str(), "***");
+            }
+        }
+        truncate(text.trim(), MAX_OUTPUT)
+    }
+
     /// Run one git command in `cwd`.
     async fn git(&self, env: &GitEnv, cwd: &Path, args: &[&str]) -> Output {
         // Only what git needs: never the instance's own environment (its
         // secrets key, provider keys, tokens).
         let mut cmd = self.command(env, cwd, args);
-        let token = self.settings.secret(TOKEN_KEY);
-        let scrub = |s: &[u8]| -> String {
-            let mut text = String::from_utf8_lossy(s).to_string();
-            if let Some(t) = &token {
-                if t.len() >= 8 {
-                    text = text.replace(t.as_str(), "***");
-                }
-            }
-            truncate(text.trim(), MAX_OUTPUT)
-        };
+        let scrub = |s: &[u8]| self.scrub(s);
         match tokio::time::timeout(GIT_TIMEOUT, cmd.output()).await {
             Ok(Ok(out)) => Output {
                 ok: out.status.success(),
@@ -1094,6 +1154,14 @@ impl SourceControl {
     /// (ahead, behind) of HEAD against `origin/<branch>`; ahead is 0
     /// without a HEAD.
     async fn ahead_behind(&self, env: &GitEnv, repo: &Path, branch: &str) -> (u64, u64) {
+        let counted = self.count_ahead_behind(env, repo, branch).await;
+        if let Ok(mut last) = self.last_sync.lock() {
+            *last = Some((branch.to_string(), counted.0, counted.1));
+        }
+        counted
+    }
+
+    async fn count_ahead_behind(&self, env: &GitEnv, repo: &Path, branch: &str) -> (u64, u64) {
         let upstream = format!("origin/{branch}");
         if self.head(env, repo).await.is_none() {
             let out = self
@@ -1138,6 +1206,8 @@ impl SourceControl {
             "auto": self.settings.string(AUTO_KEY).unwrap_or_else(|| "off".into()),
             "pull_every": self.settings.string(PULL_EVERY_KEY).unwrap_or_else(|| "5m".into()),
             "deploy_key": deploy_key,
+            "signing": self.signing(),
+            "divergence": null,
             "head": null,
             "upstream": false,
             "ahead": null,
@@ -1217,6 +1287,15 @@ impl SourceControl {
             }),
             Err(e) => json!({ "error": e }),
         };
+        // A diverged branch: what differs and the ways out (a person's call,
+        // never taken here).
+        if let (Some(ahead), Some(behind)) = (body["ahead"].as_u64(), body["behind"].as_u64()) {
+            if ahead > 0 && behind > 0 {
+                body["divergence"] = self
+                    .divergence(state, &env, &repo, &branch, ahead, behind)
+                    .await;
+            }
+        }
         body
     }
 
@@ -1225,7 +1304,7 @@ impl SourceControl {
     /// document yet.
     fn drift(&self, state: &AppState, repo: &Path) -> Result<(Vec<Change>, bool), String> {
         let dir = self.document_dir(repo);
-        let export = configdoc::export(state, SecretsMode::Refs, true).file;
+        let export = instance_document(state);
         let doc_path = dir.join(DOCUMENT_NAME);
         if !doc_path.exists() {
             let empty = crate::mocks::config_file::MocksFile::default();
@@ -1358,7 +1437,11 @@ impl SourceControl {
         // Every named checkpoint exists before anything is written.
         let kept = checkpoints::to_write(state, checkpoints)?;
         let (repo, remote) = self.ready().await?;
-        let env = self.git_env(&remote)?;
+        let mut env = self.git_env(&remote)?;
+        // Signed when `git.sign` is on; refused, never unsigned, when it is
+        // on and cannot work.
+        let signed = self.sign_into(&mut env).await?;
+        let env = env;
         let _guard = self.lock.try_lock().map_err(|_| busy())?;
         self.need_init(&repo)?;
         let dir = self.document_dir(&repo);
@@ -1393,6 +1476,7 @@ impl SourceControl {
         if staged.trim().is_empty() {
             return Ok(json!({
                 "committed": false,
+                "signed": false,
                 "checkpoints": names,
                 "detail": "nothing to commit: the working copy already matches the instance",
                 "head": self.head(&env, &repo).await,
@@ -1421,10 +1505,15 @@ impl SourceControl {
         };
         Ok(json!({
             "committed": true,
+            "signed": signed,
             "files": files,
             "checkpoints": names,
             "head": head,
-            "detail": format!("{short}: {} ({files} file(s){with})", message.lines().next().unwrap_or("")),
+            "detail": format!(
+                "{short}: {} ({files} file(s){with}{})",
+                message.lines().next().unwrap_or(""),
+                if signed { ", signed" } else { "" }
+            ),
         }))
     }
 
@@ -1477,14 +1566,16 @@ impl SourceControl {
                     _ => (0, 0),
                 };
                 let mut e = GitError::conflict(
-                    "the remote has commits this instance does not have: pull first, or resolve with the instance's copy (POST /_rustybin/git/resolve)",
+                    "the remote has commits this instance does not have: pull first, or resolve (POST /_rustybin/git/resolve) with the instance's copy, the repository's, or a pull request",
                 );
-                e.extra = json!({ "conflict": true, "ahead": ahead, "behind": behind });
+                e.extra = json!({ "conflict": true, "ahead": ahead, "behind": behind, "options": branches::RESOLVE_OPTIONS });
+                e.diverged = ahead > 0 && behind > 0;
                 return Err(e);
             }
             return Err(GitError::failed(format!("git push: {}", out.stderr)));
         }
         let head = self.head(&env, &repo).await;
+        self.synced(&branch);
         Ok(json!({
             "pushed": true,
             "head": head,
@@ -1579,9 +1670,10 @@ impl SourceControl {
             }
         } else if ahead > 0 && behind > 0 {
             let mut e = GitError::conflict(format!(
-                "the repository and this instance have diverged ({ahead} commit(s) here, {behind} there): resolve with the instance's copy or the repository's (POST /_rustybin/git/resolve)"
+                "the repository and this instance have diverged ({ahead} commit(s) here, {behind} there): resolve with the instance's copy, the repository's, or a pull request (POST /_rustybin/git/resolve)"
             ));
-            e.extra = json!({ "conflict": true, "ahead": ahead, "behind": behind, "options": ["instance", "repository"] });
+            e.extra = json!({ "conflict": true, "ahead": ahead, "behind": behind, "options": branches::RESOLVE_OPTIONS });
+            e.diverged = true;
             return Err(e);
         } else if behind > 0 && !dry_run {
             self.must(&env, &repo, &["merge", "--quiet", "--ff-only", &upstream])
@@ -1746,28 +1838,106 @@ impl SourceControl {
             }
             let _ = std::fs::write(&target, &content);
         }
+        // The scenario files the harness section names (`file:`), the same
+        // way: a path inside the repository, read from the commit, within
+        // the size a scenario may have.
+        let scenario_files = file
+            .harness
+            .iter()
+            .flat_map(|h| &h.scenarios)
+            .filter_map(|s| s.file.as_deref());
+        for name in scenario_files {
+            let rel = Path::new(name);
+            if rel.is_absolute()
+                || rel
+                    .components()
+                    .any(|c| !matches!(c, std::path::Component::Normal(_)))
+            {
+                continue; // reported by the apply as outside the repository
+            }
+            let content = match self
+                .git_bytes(
+                    env,
+                    repo,
+                    &format!("{r}:{prefix}{name}"),
+                    crate::harness::scenario::MAX_SCENARIO_BYTES,
+                )
+                .await
+            {
+                Ok(c) => c,
+                Err(e) if e.contains("not in the repository") => continue,
+                Err(e) => return Err(GitError::failed(e)),
+            };
+            let target = temp.join(rel);
+            if let Some(parent) = target.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&target, &content);
+        }
         Ok(temp.to_path_buf())
     }
 
-    /// `POST /_rustybin/git/resolve`: after a diverged pull, `instance`
-    /// drops the local commits and commits the instance's copy on top of
-    /// the remote (then pushes), `repository` takes the remote's branch
-    /// and applies it with prune.
-    pub async fn resolve(
-        &self,
-        state: &AppState,
-        with: &str,
-        message: &str,
-        by: &str,
-    ) -> GitResult<Value> {
-        if with != "instance" && with != "repository" {
+    /// A diverged branch's `409` with what differs: the answer of a pull
+    /// or a push that found the branch diverged gains `divergence`.
+    pub async fn explain(&self, state: &AppState, mut e: GitError) -> GitError {
+        if !e.diverged {
+            return e;
+        }
+        let (Some(repo), Ok(Some(remote))) = (self.repo_dir(), self.remote()) else {
+            return e;
+        };
+        let Ok(env) = self.git_env(&remote) else {
+            return e;
+        };
+        let Ok(_guard) = self.lock.try_lock() else {
+            return e;
+        };
+        let branch = self.branch();
+        let (ahead, behind) = (
+            e.extra["ahead"].as_u64().unwrap_or(0),
+            e.extra["behind"].as_u64().unwrap_or(0),
+        );
+        let differs = self
+            .divergence(state, &env, &repo, &branch, ahead, behind)
+            .await;
+        if let Value::Object(extra) = &mut e.extra {
+            extra.insert("divergence".into(), differs);
+        }
+        e
+    }
+
+    /// `POST /_rustybin/git/resolve`: the ways out of a diverged branch,
+    /// each a person's call. `instance` drops the local commits and commits
+    /// the instance's copy on top of the remote head (then pushes, never
+    /// forced), `repository` takes the remote's branch and applies it with
+    /// prune, `pull_request` pushes the instance's side to a new branch and
+    /// applies nothing. `dry_run` answers what each would do.
+    pub async fn resolve(&self, state: &AppState, req: &Resolve, by: &str) -> GitResult<Value> {
+        let with = req.with.as_str();
+        if !branches::RESOLVE_OPTIONS.contains(&with) {
             return Err(GitError::new(
                 StatusCode::BAD_REQUEST,
-                "with must be instance (this instance's copy wins) or repository (the repository's copy wins)",
+                "with must be instance (this instance's copy wins), repository (the repository's copy wins) or pull_request (this instance's side goes to a new branch for a pull request at the git host)",
             ));
         }
+        if req.dry_run {
+            // A preview is not an operation of the timeline.
+            return match with {
+                "instance" => self.preview_instance(state).await,
+                "repository" => self.preview_repository(state, by).await,
+                _ => {
+                    self.resolve_pull_request(state, req.branch.as_deref(), &req.message, true)
+                        .await
+                }
+            };
+        }
         let started = Instant::now();
-        let result = self.resolve_inner(state, with, message, by).await;
+        let result = if with == "pull_request" {
+            self.resolve_pull_request(state, req.branch.as_deref(), &req.message, false)
+                .await
+        } else {
+            self.resolve_inner(state, with, &req.message, by).await
+        };
         self.record(
             "resolve",
             by,
@@ -1799,15 +1969,21 @@ impl SourceControl {
                     "the remote has no branch {branch}: there is nothing to resolve, push"
                 )));
             }
+            // The local commits go; the remote's history is never rewritten.
             self.must(&env, &repo, &["reset", "--quiet", "--hard", &upstream])
                 .await?;
+            self.synced(&branch);
         }
+        crate::audit::event("git_resolve");
+        crate::audit::target("side", with);
         if with == "instance" {
             let message = if message.trim().is_empty() {
                 "Replace the repository's configuration with this instance's".to_string()
             } else {
                 message.to_string()
             };
+            // A new commit whose parent is the remote head, then an ordinary
+            // push: a remote that moved in between refuses it.
             let committed = self.commit_inner(state, &message, &[]).await?;
             let pushed = if committed["committed"] == json!(true) {
                 Some(self.push_inner().await?)
@@ -2136,8 +2312,24 @@ impl SourceControl {
     }
 }
 
+/// `POST /_rustybin/git/resolve`.
+#[derive(Clone, Debug, Default)]
+pub struct Resolve {
+    /// `instance`, `repository` or `pull_request`.
+    pub with: String,
+    /// The commit message when the instance's side is committed.
+    pub message: String,
+    /// The new branch of `pull_request` (a name is made when absent).
+    pub branch: Option<String>,
+    /// Answer what would happen, change nothing.
+    pub dry_run: bool,
+}
+
 fn busy() -> GitError {
-    GitError::conflict("another git operation is running: try again in a moment")
+    let mut e = GitError::conflict("another git operation is running: try again in a moment");
+    // Named, so a client waits a moment and asks again instead of failing.
+    e.extra = json!({ "busy": true });
+    e
 }
 
 fn check_message(message: &str) -> GitResult<String> {
@@ -2191,6 +2383,27 @@ pub fn read_document(
             .map(|f| format!("{}: {}", DOCUMENT_NAME, f.error)),
     );
     Ok((file, problems))
+}
+
+/// The instance as a document to compare with a repository's: what a
+/// commit writes, with each mock's spec as the text its file would hold.
+/// (A bundle's `spec:` path would be read from the working copy itself, so
+/// a changed spec would compare equal to the file it is about to replace.)
+pub(crate) fn instance_document(state: &AppState) -> crate::mocks::config_file::MocksFile {
+    let export = configdoc::export(state, SecretsMode::Refs, true);
+    let mut file = export.file;
+    for doc in file.mocks.iter_mut().flatten() {
+        let text = doc
+            .spec
+            .as_deref()
+            .and_then(|path| export.specs.iter().find(|s| s.path == path))
+            .map(|s| s.text.clone());
+        if let Some(text) = text {
+            doc.spec = None;
+            doc.spec_inline = Some(Value::String(text));
+        }
+    }
+    file
 }
 
 fn truncate(s: &str, max: usize) -> String {

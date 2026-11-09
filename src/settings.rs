@@ -1147,6 +1147,15 @@ impl Settings {
                     new_secrets.insert(key, None);
                 }
                 Some(plain) => {
+                    // A secret with a canonical form (a pasted private key
+                    // with its lines) is rewritten before it is checked.
+                    let plain = match spec.normalize {
+                        Some(f) => match f(&Value::String(plain.clone())) {
+                            Value::String(s) => s,
+                            _ => plain,
+                        },
+                        None => plain,
+                    };
                     let plain = plain.trim().to_string();
                     if plain.is_empty() {
                         new_secrets.insert(key, None);

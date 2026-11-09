@@ -30,7 +30,9 @@ registry:
 portal:
   items: [{ id: "mock:orders", title: Orders API, tags: [payments], access: closed }]
 harness:
-  scenarios: [{ name: smoke, scenario: { ... } }]   # saved scenarios (harness mode)
+  scenarios:                        # saved scenarios (harness mode)
+    - { name: smoke, scenario: { ... } }               # inline, or
+    - { name: checkout, file: scenarios/checkout.yaml } # in a file next to the document
 tests:                              # saved tests: a request and its assertions
   - name: order-1
     request: { path: /mock/orders/orders/1, headers: { x-api-key: "{{X_API_KEY}}" } }
@@ -66,7 +68,7 @@ health:
 | `mocks` | The mocks, each with its spec inline (`spec_inline`) or as a file next to the document (`spec`), exactly the [version 1 entries](mocks/config.md#reference) | the mock store, as `POST /_rustybin/mocks/apply` |
 | `registry` | `servers`: `server.json` documents of the [mock MCP registry](mcp/registry.md) | the registry's file copy (entries published through the API that the document names move into it) |
 | `portal` | `items`: what the [dev portal](portal.md) publishes | the portal (a mock the item names must exist; a `mock:` item of a visitor is skipped) |
-| `harness` | `scenarios`: the [saved scenarios](harness.md), inline, validated against the node's caps | the harness (a problem when harness mode is off) |
+| `harness` | `scenarios`: the [saved scenarios](harness.md), each inline (`scenario`) or as a file next to the document (`file`, see [A scenario in a file](#a-scenario-in-a-file)), validated against the node's caps | the harness (a problem when harness mode is off) |
 | `tests` | The [saved tests](saved-tests.md), with `{{variables}}` for credentials (never values); a test that fails validation is a problem and is kept, never pruned | the saved tests (`<state>/tests.json`) |
 | `test_schedules` | The [test schedules](saved-tests.md#schedules), without their status (a replaced schedule keeps its own); one that fails validation is a problem and is kept, never pruned | the schedules (`<state>/test-schedules.json`) |
 | `agents` | The default ceiling and the rules of [AI agents](agent-mcp.md#managing-agents) | the agents policy |
@@ -107,6 +109,40 @@ MCP resource `rustybin://config.schema.json`):
 
 ```hurl
 {{#include ../examples/config/config.hurl:schema}}
+```
+
+### A scenario in a file
+
+A saved scenario may live in a file of its own, the one `rustybin harness run` takes,
+with the document naming it: `file:` instead of `scenario:`. It is read the way a
+mock's `spec:` file is:
+
+| Where the document comes from | A scenario's `file:` |
+|---|---|
+| A file given to `RUSTYBIN_CONFIG_FILE` | A path relative to the document, or an absolute one |
+| The [configuration repository](source-control.md) (a pull, the startup, the webhook) | A path inside the repository, read from the commit: no `..`, no absolute path, no link |
+| The API, a tool, `rustybin config apply` | Not read: the entry is a problem that says to send `scenario` inline |
+
+The file is YAML or JSON, at most 256 KiB, and is not expanded for `${VAR}` (a spec
+file is not either). An entry whose file cannot be read is a problem and its saved
+scenario, if there is one, stays: a prune never deletes what the document names. An
+export writes every scenario inline, so an instance that commits its own configuration
+(`git.auto: push_on_change`) records what it holds, not the layout it was loaded from.
+
+```bash
+{{#include ../examples/config/scenario-file.sh:files}}
+```
+
+```bash
+{{#include ../examples/config/scenario-file.sh:start}}
+```
+
+```bash
+{{#include ../examples/config/scenario-file.sh:saved}}
+```
+
+```bash
+{{#include ../examples/config/scenario-file.sh:api_inline}}
 ```
 
 ### Projects

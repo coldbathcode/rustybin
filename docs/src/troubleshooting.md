@@ -32,6 +32,8 @@ rustybin doctor --profile prod
 | `listeners` | HTTPS and gRPC started (HTTP always has: a bind failure stops the process) |
 | `egress_refusals` | outbound calls the egress policy refused in the last hour, by purpose |
 | `source_control` | the last git operation |
+| `source_control_diverged` | (only when it has) the branch has commits here and on the remote: the instance never merges and the automatic mode does not resolve it, so a person [chooses a way out](source-control.md#a-diverged-branch) |
+| `source_control_signing` | (only with `git.sign` on) [commit signing](source-control.md#signed-commits) can work: a usable signing key, a git that signs with SSH keys |
 | `default_password` | the console still accepts the default password |
 | `users` | (password mode) where the users live: `<state>/users.json`, in memory without a state directory (`warn`), or a file that could not be read or written (`fail`; an unreadable file is never written over) |
 | `harness` | load test mode with an engine problem |

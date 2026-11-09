@@ -461,6 +461,29 @@ fn spec_text(doc: &MockDoc, base: Option<&Path>, max_spec: u64) -> Result<String
     }
 }
 
+/// The scenario a `harness.scenarios` entry of a local file keeps in a file
+/// of its own (`file:`), read next to the config file: `Ok(None)` for an
+/// inline entry.
+pub fn scenario_from_file(
+    doc: &crate::configdoc::ScenarioDoc,
+    base: &Path,
+) -> Result<Option<Value>, String> {
+    let Some(file) = &doc.file else {
+        return Ok(None);
+    };
+    if doc.scenario.is_some() {
+        return Err("set either scenario or file, not both".into());
+    }
+    let p = Path::new(file);
+    let full = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        base.join(p)
+    };
+    let text = read_limited(&full, crate::harness::scenario::MAX_SCENARIO_BYTES as u64)?;
+    crate::configdoc::parse_scenario_file(file, &text).map(Some)
+}
+
 /// Turn documents into definitions; entries that fail are returned as errors.
 pub fn definitions(
     mocks: Vec<MockDoc>,
@@ -502,6 +525,32 @@ where
     let (mut file, skipped) =
         parse_lenient(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     out.sections = file.sections();
+    let base = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    // A scenario's `file:` is read here, where the file's directory is
+    // known, as a mock's `spec:` is below (the operator's own file: a
+    // relative path next to it, or an absolute one).
+    if let Some(harness) = file.harness.as_mut() {
+        let mut kept = Vec::new();
+        for mut doc in std::mem::take(&mut harness.scenarios) {
+            match scenario_from_file(&doc, &base) {
+                Ok(Some(value)) => {
+                    doc.scenario = Some(value);
+                    doc.file = None;
+                    kept.push(doc);
+                }
+                Ok(None) => kept.push(doc),
+                Err(e) => out.problems.push(format!(
+                    "{}: harness.scenarios.{}: {e} (skipped)",
+                    path.display(),
+                    doc.name
+                )),
+            }
+        }
+        harness.scenarios = kept;
+    }
     out.extra = crate::configdoc::Extra::take(&mut file);
     let (registry, registry_problems) =
         crate::mcp::registry::file_entries(file.registry.take().map(|r| r.servers));
@@ -532,10 +581,6 @@ where
             out.failed.push((name, f.error));
         }
     }
-    let base = path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
     let (defs, errors) = definitions(file.mocks.unwrap_or_default(), Some(&base), max_spec);
     out.defs = defs;
     for e in errors {

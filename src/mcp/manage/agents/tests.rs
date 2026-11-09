@@ -1242,6 +1242,11 @@ const OLD_RIGHTS: &[(&str, &str, bool)] = &[
     // neighbour (admin), reading one's own requests an admin read tool.
     ("request_secret", "admin", false),
     ("get_secret_request", "admin", true),
+    // Core next 11: branches and signed commits, admin tools as the other
+    // source control tools were.
+    ("git_branches", "admin", true),
+    ("git_switch_branch", "admin", false),
+    ("git_signing_key", "admin", false),
 ];
 
 /// The 0.4 ceilings, by right: `read-only` a read-only tool that is not a

@@ -15,7 +15,9 @@ use super::*;
 use crate::mocks::store::{Definition, Origin};
 use crate::test_support::{body_json, get_request, json_request, test_app_with, test_state_with};
 
+mod branches;
 mod checkpoints;
+mod signing;
 
 const SPEC: &str = r#"{"openapi":"3.0.3","info":{"title":"Orders","version":"1"},"paths":{"/orders":{"get":{"operationId":"listOrders","responses":{"200":{"description":"ok"}}}}}}"#;
 
@@ -26,6 +28,17 @@ fn git_installed() -> bool {
         .is_ok_and(|o| o.status.success());
     if !ok {
         eprintln!("git is not installed: source control tests skipped");
+    }
+    ok
+}
+
+fn ssh_keygen_installed() -> bool {
+    let ok = std::process::Command::new("ssh-keygen")
+        .arg("-?")
+        .output()
+        .is_ok();
+    if !ok {
+        eprintln!("ssh-keygen is not installed: signing key tests skipped");
     }
     ok
 }
@@ -359,12 +372,19 @@ async fn a_diverged_branch_is_reported_and_resolved_either_way() {
         .pull(&b, true, false, true, "bob")
         .await
         .expect_err("diverged");
-    assert_eq!(e.extra["options"], json!(["instance", "repository"]));
+    assert_eq!(
+        e.extra["options"],
+        json!(["instance", "repository", "pull_request"])
+    );
     assert!(e.message.contains("diverged"), "{}", e.message);
     // The repository wins: B takes A's configuration.
+    let side = |with: &str| Resolve {
+        with: with.into(),
+        ..Default::default()
+    };
     let r = b
         .git
-        .resolve(&b, "repository", "", "bob")
+        .resolve(&b, &side("repository"), "bob")
         .await
         .expect("resolve");
     assert_eq!(r["resolved"], json!("repository"));
@@ -382,7 +402,7 @@ async fn a_diverged_branch_is_reported_and_resolved_either_way() {
     assert!(b.git.push("bob").await.is_err());
     let r = b
         .git
-        .resolve(&b, "instance", "", "bob")
+        .resolve(&b, &side("instance"), "bob")
         .await
         .expect("resolve instance");
     assert_eq!(r["resolved"], json!("instance"));
@@ -397,7 +417,7 @@ async fn a_diverged_branch_is_reported_and_resolved_either_way() {
         a.settings.string("console.title").as_deref(),
         Some("B wins after all")
     );
-    assert!(b.git.resolve(&b, "nope", "", "bob").await.is_err());
+    assert!(b.git.resolve(&b, &side("nope"), "bob").await.is_err());
 }
 
 #[tokio::test]

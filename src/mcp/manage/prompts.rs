@@ -236,8 +236,9 @@ pub fn render(name: &str, params: &Value, base: &str) -> Option<String> {
                  4. Call git_commit with a message written from the drift's summary lines (what changed, in \
                  the team's words). Nothing to commit is a fine answer.\n\
                  5. Call git_push (the user confirms: the configuration leaves this host; secrets are \
-                 references, never values). On a diverged branch, explain git_resolve's two options and let \
-                 the user choose.\n\
+                 references, never values). On a diverged branch nothing is merged here: show the user what \
+                 differs (git_status: untrusted_divergence) and let them choose a way out of git_resolve (instance, \
+                 repository, or pull_request for a pull request at the git host; dry_run previews each).\n\
                  6. Confirm with git_status (ahead 0) and name the commit. Mention the automatic mode \
                  (git.auto: commit, or commit and push on every change) if the team wants it.",
                 match remote {

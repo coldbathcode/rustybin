@@ -509,7 +509,7 @@ pub static TOOLS: &[ToolDef] = &[
         "prune": { "type": "boolean", "default": false },
         "confirm": confirm_prop()
     }), &["document"])),
-    tool!("git_status", "Git status", "Source control: the repository (remote, branch, auth, deploy key), the working copy, the drift between it and the instance, ahead and behind (with fetch), the timeline of operations and the last commits. Admin.", ToolNeed::Perm(Permission::GitRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "fetch": { "type": "boolean", "default": false, "description": "Ask the remote for ahead and behind" } }), &[])),
+    tool!("git_status", "Git status", "Source control: the repository (remote, branch, auth, deploy key), the working copy, the drift between it and the instance, ahead and behind (with fetch), untrusted_divergence when the branch has diverged (the commits of each side and what each way out of git_resolve would change), whether commits are signed, the timeline of operations and the last commits. Admin.", ToolNeed::Perm(Permission::GitRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "fetch": { "type": "boolean", "default": false, "description": "Ask the remote for ahead and behind" } }), &[])),
     tool!("git_init", "Connect the repository", "Clone the configured remote (git.remote, git.branch settings) into the working copy, or start an empty one for a new repository. Admin.", ToolNeed::Perm(Permission::GitWrite), ro=false, destructive=false, idem=true, confirm=false, no_args),
     tool!("git_commit", "Commit the configuration", "Export the instance into the working copy and commit with a message (nothing to commit is a fine answer). checkpoints names local checkpoints (list_checkpoints) to write to <git.path>/checkpoints/<name>.json in the same commit: they hold mock data, so only when the user asks; the automatic mode never writes one. Admin.", ToolNeed::Perm(Permission::GitWrite), ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
         "message": { "type": "string" },
@@ -547,7 +547,7 @@ pub static TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "git_resolve",
         title: "Resolve a diverged branch",
-        description: "After a diverged branch: with instance, this instance's configuration replaces the remote branch (a force push); with repository, the repository's document is applied here and the local commits are dropped. Destructive: confirmed. Admin.",
+        description: "The ways out of a diverged branch (git_status shows untrusted_divergence: what differs, in the repository's own words). The instance never merges and the automatic mode never resolves: the user chooses. with instance: the local commits are dropped, this instance's configuration is committed on top of the remote head and pushed (never a forced push). with repository: the repository's document is applied here with prune and the local commits are dropped. with pull_request: this instance's side is pushed to a new branch (branch, or a made name) for a pull request at the git host; nothing is applied. dry_run: true previews any of them without a confirmation. Destructive: confirmed. Admin.",
         permission: ToolNeed::Perm(Permission::GitWrite),
         read_only: false,
         destructive: true,
@@ -555,8 +555,10 @@ pub static TOOLS: &[ToolDef] = &[
         confirm: true,
         open_world: true,
         input_schema: || obj(json!({
-            "with": { "type": "string", "enum": ["instance", "repository"] },
-            "message": { "type": "string", "description": "The commit message when the instance wins" },
+            "with": { "type": "string", "enum": ["instance", "repository", "pull_request"] },
+            "message": { "type": "string", "description": "The commit message when the instance's side is committed" },
+            "branch": { "type": "string", "description": "pull_request: the new branch on the remote (a name is made when absent)" },
+            "dry_run": { "type": "boolean", "default": false, "description": "What the way out would change, validated like the apply; nothing changes" },
             "confirm": confirm_prop()
         }), &["with"]),
     },
@@ -802,6 +804,33 @@ pub static TOOLS: &[ToolDef] = &[
     }), &["setting", "reason"])),
     tool!("get_secret_request", "Secret request state", "How a secret request of this agent stands: pending, fulfilled (a person set the secret), declined or expired, with when it expires and whether the setting is set now. Without an id, every request of this agent from the last hour. Never the value, and never another agent's requests.", ToolNeed::Perm(Permission::SettingsWrite), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "id": { "type": "string", "description": "The request id request_secret answered (sr_...)" }
+    }), &[])),
+    // Core next 11: branches per environment and signed commits.
+    tool!("git_branches", "The remote's branches", "The branches of the configured remote with their commits (untrusted_branches: the names are the repository's), and the one this instance is on (the git.branch setting). git_switch_branch moves the instance to one. Admin.", ToolNeed::Perm(Permission::GitRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({}), &[])),
+    ToolDef {
+        name: "git_switch_branch",
+        title: "Switch branch, or start one",
+        description: "A branch per environment. Move this instance to another branch of the remote: dry_run true answers what applying that branch's document would change (validated like the apply, nothing changes); without it the git.branch setting is stored, the working copy takes the branch and its document is applied (apply false moves the branch only; prune makes the document the whole truth). create true starts a branch the remote does not have from this instance's configuration: committed and pushed (it leaves this host). Confirmed unless dry_run. A rustybin.yaml never names a branch. Admin.",
+        permission: ToolNeed::Perm(Permission::GitWrite),
+        read_only: false,
+        destructive: true,
+        idempotent: false,
+        confirm: true,
+        open_world: true,
+        input_schema: || obj(json!({
+            "branch": { "type": "string", "maxLength": 128 },
+            "create": { "type": "boolean", "default": false, "description": "Start the branch from this instance (the remote must not have it)" },
+            "apply": { "type": "boolean", "default": true, "description": "Apply the branch's document after the switch" },
+            "dry_run": { "type": "boolean", "default": false },
+            "prune": { "type": "boolean", "default": false },
+            "message": { "type": "string", "description": "The first commit's message of a new branch" },
+            "confirm": confirm_prop()
+        }), &["branch"]),
+    },
+    tool!("git_signing_key", "Commit signing key", "Signed commits (SSH signatures, the git.sign setting, off by default): whether commits are signed, the signing key's public half and its SHA256 fingerprint to register at the git host as a signing key, and why signing cannot work when it is on and cannot. generate true makes an ed25519 key and keeps it as a secret of the instance; replace true (confirmed) replaces it. The private half is never an input or an output, and it is never the deploy key. Admin.", ToolNeed::Perm(Permission::GitWrite), ro=false, destructive=false, idem=true, confirm=true, || obj(json!({
+        "generate": { "type": "boolean", "default": false },
+        "replace": { "type": "boolean", "default": false },
+        "confirm": confirm_prop()
     }), &[])),
 ];
 
@@ -1350,6 +1379,9 @@ async fn run_tool(
         "git_pull" => config::git_pull(ctx, access, args, params).await,
         "git_resolve" => config::git_resolve(ctx, access, args, params).await,
         "git_deploy_key" => config::git_deploy_key(ctx, access, args, params).await,
+        "git_branches" => config::git_branches(ctx, access, args).await,
+        "git_switch_branch" => config::git_switch_branch(ctx, access, args, params).await,
+        "git_signing_key" => config::git_signing_key(ctx, access, args, params).await,
         // Agents
         "list_agents" => agents::tools::list_agents(ctx, access, args),
         "get_agent" => agents::tools::get_agent(ctx, access, args),

@@ -714,6 +714,9 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | POST | `/_rustybin/git/resolve` | Resolve a diverged branch (admin) |
 | GET POST | `/_rustybin/git/key` | The deploy key (admin) |
 | GET | `/_rustybin/git/history` | Commit history (admin) |
+| GET | `/_rustybin/git/branches` | The remote's branches (admin) |
+| POST | `/_rustybin/git/branch` | Switch branch, or start one (admin) |
+| GET POST | `/_rustybin/git/signing-key` | The commit signing key (admin) |
 | GET | `/_rustybin/mcp-servers` | MCP inspector: every MCP server this instance serves, and the relay's policy |
 | POST | `/_rustybin/mcp-relay` | MCP inspector: forward one JSON-RPC message to an MCP server, the answer as SSE |
 | POST | `/_rustybin/mcp-relay/fetch` | MCP inspector: fetch one OAuth discovery or token document through the instance |

@@ -1042,6 +1042,13 @@ def run_theme(browser, theme):
         expect(page.locator("#git-key-generate")).to_be_disabled()
         # The commit card offers the instance's checkpoints to commit too.
         page.wait_for_selector("#git-checkpoints >> text=checkpoint")
+        # Branches and commit signing have their cards; without a working
+        # copy their actions wait, and nothing has diverged.
+        expect(page.locator("#git-branches-list")).to_be_disabled()
+        expect(page.locator("#git-branch-create")).to_be_disabled()
+        expect(page.locator("#git-signing-generate")).to_be_disabled()
+        page.wait_for_selector("#git-signing >> text=No signing key yet")
+        expect(page.locator("#git-ways-out")).to_have_count(0)
         shot(page, theme, "20-source-control")
         assert_icons_sized(page, "management, source control")
         # Diagnostics: one row per check of the API's report, each with its
@@ -3297,6 +3304,172 @@ def run_secret_requests(browser):
     ctx.close()
 
 
+def run_source_control(browser):
+    """Management, Source control against a real repository: a diverged
+    branch (what differs, a preview, a pull request), branches (list,
+    preview, start) and the commit signing key. The instance and its bare
+    repository are this function's own: started here, stopped here."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    if not shutil.which("git"):
+        print("source control: git is not installed, skipped")
+        return
+    binary = os.environ["RUSTYBIN_UI_BIN"]
+    port = os.environ["RUSTYBIN_UI_GIT_PORT"]
+    base = f"http://127.0.0.1:{port}"
+    tmp = tempfile.mkdtemp(prefix="ui-git-")
+    bare = os.path.join(tmp, "config.git")
+
+    def git(*args, cwd=tmp):
+        subprocess.run(["git", "-c", "user.name=Someone", "-c", "user.email=someone@example.invalid", "-c", "commit.gpgsign=false", *args],
+                       cwd=cwd, check=True, capture_output=True)
+
+    def api(method, path, body=None):
+        req = urllib.request.Request(base + path, method=method, data=json.dumps(body).encode() if body is not None else None,
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.status, json.load(r)
+        except urllib.error.HTTPError as e:
+            return e.code, json.load(e)
+
+    def settled_status():
+        # One git operation at a time: while another runs (the page's own
+        # history read, say) the status answers busy without the head or
+        # the divergence. That says nothing yet: ask again.
+        for _ in range(40):
+            _, status = api("GET", "/_rustybin/git")
+            if not status.get("busy"):
+                return status
+            time.sleep(0.25)
+        raise AssertionError("the status stayed busy")
+
+    git("init", "--quiet", "--bare", "-b", "main", bare)
+    env = dict(os.environ, RUSTYBIN_HTTP_PORT=port, RUSTYBIN_HTTPS_PORT="0", RUSTYBIN_GRPC_PORT="0", RUSTYBIN_HOST="127.0.0.1",
+               RUSTYBIN_LOG_LEVEL="warn", RUSTYBIN_CONTROL_AUTH="open", RUSTYBIN_STATE_DIR=os.path.join(tmp, "state"),
+               RUSTYBIN_EGRESS_ALLOW_LOOPBACK="true", RUSTYBIN_CONFIG_GIT="file://" + bare)
+    server = subprocess.Popen([binary], cwd=tmp, env=env)
+    print(f"source control: {base}")
+    try:
+        def up():
+            try:
+                return http_at(base, "/") == 200
+            except OSError:  # not listening yet
+                return False
+
+        deadline = time.time() + 30
+        while not up() and time.time() < deadline:
+            time.sleep(0.2)
+        assert up(), "the source control instance did not start"
+        # A diverged branch: a commit on the remote that the instance lacks,
+        # and one here that the remote lacks.
+        assert api("POST", "/_rustybin/git/commit", {"message": "First"})[0] == 200
+        assert api("POST", "/_rustybin/git/push")[0] == 200
+        git("clone", "--quiet", "file://" + bare, "elsewhere")
+        with open(os.path.join(tmp, "elsewhere", "README.md"), "w") as f:
+            f.write("# notes\n")
+        git("add", "README.md", cwd=os.path.join(tmp, "elsewhere"))
+        git("commit", "--quiet", "-m", "Notes at the host", cwd=os.path.join(tmp, "elsewhere"))
+        git("push", "--quiet", "origin", "main", cwd=os.path.join(tmp, "elsewhere"))
+        assert api("PATCH", "/_rustybin/settings", {"values": {"console.title": "Changed here"}})[0] == 200
+        assert api("POST", "/_rustybin/git/commit", {"message": "A title here"})[0] == 200
+        assert api("POST", "/_rustybin/git/push")[0] == 409
+
+        ctx = browser.new_context(viewport={"width": 1440, "height": 1200})
+        page = ctx.new_page()
+        page.set_default_timeout(TIMEOUT)
+        page.on("console", lambda msg: console_errors.append(f"[git] {msg.text}") if msg.type == "error" and "Failed to load resource" not in msg.text else None)
+        page.on("pageerror", lambda e: console_errors.append(f"[git] uncaught: {e}"))
+        page.on("dialog", lambda d: d.accept())
+
+        def says_what_differs():
+            page.goto(base + "/ui/#/manage/git")
+            page.wait_for_selector("form[aria-label='Settings: git']")
+            # The status asks the remote on a refresh: the divergence shows.
+            page.click("#git-refresh")
+            page.wait_for_selector("#git-divergence")
+            expect(page.locator("#git-diverged-local")).to_contain_text("A title here")
+            expect(page.locator("#git-diverged-remote")).to_contain_text("Notes at the host")
+            expect(page.locator("#git-diverged-instance")).to_contain_text("instance.title")
+            expect(page.locator("#git-diverged-repository")).to_contain_text("instance.title")
+            expect(page.locator("#git-ways-out")).to_be_visible()
+            for name in ["instance", "repository", "pr"]:
+                expect(page.locator(f"#git-resolve-{name}")).to_be_visible()
+                expect(page.locator(f"#git-resolve-{name}-preview")).to_be_visible()
+            shot(page, "git", "60-source-control-diverged")
+            assert_icons_sized(page, "source control, diverged")
+
+        step("source control: a diverged branch says what differs and offers the ways out", says_what_differs)
+
+        def previews_change_nothing():
+            page.click("#git-resolve-repository-preview")
+            page.wait_for_selector("#git-result >> text=would take the remote's main")
+            page.click("#git-resolve-instance-preview")
+            page.wait_for_selector("#git-result >> text=would commit this instance's configuration")
+            expect(page.locator("#git-result-summary")).to_contain_text("instance.title")
+            status = settled_status()
+            assert status["divergence"] is not None, "a preview resolved the divergence"
+            assert status["head"]["subject"] == "A title here", status["head"]
+
+        step("source control: each way out previews without changing anything", previews_change_nothing)
+
+        def pull_request_names_the_branch():
+            page.fill("#git-resolve-branch", "review/title")
+            page.click("#git-resolve-pr")
+            page.wait_for_selector("#git-result >> text=open a pull request from review/title into main")
+            # Still diverged, on purpose, and the branch is on the remote.
+            page.wait_for_selector("#git-divergence")
+            page.click("#git-branches-list")
+            page.wait_for_selector("#git-branch-list >> text=review/title")
+            expect(page.locator("#git-branch-list")).to_contain_text("this instance")
+            expect(page.locator("[data-git-branch-switch='review/title']")).to_be_visible()
+            page.click("[data-git-branch-preview='review/title']")
+            page.wait_for_selector("#git-branch-result >> text=would switch from main to review/title")
+            shot(page, "git", "61-source-control-branches")
+
+        step("source control: the instance's side goes to a branch for a pull request, and the branches list it", pull_request_names_the_branch)
+
+        def a_new_branch_and_the_setting():
+            page.fill("#git-branch-new", "staging")
+            page.click("#git-branch-create-preview")
+            page.wait_for_selector("#git-branch-result >> text=would start staging from this instance")
+            page.click("#git-branch-create")
+            page.wait_for_selector("#git-branch-result >> text=started staging from this instance")
+            # The repository form follows the setting the switch stored.
+            page.wait_for_function("document.querySelector(\"[aria-label='git.branch']\") && document.querySelector(\"[aria-label='git.branch']\").value === 'staging'")
+            status = settled_status()
+            assert status["branch"] == "staging", status["branch"]
+
+        step("source control: a new branch starts from the instance and the form follows", a_new_branch_and_the_setting)
+
+        def the_signing_key_shows_its_public_half():
+            page.wait_for_selector("#git-signing >> text=No signing key yet")
+            if not shutil.which("ssh-keygen"):
+                return
+            page.click("#git-signing-generate")
+            page.wait_for_selector("#git-signing-fingerprint")
+            expect(page.locator("#git-signing-fingerprint")).to_contain_text("SHA256:")
+            expect(page.locator("#git-signing-public")).to_contain_text("ssh-ed25519 ")
+            body = page.content()
+            assert "OPENSSH PRIVATE KEY" not in body and "b3BlbnNzaC1rZXktdjE" not in body, "the private key is on the page"
+            shot(page, "git", "62-source-control-signing")
+
+        step("source control: the signing key shows its public half and fingerprint only", the_signing_key_shows_its_public_half)
+        ctx.close()
+    except Exception as e:  # noqa: BLE001 - the setup failed: report it with the rest
+        print(f"  FAIL source control: {e}")
+        failures.append(f"source control: {e}")
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=10)
+        except Exception:  # noqa: BLE001
+            server.kill()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     print(f"console e2e against {BASE}")
     with sync_playwright() as p:
@@ -3322,6 +3495,8 @@ def main():
             run_sso(browser)
         if os.environ.get("RUSTYBIN_SIGNIN_URL"):
             run_sign_in_optional(browser)
+        if os.environ.get("RUSTYBIN_UI_BIN") and os.environ.get("RUSTYBIN_UI_GIT_PORT"):
+            run_source_control(browser)
         browser.close()
     for e in console_errors:
         failures.append("console: " + e)

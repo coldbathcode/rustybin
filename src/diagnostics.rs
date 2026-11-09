@@ -206,6 +206,35 @@ pub fn report(state: &AppState) -> Value {
         ),
         None => check("source_control", "ok", "no git operation since start", None),
     });
+    // A diverged branch waits for a person: the instance never merges and
+    // the automatic mode never resolves.
+    if let Some((ahead, behind)) = state.git.diverged() {
+        checks.push(check(
+            "source_control_diverged",
+            "warn",
+            format!(
+                "the repository and this instance have diverged ({ahead} commit(s) here, {behind} there): the instance never merges and the automatic mode does not resolve it"
+            ),
+            Some("Management, Source control shows what differs: resolve with the instance's copy, the repository's, or put the instance's side in a pull request (rustybin git resolve)"),
+        ));
+    }
+    // Signed commits: on, and able to work.
+    if state.git.signing_enabled() {
+        checks.push(match state.git.signing_problem() {
+            Some(problem) => check(
+                "source_control_signing",
+                "warn",
+                problem,
+                Some("generate a signing key (Management, Source control, or rustybin git signing-key --generate) and register its public key at the git host, or turn git.sign off; commits are refused until then"),
+            ),
+            None => check(
+                "source_control_signing",
+                "ok",
+                "commits are signed with the signing key",
+                None,
+            ),
+        });
+    }
 
     // The sign-in.
     checks.push(

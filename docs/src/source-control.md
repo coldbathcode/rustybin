@@ -4,7 +4,8 @@ An instance can keep its configuration ([the whole instance as code](configurati
 in a git repository: commit and push it from **Management, Source control**, pull and
 apply the repository's version with a dry run first, start from the repository so it
 is the source of truth and the backup, and let the instance push every change or pull
-at an interval.
+at an interval. A branch per environment, signed commits, and a diverged branch
+resolved by a person (a side, or a pull request at the git host) are on this page too.
 
 ## What it needs
 
@@ -82,6 +83,14 @@ Nothing more:
 - **Not other people's mocks.** A prune deletes only the instance's own mocks: never a
   visitor's, an API key's or a running [gateway scenario](gateway-scenarios.md)'s, and
   never a mock the document names but could not read (an entry with a typo included).
+- **Not source control itself.** No `git.*` setting or secret is changed by a pulled
+  document: not the remote, the branch, the directory, the automatic mode, commit
+  signing, the token, the webhook secret or the signing key. A pusher cannot move an
+  instance to another branch or repository, turn signing off or stop the webhook; a
+  different value is a problem and the setting is kept (the export never carries the
+  group, so only a hand-written document names one). A scenario's `file:` and a mock's
+  `spec:` are paths inside the repository, read from the commit: no `..`, no absolute
+  path, no link.
 - **Not the harness's credentials.** Saved scenarios are exported with their API keys
   and OAuth client secrets as `secret:stored`, filled back from the saved scenario of
   the same name when applied, and only when the scenario's targets (scheme, host, port,
@@ -111,6 +120,9 @@ instance is pushed and what a pull applies), and `secrets.write` for `git.token`
 | `git.author` | | `Rustybin <rustybin@example.invalid>` | `Name <email>` of the commits. |
 | `git.auto` | `RUSTYBIN_CONFIG_GIT_AUTO` | `off` | `push_on_change` or `pull`, see [Automatic mode](#automatic-mode). |
 | `git.pull_every` | | `5m` | The interval of the pull mode (`1m` to `24h`). |
+| `git.webhook_secret` (secret) | | unset | The secret a git host signs push webhooks with, see [A webhook instead of polling](#a-webhook-instead-of-polling). |
+| `git.sign` | | `false` | Sign every commit this instance makes, see [Signed commits](#signed-commits). |
+| `git.signing_key` (secret) | | unset | The private key commits are signed with: an OpenSSH key without a passphrase. Never the deploy key, never shown again. |
 
 **Deploy key.** For an ssh remote, **Generate the deploy key** (`POST
 /_rustybin/git/key`) creates an ed25519 key in `<state>/repo.key` (mode `0600`) and
@@ -134,8 +146,9 @@ and connect when ready:
 ```
 
 Every operation is admin-only, audited (`rustybin::git` log lines, the timeline in the
-status), serialised by one lock, and runs git with a timeout, `GIT_TERMINAL_PROMPT=0`
-and no global or system git configuration.
+status), serialised by one lock (a call that finds it taken answers `409` with
+`busy: true`: ask again in a moment, as the console does), and runs git with a timeout,
+`GIT_TERMINAL_PROMPT=0` and no global or system git configuration.
 
 ## Status
 
@@ -143,11 +156,21 @@ and no global or system git configuration.
 whether git is installed and the working copy exists, the last commit, ahead and
 behind against the remote, the **drift** (the changes a commit would record: the
 instance's export diffed against the working copy's document, as lines such as
-`mocks.orders: spec changed (2 operation(s) added)`), the deploy key's public half and
-the timeline of operations.
+`mocks.orders: spec changed (2 operation(s) added)`), the deploy key's public half,
+`signing` (whether commits are signed, the signing key's public half and fingerprint),
+`divergence` (what differs, when the branch has diverged) and the timeline of
+operations. While another git operation holds the working copy the status answers
+`busy: true` without the last commit, the counts, the drift or the divergence: that
+says nothing about them yet, so ask again in a moment.
 
 ```bash
 {{#include ../examples/config/source-control.sh:status}}
+```
+
+On an instance where nothing is connected yet, `signing` and `divergence` say so:
+
+```hurl
+{{#include ../examples/config/git_branches.hurl:status_signing}}
 ```
 
 ## Commit and push
@@ -155,7 +178,8 @@ the timeline of operations.
 `POST /_rustybin/git/commit` `{message}` exports the instance as a bundle into
 `<repo>/<git.path>/` (`rustybin.yaml` and `specs/`, specs as files so a reviewer
 diffs them) and commits; nothing to commit is an answer, not an error. `POST
-/_rustybin/git/push` pushes the branch.
+/_rustybin/git/push` pushes the branch. A commit is signed when `git.sign` is on
+([Signed commits](#signed-commits)) and its answer says so (`signed`).
 
 ```bash
 {{#include ../examples/config/source-control.sh:commit_push}}
@@ -195,22 +219,187 @@ never restores one (`POST /_rustybin/checkpoints/{name}/restore?from=git` does, 
 {{#include ../examples/config/source-control.sh:pull_dry_run}}
 ```
 
-**Conflicts.** The instance never merges. When the branch has diverged (commits here
-and commits there), push and pull answer `409` with `conflict`, `ahead` and `behind`,
-and `POST /_rustybin/git/resolve` `{with}` offers the two ways out: `instance`
-replaces the repository's copy with this instance's (the local commits are dropped,
-the instance's configuration is committed on top of the remote and pushed; `message`
-names the commit) and `repository` replaces this instance with the repository's (the
-remote branch is taken and applied with prune). The console shows both buttons under
-the error.
+## A diverged branch
+
+The instance never merges. When the branch has diverged (commits here and commits
+there), push and pull answer `409` with `conflict`, `ahead`, `behind`, `options` and
+`divergence`: **what differs**. The status carries the same `divergence` (null when
+nothing has diverged):
+
+- `local_commits` and `remote_commits`: the commits of each side (ten at most);
+- `instance`: what taking this instance's copy would change in the repository's
+  document, and `repository`: what taking the repository's copy would change here,
+  both by section, as the lines of a [diff](configuration-as-code.md#apply-with-a-dry-run-first).
 
 ```bash
 {{#include ../examples/config/source-control.sh:diverged}}
 ```
 
 ```bash
+{{#include ../examples/config/source-control.sh:what_differs}}
+```
+
+`POST /_rustybin/git/resolve` `{with, message, branch, dry_run}` is the way out, and a
+person chooses it: the [automatic mode](#automatic-mode) and the webhook never resolve a
+divergence, they keep reporting it (the log, the timeline, the status and the
+`source_control_diverged` check of the [diagnostics](troubleshooting.md)).
+
+| `with` | What happens | `dry_run` answers |
+|---|---|---|
+| `instance` | The local commits are dropped and this instance's configuration is committed on top of the remote's branch (the new commit's parent is the remote head), then pushed; `message` names the commit. Never a forced push: if the remote moved in between, the push is refused and nothing there changed. | The changes the commit would make to the repository's document |
+| `repository` | The working copy takes the remote's branch and its document is applied with prune, through the same checks as a pull. The local commits are dropped. | The apply's own dry run of the remote's document, validated exactly like the apply; the working copy does not move |
+| `pull_request` | Neither side wins yet. What the instance holds is committed (when it differs from its last commit) and the local branch is pushed to a new branch of the remote: `branch`, or a made name such as `main-instance-20261109-153012`. Nothing is applied, `git.branch` stays, and the answer names the branch and the base to open the pull request against. Never forced: a branch of that name with other commits is refused. | The branch and the commits it would carry |
+
+A preview of `repository` is the answer of a pull's dry run: `applied.summary` lists
+what the document itself changes, and `applied.results` is the full account, with what
+prune would unset or delete because the document does not name it.
+
+```hurl
+{{#include ../examples/config/git_branches.hurl:resolve_preview}}
+```
+
+```bash
+{{#include ../examples/config/source-control.sh:resolve_preview}}
+```
+
+```bash
 {{#include ../examples/config/source-control.sh:resolve}}
 ```
+
+**Through a pull request.** `pull_request` is for a team that reviews configuration:
+the merge happens at the git host, by a person, with the host's own tools for a
+conflict in `rustybin.yaml`.
+
+```hurl
+{{#include ../examples/config/git_branches.hurl:resolve_pull_request}}
+```
+
+```bash
+{{#include ../examples/config/source-control.sh:pull_request}}
+```
+
+Open a pull request from that branch into the instance's branch. Until it is merged the
+instance still reads as diverged, on purpose. After a merge commit the instance's
+commits are part of the branch's history, so an ordinary pull fast-forwards and
+applies:
+
+```bash
+{{#include ../examples/config/source-control.sh:after_merge}}
+```
+
+After a squash or a rebase merge the history differs, the branch still reads as
+diverged, and `repository` takes the merged result. Commits that named
+[checkpoints](checkpoints.md#in-the-configuration-repository) travel with the
+`pull_request` branch; `instance` and `repository` drop the local commits, and with
+them a checkpoint that was committed and never pushed (commit it again).
+
+In the console the status shows what differs, and **A diverged branch** has the three
+ways out, each with **Preview**.
+
+## Branches
+
+A branch per environment: one repository, a `staging` and a `production` branch, an
+instance on each. The branch is the `git.branch` setting and nothing else: a
+`rustybin.yaml` never names a branch, and a document from the repository never changes
+`git.branch` ([what a repository writer can do](#what-a-repository-writer-can-do)).
+
+`GET /_rustybin/git/branches` lists the remote's branches (200 at most, with their
+commits) and says which one the instance is on:
+
+```hurl
+{{#include ../examples/config/git_branches.hurl:branches}}
+```
+
+```bash
+{{#include ../examples/config/source-control.sh:branches}}
+```
+
+`POST /_rustybin/git/branch` `{branch, create, apply, dry_run, prune, message}` moves
+the instance:
+
+- **Switch** to a branch the remote has. With `dry_run` the answer is what applying
+  that branch's document would change, read from the commit and validated exactly like
+  the apply, and nothing changes: not the setting, not the working copy. Without it
+  `git.branch` is stored, the working copy takes the branch, and its document is
+  applied (`prune` makes it the whole truth; `apply: false` moves the branch only). A
+  branch whose document cannot be read is not switched to, and a switch that fails
+  puts the setting and the working copy back.
+- **Start** a branch the remote does not have, with `create: true`: the branch is
+  created at the working copy's head, `git.branch` is stored, the instance's
+  configuration is committed (`message`) and the branch is pushed. `dry_run` answers
+  what the commit would record.
+
+```hurl
+{{#include ../examples/config/git_branches.hurl:switch_preview}}
+```
+
+```bash
+{{#include ../examples/config/source-control.sh:switch_preview}}
+```
+
+```bash
+{{#include ../examples/config/source-control.sh:switch}}
+```
+
+```hurl
+{{#include ../examples/config/git_branches.hurl:branch_start}}
+```
+
+```bash
+{{#include ../examples/config/source-control.sh:branch_start}}
+```
+
+The old branch keeps its commits, here and on the remote; nothing is deleted. The
+webhook and the automatic mode follow the setting, so after a switch they work on the
+new branch. With `RUSTYBIN_SETTINGS_LOCK` the branch is the environment's
+(`RUSTYBIN_CONFIG_GIT_REF`) and a switch is refused.
+
+## Signed commits
+
+A git host with branch protection may want every commit signed. With `git.sign` on,
+the instance signs each commit it makes (yours, the automatic mode's, a resolve's) with
+an SSH signature, which needs git 2.34 or later (the image has it).
+
+The key is a key of its own, the secret `git.signing_key`: never the deploy key, since
+a host registers a key that pushes and a key that vouches in different places.
+`POST /_rustybin/git/signing-key` generates an ed25519 key and answers its **public
+half** and its **`SHA256:` fingerprint**; `GET` answers them again. Register the public
+key at the git host as a signing key (on GitHub: SSH keys, key type "Signing key"; on
+GitLab: SSH keys with usage "Signing"), then turn `git.sign` on:
+
+```hurl
+{{#include ../examples/config/git_branches.hurl:signing_key}}
+```
+
+```hurl
+{{#include ../examples/config/git_branches.hurl:signing_key_generate}}
+```
+
+```bash
+{{#include ../examples/config/source-control.sh:signing_key}}
+```
+
+```bash
+{{#include ../examples/config/source-control.sh:signed_commit}}
+```
+
+- **A key of yours.** Set the secret instead of generating (Management, Source
+  control, or `rustybin settings set-secret git.signing_key < key`): an OpenSSH private
+  key without a passphrase, pasted whole. It is kept as one line (the text between the
+  `BEGIN` and `END` lines), sealed like every secret, at most 4096 bytes (an ed25519
+  or ECDSA key, or RSA up to 3072 bits).
+- **Never shown.** Every answer carries the public half and the fingerprint only. When
+  a commit is signed the key is written to `<state>/repo.signing.key` (mode `0600`) for
+  git, as the deploy key is in `<state>/repo.key`.
+- **Never unsigned by accident.** With `git.sign` on and no usable key (none set, one
+  with a passphrase, git too old), a commit answers `409` with the reason and is not
+  made. The status says so under `signing.problem`, and so does the
+  `source_control_signing` check of the [diagnostics](troubleshooting.md).
+- **The author** is still `git.author`; a host shows a commit as verified when that
+  email belongs to the account the signing key is registered with.
+
+The instance signs; it does not verify. Whether the commits it pulls are signed, and by
+whom, is the host's branch protection to enforce.
 
 ## History
 
@@ -246,13 +435,19 @@ creates the branch. The deploy key file, when the remote is ssh, is
   copy's document and, when they differ, commits with a message naming the changes
   (`Update mocks.orders: added; settings.portal.enabled: changed to on`) and pushes. A
   failure is logged once until it changes. It never writes a checkpoint: those hold
-  mock data and are committed only on request.
+  mock data and are committed only on request. With `git.sign` on its commits are
+  signed.
 - `pull`: every `git.pull_every` the instance pulls and applies the repository with
   prune: the repository is the truth, console changes last until the next pull.
 
+Neither mode ever resolves a [diverged branch](#a-diverged-branch): the push or the pull
+is refused, nothing is applied, and the status and the diagnostics say so until a
+person chooses a way out.
+
 Set one per instance and one direction per repository: an instance that pushes and
 another that pulls is a deployment pipeline; two that push to one branch end in
-conflicts for someone to resolve.
+conflicts for someone to resolve. One branch per environment keeps them apart
+([Branches](#branches)).
 
 The whole flow against a bare repository in a temporary directory:
 
@@ -284,8 +479,10 @@ the right signature does nothing. Without the secret the route answers `404`:
 
 ## Not in this version
 
-Merges and conflict resolution inside the instance (resolve with either side, or in a
-pull request), branches per environment, and signed commits.
+A merge inside the instance: a diverged branch is resolved by naming a side, or in a
+pull request at the git host. Verifying the signatures of pulled commits against a
+list of allowed signers: a host's merge commits carry the host's own signature, so it
+is the host's branch protection that enforces who may sign.
 
 ## On every surface
 
@@ -293,9 +490,9 @@ The same job from the API, the console, the command line, an agent and the confi
 
 | Surface | Where |
 |---|---|
-| API | `GET /_rustybin/git`, `POST /_rustybin/git/init`, `/commit` (with `checkpoints`), `/push`, `/pull`, `/resolve`, `GET`, `POST /_rustybin/git/key`, `GET /_rustybin/git/history`; the repository's checkpoints: `GET /_rustybin/checkpoints?from=git`, `POST /_rustybin/checkpoints/{name}/restore?from=git` |
-| Console | **Management, Source control**: the repository form, status, connect, commit and push (with a checkpoint choice), pull, resolve, the deploy key, history; **Management, Checkpoints, In the repository** |
-| CLI | `rustybin git status`, `init`, `commit` (`--checkpoint NAME`), `push`, `pull`, `resolve`, `key`, `history`; `rustybin checkpoint list --from-git`, `checkpoint restore NAME --from-git` ([reference](cli.md#git)) |
-| Management MCP | `git_status`, `git_init`, `git_commit` (`checkpoints`), `git_push`, `git_pull`, `git_resolve`, `git_deploy_key`, `list_repository_checkpoints`, `restore_checkpoint` with `from: "git"`; the prompt `backup_to_git` ([agent page](agent-mcp.md)) |
-| `rustybin.yaml` | Never: the `git.*` settings (the remote, the token) are not exported, so a document in a repository cannot point the instance elsewhere |
+| API | `GET /_rustybin/git`, `POST /_rustybin/git/init`, `/commit` (with `checkpoints`), `/push`, `/pull`, `/resolve` (`instance`, `repository`, `pull_request`, with `dry_run`), `GET`, `POST /_rustybin/git/key`, `GET /_rustybin/git/history`, `GET /_rustybin/git/branches`, `POST /_rustybin/git/branch`, `GET`, `POST /_rustybin/git/signing-key`; the repository's checkpoints: `GET /_rustybin/checkpoints?from=git`, `POST /_rustybin/checkpoints/{name}/restore?from=git` |
+| Console | **Management, Source control**: the repository form, status (what differs on a diverged branch), connect, commit and push (with a checkpoint choice), pull, a diverged branch's three ways out with a preview, branches (list, preview, switch, start), the deploy key, commit signing, history; **Management, Checkpoints, In the repository** |
+| CLI | `rustybin git status`, `init`, `commit` (`--checkpoint NAME`), `push`, `pull`, `resolve` (`--with instance`, `repository` or `pull-request`, `--branch`, `--dry-run`), `key`, `history`, `branches`, `switch`, `branch`, `signing-key`; `rustybin checkpoint list --from-git`, `checkpoint restore NAME --from-git` ([reference](cli.md#git)) |
+| Management MCP | `git_status`, `git_init`, `git_commit` (`checkpoints`), `git_push`, `git_pull`, `git_resolve`, `git_deploy_key`, `git_branches`, `git_switch_branch`, `git_signing_key`, `list_repository_checkpoints`, `restore_checkpoint` with `from: "git"`; the prompt `backup_to_git` ([agent page](agent-mcp.md)) |
+| `rustybin.yaml` | Never: the `git.*` settings (the remote, the branch, the token, signing) are not exported, and a document from the repository cannot change one, so a document in a repository cannot point the instance elsewhere. The settings themselves: `git.branch`, `git.sign`, the secret `git.signing_key` |
 | Environment | `RUSTYBIN_CONFIG_GIT`, `_REF`, `_PATH`, `_AUTH`, `_TOKEN`, `_AUTO`, `_REQUIRED` ([configuration](configuration.md#source-control)) |

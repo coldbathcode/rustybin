@@ -1,6 +1,7 @@
 //! Configuration as code and source control tools: the whole instance as a
 //! version 2 `rustybin.yaml` (export, diff, apply) and the git repository
-//! (status, init, commit, push, pull, resolve, the deploy key).
+//! (status, init, commit, push, pull, resolve, the deploy key, branches,
+//! the commit signing key).
 
 use serde_json::{json, Value};
 
@@ -229,8 +230,20 @@ fn git_error(e: GitError) -> Value {
     if let Value::Object(m) = &mut body {
         m.insert("status".into(), json!(e.status.as_u16()));
     }
+    untrusted_divergence(&mut body);
     v["structuredContent"] = body;
     v
+}
+
+/// What differs on a diverged branch quotes the repository (commit
+/// subjects, the keys of its document): third-party content, so a tool
+/// answers it as `untrusted_divergence`, never in the text summary.
+fn untrusted_divergence(body: &mut Value) {
+    if let Value::Object(m) = body {
+        if let Some(d) = m.remove("divergence") {
+            m.insert("untrusted_divergence".into(), d);
+        }
+    }
 }
 
 fn git_summary(s: &Value) -> String {
@@ -275,6 +288,14 @@ fn git_summary(s: &Value) -> String {
             parts.push(format!("automatic mode {auto}"));
         }
     }
+    if s["untrusted_divergence"].is_object() {
+        parts.push("DIVERGED: the branch has commits here and there; it is never merged here and the automatic mode does not resolve it. Show the user untrusted_divergence (what differs) and let them choose git_resolve with instance, repository or pull_request (dry_run previews each)".into());
+    }
+    if let Some(problem) = s["signing"]["problem"].as_str() {
+        parts.push(format!("commit signing cannot work: {problem}"));
+    } else if s["signing"]["enabled"].as_bool() == Some(true) {
+        parts.push("commits are signed".into());
+    }
     parts.join("; ")
 }
 
@@ -290,6 +311,7 @@ pub async fn git_status(ctx: &CallCtx, _access: &Access, args: &Value) -> Value 
         };
         m.insert("commits".into(), history);
     }
+    untrusted_divergence(&mut status);
     let summary = git_summary(&status);
     ok(ctx, summary, status)
 }
@@ -377,7 +399,7 @@ pub async fn git_push(ctx: &CallCtx, access: &Access, args: &Value, params: &Val
                 .unwrap_or_else(|| format!("pushed {} to {remote}", ctx.app.git.branch())),
             v,
         ),
-        Err(e) => git_error(e),
+        Err(e) => git_error(ctx.app.git.explain(&ctx.app, e).await),
     }
 }
 
@@ -432,41 +454,220 @@ pub async fn git_pull(ctx: &CallCtx, access: &Access, args: &Value, params: &Val
             };
             ok(ctx, summary, v)
         }
-        Err(e) => git_error(e),
+        Err(e) => git_error(ctx.app.git.explain(&ctx.app, e).await),
     }
 }
 
-/// `git_resolve` (admin, confirmed): after a diverged branch, the
-/// instance's copy wins (`with: instance`) or the repository's.
+/// `git_resolve` (admin, confirmed unless `dry_run`): the ways out of a
+/// diverged branch. The instance's copy wins (`with: instance`), the
+/// repository's (`repository`), or the instance's side goes to a new branch
+/// for a pull request at the git host (`pull_request`, nothing applied).
 pub async fn git_resolve(ctx: &CallCtx, access: &Access, args: &Value, params: &Value) -> Value {
     let with = match need_str(args, "with") {
         Ok(w) => w,
         Err(e) => return e,
     };
-    if !matches!(with, "instance" | "repository") {
-        return err("with must be instance (this instance's configuration replaces the branch) or repository (the repository's document is applied here)");
+    if !crate::sourcecontrol::branches::RESOLVE_OPTIONS.contains(&with) {
+        return err("with must be instance (this instance's configuration is committed on top of the remote branch), repository (the repository's document is applied here) or pull_request (this instance's side is pushed to a new branch, nothing applied)");
     }
-    let message = arg_str(args, "message").unwrap_or("");
-    let action = match with {
-        "instance" => "resolve the diverged branch with this instance's configuration: the remote branch is replaced (force push)",
-        _ => "resolve the diverged branch with the repository's document: it is applied to this instance and the local commits are dropped",
+    let dry_run = arg_bool(args, "dry_run").unwrap_or(false);
+    let req = crate::sourcecontrol::Resolve {
+        with: with.to_string(),
+        message: arg_str(args, "message").unwrap_or("").to_string(),
+        branch: arg_str(args, "branch")
+            .filter(|b| !b.trim().is_empty())
+            .map(str::to_string),
+        dry_run,
     };
-    if let Confirm::Answer(v) = confirm(ctx, "git_resolve", args, params, action).await {
-        return v;
+    if !dry_run {
+        let action = match with {
+            "instance" => "resolve the diverged branch with this instance's configuration: the local commits are dropped and the instance's configuration is committed on top of the remote branch and pushed (the repository's document is replaced; never a forced push)".to_string(),
+            "repository" => "resolve the diverged branch with the repository's document: it is applied to this instance with prune and the local commits are dropped".to_string(),
+            _ => format!(
+                "push this instance's side to a new branch of the remote ({}) for a pull request: the configuration leaves this host, nothing is applied",
+                req.branch.as_deref().unwrap_or("a made name")
+            ),
+        };
+        if let Confirm::Answer(v) = confirm(ctx, "git_resolve", args, params, &action).await {
+            return v;
+        }
     }
     match ctx
         .app
         .git
-        .resolve(&ctx.app, with, message, &access.principal())
+        .resolve(&ctx.app, &req, &access.principal())
+        .await
+    {
+        Ok(v) => ok(
+            ctx,
+            if dry_run {
+                format!(
+                    "Preview (nothing changed): {}",
+                    v["detail"].as_str().unwrap_or("")
+                )
+            } else if with == "pull_request" {
+                v["detail"].as_str().unwrap_or("pushed").to_string()
+            } else {
+                format!(
+                    "Resolved with the {with}'s copy: {}",
+                    v["detail"].as_str().unwrap_or("")
+                )
+            },
+            v,
+        ),
+        Err(e) => git_error(e),
+    }
+}
+
+/// `git_branches` (git.read): the remote's branches and the one this
+/// instance is on. Names come from the remote: under `untrusted_branches`.
+pub async fn git_branches(ctx: &CallCtx, _access: &Access, _args: &Value) -> Value {
+    match ctx.app.git.branches().await {
+        Ok(mut v) => {
+            let listed = v["branches"].as_array().map(Vec::len).unwrap_or(0);
+            let summary = format!(
+                "This instance is on {} ({}); the remote has {listed} branch(es){}",
+                v["branch"].as_str().unwrap_or("?"),
+                if v["on_remote"].as_bool() == Some(true) {
+                    "on the remote"
+                } else {
+                    "not on the remote yet"
+                },
+                if v["truncated"].as_bool() == Some(true) {
+                    " listed, and more"
+                } else {
+                    ""
+                }
+            );
+            // What a writer of the repository named is third-party content.
+            if let Value::Object(m) = &mut v {
+                if let Some(list) = m.remove("branches") {
+                    m.insert("untrusted_branches".into(), list);
+                }
+            }
+            ok(ctx, summary, v)
+        }
+        Err(e) => git_error(e),
+    }
+}
+
+/// `git_switch_branch` (git.write, confirmed unless `dry_run`): move the
+/// instance to another branch of the remote, or start one from it.
+pub async fn git_switch_branch(
+    ctx: &CallCtx,
+    access: &Access,
+    args: &Value,
+    params: &Value,
+) -> Value {
+    let branch = match need_str(args, "branch") {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let req = crate::sourcecontrol::BranchRequest {
+        branch: branch.to_string(),
+        create: arg_bool(args, "create").unwrap_or(false),
+        apply: arg_bool(args, "apply").unwrap_or(true),
+        dry_run: arg_bool(args, "dry_run").unwrap_or(false),
+        prune: arg_bool(args, "prune").unwrap_or(false),
+        message: arg_str(args, "message").unwrap_or("").to_string(),
+    };
+    if !req.dry_run {
+        let action = if req.create {
+            format!(
+                "start the branch {branch} from this instance: its configuration is committed and pushed to the remote (it leaves this host), and the instance commits to {branch} from now on"
+            )
+        } else {
+            format!(
+                "switch this instance from {} to {branch}{}",
+                ctx.app.git.branch(),
+                match (req.apply, req.prune) {
+                    (true, true) => ": that branch's document is applied with prune (it becomes the whole truth for its sections)",
+                    (true, false) => ": that branch's document is applied to this instance",
+                    (false, _) => " without applying its document",
+                }
+            )
+        };
+        if let Confirm::Answer(v) = confirm(ctx, "git_switch_branch", args, params, &action).await {
+            return v;
+        }
+    }
+    match ctx
+        .app
+        .git
+        .switch_branch(&ctx.app, &req, &access.principal())
+        .await
+    {
+        Ok(v) => {
+            let applied = &v["applied"];
+            let summary = if req.dry_run && applied.is_object() {
+                apply_summary(
+                    applied,
+                    &format!("Preview of a switch to {branch} (nothing changed)"),
+                )
+            } else if req.dry_run {
+                format!(
+                    "Preview (nothing changed): {}",
+                    v["detail"].as_str().unwrap_or("")
+                )
+            } else {
+                v["detail"].as_str().unwrap_or("done").to_string()
+            };
+            ok(ctx, summary, v)
+        }
+        Err(e) => git_error(e),
+    }
+}
+
+/// `git_signing_key` (git.write): the commit signing key's public half and
+/// fingerprint; `generate` makes one, `replace` (confirmed) replaces it. The
+/// private half is never an input or an output.
+pub async fn git_signing_key(
+    ctx: &CallCtx,
+    access: &Access,
+    args: &Value,
+    params: &Value,
+) -> Value {
+    let generate = arg_bool(args, "generate").unwrap_or(false);
+    let replace = arg_bool(args, "replace").unwrap_or(false);
+    if !generate {
+        let signing = ctx.app.git.signing();
+        let summary = match (
+            signing["public"].as_str(),
+            signing["enabled"].as_bool().unwrap_or(false),
+            signing["problem"].as_str(),
+        ) {
+            (_, _, Some(problem)) => format!("Commit signing cannot work: {problem}"),
+            (Some(_), true, _) => format!(
+                "Commits are signed. Register the public key at the git host as a signing key (fingerprint {})",
+                signing["fingerprint"].as_str().unwrap_or("?")
+            ),
+            (Some(_), false, _) => format!(
+                "A signing key is set (fingerprint {}) and git.sign is off: commits are not signed until update_settings turns it on",
+                signing["fingerprint"].as_str().unwrap_or("?")
+            ),
+            (None, _, _) => "No signing key yet: call again with generate true, then register the public key at the git host and turn git.sign on (update_settings)".to_string(),
+        };
+        return ok(ctx, summary, json!({ "signing": signing }));
+    }
+    if replace {
+        let action = "replace the commit signing key: commits signed from now on verify only once the new public key is registered at the git host";
+        if let Confirm::Answer(v) = confirm(ctx, "git_signing_key", args, params, action).await {
+            return v;
+        }
+    }
+    match ctx
+        .app
+        .git
+        .generate_signing_key(replace, &access.principal())
         .await
     {
         Ok(v) => ok(
             ctx,
             format!(
-                "Resolved with the {with}'s copy: {}",
-                v["detail"].as_str().unwrap_or("")
+                "Signing key generated (fingerprint {}): register its public half at the git host as a signing key, then turn git.sign on (update_settings)",
+                v["fingerprint"].as_str().unwrap_or("?")
             ),
-            v,
+            json!({ "signing": v }),
         ),
         Err(e) => git_error(e),
     }

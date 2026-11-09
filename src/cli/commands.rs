@@ -243,6 +243,37 @@ const AUDIT_TAIL_FLAGS: &[Flag] = &[
     Flag::value("--max", "Stop after this many events"),
     Flag::value("--timeout", "Stop after this many seconds (default 3600)"),
 ];
+const RESOLVE_FLAGS: &[Flag] = &[
+    Flag::value("--with", "instance, repository or pull-request"),
+    Flag::value(
+        "--message",
+        "The commit message when the instance's side is committed",
+    ),
+    Flag::value(
+        "--branch",
+        "pull-request: the new branch on the remote (a name is made without it)",
+    ),
+    Flag::switch(
+        "--dry-run",
+        "What the way out would change; nothing changes",
+    ),
+];
+const SWITCH_FLAGS: &[Flag] = &[
+    Flag::switch(
+        "--dry-run",
+        "What applying the branch's document would change; nothing changes",
+    ),
+    Flag::switch("--prune", "The branch's document is the whole truth"),
+    Flag::switch("--no-apply", "Move the branch only, apply nothing"),
+];
+const BRANCH_FLAGS: &[Flag] = &[
+    Flag::value("--message", "The first commit's message (also -m)"),
+    Flag::value("-m", "The first commit's message"),
+    Flag::switch(
+        "--dry-run",
+        "What the first commit would record; nothing changes",
+    ),
+];
 const COMMIT_FLAGS: &[Flag] = &[
     Flag::value("--message", "The commit message (also -m)"),
     Flag::value("-m", "The commit message"),
@@ -460,7 +491,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("git", "commit", "-m \"<message>\" [--checkpoint NAME]...", "Export the instance into the working copy and commit; --checkpoint also commits a local checkpoint (repeat it, or a,b).", COMMIT_FLAGS,[("POST", "/_rustybin/git/commit")], false, "git commit -m \"Add the orders mock\""),
     cmd!("git", "push", "", "Push the branch.", NO_FLAGS, [("POST", "/_rustybin/git/push")], false, "git push"),
     cmd!("git", "pull", "[--apply] [--dry-run] [--prune]", "Fetch and fast-forward; --apply applies the repository's document.", &[Flag::switch("--apply", "Apply the document"), Flag::switch("--dry-run", "Show the diff, apply nothing"), Flag::switch("--prune", "The document is the whole truth")], [("POST", "/_rustybin/git/pull")], false, "git pull --apply --dry-run"),
-    cmd!("git", "resolve", "--with instance|repository", "After a diverged branch: the instance's copy wins, or the repository's.", &[Flag::value("--with", "instance or repository"), Flag::value("--message", "The commit message when the instance wins")], [("POST", "/_rustybin/git/resolve")], true, "git resolve --with repository --yes"),
+    cmd!("git", "resolve", "--with instance|repository|pull-request [--branch NAME] [--dry-run]", "The ways out of a diverged branch (git status shows what differs): the instance's copy wins, the repository's wins, or the instance's side goes to a new branch for a pull request at the git host (nothing applied). --dry-run previews any of them.", RESOLVE_FLAGS, [("POST", "/_rustybin/git/resolve")], false, "git resolve --with repository --dry-run"),
     cmd!("git", "key", "[--generate] [--replace]", "The deploy key's public half; --generate makes one.", &[Flag::switch("--generate", "Generate the key"), Flag::switch("--replace", "Replace an existing key")], [("GET", "/_rustybin/git/key"), ("POST", "/_rustybin/git/key")], true, "git key --generate"),
     cmd!("git", "history", "", "The last commits of the working copy.", NO_FLAGS, [("GET", "/_rustybin/git/history")], false, "git history"),
     // ── Harness ──
@@ -512,6 +543,11 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("settings", "requests", "[--state S]", "The secrets AI agents asked to have set (request_secret): the setting, the agent and the user it acts for, the agent's reason (its claim), the state. An agent never sets a secret: you fulfil or decline.", &[Flag::value("--state", "Only pending, fulfilled, declined or expired")], [("GET", "/_rustybin/secret-requests")], false, "settings requests --state pending"),
     cmd!("settings", "fulfil", "<id> [--stdin]", "Set the secret an agent asked for: the value is prompted without echo, or read from the first line of stdin, never an argument. It goes to the settings store and never to the agent; needs what settings set-secret needs for that setting.", &[Flag::switch("--stdin", "Read the secret from the first line of stdin")], [("GET", "/_rustybin/secret-requests/{id}"), ("POST", "/_rustybin/secret-requests/{id}/fulfil")], false, "settings fulfil sr_0000000000000000 --stdin < key.txt"),
     cmd!("settings", "decline", "<id>", "Decline a secret request: nothing is set, and the agent reads declined.", NO_FLAGS, [("POST", "/_rustybin/secret-requests/{id}/decline")], false, "settings decline sr_0000000000000000"),
+    // ── Source control: branches per environment, signed commits ──
+    cmd!("git", "branches", "", "The remote's branches, and the one this instance is on.", NO_FLAGS, [("GET", "/_rustybin/git/branches")], false, "git branches"),
+    cmd!("git", "switch", "<branch> [--dry-run] [--prune] [--no-apply]", "Move this instance to another branch of the remote (a branch per environment). --dry-run shows what applying that branch's document would change; without it the branch is stored (git.branch), taken, and its document applied.", SWITCH_FLAGS, [("POST", "/_rustybin/git/branch")], false, "git switch staging --dry-run"),
+    cmd!("git", "branch", "<name> [-m \"<message>\"] [--dry-run]", "Start a branch the remote does not have from this instance's configuration: committed, pushed, and the instance commits to it from now on.", BRANCH_FLAGS, [("POST", "/_rustybin/git/branch")], false, "git branch staging --dry-run"),
+    cmd!("git", "signing-key", "[--generate] [--replace]", "The commit signing key's public half and fingerprint, to register at the git host as a signing key; --generate makes one. Commits are signed when the git.sign setting is on.", &[Flag::switch("--generate", "Generate the key"), Flag::switch("--replace", "Replace an existing key")], [("GET", "/_rustybin/git/signing-key"), ("POST", "/_rustybin/git/signing-key")], false, "git signing-key"),
 ];
 
 /// Catalogue paths no command calls, each with its reason (the parity test
@@ -3750,11 +3786,169 @@ async fn git(ctx: &mut Ctx, verb: &str) -> Result<()> {
             let with = ctx
                 .args
                 .value("--with")
-                .ok_or_else(|| Fail::Usage("--with instance or --with repository".into()))?
-                .to_string();
-            let body =
-                json!({ "with": with, "message": ctx.args.value("--message").unwrap_or("") });
-            post(ctx, "/_rustybin/git/resolve", Body::Json(body)).await
+                .ok_or_else(|| {
+                    Fail::Usage("--with instance, --with repository or --with pull-request".into())
+                })?
+                .replace('-', "_");
+            let dry_run = ctx.args.has("--dry-run");
+            let mut body = json!({
+                "with": with,
+                "message": ctx.args.value("--message").unwrap_or(""),
+                "dry_run": dry_run,
+            });
+            if let Some(branch) = ctx.args.value("--branch") {
+                body["branch"] = json!(branch);
+            }
+            if !dry_run {
+                ctx.confirm(&match with.as_str() {
+                    "instance" => "git resolve: replace the repository's configuration with this instance's".to_string(),
+                    "repository" => "git resolve: replace this instance's configuration with the repository's (with prune)".to_string(),
+                    _ => "git resolve: push this instance's side to a new branch for a pull request".to_string(),
+                })?;
+            }
+            let v = ctx
+                .client()?
+                .post("/_rustybin/git/resolve", Body::Json(body))
+                .await?
+                .value();
+            if ctx.json {
+                ctx.emit(&v);
+            } else {
+                ctx.raw(v["detail"].as_str().unwrap_or("done"));
+                for key in ["summary", "commits"] {
+                    for line in v[key].as_array().into_iter().flatten() {
+                        ctx.raw(&format!("  {}", line.as_str().unwrap_or("")));
+                    }
+                }
+                if v["applied"].is_object() {
+                    print_apply_report(ctx, &v["applied"]);
+                }
+            }
+            Ok(())
+        }
+        "branches" => {
+            let v = ctx
+                .client()?
+                .get("/_rustybin/git/branches", &[])
+                .await?
+                .value();
+            if ctx.json {
+                ctx.emit(&v);
+            } else {
+                for b in v["branches"].as_array().into_iter().flatten() {
+                    ctx.raw(&format!(
+                        "{} {} {}",
+                        if b["current"] == json!(true) {
+                            "*"
+                        } else {
+                            " "
+                        },
+                        b["name"].as_str().unwrap_or(""),
+                        b["short"].as_str().unwrap_or("")
+                    ));
+                }
+                if v["on_remote"] == json!(false) {
+                    ctx.raw(&format!(
+                        "* {} (not on the remote yet)",
+                        v["branch"].as_str().unwrap_or("")
+                    ));
+                }
+                if v["truncated"] == json!(true) {
+                    ctx.raw("  (more branches are not listed)");
+                }
+            }
+            Ok(())
+        }
+        "switch" | "branch" => {
+            let create = verb == "branch";
+            let name = ctx.args.arg(0, "a branch name")?.to_string();
+            let dry_run = ctx.args.has("--dry-run");
+            let prune = ctx.args.has("--prune");
+            let body = if create {
+                json!({
+                    "branch": name,
+                    "create": true,
+                    "dry_run": dry_run,
+                    "message": ctx.args.value("--message").or_else(|| ctx.args.value("-m")).unwrap_or(""),
+                })
+            } else {
+                json!({
+                    "branch": name,
+                    "dry_run": dry_run,
+                    "prune": prune,
+                    "apply": !ctx.args.has("--no-apply"),
+                })
+            };
+            if !dry_run {
+                ctx.confirm(&if create {
+                    format!("git branch {name}: commit this instance's configuration to the new branch and push it")
+                } else if ctx.args.has("--no-apply") {
+                    format!("git switch {name}: move this instance to that branch")
+                } else {
+                    format!(
+                        "git switch {name}: move this instance to that branch and apply its document{}",
+                        if prune { " with prune" } else { "" }
+                    )
+                })?;
+            }
+            let v = ctx
+                .client()?
+                .post("/_rustybin/git/branch", Body::Json(body))
+                .await?
+                .value();
+            if ctx.json {
+                ctx.emit(&v);
+            } else {
+                ctx.raw(v["detail"].as_str().unwrap_or("done"));
+                for line in v["summary"].as_array().into_iter().flatten() {
+                    ctx.raw(&format!("  {}", line.as_str().unwrap_or("")));
+                }
+                if v["applied"].is_object() {
+                    print_apply_report(ctx, &v["applied"]);
+                }
+            }
+            Ok(())
+        }
+        "signing-key" => {
+            let v = if ctx.args.has("--generate") {
+                let body = json!({ "replace": ctx.args.has("--replace") });
+                ctx.client()?
+                    .post("/_rustybin/git/signing-key", Body::Json(body))
+                    .await?
+                    .value()
+            } else {
+                ctx.client()?
+                    .get("/_rustybin/git/signing-key", &[])
+                    .await?
+                    .value()
+            };
+            if ctx.json {
+                ctx.emit(&v);
+                return Ok(());
+            }
+            let s = &v["signing"];
+            match s["public"].as_str() {
+                Some(public) => {
+                    ctx.raw(public);
+                    ctx.raw(&format!(
+                        "fingerprint: {}",
+                        s["fingerprint"].as_str().unwrap_or("")
+                    ));
+                    ctx.raw(&format!(
+                        "commits are {}",
+                        if s["enabled"] == json!(true) {
+                            "signed (git.sign is on)"
+                        } else {
+                            "not signed (rustybin settings set git.sign true)"
+                        }
+                    ));
+                }
+                None => ctx.raw("no signing key yet: rustybin git signing-key --generate"),
+            }
+            if let Some(problem) = s["problem"].as_str() {
+                ctx.raw(&format!("problem: {problem}"));
+            }
+            Ok(())
         }
         "key" => {
             if ctx.args.has("--generate") {

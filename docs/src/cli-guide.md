@@ -151,7 +151,8 @@ Nouns mirror the control API: `mocks`, `requests`, `bins`, `tests`, `scenario`,
 `settings`, `sessions`, `users`, `roles`, `me`, `visits`, `visit`, `keys`, `egress`,
 `instance`, `profiles`. `rustybin help <noun>` lists the verbs, `--help` on any
 command its flags and an example. Verbs that remove or replace something (`delete`,
-`clear`, `revoke`, `end-all`, `apply --prune`, `git resolve`) ask first; `--yes` answers
+`clear`, `revoke`, `end-all`, `apply --prune`, `git resolve`, `git switch`, `git branch`)
+ask first (not their `--dry-run`); `--yes` answers
 for a script, and without a terminal they refuse rather than wait.
 
 Files are read by the command line, so `rustybin mocks create orders --spec orders.yaml`
