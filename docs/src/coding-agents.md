@@ -403,10 +403,10 @@ rule of `rustybin.yaml`; see [Managing agents](agent-mcp.md#managing-agents)):
 
 | Ceiling | For | Tools an admin credential sees |
 |---|---|---|
-| `read-only` | Exploring: what is mocked, what the deploy checks say, sample requests | 60 |
-| `traffic` | Debugging a gateway: the above plus captured traffic | 66 |
+| `read-only` | Exploring: what is mocked, what the deploy checks say, sample requests | 61 |
+| `traffic` | Debugging a gateway: the above plus captured traffic | 67 |
 | `manage` | Building mocks: reads plus creating, editing and deploying mocks, AI-built examples, the portal | 69 |
-| `full` | Building the whole platform: settings, git, agents, saved tests, checkpoints, the harness | 125 |
+| `full` | Building the whole platform: settings, git, agents, saved tests, checkpoints, the harness | 128 |
 
 The counts are for an admin credential on an instance without self-service mocks;
 `tools/list` shows only what the agent may call. Start with `read-only` while you
@@ -441,7 +441,7 @@ rustybin agents rights <id> --ceiling manage --deny delete_mock,apply_config
 
 ## Tool limits
 
-With an admin credential the server has 139 tools, sent 100 to a `tools/list` page
+With an admin credential the server has 142 tools, sent 100 to a `tools/list` page
 with `nextCursor` for the rest. Clients differ in how many tools they take:
 
 | Client | Reads every `tools/list` page | Its own limit |

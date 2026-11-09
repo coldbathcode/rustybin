@@ -1130,3 +1130,132 @@ async fn the_dry_check_exits_one_when_the_policy_would_refuse() {
         .await;
     assert_eq!(code, 0, "{out}");
 }
+
+/// Core next 11: branches, the pull request way out and the signing key
+/// from the command line.
+#[tokio::test]
+async fn git_branches_switch_resolve_and_signing_key() {
+    if !std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+    {
+        eprintln!("git is not installed: skipped");
+        return;
+    }
+    let inst = instance().await;
+    inst.login().await;
+    let bare = inst.home.path().join("remote.git");
+    let out = std::process::Command::new("git")
+        .args(["init", "--quiet", "--bare", "-b", "main"])
+        .arg(&bare)
+        .output()
+        .expect("git init --bare");
+    assert!(out.status.success());
+    let remote = format!("file://{}", bare.display());
+    inst.json(&["settings", "set", "git.remote", &remote]).await;
+    inst.json(&["git", "init"]).await;
+    inst.json(&["git", "commit", "-m", "First"]).await;
+    inst.json(&["git", "push"]).await;
+
+    // A new branch from the instance: a preview, then the branch.
+    let v = inst.json(&["git", "branch", "staging", "--dry-run"]).await;
+    assert_eq!(v["would_create"], json!("staging"), "{v}");
+    let v = inst
+        .json(&["git", "branch", "staging", "-m", "Staging starts", "--yes"])
+        .await;
+    assert_eq!(v["created"], json!(true), "{v}");
+    let (code, text) = inst.run(None, &["git", "branches"]).await;
+    assert_eq!(code, 0);
+    assert!(
+        text.contains("  main ") && text.contains("* staging "),
+        "{text}"
+    );
+    // Back to main with a preview first.
+    let (code, text) = inst
+        .run(None, &["git", "switch", "main", "--dry-run", "--prune"])
+        .await;
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("would switch from staging to main"), "{text}");
+    assert!(text.contains("would apply"), "{text}");
+    let v = inst.json(&["git", "switch", "main", "--yes"]).await;
+    assert_eq!(v["switched"], json!(true), "{v}");
+    let v = inst.json(&["settings", "get", "git.branch"]).await;
+    assert_eq!(v["value"], json!("main"));
+    // A branch the remote lacks is exit 1, a missing name is usage.
+    let (code, _) = inst.run(None, &["git", "switch", "nope", "--yes"]).await;
+    assert_eq!(code, 1);
+    let (code, _) = inst.run(None, &["git", "switch"]).await;
+    assert_eq!(code, 2);
+
+    // The instance's side to a branch for a pull request.
+    inst.json(&["settings", "set", "console.title", "For review"])
+        .await;
+    let v = inst
+        .json(&[
+            "git",
+            "resolve",
+            "--with",
+            "pull-request",
+            "--branch",
+            "review/title",
+            "--dry-run",
+        ])
+        .await;
+    assert_eq!(v["would_resolve"], json!("pull_request"), "{v}");
+    let (code, text) = inst
+        .run(
+            None,
+            &[
+                "git",
+                "resolve",
+                "--with",
+                "pull-request",
+                "--branch",
+                "review/title",
+                "--yes",
+            ],
+        )
+        .await;
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains("open a pull request from review/title into main"),
+        "{text}"
+    );
+    let (code, text) = inst
+        .run(
+            None,
+            &["git", "resolve", "--with", "repository", "--dry-run"],
+        )
+        .await;
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("would take the remote's main"), "{text}");
+    let (code, _) = inst.run(None, &["git", "resolve", "--dry-run"]).await;
+    assert_eq!(code, 2);
+
+    // The signing key: none, then generated; the private half never printed.
+    let (code, text) = inst.run(None, &["git", "signing-key"]).await;
+    assert_eq!(code, 0);
+    assert!(text.contains("no signing key yet"), "{text}");
+    if std::process::Command::new("ssh-keygen")
+        .arg("-?")
+        .output()
+        .is_ok()
+    {
+        let (code, text) = inst.run(None, &["git", "signing-key", "--generate"]).await;
+        assert_eq!(code, 0, "{text}");
+        assert!(text.starts_with("ssh-ed25519 "), "{text}");
+        assert!(text.contains("fingerprint: SHA256:"), "{text}");
+        assert!(text.contains("not signed"), "{text}");
+        let private = inst
+            .state
+            .settings
+            .secret(crate::sourcecontrol::SIGNING_KEY_KEY)
+            .expect("stored");
+        assert!(!text.contains(private.as_str()));
+        let v = inst.json(&["git", "signing-key"]).await;
+        assert_eq!(v["signing"]["key_set"], json!(true));
+        assert!(!v.to_string().contains(private.as_str()));
+    }
+    inst.server.shutdown();
+}

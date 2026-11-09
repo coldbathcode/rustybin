@@ -85,7 +85,8 @@ pub const INSTRUCTIONS: &str = "This server manages one Rustybin instance: an HT
     validate_payload, export_*, diff_config, try_request, issue_token, assist_status, \
     validate_server_json, git_status) change nothing. Tools that change the instance say so in \
     their descriptions; destructive ones (delete_mock, rollback_mock, clear_*, apply_config with \
-    prune, revoke_agent, unpublish_registry_server, git_resolve, end_session with all, the visit \
+    prune, revoke_agent, unpublish_registry_server, git_resolve, git_switch_branch, end_session \
+    with all, the visit \
     operator tools) and outward-facing ones (mcp_call and run_mcp_checks to another host, \
     browse_registry, git_push, publishing to an open portal, the AI tools when they write, harness \
     runs) ask the user to confirm (elicitation) or need \"confirm\": true, which you set only \

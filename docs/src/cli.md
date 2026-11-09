@@ -667,9 +667,13 @@ Source control
 | `rustybin git commit -m "<message>" [--checkpoint NAME]...` | Export the instance into the working copy and commit; --checkpoint also commits a local checkpoint (repeat it, or a,b). Flags: `--message` value, `-m` value, `--checkpoint` value. | `POST /_rustybin/git/commit` | `git.write` |
 | `rustybin git push` | Push the branch. | `POST /_rustybin/git/push` | `git.write` |
 | `rustybin git pull [--apply] [--dry-run] [--prune]` | Fetch and fast-forward; --apply applies the repository's document. Flags: `--apply`, `--dry-run`, `--prune`. | `POST /_rustybin/git/pull` | `git.write` |
-| `rustybin git resolve --with instance\|repository` | After a diverged branch: the instance's copy wins, or the repository's. Flags: `--with` value, `--message` value. | `POST /_rustybin/git/resolve` | `git.write` |
+| `rustybin git resolve --with instance\|repository\|pull-request [--branch NAME] [--dry-run]` | The ways out of a diverged branch (git status shows what differs): the instance's copy wins, the repository's wins, or the instance's side goes to a new branch for a pull request at the git host (nothing applied). --dry-run previews any of them. Flags: `--with` value, `--message` value, `--branch` value, `--dry-run`. | `POST /_rustybin/git/resolve` | `git.write` |
 | `rustybin git key [--generate] [--replace]` | The deploy key's public half; --generate makes one. Flags: `--generate`, `--replace`. | `GET /_rustybin/git/key`, `POST /_rustybin/git/key` | `git.read`, `git.write` |
 | `rustybin git history` | The last commits of the working copy. | `GET /_rustybin/git/history` | `git.read` |
+| `rustybin git branches` | The remote's branches, and the one this instance is on. | `GET /_rustybin/git/branches` | `git.read` |
+| `rustybin git switch <branch> [--dry-run] [--prune] [--no-apply]` | Move this instance to another branch of the remote (a branch per environment). --dry-run shows what applying that branch's document would change; without it the branch is stored (git.branch), taken, and its document applied. Flags: `--dry-run`, `--prune`, `--no-apply`. | `POST /_rustybin/git/branch` | `git.write` |
+| `rustybin git branch <name> [-m "<message>"] [--dry-run]` | Start a branch the remote does not have from this instance's configuration: committed, pushed, and the instance commits to it from now on. Flags: `--message` value, `-m` value, `--dry-run`. | `POST /_rustybin/git/branch` | `git.write` |
+| `rustybin git signing-key [--generate] [--replace]` | The commit signing key's public half and fingerprint, to register at the git host as a signing key; --generate makes one. Commits are signed when the git.sign setting is on. Flags: `--generate`, `--replace`. | `GET /_rustybin/git/signing-key`, `POST /_rustybin/git/signing-key` | `git.read`, `git.write` |
 
 ```bash
 rustybin git status --fetch
@@ -677,9 +681,13 @@ rustybin git init
 rustybin git commit -m "Add the orders mock"
 rustybin git push
 rustybin git pull --apply --dry-run
-rustybin git resolve --with repository --yes
+rustybin git resolve --with repository --dry-run
 rustybin git key --generate
 rustybin git history
+rustybin git branches
+rustybin git switch staging --dry-run
+rustybin git branch staging --dry-run
+rustybin git signing-key
 ```
 
 ## harness

@@ -7,9 +7,15 @@
 //! - `POST /_rustybin/git/commit` `{message, checkpoints}`: export into the
 //!   working copy and commit, with the named checkpoints.
 //! - `POST /_rustybin/git/push`, `POST /_rustybin/git/pull` `{apply,
-//!   dry_run, prune}`, `POST /_rustybin/git/resolve` `{with, message}`.
+//!   dry_run, prune}`, `POST /_rustybin/git/resolve` `{with, message,
+//!   branch, dry_run}`: the ways out of a diverged branch.
 //! - `GET`, `POST /_rustybin/git/key` `{replace}`: the deploy key.
 //! - `GET /_rustybin/git/history`: the last 50 commits.
+//! - `GET /_rustybin/git/branches`: the remote's branches; `POST
+//!   /_rustybin/git/branch` `{branch, create, apply, dry_run, prune,
+//!   message}`: switch to one (with a preview) or start one.
+//! - `GET`, `POST /_rustybin/git/signing-key` `{replace}`: the key commits
+//!   are signed with (the public half and its fingerprint only).
 
 use axum::body::Bytes;
 use axum::extract::{Query, State};
@@ -33,6 +39,9 @@ pub const WEBHOOK_PATH: &str = "/_rustybin/git/webhook";
 pub const RESOLVE_PATH: &str = "/_rustybin/git/resolve";
 pub const KEY_PATH: &str = "/_rustybin/git/key";
 pub const HISTORY_PATH: &str = "/_rustybin/git/history";
+pub const BRANCHES_PATH: &str = "/_rustybin/git/branches";
+pub const BRANCH_PATH: &str = "/_rustybin/git/branch";
+pub const SIGNING_KEY_PATH: &str = "/_rustybin/git/signing-key";
 
 fn answer(result: Result<Value, GitError>) -> Response {
     match result {
@@ -105,7 +114,16 @@ async fn commit(
 }
 
 async fn push(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    answer(state.git.push(&operator(&headers, &state)).await)
+    let result = state.git.push(&operator(&headers, &state)).await;
+    answer(explained(&state, result).await)
+}
+
+/// A diverged branch's `409` with what differs.
+async fn explained(state: &AppState, result: Result<Value, GitError>) -> Result<Value, GitError> {
+    match result {
+        Err(e) => Err(state.git.explain(state, e).await),
+        ok => ok,
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -128,18 +146,17 @@ async fn pull(
         Ok(b) => b,
         Err(r) => return r,
     };
-    answer(
-        state
-            .git
-            .pull(
-                &state,
-                b.apply,
-                b.dry_run,
-                b.prune,
-                &operator(&headers, &state),
-            )
-            .await,
-    )
+    let result = state
+        .git
+        .pull(
+            &state,
+            b.apply,
+            b.dry_run,
+            b.prune,
+            &operator(&headers, &state),
+        )
+        .await;
+    answer(explained(&state, result).await)
 }
 
 #[derive(Deserialize, Default)]
@@ -149,6 +166,12 @@ struct ResolveBody {
     with: String,
     #[serde(default)]
     message: String,
+    /// The new branch of `pull_request` (a name is made when absent).
+    #[serde(default)]
+    branch: Option<String>,
+    /// What the way out would do, nothing changed.
+    #[serde(default)]
+    dry_run: bool,
 }
 
 async fn resolve(
@@ -160,11 +183,104 @@ async fn resolve(
         Ok(b) => b,
         Err(r) => return r,
     };
+    let req = super::Resolve {
+        with: b.with,
+        message: b.message,
+        branch: b.branch,
+        dry_run: b.dry_run,
+    };
     answer(
         state
             .git
-            .resolve(&state, &b.with, &b.message, &operator(&headers, &state))
+            .resolve(&state, &req, &operator(&headers, &state))
             .await,
+    )
+}
+
+async fn branches(State(state): State<AppState>) -> Response {
+    answer(state.git.branches().await)
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BranchBody {
+    #[serde(default)]
+    branch: String,
+    /// Start the branch from the instance (it must not exist on the remote).
+    #[serde(default)]
+    create: bool,
+    /// Apply the branch's document after a switch (default true).
+    #[serde(default = "default_true")]
+    apply: bool,
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default)]
+    prune: bool,
+    #[serde(default)]
+    message: String,
+}
+
+impl Default for BranchBody {
+    fn default() -> Self {
+        Self {
+            branch: String::new(),
+            create: false,
+            apply: true,
+            dry_run: false,
+            prune: false,
+            message: String::new(),
+        }
+    }
+}
+
+async fn branch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> Response {
+    let b: BranchBody = match body(&bytes) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    let req = super::BranchRequest {
+        branch: b.branch,
+        create: b.create,
+        apply: b.apply,
+        dry_run: b.dry_run,
+        prune: b.prune,
+        message: b.message,
+    };
+    answer(
+        state
+            .git
+            .switch_branch(&state, &req, &operator(&headers, &state))
+            .await,
+    )
+}
+
+async fn get_signing_key(State(state): State<AppState>) -> Response {
+    Json(json!({ "signing": state.git.signing() })).into_response()
+}
+
+async fn generate_signing_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> Response {
+    let b: KeyBody = match body(&bytes) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    answer(
+        state
+            .git
+            .generate_signing_key(b.replace, &operator(&headers, &state))
+            .await
+            .map(|signing| json!({ "signing": signing })),
     )
 }
 
@@ -274,6 +390,12 @@ pub fn router(_state: &AppState) -> Router<AppState> {
         .route(RESOLVE_PATH, post(resolve))
         .route(KEY_PATH, get(get_key).post(generate_key))
         .route(HISTORY_PATH, get(history))
+        .route(BRANCHES_PATH, get(branches))
+        .route(BRANCH_PATH, post(branch))
+        .route(
+            SIGNING_KEY_PATH,
+            get(get_signing_key).post(generate_signing_key),
+        )
 }
 
 pub fn catalog() -> Vec<Endpoint> {
@@ -330,7 +452,7 @@ pub fn catalog() -> Vec<Endpoint> {
                 "{apply, dry_run, prune}: fetch and fast-forward; with apply, apply the repository's \
                  document to the instance (dry_run answers the diff without touching anything, \
                  prune makes the document the whole truth). Never merges: a diverged branch \
-                 answers 409 with the two ways out.",
+                 answers 409 with what differs (divergence) and the ways out (options).",
             )
             .example(
                 Example::post("Pull, dry run", PULL_PATH)
@@ -340,9 +462,14 @@ pub fn catalog() -> Vec<Endpoint> {
         Endpoint::new(RESOLVE_PATH, &["POST"], category::CONTROL, "Resolve a diverged branch (admin)")
 .permission(crate::rbac::Permission::GitWrite)
             .description(
-                "{with: instance | repository, message}: instance drops the local commits and \
-                 commits and pushes this instance's configuration on top of the remote; \
-                 repository takes the remote's branch and applies it with prune.",
+                "{with: instance | repository | pull_request, message, branch, dry_run}: the ways \
+                 out of a diverged branch, each a person's call (the automatic mode never \
+                 resolves). instance drops the local commits, commits this instance's \
+                 configuration on top of the remote head and pushes (never a forced push); \
+                 repository takes the remote's branch and applies it with prune; pull_request \
+                 pushes this instance's side to a new branch (branch, or a made name) for a \
+                 pull request at the git host and applies nothing. dry_run answers what the \
+                 way out would change, validated like the apply.",
             )
             .example(
                 Example::post("Resolve with the instance's copy", RESOLVE_PATH)
@@ -361,6 +488,42 @@ pub fn catalog() -> Vec<Endpoint> {
 .permission(crate::rbac::Permission::GitRead)
             .description("The last 50 commits of the working copy with their file counts.")
             .example(Example::get("History", HISTORY_PATH).expect_status(409)),
+        Endpoint::new(BRANCHES_PATH, &["GET"], category::CONTROL, "The remote's branches (admin)")
+            .permission(crate::rbac::Permission::GitRead)
+            .description(
+                "The branches of the remote (git ls-remote through the outbound policy, 200 at \
+                 most) with their commits, and which one this instance is on (the git.branch \
+                 setting).",
+            )
+            .example(Example::get("Branches", BRANCHES_PATH).expect_status(409)),
+        Endpoint::new(BRANCH_PATH, &["POST"], category::CONTROL, "Switch branch, or start one (admin)")
+            .permission(crate::rbac::Permission::GitWrite)
+            .description(
+                "{branch, create, apply, dry_run, prune, message}: move this instance to another \
+                 branch of the remote (a branch per environment). dry_run answers what applying \
+                 that branch's document would change, validated like the apply, and changes \
+                 nothing; without it the git.branch setting is stored, the working copy takes \
+                 the branch and its document is applied (apply: false moves the branch only). \
+                 create: true starts a branch the remote does not have from this instance's \
+                 current configuration: committed and pushed. A document never names a branch.",
+            )
+            .example(
+                Example::post("Preview a switch", BRANCH_PATH)
+                    .json(r#"{"branch": "staging", "dry_run": true}"#)
+                    .expect_status(409),
+            ),
+        Endpoint::new(SIGNING_KEY_PATH, &["GET", "POST"], category::CONTROL, "The commit signing key (admin)")
+            .permission_for(&["GET"], crate::rbac::Permission::GitRead)
+            .permission_for(&["POST"], crate::rbac::Permission::GitWrite)
+            .description(
+                "GET answers whether commits are signed (git.sign), the signing key's public half \
+                 and its SHA256 fingerprint to register at the git host as a signing key, and \
+                 why signing cannot work when it is on and cannot; never the private half. POST \
+                 {replace} generates an ed25519 key (ssh-keygen) and keeps it as the secret \
+                 git.signing_key. Never the deploy key.",
+            )
+            .example(Example::get("Show the signing key", SIGNING_KEY_PATH))
+            .example(Example::post("Generate the signing key", SIGNING_KEY_PATH).expect_status(409)),
     ]
 }
 
@@ -374,7 +537,7 @@ pub fn openapi_paths() -> Value {
         GIT_PATH: { "get": {
             "tags": tags, "summary": "Source control status", "operationId": "gitStatus",
             "parameters": [{ "name": "fetch", "in": "query", "schema": { "type": "boolean" }, "description": "Ask the remote for ahead and behind" }],
-            "responses": { "200": { "description": "{git, remote, branch, path, auth, initialised, head, ahead, behind, drift, deploy_key, timeline}" }, "401": admin }
+            "responses": { "200": { "description": "{git, remote, branch, path, auth, initialised, head, ahead, behind, drift, divergence (what differs and the ways out, when diverged), deploy_key, signing, timeline}" }, "401": admin }
         } },
         INIT_PATH: { "post": { "tags": tags, "summary": "Connect the repository", "operationId": "gitInit", "responses": ok("{initialised, fresh, remote_branch, head}") } },
         COMMIT_PATH: { "post": { "tags": tags, "summary": "Commit the instance's configuration", "operationId": "gitCommit",
@@ -391,14 +554,33 @@ pub fn openapi_paths() -> Value {
             "responses": ok("{fast_forwarded, ahead, behind, head, applied, checkpoints (the repository's, by name)}") } },
         RESOLVE_PATH: { "post": { "tags": tags, "summary": "Resolve a diverged branch", "operationId": "gitResolve",
             "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["with"], "properties": {
-                "with": { "type": "string", "enum": ["instance", "repository"] }, "message": { "type": "string" } } } } } },
-            "responses": ok("{resolved, commit, push} or {resolved, applied, head}") } },
+                "with": { "type": "string", "enum": ["instance", "repository", "pull_request"] },
+                "message": { "type": "string", "description": "The commit message when the instance's side is committed" },
+                "branch": { "type": "string", "maxLength": 128, "description": "pull_request: the new branch (a name is made when absent)" },
+                "dry_run": { "type": "boolean", "default": false, "description": "What the way out would change; nothing is changed" } } } } } },
+            "responses": ok("{resolved, commit, push}, {resolved, applied, head} or {resolved, branch, base, pushed}; with dry_run {dry_run, would_resolve, ...}") } },
         KEY_PATH: {
             "get": { "tags": tags, "summary": "The deploy key's public half", "operationId": "gitKey", "responses": { "200": { "description": "{deploy_key: {public, path} | null}" }, "401": admin } },
             "post": { "tags": tags, "summary": "Generate the deploy key", "operationId": "gitGenerateKey",
                 "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "replace": { "type": "boolean", "default": false } } } } } },
                 "responses": ok("{public, path, generated}") }
         },
-        HISTORY_PATH: { "get": { "tags": tags, "summary": "Commit history", "operationId": "gitHistory", "responses": ok("{commits: [{sha, short, author, at, subject, stat}]}") } }
+        HISTORY_PATH: { "get": { "tags": tags, "summary": "Commit history", "operationId": "gitHistory", "responses": ok("{commits: [{sha, short, author, at, subject, stat}]}") } },
+        BRANCHES_PATH: { "get": { "tags": tags, "summary": "The remote's branches", "operationId": "gitBranches", "responses": ok("{branch, on_remote, branches: [{name, sha, short, current}], truncated, unlisted}") } },
+        BRANCH_PATH: { "post": { "tags": tags, "summary": "Switch branch, or start one", "operationId": "gitBranch",
+            "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["branch"], "properties": {
+                "branch": { "type": "string", "maxLength": 128 },
+                "create": { "type": "boolean", "default": false, "description": "Start the branch from this instance (the remote must not have it)" },
+                "apply": { "type": "boolean", "default": true, "description": "Apply the branch's document after the switch" },
+                "dry_run": { "type": "boolean", "default": false, "description": "The preview: what applying the branch's document would change" },
+                "prune": { "type": "boolean", "default": false },
+                "message": { "type": "string", "description": "The first commit's message of a new branch" } } } } } },
+            "responses": ok("{switched, branch, from, head, applied}, {created, branch, from, commit, push} or, with dry_run, {dry_run, branch, from, applied}") } },
+        SIGNING_KEY_PATH: {
+            "get": { "tags": tags, "summary": "The commit signing key's public half", "operationId": "gitSigningKey", "responses": { "200": { "description": "{signing: {enabled, key_set, public, fingerprint, key_type, problem}}" }, "401": admin } },
+            "post": { "tags": tags, "summary": "Generate the commit signing key", "operationId": "gitGenerateSigningKey",
+                "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "replace": { "type": "boolean", "default": false } } } } } },
+                "responses": ok("{signing: {enabled, key_set, public, fingerprint, key_type, problem, generated}}") }
+        }
     })
 }

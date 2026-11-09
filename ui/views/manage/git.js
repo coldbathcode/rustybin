@@ -3,7 +3,11 @@
 // between the working copy and the instance), Connect (POST
 // /_rustybin/git/init), Commit and push (with a choice of checkpoints to
 // commit next to the document), Pull (a dry run with the diff,
-// then apply), Resolve a diverged branch, the deploy key, the history and
+// then apply), a diverged branch (what differs, and the three ways out,
+// each with a preview: this instance's copy, the repository's, or a new
+// branch for a pull request at the git host), Branches (the remote's, a
+// switch with a preview, a new branch from this instance), the deploy key,
+// the commit signing key (its public half and fingerprint), the history and
 // the timeline of operations. "Write the commit message" asks the AI from
 // the drift summary.
 import { h, replace, card, input, checkbox, notice, toast, icon, badge, spinner, kvgrid, fmtTime, copyButton } from '../../lib/dom.js';
@@ -13,12 +17,44 @@ import * as assist from '../../lib/assist.js';
 import { errorText } from '../../lib/mockapi.js';
 import * as perms from '../../lib/perms.js';
 
+// One git operation at a time: the console's own reads (the status, the
+// history) hold the working copy for a moment. A call that finds it taken
+// (409 with busy) waits and asks again rather than fail what the person
+// clicked or draw a card that says "busy".
+async function unlessBusy(once) {
+  let r = await once();
+  for (let i = 0; i < 12 && !r.ok && r.json && r.json.busy; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    r = await once();
+  }
+  return r;
+}
+
 async function post(path, body) {
-  return send({ method: 'POST', url: SERVER + path, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}), admin: true, session: false, timeout: 120000 });
+  return unlessBusy(() => send({ method: 'POST', url: SERVER + path, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}), admin: true, session: false, timeout: 120000 }));
+}
+
+// A read of a control path of the console's own (a literal of this file).
+async function read(path) {
+  return unlessBusy(() => send({ control: true, url: SERVER + path, admin: true, session: false, timeout: 120000 }));
 }
 
 function lines(list, id) {
   return h('ul', { class: 'small mono', id, style: { margin: 0, paddingLeft: '18px' } }, ...list.map((l) => h('li', null, l)));
+}
+
+// What differs on a diverged branch (GET /_rustybin/git: divergence): the
+// commits of each side and what each way out would change, by section.
+function divergenceBlock(d) {
+  const side = (title, list, id) => h('div', null, h('div', { class: 'small' }, h('strong', null, title)),
+    (list || []).length ? lines(list, id) : h('p', { class: 'muted small', style: { margin: 0 } }, 'Nothing.'));
+  return notice('warn', h('div', { class: 'grow stack', id: 'git-divergence' },
+    h('div', null, h('strong', null, 'The branch has diverged. '), d.ahead + ' commit(s) here, ' + d.behind + ' on the remote. The instance never merges and the automatic mode does not resolve it: a person chooses a way out below.'),
+    d.error ? h('p', { class: 'small', style: { margin: 0 } }, 'What differs could not be read: ' + d.error) : null,
+    side('Commits here', d.local_commits, 'git-diverged-local'),
+    side('Commits on the remote', d.remote_commits, 'git-diverged-remote'),
+    d.instance ? side('With this instance\'s copy, the repository\'s document changes', d.instance.summary, 'git-diverged-instance') : null,
+    d.repository ? side('With the repository\'s copy, this instance changes', d.repository.summary, 'git-diverged-repository') : null));
 }
 
 function reportBlock(report) {
@@ -37,19 +73,47 @@ export function gitPanel(doc, reload, error) {
   const historyEl = h('div', { id: 'git-history' });
   const timelineEl = h('div', { id: 'git-timeline' });
   const keyEl = h('div', { id: 'git-key' });
+  const branchesEl = h('div', { id: 'git-branches' });
+  const signingEl = h('div', { id: 'git-signing' });
+  // What the last action answered. These outlive the reload of the status
+  // that follows an action (the cards around them are drawn again): the
+  // answer of a pull request names the branch to open it from.
+  const result = h('div', { id: 'git-result' });
+  const branchResult = h('div', { id: 'git-branch-result' });
+  // So does what a person typed, ticked or listed: every action reloads the
+  // status and draws the cards again around these same controls.
+  const message = input({ id: 'git-message', placeholder: 'What changed and why', 'aria-label': 'Commit message', maxlength: 2000 });
+  const prBranch = input({ id: 'git-resolve-branch', placeholder: 'a new branch (a name is made when empty)', 'aria-label': 'Branch for the pull request', maxlength: 128 });
+  const branchList = h('div', { id: 'git-branch-list' });
+  let branchesListed = false;
+  const branchPrune = checkbox('Prune when applying (the branch\'s document is the whole truth)', true);
+  branchPrune.input.id = 'git-branch-prune';
+  const branchName = input({ id: 'git-branch-new', placeholder: 'staging', 'aria-label': 'New branch name', maxlength: 128 });
   let st = null;
   let fetchNext = false;
+  let refreshSettings = async () => {};
 
-  async function load(fetch) {
+  async function load(fetch, attempt) {
+    let next;
     try {
-      st = await getJson('/_rustybin/git' + (fetch ? '?fetch=true' : ''), { admin: true, session: false });
+      next = await getJson('/_rustybin/git' + (fetch ? '?fetch=true' : ''), { admin: true, session: false });
     } catch (e) {
       replace(statusEl, notice('err', 'Source control could not be read: ' + (e.message || e)));
       return;
     }
+    // Another git operation holds the working copy (the history of the last
+    // load, an automatic pull): that status has no last commit and no
+    // divergence. Ask again shortly, and keep what is shown meanwhile.
+    if (next.busy && (attempt || 0) < 8) {
+      setTimeout(() => load(fetch, (attempt || 0) + 1), 250);
+      if (st) return;
+    }
+    st = next;
     renderStatus();
     renderActions();
+    renderBranches();
     renderKey();
+    renderSigning();
     renderTimeline();
     loadHistory();
   }
@@ -75,15 +139,16 @@ export function gitPanel(doc, reload, error) {
       ['Last commit', head],
       ['Against the remote', sync || (st.fetched ? 'unknown' : h('button', { class: 'btn sm ghost', type: 'button', id: 'git-fetch', onclick: () => load(true) }, icon('refresh'), 'Ask the remote'))],
       ['Automatic mode', st.auto === 'off' ? 'off' : st.auto === 'pull' ? 'pull and apply every ' + st.pull_every : 'push every change (checked every 30 s)'],
+      ['Commit signing', st.signing && st.signing.enabled ? (st.signing.problem ? badge('on, and cannot work', 'err') : badge('on', 'ok')) : 'off'],
     ]));
     if ((drift.summary || []).length) items.push(h('div', null, h('h3', { class: 'section-title' }, 'What a commit would record'), lines(drift.summary, 'git-drift')));
+    if (st.divergence) items.push(divergenceBlock(st.divergence));
+    if (st.signing && st.signing.problem) items.push(notice('warn', h('div', { class: 'grow' }, h('strong', null, 'Commits cannot be signed. '), st.signing.problem)));
     replace(statusEl, ...items);
   }
 
   function renderActions() {
     const ready = st.git.available && st.state_dir && st.remote && !st.remote_error;
-    const message = input({ id: 'git-message', placeholder: 'What changed and why', 'aria-label': 'Commit message', maxlength: 2000 });
-    const result = h('div', { id: 'git-result' });
     const prune = checkbox('Prune when applying (the repository is the whole truth)', true);
     prune.input.id = 'git-prune';
     const driftLines = (st.drift && st.drift.summary) || [];
@@ -91,22 +156,47 @@ export function gitPanel(doc, reload, error) {
       question: 'Write a one-line git commit message (imperative mood, at most 72 characters, no quotes, no trailing period) for these configuration changes of a Rustybin instance:\n' + (driftLines.length ? driftLines.map((l) => '- ' + l).join('\n') : '- (no changes listed)'),
       view: 'manage',
     }), { class: 'ghost' });
+    // The ways out of a diverged branch, each a person's call with a
+    // preview first: this instance's copy, the repository's, or this
+    // instance's side on a new branch for a pull request at the git host.
+    function waysOut() {
+      const id = (name) => 'git-resolve-' + name;
+      const resolve = (body) => act(body.dry_run ? 'Checking' : 'Resolving', '/_rustybin/git/resolve', body);
+      const pr = (dry) => resolve(Object.assign({ with: 'pull_request', dry_run: dry, message: message.value }, prBranch.value.trim() ? { branch: prBranch.value.trim() } : {}));
+      return h('div', { class: 'stack', style: { marginTop: '6px' } },
+        h('div', { class: 'row', style: { gap: '6px', flexWrap: 'wrap' } },
+          perms.guard(h('button', { class: 'btn sm ghost', type: 'button', id: id('instance-preview'), onclick: () => resolve({ with: 'instance', dry_run: true }) }, icon('diff'), 'Preview'), 'git.write'),
+          perms.guard(h('button', { class: 'btn sm', type: 'button', id: id('instance'), onclick: () => { if (confirm('Replace the repository\'s configuration with this instance\'s? The local commits are replaced by one commit on top of the remote branch, then pushed (never a forced push).')) resolve({ with: 'instance', message: message.value }); } }, 'Use this instance\'s copy'), 'git.write'),
+          h('span', { class: 'muted small' }, 'The repository takes this instance\'s configuration.')),
+        h('div', { class: 'row', style: { gap: '6px', flexWrap: 'wrap' } },
+          perms.guard(h('button', { class: 'btn sm ghost', type: 'button', id: id('repository-preview'), onclick: () => resolve({ with: 'repository', dry_run: true }) }, icon('diff'), 'Preview'), 'git.write'),
+          perms.guard(h('button', { class: 'btn sm', type: 'button', id: id('repository'), onclick: () => { if (confirm('Replace this instance\'s configuration with the repository\'s (with prune)? The local commits are dropped.')) resolve({ with: 'repository' }); } }, 'Use the repository\'s copy'), 'git.write'),
+          h('span', { class: 'muted small' }, 'This instance takes the repository\'s configuration, with prune.')),
+        h('div', { class: 'row', style: { gap: '6px', flexWrap: 'wrap' } },
+          perms.guard(h('button', { class: 'btn sm ghost', type: 'button', id: id('pr-preview'), onclick: () => pr(true) }, icon('diff'), 'Preview'), 'git.write'),
+          perms.guard(h('button', { class: 'btn sm', type: 'button', id: id('pr'), onclick: () => { if (confirm('Push this instance\'s side to a new branch of the remote for a pull request? Nothing is applied here.')) pr(false); } }, icon('upload'), 'Push to a new branch for a pull request'), 'git.write'),
+          h('div', { style: { minWidth: '220px' } }, prBranch),
+          h('span', { class: 'muted small' }, 'A person merges it at the git host; then pull.')));
+    }
     async function act(label, path, body, after) {
       replace(result, spinner(label));
       const r = await post(path, body);
       if (!r.ok) {
         const j = r.json || {};
-        const conflict = j.conflict ? h('div', { class: 'row', style: { gap: '6px', marginTop: '6px', flexWrap: 'wrap' } },
-          perms.guard(h('button', { class: 'btn sm', type: 'button', id: 'git-resolve-instance', onclick: () => act('Resolving', '/_rustybin/git/resolve', { with: 'instance', message: message.value }) }, 'Replace the repository\'s copy with this instance\'s'), 'git.write'),
-          perms.guard(h('button', { class: 'btn sm', type: 'button', id: 'git-resolve-repository', onclick: () => { if (confirm('Replace this instance\'s configuration with the repository\'s (with prune)?')) act('Resolving', '/_rustybin/git/resolve', { with: 'repository' }); } }, 'Replace this instance with the repository\'s'), 'git.write')) : null;
-        replace(result, notice('err', h('div', { class: 'grow' }, errorText(r, label), conflict)));
+        // The divergence is shown in the status with the ways out in their
+        // own card (the reload below draws both).
+        replace(result, notice('err', h('div', { class: 'grow' }, errorText(r, label), j.conflict ? h('div', { class: 'small', id: 'git-conflict' }, 'The ways out are under "A diverged branch".') : null)));
         load(false);
         return;
       }
       const j = r.json || {};
-      replace(result, notice('ok', icon('check'), h('div', { class: 'grow' }, j.detail || label + ' done')), reportBlock(j.applied));
+      replace(result, notice('ok', j.detail || label + ' done'),
+        (j.commits || []).length ? lines(j.commits, 'git-result-commits') : null,
+        !j.applied && (j.summary || []).length ? lines(j.summary, 'git-result-summary') : null,
+        reportBlock(j.applied));
       if (after) after(j);
-      load(false);
+      // A preview changes nothing: the status is as it was.
+      if (!j.dry_run) load(false);
     }
     const connect = perms.guard(h('button', { class: 'btn primary', type: 'button', id: 'git-init', disabled: !ready, onclick: () => act('Connecting', '/_rustybin/git/init') }, icon('link'), st.initialised ? 'Reconnect' : 'Connect'), 'git.write');
     // The checkpoint choice: local checkpoints written next to rustybin.yaml
@@ -144,7 +234,8 @@ export function gitPanel(doc, reload, error) {
       card('Pull', { hint: 'fetch, fast-forward, apply the repository\'s document' },
         h('div', { class: 'stack' },
           prune.el,
-          h('div', { class: 'row', style: { gap: '8px', flexWrap: 'wrap' } }, pullDry, pullApply, h('span', { class: 'muted small' }, 'The instance never merges: a diverged branch offers the two ways out.')))),
+          h('div', { class: 'row', style: { gap: '8px', flexWrap: 'wrap' } }, pullDry, pullApply, h('span', { class: 'muted small' }, 'The instance never merges: a diverged branch says what differs and offers the ways out.')))),
+      st.divergence ? card('A diverged branch', { hint: 'never merged here: choose a way out, with a preview first' }, h('div', { id: 'git-ways-out' }, waysOut())) : null,
       result);
   }
 
@@ -164,6 +255,94 @@ export function gitPanel(doc, reload, error) {
         : h('p', { class: 'muted small', style: { margin: 0 } }, 'No key yet. With git.auth set to deploy_key, generate one here and add its public key to the repository (a deploy key on GitHub or GitLab, with write access to push).')));
   }
 
+  // Branches: the remote's (asked on request, it reaches the remote), a
+  // switch with a preview (what applying that branch's document would
+  // change, validated like the apply) and a new branch from this instance.
+  function renderBranches() {
+    const ready = !!(st.git.available && st.state_dir && st.remote && !st.remote_error && st.initialised);
+    const listEl = branchList;
+    if (!ready) branchesListed = false;
+    if (!branchesListed) replace(listEl, h('p', { class: 'muted small', style: { margin: 0 } }, ready ? 'Ask the remote for its branches to switch to one.' : 'Connect the repository first.'));
+    const out = branchResult;
+    const prune = branchPrune;
+    const name = branchName;
+    async function branch(label, body) {
+      replace(out, spinner(label));
+      const r = await post('/_rustybin/git/branch', body);
+      if (!r.ok) { replace(out, notice('err', errorText(r, label))); return; }
+      const j = r.json || {};
+      replace(out, notice('ok', j.detail || label + ' done'),
+        !j.applied && (j.summary || []).length ? lines(j.summary, 'git-branch-summary') : null,
+        reportBlock(j.applied));
+      if (!j.dry_run) {
+        refreshSettings();
+        load(false);
+        // The list shown is of before the switch: ask the remote again.
+        if (branchesListed) list();
+      }
+    }
+    async function list() {
+      replace(listEl, spinner('Asking the remote'));
+      const r = await read('/_rustybin/git/branches');
+      if (!r.ok) {
+        replace(listEl, notice('err', 'The branches could not be listed: ' + errorText(r, 'branches')));
+        return;
+      }
+      const d = r.json || {};
+      branchesListed = true;
+      const rows = (d.branches || []).map((b) => h('tr', null,
+        h('td', { class: 'mono' }, b.name, b.current ? h('span', null, ' ', badge('this instance', 'ok')) : null),
+        h('td', { class: 'mono muted' }, b.short),
+        h('td', null, b.current ? null : h('div', { class: 'row', style: { gap: '6px' } },
+          perms.guard(h('button', { class: 'btn sm ghost', type: 'button', 'data-git-branch-preview': b.name, onclick: () => branch('Checking', { branch: b.name, dry_run: true, prune: prune.input.checked }) }, icon('diff'), 'Preview'), 'git.write'),
+          perms.guard(h('button', { class: 'btn sm', type: 'button', 'data-git-branch-switch': b.name, onclick: () => { if (confirm('Switch this instance to ' + b.name + ' and apply its document' + (prune.input.checked ? ' with prune' : '') + '?')) branch('Switching', { branch: b.name, prune: prune.input.checked }); } }, 'Switch'), 'git.write')))));
+      replace(listEl,
+        rows.length ? h('table', { class: 'table small' }, h('thead', null, h('tr', null, h('th', null, 'Branch'), h('th', null, 'Commit'), h('th', null, ''))), h('tbody', null, ...rows))
+          : h('p', { class: 'muted small', style: { margin: 0 } }, 'The remote has no branch yet: the first push creates ' + d.branch + '.'),
+        d.on_remote === false && rows.length ? h('p', { class: 'muted small', style: { margin: 0 } }, 'This instance is on ' + d.branch + ', which the remote does not have yet.') : null,
+        d.truncated ? h('p', { class: 'muted small', style: { margin: 0 } }, 'More branches are not listed.') : null);
+    }
+    const listBtn = h('button', { class: 'btn sm', type: 'button', id: 'git-branches-list', disabled: !ready, onclick: list }, icon('refresh'), 'List the remote\'s branches');
+    const create = (dry) => {
+      const b = name.value.trim();
+      if (!b) { toast('Name the new branch', 'err'); return; }
+      if (dry || confirm('Start ' + b + ' from this instance? Its configuration is committed to the new branch and pushed, and the instance commits to ' + b + ' from now on.')) branch(dry ? 'Checking' : 'Starting', { branch: b, create: true, dry_run: dry });
+    };
+    replace(branchesEl, card('Branches', { hint: 'a branch per environment: this instance is on ' + st.branch, actions: listBtn },
+      h('div', { class: 'stack' },
+        listEl,
+        prune.el,
+        h('div', { class: 'row', style: { gap: '8px', flexWrap: 'wrap' } },
+          h('div', { style: { minWidth: '220px' } }, name),
+          perms.guard(h('button', { class: 'btn sm ghost', type: 'button', id: 'git-branch-create-preview', disabled: !ready, onclick: () => create(true) }, icon('diff'), 'Preview'), 'git.write'),
+          perms.guard(h('button', { class: 'btn sm', type: 'button', id: 'git-branch-create', disabled: !ready, onclick: () => create(false) }, icon('plus'), 'Start a new branch from this instance'), 'git.write')),
+        h('p', { class: 'muted small', style: { margin: 0 } }, 'The branch is the git.branch setting: a rustybin.yaml never names one, and a document from the repository cannot change it.'),
+        out)));
+  }
+
+  // Commit signing: the signing key's public half and fingerprint (never
+  // the private half), to register at the git host as a signing key.
+  function renderSigning() {
+    const sg = st.signing || {};
+    const gen = perms.guard(h('button', { class: 'btn sm', type: 'button', id: 'git-signing-generate', disabled: !st.state_dir, onclick: async () => {
+      if (sg.key_set && !confirm('Generate a new signing key? Commits signed from now on verify only once the new public key is registered at the git host.')) return;
+      const r = await post('/_rustybin/git/signing-key', { replace: !!sg.key_set });
+      if (!r.ok) { toast(errorText(r, 'signing key'), 'err'); return; }
+      toast('Signing key generated');
+      refreshSettings();
+      load(false);
+    } }, icon('token'), sg.key_set ? 'Generate a new key' : 'Generate the signing key'), 'git.write');
+    replace(signingEl, card('Commit signing', { hint: 'SSH signatures with a key of their own; ' + (sg.enabled ? 'on' : 'off (the Sign commits setting above turns it on)'), actions: gen },
+      sg.public ? h('div', { class: 'stack' },
+        h('div', { class: 'row', style: { gap: '6px' } }, h('code', { class: 'mono small', id: 'git-signing-public', style: { wordBreak: 'break-all' } }, sg.public), copyButton(() => sg.public, { label: 'Copy', toast: 'Public key copied' })),
+        h('div', { class: 'small' }, 'Fingerprint ', h('code', { class: 'mono', id: 'git-signing-fingerprint' }, sg.fingerprint)),
+        sg.problem ? notice('warn', sg.problem) : null,
+        h('p', { class: 'muted small', style: { margin: 0 } }, 'Register this public key at the git host as a signing key (not as a deploy key: this key never pushes). The private half is a secret of this instance and is never shown.'))
+        : h('div', { class: 'stack' },
+          sg.problem ? notice('warn', sg.problem) : null,
+          h('p', { class: 'muted small', style: { margin: 0 } }, 'No signing key yet. Generate one here (or paste an OpenSSH private key without a passphrase into the Signing key setting above), register its public key at the git host as a signing key, then turn Sign commits on.'))));
+  }
+
   function renderTimeline() {
     const list = st.timeline || [];
     replace(timelineEl, card('Operations', { hint: 'the last ' + list.length + ' on this instance' },
@@ -174,7 +353,7 @@ export function gitPanel(doc, reload, error) {
 
   async function loadHistory() {
     if (!st.initialised) { replace(historyEl); return; }
-    const r = await send({ control: true, url: SERVER + '/_rustybin/git/history', admin: true, session: false });
+    const r = await read('/_rustybin/git/history');
     const commits = (r.ok && r.json && r.json.commits) || [];
     replace(historyEl, card('History', { hint: commits.length ? 'the last ' + commits.length + ' commits' : 'no commits yet' },
       commits.length ? h('table', { class: 'table small' }, h('thead', null, h('tr', null, h('th', null, 'Commit'), h('th', null, 'Message'), h('th', null, 'Author'), h('th', null, 'When'), h('th', null, 'Files'))),
@@ -182,15 +361,31 @@ export function gitPanel(doc, reload, error) {
         : h('p', { class: 'muted small', style: { margin: 0 } }, r.ok ? 'Commit the instance to start the history.' : errorText(r, 'history'))));
   }
 
+  // The repository form (the git.* settings). A switch of branch and a new
+  // signing key change settings from here, so the form is drawn again.
+  const formEl = h('div', { id: 'git-settings' });
+  function renderForm(d) {
+    const form = settingsForm(d, 'git', { saveLabel: 'Save repository settings', onSaved: (saved) => { reload(saved); renderForm(saved); load(false); } });
+    replace(formEl, form.el);
+  }
+  refreshSettings = async () => {
+    try {
+      const d = await getJson('/_rustybin/settings', { admin: true, session: false });
+      reload(d);
+      renderForm(d);
+    } catch (e) { /* the form keeps what it showed; the status below is current */ }
+  };
   if (doc) {
-    const form = settingsForm(doc, 'git', { saveLabel: 'Save repository settings', onSaved: (d) => { reload(d); load(false); } });
-    el.appendChild(card('Repository', { hint: 'where this instance commits its configuration' }, form.el));
+    renderForm(doc);
+    el.appendChild(card('Repository', { hint: 'where this instance commits its configuration' }, formEl));
   } else {
     el.appendChild(card('Repository', {}, notice('err', 'Settings could not be loaded: ' + ((error && error.message) || error))));
   }
   el.appendChild(card('Status', { hint: 'the working copy against the instance and the remote', actions: h('button', { class: 'btn sm ghost', type: 'button', id: 'git-refresh', onclick: () => load(fetchNext) }, icon('refresh'), 'Refresh') }, statusEl));
   el.appendChild(actionsEl);
+  el.appendChild(branchesEl);
   el.appendChild(keyEl);
+  el.appendChild(signingEl);
   el.appendChild(historyEl);
   el.appendChild(timelineEl);
   fetchNext = true;

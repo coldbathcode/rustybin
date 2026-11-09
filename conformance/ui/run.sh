@@ -122,4 +122,9 @@ for url in "$RUSTYBIN_URL" "$RUSTYBIN_JWT_URL" "$RUSTYBIN_SS_URL" "$RUSTYBIN_HAR
   done
 done
 
+# The source control check starts an instance of its own (a state directory
+# and a bare repository in a temporary directory) and stops it again.
+export RUSTYBIN_UI_BIN="$BIN"
+export RUSTYBIN_UI_GIT_PORT=$((PORT + 9))
+
 "$PYTHON" "$HERE/console_e2e.py"

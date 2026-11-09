@@ -1256,3 +1256,150 @@ fn an_export_leaves_out_a_scenarios_scratch_mock() {
     assert!(mocks_yaml.contains("orders"), "{mocks_yaml}");
     assert!(!mocks_yaml.contains("scn-run"), "{mocks_yaml}");
 }
+
+// ── Core next 11: `file:` for the harness section ───────────────────
+
+const SCENARIO_FILE: &str = "name: smoke\ntarget: http://127.0.0.1:8080\nsource: { request: { path: /status/200 } }\npattern: { type: constant, rate: 1, for: 1s }\n";
+
+fn harness_state() -> AppState {
+    let mut config = Config::for_tests();
+    config.harness.enabled = true;
+    config.harness.roles = vec![crate::harness::Role::Client, crate::harness::Role::Server];
+    config.harness.targets = vec!["127.0.0.1".into()];
+    config.harness.threads = Some(1);
+    test_state_with(config)
+}
+
+/// The operator's own file: a scenario's `file:` is read next to it (or at
+/// an absolute path), as a mock's `spec:` is, and reaches the apply inline.
+#[test]
+fn a_scenario_file_next_to_a_config_file_is_loaded() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("scenarios")).expect("dir");
+    std::fs::write(dir.path().join("scenarios/smoke.yaml"), SCENARIO_FILE).expect("scenario");
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    let absolute = elsewhere.path().join("soak.json");
+    std::fs::write(
+        &absolute,
+        r#"{"name":"soak","target":"http://127.0.0.1:8080","source":{"request":{"path":"/"}},"pattern":{"type":"constant","rate":1,"for":"1s"}}"#,
+    )
+    .expect("absolute");
+    let path = dir.path().join("rustybin.yaml");
+    std::fs::write(
+        &path,
+        format!(
+            "version: 2\nharness:\n  scenarios:\n    - name: smoke\n      file: scenarios/smoke.yaml\n    - name: soak\n      file: {}\n    - name: gone\n      file: scenarios/gone.yaml\n    - name: both\n      file: scenarios/smoke.yaml\n      scenario: {{}}\n    - name: inline\n      scenario: {{name: inline}}\n",
+            absolute.display()
+        ),
+    )
+    .expect("document");
+    let loaded = config_file::load_file(&path, |_| None, 1024 * 1024).expect("loaded");
+    let scenarios = loaded.extra.harness.expect("harness").scenarios;
+    let names: Vec<&str> = scenarios.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, vec!["smoke", "soak", "inline"]);
+    for s in &scenarios {
+        assert!(s.file.is_none(), "{s:?}: read into the document");
+        assert!(s.scenario.as_ref().is_some_and(Value::is_object), "{s:?}");
+    }
+    assert_eq!(
+        scenarios[0].scenario.as_ref().expect("smoke")["name"],
+        "smoke"
+    );
+    assert_eq!(
+        scenarios[0].scenario.as_ref().expect("smoke")["target"],
+        "http://127.0.0.1:8080"
+    );
+    assert!(
+        loaded
+            .problems
+            .iter()
+            .any(|p| p.contains("harness.scenarios.gone") && p.contains("gone.yaml")),
+        "{:?}",
+        loaded.problems
+    );
+    assert!(
+        loaded
+            .problems
+            .iter()
+            .any(|p| p.contains("harness.scenarios.both") && p.contains("not both")),
+        "{:?}",
+        loaded.problems
+    );
+    // Applied as the file's other sections are: the scenarios are saved.
+    let state = harness_state();
+    let extra = Extra {
+        harness: Some(HarnessSection { scenarios }),
+        ..Default::default()
+    };
+    let problems = apply_extra(&state, extra, "config-file");
+    let saved = &state.harness.as_ref().expect("harness").saved;
+    assert!(saved.get("smoke").is_some(), "{problems:?}");
+    assert!(saved.get("soak").is_some(), "{problems:?}");
+}
+
+/// A document sent to the API (or a tool) never makes the server read a
+/// path: the entry is a problem that says to send the scenario inline, in
+/// the dry run and the apply alike, and a prune keeps what it names.
+#[test]
+fn a_document_sent_to_the_api_carries_the_scenario_inline() {
+    let state = harness_state();
+    let h = state.harness.as_ref().expect("harness");
+    h.saved
+        .put(
+            "smoke",
+            crate::harness::scenario::Scenario::parse(SCENARIO_FILE).expect("scenario"),
+        )
+        .expect("saved");
+    let file = config_file::parse(
+        "version: 2\nharness:\n  scenarios:\n    - name: smoke\n      file: /etc/passwd\n    - name: other\n      file: scenarios/other.yaml\n",
+    )
+    .expect("parsed");
+    for dry_run in [true, false] {
+        let report = apply(
+            &state,
+            config_file::parse(&to_yaml(&file)).expect("again"),
+            &ApplyOptions {
+                prune: true,
+                dry_run,
+                principal: "test".into(),
+                base: None,
+                untrusted: false,
+                caller: None,
+                base_url: None,
+            },
+        );
+        let problems: Vec<&str> = report["problems"]
+            .as_array()
+            .expect("problems")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        for name in ["smoke", "other"] {
+            assert!(
+                problems
+                    .iter()
+                    .any(|p| p.starts_with(&format!("harness.scenarios.{name}:"))
+                        && p.contains("send scenario inline")),
+                "dry_run {dry_run}: {problems:?}"
+            );
+        }
+        // The diff names why, and never what a file holds.
+        let summary = report["summary"].to_string();
+        assert!(summary.contains("send scenario inline"), "{summary}");
+        assert!(!summary.contains("root:"), "{summary}");
+    }
+    assert!(h.saved.get("smoke").is_some(), "named, so never pruned");
+    assert!(h.saved.get("other").is_none());
+    // The schema documents the choice.
+    let schema = harness_schema();
+    let item = &schema["properties"]["scenarios"]["items"];
+    assert!(item["properties"]["file"].is_object());
+    assert_eq!(item["required"], json!(["name"]));
+    assert_eq!(item["oneOf"].as_array().map(Vec::len), Some(2));
+    // An export stays inline: the instance's own document names no file.
+    let yaml = export(&state, SecretsMode::Refs, true).yaml();
+    assert!(
+        yaml.contains("scenario:") && !yaml.contains("file:"),
+        "{yaml}"
+    );
+}

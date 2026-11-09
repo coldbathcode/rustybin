@@ -147,10 +147,15 @@ and the rest can also be set under **Management, Source control**.
 | `RUSTYBIN_CONFIG_GIT_AUTO` | `off` | `push_on_change` (commit and push every change, checked every 30 s) or `pull` (pull and apply with prune every `git.pull_every`, 5 minutes by default). Seeds `git.auto`. |
 | `RUSTYBIN_CONFIG_GIT_REQUIRED` | `false` | A clone or apply failure at startup stops the instance. By default it warns and starts without the repository's configuration. |
 
-Three `git.*` settings have no variable: `git.username` (the user name sent with the
+The other `git.*` settings have no variable: `git.username` (the user name sent with the
 token, `x-access-token` by default), `git.author` (the commits' `Name <email>`,
-`Rustybin <rustybin@example.invalid>` by default) and `git.pull_every` (the pull mode's
-interval, `1m` to `24h`, `5m` by default).
+`Rustybin <rustybin@example.invalid>` by default), `git.pull_every` (the pull mode's
+interval, `1m` to `24h`, `5m` by default), the secret `git.webhook_secret` (a git host's
+[push webhook](source-control.md#a-webhook-instead-of-polling)), and `git.sign` (off by
+default) with the secret `git.signing_key` for [signed
+commits](source-control.md#signed-commits). No document sets any of them from the
+repository, and `git.branch` changes with a [switch of
+branch](source-control.md#branches).
 
 **Settings** are dotted keys owned by features (`console.title`, `egress.allow`,
 `leads.webhook_token`), each with a schema, a default, and usually an environment
