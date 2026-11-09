@@ -9,6 +9,14 @@ Nothing is scheduled. The candidates under consideration below are not planned y
 
 ## Recently built
 
+- The last of the roadmap's candidates ([unreleased](changelog.md#unreleased-the-last-of-the-roadmaps-candidates),
+  built 2026-11-09): for source control a [diverged branch](source-control.md#a-diverged-branch)
+  resolved by a person, [branches per environment](source-control.md#branches) and
+  [signed commits](source-control.md#signed-commits); [a secret at an agent's request](agent-mcp.md#a-secret-at-an-agents-request)
+  and [an agent's sign-in from the command line](agent-mcp.md#connect-an-agent); and for the
+  harness [import from other tools](harness.md#importing-a-postman-collection-or-an-artillery-script),
+  [HTTP/3 targets](harness.md#http3-targets) and [server-to-server chains](harness.md#server-to-server-chains).
+
 - [The hosted demo](https://demo.rustybin.dev) (2026-11-07): an instance on the current release,
   private for now, with its mocks at `<name>.rustybin-mock.dev`.
 
@@ -81,17 +89,11 @@ Nothing is scheduled. The candidates under consideration below are not planned y
 From the build notes of the 0.2 and 0.3 steps and the harness plan, in no order:
 
 - **MCP inspector**: client ID metadata documents.
-- **Source control**: merges and conflict resolution inside the instance (resolve
-  with either side, or in a pull request), branches per environment, signed commits,
-  and `file:` references for the harness section.
-- **The command line**: an interactive agent sign-in from the CLI.
-- **Agents**: setting a secret from an agent with an out-of-band confirmation (today
-  the console, the CLI or the environment); OAuth sign-in for self-service visitors and
-  shared-mode key holders.
-- **Harness follow-ups** (`docs/plans/harness.md`, open questions):
-  HTTP/3 targets; scenario
-  import from other tools' formats; server-to-server chains for multi-hop meshes (held
-  back until the safety model covers outbound traffic from the server role).
+- **Source control**: verifying the signatures of pulled commits against allowed
+  signers; a pull request opened through the git host's API.
+- **Agents**: OAuth sign-in for self-service visitors and shared-mode key holders.
+- **Harness follow-ups**: variables given to an import by the caller; a chain over
+  HTTP/3; a Prometheus series for chain calls; an image that includes `harness-http3`.
 - **Self-service across replicas**: visits and visitor mocks live in memory on one
   instance today. A shared store would let a hosted demo run several replicas
   without routing each mock to one of them.

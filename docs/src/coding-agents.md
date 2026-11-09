@@ -403,10 +403,10 @@ rule of `rustybin.yaml`; see [Managing agents](agent-mcp.md#managing-agents)):
 
 | Ceiling | For | Tools an admin credential sees |
 |---|---|---|
-| `read-only` | Exploring: what is mocked, what the deploy checks say, sample requests | 61 |
-| `traffic` | Debugging a gateway: the above plus captured traffic | 67 |
-| `manage` | Building mocks: reads plus creating, editing and deploying mocks, AI-built examples, the portal | 69 |
-| `full` | Building the whole platform: settings, git, agents, saved tests, checkpoints, the harness | 128 |
+| `read-only` | Exploring: what is mocked, what the deploy checks say, sample requests | 69 |
+| `traffic` | Debugging a gateway: the above plus captured traffic | 75 |
+| `manage` | Building mocks: reads plus creating, editing and deploying mocks, AI-built examples, the portal | 72 |
+| `full` | Building the whole platform: settings, git, agents, saved tests, checkpoints, the harness | 145 |
 
 The counts are for an admin credential on an instance without self-service mocks;
 `tools/list` shows only what the agent may call. Start with `read-only` while you
@@ -466,15 +466,14 @@ already carry it; it does no harm on the other clients.
 
 To keep a client's list short instead (a smaller context, or a client with a
 per-request limit), narrow the agent on the instance, then reconnect the client.
-The `manage` ceiling (70 tools), for building mocks, fits in the default page of 100.
-Full rights without the 19 harness tools no longer do (118 tools since 0.5.0), so a
-
+The `manage` ceiling (72 tools), for building mocks, fits in the default page of 100.
+Full rights without the 22 harness tools do not (123 tools), so a
 client that reads one page and needs more than `manage` takes `?page_size=200`. To
 drop the harness tools anyway, for a smaller context:
 
 ```bash
 rustybin agents list    # the client's agent id, after it connected once
-rustybin agents rights <id> --deny harness_status,validate_scenario,list_scenarios,get_scenario,create_run,create_cluster,list_cluster_nodes,get_leader,export_upstreams,start_run,list_patterns,preview_scenario,save_scenario,update_run,list_runs,get_run,stop_run,get_run_report,harness_stop
+rustybin agents rights <id> --deny harness_status,validate_scenario,list_scenarios,get_scenario,create_run,create_cluster,list_cluster_nodes,get_leader,export_upstreams,start_run,list_patterns,preview_scenario,save_scenario,update_run,list_runs,get_run,stop_run,get_run_report,harness_stop,import_traffic,step_aside,import_scenario
 ```
 
 Give such a client its own credential (OAuth sign-in does), since rights follow the

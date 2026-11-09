@@ -1,5 +1,75 @@
 # Changelog
 
+## Unreleased: the last of the roadmap's candidates
+
+[The plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/core-next/master-plan.md),
+steps 11 to 13, built on 2026-11-09 and not released yet. Nothing to do when upgrading: what is new
+is off until you turn it on or name it in a scenario.
+
+**New**:
+
+- Source control: a [diverged branch](source-control.md#a-diverged-branch) says what differs
+  (`divergence` in the status and in the `409`) and is resolved by a person: `POST
+  /_rustybin/git/resolve` takes `instance`, `repository` or `pull_request` (this instance's
+  side to a new branch, for a pull request at the git host), each with `dry_run`. Still never a
+  merge, never a forced push, and the automatic mode never resolves.
+- [Branches per environment](source-control.md#branches): `GET /_rustybin/git/branches`, and
+  `POST /_rustybin/git/branch` to switch with a preview or to start a branch from the instance.
+  `rustybin git branches`, `switch`, `branch`; the tools `git_branches`, `git_switch_branch`.
+- [Signed commits](source-control.md#signed-commits): `git.sign` (off by default) with a signing
+  key of its own, the secret `git.signing_key`; `POST /_rustybin/git/signing-key` generates it and
+  answers the public key and its fingerprint. `rustybin git signing-key`, the tool
+  `git_signing_key`. The instance signs; it does not verify the signatures of what it pulls.
+- A saved harness scenario [in a file of its own](configuration-as-code.md#a-scenario-in-a-file):
+  `file:` in the `harness` section, read like a mock's `spec:`.
+- [A secret at an agent's request](agent-mcp.md#a-secret-at-an-agents-request): with the
+  `agents.secret_requests` setting on (off by default), an agent asks for a secret setting to
+  be set (`request_secret`: the setting and a reason) and a person types the value in
+  **Management** or gives it to `rustybin settings fulfil <id>` on stdin, or declines. The value
+  never passes through the agent: the tools answer a request's state only. Requests expire after
+  15 minutes; `GET /_rustybin/secret-requests`, `POST .../{id}/fulfil | decline`
+  (`secrets.write`, and what setting that secret needs).
+- [An agent's sign-in from the command line](agent-mcp.md#connect-an-agent): `rustybin login
+  --agent` walks the instance's own OAuth sign-in in the browser and keeps the agent's tokens in
+  the profile; `rustybin mcp-stdio --profile <name>` uses and renews them. The credential works
+  with `mcp-stdio` only, and the other commands say so.
+- Harness: [import from other tools](harness.md#importing-a-postman-collection-or-an-artillery-script).
+  `POST /_rustybin/harness/import`, `rustybin harness import --format` and the new
+  `import_scenario` tool read a Postman collection (v2.1) and an Artillery script as well as a
+  recording. What has no counterpart (scripts, hooks, plugins, captures, think times) is never run
+  and is named in `left_out`; a request with a variable the document does not define is left out
+  and the variable named; an Artillery script's phases become `pattern` when they map exactly. A
+  program is refused.
+- Harness: [HTTP/3 targets](harness.md#http3-targets) (`targets[].http: h3`) in builds with the
+  cargo feature `harness-http3`. The default binary and the published image have no QUIC stack and
+  refuse the scenario with a message naming the feature. QUIC connects to the run's pinned
+  addresses only.
+- Harness: [server-to-server chains](harness.md#server-to-server-chains) (`servers.chain`): a
+  server answering a request of the run calls a further hop, and the report gains the leg of each
+  hop (`server.chain`). A server calls on only for a request with its run's signed marker, only
+  while the run is live, only to a hop the scenario names and the server node allows, pins and
+  verifies, once per request and hop, to a depth of 3. A scenario with a chain needs every server
+  node on this version; runs without one are unchanged on a mixed cluster.
+
+**Changed**:
+
+- The management MCP server has 145 tools for an admin (`request_secret`, `get_secret_request`,
+  `git_branches`, `git_switch_branch`, `git_signing_key`, `import_scenario`).
+- `profiles.json` may hold an `agent` object per profile. An older `rustybin` reads the file
+  and ignores it.
+- A harness import keeps at most 64 requests (a layer's limit; it kept 200, which did not
+  validate) and a weight never passes 1000.
+
+**Fixed**:
+
+- A document pulled from the configuration repository could change the `git.*` settings (the
+  remote, the branch, the automatic mode) when someone wrote them into it by hand. It no longer
+  can: a different value is a problem and the setting is kept.
+- A mock whose spec changed, and nothing else, was not seen as a change against the working
+  copy: `git.auto: push_on_change` did not commit it and the status showed no drift.
+- A harness scenario written by hand in a document (the shorthand with `target`) was refused
+  when applied; it is folded like every other way of saving one.
+
 ## 0.6.0 (2026-11-07): more from an instance
 
 [The plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/core-next/master-plan.md),

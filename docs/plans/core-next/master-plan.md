@@ -35,11 +35,11 @@ The marker a session looks for is the first row that is not done.
 | 08 | Harness: replay captured traffic or a HAR file (`harness/import.rs`: an import into `source.requests`, not a new source, so the engine and the safety checks are unchanged; credentials removed) | done 2026-11-07 |
 | 09 | MCP-level OAuth on a mock's own MCP server (`mcp.oauth`, through the same `auth::require_bearer_for` as `/mcp/protected`; not on a visitor's mock) | done 2026-11-07 |
 | 10 | Harness: OpenTelemetry export (`harness/otlp.rs`: metrics of finished runs as OTLP over HTTP with JSON, no new dependency; traces are not sent, a run has no spans) | done 2026-11-07 |
-| [11](step-11-source-control.md) | Source control: branches per environment, signed commits, a divergence resolved by naming a side or through a pull request, `file:` references for the harness section | in progress 2026-11-09, section 5 |
-| [12](step-12-agent-secrets-and-sign-in.md) | Agents: secrets with an out-of-band confirmation; an interactive sign-in from the CLI | in progress 2026-11-09, section 5 |
-| [13](step-13-harness-follow-ups.md) | Harness: scenario import, HTTP/3 targets, server-to-server chains | in progress 2026-11-09, section 5 |
+| [11](step-11-source-control.md) | Source control: branches per environment, signed commits, a divergence resolved by naming a side or through a pull request, `file:` references for the harness section | done 2026-11-09 |
+| [12](step-12-agent-secrets-and-sign-in.md) | Agents: secrets with an out-of-band confirmation; an interactive sign-in from the CLI | done 2026-11-09 |
+| [13](step-13-harness-follow-ups.md) | Harness: scenario import, HTTP/3 targets, server-to-server chains | done 2026-11-09 |
 
-Released as 0.6.0 after step 10. Steps 11 to 13 are released when the owner says so.
+Released as 0.6.0 after step 10. Steps 11 to 13 are built and merged, and are released when the owner says so.
 
 ## 4. Why steps 11 to 13 stopped
 
@@ -110,5 +110,8 @@ change to the step, not a new plan.
   `safety.rs` (allowlist, pinning, forbidden addresses, the kill switch), with a hop count in the
   marker and a small fixed depth.
 
-How the three are built: each in its own worktree and branch, the step file written first, then
-tests, code and docs; merged into `main` in order, the full checks run on the merge.
+How the three were built: each by its own agent in its own worktree and branch, the step file
+written first, then tests, code and docs; merged into `main` on 2026-11-09 with the full checks run
+on the merge. Each step file's build notes say where the build differs from these choices and what
+was left out (step 11: no verification of pulled commits' signatures; step 13: no image with
+`harness-http3`).

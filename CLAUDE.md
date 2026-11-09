@@ -66,7 +66,7 @@ reaches what it reaches on `open`, which `a_caller_without_a_credential_reaches_
 ## Rustybin 0.6, more from an instance (built and released 2026-11-07)
 
 [docs/plans/core-next/master-plan.md](docs/plans/core-next/master-plan.md): steps 01 to 10 of the roadmap's candidates,
-released as `v0.6.0` (the signed image's digest is in the changelog); section 4 says why steps 11 to 13 wait for the owner. Rules it left: a dry check of the outbound policy is
+released as `v0.6.0` (the signed image's digest is in the changelog); steps 11 to 13 waited for the owner (section 4) and were built on 2026-11-09 with the choices of section 5, see the next section. Rules it left: a dry check of the outbound policy is
 `Egress::dry_check` (never a copy); a feature that reaches out on a caller's word needs `mocks.write` or better and a
 `Purpose` with no default (`mocks/fetch.rs`), and `rustybin.yaml` never reaches out; a route a git host calls is open and
 its signature is the credential (`sourcecontrol::is_public_path`), off until its secret is set; a harness feature that
@@ -74,6 +74,62 @@ can be an import stays one (`harness/import.rs` makes `source.requests`, so the 
 untouched), and what reads finished runs does so after the fact (`harness/otlp.rs`); a timing change is measured under
 the parallel suite, not alone; a Hurl body in an included example is bare JSON, never a fenced block, which closes the
 page's own fence.
+
+## Core next steps 11 to 13 (built and merged 2026-11-09, not released)
+
+The owner said "build it all out" on 2026-11-09; section 5 of
+[docs/plans/core-next/master-plan.md](docs/plans/core-next/master-plan.md) records the choice each step took
+(the one that keeps the rule it touches), each step file has build notes, and the changelog's "Unreleased"
+section lists what is new. A release waits for the owner's word.
+
+Step 11 (source control; `docs/plans/core-next/step-11-source-control.md`):
+`src/sourcecontrol/branches.rs` (a diverged branch: `divergence`, the previews, `pull_request`; the
+remote's branches, switching and starting one) and `signing.rs` (signed commits). Rules it left:
+the instance never merges and never force-pushes, and no code path of the automatic mode or the
+webhook reaches `resolve` (a divergence is a person's call: `instance`, `repository` or
+`pull_request`, each with a `dry_run` that validates like the apply); the branch is the
+`git.branch` setting, changed only by `switch_branch` or the settings API, never by a document;
+a document from the repository never changes a `git.*` setting or secret
+(`REPOSITORY_REFUSED_PREFIXES`, the group check in `apply_secrets`); a comparison of the instance
+with a repository's document goes through `sourcecontrol::instance_document` (a bundle's `spec:`
+path compares a file with itself); the signing key is the secret `git.signing_key`, never the
+deploy key, and a commit with `git.sign` on is signed or refused, never unsigned; what a tool
+answers about the repository's side (`untrusted_divergence`, `untrusted_branches`) is third-party
+content; a file a document names (`spec:`, a scenario's `file:`) goes through
+`configdoc::contained_path` and is copied out of the commit by `extract`.
+
+Step 12 (agents; `docs/plans/core-next/step-12-agent-secrets-and-sign-in.md`): a secret set at
+an agent's request (`src/secret_requests.rs`, `AppState.secret_requests`, the tools in
+`src/mcp/manage/secrets.rs`, `ui/lib/secretrequests.js`, `rustybin settings requests | fulfil |
+decline`; user docs `docs/src/agent-mcp.md#a-secret-at-an-agents-request`) and the agent
+sign-in from the CLI (`rustybin login --agent`, `src/cli/agent_login.rs`, `Profile.agent`, used
+and renewed by `rustybin mcp-stdio`). Rules it left: a secret is still never a tool input or
+output (`request_secret` and `get_secret_request` carry a setting's key, a reason and a state;
+`every_tool_is_fully_defined` is unchanged), and fulfilling has no tool; a value an agent asked
+for is written by a person's own call through `Settings::update`, with what setting that secret
+needs (`settings::check_keys`), never by a path of its own; what an agent wrote for a person to
+read (its reason, its name) is answered as `untrusted_*`, cleaned and capped
+(`secret_requests::clean_reason`), rendered as text, and never in an audit entry; requests are
+in memory, bounded and expiring, and no document carries one; an agent sign-in's tokens are
+for `/_rustybin/mcp` only, so no command but `mcp-stdio` sends `Profile.agent`, and
+`Ctx::client` refuses an agent token before any call (`agent_login::ONLY_MCP`); the CLI
+registers one client (`agent_login::CLIENT_NAME`, `REDIRECT_URI`), so a new sign-in is the same
+agent.
+
+Step 13 (harness; `docs/plans/core-next/step-13-harness-follow-ups.md`): scenario
+import for Postman collections and Artillery scripts (`import.rs`, the `import_scenario` tool),
+HTTP/3 targets behind the cargo feature `harness-http3` (`http3.rs`) and server-to-server chains
+(`chain.rs`, the rules in `safety.rs`). Rules it left: an import never runs or guesses (what has
+no counterpart is named in `left_out`, a variable the document does not define leaves its request
+out) and always validates (`import::fits`); a protocol's client is handed the pinned addresses
+and resolves nothing itself (the QUIC client: no `Alt-Svc`, no preferred address); what the
+default build must not gain goes behind a cargo feature whose parameter stays in the schema and is
+refused at validation by name (`scenario::http3_built`); the server role sends only through
+`chain::call_on`, which is given a marker the correlation layer verified and never the request,
+and only through `safety::ChainGate` (live, the kill switch, once per request and hop, a cap) to
+hops `safety::pin_chain` pinned; a field added to the marker goes inside its signature and leaves
+a client's marker byte for byte what it was; an onward call is never counted with the clients'
+arrivals.
 
 ## Rustybin 0.3, reliability and testing workflows (built and released 2026-11-02)
 
@@ -189,7 +245,8 @@ Step 10 of the 0.2 plan (user docs `docs/src/cli-guide.md`, the generated `docs/
 `commands.rs` is the command tree, one static table `COMMANDS` (noun, verb, usage, summary, flags, the routes it
 calls, destructive, example) and one `dispatch` match; `mod.rs` the parser, help, completion, the rendering for
 people and `execute` (tests pass a canned stdin and a buffer); `client.rs` the control-API client (bearer,
-session and manage-token headers, SSE for the tails); `profiles.rs` `profiles.json` (0600). `main.rs` routes every
+session and manage-token headers, SSE for the tails); `profiles.rs` `profiles.json` (0600); `agent_login.rs` the agent sign-in
+(`rustybin login --agent`, for `mcp-stdio` only). `main.rs` routes every
 noun here; `mock`, `mcp-stdio` and the offline harness verbs keep their modules. A new control route needs a
 command (or an `UNCOVERED` entry with a reason) or `the_command_tree_is_consistent_with_the_catalogue` fails;
 every command's example runs against a live instance in `every_command_runs_against_an_instance`; the reference
@@ -290,6 +347,7 @@ cargo fmt
 cargo clippy --all-targets -- -D warnings
 cargo test                                   # unit + tests/integration.rs, a few seconds
 cargo test --features quota-postgres         # + the PostgreSQL quota store (set RUSTYBIN_TEST_QUOTA_STORE to run against a database)
+cargo test --features harness-http3          # + HTTP/3 targets (an in-process QUIC server on loopback)
 RUSTYBIN_UPDATE_README=1 cargo test readme_endpoints   # regenerate README endpoint tables
 cargo run -- --print-endpoints-markdown      # print them instead
 cargo run -- mock validate src/mocks/petstore.yaml   # OpenAPI mocks CLI (offline: validate, init, sample, check-config)
@@ -339,6 +397,9 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   feature joined by `settings::specs()`, env seed / stored / default resolution with `Source`, `secret()` for the
   feature that uses one, `{set, hint}` in the API, audit lines without values; `/_rustybin/settings` (GET, PATCH,
   DELETE `/{key}`, admin). `AppState.settings`.
+- `src/secret_requests.rs`: secrets an agent asked for (`AppState.secret_requests`, `/_rustybin/secret-requests*`,
+  the setting `agents.secret_requests`, off by default): bounded, expiring, in memory; a person fulfils through
+  `Settings::update` or declines; see core next step 12 above.
 - `src/egress.rs`: the outbound policy (`RUSTYBIN_EGRESS_ALLOW`, `RUSTYBIN_EGRESS_ALLOW_LOOPBACK`, the settings
   `egress.*`): the `Allowlist` grammar (shared with the harness, which re-exports it from `safety.rs`), forbidden
   addresses, `parse_url`, `pin_with`, a `Rule` per `Purpose` (A2A push, leads, key registry, assist, and the
@@ -534,6 +595,10 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   (rate-limit headers, the per-layer `LimitAcc` merged across nodes, the analysis in the report's `rate_limits`),
   `live.rs` (live changes: `Change`, the versioned `Controls` every node applies, the `LiveView` the scheduler
   evaluates, the stage log, the closed loops `target`, `breakpoint` and `limit_probe`), `saved.rs` (saved scenarios, `RUSTYBIN_HARNESS_STATE_DIR`),
+  `import.rs` (recordings, Postman collections and Artillery scripts into `source.requests`), `http3.rs` (the
+  HTTP/3 client of a pinned target, the cargo feature `harness-http3`; `http3_tests.rs`), `chain.rs`
+  (server-to-server chains: the prepared hops, the onward call, the per-hop report and its merge;
+  `chain_tests.rs`),
   `engine.rs` (own tokio runtime, a scheduler thread per run, `PinnedConnector` with TLS and ALPN, per-worker
   histogram shards rolled into a per-second timeline by a roller thread, closed-model users, saturation, the marker on every
   request and the classification of every answer), `correlate.rs` (the run key, the signed marker and tag,
