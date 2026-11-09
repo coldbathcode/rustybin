@@ -24,6 +24,7 @@ use std::process::ExitCode;
 
 use serde_json::Value;
 
+pub mod agent_login;
 pub mod client;
 pub mod commands;
 pub mod profiles;
@@ -263,6 +264,25 @@ impl Ctx {
     pub fn client(&mut self) -> Result<&Client> {
         if self.client.is_none() {
             let resolved = profiles::resolve(&self.env, &self.args)?;
+            // An agent sign-in is for `rustybin mcp-stdio`: said here, not
+            // by the instance's 401.
+            if resolved
+                .token
+                .as_deref()
+                .is_some_and(agent_login::is_agent_token)
+            {
+                return Err(Fail::Auth(format!(
+                    "the token given is {}",
+                    agent_login::ONLY_MCP
+                )));
+            }
+            if resolved.agent_only && needs_credential(self.cmd) {
+                return Err(Fail::Auth(format!(
+                    "the profile {} holds an agent sign-in only: {}",
+                    resolved.profile.as_deref().unwrap_or("in use"),
+                    agent_login::ONLY_MCP
+                )));
+            }
             let mut client = Client::new(&resolved.url, resolved.token.clone())?;
             client.session = self.args.value("--session").map(str::to_string);
             client.mock_token = self
@@ -654,8 +674,21 @@ pub fn reference_markdown() -> String {
             s.push_str("```\n");
         }
     }
-    s.push_str("\n## Not covered by a command\n\nThe management MCP endpoint (`rustybin mcp-stdio` bridges a client to it), the agent sign-in (OAuth) routes a browser walks, the harness cluster's node-to-node routes, a request bin's capture URLs and a mock's data plane.\n");
+    s.push_str("\n## Not covered by a command\n\nThe management MCP endpoint (`rustybin mcp-stdio` bridges a client to it), the agent sign-in's consent API (the console's screen; `rustybin login --agent` walks the rest), the harness cluster's node-to-node routes, a request bin's capture URLs and a mock's data plane.\n");
     s
+}
+
+/// Does a command call a route that asks for a credential? (A command
+/// whose routes are all open, the readiness probe or the version, runs
+/// without one.)
+pub fn needs_credential(c: &Cmd) -> bool {
+    c.routes.iter().any(|(m, p)| {
+        let path = p.split('?').next().unwrap_or(p);
+        crate::catalog::control_route(path)
+            .or_else(|| crate::catalog::control_route_for_path(path))
+            .and_then(|e| e.need(m))
+            != Some(crate::rbac::Need::Open)
+    })
 }
 
 /// The permissions a command needs: what the routes it calls declare

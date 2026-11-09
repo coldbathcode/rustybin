@@ -116,6 +116,7 @@ route's:
 | A settings change of a `git.*` setting (the remote and the automatic mode decide where the whole instance is pushed and what a pull applies) | `git.write` |
 | A settings change (or a document's `settings:`) of `sso.role_map` or `sso.default_roles` | every permission of each role named (in its project for `project:role`): nobody grants more than they hold, through the provider's groups included |
 | A settings change that sets or clears a secret, a document with `secrets:` | `secrets.write` |
+| `POST /_rustybin/secret-requests/{id}/fulfil` (the secret [an agent asked for](../agent-mcp.md#a-secret-at-an-agents-request); the route itself needs `secrets.write`) | what setting that secret needs: `settings.write`, and `settings.security`, `git.write` or `portal.settings` for a secret of those groups |
 | A document (`POST /_rustybin/config/apply`, the `apply_config` tool) with `settings:` or `instance:`; with `agents:`; with `users:`, `roles:` or `projects:` | `settings.write`; `agents.manage`; `users.manage` |
 | A project's members (`PUT /_rustybin/projects/{name}`, a document's `projects:`), deleting a project | every permission of the roles given or taken, in that project; a move of its resources (`move_to`) the write permission of each kind in both |
 

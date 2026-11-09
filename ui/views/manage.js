@@ -12,6 +12,8 @@
 // token, theme) stay in this browser as before. Sign-in changes the console
 // user name and password (PUT /_rustybin/password, the current password
 // required) and lists the sign-in sessions (GET /_rustybin/sessions).
+// Above the tabs, the secrets AI agents asked to have set
+// (../lib/secretrequests.js): typed here or declined, never sent to the agent.
 // Routes: #/manage/<tab>.
 import { h, replace, clear, card, field, input, select, notice, toast, icon, badge, spinner, kvgrid, fmtTime } from '../lib/dom.js';
 import { SERVER, getJson, send, trimBase } from '../lib/http.js';
@@ -19,6 +21,7 @@ import * as settings from '../lib/settings.js';
 import * as auth from '../lib/auth.js';
 import * as assist from '../lib/assist.js';
 import { settingsForm } from '../lib/settingsform.js';
+import { secretRequests } from '../lib/secretrequests.js';
 import * as portal from '../lib/portal.js';
 import { exportPanel } from './manage/export.js';
 import { gitPanel } from './manage/git.js';
@@ -800,10 +803,9 @@ export default {
       h('div', { class: 'grow' }, h('h1', null, 'Management'),
         h('p', null, 'Configure this instance: what the console shows, who may sign in, where it may connect, what this browser remembers, and the whole instance as rustybin.yaml in a git repository. Instance settings override their environment variables and persist with RUSTYBIN_STATE_DIR.')),
       status));
-    root.appendChild(h('div', { class: 'rail-layout' }, rail, panel));
-    replace(panel, spinner('Loading settings'));
-
-    getJson('/_rustybin/settings', { admin: true, session: false })
+    // Secrets an AI agent asked to have set: above every tab, since a
+    // secret of any group may be asked for. Setting one reloads the forms.
+    const loadSettings = () => getJson('/_rustybin/settings', { admin: true, session: false })
       .then((d) => { if (!alive) return; doc = d; renderStatus(); show(current); })
       .catch((e) => {
         if (!alive) return;
@@ -812,8 +814,14 @@ export default {
         console.warn('settings unavailable', e);
         show(current);
       });
+    const requests = secretRequests({ onSet: loadSettings });
+    root.appendChild(requests.el);
+    root.appendChild(h('div', { class: 'rail-layout' }, rail, panel));
+    replace(panel, spinner('Loading settings'));
 
-    const cleanup = () => { alive = false; };
+    loadSettings();
+
+    const cleanup = () => { alive = false; requests.destroy(); };
     cleanup.onRoute = (r) => { if (TABS.some((t) => t.id === r) && r !== current) show(r); };
     cleanup.destroy = cleanup;
     return cleanup;

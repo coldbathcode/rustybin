@@ -80,6 +80,17 @@ exits `3` with the reason. `rustybin sso status` says whether single sign-on is 
 `rustybin sso test` fetches the provider's discovery document and keys now (exit `1`
 when it cannot).
 
+**An AI agent's sign-in.** `rustybin login --agent --url <url>` signs an agent in
+instead of you: the browser opens the console's consent page, you approve, and the
+agent's tokens are kept in the profile under `agent` for [`rustybin
+mcp-stdio`](agent-mcp.md#connect-an-agent) (`--scope` caps what may be granted;
+`--no-browser` and `--wait` as for `--sso`). The profile's own token, if it has one,
+stays. That credential works with `rustybin mcp-stdio` only: the instance accepts its
+tokens on `/_rustybin/mcp` and nowhere else, so the other commands never send it, and
+refuse a profile that holds nothing else (or an agent token given as `--token`) with
+a message that says so, exit `3`. Not offered where the instance's own agent sign-in
+is off (an open control plane, shared mode, a self-service instance).
+
 Several instances are several profiles: `--profile staging` on the login names one,
 `rustybin profiles list | use | remove` manage them, and `--profile` (or
 `RUSTYBIN_PROFILE`) picks one for a call. For a call, `--url` and `--token` win over
@@ -113,6 +124,21 @@ name or the email; `users disable` (asks first), `enable`, `delete` (asks first)
 `users sessions NAME` (`--end` signs them out everywhere) and `users invite NAME
 --reset` (a new link, a password reset). `rustybin roles list | show | save | delete`
 manage custom roles (`--permission`, repeatable or comma separated).
+
+## Secrets an agent asked for
+
+```bash
+{{#include ../examples/cli/cli.sh:secret_requests}}
+```
+
+An AI agent never sets a secret; with the `agents.secret_requests` setting on it may
+[ask for one to be set](agent-mcp.md#a-secret-at-an-agents-request). `rustybin
+settings requests` lists what waits (the setting, the agent and the user it acts for,
+and the agent's reason, which is its own claim), `settings fulfil <id>` sets the
+secret from a prompt without echo or from the first line of stdin (`--stdin`), never
+from an argument (it would stay in the shell's history), and `settings decline <id>`
+declines. Fulfilling needs what `settings set-secret` needs for that setting; the
+value goes to the settings store and never to the agent.
 
 ## Nouns and verbs
 
@@ -172,9 +198,9 @@ verbs: `source <(rustybin completion bash)` in `.bashrc`, or save the fish one u
 ## What the command line does not do
 
 The management MCP endpoint is for agents (`rustybin mcp-stdio` bridges a stdio client
-to it); the agent sign-in, an invitation link (`POST /_rustybin/join`) and the identity
-provider's redirect to `/_rustybin/sso/callback` (`login --sso` waits for its answer)
-are browser flows; the harness cluster's node-to-node routes
+to it); the agent sign-in's consent (`login --agent` waits for it), an invitation link
+(`POST /_rustybin/join`) and the identity provider's redirect to
+`/_rustybin/sso/callback` (`login --sso` waits for its answer) are browser flows; the harness cluster's node-to-node routes
 are the nodes' business; a request bin's capture URLs are for the thing under test.
 Everything else on the control plane has a verb, and a test keeps it so: a route that
 lands without a command fails the build.
@@ -188,6 +214,6 @@ The same job from the API, the console, the command line, an agent and the confi
 | API | Every command calls the control plane: the **Calls** column of the [reference](cli.md) names the routes |
 | Console | The same sign-in (`rustybin login` takes the console's user name and password) and the same sessions (**Management, Sign-in** lists the CLI's token and can end it) |
 | CLI | This page |
-| Management MCP | `rustybin mcp-stdio --url <url> --profile <p>` bridges a local agent to a remote instance's management server with the profile's token; the resource `rustybin://cli.md` is this reference ([agent page](agent-mcp.md)) |
+| Management MCP | `rustybin mcp-stdio --url <url> --profile <p>` bridges a local agent to a remote instance's management server with the profile's agent sign-in (`rustybin login --agent`) or its token; the resource `rustybin://cli.md` is this reference ([agent page](agent-mcp.md)) |
 | `rustybin.yaml` | `rustybin config export > rustybin.yaml`, `rustybin config apply rustybin.yaml --dry-run` ([the whole instance as code](configuration-as-code.md)) |
 | Environment | `RUSTYBIN_URL`, `RUSTYBIN_TOKEN` (else `RUSTYBIN_ADMIN_TOKEN`), `RUSTYBIN_HTTP_PORT` (the default URL's port), `RUSTYBIN_PROFILE`, `RUSTYBIN_MOCK_TOKEN`, `RUSTYBIN_CONFIG_HOME` (where `profiles.json` lives) |

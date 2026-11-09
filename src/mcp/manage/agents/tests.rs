@@ -1238,6 +1238,10 @@ const OLD_RIGHTS: &[(&str, &str, bool)] = &[
     // A cluster's leader steps aside: a harness change, as create_cluster.
     ("step_aside", "harness", false),
     ("import_traffic", "read", true),
+    // Secret requests (core next 12): asking is a settings change's
+    // neighbour (admin), reading one's own requests an admin read tool.
+    ("request_secret", "admin", false),
+    ("get_secret_request", "admin", true),
 ];
 
 /// The 0.4 ceilings, by right: `read-only` a read-only tool that is not a

@@ -1,0 +1,200 @@
+# A secret set at an agent's request (docs/src/agent-mcp.md, "A secret at an
+# agent's request"), on the password instance of docs/examples/run.sh
+# (rustybin / rustybin). An agent asks for two secrets with request_secret, a
+# person reads the requests, fulfils one and declines the other, and the agent
+# reads the state of each: never the value. Leaves the instance as it found it.
+
+POST {{password_url}}/_rustybin/login
+Content-Type: application/json
+{ "username": "rustybin", "password": "rustybin" }
+HTTP 200
+[Captures]
+admin: jsonpath "$.token"
+
+# The agent signs in on a token of its own.
+POST {{password_url}}/_rustybin/login
+Content-Type: application/json
+{ "username": "rustybin", "password": "rustybin" }
+HTTP 200
+[Captures]
+agent: jsonpath "$.token"
+
+# Off until someone turns it on: the agent is told, nobody is asked.
+POST {{password_url}}/_rustybin/mcp
+Authorization: Bearer {{agent}}
+Accept: application/json, text/event-stream
+Content-Type: application/json
+MCP-Protocol-Version: 2026-07-28
+Mcp-Method: tools/call
+Mcp-Name: request_secret
+{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "request_secret", "arguments": {"setting": "notify.webhook_token", "reason": "the nightly schedule posts its failures to the team webhook"}, "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}, "io.modelcontextprotocol/clientInfo": {"name": "docs-secret-agent", "version": "1.0"}}}}
+HTTP 200
+[Asserts]
+jsonpath "$.result.isError" == true
+jsonpath "$.result.content[0].text" contains "secret requests are off"
+
+# ANCHOR: enable
+# Let agents ask (a setting of the agents group: settings.security).
+PATCH {{password_url}}/_rustybin/settings
+Authorization: Bearer {{admin}}
+Content-Type: application/json
+{ "values": { "agents.secret_requests": true } }
+HTTP 200
+[Asserts]
+jsonpath "$.changed" contains "agents.secret_requests"
+# ANCHOR_END: enable
+
+# ANCHOR: ask
+# The agent asks: the setting's name and a reason. Never a value.
+POST {{password_url}}/_rustybin/mcp
+Authorization: Bearer {{agent}}
+Accept: application/json, text/event-stream
+Content-Type: application/json
+MCP-Protocol-Version: 2026-07-28
+Mcp-Method: tools/call
+Mcp-Name: request_secret
+{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "request_secret", "arguments": {"setting": "notify.webhook_token", "reason": "the nightly schedule posts its failures to the team webhook"}, "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}, "io.modelcontextprotocol/clientInfo": {"name": "docs-secret-agent", "version": "1.0"}}}}
+HTTP 200
+[Captures]
+request: jsonpath "$.result.structuredContent.request.id"
+[Asserts]
+jsonpath "$.result.isError" == false
+jsonpath "$.result.structuredContent.request.state" == "pending"
+jsonpath "$.result.structuredContent.request.setting" == "notify.webhook_token"
+jsonpath "$.result.structuredContent.request.set" == false
+jsonpath "$.result.structuredContent.cli" == "rustybin settings fulfil {{request}}"
+# ANCHOR_END: ask
+
+# A second one, to decline below.
+POST {{password_url}}/_rustybin/mcp
+Authorization: Bearer {{agent}}
+Accept: application/json, text/event-stream
+Content-Type: application/json
+MCP-Protocol-Version: 2026-07-28
+Mcp-Method: tools/call
+Mcp-Name: request_secret
+{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "request_secret", "arguments": {"setting": "git.token", "reason": "the configuration repository"}, "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}, "io.modelcontextprotocol/clientInfo": {"name": "docs-secret-agent", "version": "1.0"}}}}
+HTTP 200
+[Captures]
+other: jsonpath "$.result.structuredContent.request.id"
+
+# A secret is never a tool input: update_settings still refuses one.
+POST {{password_url}}/_rustybin/mcp
+Authorization: Bearer {{agent}}
+Accept: application/json, text/event-stream
+Content-Type: application/json
+MCP-Protocol-Version: 2026-07-28
+Mcp-Method: tools/call
+Mcp-Name: update_settings
+{"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "update_settings", "arguments": {"values": {"notify.webhook_token": "never-through-an-agent"}}, "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}, "io.modelcontextprotocol/clientInfo": {"name": "docs-secret-agent", "version": "1.0"}}}}
+HTTP 200
+[Asserts]
+jsonpath "$.result.isError" == true
+jsonpath "$.result.content[0].text" contains "an agent never sets secrets"
+
+# ANCHOR: list
+# A person with secrets.write reads what waits: the setting, the agent and the
+# user it acts for, and the agent's reason as untrusted_reason (its claim).
+GET {{password_url}}/_rustybin/secret-requests?state=pending
+Authorization: Bearer {{admin}}
+HTTP 200
+[Asserts]
+jsonpath "$.enabled" == true
+jsonpath "$.pending" == 2
+jsonpath "$.requests[?(@.id == '{{request}}')].setting.key" == "notify.webhook_token"
+jsonpath "$.requests[?(@.id == '{{request}}')].setting.set" == false
+jsonpath "$.requests[?(@.id == '{{request}}')].agent.untrusted_name" == "docs-secret-agent"
+jsonpath "$.requests[?(@.id == '{{request}}')].agent.owner_label" == "rustybin"
+jsonpath "$.requests[?(@.id == '{{request}}')].untrusted_reason" == "the nightly schedule posts its failures to the team webhook"
+# ANCHOR_END: list
+
+# ANCHOR: one
+GET {{password_url}}/_rustybin/secret-requests/{{request}}
+Authorization: Bearer {{admin}}
+HTTP 200
+[Asserts]
+jsonpath "$.state" == "pending"
+jsonpath "$.setting.needs" contains "secrets.write"
+jsonpath "$.expires_in" > 0
+# ANCHOR_END: one
+
+# ANCHOR: fulfil
+# The person types the value: it goes to the settings store, as a PATCH of
+# /_rustybin/settings would put it there, and the answer never carries it.
+POST {{password_url}}/_rustybin/secret-requests/{{request}}/fulfil
+Authorization: Bearer {{admin}}
+Content-Type: application/json
+{ "value": "whk_docs-example-value-k3Qx" }
+HTTP 200
+[Asserts]
+jsonpath "$.state" == "fulfilled"
+jsonpath "$.setting.set" == true
+jsonpath "$.resolved_by" == "rustybin"
+body not contains "whk_docs-example-value"
+# ANCHOR_END: fulfil
+
+# A request is answered once.
+POST {{password_url}}/_rustybin/secret-requests/{{request}}/fulfil
+Authorization: Bearer {{admin}}
+Content-Type: application/json
+{ "value": "another" }
+HTTP 410
+[Asserts]
+jsonpath "$.state" == "fulfilled"
+
+# ANCHOR: state
+# The agent reads how its request stands: fulfilled, and that the setting is
+# set. Never the value, and no hint of it.
+POST {{password_url}}/_rustybin/mcp
+Authorization: Bearer {{agent}}
+Accept: application/json, text/event-stream
+Content-Type: application/json
+MCP-Protocol-Version: 2026-07-28
+Mcp-Method: tools/call
+Mcp-Name: get_secret_request
+{"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "get_secret_request", "arguments": {"id": "{{request}}"}, "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}, "io.modelcontextprotocol/clientInfo": {"name": "docs-secret-agent", "version": "1.0"}}}}
+HTTP 200
+[Asserts]
+jsonpath "$.result.structuredContent.request.state" == "fulfilled"
+jsonpath "$.result.structuredContent.request.set" == true
+body not contains "whk_docs-example-value"
+body not contains "k3Qx"
+# ANCHOR_END: state
+
+# ANCHOR: decline
+# Declined: nothing is set, and the agent reads declined.
+POST {{password_url}}/_rustybin/secret-requests/{{other}}/decline
+Authorization: Bearer {{admin}}
+HTTP 200
+[Asserts]
+jsonpath "$.state" == "declined"
+jsonpath "$.setting.set" == false
+# ANCHOR_END: decline
+
+# The audit log names the request, the setting and the agent; never a value
+# or the agent's reason.
+GET {{password_url}}/_rustybin/audit?action=secret-requests
+Authorization: Bearer {{admin}}
+HTTP 200
+[Asserts]
+jsonpath "$.entries[*].event" contains "secret_fulfilled"
+jsonpath "$.entries[*].event" contains "secret_declined"
+body not contains "whk_docs-example-value"
+body not contains "nightly schedule"
+
+# Back to how it was.
+DELETE {{password_url}}/_rustybin/settings/notify.webhook_token
+Authorization: Bearer {{admin}}
+HTTP 200
+
+DELETE {{password_url}}/_rustybin/settings/agents.secret_requests
+Authorization: Bearer {{admin}}
+HTTP 200
+
+POST {{password_url}}/_rustybin/logout
+Authorization: Bearer {{agent}}
+HTTP *
+
+POST {{password_url}}/_rustybin/logout
+Authorization: Bearer {{admin}}
+HTTP *

@@ -795,6 +795,14 @@ pub static TOOLS: &[ToolDef] = &[
     tool!("step_aside", "Leader steps aside", "Before maintenance: the leader of a cluster hands it to the first in the succession, by the ordinary election, with the run still on. Needs three or more eligible nodes; call it on the leader. If nobody takes over in four election timeouts the leader keeps leading.", ToolNeed::Perm(Permission::HarnessCluster), ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
         "cluster_id": cluster_id_prop(),
     }), &["cluster_id"])),
+    // Core next 12: a secret set at an agent's request, by a person.
+    tool!("request_secret", "Ask for a secret to be set", "Ask for a secret setting (an API key, a client secret, a token) to be set by a person: the setting's name and a short reason. An agent never sets a secret and never sees one: a person with the permission to set it types the value in the console (Management) or gives it to `rustybin settings fulfil` on stdin, or declines. Answers the request's id and state only; read it again with get_secret_request. Needs the agents.secret_requests setting on, settings.write, and what changing a setting of that group needs. At most 3 requests of one agent wait at a time, each for 15 minutes; asking again for the same setting answers the request that waits. Never put a value in the reason, and never ask the user to paste a secret into the conversation.", ToolNeed::Perm(Permission::SettingsWrite), ro=false, destructive=false, idem=true, confirm=false, || obj(json!({
+        "setting": { "type": "string", "description": "The secret setting's name, as get_settings lists it (assist.openai_key, sso.client_secret, notify.webhook_token, ...)" },
+        "reason": { "type": "string", "maxLength": 300, "description": "One sentence on what needs it, shown to the person as your claim" }
+    }), &["setting", "reason"])),
+    tool!("get_secret_request", "Secret request state", "How a secret request of this agent stands: pending, fulfilled (a person set the secret), declined or expired, with when it expires and whether the setting is set now. Without an id, every request of this agent from the last hour. Never the value, and never another agent's requests.", ToolNeed::Perm(Permission::SettingsWrite), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "id": { "type": "string", "description": "The request id request_secret answered (sr_...)" }
+    }), &[])),
 ];
 
 /// The `project` property of a tool that creates or lists.
@@ -1368,6 +1376,9 @@ async fn run_tool(
         "delete_project" => projects::delete_project(ctx, access, args, params).await,
         // The audit log
         "list_audit" => audit::list_audit(ctx, args),
+        // Secret requests
+        "request_secret" => super::secrets::request_secret(ctx, access, agent, args, params).await,
+        "get_secret_request" => super::secrets::get_secret_request(ctx, access, agent, args),
 
         _ => return Err(RpcError::invalid_params(format!("Unknown tool: {name}"))),
     })
@@ -1451,6 +1462,7 @@ fn tool_targets(tool: &str, args: &Value) -> Vec<(&'static str, String)> {
         ("agent", "agent"),
         ("server", "server"),
         ("cluster_id", "cluster"),
+        ("setting", "setting"),
     ];
     let mut out = Vec::new();
     for (key, kind) in KEYS {

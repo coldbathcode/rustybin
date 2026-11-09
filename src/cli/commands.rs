@@ -270,10 +270,10 @@ macro_rules! cmd {
 /// The command tree.
 pub static COMMANDS: &[Cmd] = &[
     // ── Sign-in ──
-    cmd!("login", "", "[--url U] [--user U] [--password-stdin] [--sso [--no-browser] [--wait S]] [--profile P]", "Sign in with the console user name and password (prompted, or the first line of stdin) and keep the token in a profile; --sso signs in with the identity provider in the browser instead (a loopback address on this machine takes the answer); --token keeps a token you already have.",
-        &[Flag::value("--user", "The console user name (default rustybin)"), Flag::switch("--password-stdin", "Read the password from the first line of stdin"), Flag::switch("--sso", "Single sign-on: the browser signs in at the identity provider"), Flag::switch("--no-browser", "With --sso: print the address to open instead of opening it"), Flag::value("--wait", "With --sso: how long to wait for the browser, in seconds (default 300)")],
-        [("POST", "/_rustybin/login"), ("GET", "/_rustybin/session"), ("GET", "/_rustybin/sso/status"), ("GET", "/_rustybin/sso/start"), ("POST", "/_rustybin/sso/token")], false, "login --url https://mocks.example.com --user rustybin"),
-    cmd!("logout", "", "", "Revoke the profile's token on the instance and forget it.", NO_FLAGS, [("POST", "/_rustybin/logout")], false, "logout"),
+    cmd!("login", "", "[--url U] [--user U] [--password-stdin] [--sso | --agent [--scope S]] [--no-browser] [--wait S] [--profile P]", "Sign in with the console user name and password (prompted, or the first line of stdin) and keep the token in a profile; --sso signs in with the identity provider in the browser instead (a loopback address on this machine takes the answer); --token keeps a token you already have. --agent signs an AI agent in instead: the browser opens the console's consent screen, you approve, and the agent's tokens are kept in the profile for rustybin mcp-stdio. An agent sign-in works with rustybin mcp-stdio only (the instance accepts its tokens on /_rustybin/mcp and nowhere else): the other commands need a sign-in of your own.",
+        &[Flag::value("--user", "The console user name (default rustybin)"), Flag::switch("--password-stdin", "Read the password from the first line of stdin"), Flag::switch("--sso", "Single sign-on: the browser signs in at the identity provider"), Flag::switch("--no-browser", "With --sso or --agent: print the address to open instead of opening it"), Flag::value("--wait", "With --sso or --agent: how long to wait for the browser, in seconds (default 300)"), Flag::switch("--agent", "Sign an AI agent in for rustybin mcp-stdio: you approve it on the console's consent screen"), Flag::value("--scope", "With --agent: the most the agent may be given (admin, console, inspector, harness; default: what you choose on the consent screen)")],
+        [("POST", "/_rustybin/login"), ("GET", "/_rustybin/session"), ("GET", "/_rustybin/sso/status"), ("GET", "/_rustybin/sso/start"), ("POST", "/_rustybin/sso/token"), ("POST", "/_rustybin/oauth/register"), ("GET", "/_rustybin/oauth/authorize"), ("POST", "/_rustybin/oauth/token")], false, "login --url https://mocks.example.com --user rustybin"),
+    cmd!("logout", "", "", "Revoke the profile's token on the instance and forget it, with the profile's agent sign-in (rustybin agents revoke ends an agent on the instance).", NO_FLAGS, [("POST", "/_rustybin/logout")], false, "logout"),
     cmd!("whoami", "", "", "The credential the calls carry: user, scopes, expiry.", NO_FLAGS, [("GET", "/_rustybin/session")], false, "whoami"),
     cmd!("status", "", "", "Name, version, modes, health, the features that are on.", NO_FLAGS, [("GET", "/_rustybin/status")], false, "status"),
     cmd!("doctor", "", "", "What is wrong with the instance and how to fix it; exits 1 when a check fails.", NO_FLAGS, [("GET", "/_rustybin/diagnostics")], false, "doctor"),
@@ -508,6 +508,10 @@ pub static COMMANDS: &[Cmd] = &[
     // ── The audit log ──
     cmd!("audit", "list", "[--actor A] [--action A] [--target T] [--since S] [--until U] [--result R] [--limit N] [--cursor C]", "The audit log, newest first: who did what and when, sign-ins and refusals (audit.read). --cursor pages back with the next_cursor printed last.", AUDIT_LIST_FLAGS, [("GET", "/_rustybin/audit")], false, "audit list --since 1h --result refused"),
     cmd!("audit", "tail", "[--actor A] [--action A] [--target T] [--result R]", "Follow the audit log: one line per new entry that matches (audit.read).", AUDIT_TAIL_FLAGS, [("GET", "/_rustybin/audit/stream")], false, "audit tail --action mocks --max 10"),
+    // ── Secrets an agent asked for (core next 12) ──
+    cmd!("settings", "requests", "[--state S]", "The secrets AI agents asked to have set (request_secret): the setting, the agent and the user it acts for, the agent's reason (its claim), the state. An agent never sets a secret: you fulfil or decline.", &[Flag::value("--state", "Only pending, fulfilled, declined or expired")], [("GET", "/_rustybin/secret-requests")], false, "settings requests --state pending"),
+    cmd!("settings", "fulfil", "<id> [--stdin]", "Set the secret an agent asked for: the value is prompted without echo, or read from the first line of stdin, never an argument. It goes to the settings store and never to the agent; needs what settings set-secret needs for that setting.", &[Flag::switch("--stdin", "Read the secret from the first line of stdin")], [("GET", "/_rustybin/secret-requests/{id}"), ("POST", "/_rustybin/secret-requests/{id}/fulfil")], false, "settings fulfil sr_0000000000000000 --stdin < key.txt"),
+    cmd!("settings", "decline", "<id>", "Decline a secret request: nothing is set, and the agent reads declined.", NO_FLAGS, [("POST", "/_rustybin/secret-requests/{id}/decline")], false, "settings decline sr_0000000000000000"),
 ];
 
 /// Catalogue paths no command calls, each with its reason (the parity test
@@ -534,20 +538,8 @@ pub const UNCOVERED: &[(&str, &str)] = &[
         "the management MCP endpoint: rustybin mcp-stdio bridges a client to it",
     ),
     (
-        "/_rustybin/oauth/authorize",
-        "the agent sign-in a browser walks",
-    ),
-    (
-        "/_rustybin/oauth/register",
-        "the agent sign-in a browser walks",
-    ),
-    (
-        "/_rustybin/oauth/token",
-        "the agent sign-in a browser walks",
-    ),
-    (
         "/_rustybin/oauth/requests/{id}",
-        "the console's consent screen",
+        "the console's consent screen, where a person approves an agent's sign-in (rustybin login --agent waits for it)",
     ),
     (
         "/_rustybin/harness/clusters/{id}/nodes",
@@ -819,7 +811,16 @@ async fn login(ctx: &mut Ctx) -> Result<()> {
         .value("--profile")
         .map(str::to_string)
         .unwrap_or_else(|| profiles::name_for(&url));
+    if ctx.args.has("--agent") {
+        return agent_login(ctx, &url, &name).await;
+    }
     let (token, expires_at, user) = match ctx.args.value("--token") {
+        Some(t) if super::agent_login::is_agent_token(t) => {
+            return Err(Fail::Auth(format!(
+                "{}; rustybin login --agent keeps one in a profile",
+                super::agent_login::ONLY_MCP
+            )))
+        }
         Some(t) => {
             let client = super::client::Client::new(&url, Some(t.to_string()))?;
             let session = client.get("/_rustybin/session", &[]).await?.value();
@@ -878,6 +879,12 @@ async fn login(ctx: &mut Ctx) -> Result<()> {
         ));
     };
     let mut all = profiles::load(&path)?;
+    // The profile's agent sign-in stays when it is for the same instance.
+    let agent = all
+        .profiles
+        .get(&name)
+        .filter(|p| p.url == url)
+        .and_then(|p| p.agent.clone());
     all.profiles.insert(
         name.clone(),
         profiles::Profile {
@@ -885,6 +892,7 @@ async fn login(ctx: &mut Ctx) -> Result<()> {
             token: Some(token),
             expires_at: expires_at.clone(),
             user: user.clone(),
+            agent,
         },
     );
     all.default = Some(name.clone());
@@ -898,6 +906,53 @@ async fn login(ctx: &mut Ctx) -> Result<()> {
             expires_at
                 .map(|e| format!(", expires {e}"))
                 .unwrap_or_default(),
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// `login --agent`: the browser walk of the control plane's own
+/// authorization server (`super::agent_login`), kept in the profile beside
+/// the person's token. For `rustybin mcp-stdio` only.
+async fn agent_login(ctx: &mut Ctx, url: &str, name: &str) -> Result<()> {
+    if ctx.args.has("--sso") || ctx.args.value("--token").is_some() {
+        return Err(Fail::Usage(
+            "--agent signs an agent in through the browser: it does not go with --sso or --token"
+                .into(),
+        ));
+    }
+    let Some(path) = profiles::path(&ctx.env) else {
+        return Err(Fail::Usage(
+            "no home directory to keep the profile in: set RUSTYBIN_CONFIG_HOME".into(),
+        ));
+    };
+    let kept = super::agent_login::login(ctx, url).await?;
+    let mut all = profiles::load(&path)?;
+    let entry = all
+        .profiles
+        .entry(name.to_string())
+        .or_insert_with(profiles::Profile::default);
+    if entry.url != url {
+        // Another instance's sign-in never goes to this one.
+        *entry = profiles::Profile {
+            url: url.to_string(),
+            ..profiles::Profile::default()
+        };
+    }
+    let (scope, expires_at) = (kept.scope.clone(), kept.expires_at.clone());
+    entry.agent = Some(kept);
+    // A person's default profile stays theirs.
+    if all.default.is_none() {
+        all.default = Some(name.to_string());
+    }
+    profiles::save(&path, &all)?;
+    if ctx.json {
+        ctx.emit(&json!({ "profile": name, "url": url, "agent": { "scope": scope, "expires_at": expires_at }, "for": "mcp-stdio", "file": path.display().to_string() }));
+    } else {
+        ctx.say(&format!(
+            "An agent is signed in to {url}{} (profile {name}, kept in {}).\nUse it with: rustybin mcp-stdio --profile {name}\nIt works with rustybin mcp-stdio only (the instance accepts its tokens on /_rustybin/mcp and nowhere else). The access token lasts an hour and mcp-stdio renews it for up to thirty days; it acts for you, with at most your permissions. See and revoke it in the console (AI agents) or with rustybin agents list | revoke.",
+            scope.map(|s| format!(" with the scope {s}")).unwrap_or_default(),
             path.display()
         ));
     }
@@ -970,7 +1025,7 @@ async fn sso_login(ctx: &mut Ctx, url: &str) -> Result<(String, Option<String>, 
         .clamp(1, 3600);
     let query = tokio::time::timeout(
         Duration::from_secs(wait),
-        loopback_answer(listener, &cli_state),
+        loopback_answer(listener, "cli_state", &cli_state),
     )
     .await
     .map_err(|_| Fail::Failed(format!("the browser did not come back in {wait} s")))?
@@ -1024,7 +1079,7 @@ async fn sso_login(ctx: &mut Ctx, url: &str) -> Result<(String, Option<String>, 
 
 /// Open a URL with the system's opener (best effort: the address is
 /// printed too).
-fn open_browser(url: &str) {
+pub(crate) fn open_browser(url: &str) {
     let mut cmd = if cfg!(target_os = "macos") {
         let mut c = std::process::Command::new("open");
         c.arg(url);
@@ -1046,12 +1101,14 @@ fn open_browser(url: &str) {
 }
 
 /// Wait for the browser on the loopback listener: the query of the first
-/// `GET /callback` whose `cli_state` is `expected`, answered with a page
+/// `GET /callback` whose `key` parameter (`cli_state` for single sign-on,
+/// OAuth's `state` for an agent sign-in) is `expected`, answered with a page
 /// that says what happened. Other requests (a favicon, a callback without
 /// the value: another page or local user guessing the port) get an error
 /// and the listener keeps waiting.
 pub(crate) async fn loopback_answer(
     listener: tokio::net::TcpListener,
+    key: &str,
     expected: &str,
 ) -> std::io::Result<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1084,7 +1141,7 @@ pub(crate) async fn loopback_answer(
         };
         let query = rest.strip_prefix('?').unwrap_or("").to_string();
         let carries = form_urlencoded::parse(query.as_bytes())
-            .any(|(k, v)| k == "cli_state" && crate::control_auth::constant_time_eq(&v, expected));
+            .any(|(k, v)| k == key && crate::control_auth::constant_time_eq(&v, expected));
         if !carries {
             let _ = stream
                 .write_all(
@@ -1163,13 +1220,18 @@ async fn logout(ctx: &mut Ctx) -> Result<()> {
     }
     if let (Some(path), Some(name)) = (profiles::path(&ctx.env), resolved.profile.clone()) {
         let mut all = profiles::load(&path)?;
+        let mut agent = false;
         if let Some(p) = all.profiles.get_mut(&name) {
             p.token = None;
             p.expires_at = None;
             p.user = None;
+            agent = p.agent.take().is_some();
         }
         profiles::save(&path, &all)?;
         ctx.say(&format!("Signed out of {} (profile {name}).", resolved.url));
+        if agent {
+            ctx.say("The profile's agent sign-in is forgotten too. Its tokens work until they expire: revoke the agent in the console (AI agents) or with rustybin agents revoke.");
+        }
     } else {
         ctx.say(&format!("Signed out of {}.", resolved.url));
     }
@@ -1344,8 +1406,103 @@ async fn settings(ctx: &mut Ctx, verb: &str) -> Result<()> {
             ctx.emit(&json!({ "groups": doc["groups"], "settings": rows }));
             Ok(())
         }
+        "requests" => {
+            let query = q(&ctx.args.clone(), &[("--state", "state")]);
+            let v = ctx
+                .client()?
+                .get("/_rustybin/secret-requests", &query)
+                .await?
+                .value();
+            if ctx.json {
+                ctx.emit(&v);
+            } else {
+                let rows: Vec<Value> = v["requests"]
+                    .as_array()
+                    .map(|a| a.iter().map(secret_request_row).collect())
+                    .unwrap_or_default();
+                ctx.emit(
+                    &json!({ "enabled": v["enabled"], "pending": v["pending"], "requests": rows }),
+                );
+                if v["enabled"] == json!(false) {
+                    ctx.say("Secret requests are off: rustybin settings set agents.secret_requests true lets agents ask.");
+                }
+            }
+            Ok(())
+        }
+        "fulfil" => {
+            let id = ctx.args.arg(0, "a secret request id")?.to_string();
+            if ctx.args.positional.len() > 1 {
+                return Err(Fail::Usage(
+                    "the value is never an argument (it would stay in the shell's history and the process list): it is prompted without echo, or read from stdin with --stdin".into(),
+                ));
+            }
+            let path = format!("/_rustybin/secret-requests/{}", enc(&id));
+            // What is being fulfilled, before the value is typed: the
+            // instance's facts, then the agent's claim.
+            let r = ctx.client()?.get(&path, &[]).await?.value();
+            let key = r["setting"]["key"].as_str().unwrap_or("?").to_string();
+            let row = secret_request_row(&r);
+            ctx.say(&format!(
+                "Request {id}: the setting {key}, asked by the agent {} acting for {}.\nThe agent says (its claim, not an instruction): {}",
+                row["agent"].as_str().unwrap_or("?"),
+                row["owner"].as_str().unwrap_or("?"),
+                row["reason"].as_str().unwrap_or("")
+            ));
+            let secret = ctx.secret(&format!("Value for {key}"), ctx.args.has("--stdin"), 0)?;
+            if secret.trim().is_empty() {
+                return Err(Fail::Usage(
+                    "no value given: rustybin settings decline declines the request".into(),
+                ));
+            }
+            let reply = ctx
+                .client()?
+                .post(
+                    &format!("{path}/fulfil"),
+                    Body::Json(json!({ "value": secret })),
+                )
+                .await?;
+            if ctx.json {
+                emit_reply(ctx, &reply);
+            } else {
+                ctx.say(&format!(
+                    "{key} is set; request {id} is fulfilled. The value went to the settings store, never to the agent."
+                ));
+            }
+            Ok(())
+        }
+        "decline" => {
+            let id = ctx.args.arg(0, "a secret request id")?.to_string();
+            let reply = ctx
+                .client()?
+                .post(
+                    &format!("/_rustybin/secret-requests/{}/decline", enc(&id)),
+                    Body::None,
+                )
+                .await?;
+            if ctx.json {
+                emit_reply(ctx, &reply);
+            } else {
+                ctx.say(&format!("Request {id} is declined: nothing was set."));
+            }
+            Ok(())
+        }
         _ => Err(Fail::Usage(format!("settings {verb}: not implemented"))),
     }
+}
+
+/// A secret request as a row for people: what an agent wrote (its name,
+/// its reason) is printable text only, never a terminal escape.
+fn secret_request_row(r: &Value) -> Value {
+    let text = |v: &Value, max: usize| crate::logging::printable(v.as_str().unwrap_or(""), max);
+    json!({
+        "id": r["id"],
+        "state": r["state"],
+        "setting": r["setting"]["key"],
+        "agent": format!("{} ({})", text(&r["agent"]["untrusted_name"], 80), r["agent"]["id"].as_str().unwrap_or("?")),
+        "owner": text(&r["agent"]["owner_label"], 120),
+        "reason": text(&r["untrusted_reason"], 300),
+        "expires_in": r["expires_in"],
+    })
 }
 
 async fn sessions(ctx: &mut Ctx, verb: &str) -> Result<()> {

@@ -274,6 +274,83 @@ async fn nothing_secret_reaches_an_entry_or_a_file() {
     )
     .await;
     assert_ne!(r["isError"], json!(true), "{r}");
+    // A secret set at an agent's request (core next 12): the reason the
+    // agent gave and the value the person typed are in no entry.
+    state
+        .settings
+        .update(
+            BTreeMap::from([(crate::secret_requests::SWITCH_KEY.to_string(), json!(true))]),
+            BTreeMap::new(),
+            "test",
+        )
+        .expect("switch");
+    let r = tool(
+        &app,
+        &[("authorization", &bearer)],
+        "request_secret",
+        json!({ "setting": "git.token", "reason": "SECRET-reason-12 for the repository" }),
+    )
+    .await;
+    assert_ne!(r["isError"], json!(true), "{r}");
+    let request = r["structuredContent"]["request"]["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+    let asked = last(&state);
+    assert_eq!(
+        (asked.via.to_string().as_str(), asked.action.as_str()),
+        ("mcp", "request_secret")
+    );
+    assert_eq!(asked.event.as_deref(), Some("secret_request"));
+    for (kind, name) in [("setting", "git.token"), ("secret-request", &request)] {
+        assert!(
+            asked.targets.contains(&Target {
+                kind: kind.into(),
+                name: name.into()
+            }),
+            "{kind}: {:?}",
+            asked.targets
+        );
+    }
+    let (status, v) = call(
+        &app,
+        "POST",
+        &format!("/_rustybin/secret-requests/{request}/fulfil"),
+        &[("authorization", admin)],
+        Some(json!({ "value": "SECRET-value-13" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        state
+            .settings
+            .secret("git.token")
+            .as_deref()
+            .map(String::as_str),
+        Some("SECRET-value-13")
+    );
+    let fulfilled = last(&state);
+    assert_eq!(fulfilled.event.as_deref(), Some("secret_fulfilled"));
+    assert_eq!(fulfilled.actor.kind, "admin_token");
+    assert_eq!(
+        fulfilled
+            .targets
+            .iter()
+            .map(|t| t.kind.as_str())
+            .collect::<Vec<_>>(),
+        ["secret-request", "setting", "agent"]
+    );
+    // A refused one (a body that is not the shape) quotes nothing either.
+    let (status, v) = call(
+        &app,
+        "POST",
+        &format!("/_rustybin/secret-requests/{request}/decline"),
+        &[("authorization", admin)],
+        Some(json!({ "value": "SECRET-value-14" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE, "{v}");
+    assert!(!v.to_string().contains("SECRET"), "{v}");
     state.audit.flush();
 
     let ring = serde_json::to_string(&state.audit.all()).expect("json");

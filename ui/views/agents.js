@@ -361,7 +361,7 @@ export default {
         h('div', { class: 'stack' },
           h('p', { class: 'small', style: { margin: 0 } }, 'The default ceiling is ', badge(p.default_ceiling, p.default_ceiling === 'full' ? 'outline' : 'warn'), ', ' + src + '. The default for a role of the agent\'s user comes before it, rules of rustybin.yaml before that (the first that matches); an agent\'s own rights win field by field. An agent that acts for a user never does more than the user.'),
           (p.default_ceiling_for || []).length ? h('p', { class: 'small', id: 'agents-role-defaults', style: { margin: 0 } }, 'Per role: ', p.default_ceiling_for.map((e, i) => [i ? ', ' : '', h('code', null, e.role), ' ', badge(e.ceiling, 'warn')])) : null,
-          doc ? settingsForm(doc, 'agents', { saveLabel: 'Save the default ceiling', onSaved: () => reload() }).el : null,
+          doc ? settingsForm(doc, 'agents', { saveLabel: 'Save the agents settings', onSaved: () => reload() }).el : null,
           h('h3', { style: { margin: 0 } }, 'Rules of rustybin.yaml'),
           rules)));
     }

@@ -14,7 +14,7 @@ An entry is:
 | `actor` | `kind` (`user`, `admin_token`, `token`, `key`, `visit`, `open`, `anonymous`, `system`), the user's `id` and `name` (a token's subject, the key's id, the visit's fingerprint), and the `agent` when an [AI agent](agent-mcp.md#managing-agents) made the call |
 | `via` | `api` (a route), `mcp` (a management tool), `system` (the instance on its own) |
 | `action` | The route template and method (`PUT /_rustybin/projects/{name}`), or the tool (`deploy_mock`) |
-| `event` | What the handler said happened: `login`, `logout`, `join`, `invite`, `reset`, `update`, `disable`, `delete`, `create_role`, `create_project`, `sso`, `sso_token`, `portal_login`, `close_item`, `open_item`, `revoke_agent`, `apply_config`, `git_pull`, ... |
+| `event` | What the handler said happened: `login`, `logout`, `join`, `invite`, `reset`, `update`, `disable`, `delete`, `create_role`, `create_project`, `sso`, `sso_token`, `portal_login`, `close_item`, `open_item`, `revoke_agent`, `apply_config`, `git_pull`, `secret_request`, `secret_fulfilled`, `secret_declined`, ... |
 | `targets` | The names it was about: `{kind, name}` (`mock`, `operation`, `user`, `role`, `project`, `setting`, `test`, `checkpoint`, `agent`, `owner`, `item`, `group`, `commit`, `section`, ...) |
 | `result` | `status` (a route), `outcome` (`ok`, `error`, `refused`, `asked`: a tool waiting for the user's confirmation), the `reason` and `permission` of a refusal |
 | `request_id`, `address` | The `X-Request-Id` and the client's address, as the sign-in throttle sees it |
@@ -43,6 +43,11 @@ a handle rather than a name (an MCP relay session, a consent request) is a short
   or deleted, custom roles, [projects](projects.md) created, changed or deleted and
   resources moved between them, agents revoked (`revoke_agent` with the agent and its
   `owner`), portal items opened or closed.
+- **Secrets an agent asked for** ([a secret at an agent's
+  request](agent-mcp.md#a-secret-at-an-agents-request)): the asking (`secret_request`,
+  the tool call), the fulfilling (`secret_fulfilled`) and the declining
+  (`secret_declined`), each with the request, the setting and the agent. Never the
+  value, and never the reason the agent gave.
 - **The instance as code**: config applies (`apply_config` with the sections the
   document changed), git pulls with the commit they reached (`git_pull`; the
   automatic mode's pulls are `system` entries).

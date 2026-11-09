@@ -106,6 +106,10 @@ pub struct AppState {
     /// The audit log (`crate::audit`): who did what, in memory and in
     /// `<state>/audit/`.
     pub audit: Arc<crate::audit::Audit>,
+    /// Secrets AI agents asked to have set (`crate::secret_requests`): in
+    /// memory, bounded, expiring; shared by the management tools that ask
+    /// and read and the routes a person fulfils through.
+    pub secret_requests: Arc<crate::secret_requests::SecretRequests>,
 }
 
 impl AppState {
@@ -224,7 +228,9 @@ impl AppState {
             settings.clone(),
             clock.clone(),
         ));
+        let secret_requests = Arc::new(crate::secret_requests::SecretRequests::new(clock.clone()));
         Self {
+            secret_requests,
             keys,
             limits,
             config: Arc::new(config),

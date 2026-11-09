@@ -469,6 +469,7 @@ const SOURCES: &[fn() -> Vec<Endpoint>] = &[
     crate::ui::catalog,
     crate::openapi::catalog,
     crate::collections::catalog,
+    crate::secret_requests::catalog,
 ];
 
 /// The full catalogue, ordered by [`CATEGORY_ORDER`] (module order within a

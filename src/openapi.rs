@@ -60,6 +60,7 @@ const MODULE_PATHS: &[fn() -> Value] = &[
     crate::ai::openapi_paths,
     crate::graphql::openapi_paths,
     crate::a2a::openapi_paths,
+    crate::secret_requests::openapi_paths,
 ];
 
 /// Per-module OpenAPI components fragments (e.g. `{"schemas": {...}}`).
@@ -70,6 +71,7 @@ const MODULE_COMPONENTS: &[fn() -> Value] = &[
     crate::mcp::openapi_components,
     crate::mcp::registry::openapi_components,
     crate::ai::openapi_components,
+    crate::secret_requests::openapi_components,
 ];
 
 /// Merge path items: new operations are added to existing paths.

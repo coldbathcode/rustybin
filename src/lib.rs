@@ -68,6 +68,7 @@ pub mod replay;
 pub mod request_bin;
 pub mod response_shaping;
 pub mod scenarios;
+pub mod secret_requests;
 pub mod server;
 pub mod session;
 pub mod settings;
@@ -168,6 +169,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     limits::router,
     keys::router,
     ui::router,
+    secret_requests::router,
 ];
 
 /// Build the complete application: all module routers plus the middleware

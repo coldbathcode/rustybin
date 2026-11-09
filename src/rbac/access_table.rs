@@ -148,6 +148,10 @@ pub(crate) const NEW_SINCE_0_4: &[&str] = &[
     "/_rustybin/projects/{name}",
     "/_rustybin/audit",
     "/_rustybin/audit/stream",
+    "/_rustybin/secret-requests",
+    "/_rustybin/secret-requests/{id}",
+    "/_rustybin/secret-requests/{id}/fulfil",
+    "/_rustybin/secret-requests/{id}/decline",
 ];
 
 /// The harness mutations an open control plane guarded with the admin

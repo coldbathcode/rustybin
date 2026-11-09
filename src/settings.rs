@@ -441,6 +441,7 @@ pub fn specs() -> Vec<Spec> {
     all.extend(crate::egress::specs());
     all.extend(crate::mcp::registry::specs());
     all.extend(crate::mcp::manage::agents::specs());
+    all.extend(crate::secret_requests::specs());
     all.extend(crate::portal::specs());
     all.extend(crate::mocks::leads::specs());
     all.extend(crate::replay::schedule::specs());
@@ -1608,7 +1609,7 @@ pub fn check_keys<'a>(
     }
 }
 
-fn refusal(e: UpdateError) -> Response {
+pub(crate) fn refusal(e: UpdateError) -> Response {
     match e {
         UpdateError::Locked(keys) => (
             StatusCode::CONFLICT,

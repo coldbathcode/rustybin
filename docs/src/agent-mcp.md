@@ -46,7 +46,7 @@ stdout:
 rustybin mcp-stdio --server https://<host>/_rustybin/mcp --token <token>
 # a visitor on a self-service demo
 rustybin mcp-stdio --server https://<host> --header 'X-Rustybin-Mock-Token: rbm_...'
-# a profile of `rustybin login`: its URL and token
+# a profile of `rustybin login`: its URL and its agent sign-in, else its token
 rustybin mcp-stdio --profile mocks.example.com
 # the instance's URL: the token of the profile kept for it
 rustybin mcp-stdio --url https://mocks.example.com
@@ -57,6 +57,41 @@ appended) and `--token` to `RUSTYBIN_TOKEN` or `RUSTYBIN_ADMIN_TOKEN`. `--profil
 `--url` read the [command line's](cli-guide.md) `profiles.json`, so a local agent manages a
 remote instance with the sign-in `rustybin login` already did; without any of them the
 default profile is used.
+
+**A sign-in of the agent's own, from the terminal.** A stdio client has no browser
+flow of its own, so the command line does it once:
+
+```bash
+rustybin login --agent --url https://mocks.example.com
+rustybin mcp-stdio --profile mocks.example.com
+```
+
+`rustybin login --agent` walks the instance's own [OAuth sign-in](#sign-in-with-oauth):
+it registers as the client `Rustybin CLI`, opens your browser on the console's consent
+page (`--no-browser` prints the address instead), you sign in there if asked, choose
+what to grant and approve, and a loopback address on this machine takes the answer
+(PKCE; only the callback carrying this sign-in's `state` is accepted; `--wait` is how
+long it waits, 300 seconds by default). `--scope admin | console | inspector | harness`
+caps what may be granted. The access token (an hour), the refresh token (thirty days)
+and the client id are kept in the profile under `agent`, in `profiles.json` (mode
+`0600`), beside your own token when the profile has one. `rustybin mcp-stdio` uses a
+profile's agent sign-in before its token, renews the access token with the refresh
+token shortly before it expires (and once after a `401`) and writes the new pair
+back; when the renewal is refused (the agent was revoked, you signed out everywhere,
+your user was disabled, thirty days passed) it says to sign in again.
+
+The agent [acts for you](#agents-act-for-a-user): it is listed in **AI agents** with
+you as its owner, limited and revoked like any other, and a new `rustybin login
+--agent` is the same agent (the same registration), so its rights and a revocation
+stay. **This credential is for `rustybin mcp-stdio` only**: the instance accepts
+these tokens on `/_rustybin/mcp` and nowhere else, so no other command sends them. A
+profile that holds only an agent sign-in, and an agent token given as `--token` or
+`RUSTYBIN_TOKEN`, are refused by the other commands before any call, with a message
+that says so (exit `3`); sign in with `rustybin login` for those. `rustybin logout`
+forgets the profile's agent sign-in too; `rustybin agents revoke <id>` ends it on the
+instance. Not offered where the built-in sign-in is off (an open control plane, shared
+mode, a self-service instance, `RUSTYBIN_CONTROL_OAUTH=off`, an external
+authorization server): give `mcp-stdio` a token there.
 
 The bridge handles one request at a time and does not relay requests the server
 sends while a call runs. Clients on protocol 2026-07-28 get confirmation questions
@@ -412,6 +447,107 @@ moved to their user at the first start with the password sign-in: a console reco
 the user of that name, an OAuth record to the first admin, with their rights, notes
 and revocations.
 
+## A secret at an agent's request
+
+A secret is never a tool input: `update_settings` refuses one, and no tool returns
+one. So that an agent is not stuck when a job needs a provider key, a webhook token
+or a client secret, it can **ask for the secret to be set**, and a person who may set
+it types the value somewhere the agent is not: the console, or the command line's
+stdin. The agent reads only how its request stands.
+
+It is off until someone turns it on (the `agents.secret_requests` setting, in the
+`agents` group, so the change needs `settings.security`):
+
+```hurl
+{{#include ../examples/agent/secret_requests.hurl:enable}}
+```
+
+**The agent asks** with `request_secret`: the setting's name (a secret setting
+`get_settings` lists) and a reason in a sentence. The answer is the request's id and
+state, and where a person goes; never a value.
+
+```hurl
+{{#include ../examples/agent/secret_requests.hurl:ask}}
+```
+
+- Asking needs `settings.write` (the tool's permission, as `update_settings`: an agent
+  under the `read-only`, `traffic` or `manage` ceiling cannot ask, and a revoked agent
+  is refused like on every tool) and what changing a setting of that group needs
+  (`settings.security` for `sso.*`, `git.write` for `git.*`, `portal.settings` for
+  `portal.*`): everything a person needs to set it except `secrets.write`.
+- Never `console.password_hash` (a password passes through nobody but its owner), and
+  never a setting `RUSTYBIN_SETTINGS_LOCK` holds (the answer names its variable).
+- At most 3 requests of one agent wait at a time (10 asked per agent per hour, 32
+  waiting on the instance), each for 15 minutes. Asking again for the same setting
+  answers the request that waits. A resolved request stays readable for an hour.
+  Requests live in memory: none survives a restart, and none is in `rustybin.yaml`.
+- A client on protocol 2026-07-28 that declares the `elicitation.url` capability is
+  sent the console's Management address to show the person, inside the call's own
+  answer; it calls again and gets the request. Never a form: nothing typed at the
+  agent could be the value.
+
+**A person fulfils or declines.** In the console, **Management** shows a card
+**Secrets an agent asked for** above every tab while a request waits: the setting,
+the agent's id, the user it acts for and its credential (what the instance knows),
+then, set apart, the name the agent gave itself and its reason (what the agent
+claims, shown as text). Type the value and **Set the secret**, or **Decline**. From
+the command line the value comes from a prompt without echo or from stdin, never an
+argument:
+
+```bash
+{{#include ../examples/cli/cli.sh:secret_requests}}
+```
+
+The same over the API, for a caller with `secrets.write`:
+
+```hurl
+{{#include ../examples/agent/secret_requests.hurl:list}}
+```
+
+```hurl
+{{#include ../examples/agent/secret_requests.hurl:one}}
+```
+
+```hurl
+{{#include ../examples/agent/secret_requests.hurl:fulfil}}
+```
+
+Fulfilling writes through the settings store exactly as setting that secret does, so
+it needs what that needs (`settings.write`, `secrets.write` and the group's
+permission; a `403` names the one missing), the store validates and seals the value,
+and `RUSTYBIN_SETTINGS_LOCK` answers `409`. Nobody fulfils more than they could set
+themselves. A request that is no longer pending answers `410`, and so does one whose
+agent was revoked since (it is declined, nothing is set).
+
+```hurl
+{{#include ../examples/agent/secret_requests.hurl:decline}}
+```
+
+**The agent reads the state** with `get_secret_request`: `pending`, `fulfilled`,
+`declined` or `expired`, and whether the setting is set now. Its own requests only
+(another agent's id does not exist for it), and never the value or a hint of it.
+
+```hurl
+{{#include ../examples/agent/secret_requests.hurl:state}}
+```
+
+**The reason is the agent's claim.** It is text an agent wrote, shown to a person who
+is about to type a secret, so it is cleaned (control characters dropped), capped at
+300 characters, answered as `untrusted_reason` (the client's name as
+`untrusted_name`) and rendered as text everywhere. Check the setting and whose agent
+it is, which the instance knows, before believing the reason. The [audit
+log](audit-log.md) records the asking (`secret_request`), the fulfilling
+(`secret_fulfilled`) and the declining (`secret_declined`) with the request, the
+setting and the agent; never the value, and never the reason.
+
+| Surface | Where |
+|---|---|
+| API | `GET /_rustybin/secret-requests[?state=pending]`, `GET /_rustybin/secret-requests/{id}`, `POST /_rustybin/secret-requests/{id}/fulfil` (`{"value"}`), `POST /_rustybin/secret-requests/{id}/decline` |
+| Console | **Management**, above every tab: **Secrets an agent asked for** (the value field, **Set the secret**, **Decline**); the switch is in **AI agents**, Defaults and rules |
+| CLI | `rustybin settings requests [--state S]`, `rustybin settings fulfil <id> [--stdin]`, `rustybin settings decline <id>` ([reference](cli.md#settings)) |
+| Management MCP | `request_secret` (asks), `get_secret_request` (the caller's own requests); fulfilling and declining have no tool, on purpose |
+| `rustybin.yaml` | `settings: {agents.secret_requests: true}`; a request itself is not instance state and is in no document |
+
 ## Talking to the server
 
 `server/discover` (or `initialize` on the handshake versions) returns the server
@@ -492,7 +628,8 @@ example), the input of `generate_examples`.
 
 Every model call is an [assist task](ai-assist.md) with the user's own key. Keys are
 never tool inputs and never returned: the operator sets them in the console or with
-`rustybin settings set-secret`; `assist_status` shows `{set, hint}`.
+`rustybin settings set-secret`, or an agent [asks for one to be
+set](#a-secret-at-an-agents-request); `assist_status` shows `{set, hint}`.
 
 | Tool | Permission | |
 |---|---|---|
@@ -513,6 +650,8 @@ never tool inputs and never returned: the operator sets them in the console or w
 | `get_settings` | `settings.read` | Every [instance setting](configuration.md#state-directory-settings-and-secrets) with its value, source and lock state, or one group or key; secrets show `{set, hint}` |
 | `update_settings` | `settings.write` | Set values (`null` forgets a stored one) and unset stored values; secrets are refused, and so is the console sign-in in password mode (it changes only with its current password); each key needs what `PATCH /_rustybin/settings` needs for it (`settings.security` for the security groups, `portal.settings`, `git.write` for `git.*`, the permissions of the roles a `sso.role_map` or `sso.default_roles` names); a change of `egress.*`, `agents.*`, `console.*`, `git.*`, `sso.*`, `proxy.*`, `assist.provider` or `assist.base_url` is then confirmed by the user |
 | `check_egress` | `settings.read` | The [outbound policy](configuration.md#outbound-connections) and, with `url` and `purpose`, whether that URL would be allowed before DNS and why not |
+| `request_secret` | `settings.write` | [Ask for a secret setting to be set](#a-secret-at-an-agents-request) by a person (`setting`, `reason`): the request's id and state, never a value; needs the `agents.secret_requests` setting on and what changing a setting of that group needs; at most 3 waiting per agent, 15 minutes each |
+| `get_secret_request` | `settings.write` | How a request of this agent stands (`pending`, `fulfilled`, `declined`, `expired`) and whether the setting is set now; without `id`, its requests of the last hour. Never the value, never another agent's |
 
 ### MCP inspector and registry
 
@@ -554,7 +693,7 @@ never tool inputs and never returned: the operator sets them in the console or w
 | `git_resolve` | `git.write` | After a diverged branch: the instance's copy wins or the repository's (confirmed) |
 | `git_deploy_key` | `git.write` | The deploy key's public half; `generate: true` makes one, `replace: true` (confirmed) replaces it |
 
-The token for an https remote is the secret `git.token`: an agent cannot set it.
+The token for an https remote is the secret `git.token`: an agent cannot set it (it can [ask for it to be set](#a-secret-at-an-agents-request)).
 
 ### Agents, users and sign-in sessions
 
@@ -898,7 +1037,10 @@ No tool takes a secret: `update_settings` refuses secret keys, saved MCP connect
 are written in the console or the CLI, the git token and the console password are set
 there or in the environment, and exports carry references (`${VAR}`,
 `secret:stored`), never values. What an agent can read about a secret is `{set,
-hint}`. The parity test (`every_control_route_has_a_management_tool`) keeps every
+hint}`. An agent that needs one set [asks](#a-secret-at-an-agents-request)
+(`request_secret`: a setting's name and a reason) and a person types the value in the
+console or on the command line's stdin; the request's answers carry its state, never
+the value. The parity test (`every_control_route_has_a_management_tool`) keeps every
 control route mapped to a tool, a resource or a written reason, and a second test
 checks that no tool input is named like a secret.
 
@@ -940,7 +1082,8 @@ so [plan limits](concepts/plans-and-limits.md) apply as for the REST routes.
   in the deployment. The [instance settings](configuration.md#state-directory-settings-and-secrets) are
   tools.
 - Setting a secret (a provider key, the git token, a saved connection's credential,
-  the console password): the console, the CLI or the environment.
+  the console password): the console, the CLI or the environment. An agent may [ask
+  for a secret setting to be set](#a-secret-at-an-agents-request); a person types it.
 - Fetching a spec from a URL on the server: the agent reads the file and sends its
   content.
 - The self-service email step: consent stays in the console.
@@ -954,9 +1097,9 @@ The same job from the API, the console, the command line, an agent and the confi
 
 | Surface | Where |
 |---|---|
-| API | `POST /_rustybin/mcp` (the server), `GET /_rustybin/agents` (each agent's `owner`, `?owner=`), `GET /_rustybin/agents/events`, `GET`, `PATCH /_rustybin/agents/{id}` (a role as the ceiling), `POST /_rustybin/agents/{id}/revoke \| restore`, `DELETE /_rustybin/agents/{id}/sessions`, the OAuth routes under `/_rustybin/oauth` (the consent request's `permissions`, `grants` and `approver`) |
-| Console | The **AI agents** view (the list with the **Owner** column and its filter, rights with a role as the ceiling, revoke, the live feed, **Connect an agent** with the `claude mcp add` command), `#/authorize/<id>` for the agent sign-in (the permissions the agent will hold) |
-| CLI | `rustybin agents list [--owner U] \| get \| rights [--ceiling ROLE] \| revoke \| restore \| end-sessions \| tail`, `rustybin mcp-stdio` ([reference](cli.md#agents)) |
-| Management MCP | `list_agents` (`owner`), `get_agent`, `set_agent_rights` (a role as the ceiling), `revoke_agent` (never oneself), `restore_agent`, `end_agent_sessions` (rights, restore and end sessions never on an agent of the caller's own credential; a user's own agents without `agents.read` / `agents.manage`); the prompt `onboard_agent` |
-| `rustybin.yaml` | `agents:` (`default_ceiling`, `rules` by client name, credential kind, user and role, a role as the ceiling), `settings: {agents.default_ceiling_for: [...]}` ([the whole instance as code](configuration-as-code.md)) |
+| API | `POST /_rustybin/mcp` (the server), `GET /_rustybin/agents` (each agent's `owner`, `?owner=`), `GET /_rustybin/agents/events`, `GET`, `PATCH /_rustybin/agents/{id}` (a role as the ceiling), `POST /_rustybin/agents/{id}/revoke \| restore`, `DELETE /_rustybin/agents/{id}/sessions`, the OAuth routes under `/_rustybin/oauth` (the consent request's `permissions`, `grants` and `approver`), `GET /_rustybin/secret-requests`, `GET /_rustybin/secret-requests/{id}`, `POST /_rustybin/secret-requests/{id}/fulfil \| decline` ([a secret at an agent's request](#a-secret-at-an-agents-request)) |
+| Console | The **AI agents** view (the list with the **Owner** column and its filter, rights with a role as the ceiling, revoke, the live feed, **Connect an agent** with the `claude mcp add` command), `#/authorize/<id>` for the agent sign-in (the permissions the agent will hold); **Management**, **Secrets an agent asked for** (set or decline) |
+| CLI | `rustybin agents list [--owner U] \| get \| rights [--ceiling ROLE] \| revoke \| restore \| end-sessions \| tail`, `rustybin mcp-stdio`, `rustybin login --agent` (an agent's own sign-in for `mcp-stdio`), `rustybin settings requests \| fulfil \| decline` ([reference](cli.md#agents)) |
+| Management MCP | `list_agents` (`owner`), `get_agent`, `set_agent_rights` (a role as the ceiling), `revoke_agent` (never oneself), `restore_agent`, `end_agent_sessions` (rights, restore and end sessions never on an agent of the caller's own credential; a user's own agents without `agents.read` / `agents.manage`); `request_secret`, `get_secret_request`; the prompt `onboard_agent` |
+| `rustybin.yaml` | `agents:` (`default_ceiling`, `rules` by client name, credential kind, user and role, a role as the ceiling), `settings: {agents.default_ceiling_for: [...], agents.secret_requests: true}` ([the whole instance as code](configuration-as-code.md)) |
 | Environment | `RUSTYBIN_AGENTS_DEFAULT_CEILING`, `RUSTYBIN_CONTROL_OAUTH`, `RUSTYBIN_CONTROL_OAUTH_ISSUER`, `RUSTYBIN_CONTROL_OAUTH_KEY` ([configuration](configuration.md#control-plane-and-console)) |

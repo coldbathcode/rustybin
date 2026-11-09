@@ -9,6 +9,11 @@
 //! rustybin mcp-stdio --profile mocks.example.com      # a profile of `rustybin login`
 //! rustybin mcp-stdio --url https://host               # the profile's token for that URL
 //! ```
+//!
+//! A profile with an agent sign-in (`rustybin login --agent`) is used
+//! before the profile's own token: the bridge renews its access token with
+//! the refresh token shortly before it expires, and once after a `401`,
+//! and writes the new pair back to the profile.
 
 use std::process::ExitCode;
 
@@ -28,7 +33,8 @@ USAGE:
     --url      The instance's base URL, as `rustybin login --url` keeps it: the token of
                the profile for that URL is used when no --token is given
     --profile  A profile of `rustybin login` (or $RUSTYBIN_PROFILE, else the default
-               profile): its URL and token
+               profile): its URL and its agent sign-in (`rustybin login --agent`,
+               renewed as it expires), else its token
     --header   An extra request header, repeatable (e.g. 'X-Rustybin-Mock-Token: rbm_...')
 
 Messages are read from stdin (one JSON-RPC message per line) and answers written
@@ -42,24 +48,36 @@ struct Args {
     server: String,
     token: Option<String>,
     headers: Vec<(String, String)>,
+    /// The profile's agent sign-in, when one is used: `token` is its access
+    /// token as kept, and the bridge renews it.
+    agent: Option<crate::cli::agent_login::AgentSession>,
+}
+
+/// What a profile gives the bridge.
+struct FromProfile {
+    url: String,
+    token: Option<String>,
+    agent: Option<crate::cli::agent_login::AgentSession>,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
     parse_with(args, &crate::cli::Env::from_process())
 }
 
-/// The profile's URL and token for `--url` and `--profile` (the CLI's
+/// The profile's URL and credential for `--url` and `--profile` (the CLI's
 /// `profiles.json`): a named profile, else the profile kept for the URL,
-/// else the default profile.
+/// else the default profile. Its agent sign-in when it has one, else its
+/// token.
 fn from_profiles(
     env: &crate::cli::Env,
     url: Option<&str>,
     profile: Option<&str>,
-) -> Result<(String, Option<String>), String> {
+) -> Result<FromProfile, String> {
     use crate::cli::profiles;
     let fail = |e: crate::cli::Fail| e.message().to_string();
-    let all = match profiles::path(env) {
-        Some(p) => profiles::load(&p).map_err(fail)?,
+    let file = profiles::path(env);
+    let all = match &file {
+        Some(p) => profiles::load(p).map_err(fail)?,
         None if profile.is_some() => {
             return Err(
                 "no home directory: profiles are unavailable, use --server and --token".into(),
@@ -75,24 +93,40 @@ fn from_profiles(
     let wanted_url = url.map(profiles::normalise);
     let found =
         match (&name, &wanted_url) {
-            (Some(n), _) => Some(all.profiles.get(n).ok_or_else(|| {
+            (Some(n), _) => Some(all.profiles.get_key_value(n).ok_or_else(|| {
                 format!("no profile {n:?} (rustybin login --url ... --profile {n})")
             })?),
-            (None, Some(u)) => all.profiles.values().find(|p| &p.url == u).or_else(|| {
+            (None, Some(u)) => all.profiles.iter().find(|(_, p)| &p.url == u).or_else(|| {
                 all.default
                     .as_ref()
-                    .and_then(|d| all.profiles.get(d))
-                    .filter(|p| &p.url == u)
+                    .and_then(|d| all.profiles.get_key_value(d))
+                    .filter(|(_, p)| &p.url == u)
             }),
-            (None, None) => all.default.as_ref().and_then(|d| all.profiles.get(d)),
+            (None, None) => all
+                .default
+                .as_ref()
+                .and_then(|d| all.profiles.get_key_value(d)),
         };
     let url = wanted_url
-        .or_else(|| found.map(|p| p.url.clone()))
+        .or_else(|| found.map(|(_, p)| p.url.clone()))
         .ok_or_else(|| {
             "no URL: give --server or --url, or sign in with rustybin login".to_string()
         })?;
-    let token = found.filter(|p| p.url == url).and_then(|p| p.token.clone());
-    Ok((url, token))
+    let found = found.filter(|(_, p)| p.url == url);
+    let agent = found.and_then(|(n, p)| {
+        p.agent
+            .clone()
+            .map(|login| crate::cli::agent_login::AgentSession {
+                url: url.clone(),
+                profile: file.clone().map(|f| (f, n.clone())),
+                login,
+            })
+    });
+    let token = match &agent {
+        Some(a) => Some(a.login.access_token.clone()),
+        None => found.and_then(|(_, p)| p.token.clone()),
+    };
+    Ok(FromProfile { url, token, agent })
 }
 
 fn parse_with(args: &[String], env: &crate::cli::Env) -> Result<Args, String> {
@@ -131,13 +165,15 @@ fn parse_with(args: &[String], env: &crate::cli::Env) -> Result<Args, String> {
         .or_else(|| std::env::var("RUSTYBIN_MCP_URL").ok())
         .filter(|s| !s.trim().is_empty());
     let mut profile_token = None;
+    let mut agent = None;
     let server = match server {
         Some(s) => s,
         None if url.is_some() || profile.is_some() || env.url.is_none() => {
-            let (u, t) = from_profiles(env, url.as_deref(), profile.as_deref())
+            let found = from_profiles(env, url.as_deref(), profile.as_deref())
                 .map_err(|e| format!("{e}\n\n{USAGE}"))?;
-            profile_token = t;
-            u
+            profile_token = found.token;
+            agent = found.agent;
+            found.url
         }
         None => env.url.clone().unwrap_or_default(),
     };
@@ -147,21 +183,70 @@ fn parse_with(args: &[String], env: &crate::cli::Env) -> Result<Args, String> {
     } else {
         format!("{server}{}", super::MANAGE_PATH)
     };
-    let token = token
+    let given = token
         .or_else(|| std::env::var("RUSTYBIN_TOKEN").ok())
         .or_else(|| std::env::var("RUSTYBIN_ADMIN_TOKEN").ok())
-        .filter(|t| !t.trim().is_empty())
-        .or(profile_token);
+        .filter(|t| !t.trim().is_empty());
+    // A token given on the command line or in the environment wins over the
+    // profile's, agent sign-in included (nothing is renewed then).
+    if given.is_some() {
+        agent = None;
+    }
     Ok(Args {
         server,
-        token,
+        token: given.or(profile_token),
         headers,
+        agent,
     })
+}
+
+/// One message to the server: the bearer, the extra headers, the session
+/// and the 2026-07-28 routing headers derived from the body.
+fn request(
+    client: &reqwest::Client,
+    args: &Args,
+    bearer: Option<&str>,
+    session: Option<&str>,
+    msg: &Value,
+    line: &str,
+) -> reqwest::RequestBuilder {
+    let mut req = client
+        .post(&args.server)
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream");
+    if let Some(t) = bearer {
+        req = req.header("authorization", format!("Bearer {t}"));
+    }
+    for (n, v) in &args.headers {
+        req = req.header(n.as_str(), v.as_str());
+    }
+    if let Some(s) = session {
+        req = req.header("mcp-session-id", s);
+    }
+    // Routing headers of 2026-07-28 messages, derived from the body.
+    if let Some(version) = msg
+        .pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion")
+        .and_then(Value::as_str)
+    {
+        req = req.header("mcp-protocol-version", version);
+        if let Some(m) = msg.get("method").and_then(Value::as_str) {
+            req = req.header("mcp-method", m);
+            let name = match m {
+                "tools/call" | "prompts/get" => msg.pointer("/params/name"),
+                "resources/read" => msg.pointer("/params/uri"),
+                _ => None,
+            };
+            if let Some(n) = name.and_then(Value::as_str) {
+                req = req.header("mcp-name", n);
+            }
+        }
+    }
+    req.body(line.to_string())
 }
 
 /// Entry point of `rustybin mcp-stdio`.
 pub async fn run(args: &[String]) -> ExitCode {
-    let args = match parse(args) {
+    let mut args = match parse(args) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("{e}");
@@ -203,38 +288,27 @@ pub async fn run(args: &[String]) -> ExitCode {
                 continue;
             }
         };
-        let mut req = client
-            .post(&args.server)
-            .header("content-type", "application/json")
-            .header("accept", "application/json, text/event-stream");
-        if let Some(t) = &args.token {
-            req = req.header("authorization", format!("Bearer {t}"));
-        }
-        for (n, v) in &args.headers {
-            req = req.header(n.as_str(), v.as_str());
-        }
-        if let Some(s) = &session {
-            req = req.header("mcp-session-id", s.as_str());
-        }
-        // Routing headers of 2026-07-28 messages, derived from the body.
-        if let Some(version) = msg
-            .pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion")
-            .and_then(Value::as_str)
-        {
-            req = req.header("mcp-protocol-version", version);
-            if let Some(m) = msg.get("method").and_then(Value::as_str) {
-                req = req.header("mcp-method", m);
-                let name = match m {
-                    "tools/call" | "prompts/get" => msg.pointer("/params/name"),
-                    "resources/read" => msg.pointer("/params/uri"),
-                    _ => None,
-                };
-                if let Some(n) = name.and_then(Value::as_str) {
-                    req = req.header("mcp-name", n);
-                }
+        // An agent sign-in: its access token, renewed first when it is
+        // about to expire.
+        let mut bearer = args.token.clone();
+        if let Some(agent) = args.agent.as_mut() {
+            let (token, renewed) = agent.bearer().await;
+            if let Err(e) = renewed {
+                eprintln!("rustybin mcp-stdio: {}", e.message());
             }
+            bearer = Some(token);
         }
-        let resp = match req.body(line).send().await {
+        let sent = request(
+            &client,
+            &args,
+            bearer.as_deref(),
+            session.as_deref(),
+            &msg,
+            &line,
+        )
+        .send()
+        .await;
+        let mut resp = match sent {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("rustybin mcp-stdio: request failed: {e}");
@@ -242,6 +316,41 @@ pub async fn run(args: &[String]) -> ExitCode {
                 continue;
             }
         };
+        // The instance refused the agent's access token (it expired on the
+        // way, or the instance's clock is ahead): renew once and send again.
+        if resp.status().as_u16() == 401 {
+            if let Some(agent) = args.agent.as_mut() {
+                match agent.renew().await {
+                    Ok(()) => {
+                        let token = agent.login.access_token.clone();
+                        let again = request(
+                            &client,
+                            &args,
+                            Some(&token),
+                            session.as_deref(),
+                            &msg,
+                            &line,
+                        )
+                        .send()
+                        .await;
+                        match again {
+                            Ok(r) => resp = r,
+                            Err(e) => {
+                                eprintln!("rustybin mcp-stdio: request failed: {e}");
+                                write_error(&mut stdout, &msg, &format!("request failed: {e}"))
+                                    .await;
+                                continue;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("rustybin mcp-stdio: {}", e.message());
+                        write_error(&mut stdout, &msg, e.message()).await;
+                        continue;
+                    }
+                }
+            }
+        }
         if let Some(s) = resp
             .headers()
             .get("mcp-session-id")
@@ -403,6 +512,43 @@ mod tests {
         .expect("args");
         assert_eq!(a.token.as_deref(), Some("mine"));
         assert!(parse_with(&["--profile".into(), "nope".into()], &env).is_err());
+    }
+
+    #[test]
+    fn a_profiles_agent_sign_in_is_used_before_its_token() {
+        use crate::cli::profiles::{AgentLogin, Profile, Profiles};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(crate::cli::profiles::FILE);
+        let mut profiles = Profiles::default();
+        profiles.profiles.insert(
+            "both".into(),
+            Profile {
+                url: "https://mocks.example.com".into(),
+                token: Some("tok-person".into()),
+                agent: Some(AgentLogin {
+                    client_id: "rbc.x.y".into(),
+                    access_token: "tok-agent".into(),
+                    refresh_token: Some("tok-refresh".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        profiles.default = Some("both".into());
+        crate::cli::profiles::save(&path, &profiles).expect("save");
+        let env = crate::cli::Env {
+            config_home: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let a = parse_with(&[], &env).expect("args");
+        assert_eq!(a.token.as_deref(), Some("tok-agent"));
+        let agent = a.agent.expect("the agent sign-in");
+        assert_eq!(agent.url, "https://mocks.example.com");
+        assert_eq!(agent.profile, Some((path, "both".to_string())));
+        // A token given by hand wins, and nothing is renewed.
+        let a = parse_with(&["--token".into(), "mine".into()], &env).expect("args");
+        assert_eq!(a.token.as_deref(), Some("mine"));
+        assert!(a.agent.is_none());
     }
 
     #[test]

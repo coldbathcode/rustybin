@@ -99,6 +99,42 @@ expect "$out" 'name: rustybin'
 rustybin users delete alice --yes --quiet
 rustybin roles delete catalog-reader --yes --quiet
 
+# A secret an agent asked for (docs/src/agent-mcp.md, "A secret at an agent's
+# request"). The agent here is a curl call on the management server with the
+# profile's sign-in token.
+token="$(jq -r '.profiles[].token' "$RUSTYBIN_CONFIG_HOME/profiles.json")"
+agent_asks() {
+  curl -fsS "$URL/_rustybin/mcp" -H "Authorization: Bearer $token" \
+    -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+    -H 'MCP-Protocol-Version: 2026-07-28' -H 'Mcp-Method: tools/call' -H 'Mcp-Name: request_secret' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"request_secret","arguments":{"setting":"'"$1"'","reason":"'"$2"'"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"docs-agent","version":"1.0"}}}}' \
+    | jq -r '.result.structuredContent.request.id'
+}
+rustybin settings set agents.secret_requests true >/dev/null
+agent_asks notify.webhook_token "the nightly schedule posts its failures to the team webhook" >/dev/null
+declined="$(agent_asks git.token "the configuration repository")"
+printf 'whk_docs-example-value-k3Qx\n' > webhook-token.txt
+
+out=$(
+# ANCHOR: secret_requests
+# What agents asked for: the setting, whose agent, and the agent's reason (its claim).
+rustybin settings requests --state pending
+request="$(rustybin settings requests --state pending --json | jq -r '.requests[] | select(.setting.key == "notify.webhook_token") | .id')"
+# The value on stdin (or prompted without echo), never an argument: it goes to
+# the settings store, and the agent reads only that the request was fulfilled.
+rustybin settings fulfil "$request" --stdin < webhook-token.txt
+rustybin settings get notify.webhook_token --json | jq -c '.value | {set, hint}'
+# ANCHOR_END: secret_requests
+)
+expect "$out" 'docs-agent'
+expect "$out" 'the nightly schedule posts its failures'
+expect "$out" 'notify.webhook_token is set'
+expect "$out" '{"set":true,"hint":"k3Qx"}'
+if grep -q 'whk_docs-example-value' <<<"$out"; then echo "the value was printed" >&2; exit 1; fi
+out=$(rustybin settings decline "$declined")
+expect "$out" 'is declined: nothing was set'
+rustybin settings unset agents.secret_requests >/dev/null
+
 # Exit codes: a refused operation is 1, usage 2, a bad credential 3.
 set +e
 rustybin mocks get nope --quiet; echo "exit $?"

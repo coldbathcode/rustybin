@@ -1871,7 +1871,13 @@ const COVERAGE: &[(&str, Cover)] = &[
     ("/_rustybin/status", Tool("get_instance")),
     ("/_rustybin/usage", Tool("get_usage")),
     ("/_rustybin/version", Tool("get_instance")),
+    ("/_rustybin/secret-requests", Tool("get_secret_request")),
+    ("/_rustybin/secret-requests/{id}", Tool("get_secret_request")),
+    ("/_rustybin/secret-requests/{id}/fulfil", Excluded(SECRET_BY_A_PERSON)),
+    ("/_rustybin/secret-requests/{id}/decline", Excluded(SECRET_BY_A_PERSON)),
 ];
+
+const SECRET_BY_A_PERSON: &str = "a secret is never a tool input: a person fulfils or declines an agent's request in the console (Management) or with rustybin settings fulfil | decline; the agent asks with request_secret and reads the state with get_secret_request";
 
 #[test]
 fn every_control_route_has_a_management_tool() {
@@ -3969,7 +3975,7 @@ async fn users_and_roles_tools_invite_confirm_and_never_carry_a_password() {
     let headers: [(&str, &str); 1] = [("authorization", "Bearer admin-09")];
     // The admin's tool list counts the step 09 and 10 tools (and the docs say so).
     let names = tool_names(&app, &headers).await;
-    assert_eq!(names.len(), 139, "docs/src/coding-agents.md counts 139");
+    assert_eq!(names.len(), 141, "docs/src/coding-agents.md counts 141");
     for t in [
         "list_users",
         "invite_user",

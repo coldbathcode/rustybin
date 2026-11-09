@@ -24,6 +24,36 @@ pub struct Profile {
     pub expires_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// An agent sign-in (`rustybin login --agent`): tokens of the control
+    /// plane's own authorization server, accepted on `/_rustybin/mcp` only.
+    /// `rustybin mcp-stdio` uses it; no other command sends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentLogin>,
+}
+
+/// What `rustybin login --agent` keeps: the OAuth client it registered and
+/// the token pair the authorization server issued (an access token of an
+/// hour, a refresh token of thirty days).
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentLogin {
+    pub client_id: String,
+    pub access_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    /// When the access token expires (RFC 3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+}
+
+impl std::fmt::Debug for AgentLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentLogin")
+            .field("scope", &self.scope)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +123,9 @@ pub struct Resolved {
     pub token: Option<String>,
     /// The profile the URL came from, when one did.
     pub profile: Option<String>,
+    /// The profile holds an agent sign-in and nothing a command may send
+    /// (`rustybin login --agent`: for `rustybin mcp-stdio` only).
+    pub agent_only: bool,
 }
 
 /// The instance and credential for a call (see the module doc).
@@ -147,10 +180,15 @@ pub fn resolve(env: &Env, args: &Args) -> Result<Resolved> {
     if token.is_some() && url.starts_with("http://") && !is_loopback_url(&url) {
         eprintln!("warning: sending a token over plain http to {url}: use https");
     }
+    let agent_only = token.is_none()
+        && profile_for_url
+            .as_ref()
+            .is_some_and(|(_, p)| p.agent.is_some());
     Ok(Resolved {
         url,
         token,
         profile: profile_for_url.map(|(n, _)| n),
+        agent_only,
     })
 }
 

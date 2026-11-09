@@ -22,7 +22,7 @@ Sign in to an instance and keep its token in a profile
 
 | Command | What it does | Calls | Needs |
 |---|---|---|---|
-| `rustybin login [--url U] [--user U] [--password-stdin] [--sso [--no-browser] [--wait S]] [--profile P]` | Sign in with the console user name and password (prompted, or the first line of stdin) and keep the token in a profile; --sso signs in with the identity provider in the browser instead (a loopback address on this machine takes the answer); --token keeps a token you already have. Flags: `--user` value, `--password-stdin`, `--sso`, `--no-browser`, `--wait` value. | `POST /_rustybin/login`, `GET /_rustybin/session`, `GET /_rustybin/sso/status`, `GET /_rustybin/sso/start`, `POST /_rustybin/sso/token` | open, signed in |
+| `rustybin login [--url U] [--user U] [--password-stdin] [--sso \| --agent [--scope S]] [--no-browser] [--wait S] [--profile P]` | Sign in with the console user name and password (prompted, or the first line of stdin) and keep the token in a profile; --sso signs in with the identity provider in the browser instead (a loopback address on this machine takes the answer); --token keeps a token you already have. --agent signs an AI agent in instead: the browser opens the console's consent screen, you approve, and the agent's tokens are kept in the profile for rustybin mcp-stdio. An agent sign-in works with rustybin mcp-stdio only (the instance accepts its tokens on /_rustybin/mcp and nowhere else): the other commands need a sign-in of your own. Flags: `--user` value, `--password-stdin`, `--sso`, `--no-browser`, `--wait` value, `--agent`, `--scope` value. | `POST /_rustybin/login`, `GET /_rustybin/session`, `GET /_rustybin/sso/status`, `GET /_rustybin/sso/start`, `POST /_rustybin/sso/token`, `POST /_rustybin/oauth/register`, `GET /_rustybin/oauth/authorize`, `POST /_rustybin/oauth/token` | open, signed in |
 
 ```bash
 rustybin login --url https://mocks.example.com --user rustybin
@@ -34,7 +34,7 @@ Revoke the profile's token and forget it
 
 | Command | What it does | Calls | Needs |
 |---|---|---|---|
-| `rustybin logout` | Revoke the profile's token on the instance and forget it. | `POST /_rustybin/logout` | signed in |
+| `rustybin logout` | Revoke the profile's token on the instance and forget it, with the profile's agent sign-in (rustybin agents revoke ends an agent on the instance). | `POST /_rustybin/logout` | signed in |
 
 ```bash
 rustybin logout
@@ -125,6 +125,9 @@ Instance settings: get, set, secrets, unset, the schema
 | `rustybin settings set-secret <key> [--stdin]` | Save a secret (prompted without echo, or the first line of stdin). Flags: `--stdin`. | `PATCH /_rustybin/settings` | `settings.write` |
 | `rustybin settings unset <key>` | Forget the stored value (back to the environment or the default). | `DELETE /_rustybin/settings/{key}` | `settings.write` |
 | `rustybin settings schema` | Every registered setting: key, kind, default, variable. | `GET /_rustybin/settings` | `settings.read` |
+| `rustybin settings requests [--state S]` | The secrets AI agents asked to have set (request_secret): the setting, the agent and the user it acts for, the agent's reason (its claim), the state. An agent never sets a secret: you fulfil or decline. Flags: `--state` value. | `GET /_rustybin/secret-requests` | `secrets.write` |
+| `rustybin settings fulfil <id> [--stdin]` | Set the secret an agent asked for: the value is prompted without echo, or read from the first line of stdin, never an argument. It goes to the settings store and never to the agent; needs what settings set-secret needs for that setting. Flags: `--stdin`. | `GET /_rustybin/secret-requests/{id}`, `POST /_rustybin/secret-requests/{id}/fulfil` | `secrets.write` |
+| `rustybin settings decline <id>` | Decline a secret request: nothing is set, and the agent reads declined. | `POST /_rustybin/secret-requests/{id}/decline` | `secrets.write` |
 
 ```bash
 rustybin settings get console.title
@@ -132,6 +135,9 @@ rustybin settings set console.title "Payments mocks"
 rustybin settings set-secret assist.openai_key --stdin < key.txt
 rustybin settings unset console.title
 rustybin settings schema
+rustybin settings requests --state pending
+rustybin settings fulfil sr_0000000000000000 --stdin < key.txt
+rustybin settings decline sr_0000000000000000
 ```
 
 ## sessions
@@ -802,4 +808,4 @@ rustybin audit tail --action mocks --max 10
 
 ## Not covered by a command
 
-The management MCP endpoint (`rustybin mcp-stdio` bridges a client to it), the agent sign-in (OAuth) routes a browser walks, the harness cluster's node-to-node routes, a request bin's capture URLs and a mock's data plane.
+The management MCP endpoint (`rustybin mcp-stdio` bridges a client to it), the agent sign-in's consent API (the console's screen; `rustybin login --agent` walks the rest), the harness cluster's node-to-node routes, a request bin's capture URLs and a mock's data plane.

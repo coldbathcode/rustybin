@@ -12,6 +12,8 @@ use crate::config::Config;
 use crate::control_auth::ControlAuth;
 use crate::state::AppState;
 
+mod agent;
+
 /// An `Out` the test reads back.
 #[derive(Clone, Default)]
 struct Buf(Arc<Mutex<Vec<u8>>>);
@@ -1059,7 +1061,9 @@ async fn the_loopback_listener_waits_for_its_own_callback() {
         .expect("bind");
     let addr = listener.local_addr().expect("addr");
     let waiting =
-        tokio::spawn(async move { commands::loopback_answer(listener, "the-state").await });
+        tokio::spawn(
+            async move { commands::loopback_answer(listener, "cli_state", "the-state").await },
+        );
     let get = |target: &'static str| async move {
         let mut s = tokio::net::TcpStream::connect(addr).await.expect("connect");
         s.write_all(format!("GET {target} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())

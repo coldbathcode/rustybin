@@ -143,6 +143,10 @@ pub const BODY_CHECKS: &[(Permission, &str)] = &[
         Permission::MocksWrite,
         "PUT /_rustybin/portal/items/{id} with secure: true (turns on a mock's mocked security to close it)",
     ),
+    (
+        Permission::SettingsWrite,
+        "POST /_rustybin/secret-requests/{id}/fulfil (the route declares secrets.write): what setting that secret needs, so also settings.security, git.write or portal.settings for a secret of those groups",
+    ),
 ];
 
 /// The routes whose resources may belong to a project (step 11): the

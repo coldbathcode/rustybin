@@ -197,7 +197,7 @@ in password mode). The settings of this release: `console.title`,
 `console.backlink`, the sign-in's `console.user` and secret `console.password_hash`,
 the `assist.*` settings of [AI assist](ai-assist.md) (the provider keys are secrets,
 `assist.job.<task>` the model per job), `proxy.client_ip_header`, `egress.allow`,
-`egress.allow_loopback`, `agents.default_ceiling` and `agents.default_ceiling_for` (the default ceiling of the agents of a role's users, `role=ceiling` entries), `registry.scenario`,
+`egress.allow_loopback`, `agents.default_ceiling` and `agents.default_ceiling_for` (the default ceiling of the agents of a role's users, `role=ceiling` entries), `agents.secret_requests` (off by default: lets an agent [ask for a secret to be set](agent-mcp.md#a-secret-at-an-agents-request) by a person), `registry.scenario`,
 `registry.saved`, the `portal.*` settings of the [dev portal](#dev-portal), the secret
 `leads.webhook_token`, the [test schedule notices](saved-tests.md#the-failure-notice)' secret
 `notify.webhook_token` and `notify.base_url`, `mocks.require_revision` (no variable; `false` by default: when

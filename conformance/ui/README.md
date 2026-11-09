@@ -51,6 +51,7 @@ Other knobs: `THEMES=dark` (one theme only), `HEADED=1` (visible browser),
 | MCP registry | the mock registry tab (scenario, entries, a published server.json), Browse a registry against the mock one, Open in inspector |
 | Management | General (browser settings, keyboard navigation), the instance settings forms with a secret shown as set plus hint, the egress policy and decisions, Export (the document, apply with a dry run), the Source control form |
 | AI agents | the list, a detail panel, the rights form, the live feed, revoke and restore |
+| Secrets an agent asked for (password instance) | an agent asks for two secrets over the management server; Management shows them above the tabs with the agent's reason as text (markup in it is shown, never run) apart from the setting, the agent and its user; the admin types one value there and declines the other; the agent reads fulfilled and declined, never the value; the audit log holds neither |
 | Dev portal | publish a mock from Management, read the portal in a credential-less context, Try it, download a collection |
 | Shell | keyboard navigation (Alt+1..9), send via a CORS-enabled second origin, unreachable gateway message, phone width without horizontal scroll |
 | Control-plane auth (jwt instance) | sign-in screen with back link, refused token, `#token=` fragment sign-in (token stripped from the URL, kept for the tab), title and back link in the header, live feed over fetch with the bearer token, reload, expiry screen, sign out |

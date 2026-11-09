@@ -799,6 +799,10 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET | `/_rustybin/keys/usage` | Per-key daily totals (requests, response bytes), paginated (shared mode, admin) |
 | GET | `/_rustybin/catalog` | Route catalogue as JSON (paths, methods, categories, examples) |
 | GET | `/_rustybin/status` | Uptime, health state and inspector counters |
+| GET | `/_rustybin/secret-requests` | Secrets AI agents asked to have set: pending and lately resolved requests (secrets.write) |
+| GET | `/_rustybin/secret-requests/{id}` | One secret request and its state (secrets.write) |
+| POST | `/_rustybin/secret-requests/{id}/fulfil` | Set the secret an agent asked for: the value goes to the settings store, never to the agent |
+| POST | `/_rustybin/secret-requests/{id}/decline` | Decline a secret request: nothing is set and the agent reads declined (secrets.write) |
 
 ### Docs & Exports
 
