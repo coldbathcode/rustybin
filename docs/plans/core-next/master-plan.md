@@ -35,11 +35,11 @@ The marker a session looks for is the first row that is not done.
 | 08 | Harness: replay captured traffic or a HAR file (`harness/import.rs`: an import into `source.requests`, not a new source, so the engine and the safety checks are unchanged; credentials removed) | done 2026-11-07 |
 | 09 | MCP-level OAuth on a mock's own MCP server (`mcp.oauth`, through the same `auth::require_bearer_for` as `/mcp/protected`; not on a visitor's mock) | done 2026-11-07 |
 | 10 | Harness: OpenTelemetry export (`harness/otlp.rs`: metrics of finished runs as OTLP over HTTP with JSON, no new dependency; traces are not sent, a run has no spans) | done 2026-11-07 |
-| 11 | Source control: branches per environment, signed commits, merges | not built: owner decision, section 4 |
-| 12 | Agents: secrets with an out-of-band confirmation; an interactive sign-in from the CLI | not built: owner decision, section 4 |
-| 13 | Harness: scenario import, HTTP/3 targets, server-to-server chains | not built: owner decision, section 4 |
+| [11](step-11-source-control.md) | Source control: branches per environment, signed commits, a divergence resolved by naming a side or through a pull request, `file:` references for the harness section | in progress 2026-11-09, section 5 |
+| [12](step-12-agent-secrets-and-sign-in.md) | Agents: secrets with an out-of-band confirmation; an interactive sign-in from the CLI | in progress 2026-11-09, section 5 |
+| [13](step-13-harness-follow-ups.md) | Harness: scenario import, HTTP/3 targets, server-to-server chains | in progress 2026-11-09, section 5 |
 
-Released as 0.6.0 after step 10.
+Released as 0.6.0 after step 10. Steps 11 to 13 are released when the owner says so.
 
 ## 4. Why steps 11 to 13 stopped
 
@@ -61,3 +61,54 @@ they wait for one rather than a guess:
   protocol few gateways under test speak.
 - **Scenario import from other tools**: which tools, and how much of each one's model, is a choice
   of what to support for years.
+
+## 5. Steps 11 to 13: the owner said build it all (2026-11-09)
+
+The owner read section 4 and answered "build it all out", one agent per step. No single choice of
+section 4 was named, so each step takes the choice that keeps the rule it touches, and anything that
+could surprise an instance is off until someone turns it on. A choice the owner wants otherwise is a
+change to the step, not a new plan.
+
+**Step 11, source control**
+
+- **Still never a textual merge.** A diverged branch keeps answering `409`. What is new is the two
+  ways out as calls: a person names a side (the instance's document committed on top of the remote
+  head, never a forced push; or the repository's document applied with `ApplyOptions.untrusted`), or
+  the instance's side is pushed to a new branch for a pull request on the host. The automatic mode
+  never resolves.
+- **Branches per environment**: the branch stays the `git.branch` setting. Listing the remote's
+  branches, switching with a preview that validates like the apply, and starting a new branch from
+  the instance are calls. A document never names a branch and a document from git never changes
+  `git.*`.
+- **Signed commits**: SSH signatures with a key of their own (a secret setting, never the deploy
+  key), off by default; the public key and its fingerprint are shown so the owner registers it at
+  the host.
+- **`file:` references for the harness section**, from the same roadmap line.
+
+**Step 12, agents**
+
+- **A secret is still never a tool input.** An agent asks for a secret to be set (the setting's key
+  and a reason); a person with the permission to set it types the value in the console or gives it
+  to the CLI on stdin. The tool answers the request's state only. Requests are bounded and expire.
+  `every_tool_is_fully_defined` stays as it is.
+- **The interactive sign-in from the CLI** walks the control plane's own OAuth (PKCE, a loopback
+  address, the console's consent), as `rustybin login --sso` does for people. Its tokens stay
+  accepted on `/_rustybin/mcp` only.
+- **OAuth for visitors and key holders is not built**: it reopens step 04b of the hosted demo, and
+  the demo has no visitors.
+
+**Step 13, harness**
+
+- **Scenario import** stays an import into `source.requests` (`harness/import.rs`), for the
+  declarative formats: Postman collections (v2.1) and Artillery scripts. Scripts in a programming
+  language are not run. What does not map is named in the answer; credentials are removed.
+- **HTTP/3 targets** sit behind a cargo feature that is off in the default build, so the default
+  binary gains no QUIC stack; the parameter is in the schema either way and a build without the
+  feature refuses it with the reason.
+- **Server-to-server chains**: the safety model first. A server calls on only for a request that
+  carries its run's signed marker, only to a hop the scenario names and the run verified, through
+  `safety.rs` (allowlist, pinning, forbidden addresses, the kill switch), with a hop count in the
+  marker and a small fixed depth.
+
+How the three are built: each in its own worktree and branch, the step file written first, then
+tests, code and docs; merged into `main` in order, the full checks run on the merge.
