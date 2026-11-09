@@ -832,6 +832,10 @@ pub static TOOLS: &[ToolDef] = &[
         "replace": { "type": "boolean", "default": false },
         "confirm": confirm_prop()
     }), &[])),
+    tool!("import_scenario", "Import a collection or a script", "A Postman collection (v2.1) or an Artillery script (YAML or JSON) as a scenario's source, given as text; a HAR file or saved captures are read too. Requests become weighted templates; an Artillery script's phases become pattern when they map exactly. What has no counterpart (scripts, hooks, plugins, captures, think times) is never run or guessed: it is named in left_out. A request with a variable the document does not define is left out and the variable named in variables. Credentials are removed and named in removed. A program in a scripting language is refused. Sends nothing: put source (and pattern, timeout) in a scenario and name your own target.", ToolNeed::Perm(Permission::HarnessRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "document": { "type": "string", "description": "The text of the collection, the script or the recording (JSON or YAML)" },
+        "format": { "type": "string", "enum": ["har", "captures", "postman", "artillery"], "description": "The format, when it should not be read from the document" },
+    }), &["document"])),
 ];
 
 /// The `project` property of a tool that creates or lists.
@@ -1329,6 +1333,7 @@ async fn run_tool(
         "get_leader" => harness::get_leader(ctx, args),
         "step_aside" => harness::step_aside(ctx, args),
         "import_traffic" => harness::import_traffic(ctx, args),
+        "import_scenario" => harness::import_scenario(ctx, args).await,
         "list_patterns" => harness::list_patterns(ctx),
         "preview_scenario" => harness::preview_scenario(ctx, args),
         "save_scenario" => harness::save_scenario(ctx, args),

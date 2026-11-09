@@ -499,6 +499,7 @@ pub fn tls_config_with(target: &Target, http: HttpVersion) -> Result<rustls::Cli
         HttpVersion::Auto => vec![b"h2".to_vec(), b"http/1.1".to_vec()],
         HttpVersion::H1 | HttpVersion::H2c => vec![b"http/1.1".to_vec()],
         HttpVersion::H2 => vec![b"h2".to_vec()],
+        HttpVersion::H3 => vec![b"h3".to_vec()],
     };
     Ok(config)
 }
@@ -662,6 +663,10 @@ pub struct PinnedTarget {
     h2: HttpClient,
     /// No pool: a connection per request (the `connection_churn` fault).
     churn: HttpClient,
+    /// The HTTP/3 client of an `http: h3` target: QUIC to the same pinned
+    /// addresses (the cargo feature `harness-http3`).
+    #[cfg(feature = "harness-http3")]
+    pub h3: Option<Arc<super::http3::H3Client>>,
 }
 
 fn make_client(handle: &Handle, connector: PinnedConnector, pool: usize, h2c: bool) -> HttpClient {
@@ -697,6 +702,28 @@ impl PinnedTarget {
         } else {
             None
         };
+        // HTTP/3: QUIC to the pinned addresses, with the target's TLS
+        // rules. A build without the feature never gets here (validation
+        // refuses the scenario); it refuses again rather than fall back to
+        // another protocol.
+        #[cfg(feature = "harness-http3")]
+        let h3 = if target.http == HttpVersion::H3 {
+            Some(Arc::new(super::http3::H3Client::new(
+                handle,
+                addrs.clone(),
+                tls_config(&target)?,
+                &server_name,
+            )?))
+        } else {
+            None
+        };
+        #[cfg(not(feature = "harness-http3"))]
+        if target.http == HttpVersion::H3 {
+            return Err(format!(
+                "http: h3 needs a build with the cargo feature {}",
+                super::scenario::HTTP3_FEATURE
+            ));
+        }
         let connector = PinnedConnector::new(addrs.clone(), tls, &server_name)?;
         let client = make_client(
             handle,
@@ -753,7 +780,14 @@ impl PinnedTarget {
             h1,
             h2,
             churn,
+            #[cfg(feature = "harness-http3")]
+            h3,
         })
+    }
+
+    /// Whether the target is sent to over HTTP/3.
+    pub fn is_http3(&self) -> bool {
+        self.target.http == HttpVersion::H3
     }
 
     /// The client of a protocol or fault choice: a connection per request
@@ -2074,6 +2108,8 @@ impl Run {
                 correlate::digest([body.as_ref()])
             },
             path_digest: correlate::digest_path(&method, &path_and_query),
+            // A client's request: no server of the run before it.
+            hop: 0,
             sig: String::new(),
         };
         marker.sign(&self.key);
@@ -2358,7 +2394,11 @@ impl Run {
                     None => untracked += 1,
                 }
             }
-            (stats.report(), lost, after, untracked)
+            let mut report = stats.report();
+            drop(stats);
+            // The legs of the run's chain, when it has one.
+            report.chain = e.chain_report();
+            (report, lost, after, untracked)
         });
         if let Some((_, lost, after, untracked)) = &server {
             totals.counts.lost = *lost;
@@ -2822,7 +2862,7 @@ impl Roller {
 }
 
 /// Why a request failed, as a bounded set of kinds.
-fn classify_error(e: &hyper_util::client::legacy::Error) -> &'static str {
+pub(super) fn classify_error(e: &hyper_util::client::legacy::Error) -> &'static str {
     if e.is_connect() {
         let text = e.to_string().to_ascii_lowercase();
         let source = std::error::Error::source(e)
@@ -3021,6 +3061,13 @@ async fn send_one_inner(run: Arc<Run>, job: Job, slot: &InFlight<'_>) {
         _ => None,
     };
     let target = &run.targets[target_idx];
+    // An HTTP/3 target has one way to be reached: no churn, no protocol mix
+    // (validation refuses them; a live change cannot bring them back).
+    let choice = if target.is_http3() {
+        ClientChoice::Default
+    } else {
+        choice
+    };
     let Built {
         req,
         request_id,
@@ -3082,32 +3129,43 @@ async fn send_one_inner(run: Arc<Run>, job: Job, slot: &InFlight<'_>) {
         _ => timeout * 10 + hold,
     };
     let exchange = async {
+        // What the answer's headers say, whatever carried them: the tag and
+        // the upstream timing, verified with the run key.
+        let head = |status: u16, headers: &axum::http::HeaderMap| {
+            let tag = headers
+                .get(correlate::SERVED_BY)
+                .and_then(|v| v.to_str().ok())
+                .and_then(Tag::parse)
+                .filter(|t| t.run == run.id && t.seq == seq && t.verify(&run.key));
+            let upstream_ms = headers
+                .get("server-timing")
+                .and_then(|v| v.to_str().ok())
+                .and_then(correlate::parse_server_timing);
+            let observed = if read_headers {
+                ratelimit::observe(headers, node_header.as_deref())
+            } else {
+                ratelimit::Observed::default()
+            };
+            Exchange {
+                status,
+                tag,
+                upstream_ms,
+                observed,
+                ..Exchange::default()
+            }
+        };
+        // HTTP/3: the same request (marker and all) over QUIC to the pinned
+        // addresses, the answer read whole.
+        #[cfg(feature = "harness-http3")]
+        if let Some(h3) = target.h3.as_ref() {
+            let answer = h3.request(req, keep_body).await?;
+            let mut ex = head(answer.status, &answer.headers);
+            ex.bytes = answer.bytes;
+            ex.kept = answer.kept;
+            return Ok(ex);
+        }
         let resp = client.request(req).await.map_err(|e| classify_error(&e))?;
-        let status = resp.status().as_u16();
-        // The tag and the upstream timing, verified with the run key.
-        let tag = resp
-            .headers()
-            .get(correlate::SERVED_BY)
-            .and_then(|v| v.to_str().ok())
-            .and_then(Tag::parse)
-            .filter(|t| t.run == run.id && t.seq == seq && t.verify(&run.key));
-        let upstream_ms = resp
-            .headers()
-            .get("server-timing")
-            .and_then(|v| v.to_str().ok())
-            .and_then(correlate::parse_server_timing);
-        let observed = if read_headers {
-            ratelimit::observe(resp.headers(), node_header.as_deref())
-        } else {
-            ratelimit::Observed::default()
-        };
-        let mut ex = Exchange {
-            status,
-            tag,
-            upstream_ms,
-            observed,
-            ..Exchange::default()
-        };
+        let mut ex = head(resp.status().as_u16(), resp.headers());
         match protocol {
             Protocol::Http | Protocol::Mcp => {
                 let (bytes, kept) = read_body(resp.into_body(), keep_body).await?;

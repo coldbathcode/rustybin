@@ -662,7 +662,7 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET | `/_rustybin/harness/scenarios` | The built-in scenarios (smoke, ramp-to-target, soak, closed-users, step-plateaus, breakpoint, spike-and-recover, pulse, burst, daily-wave) and the saved ones |
 | GET PUT DELETE | `/_rustybin/harness/scenarios/{name}` | A built-in or saved scenario (?format=yaml for YAML); PUT saves one under a name, DELETE removes it |
 | POST | `/_rustybin/harness/preview` | The expected rate per second per layer and in total, without sending anything |
-| POST | `/_rustybin/harness/import` | A recording (a HAR file, or the answer of GET /_rustybin/requests) as a scenario's source |
+| POST | `/_rustybin/harness/import` | A recording (a HAR file, or the answer of GET /_rustybin/requests), a Postman collection or an Artillery script as a scenario's source |
 | POST | `/_rustybin/harness/validate` | Validate a scenario (JSON or YAML) against this node's caps without sending anything |
 | GET POST | `/_rustybin/harness/runs` | Runs on this node; POST a scenario (JSON or YAML) to validate, pin its targets and start it |
 | GET PATCH | `/_rustybin/harness/runs/{run}` | Live stats of a run; PATCH tunes it while it runs (rate_multiplier, pause, resume, hold, skip_stage, set, add_layer, remove_layer) |

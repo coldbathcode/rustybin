@@ -23,12 +23,15 @@
 
 pub mod api;
 pub mod breakdown;
+pub mod chain;
 pub mod cli;
 pub mod cluster;
 pub mod correlate;
 pub mod election;
 pub mod engine;
 pub mod faults;
+#[cfg(feature = "harness-http3")]
+pub mod http3;
 pub mod identity;
 pub mod import;
 pub mod limit_test;
@@ -818,6 +821,8 @@ impl Harness {
             "allowlist": self.allowlist.describe(),
             "allowlist_warnings": self.allowlist_warnings,
             "verify_targets": self.config.verify_targets,
+            // Whether this build sends HTTP/3 (the cargo feature).
+            "http3": scenario::http3_built(),
             "active_run": active.map(|r| r.summary()),
             "runs": self.runs().len(),
             "kill_switch": self.kill.is_set(),
@@ -1054,6 +1059,39 @@ impl Harness {
                 target.verified = true;
             }
         }
+        // A chain is traffic this node's server side sends, so its hops are
+        // checked like the targets and before anything is sent: allowed by
+        // this node's list, pinned, and verified when targets are. A cluster
+        // run's chain is prepared by its server nodes, each against its own
+        // list, when the leader assigns it.
+        let chain = match &scenario.servers.chain {
+            Some(declared) if options.cluster.is_none() => {
+                if !self.is_server() {
+                    return Err(RunError {
+                        status: 422,
+                        error: "the scenario cannot run on this node".into(),
+                        problems: vec![
+                            "servers.chain: the onward calls are made by the server role: run it on a node with RUSTYBIN_HARNESS_ROLES=both, or on a cluster with server nodes".into(),
+                        ],
+                    });
+                }
+                let token = options
+                    .verification_token
+                    .clone()
+                    .unwrap_or_else(|| self.verification_token.clone());
+                match chain::Chain::prepare(self, declared, &token).await {
+                    Ok(chain) => Some(Arc::new(chain)),
+                    Err(problems) => {
+                        return Err(RunError {
+                            status: 403,
+                            error: "a chain hop is not allowed or not verified on this node".into(),
+                            problems,
+                        })
+                    }
+                }
+            }
+            _ => None,
+        };
         let id = options.id.clone().unwrap_or_else(|| random_hex(6));
         // The run key signs the markers. On a single node its server side
         // learns it now; the server nodes of a cluster get it from the
@@ -1065,6 +1103,10 @@ impl Harness {
                 .register(&id, key.clone(), scenario.servers.clone());
             entry.set_faults(scenario.faults.as_ref().and_then(|f| f.server()), [0, 1]);
             self.watch_server_faults(entry.clone());
+            // Prepared, not live: the gate opens when the run starts.
+            if let Some(chain) = &chain {
+                entry.set_chain(chain.clone());
+            }
             Some(entry)
         } else {
             None
@@ -1072,11 +1114,15 @@ impl Harness {
         // The kill switch may have been pressed while the run was prepared
         // (and cleared since: the generation tells).
         if self.kill.is_set() || self.kill.generation() != kill_generation {
+            if let Some(entry) = &entry {
+                entry.finish();
+            }
             return Err(RunError::new(
                 409,
                 "the kill switch was set while the run was being prepared: not started",
             ));
         }
+        let server_entry = entry.clone();
         let run = Run::new(RunParams {
             id: id.clone(),
             node_id: self.node_id.clone(),
@@ -1124,7 +1170,17 @@ impl Harness {
             peak_rate = run.scenario.peak_rate(),
             "harness run starting"
         );
-        engine::start(run.clone(), engine.handle()).map_err(|e| RunError::new(500, e))?;
+        // The chain is live from here until the run ends on this node (the
+        // run's entry closes the gate), and never longer than a run may be.
+        if let (Some(entry), Some(_)) = (&server_entry, &chain) {
+            entry.chain_live_for(self.caps().max_duration() + engine::DRAIN_GRACE);
+        }
+        if let Err(e) = engine::start(run.clone(), engine.handle()) {
+            if let Some(entry) = &server_entry {
+                entry.finish();
+            }
+            return Err(RunError::new(500, e));
+        }
         Ok(run)
     }
 
@@ -1161,7 +1217,23 @@ impl Harness {
             .map_err(|e| format!("verification request: {e}"))?;
         let client = target.client.clone();
         let url = target.target.url.clone();
+        // An HTTP/3 target is verified over HTTP/3: the TCP port of the
+        // same number may be another service.
+        #[cfg(feature = "harness-http3")]
+        let h3 = target.h3.clone();
         let fut = async move {
+            #[cfg(feature = "harness-http3")]
+            if let Some(h3) = h3 {
+                let answer = h3
+                    .request_on_engine(req, true)
+                    .await
+                    .map_err(|kind| format!("{url}: verification request failed: {kind}"))?;
+                let status = axum::http::StatusCode::from_u16(answer.status)
+                    .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
+                let mut body = answer.kept.unwrap_or_default();
+                body.truncate(4096);
+                return Ok((status, bytes::Bytes::from(body)));
+            }
             let resp = client
                 .request(req)
                 .await
@@ -1599,14 +1671,20 @@ pub fn catalog() -> Vec<Endpoint> {
             "/_rustybin/harness/import",
             &["POST"],
             category::HARNESS,
-            "A recording (a HAR file, or the answer of GET /_rustybin/requests) as a scenario's source",
+            "A recording (a HAR file, or the answer of GET /_rustybin/requests), a Postman collection or an Artillery script as a scenario's source",
         )
         .permission(crate::rbac::Permission::HarnessRead)
         .description(
             "Identical requests become one template weighted by their count, so the mix is the \
-             recording's. Hosts are dropped. A secret-looking header or query parameter is removed \
+             document's. Hosts are dropped. A secret-looking header or query parameter is removed \
              and named in `removed`; an entry whose body has a secret-looking field is left out. \
-             Sends nothing. Works with harness mode off.",
+             A Postman collection (v2.1) and an Artillery script (YAML or JSON) are read too: what \
+             has no counterpart (scripts, hooks, plugins, captures, think times) is never run and \
+             is named in `left_out`, a request with a variable the document does not define is \
+             left out and the variable named in `variables`, and an Artillery script's phases \
+             become `pattern` when they map exactly. `?format=` (har, captures, postman, \
+             artillery) names the format instead of reading it from the document. A program in a \
+             scripting language is refused. Sends nothing. Works with harness mode off.",
         )
         .example(
             Example::post("Import", "/_rustybin/harness/import").json(
@@ -2179,10 +2257,19 @@ fn live_openapi_paths(paths: &mut Value, tag: &Value, off: &Value, scenario_body
         all.insert("/_rustybin/harness/import".into(), json!({
             "post": {
                 "tags": tag,
-                "summary": "A recording as a scenario's source",
-                "description": "A HAR file, or the answer of GET /_rustybin/requests, as weighted request templates. Secret-looking headers and query parameters are removed and named; entries with a secret-looking field in the body are left out. Sends nothing.",
+                "summary": "A recording, a collection or a script as a scenario's source",
+                "description": "A HAR file, the answer of GET /_rustybin/requests, a Postman collection (v2.1) or an Artillery script (YAML or JSON), as weighted request templates. Secret-looking headers and query parameters are removed and named; entries with a secret-looking field in the body are left out. What a collection or a script says that has no counterpart (scripts, hooks, plugins, captures, think times) is never run: it is named in `left_out`. A request with a variable the document does not define is left out and the variable named in `variables`. An Artillery script's phases become `pattern` when they map exactly. Sends nothing.",
                 "operationId": "importHarnessRecording",
-                "responses": { "200": json_ok("`source.requests`, `entries`, `skipped`, `removed`, `hosts`"), "400": { "description": "Not a recording, or nothing to replay" } }
+                "parameters": [{
+                    "name": "format", "in": "query", "required": false,
+                    "description": "The format, instead of reading it from the document.",
+                    "schema": { "type": "string", "enum": ["har", "captures", "postman", "artillery"] }
+                }],
+                "requestBody": { "required": true, "content": {
+                    "application/json": { "schema": { "type": "object", "description": "A HAR file, saved captures, a Postman collection or an Artillery script." } },
+                    "application/yaml": { "schema": { "type": "string", "description": "An Artillery script." } }
+                } },
+                "responses": { "200": json_ok("`format`, `source.requests`, `entries`, `skipped`, `removed`, `hosts`, `left_out`, `variables`, `notes`, and `pattern` and `timeout` when an Artillery script gives them"), "400": { "description": "Not a document this import reads (a program is refused), or nothing to import" } }
             }
         }));
         all.insert("/_rustybin/harness/preview".into(), json!({

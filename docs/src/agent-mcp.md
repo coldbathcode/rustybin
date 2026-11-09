@@ -832,6 +832,7 @@ is the `harness` or `admin` scope, or the admin token on an open control plane.
 | `get_run_report` | `harness.read` | The final report as JSON, text or JUnit |
 | `harness_stop` | `harness.run` | The kill switch: all load on this node stops now (no confirmation) |
 | `import_traffic` | `harness.read` | A HAR file or saved captures as a scenario's source, without credentials; sends nothing |
+| `import_scenario` | `harness.read` | A Postman collection (v2.1) or an Artillery script, given as text, as a scenario's source: what does not map is named in `left_out`, nothing in the document is run, a program is refused; sends nothing |
 | `step_aside` | `harness.cluster` | Before maintenance: the leader hands the cluster to the first in the succession, with the run still on |
 | `create_cluster` / `list_cluster_nodes` / `export_upstreams` / `get_leader` | `harness.cluster` / `harness.read` | A cluster led by this node (the join token once), its members, the server nodes' URLs for the gateway's upstream pool, and who leads with the succession and the history of leader changes |
 

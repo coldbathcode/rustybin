@@ -2197,6 +2197,34 @@ def run_harness(browser):
         import_recording(page)
 
     step("harness: a recording becomes the source, without its token", replay_a_recording)
+
+    def chain_report():
+        # A scenario with a one-hop chain, through the YAML pane (the form
+        # takes servers.chain from the schema like any other parameter): the
+        # report shows the hop's leg.
+        page.reload()
+        page.wait_for_selector("#harness-builtin", state="attached")
+        page.select_option("#harness-builtin", "smoke")
+        page.wait_for_function("document.querySelector('#scenario-form [aria-label=\"targets[0].url\"]')")
+        page.fill("#scenario-form [aria-label='targets[0].url']", base)
+        page.get_by_role("button", name="YAML", exact=True).click()
+        page.fill("#harness-yaml", (
+            f"name: ui-chain\ntarget: {base}\n"
+            "source:\n  request:\n    path: /harness/front\n"
+            "pattern:\n  type: constant\n  rate: 20\n  for: 2s\n"
+            f"servers:\n  chain:\n    hops:\n      - url: {base}\n        path: /harness/next\n"
+        ))
+        page.get_by_role("button", name="Apply YAML to the form").click()
+        page.wait_for_selector("#view .notice.ok")
+        page.click("#harness-run")
+        page.wait_for_selector("#harness-chain", timeout=TIMEOUT)
+        chain = page.locator("#harness-chain")
+        expect(chain).to_contain_text(f"1: {base}/harness/next")
+        # Every request made its call, and none was refused.
+        expect(chain.locator("tbody tr td").last).to_have_text("none")
+        shot(page, "harness", "42-harness-chain")
+
+    step("harness: a chain's legs are in the report", chain_report)
     ctx.close()
 
 
@@ -3057,6 +3085,20 @@ def import_recording(page):
         "name": "recording.har", "mimeType": "application/json", "buffer": json.dumps(har).encode(),
     }])
     expect(page.locator("#harness-yaml")).to_have_value(re.compile(r"/orders\?page=2"))
+    assert "abc123" not in page.locator("#harness-yaml").input_value()
+    # An Artillery script: the phases become the pattern, a hook is named
+    # and never run.
+    script = (
+        "config:\n  target: https://api.example.com\n  processor: ./functions.js\n"
+        "  phases:\n    - duration: 20\n      arrivalRate: 3\n"
+        "scenarios:\n  - flow:\n      - get:\n          url: /items?api_key=abc123\n"
+    )
+    page.set_input_files("#harness-import", files=[{
+        "name": "load.yml", "mimeType": "application/yaml", "buffer": script.encode(),
+    }])
+    expect(page.locator("#harness-yaml")).to_have_value(re.compile(r"/items"))
+    expect(page.locator("#harness-yaml")).to_have_value(re.compile(r"rate: 3"))
+    expect(page.locator("#harness-imported")).to_contain_text("config.processor")
     assert "abc123" not in page.locator("#harness-yaml").input_value()
 
 

@@ -503,7 +503,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("harness", "delete-scenario", "<name>", "Delete a saved scenario.", NO_FLAGS, [("DELETE", "/_rustybin/harness/scenarios/{name}")], true, "harness delete-scenario my-smoke --yes"),
     cmd!("harness", "validate", "<file> --remote", "Validate a scenario on the instance (without --remote: offline, in this process).", &[Flag::switch("--remote", "On the instance")], [("POST", "/_rustybin/harness/validate")], false, "harness validate smoke.yaml --remote"),
     cmd!("harness", "preview", "<file>", "The run plan of a scenario: stages, requests, duration.", NO_FLAGS, [("POST", "/_rustybin/harness/preview")], false, "harness preview smoke.yaml"),
-    cmd!("harness", "import", "<file>", "A recording (a HAR file, or saved GET /_rustybin/requests) as a scenario's source. Sends nothing.", NO_FLAGS, [("POST", "/_rustybin/harness/import")], false, "harness import recording.har"),
+    cmd!("harness", "import", "<file> [--format F]", "A recording (a HAR file, or saved GET /_rustybin/requests), a Postman collection (v2.1) or an Artillery script as a scenario's source; what does not map is named, nothing in the file is run. Sends nothing.", &[Flag::value("--format", "har, captures, postman or artillery (default: read from the file)")], [("POST", "/_rustybin/harness/import")], false, "harness import recording.har"),
     cmd!("harness", "runs", "", "The runs on this node.", NO_FLAGS, [("GET", "/_rustybin/harness/runs")], false, "harness runs"),
     cmd!("harness", "run", "<file> --remote [--wait]", "Start a run on the instance (without --remote: from this process); --wait follows it and prints the report.", &[Flag::switch("--remote", "On the instance"), Flag::switch("--wait", "Follow the run and print the report"), Flag::value("--format", "The report format with --wait: text (default), json or junit")], [("POST", "/_rustybin/harness/runs")], false, "harness run smoke.yaml --remote --wait"),
     cmd!("harness", "show", "<run>", "One run: state, progress, the live controls.", NO_FLAGS, [("GET", "/_rustybin/harness/runs/{run}")], false, "harness show r-1"),
@@ -4035,14 +4035,16 @@ async fn harness(ctx: &mut Ctx, verb: &str) -> Result<()> {
             .await
         }
         "import" => {
-            ctx.args.arg(0, "a recording file")?;
+            ctx.args
+                .arg(0, "a recording, a collection or a script file")?;
             let text = ctx.input(&first)?;
-            post(
-                ctx,
-                "/_rustybin/harness/import",
-                Body::Text(text, "application/json"),
-            )
-            .await
+            // JSON, or YAML for an Artillery script: the instance reads both.
+            let content_type = content_type_for(&first, &text);
+            let path = match ctx.args.value("--format") {
+                Some(format) => format!("/_rustybin/harness/import?format={}", enc(format)),
+                None => "/_rustybin/harness/import".to_string(),
+            };
+            post(ctx, &path, Body::Text(text, content_type)).await
         }
         "validate" | "preview" => {
             ctx.args.arg(0, "a scenario file")?;

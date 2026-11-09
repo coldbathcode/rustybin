@@ -244,7 +244,7 @@ joined ([a cluster](#a-cluster) below).
 ### From an agent or the console
 
 The [management MCP server](agent-mcp.md#harness) has a tool per step
-(`harness_status`, `validate_scenario`, `preview_scenario`, `create_run`, `get_run`,
+(`harness_status`, `validate_scenario`, `preview_scenario`, `import_traffic`, `import_scenario`, `create_run`, `get_run`,
 `update_run`, `get_run_report`, the cluster tools) and a prompt, `load_test_gateway`,
 that walks an agent from the allowlist to a dry run and the real one; starting load always
 asks for confirmation. The [console](console.md)'s Harness view has the scenario builder
@@ -365,6 +365,114 @@ turn, which exercises the gateway's health checks and circuit breakers. The buil
 
 The tables of every parameter are in [configuration](configuration.md#harness-mode).
 
+## HTTP/3 targets
+
+A target with `http: h3` is sent to over HTTP/3 (QUIC), for a gateway that terminates it:
+
+```yaml
+targets:
+  - url: https://gateway.internal:8443
+    http: h3
+```
+
+It needs a build with the cargo feature `harness-http3` (`cargo build --release --features
+harness-http3`, or the image built with `--build-arg CARGO_FEATURES="quota-postgres
+harness-http3"`). The default binary and the published image carry no QUIC stack: they know
+the parameter (it is in the schema, the console form and the tools' schemas in every build)
+and refuse the scenario at validation with a message that names the feature. `GET
+/_rustybin/harness` answers `http3: true` on a build that has it.
+
+Nothing about where load may go changes with the protocol. The allowlist entry's port is the
+UDP port; the name is resolved once and QUIC connects to those pinned addresses only, with no
+`Alt-Svc`, no redirect, and no move to another address a server asks for; forbidden addresses
+are refused; with `RUSTYBIN_HARNESS_VERIFY_TARGETS` the target is verified over HTTP/3 (the
+TCP port of the same number may be another service); the kill switch stops it; TLS is
+verified unless the target says `insecure`. Every request carries the marker, and the report
+classes the answers (`upstream`, `gateway`, `transport` with its kinds) and measures the
+overhead as over HTTP/1 and 2.
+
+HTTP/3 carries the plain HTTP sources (`request`, `requests`, a `mock`). The protocol
+sources, the faults `connection_churn` and `http2`, and `identities.source_addresses` are
+refused with an `h3` target, by name.
+
+```hurl
+{{#include ../examples/harness/api.hurl:harness_http3}}
+```
+
+## Server-to-server chains
+
+A request through a gateway often goes on: the service it reaches calls another service, through
+the gateway again. `servers.chain` makes the harness's server side do the same, so a run measures
+every leg: the server that answers a client's request calls the first hop, the server that answers
+that call the second, and so on.
+
+```yaml
+servers:
+  chain:
+    hops:
+      - url: https://gateway.internal
+        path: /orders          # the route that reaches the next server
+      - url: https://gateway.internal
+        path: /stock
+    timeout: 5s                # per onward call (default 5s, at most 30s)
+    max_concurrent: 64         # onward calls in flight per run on a server node
+```
+
+A hop is a gateway URL plus the one path the call asks for (default `/`), with `host`, `http`
+(`auto`, `h1`, `h2`, `h2c`) and `insecure` as a target has them. The onward call is a `GET` with
+the harness's own headers and no body.
+
+This is the only traffic the server role sends, so it has rules of its own, and nothing turns it on
+except a scenario that declares a chain:
+
+- **Only the run's own requests.** A server calls on only for a request that carries its run's
+  signed marker. A request without one, with a marker of another run, or with a signature that does
+  not verify is answered as an ordinary request and makes no call.
+- **Only while the run is live.** When the run ends, or the kill switch is pressed, the calls stop
+  at once, those under way included. In a cluster a server calls on only on its leader's word that
+  the run is sending, renewed like a client's lease, so a lost leader leaves no server calling. A
+  marker replayed after the run calls nothing.
+- **Only to the hops the scenario names.** Nothing of the incoming request (address, host, path,
+  query, headers, body) chooses where the next call goes or travels with it.
+- **Checked like a target.** Every hop must be allowed by `RUSTYBIN_HARNESS_TARGETS` **on the server
+  node**, is resolved once and pinned, is never a link-local or metadata address or a control plane,
+  and, with `RUSTYBIN_HARNESS_VERIFY_TARGETS`, must serve the verification token. A chain is
+  prepared whole or not at all: a single node refuses the run (`403`, the problems by hop), a
+  cluster's server node that cannot prepare it makes no call and the report says why.
+- **A fixed depth, no loops.** At most 3 hops, never the same one twice. The hop count travels
+  inside the marker's signature, so it cannot be changed on the way, and a server calls on at most
+  once for a request at a hop: a gateway's retry, a mirrored or a replayed request calls nothing a
+  second time. A run's onward calls never exceed the requests its clients sent times the hops.
+- **Bounded.** `max_concurrent` calls in flight per run on a node; one over it is refused, not
+  queued. Each call has its `timeout`. A run follows the first 16,777,216 requests of each hop.
+
+The preview (`POST /_rustybin/harness/preview`) and the `summary` of a validation list the hops
+before anything is sent:
+
+```hurl
+{{#include ../examples/harness/api.hurl:harness_chain_preview}}
+```
+
+A hop outside the allowlist refuses the run:
+
+```hurl
+{{#include ../examples/harness/api.hurl:harness_chain_refused}}
+```
+
+The report's `server.chain` has one entry per hop: the `calls` made, how they were answered
+(`upstream`: by a server of the run, its tag verified; `gateway`: answered without it;
+`transport` by kind), the `latency` of the leg, the next server's processing time
+(`upstream_latency`) and the difference (`overhead`, the gateway's part of the leg), the
+`arrivals` of that hop, and `refused`: the requests that made no call, by reason (`not_live`,
+`kill_switch`, `seen_before`, `untracked`, `busy`, `not_prepared`). A server's processing time
+includes its onward call, as a real service's would, so the client's `upstream_latency` holds the
+legs behind it. An onward call is counted with its hop and not with `server.arrivals`, so `lost`
+and `upstream_reach` keep describing what the clients sent.
+
+```hurl
+{{#include ../examples/harness/api.hurl:harness_chain_run}}
+```
+
 ## OpenTelemetry
 
 Set `harness.otlp_endpoint` (Management, or `rustybin settings set`) to a collector's HTTP base URL
@@ -382,7 +490,8 @@ warning in the log, since the report still holds everything.
 A HAR file from a browser or a proxy, or the captures of `GET /_rustybin/requests`, can become a
 scenario's source: `POST /_rustybin/harness/import`, `rustybin harness import <file>`, the
 `import_traffic` tool, or the file field of the console's builder. Identical requests turn into one
-template with their count as its weight, so the replay keeps the recording's mix. Nothing is sent:
+template with their count as its weight (scaled when one passes 1000, the proportions kept), so the
+replay keeps the recording's mix; the 64 most frequent are kept, as many as a layer takes. Nothing is sent:
 put the answer's `source` in a scenario, which then meets the same validation and allowlist as any
 other, and name your own target, since the recording's hosts are dropped.
 
@@ -393,6 +502,50 @@ is left out and counted in `skipped`. Add the credentials your target needs thro
 
 ```hurl
 {{#include ../examples/harness/api.hurl:harness_import}}
+```
+
+## Importing a Postman collection or an Artillery script
+
+The same import reads two formats other tools write: a Postman collection (v2.1, as the
+app exports it) and an Artillery script (YAML or JSON). The format is read from the
+document; `?format=har|captures|postman|artillery` (`--format` on the command line, `format`
+of the `import_scenario` tool) names it instead. It is still an import: the answer's `source`
+goes into a scenario that names its own target and meets the same validation and allowlist
+as a hand-written one.
+
+Other tools say more than a request list, and only what has an exact counterpart is taken:
+
+| From | Taken | Named in `left_out`, never run |
+|---|---|---|
+| A Postman collection | Folders (16 deep), each request's method, path, enabled query parameters and headers, the body modes `raw`, `urlencoded` and `graphql`, collection variables | `event` (pre-request and test scripts), `auth` at every level, `protocolProfileBehavior`; a `formdata` or `file` body leaves its request out |
+| An Artillery script | `config.target` (its path leads the requests), `config.defaults.headers`, `config.variables` with one value, `config.http.timeout` (as `timeout`), each scenario's `weight`, the request steps with `url`, `qs`, `headers`, `json`, `body`, `form` and the `statusCode` of an `expect` | `config.processor` and every `function`, `beforeRequest`, `afterResponse`, `beforeScenario`, `afterScenario` (code), `config.plugins`, `payload`, `environments`, `ensure`, `tls`, `capture`, `match`, `think`, `loop`, `parallel`, `log`, scenarios of another engine; `ifTrue` and `formData` leave their request out |
+
+An Artillery script's **phases** become `pattern` when the pattern model says the same
+thing: `arrivalRate` is a `constant` stage, with `rampTo` a linear `ramp`, `arrivalCount` a
+`constant` at the count over the duration, `pause` a `constant` at 0. An Artillery phase
+counts arrivals and each arrival runs one flow, so a stage's rate is the arrivals times the
+weighted requests per flow (`notes` says the number). The phases are all or nothing: a
+`maxVusers`, a value that is not a number, more than 16 phases, a flow with `think`, `loop`,
+`parallel`, `function` or `ifTrue`, or a request that was left out, and `pattern` is absent
+with the reason in `left_out`.
+
+**Variables** (`{{name}}` in both formats): one the document defines with a single plain
+value is put in. Any other (an environment variable, a captured value, `{{$guid}}`) is
+never guessed: its request is left out, counted in `skipped`, and the name is listed in
+`variables`. Define it in the collection or the script and import again. A variable whose
+name looks secret is never put in, and credentials are removed as for a recording.
+
+A program in a scripting language (a k6 or Locust script, an Artillery processor) is refused
+with `400`: nothing here runs or translates code. A collection or a script is at most 4 MiB,
+and at most 64 different requests are kept, the most frequent ones, since that is what a
+layer takes.
+
+```hurl
+{{#include ../examples/harness/api.hurl:harness_import_postman}}
+```
+
+```hurl
+{{#include ../examples/harness/api.hurl:harness_import_artillery}}
 ```
 
 ## Live tuning
@@ -562,6 +715,14 @@ assignment it receives, and node-to-node calls (join, heartbeat, vote, announcem
 a URL with credentials and every link-local, cloud metadata or multicast address, checked
 at each connection, so a DNS change cannot turn a node into a way to reach one.
 
+Two things send in other ways and go through the same fences. An
+[HTTP/3 target](#http3-targets) is pinned like any other and QUIC connects to the pinned
+addresses only, so UDP is no way around the allowlist. A
+[chain](#server-to-server-chains) is the only traffic the server role sends: only for a
+request carrying its run's signed marker, only while the run is live, only to the hops the
+scenario names (each allowed on the server node, pinned and verified like a target), once
+per request and hop to a fixed depth, and the kill switch stops it at once.
+
 ## Testing it
 
 `cargo test` covers the engine, correlation, patterns, rate-limit tests, mock traffic,
@@ -578,9 +739,9 @@ The same job from the API, the console, the command line, an agent and the confi
 
 | Surface | Where |
 |---|---|
-| API | `GET /_rustybin/harness`, `/schema`, `/scenarios`, `POST /_rustybin/harness/validate \| preview \| runs`, `GET`, `PATCH /_rustybin/harness/runs/{run}`, `/stop`, `/events`, `/report`, the cluster routes under `/_rustybin/harness/clusters` |
-| Console | The **Harness** view (shown when harness mode is on): the builder generated from the schema, runs, live tuning, reports |
-| CLI | `rustybin harness validate \| run \| report` offline, the same with `--remote` and `status \| scenarios \| runs \| show \| tune \| stop \| stop-all \| events \| clusters ...` against an instance ([reference](cli.md#harness)) |
-| Management MCP | `harness_status`, `list_scenarios`, `get_scenario`, `save_scenario`, `list_patterns`, `validate_scenario`, `preview_scenario`, `create_run`, `start_run`, `update_run`, `list_runs`, `get_run`, `stop_run`, `get_run_report`, `harness_stop` (the kill switch), `create_cluster` and the cluster tools; the prompt `load_test_gateway`; the resource `rustybin://harness.schema.json` ([agent page](agent-mcp.md#harness)) |
+| API | `GET /_rustybin/harness`, `/schema`, `/scenarios`, `POST /_rustybin/harness/validate \| preview \| import \| runs`, `GET`, `PATCH /_rustybin/harness/runs/{run}`, `/stop`, `/events`, `/report`, the cluster routes under `/_rustybin/harness/clusters` |
+| Console | The **Harness** view (shown when harness mode is on): the builder generated from the schema with its file field for a recording, a collection or a script, runs, live tuning, reports |
+| CLI | `rustybin harness validate \| run \| report` offline, the same with `--remote` and `status \| scenarios \| import \| runs \| show \| tune \| stop \| stop-all \| events \| clusters ...` against an instance ([reference](cli.md#harness)) |
+| Management MCP | `harness_status`, `list_scenarios`, `get_scenario`, `save_scenario`, `list_patterns`, `validate_scenario`, `preview_scenario`, `import_traffic`, `import_scenario`, `create_run`, `start_run`, `update_run`, `list_runs`, `get_run`, `stop_run`, `get_run_report`, `harness_stop` (the kill switch), `create_cluster` and the cluster tools; the prompt `load_test_gateway`; the resource `rustybin://harness.schema.json` ([agent page](agent-mcp.md#harness)) |
 | `rustybin.yaml` | `harness:` (the saved scenarios) ([the whole instance as code](configuration-as-code.md)) |
 | Environment | `RUSTYBIN_HARNESS`, `_ROLES`, `_TARGETS`, `_MAX_RATE`, `_MAX_INFLIGHT`, `_MAX_DURATION`, `_VERIFY_TARGETS`, `_SCENARIO`, `_START`, `_REPORT`, `_EXIT` and the cluster variables ([configuration](configuration.md#harness-mode)) |

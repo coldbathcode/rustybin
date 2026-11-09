@@ -317,6 +317,11 @@ pub struct ServerAssignment {
     /// sequence numbers): answer which ones arrived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collect: Option<BTreeMap<String, String>>,
+    /// The run's clients are sending (or about to): a chain's onward calls
+    /// are made only while the leader says so, and each word holds for a
+    /// lease. Absent from a leader that knows no chains: never live.
+    #[serde(default)]
+    pub live: bool,
 }
 
 impl std::fmt::Debug for ServerAssignment {
@@ -433,6 +438,10 @@ pub struct ServerStatsWire {
     /// tell (encoded).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collected: Option<Collected>,
+    /// The histograms of the run's chain, by hop (the counts are in
+    /// `report.chain`): merged by the leader, never averaged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chain: Vec<super::chain::HopHists>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

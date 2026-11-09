@@ -515,6 +515,56 @@ the leader) to rejoin the cluster. The node routes
 `.../election/elected`) authenticate with the join token and the node credential
 instead of the control-plane credentials.
 
+A scenario's `targets` are the gateways (or gateway nodes) the load goes to, each a URL
+or an object:
+
+| `targets[]` | Default | Description |
+|---|---|---|
+| `url` | required | `http` or `https`, without query or fragment; its path leads every request. Allowed by `RUSTYBIN_HARNESS_TARGETS` on every client node, never a control plane path. |
+| `weight` | `1` | The share of the requests this target gets (1 to 1000). |
+| `host` | the URL's host | The `Host` header and TLS server name to send instead. |
+| `http` | `auto` | `auto` (ALPN on TLS, HTTP/1.1 on plain connections), `h1`, `h2` (TLS only), `h2c` (prior knowledge on plain connections) or `h3` (HTTP/3 over QUIC, `https` only). |
+| `insecure` | `false` | Skip TLS certificate verification (a demo gateway with a self-signed certificate). |
+
+**HTTP/3 targets.** `http: h3` needs a build with the cargo feature `harness-http3`
+(`cargo build --release --features harness-http3`, or the image built with
+`--build-arg CARGO_FEATURES="quota-postgres harness-http3"`); the default binary and the
+published image have no QUIC stack, and refuse the scenario at validation with a message
+that names the feature. `GET /_rustybin/harness` says `http3: true` on a build that has
+it. An HTTP/3 target goes through the same fences as any other: the allowlist entry's
+port is the UDP port, the name is resolved once and QUIC connects to those pinned
+addresses only (no `Alt-Svc`, no redirect, no move to an address the server prefers),
+forbidden addresses are refused, target verification runs over HTTP/3, the kill switch
+stops it, and TLS is verified unless `insecure`. Requests carry the marker and answers
+are classed and reported as over HTTP/1 and 2. HTTP/3 carries the plain HTTP sources
+(`request`, `requests`, `mock`): the protocol sources, the faults `connection_churn` and
+`http2`, and `identities.source_addresses` are refused with an `h3` target. A target
+keeps 8 QUIC connections, round robin over its pinned addresses, and requests are
+streams on them.
+
+**Server-to-server chains.** `servers.chain` makes a server that answers a request of the
+run call a further hop, so the report gains the leg of each hop
+([the guide](harness.md#server-to-server-chains) has the rules). Off without it.
+
+| `servers.chain` | Default | Description |
+|---|---|---|
+| `hops` | required | 1 to 3 hops in order, never the same one twice: the server answering a client's request calls the first, the server answering that call the second. Each is a URL or an object. |
+| `hops[].url` | required | A gateway URL (`http` or `https`, no query or fragment). Allowed by `RUSTYBIN_HARNESS_TARGETS` **on the server node**, pinned, and verified like a target when `RUSTYBIN_HARNESS_VERIFY_TARGETS` is on. Never a control plane path. |
+| `hops[].path` | `/` | The one path the call asks for, after the URL's own. No placeholders: a hop is one fixed `GET`. |
+| `hops[].host`, `http`, `insecure` | as a target's | The `Host` header and TLS name, the protocol (`auto`, `h1`, `h2`, `h2c`; not `h3`) and whether to skip certificate verification. |
+| `timeout` | `5s` | Per onward call (1 ms to 30 s). |
+| `max_concurrent` | `64` | Onward calls in flight per run on a server node (1 to 1024); one over it is refused, not queued. |
+
+A server calls on only for a request carrying the run's signed marker, only while the run
+is live (in a cluster: on its leader's word, renewed like a lease), at most once per
+request and hop, and the kill switch stops the calls at once. A server node needs
+`RUSTYBIN_HARNESS_TARGETS` for the hops it may call; one whose list does not allow a hop
+makes no call and the report's `server.chain.problems` says why. The report's
+`server.chain.hops[]` has `calls`, `upstream`, `gateway`, `transport`, `statuses`,
+`transport_kinds`, `refused` (by reason: `not_live`, `kill_switch`, `seen_before`,
+`untracked`, `busy`, `not_prepared`), `arrivals`, and the `latency`, `upstream_latency`
+and `overhead` of the leg.
+
 Each layer's `pattern` says how hard it pushes over time, as a rate (open model) or
 a number of users (closed model):
 

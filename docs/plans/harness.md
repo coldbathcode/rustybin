@@ -1383,3 +1383,13 @@ largest risk to the estimate is phase 3b.
 5. **Scenario import** from other tools' formats, if users ask for it.
 6. **Server-to-server chains**: servers that call further servers, for multi-hop meshes. That is
    outbound traffic from the server role, so it stays out until the safety model covers it.
+
+Questions 3, 5 and 6 were built on 2026-11-09 as step 13 of `docs/plans/core-next`
+(`step-13-harness-follow-ups.md` has the design and the build notes): HTTP/3 targets behind the
+cargo feature `harness-http3` (`http3.rs`; a QUIC connection goes to the run's pinned addresses
+only), scenario import for Postman collections and Artillery scripts (`import.rs`, still an import
+into `source.requests`), and chains (`chain.rs`), whose safety model is in `safety.rs`: a server
+calls on only for a request with its run's verified marker, only while the run is live, only to a
+hop the scenario names and the node pinned and verified, once per request and hop, to a depth of 3,
+with the hop count inside the marker's signature. Questions 1, 2 and 4 were steps 04, 10 and 08 of
+the same plan.

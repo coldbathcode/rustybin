@@ -1213,6 +1213,7 @@ async fn spoofed_markers_are_rejected_and_never_counted() {
         headers_digest: "00000000".into(),
         body_digest: String::new(),
         path_digest: "00000000".into(),
+        hop: 0,
         sig: String::new(),
     };
     m.sign(&other);
@@ -1569,4 +1570,102 @@ async fn a_panic_after_the_release_gives_the_slot_back_once() {
     assert_eq!(snap["not_sent"], 0, "{snap}");
     server.shutdown();
     let _ = server.wait().await;
+}
+
+/// Core next step 13: the import route reads YAML (an Artillery script),
+/// takes the format by name, and refuses a program. Harness mode is off.
+#[tokio::test]
+async fn the_import_route_reads_yaml_and_the_format() {
+    let app = test_app_with(AppState::for_tests(Config::for_tests()));
+    let post = |path: &'static str, content_type: &'static str, body: String| {
+        let app = app.clone();
+        async move {
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri(path)
+                .header("content-type", content_type)
+                .body(Body::from(body))
+                .expect("request");
+            let resp = app.oneshot(req).await.expect("response");
+            let status = resp.status();
+            let text = body_string(resp).await;
+            (
+                status,
+                serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)),
+            )
+        }
+    };
+    let script = "config:\n  target: https://api.example.com\n  phases:\n    - duration: 10\n      arrivalRate: 2\nscenarios:\n  - flow:\n      - get:\n          url: /orders\n      - think: 1\n";
+    let (status, j) = post(
+        "/_rustybin/harness/import",
+        "application/yaml",
+        script.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["format"], "artillery");
+    assert_eq!(j["source"]["requests"][0]["path"], "/orders");
+    assert_eq!(j["hosts"], json!(["api.example.com"]));
+    assert!(j.get("pattern").is_none(), "a think time: no pattern: {j}");
+    assert!(
+        j["left_out"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|x| x == "scenarios[0].flow[1].think")),
+        "{j}"
+    );
+    // Without the think time the phases are a pattern.
+    let (status, j) = post(
+        "/_rustybin/harness/import",
+        "application/yaml",
+        script.replace("      - think: 1\n", ""),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(
+        j["pattern"],
+        json!({ "type": "constant", "rate": 2.0, "for": "10s" })
+    );
+    // The format by name: a collection read as a script is refused.
+    let collection = json!({
+        "info": { "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+        "item": [{ "name": "a", "request": { "method": "GET", "url": "https://a.test/x" } }]
+    });
+    let (status, j) = post(
+        "/_rustybin/harness/import?format=postman",
+        "application/json",
+        collection.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["format"], "postman");
+    let (status, j) = post(
+        "/_rustybin/harness/import?format=artillery",
+        "application/json",
+        collection.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    let (status, j) = post(
+        "/_rustybin/harness/import?format=k6",
+        "application/json",
+        collection.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    assert!(j["error"].as_str().is_some_and(|e| e.contains("artillery")));
+    // A program is refused with the reason, never run.
+    let (status, j) = post(
+        "/_rustybin/harness/import",
+        "text/plain",
+        "import http from 'k6/http';\nexport default function () { http.get('https://a.test'); }\n"
+            .to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    assert!(
+        j["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("never run or translated")),
+        "{j}"
+    );
 }

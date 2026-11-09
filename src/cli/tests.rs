@@ -1263,3 +1263,43 @@ async fn git_branches_switch_resolve_and_signing_key() {
     }
     inst.server.shutdown();
 }
+
+/// Core next step 13: `harness import` sends a script as YAML and names
+/// the format with `--format`; a program is refused (exit 1).
+#[tokio::test]
+async fn harness_import_reads_a_script_and_refuses_a_program() {
+    let inst = instance().await;
+    inst.login().await;
+    let dir = inst.home.path().join("import");
+    std::fs::create_dir_all(&dir).expect("dir");
+    let script = dir.join("load.yml");
+    std::fs::write(
+        &script,
+        "config:\n  target: https://api.example.com\n  phases:\n    - duration: 10\n      arrivalRate: 2\nscenarios:\n  - flow:\n      - get:\n          url: /orders\n      - think: 1\n",
+    )
+    .expect("script");
+    let script = script.display().to_string();
+    let j = inst.json(&["harness", "import", &script]).await;
+    assert_eq!(j["format"], json!("artillery"), "{j}");
+    assert_eq!(j["source"]["requests"][0]["path"], json!("/orders"));
+    assert!(j["left_out"].to_string().contains("think"), "{j}");
+    let j = inst
+        .json(&["harness", "import", &script, "--format", "artillery"])
+        .await;
+    assert_eq!(j["format"], json!("artillery"), "{j}");
+    let (code, _) = inst
+        .run(None, &["harness", "import", &script, "--format", "postman"])
+        .await;
+    assert_eq!(code, 1);
+    let program = dir.join("load.js");
+    std::fs::write(
+        &program,
+        "import http from 'k6/http';\nexport default function () { http.get('https://a.test'); }\n",
+    )
+    .expect("program");
+    let (code, _, why) = inst
+        .run_full(None, &["harness", "import", &program.display().to_string()])
+        .await;
+    assert_eq!(code, 1);
+    assert!(why.contains("never run or translated"), "{why}");
+}

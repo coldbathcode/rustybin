@@ -66,6 +66,25 @@ jobs:
       - run: cargo clippy --all-targets --locked --features quota-postgres -- -D warnings
       - run: cargo test --all-targets --locked --features quota-postgres
 
+  harness-http3:
+    name: test (harness-http3 feature, HTTP/3 targets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --locked --features harness-http3 -- -D warnings
+      - run: cargo test --all-targets --locked --features harness-http3
+      # The default build gains no QUIC stack: the feature is the only way in.
+      - name: The default build has no QUIC crate
+        run: |
+          if cargo tree --locked -e normal | grep -E '(^|[^a-z0-9-])(quinn|h3)(-[a-z]+)? v'; then
+            echo "error: a QUIC crate is in the default dependency tree" >&2
+            exit 1
+          fi
+
   audit:
     name: cargo audit (RustSec advisories)
     runs-on: ubuntu-latest
@@ -88,6 +107,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked
       - run: cargo check --locked --features quota-postgres
+      - run: cargo check --locked --features harness-http3
 
   docker:
     name: docker build

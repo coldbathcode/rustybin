@@ -1039,6 +1039,40 @@ impl Report {
                     }
                 ));
             }
+            // The legs of a chain: what each server's onward call came to.
+            if let Some(chain) = &server.chain {
+                for hop in &chain.hops {
+                    let refused: u64 = hop.refused.values().sum();
+                    out.push_str(&format!(
+                        "\n  chain hop {} {}: {} calls | upstream {}, gateway {}, transport {} | leg p50 {:.2} ms, p99 {:.2} ms | gateway part p99 {:.2} ms | {} arrived{}",
+                        hop.hop,
+                        hop.url,
+                        hop.calls,
+                        hop.upstream,
+                        hop.gateway,
+                        hop.transport,
+                        hop.latency.p50_ms,
+                        hop.latency.p99_ms,
+                        hop.overhead.p99_ms,
+                        hop.arrivals,
+                        if refused == 0 {
+                            String::new()
+                        } else {
+                            format!(
+                                " | no call for {refused}: {}",
+                                hop.refused
+                                    .iter()
+                                    .map(|(k, v)| format!("{k} ({v})"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        }
+                    ));
+                }
+                for problem in &chain.problems {
+                    out.push_str(&format!("\n  chain not prepared: {problem}"));
+                }
+            }
             out.push('\n');
         }
         if self.rejected_markers > 0 {

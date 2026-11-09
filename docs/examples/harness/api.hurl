@@ -439,3 +439,196 @@ jsonpath "$.source.requests[0].path" == "/orders?page=2"
 jsonpath "$.source.requests[0].weight" == 2
 jsonpath "$.removed[0]" == "token"
 # ANCHOR_END: harness_import
+
+# ANCHOR: harness_import_postman
+# A Postman collection (v2.1): the path variable with a value is put in, the
+# test script and the bearer token are named and left out, and the request
+# whose variable has no value is left out too.
+POST {{harness_url}}/_rustybin/harness/import
+Authorization: Bearer {{admin_token}}
+{"info": {"name": "Orders", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+ "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "abc"}]},
+ "item": [
+  {"name": "One order", "event": [{"listen": "test", "script": {"exec": ["pm.test('ok', () => {})"]}}],
+   "request": {"method": "GET", "header": [{"key": "Accept", "value": "application/json"}],
+    "url": {"raw": "https://api.example.com/v2/orders/:id?page=2", "protocol": "https", "host": ["api", "example", "com"],
+     "path": ["v2", "orders", ":id"], "query": [{"key": "page", "value": "2"}], "variable": [{"key": "id", "value": "42"}]}}},
+  {"name": "A customer", "request": {"method": "GET", "header": [],
+    "url": {"raw": "https://api.example.com/v2/customers/:customer", "protocol": "https", "host": ["api", "example", "com"],
+     "path": ["v2", "customers", ":customer"]}}}
+ ]}
+HTTP 200
+[Asserts]
+jsonpath "$.format" == "postman"
+jsonpath "$.entries" == 2
+jsonpath "$.source.requests" count == 1
+jsonpath "$.source.requests[0].path" == "/v2/orders/42?page=2"
+jsonpath "$.left_out" includes "collection.auth (bearer)"
+jsonpath "$.left_out" includes "item[0].event (scripts)"
+jsonpath "$.variables[0]" == ":customer"
+jsonpath "$.hosts[0]" == "api.example.com"
+# ANCHOR_END: harness_import_postman
+
+# ANCHOR: harness_import_artillery
+# An Artillery script (here as JSON; YAML is read too): two phases become a
+# pattern, at 2 requests per arrival, and the processor is named, never run.
+POST {{harness_url}}/_rustybin/harness/import?format=artillery
+Authorization: Bearer {{admin_token}}
+{"config": {"target": "https://api.example.com", "processor": "./functions.js",
+  "phases": [{"duration": 60, "arrivalRate": 5}, {"duration": 120, "arrivalRate": 5, "rampTo": 20}]},
+ "scenarios": [{"flow": [
+  {"get": {"url": "/orders"}},
+  {"post": {"url": "/orders", "json": {"item": "tea"}}}
+ ]}]}
+HTTP 200
+[Asserts]
+jsonpath "$.format" == "artillery"
+jsonpath "$.source.requests" count == 2
+jsonpath "$.pattern.type" == "constant"
+jsonpath "$.pattern.rate" == 10.0
+jsonpath "$.pattern.then.type" == "ramp"
+jsonpath "$.pattern.then.to" == 40.0
+jsonpath "$.left_out" includes "config.processor (code, never run)"
+jsonpath "$.hosts[0]" == "api.example.com"
+# ANCHOR_END: harness_import_artillery
+
+# A program is refused: nothing here runs or translates code.
+POST {{harness_url}}/_rustybin/harness/import
+Authorization: Bearer {{admin_token}}
+Content-Type: text/plain
+`import http from 'k6/http'; export default function () { http.get('https://a.test'); }`
+HTTP 400
+[Asserts]
+jsonpath "$.error" contains "never run or translated"
+
+# ANCHOR: harness_http3
+# Whether this build sends HTTP/3 (the cargo feature harness-http3).
+GET {{harness_url}}/_rustybin/harness
+HTTP 200
+[Asserts]
+jsonpath "$.http3" isBoolean
+
+# The parameter is known to every build; one without the feature answers
+# valid: false with a problem that names the feature. HTTP/3 is always TLS.
+POST {{harness_url}}/_rustybin/harness/validate
+Content-Type: application/json
+{
+  "name": "over-quic",
+  "targets": [{"url": "https://gateway.internal:8443", "http": "h3"}],
+  "source": {"request": {"path": "/status/200"}},
+  "pattern": {"type": "constant", "rate": 50, "for": "10s"}
+}
+HTTP 200
+[Asserts]
+jsonpath "$.scenario.targets[0].http" == "h3"
+
+POST {{harness_url}}/_rustybin/harness/validate
+Content-Type: application/json
+{
+  "name": "plain",
+  "targets": [{"url": "http://gateway.internal:8080", "http": "h3"}],
+  "source": {"request": {"path": "/status/200"}},
+  "pattern": {"type": "constant", "rate": 50, "for": "10s"}
+}
+HTTP 200
+[Asserts]
+jsonpath "$.valid" == false
+jsonpath "$.problems[*]" includes "targets[0].http: h3 needs an https target (HTTP/3 is always TLS)"
+# ANCHOR_END: harness_http3
+
+# ANCHOR: harness_chain_preview
+# A chain of two hops: the preview names where the server side will call,
+# before anything is sent.
+POST {{harness_url}}/_rustybin/harness/preview
+Content-Type: application/json
+{
+  "name": "two-hops",
+  "target": "{{harness_url}}",
+  "source": {"request": {"path": "/harness/front"}},
+  "pattern": {"type": "constant", "rate": 20, "for": "2s"},
+  "servers": {"chain": {"hops": [
+    {"url": "{{harness_url}}", "path": "/harness/orders"},
+    {"url": "{{harness_url}}", "path": "/harness/stock"}
+  ]}}
+}
+HTTP 200
+[Asserts]
+jsonpath "$.chain.calls_per_request" == 2
+jsonpath "$.chain.hops[0].hop" == 1
+jsonpath "$.chain.hops[0].url" == "{{harness_url}}/harness/orders"
+jsonpath "$.chain.hops[1].called_by" == "the server answering hop 1"
+# ANCHOR_END: harness_chain_preview
+
+# ANCHOR: harness_chain_refused
+# A hop is checked like a target: one outside RUSTYBIN_HARNESS_TARGETS
+# refuses the run before anything is sent.
+POST {{harness_url}}/_rustybin/harness/runs
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+[Options]
+retry: 10
+retry-interval: 300
+{
+  "name": "elsewhere",
+  "target": "{{harness_url}}",
+  "source": {"request": {"path": "/harness/front"}},
+  "pattern": {"type": "constant", "rate": 20, "for": "2s"},
+  "servers": {"chain": {"hops": ["http://10.255.255.1:9"]}}
+}
+HTTP 403
+[Asserts]
+jsonpath "$.error" == "a chain hop is not allowed or not verified on this node"
+jsonpath "$.problems[0]" contains "servers.chain.hops[0].url"
+jsonpath "$.problems[0]" contains "RUSTYBIN_HARNESS_TARGETS"
+# ANCHOR_END: harness_chain_refused
+
+# ANCHOR: harness_chain_run
+# The run: every request the node answers calls the first hop, whose
+# answer calls the second.
+POST {{harness_url}}/_rustybin/harness/runs
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+[Options]
+retry: 10
+retry-interval: 300
+{
+  "name": "two-hops",
+  "target": "{{harness_url}}",
+  "source": {"request": {"path": "/harness/front"}},
+  "pattern": {"type": "constant", "rate": 20, "for": "2s"},
+  "timeout": "2s",
+  "servers": {"chain": {"hops": [
+    {"url": "{{harness_url}}", "path": "/harness/orders"},
+    {"url": "{{harness_url}}", "path": "/harness/stock"}
+  ]}}
+}
+HTTP 202
+[Captures]
+chain_run: jsonpath "$.run_id"
+
+GET {{harness_url}}/_rustybin/harness/runs/{{chain_run}}
+[Options]
+retry: 30
+retry-interval: 500
+HTTP 200
+[Asserts]
+jsonpath "$.report_ready" == true
+
+# The report: one leg per hop. The clients' requests are still the only
+# arrivals, so lost and upstream_reach mean what they did.
+GET {{harness_url}}/_rustybin/harness/runs/{{chain_run}}/report
+HTTP 200
+[Asserts]
+jsonpath "$.totals.sent" >= 30
+jsonpath "$.server.arrivals" >= 30
+jsonpath "$.server.chain.hops" count == 2
+jsonpath "$.server.chain.hops[0].url" == "{{harness_url}}/harness/orders"
+jsonpath "$.server.chain.hops[0].calls" >= 30
+jsonpath "$.server.chain.hops[0].upstream" >= 30
+jsonpath "$.server.chain.hops[0].gateway" == 0
+jsonpath "$.server.chain.hops[0].transport" == 0
+jsonpath "$.server.chain.hops[0].latency.p50_ms" > 0
+jsonpath "$.server.chain.hops[1].calls" >= 30
+jsonpath "$.server.chain.hops[1].arrivals" >= 30
+jsonpath "$.server.chain.hops[1].refused.seen_before" not exists
+# ANCHOR_END: harness_chain_run

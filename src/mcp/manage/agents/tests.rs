@@ -1247,6 +1247,8 @@ const OLD_RIGHTS: &[(&str, &str, bool)] = &[
     ("git_branches", "admin", true),
     ("git_switch_branch", "admin", false),
     ("git_signing_key", "admin", false),
+    // Core next step 13: a collection or a script as a source, a read.
+    ("import_scenario", "read", true),
 ];
 
 /// The 0.4 ceilings, by right: `read-only` a read-only tool that is not a

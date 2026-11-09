@@ -168,6 +168,253 @@ impl Lease {
     }
 }
 
+// ── Server-to-server chains ─────────────────────────────────────────
+//
+// A chain is the one case where the server role sends: a server answering
+// a request of a run calls a further hop the scenario names. The rules
+// (step 13 of `docs/plans/core-next`), each enforced here or named where:
+//
+//  1. off unless the run's `servers.chain` names hops;
+//  2. only for a request whose marker verified with the run key (the
+//     correlation layer calls [`ChainGate::admit`] after `Marker::verify`,
+//     never before);
+//  3. only while the run is live ([`ChainGate::live`]: the run did not end
+//     and its liveness was renewed, as a client's lease is);
+//  4. only to `hops[n]`, `n` being the hop count of the verified marker:
+//     nothing of the incoming request chooses or reaches the destination;
+//  5. through the pinned, allowlisted path: [`pin_chain`] parses every hop
+//     like a target, checks it against this node's allowlist and pins its
+//     addresses, whole or not at all; the caller builds the engine's
+//     pinned client on those addresses and verifies each hop like a target;
+//  6. the hop count is inside the marker's signature;
+//  7. a fixed depth, [`MAX_CHAIN_HOPS`];
+//  8. at most one onward call per client request and hop: a repeat (a
+//     gateway's retry, a mirrored or replayed request) calls nothing, and
+//     so does a request the bitmap cannot track;
+//  9. bounded: [`ChainGate`]'s permits (no queue) and a timeout per call;
+// 10. the kill switch refuses at the gate and ends a call under way.
+
+/// The depth of a chain: hops after the server a client's request reaches.
+pub const MAX_CHAIN_HOPS: usize = 3;
+/// Onward calls in flight per run on a node: the default and the most.
+pub const DEFAULT_CHAIN_CONCURRENCY: u32 = 64;
+pub const MAX_CHAIN_CONCURRENCY: u32 = 1024;
+/// One onward call: the default and the longest.
+pub const DEFAULT_CHAIN_TIMEOUT: Duration = Duration::from_secs(5);
+pub const MAX_CHAIN_TIMEOUT: Duration = Duration::from_secs(30);
+/// Sequence numbers followed per hop and run (a bitmap of 2 MiB); a
+/// request past it makes no onward call.
+pub const CHAIN_SEEN_BITS: u64 = 1 << 24;
+/// Client nodes followed per hop and run.
+pub const CHAIN_SEEN_NODES: usize = 64;
+
+/// Why a server makes no onward call for a request of its run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ChainRefusal {
+    /// The chain could not be prepared on this node (a hop not allowed,
+    /// not verified, not resolvable).
+    NotPrepared,
+    /// The run is not live: ended, or its liveness was not renewed.
+    NotLive,
+    KillSwitch,
+    /// The request already made its call at this hop.
+    SeenBefore,
+    /// Past what the bitmap follows: not known to be the first.
+    Untracked,
+    /// The run's onward calls in flight are at their cap.
+    Busy,
+}
+
+impl ChainRefusal {
+    pub const ALL: [ChainRefusal; 6] = [
+        ChainRefusal::NotPrepared,
+        ChainRefusal::NotLive,
+        ChainRefusal::KillSwitch,
+        ChainRefusal::SeenBefore,
+        ChainRefusal::Untracked,
+        ChainRefusal::Busy,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChainRefusal::NotPrepared => "not_prepared",
+            ChainRefusal::NotLive => "not_live",
+            ChainRefusal::KillSwitch => "kill_switch",
+            ChainRefusal::SeenBefore => "seen_before",
+            ChainRefusal::Untracked => "untracked",
+            ChainRefusal::Busy => "busy",
+        }
+    }
+}
+
+/// Sequence numbers already called on at one hop, per client node.
+#[derive(Default)]
+struct HopSeen {
+    nodes: std::collections::HashMap<String, Vec<u64>>,
+    words: u64,
+}
+
+impl HopSeen {
+    /// Mark `(node, seq)`: `Ok(true)` when it is the first time,
+    /// `Ok(false)` when it was marked before, `Err` when it cannot be told.
+    fn first(&mut self, node: &str, seq: u64) -> Result<bool, ()> {
+        if seq >= CHAIN_SEEN_BITS {
+            return Err(());
+        }
+        let word = seq / 64;
+        let have = self.nodes.get(node).map_or(0, |v| v.len() as u64);
+        let grow = (word + 1).saturating_sub(have);
+        if self.words + grow > CHAIN_SEEN_BITS / 64
+            || (!self.nodes.contains_key(node) && self.nodes.len() >= CHAIN_SEEN_NODES)
+        {
+            return Err(());
+        }
+        let bits = self.nodes.entry(node.to_string()).or_default();
+        if grow > 0 {
+            bits.resize(word as usize + 1, 0);
+            self.words += grow;
+        }
+        let mask = 1u64 << (seq % 64);
+        match bits.get_mut(word as usize) {
+            Some(w) if *w & mask != 0 => Ok(false),
+            Some(w) => {
+                *w |= mask;
+                Ok(true)
+            }
+            None => Err(()),
+        }
+    }
+}
+
+/// The gate every onward call of a run passes on a server node: liveness,
+/// the kill switch, the one call per request and hop, and the cap on calls
+/// in flight. It decides whether a call may be made, never where to.
+pub struct ChainGate {
+    kill: Arc<KillSwitch>,
+    permits: Arc<tokio::sync::Semaphore>,
+    /// The run is live until then; `None`: not live (yet, or any more).
+    live_until: std::sync::Mutex<Option<std::time::Instant>>,
+    /// One bitmap per hop.
+    seen: std::sync::Mutex<Vec<HopSeen>>,
+}
+
+impl ChainGate {
+    /// A gate for a chain of `hops` hops with `max_concurrent` calls in
+    /// flight. Not live until [`ChainGate::renew`] says so.
+    pub fn new(kill: Arc<KillSwitch>, hops: usize, max_concurrent: usize) -> Self {
+        let hops = hops.min(MAX_CHAIN_HOPS);
+        Self {
+            kill,
+            permits: Arc::new(tokio::sync::Semaphore::new(
+                max_concurrent.clamp(1, MAX_CHAIN_CONCURRENCY as usize),
+            )),
+            live_until: std::sync::Mutex::new(None),
+            seen: std::sync::Mutex::new((0..hops).map(|_| HopSeen::default()).collect()),
+        }
+    }
+
+    /// The run is live for `period` from now (a single node: until the
+    /// run's longest duration; a cluster member: until the leader's next
+    /// word is overdue, as a client's lease).
+    pub fn renew(&self, period: Duration) {
+        *self.live_until.lock().unwrap_or_else(|p| p.into_inner()) =
+            std::time::Instant::now().checked_add(period);
+    }
+
+    /// The run is over (or not started): no call from here on.
+    pub fn end(&self) {
+        *self.live_until.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
+
+    pub fn live(&self) -> bool {
+        self.live_until
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some_and(|until| std::time::Instant::now() < until)
+    }
+
+    pub fn kill_switch(&self) -> &Arc<KillSwitch> {
+        &self.kill
+    }
+
+    /// May the request `(node, seq)` of the run, verified by the caller,
+    /// make its onward call at `hop` (0: the server a client reached)? The
+    /// permit is held for the call; dropping it gives the slot back.
+    pub fn admit(
+        &self,
+        hop: usize,
+        node: &str,
+        seq: u64,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, ChainRefusal> {
+        if !self.live() {
+            return Err(ChainRefusal::NotLive);
+        }
+        if self.kill.is_set() {
+            return Err(ChainRefusal::KillSwitch);
+        }
+        let permit = self
+            .permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ChainRefusal::Busy)?;
+        let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+        match seen.get_mut(hop).map(|h| h.first(node, seq)) {
+            Some(Ok(true)) => Ok(permit),
+            Some(Ok(false)) => Err(ChainRefusal::SeenBefore),
+            // Past the bitmap, or a hop the gate has no bitmap for.
+            Some(Err(())) | None => Err(ChainRefusal::Untracked),
+        }
+    }
+}
+
+/// A hop checked and pinned: what the engine's pinned client is built on.
+pub struct PinnedHop {
+    pub parsed: ParsedTarget,
+    pub addrs: Vec<SocketAddr>,
+}
+
+/// Check every hop of a chain like a target and pin its addresses: parsed
+/// by [`parse_target_url`] (never a control plane path), in this node's
+/// allowlist, resolved once, never a forbidden address. Whole or not at
+/// all: one hop refused and no hop is pinned, the problems named by hop.
+pub async fn pin_chain(
+    hops: &[(String, String)],
+    allowlist: &Allowlist,
+) -> Result<Vec<PinnedHop>, Vec<String>> {
+    let mut pinned = Vec::with_capacity(hops.len());
+    let mut problems = Vec::new();
+    if hops.len() > MAX_CHAIN_HOPS {
+        return Err(vec![format!(
+            "servers.chain.hops: at most {MAX_CHAIN_HOPS} hops"
+        )]);
+    }
+    for (i, (url, path)) in hops.iter().enumerate() {
+        let here = format!("servers.chain.hops[{i}]");
+        let parsed = match parse_target_url(url) {
+            Ok(p) => p,
+            Err(e) => {
+                problems.push(format!("{here}.url: {e}"));
+                continue;
+            }
+        };
+        if !path.starts_with('/') || is_control_prefix(&format!("{}{path}", parsed.path)) {
+            problems.push(format!(
+                "{here}.path: a chain never calls a Rustybin control plane"
+            ));
+            continue;
+        }
+        match pin(&parsed, allowlist).await {
+            Ok(addrs) => pinned.push(PinnedHop { parsed, addrs }),
+            Err(e) => problems.push(format!("{here}.url: {e}")),
+        }
+    }
+    if problems.is_empty() {
+        Ok(pinned)
+    } else {
+        Err(problems)
+    }
+}
+
 /// Check a node URL without resolving it: `http` or `https`, no
 /// credentials, a host, and a literal address that is never a forbidden
 /// one. Returns the host (brackets trimmed) and port. Every node-to-node
@@ -443,5 +690,168 @@ mod tests {
         assert!(k.is_set());
         k.clear();
         assert!(!k.is_set());
+    }
+
+    // ── Chains (core next step 13) ──────────────────────────────────
+
+    /// The gate, rule by rule: not live until told, the kill switch, once
+    /// per request and hop, no call past what it can follow, a cap on
+    /// calls in flight with no queue.
+    #[tokio::test]
+    async fn the_chain_gate_admits_one_call_per_request_and_hop() {
+        let kill = KillSwitch::new();
+        let gate = ChainGate::new(kill.clone(), 2, 2);
+        // A gate is closed until the run is said to be live.
+        assert!(!gate.live());
+        assert_eq!(
+            gate.admit(0, "node-1", 7).unwrap_err(),
+            ChainRefusal::NotLive
+        );
+        gate.renew(Duration::from_secs(60));
+        assert!(gate.live());
+        // The refusal above marked nothing: the request still has its call.
+        let first = gate.admit(0, "node-1", 7).expect("the first call");
+        drop(first);
+        // Once per request and hop, whoever sends it again.
+        assert_eq!(
+            gate.admit(0, "node-1", 7).unwrap_err(),
+            ChainRefusal::SeenBefore
+        );
+        // The next hop of the same request, and the same number from
+        // another client node, are other calls.
+        drop(gate.admit(1, "node-1", 7).expect("the next hop"));
+        drop(gate.admit(0, "node-2", 7).expect("another client node"));
+        assert_eq!(
+            gate.admit(1, "node-1", 7).unwrap_err(),
+            ChainRefusal::SeenBefore
+        );
+        // A hop the chain does not have, a number past the bitmap: not
+        // known to be the first, so no call.
+        assert_eq!(
+            gate.admit(2, "node-1", 8).unwrap_err(),
+            ChainRefusal::Untracked
+        );
+        assert_eq!(
+            gate.admit(0, "node-1", CHAIN_SEEN_BITS).unwrap_err(),
+            ChainRefusal::Untracked
+        );
+        // The kill switch closes it at once, and it opens with the switch.
+        kill.set();
+        assert_eq!(
+            gate.admit(0, "node-1", 9).unwrap_err(),
+            ChainRefusal::KillSwitch
+        );
+        kill.clear();
+        // Two calls in flight and no more: the third is refused, not
+        // queued, and has its call once a slot is back.
+        let a = gate.admit(0, "node-1", 9).expect("first slot");
+        let b = gate.admit(0, "node-1", 10).expect("second slot");
+        assert_eq!(gate.admit(0, "node-1", 11).unwrap_err(), ChainRefusal::Busy);
+        drop(a);
+        let c = gate.admit(0, "node-1", 11).expect("a slot came back");
+        drop((b, c));
+        // The run's end closes it for good; an expired word does too.
+        gate.end();
+        assert_eq!(
+            gate.admit(0, "node-1", 12).unwrap_err(),
+            ChainRefusal::NotLive
+        );
+        gate.renew(Duration::ZERO);
+        assert_eq!(
+            gate.admit(0, "node-1", 12).unwrap_err(),
+            ChainRefusal::NotLive
+        );
+        // Every reason has its own name in the report.
+        let mut names: Vec<&str> = ChainRefusal::ALL.iter().map(|r| r.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), ChainRefusal::ALL.len());
+    }
+
+    /// The client nodes followed per hop are bounded: one past it makes no
+    /// call rather than an untracked one.
+    #[tokio::test]
+    async fn the_chain_gate_follows_a_bounded_number_of_client_nodes() {
+        let gate = ChainGate::new(KillSwitch::new(), 1, 4);
+        gate.renew(Duration::from_secs(60));
+        for n in 0..CHAIN_SEEN_NODES {
+            drop(gate.admit(0, &format!("node-{n}"), 1).expect("followed"));
+        }
+        assert_eq!(
+            gate.admit(0, "one-more", 1).unwrap_err(),
+            ChainRefusal::Untracked
+        );
+        // A node already followed keeps its calls.
+        drop(gate.admit(0, "node-0", 2).expect("a followed node"));
+    }
+
+    #[tokio::test]
+    async fn a_chain_is_prepared_whole_or_not_at_all() {
+        let l = list(&["127.0.0.1:9000", "10.0.0.0/8"]);
+        let hop = |url: &str, path: &str| (url.to_string(), path.to_string());
+        // Every hop allowed: each is pinned to its own addresses.
+        let pinned = pin_chain(
+            &[
+                hop("http://127.0.0.1:9000", "/a"),
+                hop("http://10.1.2.3/api", "/b"),
+            ],
+            &l,
+        )
+        .await
+        .map_err(|p| p.join("; "))
+        .expect("pinned");
+        assert_eq!(pinned.len(), 2);
+        assert_eq!(pinned[0].addrs, vec!["127.0.0.1:9000".parse().unwrap()]);
+        assert_eq!(pinned[1].addrs, vec!["10.1.2.3:80".parse().unwrap()]);
+        assert_eq!(pinned[1].parsed.path, "/api");
+        // One hop refused and nothing is pinned; the problem names the hop.
+        for (hops, needle) in [
+            (
+                vec![
+                    hop("http://127.0.0.1:9000", "/a"),
+                    hop("http://127.0.0.1:9001", "/b"),
+                ],
+                "servers.chain.hops[1].url: 127.0.0.1:9001 is not in RUSTYBIN_HARNESS_TARGETS",
+            ),
+            // Forbidden whatever the list says.
+            (vec![hop("http://169.254.169.254/latest", "/")], "metadata"),
+            // Never this or another node's control plane.
+            (
+                vec![hop("http://127.0.0.1:9000/_rustybin", "/")],
+                "control plane",
+            ),
+            (
+                vec![hop("http://127.0.0.1:9000", "/_rustybin/harness/stop")],
+                "control plane",
+            ),
+            (vec![hop("http://127.0.0.1:9000/ui", "/")], "control plane"),
+            (vec![hop("ftp://127.0.0.1:9000", "/")], "hops[0].url"),
+            (vec![hop("http://u:p@127.0.0.1:9000", "/")], "hops[0].url"),
+            // Past the fixed depth.
+            (
+                vec![
+                    hop("http://127.0.0.1:9000", "/1"),
+                    hop("http://127.0.0.1:9000", "/2"),
+                    hop("http://127.0.0.1:9000", "/3"),
+                    hop("http://127.0.0.1:9000", "/4"),
+                ],
+                "at most 3 hops",
+            ),
+        ] {
+            let problems = pin_chain(&hops, &l).await.err().expect("refused");
+            assert!(
+                problems.iter().any(|p| p.contains(needle)),
+                "{needle}: {problems:?}"
+            );
+        }
+        // Nothing without a list: a server with no targets calls nowhere.
+        let problems = pin_chain(&[hop("http://127.0.0.1:9000", "/")], &Allowlist::default())
+            .await
+            .err()
+            .expect("refused");
+        assert!(
+            problems[0].contains("RUSTYBIN_HARNESS_TARGETS"),
+            "{problems:?}"
+        );
     }
 }
