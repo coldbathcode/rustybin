@@ -535,3 +535,100 @@ HTTP 200
 jsonpath "$.valid" == false
 jsonpath "$.problems[*]" includes "targets[0].http: h3 needs an https target (HTTP/3 is always TLS)"
 # ANCHOR_END: harness_http3
+
+# ANCHOR: harness_chain_preview
+# A chain of two hops: the preview names where the server side will call,
+# before anything is sent.
+POST {{harness_url}}/_rustybin/harness/preview
+Content-Type: application/json
+{
+  "name": "two-hops",
+  "target": "{{harness_url}}",
+  "source": {"request": {"path": "/harness/front"}},
+  "pattern": {"type": "constant", "rate": 20, "for": "2s"},
+  "servers": {"chain": {"hops": [
+    {"url": "{{harness_url}}", "path": "/harness/orders"},
+    {"url": "{{harness_url}}", "path": "/harness/stock"}
+  ]}}
+}
+HTTP 200
+[Asserts]
+jsonpath "$.chain.calls_per_request" == 2
+jsonpath "$.chain.hops[0].hop" == 1
+jsonpath "$.chain.hops[0].url" == "{{harness_url}}/harness/orders"
+jsonpath "$.chain.hops[1].called_by" == "the server answering hop 1"
+# ANCHOR_END: harness_chain_preview
+
+# ANCHOR: harness_chain_refused
+# A hop is checked like a target: one outside RUSTYBIN_HARNESS_TARGETS
+# refuses the run before anything is sent.
+POST {{harness_url}}/_rustybin/harness/runs
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+[Options]
+retry: 10
+retry-interval: 300
+{
+  "name": "elsewhere",
+  "target": "{{harness_url}}",
+  "source": {"request": {"path": "/harness/front"}},
+  "pattern": {"type": "constant", "rate": 20, "for": "2s"},
+  "servers": {"chain": {"hops": ["http://10.255.255.1:9"]}}
+}
+HTTP 403
+[Asserts]
+jsonpath "$.error" == "a chain hop is not allowed or not verified on this node"
+jsonpath "$.problems[0]" contains "servers.chain.hops[0].url"
+jsonpath "$.problems[0]" contains "RUSTYBIN_HARNESS_TARGETS"
+# ANCHOR_END: harness_chain_refused
+
+# ANCHOR: harness_chain_run
+# The run: every request the node answers calls the first hop, whose
+# answer calls the second.
+POST {{harness_url}}/_rustybin/harness/runs
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+[Options]
+retry: 10
+retry-interval: 300
+{
+  "name": "two-hops",
+  "target": "{{harness_url}}",
+  "source": {"request": {"path": "/harness/front"}},
+  "pattern": {"type": "constant", "rate": 20, "for": "2s"},
+  "timeout": "2s",
+  "servers": {"chain": {"hops": [
+    {"url": "{{harness_url}}", "path": "/harness/orders"},
+    {"url": "{{harness_url}}", "path": "/harness/stock"}
+  ]}}
+}
+HTTP 202
+[Captures]
+chain_run: jsonpath "$.run_id"
+
+GET {{harness_url}}/_rustybin/harness/runs/{{chain_run}}
+[Options]
+retry: 30
+retry-interval: 500
+HTTP 200
+[Asserts]
+jsonpath "$.report_ready" == true
+
+# The report: one leg per hop. The clients' requests are still the only
+# arrivals, so lost and upstream_reach mean what they did.
+GET {{harness_url}}/_rustybin/harness/runs/{{chain_run}}/report
+HTTP 200
+[Asserts]
+jsonpath "$.totals.sent" >= 30
+jsonpath "$.server.arrivals" >= 30
+jsonpath "$.server.chain.hops" count == 2
+jsonpath "$.server.chain.hops[0].url" == "{{harness_url}}/harness/orders"
+jsonpath "$.server.chain.hops[0].calls" >= 30
+jsonpath "$.server.chain.hops[0].upstream" >= 30
+jsonpath "$.server.chain.hops[0].gateway" == 0
+jsonpath "$.server.chain.hops[0].transport" == 0
+jsonpath "$.server.chain.hops[0].latency.p50_ms" > 0
+jsonpath "$.server.chain.hops[1].calls" >= 30
+jsonpath "$.server.chain.hops[1].arrivals" >= 30
+jsonpath "$.server.chain.hops[1].refused.seen_before" not exists
+# ANCHOR_END: harness_chain_run

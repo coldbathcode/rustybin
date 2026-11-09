@@ -399,6 +399,80 @@ refused with an `h3` target, by name.
 {{#include ../examples/harness/api.hurl:harness_http3}}
 ```
 
+## Server-to-server chains
+
+A request through a gateway often goes on: the service it reaches calls another service, through
+the gateway again. `servers.chain` makes the harness's server side do the same, so a run measures
+every leg: the server that answers a client's request calls the first hop, the server that answers
+that call the second, and so on.
+
+```yaml
+servers:
+  chain:
+    hops:
+      - url: https://gateway.internal
+        path: /orders          # the route that reaches the next server
+      - url: https://gateway.internal
+        path: /stock
+    timeout: 5s                # per onward call (default 5s, at most 30s)
+    max_concurrent: 64         # onward calls in flight per run on a server node
+```
+
+A hop is a gateway URL plus the one path the call asks for (default `/`), with `host`, `http`
+(`auto`, `h1`, `h2`, `h2c`) and `insecure` as a target has them. The onward call is a `GET` with
+the harness's own headers and no body.
+
+This is the only traffic the server role sends, so it has rules of its own, and nothing turns it on
+except a scenario that declares a chain:
+
+- **Only the run's own requests.** A server calls on only for a request that carries its run's
+  signed marker. A request without one, with a marker of another run, or with a signature that does
+  not verify is answered as an ordinary request and makes no call.
+- **Only while the run is live.** When the run ends, or the kill switch is pressed, the calls stop
+  at once, those under way included. In a cluster a server calls on only on its leader's word that
+  the run is sending, renewed like a client's lease, so a lost leader leaves no server calling. A
+  marker replayed after the run calls nothing.
+- **Only to the hops the scenario names.** Nothing of the incoming request (address, host, path,
+  query, headers, body) chooses where the next call goes or travels with it.
+- **Checked like a target.** Every hop must be allowed by `RUSTYBIN_HARNESS_TARGETS` **on the server
+  node**, is resolved once and pinned, is never a link-local or metadata address or a control plane,
+  and, with `RUSTYBIN_HARNESS_VERIFY_TARGETS`, must serve the verification token. A chain is
+  prepared whole or not at all: a single node refuses the run (`403`, the problems by hop), a
+  cluster's server node that cannot prepare it makes no call and the report says why.
+- **A fixed depth, no loops.** At most 3 hops, never the same one twice. The hop count travels
+  inside the marker's signature, so it cannot be changed on the way, and a server calls on at most
+  once for a request at a hop: a gateway's retry, a mirrored or a replayed request calls nothing a
+  second time. A run's onward calls never exceed the requests its clients sent times the hops.
+- **Bounded.** `max_concurrent` calls in flight per run on a node; one over it is refused, not
+  queued. Each call has its `timeout`. A run follows the first 16,777,216 requests of each hop.
+
+The preview (`POST /_rustybin/harness/preview`) and the `summary` of a validation list the hops
+before anything is sent:
+
+```hurl
+{{#include ../examples/harness/api.hurl:harness_chain_preview}}
+```
+
+A hop outside the allowlist refuses the run:
+
+```hurl
+{{#include ../examples/harness/api.hurl:harness_chain_refused}}
+```
+
+The report's `server.chain` has one entry per hop: the `calls` made, how they were answered
+(`upstream`: by a server of the run, its tag verified; `gateway`: answered without it;
+`transport` by kind), the `latency` of the leg, the next server's processing time
+(`upstream_latency`) and the difference (`overhead`, the gateway's part of the leg), the
+`arrivals` of that hop, and `refused`: the requests that made no call, by reason (`not_live`,
+`kill_switch`, `seen_before`, `untracked`, `busy`, `not_prepared`). A server's processing time
+includes its onward call, as a real service's would, so the client's `upstream_latency` holds the
+legs behind it. An onward call is counted with its hop and not with `server.arrivals`, so `lost`
+and `upstream_reach` keep describing what the clients sent.
+
+```hurl
+{{#include ../examples/harness/api.hurl:harness_chain_run}}
+```
+
 ## OpenTelemetry
 
 Set `harness.otlp_endpoint` (Management, or `rustybin settings set`) to a collector's HTTP base URL
@@ -640,6 +714,14 @@ self-service mocks. In a cluster, each node applies its own caps and allowlist t
 assignment it receives, and node-to-node calls (join, heartbeat, vote, announcement) refuse
 a URL with credentials and every link-local, cloud metadata or multicast address, checked
 at each connection, so a DNS change cannot turn a node into a way to reach one.
+
+Two things send in other ways and go through the same fences. An
+[HTTP/3 target](#http3-targets) is pinned like any other and QUIC connects to the pinned
+addresses only, so UDP is no way around the allowlist. A
+[chain](#server-to-server-chains) is the only traffic the server role sends: only for a
+request carrying its run's signed marker, only while the run is live, only to the hops the
+scenario names (each allowed on the server node, pinned and verified like a target), once
+per request and hop to a fixed depth, and the kill switch stops it at once.
 
 ## Testing it
 

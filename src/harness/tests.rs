@@ -1213,6 +1213,7 @@ async fn spoofed_markers_are_rejected_and_never_counted() {
         headers_digest: "00000000".into(),
         body_digest: String::new(),
         path_digest: "00000000".into(),
+        hop: 0,
         sig: String::new(),
     };
     m.sign(&other);

@@ -537,6 +537,29 @@ are classed and reported as over HTTP/1 and 2. HTTP/3 carries the plain HTTP sou
 keeps 8 QUIC connections, round robin over its pinned addresses, and requests are
 streams on them.
 
+**Server-to-server chains.** `servers.chain` makes a server that answers a request of the
+run call a further hop, so the report gains the leg of each hop
+([the guide](harness.md#server-to-server-chains) has the rules). Off without it.
+
+| `servers.chain` | Default | Description |
+|---|---|---|
+| `hops` | required | 1 to 3 hops in order, never the same one twice: the server answering a client's request calls the first, the server answering that call the second. Each is a URL or an object. |
+| `hops[].url` | required | A gateway URL (`http` or `https`, no query or fragment). Allowed by `RUSTYBIN_HARNESS_TARGETS` **on the server node**, pinned, and verified like a target when `RUSTYBIN_HARNESS_VERIFY_TARGETS` is on. Never a control plane path. |
+| `hops[].path` | `/` | The one path the call asks for, after the URL's own. No placeholders: a hop is one fixed `GET`. |
+| `hops[].host`, `http`, `insecure` | as a target's | The `Host` header and TLS name, the protocol (`auto`, `h1`, `h2`, `h2c`; not `h3`) and whether to skip certificate verification. |
+| `timeout` | `5s` | Per onward call (1 ms to 30 s). |
+| `max_concurrent` | `64` | Onward calls in flight per run on a server node (1 to 1024); one over it is refused, not queued. |
+
+A server calls on only for a request carrying the run's signed marker, only while the run
+is live (in a cluster: on its leader's word, renewed like a lease), at most once per
+request and hop, and the kill switch stops the calls at once. A server node needs
+`RUSTYBIN_HARNESS_TARGETS` for the hops it may call; one whose list does not allow a hop
+makes no call and the report's `server.chain.problems` says why. The report's
+`server.chain.hops[]` has `calls`, `upstream`, `gateway`, `transport`, `statuses`,
+`transport_kinds`, `refused` (by reason: `not_live`, `kill_switch`, `seen_before`,
+`untracked`, `busy`, `not_prepared`), `arrivals`, and the `latency`, `upstream_latency`
+and `overhead` of the leg.
+
 Each layer's `pattern` says how hard it pushes over time, as a rate (open model) or
 a number of users (closed model):
 

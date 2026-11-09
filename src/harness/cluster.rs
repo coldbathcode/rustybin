@@ -1464,9 +1464,13 @@ fn build_report(
     let mut server: Option<ServerReport> = None;
     let mut processing = histogram(2);
     let mut rejected = 0u64;
+    let mut chain = super::chain::Merge::default();
     for p in &inner.servers {
         let Some(st) = &p.stats else { continue };
         rejected += st.rejected;
+        if let Some(c) = &st.report.chain {
+            chain.add(&p.node_id, c, &st.chain);
+        }
         let _ = st.processing.add_to(&mut processing);
         let s = server.get_or_insert_with(|| ServerReport {
             seen_tracked_up_to: st.report.seen_tracked_up_to,
@@ -1497,6 +1501,7 @@ fn build_report(
     }
     if let Some(s) = &mut server {
         s.processing = Percentiles::from_histogram(&processing);
+        s.chain = chain.finish();
     }
     // Lost: a transport failure no server node saw.
     let lost_check = if inner.servers.is_empty() {
@@ -2704,6 +2709,10 @@ impl Cluster {
                     faults,
                     churn_slot,
                     collect,
+                    // A chain's onward calls: only while the clients send,
+                    // and never for a run that was told to stop.
+                    live: matches!(inner.state, RunState::Starting | RunState::Running)
+                        && inner.stop_reason.is_none(),
                 });
             }
         }

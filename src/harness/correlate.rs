@@ -202,6 +202,12 @@ pub struct Marker {
     /// Empty when the request has no body.
     pub body_digest: String,
     pub path_digest: String,
+    /// How many servers of the run the request went through before this
+    /// one: 0 for a client's request, 1 to
+    /// [`MAX_CHAIN_HOPS`](super::safety::MAX_CHAIN_HOPS) for a chain's
+    /// onward call. Inside the signature, so it cannot be lowered, raised
+    /// or taken off without the run key.
+    pub hop: u8,
     pub sig: String,
 }
 
@@ -214,7 +220,7 @@ fn safe_token(s: &str) -> bool {
 
 impl Marker {
     fn message(&self) -> String {
-        format!(
+        let mut message = format!(
             "{VERSION}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             self.run,
             self.node,
@@ -226,7 +232,15 @@ impl Marker {
             self.headers_digest,
             self.body_digest,
             self.path_digest
-        )
+        );
+        // Signed whenever it is set. A client's marker (hop 0) is byte for
+        // byte what it was before chains, and no other message ends like
+        // this one, so a hop can neither be added to nor taken off a
+        // signed marker.
+        if self.hop > 0 {
+            message.push_str(&format!("|hop={}", self.hop));
+        }
+        message
     }
 
     /// Sign with the run key (sets `sig`).
@@ -240,8 +254,13 @@ impl Marker {
 
     /// The header value.
     pub fn to_header(&self) -> String {
+        let hop = if self.hop > 0 {
+            format!(" hop={};", self.hop)
+        } else {
+            String::new()
+        };
         format!(
-            "{VERSION}; run={}; node={}; seq={}; vu={}; l={}; sent={}; h={}; hd={}; b={}; p={}; sig={}",
+            "{VERSION}; run={}; node={}; seq={}; vu={}; l={}; sent={}; h={}; hd={}; b={}; p={};{hop} sig={}",
             self.run,
             self.node,
             self.seq,
@@ -276,11 +295,23 @@ impl Marker {
             headers_digest: String::new(),
             body_digest: String::new(),
             path_digest: String::new(),
+            hop: 0,
             sig: String::new(),
         };
         for f in fields {
             let (k, v) = f.split_once('=')?;
             match k {
+                // One way to write each count: 0 is the field left out, and
+                // nothing is past the fixed depth.
+                "hop" => {
+                    m.hop = v
+                        .parse()
+                        .ok()
+                        .filter(|h| (1..=super::safety::MAX_CHAIN_HOPS as u8).contains(h))?;
+                    if v.len() != 1 {
+                        return None;
+                    }
+                }
                 "run" => m.run = v.to_string(),
                 "node" => m.node = v.to_string(),
                 "seq" => m.seq = v.parse().ok()?,
@@ -587,6 +618,8 @@ impl ServerStats {
             captured: self.captured,
             seen_tracked_up_to: SEEN_CAP_BITS,
             seen_overflow: self.seen_overflow,
+            // The run's entry adds it ([`RunEntry::chain_report`]).
+            chain: None,
         }
     }
 }
@@ -619,6 +652,9 @@ pub struct ServerReport {
     pub captured: u64,
     pub seen_tracked_up_to: u64,
     pub seen_overflow: u64,
+    /// The legs of a server-to-server chain, when the run declares one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain: Option<super::chain::ChainReport>,
 }
 
 /// What the gateway changed on the way in.
@@ -648,9 +684,97 @@ pub struct RunEntry {
     churn_slot: Mutex<[u32; 2]>,
     /// The run ended on this node (its fault task stops).
     pub done: std::sync::atomic::AtomicBool,
+    /// The chain's numbers on this node, when the run declares a chain.
+    chain_stats: Option<Mutex<super::chain::ChainStats>>,
+    /// The chain as prepared on this node (pinned clients and the gate):
+    /// absent until it is prepared, and for good when it could not be.
+    chain: Mutex<Option<Arc<super::chain::Chain>>>,
+    /// Until when the run was last said to be live (`None`: it is not).
+    chain_live: Mutex<Option<Instant>>,
 }
 
 impl RunEntry {
+    /// The chain's numbers (`None`: the run declares no chain).
+    pub fn chain_stats(&self) -> Option<&Mutex<super::chain::ChainStats>> {
+        self.chain_stats.as_ref()
+    }
+
+    /// The prepared chain, when there is one.
+    pub fn chain(&self) -> Option<Arc<super::chain::Chain>> {
+        self.chain.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// The chain prepared on this node. Live only for what is left of the
+    /// last word that the run is ([`RunEntry::chain_live_for`]), which may
+    /// have come while the chain was being prepared.
+    pub fn set_chain(&self, chain: Arc<super::chain::Chain>) {
+        let left = self
+            .chain_live
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .and_then(|until| until.checked_duration_since(Instant::now()));
+        match left {
+            // A run that ended while its chain was prepared stays ended.
+            Some(left) if !self.is_done() => chain.gate().renew(left),
+            _ => chain.gate().end(),
+        }
+        *self.chain.lock().unwrap_or_else(|p| p.into_inner()) = Some(chain);
+    }
+
+    /// The run is live for `period` from now: a single node says so when
+    /// the run starts (for as long as a run may last; its end closes the
+    /// gate), a cluster member at every word of its leader (for a lease).
+    pub fn chain_live_for(&self, period: Duration) {
+        if self.is_done() {
+            return;
+        }
+        *self.chain_live.lock().unwrap_or_else(|p| p.into_inner()) =
+            Instant::now().checked_add(period);
+        if let Some(chain) = self.chain() {
+            chain.gate().renew(period);
+        }
+        // The run may have ended meanwhile: the end has the last word.
+        if self.is_done() {
+            self.chain_not_live();
+        }
+    }
+
+    /// The run is not live (any more): its chain calls nothing on.
+    pub fn chain_not_live(&self) {
+        *self.chain_live.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        if let Some(chain) = self.chain() {
+            chain.gate().end();
+        }
+    }
+
+    /// The chain could not be prepared on this node: it makes no onward
+    /// call for the run, and the report says why.
+    pub fn set_chain_problem(&self, problem: String) {
+        if let Some(stats) = &self.chain_stats {
+            stats
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .set_problem(problem);
+        }
+    }
+
+    /// The chain in the report (`None`: the run declares no chain).
+    pub fn chain_report(&self) -> Option<super::chain::ChainReport> {
+        let chain = self.chain();
+        self.chain_stats.as_ref().map(|s| {
+            s.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .report(chain.as_deref())
+        })
+    }
+
+    /// The chain's histograms, for a cluster's leader.
+    pub fn chain_hists(&self) -> Vec<super::chain::HopHists> {
+        self.chain_stats.as_ref().map_or_else(Vec::new, |s| {
+            s.lock().unwrap_or_else(|p| p.into_inner()).hists()
+        })
+    }
+
     pub fn faults(&self) -> Option<super::faults::ServerFaults> {
         self.faults
             .lock()
@@ -670,6 +794,8 @@ impl RunEntry {
 
     pub fn finish(&self) {
         self.done.store(true, std::sync::atomic::Ordering::Relaxed);
+        // The run is over: its chain makes no call from here on.
+        self.chain_not_live();
     }
 
     /// Whether this node is down for churn now: in each `every`, server
@@ -720,6 +846,12 @@ impl Correlator {
         let entry = Arc::new(RunEntry {
             id: id.to_string(),
             key,
+            chain_stats: profile
+                .chain
+                .as_ref()
+                .map(|c| Mutex::new(super::chain::ChainStats::new(c))),
+            chain: Mutex::new(None),
+            chain_live: Mutex::new(None),
             profile,
             stats: Mutex::new(ServerStats::new()),
             created: Instant::now(),
@@ -863,12 +995,23 @@ pub async fn layer(State(state): State<AppState>, req: Request, next: Next) -> R
         seq: marker.seq,
         entry: entry.clone(),
     });
+    // A chain: this server's onward call, made for a marker verified above
+    // and for nothing else, before the handler runs (the processing time
+    // then includes the dependency, as a real service's would). Where the
+    // call goes is the run's, never this request's: only the marker is
+    // handed on.
+    if entry.chain_stats().is_some() {
+        super::chain::call_on(&entry, &marker).await;
+    }
     let mut resp = next.run(req).await;
     let processing = started.elapsed();
     let done_ns = unix_ns();
     let status = resp.status().as_u16();
     let anomaly = changes.any() || status >= 500;
-    {
+    // An onward call's arrival is counted with its hop (by `call_on`), not
+    // with the clients' requests: `arrivals`, `lost` and `upstream_reach`
+    // keep describing what the clients sent.
+    if marker.hop == 0 {
         let mut stats = entry.stats.lock().unwrap_or_else(|p| p.into_inner());
         stats.record(
             &marker,
@@ -878,8 +1021,9 @@ pub async fn layer(State(state): State<AppState>, req: Request, next: Next) -> R
             &changes,
             captured || anomaly,
         );
+        drop(stats);
+        state.metrics.harness_arrival(&marker.run);
     }
-    state.metrics.harness_arrival(&marker.run);
     let timing = format!("rb;dur={:.3}", processing.as_secs_f64() * 1000.0);
     let headers = resp.headers_mut();
     let timing_value = match headers.get(header::HeaderName::from_static("server-timing")) {
@@ -920,6 +1064,7 @@ mod tests {
             headers_digest: "0123abcd".into(),
             body_digest: String::new(),
             path_digest: "89abcdef".into(),
+            hop: 0,
             sig: String::new(),
         }
     }

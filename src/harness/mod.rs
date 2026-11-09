@@ -23,6 +23,7 @@
 
 pub mod api;
 pub mod breakdown;
+pub mod chain;
 pub mod cli;
 pub mod cluster;
 pub mod correlate;
@@ -1058,6 +1059,39 @@ impl Harness {
                 target.verified = true;
             }
         }
+        // A chain is traffic this node's server side sends, so its hops are
+        // checked like the targets and before anything is sent: allowed by
+        // this node's list, pinned, and verified when targets are. A cluster
+        // run's chain is prepared by its server nodes, each against its own
+        // list, when the leader assigns it.
+        let chain = match &scenario.servers.chain {
+            Some(declared) if options.cluster.is_none() => {
+                if !self.is_server() {
+                    return Err(RunError {
+                        status: 422,
+                        error: "the scenario cannot run on this node".into(),
+                        problems: vec![
+                            "servers.chain: the onward calls are made by the server role: run it on a node with RUSTYBIN_HARNESS_ROLES=both, or on a cluster with server nodes".into(),
+                        ],
+                    });
+                }
+                let token = options
+                    .verification_token
+                    .clone()
+                    .unwrap_or_else(|| self.verification_token.clone());
+                match chain::Chain::prepare(self, declared, &token).await {
+                    Ok(chain) => Some(Arc::new(chain)),
+                    Err(problems) => {
+                        return Err(RunError {
+                            status: 403,
+                            error: "a chain hop is not allowed or not verified on this node".into(),
+                            problems,
+                        })
+                    }
+                }
+            }
+            _ => None,
+        };
         let id = options.id.clone().unwrap_or_else(|| random_hex(6));
         // The run key signs the markers. On a single node its server side
         // learns it now; the server nodes of a cluster get it from the
@@ -1069,6 +1103,10 @@ impl Harness {
                 .register(&id, key.clone(), scenario.servers.clone());
             entry.set_faults(scenario.faults.as_ref().and_then(|f| f.server()), [0, 1]);
             self.watch_server_faults(entry.clone());
+            // Prepared, not live: the gate opens when the run starts.
+            if let Some(chain) = &chain {
+                entry.set_chain(chain.clone());
+            }
             Some(entry)
         } else {
             None
@@ -1076,11 +1114,15 @@ impl Harness {
         // The kill switch may have been pressed while the run was prepared
         // (and cleared since: the generation tells).
         if self.kill.is_set() || self.kill.generation() != kill_generation {
+            if let Some(entry) = &entry {
+                entry.finish();
+            }
             return Err(RunError::new(
                 409,
                 "the kill switch was set while the run was being prepared: not started",
             ));
         }
+        let server_entry = entry.clone();
         let run = Run::new(RunParams {
             id: id.clone(),
             node_id: self.node_id.clone(),
@@ -1128,7 +1170,17 @@ impl Harness {
             peak_rate = run.scenario.peak_rate(),
             "harness run starting"
         );
-        engine::start(run.clone(), engine.handle()).map_err(|e| RunError::new(500, e))?;
+        // The chain is live from here until the run ends on this node (the
+        // run's entry closes the gate), and never longer than a run may be.
+        if let (Some(entry), Some(_)) = (&server_entry, &chain) {
+            entry.chain_live_for(self.caps().max_duration() + engine::DRAIN_GRACE);
+        }
+        if let Err(e) = engine::start(run.clone(), engine.handle()) {
+            if let Some(entry) = &server_entry {
+                entry.finish();
+            }
+            return Err(RunError::new(500, e));
+        }
         Ok(run)
     }
 

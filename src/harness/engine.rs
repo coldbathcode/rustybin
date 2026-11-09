@@ -2108,6 +2108,8 @@ impl Run {
                 correlate::digest([body.as_ref()])
             },
             path_digest: correlate::digest_path(&method, &path_and_query),
+            // A client's request: no server of the run before it.
+            hop: 0,
             sig: String::new(),
         };
         marker.sign(&self.key);
@@ -2392,7 +2394,11 @@ impl Run {
                     None => untracked += 1,
                 }
             }
-            (stats.report(), lost, after, untracked)
+            let mut report = stats.report();
+            drop(stats);
+            // The legs of the run's chain, when it has one.
+            report.chain = e.chain_report();
+            (report, lost, after, untracked)
         });
         if let Some((_, lost, after, untracked)) = &server {
             totals.counts.lost = *lost;
@@ -2856,7 +2862,7 @@ impl Roller {
 }
 
 /// Why a request failed, as a bounded set of kinds.
-fn classify_error(e: &hyper_util::client::legacy::Error) -> &'static str {
+pub(super) fn classify_error(e: &hyper_util::client::legacy::Error) -> &'static str {
     if e.is_connect() {
         let text = e.to_string().to_ascii_lowercase();
         let source = std::error::Error::source(e)

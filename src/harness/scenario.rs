@@ -855,6 +855,10 @@ pub struct ServerProfile {
     /// 0 captures none.
     #[serde(default = "default_sample")]
     pub capture_sample: u32,
+    /// Server-to-server chains: a server answering a request of the run
+    /// calls a further hop (`safety.rs` holds the rules). Off without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain: Option<Chain>,
 }
 
 impl Default for ServerProfile {
@@ -866,7 +870,111 @@ impl Default for ServerProfile {
             chunked: false,
             first_byte_delay: Dur::default(),
             capture_sample: default_sample(),
+            chain: None,
         }
+    }
+}
+
+/// The hops a server calls on to, in order: the server that answers a
+/// client's request calls `hops[0]`, the server that answers that call
+/// `hops[1]`, and so on (at most [`safety::MAX_CHAIN_HOPS`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Chain {
+    pub hops: Vec<Hop>,
+    /// Per onward call (default 5s, at most 30s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<Dur>,
+    /// Onward calls in flight per run on a server node (default 64); one
+    /// over it is refused, not queued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<u32>,
+}
+
+impl Chain {
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+            .map_or(safety::DEFAULT_CHAIN_TIMEOUT, |d| d.0)
+            .min(safety::MAX_CHAIN_TIMEOUT)
+    }
+
+    pub fn max_concurrent(&self) -> usize {
+        (self
+            .max_concurrent
+            .unwrap_or(safety::DEFAULT_CHAIN_CONCURRENCY) as usize)
+            .clamp(1, safety::MAX_CHAIN_CONCURRENCY as usize)
+    }
+}
+
+/// One hop of a chain: where a server calls on to. Like a target (a gateway
+/// URL, allowed by `RUSTYBIN_HARNESS_TARGETS` on the server node and
+/// verified like one) plus the one path the call asks for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Hop {
+    pub url: String,
+    /// The path asked for, after the URL's own (default `/`).
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    pub http: HttpVersion,
+    pub insecure: bool,
+}
+
+impl Hop {
+    /// The hop as the target it is checked, pinned and verified as.
+    pub fn target(&self) -> Target {
+        Target {
+            url: self.url.clone(),
+            weight: 1,
+            host: self.host.clone(),
+            http: self.http,
+            insecure: self.insecure,
+        }
+    }
+
+    /// What a report and a preview call the hop: the URL and the path.
+    pub fn label(&self) -> String {
+        format!("{}{}", self.url.trim_end_matches('/'), self.path)
+    }
+}
+
+impl<'de> Deserialize<'de> for Hop {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Full {
+            url: String,
+            #[serde(default = "root")]
+            path: String,
+            #[serde(default)]
+            host: Option<String>,
+            #[serde(default)]
+            http: HttpVersion,
+            #[serde(default)]
+            insecure: bool,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Url(String),
+            Full(Full),
+        }
+        Ok(match Raw::deserialize(d)? {
+            Raw::Url(url) => Hop {
+                url,
+                path: root(),
+                host: None,
+                http: HttpVersion::Auto,
+                insecure: false,
+            },
+            Raw::Full(f) => Hop {
+                url: f.url,
+                path: f.path,
+                host: f.host,
+                http: f.http,
+                insecure: f.insecure,
+            },
+        })
     }
 }
 
@@ -967,6 +1075,9 @@ pub struct Summary {
     pub expected_requests: f64,
     pub layers: Vec<LayerSummary>,
     pub targets: usize,
+    /// The hops of the scenario's chain, in order (absent without one).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub chain: Vec<Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1107,7 +1218,7 @@ impl Scenario {
                 })
             })
             .collect();
-        json!({
+        let mut preview = json!({
             "name": self.name,
             "duration_secs": total,
             "step_secs": step,
@@ -1115,7 +1226,39 @@ impl Scenario {
             "peak_rate": round(self.peak_rate()),
             "layers": layers,
             "total": sum.into_iter().map(round).collect::<Vec<_>>(),
-        })
+        });
+        // A chain is traffic the server side sends: the preview names where.
+        if let Some(chain) = &self.servers.chain {
+            preview["chain"] = json!({
+                "hops": self.chain_hops(),
+                "timeout_secs": chain.timeout().as_secs_f64(),
+                "max_concurrent": chain.max_concurrent(),
+                "calls_per_request": chain.hops.len().min(safety::MAX_CHAIN_HOPS),
+            });
+        }
+        preview
+    }
+
+    /// The hops of the scenario's chain, in order, as a preview and a
+    /// summary name them (empty without a chain).
+    pub fn chain_hops(&self) -> Vec<Value> {
+        self.servers
+            .chain
+            .iter()
+            .flat_map(|c| c.hops.iter().enumerate())
+            .map(|(i, hop)| {
+                json!({
+                    "hop": i + 1,
+                    "url": hop.label(),
+                    "http": hop.http.as_str(),
+                    "called_by": if i == 0 {
+                        "the server answering a client's request".to_string()
+                    } else {
+                        format!("the server answering hop {i}")
+                    },
+                })
+            })
+            .collect()
     }
 
     pub fn summary(&self) -> Summary {
@@ -1145,6 +1288,7 @@ impl Scenario {
                 })
                 .collect(),
             targets: self.targets.len(),
+            chain: self.chain_hops(),
         }
     }
 
@@ -1516,6 +1660,9 @@ impl Scenario {
         if sv.capture_sample > 1_000_000 {
             p.push("servers.capture_sample: at most 1000000".into());
         }
+        if let Some(chain) = &sv.chain {
+            validate_chain(chain, &mut p);
+        }
         if let Some(f) = &self.faults {
             f.validate("faults", &mut p);
             if f.client().expired_tokens.is_some_and(|v| v > 0.0)
@@ -1560,6 +1707,106 @@ impl Scenario {
             }
         }
         p
+    }
+}
+
+/// Every problem with a chain: its hops are checked like targets (the same
+/// URL rules, never a control plane path), its depth is the fixed
+/// [`safety::MAX_CHAIN_HOPS`], and no hop comes twice. Whether a hop is
+/// allowed and verified is for the server node that prepares it
+/// ([`safety::pin_chain`]), as for a target.
+fn validate_chain(chain: &Chain, p: &mut Vec<String>) {
+    let max = safety::MAX_CHAIN_HOPS;
+    if chain.hops.is_empty() {
+        p.push("servers.chain.hops: at least one hop (leave servers.chain out for none)".into());
+    } else if chain.hops.len() > max {
+        p.push(format!(
+            "servers.chain.hops: at most {max} hops (the depth of a chain is fixed)"
+        ));
+    }
+    let mut seen: Vec<String> = Vec::new();
+    for (i, hop) in chain.hops.iter().take(max).enumerate() {
+        let here = format!("servers.chain.hops[{i}]");
+        let mut key = None;
+        match safety::parse_target_url(&hop.url) {
+            Ok(parsed) => {
+                match hop.http {
+                    HttpVersion::H2 if !parsed.tls() => p.push(format!(
+                        "{here}.http: h2 needs an https hop (use h2c for a plain connection)"
+                    )),
+                    HttpVersion::H2c if parsed.tls() => p.push(format!(
+                        "{here}.http: h2c is for plain connections (use h2 with https)"
+                    )),
+                    HttpVersion::H3 => p.push(format!(
+                        "{here}.http: a hop is called over HTTP/1.1 or HTTP/2 (the server role has no HTTP/3 client)"
+                    )),
+                    _ => {}
+                }
+                if hop.path.starts_with('/')
+                    && safety::is_control_prefix(&format!("{}{}", parsed.path, hop.path))
+                {
+                    p.push(format!(
+                        "{here}.path: a chain never calls a Rustybin control plane (/_rustybin, /ui)"
+                    ));
+                }
+                key = Some(format!(
+                    "{}{}{}|{}",
+                    parsed.origin(),
+                    parsed.path,
+                    hop.path,
+                    hop.host.as_deref().unwrap_or("")
+                ));
+            }
+            Err(e) => p.push(format!("{here}.url: {e}")),
+        }
+        if !hop.path.starts_with('/') {
+            p.push(format!("{here}.path: must start with /"));
+        } else if hop.path.len() > 2048
+            || hop.path.contains(['\r', '\n', ' ', '#'])
+            || hop.path.contains("{{")
+        {
+            p.push(format!(
+                "{here}.path: at most 2048 characters, no spaces, fragment or placeholders (a hop is one fixed request)"
+            ));
+        } else if safety::is_control_prefix(&hop.path) {
+            p.push(format!(
+                "{here}.path: a chain never calls a Rustybin control plane (/_rustybin, /ui)"
+            ));
+        }
+        if let Some(host) = &hop.host {
+            let name = match host.rsplit_once(':') {
+                Some((n, port)) if port.parse::<u16>().is_ok() => n,
+                _ => host.as_str(),
+            };
+            if !safety::valid_hostname(name.trim_end_matches('.'))
+                && name.parse::<std::net::IpAddr>().is_err()
+            {
+                p.push(format!("{here}.host: not a host name"));
+            }
+        }
+        // The same hop twice would be a loop.
+        if let Some(key) = key {
+            if seen.contains(&key) {
+                p.push(format!(
+                    "{here}: the same hop twice (a chain never calls a hop it called before)"
+                ));
+            } else {
+                seen.push(key);
+            }
+        }
+    }
+    if let Some(t) = chain.timeout {
+        if t.0 < MIN_TIMEOUT || t.0 > safety::MAX_CHAIN_TIMEOUT {
+            p.push("servers.chain.timeout: 1ms to 30s".into());
+        }
+    }
+    if let Some(n) = chain.max_concurrent {
+        if n == 0 || n > safety::MAX_CHAIN_CONCURRENCY {
+            p.push(format!(
+                "servers.chain.max_concurrent: 1 to {}",
+                safety::MAX_CHAIN_CONCURRENCY
+            ));
+        }
     }
 }
 
@@ -2435,7 +2682,42 @@ pub fn schema(caps: &Caps) -> Value {
                     "body_bytes": integer("Response body size: a JSON object padded to this length.", 0, MAX_SERVER_BODY as u64),
                     "chunked": prop("boolean", "Stream the body in chunks instead of one piece."),
                     "first_byte_delay": duration("Delay before the first byte, on top of the latency.", 30),
-                    "capture_sample": integer("The inspector captures 1 in N marked requests, plus every anomaly (0: none).", 0, 1_000_000)
+                    "capture_sample": integer("The inspector captures 1 in N marked requests, plus every anomaly (0: none).", 0, 1_000_000),
+                    "chain": {
+                        "type": "object",
+                        "description": "Server-to-server chains: a server answering a request of the run calls a further hop, and the report gains the leg of each hop. Only for requests carrying the run's signed marker, only while the run is live, only to the hops named here (each allowed by RUSTYBIN_HARNESS_TARGETS on the server node and verified like a target), once per request and hop. Off without it.",
+                        "properties": {
+                            "hops": {
+                                "type": "array",
+                                "description": "The hops in order: the server answering a client's request calls the first, the server answering that call the second, and so on. At most 3, never the same hop twice.",
+                                "items": {
+                                    "description": "A hop: a URL, or an object with the URL and its options.",
+                                    "oneOf": [
+                                        json!({ "type": "string", "description": "The hop's URL (http or https); the call asks for /.", "maxLength": 2048, "format": "uri" }),
+                                        {
+                                            "type": "object",
+                                            "description": "A hop with options.",
+                                            "properties": {
+                                                "url": json!({ "type": "string", "description": "The hop's URL (http or https), without query or fragment: a gateway, allowed and verified like a target.", "maxLength": 2048, "format": "uri" }),
+                                                "path": json!({ "type": "string", "description": "The one path the call asks for, after the URL's own. Never a Rustybin control plane path, no placeholders.", "default": "/", "maxLength": 2048, "pattern": "^/" }),
+                                                "host": string("Host header and TLS server name to send instead of the URL's host.", 253),
+                                                "http": enumeration("Protocol: auto (ALPN on TLS, HTTP/1.1 on plain), h1, h2 (TLS only), h2c (prior knowledge on plain connections).", &["auto", "h1", "h2", "h2c"], "auto"),
+                                                "insecure": prop("boolean", "Skip TLS certificate verification (demo gateways with self-signed certificates).")
+                                            },
+                                            "required": ["url"],
+                                            "additionalProperties": false
+                                        }
+                                    ]
+                                },
+                                "minItems": 1,
+                                "maxItems": safety::MAX_CHAIN_HOPS
+                            },
+                            "timeout": duration("Per onward call (default 5s).", safety::MAX_CHAIN_TIMEOUT.as_secs()),
+                            "max_concurrent": integer("Onward calls in flight per run on a server node (default 64); one over it is refused, not queued.", 1, safety::MAX_CHAIN_CONCURRENCY as u64)
+                        },
+                        "required": ["hops"],
+                        "additionalProperties": false
+                    }
                 },
                 "additionalProperties": false
             },
@@ -2793,6 +3075,20 @@ mod tests {
                 chunked: true,
                 first_byte_delay: Dur(Duration::from_millis(1)),
                 capture_sample: 10,
+                chain: Some(Chain {
+                    hops: vec![
+                        Hop {
+                            url: "http://127.0.0.1:2".into(),
+                            path: "/harness/next".into(),
+                            host: Some("inner.example".into()),
+                            http: HttpVersion::H1,
+                            insecure: true,
+                        },
+                        serde_yaml::from_str("http://127.0.0.1:3").expect("a hop as a URL"),
+                    ],
+                    timeout: Some(Dur::secs(2)),
+                    max_concurrent: Some(8),
+                }),
             },
             faults: Some(
                 serde_yaml::from_str(
@@ -3045,5 +3341,133 @@ mod tests {
         let caps = Caps::default();
         let problems = s.validate(&caps);
         assert!(problems.is_empty(), "{problems:#?}");
+    }
+
+    /// Core next step 13: a chain is validated like targets, with a fixed
+    /// depth, no hop twice, and nothing of a request in a hop.
+    #[test]
+    fn chains_are_validated() {
+        let with = |chain: &str| {
+            let mut s = Scenario::parse(&format!(
+                "name: c\ntarget: http://gw.example\nsource: {{ request: {{ path: / }} }}\npattern: {{ type: constant, rate: 1, for: 1s }}\nservers:\n  chain: {chain}\n"
+            ))
+            .unwrap_or_else(|e| panic!("{chain}: {e}"));
+            s.normalise();
+            s.validate(&Caps::default())
+        };
+        // A hop is a URL or an object; the defaults.
+        let mut s = Scenario::parse(
+            "name: c\ntarget: http://gw.example\nsource: { request: { path: / } }\npattern: { type: constant, rate: 1, for: 1s }\nservers:\n  chain:\n    hops:\n      - http://gw.example/inner\n      - { url: 'https://gw2.example', path: /orders?x=1, host: inner.example, http: h2, insecure: true }\n",
+        )
+        .expect("parses");
+        s.normalise();
+        assert!(s.validate(&Caps::default()).is_empty());
+        let chain = s.servers.chain.as_ref().expect("chain");
+        assert_eq!(chain.hops[0].path, "/");
+        assert_eq!(chain.hops[0].label(), "http://gw.example/inner/");
+        assert_eq!(chain.hops[1].label(), "https://gw2.example/orders?x=1");
+        assert_eq!(chain.timeout(), safety::DEFAULT_CHAIN_TIMEOUT);
+        assert_eq!(chain.max_concurrent(), 64);
+        assert_eq!(s.summary().chain.len(), 2);
+        assert_eq!(s.preview()["chain"]["calls_per_request"], 2);
+        // A scenario without a chain says nothing of one, anywhere.
+        let plain = tests::smoke("http://gw.example");
+        assert!(plain.servers.chain.is_none());
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json["servers"].get("chain").is_none(), "{json}");
+        assert!(plain.preview().get("chain").is_none());
+        assert!(serde_json::to_value(plain.summary())
+            .unwrap()
+            .get("chain")
+            .is_none());
+        for (chain, needle) in [
+            ("{ hops: [] }", "servers.chain.hops: at least one hop"),
+            (
+                "{ hops: ['http://a.example', 'http://b.example', 'http://c.example', 'http://d.example'] }",
+                "servers.chain.hops: at most 3 hops",
+            ),
+            (
+                "{ hops: ['http://a.example', 'http://a.example/'] }",
+                "servers.chain.hops[1]: the same hop twice",
+            ),
+            (
+                "{ hops: [{ url: 'http://a.example', path: /x }, { url: 'http://a.example', path: /x }] }",
+                "the same hop twice",
+            ),
+            (
+                "{ hops: ['http://a.example/_rustybin'] }",
+                "servers.chain.hops[0].url",
+            ),
+            (
+                "{ hops: [{ url: 'http://a.example', path: /_rustybin/harness/stop }] }",
+                "servers.chain.hops[0].path: a chain never calls a Rustybin control plane",
+            ),
+            (
+                "{ hops: [{ url: 'http://a.example', path: /ui/ }] }",
+                "control plane",
+            ),
+            (
+                "{ hops: [{ url: 'http://a.example', path: x }] }",
+                "servers.chain.hops[0].path: must start with /",
+            ),
+            (
+                "{ hops: [{ url: 'http://a.example', path: '/x/{{seq}}' }] }",
+                "no spaces, fragment or placeholders",
+            ),
+            (
+                "{ hops: [{ url: 'http://a.example', path: '/a b' }] }",
+                "no spaces, fragment or placeholders",
+            ),
+            ("{ hops: ['ftp://a.example'] }", "servers.chain.hops[0].url"),
+            (
+                "{ hops: ['http://u:p@a.example'] }",
+                "servers.chain.hops[0].url",
+            ),
+            (
+                "{ hops: ['http://a.example/?next=1'] }",
+                "servers.chain.hops[0].url",
+            ),
+            (
+                "{ hops: [{ url: 'http://a.example', http: h2 }] }",
+                "servers.chain.hops[0].http: h2 needs an https hop",
+            ),
+            (
+                "{ hops: [{ url: 'https://a.example', http: h2c }] }",
+                "servers.chain.hops[0].http: h2c is for plain connections",
+            ),
+            (
+                "{ hops: [{ url: 'https://a.example', http: h3 }] }",
+                "the server role has no HTTP/3 client",
+            ),
+            (
+                "{ hops: [{ url: 'http://a.example', host: 'not a host' }] }",
+                "servers.chain.hops[0].host: not a host name",
+            ),
+            (
+                "{ hops: ['http://a.example'], timeout: 31s }",
+                "servers.chain.timeout: 1ms to 30s",
+            ),
+            (
+                "{ hops: ['http://a.example'], max_concurrent: 0 }",
+                "servers.chain.max_concurrent: 1 to 1024",
+            ),
+            (
+                "{ hops: ['http://a.example'], max_concurrent: 1025 }",
+                "servers.chain.max_concurrent: 1 to 1024",
+            ),
+        ] {
+            let problems = with(chain);
+            assert!(
+                problems.iter().any(|p| p.contains(needle)),
+                "{chain}: wanted {needle:?} in {problems:#?}"
+            );
+        }
+        // An unknown field of a chain or a hop is a parse error, by name.
+        for bad in [
+            "name: c\nservers: { chain: { hops: ['http://a.example'], depth: 9 } }\n",
+            "name: c\nservers: { chain: { hops: [{ url: 'http://a.example', weight: 2 }] } }\n",
+        ] {
+            assert!(Scenario::parse(bad).is_err(), "{bad}");
+        }
     }
 }

@@ -2190,6 +2190,34 @@ def run_harness(browser):
         import_recording(page)
 
     step("harness: a recording becomes the source, without its token", replay_a_recording)
+
+    def chain_report():
+        # A scenario with a one-hop chain, through the YAML pane (the form
+        # takes servers.chain from the schema like any other parameter): the
+        # report shows the hop's leg.
+        page.reload()
+        page.wait_for_selector("#harness-builtin", state="attached")
+        page.select_option("#harness-builtin", "smoke")
+        page.wait_for_function("document.querySelector('#scenario-form [aria-label=\"targets[0].url\"]')")
+        page.fill("#scenario-form [aria-label='targets[0].url']", base)
+        page.get_by_role("button", name="YAML", exact=True).click()
+        page.fill("#harness-yaml", (
+            f"name: ui-chain\ntarget: {base}\n"
+            "source:\n  request:\n    path: /harness/front\n"
+            "pattern:\n  type: constant\n  rate: 20\n  for: 2s\n"
+            f"servers:\n  chain:\n    hops:\n      - url: {base}\n        path: /harness/next\n"
+        ))
+        page.get_by_role("button", name="Apply YAML to the form").click()
+        page.wait_for_selector("#view .notice.ok")
+        page.click("#harness-run")
+        page.wait_for_selector("#harness-chain", timeout=TIMEOUT)
+        chain = page.locator("#harness-chain")
+        expect(chain).to_contain_text(f"1: {base}/harness/next")
+        # Every request made its call, and none was refused.
+        expect(chain.locator("tbody tr td").last).to_have_text("none")
+        shot(page, "harness", "42-harness-chain")
+
+    step("harness: a chain's legs are in the report", chain_report)
     ctx.close()
 
 

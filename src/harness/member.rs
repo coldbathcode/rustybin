@@ -733,12 +733,15 @@ impl Membership {
             .iter()
             .map(|(id, sr)| {
                 let stats = lock(&sr.entry.stats);
+                let mut report = stats.report();
+                report.chain = sr.entry.chain_report();
                 ServerStatsWire {
                     run_id: id.clone(),
-                    report: stats.report(),
+                    report,
                     processing: WireHist::encode(stats.processing()),
                     rejected: rejected.saturating_sub(sr.rejected_before),
                     collected: sr.collected.clone(),
+                    chain: sr.entry.chain_hists(),
                 }
             })
             .collect();
@@ -1014,7 +1017,8 @@ impl Membership {
         }
     }
 
-    fn serve(&self, h: &Harness, st: &mut AgentState, sa: ServerAssignment) {
+    fn serve(&self, h: &Arc<Harness>, st: &mut AgentState, sa: ServerAssignment) {
+        let lease = st.lease;
         if !st.server_runs.contains_key(&sa.run_id) {
             if !h.is_server() || st.server_runs.len() >= MAX_AGENT_RUNS {
                 return;
@@ -1024,6 +1028,34 @@ impl Membership {
             };
             let entry = h.correlator.register(&sa.run_id, key, sa.profile.clone());
             h.watch_server_faults(entry.clone());
+            // A chain: this node checks every hop against its own allowlist
+            // (a leader cannot aim it elsewhere), pins it and verifies it
+            // with the cluster's token, whole or not at all. Until that is
+            // done, and for good when it fails, the node calls nothing on.
+            if let Some(chain) = sa.profile.chain.clone() {
+                let token = st.verification_token.clone().unwrap_or_default();
+                let (h, entry, cluster, run) = (
+                    h.clone(),
+                    entry.clone(),
+                    self.cluster_id.clone(),
+                    sa.run_id.clone(),
+                );
+                tokio::spawn(async move {
+                    match super::chain::Chain::prepare(&h, &chain, &token).await {
+                        Ok(prepared) => entry.set_chain(Arc::new(prepared)),
+                        Err(problems) => {
+                            let problem = problems.join("; ");
+                            tracing::warn!(
+                                target: "rustybin::harness",
+                                cluster = %cluster,
+                                run = %run,
+                                "harness: the run's chain is refused on this node, it makes no onward call: {problem}"
+                            );
+                            entry.set_chain_problem(problem);
+                        }
+                    }
+                });
+            }
             st.server_runs.insert(
                 sa.run_id.clone(),
                 ServerRunState {
@@ -1039,6 +1071,16 @@ impl Membership {
         if sr.entry.faults() != sa.faults {
             sr.entry
                 .set_faults(sa.faults.clone(), sa.churn_slot.unwrap_or([0, 1]));
+        }
+        // The chain is live only on the leader's word, renewed like a
+        // client's lease: a lost leader, a partition or a finished run
+        // leaves no server calling on.
+        if sr.entry.chain_stats().is_some() {
+            if sa.live {
+                sr.entry.chain_live_for(lease);
+            } else {
+                sr.entry.chain_not_live();
+            }
         }
         if let (Some(collect), None) = (sa.collect, &sr.collected) {
             let stats = lock(&sr.entry.stats);
