@@ -870,6 +870,40 @@ pub fn import_traffic(ctx: &CallCtx, args: &Value) -> Value {
     }
 }
 
+/// `import_scenario`: a Postman collection or an Artillery script (or a
+/// recording) given as text, as a scenario's source. Nothing is sent and
+/// nothing in the document is run.
+pub async fn import_scenario(ctx: &CallCtx, args: &Value) -> Value {
+    let Some(document) = args.get("document").and_then(Value::as_str) else {
+        return err("document is required (the text of the collection or the script)");
+    };
+    let format = args
+        .get("format")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    match crate::harness::api::import_document(document.to_string(), format).await {
+        Ok(view) => {
+            let count = |key: &str| view[key].as_array().map_or(0, Vec::len);
+            let summary = format!(
+                "{} request(s) from {} entries of a {} document; {} left out by name, {} variable(s) not defined, {} name(s) removed{}",
+                view["source"]["requests"].as_array().map_or(0, Vec::len),
+                view["entries"].as_u64().unwrap_or(0),
+                view["format"].as_str().unwrap_or("?"),
+                count("left_out"),
+                count("variables"),
+                count("removed"),
+                if view.get("pattern").is_some() {
+                    "; the phases are in pattern"
+                } else {
+                    ""
+                }
+            );
+            ok(ctx, summary, view)
+        }
+        Err(e) => err(e),
+    }
+}
+
 pub fn step_aside(ctx: &CallCtx, args: &Value) -> Value {
     let h = match harness_of(ctx) {
         Ok(h) => h,

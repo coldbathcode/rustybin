@@ -1142,28 +1142,58 @@ pub async fn patch_cluster_run(
 }
 
 /// `POST /_rustybin/harness/import`: a recording (a HAR file, or the answer
-/// of `GET /_rustybin/requests`) as a scenario's `source`. Sends nothing and
-/// works with harness mode off.
-pub async fn import(body: Bytes) -> Response {
-    let doc: Value = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(e) => return error(StatusCode::BAD_REQUEST, format!("not JSON: {e}")),
+/// of `GET /_rustybin/requests`), a Postman collection or an Artillery
+/// script as a scenario's `source`. Sends nothing and works with harness
+/// mode off.
+pub async fn import(Query(q): Query<FormatQuery>, body: Bytes) -> Response {
+    let Ok(text) = String::from_utf8(body.to_vec()) else {
+        return error(StatusCode::BAD_REQUEST, "the document is not UTF-8 text");
     };
-    match super::import::import(&doc) {
-        Ok(i) => Json(import_view(&i)).into_response(),
+    match import_document(text, q.format).await {
+        Ok(view) => Json(view).into_response(),
         Err(e) => error(StatusCode::BAD_REQUEST, e),
     }
 }
 
-/// The answer of an import, on the API and the tool alike.
+/// Read a document (JSON, or YAML for an Artillery script) as a scenario's
+/// source, on the blocking pool: a large recording is parsed off the
+/// request workers. `format` names the format instead of reading it from
+/// the document. The route and the tools share this.
+pub async fn import_document(text: String, format: Option<String>) -> Result<Value, String> {
+    let format =
+        match format.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
+            None => None,
+            Some(name) => Some(super::import::Format::parse(name).ok_or_else(|| {
+                format!("format: one of {}", super::import::Format::ALL.join(", "))
+            })?),
+        };
+    tokio::task::spawn_blocking(move || {
+        super::import::import_text(&text, format).map(|i| import_view(&i))
+    })
+    .await
+    .map_err(|_| "the import did not finish".to_string())?
+}
+
+/// The answer of an import, on the API and the tools alike.
 pub fn import_view(i: &super::import::Imported) -> Value {
-    json!({
+    let mut view = json!({
+        "format": i.format,
         "source": { "requests": i.requests },
         "entries": i.entries,
         "skipped": i.skipped,
         "removed": i.removed,
         "hosts": i.hosts,
-    })
+        "left_out": i.left_out,
+        "variables": i.variables,
+        "notes": i.notes,
+    });
+    if let Some(pattern) = &i.pattern {
+        view["pattern"] = json!(pattern);
+    }
+    if let Some(timeout) = &i.timeout {
+        view["timeout"] = json!(timeout);
+    }
+    view
 }
 
 /// `POST /_rustybin/harness/preview`: the expected rate per second per layer

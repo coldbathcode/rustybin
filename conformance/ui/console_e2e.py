@@ -3051,6 +3051,20 @@ def import_recording(page):
     }])
     expect(page.locator("#harness-yaml")).to_have_value(re.compile(r"/orders\?page=2"))
     assert "abc123" not in page.locator("#harness-yaml").input_value()
+    # An Artillery script: the phases become the pattern, a hook is named
+    # and never run.
+    script = (
+        "config:\n  target: https://api.example.com\n  processor: ./functions.js\n"
+        "  phases:\n    - duration: 20\n      arrivalRate: 3\n"
+        "scenarios:\n  - flow:\n      - get:\n          url: /items?api_key=abc123\n"
+    )
+    page.set_input_files("#harness-import", files=[{
+        "name": "load.yml", "mimeType": "application/yaml", "buffer": script.encode(),
+    }])
+    expect(page.locator("#harness-yaml")).to_have_value(re.compile(r"/items"))
+    expect(page.locator("#harness-yaml")).to_have_value(re.compile(r"rate: 3"))
+    expect(page.locator("#harness-imported")).to_contain_text("config.processor")
+    assert "abc123" not in page.locator("#harness-yaml").input_value()
 
 
 def spec_fetch_refused(page):

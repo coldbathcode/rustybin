@@ -439,3 +439,64 @@ jsonpath "$.source.requests[0].path" == "/orders?page=2"
 jsonpath "$.source.requests[0].weight" == 2
 jsonpath "$.removed[0]" == "token"
 # ANCHOR_END: harness_import
+
+# ANCHOR: harness_import_postman
+# A Postman collection (v2.1): the path variable with a value is put in, the
+# test script and the bearer token are named and left out, and the request
+# whose variable has no value is left out too.
+POST {{harness_url}}/_rustybin/harness/import
+Authorization: Bearer {{admin_token}}
+{"info": {"name": "Orders", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+ "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "abc"}]},
+ "item": [
+  {"name": "One order", "event": [{"listen": "test", "script": {"exec": ["pm.test('ok', () => {})"]}}],
+   "request": {"method": "GET", "header": [{"key": "Accept", "value": "application/json"}],
+    "url": {"raw": "https://api.example.com/v2/orders/:id?page=2", "protocol": "https", "host": ["api", "example", "com"],
+     "path": ["v2", "orders", ":id"], "query": [{"key": "page", "value": "2"}], "variable": [{"key": "id", "value": "42"}]}}},
+  {"name": "A customer", "request": {"method": "GET", "header": [],
+    "url": {"raw": "https://api.example.com/v2/customers/:customer", "protocol": "https", "host": ["api", "example", "com"],
+     "path": ["v2", "customers", ":customer"]}}}
+ ]}
+HTTP 200
+[Asserts]
+jsonpath "$.format" == "postman"
+jsonpath "$.entries" == 2
+jsonpath "$.source.requests" count == 1
+jsonpath "$.source.requests[0].path" == "/v2/orders/42?page=2"
+jsonpath "$.left_out" includes "collection.auth (bearer)"
+jsonpath "$.left_out" includes "item[0].event (scripts)"
+jsonpath "$.variables[0]" == ":customer"
+jsonpath "$.hosts[0]" == "api.example.com"
+# ANCHOR_END: harness_import_postman
+
+# ANCHOR: harness_import_artillery
+# An Artillery script (here as JSON; YAML is read too): two phases become a
+# pattern, at 2 requests per arrival, and the processor is named, never run.
+POST {{harness_url}}/_rustybin/harness/import?format=artillery
+Authorization: Bearer {{admin_token}}
+{"config": {"target": "https://api.example.com", "processor": "./functions.js",
+  "phases": [{"duration": 60, "arrivalRate": 5}, {"duration": 120, "arrivalRate": 5, "rampTo": 20}]},
+ "scenarios": [{"flow": [
+  {"get": {"url": "/orders"}},
+  {"post": {"url": "/orders", "json": {"item": "tea"}}}
+ ]}]}
+HTTP 200
+[Asserts]
+jsonpath "$.format" == "artillery"
+jsonpath "$.source.requests" count == 2
+jsonpath "$.pattern.type" == "constant"
+jsonpath "$.pattern.rate" == 10.0
+jsonpath "$.pattern.then.type" == "ramp"
+jsonpath "$.pattern.then.to" == 40.0
+jsonpath "$.left_out" includes "config.processor (code, never run)"
+jsonpath "$.hosts[0]" == "api.example.com"
+# ANCHOR_END: harness_import_artillery
+
+# A program is refused: nothing here runs or translates code.
+POST {{harness_url}}/_rustybin/harness/import
+Authorization: Bearer {{admin_token}}
+Content-Type: text/plain
+`import http from 'k6/http'; export default function () { http.get('https://a.test'); }`
+HTTP 400
+[Asserts]
+jsonpath "$.error" contains "never run or translated"

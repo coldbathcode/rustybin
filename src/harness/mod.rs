@@ -1599,14 +1599,20 @@ pub fn catalog() -> Vec<Endpoint> {
             "/_rustybin/harness/import",
             &["POST"],
             category::HARNESS,
-            "A recording (a HAR file, or the answer of GET /_rustybin/requests) as a scenario's source",
+            "A recording (a HAR file, or the answer of GET /_rustybin/requests), a Postman collection or an Artillery script as a scenario's source",
         )
         .permission(crate::rbac::Permission::HarnessRead)
         .description(
             "Identical requests become one template weighted by their count, so the mix is the \
-             recording's. Hosts are dropped. A secret-looking header or query parameter is removed \
+             document's. Hosts are dropped. A secret-looking header or query parameter is removed \
              and named in `removed`; an entry whose body has a secret-looking field is left out. \
-             Sends nothing. Works with harness mode off.",
+             A Postman collection (v2.1) and an Artillery script (YAML or JSON) are read too: what \
+             has no counterpart (scripts, hooks, plugins, captures, think times) is never run and \
+             is named in `left_out`, a request with a variable the document does not define is \
+             left out and the variable named in `variables`, and an Artillery script's phases \
+             become `pattern` when they map exactly. `?format=` (har, captures, postman, \
+             artillery) names the format instead of reading it from the document. A program in a \
+             scripting language is refused. Sends nothing. Works with harness mode off.",
         )
         .example(
             Example::post("Import", "/_rustybin/harness/import").json(
@@ -2179,10 +2185,19 @@ fn live_openapi_paths(paths: &mut Value, tag: &Value, off: &Value, scenario_body
         all.insert("/_rustybin/harness/import".into(), json!({
             "post": {
                 "tags": tag,
-                "summary": "A recording as a scenario's source",
-                "description": "A HAR file, or the answer of GET /_rustybin/requests, as weighted request templates. Secret-looking headers and query parameters are removed and named; entries with a secret-looking field in the body are left out. Sends nothing.",
+                "summary": "A recording, a collection or a script as a scenario's source",
+                "description": "A HAR file, the answer of GET /_rustybin/requests, a Postman collection (v2.1) or an Artillery script (YAML or JSON), as weighted request templates. Secret-looking headers and query parameters are removed and named; entries with a secret-looking field in the body are left out. What a collection or a script says that has no counterpart (scripts, hooks, plugins, captures, think times) is never run: it is named in `left_out`. A request with a variable the document does not define is left out and the variable named in `variables`. An Artillery script's phases become `pattern` when they map exactly. Sends nothing.",
                 "operationId": "importHarnessRecording",
-                "responses": { "200": json_ok("`source.requests`, `entries`, `skipped`, `removed`, `hosts`"), "400": { "description": "Not a recording, or nothing to replay" } }
+                "parameters": [{
+                    "name": "format", "in": "query", "required": false,
+                    "description": "The format, instead of reading it from the document.",
+                    "schema": { "type": "string", "enum": ["har", "captures", "postman", "artillery"] }
+                }],
+                "requestBody": { "required": true, "content": {
+                    "application/json": { "schema": { "type": "object", "description": "A HAR file, saved captures, a Postman collection or an Artillery script." } },
+                    "application/yaml": { "schema": { "type": "string", "description": "An Artillery script." } }
+                } },
+                "responses": { "200": json_ok("`format`, `source.requests`, `entries`, `skipped`, `removed`, `hosts`, `left_out`, `variables`, `notes`, and `pattern` and `timeout` when an Artillery script gives them"), "400": { "description": "Not a document this import reads (a program is refused), or nothing to import" } }
             }
         }));
         all.insert("/_rustybin/harness/preview".into(), json!({

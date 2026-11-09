@@ -3969,7 +3969,7 @@ async fn users_and_roles_tools_invite_confirm_and_never_carry_a_password() {
     let headers: [(&str, &str); 1] = [("authorization", "Bearer admin-09")];
     // The admin's tool list counts the step 09 and 10 tools (and the docs say so).
     let names = tool_names(&app, &headers).await;
-    assert_eq!(names.len(), 139, "docs/src/coding-agents.md counts 139");
+    assert_eq!(names.len(), 140, "docs/src/coding-agents.md counts 140");
     for t in [
         "list_users",
         "invite_user",
@@ -4390,4 +4390,51 @@ async fn export_config_without_users_read_has_no_users() {
         r["structuredContent"]["document"].get("roles").is_some(),
         "{r}"
     );
+}
+
+/// Core next step 13: a collection or a script as text. What does not map
+/// is named, a program is refused, nothing is sent.
+#[tokio::test]
+async fn import_scenario_takes_text() {
+    let app = app_with(Config::for_tests());
+    let script = "config:\n  target: https://api.example.com\n  processor: ./f.js\n  phases:\n    - duration: 10\n      arrivalRate: 2\nscenarios:\n  - flow:\n      - get:\n          url: /orders?api_key=abc123\n";
+    let r = tool(&app, &[], "import_scenario", json!({ "document": script })).await;
+    assert!(!is_error(&r), "{r}");
+    let s = &r["structuredContent"];
+    assert_eq!(s["format"], "artillery");
+    assert_eq!(s["source"]["requests"][0]["path"], "/orders");
+    assert_eq!(s["removed"], json!(["api_key"]));
+    assert_eq!(s["pattern"]["type"], "constant");
+    assert!(
+        s["left_out"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|x| x == "config.processor (code, never run)")),
+        "{r}"
+    );
+    assert!(!r.to_string().contains("abc123"), "{r}");
+    assert!(text_of(&r).contains("1 request(s)"), "{r}");
+    let collection = json!({
+        "info": { "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+        "item": [{ "name": "a", "request": { "method": "GET", "url": "https://a.test/x" } }]
+    });
+    let r = tool(
+        &app,
+        &[],
+        "import_scenario",
+        json!({ "document": collection.to_string(), "format": "postman" }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(r["structuredContent"]["format"], "postman");
+    let r = tool(
+        &app,
+        &[],
+        "import_scenario",
+        json!({ "document": "export default function () { http.get('https://a.test'); }" }),
+    )
+    .await;
+    assert!(is_error(&r), "{r}");
+    assert!(text_of(&r).contains("never run or translated"), "{r}");
+    let r = tool(&app, &[], "import_scenario", json!({})).await;
+    assert!(is_error(&r), "{r}");
 }

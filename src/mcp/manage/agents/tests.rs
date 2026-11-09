@@ -1238,6 +1238,8 @@ const OLD_RIGHTS: &[(&str, &str, bool)] = &[
     // A cluster's leader steps aside: a harness change, as create_cluster.
     ("step_aside", "harness", false),
     ("import_traffic", "read", true),
+    // Core next step 13: a collection or a script as a source, a read.
+    ("import_scenario", "read", true),
 ];
 
 /// The 0.4 ceilings, by right: `read-only` a read-only tool that is not a

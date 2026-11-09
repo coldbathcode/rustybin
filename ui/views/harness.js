@@ -374,25 +374,45 @@ export default {
       yamlArea.value = toYaml(normalise(initial));
       const modes = h('div', { class: 'seg', role: 'group' });
       const formPane = h('div', null, form.el);
-      // A recording as the scenario's source: the mix of the file, without
-      // its credentials. It goes through the form like anything else.
-      const recording = h('input', { type: 'file', accept: '.har,.json,application/json', id: 'harness-import', 'aria-label': 'A HAR file' });
+      // A recording, a Postman collection or an Artillery script as the
+      // scenario's source: the mix of the file, without its credentials. It
+      // goes through the form like anything else; nothing in the file is run.
+      const recording = h('input', { type: 'file', accept: '.har,.json,.yaml,.yml,application/json', id: 'harness-import', 'aria-label': 'A HAR file, a Postman collection or an Artillery script' });
+      const importedEl = h('div', { id: 'harness-imported', 'aria-live': 'polite' });
       recording.addEventListener('change', async () => {
         const file = recording.files[0];
         recording.value = '';
         if (!file) return;
-        const r = await send({ control: true, method: 'POST', url: `${SERVER}${PREFIX}/import`, headers: { 'Content-Type': 'application/json' }, body: await file.text(), timeout: 30000 });
+        const text = await file.text();
+        const yaml = /\.ya?ml$/i.test(file.name) && !text.trimStart().startsWith('{');
+        const r = await send({ control: true, method: 'POST', url: `${SERVER}${PREFIX}/import`, headers: { 'Content-Type': yaml ? 'application/yaml' : 'application/json' }, body: text, timeout: 30000 });
         if (!r.ok || !r.json) { toast((r.json && r.json.error) || `answered ${r.status}`, 'err'); return; }
         let current = normalise(initial);
         try { current = form.value(); } catch { /* the form is half filled: start from what it opened with */ }
         // A scenario's first layer holds the source: the top-level one is a
-        // shorthand the form does not show.
+        // shorthand the form does not show. An Artillery script's phases,
+        // when they map, are that layer's pattern.
         const layers = Array.isArray(current.layers) && current.layers.length ? current.layers : [{}];
-        layers[0] = Object.assign({}, layers[0], { source: r.json.source });
-        form.set(Object.assign({}, current, { layers }));
+        const mapped = { source: r.json.source };
+        if (r.json.pattern) mapped.pattern = r.json.pattern;
+        layers[0] = Object.assign({}, layers[0], mapped);
+        const next = Object.assign({}, current, { layers });
+        if (r.json.timeout) next.timeout = r.json.timeout;
+        form.set(next);
         show('yaml');
         const left = r.json.removed.length ? ` Removed: ${r.json.removed.join(', ')}.` : '';
         toast(`${r.json.source.requests.length} request(s) from ${r.json.entries} entries.${left}`);
+        // What the file says that has no counterpart: named, never run.
+        const leftOut = r.json.left_out || [];
+        const variables = r.json.variables || [];
+        const skipped = Object.entries(r.json.skipped || {});
+        const notes = r.json.notes || [];
+        const lines = [];
+        if (leftOut.length) lines.push(h('div', null, h('strong', null, 'Left out, never run: '), leftOut.join('; ')));
+        if (variables.length) lines.push(h('div', null, h('strong', null, 'Variables the file does not define (their requests are left out): '), variables.join(', ')));
+        if (skipped.length) lines.push(h('div', null, h('strong', null, 'Requests left out: '), skipped.map(([why, n]) => `${n} with ${why}`).join('; ')));
+        for (const n of notes) lines.push(h('div', null, n));
+        replace(importedEl, lines.length ? notice('warn', h('div', { class: 'stack-sm' }, ...lines)) : null);
       });
       const yamlPane = h('div', { hidden: true, class: 'stack-sm' }, yamlArea,
         h('div', { class: 'row' }, h('button', { class: 'btn sm', type: 'button', onclick: applyYaml }, 'Apply YAML to the form'), copyButton(() => yamlArea.value, { label: 'Copy YAML' })));
@@ -415,8 +435,8 @@ export default {
           h('button', { class: 'btn', type: 'button', id: 'harness-validate', onclick: () => validate(false) }, 'Validate'),
           perms.guard(h('button', { class: 'btn primary', type: 'button', id: 'harness-run', onclick: () => validate(true) }, 'Run'), 'harness.run')),
         summaryEl, problemsEl, previewEl,
-        h('label', { class: 'field' }, h('span', null, 'Replay a recording'), recording, h('span', { class: 'hint' }, 'A HAR file, or saved GET /_rustybin/requests: it becomes the source, without its credentials. Nothing is sent.')),
-        formPane, yamlPane));
+        h('label', { class: 'field' }, h('span', null, 'Replay a recording or import a collection'), recording, h('span', { class: 'hint' }, 'A HAR file, saved GET /_rustybin/requests, a Postman collection (v2.1) or an Artillery script: it becomes the source, without its credentials. Scripts and hooks are named, never run. Nothing is sent.')),
+        importedEl, formPane, yamlPane));
       schedulePreview();
     }
 

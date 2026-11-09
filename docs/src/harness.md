@@ -244,7 +244,7 @@ joined ([a cluster](#a-cluster) below).
 ### From an agent or the console
 
 The [management MCP server](agent-mcp.md#harness) has a tool per step
-(`harness_status`, `validate_scenario`, `preview_scenario`, `create_run`, `get_run`,
+(`harness_status`, `validate_scenario`, `preview_scenario`, `import_traffic`, `import_scenario`, `create_run`, `get_run`,
 `update_run`, `get_run_report`, the cluster tools) and a prompt, `load_test_gateway`,
 that walks an agent from the allowlist to a dry run and the real one; starting load always
 asks for confirmation. The [console](console.md)'s Harness view has the scenario builder
@@ -382,7 +382,8 @@ warning in the log, since the report still holds everything.
 A HAR file from a browser or a proxy, or the captures of `GET /_rustybin/requests`, can become a
 scenario's source: `POST /_rustybin/harness/import`, `rustybin harness import <file>`, the
 `import_traffic` tool, or the file field of the console's builder. Identical requests turn into one
-template with their count as its weight, so the replay keeps the recording's mix. Nothing is sent:
+template with their count as its weight (scaled when one passes 1000, the proportions kept), so the
+replay keeps the recording's mix; the 64 most frequent are kept, as many as a layer takes. Nothing is sent:
 put the answer's `source` in a scenario, which then meets the same validation and allowlist as any
 other, and name your own target, since the recording's hosts are dropped.
 
@@ -393,6 +394,50 @@ is left out and counted in `skipped`. Add the credentials your target needs thro
 
 ```hurl
 {{#include ../examples/harness/api.hurl:harness_import}}
+```
+
+## Importing a Postman collection or an Artillery script
+
+The same import reads two formats other tools write: a Postman collection (v2.1, as the
+app exports it) and an Artillery script (YAML or JSON). The format is read from the
+document; `?format=har|captures|postman|artillery` (`--format` on the command line, `format`
+of the `import_scenario` tool) names it instead. It is still an import: the answer's `source`
+goes into a scenario that names its own target and meets the same validation and allowlist
+as a hand-written one.
+
+Other tools say more than a request list, and only what has an exact counterpart is taken:
+
+| From | Taken | Named in `left_out`, never run |
+|---|---|---|
+| A Postman collection | Folders (16 deep), each request's method, path, enabled query parameters and headers, the body modes `raw`, `urlencoded` and `graphql`, collection variables | `event` (pre-request and test scripts), `auth` at every level, `protocolProfileBehavior`; a `formdata` or `file` body leaves its request out |
+| An Artillery script | `config.target` (its path leads the requests), `config.defaults.headers`, `config.variables` with one value, `config.http.timeout` (as `timeout`), each scenario's `weight`, the request steps with `url`, `qs`, `headers`, `json`, `body`, `form` and the `statusCode` of an `expect` | `config.processor` and every `function`, `beforeRequest`, `afterResponse`, `beforeScenario`, `afterScenario` (code), `config.plugins`, `payload`, `environments`, `ensure`, `tls`, `capture`, `match`, `think`, `loop`, `parallel`, `log`, scenarios of another engine; `ifTrue` and `formData` leave their request out |
+
+An Artillery script's **phases** become `pattern` when the pattern model says the same
+thing: `arrivalRate` is a `constant` stage, with `rampTo` a linear `ramp`, `arrivalCount` a
+`constant` at the count over the duration, `pause` a `constant` at 0. An Artillery phase
+counts arrivals and each arrival runs one flow, so a stage's rate is the arrivals times the
+weighted requests per flow (`notes` says the number). The phases are all or nothing: a
+`maxVusers`, a value that is not a number, more than 16 phases, a flow with `think`, `loop`,
+`parallel`, `function` or `ifTrue`, or a request that was left out, and `pattern` is absent
+with the reason in `left_out`.
+
+**Variables** (`{{name}}` in both formats): one the document defines with a single plain
+value is put in. Any other (an environment variable, a captured value, `{{$guid}}`) is
+never guessed: its request is left out, counted in `skipped`, and the name is listed in
+`variables`. Define it in the collection or the script and import again. A variable whose
+name looks secret is never put in, and credentials are removed as for a recording.
+
+A program in a scripting language (a k6 or Locust script, an Artillery processor) is refused
+with `400`: nothing here runs or translates code. A collection or a script is at most 4 MiB,
+and at most 64 different requests are kept, the most frequent ones, since that is what a
+layer takes.
+
+```hurl
+{{#include ../examples/harness/api.hurl:harness_import_postman}}
+```
+
+```hurl
+{{#include ../examples/harness/api.hurl:harness_import_artillery}}
 ```
 
 ## Live tuning
@@ -578,9 +623,9 @@ The same job from the API, the console, the command line, an agent and the confi
 
 | Surface | Where |
 |---|---|
-| API | `GET /_rustybin/harness`, `/schema`, `/scenarios`, `POST /_rustybin/harness/validate \| preview \| runs`, `GET`, `PATCH /_rustybin/harness/runs/{run}`, `/stop`, `/events`, `/report`, the cluster routes under `/_rustybin/harness/clusters` |
-| Console | The **Harness** view (shown when harness mode is on): the builder generated from the schema, runs, live tuning, reports |
-| CLI | `rustybin harness validate \| run \| report` offline, the same with `--remote` and `status \| scenarios \| runs \| show \| tune \| stop \| stop-all \| events \| clusters ...` against an instance ([reference](cli.md#harness)) |
-| Management MCP | `harness_status`, `list_scenarios`, `get_scenario`, `save_scenario`, `list_patterns`, `validate_scenario`, `preview_scenario`, `create_run`, `start_run`, `update_run`, `list_runs`, `get_run`, `stop_run`, `get_run_report`, `harness_stop` (the kill switch), `create_cluster` and the cluster tools; the prompt `load_test_gateway`; the resource `rustybin://harness.schema.json` ([agent page](agent-mcp.md#harness)) |
+| API | `GET /_rustybin/harness`, `/schema`, `/scenarios`, `POST /_rustybin/harness/validate \| preview \| import \| runs`, `GET`, `PATCH /_rustybin/harness/runs/{run}`, `/stop`, `/events`, `/report`, the cluster routes under `/_rustybin/harness/clusters` |
+| Console | The **Harness** view (shown when harness mode is on): the builder generated from the schema with its file field for a recording, a collection or a script, runs, live tuning, reports |
+| CLI | `rustybin harness validate \| run \| report` offline, the same with `--remote` and `status \| scenarios \| import \| runs \| show \| tune \| stop \| stop-all \| events \| clusters ...` against an instance ([reference](cli.md#harness)) |
+| Management MCP | `harness_status`, `list_scenarios`, `get_scenario`, `save_scenario`, `list_patterns`, `validate_scenario`, `preview_scenario`, `import_traffic`, `import_scenario`, `create_run`, `start_run`, `update_run`, `list_runs`, `get_run`, `stop_run`, `get_run_report`, `harness_stop` (the kill switch), `create_cluster` and the cluster tools; the prompt `load_test_gateway`; the resource `rustybin://harness.schema.json` ([agent page](agent-mcp.md#harness)) |
 | `rustybin.yaml` | `harness:` (the saved scenarios) ([the whole instance as code](configuration-as-code.md)) |
 | Environment | `RUSTYBIN_HARNESS`, `_ROLES`, `_TARGETS`, `_MAX_RATE`, `_MAX_INFLIGHT`, `_MAX_DURATION`, `_VERIFY_TARGETS`, `_SCENARIO`, `_START`, `_REPORT`, `_EXIT` and the cluster variables ([configuration](configuration.md#harness-mode)) |
