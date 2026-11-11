@@ -1257,6 +1257,10 @@ const OLD_RIGHTS: &[(&str, &str, bool)] = &[
     ("stop_recording", "manage", false),
     ("build_mock_from_recording", "manage", false),
     ("delete_recording", "manage", false),
+    // Demo next step 04: a drift check sends traffic out, as a gateway
+    // scenario's check does; its runs are a mocks read.
+    ("check_mock_drift", "manage", false),
+    ("list_drift_runs", "read", true),
 ];
 
 /// The 0.4 ceilings, by right: `read-only` a read-only tool that is not a

@@ -20,6 +20,7 @@ pub mod cli;
 pub mod collections;
 pub mod compile;
 pub mod config_file;
+pub mod drift;
 pub mod fetch;
 pub mod handlers;
 pub mod host;
@@ -313,6 +314,10 @@ pub fn router(_state: &AppState) -> Router<AppState> {
         .route(ai::EXAMPLES_PATH, post(ai::examples))
         .route(ai::EDIT_PATH, post(ai::edit))
         .route(ai::COVERAGE_PATH, get(ai::coverage))
+        .route(
+            drift::PATH,
+            get(drift::runs_handler).post(drift::run_handler),
+        )
         .route("/_rustybin/mocks/{name}/export", get(h::export_one))
         .route("/_rustybin/mocks/{name}/spec", get(h::spec_source))
         .route(
@@ -361,6 +366,19 @@ const SMALL_SPEC: &str = r#"{"spec":{"openapi":"3.0.3","info":{"title":"Orders",
 
 pub fn catalog() -> Vec<Endpoint> {
     vec![
+        Endpoint::new(
+            drift::PATH,
+            &["GET", "POST"],
+            category::MOCKS,
+            "Contract drift: POST sends one request per operation to the real API the mock imitates and reports where it disagrees with the spec (JSON or JUnit; egress purpose record); GET, the kept runs",
+        )
+.permission_for(&["GET"], crate::rbac::Permission::MocksRead).permission_for(&["POST"], crate::rbac::Permission::MocksWrite).project_scoped()
+        .example(Example::get("Drift runs of the sample mock", "/_rustybin/mocks/petstore/drift"))
+        .example(
+            Example::post("A drift check", "/_rustybin/mocks/petstore/drift")
+                .json(r#"{"upstream": "https://api.example.com/v1"}"#)
+                .skip_check("reaches out to the real API"),
+        ),
         Endpoint::new(
             "/_rustybin/mocks/{name}/coverage",
             &["GET"],
@@ -885,6 +903,7 @@ pub fn openapi_paths() -> Value {
                     "security": { "type": "object" },
                     "operations": { "type": "object" },
                     "mcp": { "type": "object", "description": "{enabled, exclude}: the mock's MCP server" },
+                    "drift": { "type": "object", "description": "{upstream}: the real API this mock imitates, for drift checks" },
                     "project": { "type": "string", "description": "The project it belongs to (mocks.write there); absent: the instance's, or the one project the caller works in" }
                 }
             })),
@@ -953,6 +972,20 @@ pub fn openapi_paths() -> Value {
         "/_rustybin/mocks/{name}/deploy": { "post": deploy_op },
         "/_rustybin/mocks/{name}/rollback": { "post": admin("rollbackMock", "Roll back", json!([name])) },
         "/_rustybin/mocks/{name}/report": { "get": simple("getMockReport", "Deploy-check report", json!([name])) },
+        "/_rustybin/mocks/{name}/drift": {
+            "get": simple("listMockDriftRuns", "A mock's kept drift checks, newest first", json!([name.clone()])),
+            "post": {
+                "tags": ["Mocks"], "summary": "Check a mock against the real API it imitates (egress purpose record)",
+                "operationId": "checkMockDrift", "parameters": [name.clone(), { "name": "format", "in": "query", "schema": { "type": "string", "enum": ["json", "junit"] } }],
+                "requestBody": { "required": false, "content": { "application/json": { "schema": { "type": "object", "additionalProperties": false, "properties": {
+                    "upstream": { "type": "string", "description": "The real API's base URL (default: the mock's drift.upstream)" },
+                    "headers": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Headers for the real API; values may hold {{VAR}}" },
+                    "variables": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Values of the {{VAR}} variables (never kept)" },
+                    "operations": { "type": "array", "items": { "type": "string" }, "description": "Only these operationIds" }
+                } } } } },
+                "responses": { "200": { "description": "The run: per operation, the status and the findings", "content": { "application/json": { "schema": { "type": "object" } }, "application/xml": {} } }, "400": { "description": "No upstream, or a variable not given" }, "403": { "description": "The egress policy refused the upstream" }, "404": { "description": "No such mock" } }
+            }
+        },
         "/_rustybin/mocks/{name}/coverage": { "get": simple("getMockCoverage", "Example coverage: which operations have an example for their success responses (draft and live)", json!([name])) },
         "/_rustybin/mocks/ai/spec": { "post": {
             "tags": tags, "summary": "AI: an OpenAPI document from a description",

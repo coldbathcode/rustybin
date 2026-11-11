@@ -10,6 +10,7 @@ import { api, errorText, report, readOnlyReason, mockReadOnly, setMockBase, name
 import * as visit from '../../lib/visit.js';
 import { operationEditor, checkIcon, responseChecks } from './operation.js';
 import { tryPanel, securityPanel, trafficPanel, mcpPanel } from './panels.js';
+import { driftPanel } from './drift.js';
 import { checksFailed, wireDrop } from './wizard.js';
 import { coverageBanner, openEditDialog, openExamplesDialog } from './ai.js';
 import * as assist from '../../lib/assist.js';
@@ -19,7 +20,7 @@ import * as projects from '../../lib/projects.js';
 import * as perms from '../../lib/perms.js';
 
 const enc = encodeURIComponent;
-const TABS = [['operations', 'Operations'], ['try', 'Try it'], ['data', 'Data'], ['security', 'Security'], ['mcp', 'MCP server'], ['settings', 'Settings'], ['traffic', 'Traffic'], ['report', 'Deploy report']];
+const TABS = [['operations', 'Operations'], ['try', 'Try it'], ['data', 'Data'], ['security', 'Security'], ['mcp', 'MCP server'], ['settings', 'Settings'], ['traffic', 'Traffic'], ['drift', 'Drift'], ['report', 'Deploy report']];
 const SOURCE_LABEL = { examples: 'Example', generated: 'Generated', static: 'Static', stateful: 'Stateful', override: 'Override', custom: 'Custom', rules: 'Rules' };
 
 /** Mount the detail of mock `name` into `root`. Returns {destroy, route(sub)}. */
@@ -398,6 +399,7 @@ export function mountDetail(root, name, sub) {
     panels.mcp = mcpPanel(ctx);
     panels.settings = settingsPanel();
     panels.traffic = trafficPanel(ctx);
+    panels.drift = driftPanel(ctx);
     panels.report = reportPanel();
     panels.data = dataPanel();
     for (const p of Object.values(panels)) if (p.update) p.update(detail);

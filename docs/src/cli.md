@@ -296,6 +296,8 @@ OpenAPI mocks on the instance (rustybin mock ... works offline)
 | `rustybin mocks duplicate <name> [--name NEW]` | Copy a mock. Flags: `--name` value. | `POST /_rustybin/mocks/{name}/duplicate` | `mocks.write` |
 | `rustybin mocks check <name>` | The deploy report: a valid request and response per operation. | `GET /_rustybin/mocks/{name}/report` | `mocks.read` |
 | `rustybin mocks coverage <name>` | Which operations lack an example. | `GET /_rustybin/mocks/{name}/coverage` | `mocks.read` |
+| `rustybin mocks drift <name> [--upstream URL] [--header 'K: V']... [--operation ID]... [--junit]` | Check the mock against the real API it imitates (its drift.upstream, or --upstream): one request per operation, where the answers disagree with the spec; exits 1 on drift. A header value may hold {{VAR}}, filled from this shell's RUSTYBIN_TEST_<VAR>. Flags: `--upstream` value, `--header` value, `--operation` value, `--junit`. | `POST /_rustybin/mocks/{name}/drift` | `mocks.write` |
+| `rustybin mocks drift-runs <name>` | The mock's kept drift checks, newest first. | `GET /_rustybin/mocks/{name}/drift` | `mocks.read` |
 | `rustybin mocks spec <name>` | The mock's OpenAPI document as stored. | `GET /_rustybin/mocks/{name}/spec` | `mocks.read` |
 | `rustybin mocks revision <name> <revision>` | A kept revision: what changed since in the draft, its settings and spec (the whole answer with --json). Flags: `--spec`. | `GET /_rustybin/mocks/{name}/revisions/{revision}` | `mocks.read` |
 | `rustybin mocks export [name]` | One mock, or all, as a rustybin.yaml with only the mocks section. | `GET /_rustybin/mocks/{name}/export`, `GET /_rustybin/mocks/export` | `mocks.read` |
@@ -333,6 +335,8 @@ rustybin mocks delete orders --yes
 rustybin mocks duplicate orders --name orders-v2
 rustybin mocks check orders
 rustybin mocks coverage orders
+rustybin mocks drift orders --upstream https://api.example.com/v1
+rustybin mocks drift-runs orders
 rustybin mocks spec orders > orders.yaml
 rustybin mocks revision orders 12
 rustybin mocks export orders

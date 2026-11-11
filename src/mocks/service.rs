@@ -240,6 +240,8 @@ pub struct CreateBody {
     pub security: Option<SecuritySettings>,
     pub operations: Option<BTreeMap<String, OperationSettings>>,
     pub mcp: Option<McpSettings>,
+    /// The real API it imitates, for drift checks.
+    pub drift: Option<crate::mocks::model::DriftSettings>,
     /// The project the mock goes to (step 11): `mocks.write` there; absent:
     /// the instance's, or the one project the caller works in.
     pub project: Option<String>,
@@ -269,8 +271,21 @@ pub struct PatchBody {
     pub security: Option<SecuritySettings>,
     pub operations: Option<BTreeMap<String, OperationSettings>>,
     pub mcp: Option<McpSettings>,
+    /// The real API it imitates (`null` removes it).
+    #[serde(default, deserialize_with = "double_option_drift")]
+    pub drift: Option<Option<crate::mocks::model::DriftSettings>>,
     pub deploy: Option<bool>,
     pub force: Option<bool>,
+}
+
+/// `drift` that may be absent, `null` or a value.
+fn double_option_drift<'de, D>(
+    d: D,
+) -> Result<Option<Option<crate::mocks::model::DriftSettings>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<crate::mocks::model::DriftSettings>::deserialize(d).map(Some)
 }
 
 impl PatchBody {
@@ -283,6 +298,7 @@ impl PatchBody {
             && self.security.is_none()
             && self.operations.is_none()
             && self.mcp.is_none()
+            && self.drift.is_none()
             && self.deploy.is_none()
     }
 }
@@ -1165,6 +1181,7 @@ impl Svc {
             security: req.security.unwrap_or_default(),
             operations: req.operations.unwrap_or_default(),
             mcp: req.mcp.unwrap_or_default(),
+            drift: req.drift,
         };
         let compiled = self
             .store()
@@ -1378,7 +1395,8 @@ impl Svc {
             || req.responses.is_some()
             || req.security.is_some()
             || req.operations.is_some()
-            || req.mcp.is_some();
+            || req.mcp.is_some()
+            || req.drift.is_some();
         let compiled = if changes_definition {
             let source = match &req.spec {
                 Some(v) => Some(spec_text(v).map_err(ServiceError::bad_request)?),
@@ -1399,6 +1417,9 @@ impl Svc {
             }
             if let Some(v) = &req.mcp {
                 settings.mcp = v.clone();
+            }
+            if let Some(v) = &req.drift {
+                settings.drift = v.clone();
             }
             Some(
                 self.store()

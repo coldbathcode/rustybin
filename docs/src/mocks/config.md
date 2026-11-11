@@ -91,6 +91,8 @@ mocks:
     mcp:                         # the mock's MCP server (/mock/orders/_rustybin/mcp)
       enabled: true
       exclude: [deleteOrder]     # operationIds that are not tools
+    drift:                       # the real API it imitates (drift checks)
+      upstream: https://api.example.com/v1
 ```
 
 Every field except `name` (and one of `spec` / `spec_inline`) is optional, with the

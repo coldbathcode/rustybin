@@ -321,6 +321,10 @@ pub async fn create_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value 
             Ok(v) => v,
             Err(e) => return e,
         },
+        drift: match settings_from(args, "drift") {
+            Ok(v) => v,
+            Err(e) => return e,
+        },
     };
     let s = svc(ctx, access);
     if let Err(e) = s.fill_spec(&mut body).await {
@@ -369,6 +373,14 @@ pub async fn update_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value 
         mcp: match settings_from(args, "mcp") {
             Ok(v) => v,
             Err(e) => return e,
+        },
+        drift: match args.get("drift") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => match serde_json::from_value(v.clone()) {
+                Ok(d) => Some(Some(d)),
+                Err(e) => return err(format!("drift: {e}")),
+            },
         },
         deploy: arg_bool(args, "deploy"),
         force: arg_bool(args, "force"),
@@ -898,5 +910,106 @@ pub async fn clear_traffic(ctx: &CallCtx, access: &Access, args: &Value, params:
             r,
         ),
         Err(e) => service_error(&e),
+    }
+}
+
+/// `check_mock_drift`: compare a mock with the real API it imitates
+/// (confirmed: it sends requests out). What the API answered is never in the
+/// answer; the findings say where it differs, by operation.
+pub async fn check_mock_drift(
+    ctx: &CallCtx,
+    access: &Access,
+    args: &Value,
+    params: &Value,
+) -> Value {
+    let name = match need_str(args, "name") {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let upstream = arg_str(args, "upstream").map(str::to_string);
+    let action = format!(
+        "send one request per operation of mock {name} to {}",
+        upstream.as_deref().unwrap_or("its drift.upstream")
+    );
+    if let super::tools::Confirm::Answer(v) =
+        super::tools::confirm(ctx, "check_mock_drift", args, params, &action).await
+    {
+        return v;
+    }
+    let strings = |key: &str| -> std::collections::BTreeMap<String, String> {
+        args.get(key)
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let body = crate::mocks::drift::DriftBody {
+        upstream,
+        headers: strings("headers"),
+        variables: strings("variables"),
+        operations: args.get("operations").and_then(Value::as_array).map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        }),
+    };
+    match crate::mocks::drift::run(svc(ctx, access), name, body).await {
+        Ok(run) => {
+            let lines: Vec<String> = run["results"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|r| r["ok"] == false)
+                .take(10)
+                .map(|r| {
+                    let kinds: Vec<&str> = r["findings"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|f| f["kind"].as_str())
+                        .collect();
+                    format!(
+                        "{} {}: {}",
+                        r["method"].as_str().unwrap_or(""),
+                        r["path"].as_str().unwrap_or(""),
+                        kinds.join(", ")
+                    )
+                })
+                .collect();
+            let text = if run["passed"] == true {
+                format!(
+                    "Mock {name} matches the real API: {} operation(s) checked.",
+                    run["operations"]
+                )
+            } else {
+                format!(
+                    "Mock {name} drifted from the real API in {} of {} operation(s):\n{}",
+                    run["drifted"],
+                    run["operations"],
+                    lines.join("\n")
+                )
+            };
+            ok(ctx, text, run)
+        }
+        Err(e) => err(e.message()),
+    }
+}
+
+/// `list_drift_runs`.
+pub fn list_drift_runs(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
+    let name = match need_str(args, "name") {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    match crate::mocks::drift::runs(&svc(ctx, access), name) {
+        Ok(v) => {
+            let n = v["runs"].as_array().map_or(0, Vec::len);
+            ok(ctx, format!("{n} drift check(s) kept for mock {name}."), v)
+        }
+        Err(e) => err(e.message()),
     }
 }

@@ -312,6 +312,19 @@ pub struct MockSettings {
     /// The mock's MCP server (`/mock/{name}/_rustybin/mcp`).
     #[serde(skip_serializing_if = "McpSettings::is_default")]
     pub mcp: McpSettings,
+    /// The real API this mock imitates, for drift checks
+    /// (`crate::mocks::drift`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drift: Option<DriftSettings>,
+}
+
+/// The real API a mock imitates: what a drift check compares it with.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DriftSettings {
+    /// The real API's base URL (its host must be allowed for the outbound
+    /// purpose `record`).
+    pub upstream: String,
 }
 
 /// Most entries in `mcp.exclude`.

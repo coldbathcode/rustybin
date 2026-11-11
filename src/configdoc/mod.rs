@@ -592,6 +592,7 @@ fn mock_doc(s: &Snapshot, reveal: bool, bundle: bool) -> (MockDoc, Option<SpecFi
         },
         operations: settings.operations.clone(),
         mcp: settings.mcp.clone(),
+        drift: settings.drift.clone(),
         project: s.project.clone(),
     };
     if bundle {

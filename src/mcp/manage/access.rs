@@ -90,6 +90,8 @@ pub const PROJECT_TOOLS: &[&str] = &[
     "run_tests",
     "list_test_runs",
     "get_test_run",
+    "check_mock_drift",
+    "list_drift_runs",
 ];
 
 /// Request headers forwarded into in-process requests (`try_request`,

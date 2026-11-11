@@ -24,6 +24,8 @@ recommended against for now.
 - [A mock recorded from a real API](mocks/record.md) (unreleased, built 2026-11-11, step 03 of
   the demo next plan): a recording proxy, a spec inferred from the traffic, the answers as
   examples.
+- [Contract drift](mocks/drift.md) (unreleased, built 2026-11-11, step 04 of the demo next
+  plan): a mock checked against the real API it imitates, JSON or JUnit.
 - The last of the roadmap's candidates ([unreleased](changelog.md#unreleased-the-last-of-the-roadmaps-candidates),
   built 2026-11-09): for source control a [diverged branch](source-control.md#a-diverged-branch)
   resolved by a person, [branches per environment](source-control.md#branches) and
@@ -101,8 +103,7 @@ recommended against for now.
 
 Planned on 2026-11-11 as a second milestone, in
 [the demo next plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/demo-next/master-plan.md)
-(steps 01 to 03 are built: the AI gateway scenarios, MCP security and recording): drift checks
-of a mock against the real API; demo storyboards and customer demo packs; Arazzo
+(steps 01 to 04 are built: the AI gateway scenarios, MCP security, recording and drift): demo storyboards and customer demo packs; Arazzo
 workflows as multi-step tests; realtime and batch AI APIs; event-driven mocks from AsyncAPI.
 
 ## Under consideration

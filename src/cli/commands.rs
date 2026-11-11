@@ -372,6 +372,8 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("mocks", "duplicate", "<name> [--name NEW]", "Copy a mock.", &[Flag::value("--name", "The copy's name (default <name>-copy)")], [("POST", "/_rustybin/mocks/{name}/duplicate")], false, "mocks duplicate orders --name orders-v2"),
     cmd!("mocks", "check", "<name>", "The deploy report: a valid request and response per operation.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}/report")], false, "mocks check orders"),
     cmd!("mocks", "coverage", "<name>", "Which operations lack an example.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}/coverage")], false, "mocks coverage orders"),
+    cmd!("mocks", "drift", "<name> [--upstream URL] [--header 'K: V']... [--operation ID]... [--junit]", "Check the mock against the real API it imitates (its drift.upstream, or --upstream): one request per operation, where the answers disagree with the spec; exits 1 on drift. A header value may hold {{VAR}}, filled from this shell's RUSTYBIN_TEST_<VAR>.", &[Flag::value("--upstream", "The real API's base URL"), Flag::value("--header", "A header for the real API, 'Name: value' (repeatable)"), Flag::value("--operation", "Only this operationId (repeatable)"), Flag::switch("--junit", "Print a JUnit report")], [("POST", "/_rustybin/mocks/{name}/drift")], false, "mocks drift orders --upstream https://api.example.com/v1"),
+    cmd!("mocks", "drift-runs", "<name>", "The mock's kept drift checks, newest first.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}/drift")], false, "mocks drift-runs orders"),
     cmd!("mocks", "spec", "<name>", "The mock's OpenAPI document as stored.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}/spec")], false, "mocks spec orders > orders.yaml"),
     cmd!("mocks", "revision", "<name> <revision>", "A kept revision: what changed since in the draft, its settings and spec (the whole answer with --json).", &[Flag::switch("--spec", "Print only the revision's spec as uploaded")], [("GET", "/_rustybin/mocks/{name}/revisions/{revision}")], false, "mocks revision orders 12"),
     cmd!("mocks", "export", "[name]", "One mock, or all, as a rustybin.yaml with only the mocks section.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}/export"), ("GET", "/_rustybin/mocks/export")], false, "mocks export orders"),
@@ -2191,6 +2193,72 @@ async fn mocks(ctx: &mut Ctx, verb: &str) -> Result<()> {
         "coverage" => {
             need_name(ctx)?;
             get(ctx, &format!("{base}/coverage"), &[]).await
+        }
+        "drift-runs" => {
+            need_name(ctx)?;
+            get(ctx, &format!("{base}/drift"), &[]).await
+        }
+        "drift" => {
+            need_name(ctx)?;
+            let mut body = json!({});
+            if let Some(u) = ctx.args.value("--upstream") {
+                body["upstream"] = json!(u);
+            }
+            let mut headers = serde_json::Map::new();
+            let mut variables = serde_json::Map::new();
+            for h in ctx.args.values("--header") {
+                let (k, v) = h
+                    .split_once(':')
+                    .ok_or_else(|| Fail::Usage(format!("--header {h:?}: 'Name: value'")))?;
+                let v = v.trim().to_string();
+                // {{VAR}} from this shell's RUSTYBIN_TEST_<VAR>: the value
+                // goes to the instance with the run, never on a command line.
+                let mut rest = v.as_str();
+                while let Some(i) = rest.find("{{") {
+                    let after = &rest[i + 2..];
+                    let Some(j) = after.find("}}") else { break };
+                    let name = after[..j].trim().to_string();
+                    if let Ok(value) = std::env::var(format!("RUSTYBIN_TEST_{name}")) {
+                        variables.insert(name, json!(value));
+                    }
+                    rest = &after[j + 2..];
+                }
+                headers.insert(k.trim().to_string(), json!(v));
+            }
+            if !headers.is_empty() {
+                body["headers"] = Value::Object(headers);
+            }
+            if !variables.is_empty() {
+                body["variables"] = Value::Object(variables);
+            }
+            let ops = ctx.args.values("--operation");
+            if !ops.is_empty() {
+                body["operations"] = json!(ops);
+            }
+            let junit = ctx.args.has("--junit");
+            let path = if junit {
+                format!("{base}/drift?format=junit")
+            } else {
+                format!("{base}/drift")
+            };
+            let reply = ctx.client()?.post(&path, Body::Json(body)).await?.ok()?;
+            if junit {
+                ctx.raw(&reply.text);
+                let drifted = reply.text.contains("<failure");
+                return if drifted {
+                    Err(Fail::Failed("the mock drifted from the real API".into()))
+                } else {
+                    Ok(())
+                };
+            }
+            let v = reply.value();
+            ctx.emit(&v);
+            if v["passed"] != true {
+                return Err(Fail::Failed(
+                    "the mock drifted from the real API (see above)".into(),
+                ));
+            }
+            Ok(())
         }
         "revision" => {
             need_name(ctx)?;

@@ -849,6 +849,15 @@ pub static TOOLS: &[ToolDef] = &[
         "mock": { "type": "string", "description": "Another mock name than the recording's" },
         "dry_run": { "type": "boolean", "default": false },
     }), &["name"])),
+    tool!("check_mock_drift", "Check a mock for drift", "SEND REQUESTS to the real API a mock imitates (its drift.upstream, or upstream): one valid request per operation, through the outbound policy (purpose record), and report where the answers disagree with the spec: status_differs, schema_violation, missing_field, undocumented_field (a warning), unreachable. headers (values may hold {{VAR}}) and variables give the real API's credential: never kept, never in the answer. Confirmed (elicitation, else confirm: true after the user agreed).", ToolNeed::Project(Permission::MocksWrite), ro=false, destructive=false, idem=false, confirm=true, || obj(json!({
+        "name": name_prop(),
+        "upstream": { "type": "string", "description": "The real API's base URL (default: the mock's drift.upstream)" },
+        "headers": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Headers for the real API; values may hold {{VAR}}" },
+        "variables": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Values of the {{VAR}} variables, given by the user" },
+        "operations": { "type": "array", "items": { "type": "string" }, "description": "Only these operationIds" },
+        "confirm": confirm_prop(),
+    }), &["name"])),
+    tool!("list_drift_runs", "Drift checks of a mock", "A mock's kept drift checks, newest first: per operation the status and the findings.", ToolNeed::Project(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "name": name_prop() }), &["name"])),
     tool!("delete_recording", "Delete a recording", "Delete a recording and what it kept; the mock it built stays. Destructive: confirmed.", ToolNeed::Perm(Permission::MocksWrite), ro=false, destructive=true, idem=true, confirm=true, || obj(json!({ "name": super::recordings::name_prop(), "confirm": confirm_prop() }), &["name"])),
 ];
 
@@ -1439,6 +1448,9 @@ async fn run_tool(
             super::recordings::build_mock_from_recording(ctx, access, args).await
         }
         "delete_recording" => super::recordings::delete_recording(ctx, args, params).await,
+        // Contract drift
+        "check_mock_drift" => mocks::check_mock_drift(ctx, access, args, params).await,
+        "list_drift_runs" => mocks::list_drift_runs(ctx, access, args),
 
         _ => return Err(RpcError::invalid_params(format!("Unknown tool: {name}"))),
     })

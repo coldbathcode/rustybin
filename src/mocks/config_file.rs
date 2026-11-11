@@ -218,6 +218,9 @@ pub struct MockDoc {
     pub operations: BTreeMap<String, OperationSettings>,
     #[serde(default, skip_serializing_if = "McpSettings::is_default")]
     pub mcp: McpSettings,
+    /// The real API it imitates, for drift checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drift: Option<super::model::DriftSettings>,
     /// The project the mock belongs to (absent: the instance's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
@@ -231,6 +234,7 @@ impl MockDoc {
             security: self.security.clone(),
             operations: self.operations.clone(),
             mcp: self.mcp.clone(),
+            drift: self.drift.clone(),
         }
     }
 }
@@ -742,6 +746,13 @@ pub fn json_schema() -> Value {
         "spec_inline": { "description": "The OpenAPI document (object or text)" },
         "enabled": { "type": "boolean", "default": true },
         "strip_server_prefix": { "type": "boolean", "default": false },
+        "drift": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["upstream"],
+            "description": "The real API this mock imitates, for drift checks",
+            "properties": { "upstream": { "type": "string", "description": "The real API's base URL" } }
+        },
         "responses": responses,
         "security": security,
         "operations": {

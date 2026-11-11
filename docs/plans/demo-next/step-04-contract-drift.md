@@ -69,3 +69,38 @@ the spec on purpose.
 
 A drift run reports each kind of finding on every surface, can be scheduled and run from CI, and is
 documented with tested examples.
+
+## Build notes (2026-11-11)
+
+Built whole. Where the build differs from the plan above:
+
+- **The request source is the mock's own sample per operation** (`checks::sample_request`, the
+  deploy checks' request, with the mock's fake credentials taken out and the server prefix
+  stripped from the path). Saved tests and recordings as sources were left out: the sample covers
+  every operation, which is what a drift report is about.
+- **Runs are kept in memory** (`AppState.drift`, 10 per mock for 50 mocks), not in the saved
+  tests' history, and **schedules are not part of this step**: a drift check runs from the
+  console, an agent or CI (`rustybin mocks drift ... --junit`, exit 1 on drift), which is where
+  the plan's scheduled use mostly sits. A schedule target can come later through
+  `replay::schedule` if asked.
+- **The setting is the draft's, the definition the deployed one.** `drift.upstream` saved through
+  `PATCH` deploys nothing, so the check reads the setting from the draft and judges against the
+  live revision (or the draft when never deployed).
+- **Variables**: `{{VAR}}` in header values from the run's `variables` or the instance's
+  `RUSTYBIN_TEST_<VAR>`; the CLI fills `variables` from its own shell's `RUSTYBIN_TEST_<VAR>`, so
+  a credential is never on a command line.
+- **Findings**: `missing_field` is a required-property issue of the validator, the other issues
+  `schema_violation` (at most 5 per operation); `undocumented_field` walks the schema with `$ref`s
+  followed and is a warning that fails nothing.
+- **Fix the spec with AI** is the mock page's existing AI edit; the Drift tab does not add a
+  second entry.
+- The docs example shows the refusals (no outbound host is allowed on the docs instance); the
+  whole check against a real API that matches and one that drifted in every way is the test
+  `an_api_that_matches_has_no_findings_and_each_drift_is_named`.
+
+### For the merge
+
+`src/mocks/drift.rs` (and its tests), `MockSettings.drift` (create, patch, `rustybin.yaml`, the
+export and the config schema), the route in the mocks router and `PROJECT_ROUTES`, two tools at
+the end of `TOOLS` (`PROJECT_TOOLS`, the frozen rights, 153 tools for an admin),
+`rustybin mocks drift` and `drift-runs`, the console's Drift tab.

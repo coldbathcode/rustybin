@@ -3,7 +3,7 @@
 ## Unreleased: the last of the roadmap's candidates
 
 [The plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/core-next/master-plan.md),
-steps 11 to 13, built on 2026-11-09 and not released yet, and steps 01 to 03 of
+steps 11 to 13, built on 2026-11-09 and not released yet, and steps 01 to 04 of
 [the demo next plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/demo-next/master-plan.md),
 built on 2026-11-11. Nothing to do when upgrading: what is new is off until you turn it on or
 name it in a scenario.
@@ -37,6 +37,13 @@ name it in a scenario.
   recorded answers as stored examples (source `recorded`), naming what looked like personal data
   by kind. On every surface: the routes, `rustybin record`, six management tools, the console's
   Mock APIs view.
+- [Contract drift](mocks/drift.md): `POST /_rustybin/mocks/{name}/drift` sends one request per
+  operation to the real API a mock imitates (`drift.upstream`, a new setting of a mock, or
+  `upstream`) under the purpose `record`, and reports `status_differs`, `schema_violation`,
+  `missing_field`, `undocumented_field` (a warning) and `unreachable` per operation, as JSON or
+  JUnit; credentials as `{{VAR}}` headers, never kept; the last 10 runs kept per mock. On every
+  surface: `rustybin mocks drift` (exits 1 on drift) and `drift-runs`, `check_mock_drift` and
+  `list_drift_runs`, a mock's Drift tab, `drift:` in `rustybin.yaml`.
 
 - Source control: a [diverged branch](source-control.md#a-diverged-branch) says what differs
   (`divergence` in the status and in the `409`) and is resolved by a person: `POST
@@ -83,10 +90,10 @@ name it in a scenario.
 
 **Changed**:
 
-- The management MCP server has 151 tools for an admin (`request_secret`, `get_secret_request`,
+- The management MCP server has 153 tools for an admin (`request_secret`, `get_secret_request`,
   `git_branches`, `git_switch_branch`, `git_signing_key`, `import_scenario`, and the six recording
   tools `list_recordings`, `start_recording`, `get_recording`, `stop_recording`,
-  `build_mock_from_recording`, `delete_recording`).
+  `build_mock_from_recording`, `delete_recording`, and `check_mock_drift`, `list_drift_runs`).
 - `profiles.json` may hold an `agent` object per profile. An older `rustybin` reads the file
   and ignores it.
 - A harness import keeps at most 64 requests (a layer's limit; it kept 200, which did not

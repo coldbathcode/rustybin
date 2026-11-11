@@ -1292,6 +1292,18 @@ def run_theme(browser, theme):
 
     step("mocks: record from an API, then delete the recording", recordings)
 
+    def drift():
+        # A mock's Drift tab: a check without an upstream is refused with the
+        # reason; no check is kept yet.
+        page.goto(BASE + "/ui/#/mocks/petstore/drift")
+        page.wait_for_selector("#drift-panel")
+        expect(page.locator("#drift-panel")).to_contain_text("No drift check yet")
+        page.click("#drift-check")
+        expect(page.locator("#drift-panel .notice.err")).to_contain_text("drift.upstream")
+        shot(page, theme, "06d-mock-drift")
+
+    step("mocks: the Drift tab refuses a check without an upstream", drift)
+
     def saved_tests():
         # A captured request saved from Live traffic, run on the Saved tests
         # view, exported as Hurl, deleted.

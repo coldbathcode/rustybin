@@ -626,6 +626,8 @@ self-service on.
 | `stop_recording` | `mocks.write` | The proxy refuses from now on |
 | `build_mock_from_recording` | `mocks.write` | A mock from a recording: the inferred spec, the recorded answers as examples; `dry_run` answers the spec under `untrusted_spec`; what looked like personal data by kind and operation |
 | `delete_recording` | `mocks.write` | The recording and what it kept; the mock it built stays (confirmed) |
+| `check_mock_drift` | `mocks.write` | [Contract drift](mocks/drift.md): one request per operation to the real API the mock imitates, the findings by operation (confirmed: it sends requests out) |
+| `list_drift_runs` | `mocks.read` | A mock's kept drift checks |
 
 `get_mock` and `check_mock` carry the example `coverage` (which operations lack an
 example), the input of `generate_examples`.

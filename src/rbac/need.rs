@@ -163,6 +163,7 @@ pub const PROJECT_ROUTES: &[&str] = &[
     "/_rustybin/mocks/ai/spec",
     "/_rustybin/mocks/{name}",
     "/_rustybin/mocks/{name}/coverage",
+    "/_rustybin/mocks/{name}/drift",
     "/_rustybin/mocks/{name}/ai/examples",
     "/_rustybin/mocks/{name}/ai/edit",
     "/_rustybin/mocks/{name}/enable",

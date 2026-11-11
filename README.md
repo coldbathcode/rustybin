@@ -603,6 +603,7 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | Methods | Path | Description |
 |---|---|---|
 | POST GET DELETE | `/mock/{name}/_rustybin/mcp` | MCP server of an OpenAPI mock: one tool per operation |
+| GET POST | `/_rustybin/mocks/{name}/drift` | Contract drift: POST sends one request per operation to the real API the mock imitates and reports where it disagrees with the spec (JSON or JUnit; egress purpose record); GET, the kept runs |
 | GET | `/_rustybin/mocks/{name}/coverage` | Example coverage of a mock: which operations lack an example for their success responses |
 | POST | `/_rustybin/mocks/ai/spec` | AI: an OpenAPI document from a plain description, checked, nothing created |
 | POST | `/_rustybin/mocks/{name}/ai/examples` | AI (or the generator): examples for the operations that lack them, stored in the draft with apply |

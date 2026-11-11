@@ -128,6 +128,7 @@ pub(crate) const NEW_SINCE_0_4: &[&str] = &[
     "/_rustybin/git/webhook",
     "/_rustybin/harness/clusters/{id}/leader/step-aside",
     "/_rustybin/mocks/import/fetch",
+    "/_rustybin/mocks/{name}/drift",
     "/_rustybin/recordings",
     "/_rustybin/recordings/{name}",
     "/_rustybin/recordings/{name}/stop",

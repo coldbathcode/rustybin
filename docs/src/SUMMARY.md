@@ -22,6 +22,7 @@
   - [Self-service mocks](mocks/self-service.md)
 - [Build mocks with AI](mocks/ai.md)
 - [Record a mock from a real API](mocks/record.md)
+- [Contract drift](mocks/drift.md)
 - [Bring your own AI](ai-assist.md)
 - [Dev portal](portal.md)
 - [Collections and OpenAPI](exports.md)

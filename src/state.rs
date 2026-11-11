@@ -95,6 +95,8 @@ pub struct AppState {
     pub scenarios: Arc<crate::scenarios::Scenarios>,
     /// Recordings of real APIs (`crate::recordings`), bounded.
     pub recordings: Arc<crate::recordings::Recordings>,
+    /// The kept drift checks of mocks (`crate::mocks::drift`), bounded.
+    pub drift: Arc<crate::mocks::drift::DriftRuns>,
     /// Saved tests (`crate::replay`), `<state>/tests.json`.
     pub saved_tests: Arc<crate::replay::Tests>,
     /// Checkpoints (`crate::checkpoints`), `<state>/checkpoints/`.
@@ -257,6 +259,7 @@ impl AppState {
             diagnostics: Arc::new(crate::diagnostics::Diagnostics::default()),
             scenarios: Arc::new(crate::scenarios::Scenarios::default()),
             recordings: Arc::new(crate::recordings::Recordings::default()),
+            drift: Arc::new(crate::mocks::drift::DriftRuns::default()),
             saved_tests,
             checkpoints,
             users,
