@@ -57,7 +57,7 @@ The marker a session looks for is the first row that is not done.
 |---|---|---|---|---|
 | [01](step-01-ai-gateway-scenarios.md) | AI gateway scenarios: token limits, model fallback, semantic cache, prompt guard, provider balancing | | medium | done 2026-11-11 |
 | [02](step-02-mcp-security-scenarios.md) | MCP security scenarios: tool poisoning, rug pull, shadowing, result injection, scope overreach | | medium | done 2026-11-11 |
-| [03](step-03-record-from-upstream.md) | Record a mock from a real upstream | | large | planned 2026-11-11: owner decision, section 6 |
+| [03](step-03-record-from-upstream.md) | Record a mock from a real upstream | | large | done 2026-11-11 |
 | [04](step-04-contract-drift.md) | Contract drift: a mock checked against the real API it imitates | 03 (shares the purpose) | medium | planned 2026-11-11 |
 | [05](step-05-demo-storyboards.md) | Demo storyboards: a scripted demo with a talk track and resets | | medium | planned 2026-11-11 |
 | [06](step-06-demo-packs.md) | Customer demo packs: one apply, one teardown | 05 | medium | planned 2026-11-11: owner decision, section 6 |

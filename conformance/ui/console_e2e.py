@@ -1272,6 +1272,26 @@ def run_theme(browser, theme):
 
     step("gateway scenarios: prepare, a refused check, clean up", gateway_scenarios)
 
+    def recordings():
+        # Record from an API: a recording starts with its proxy URL (the
+        # outbound policy does not allow the upstream here), and is deleted.
+        page.goto(BASE + "/ui/#/mocks")
+        page.click("#record-mock")
+        page.wait_for_selector("#record-panel")
+        page.fill("#recording-name", "e2e-orders")
+        page.fill("#recording-upstream", "https://api.example.com/v1")
+        page.click("#recording-start")
+        row = page.locator("[data-recording='e2e-orders']")
+        row.wait_for()
+        expect(row).to_contain_text("recording, 0 exchange(s)")
+        expect(row).to_contain_text("/record/")
+        shot(page, theme, "06c-record-from-an-api")
+        page.once("dialog", lambda d: d.accept())
+        page.click("#recording-delete-e2e-orders")
+        expect(page.locator("[data-recording='e2e-orders']")).to_have_count(0)
+
+    step("mocks: record from an API, then delete the recording", recordings)
+
     def saved_tests():
         # A captured request saved from Live traffic, run on the Saved tests
         # view, exported as Hurl, deleted.

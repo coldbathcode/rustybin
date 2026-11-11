@@ -3,7 +3,7 @@
 ## Unreleased: the last of the roadmap's candidates
 
 [The plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/core-next/master-plan.md),
-steps 11 to 13, built on 2026-11-09 and not released yet, and steps 01 and 02 of
+steps 11 to 13, built on 2026-11-09 and not released yet, and steps 01 to 03 of
 [the demo next plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/demo-next/master-plan.md),
 built on 2026-11-11. Nothing to do when upgrading: what is new is off until you turn it on or
 name it in a scenario.
@@ -29,6 +29,14 @@ name it in a scenario.
   session through the gateway; and three inspector checks that warn on any server
   (`descriptions_look_clean`, `results_carry_no_instructions`, `definitions_are_stable`). The
   attack servers are listed in the MCP inspector, never in the mock MCP registry.
+- [A mock recorded from a real API](mocks/record.md): `POST /_rustybin/recordings` answers a
+  proxy URL; requests sent to it go to the real API through the outbound policy (purpose
+  `record`, no default) and the exchanges are kept with credentials removed (headers not kept,
+  secret-looking query values and JSON fields as `{{NAME}}`); `POST .../build` infers a spec by
+  code (path templates, parameters and schemas from the traffic) and creates the mock with the
+  recorded answers as stored examples (source `recorded`), naming what looked like personal data
+  by kind. On every surface: the routes, `rustybin record`, six management tools, the console's
+  Mock APIs view.
 
 - Source control: a [diverged branch](source-control.md#a-diverged-branch) says what differs
   (`divergence` in the status and in the `409`) and is resolved by a person: `POST
@@ -75,8 +83,10 @@ name it in a scenario.
 
 **Changed**:
 
-- The management MCP server has 145 tools for an admin (`request_secret`, `get_secret_request`,
-  `git_branches`, `git_switch_branch`, `git_signing_key`, `import_scenario`).
+- The management MCP server has 151 tools for an admin (`request_secret`, `get_secret_request`,
+  `git_branches`, `git_switch_branch`, `git_signing_key`, `import_scenario`, and the six recording
+  tools `list_recordings`, `start_recording`, `get_recording`, `stop_recording`,
+  `build_mock_from_recording`, `delete_recording`).
 - `profiles.json` may hold an `agent` object per profile. An older `rustybin` reads the file
   and ignores it.
 - A harness import keeps at most 64 requests (a layer's limit; it kept 200, which did not

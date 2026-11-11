@@ -260,6 +260,7 @@ under a **purpose** with its own rule, on only when the feature is configured:
 | `notify` | No default: name the webhooks of [test schedules](saved-tests.md#the-failure-notice) in `RUSTYBIN_EGRESS_ALLOW`. A refused notice is reported in the schedule's status and never retried. |
 | `otlp` | The host of `harness.otlp_endpoint`, once set: [a finished run's metrics](harness.md#opentelemetry). |
 | `spec_fetch` | No default: name the hosts [specs are fetched from](mocks/index.md#a-spec-from-a-url) in `RUSTYBIN_EGRESS_ALLOW`. Never a visitor's. |
+| `record` | No default: name the hosts of the APIs you [record](mocks/record.md) in `RUSTYBIN_EGRESS_ALLOW`. Never a visitor's. |
 | `sso` | The issuer's host once [single sign-on](sso.md) is set up (`sso.enabled`, `sso.issuer`, `sso.client_id`): discovery, the keys and the token endpoint. Keys or a token endpoint on another host need `RUSTYBIN_EGRESS_ALLOW`; a provider on the same machine `RUSTYBIN_EGRESS_ALLOW_LOOPBACK=true`. |
 
 ```hurl
@@ -365,6 +366,7 @@ Read when the server starts.
 | `RUSTYBIN_MCP_API_KEY` | unset | The only `X-API-Key` value `/mcp/apikey` accepts. Unset: any non-empty key is accepted. |
 | `RUSTYBIN_MCP_ALLOWED_ORIGINS` | `*` | Comma-separated `Origin` values accepted by every MCP endpoint (DNS rebinding protection). Requests with another `Origin` get `403`; requests without `Origin` are always accepted. |
 | `RUSTYBIN_MCP_ACCEPTED_AUDIENCES` | `rustybin` | Token audiences `/mcp/protected` accepts besides its own resource URL. The default is the identity provider's default audience, so a plain `client_credentials` token works. `none` accepts only tokens issued for the resource (strict RFC 8707). |
+| `RUSTYBIN_MCP_ATTACK_SERVERS` | `true` | Seeds the `mcp.attack_servers` setting: the [MCP attack servers](mcp/security.md) at `/mcp/attack/{kind}` and the `mcp_*` gateway scenarios. Always off in public mode. |
 | `RUSTYBIN_MCP_RESOURCE_URL` | derived | Override the resource identifier of `/mcp/protected` (by default `<scheme>://<host>/mcp/protected` from the request). Set it to the gateway's public URL when the gateway does not forward `Host`. |
 | `RUSTYBIN_MCP_CLOCK_TICK_SECS` | `5` | Update interval of the subscribable `rustybin://clock` resource (1 to 3600). |
 | `RUSTYBIN_REGISTRY_SCENARIO` | `normal` | The [mock MCP registry](mcp/registry.md#scenarios)'s scenario: `normal`, `empty`, `large`, `flaky`, `slow`, `stale`, `invalid` or `auth_fail` (an invalid value warns and is ignored). Seeds the `registry.scenario` setting. |

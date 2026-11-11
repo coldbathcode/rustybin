@@ -81,3 +81,40 @@ Docs: a new page `docs/src/mocks/record.md`, Hurl examples recording against an 
 
 A recording against a real API builds a working mock on every surface, nothing secret is kept, and
 the page shows the whole loop with tested examples.
+
+## Build notes (2026-11-11)
+
+Built whole with the recommended answers (inference by code, no recording for visitors).
+Where the build differs from the plan above:
+
+- **Tighter memory bounds.** 8 recordings (not 16), 64 KiB kept per body (not 256 KiB), and
+  4 MiB of bodies per recording in all; what is over is forwarded but not kept (`not_kept`).
+  At the plan's numbers a full instance could have held gigabytes.
+- **The proxy's address carries a random id**, never the recording's name: the proxy is a data
+  plane route (`/record/{id}/...`) and must not be guessable, or anyone could use the instance to
+  reach an allowed host.
+- **Starting never reaches out and never refuses for the policy.** It answers what
+  `Egress::dry_check` says (`egress`), and the proxy refuses each request until the host is
+  allowed, counted in `refused`. This keeps the CLI's examples runnable and tells a person what
+  to allow before any traffic.
+- **Permissions**: listing is `mocks.read`, what a recording kept is `traffic.read` (it is
+  captured traffic, as in the inspector), starting, stopping, building and deleting are
+  `mocks.write`. The ceilings follow (the read-only tool `get_recording` counts as traffic).
+- **The build creates a new mock; it never replaces one.** A name in use is refused through the
+  ordinary create (`409`), so the build goes through `Svc::create` and the compile pool with no
+  path of its own.
+- **Personal data** is found by email, phone and card number (Luhn checked) patterns in the
+  stored examples and named by kind and operation.
+- **The docs example cannot record for real**: no docs instance allows an outbound host, which
+  is the point of the purpose having no default. The example shows the flow up to the refusal;
+  the record, forward byte for byte, redact and build loop is the integration test
+  `a_recording_through_the_proxy_builds_a_working_mock` against the instance's own petstore.
+- **Improve with AI** stays the mock page's existing AI edit; the recording panel links to it in
+  words rather than adding a second entry.
+
+### For the merge
+
+New module `src/recordings/` (`AppState.recordings`, `Purpose::Record`, `ExampleSource::Recorded`),
+four control routes and the proxy route (catalogue, OpenAPI, README tables, `NEW_SINCE_0_4`,
+the management `COVERAGE` table), six tools at the end of `TOOLS` (the frozen rights table and
+the documented counts: 151 tools for an admin), `rustybin record`, the console's Mock APIs view.

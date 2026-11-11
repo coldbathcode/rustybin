@@ -135,6 +135,10 @@ pub const NOUNS: &[(&str, &str)] = &[
         "scenario",
         "Guided gateway scenarios: prepare the upstream, check through the gateway, clean up",
     ),
+    (
+        "record",
+        "Recordings of a real API: a proxy URL to send traffic through, then a mock built from it",
+    ),
     ("agents", "AI agents on the management MCP server"),
     ("ai", "AI assist: status, models, usage, test, run a task"),
     (
@@ -405,6 +409,12 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("requests", "get", "<id>", "One captured request.", NO_FLAGS, [("GET", "/_rustybin/requests/{id}")], false, "requests get 42"),
     cmd!("requests", "tail", "", "Follow the requests as they arrive.", TAIL_FLAGS, [("GET", "/_rustybin/requests/stream")], false, "requests tail --max 5"),
     cmd!("requests", "clear", "", "Forget the captured requests.", NO_FLAGS, [("DELETE", "/_rustybin/requests")], true, "requests clear --yes"),
+    cmd!("record", "list", "", "Your recordings of real APIs: upstream, proxy URL, state, counts.", NO_FLAGS, [("GET", "/_rustybin/recordings")], false, "record list"),
+    cmd!("record", "start", "<name> --upstream URL [--mock NAME]", "Start a recording: send requests to the proxy URL it answers (as you would to the upstream); the upstream's host must be in RUSTYBIN_EGRESS_ALLOW (purpose record).", &[Flag::value("--upstream", "The real API's base URL"), Flag::value("--mock", "The mock it becomes (default: the recording's name)")], [("POST", "/_rustybin/recordings")], false, "record start orders --upstream https://api.example.com/v1"),
+    cmd!("record", "show", "<name>", "A recording with what it kept (credentials removed).", NO_FLAGS, [("GET", "/_rustybin/recordings/{name}")], false, "record show orders"),
+    cmd!("record", "stop", "<name>", "Stop recording: the proxy refuses from now on.", NO_FLAGS, [("POST", "/_rustybin/recordings/{name}/stop")], false, "record stop orders"),
+    cmd!("record", "build", "<name> [--mock NAME] [--dry-run]", "Build a mock from a recording: an inferred spec, the recorded answers as examples; --dry-run prints the spec.", &[Flag::value("--mock", "Another mock name than the recording's"), Flag::switch("--dry-run", "Print the inferred spec, change nothing")], [("POST", "/_rustybin/recordings/{name}/build")], false, "record build orders --dry-run"),
+    cmd!("record", "delete", "<name>", "Delete a recording and what it kept (the mock it built stays).", NO_FLAGS, [("DELETE", "/_rustybin/recordings/{name}")], true, "record delete orders --yes"),
     cmd!("checkpoint", "list", "[--from-git] [--project P]", "The checkpoints and the mocks each holds; --from-git lists the configuration repository's (after git pull).", &[Flag::switch("--from-git", "The repository's checkpoints, at the working copy's HEAD"), PROJECT_FLAG], [("GET", "/_rustybin/checkpoints")], false, "checkpoint list"),
     cmd!("checkpoint", "show", "<name>", "One checkpoint.", NO_FLAGS, [("GET", "/_rustybin/checkpoints/{name}")], false, "checkpoint show demo-start"),
     cmd!("checkpoint", "save", "<name> [--replace] [--project P]", "Save the instance's API mocks (with their data) and the health toggle; --project keeps one project's mocks only.", &[Flag::switch("--replace", "Overwrite a checkpoint of that name"), Flag::value("--project", "Keep this project's mocks only (a restore changes only those)")], [("POST", "/_rustybin/checkpoints")], false, "checkpoint save demo-start"),
@@ -804,6 +814,7 @@ pub async fn dispatch(ctx: &mut Ctx) -> Result<()> {
         "scenario" => scenario(ctx, cmd.verb).await,
         "tests" => tests(ctx, cmd.verb).await,
         "checkpoint" => checkpoint(ctx, cmd.verb).await,
+        "record" => record(ctx, cmd.verb).await,
         "ai" => ai(ctx, cmd.verb).await,
         "mcp" => mcp(ctx, cmd.verb).await,
         "registry" => registry(ctx, cmd.verb).await,
@@ -2534,6 +2545,39 @@ async fn bins(ctx: &mut Ctx, verb: &str) -> Result<()> {
 }
 
 // ── Checkpoints ─────────────────────────────────────────────────────
+
+async fn record(ctx: &mut Ctx, verb: &str) -> Result<()> {
+    if verb == "list" {
+        return get(ctx, "/_rustybin/recordings", &[]).await;
+    }
+    let name = ctx.args.arg(0, "a recording name")?.to_string();
+    let path = format!("/_rustybin/recordings/{}", enc(&name));
+    match verb {
+        "show" => get(ctx, &path, &[]).await,
+        "delete" => delete(ctx, &path, &[]).await,
+        "stop" => post(ctx, &format!("{path}/stop"), Body::Json(json!({}))).await,
+        "start" => {
+            let upstream = ctx
+                .args
+                .value("--upstream")
+                .ok_or_else(|| Fail::Usage("--upstream: the real API's base URL".into()))?
+                .to_string();
+            let mut body = json!({ "name": name, "upstream": upstream });
+            if let Some(m) = ctx.args.value("--mock") {
+                body["mock"] = json!(m);
+            }
+            post(ctx, "/_rustybin/recordings", Body::Json(body)).await
+        }
+        "build" => {
+            let mut body = json!({ "dry_run": ctx.args.has("--dry-run") });
+            if let Some(m) = ctx.args.value("--mock") {
+                body["mock"] = json!(m);
+            }
+            post(ctx, &format!("{path}/build"), Body::Json(body)).await
+        }
+        _ => Err(Fail::Usage(format!("record {verb}: not implemented"))),
+    }
+}
 
 async fn checkpoint(ctx: &mut Ctx, verb: &str) -> Result<()> {
     let from_git = ctx.args.has("--from-git");

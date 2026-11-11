@@ -8,6 +8,7 @@ import * as visit from '../lib/visit.js';
 import { openWizard, sampleSpecText, wireDrop } from './mocks/wizard.js';
 import { mountDetail } from './mocks/detail.js';
 import { visitBar } from './mocks/visit.js';
+import { recordPanel } from './mocks/record.js';
 import { agentPanel } from '../lib/agent.js';
 import * as portal from '../lib/portal.js';
 import * as projects from '../lib/projects.js';
@@ -44,6 +45,15 @@ function mountList(root) {
   search.addEventListener('input', debounce(() => { st.q = search.value.trim().toLowerCase(); renderList(); }, 100));
   const yamlIn = h('input', { type: 'file', accept: '.yaml,.yml,.json', hidden: true });
   const newBtn = h('button', { class: 'btn primary', type: 'button', id: 'new-mock', hidden: !!readOnly, onclick: () => wizard() }, icon('plus'), 'New mock');
+  // Record from an API: a panel opened on demand (mocks.write).
+  const recordSlot = h('div');
+  const recordBtn = readOnly || !perms.can('mocks.write') ? null : h('button', { class: 'btn', type: 'button', id: 'record-mock', title: 'Record a real API through a proxy and build a mock from it' }, icon('traffic'), 'Record from an API');
+  if (recordBtn) {
+    recordBtn.onclick = () => {
+      if (recordSlot.firstChild) { clear(recordSlot); return; }
+      recordSlot.appendChild(recordPanel({ onBuilt: () => load() }));
+    };
+  }
   yamlIn.addEventListener('change', () => { if (yamlIn.files[0]) importYaml(yamlIn.files[0]); yamlIn.value = ''; });
 
   root.append(
@@ -53,9 +63,10 @@ function mountList(root) {
       h('div', { class: 'row' },
         readOnly || !perms.can('config.apply') ? null : h('button', { class: 'btn', type: 'button', onclick: () => yamlIn.click(), title: 'Apply a rustybin.yaml document (creates or updates mocks)' }, icon('upload'), 'Import YAML'),
         h('button', { class: 'btn', type: 'button', onclick: exportAll, title: 'Every mock (except the sample) as rustybin.yaml' }, icon('download'), 'Export all'),
+        recordBtn,
         newBtn,
         yamlIn)),
-    visitEl, noticeEl, heroEl,
+    visitEl, noticeEl, recordSlot, heroEl,
     h('div', { class: 'card', style: { padding: '10px 14px' }, id: 'agent-connect' }, agentPanel({ compact: true })),
     card('Mocks', { actions: h('div', { class: 'row mock-filters' }, search, filter.el) }, readOnly ? null : bulkEl, listEl, limitsEl));
 

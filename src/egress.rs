@@ -710,10 +710,12 @@ pub enum Purpose {
     /// Single sign-on: the identity provider's discovery document, keys
     /// and token endpoint (`crate::sso`).
     Sso,
+    /// A recording's proxy to the real API it records (`crate::recordings`).
+    Record,
 }
 
 impl Purpose {
-    pub const ALL: [Purpose; 13] = [
+    pub const ALL: [Purpose; 14] = [
         Purpose::Assist,
         Purpose::McpRelay,
         Purpose::Registry,
@@ -727,6 +729,7 @@ impl Purpose {
         Purpose::SpecFetch,
         Purpose::Otlp,
         Purpose::Sso,
+        Purpose::Record,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -744,6 +747,7 @@ impl Purpose {
             Purpose::SpecFetch => "spec_fetch",
             Purpose::Otlp => "otlp",
             Purpose::Sso => "sso",
+            Purpose::Record => "record",
         }
     }
 
@@ -763,6 +767,7 @@ impl Purpose {
             Purpose::SpecFetch => "Specs fetched from a URL",
             Purpose::Otlp => "OpenTelemetry collector",
             Purpose::Sso => "Single sign-on provider",
+            Purpose::Record => "Recordings of a real API",
         }
     }
 
@@ -784,6 +789,7 @@ impl Purpose {
             }
             Purpose::Otlp => "the host of harness.otlp_endpoint, once set",
             Purpose::Sso => "the issuer's host, once single sign-on is set up",
+            Purpose::Record => "RUSTYBIN_EGRESS_ALLOW only (the APIs recorded; no default)",
         }
     }
 }

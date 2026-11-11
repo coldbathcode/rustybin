@@ -93,6 +93,8 @@ pub struct AppState {
     pub diagnostics: Arc<crate::diagnostics::Diagnostics>,
     /// Gateway scenario runs (`crate::scenarios`), bounded.
     pub scenarios: Arc<crate::scenarios::Scenarios>,
+    /// Recordings of real APIs (`crate::recordings`), bounded.
+    pub recordings: Arc<crate::recordings::Recordings>,
     /// Saved tests (`crate::replay`), `<state>/tests.json`.
     pub saved_tests: Arc<crate::replay::Tests>,
     /// Checkpoints (`crate::checkpoints`), `<state>/checkpoints/`.
@@ -254,6 +256,7 @@ impl AppState {
             flaky,
             diagnostics: Arc::new(crate::diagnostics::Diagnostics::default()),
             scenarios: Arc::new(crate::scenarios::Scenarios::default()),
+            recordings: Arc::new(crate::recordings::Recordings::default()),
             saved_tests,
             checkpoints,
             users,

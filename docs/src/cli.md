@@ -516,6 +516,28 @@ rustybin scenario check caching 1a2b3c4d --gateway http://localhost:8000/catalog
 rustybin scenario end caching 1a2b3c4d --yes
 ```
 
+## record
+
+Recordings of a real API: a proxy URL to send traffic through, then a mock built from it
+
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin record list` | Your recordings of real APIs: upstream, proxy URL, state, counts. | `GET /_rustybin/recordings` | `mocks.read` |
+| `rustybin record start <name> --upstream URL [--mock NAME]` | Start a recording: send requests to the proxy URL it answers (as you would to the upstream); the upstream's host must be in RUSTYBIN_EGRESS_ALLOW (purpose record). Flags: `--upstream` value, `--mock` value. | `POST /_rustybin/recordings` | `mocks.write` |
+| `rustybin record show <name>` | A recording with what it kept (credentials removed). | `GET /_rustybin/recordings/{name}` | `traffic.read` |
+| `rustybin record stop <name>` | Stop recording: the proxy refuses from now on. | `POST /_rustybin/recordings/{name}/stop` | `mocks.write` |
+| `rustybin record build <name> [--mock NAME] [--dry-run]` | Build a mock from a recording: an inferred spec, the recorded answers as examples; --dry-run prints the spec. Flags: `--mock` value, `--dry-run`. | `POST /_rustybin/recordings/{name}/build` | `mocks.write` |
+| `rustybin record delete <name>` | Delete a recording and what it kept (the mock it built stays). | `DELETE /_rustybin/recordings/{name}` | `mocks.write` |
+
+```bash
+rustybin record list
+rustybin record start orders --upstream https://api.example.com/v1
+rustybin record show orders
+rustybin record stop orders
+rustybin record build orders --dry-run
+rustybin record delete orders --yes
+```
+
 ## agents
 
 AI agents on the management MCP server

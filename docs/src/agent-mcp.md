@@ -620,6 +620,12 @@ self-service on.
 | `get_mock_data` / `clear_mock_data` | `mocks.read` / `mocks.data` or owner | What a `stateful` mock stored; clearing is confirmed |
 | `get_mock_traffic` / `clear_traffic` | `traffic.read` / `mocks.data` or owner | The calls a mock received: operation, status, validation and auth result, how the response was chosen; clearing is confirmed |
 | `reload_mocks` | `config.apply` | Reload the file-defined mocks (`RUSTYBIN_CONFIG_FILE`, `RUSTYBIN_MOCKS_DIR`), as SIGHUP does |
+| `list_recordings` | `mocks.read` | The caller's [recordings of a real API](mocks/record.md): upstream, proxy URL, state, counts |
+| `start_recording` | `mocks.write` | Start a recording: answers the proxy URL to send traffic through (the upstream's host must be allowed for the purpose `record`); sends nothing |
+| `get_recording` | `traffic.read` | What a recording kept, credentials removed, under `untrusted_recorded` |
+| `stop_recording` | `mocks.write` | The proxy refuses from now on |
+| `build_mock_from_recording` | `mocks.write` | A mock from a recording: the inferred spec, the recorded answers as examples; `dry_run` answers the spec under `untrusted_spec`; what looked like personal data by kind and operation |
+| `delete_recording` | `mocks.write` | The recording and what it kept; the mock it built stays (confirmed) |
 
 `get_mock` and `check_mock` carry the example `coverage` (which operations lack an
 example), the input of `generate_examples`.

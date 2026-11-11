@@ -644,6 +644,12 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET DELETE | `/_rustybin/mocks/{name}/requests` | Requests a mock received, newest first (DELETE clears them) |
 | GET | `/_rustybin/mocks/{name}/requests/stream` | Live feed of a mock's requests (SSE) (SSE) |
 | GET | `/_rustybin/mocks/{name}/requests/{n}` | One captured request by sequence number |
+| GET POST | `/_rustybin/recordings` | Recordings of a real API (GET, the caller's) and starting one (POST: a name, the upstream's base URL) |
+| GET DELETE | `/_rustybin/recordings/{name}` | A recording with what it kept (redacted); DELETE removes it (never the mock it built) |
+| POST | `/_rustybin/recordings/{name}/stop` | Stop recording: the proxy refuses from now on |
+| POST | `/_rustybin/recordings/{name}/build` | Build a mock from a recording: an inferred spec, the recorded answers as examples (dry_run answers the spec) |
+| ANY | `/record/{id}` | The recording proxy: forwards to the recording's upstream (egress purpose record) and keeps the exchange |
+| ANY | `/record/{id}/{*path}` | The recording proxy with a path |
 
 ### Health & Identity
 

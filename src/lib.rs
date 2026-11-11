@@ -63,6 +63,7 @@ pub mod orchestration;
 pub mod portal;
 pub mod random;
 pub mod rbac;
+pub mod recordings;
 pub mod redirects;
 pub mod replay;
 pub mod request_bin;
@@ -161,6 +162,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     settings::router,
     diagnostics::router,
     scenarios::router,
+    recordings::router,
     replay::router,
     checkpoints::router,
     egress::router,

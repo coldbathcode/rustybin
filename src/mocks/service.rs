@@ -223,7 +223,7 @@ pub struct Svc {
 
 // ── Request bodies (the REST bodies, also the MCP tool arguments) ───
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateBody {
     pub name: Option<String>,

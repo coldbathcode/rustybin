@@ -27,6 +27,7 @@ pub mod mocks;
 pub mod portal;
 pub mod projects;
 pub mod prompts;
+pub mod recordings;
 pub mod registry;
 pub mod replay;
 pub mod resources;

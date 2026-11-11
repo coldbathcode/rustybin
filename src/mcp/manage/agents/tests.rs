@@ -1249,6 +1249,14 @@ const OLD_RIGHTS: &[(&str, &str, bool)] = &[
     ("git_signing_key", "admin", false),
     // Core next step 13: a collection or a script as a source, a read.
     ("import_scenario", "read", true),
+    // Demo next step 03: recordings of a real API. Listing is a mocks read,
+    // what a recording kept is captured traffic, the rest builds mocks.
+    ("list_recordings", "read", true),
+    ("start_recording", "manage", false),
+    ("get_recording", "traffic", true),
+    ("stop_recording", "manage", false),
+    ("build_mock_from_recording", "manage", false),
+    ("delete_recording", "manage", false),
 ];
 
 /// The 0.4 ceilings, by right: `read-only` a read-only tool that is not a

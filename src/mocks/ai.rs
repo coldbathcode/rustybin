@@ -399,6 +399,7 @@ fn merge_examples(
                 ExampleSource::Ai => "ai",
                 ExampleSource::Generated => "generated",
                 ExampleSource::User => "user",
+                ExampleSource::Recorded => "recorded",
             };
             for (i, value) in list.iter().enumerate() {
                 if slot.len() >= MAX_STORED_EXAMPLES {

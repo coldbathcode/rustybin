@@ -230,6 +230,8 @@ pub enum ExampleSource {
     Ai,
     /// Produced by the deterministic generator ("Use generated values").
     Generated,
+    /// What a real API answered, through a recording (`crate::recordings`).
+    Recorded,
 }
 
 impl ExampleSource {
@@ -238,6 +240,7 @@ impl ExampleSource {
             ExampleSource::User => "user",
             ExampleSource::Ai => "ai",
             ExampleSource::Generated => "generated",
+            ExampleSource::Recorded => "recorded",
         }
     }
 }

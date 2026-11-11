@@ -836,6 +836,20 @@ pub static TOOLS: &[ToolDef] = &[
         "document": { "type": "string", "description": "The text of the collection, the script or the recording (JSON or YAML)" },
         "format": { "type": "string", "enum": ["har", "captures", "postman", "artillery"], "description": "The format, when it should not be read from the document" },
     }), &["document"])),
+    tool!("list_recordings", "Recordings", "The caller's recordings of real APIs: each one's upstream, proxy URL, state (recording or stopped) and counts.", ToolNeed::Perm(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("start_recording", "Start a recording", "Record a real API to mock it: answers a proxy URL. Requests sent to the proxy URL go to the upstream (the real API's base URL) through the outbound policy (purpose record: its host must be in RUSTYBIN_EGRESS_ALLOW) and the exchanges are kept, credentials removed. Then build_mock_from_recording. Starting sends nothing.", ToolNeed::Perm(Permission::MocksWrite), ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
+        "name": super::recordings::name_prop(),
+        "upstream": { "type": "string", "description": "The real API's base URL, such as https://api.example.com/v1" },
+        "mock": { "type": "string", "description": "The mock it becomes (default: the recording's name)" },
+    }), &["name", "upstream"])),
+    tool!("get_recording", "Get a recording", "One recording with what it kept (requests and answers of the real API, credentials removed), under untrusted_recorded.", ToolNeed::Perm(Permission::TrafficRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "name": super::recordings::name_prop() }), &["name"])),
+    tool!("stop_recording", "Stop a recording", "Stop recording: the proxy refuses from now on; what was kept stays for the build.", ToolNeed::Perm(Permission::MocksWrite), ro=false, destructive=false, idem=true, confirm=false, || obj(json!({ "name": super::recordings::name_prop() }), &["name"])),
+    tool!("build_mock_from_recording", "Build a mock from a recording", "Build a mock from what a recording kept: a spec inferred by code (operations with path templates, parameters and schemas from the traffic) and the recorded answers as stored examples (source recorded), deployed like any other mock. dry_run answers the spec (under untrusted_spec) and changes nothing. Answers what looked like personal data, by kind and operation, never the value.", ToolNeed::Perm(Permission::MocksWrite), ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
+        "name": super::recordings::name_prop(),
+        "mock": { "type": "string", "description": "Another mock name than the recording's" },
+        "dry_run": { "type": "boolean", "default": false },
+    }), &["name"])),
+    tool!("delete_recording", "Delete a recording", "Delete a recording and what it kept; the mock it built stays. Destructive: confirmed.", ToolNeed::Perm(Permission::MocksWrite), ro=false, destructive=true, idem=true, confirm=true, || obj(json!({ "name": super::recordings::name_prop(), "confirm": confirm_prop() }), &["name"])),
 ];
 
 /// The `project` property of a tool that creates or lists.
@@ -1416,6 +1430,15 @@ async fn run_tool(
         // Secret requests
         "request_secret" => super::secrets::request_secret(ctx, access, agent, args, params).await,
         "get_secret_request" => super::secrets::get_secret_request(ctx, access, agent, args),
+        // Recordings of a real API
+        "list_recordings" => super::recordings::list_recordings(ctx, access),
+        "start_recording" => super::recordings::start_recording(ctx, access, args).await,
+        "get_recording" => super::recordings::get_recording(ctx, access, args),
+        "stop_recording" => super::recordings::stop_recording(ctx, access, args),
+        "build_mock_from_recording" => {
+            super::recordings::build_mock_from_recording(ctx, access, args).await
+        }
+        "delete_recording" => super::recordings::delete_recording(ctx, args, params).await,
 
         _ => return Err(RpcError::invalid_params(format!("Unknown tool: {name}"))),
     })
