@@ -55,6 +55,119 @@ pub const PREFLIGHT_ALLOWED: &str = "preflight from allowed_origin";
 pub const PREFLIGHT_REFUSED: &str = "preflight from refused_origin";
 pub const SIMPLE_ALLOWED: &str = "GET from allowed_origin";
 
+/// The upstream of the AI scenarios: this instance's OpenAI chat
+/// completions, and the second target of `ai_model_fallback` and
+/// `ai_provider_balance` (the same API at another path, so no format
+/// translation is needed and the check tells the targets apart by path).
+pub const AI_PRIMARY_PATH: &str = "/ai/openai/v1/chat/completions";
+pub const AI_SECOND_PATH: &str = "/ai/v1/chat/completions";
+/// The model and completion size of every AI check request.
+pub const AI_MODEL: &str = "gpt-4o-mini";
+pub const AI_MAX_TOKENS: u64 = 100;
+/// The token budget the check assumes when the caller gives none, and its
+/// bounds.
+pub const DEFAULT_TOKEN_LIMIT: u64 = 500;
+pub const MIN_TOKEN_LIMIT: u64 = 100;
+pub const MAX_TOKEN_LIMIT: u64 = 2000;
+/// The most requests an `ai_token_limit` check sends.
+pub const MAX_TOKEN_REQUESTS: usize = 40;
+/// The requests of an `ai_provider_balance` check, and the share each
+/// target needs when the caller gives none (percent).
+pub const BALANCE_REQUESTS: usize = 10;
+pub const DEFAULT_MIN_SHARE: u64 = 20;
+/// The native errors the primary target of `ai_model_fallback` answers.
+pub const FAIL_KINDS: &[&str] = &[
+    "rate_limit",
+    "overloaded",
+    "server_error",
+    "unavailable",
+    "timeout",
+];
+/// The fake personal data the guard scenarios plant (the AI mock's scripted
+/// customer record answers the same values), named by kind.
+pub const PLANTED: &[(&str, &str)] = &[
+    ("SSN", "123-45-6789"),
+    ("card number", "4111 1111 1111 1111"),
+    ("card number", "4111111111111111"),
+    ("email", "jane.doe@example.com"),
+    ("phone", "+1-555-0100"),
+];
+/// What marks the planted prompt injection (`crate::mcp::tools::INJECTION_SAMPLE`
+/// starts with it), compared without case.
+pub const INJECTION_MARK: &str = "ignore all previous instructions";
+/// The prompts of the AI checks: `{n}` is a word unique to the check, so a
+/// cache filled by an earlier check does not answer this one.
+pub const PROMPT_LONG: &str = "Write a long article about API gateways. Reference {n}.";
+/// The questions of the `ai_semantic_cache` checks, one a check in turn
+/// (from a point chosen per run), so a cache an earlier check filled does
+/// not answer the next: a semantic cache rightly takes the same question
+/// with another reference word for the same prompt. Each is asked as is,
+/// in other case and punctuation, and with a word more ([`cache_prompts`]).
+pub const CACHE_TOPICS: &[&str] = &[
+    "what is the refund policy for damaged items",
+    "how long does standard shipping take to canada",
+    "which payment methods does the online store accept",
+    "can i change the delivery address after ordering",
+    "how do i reset the password of my account",
+    "what are the opening hours of the flagship store",
+    "is there a warranty on refurbished laptops",
+    "how do i cancel a monthly subscription plan",
+    "where can i download my past invoices",
+    "do you offer discounts for students and teachers",
+    "how can i track a parcel sent by express courier",
+    "what happens if a gift card expires",
+];
+/// The different prompt of each `ai_semantic_cache` check (none of them
+/// near a question of [`CACHE_TOPICS`]).
+pub const CACHE_OTHERS: &[&str] = &[
+    "explain the rules of cricket to a beginner",
+    "suggest a vegetarian recipe with chickpeas and spinach",
+    "summarise the plot of a famous detective novel",
+    "list three exercises that strengthen the lower back",
+    "describe how volcanoes form along tectonic plates",
+    "recommend houseplants that survive in low light",
+    "translate good morning into five languages",
+    "compare electric and petrol lawn mowers",
+    "outline a two day walking tour of rome",
+    "write a haiku about autumn rain on a lake",
+    "give tips for learning to play the cello",
+    "explain why the sky looks blue at noon",
+];
+
+/// The four prompts of an `ai_semantic_cache` check of `round`: a
+/// question, the same in other case and punctuation, the same with a word
+/// more, and a different one. `word` is the check's own word.
+pub fn cache_prompts(round: usize, word: &str) -> [String; 4] {
+    let topic = CACHE_TOPICS[round % CACHE_TOPICS.len()];
+    let other = CACHE_OTHERS[round % CACHE_OTHERS.len()];
+    [
+        format!("{topic} reference {word}"),
+        format!("{}? Reference {word}.", capitalised(topic)),
+        format!("Please, {topic}? Reference {word}."),
+        format!("{}? Reference {word}.", capitalised(other)),
+    ]
+}
+
+/// `text` with its first letter upper case.
+fn capitalised(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+pub const PROMPT_CLEAN: &str = "What are the opening hours of the support desk? Reference {n}.";
+pub const PROMPT_PII: &str = "Update my billing: my SSN is 123-45-6789, my card is 4111 1111 1111 1111 and my email is jane.doe@example.com. Reference {n}.";
+pub const PROMPT_RECORD: &str = "Show me the customer record for account 42. Reference {n}.";
+/// The labels of the AI checks' requests.
+pub const LABEL_CACHE_FIRST: &str = "first prompt";
+pub const LABEL_CACHE_CASE: &str = "same prompt, other case and punctuation";
+pub const LABEL_CACHE_PLEASE: &str = "same prompt, reworded";
+pub const LABEL_CACHE_OTHER: &str = "a different prompt";
+pub const LABEL_CLEAN: &str = "clean prompt";
+pub const LABEL_PII: &str = "prompt with personal data";
+pub const LABEL_INJECTION: &str = "prompt injection";
+
 /// What a test parameter holds, with its bounds and default.
 #[derive(Clone, Copy, Debug)]
 pub enum Kind {
@@ -68,6 +181,11 @@ pub enum Kind {
     HeaderName { default: &'static str },
     /// A header value; optional (no default).
     HeaderValue,
+    /// One of a fixed set of words.
+    Choice {
+        options: &'static [&'static str],
+        default: &'static str,
+    },
 }
 
 /// A test parameter of a check.
@@ -95,6 +213,9 @@ impl Param {
             Kind::HeaderValue => {
                 format!("optional, at most {MAX_HEADER_VALUE_LEN} visible characters")
             }
+            Kind::Choice { options, default } => {
+                format!("one of {}, default {default}", options.join(", "))
+            }
         }
     }
 
@@ -112,6 +233,9 @@ impl Param {
                 "type": "string", "format": "header-name", "maxLength": MAX_HEADER_NAME_LEN, "default": default
             }),
             Kind::HeaderValue => json!({ "type": "string", "maxLength": MAX_HEADER_VALUE_LEN }),
+            Kind::Choice { options, default } => {
+                json!({ "type": "string", "enum": options, "default": default })
+            }
         };
         match v {
             Value::Object(m) => m,
@@ -177,6 +301,11 @@ impl Param {
                 }
                 Ok(Value::String(s.to_string()))
             }
+            Kind::Choice { options, .. } => v
+                .as_str()
+                .and_then(|s| options.iter().find(|o| **o == s))
+                .map(|o| Value::String(o.to_string()))
+                .ok_or_else(|| self.refuse()),
         }
     }
 }
@@ -337,6 +466,43 @@ pub const ADD_RESPONSE_HEADER: Param = Param {
     },
 };
 
+pub const TOKEN_LIMIT: Param = Param {
+    name: "token_limit",
+    label: "Token budget on the gateway",
+    description: "The tokens the gateway lets the route use in its window (prompt and completion): the check sends requests until the gateway refuses one",
+    kind: Kind::Integer {
+        min: MIN_TOKEN_LIMIT,
+        max: MAX_TOKEN_LIMIT,
+        default: DEFAULT_TOKEN_LIMIT,
+    },
+};
+pub const FAIL_KIND: Param = Param {
+    name: "fail_kind",
+    label: "How the primary target fails",
+    description: "The provider error the primary target answers every request with (rate_limit 429, overloaded and unavailable 503, server_error 500, timeout 504)",
+    kind: Kind::Choice {
+        options: FAIL_KINDS,
+        default: "rate_limit",
+    },
+};
+pub const SKIP_INJECTION: Param = Param {
+    name: "skip_injection",
+    label: "Leave out the prompt injection",
+    description:
+        "Whether the check leaves out the prompt injection, for a guard of personal data only",
+    kind: Kind::Bool { default: false },
+};
+pub const MIN_SHARE: Param = Param {
+    name: "min_share",
+    label: "Least share per target (%)",
+    description: "The least share of the requests each target must receive, in percent (20 suits an even split and a weighted one down to 80/20)",
+    kind: Kind::Integer {
+        min: 1,
+        max: 50,
+        default: DEFAULT_MIN_SHARE,
+    },
+};
+
 /// Every test parameter, whatever the scenario (the MCP tool, the CLI and
 /// the OpenAPI document list these).
 pub const PARAMS: &[Param] = &[
@@ -350,6 +516,10 @@ pub const PARAMS: &[Param] = &[
     ADD_REQUEST_VALUE,
     REMOVE_REQUEST_HEADER,
     ADD_RESPONSE_HEADER,
+    TOKEN_LIMIT,
+    FAIL_KIND,
+    SKIP_INJECTION,
+    MIN_SHARE,
 ];
 
 /// The scenarios that take a parameter.
@@ -397,6 +567,11 @@ pub struct Params {
     pub add_request_value: Option<String>,
     pub remove_request_header: String,
     pub add_response_header: String,
+    pub token_limit: u64,
+    /// One of [`FAIL_KINDS`].
+    pub fail_kind: &'static str,
+    pub skip_injection: bool,
+    pub min_share: u64,
 }
 
 impl Default for Params {
@@ -412,6 +587,10 @@ impl Default for Params {
             add_request_value: None,
             remove_request_header: DEFAULT_REMOVE_REQUEST_HEADER.to_ascii_lowercase(),
             add_response_header: DEFAULT_ADD_RESPONSE_HEADER.to_ascii_lowercase(),
+            token_limit: DEFAULT_TOKEN_LIMIT,
+            fail_kind: "rate_limit",
+            skip_injection: false,
+            min_share: DEFAULT_MIN_SHARE,
         }
     }
 }
@@ -431,6 +610,14 @@ impl Params {
             "add_request_value" => self.add_request_value = Some(text()),
             "remove_request_header" => self.remove_request_header = text(),
             "add_response_header" => self.add_response_header = text(),
+            "token_limit" => self.token_limit = v.as_u64().unwrap_or_default(),
+            "fail_kind" => {
+                if let Some(k) = FAIL_KINDS.iter().find(|k| v.as_str() == Some(**k)) {
+                    self.fail_kind = k;
+                }
+            }
+            "skip_injection" => self.skip_injection = v.as_bool().unwrap_or_default(),
+            "min_share" => self.min_share = v.as_u64().unwrap_or_default(),
             _ => {}
         }
     }
@@ -444,6 +631,22 @@ pub enum Upstream {
     /// A `/flaky` route of this instance; the run's counters are reset when
     /// it ends.
     Flaky(&'static str),
+    /// This instance's AI chat completions ([`AI_PRIMARY_PATH`]), steered
+    /// for the run's own requests only by the run's [`AiProfile`]; with
+    /// `second`, a second target at [`AI_SECOND_PATH`].
+    Ai { second: bool },
+}
+
+/// How the AI mock answers the requests of one AI scenario run (and only
+/// those: they carry the run's secret session). Kept in the run, so ending
+/// the run ends it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AiProfile {
+    /// Requests to [`AI_PRIMARY_PATH`] fail with this kind (one of
+    /// [`FAIL_KINDS`]).
+    pub fail_primary: Option<&'static str>,
+    /// The reply mode (an AI mock mode name), over the request's own.
+    pub mode: Option<&'static str>,
 }
 
 pub struct Scenario {
@@ -462,6 +665,8 @@ pub struct Scenario {
 }
 
 const ROUTE: &str = "Create a route on the gateway whose upstream is {upstream}, and let it forward the X-Rustybin-Session request header (the check uses it to see which upstream requests each of its requests caused).";
+const AI_ROUTE: &str = "Create an AI route on the gateway (OpenAI chat completions format) whose upstream is {upstream}, and let it forward the X-Rustybin-Session request header (the check uses it to see which upstream requests each of its requests caused). The upstream needs no credential.";
+const AI_CHECK: &str = "Check with the URL the gateway serves the route's chat completions at: the check sends POST requests in the OpenAI chat completions format (model gpt-4o-mini, max_tokens 100).";
 
 pub static SCENARIOS: &[Scenario] = &[
     Scenario {
@@ -587,6 +792,89 @@ pub static SCENARIOS: &[Scenario] = &[
             ADD_RESPONSE_HEADER,
         ],
     },
+    Scenario {
+        id: "ai_token_limit",
+        title: "AI token rate limiting",
+        proves: "The gateway limits an AI route by the tokens it uses, not by its requests: once the budget is spent it answers 429, and the refused requests never reach the model.",
+        setup: &[
+            AI_ROUTE,
+            "Limit the route by tokens (prompt plus completion, from the usage the model answers), a few hundred per minute (500, say), counted per client or for the whole route. Each check request uses a little over 100 tokens.",
+            AI_CHECK,
+            "Check with the token budget you set (token_limit): the check sends requests until the gateway refuses one. Wait for the window to pass before checking again.",
+        ],
+        request_path: "",
+        upstream: Upstream::Ai { second: false },
+        params: &[TOKEN_LIMIT],
+    },
+    Scenario {
+        id: "ai_model_fallback",
+        title: "AI model fallback",
+        proves: "When the primary model answers a provider error (429 by default), the gateway retries the request on a fallback target and the client sees a success.",
+        setup: &[
+            AI_ROUTE,
+            "Give the route a fallback: on an error from {upstream} (429, 5xx), send the request to {second_upstream} (the same API at another path; any other provider path of this instance works too). For this run, {upstream} answers every request with the error of fail_kind.",
+            AI_CHECK,
+            "Check with the kind of error the primary target should answer (fail_kind, rate_limit by default).",
+        ],
+        request_path: "",
+        upstream: Upstream::Ai { second: true },
+        params: &[FAIL_KIND],
+    },
+    Scenario {
+        id: "ai_semantic_cache",
+        title: "AI semantic caching",
+        proves: "The gateway answers prompts that mean the same from its cache (other case, punctuation, a word more): only the first reaches the model, and a different prompt still does.",
+        setup: &[
+            AI_ROUTE,
+            "Turn on semantic caching for the route, with a similarity threshold of 0.9 or less. When the gateway needs embeddings, this instance serves them at {base}/ai/openai/v1/embeddings (similar texts get close vectors).",
+            AI_CHECK,
+            "The check sends a prompt, the same prompt in other case and punctuation, the same prompt with a word more, then a different prompt. Each check asks another question (twelve in turn), so what an earlier check left in the cache does not answer it.",
+        ],
+        request_path: "",
+        upstream: Upstream::Ai { second: false },
+        params: &[],
+    },
+    Scenario {
+        id: "ai_prompt_guard",
+        title: "AI prompt guard",
+        proves: "The gateway stops personal data and a prompt injection on the way to the model, by refusing the prompt or redacting it, and lets a clean prompt through.",
+        setup: &[
+            AI_ROUTE,
+            "Turn on a prompt guard for the route that refuses or redacts personal data (SSN, card numbers, email addresses) and refuses prompt injections (\"ignore all previous instructions\").",
+            AI_CHECK,
+            "The check sends a clean prompt, a prompt with fake personal data (SSN 123-45-6789, card 4111 1111 1111 1111, jane.doe@example.com) and, unless skip_injection is set, a prompt injection.",
+        ],
+        request_path: "",
+        upstream: Upstream::Ai { second: false },
+        params: &[SKIP_INJECTION],
+    },
+    Scenario {
+        id: "ai_response_guard",
+        title: "AI response guard",
+        proves: "The gateway removes personal data from what the model answers before the client sees it.",
+        setup: &[
+            AI_ROUTE,
+            "Turn on a response guard for the route that redacts or blocks personal data (SSN, card numbers, email addresses, phone numbers) in answers. For this run, {upstream} answers with a fake customer record.",
+            AI_CHECK,
+        ],
+        request_path: "",
+        upstream: Upstream::Ai { second: false },
+        params: &[],
+    },
+    Scenario {
+        id: "ai_provider_balance",
+        title: "AI load balancing",
+        proves: "The gateway spreads an AI route's requests across two targets, by its balancing rule, and every request succeeds.",
+        setup: &[
+            AI_ROUTE,
+            "Give the route two targets, {upstream} and {second_upstream} (the same API at another path), balanced round robin or by weight.",
+            AI_CHECK,
+            "Check with the least share of the requests each target should get (min_share, 20 percent by default): the check sends 10 requests.",
+        ],
+        request_path: "",
+        upstream: Upstream::Ai { second: true },
+        params: &[MIN_SHARE],
+    },
 ];
 
 pub fn find(id: &str) -> Option<&'static Scenario> {
@@ -594,25 +882,61 @@ pub fn find(id: &str) -> Option<&'static Scenario> {
 }
 
 impl Scenario {
-    /// The setup steps for one run.
-    pub fn setup_for(&self, upstream: &str, key: Option<&str>) -> Vec<String> {
+    /// The setup steps for one run (`second`: the second target's URL).
+    pub fn setup_for(
+        &self,
+        upstream: &str,
+        second: Option<&str>,
+        key: Option<&str>,
+    ) -> Vec<String> {
+        let base = upstream.strip_suffix(AI_PRIMARY_PATH).unwrap_or("{base}");
         self.setup
             .iter()
             .map(|s| {
                 s.replace("{upstream}", upstream)
+                    .replace("{second_upstream}", second.unwrap_or("{second_upstream}"))
+                    .replace("{base}", base)
                     .replace("{key}", key.unwrap_or(""))
                     .replace("{slow_ms}", &SLOW_MS.to_string())
             })
             .collect()
     }
 
-    /// How many requests a check sends (at most, for `circuit_breaker`).
+    /// `http` or `ai`: the console groups the scenarios by it.
+    pub fn group(&self) -> &'static str {
+        match self.upstream {
+            Upstream::Ai { .. } => "ai",
+            _ => "http",
+        }
+    }
+
+    /// How the AI mock answers a run's requests before its first check
+    /// (each check sets it again from its parameters: [`Self::ai_profile`]).
+    pub fn ai_profile(&self, p: &Params) -> AiProfile {
+        match self.id {
+            "ai_model_fallback" => AiProfile {
+                fail_primary: Some(p.fail_kind),
+                mode: None,
+            },
+            "ai_response_guard" => AiProfile {
+                fail_primary: None,
+                mode: Some("scripted"),
+            },
+            _ => AiProfile::default(),
+        }
+    }
+
+    /// How many requests a check sends (at most, for `circuit_breaker`
+    /// and `ai_token_limit`).
     pub fn requests(&self, limit: u32) -> usize {
         match self.id {
-            "retries" | "caching" | "cors" => 3,
+            "retries" | "caching" | "cors" | "ai_model_fallback" | "ai_prompt_guard" => 3,
             "rate_limiting" => (limit * 2) as usize,
             "credential_injection" | "request_size_limit" => 2,
             "circuit_breaker" => MAX_BREAKER_REQUESTS + BREAKER_TRIALS,
+            "ai_token_limit" => MAX_TOKEN_REQUESTS,
+            "ai_semantic_cache" => 4,
+            "ai_provider_balance" => BALANCE_REQUESTS,
             _ => 1,
         }
     }
@@ -655,12 +979,17 @@ impl Scenario {
         json!({
             "id": self.id,
             "title": self.title,
+            "group": self.group(),
             "proves": self.proves,
             "upstream": match self.upstream {
                 Upstream::Mock => "a mock created for the run".to_string(),
                 Upstream::Flaky(p) => format!("{p} on this instance"),
+                Upstream::Ai { second: false } => format!("{AI_PRIMARY_PATH} on this instance"),
+                Upstream::Ai { second: true } => {
+                    format!("{AI_PRIMARY_PATH} and {AI_SECOND_PATH} on this instance")
+                }
             },
-            "setup": self.setup_for("{upstream}", Some("{key}")),
+            "setup": self.setup_for("{upstream}", Some("{second_upstream}"), Some("{key}")),
             "requests": self.requests(DEFAULT_LIMIT),
             "parameters": self.parameters(),
         })
@@ -836,9 +1165,334 @@ impl Scenario {
             "request_size_limit" => size_limit(sent, p.size_limit),
             "cors" => cors(sent, p),
             "header_transformation" => transformation(sent, p),
+            "ai_token_limit" => ai_token_limit(sent, p.token_limit),
+            "ai_model_fallback" => ai_fallback(sent, p.fail_kind),
+            "ai_semantic_cache" => ai_cache(sent),
+            "ai_prompt_guard" => ai_prompt_guard(sent, !p.skip_injection),
+            "ai_response_guard" => ai_response_guard(sent),
+            "ai_provider_balance" => ai_balance(sent, p.min_share),
             _ => Vec::new(),
         }
     }
+}
+
+/// The model calls among a request's upstream requests (a gateway's own
+/// embedding calls for a semantic cache are not model calls).
+fn model_calls(s: &Sent) -> usize {
+    s.upstream_paths
+        .iter()
+        .filter(|p| !p.contains("embeddings"))
+        .count()
+}
+
+/// The kinds of planted personal data in `text`, in order, each once.
+pub fn planted_in(text: &str) -> Vec<&'static str> {
+    let mut kinds: Vec<&'static str> = Vec::new();
+    for (kind, value) in PLANTED {
+        if text.contains(value) && !kinds.contains(kind) {
+            kinds.push(kind);
+        }
+    }
+    kinds
+}
+
+/// Does `text` carry the planted prompt injection?
+pub fn injection_in(text: &str) -> bool {
+    text.to_ascii_lowercase().contains(INJECTION_MARK)
+}
+
+/// `ai_token_limit`: refusals once about the budget reached the model, and
+/// none of them reached it.
+fn ai_token_limit(sent: &[Sent], limit: u64) -> Vec<Expectation> {
+    let n = sent.len();
+    let refused: Vec<&Sent> = sent.iter().filter(|s| s.status == 429).collect();
+    let first = sent.iter().position(|s| s.status == 429);
+    let before = &sent[..first.unwrap_or(n)];
+    // What the model used before the first refusal, from the usage of the
+    // answers that reached it.
+    let used: u64 = before
+        .iter()
+        .filter(|s| model_calls(s) > 0)
+        .filter_map(|s| s.tokens)
+        .sum();
+    let per = sent.iter().find_map(|s| s.tokens).unwrap_or(0);
+    let lo = limit.saturating_sub(2 * per);
+    let hi = limit + limit / 4 + 2 * per;
+    let leaked = refused.iter().filter(|s| !s.upstream.is_empty()).count();
+    vec![
+        Expectation::new(
+            "The gateway refused requests once the token budget was spent",
+            "429 for at least one request",
+            format!(
+                "429 for {} of {n} ({})",
+                refused.len(),
+                list(sent.iter().map(|s| s.status_text()))
+            ),
+            !refused.is_empty(),
+        ),
+        Expectation::new(
+            "Refused requests never reached the model",
+            "0 upstream requests for each 429",
+            format!("{leaked} of {} reached it", refused.len()),
+            !refused.is_empty() && leaked == 0,
+        ),
+        Expectation::new(
+            "The budget was counted in tokens",
+            format!("the first 429 after {lo} to {hi} tokens reached the model ({per} tokens per request, budget {limit})"),
+            match (first, per) {
+                (_, 0) => "the answers carried no usage".to_string(),
+                (None, _) => format!("no 429 after {used} tokens"),
+                (Some(i), _) => format!("the first 429 (request {}) after {used} tokens", i + 1),
+            },
+            first.is_some() && per > 0 && (lo..=hi).contains(&used),
+        ),
+    ]
+}
+
+/// `ai_model_fallback`: each request failed on the primary target, then
+/// succeeded on another.
+fn ai_fallback(sent: &[Sent], kind: &str) -> Vec<Expectation> {
+    let n = sent.len();
+    let ok2xx = |c: u16| (200..300).contains(&c);
+    let count = sent.iter().filter(|s| ok2xx(s.status)).count();
+    let primary_failed = |s: &Sent| {
+        s.upstream_paths.first().map(String::as_str) == Some(AI_PRIMARY_PATH)
+            && s.upstream.first().is_some_and(|c| *c >= 400)
+    };
+    let fell_back = |s: &Sent| {
+        s.upstream_paths
+            .iter()
+            .zip(&s.upstream)
+            .skip(1)
+            .any(|(p, c)| p != AI_PRIMARY_PATH && ok2xx(*c))
+    };
+    let route = |s: &Sent| {
+        let hops: Vec<String> = s
+            .upstream_paths
+            .iter()
+            .zip(&s.upstream)
+            .map(|(p, c)| {
+                let target = if p == AI_PRIMARY_PATH {
+                    "primary"
+                } else {
+                    "fallback"
+                };
+                format!("{target} {c}")
+            })
+            .collect();
+        if hops.is_empty() {
+            "nothing upstream".to_string()
+        } else {
+            hops.join(" then ")
+        }
+    };
+    vec![
+        Expectation::new(
+            "Every request succeeded through the gateway",
+            format!("2xx for {n} of {n}"),
+            format!(
+                "2xx for {count} of {n} ({})",
+                list(sent.iter().map(|s| s.status_text()))
+            ),
+            count == n,
+        ),
+        Expectation::new(
+            "The primary target was tried first and failed",
+            format!("the first upstream request of each went to {AI_PRIMARY_PATH} and got its {kind} error"),
+            list(sent.iter().map(route)),
+            n > 0 && sent.iter().all(primary_failed),
+        ),
+        Expectation::new(
+            "The gateway fell back to another target",
+            "after the failure, an upstream request of each to another target succeeded",
+            format!("{} of {n} fell back", sent.iter().filter(|s| fell_back(s)).count()),
+            n > 0 && sent.iter().all(fell_back),
+        ),
+    ]
+}
+
+/// `ai_semantic_cache`: the first and the different prompt reached the
+/// model, the two rewordings did not.
+fn ai_cache(sent: &[Sent]) -> Vec<Expectation> {
+    let by = |label: &str| sent.iter().find(|s| s.label == Some(label));
+    let calls = |s: Option<&Sent>| s.map(model_calls).unwrap_or(0);
+    let first = by(LABEL_CACHE_FIRST);
+    let similar = [by(LABEL_CACHE_CASE), by(LABEL_CACHE_PLEASE)];
+    let other = by(LABEL_CACHE_OTHER);
+    let n = sent.len();
+    let ok = sent
+        .iter()
+        .filter(|s| (200..300).contains(&s.status))
+        .count();
+    let similar_calls: Vec<usize> = similar.iter().map(|s| calls(*s)).collect();
+    vec![
+        Expectation::new(
+            "Every request got an answer",
+            format!("2xx for {n} of {n}"),
+            format!(
+                "2xx for {ok} of {n} ({})",
+                list(sent.iter().map(|s| s.status_text()))
+            ),
+            n == 4 && ok == n,
+        ),
+        Expectation::new(
+            "The first prompt reached the model",
+            "1 model request for it",
+            format!("{} model request(s)", calls(first)),
+            calls(first) >= 1,
+        ),
+        Expectation::new(
+            "Prompts that mean the same were answered from the cache",
+            "0 model requests for the same prompt in other case and punctuation, and for it with a word more",
+            format!(
+                "{} and {} model request(s)",
+                similar_calls[0], similar_calls[1]
+            ),
+            similar.iter().all(|s| s.is_some_and(|s| (200..300).contains(&s.status)))
+                && similar_calls.iter().all(|c| *c == 0),
+        ),
+        Expectation::new(
+            "A different prompt reached the model",
+            "1 model request for it",
+            format!("{} model request(s)", calls(other)),
+            calls(other) >= 1,
+        ),
+    ]
+}
+
+/// What became of a guarded prompt: refused by the gateway, redacted, or
+/// what reached the model.
+fn guarded(s: Option<&Sent>, found: impl Fn(&str) -> Vec<&'static str>) -> (bool, String) {
+    let Some(s) = s else {
+        return (false, "not sent".into());
+    };
+    if s.status == 0 {
+        return (false, "no answer".into());
+    }
+    if s.upstream.is_empty() {
+        return (true, format!("refused by the gateway ({})", s.status));
+    }
+    let mut kinds: Vec<&'static str> = Vec::new();
+    for body in &s.upstream_bodies {
+        for k in found(body) {
+            if !kinds.contains(&k) {
+                kinds.push(k);
+            }
+        }
+    }
+    if kinds.is_empty() {
+        (true, "redacted before the model".into())
+    } else {
+        (
+            false,
+            format!("reached the model with: {}", kinds.join(", ")),
+        )
+    }
+}
+
+/// `ai_prompt_guard`: the clean prompt through, the planted data and the
+/// injection stopped.
+fn ai_prompt_guard(sent: &[Sent], injection: bool) -> Vec<Expectation> {
+    let by = |label: &str| sent.iter().find(|s| s.label == Some(label));
+    let clean = by(LABEL_CLEAN);
+    let mut out = vec![Expectation::new(
+        "A clean prompt went through to the model",
+        "2xx, and it reached the model",
+        match clean {
+            None => "not sent".to_string(),
+            Some(s) => format!("{}, {} model request(s)", s.status_text(), model_calls(s)),
+        },
+        clean.is_some_and(|s| (200..300).contains(&s.status) && model_calls(s) > 0),
+    )];
+    let (ok, seen) = guarded(by(LABEL_PII), planted_in);
+    out.push(Expectation::new(
+        "Personal data never reached the model",
+        "the prompt refused by the gateway, or the SSN, card number and email removed from it",
+        seen,
+        ok,
+    ));
+    if injection {
+        let (ok, seen) = guarded(by(LABEL_INJECTION), |t| {
+            if injection_in(t) {
+                vec!["the injection"]
+            } else {
+                Vec::new()
+            }
+        });
+        out.push(Expectation::new(
+            "The prompt injection never reached the model",
+            "the prompt refused by the gateway, or the injection removed from it",
+            seen,
+            ok,
+        ));
+    }
+    out
+}
+
+/// `ai_response_guard`: the model answered the record, the client got none
+/// of it.
+fn ai_response_guard(sent: &[Sent]) -> Vec<Expectation> {
+    let s = sent.first();
+    let leaked = s
+        .and_then(|s| s.body.as_deref())
+        .map(planted_in)
+        .unwrap_or_default();
+    vec![
+        Expectation::new(
+            "The request reached the model",
+            "1 model request (it answers a fake customer record)",
+            format!("{} model request(s)", s.map(model_calls).unwrap_or(0)),
+            s.is_some_and(|s| model_calls(s) > 0),
+        ),
+        Expectation::new(
+            "No personal data reached the client",
+            "an answer without the SSN, card number, email and phone (redacted, or the answer refused)",
+            match s {
+                None => "not sent".to_string(),
+                Some(s) if s.status == 0 => "no answer".to_string(),
+                Some(s) if leaked.is_empty() => format!("{}, none of it", s.status_text()),
+                Some(s) => format!("{} with: {}", s.status_text(), leaked.join(", ")),
+            },
+            s.is_some_and(|s| s.status != 0) && leaked.is_empty(),
+        ),
+    ]
+}
+
+/// `ai_provider_balance`: every request through, each target its share.
+fn ai_balance(sent: &[Sent], min_share: u64) -> Vec<Expectation> {
+    let n = sent.len();
+    let ok = sent
+        .iter()
+        .filter(|s| (200..300).contains(&s.status))
+        .count();
+    // The target that answered each request: its last model call.
+    let target = |s: &Sent| {
+        s.upstream_paths
+            .iter()
+            .rev()
+            .find(|p| !p.contains("embeddings"))
+            .map(|p| p == AI_PRIMARY_PATH)
+    };
+    let primary = sent.iter().filter(|s| target(s) == Some(true)).count();
+    let other = sent.iter().filter(|s| target(s) == Some(false)).count();
+    let need = (n as u64 * min_share).div_ceil(100) as usize;
+    vec![
+        Expectation::new(
+            "Every request succeeded through the gateway",
+            format!("2xx for {n} of {n}"),
+            format!(
+                "2xx for {ok} of {n} ({})",
+                list(sent.iter().map(|s| s.status_text()))
+            ),
+            n > 0 && ok == n,
+        ),
+        Expectation::new(
+            "Both targets received requests",
+            format!("at least {need} of {n} ({min_share}%) for each target"),
+            format!("{primary} to the first target, {other} to the second"),
+            n > 0 && primary >= need.max(1) && other >= need.max(1),
+        ),
+    ]
 }
 
 /// An answer's `Access-Control-Allow-Origin` in words, against `origin`
@@ -1173,6 +1827,20 @@ pub struct Sent {
     /// captured them; never shown.
     #[serde(skip)]
     pub upstream_headers: Vec<Vec<(String, String)>>,
+    /// The path of each upstream request it caused (the AI checks tell the
+    /// targets and the embedding calls apart by it); never shown.
+    #[serde(skip)]
+    pub upstream_paths: Vec<String>,
+    /// The body of each upstream request it caused, as the inspector kept
+    /// it (bounded); never shown.
+    #[serde(skip)]
+    pub upstream_bodies: Vec<String>,
+    /// The answer's body (the AI checks, bounded); never shown.
+    #[serde(skip)]
+    pub body: Option<String>,
+    /// The tokens the answer says the model used (`usage.total_tokens`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
 }
 
 impl Sent {

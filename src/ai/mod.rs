@@ -79,6 +79,9 @@ pub struct AiShared {
     pub prompt_cache: PromptCache,
     /// Token counters for `/_rustybin/metrics`.
     pub metrics: Arc<crate::metrics::Metrics>,
+    /// The gateway scenario runs: an AI run's requests (its secret session)
+    /// are answered by its profile (`crate::scenarios::AiProfile`).
+    pub scenarios: Arc<crate::scenarios::Scenarios>,
 }
 
 impl AiShared {
@@ -88,6 +91,7 @@ impl AiShared {
             config: state.config.clone(),
             inspector: state.inspector.clone(),
             metrics: state.metrics.clone(),
+            scenarios: state.scenarios.clone(),
             auth,
             store: RequestStore::new(if public { 200 } else { 1000 }, Duration::from_secs(3600)),
             prompt_cache: PromptCache::new(
@@ -461,9 +465,17 @@ pub async fn ai_layer(
         tokio::time::sleep(Duration::from_millis(latency)).await;
     }
 
-    // Faults: header first, then ?fail= / ?fail_rate=.
-    let fault = header_str(&headers, FAIL_HEADER)
-        .and_then(faults::parse_fail)
+    // A gateway scenario run's own requests: its profile first (the primary
+    // target's error, the reply mode); nobody else's requests match it.
+    let profile = shared.scenarios.ai_profile(&session);
+    let scenario_fault = profile
+        .and_then(|p| p.fail_primary)
+        .filter(|_| path == crate::scenarios::catalog::AI_PRIMARY_PATH)
+        .and_then(faults::parse_fail);
+
+    // Faults: a scenario's, then the header, then ?fail= / ?fail_rate=.
+    let fault = scenario_fault
+        .or_else(|| header_str(&headers, FAIL_HEADER).and_then(faults::parse_fail))
         .or_else(|| {
             let rate = query.get("fail_rate").and_then(|r| faults::parse_rate(r));
             let kind = query.get("fail").and_then(|k| faults::parse_fail(k));
@@ -498,7 +510,10 @@ pub async fn ai_layer(
         }
     }
 
-    let mode_header = header_str(&headers, MODE_HEADER).and_then(Mode::parse);
+    let mode_header = profile
+        .and_then(|p| p.mode)
+        .and_then(Mode::parse)
+        .or_else(|| header_str(&headers, MODE_HEADER).and_then(Mode::parse));
     let ctx = AiCtx {
         shared: shared.clone(),
         provider,

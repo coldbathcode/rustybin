@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -36,6 +36,8 @@ struct Gw {
     remove: Option<&'static str>,
     /// A response header added on the way back.
     add_response: Option<(&'static str, &'static str)>,
+    /// An AI gateway in front of the AI mock (the AI scenarios).
+    ai: Option<AiGw>,
     count: AtomicU32,
     cached: Mutex<HashMap<String, (u16, bytes::Bytes)>>,
     circuit: Mutex<Circuit>,
@@ -67,7 +69,130 @@ struct Circuit {
     trial: bool,
 }
 
+/// What a guard does with a prompt carrying planted data.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Guard {
+    Block,
+    Redact,
+}
+
+/// A stand-in AI gateway: a token budget, a fallback target, a semantic
+/// (or exact) cache, a prompt guard, a response guard, round robin.
+#[derive(Default)]
+struct AiGw {
+    second: Option<String>,
+    fallback: bool,
+    balance: bool,
+    token_limit: Option<u64>,
+    /// A request limit instead (to prove a request limit is told apart).
+    request_limit: Option<u32>,
+    semantic: bool,
+    exact_cache: bool,
+    guard: Option<Guard>,
+    redact_response: bool,
+    rr: AtomicU32,
+    used: AtomicU64,
+    /// (embedding, prompt, answer) of the answers kept.
+    cache: Mutex<Vec<(Vec<f32>, String, bytes::Bytes)>>,
+}
+
+const REDACTED: &str = "[REDACTED]";
+
+async fn ai_gw(g: &Gw, a: &AiGw, req: Request) -> Response {
+    let mut headers = req.headers().clone();
+    for h in HOP {
+        headers.remove(*h);
+    }
+    let raw = axum::body::to_bytes(req.into_body(), 1 << 20)
+        .await
+        .unwrap_or_default();
+    let mut body = String::from_utf8_lossy(&raw).into_owned();
+    if let Some(l) = a.token_limit {
+        if a.used.load(Ordering::SeqCst) >= l {
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
+    }
+    if let Some(l) = a.request_limit {
+        if a.rr.fetch_add(1, Ordering::SeqCst) + 1 > l {
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
+    }
+    if let Some(mode) = a.guard {
+        let planted = !catalog::planted_in(&body).is_empty();
+        if catalog::injection_in(&body) || (planted && mode == Guard::Block) {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+        for (_, v) in catalog::PLANTED {
+            body = body.replace(v, REDACTED);
+        }
+    }
+    let prompt = serde_json::from_str::<Value>(&body)
+        .ok()
+        .and_then(|v| {
+            v["messages"].as_array()?.last()?["content"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    let vector = crate::ai::embed::embed(&prompt, 256);
+    for (v, p, b) in a.cache.lock().expect("lock").iter() {
+        let hit = (a.semantic && crate::ai::embed::cosine(v, &vector) >= 0.9)
+            || (a.exact_cache && *p == prompt);
+        if hit {
+            return (StatusCode::OK, b.clone()).into_response();
+        }
+    }
+    let second = a.second.clone().unwrap_or_default();
+    let first = if a.balance && a.rr.fetch_add(1, Ordering::SeqCst) % 2 == 1 {
+        second.clone()
+    } else {
+        g.upstream.clone()
+    };
+    let send = |url: String| {
+        g.client
+            .post(url)
+            .headers(headers.clone())
+            .body(body.clone())
+            .send()
+    };
+    let mut resp = send(first).await;
+    if a.fallback && !matches!(&resp, Ok(r) if r.status().is_success()) {
+        resp = send(second).await;
+    }
+    let Ok(r) = resp else {
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
+    let status = r.status().as_u16();
+    let mut text = String::from_utf8_lossy(&r.bytes().await.unwrap_or_default()).into_owned();
+    if a.token_limit.is_some() {
+        let used = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| v["usage"]["total_tokens"].as_u64())
+            .unwrap_or(0);
+        a.used.fetch_add(used, Ordering::SeqCst);
+    }
+    if a.redact_response {
+        for (_, v) in catalog::PLANTED {
+            text = text.replace(v, REDACTED);
+        }
+    }
+    let answer = bytes::Bytes::from(text);
+    if status == 200 && (a.semantic || a.exact_cache) {
+        a.cache
+            .lock()
+            .expect("lock")
+            .push((vector, prompt, answer.clone()));
+    }
+    let mut out = (StatusCode::from_u16(status).expect("status"), answer).into_response();
+    out.headers_mut()
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    out
+}
+
 async fn gw(State(g): State<Arc<Gw>>, req: Request) -> Response {
+    if let Some(a) = &g.ai {
+        return ai_gw(&g, a, req).await;
+    }
     let path = req
         .uri()
         .path_and_query()
@@ -287,11 +412,57 @@ fn failed(verdict: &Value) -> Vec<String> {
 }
 
 fn behaving(id: &str, upstream: &str, key: Option<&str>) -> Gw {
+    behaving_with(id, upstream, None, key)
+}
+
+fn behaving_with(id: &str, upstream: &str, second: Option<&str>, key: Option<&str>) -> Gw {
     let mut g = Gw {
         upstream: upstream.to_string(),
         ..Gw::default()
     };
+    let ai = |a: AiGw| {
+        Some(AiGw {
+            second: second.map(str::to_string),
+            ..a
+        })
+    };
     match id {
+        "ai_token_limit" => {
+            g.ai = ai(AiGw {
+                token_limit: Some(catalog::DEFAULT_TOKEN_LIMIT),
+                ..AiGw::default()
+            })
+        }
+        "ai_model_fallback" => {
+            g.ai = ai(AiGw {
+                fallback: true,
+                ..AiGw::default()
+            })
+        }
+        "ai_semantic_cache" => {
+            g.ai = ai(AiGw {
+                semantic: true,
+                ..AiGw::default()
+            })
+        }
+        "ai_prompt_guard" => {
+            g.ai = ai(AiGw {
+                guard: Some(Guard::Block),
+                ..AiGw::default()
+            })
+        }
+        "ai_response_guard" => {
+            g.ai = ai(AiGw {
+                redact_response: true,
+                ..AiGw::default()
+            })
+        }
+        "ai_provider_balance" => {
+            g.ai = ai(AiGw {
+                balance: true,
+                ..AiGw::default()
+            })
+        }
         "retries" => g.retry = true,
         "rate_limiting" => g.limit = Some(catalog::DEFAULT_LIMIT),
         "credential_injection" => {
@@ -334,7 +505,13 @@ async fn every_scenario_passes_through_a_gateway_that_behaves() {
     for sc in SCENARIOS {
         let run = run_of(&state, &base, sc.id).await;
         let upstream = run["upstream"].as_str().expect("upstream").to_string();
-        let gateway = start_gw(behaving(sc.id, &upstream, key_of(&run).as_deref())).await;
+        let gateway = start_gw(behaving_with(
+            sc.id,
+            &upstream,
+            run["second_upstream"].as_str(),
+            key_of(&run).as_deref(),
+        ))
+        .await;
         let v = check_via(&state, &run, &gateway).await;
         assert_eq!(v["passed"], true, "{}: {v:#}", sc.id);
         end(&state, "me", sc.id, run["id"].as_str().expect("id")).expect("end");
@@ -375,6 +552,21 @@ async fn a_gateway_without_the_feature_fails_with_the_expectation_named() {
             "header_transformation",
             "The added request header reached the upstream",
         ),
+        (
+            "ai_token_limit",
+            "The gateway refused requests once the token budget was spent",
+        ),
+        (
+            "ai_model_fallback",
+            "The gateway fell back to another target",
+        ),
+        (
+            "ai_semantic_cache",
+            "Prompts that mean the same were answered from the cache",
+        ),
+        ("ai_prompt_guard", "Personal data never reached the model"),
+        ("ai_response_guard", "No personal data reached the client"),
+        ("ai_provider_balance", "Both targets received requests"),
     ];
     assert_eq!(expected.len(), SCENARIOS.len(), "a scenario without a case");
     for (id, name) in expected {
@@ -383,6 +575,7 @@ async fn a_gateway_without_the_feature_fails_with_the_expectation_named() {
         // A pass-through proxy, then no gateway at all (the instance itself).
         let plain = start_gw(Gw {
             upstream: upstream.clone(),
+            ai: id.starts_with("ai_").then(AiGw::default),
             ..Gw::default()
         })
         .await;
@@ -1083,4 +1276,290 @@ fn every_test_parameter_has_a_cli_flag_and_a_tool_property() {
             p.name
         );
     }
+}
+
+// ── AI scenarios ────────────────────────────────────────────────────
+
+/// An AI run and a stand-in gateway in front of it.
+async fn ai_run(state: &AppState, base: &str, id: &str, a: AiGw) -> (Value, String) {
+    let run = run_of(state, base, id).await;
+    let upstream = run["upstream"].as_str().expect("upstream").to_string();
+    let gateway = start_gw(Gw {
+        upstream,
+        ai: Some(AiGw {
+            second: run["second_upstream"].as_str().map(str::to_string),
+            ..a
+        }),
+        ..Gw::default()
+    })
+    .await;
+    (run, gateway)
+}
+
+/// A chat completion to this instance's AI mock in one session.
+async fn chat(base: &str, path: &str, session: &str, prompt: &str) -> (u16, String) {
+    let r = reqwest::Client::new()
+        .post(format!("{base}{path}"))
+        .header(SESSION_HEADER, session)
+        .json(
+            &json!({ "model": "gpt-4o-mini", "messages": [{ "role": "user", "content": prompt }] }),
+        )
+        .send()
+        .await
+        .expect("send");
+    let status = r.status().as_u16();
+    (status, r.text().await.unwrap_or_default())
+}
+
+#[tokio::test]
+async fn an_ai_runs_profile_answers_its_own_requests_only() {
+    let (_server, state, base) = instance(config()).await;
+    let run = run_of(&state, &base, "ai_model_fallback").await;
+    let id = run["id"].as_str().expect("id").to_string();
+    let prefix = {
+        let runs = state.scenarios.runs();
+        runs.iter()
+            .find(|r| r.id == id)
+            .expect("run")
+            .session_prefix()
+    };
+    let primary = catalog::AI_PRIMARY_PATH;
+    // The run's requests: the primary target fails, the second answers.
+    let (s, _) = chat(&base, primary, &format!("{prefix}1-0"), "hello").await;
+    assert_eq!(s, 429);
+    let (s, _) = chat(
+        &base,
+        catalog::AI_SECOND_PATH,
+        &format!("{prefix}1-0"),
+        "hello",
+    )
+    .await;
+    assert_eq!(s, 200);
+    // Anyone else, a forged prefix without the secret included: untouched.
+    for other in ["someone", &format!("scn-{id}-0000000000000000-1-0")] {
+        let (s, _) = chat(&base, primary, other, "hello").await;
+        assert_eq!(s, 200, "{other}");
+    }
+    // The answer of a response guard run: a customer record, for its
+    // requests only.
+    let guard = run_of(&state, &base, "ai_response_guard").await;
+    let gid = guard["id"].as_str().expect("id").to_string();
+    let gprefix = {
+        let runs = state.scenarios.runs();
+        runs.iter()
+            .find(|r| r.id == gid)
+            .expect("run")
+            .session_prefix()
+    };
+    let (_, body) = chat(
+        &base,
+        primary,
+        &format!("{gprefix}1-0"),
+        "the customer record",
+    )
+    .await;
+    assert!(body.contains("123-45-6789"), "{body}");
+    let (_, body) = chat(&base, primary, "someone", "the customer record").await;
+    assert!(!body.contains("123-45-6789"), "{body}");
+    // Ended: the profile is gone.
+    end(&state, "me", "ai_model_fallback", &id).expect("end");
+    let (s, _) = chat(&base, primary, &format!("{prefix}1-0"), "hello").await;
+    assert_eq!(s, 200);
+}
+
+#[tokio::test]
+async fn a_fallback_check_takes_the_kind_of_error() {
+    let (_server, state, base) = instance(config()).await;
+    let (run, gateway) = ai_run(
+        &state,
+        &base,
+        "ai_model_fallback",
+        AiGw {
+            fallback: true,
+            ..AiGw::default()
+        },
+    )
+    .await;
+    let v = check_with(
+        &state,
+        &run,
+        CheckBody::new(&gateway).with("fail_kind", "overloaded"),
+    )
+    .await;
+    assert_eq!(v["passed"], true, "{v:#}");
+    let seen = v["expectations"][1]["seen"].as_str().expect("seen");
+    assert!(seen.contains("primary 503 then fallback 200"), "{seen}");
+    let id = run["id"].as_str().expect("id");
+    let e = check(
+        &state,
+        "me",
+        "ai_model_fallback",
+        id,
+        CheckBody::new(&gateway).with("fail_kind", "teapot"),
+    )
+    .await
+    .expect_err("an unknown kind");
+    assert!(e.1.contains("one of rate_limit"), "{}", e.1);
+    let e = check(
+        &state,
+        "me",
+        "ai_model_fallback",
+        id,
+        CheckBody::new(&gateway).with("token_limit", 500),
+    )
+    .await
+    .expect_err("another scenario's parameter");
+    assert!(e.1.contains("applies to ai_token_limit only"), "{}", e.1);
+}
+
+#[tokio::test]
+async fn a_request_limit_does_not_pass_for_a_token_budget() {
+    let (_server, state, base) = instance(config()).await;
+    // Two requests then 429: refusals, but far under the token budget.
+    let (run, gateway) = ai_run(
+        &state,
+        &base,
+        "ai_token_limit",
+        AiGw {
+            request_limit: Some(2),
+            ..AiGw::default()
+        },
+    )
+    .await;
+    let v = check_via(&state, &run, &gateway).await;
+    assert_eq!(v["passed"], false, "{v:#}");
+    assert_eq!(failed(&v), ["The budget was counted in tokens"], "{v:#}");
+    // The budget the check is told: a gateway with 1000 passes when told 1000.
+    let (run, gateway) = ai_run(
+        &state,
+        &base,
+        "ai_token_limit",
+        AiGw {
+            token_limit: Some(1000),
+            ..AiGw::default()
+        },
+    )
+    .await;
+    let v = check_with(
+        &state,
+        &run,
+        CheckBody::new(&gateway).with("token_limit", 1000),
+    )
+    .await;
+    assert_eq!(v["passed"], true, "{v:#}");
+}
+
+#[tokio::test]
+async fn a_redacting_guard_passes_and_an_exact_cache_does_not() {
+    let (_server, state, base) = instance(config()).await;
+    let (run, gateway) = ai_run(
+        &state,
+        &base,
+        "ai_prompt_guard",
+        AiGw {
+            guard: Some(Guard::Redact),
+            ..AiGw::default()
+        },
+    )
+    .await;
+    let v = check_via(&state, &run, &gateway).await;
+    assert_eq!(v["passed"], true, "{v:#}");
+    assert!(v.to_string().contains("redacted before the model"), "{v:#}");
+    // Without the injection request: two requests, two lines of verdict
+    // about them.
+    let v = check_with(
+        &state,
+        &run,
+        CheckBody::new(&gateway).with("skip_injection", true),
+    )
+    .await;
+    assert_eq!(v["requests"].as_array().map(Vec::len), Some(2), "{v:#}");
+    assert_eq!(v["expectations"].as_array().map(Vec::len), Some(2), "{v:#}");
+    // A guard that lets the data through names what reached the model,
+    // never the values.
+    let (run, plain) = ai_run(&state, &base, "ai_prompt_guard", AiGw::default()).await;
+    let v = check_via(&state, &run, &plain).await;
+    let seen = v["expectations"][1]["seen"].as_str().expect("seen");
+    assert_eq!(seen, "reached the model with: SSN, card number, email");
+    assert!(!v.to_string().contains("123-45-6789"), "{v:#}");
+    // An exact cache answers none of the rewordings.
+    let (run, gateway) = ai_run(
+        &state,
+        &base,
+        "ai_semantic_cache",
+        AiGw {
+            exact_cache: true,
+            ..AiGw::default()
+        },
+    )
+    .await;
+    let v = check_via(&state, &run, &gateway).await;
+    assert_eq!(
+        failed(&v),
+        ["Prompts that mean the same were answered from the cache"],
+        "{v:#}"
+    );
+    // A second check of the semantic cache uses new prompts: it passes
+    // again on a warm cache.
+    let (run, gateway) = ai_run(
+        &state,
+        &base,
+        "ai_semantic_cache",
+        AiGw {
+            semantic: true,
+            ..AiGw::default()
+        },
+    )
+    .await;
+    for _ in 0..2 {
+        let v = check_via(&state, &run, &gateway).await;
+        assert_eq!(v["passed"], true, "{v:#}");
+    }
+}
+
+#[test]
+fn the_cache_prompts_are_close_and_the_others_are_not() {
+    use crate::ai::embed::{cosine, embed};
+    assert_eq!(catalog::CACHE_TOPICS.len(), catalog::CACHE_OTHERS.len());
+    let rounds = catalog::CACHE_TOPICS.len();
+    let e = |t: &str| embed(t, 1536);
+    let all: Vec<[String; 4]> = (0..rounds)
+        .map(|r| catalog::cache_prompts(r, &format!("w{r}")))
+        .collect();
+    for (r, [first, case, please, other]) in all.iter().enumerate() {
+        let f = e(first);
+        for t in [case, please] {
+            let c = cosine(&f, &e(t));
+            assert!(c >= 0.9, "round {r}, {t}: {c}");
+            // They differ as text, so only a semantic cache answers them.
+            assert_ne!(first, t);
+        }
+        assert!(cosine(&f, &e(other)) < 0.5, "round {r}: {other}");
+        // Nothing of another round is near this round's question, so a
+        // cache an earlier check filled does not answer it.
+        for (q, prompts) in all.iter().enumerate().filter(|(q, _)| *q != r) {
+            for t in prompts {
+                let c = cosine(&f, &e(t));
+                assert!(c < 0.6, "round {r} near round {q}: {t}: {c}");
+            }
+        }
+    }
+}
+
+#[test]
+fn every_planted_value_is_what_the_mock_answers_and_the_prompt_carries() {
+    for (kind, v) in catalog::PLANTED {
+        if !v.contains(' ') && v.starts_with("4111") {
+            continue; // the card without spaces: a guard's rewrite
+        }
+        assert!(
+            crate::ai::engine::PII_TEXT.contains(v),
+            "{kind} {v} is not in the scripted record"
+        );
+    }
+    assert_eq!(
+        catalog::planted_in(catalog::PROMPT_PII),
+        ["SSN", "card number", "email"]
+    );
+    assert!(catalog::injection_in(crate::mcp::tools::INJECTION_SAMPLE));
 }

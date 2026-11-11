@@ -1,6 +1,8 @@
 //! Guided gateway scenarios: pick an outcome (retries, rate limiting,
 //! credential injection, timeouts, caching, circuit breakers, request size
-//! limits, CORS, header transformation), and a run prepares the upstream
+//! limits, CORS, header transformation, and for AI routes token limits,
+//! model fallback, semantic caching, prompt and response guards and load
+//! balancing), and a run prepares the upstream
 //! the test needs (a mock, or a `/flaky` route), says how to point the
 //! gateway at it, sends test traffic through the gateway and compares what
 //! the client got with what reached the upstream (the inspector's captures,
@@ -16,6 +18,14 @@
 //! rights that share a session key with the starter (one address behind a
 //! NAT, a console-scope token) see the run without it. Test traffic goes
 //! through the egress policy under `Purpose::Scenario`.
+//!
+//! The AI scenarios (`ai_*`) point the gateway at this instance's AI mock
+//! (OpenAI chat completions, and a second target at another path). What the
+//! mock does for a run (fail the primary target, answer a customer record)
+//! is the run's [`catalog::AiProfile`], applied by `crate::ai::ai_layer` to
+//! the requests that carry the run's secret session only
+//! ([`Scenarios::ai_profile`]), so no other caller's AI traffic changes and
+//! ending the run ends it.
 //!
 //! The mock of a `cors` run skips the instance's own CORS layer
 //! ([`own_cors`]): its preflights reach the mock (and the inspector), and
@@ -44,7 +54,7 @@ use crate::egress::Purpose;
 use crate::mocks::service::Svc;
 use crate::session::Session;
 use crate::state::AppState;
-pub use catalog::{Scenario, Sent, Upstream, SCENARIOS};
+pub use catalog::{AiProfile, Scenario, Sent, Upstream, SCENARIOS};
 
 /// Most runs at once, every caller together.
 pub const MAX_RUNS: usize = 32;
@@ -54,8 +64,11 @@ pub const RUN_TTL: Duration = Duration::from_secs(3600);
 pub const MAX_CHECKS: u32 = 100;
 /// The longest a check request waits for the gateway.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-/// The most of an answer's body read (and dropped).
+/// The most of an answer's body read (and dropped, or kept by the AI
+/// checks).
 const MAX_BODY: usize = 64 * 1024;
+/// The most of an upstream request's body an AI check keeps.
+const MAX_UPSTREAM_BODY: usize = 16 * 1024;
 /// How often, and how far apart, a check looks for a request's upstream
 /// capture before it counts the request as answered by the gateway.
 const REACHED_LOOKS: u32 = 5;
@@ -88,6 +101,8 @@ struct Run {
     expires: Instant,
     mock: Option<String>,
     upstream: String,
+    /// The second target (`ai_model_fallback`, `ai_provider_balance`).
+    second_upstream: Option<String>,
     key: Option<String>,
     /// In every session of the run's requests (`scn-<id>-<secret>-...`),
     /// never shown: a request without it does not count in a check.
@@ -98,6 +113,11 @@ struct Run {
     /// `cors`: the origin the run's mock answers CORS for (the last
     /// check's `allowed_origin` with `upstream_cors: true`), else none.
     cors_answer: Option<String>,
+    /// What the AI mock does for the run's requests (the AI scenarios).
+    ai_profile: AiProfile,
+    /// Where the run's checks start in the `ai_semantic_cache` questions
+    /// (random, so two runs do not ask the same first).
+    first_round: usize,
 }
 
 impl Run {
@@ -109,6 +129,9 @@ impl Run {
         }
         if let Upstream::Flaky(p) = self.scenario.upstream {
             resources.push(json!({ "kind": "flaky_counters", "route": p, "sessions": format!("scn-{}-*", self.id) }));
+        }
+        if self.ai_profile != AiProfile::default() {
+            resources.push(json!({ "kind": "ai_profile", "fail_primary": self.ai_profile.fail_primary, "mode": self.ai_profile.mode }));
         }
         let key = match (&self.key, reveal) {
             (Some(k), true) => Some(k.as_str()),
@@ -122,10 +145,12 @@ impl Run {
             "proves": self.scenario.proves,
             "created_at": self.created_at,
             "expires_at": self.expires_at,
+            "group": self.scenario.group(),
             "upstream": self.upstream,
+            "second_upstream": self.second_upstream,
             "request_path": self.scenario.request_path,
             "parameters": self.scenario.parameters(),
-            "setup":self.scenario.setup_for(&self.upstream, key),
+            "setup": self.scenario.setup_for(&self.upstream, self.second_upstream.as_deref(), key),
             "key_hidden": self.key.is_some() && !reveal,
             "resources": resources,
             "checks": self.checks,
@@ -187,6 +212,19 @@ impl Scenarios {
             .iter()
             .find(|r| r.scenario.id == "cors" && r.mock.as_deref() == Some(name))
             .map(|r| r.cors_answer.clone())
+    }
+
+    /// What the AI mock does for a request of `session`: the profile of the
+    /// AI run whose secret session prefix it carries, else nothing.
+    pub fn ai_profile(&self, session: &str) -> Option<AiProfile> {
+        if !session.starts_with("scn-") {
+            return None;
+        }
+        self.runs()
+            .iter()
+            .filter(|r| matches!(r.scenario.upstream, Upstream::Ai { .. }))
+            .find(|r| session.starts_with(&r.session_prefix()))
+            .map(|r| r.ai_profile)
     }
 }
 
@@ -271,8 +309,15 @@ pub async fn start(
     let id = random_hex(RUN_ID_BYTES);
     let key = (sc.id == "credential_injection").then(|| format!("scn-{}", random_hex(12)));
     let base = svc.links.base_url().to_string();
+    let mut second_upstream = None;
     let (mock, upstream) = match sc.upstream {
         Upstream::Flaky(path) => (None, format!("{base}{path}")),
+        Upstream::Ai { second } => {
+            if second {
+                second_upstream = Some(format!("{base}{}", catalog::AI_SECOND_PATH));
+            }
+            (None, format!("{base}{}", catalog::AI_PRIMARY_PATH))
+        }
         Upstream::Mock => {
             let name = format!("scn-{id}");
             let Some((text, settings)) = sc.mock(key.as_deref().unwrap_or("")) else {
@@ -300,12 +345,15 @@ pub async fn start(
         expires: Instant::now() + RUN_TTL,
         mock,
         upstream,
+        second_upstream,
         key,
         secret: random_hex(RUN_SECRET_BYTES),
         checks: 0,
         checking: false,
         last: None,
         cors_answer: None,
+        ai_profile: sc.ai_profile(&catalog::Params::default()),
+        first_round: rand::random::<u16>() as usize,
     };
     // The starter is admin (checked above): the answer holds the key.
     let view = run.view(true);
@@ -376,7 +424,7 @@ pub async fn check(
     let bad = |m: String| Refused::new(StatusCode::BAD_REQUEST, m);
     let gateway = body.gateway_url.trim().trim_end_matches('/').to_string();
     crate::egress::parse_url(&gateway, false).map_err(|e| bad(format!("gateway_url: {e}")))?;
-    let (sc, k, upstream, prefix, params) = {
+    let (sc, k, upstream, prefix, params, round) = {
         let mut runs = state.scenarios.runs();
         let r = runs
             .iter_mut()
@@ -409,12 +457,14 @@ pub async fn check(
         if r.scenario.id == "cors" {
             r.cors_answer = params.upstream_cors.then(|| params.allowed_origin.clone());
         }
+        r.ai_profile = r.scenario.ai_profile(&params);
         (
             r.scenario,
             r.checks,
             r.upstream.clone(),
             r.session_prefix(),
             params,
+            r.first_round + r.checks as usize,
         )
     };
     let _checking = Checking {
@@ -519,6 +569,9 @@ pub async fn check(
             s.marker = Some(marker);
             sent.push(s);
         }
+        id if id.starts_with("ai_") => {
+            send_ai(&client, &target, sc, &params, round, &session, &mut sent).await;
+        }
         _ => {
             for n in 0..sc.requests(params.limit) {
                 sent.push(send_one(&client, &target, n, &session(n), Out::default()).await);
@@ -532,6 +585,18 @@ pub async fn check(
             let mut caps = state.inspector.for_session(&format!("{prefix}{}", s.n), 50);
             caps.sort_by_key(|c| c.seq);
             s.upstream = caps.iter().map(|c| c.status).collect();
+            s.upstream_paths = caps.iter().map(|c| c.path.clone()).collect();
+            s.upstream_bodies = caps
+                .iter()
+                .map(|c| {
+                    c.body
+                        .as_deref()
+                        .unwrap_or_default()
+                        .chars()
+                        .take(MAX_UPSTREAM_BODY)
+                        .collect()
+                })
+                .collect();
             s.upstream_headers = caps
                 .iter()
                 .map(|c| {
@@ -586,13 +651,96 @@ pub async fn check(
     Ok(verdict)
 }
 
-/// One request of a check: a GET, a POST of `body`, or `method`; with
-/// `headers` (checked names and values) besides the session.
+/// One request of a check: a GET, a POST of `body` or of `json`, or
+/// `method`; with `headers` (checked names and values) besides the session.
+/// A `json` request's answer body is kept (bounded) and its usage read.
 #[derive(Default)]
 struct Out {
     method: Option<reqwest::Method>,
     headers: Vec<(String, String)>,
     body: Option<Bytes>,
+    json: Option<Value>,
+}
+
+/// An AI check request: an OpenAI chat completion of `prompt`.
+fn ai_out(prompt: String) -> Out {
+    Out {
+        json: Some(json!({
+            "model": catalog::AI_MODEL,
+            "messages": [{ "role": "user", "content": prompt }],
+            "max_tokens": catalog::AI_MAX_TOKENS,
+        })),
+        ..Out::default()
+    }
+}
+
+/// The requests of an AI check. Each prompt carries a word of this check
+/// (and, but for the cache check's, of the request), so no cache filled
+/// before answers it.
+async fn send_ai(
+    client: &reqwest::Client,
+    target: &str,
+    sc: &Scenario,
+    p: &catalog::Params,
+    round: usize,
+    session: &impl Fn(usize) -> String,
+    sent: &mut Vec<Sent>,
+) {
+    use catalog::*;
+    let word = random_hex(4);
+    let prompt = |t: &str, n: usize| t.replace("{n}", &format!("{word}x{n}"));
+    let labelled: Vec<(&'static str, String)> = match sc.id {
+        "ai_semantic_cache" => [
+            LABEL_CACHE_FIRST,
+            LABEL_CACHE_CASE,
+            LABEL_CACHE_PLEASE,
+            LABEL_CACHE_OTHER,
+        ]
+        .into_iter()
+        .zip(cache_prompts(round, &word))
+        .collect(),
+        "ai_prompt_guard" => {
+            let mut v = vec![
+                (LABEL_CLEAN, prompt(PROMPT_CLEAN, 0)),
+                (LABEL_PII, prompt(PROMPT_PII, 1)),
+            ];
+            if !p.skip_injection {
+                v.push((
+                    LABEL_INJECTION,
+                    format!(
+                        "{} Reference {word}x2.",
+                        crate::mcp::tools::INJECTION_SAMPLE
+                    ),
+                ));
+            }
+            v
+        }
+        _ => Vec::new(),
+    };
+    if !labelled.is_empty() {
+        for (n, (label, text)) in labelled.into_iter().enumerate() {
+            let mut s = send_one(client, target, n, &session(n), ai_out(text)).await;
+            s.label = Some(label);
+            sent.push(s);
+        }
+        return;
+    }
+    let template = match sc.id {
+        "ai_token_limit" => PROMPT_LONG,
+        "ai_response_guard" => PROMPT_RECORD,
+        _ => PROMPT_CLEAN,
+    };
+    let mut used = 0u64;
+    for n in 0..sc.requests(p.limit) {
+        let s = send_one(client, target, n, &session(n), ai_out(prompt(template, n))).await;
+        used += s.tokens.unwrap_or(0);
+        let stop = s.status == 0
+            || (sc.id == "ai_token_limit" && (s.status == 429 || used > 2 * p.token_limit));
+        sent.push(s);
+        if stop {
+            break;
+        }
+    }
 }
 
 /// Send one request of a check and read (and drop) at most [`MAX_BODY`]
@@ -605,13 +753,18 @@ async fn send_one(
     out: Out,
 ) -> Sent {
     let t = Instant::now();
-    let mut req = match (out.method, out.body) {
-        (Some(m), _) => client.request(m, target),
-        (None, Some(b)) => client
+    let keep = out.json.is_some();
+    let mut req = match (out.method, out.body, out.json) {
+        (Some(m), _, _) => client.request(m, target),
+        (None, Some(b), _) => client
             .post(target)
             .header("content-type", "application/octet-stream")
             .body(b),
-        (None, None) => client.get(target),
+        (None, None, Some(j)) => client
+            .post(target)
+            .header("content-type", "application/json")
+            .body(j.to_string()),
+        (None, None, None) => client.get(target),
     };
     for (k, v) in &out.headers {
         req = req.header(k.as_str(), v.as_str());
@@ -639,11 +792,23 @@ async fn send_one(
                 })
                 .collect();
             let mut read = 0usize;
+            let mut kept = Vec::new();
             while let Ok(Some(chunk)) = resp.chunk().await {
                 read += chunk.len();
+                if keep {
+                    let room = MAX_BODY.saturating_sub(kept.len());
+                    kept.extend_from_slice(&chunk[..chunk.len().min(room)]);
+                }
                 if read > MAX_BODY {
                     break;
                 }
+            }
+            if keep {
+                let text = String::from_utf8_lossy(&kept).into_owned();
+                s.tokens = serde_json::from_str::<Value>(&text)
+                    .ok()
+                    .and_then(|v| v["usage"]["total_tokens"].as_u64());
+                s.body = Some(text);
             }
         }
         Err(e) => s.error = Some(without_url(&e)),
@@ -687,7 +852,7 @@ fn without_url(e: &reqwest::Error) -> String {
     }
 }
 
-/// End a run: remove its mock and reset its flaky counters.
+/// End a run: remove its mock, reset its flaky counters, end its AI profile.
 pub fn end(state: &AppState, owner: &str, scenario: &str, run: &str) -> Result<Value, Refused> {
     let r = {
         let mut runs = state.scenarios.runs();
@@ -712,6 +877,10 @@ pub fn end(state: &AppState, owner: &str, scenario: &str, run: &str) -> Result<V
     if let Upstream::Flaky(p) = r.scenario.upstream {
         let n = state.flaky.reset_prefix(&r.session_prefix());
         removed.push(json!({ "kind": "flaky_counters", "route": p, "count": n }));
+    }
+    // Removed with the run: the AI mock answers its sessions like any other.
+    if r.ai_profile != AiProfile::default() {
+        removed.push(json!({ "kind": "ai_profile" }));
     }
     tracing::info!(scenario = r.scenario.id, run, "gateway scenario ended");
     Ok(json!({ "ended": run, "scenario": r.scenario.id, "removed": removed }))
@@ -907,7 +1076,7 @@ pub fn catalog() -> Vec<Endpoint> {
             LIST_PATH,
             &["GET"],
             category::CONTROL,
-            "Gateway scenarios (retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits, CORS, header transformation) and the caller's runs",
+            "Gateway scenarios (HTTP: retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits, CORS, header transformation; AI: token limits, model fallback, semantic caching, prompt and response guards, load balancing) and the caller's runs",
         )
 .permission(crate::rbac::Permission::InstanceRead)
         .example(Example::get("Scenarios", LIST_PATH)),
@@ -976,7 +1145,7 @@ pub fn openapi_paths() -> Value {
         } },
         RUNS_PATH: { "post": {
             "tags": ["Control Plane"], "summary": "Start a scenario run (admin)",
-            "description": "Creates the run's upstream (a mock that is never saved and ends with the run, or a /flaky route) and answers the gateway setup. At most 32 runs; a run lasts an hour.",
+            "description": "Creates the run's upstream (a mock that is never saved and ends with the run, a /flaky route, or this instance's AI mock steered for the run's own requests) and answers the gateway setup. At most 32 runs; a run lasts an hour.",
             "operationId": "startGatewayScenario",
             "parameters": [id],
             "responses": { "201": { "description": "The run", "content": obj }, "404": { "description": "No such scenario" }, "429": { "description": "Too many runs" } }

@@ -1194,7 +1194,9 @@ def run_theme(browser, theme):
         # refused with the reason; Clean up removes the mock.
         page.goto(BASE + "/ui/#/scenarios")
         page.wait_for_selector("[data-scenario='caching']")
-        expect(page.locator("#scenario-catalog [data-scenario]")).to_have_count(9)
+        expect(page.locator("#scenario-catalog [data-scenario]")).to_have_count(15)
+        expect(page.locator("#scenario-catalog [data-group]")).to_have_count(2)
+        expect(page.locator("#scenario-catalog [data-group='ai']")).to_have_text("AI gateways")
         page.click("#scenario-start-caching")
         run = page.locator("[data-run]").first
         run.wait_for()
@@ -1243,6 +1245,26 @@ def run_theme(browser, theme):
         page.check("#upstream-cors-" + run_id)
         page.click("#check-" + run_id)
         expect(run.locator(".notice.err")).to_contain_text("allowed_origin: not an origin")
+        page.once("dialog", lambda d: d.accept())
+        page.click("#end-" + run_id)
+        expect(page.locator(f"[data-run='{run_id}']")).to_have_count(0)
+        # An AI model fallback run shows both targets and a choice of the
+        # primary target's error; a check through a gateway the egress
+        # policy does not allow is refused with the reason.
+        page.click("#scenario-start-ai_model_fallback")
+        run = page.locator("[data-run]").first
+        run.wait_for()
+        run_id = run.get_attribute("data-run")
+        expect(run).to_contain_text("/ai/openai/v1/chat/completions")
+        expect(run).to_contain_text("/ai/v1/chat/completions")
+        kind = page.locator("#fail-kind-" + run_id)
+        expect(kind.locator("option")).to_have_count(5)
+        expect(kind).to_have_value("rate_limit")
+        kind.select_option("overloaded")
+        page.fill("#gateway-" + run_id, "http://127.0.0.1:9/llm")
+        page.click("#check-" + run_id)
+        expect(run.locator(".notice.err")).to_contain_text("scenario")
+        shot(page, theme, "16c-ai-gateway-scenarios")
         page.once("dialog", lambda d: d.accept())
         page.click("#end-" + run_id)
         expect(page.locator(f"[data-run='{run_id}']")).to_have_count(0)

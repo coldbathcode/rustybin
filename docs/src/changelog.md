@@ -3,10 +3,23 @@
 ## Unreleased: the last of the roadmap's candidates
 
 [The plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/core-next/master-plan.md),
-steps 11 to 13, built on 2026-11-09 and not released yet. Nothing to do when upgrading: what is new
-is off until you turn it on or name it in a scenario.
+steps 11 to 13, built on 2026-11-09 and not released yet, and step 01 of
+[the demo next plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/demo-next/master-plan.md),
+built on 2026-11-11. Nothing to do when upgrading: what is new is off until you turn it on or
+name it in a scenario.
 
 **New**:
+
+- [AI gateway scenarios](gateway-scenarios.md#ai-gateway-scenarios): six guided scenarios with a
+  pass or fail verdict for an AI gateway in front of this instance's AI mock: `ai_token_limit`
+  (a token budget, told apart from a request limit), `ai_model_fallback` (a provider error on the
+  primary target, the success from a fallback; `fail_kind`), `ai_semantic_cache` (rewordings from
+  the cache, a different prompt to the model), `ai_prompt_guard` (fake personal data and a prompt
+  injection refused or redacted; `skip_injection`), `ai_response_guard` (a fake customer record
+  removed from the answer) and `ai_provider_balance` (two targets, each its share; `min_share`).
+  A run steers the AI mock for its own requests only (the run's secret session), and ending it
+  ends that. On every surface: the scenario routes, the console's AI group, `rustybin scenario`
+  (`--token-limit`, `--fail-kind`, `--skip-injection`, `--min-share`), the scenario tools.
 
 - Source control: a [diverged branch](source-control.md#a-diverged-branch) says what differs
   (`divergence` in the status and in the `409`) and is resolved by a person: `POST

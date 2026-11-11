@@ -1,12 +1,13 @@
-// Gateway scenarios: pick an outcome (retries, rate limiting, credential
-// injection, timeouts, caching, circuit breakers, request size limits,
-// CORS, header transformation), prepare its upstream, follow the steps on
-// the gateway, check through it and clean up. GET /_rustybin/scenarios; the
-// run routes are admin. A run's test parameters (limit, half_open_ms,
-// size_limit, the origins, upstream_cors, the header names) are fields
-// from its `parameters`, by type. The same on every surface: rustybin
+// Gateway scenarios: pick an outcome (HTTP: retries, rate limiting,
+// credential injection, timeouts, caching, circuit breakers, request size
+// limits, CORS, header transformation; AI: token limits, model fallback,
+// semantic caching, prompt and response guards, load balancing), prepare
+// its upstream, follow the steps on the gateway, check through it and clean
+// up. GET /_rustybin/scenarios; the run routes are admin. A run's test
+// parameters are fields from its `parameters`, by type (a number, a
+// checkbox, a choice or text). The same on every surface: rustybin
 // scenario, the *_gateway_scenario tools.
-import { h, replace, clear, card, field, input, checkbox, notice, icon, badge, spinner, toast, fmtTime } from '../lib/dom.js';
+import { h, replace, clear, card, field, input, select, checkbox, notice, icon, badge, spinner, toast, fmtTime } from '../lib/dom.js';
 import { copyableCode } from '../lib/format.js';
 import { getJson, send, SERVER } from '../lib/http.js';
 
@@ -47,9 +48,14 @@ export default {
         return;
       }
       if (!alive) return;
-      replace(catalogEl, h('div', { class: 'stack' }, ...d.scenarios.map((s) => h('div', { class: 'row', 'data-scenario': s.id },
+      const row = (s) => h('div', { class: 'row', 'data-scenario': s.id },
         h('div', { class: 'grow' }, h('strong', null, s.title), h('div', { class: 'muted small' }, s.proves)),
-        h('button', { class: 'btn sm', type: 'button', id: 'scenario-start-' + s.id, onclick: () => start(s.id) }, icon('plus'), 'Prepare')))));
+        h('button', { class: 'btn sm', type: 'button', id: 'scenario-start-' + s.id, onclick: () => start(s.id) }, icon('plus'), 'Prepare'));
+      const groups = [['http', 'HTTP gateways'], ['ai', 'AI gateways']];
+      replace(catalogEl, h('div', { class: 'stack' }, ...groups.flatMap(([g, title]) => {
+        const items = d.scenarios.filter((s) => (s.group || 'http') === g);
+        return items.length ? [h('h3', { class: 'section-title', 'data-group': g }, title), ...items.map(row)] : [];
+      })));
       clear(runsEl);
       if (!d.runs.length) runsEl.appendChild(h('p', { class: 'muted' }, 'No runs in this session. Prepare a scenario above.'));
       for (const run of d.runs) runsEl.appendChild(runCard(run));
@@ -80,6 +86,10 @@ export default {
           cb.input.title = p.description;
           return { name: p.name, type: p.type, el: cb.input, view: cb.el };
         }
+        if (Array.isArray(p.enum)) {
+          const el = select(p.enum, p.default, { id, title: p.description });
+          return { name: p.name, type: 'choice', el, view: field(label, el) };
+        }
         const el = p.type === 'integer'
           ? input({ id, type: 'number', min: p.minimum, max: p.maximum, placeholder: String(p.default), title: p.description })
           : input({ id, maxlength: p.maxLength, placeholder: p.default === undefined ? 'any' : String(p.default), title: p.description });
@@ -91,6 +101,8 @@ export default {
         for (const p of params) {
           if (p.type === 'boolean') {
             if (p.el.checked) body[p.name] = true;
+          } else if (p.type === 'choice') {
+            if (p.el.value) body[p.name] = p.el.value;
           } else if (p.el.value.trim()) {
             body[p.name] = p.type === 'integer' ? Number(p.el.value) : p.el.value.trim();
           }
@@ -107,7 +119,7 @@ export default {
       };
       const endBtn = h('button', { class: 'btn sm', type: 'button', id: 'end-' + run.id }, icon('trash'), 'Clean up');
       endBtn.onclick = async () => {
-        if (!window.confirm(`End this ${run.title.toLowerCase()} run? Its mock and counters are removed.`)) return;
+        if (!window.confirm(`End this ${run.title.toLowerCase()} run? What it created (a mock, counters, an AI profile) is removed.`)) return;
         try {
           const r = await call('DELETE', path);
           toast(`Ended: removed ${r.removed.length} resource(s)`);
@@ -117,8 +129,9 @@ export default {
         }
       };
       const el = card(run.title + ' run ' + run.id, { hint: 'Expires ' + fmtTime(run.expires_at), actions: endBtn },
-        h('p', { class: 'small' }, 'Upstream for the gateway route:'),
+        h('p', { class: 'small' }, run.second_upstream ? 'Upstream targets for the gateway route:' : 'Upstream for the gateway route:'),
         copyableCode(run.upstream),
+        run.second_upstream ? copyableCode(run.second_upstream) : null,
         h('ol', { class: 'small' }, ...run.setup.map((s) => h('li', null, s))),
         h('div', { class: 'row' }, field('Gateway URL of the route', gw), ...params.map((p) => p.view)),
         h('div', { class: 'row' }, checkBtn),

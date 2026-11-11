@@ -649,8 +649,8 @@ pub static TOOLS: &[ToolDef] = &[
             "confirm": confirm_prop()
         }), &[]),
     },
-    tool!("list_gateway_scenarios", "Gateway scenarios", "The guided gateway scenarios (retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits, CORS, header transformation): what each proves, the test parameters a check takes, the upstream it prepares, the steps on the gateway; and the caller's runs with their last verdicts.", ToolNeed::Perm(Permission::InstanceRead), ro=true, destructive=false, idem=true, confirm=false, no_args),
-    tool!("start_gateway_scenario", "Start a gateway scenario", "Prepare a scenario run: create its upstream (a mock that is never saved and ends with the run, or a /flaky route) and answer the steps to configure on the gateway, with the upstream URL. Then call check_gateway_scenario with the URL the gateway serves the route at. Admin.", ToolNeed::Perm(Permission::ScenariosRun), ro=false, destructive=false, idem=false, confirm=false, || obj(json!({ "scenario": { "type": "string", "description": "retries, rate_limiting, credential_injection, timeouts, caching, circuit_breaker, request_size_limit, cors or header_transformation" } }), &["scenario"])),
+    tool!("list_gateway_scenarios", "Gateway scenarios", "The guided gateway scenarios (HTTP: retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits, CORS, header transformation; AI: ai_token_limit, ai_model_fallback, ai_semantic_cache, ai_prompt_guard, ai_response_guard, ai_provider_balance): what each proves, the test parameters a check takes, the upstream it prepares, the steps on the gateway; and the caller's runs with their last verdicts.", ToolNeed::Perm(Permission::InstanceRead), ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("start_gateway_scenario", "Start a gateway scenario", "Prepare a scenario run: create its upstream (a mock that is never saved and ends with the run, a /flaky route, or this instance's AI mock steered for the run's own requests) and answer the steps to configure on the gateway, with the upstream URL. Then call check_gateway_scenario with the URL the gateway serves the route at. Admin.", ToolNeed::Perm(Permission::ScenariosRun), ro=false, destructive=false, idem=false, confirm=false, || obj(json!({ "scenario": { "type": "string", "description": "retries, rate_limiting, credential_injection, timeouts, caching, circuit_breaker, request_size_limit, cors, header_transformation, ai_token_limit, ai_model_fallback, ai_semantic_cache, ai_prompt_guard, ai_response_guard or ai_provider_balance" } }), &["scenario"])),
     tool!("get_gateway_scenario_run", "Get a scenario run", "One of the caller's scenario runs: the setup, what it created and the last verdict.", ToolNeed::Perm(Permission::InstanceRead), ro=true, destructive=false, idem=true, confirm=false, || obj(super::scenarios::run_props(), &["scenario", "run"])),
     ToolDef {
         name: "check_gateway_scenario",
@@ -672,7 +672,7 @@ pub static TOOLS: &[ToolDef] = &[
             obj(props, &["scenario", "run", "gateway_url"])
         },
     },
-    tool!("end_gateway_scenario", "End a gateway scenario", "End a run: remove the mock it created and reset its flaky counters, nothing else. Destructive: confirmed. Admin.", ToolNeed::Perm(Permission::ScenariosRun), ro=false, destructive=true, idem=true, confirm=true, || {
+    tool!("end_gateway_scenario", "End a gateway scenario", "End a run: remove the mock it created, reset its flaky counters and end its AI profile, nothing else. Destructive: confirmed. Admin.", ToolNeed::Perm(Permission::ScenariosRun), ro=false, destructive=true, idem=true, confirm=true, || {
         let mut props = super::scenarios::run_props();
         props["confirm"] = confirm_prop();
         obj(props, &["scenario", "run"])

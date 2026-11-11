@@ -4,7 +4,9 @@ A gateway scenario proves one gateway feature end to end. Pick the outcome, and
 Rustybin prepares the upstream the test needs, tells you how to point the gateway at
 it, sends test traffic through the gateway, and compares what the client got with
 what reached the upstream. Ending the run removes what it created and nothing else.
-No gateway product is assumed: the steps are written for any gateway.
+No gateway product is assumed: the steps are written for any gateway. There are
+scenarios for [HTTP gateways](#gateway-scenarios) (the table below) and for
+[AI gateways](#ai-gateway-scenarios).
 
 | Scenario | What a pass proves | Upstream the run prepares |
 |---|---|---|
@@ -63,6 +65,88 @@ What to turn on at the gateway for the two HTTP scenarios:
   the answer. Name headers neither side sets on its own: `Host`, `Content-Type`,
   `Origin`, `X-Request-Id`, `X-Rustybin-*` and `Access-Control-*`, among others, are
   refused.
+
+## AI gateway scenarios
+
+The AI scenarios prove what an AI gateway does in front of a model. Their upstream is
+this instance's [AI mock](ai/index.md) in the OpenAI chat completions format
+(`/ai/openai/v1/chat/completions`, and a second target at `/ai/v1/chat/completions`,
+the same API at another path, for the two scenarios that need two). A run steers the
+mock for its own requests only: the check's requests carry a secret of the run in
+`X-Rustybin-Session`, and the mock applies the run's profile (fail the primary target,
+answer a customer record) to those and to nothing else, so other callers of the AI
+mock see no change, and ending the run ends the profile. The check sends `POST`
+requests in the OpenAI format (model `gpt-4o-mini`, `max_tokens` 100) to the URL you
+give, so point it at the URL the gateway serves the route's chat completions at.
+
+| Scenario | What a pass proves | What the mock does for the run |
+|---|---|---|
+| `ai_token_limit` | The gateway limits by tokens, not requests: once the budget is spent it answers `429`, the refused requests never reach the model, and the first refusal comes after about the budget | Answers each request with a little over 100 tokens of usage |
+| `ai_model_fallback` | When the primary target answers a provider error, the gateway sends the request to a fallback and the client sees a success | The primary target answers every request with the error of `fail_kind`; the second target answers normally |
+| `ai_semantic_cache` | Prompts that mean the same (other case and punctuation, a word more) come from the cache; a different prompt still reaches the model | Answers normally; its [embeddings](ai/embeddings.md) keep similar texts close, for a gateway that asks this instance for them |
+| `ai_prompt_guard` | Personal data and a prompt injection never reach the model (the gateway refuses the prompt or redacts it), and a clean prompt does | Answers normally; the check reads what reached it |
+| `ai_response_guard` | The gateway removes personal data from the model's answer before the client sees it | Answers every request with a fake customer record (SSN, card number, email, phone) |
+| `ai_provider_balance` | The gateway spreads the requests across two targets, each getting at least its share, and every request succeeds | Two targets answer normally |
+
+What each check sends and how it judges:
+
+- **`ai_token_limit`**: the same long prompt until the gateway refuses one (at most 40
+  requests, or until twice the budget went to the model). Give the check the budget you
+  set (`token_limit`, 100 to 2000, default 500), counted in prompt plus completion
+  tokens. The check reads `usage.total_tokens` from each answer; a pass needs a `429`,
+  no `429` that reached the model, and the first `429` after the tokens that reached the
+  model were between the budget less two requests' worth and a quarter over the budget
+  plus two requests' worth (a gateway that counts completion tokens only, or checks a
+  request's `max_tokens` up front, falls inside). A request limit set instead refuses
+  too early and fails this line. Wait for the gateway's window to pass before checking
+  again.
+- **`ai_model_fallback`**: three requests. The primary target fails each with the
+  provider error of `fail_kind` (`rate_limit` `429`, `overloaded` and `unavailable`
+  `503`, `server_error` `500`, `timeout` `504`; default `rate_limit`). A pass needs every
+  request answered `2xx`, its first upstream request to the primary target and failed,
+  and a later one to another target answered `2xx`. Any other provider path of this
+  instance counts as the fallback, for a gateway that falls back to another provider.
+- **`ai_semantic_cache`**: a question, the same question in other case and
+  punctuation, the same with a word more (`Please, ...`), then a different question. A
+  pass needs the first and the different one to reach the model and neither of the
+  other two. Set the gateway's similarity threshold at 0.9 or less. Each check asks
+  another question (twelve in turn, from a point chosen per run), so what an earlier
+  check left in the cache does not answer it. The gateway's own embedding calls, when
+  they go to this instance with the session header, are not counted as model calls.
+- **`ai_prompt_guard`**: a clean prompt, a prompt with fake personal data (SSN
+  `123-45-6789`, card `4111 1111 1111 1111`, `jane.doe@example.com`) and, unless
+  `skip_injection` is set, a prompt injection ("Ignore all previous instructions ...").
+  The clean prompt must reach the model; each of the others must either be refused by
+  the gateway or reach the model without what was planted. The verdict says which
+  (refused, redacted, or the kinds that reached the model), never the values.
+- **`ai_response_guard`**: one request whose answer from the mock is a fake customer
+  record. A pass needs it to reach the model and the client's answer to hold none of
+  the SSN, card number, email and phone: redacted, or the answer refused.
+- **`ai_provider_balance`**: ten requests. A pass needs every one answered `2xx` and
+  each target to have answered at least `min_share` percent of them (1 to 50, default
+  20, which suits an even split and a weighted one down to 80/20).
+
+```hurl
+{{#include ../examples/scenarios/ai.hurl:ai_start}}
+```
+
+A check's parameters are refused before anything is sent when they do not fit:
+
+```hurl
+{{#include ../examples/scenarios/ai.hurl:ai_kind}}
+```
+
+The AI mock answers everyone else as before, while the run is on:
+
+```hurl
+{{#include ../examples/scenarios/ai.hurl:ai_untouched}}
+```
+
+Ending the run removes its profile:
+
+```hurl
+{{#include ../examples/scenarios/ai.hurl:ai_end}}
+```
 
 ## How a run works
 
@@ -132,8 +216,9 @@ Each scenario lists its test parameters under `parameters` (name, type, bounds,
 default), and a run repeats them: the console shows a field for each, the CLI has a
 flag for each (`--limit`, `--half-open-ms`, `--size-limit`, `--allowed-origin`,
 `--refused-origin`, `--upstream-cors`, `--add-request-header`, `--add-request-value`,
-`--remove-request-header`, `--add-response-header`), the `check_gateway_scenario`
-tool takes them by name.
+`--remove-request-header`, `--add-response-header`, `--token-limit`, `--fail-kind`,
+`--skip-injection`, `--min-share`), the `check_gateway_scenario` tool takes them by
+name.
 
 | Parameter | Scenario | Type and bounds | Default |
 |---|---|---|---|
@@ -147,6 +232,10 @@ tool takes them by name.
 | `add_request_value` | `header_transformation` | visible characters, at most 200 (optional) | any value |
 | `remove_request_header` | `header_transformation` | a header name, another than `add_request_header` | `X-Client-Internal` |
 | `add_response_header` | `header_transformation` | a header name | `X-Gateway-Response` |
+| `token_limit` | `ai_token_limit` | integer, 100 to 2000 | 500 |
+| `fail_kind` | `ai_model_fallback` | one of `rate_limit`, `overloaded`, `server_error`, `unavailable`, `timeout` | `rate_limit` |
+| `skip_injection` | `ai_prompt_guard` | `true` or `false` | `false` |
+| `min_share` | `ai_provider_balance` | integer, 1 to 50 (percent) | 20 |
 
 A parameter out of its bounds or of the wrong type, an unknown one, or one given to a
 scenario that does not take it, is refused with the bounds before anything is sent:
@@ -181,7 +270,7 @@ Pass the CLI's `--session` to reach a run the console started.
 | Surface | Where |
 |---|---|
 | API | `GET /_rustybin/scenarios`, `POST /_rustybin/scenarios/{id}/runs`, `GET`, `DELETE /_rustybin/scenarios/{id}/runs/{run}`, `POST .../check` |
-| Console | **Gateway scenarios**: prepare, the steps with the upstream URL, the gateway URL, **Check through the gateway**, the verdict table, **Clean up** |
+| Console | **Gateway scenarios**: the HTTP and AI groups, prepare, the steps with the upstream URL (two for the scenarios with a second target), the gateway URL and the test parameters (a choice for `fail_kind`), **Check through the gateway**, the verdict table, **Clean up** |
 | CLI | `rustybin scenario list`, `start`, `show`, `check`, `end` (`check` exits `1` when an expectation fails) ([reference](cli.md#scenario)) |
 | Management MCP | `list_gateway_scenarios`, `start_gateway_scenario`, `get_gateway_scenario_run`, `check_gateway_scenario` (confirmed: it sends traffic out), `end_gateway_scenario` (confirmed) ([agent page](agent-mcp.md)) |
-| `rustybin.yaml` | Nothing: runs are transient. A run's mock is never exported, saved to disk, kept in a checkpoint nor pruned; it ends with the run |
+| `rustybin.yaml` | Nothing: runs are transient. A run's mock is never exported, saved to disk, kept in a checkpoint nor pruned; it ends with the run, and so does an AI run's profile |

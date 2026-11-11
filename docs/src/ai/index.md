@@ -15,11 +15,11 @@ answer and demos are reproducible.
 | Gateway capability | What Rustybin provides |
 |---|---|
 | AI proxy, provider abstraction, model routing | Seven providers' APIs at stable paths; any model name accepted; `X-Rustybin-Provider` and `X-Rustybin-Model` response headers |
-| Token based rate limiting, cost accounting | Deterministic token counts in native usage fields and rate-limit headers |
+| Token based rate limiting, cost accounting | Deterministic token counts in native usage fields and rate-limit headers; the [`ai_token_limit` scenario](../gateway-scenarios.md#ai-gateway-scenarios) checks a gateway's budget end to end |
 | Prompt decorators and templates | [Echo mode](behaviour.md#modes) returns the exact prompt the upstream received |
-| Prompt guards, response sanitisers | [Scripted mode](behaviour.md#scripted-rules) returns fake PII, secrets, unsafe text, URLs on demand; plus mock [guardrail services](guardrails.md) |
-| Semantic caching | Similarity-preserving [embeddings](embeddings.md) |
-| Retries, fallback, load balancing | [Native errors](gateway-features.md#faults) (429 with rate-limit headers, Anthropic 529, timeouts, context length) on demand or at a rate; `X-Rustybin-Instance` |
+| Prompt guards, response sanitisers | [Scripted mode](behaviour.md#scripted-rules) returns fake PII, secrets, unsafe text, URLs on demand; plus mock [guardrail services](guardrails.md); the [`ai_prompt_guard` and `ai_response_guard` scenarios](../gateway-scenarios.md#ai-gateway-scenarios) check a gateway's guards end to end |
+| Semantic caching | Similarity-preserving [embeddings](embeddings.md); the [`ai_semantic_cache` scenario](../gateway-scenarios.md#ai-gateway-scenarios) checks a gateway's cache end to end |
+| Retries, fallback, load balancing | [Native errors](gateway-features.md#faults) (429 with rate-limit headers, Anthropic 529, timeouts, context length) on demand or at a rate; `X-Rustybin-Instance`; the [`ai_model_fallback` and `ai_provider_balance` scenarios](../gateway-scenarios.md#ai-gateway-scenarios) check a gateway's fallback and balancing end to end |
 | Streaming | Native SSE, NDJSON and AWS event stream framing with configurable pace and time to first token |
 | Credential injection, key vaults | [Native credential checks](gateway-features.md#credential-checks) that report the redacted key they received |
 | Tool calling, structured output, agent flows | [Tool calls](behaviour.md#tool-calls) with arguments generated from your JSON schema; [structured output](behaviour.md#structured-output) valid against your schema |
