@@ -38,6 +38,8 @@ struct Gw {
     add_response: Option<(&'static str, &'static str)>,
     /// An AI gateway in front of the AI mock (the AI scenarios).
     ai: Option<AiGw>,
+    /// An MCP gateway in front of an attack server (the MCP scenarios).
+    mcp: Option<McpGw>,
     count: AtomicU32,
     cached: Mutex<HashMap<String, (u16, bytes::Bytes)>>,
     circuit: Mutex<Circuit>,
@@ -189,9 +191,126 @@ async fn ai_gw(g: &Gw, a: &AiGw, req: Request) -> Response {
     out
 }
 
+/// A stand-in MCP gateway: removes tools with hidden instructions, pins
+/// definitions, namespaces a second server's tools next to the first's,
+/// guards tool results, caps the size of answers.
+#[derive(Default)]
+struct McpGw {
+    second: Option<String>,
+    strip_poison: bool,
+    pin: bool,
+    namespace: bool,
+    guard_results: bool,
+    max_bytes: Option<usize>,
+    pinned: Mutex<HashMap<String, Value>>,
+}
+
+/// The tools of the second server (the stateless 2026-07-28 protocol).
+async fn second_tools(g: &Gw, url: &str) -> Vec<Value> {
+    let meta = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} });
+    let r = g
+        .client
+        .post(url)
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-protocol-version", "2026-07-28")
+        .header("mcp-method", "tools/list")
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": meta } }))
+        .send()
+        .await;
+    let Ok(r) = r else { return Vec::new() };
+    let text = r.text().await.unwrap_or_default();
+    catalog::rpc_answer(&text)
+        .and_then(|v| v["result"]["tools"].as_array().cloned())
+        .unwrap_or_default()
+}
+
+async fn mcp_gw(g: &Gw, m: &McpGw, req: Request) -> Response {
+    let mut headers = req.headers().clone();
+    for h in HOP {
+        headers.remove(*h);
+    }
+    let body = axum::body::to_bytes(req.into_body(), 1 << 20)
+        .await
+        .unwrap_or_default();
+    let Ok(r) = g
+        .client
+        .post(&g.upstream)
+        .headers(headers)
+        .body(body)
+        .send()
+        .await
+    else {
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
+    let status = r.status().as_u16();
+    let session = r.headers().get("mcp-session-id").cloned();
+    let raw = r.bytes().await.unwrap_or_default();
+    if m.max_bytes.is_some_and(|max| raw.len() > max) {
+        return StatusCode::BAD_GATEWAY.into_response();
+    }
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let mut out = match catalog::rpc_answer(&text) {
+        None => (StatusCode::from_u16(status).expect("status"), text).into_response(),
+        Some(mut v) => {
+            if let Some(tools) = v["result"]["tools"].as_array().cloned() {
+                let mut tools: Vec<Value> = tools
+                    .into_iter()
+                    .filter(|t| {
+                        !m.strip_poison
+                            || crate::mcp::attacks::hidden_instructions(&t.to_string()).is_empty()
+                    })
+                    .collect();
+                if m.pin {
+                    let mut pinned = m.pinned.lock().expect("lock");
+                    for t in tools.iter_mut() {
+                        let name = t["name"].as_str().unwrap_or("").to_string();
+                        match pinned.get(&name) {
+                            Some(p) => *t = p.clone(),
+                            None => {
+                                pinned.insert(name, t.clone());
+                            }
+                        }
+                    }
+                }
+                if let Some(second) = &m.second {
+                    let mut more = second_tools(g, second).await;
+                    if m.namespace {
+                        for t in tools.iter_mut() {
+                            t["name"] =
+                                json!(format!("attack_{}", t["name"].as_str().unwrap_or("")));
+                        }
+                        for t in more.iter_mut() {
+                            t["name"] = json!(format!("crm_{}", t["name"].as_str().unwrap_or("")));
+                        }
+                    }
+                    tools.extend(more);
+                }
+                v["result"]["tools"] = json!(tools);
+            } else if m.guard_results && v.get("result").is_some() {
+                let r = v["result"].to_string();
+                if !crate::mcp::attacks::hidden_instructions(&r).is_empty()
+                    || r.contains(crate::mcp::attacks::EXFIL_HOST)
+                {
+                    v["result"] = json!({ "content": [{ "type": "text", "text": "removed by the gateway" }], "isError": true });
+                }
+            }
+            (StatusCode::from_u16(status).expect("status"), v.to_string()).into_response()
+        }
+    };
+    out.headers_mut()
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    if let Some(sid) = session {
+        out.headers_mut().insert("mcp-session-id", sid);
+    }
+    out
+}
+
 async fn gw(State(g): State<Arc<Gw>>, req: Request) -> Response {
     if let Some(a) = &g.ai {
         return ai_gw(&g, a, req).await;
+    }
+    if let Some(m) = &g.mcp {
+        return mcp_gw(&g, m, req).await;
     }
     let path = req
         .uri()
@@ -426,7 +545,43 @@ fn behaving_with(id: &str, upstream: &str, second: Option<&str>, key: Option<&st
             ..a
         })
     };
+    let mcp = |m: McpGw| {
+        Some(McpGw {
+            second: second.map(str::to_string),
+            ..m
+        })
+    };
     match id {
+        "mcp_tool_poisoning" => {
+            g.mcp = mcp(McpGw {
+                strip_poison: true,
+                ..McpGw::default()
+            })
+        }
+        "mcp_rug_pull" => {
+            g.mcp = mcp(McpGw {
+                pin: true,
+                ..McpGw::default()
+            })
+        }
+        "mcp_tool_shadowing" => {
+            g.mcp = mcp(McpGw {
+                namespace: true,
+                ..McpGw::default()
+            })
+        }
+        "mcp_result_injection" | "mcp_exfiltration_url" => {
+            g.mcp = mcp(McpGw {
+                guard_results: true,
+                ..McpGw::default()
+            })
+        }
+        "mcp_oversized_result" => {
+            g.mcp = mcp(McpGw {
+                max_bytes: Some(64 * 1024),
+                ..McpGw::default()
+            })
+        }
         "ai_token_limit" => {
             g.ai = ai(AiGw {
                 token_limit: Some(catalog::DEFAULT_TOKEN_LIMIT),
@@ -567,6 +722,30 @@ async fn a_gateway_without_the_feature_fails_with_the_expectation_named() {
         ("ai_prompt_guard", "Personal data never reached the model"),
         ("ai_response_guard", "No personal data reached the client"),
         ("ai_provider_balance", "Both targets received requests"),
+        (
+            "mcp_tool_poisoning",
+            "The poisoned description never reached the client",
+        ),
+        (
+            "mcp_rug_pull",
+            "The changed definition never reached the client",
+        ),
+        (
+            "mcp_tool_shadowing",
+            "The attacker's copy did not take the trusted tool's name",
+        ),
+        (
+            "mcp_result_injection",
+            "The prompt injection never reached the client",
+        ),
+        (
+            "mcp_oversized_result",
+            "The client never received more than the limit",
+        ),
+        (
+            "mcp_exfiltration_url",
+            "No link to the unknown host reached the client",
+        ),
     ];
     assert_eq!(expected.len(), SCENARIOS.len(), "a scenario without a case");
     for (id, name) in expected {
@@ -576,6 +755,7 @@ async fn a_gateway_without_the_feature_fails_with_the_expectation_named() {
         let plain = start_gw(Gw {
             upstream: upstream.clone(),
             ai: id.starts_with("ai_").then(AiGw::default),
+            mcp: id.starts_with("mcp_").then(McpGw::default),
             ..Gw::default()
         })
         .await;
@@ -1562,4 +1742,131 @@ fn every_planted_value_is_what_the_mock_answers_and_the_prompt_carries() {
         ["SSN", "card number", "email"]
     );
     assert!(catalog::injection_in(crate::mcp::tools::INJECTION_SAMPLE));
+}
+
+// ── MCP scenarios ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn each_mcp_check_starts_with_an_unpulled_rug() {
+    let (_server, state, base) = instance(config()).await;
+    let run = run_of(&state, &base, "mcp_rug_pull").await;
+    let upstream = run["upstream"].as_str().expect("upstream").to_string();
+    assert!(upstream.ends_with("/mcp/attack/rug_pull"), "{upstream}");
+    // Straight to the attack server: each check sees the harmless
+    // definition first, then the changed one.
+    for _ in 0..2 {
+        let v = check_via(&state, &run, &upstream).await;
+        assert_eq!(
+            failed(&v),
+            ["The changed definition never reached the client"],
+            "{v:#}"
+        );
+    }
+    // A pinning gateway passes, check after check.
+    let gateway = start_gw(behaving("mcp_rug_pull", &upstream, None)).await;
+    for _ in 0..2 {
+        let v = check_via(&state, &run, &gateway).await;
+        assert_eq!(v["passed"], true, "{v:#}");
+    }
+    // The verdict names the requests of the session, never the bodies.
+    let v = check_via(&state, &run, &gateway).await;
+    let labels: Vec<&str> = v["requests"]
+        .as_array()
+        .expect("requests")
+        .iter()
+        .filter_map(|r| r["label"].as_str())
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            catalog::LABEL_INITIALIZE,
+            catalog::LABEL_INITIALIZED,
+            catalog::LABEL_FIRST_LIST,
+            catalog::LABEL_CALL,
+            catalog::LABEL_SECOND_LIST
+        ]
+    );
+    assert!(!v.to_string().contains("RUSTYBIN-RUG-PULL"), "{v:#}");
+}
+
+#[tokio::test]
+async fn the_attack_servers_are_off_in_public_mode_and_by_the_setting() {
+    // Public mode: the routes are 404, the scenarios unlisted, a run refused.
+    let mut c = config();
+    c.public_mode = true;
+    let (_server, state, base) = instance(c).await;
+    let r = reqwest::Client::new()
+        .post(format!("{base}/mcp/attack/poisoned_description"))
+        .header("accept", "application/json, text/event-stream")
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } } }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(r.status().as_u16(), 404);
+    let listed = list(&state, "me", true);
+    assert!(
+        !listed.to_string().contains("mcp_tool_poisoning"),
+        "{listed}"
+    );
+    assert!(
+        start(&state, svc(&state, &base), "me", "mcp_tool_poisoning")
+            .await
+            .is_err()
+    );
+    // The setting off on an ordinary instance: the same, and an admin is
+    // told why.
+    let (_server, state, base) = instance(config()).await;
+    state
+        .settings
+        .update(
+            std::collections::BTreeMap::from([(
+                crate::mcp::attacks::SWITCH_KEY.to_string(),
+                json!(false),
+            )]),
+            std::collections::BTreeMap::new(),
+            "test",
+        )
+        .expect("set");
+    let r = reqwest::get(format!(
+        "{base}/.well-known/oauth-protected-resource/mcp/attack/scope_overreach"
+    ))
+    .await
+    .expect("get");
+    assert_eq!(r.status().as_u16(), 404);
+    let e = start(&state, svc(&state, &base), "me", "mcp_rug_pull")
+        .await
+        .expect_err("refused");
+    assert_eq!(e.0, StatusCode::CONFLICT);
+    assert!(e.1.contains("mcp.attack_servers"), "{}", e.1);
+}
+
+#[tokio::test]
+async fn the_scope_overreach_server_asks_for_more_than_it_needs() {
+    let (_server, _state, base) = instance(config()).await;
+    let r = reqwest::Client::new()
+        .post(format!("{base}/mcp/attack/scope_overreach"))
+        .header("accept", "application/json, text/event-stream")
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(r.status().as_u16(), 401);
+    let challenge = r.headers()["www-authenticate"]
+        .to_str()
+        .expect("header")
+        .to_string();
+    assert!(
+        challenge.contains("scope=\"admin offline_access tools:* files:write\""),
+        "{challenge}"
+    );
+    assert!(challenge.contains("/.well-known/oauth-protected-resource/mcp/attack/scope_overreach"));
+    let meta: Value = reqwest::get(format!(
+        "{base}/.well-known/oauth-protected-resource/mcp/attack/scope_overreach"
+    ))
+    .await
+    .expect("get")
+    .json()
+    .await
+    .expect("json");
+    assert_eq!(meta["scopes_supported"][0], "admin");
 }

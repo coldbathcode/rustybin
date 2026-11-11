@@ -15,6 +15,7 @@ Inspector CLI) in `conformance/mcp/`.
 | `POST, GET, DELETE /mcp/protected` | Same server behind OAuth 2.1 bearer tokens (MCP authorization spec) |
 | `POST, GET, DELETE /mcp/apikey` | Same server behind an `X-API-Key` header |
 | `POST, GET, DELETE /mcp/servers/{name}` | Named servers with tool subsets: `weather`, `crm`, `devtools` |
+| `POST, GET, DELETE /mcp/attack/{kind}` | [Attack servers](security.md) that misbehave on purpose, for MCP security demos (off in public mode) |
 | `GET /mcp/sse` + `POST /mcp/messages?sessionId=` | Legacy HTTP+SSE transport (2024-11-05) |
 | `GET /.well-known/oauth-protected-resource` and `.../oauth-protected-resource/mcp/protected` | RFC 9728 metadata of `/mcp/protected` |
 | `POST, GET, DELETE /mock/{name}/_rustybin/mcp` | The MCP server of an [OpenAPI mock](../mocks/mcp.md): the customer's own operations as tools instead of fake data |

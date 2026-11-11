@@ -1109,3 +1109,51 @@ async fn a_visitors_check_runs_are_answered_and_never_kept() {
     let resp = app.clone().oneshot(list(None)).await.expect("r");
     assert_eq!(body_json(resp).await["runs"], json!([]));
 }
+
+#[tokio::test]
+async fn the_security_checks_warn_on_the_attack_servers_and_pass_a_clean_one() {
+    let app = test_app_with(test_state_with(Config::for_tests()));
+    let only = json!([
+        "connect",
+        "tools_list",
+        "tools_call",
+        "descriptions_look_clean",
+        "results_carry_no_instructions",
+        "definitions_are_stable"
+    ]);
+    let run = |target: &str| json!({ "target": target, "checks": only, "transport": "session", "version": "2025-06-18" });
+    // A clean server: every security check passes.
+    let (_, r) = checks_call(&app, run("/mcp/servers/weather")).await;
+    for id in [
+        "descriptions_look_clean",
+        "results_carry_no_instructions",
+        "definitions_are_stable",
+    ] {
+        assert_eq!(check(&r, id)["status"], "pass", "{id}: {}", check(&r, id));
+    }
+    // Tool poisoning: the description check warns and names the tool.
+    let (_, r) = checks_call(&app, run("/mcp/attack/poisoned_description")).await;
+    let c = check(&r, "descriptions_look_clean");
+    assert_eq!(c["status"], "warn", "{c}");
+    assert!(
+        c["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("add_numbers")),
+        "{c}"
+    );
+    // A warning is not a failure.
+    assert_eq!(r["ok"], true, "{}", r["checks"]);
+    // Result injection and the exfiltration link: the results check warns.
+    let (_, r) = checks_call(&app, run("/mcp/attack/result_injection")).await;
+    assert_eq!(
+        check(&r, "results_carry_no_instructions")["status"],
+        "warn",
+        "{}",
+        r["checks"]
+    );
+    // The rug pull: the definitions change after the call.
+    let (_, r) = checks_call(&app, run("/mcp/attack/rug_pull")).await;
+    let c = check(&r, "definitions_are_stable");
+    assert_eq!(c["status"], "warn", "{c}");
+    assert_eq!(c["details"]["changed"][0], "get_exchange_rate", "{c}");
+}

@@ -85,3 +85,49 @@ are not listed.
 
 Seven attack servers, seven scenarios and three inspector checks run on every surface, each scenario
 proven both ways against the test proxy, documented on the new page.
+
+## Build notes (2026-11-11)
+
+Built whole. Where the build differs from the plan above:
+
+- **The attack servers are a fourth MCP family** (`Family::Attack`, `src/mcp/attacks.rs`), on
+  the existing protocol and transport code with their own dispatch, like the OpenAPI mocks'
+  servers. `Profile.server` holds the kind; `Shared.attacks` the bounded state (the rug pull's
+  keys, 1024 for an hour; at most 4 oversized results built at once). Seven kinds as planned;
+  `oversized` is 2 MiB built in memory under that cap, not a never-ending stream (the transport
+  answers whole JSON-RPC messages).
+- **Six scenarios, not seven.** `scope_overreach` is an authorization flow, not a message a
+  check can send through a gateway: it is an attack server (a `401` challenge and protected
+  resource metadata asking for `admin offline_access tools:* files:write`; any bearer passes)
+  for demos and the inspector's OAuth walk, without a scenario.
+- **The rug pull is keyed per check.** `Scenarios::check_key` gives every request of one check
+  the same key (`scn-<run>-<secret>-<check>`) and the next check a new one, so each check starts
+  with the harmless definition; outside a scenario the key is the MCP session, else the caller's
+  `X-Rustybin-Session` or address.
+- **The check is its own small MCP client** (`send_mcp` in `src/scenarios/mod.rs`): `initialize`
+  with `2025-06-18`, `notifications/initialized`, then the scenario's requests in the session,
+  through the same egress client as the other checks; answers are read as JSON or SSE
+  (`catalog::rpc_answer`). The inspector's client was not reused: it goes through the relay
+  under `Purpose::McpRelay`, and a check's traffic belongs to `Purpose::Scenario`.
+- **A namespaced name counts.** `crm_lookup_customer`, `crm.lookup_customer` and the like are the
+  trusted tool when their description is the trusted one; the shadowing line fails only when the
+  exact name is the attacker's or is listed twice.
+- **The setting is off in public mode whatever it says** (`attacks::enabled`), rather than a
+  default that depends on the mode; it is not refused from git (it is not a security setting:
+  turning it on in a document still serves nothing in public mode). The console's card is on
+  Management, General.
+- **The attack servers are listed in the inspector** (kind `attack-mcp`, with the attack in
+  words and a warning in the console) and skipped by the registry's generated entries, so an
+  agent browsing the registry never finds them.
+- **Inspector checks** are heuristics shared with the scenarios' stand-in gateway
+  (`attacks::hidden_instructions`); `results_carry_no_instructions` reads the answers of the
+  `tools_call` calls (and makes the calls when asked alone), `definitions_are_stable` lists the
+  tools again after them. Their details are `untrusted_tools` and `untrusted_results`.
+
+### For the merge
+
+Touches the MCP router and core dispatch (one family arm each), the settings table, the
+inspector's server list and checks, the registry's generated entries, the scenario table and
+engine, the CLI's `scenario check` flags and the console's scenarios, MCP and Management views.
+Two new data plane routes (in the catalogue, OpenAPI and README tables); no control route, tool
+or permission is new.

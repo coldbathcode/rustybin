@@ -219,7 +219,9 @@ pub fn generated(state: &AppState, base: &str, started: DateTime<Utc>) -> Vec<En
     let mocks = state.mocks.list();
     let mut out = Vec::new();
     for s in &list {
-        if s["state"] != "serving" {
+        // The attack servers misbehave on purpose: never offered to agents
+        // browsing the registry.
+        if s["state"] != "serving" || s["kind"] == "attack-mcp" {
             continue;
         }
         match s["mock"].as_str() {

@@ -5,8 +5,10 @@ Rustybin prepares the upstream the test needs, tells you how to point the gatewa
 it, sends test traffic through the gateway, and compares what the client got with
 what reached the upstream. Ending the run removes what it created and nothing else.
 No gateway product is assumed: the steps are written for any gateway. There are
-scenarios for [HTTP gateways](#gateway-scenarios) (the table below) and for
-[AI gateways](#ai-gateway-scenarios).
+scenarios for [HTTP gateways](#gateway-scenarios) (the table below), for
+[AI gateways](#ai-gateway-scenarios) and for [MCP gateways](mcp/security.md#mcp-gateway-scenarios)
+(tool poisoning, rug pulls, tool shadowing, result injection, oversized results and
+exfiltration links, against this instance's MCP attack servers).
 
 | Scenario | What a pass proves | Upstream the run prepares |
 |---|---|---|
@@ -217,8 +219,8 @@ default), and a run repeats them: the console shows a field for each, the CLI ha
 flag for each (`--limit`, `--half-open-ms`, `--size-limit`, `--allowed-origin`,
 `--refused-origin`, `--upstream-cors`, `--add-request-header`, `--add-request-value`,
 `--remove-request-header`, `--add-response-header`, `--token-limit`, `--fail-kind`,
-`--skip-injection`, `--min-share`), the `check_gateway_scenario` tool takes them by
-name.
+`--skip-injection`, `--min-share`, `--max-result-kib`), the `check_gateway_scenario`
+tool takes them by name.
 
 | Parameter | Scenario | Type and bounds | Default |
 |---|---|---|---|
@@ -236,6 +238,7 @@ name.
 | `fail_kind` | `ai_model_fallback` | one of `rate_limit`, `overloaded`, `server_error`, `unavailable`, `timeout` | `rate_limit` |
 | `skip_injection` | `ai_prompt_guard` | `true` or `false` | `false` |
 | `min_share` | `ai_provider_balance` | integer, 1 to 50 (percent) | 20 |
+| `max_result_kib` | `mcp_oversized_result` | integer, 16 to 1024 (KiB) | 256 |
 
 A parameter out of its bounds or of the wrong type, an unknown one, or one given to a
 scenario that does not take it, is refused with the bounds before anything is sent:
@@ -270,7 +273,7 @@ Pass the CLI's `--session` to reach a run the console started.
 | Surface | Where |
 |---|---|
 | API | `GET /_rustybin/scenarios`, `POST /_rustybin/scenarios/{id}/runs`, `GET`, `DELETE /_rustybin/scenarios/{id}/runs/{run}`, `POST .../check` |
-| Console | **Gateway scenarios**: the HTTP and AI groups, prepare, the steps with the upstream URL (two for the scenarios with a second target), the gateway URL and the test parameters (a choice for `fail_kind`), **Check through the gateway**, the verdict table, **Clean up** |
+| Console | **Gateway scenarios**: the HTTP, AI and MCP groups, prepare, the steps with the upstream URL (two for the scenarios with a second target), the gateway URL and the test parameters (a choice for `fail_kind`), **Check through the gateway**, the verdict table, **Clean up** |
 | CLI | `rustybin scenario list`, `start`, `show`, `check`, `end` (`check` exits `1` when an expectation fails) ([reference](cli.md#scenario)) |
 | Management MCP | `list_gateway_scenarios`, `start_gateway_scenario`, `get_gateway_scenario_run`, `check_gateway_scenario` (confirmed: it sends traffic out), `end_gateway_scenario` (confirmed) ([agent page](agent-mcp.md)) |
 | `rustybin.yaml` | Nothing: runs are transient. A run's mock is never exported, saved to disk, kept in a checkpoint nor pruned; it ends with the run, and so does an AI run's profile |

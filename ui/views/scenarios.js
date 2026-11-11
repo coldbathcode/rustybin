@@ -1,7 +1,9 @@
 // Gateway scenarios: pick an outcome (HTTP: retries, rate limiting,
 // credential injection, timeouts, caching, circuit breakers, request size
 // limits, CORS, header transformation; AI: token limits, model fallback,
-// semantic caching, prompt and response guards, load balancing), prepare
+// semantic caching, prompt and response guards, load balancing; MCP: tool
+// poisoning, rug pull, shadowing, result injection, oversized results,
+// exfiltration links), prepare
 // its upstream, follow the steps on the gateway, check through it and clean
 // up. GET /_rustybin/scenarios; the run routes are admin. A run's test
 // parameters are fields from its `parameters`, by type (a number, a
@@ -51,7 +53,7 @@ export default {
       const row = (s) => h('div', { class: 'row', 'data-scenario': s.id },
         h('div', { class: 'grow' }, h('strong', null, s.title), h('div', { class: 'muted small' }, s.proves)),
         h('button', { class: 'btn sm', type: 'button', id: 'scenario-start-' + s.id, onclick: () => start(s.id) }, icon('plus'), 'Prepare'));
-      const groups = [['http', 'HTTP gateways'], ['ai', 'AI gateways']];
+      const groups = [['http', 'HTTP gateways'], ['ai', 'AI gateways'], ['mcp', 'MCP gateways']];
       replace(catalogEl, h('div', { class: 'stack' }, ...groups.flatMap(([g, title]) => {
         const items = d.scenarios.filter((s) => (s.group || 'http') === g);
         return items.length ? [h('h3', { class: 'section-title', 'data-group': g }, title), ...items.map(row)] : [];

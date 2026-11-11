@@ -176,7 +176,8 @@ export default {
       const s = serverInfo();
       const picker = st.source === 'instance'
         ? h('div', { class: 'stack-sm' }, serverSel,
-          s ? h('div', { class: 'small muted' }, 'Transports ', (s.transports || []).join(', '), ' | auth ', (s.auth && s.auth.kind) || 'none', s.auth && s.auth.hint ? ': ' + s.auth.hint : '', s.tools !== undefined ? ' | ' + s.tools + ' tools' : '') : null)
+          s ? h('div', { class: 'small muted' }, 'Transports ', (s.transports || []).join(', '), ' | auth ', (s.auth && s.auth.kind) || 'none', s.auth && s.auth.hint ? ': ' + s.auth.hint : '', s.tools !== undefined ? ' | ' + s.tools + ' tools' : '') : null,
+          s && s.kind === 'attack-mcp' ? notice('warn', 'This server misbehaves on purpose (inert test data): ' + s.attack + '. Run checks to see the security checks warn.') : null)
         : st.source === 'saved'
           ? h('div', { class: 'stack-sm' }, savedSel, savedNote())
           : field('Server URL', urlIn, relayInfo ? 'Through the relay the host must be in the outbound allowlist (' + (relayInfo.allow.length ? relayInfo.allow.join(', ') : 'empty') + ').' : null);

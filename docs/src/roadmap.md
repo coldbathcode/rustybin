@@ -19,6 +19,8 @@ recommended against for now.
 - [AI gateway scenarios](gateway-scenarios.md#ai-gateway-scenarios) (unreleased, built
   2026-11-11, step 01 of the demo next plan): token limits, model fallback, semantic caching,
   prompt and response guards and load balancing, each proven against this instance's AI mock.
+- [MCP security](mcp/security.md) (unreleased, built 2026-11-11, step 02 of the demo next plan):
+  attack servers, six MCP gateway scenarios against them and three inspector checks.
 - The last of the roadmap's candidates ([unreleased](changelog.md#unreleased-the-last-of-the-roadmaps-candidates),
   built 2026-11-09): for source control a [diverged branch](source-control.md#a-diverged-branch)
   resolved by a person, [branches per environment](source-control.md#branches) and
@@ -96,8 +98,8 @@ recommended against for now.
 
 Planned on 2026-11-11 as a second milestone, in
 [the demo next plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/demo-next/master-plan.md)
-(step 01, the AI gateway scenarios, is built): guided scenarios for MCP security (tool poisoning, rug pulls, shadowing, injected results); a mock recorded from a real
-API, and drift checks of a mock against it; demo storyboards and customer demo packs; Arazzo
+(steps 01 and 02, the AI gateway scenarios and MCP security, are built): a mock recorded from
+a real API, and drift checks of a mock against it; demo storyboards and customer demo packs; Arazzo
 workflows as multi-step tests; realtime and batch AI APIs; event-driven mocks from AsyncAPI.
 
 ## Under consideration

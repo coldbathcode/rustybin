@@ -366,6 +366,11 @@ pub fn groups() -> Vec<Group> {
             description: "The mock MCP registry at /mcp-registry (its scenario) and the real registries the console browses.",
         },
         Group {
+            id: "mcp",
+            title: "MCP attack servers",
+            description: "The MCP servers that misbehave on purpose at /mcp/attack/{kind}, for MCP security demos and the mcp_* gateway scenarios (always off in public mode).",
+        },
+        Group {
             id: "agents",
             title: "AI agents",
             description: "What agents on the management MCP server (/_rustybin/mcp) may do unless a rule of rustybin.yaml or their own rights say otherwise.",
@@ -442,6 +447,7 @@ pub fn specs() -> Vec<Spec> {
     all.extend(crate::mcp::registry::specs());
     all.extend(crate::mcp::manage::agents::specs());
     all.extend(crate::secret_requests::specs());
+    all.extend(crate::mcp::attacks::specs());
     all.extend(crate::portal::specs());
     all.extend(crate::mocks::leads::specs());
     all.extend(crate::replay::schedule::specs());

@@ -8,7 +8,7 @@
 GET {{base_url}}/_rustybin/scenarios
 HTTP 200
 [Asserts]
-jsonpath "$.scenarios" count == 15
+jsonpath "$.scenarios" count == 21
 jsonpath "$.scenarios[*].id" contains "caching"
 # ANCHOR_END: list
 

@@ -141,6 +141,9 @@ pub struct Config {
     pub console_backlink: Option<String>,
     /// Title shown in the console header (`RUSTYBIN_CONSOLE_TITLE`).
     pub console_title: Option<String>,
+    /// The seed of the `mcp.attack_servers` setting
+    /// (`RUSTYBIN_MCP_ATTACK_SERVERS`; unset: the setting's default).
+    pub mcp_attack_servers: Option<bool>,
     /// Shared mode (`RUSTYBIN_SHARED_MODE`): every data-plane request needs an
     /// API key from the key registry; implies public mode, session-scoped
     /// limits and daily quotas (see `crate::keys`).
@@ -983,6 +986,8 @@ impl Config {
             grpc_on_http: parse_bool_or(&get, "RUSTYBIN_GRPC_ON_HTTP", false, &mut warnings),
             console_backlink,
             console_title,
+            mcp_attack_servers: get("RUSTYBIN_MCP_ATTACK_SERVERS")
+                .map(|_| parse_bool_or(&get, "RUSTYBIN_MCP_ATTACK_SERVERS", true, &mut warnings)),
             shared_mode,
             require_key,
             keys_file,
@@ -1202,6 +1207,7 @@ impl Config {
             grpc_on_http: false,
             console_backlink: None,
             console_title: None,
+            mcp_attack_servers: None,
             shared_mode: false,
             require_key: false,
             keys_file: None,
@@ -1310,6 +1316,7 @@ impl Config {
             "grpc_on_http": self.grpc_on_http,
             "console_backlink": self.console_backlink,
             "console_title": self.console_title,
+            "mcp_attack_servers": self.mcp_attack_servers,
             "shared_mode": self.shared_mode,
             "require_key": self.require_key,
             "keys_source": if self.keys_file.is_some() {

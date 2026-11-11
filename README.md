@@ -517,6 +517,8 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | POST GET DELETE | `/mcp/protected` | MCP server behind OAuth 2.1 bearer auth (MCP authorization spec) |
 | POST GET DELETE | `/mcp/apikey` | MCP server requiring an X-API-Key header |
 | POST GET DELETE | `/mcp/servers/{name}` | Named MCP servers with tool subsets: weather, crm, devtools |
+| POST GET DELETE | `/mcp/attack/{kind}` | MCP attack servers that misbehave on purpose: tool poisoning, rug pull, shadowing, result injection, oversized result, exfiltration link, scope overreach |
+| GET | `/.well-known/oauth-protected-resource/mcp/attack/scope_overreach` | Protected resource metadata of the scope overreach attack server: more scopes than its tool needs |
 | GET | `/mcp/sse` | Legacy MCP HTTP+SSE transport (2024-11-05): event stream (SSE) |
 | POST | `/mcp/messages` | Legacy MCP HTTP+SSE transport (2024-11-05): message endpoint |
 | GET | `/.well-known/oauth-protected-resource` | OAuth Protected Resource Metadata (RFC 9728) for /mcp/protected |
@@ -779,7 +781,7 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET PATCH | `/_rustybin/settings` | Instance settings: every registered key with its value, source and lock state; PATCH changes values and secrets |
 | DELETE | `/_rustybin/settings/{key}` | Forget a stored setting: back to its environment variable or default |
 | GET | `/_rustybin/diagnostics` | Instance diagnostics: storage, the secrets key, load errors, listeners, outbound refusals, source control, the sign-in (admin) |
-| GET | `/_rustybin/scenarios` | Gateway scenarios (HTTP: retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits, CORS, header transformation; AI: token limits, model fallback, semantic caching, prompt and response guards, load balancing) and the caller's runs |
+| GET | `/_rustybin/scenarios` | Gateway scenarios (HTTP: retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits, CORS, header transformation; AI: token limits, model fallback, semantic caching, prompt and response guards, load balancing; MCP: tool poisoning, rug pull, tool shadowing, result injection, oversized results, exfiltration links) and the caller's runs |
 | POST | `/_rustybin/scenarios/{id}/runs` | Start a scenario run: prepare its upstream and get the gateway setup (admin) |
 | GET DELETE | `/_rustybin/scenarios/{id}/runs/{run}` | A scenario run with its setup and last verdict; DELETE ends it and removes what it created (admin) |
 | POST | `/_rustybin/scenarios/{id}/runs/{run}/check` | Send the run's test traffic through the gateway and compare what the client got with what reached the upstream (admin; egress purpose scenario) |

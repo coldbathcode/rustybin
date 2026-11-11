@@ -153,6 +153,16 @@ pub fn server_list(
     for name in crate::mcp::NAMED_SERVERS {
         list.push(json!({ "id": format!("mcp-{name}"), "path": format!("/mcp/servers/{name}"), "kind": "mock-mcp", "title": format!("Named server {name} (a tool subset)"), "transports": ["modern", "session"], "versions": versions(), "auth": { "kind": "none" }, "state": "serving" }));
     }
+    if crate::mcp::attacks::enabled(&state.settings, state.config.public_mode) {
+        for (kind, title, attack, _) in crate::mcp::attacks::KINDS {
+            let auth = if *kind == "scope_overreach" {
+                json!({ "kind": "oauth", "hint": "any bearer passes: the point is the scope it asks for" })
+            } else {
+                json!({ "kind": "none" })
+            };
+            list.push(json!({ "id": format!("attack-{kind}"), "path": format!("{}{kind}", crate::mcp::attacks::PATH_PREFIX), "kind": "attack-mcp", "title": format!("Attack server: {title} (misbehaves on purpose)"), "attack": attack, "transports": ["modern", "session"], "versions": versions(), "auth": auth, "state": "serving" }));
+        }
+    }
     list.push(json!({ "id": "mcp-sse", "path": "/mcp/sse", "kind": "mock-mcp", "title": "Mock MCP server, legacy HTTP+SSE (2024-11-05)", "transports": ["legacy"], "versions": [client::LEGACY_VERSION], "auth": { "kind": "none" }, "state": "serving" }));
     let manage_auth = match state.config.control_auth {
         ControlAuth::Open => json!({ "kind": "none" }),

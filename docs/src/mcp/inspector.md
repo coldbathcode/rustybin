@@ -143,6 +143,9 @@ runs it: in process for its own servers, through the egress policy for others.
 | `auth_refusal` | with credentials configured, the same request without them is refused |
 | `tools_list` | `tools/list` answers and every `inputSchema` is a usable JSON Schema |
 | `tools_call` | every tool answers a call with generated arguments (AI when chosen); `isError` is a warning |
+| `descriptions_look_clean` | no tool description or schema shows signs of hidden instructions (a warning: see [MCP security](security.md#security-checks-in-the-inspector)) |
+| `results_carry_no_instructions` | no answer to the calls shows signs of instructions for the model (a warning) |
+| `definitions_are_stable` | `tools/list` after the calls is the same as before them (a warning: a rug pull, or an update) |
 | `unknown_tool` | an unknown tool gives a JSON-RPC error |
 | `bad_arguments` | a call without its required arguments is refused |
 | `unknown_method` | an unknown method gives `-32601` |

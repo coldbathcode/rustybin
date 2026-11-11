@@ -3,7 +3,7 @@
 ## Unreleased: the last of the roadmap's candidates
 
 [The plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/core-next/master-plan.md),
-steps 11 to 13, built on 2026-11-09 and not released yet, and step 01 of
+steps 11 to 13, built on 2026-11-09 and not released yet, and steps 01 and 02 of
 [the demo next plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/demo-next/master-plan.md),
 built on 2026-11-11. Nothing to do when upgrading: what is new is off until you turn it on or
 name it in a scenario.
@@ -20,6 +20,15 @@ name it in a scenario.
   A run steers the AI mock for its own requests only (the run's secret session), and ending it
   ends that. On every surface: the scenario routes, the console's AI group, `rustybin scenario`
   (`--token-limit`, `--fail-kind`, `--skip-injection`, `--min-share`), the scenario tools.
+- [MCP security](mcp/security.md): attack servers at `/mcp/attack/{kind}` that misbehave on
+  purpose with inert test data (tool poisoning, a rug pull, tool shadowing, result injection, an
+  oversized result, an exfiltration link, scope overreach), on by default and always off in public
+  mode (`mcp.attack_servers`, `RUSTYBIN_MCP_ATTACK_SERVERS`); six MCP gateway scenarios against
+  them (`mcp_tool_poisoning`, `mcp_rug_pull`, `mcp_tool_shadowing`, `mcp_result_injection`,
+  `mcp_oversized_result` with `max_result_kib`, `mcp_exfiltration_url`), each check an MCP
+  session through the gateway; and three inspector checks that warn on any server
+  (`descriptions_look_clean`, `results_carry_no_instructions`, `definitions_are_stable`). The
+  attack servers are listed in the MCP inspector, never in the mock MCP registry.
 
 - Source control: a [diverged branch](source-control.md#a-diverged-branch) says what differs
   (`divergence` in the status and in the `409`) and is resolved by a person: `POST

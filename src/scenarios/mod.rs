@@ -214,6 +214,23 @@ impl Scenarios {
             .map(|r| r.cors_answer.clone())
     }
 
+    /// The check a request of `session` belongs to: its session without the
+    /// request's number (`scn-<run>-<secret>-<check>`), when it carries a
+    /// live run's secret; else nothing. An MCP attack server keys its state
+    /// by it, so every request of one check shares it and the next check
+    /// starts afresh.
+    pub fn check_key(&self, session: &str) -> Option<String> {
+        if !session.starts_with("scn-") {
+            return None;
+        }
+        let live = self
+            .runs()
+            .iter()
+            .any(|r| session.starts_with(&r.session_prefix()));
+        live.then(|| session.rsplit_once('-').map(|(k, _)| k.to_string()))
+            .flatten()
+    }
+
     /// What the AI mock does for a request of `session`: the profile of the
     /// AI run whose secret session prefix it carries, else nothing.
     pub fn ai_profile(&self, session: &str) -> Option<AiProfile> {
@@ -226,6 +243,11 @@ impl Scenarios {
             .find(|r| session.starts_with(&r.session_prefix()))
             .map(|r| r.ai_profile)
     }
+}
+
+/// Are the MCP attack servers (the upstreams of the `mcp_*` scenarios) on?
+fn mcp_attacks_on(state: &AppState) -> bool {
+    crate::mcp::attacks::enabled(&state.settings, state.config.public_mode)
 }
 
 fn not_found(scenario: &str, run: &str) -> Refused {
@@ -251,8 +273,13 @@ pub fn list(state: &AppState, owner: &str, reveal: bool) -> Value {
         .filter(|r| r.owner == owner)
         .map(|r| r.view(reveal))
         .collect();
+    let mcp = mcp_attacks_on(state);
     json!({
-        "scenarios": SCENARIOS.iter().map(Scenario::view).collect::<Vec<_>>(),
+        "scenarios": SCENARIOS
+            .iter()
+            .filter(|s| mcp || !matches!(s.upstream, Upstream::Mcp { .. }))
+            .map(Scenario::view)
+            .collect::<Vec<_>>(),
         "runs": runs,
         "max_runs": MAX_RUNS,
     })
@@ -317,6 +344,22 @@ pub async fn start(
                 second_upstream = Some(format!("{base}{}", catalog::AI_SECOND_PATH));
             }
             (None, format!("{base}{}", catalog::AI_PRIMARY_PATH))
+        }
+        Upstream::Mcp { kind, second } => {
+            if !mcp_attacks_on(state) {
+                return Err(Refused::new(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "the MCP attack servers are off: the {} setting turns them on (never in public mode)",
+                        crate::mcp::attacks::SWITCH_KEY
+                    ),
+                ));
+            }
+            second_upstream = second.map(|p| format!("{base}{p}"));
+            (
+                None,
+                format!("{base}{}{kind}", crate::mcp::attacks::PATH_PREFIX),
+            )
         }
         Upstream::Mock => {
             let name = format!("scn-{id}");
@@ -569,6 +612,9 @@ pub async fn check(
             s.marker = Some(marker);
             sent.push(s);
         }
+        id if id.starts_with("mcp_") => {
+            send_mcp(&client, &target, sc, &params, &session, &mut sent).await;
+        }
         id if id.starts_with("ai_") => {
             send_ai(&client, &target, sc, &params, round, &session, &mut sent).await;
         }
@@ -660,6 +706,112 @@ struct Out {
     headers: Vec<(String, String)>,
     body: Option<Bytes>,
     json: Option<Value>,
+    /// Read up to this much of the answer (counted in `Sent::received`),
+    /// rather than [`MAX_BODY`]; at most [`MAX_BODY`] of it is kept.
+    read_cap: Option<usize>,
+}
+
+/// An MCP check request: a JSON-RPC message in the check's MCP session.
+fn mcp_out(message: Value, session_id: Option<&str>) -> Out {
+    let mut headers = vec![
+        (
+            "accept".to_string(),
+            "application/json, text/event-stream".to_string(),
+        ),
+        (
+            "mcp-protocol-version".to_string(),
+            catalog::MCP_VERSION.to_string(),
+        ),
+    ];
+    if let Some(id) = session_id {
+        headers.push(("mcp-session-id".to_string(), id.to_string()));
+    }
+    Out {
+        json: Some(message),
+        headers,
+        ..Out::default()
+    }
+}
+
+/// The requests of an MCP check: a session (initialize, initialized), then
+/// the scenario's requests in it.
+async fn send_mcp(
+    client: &reqwest::Client,
+    target: &str,
+    sc: &Scenario,
+    p: &catalog::Params,
+    session: &impl Fn(usize) -> String,
+    sent: &mut Vec<Sent>,
+) {
+    use catalog::*;
+    let init = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": MCP_VERSION,
+            "capabilities": {},
+            "clientInfo": { "name": "rustybin-gateway-scenario", "version": env!("CARGO_PKG_VERSION") },
+        },
+    });
+    let mut s = send_one(client, target, 0, &session(0), mcp_out(init, None)).await;
+    s.label = Some(LABEL_INITIALIZE);
+    let ok = (200..300).contains(&s.status);
+    let id = s.header("mcp-session-id").map(str::to_string);
+    sent.push(s);
+    if !ok {
+        return;
+    }
+    let initialized = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+    let mut s = send_one(
+        client,
+        target,
+        1,
+        &session(1),
+        mcp_out(initialized, id.as_deref()),
+    )
+    .await;
+    s.label = Some(LABEL_INITIALIZED);
+    sent.push(s);
+    let list =
+        |rpc: u64| json!({ "jsonrpc": "2.0", "id": rpc, "method": "tools/list", "params": {} });
+    let call = |rpc: u64, name: &str, args: Value| json!({ "jsonrpc": "2.0", "id": rpc, "method": "tools/call", "params": { "name": name, "arguments": args } });
+    let steps: Vec<(&'static str, Value)> = match sc.id {
+        "mcp_rug_pull" => vec![
+            (LABEL_FIRST_LIST, list(2)),
+            (
+                LABEL_CALL,
+                call(
+                    3,
+                    "get_exchange_rate",
+                    json!({ "from": "EUR", "to": "USD" }),
+                ),
+            ),
+            (LABEL_SECOND_LIST, list(4)),
+        ],
+        "mcp_result_injection" => vec![(
+            LABEL_CALL,
+            call(2, "get_order_notes", json!({ "order_id": "A-1001" })),
+        )],
+        "mcp_oversized_result" => vec![(LABEL_CALL, call(2, "export_logs", json!({})))],
+        "mcp_exfiltration_url" => vec![(
+            LABEL_CALL,
+            call(2, "fetch_report", json!({ "report_id": "Q3" })),
+        )],
+        _ => vec![(LABEL_LIST, list(2))],
+    };
+    for (i, (label, message)) in steps.into_iter().enumerate() {
+        let n = i + 2;
+        let mut out = mcp_out(message, id.as_deref());
+        if sc.id == "mcp_oversized_result" {
+            out.read_cap = Some(p.max_result_kib as usize * 1024);
+        }
+        let mut s = send_one(client, target, n, &session(n), out).await;
+        s.label = Some(label);
+        let failed = s.status == 0;
+        sent.push(s);
+        if failed {
+            break;
+        }
+    }
 }
 
 /// An AI check request: an OpenAI chat completion of `prompt`.
@@ -754,6 +906,7 @@ async fn send_one(
 ) -> Sent {
     let t = Instant::now();
     let keep = out.json.is_some();
+    let cap = out.read_cap.unwrap_or(MAX_BODY);
     let mut req = match (out.method, out.body, out.json) {
         (Some(m), _, _) => client.request(m, target),
         (None, Some(b), _) => client
@@ -799,11 +952,12 @@ async fn send_one(
                     let room = MAX_BODY.saturating_sub(kept.len());
                     kept.extend_from_slice(&chunk[..chunk.len().min(room)]);
                 }
-                if read > MAX_BODY {
+                if read > cap {
                     break;
                 }
             }
             if keep {
+                s.received = Some(read);
                 let text = String::from_utf8_lossy(&kept).into_owned();
                 s.tokens = serde_json::from_str::<Value>(&text)
                     .ok()
@@ -1076,7 +1230,7 @@ pub fn catalog() -> Vec<Endpoint> {
             LIST_PATH,
             &["GET"],
             category::CONTROL,
-            "Gateway scenarios (HTTP: retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits, CORS, header transformation; AI: token limits, model fallback, semantic caching, prompt and response guards, load balancing) and the caller's runs",
+            "Gateway scenarios (HTTP: retries, rate limiting, credential injection, timeouts, caching, circuit breakers, request size limits, CORS, header transformation; AI: token limits, model fallback, semantic caching, prompt and response guards, load balancing; MCP: tool poisoning, rug pull, tool shadowing, result injection, oversized results, exfiltration links) and the caller's runs",
         )
 .permission(crate::rbac::Permission::InstanceRead)
         .example(Example::get("Scenarios", LIST_PATH)),
@@ -1145,7 +1299,7 @@ pub fn openapi_paths() -> Value {
         } },
         RUNS_PATH: { "post": {
             "tags": ["Control Plane"], "summary": "Start a scenario run (admin)",
-            "description": "Creates the run's upstream (a mock that is never saved and ends with the run, a /flaky route, or this instance's AI mock steered for the run's own requests) and answers the gateway setup. At most 32 runs; a run lasts an hour.",
+            "description": "Creates the run's upstream (a mock that is never saved and ends with the run, a /flaky route, this instance's AI mock steered for the run's own requests, or an MCP attack server) and answers the gateway setup. At most 32 runs; a run lasts an hour.",
             "operationId": "startGatewayScenario",
             "parameters": [id],
             "responses": { "201": { "description": "The run", "content": obj }, "404": { "description": "No such scenario" }, "429": { "description": "Too many runs" } }

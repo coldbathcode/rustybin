@@ -197,6 +197,13 @@ pub fn capabilities(profile: &Profile, version: Version) -> Value {
         caps.insert("logging".into(), json!({}));
         return Value::Object(caps);
     }
+    if profile.family == super::Family::Attack {
+        // The rug pull says its list changes (it does).
+        let changes = profile.server == Some("rug_pull");
+        caps.insert("tools".into(), json!({ "listChanged": changes }));
+        caps.insert("logging".into(), json!({}));
+        return Value::Object(caps);
+    }
     caps.insert(
         "resources".into(),
         json!({ "subscribe": true, "listChanged": false }),
@@ -217,6 +224,12 @@ pub fn instructions(profile: &Profile) -> String {
     }
     if let Some(m) = &profile.mock {
         return m.instructions();
+    }
+    if profile.family == super::Family::Attack {
+        return format!(
+            "Rustybin MCP attack server ({}): it misbehaves on purpose, for gateway and client demos. Everything is inert test data.",
+            profile.server.unwrap_or("")
+        );
     }
     format!(
         "Rustybin mock MCP server ({}). Everything is fake test data for gateway demos: \
@@ -445,6 +458,9 @@ pub async fn dispatch(ctx: &CallCtx, method: &str, params: &Value) -> Result<Val
         return openapi::dispatch(ctx, method, params)
             .await
             .map(|result| finalize(ctx, result));
+    }
+    if ctx.profile.family == super::Family::Attack {
+        return super::attacks::dispatch(ctx, method, params).await;
     }
     if let Some(built) = list_method(&ctx.profile, ctx.version, method, params, ctx.page_size) {
         return built.map(|(result, _)| finalize(ctx, result));

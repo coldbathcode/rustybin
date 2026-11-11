@@ -32,6 +32,18 @@ pub const CHECKS: &[(&str, &str)] = &[
         "tools_call",
         "Every tool answers a call with generated arguments",
     ),
+    (
+        "descriptions_look_clean",
+        "No tool description hides instructions for the model (a heuristic: a warning, never a failure)",
+    ),
+    (
+        "results_carry_no_instructions",
+        "No tool result carries instructions for the model or a credential file (a heuristic)",
+    ),
+    (
+        "definitions_are_stable",
+        "The tool definitions are the same after the calls (a changed one is a rug pull, or an update)",
+    ),
     ("unknown_tool", "An unknown tool gives a JSON-RPC error"),
     (
         "bad_arguments",
@@ -499,6 +511,9 @@ pub async fn run(state: &AppState, spec: RunSpec) -> Value {
         || wanted("tools_call")
         || wanted("bad_arguments")
         || wanted("routing_headers")
+        || wanted("descriptions_look_clean")
+        || wanted("results_carry_no_instructions")
+        || wanted("definitions_are_stable")
     {
         let t0 = Instant::now();
         match list_all(&mut conn, "tools/list", "tools", &mut lat).await {
@@ -590,24 +605,85 @@ pub async fn run(state: &AppState, spec: RunSpec) -> Value {
         }
     }
 
+    // descriptions_look_clean
+    if wanted("descriptions_look_clean") {
+        let found: Vec<Value> = tools
+            .iter()
+            .filter_map(|t| {
+                let signs = crate::mcp::attacks::hidden_instructions(&t.to_string());
+                (!signs.is_empty()).then(|| {
+                    json!({ "tool": t.get("name").and_then(Value::as_str).unwrap_or("?"), "signs": signs })
+                })
+            })
+            .collect();
+        let (status, message) = if tools.is_empty() {
+            (Status::Skip, "no tools listed".to_string())
+        } else if found.is_empty() {
+            (
+                Status::Pass,
+                format!("{} tool(s), no sign of hidden instructions", tools.len()),
+            )
+        } else {
+            (
+                Status::Warn,
+                format!(
+                    "{} of {} tool(s) look poisoned: {}",
+                    found.len(),
+                    tools.len(),
+                    found
+                        .iter()
+                        .take(3)
+                        .map(|f| format!(
+                            "{} ({})",
+                            f["tool"].as_str().unwrap_or("?"),
+                            f["signs"]
+                                .as_array()
+                                .map(|a| a
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .collect::<Vec<_>>()
+                                    .join(", "))
+                                .unwrap_or_default()
+                        ))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            )
+        };
+        results.push(CheckResult {
+            id: "descriptions_look_clean",
+            status,
+            message,
+            ms: 0,
+            details: json!({ "untrusted_tools": found }),
+        });
+    }
+
+    // What the tools answered (bounded), for results_carry_no_instructions.
+    let mut answered: Vec<(String, String)> = Vec::new();
+
     // tools_call
-    if wanted("tools_call") {
+    if wanted("tools_call") || wanted("results_carry_no_instructions") {
         if !spec.call_tools {
-            results.push(CheckResult {
-                id: "tools_call",
-                status: Status::Skip,
-                message: NEEDS_ADMIN.into(),
-                ms: 0,
-                details: Value::Null,
-            });
+            if wanted("tools_call") {
+                results.push(CheckResult {
+                    id: "tools_call",
+                    status: Status::Skip,
+                    message: NEEDS_ADMIN.into(),
+                    ms: 0,
+                    details: Value::Null,
+                });
+            }
         } else if tools.is_empty() {
-            results.push(CheckResult {
-                id: "tools_call",
-                status: Status::Skip,
-                message: "no tools to call".into(),
-                ms: 0,
-                details: Value::Null,
-            });
+            if wanted("tools_call") {
+                results.push(CheckResult {
+                    id: "tools_call",
+                    status: Status::Skip,
+                    message: "no tools to call".into(),
+                    ms: 0,
+                    details: Value::Null,
+                });
+            }
         } else {
             let t0 = Instant::now();
             let mut rows = Vec::new();
@@ -634,6 +710,12 @@ pub async fn run(state: &AppState, spec: RunSpec) -> Value {
                     .request("tools/call", json!({ "name": name, "arguments": args }))
                     .await;
                 lat.push(("tools/call".into(), o.ms));
+                if let Some(r) = &o.result {
+                    answered.push((
+                        name.clone(),
+                        r.to_string().chars().take(64 * 1024).collect(),
+                    ));
+                }
                 let (outcome, message) = match (&o.result, &o.error, &o.transport_error) {
                     (Some(r), _, _)
                         if r.get("resultType").and_then(Value::as_str)
@@ -684,14 +766,126 @@ pub async fn run(state: &AppState, spec: RunSpec) -> Value {
             let message = format!(
                 "{ok} answered, {tool_errors} with isError, {rpc_errors} JSON-RPC error(s), {broken} transport error(s), {skipped} skipped"
             );
-            results.push(CheckResult {
-                id: "tools_call",
-                status,
-                message,
-                ms: t0.elapsed().as_millis() as u64,
-                details: json!({ "calls": rows }),
-            });
+            if wanted("tools_call") {
+                results.push(CheckResult {
+                    id: "tools_call",
+                    status,
+                    message,
+                    ms: t0.elapsed().as_millis() as u64,
+                    details: json!({ "calls": rows }),
+                });
+            }
         }
+    }
+
+    // results_carry_no_instructions
+    if wanted("results_carry_no_instructions") {
+        let found: Vec<Value> = answered
+            .iter()
+            .filter_map(|(name, text)| {
+                let signs = crate::mcp::attacks::hidden_instructions(text);
+                (!signs.is_empty()).then(|| json!({ "tool": name, "signs": signs }))
+            })
+            .collect();
+        let (status, message) = if answered.is_empty() {
+            (
+                Status::Skip,
+                "no tool answered a call (tools_call calls them)".to_string(),
+            )
+        } else if found.is_empty() {
+            (
+                Status::Pass,
+                format!("{} result(s), no sign of instructions", answered.len()),
+            )
+        } else {
+            (
+                Status::Warn,
+                format!(
+                    "{} of {} result(s) carry instructions for the model: {}",
+                    found.len(),
+                    answered.len(),
+                    found
+                        .iter()
+                        .take(3)
+                        .filter_map(|f| f["tool"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+        };
+        results.push(CheckResult {
+            id: "results_carry_no_instructions",
+            status,
+            message,
+            ms: 0,
+            details: json!({ "untrusted_results": found }),
+        });
+    }
+
+    // definitions_are_stable
+    if wanted("definitions_are_stable") {
+        let t0 = Instant::now();
+        let (status, message, details) = if tools.is_empty() {
+            (Status::Skip, "no tools listed".to_string(), Value::Null)
+        } else {
+            match list_all(&mut conn, "tools/list", "tools", &mut lat).await {
+                Err(o) => (Status::Fail, error_text(&o), Value::Null),
+                Ok(again) => {
+                    let by_name = |l: &[Value]| -> BTreeMap<String, String> {
+                        l.iter()
+                            .map(|t| {
+                                (
+                                    t.get("name")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    json!([t.get("description"), t.get("inputSchema")]).to_string(),
+                                )
+                            })
+                            .collect()
+                    };
+                    let (before, after) = (by_name(&tools), by_name(&again));
+                    let changed: Vec<&String> = before
+                        .iter()
+                        .filter(|(n, d)| after.get(*n).is_some_and(|a| a != *d))
+                        .map(|(n, _)| n)
+                        .collect();
+                    let gone: Vec<&String> =
+                        before.keys().filter(|n| !after.contains_key(*n)).collect();
+                    let new: Vec<&String> =
+                        after.keys().filter(|n| !before.contains_key(*n)).collect();
+                    if changed.is_empty() && gone.is_empty() && new.is_empty() {
+                        (
+                            Status::Pass,
+                            format!("{} tool(s), the same after the calls", tools.len()),
+                            Value::Null,
+                        )
+                    } else {
+                        (
+                            Status::Warn,
+                            format!(
+                                "the tools changed after the calls: {} changed, {} gone, {} new{}",
+                                changed.len(),
+                                gone.len(),
+                                new.len(),
+                                changed
+                                    .first()
+                                    .map(|n| format!(" (first changed: {n})"))
+                                    .unwrap_or_default()
+                            ),
+                            json!({ "changed": changed, "gone": gone, "new": new }),
+                        )
+                    }
+                }
+            }
+        };
+        results.push(CheckResult {
+            id: "definitions_are_stable",
+            status,
+            message,
+            ms: t0.elapsed().as_millis() as u64,
+            details,
+        });
     }
 
     // unknown_tool

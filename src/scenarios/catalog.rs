@@ -168,6 +168,22 @@ pub const LABEL_CLEAN: &str = "clean prompt";
 pub const LABEL_PII: &str = "prompt with personal data";
 pub const LABEL_INJECTION: &str = "prompt injection";
 
+/// The MCP protocol version and request labels of the MCP checks.
+pub const MCP_VERSION: &str = "2025-06-18";
+pub const LABEL_INITIALIZE: &str = "initialize";
+pub const LABEL_INITIALIZED: &str = "notifications/initialized";
+pub const LABEL_LIST: &str = "tools/list";
+pub const LABEL_FIRST_LIST: &str = "tools/list before the call";
+pub const LABEL_CALL: &str = "tools/call";
+pub const LABEL_SECOND_LIST: &str = "tools/list after the call";
+/// The result size a check assumes the gateway caps when the caller gives
+/// none, and its bounds (KiB; the oversized result is 2 MiB).
+pub const DEFAULT_MAX_RESULT_KIB: u64 = 256;
+pub const MIN_MAX_RESULT_KIB: u64 = 16;
+pub const MAX_MAX_RESULT_KIB: u64 = 1024;
+/// The trusted MCP server of `mcp_tool_shadowing`.
+pub const SHADOWED_SERVER_PATH: &str = "/mcp/servers/crm";
+
 /// What a test parameter holds, with its bounds and default.
 #[derive(Clone, Copy, Debug)]
 pub enum Kind {
@@ -503,6 +519,17 @@ pub const MIN_SHARE: Param = Param {
     },
 };
 
+pub const MAX_RESULT_KIB: Param = Param {
+    name: "max_result_kib",
+    label: "Result size limit on the gateway (KiB)",
+    description: "The largest tool result the gateway passes to the client, in KiB: the attack server answers 2 MiB",
+    kind: Kind::Integer {
+        min: MIN_MAX_RESULT_KIB,
+        max: MAX_MAX_RESULT_KIB,
+        default: DEFAULT_MAX_RESULT_KIB,
+    },
+};
+
 /// Every test parameter, whatever the scenario (the MCP tool, the CLI and
 /// the OpenAPI document list these).
 pub const PARAMS: &[Param] = &[
@@ -520,6 +547,7 @@ pub const PARAMS: &[Param] = &[
     FAIL_KIND,
     SKIP_INJECTION,
     MIN_SHARE,
+    MAX_RESULT_KIB,
 ];
 
 /// The scenarios that take a parameter.
@@ -572,6 +600,7 @@ pub struct Params {
     pub fail_kind: &'static str,
     pub skip_injection: bool,
     pub min_share: u64,
+    pub max_result_kib: u64,
 }
 
 impl Default for Params {
@@ -591,6 +620,7 @@ impl Default for Params {
             fail_kind: "rate_limit",
             skip_injection: false,
             min_share: DEFAULT_MIN_SHARE,
+            max_result_kib: DEFAULT_MAX_RESULT_KIB,
         }
     }
 }
@@ -618,6 +648,7 @@ impl Params {
             }
             "skip_injection" => self.skip_injection = v.as_bool().unwrap_or_default(),
             "min_share" => self.min_share = v.as_u64().unwrap_or_default(),
+            "max_result_kib" => self.max_result_kib = v.as_u64().unwrap_or_default(),
             _ => {}
         }
     }
@@ -635,6 +666,12 @@ pub enum Upstream {
     /// for the run's own requests only by the run's [`AiProfile`]; with
     /// `second`, a second target at [`AI_SECOND_PATH`].
     Ai { second: bool },
+    /// The MCP attack server of `kind` (`/mcp/attack/{kind}`); with
+    /// `second`, a trusted MCP server of this instance at that path.
+    Mcp {
+        kind: &'static str,
+        second: Option<&'static str>,
+    },
 }
 
 /// How the AI mock answers the requests of one AI scenario run (and only
@@ -666,6 +703,8 @@ pub struct Scenario {
 
 const ROUTE: &str = "Create a route on the gateway whose upstream is {upstream}, and let it forward the X-Rustybin-Session request header (the check uses it to see which upstream requests each of its requests caused).";
 const AI_ROUTE: &str = "Create an AI route on the gateway (OpenAI chat completions format) whose upstream is {upstream}, and let it forward the X-Rustybin-Session request header (the check uses it to see which upstream requests each of its requests caused). The upstream needs no credential.";
+const MCP_ROUTE: &str = "Put the MCP server at {upstream} behind the gateway (Streamable HTTP), and let it forward the X-Rustybin-Session request header (the check uses it to see which upstream requests each of its requests caused).";
+const MCP_CHECK: &str = "Check with the URL the gateway serves the MCP server at: the check starts a session (initialize, protocol 2025-06-18) and sends its requests in it.";
 const AI_CHECK: &str = "Check with the URL the gateway serves the route's chat completions at: the check sends POST requests in the OpenAI chat completions format (model gpt-4o-mini, max_tokens 100).";
 
 pub static SCENARIOS: &[Scenario] = &[
@@ -875,6 +914,86 @@ pub static SCENARIOS: &[Scenario] = &[
         upstream: Upstream::Ai { second: true },
         params: &[MIN_SHARE],
     },
+    Scenario {
+        id: "mcp_tool_poisoning",
+        title: "MCP tool poisoning",
+        proves: "The gateway keeps a tool whose description hides instructions for the model from the client (removed, refused or rewritten), and still passes the clean tool next to it.",
+        setup: &[
+            MCP_ROUTE,
+            "Turn on the gateway's protection against poisoned tool descriptions (hidden instructions, HTML comments, <IMPORTANT> blocks in descriptions and parameter descriptions). {upstream} lists a clean get_weather and a poisoned add_numbers.",
+            MCP_CHECK,
+        ],
+        request_path: "",
+        upstream: Upstream::Mcp { kind: "poisoned_description", second: None },
+        params: &[],
+    },
+    Scenario {
+        id: "mcp_rug_pull",
+        title: "MCP rug pull",
+        proves: "When a tool's definition changes after the client approved it (hidden instructions and a new parameter), the gateway keeps the approved definition or refuses the changed one.",
+        setup: &[
+            MCP_ROUTE,
+            "Turn on the gateway's pinning of tool definitions (or its detection of changed definitions). {upstream} lists a harmless get_exchange_rate; after its first call, the tool comes back changed.",
+            MCP_CHECK,
+            "The check lists the tools, calls get_exchange_rate, and lists them again. Each check starts with the harmless definition.",
+        ],
+        request_path: "",
+        upstream: Upstream::Mcp { kind: "rug_pull", second: None },
+        params: &[],
+    },
+    Scenario {
+        id: "mcp_tool_shadowing",
+        title: "MCP tool shadowing",
+        proves: "When two servers behind the gateway offer a tool of the same name, the attacker's copy (with hidden instructions) does not take the trusted tool's place: the gateway namespaces or refuses it.",
+        setup: &[
+            "Put two MCP servers behind one gateway route (one virtual server): the trusted {second_upstream} and the attacker's {upstream} (Streamable HTTP), and let it forward the X-Rustybin-Session request header. Both offer lookup_customer.",
+            "Turn on the gateway's namespacing of tool names, or its refusal of duplicate names.",
+            MCP_CHECK,
+        ],
+        request_path: "",
+        upstream: Upstream::Mcp { kind: "shadowing", second: Some(SHADOWED_SERVER_PATH) },
+        params: &[],
+    },
+    Scenario {
+        id: "mcp_result_injection",
+        title: "MCP result injection",
+        proves: "The gateway removes or flags a prompt injection in a tool's result (its text, its structured content and a resource link) before the client sees it.",
+        setup: &[
+            MCP_ROUTE,
+            "Turn on the gateway's guard of tool results against prompt injection (\"ignore all previous instructions\"). {upstream}'s get_order_notes answers one in its text, its structured content and a resource link.",
+            MCP_CHECK,
+        ],
+        request_path: "",
+        upstream: Upstream::Mcp { kind: "result_injection", second: None },
+        params: &[],
+    },
+    Scenario {
+        id: "mcp_oversized_result",
+        title: "MCP oversized result",
+        proves: "The gateway caps the size of a tool result: the client never receives more than the limit (the result cut, or refused).",
+        setup: &[
+            MCP_ROUTE,
+            "Limit the size of the answers the gateway passes from the MCP server (256 KiB, say). {upstream}'s export_logs answers 2 MiB.",
+            MCP_CHECK,
+            "Check with the limit you set, in KiB (max_result_kib).",
+        ],
+        request_path: "",
+        upstream: Upstream::Mcp { kind: "oversized", second: None },
+        params: &[MAX_RESULT_KIB],
+    },
+    Scenario {
+        id: "mcp_exfiltration_url",
+        title: "MCP exfiltration link",
+        proves: "The gateway removes or refuses a link in a tool result that would send data to a host nobody allowed.",
+        setup: &[
+            MCP_ROUTE,
+            "Turn on the gateway's filtering of links in tool results to hosts you did not allow. {upstream}'s fetch_report answers a link to exfil.rustybin.invalid with data in its query string.",
+            MCP_CHECK,
+        ],
+        request_path: "",
+        upstream: Upstream::Mcp { kind: "exfiltration_url", second: None },
+        params: &[],
+    },
 ];
 
 pub fn find(id: &str) -> Option<&'static Scenario> {
@@ -906,6 +1025,7 @@ impl Scenario {
     pub fn group(&self) -> &'static str {
         match self.upstream {
             Upstream::Ai { .. } => "ai",
+            Upstream::Mcp { .. } => "mcp",
             _ => "http",
         }
     }
@@ -937,6 +1057,8 @@ impl Scenario {
             "ai_token_limit" => MAX_TOKEN_REQUESTS,
             "ai_semantic_cache" => 4,
             "ai_provider_balance" => BALANCE_REQUESTS,
+            "mcp_rug_pull" => 5,
+            id if id.starts_with("mcp_") => 3,
             _ => 1,
         }
     }
@@ -988,6 +1110,12 @@ impl Scenario {
                 Upstream::Ai { second: true } => {
                     format!("{AI_PRIMARY_PATH} and {AI_SECOND_PATH} on this instance")
                 }
+                Upstream::Mcp { kind, second: None } => {
+                    format!("the MCP attack server /mcp/attack/{kind} on this instance")
+                }
+                Upstream::Mcp { kind, second: Some(s) } => format!(
+                    "the MCP attack server /mcp/attack/{kind} and the trusted {s} on this instance"
+                ),
             },
             "setup": self.setup_for("{upstream}", Some("{second_upstream}"), Some("{key}")),
             "requests": self.requests(DEFAULT_LIMIT),
@@ -1171,9 +1299,293 @@ impl Scenario {
             "ai_prompt_guard" => ai_prompt_guard(sent, !p.skip_injection),
             "ai_response_guard" => ai_response_guard(sent),
             "ai_provider_balance" => ai_balance(sent, p.min_share),
+            "mcp_tool_poisoning" => mcp_poisoning(sent),
+            "mcp_rug_pull" => mcp_rug_pull(sent),
+            "mcp_tool_shadowing" => mcp_shadowing(sent),
+            "mcp_result_injection" => mcp_contains(
+                sent,
+                "The prompt injection never reached the client",
+                "a result without the injection (removed, or the result refused or flagged)",
+                injection_in,
+            ),
+            "mcp_oversized_result" => mcp_oversized(sent, p.max_result_kib),
+            "mcp_exfiltration_url" => mcp_contains(
+                sent,
+                "No link to the unknown host reached the client",
+                "a result without a link to exfil.rustybin.invalid (removed, or the result refused)",
+                |t| t.contains(crate::mcp::attacks::EXFIL_HOST),
+            ),
             _ => Vec::new(),
         }
     }
+}
+
+/// The JSON-RPC answer in a body: plain JSON, or the first SSE `data:`
+/// event that is an answer (has an `id`).
+pub fn rpc_answer(body: &str) -> Option<Value> {
+    let t = body.trim_start();
+    if t.starts_with('{') {
+        return serde_json::from_str(t).ok();
+    }
+    body.lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
+        .find(|v| v.get("id").is_some() && (v.get("result").is_some() || v.get("error").is_some()))
+}
+
+/// The tools (name, the rest as text) of a `tools/list` answer.
+fn listed(s: &Sent) -> Option<Vec<(String, String)>> {
+    let v = rpc_answer(s.body.as_deref()?)?;
+    let tools = v.get("result")?.get("tools")?.as_array()?;
+    Some(
+        tools
+            .iter()
+            .map(|t| {
+                (
+                    t.get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    t.to_string(),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// A tool's name as a client sees it through a gateway: the name itself,
+/// or a namespaced one ending with it.
+fn named(name: &str, wanted: &str) -> bool {
+    name == wanted
+        || name.ends_with(&format!("_{wanted}"))
+        || name.ends_with(&format!(".{wanted}"))
+        || name.ends_with(&format!("/{wanted}"))
+        || name.ends_with(&format!(":{wanted}"))
+}
+
+/// What became of a request of an MCP check, in words.
+fn mcp_status(s: Option<&Sent>) -> String {
+    match s {
+        None => "not sent".into(),
+        Some(s) if s.status == 0 => "no answer".into(),
+        Some(s) => match s.body.as_deref().and_then(rpc_answer) {
+            Some(v) if v.get("error").is_some() => format!("{}, a JSON-RPC error", s.status),
+            Some(_) => format!("{}, answered", s.status),
+            None => format!("{}, no JSON-RPC answer", s.status),
+        },
+    }
+}
+
+fn by_label<'a>(sent: &'a [Sent], label: &str) -> Option<&'a Sent> {
+    sent.iter().find(|s| s.label == Some(label))
+}
+
+fn reached(s: Option<&Sent>) -> bool {
+    s.is_some_and(|s| !s.upstream.is_empty())
+}
+
+/// `mcp_tool_poisoning`: the poisoned tool kept from the client, the clean
+/// one passed.
+fn mcp_poisoning(sent: &[Sent]) -> Vec<Expectation> {
+    use crate::mcp::attacks::POISON_MARK;
+    let s = by_label(sent, LABEL_LIST);
+    let tools = s.and_then(listed);
+    let poisoned = s
+        .and_then(|s| s.body.as_deref())
+        .is_some_and(|b| b.contains(POISON_MARK));
+    let clean = tools
+        .as_ref()
+        .is_some_and(|t| t.iter().any(|(n, _)| named(n, "get_weather")));
+    vec![
+        Expectation::new(
+            "The tool list reached the server",
+            "tools/list reached the attack server",
+            format!(
+                "{} upstream request(s)",
+                s.map(|s| s.upstream.len()).unwrap_or(0)
+            ),
+            reached(s),
+        ),
+        Expectation::new(
+            "The poisoned description never reached the client",
+            "a tool list without the hidden instructions (the tool removed, refused or rewritten)",
+            if poisoned {
+                "the poisoned add_numbers reached the client as served".to_string()
+            } else {
+                format!("{}, without the hidden instructions", mcp_status(s))
+            },
+            s.is_some_and(|s| s.status != 0) && !poisoned,
+        ),
+        Expectation::new(
+            "The clean tool still reached the client",
+            "get_weather in the tool list",
+            match &tools {
+                Some(t) => format!(
+                    "{} tool(s): {}",
+                    t.len(),
+                    list(t.iter().map(|(n, _)| n.clone()))
+                ),
+                None => mcp_status(s),
+            },
+            clean,
+        ),
+    ]
+}
+
+/// `mcp_rug_pull`: the approved definition first, the changed one never.
+fn mcp_rug_pull(sent: &[Sent]) -> Vec<Expectation> {
+    use crate::mcp::attacks::RUG_MARK;
+    let first = by_label(sent, LABEL_FIRST_LIST);
+    let call = by_label(sent, LABEL_CALL);
+    let second = by_label(sent, LABEL_SECOND_LIST);
+    let has = |s: Option<&Sent>, name: &str| {
+        s.and_then(listed)
+            .is_some_and(|t| t.iter().any(|(n, _)| named(n, name)))
+    };
+    let pulled = |s: Option<&Sent>| {
+        s.and_then(|s| s.body.as_deref())
+            .is_some_and(|b| b.contains(RUG_MARK))
+    };
+    vec![
+        Expectation::new(
+            "The client saw the harmless definition first",
+            "get_exchange_rate in the first tool list, without hidden instructions",
+            mcp_status(first),
+            has(first, "get_exchange_rate") && !pulled(first),
+        ),
+        Expectation::new(
+            "The call reached the server (which then changes the tool)",
+            "tools/call reached the attack server",
+            format!(
+                "{} upstream request(s)",
+                call.map(|s| s.upstream.len()).unwrap_or(0)
+            ),
+            reached(call),
+        ),
+        Expectation::new(
+            "The changed definition never reached the client",
+            "a second tool list with the approved definition, without the tool, or refused",
+            if pulled(second) {
+                "the changed get_exchange_rate reached the client".to_string()
+            } else {
+                format!("{}, without the changed definition", mcp_status(second))
+            },
+            second.is_some_and(|s| s.status != 0) && !pulled(second),
+        ),
+    ]
+}
+
+/// `mcp_tool_shadowing`: the trusted tool keeps its name, the attacker's
+/// copy does not take it.
+fn mcp_shadowing(sent: &[Sent]) -> Vec<Expectation> {
+    use crate::mcp::attacks::SHADOW_MARK;
+    let s = by_label(sent, LABEL_LIST);
+    let tools = s.and_then(listed).unwrap_or_default();
+    let exact: Vec<&(String, String)> = tools
+        .iter()
+        .filter(|(n, _)| n == "lookup_customer")
+        .collect();
+    let trusted = tools
+        .iter()
+        .any(|(n, t)| named(n, "lookup_customer") && !t.contains(SHADOW_MARK));
+    let shadowed = exact.iter().any(|(_, t)| t.contains(SHADOW_MARK)) || exact.len() > 1;
+    vec![
+        Expectation::new(
+            "The trusted tool reached the client",
+            "the trusted server's lookup_customer in the tool list",
+            format!(
+                "{}: {}",
+                mcp_status(s),
+                list(
+                    tools
+                        .iter()
+                        .filter(|(n, _)| named(n, "lookup_customer"))
+                        .map(|(n, t)| {
+                            format!(
+                                "{n} ({})",
+                                if t.contains(SHADOW_MARK) {
+                                    "the attacker's"
+                                } else {
+                                    "the trusted one"
+                                }
+                            )
+                        })
+                )
+            ),
+            trusted,
+        ),
+        Expectation::new(
+            "The attacker's copy did not take the trusted tool's name",
+            "no tool named exactly lookup_customer is the attacker's, and no two share the name",
+            if shadowed {
+                "the attacker's lookup_customer is listed under the trusted name".to_string()
+            } else {
+                "the name lookup_customer is the trusted tool's only".to_string()
+            },
+            s.is_some_and(|s| s.status != 0) && !shadowed,
+        ),
+    ]
+}
+
+/// An MCP check whose call must not bring `found` to the client.
+fn mcp_contains(
+    sent: &[Sent],
+    name: &'static str,
+    expected: &str,
+    found: impl Fn(&str) -> bool,
+) -> Vec<Expectation> {
+    let call = by_label(sent, LABEL_CALL);
+    let leaked = call.and_then(|s| s.body.as_deref()).is_some_and(&found);
+    vec![
+        Expectation::new(
+            "The call reached the server",
+            "tools/call reached the attack server",
+            format!(
+                "{} upstream request(s)",
+                call.map(|s| s.upstream.len()).unwrap_or(0)
+            ),
+            reached(call),
+        ),
+        Expectation::new(
+            name,
+            expected,
+            if leaked {
+                format!("{}, with it", mcp_status(call))
+            } else {
+                format!("{}, without it", mcp_status(call))
+            },
+            call.is_some_and(|s| s.status != 0) && !leaked,
+        ),
+    ]
+}
+
+/// `mcp_oversized_result`: the client never got more than the limit.
+fn mcp_oversized(sent: &[Sent], kib: u64) -> Vec<Expectation> {
+    let call = by_label(sent, LABEL_CALL);
+    let limit = kib as usize * 1024;
+    let got = call.and_then(|s| s.received).unwrap_or(0);
+    vec![
+        Expectation::new(
+            "The call reached the server",
+            "tools/call reached the attack server",
+            format!(
+                "{} upstream request(s)",
+                call.map(|s| s.upstream.len()).unwrap_or(0)
+            ),
+            reached(call),
+        ),
+        Expectation::new(
+            "The client never received more than the limit",
+            format!("an answer of at most {kib} KiB (the result cut, or refused)"),
+            match call {
+                None => "not sent".to_string(),
+                Some(s) if s.status == 0 => "no answer".to_string(),
+                Some(s) if got > limit => format!("{}, more than {kib} KiB", s.status),
+                Some(s) => format!("{}, {got} bytes", s.status),
+            },
+            call.is_some_and(|s| s.status != 0) && got <= limit,
+        ),
+    ]
 }
 
 /// The model calls among a request's upstream requests (a gateway's own
@@ -1841,6 +2253,10 @@ pub struct Sent {
     /// The tokens the answer says the model used (`usage.total_tokens`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens: Option<u64>,
+    /// The bytes of the answer's body read (the MCP checks; at most one
+    /// past the limit they read up to).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received: Option<usize>,
 }
 
 impl Sent {

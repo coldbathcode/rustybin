@@ -17,6 +17,7 @@
 //! `RUSTYBIN_MCP_RESOURCE_URL` (override the protected resource identifier),
 //! `RUSTYBIN_MCP_CLOCK_TICK_SECS` (default 5).
 
+pub mod attacks;
 pub mod auth;
 pub mod core;
 pub mod data;
@@ -184,6 +185,8 @@ pub enum Family {
     Mock,
     Manage,
     OpenApi,
+    /// An attack server (`/mcp/attack/{kind}`, see [`attacks`]).
+    Attack,
 }
 
 /// One served MCP server variant.
@@ -247,6 +250,19 @@ impl Profile {
         })
     }
 
+    /// An attack server (`server` holds its kind).
+    pub fn attack(kind: &str) -> Option<Self> {
+        let k = attacks::KINDS.iter().find(|k| k.0 == kind)?;
+        Some(Self {
+            key: format!("attack:{}", k.0),
+            path: format!("{}{}", attacks::PATH_PREFIX, k.0),
+            access: Access::Open,
+            server: Some(k.0),
+            family: Family::Attack,
+            mock: None,
+        })
+    }
+
     /// The management server (transport auth is the control plane's).
     pub fn manage() -> Self {
         Self {
@@ -287,6 +303,7 @@ impl Profile {
                 Some(m) => format!("rustybin-mock-{}", m.name),
                 None => "rustybin-mock".to_string(),
             },
+            (Family::Attack, Some(s)) => format!("rustybin-attack-{s}"),
             (_, Some(s)) => format!("rustybin-mcp-{s}"),
             (_, None) => "rustybin-mcp".to_string(),
         }
@@ -299,6 +316,7 @@ impl Profile {
                 Some(m) => m.title(),
                 None => "Rustybin mock".into(),
             },
+            (Family::Attack, Some(s), _) => format!("Rustybin MCP attack server: {s}"),
             (_, Some(s), _) => format!("Rustybin MCP: {s}"),
             (_, None, Access::OAuth) => "Rustybin MCP (OAuth protected)".into(),
             (_, None, Access::ApiKey) => "Rustybin MCP (API key)".into(),
@@ -318,12 +336,15 @@ pub struct Shared {
     pub list_cache: HashMap<String, core::ListCache>,
     /// Concurrent `wait_for_requests` calls of the management server.
     pub waits: tokio::sync::Semaphore,
+    /// The attack servers' state (bounded).
+    pub attacks: attacks::AttackState,
 }
 
 impl Shared {
     pub fn new(cfg: McpConfig) -> Self {
         let mut all = vec![Profile::open(), Profile::protected(), Profile::apikey()];
         all.extend(NAMED_SERVERS.iter().filter_map(|n| Profile::named(n)));
+        all.extend(attacks::KINDS.iter().filter_map(|k| Profile::attack(k.0)));
         Self::with_profiles(cfg, all)
     }
 
@@ -353,6 +374,7 @@ impl Shared {
             state_key,
             profiles,
             waits,
+            attacks: attacks::AttackState::default(),
         }
     }
 
@@ -403,6 +425,71 @@ async fn named_handler(
     transport_streamable::handle(app, sh, profile, req).await
 }
 
+/// An attack server: 404 when they are off (always in public mode) or the
+/// kind is unknown; the scope overreach server challenges a caller without
+/// a bearer (any bearer passes: the point is the scope it asks for).
+async fn attack_handler(
+    State(app): State<AppState>,
+    Extension(sh): Sh,
+    Path(kind): Path<String>,
+    req: Request,
+) -> Response {
+    if !attacks::enabled(&app.settings, app.config.public_mode) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": "the MCP attack servers are off",
+                "hint": format!("the {} setting turns them on (never in public mode)", attacks::SWITCH_KEY),
+            })),
+        )
+            .into_response();
+    }
+    if !attacks::known(&kind) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": "unknown MCP attack server",
+                "kind": kind,
+                "available": attacks::KINDS.iter().map(|k| k.0).collect::<Vec<_>>(),
+            })),
+        )
+            .into_response();
+    }
+    if kind == "scope_overreach"
+        && !req
+            .headers()
+            .contains_key(axum::http::header::AUTHORIZATION)
+    {
+        let (parts, _) = req.into_parts();
+        let base = auth::base_url(&parts.headers, &parts.extensions, &parts.uri, &sh.cfg);
+        let mut resp = (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized", "scope": attacks::OVERREACH_SCOPES.join(" ") })),
+        )
+            .into_response();
+        if let Ok(v) = axum::http::HeaderValue::from_str(&attacks::overreach_challenge(&base)) {
+            resp.headers_mut()
+                .insert(axum::http::header::WWW_AUTHENTICATE, v);
+        }
+        return resp;
+    }
+    let profile = sh.profile(&format!("attack:{kind}"));
+    transport_streamable::handle(app, sh, profile, req).await
+}
+
+/// The protected resource metadata of the scope overreach server.
+async fn overreach_prm(
+    State(app): State<AppState>,
+    Extension(sh): Sh,
+    parts: axum::http::request::Parts,
+) -> Response {
+    if !attacks::enabled(&app.settings, app.config.public_mode) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let base = auth::base_url(&parts.headers, &parts.extensions, &parts.uri, &sh.cfg);
+    Json(attacks::overreach_metadata(&base)).into_response()
+}
+
 async fn prm_handler(Extension(sh): Sh, parts: axum::http::request::Parts) -> Response {
     let base = auth::base_url(&parts.headers, &parts.extensions, &parts.uri, &sh.cfg);
     Json(auth::protected_resource_metadata(&base, &sh.cfg)).into_response()
@@ -435,6 +522,16 @@ pub fn router_with(shared: Arc<Shared>) -> Router<AppState> {
         .route(
             "/mcp/servers/{name}",
             post(named_handler).get(named_handler).delete(named_handler),
+        )
+        .route(
+            "/mcp/attack/{kind}",
+            post(attack_handler)
+                .get(attack_handler)
+                .delete(attack_handler),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp/attack/scope_overreach",
+            get(overreach_prm),
         )
         .route(
             "/mock/{name}/_rustybin/mcp",
@@ -578,6 +675,40 @@ pub fn catalog() -> Vec<Endpoint> {
             modern(Example::post("Devtools server tools/list", "/mcp/servers/devtools"), "tools/list")
                 .json(TOOLS_LIST_BODY),
         ),
+        Endpoint::new(
+            "/mcp/attack/{kind}",
+            &["POST", "GET", "DELETE"],
+            category::MCP,
+            "MCP attack servers that misbehave on purpose: tool poisoning, rug pull, shadowing, result injection, oversized result, exfiltration link, scope overreach",
+        )
+        .description(
+            "Mock MCP servers for MCP gateway and client security demos (the mcp_* gateway \
+             scenarios check a gateway against them). poisoned_description hides instructions in a \
+             tool's description; rug_pull changes a tool after its first call; shadowing offers \
+             lookup_customer like /mcp/servers/crm with a hidden instruction; result_injection, \
+             oversized and exfiltration_url misbehave in tool results; scope_overreach challenges \
+             for scopes its tool never needs. Inert test data with RUSTYBIN-* markers. On by \
+             default (mcp.attack_servers), always off in public mode (404).",
+        )
+        .example(
+            modern(Example::post("Tool poisoning: tools/list", "/mcp/attack/poisoned_description"), "tools/list")
+                .json(TOOLS_LIST_BODY),
+        )
+        .example(
+            modern(Example::post("An unknown attack server (404)", "/mcp/attack/nope"), "tools/list")
+                .json(TOOLS_LIST_BODY)
+                .expect_status(404),
+        ),
+        Endpoint::new(
+            "/.well-known/oauth-protected-resource/mcp/attack/scope_overreach",
+            &["GET"],
+            category::MCP,
+            "Protected resource metadata of the scope overreach attack server: more scopes than its tool needs",
+        )
+        .example(Example::get(
+            "Scope overreach metadata",
+            "/.well-known/oauth-protected-resource/mcp/attack/scope_overreach",
+        )),
         Endpoint::new(
             "/mock/{name}/_rustybin/mcp",
             &["POST", "GET", "DELETE"],
@@ -743,6 +874,16 @@ pub fn openapi_paths() -> Value {
             );
         }
     }
+    let mut attack = mcp_path_item("MCP attack server", "mcpAttackServer", None);
+    for op in ["post", "get", "delete"] {
+        if let Some(params) = attack[op]["parameters"].as_array_mut() {
+            params.insert(
+                0,
+                json!({ "name": "kind", "in": "path", "required": true,
+                        "schema": { "type": "string", "enum": attacks::KINDS.iter().map(|k| k.0).collect::<Vec<_>>() } }),
+            );
+        }
+    }
     let mut mock_mcp = mcp_path_item("OpenAPI mock MCP server", "mockMcp", None);
     for op in ["post", "get", "delete"] {
         mock_mcp[op]["tags"] = json!(["Mocks"]);
@@ -776,6 +917,7 @@ pub fn openapi_paths() -> Value {
         "/mcp/protected": mcp_path_item("Protected MCP", "mcpProtected", Some("bearerAuth")),
         "/mcp/apikey": mcp_path_item("API key MCP", "mcpApiKey", Some("mcpApiKey")),
         "/mcp/servers/{name}": named,
+        "/mcp/attack/{kind}": attack,
         "/mock/{name}/_rustybin/mcp": mock_mcp,
         "/mcp/sse": { "get": {
             "tags": ["MCP"],
@@ -797,6 +939,7 @@ pub fn openapi_paths() -> Value {
         } },
         "/.well-known/oauth-protected-resource": { "get": prm_root },
         "/.well-known/oauth-protected-resource/mcp/protected": { "get": prm_path },
+        "/.well-known/oauth-protected-resource/mcp/attack/scope_overreach": { "get": { "tags": ["MCP"], "summary": "Protected resource metadata of the scope overreach attack server", "operationId": "getMcpAttackScopeOverreachMetadata", "responses": { "200": { "description": "RFC 9728 metadata asking for more scopes than the tool needs" }, "404": { "description": "The attack servers are off" } } } },
         "/.well-known/oauth-protected-resource/mock/{name}/_rustybin/mcp": { "get": { "tags": ["MCP"], "summary": "Protected resource metadata of a mock with mcp.oauth", "operationId": "getMockMcpResourceMetadata", "parameters": [{ "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "RFC 9728 metadata" }, "404": { "description": "No such mock, or it does not ask for a token" } } } },
     })
 }

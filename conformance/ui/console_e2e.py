@@ -1194,8 +1194,9 @@ def run_theme(browser, theme):
         # refused with the reason; Clean up removes the mock.
         page.goto(BASE + "/ui/#/scenarios")
         page.wait_for_selector("[data-scenario='caching']")
-        expect(page.locator("#scenario-catalog [data-scenario]")).to_have_count(15)
-        expect(page.locator("#scenario-catalog [data-group]")).to_have_count(2)
+        expect(page.locator("#scenario-catalog [data-scenario]")).to_have_count(21)
+        expect(page.locator("#scenario-catalog [data-group]")).to_have_count(3)
+        expect(page.locator("#scenario-catalog [data-group='mcp']")).to_have_text("MCP gateways")
         expect(page.locator("#scenario-catalog [data-group='ai']")).to_have_text("AI gateways")
         page.click("#scenario-start-caching")
         run = page.locator("[data-run]").first

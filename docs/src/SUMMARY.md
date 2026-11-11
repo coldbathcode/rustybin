@@ -36,6 +36,7 @@
 - [MCP server](mcp/index.md)
 - [MCP inspector](mcp/inspector.md)
 - [MCP registry](mcp/registry.md)
+- [MCP security](mcp/security.md)
 - [A2A agents](a2a/index.md)
 - [Management MCP](agent-mcp.md)
   - [Connect your coding agent](coding-agents.md)
