@@ -1264,7 +1264,7 @@ def run_theme(browser, theme):
         page.fill("#gateway-" + run_id, "http://127.0.0.1:9/llm")
         page.click("#check-" + run_id)
         expect(run.locator(".notice.err")).to_contain_text("scenario")
-        shot(page, theme, "16c-ai-gateway-scenarios")
+        shot(page, theme, "16b2-ai-gateway-scenarios")
         page.once("dialog", lambda d: d.accept())
         page.click("#end-" + run_id)
         expect(page.locator(f"[data-run='{run_id}']")).to_have_count(0)
