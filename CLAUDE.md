@@ -137,6 +137,15 @@ hops `safety::pin_chain` pinned; a field added to the marker goes inside its sig
 a client's marker byte for byte what it was; an onward call is never counted with the clients'
 arrivals.
 
+## Demo next, new features for gateway demos (planned 2026-11-11, not built)
+
+[docs/plans/demo-next/master-plan.md](docs/plans/demo-next/master-plan.md): nine new features and a
+release, one file each (section 4 is the build marker, section 6 the owner's decisions with a
+recommendation each): AI gateway scenarios, MCP security scenarios, a mock recorded from a real
+upstream, contract drift, demo storyboards, customer demo packs, Arazzo workflows, realtime and batch
+AI APIs, AsyncAPI event mocks. It follows core-next step 14 (the 0.7.0 release); nothing is built
+until the owner says go.
+
 ## Rustybin 0.3, reliability and testing workflows (built and released 2026-11-02)
 
 [docs/plans/reliability/master-plan.md](docs/plans/reliability/master-plan.md) (planned 2026-11-02 from section 8 of

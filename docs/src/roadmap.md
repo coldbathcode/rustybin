@@ -91,6 +91,13 @@ recommended against for now.
   agents](agent-mcp.md#sign-in-with-oauth), and [self-service mocks](mocks/self-service.md)
   for the hosted demo.
 
+Planned on 2026-11-11 as a second milestone, also waiting for a go, in
+[the demo next plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/demo-next/master-plan.md):
+guided scenarios for AI gateways (token limits, model fallback, semantic caching, guards) and for
+MCP security (tool poisoning, rug pulls, shadowing, injected results); a mock recorded from a real
+API, and drift checks of a mock against it; demo storyboards and customer demo packs; Arazzo
+workflows as multi-step tests; realtime and batch AI APIs; event-driven mocks from AsyncAPI.
+
 ## Under consideration
 
 From the build notes of the earlier steps and the harness plan, in no order; each has a step in

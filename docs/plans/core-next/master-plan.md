@@ -188,3 +188,23 @@ surface, then the docs with a tested example per route; fmt, clippy on both tool
 feature, the full suite, `scripts/check-no-dashes.sh`, the docs examples, the include and link
 checks and, when the console changed, `conformance/ui`. Add the step's build notes and its "For the
 merge" text, set the row to done with the date, push.
+
+## 7. New features after this plan (planned 2026-11-11)
+
+The owner asked what new features could be built beyond steps 14 to 26, then for them to be planned.
+They are a new milestone with its own plan, [demo next](../demo-next/master-plan.md), so this plan's
+step numbers stay as they are. It follows step 14 here (the 0.7.0 release) and does not wait for
+steps 15 to 26:
+
+| Step | Feature |
+|---|---|
+| 01 | AI gateway scenarios: token limits, model fallback, semantic cache, prompt and response guards, provider balancing |
+| 02 | MCP security scenarios: tool poisoning, rug pull, shadowing, result injection, scope overreach |
+| 03 | Record a mock from a real upstream |
+| 04 | Contract drift: a mock checked against the real API it imitates |
+| 05 | Demo storyboards: a scripted demo with a talk track and resets |
+| 06 | Customer demo packs: one apply, one teardown |
+| 07 | Arazzo workflows as multi-step saved tests and harness scenarios |
+| 08 | Realtime (WebSocket) and batch AI APIs |
+| 09 | Event-driven mocks from AsyncAPI |
+| 10 | Docs and release |
