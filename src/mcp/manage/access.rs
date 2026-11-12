@@ -92,6 +92,11 @@ pub const PROJECT_TOOLS: &[&str] = &[
     "get_test_run",
     "check_mock_drift",
     "list_drift_runs",
+    "list_storyboards",
+    "save_storyboard",
+    "delete_storyboard",
+    "run_storyboard_step",
+    "reset_storyboard",
 ];
 
 /// Request headers forwarded into in-process requests (`try_request`,

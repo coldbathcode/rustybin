@@ -520,6 +520,28 @@ rustybin scenario check caching 1a2b3c4d --gateway http://localhost:8000/catalog
 rustybin scenario end caching 1a2b3c4d --yes
 ```
 
+## storyboard
+
+Demo storyboards: a scripted demo with a talk track, rehearsed step by step
+
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin storyboard list [--project P]` | The demo storyboards and the variables each uses. Flags: `--project` value. | `GET /_rustybin/storyboards` | `tests.read` |
+| `rustybin storyboard show <name>` | One storyboard: its steps, and where you are in it. | `GET /_rustybin/storyboards/{name}` | `tests.read` |
+| `rustybin storyboard apply [<name>] --file F [--project P]` | Save or replace a storyboard from a file (JSON or YAML: title, steps with a talk_track, an action and a reset); the name is the argument, else the file's. Flags: `--file` value, `--project` value. | `PUT /_rustybin/storyboards/{name}` | `tests.write` |
+| `rustybin storyboard run <name> [--step N] [--var NAME=value]...` | Rehearse a storyboard: run every step in order (or one with --step) with your own permissions and print each verdict; exits 1 when a step fails. Flags: `--step` value, `--var` value. | `POST /_rustybin/storyboards/{name}/steps/{index}/run` | `tests.run` |
+| `rustybin storyboard reset <name> [--var NAME=value]...` | Before a rehearsal: run every step's reset action, end the scenario runs the storyboard started, clear your progress. Flags: `--var` value. | `POST /_rustybin/storyboards/{name}/reset` | `tests.run` |
+| `rustybin storyboard delete <name>` | Delete a storyboard (what its steps changed stays). | `DELETE /_rustybin/storyboards/{name}` | `tests.write` |
+
+```bash
+rustybin storyboard list
+rustybin storyboard show retry-demo
+rustybin storyboard apply retry-demo --file '{"title":"Retries","steps":[{"title":"Open the mocks","action":{"type":"open_view","route":"#/mocks"}}]}'
+rustybin storyboard run retry-demo
+rustybin storyboard reset retry-demo
+rustybin storyboard delete retry-demo --yes
+```
+
 ## record
 
 Recordings of a real API: a proxy URL to send traffic through, then a mock built from it

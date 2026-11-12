@@ -60,6 +60,24 @@ test_schedules:
   enabled: true
   webhook: https://hooks.example.com/rustybin
   notify_recovery: true
+storyboards:
+- name: retry-demo
+  title: Retries
+  steps:
+  - title: Start clean
+    talk_track: |
+      We start from a **known state**.
+    action:
+      type: restore_checkpoint
+      name: demo-start
+  - title: Break the upstream
+    action:
+      type: set_health
+      healthy: false
+    reset:
+      type: set_health
+      healthy: true
+  - title: Any questions?
 agents:
   default_ceiling: traffic
   rules:

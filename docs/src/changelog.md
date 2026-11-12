@@ -3,9 +3,9 @@
 ## Unreleased: the last of the roadmap's candidates
 
 [The plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/core-next/master-plan.md),
-steps 11 to 13, built on 2026-11-09 and not released yet, and steps 01 to 04 of
+steps 11 to 13, built on 2026-11-09 and not released yet, and steps 01 to 05 of
 [the demo next plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/demo-next/master-plan.md),
-built on 2026-11-11. Nothing to do when upgrading: what is new is off until you turn it on or
+built on 2026-11-11 and 2026-11-12. Nothing to do when upgrading: what is new is off until you turn it on or
 name it in a scenario.
 
 **New**:
@@ -44,6 +44,22 @@ name it in a scenario.
   JUnit; credentials as `{{VAR}}` headers, never kept; the last 10 runs kept per mock. On every
   surface: `rustybin mocks drift` (exits 1 on drift) and `drift-runs`, `check_mock_drift` and
   `list_drift_runs`, a mock's Drift tab, `drift:` in `rustybin.yaml`.
+- [Demo storyboards](storyboards.md): a demo as a script. A storyboard is a list of steps, each
+  with a talk track (Markdown), an action and an optional reset; an action is what an instance
+  already does (`restore_checkpoint`, `start_scenario`, `check_scenario`, `run_test`, `send`,
+  `set_health`, `set_mock_mode`, `open_view`, or `none` for a talking point). `POST
+  /_rustybin/storyboards/{name}/steps/{index}/run` runs one step with the caller's own
+  permissions (`tests.run` plus what the action needs; a missing one is `403
+  permission_required` and nothing runs) and answers the verdict; `POST .../reset` runs every
+  step's reset, ends the scenario runs the storyboard started and clears the caller's progress.
+  Progress is per session, in memory, never exported. At most 50 storyboards of 40 steps in
+  `<state>/storyboards.json`; a credential is never saved (`{{NAME}}` variables, as saved tests).
+  A storyboard may belong to a project. On every surface: the routes, the console's Storyboards
+  view (an editor whose action forms come from the configuration schema, and a presenter mode
+  driven from the keyboard), `rustybin storyboard list`, `show`, `apply`, `run` (a rehearsal:
+  exits 1 when a step fails), `reset`, `delete`, five management tools and the prompt
+  `rehearse_demo`, `storyboards:` in `rustybin.yaml` (a pulled document cannot point a step at
+  a new gateway).
 
 - Source control: a [diverged branch](source-control.md#a-diverged-branch) says what differs
   (`divergence` in the status and in the `409`) and is resolved by a person: `POST
@@ -90,10 +106,14 @@ name it in a scenario.
 
 **Changed**:
 
-- The management MCP server has 153 tools for an admin (`request_secret`, `get_secret_request`,
-  `git_branches`, `git_switch_branch`, `git_signing_key`, `import_scenario`, and the six recording
+- The management MCP server has 158 tools for an admin (`request_secret`, `get_secret_request`,
+  `git_branches`, `git_switch_branch`, `git_signing_key`, `import_scenario`, the six recording
   tools `list_recordings`, `start_recording`, `get_recording`, `stop_recording`,
-  `build_mock_from_recording`, `delete_recording`, and `check_mock_drift`, `list_drift_runs`).
+  `build_mock_from_recording`, `delete_recording`, `check_mock_drift`, `list_drift_runs`, and
+  the five storyboard tools `list_storyboards`, `save_storyboard`, `delete_storyboard`,
+  `run_storyboard_step`, `reset_storyboard`) and ten prompts (`rehearse_demo` is new).
+- `rustybin.yaml` has a `storyboards:` section (empty when there are none), and a project's
+  resources count its storyboards.
 - `profiles.json` may hold an `agent` object per profile. An older `rustybin` reads the file
   and ignores it.
 - A harness import keeps at most 64 requests (a layer's limit; it kept 200, which did not

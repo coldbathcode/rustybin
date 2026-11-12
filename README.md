@@ -801,6 +801,10 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET POST | `/_rustybin/tests/schedules` | Saved tests on a schedule: list them with their status, or create one (admin) |
 | GET PUT DELETE | `/_rustybin/tests/schedules/{name}` | A test schedule: read it with its status, save or replace it, delete it (admin) |
 | POST | `/_rustybin/tests/schedules/{name}/run` | Run a test schedule now: its tests, kept in the history, its notice when it fails (admin) |
+| GET POST | `/_rustybin/storyboards` | Demo storyboards: list them, or save a new one (steps with a talk track, an action and a reset) |
+| GET PUT DELETE | `/_rustybin/storyboards/{name}` | A storyboard with your progress through it: read, replace or delete it |
+| POST | `/_rustybin/storyboards/{name}/steps/{index}/run` | Run one step of a storyboard (counted from 1): its action, with your own permissions, and the verdict |
+| POST | `/_rustybin/storyboards/{name}/reset` | Reset a storyboard before a rehearsal: every step's reset action, the scenario runs it started ended, your progress cleared |
 | GET POST | `/_rustybin/checkpoints` | Checkpoints of the instance's API mocks and health: list them (?from=git: the configuration repository's, admin), or save one (admin) |
 | GET DELETE | `/_rustybin/checkpoints/{name}` | A checkpoint: what it holds; DELETE removes it (admin) |
 | POST | `/_rustybin/checkpoints/{name}/restore` | Restore a checkpoint: mocks, their data and health back, flaky counters reset; ?dry_run=true says what would change, ?from=git restores the configuration repository's (admin) |

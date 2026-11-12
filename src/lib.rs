@@ -79,6 +79,7 @@ pub mod sse;
 pub mod sso;
 pub mod state;
 pub mod status;
+pub mod storyboards;
 pub mod transfer;
 pub mod types;
 pub mod ui;
@@ -164,6 +165,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     scenarios::router,
     recordings::router,
     replay::router,
+    storyboards::router,
     checkpoints::router,
     egress::router,
     harness::router,

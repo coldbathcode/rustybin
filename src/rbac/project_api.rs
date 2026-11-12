@@ -51,11 +51,15 @@ pub struct Resources {
     pub mocks: Vec<String>,
     pub tests: Vec<String>,
     pub checkpoints: Vec<String>,
+    pub storyboards: Vec<String>,
 }
 
 impl Resources {
     pub fn is_empty(&self) -> bool {
-        self.mocks.is_empty() && self.tests.is_empty() && self.checkpoints.is_empty()
+        self.mocks.is_empty()
+            && self.tests.is_empty()
+            && self.checkpoints.is_empty()
+            && self.storyboards.is_empty()
     }
 
     pub fn view(&self) -> Value {
@@ -63,12 +67,13 @@ impl Resources {
             "mocks": self.mocks,
             "tests": self.tests,
             "checkpoints": self.checkpoints,
+            "storyboards": self.storyboards,
         })
     }
 }
 
-/// What belongs to `project`: mocks, saved tests, checkpoints. (A mock's
-/// portal item follows its mock.)
+/// What belongs to `project`: mocks, saved tests, checkpoints,
+/// storyboards. (A mock's portal item follows its mock.)
 pub fn resources(state: &AppState, project: &str) -> Resources {
     Resources {
         mocks: state.mocks.in_project(project),
@@ -80,6 +85,13 @@ pub fn resources(state: &AppState, project: &str) -> Resources {
             .map(|t| t.name)
             .collect(),
         checkpoints: state.checkpoints.names_in(project),
+        storyboards: state
+            .storyboards
+            .list()
+            .into_iter()
+            .filter(|s| s.project.as_deref() == Some(project))
+            .map(|s| s.name)
+            .collect(),
     }
 }
 
@@ -105,6 +117,7 @@ fn project_view(state: &AppState, caller: &Resolved, p: &Project) -> Value {
     }
     if !may(Permission::TestsRead) {
         held.tests.clear();
+        held.storyboards.clear();
     }
     v["resources"] = held.view();
     v
@@ -318,8 +331,8 @@ pub fn delete(
                 StatusCode::CONFLICT,
                 json!({
                     "error": format!(
-                        "the project {name} holds {} mock(s), {} saved test(s) and {} checkpoint(s): move them first, or delete with move_to (another project, or instance)",
-                        held.mocks.len(), held.tests.len(), held.checkpoints.len()
+                        "the project {name} holds {} mock(s), {} saved test(s), {} checkpoint(s) and {} storyboard(s): move them first, or delete with move_to (another project, or instance)",
+                        held.mocks.len(), held.tests.len(), held.checkpoints.len(), held.storyboards.len()
                     ),
                     "reason": projects::NOT_EMPTY,
                     "resources": held.view(),
@@ -337,7 +350,10 @@ pub fn delete(
         };
         need(&[
             (!held.mocks.is_empty(), Permission::MocksWrite),
-            (!held.tests.is_empty(), Permission::TestsWrite),
+            (
+                !held.tests.is_empty() || !held.storyboards.is_empty(),
+                Permission::TestsWrite,
+            ),
             (!held.checkpoints.is_empty(), Permission::CheckpointsWrite),
         ])?;
         moved = move_resources(state, &held, to);
@@ -376,7 +392,16 @@ pub fn move_resources(state: &AppState, held: &Resources, to: Option<&str>) -> V
         Some(f) => crate::checkpoints::move_project(state, &f, to),
         None => Vec::new(),
     };
-    json!({ "to": to.unwrap_or(projects::INSTANCE), "mocks": mocks, "tests": tests, "checkpoints": checkpoints })
+    let mut storyboards = Vec::new();
+    for n in &held.storyboards {
+        if let Some(mut s) = state.storyboards.get(n) {
+            s.project = to.map(str::to_string);
+            if state.storyboards.put(s, true).is_ok() {
+                storyboards.push(n.clone());
+            }
+        }
+    }
+    json!({ "to": to.unwrap_or(projects::INSTANCE), "mocks": mocks, "tests": tests, "checkpoints": checkpoints, "storyboards": storyboards })
 }
 
 // ── Routes ──────────────────────────────────────────────────────────
@@ -522,7 +547,8 @@ pub fn openapi_paths() -> Value {
             "resources": { "type": "object", "properties": {
                 "mocks": { "type": "array", "items": { "type": "string" } },
                 "tests": { "type": "array", "items": { "type": "string" } },
-                "checkpoints": { "type": "array", "items": { "type": "string" } }
+                "checkpoints": { "type": "array", "items": { "type": "string" } },
+                "storyboards": { "type": "array", "items": { "type": "string" } }
             } }
         }
     });

@@ -160,6 +160,15 @@ async fn fixture() -> Fixture {
         let (s, v) = send(&app, "POST", "/_rustybin/checkpoints", &admin(), Some(body)).await;
         assert_eq!(s, StatusCode::CREATED, "{v}");
     }
+    // A storyboard each, with a step everyone's role may run.
+    for (sb, project) in [("sa", Some("a")), ("sb", Some("b")), ("si", None)] {
+        let mut body = json!({ "name": sb, "steps": [{ "title": "Say hello" }] });
+        if let Some(p) = project {
+            body["project"] = json!(p);
+        }
+        let (s, v) = send(&app, "POST", "/_rustybin/storyboards", &admin(), Some(body)).await;
+        assert_eq!(s, StatusCode::CREATED, "{v}");
+    }
     // A kept run of b's test only.
     let bob_token = sign_in(&app, "bob").await;
     let (s, run) = send(
@@ -299,6 +308,8 @@ async fn every_project_route_checks_each_resource() {
             "tb"
         } else if p.starts_with("/_rustybin/checkpoints/") {
             "cb"
+        } else if p.starts_with("/_rustybin/storyboards/") {
+            "sb"
         } else {
             "mb"
         };
@@ -308,6 +319,7 @@ async fn every_project_route_checks_each_resource() {
             ("{revision}", "1"),
             ("{format}", "postman"),
             ("{n}", "1"),
+            ("{index}", "1"),
             ("{id}", ""),
         ] {
             p = p.replace(k, v);
@@ -356,6 +368,21 @@ async fn every_project_route_checks_each_resource() {
     );
     let (_, v) = send(app, "GET", "/_rustybin/tests", alice, None).await;
     assert_eq!(names(&v, "tests"), vec!["ta"]);
+    // Storyboards: hers, which she runs; b's and the instance's are not there.
+    let (_, v) = send(app, "GET", "/_rustybin/storyboards", alice, None).await;
+    assert_eq!(names(&v, "storyboards"), vec!["sa"]);
+    let (s, v) = send(
+        app,
+        "POST",
+        "/_rustybin/storyboards/sa/steps/1/run",
+        alice,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["ok"], json!(true), "{v}");
+    let (s, _) = send(app, "GET", "/_rustybin/storyboards/si", alice, None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
     let (_, v) = send(app, "GET", "/_rustybin/tests/export", alice, None).await;
     let text = v.as_str().expect("hurl").to_string();
     assert!(

@@ -28,7 +28,7 @@
 //! the whole instance: `instance:` (the title and console user), `settings:`
 //! (non-secret settings by dotted key), `secrets:` (references, never
 //! values), `harness:` (saved scenarios), `tests:` (saved tests), `test_schedules:`
-//! (saved tests on a schedule), `users:` and `roles:` (who signs in and the
+//! (saved tests on a schedule), `storyboards:` (demo storyboards), `users:` and `roles:` (who signs in and the
 //! custom roles; never a password or a hash) and `health:` (the initial
 //! state); see `crate::configdoc`, which exports, diffs and applies such
 //! documents. Version 1 files still load (they are version 2 documents with
@@ -76,6 +76,7 @@ pub const SECTIONS: &[&str] = &[
     "harness",
     "tests",
     "test_schedules",
+    "storyboards",
     "agents",
     "roles",
     "users",
@@ -112,6 +113,9 @@ pub struct MocksFile {
     /// Saved tests on a schedule (`crate::replay::schedule`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_schedules: Option<Vec<crate::replay::schedule::Schedule>>,
+    /// Demo storyboards (`crate::storyboards`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storyboards: Option<Vec<crate::storyboards::Storyboard>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents: Option<crate::mcp::manage::agents::FileSection>,
     /// Custom roles (`crate::rbac::role`).
@@ -166,6 +170,9 @@ impl MocksFile {
         }
         if self.test_schedules.is_some() {
             out.push("test_schedules");
+        }
+        if self.storyboards.is_some() {
+            out.push("storyboards");
         }
         if self.agents.is_some() {
             out.push("agents");
@@ -313,6 +320,7 @@ pub fn parse_lenient(text: &str) -> Result<(MocksFile, Vec<Failed>), String> {
     let harness = section(&mut top, "harness", &mut failed);
     let tests = section(&mut top, "tests", &mut failed);
     let test_schedules = section(&mut top, "test_schedules", &mut failed);
+    let storyboards = section(&mut top, "storyboards", &mut failed);
     let agents = section(&mut top, "agents", &mut failed);
     let roles = section(&mut top, "roles", &mut failed);
     let users = section(&mut top, "users", &mut failed);
@@ -358,6 +366,7 @@ pub fn parse_lenient(text: &str) -> Result<(MocksFile, Vec<Failed>), String> {
             harness,
             tests,
             test_schedules,
+            storyboards,
             agents,
             roles,
             users,
@@ -829,6 +838,7 @@ pub fn json_schema() -> Value {
         "harness": crate::configdoc::harness_schema(),
         "tests": crate::replay::schema(),
         "test_schedules": crate::replay::schedule::schema(),
+        "storyboards": crate::storyboards::schema(),
         "agents": agents,
         "roles": crate::configdoc::roles_schema(),
         "users": crate::configdoc::users_schema(),

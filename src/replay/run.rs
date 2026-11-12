@@ -480,7 +480,17 @@ pub async fn run(
         }
         out
     };
-    let vars = body.variables;
+    Ok(run_these(state, session, &tests, body.variables).await)
+}
+
+/// Run these tests in order (a saved test, or one a storyboard's `send`
+/// step wrote out): the report, with no variable's value in it.
+pub async fn run_these(
+    state: &AppState,
+    session: &str,
+    tests: &[SavedTest],
+    vars: BTreeMap<String, String>,
+) -> Report {
     let lookup = move |n: &str| -> Option<String> {
         vars.get(n).cloned().or_else(|| {
             let env = if n.starts_with(ENV_PREFIX) {
@@ -564,7 +574,7 @@ pub async fn run(
         .filter(|r| !r.passed && r.error.is_none())
         .count();
     let errors = results.iter().filter(|r| r.error.is_some()).count();
-    Ok(Report {
+    Report {
         passed: failed == 0 && errors == 0,
         total: results.len(),
         failed,
@@ -572,7 +582,7 @@ pub async fn run(
         duration_ms: started.elapsed().as_millis() as u64,
         ran_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         results,
-    })
+    }
 }
 
 /// The report as JUnit XML (one suite, a case per test).

@@ -99,6 +99,9 @@ pub struct AppState {
     pub drift: Arc<crate::mocks::drift::DriftRuns>,
     /// Saved tests (`crate::replay`), `<state>/tests.json`.
     pub saved_tests: Arc<crate::replay::Tests>,
+    /// Demo storyboards (`crate::storyboards`), `<state>/storyboards.json`,
+    /// and each session's progress (in memory, bounded).
+    pub storyboards: Arc<crate::storyboards::Storyboards>,
     /// Checkpoints (`crate::checkpoints`), `<state>/checkpoints/`.
     pub checkpoints: Arc<crate::checkpoints::Checkpoints>,
     /// Users and custom roles (`crate::rbac::users`, `<state>/users.json`):
@@ -219,6 +222,9 @@ impl AppState {
         let mcp_inspector = Arc::new(crate::mcp::inspector::Inspector::new(settings.clone()));
         let flaky = Arc::new(crate::flaky::FlakyState::for_config(&config));
         let saved_tests = Arc::new(crate::replay::Tests::new(config.state_dir.as_deref()));
+        let storyboards = Arc::new(crate::storyboards::Storyboards::new(
+            config.state_dir.as_deref(),
+        ));
         let checkpoints = Arc::new(crate::checkpoints::Checkpoints::new(
             config.state_dir.as_deref(),
         ));
@@ -261,6 +267,7 @@ impl AppState {
             recordings: Arc::new(crate::recordings::Recordings::default()),
             drift: Arc::new(crate::mocks::drift::DriftRuns::default()),
             saved_tests,
+            storyboards,
             checkpoints,
             users,
             sso,

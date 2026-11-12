@@ -35,6 +35,7 @@ pub mod scenarios;
 pub mod secrets;
 pub mod settings;
 pub mod stdio;
+pub mod storyboards;
 pub mod testing;
 pub mod tools;
 pub mod traffic;

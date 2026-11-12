@@ -821,6 +821,16 @@ server and a gateway's JWT validation:
 | `delete_checkpoint` | `checkpoints.write` | Delete a checkpoint, not the instance's mocks (confirmed) |
 | `list_repository_checkpoints` | `git.read` | The checkpoints committed to the configuration repository (at the working copy's `HEAD`), each with what it holds or why it cannot be restored, under `untrusted_checkpoints` |
 
+### Storyboards
+
+| Tool | Permission | |
+|---|---|---|
+| `list_storyboards` | `tests.read` | The [demo storyboards](storyboards.md), or one by name with your progress through it; what people wrote is under `untrusted_*` |
+| `save_storyboard` | `tests.write` | Save a storyboard: steps with a `title`, a `talk_track`, an `action` and a `reset`; `replace: true` overwrites one. Saving runs nothing |
+| `delete_storyboard` | `tests.write` | Delete a storyboard (confirmed) |
+| `run_storyboard_step` | `tests.run` | Run one step (`step`, counted from 1) with your own permissions: the step's action needs its own (`checkpoints.restore`, `scenarios.run`, `settings.write`, `mocks.write`). Confirmed when the action restores a checkpoint, checks a scenario or sends through a gateway, or replays a request that changes state. The action's answer is under `untrusted_detail` |
+| `reset_storyboard` | `tests.run` | Run every step's reset action, end the scenario runs your progress started, clear your progress (confirmed as a step is) |
+
 ### Harness
 
 Only when [load test mode](harness.md) is on (`RUSTYBIN_HARNESS=on`). Rights: **harness**
@@ -892,6 +902,7 @@ Clients that support MCP prompts offer these as commands:
 | `debug_gateway_call` | `path` | Find the request a gateway sent and explain what arrived (headers, auth, validation) against what was expected |
 | `load_test_gateway` | `target`, `rate` | On a [harness](harness.md) node: check the allowed targets, build and validate a scenario, preview it, dry-run it at a low rate, then run it for real and read the report |
 | `secure_a_mock` | `name`, `mode` | Pick a mocked security mode and show the credentials a gateway must present |
+| `rehearse_demo` | `name` | Reset a [storyboard](storyboards.md), run its steps in order (asking before a step that restores, sends out or changes state) and report each verdict |
 
 | Resource | |
 |---|---|

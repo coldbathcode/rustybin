@@ -94,6 +94,40 @@ fn state_with_everything() -> AppState {
             false,
         )
         .expect("schedule");
+    state
+        .storyboards
+        .put(
+            crate::storyboards::Storyboard {
+                name: "retry-demo".into(),
+                title: Some("Retries".into()),
+                description: None,
+                steps: vec![
+                    crate::storyboards::Step {
+                        title: "Start clean".into(),
+                        talk_track: Some("We start from a **known state**.\n".into()),
+                        action: crate::storyboards::Action::RestoreCheckpoint {
+                            name: "demo-start".into(),
+                        },
+                        reset: None,
+                    },
+                    crate::storyboards::Step {
+                        title: "Break the upstream".into(),
+                        talk_track: None,
+                        action: crate::storyboards::Action::SetHealth { healthy: false },
+                        reset: Some(crate::storyboards::Action::SetHealth { healthy: true }),
+                    },
+                    crate::storyboards::Step {
+                        title: "Any questions?".into(),
+                        talk_track: None,
+                        action: crate::storyboards::Action::None,
+                        reset: None,
+                    },
+                ],
+                project: None,
+            },
+            false,
+        )
+        .expect("storyboard");
     state.health.set(false);
     state
 }

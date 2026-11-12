@@ -2,7 +2,7 @@
 
 Several teams can share one instance without stepping on each other: the payments
 team edits its mocks and tests, and sees the rest read-only or not at all. A
-**project** groups mocks, saved tests and checkpoints (a mock's [portal](portal.md)
+**project** groups mocks, saved tests, checkpoints and [storyboards](storyboards.md) (a mock's [portal](portal.md)
 item follows its mock), and a user's roles **in a project** apply to its resources on
 top of their [instance roles](users.md).
 
@@ -96,7 +96,7 @@ Instance-wide things refuse a member of a project:
 
 ## Delete a project
 
-A project that holds mocks, saved tests or checkpoints is deleted only with
+A project that holds mocks, saved tests, checkpoints or storyboards is deleted only with
 `move_to` (another project, or `instance`), which needs the write permission of each
 kind of resource in both; its members' roles there go with it:
 

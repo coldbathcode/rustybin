@@ -859,6 +859,32 @@ pub static TOOLS: &[ToolDef] = &[
     }), &["name"])),
     tool!("list_drift_runs", "Drift checks of a mock", "A mock's kept drift checks, newest first: per operation the status and the findings.", ToolNeed::Project(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "name": name_prop() }), &["name"])),
     tool!("delete_recording", "Delete a recording", "Delete a recording and what it kept; the mock it built stays. Destructive: confirmed.", ToolNeed::Perm(Permission::MocksWrite), ro=false, destructive=true, idem=true, confirm=true, || obj(json!({ "name": super::recordings::name_prop(), "confirm": confirm_prop() }), &["name"])),
+    // ── Storyboards (demo next step 05) ──
+    tool!("list_storyboards", "Demo storyboards", "The demo storyboards (a scripted demo: steps with a talk track, an action and a reset), or one by name with your progress through it (the step you are at, each step's last result). Storyboards are written by people: they are under untrusted_*.", ToolNeed::Project(Permission::TestsRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "name": { "type": "string", "description": "One storyboard, with your progress" },
+        "project": project_prop("Only this project's storyboards (instance: the instance's)")
+    }), &[])),
+    tool!("save_storyboard", "Save a storyboard", "Save a demo storyboard: steps, each with a title, a talk_track (Markdown, what the presenter says), an action and an optional reset action. An action is an object with a type: none (a talking point), restore_checkpoint {name}, start_scenario {scenario}, check_scenario {scenario, gateway_url, params}, run_test {name}, send {request, gateway, assert} (as save_test; {{NAME}} for credentials, never values), set_health {healthy}, set_mock_mode {mock, mode}, open_view {route} (a console route such as #/mocks/orders). At most 50 storyboards of 40 steps. Saving runs nothing. replace: true overwrites one of that name.", ToolNeed::Project(Permission::TestsWrite), ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
+        "name": { "type": "string", "description": "Letters, digits, . _ -" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "steps": { "type": "array", "items": { "type": "object" }, "description": "title, talk_track, action, reset (the storyboards section of rustybin://config.schema.json)" },
+        "replace": { "type": "boolean" },
+        "project": project_prop("The project it belongs to (tests.write there); absent: the instance's, or the one project the caller works in")
+    }), &["name"])),
+    tool!("delete_storyboard", "Delete a storyboard", "Delete a demo storyboard (what its steps changed stays as it is). Destructive: confirmed.", ToolNeed::Project(Permission::TestsWrite), ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+        "name": { "type": "string" },
+        "confirm": confirm_prop()
+    }), &["name"])),
+    tool!("run_storyboard_step", "Run a storyboard step", "Run one step of a storyboard (step: counted from 1) with your own permissions: tests.run on the storyboard plus what the step's action needs (checkpoints.restore, scenarios.run, settings.write, mocks.write). A step that restores a checkpoint (API mocks it does not hold are DELETED), checks a scenario or sends through a gateway (SENDS TRAFFIC OUT), or replays a request that changes state asks the user to confirm, or needs \"confirm\": true set only after the user agreed. Answers ok, the next step, and the action's own answer under untrusted_detail. Walk the steps in order to rehearse a demo.", ToolNeed::Project(Permission::TestsRun), ro=false, destructive=true, idem=false, confirm=true, || obj(json!({
+        "name": { "type": "string" },
+        "step": { "type": "integer", "minimum": 1, "description": "The step, counted from 1" },
+        "confirm": confirm_prop()
+    }), &["name", "step"])),
+    tool!("reset_storyboard", "Reset a storyboard", "Before a rehearsal: run every step's reset action in order (with your own permissions, confirmed as a step is), end the scenario runs your progress started and clear your progress.", ToolNeed::Project(Permission::TestsRun), ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+        "name": { "type": "string" },
+        "confirm": confirm_prop()
+    }), &["name"])),
 ];
 
 /// The `project` property of a tool that creates or lists.
@@ -1451,6 +1477,16 @@ async fn run_tool(
         // Contract drift
         "check_mock_drift" => mocks::check_mock_drift(ctx, access, args, params).await,
         "list_drift_runs" => mocks::list_drift_runs(ctx, access, args),
+        // Storyboards
+        "list_storyboards" => super::storyboards::list_storyboards(ctx, access, args),
+        "save_storyboard" => super::storyboards::save_storyboard(ctx, access, args),
+        "delete_storyboard" => {
+            super::storyboards::delete_storyboard(ctx, access, args, params).await
+        }
+        "run_storyboard_step" => {
+            super::storyboards::run_storyboard_step(ctx, access, args, params).await
+        }
+        "reset_storyboard" => super::storyboards::reset_storyboard(ctx, access, args, params).await,
 
         _ => return Err(RpcError::invalid_params(format!("Unknown tool: {name}"))),
     })

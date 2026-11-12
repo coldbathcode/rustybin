@@ -137,14 +137,31 @@ hops `safety::pin_chain` pinned; a field added to the marker goes inside its sig
 a client's marker byte for byte what it was; an onward call is never counted with the clients'
 arrivals.
 
-## Demo next, new features for gateway demos (planned 2026-11-11, not built)
+## Demo next, new features for gateway demos (planned 2026-11-11, steps 01 to 05 built, not released)
 
 [docs/plans/demo-next/master-plan.md](docs/plans/demo-next/master-plan.md): nine new features and a
 release, one file each (section 4 is the build marker, section 6 the owner's decisions with a
 recommendation each): AI gateway scenarios, MCP security scenarios, a mock recorded from a real
-upstream, contract drift, demo storyboards, customer demo packs, Arazzo workflows, realtime and batch
-AI APIs, AsyncAPI event mocks. It follows core-next step 14 (the 0.7.0 release); nothing is built
-until the owner says go.
+upstream, contract drift (steps 01 to 04, built 2026-11-11), demo storyboards (step 05, built
+2026-11-12), customer demo packs, Arazzo workflows, realtime and batch AI APIs, AsyncAPI event
+mocks. Each built step file has build notes; the changelog's "Unreleased" section lists what is new.
+Steps 06 to 09 wait for the owner's decisions (section 6), step 10 (the release) is the owner's to
+start, and core-next step 14 (the 0.7.0 release) has not been done either.
+
+Step 05 (storyboards; `docs/plans/demo-next/step-05-demo-storyboards.md`, user docs
+`docs/src/storyboards.md`): `src/storyboards/` (`mod.rs`: `Storyboard`, `Step`, `Action`, the store
+in `AppState.storyboards` and `<state>/storyboards.json`, the service the routes, tools and documents
+share, `/_rustybin/storyboards*`; `run.rs`: `run_step`, `reset`, each session's progress in
+`Storyboards.runs`), `src/mcp/manage/storyboards.rs`, `rustybin storyboard`, `ui/views/storyboards.js`,
+`storyboards:` of `rustybin.yaml`. Rules it left: an action calls the function its own route and
+tool call (`run::act`), never a control route in process, and checks the runner's permission for it
+at run time (a missing one is the `403 permission_required` of that permission, any other failure
+is a result with `ok: false`); the service handed to an action has no `route_need`; a new kind of
+action is a variant of `Action` with its arms in `validate`, `act`, `confirm_reason` and
+`action_schema` (the console's forms follow the schema); a storyboard never holds a credential (a
+`send` action is validated as a saved test) and progress is never instance state (in memory, bounded,
+in no export or checkpoint); a storyboard from git is never moved and never gains a gateway
+(`Storyboard::outbound`).
 
 ## Rustybin 0.3, reliability and testing workflows (built and released 2026-11-02)
 
@@ -449,6 +466,9 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   caller's session, or the test's gateway under `Purpose::Replay`; 200 requests, 60 s; variables from the run or
   `RUSTYBIN_TEST_*` only; JUnit); `hurl.rs` the export; `history.rs` the kept runs (`<state>/test-runs/`, 200 runs and 30 days, never a variable's value; `run_and_keep` with a trigger label from `X-Rustybin-Client`, `mcp` or `schedule:<name>`); `schedule.rs` the schedules (`Tests.schedules`, 20, `every` or `at` UTC, the scheduler and notice tasks in `server.rs`, skipped while the harness sends load, failure notices under `Purpose::Notify` with the `notify.webhook_token` secret, `test_schedules:` of `rustybin.yaml`). Variables are `{{name}}`, not `${VAR}` (a file load
   expands `${VAR}` across the whole document).
+- `src/storyboards/`: demo storyboards (`/_rustybin/storyboards*`, `rustybin storyboard`, the `*_storyboard*`
+  tools and the `rehearse_demo` prompt, the console's Storyboards view, `storyboards:` of `rustybin.yaml`): at most
+  50 of 40 steps, 64 KiB each; a step's action runs as the caller through `run::act`; see demo next step 05 above.
 - `src/scenarios/`: guided gateway scenarios (`/_rustybin/scenarios*`, `rustybin scenario`, the
   `*_gateway_scenario` tools, the console's Gateway scenarios view). `catalog.rs` is the one table (what each
   proves, the upstream, the steps, the requests, `evaluate`); `mod.rs` the runs (`AppState.scenarios`, 32, an hour,

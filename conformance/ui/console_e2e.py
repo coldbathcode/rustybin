@@ -168,7 +168,7 @@ def run_theme(browser, theme):
         page.wait_for_selector("text=Requests captured")
         page.wait_for_selector("text=What Rustybin sees of this browser")
         page.wait_for_selector(".url-row code")
-        expect(page.locator(".nav-link")).to_have_count(15)
+        expect(page.locator(".nav-link")).to_have_count(16)
         # No plan configured (RUSTYBIN_PLAN=none): no "Plan and usage" card.
         expect(page.locator("text=Plan and usage")).to_have_count(0)
         # AI assist with the mock provider: the Ask card offers suggestions.
@@ -1365,6 +1365,74 @@ def run_theme(browser, theme):
         expect(page.locator(f"tr[data-test='{name}']")).to_have_count(0)
 
     step("saved tests: save from live traffic, run, export, schedule, delete", saved_tests)
+
+    def storyboards():
+        # A storyboard written in the editor (the action forms come from the
+        # configuration schema), presented with the keyboard (a tick, then a
+        # cross for an assertion that does not hold), reset and deleted.
+        name = f"e2e-demo-{theme}"
+        page.goto(BASE + "/ui/#/storyboards")
+        page.wait_for_selector("#storyboards-list")
+        page.click("#storyboard-new")
+        page.fill("#storyboard-name", name)
+        page.fill("#storyboard-title", "An upstream that goes down")
+        first = page.locator("[data-step='1']")
+        first.locator("[data-step-title]").fill("Say hello")
+        first.locator("[data-step-talk]").fill("Welcome. This is the **upstream**.")
+        page.click("#storyboard-add-step")
+        second = page.locator("[data-step='2']")
+        second.locator("[data-step-title]").fill("Break it")
+        second.locator("select[id$='-action-type']").select_option("set_health")
+        second.locator("select[id$='-action-healthy']").select_option("false")
+        second.locator("select[id$='-reset-type']").select_option("set_health")
+        page.click("#storyboard-add-step")
+        third = page.locator("[data-step='3']")
+        third.locator("[data-step-title]").fill("It should be up")
+        third.locator("select[id$='-action-type']").select_option("send")
+        third.locator("textarea[id$='-action-request']").fill('{"path": "/health"}')
+        third.locator("textarea[id$='-action-assert']").fill('[{"status": 200}]')
+        # The third step moves up and back down: the order is the list's.
+        third.locator("[data-step-up]").click()
+        expect(page.locator("[data-step='2'] [data-step-title]")).to_have_value("It should be up")
+        page.locator("[data-step='2'] [data-step-down]").click()
+        expect(page.locator("[data-step='3'] [data-step-title]")).to_have_value("It should be up")
+        page.click("#storyboard-save")
+        page.wait_for_selector("#storyboard-present")
+        shot(page, theme, "16d-storyboard-editor")
+        assert_icons_sized(page, "storyboard editor")
+        page.click("#storyboard-present")
+        page.wait_for_selector("#presenter")
+        expect(page.locator("#presenter-count")).to_have_text("Step 1 of 3")
+        expect(page.locator(".presenter-talk strong")).to_have_text("upstream")
+        # A talking point moves on by itself; the next step runs, then Next.
+        page.keyboard.press("ArrowRight")
+        expect(page.locator("#presenter-count")).to_have_text("Step 2 of 3")
+        page.keyboard.press("ArrowRight")
+        expect(page.locator("#presenter-verdict")).to_contain_text("503")
+        expect(page.locator("#presenter-verdict")).to_contain_text("OK")
+        assert http("GET", "/health") == 503
+        page.keyboard.press("ArrowRight")
+        expect(page.locator("#presenter-count")).to_have_text("Step 3 of 3")
+        page.keyboard.press("ArrowRight")
+        expect(page.locator("#presenter-verdict")).to_contain_text("Failed")
+        expect(page.locator("#presenter-verdict")).to_contain_text("expected 200, saw 503")
+        expect(page.locator("#presenter-steps .badge.err")).to_have_count(1)
+        shot(page, theme, "16e-storyboard-presenter")
+        assert_icons_sized(page, "storyboard presenter")
+        # The reset undoes the second step and starts over.
+        page.once("dialog", lambda d: d.accept())
+        page.click("#presenter-reset")
+        expect(page.locator("#presenter-count")).to_have_text("Step 1 of 3")
+        expect(page.locator("#presenter-steps .badge.err")).to_have_count(0)
+        assert http("GET", "/health") == 200
+        page.keyboard.press("Escape")
+        page.wait_for_selector("#storyboards-table")
+        expect(page.locator("#presenter")).to_have_count(0)
+        page.once("dialog", lambda d: d.accept())
+        page.click(f"[data-delete='{name}']")
+        expect(page.locator(f"tr[data-storyboard='{name}']")).to_have_count(0)
+
+    step("storyboards: write one, present it with the keyboard, reset, delete", storyboards)
 
     def checkpoints():
         # Save a checkpoint, flip health, preview and restore it (health

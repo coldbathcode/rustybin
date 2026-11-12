@@ -885,6 +885,66 @@ async fn git_commit_takes_checkpoints_and_restore_reads_the_repository() {
     inst.server.shutdown();
 }
 
+/// `storyboard run` is a rehearsal: every step's verdict, exit 1 when one
+/// fails; `--step` runs one; a viewer is refused naming the permission.
+#[tokio::test]
+async fn a_storyboard_is_rehearsed_step_by_step() {
+    let inst = instance().await;
+    inst.login().await;
+    let doc = r#"{"title":"A demo","steps":[
+        {"title":"Say hello","talk_track":"Welcome."},
+        {"title":"It answers","action":{"type":"send","request":{"path":"/status/200"},"assert":[{"status":200}]}},
+        {"title":"Break it","action":{"type":"set_health","healthy":false},"reset":{"type":"set_health","healthy":true}},
+        {"title":"A wrong guess","action":{"type":"send","request":{"path":"/health"},"assert":[{"status":200}]}}
+    ]}"#;
+    let saved = inst
+        .json(&["storyboard", "apply", "demo", "--file", doc])
+        .await;
+    assert_eq!(saved["name"], json!("demo"));
+    let list = inst.json(&["storyboard", "list"]).await;
+    assert_eq!(list["storyboards"][0]["name"], json!("demo"));
+    // One step.
+    let one = inst
+        .json(&["storyboard", "run", "demo", "--step", "2"])
+        .await;
+    assert_eq!(one["ok"], json!(true), "{one}");
+    assert_eq!(one["results"][0]["action"], json!("send"));
+    // The whole rehearsal: the last step fails, the others are reported.
+    let (code, out, message) = inst
+        .run_full(None, &["storyboard", "run", "demo", "--json"])
+        .await;
+    assert_eq!(code, 1, "{out} {message}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let oks: Vec<bool> = v["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .map(|r| r["ok"] == json!(true))
+        .collect();
+    assert_eq!(oks, vec![true, true, true, false], "{out}");
+    assert!(!inst.state.health.is_healthy());
+    let (code, text, message) = inst.run_full(None, &["storyboard", "run", "demo"]).await;
+    assert_eq!(code, 1);
+    assert!(text.contains("A wrong guess"), "{text}");
+    assert!(
+        message.contains("step 4 (A wrong guess)") && message.contains("expected 200, saw 503"),
+        "{message}"
+    );
+    // Where the presenter is, then the reset.
+    let shown = inst.json(&["storyboard", "show", "demo"]).await;
+    assert_eq!(shown["progress"]["done"], json!(true), "{shown}");
+    let reset = inst.json(&["storyboard", "reset", "demo"]).await;
+    assert_eq!(reset["ok"], json!(true), "{reset}");
+    assert!(inst.state.health.is_healthy());
+    let (code, _) = inst
+        .run(None, &["storyboard", "run", "demo", "--step", "0"])
+        .await;
+    assert_eq!(code, 2);
+    let gone = inst.json(&["storyboard", "delete", "demo", "--yes"]).await;
+    assert_eq!(gone["deleted"], json!("demo"));
+    inst.server.shutdown();
+}
+
 /// A command the credential may not run prints the permission it needs and
 /// exits 3.
 #[tokio::test]

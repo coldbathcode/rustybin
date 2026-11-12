@@ -136,6 +136,10 @@ pub const NOUNS: &[(&str, &str)] = &[
         "Guided gateway scenarios: prepare the upstream, check through the gateway, clean up",
     ),
     (
+        "storyboard",
+        "Demo storyboards: a scripted demo with a talk track, rehearsed step by step",
+    ),
+    (
         "record",
         "Recordings of a real API: a proxy URL to send traffic through, then a mock built from it",
     ),
@@ -442,6 +446,12 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("scenario", "show", "<scenario> <run>", "A run: the setup, what it created, the last verdict.", NO_FLAGS, [("GET", "/_rustybin/scenarios/{id}/runs/{run}")], false, "scenario show caching 1a2b3c4d"),
     cmd!("scenario", "check", "<scenario> <run> --gateway U [--limit N] [--half-open-ms MS] [--size-limit BYTES] [--allowed-origin O] [--refused-origin O] [--upstream-cors] [--add-request-header H] [--add-request-value V] [--remove-request-header H] [--add-response-header H] [--token-limit N] [--fail-kind K] [--skip-injection] [--min-share PCT] [--max-result-kib KIB]", "Send the run's test requests through the gateway and compare what the client got with what reached the upstream; exits 1 when an expectation fails.", &[Flag::value("--gateway", "The URL the gateway serves the route at"), Flag::value("--limit", "rate_limiting: the limit set on the gateway"), Flag::value("--half-open-ms", "circuit_breaker: the gateway's half-open time in milliseconds"), Flag::value("--size-limit", "request_size_limit: the gateway's body limit in bytes"), Flag::value("--allowed-origin", "cors: an origin the gateway allows (scheme://host[:port])"), Flag::value("--refused-origin", "cors: an origin the gateway refuses"), Flag::switch("--upstream-cors", "cors: the gateway lets preflights through and the upstream answers CORS"), Flag::value("--add-request-header", "header_transformation: the request header the gateway adds"), Flag::value("--add-request-value", "header_transformation: the value it adds (optional)"), Flag::value("--remove-request-header", "header_transformation: the request header the gateway removes"), Flag::value("--add-response-header", "header_transformation: the response header the gateway adds"), Flag::value("--token-limit", "ai_token_limit: the token budget set on the gateway"), Flag::value("--fail-kind", "ai_model_fallback: the error the primary target answers (rate_limit, overloaded, server_error, unavailable, timeout)"), Flag::switch("--skip-injection", "ai_prompt_guard: leave out the prompt injection"), Flag::value("--min-share", "ai_provider_balance: the least share of the requests per target, in percent"), Flag::value("--max-result-kib", "mcp_oversized_result: the largest tool result the gateway passes, in KiB")], [("POST", "/_rustybin/scenarios/{id}/runs/{run}/check")], false, "scenario check caching 1a2b3c4d --gateway http://localhost:8000/catalog-api"),
     cmd!("scenario", "end", "<scenario> <run>", "End a run: remove the mock and counters it created, nothing else.", NO_FLAGS, [("DELETE", "/_rustybin/scenarios/{id}/runs/{run}")], true, "scenario end caching 1a2b3c4d --yes"),
+    cmd!("storyboard", "list", "[--project P]", "The demo storyboards and the variables each uses.", PROJECT_FLAGS, [("GET", "/_rustybin/storyboards")], false, "storyboard list"),
+    cmd!("storyboard", "show", "<name>", "One storyboard: its steps, and where you are in it.", NO_FLAGS, [("GET", "/_rustybin/storyboards/{name}")], false, "storyboard show retry-demo"),
+    cmd!("storyboard", "apply", "[<name>] --file F [--project P]", "Save or replace a storyboard from a file (JSON or YAML: title, steps with a talk_track, an action and a reset); the name is the argument, else the file's.", &[Flag::value("--file", "The storyboard: a file, - for stdin, or inline JSON"), Flag::value("--project", "The project it belongs to (default: the instance's, or your one project)")], [("PUT", "/_rustybin/storyboards/{name}")], false, r##"storyboard apply retry-demo --file '{"title":"Retries","steps":[{"title":"Open the mocks","action":{"type":"open_view","route":"#/mocks"}}]}'"##),
+    cmd!("storyboard", "run", "<name> [--step N] [--var NAME=value]...", "Rehearse a storyboard: run every step in order (or one with --step) with your own permissions and print each verdict; exits 1 when a step fails.", &[Flag::value("--step", "Only this step, counted from 1"), Flag::value("--var", "A {{variable}}: NAME=value, or NAME=- (stdin) or NAME=@file for a credential (repeat it)")], [("POST", "/_rustybin/storyboards/{name}/steps/{index}/run")], false, "storyboard run retry-demo"),
+    cmd!("storyboard", "reset", "<name> [--var NAME=value]...", "Before a rehearsal: run every step's reset action, end the scenario runs the storyboard started, clear your progress.", &[Flag::value("--var", "A {{variable}}: NAME=value, or NAME=- (stdin) or NAME=@file for a credential (repeat it)")], [("POST", "/_rustybin/storyboards/{name}/reset")], false, "storyboard reset retry-demo"),
+    cmd!("storyboard", "delete", "<name>", "Delete a storyboard (what its steps changed stays).", NO_FLAGS, [("DELETE", "/_rustybin/storyboards/{name}")], true, "storyboard delete retry-demo --yes"),
     cmd!("bins", "list", "", "Your request bins.", NO_FLAGS, [("GET", "/bin")], false, "bins list"),
     cmd!("bins", "create", "[--status N] [--body B] [--delay-ms N]", "A new bin, with the answer it gives.", &[Flag::value("--status", "The status the bin answers"), Flag::value("--body", "The body it answers: a file or inline JSON"), Flag::value("--delay-ms", "A delay before the answer")], [("POST", "/bin")], false, "bins create --status 202"),
     cmd!("bins", "delete", "<id>", "Delete a bin.", NO_FLAGS, [("DELETE", "/bin/{id}")], true, "bins delete 0123456789abcdef01234567 --yes"),
@@ -815,6 +825,7 @@ pub async fn dispatch(ctx: &mut Ctx) -> Result<()> {
         "agents" => agents(ctx, cmd.verb).await,
         "scenario" => scenario(ctx, cmd.verb).await,
         "tests" => tests(ctx, cmd.verb).await,
+        "storyboard" => storyboard(ctx, cmd.verb).await,
         "checkpoint" => checkpoint(ctx, cmd.verb).await,
         "record" => record(ctx, cmd.verb).await,
         "ai" => ai(ctx, cmd.verb).await,
@@ -2690,6 +2701,158 @@ async fn checkpoint(ctx: &mut Ctx, verb: &str) -> Result<()> {
     }
 }
 
+// ── Storyboards ─────────────────────────────────────────────────────
+
+async fn storyboard(ctx: &mut Ctx, verb: &str) -> Result<()> {
+    if verb == "list" {
+        let query = project_query(ctx);
+        return get(ctx, "/_rustybin/storyboards", &query).await;
+    }
+    if verb == "apply" {
+        let file = ctx
+            .args
+            .value("--file")
+            .ok_or_else(|| Fail::Usage("--file: the storyboard as JSON or YAML".into()))?
+            .to_string();
+        let text = ctx.input(&file)?;
+        let mut v: Value = serde_yaml::from_str(&text)
+            .map_err(|e| Fail::Usage(format!("--file: not JSON or YAML ({e})")))?;
+        let name = match ctx.args.arg(0, "a storyboard name") {
+            Ok(n) => n.to_string(),
+            Err(_) => v["name"]
+                .as_str()
+                .ok_or_else(|| {
+                    Fail::Usage("a storyboard name: the argument, or name: in the file".into())
+                })?
+                .to_string(),
+        };
+        if let Some(p) = ctx.args.value("--project") {
+            v["project"] = json!(p);
+        }
+        let path = format!("/_rustybin/storyboards/{}", enc(&name));
+        let reply = ctx.client()?.put(&path, Body::Json(v)).await?;
+        emit_reply(ctx, &reply);
+        return Ok(());
+    }
+    let name = ctx
+        .args
+        .arg(0, "a storyboard name (rustybin storyboard list)")?
+        .to_string();
+    let path = format!("/_rustybin/storyboards/{}", enc(&name));
+    match verb {
+        "show" => get(ctx, &path, &[]).await,
+        "delete" => delete(ctx, &path, &[]).await,
+        "reset" => {
+            let vars = var_flags(ctx)?;
+            let reply = ctx
+                .client()?
+                .post(
+                    &format!("{path}/reset"),
+                    Body::Json(json!({ "variables": vars })),
+                )
+                .await?;
+            let v = reply.value();
+            if ctx.json {
+                ctx.emit(&v);
+            } else {
+                ctx.emit(&json!({
+                    "ok": v["ok"],
+                    "reset": step_rows(&v["reset"]),
+                    "ended_scenarios": v["ended_scenarios"],
+                }));
+            }
+            if v["ok"] != json!(true) {
+                return Err(Fail::Failed(format!(
+                    "a reset failed: {}",
+                    failed_steps(&v["reset"]).join("; ")
+                )));
+            }
+            Ok(())
+        }
+        "run" => storyboard_run(ctx, &path).await,
+        _ => Err(Fail::Usage(format!("storyboard {verb}: not implemented"))),
+    }
+}
+
+/// Step results as rows for people.
+fn step_rows(results: &Value) -> Vec<Value> {
+    results
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|r| {
+            json!({
+                "step": r["step"],
+                "title": r["title"],
+                "action": r["action"],
+                "ok": r["ok"],
+                "summary": r["summary"],
+            })
+        })
+        .collect()
+}
+
+/// The failed results, each as `step N (title): why`.
+fn failed_steps(results: &Value) -> Vec<String> {
+    results
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["ok"] != json!(true))
+        .map(|r| {
+            format!(
+                "step {} ({}): {}",
+                r["step"],
+                r["title"].as_str().unwrap_or(""),
+                r["summary"].as_str().unwrap_or("")
+            )
+        })
+        .collect()
+}
+
+/// `rustybin storyboard run`: a rehearsal. Every step in order (or the
+/// one of `--step`), each verdict printed; exit 1 when one fails.
+async fn storyboard_run(ctx: &mut Ctx, path: &str) -> Result<()> {
+    let vars = var_flags(ctx)?;
+    let body = json!({ "variables": vars });
+    let steps: Vec<usize> = match ctx.args.value("--step") {
+        Some(n) => vec![n
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n >= 1)
+            .ok_or_else(|| Fail::Usage("--step: a number, counted from 1".into()))?],
+        None => {
+            let v = ctx.client()?.get(path, &[]).await?.value();
+            (1..=v["steps"].as_array().map(Vec::len).unwrap_or(0)).collect()
+        }
+    };
+    let mut results = Vec::new();
+    for n in steps {
+        let reply = ctx
+            .client()?
+            .post(&format!("{path}/steps/{n}/run"), Body::Json(body.clone()))
+            .await?;
+        results.push(reply.value());
+    }
+    let results = Value::Array(results);
+    let ok = results
+        .as_array()
+        .is_some_and(|a| a.iter().all(|r| r["ok"] == json!(true)));
+    if ctx.json {
+        ctx.emit(&json!({ "ok": ok, "results": results }));
+    } else {
+        ctx.emit(&json!({ "ok": ok, "results": step_rows(&results) }));
+    }
+    if !ok {
+        // The table cuts a long summary: the message says each failure whole.
+        return Err(Fail::Failed(format!(
+            "a step failed: {}",
+            failed_steps(&results).join("; ")
+        )));
+    }
+    Ok(())
+}
+
 // ── Saved tests ─────────────────────────────────────────────────────
 
 async fn tests(ctx: &mut Ctx, verb: &str) -> Result<()> {
@@ -2928,17 +3091,10 @@ async fn tests_schedule_run(ctx: &mut Ctx, path: &str) -> Result<()> {
 
 /// `rustybin tests run`: a table (or JSON, or JUnit XML); exit 1 when a
 /// test fails or cannot run.
-async fn tests_run(ctx: &mut Ctx) -> Result<()> {
-    let mut body = json!({});
-    if let Some(p) = ctx.args.value("--project") {
-        body["project"] = json!(p);
-    }
-    if let Some(names) = list_flag(&ctx.args, "--names") {
-        body["names"] = json!(names);
-    }
-    // A credential never on the command line: `NAME=-` reads stdin (or
-    // prompts), `NAME=@file` a file; a literal value is refused for a
-    // secret-looking name.
+/// The `--var` flags of a run as `{{variables}}`. A credential is never on
+/// the command line: `NAME=-` reads stdin (or prompts), `NAME=@file` a
+/// file; a literal value is refused for a secret-looking name.
+fn var_flags(ctx: &mut Ctx) -> Result<Map<String, Value>> {
     let mut vars = Map::new();
     let given: Vec<String> = ctx
         .args
@@ -2964,6 +3120,18 @@ async fn tests_run(ctx: &mut Ctx) -> Result<()> {
         };
         vars.insert(k.to_string(), json!(value));
     }
+    Ok(vars)
+}
+
+async fn tests_run(ctx: &mut Ctx) -> Result<()> {
+    let mut body = json!({});
+    if let Some(p) = ctx.args.value("--project") {
+        body["project"] = json!(p);
+    }
+    if let Some(names) = list_flag(&ctx.args, "--names") {
+        body["names"] = json!(names);
+    }
+    let vars = var_flags(ctx)?;
     if !vars.is_empty() {
         body["variables"] = Value::Object(vars);
     }

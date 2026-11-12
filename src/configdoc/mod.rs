@@ -101,8 +101,8 @@ pub const REPOSITORY_REFUSED_SECTIONS: [(&str, &str); 4] = [
         "a change of a project's members, a prune of projects (a new project and descriptions apply)",
     ),
     (
-        "mocks, tests",
-        "a move of an existing mock or saved test to another project (project:)",
+        "mocks, tests, storyboards",
+        "a move of an existing mock, saved test or storyboard to another project (project:)",
     ),
     (
         "users",
@@ -263,6 +263,7 @@ pub struct Extra {
     pub harness: Option<HarnessSection>,
     pub tests: Option<Vec<crate::replay::SavedTest>>,
     pub test_schedules: Option<Vec<crate::replay::schedule::Schedule>>,
+    pub storyboards: Option<Vec<crate::storyboards::Storyboard>>,
     pub roles: Option<Vec<crate::rbac::CustomRole>>,
     pub users: Option<Vec<UserDoc>>,
     pub projects: Option<Vec<ProjectDoc>>,
@@ -279,6 +280,7 @@ impl Extra {
             harness: file.harness.take(),
             tests: file.tests.take(),
             test_schedules: file.test_schedules.take(),
+            storyboards: file.storyboards.take(),
             roles: file.roles.take(),
             users: file.users.take(),
             projects: file.projects.take(),
@@ -293,6 +295,7 @@ impl Extra {
             && self.harness.is_none()
             && self.tests.is_none()
             && self.test_schedules.is_none()
+            && self.storyboards.is_none()
             && self.roles.is_none()
             && self.users.is_none()
             && self.projects.is_none()
@@ -309,6 +312,7 @@ impl Extra {
             harness: self.harness,
             tests: self.tests,
             test_schedules: self.test_schedules,
+            storyboards: self.storyboards,
             roles: self.roles,
             users: self.users,
             projects: self.projects,
@@ -537,6 +541,7 @@ pub fn export(state: &AppState, secrets: SecretsMode, bundle: bool) -> Export {
         }),
         tests: Some(state.saved_tests.list()),
         test_schedules: Some(state.saved_tests.schedules.list()),
+        storyboards: Some(state.storyboards.list()),
         agents: Some(agents_section(&state.mocks.file_agents())),
         roles: Some(state.users.custom_roles()),
         // Users sign in only with the password sign-in: other modes carry
@@ -1148,6 +1153,17 @@ pub fn diff(before: &MocksFile, after: &MocksFile, base: Option<&Path>) -> Vec<C
             a.iter().map(|s| (s.name.clone(), s)).collect();
         map_changes(&mut out, "test_schedules", &b, &a, |_| String::new());
     }
+    if let Some(a) = &after.storyboards {
+        let b: BTreeMap<String, &crate::storyboards::Storyboard> = before
+            .storyboards
+            .iter()
+            .flatten()
+            .map(|s| (s.name.clone(), s))
+            .collect();
+        let a: BTreeMap<String, &crate::storyboards::Storyboard> =
+            a.iter().map(|s| (s.name.clone(), s)).collect();
+        map_changes(&mut out, "storyboards", &b, &a, |_| String::new());
+    }
     if let Some(a) = &after.agents {
         let b = before.agents.clone().unwrap_or_default();
         value_change(
@@ -1550,6 +1566,16 @@ pub fn apply(state: &AppState, file: MocksFile, opts: &ApplyOptions) -> Value {
         apply_test_schedules(state, file.test_schedules, opts, &mut problems),
     );
     put(
+        "storyboards",
+        apply_storyboards(
+            state,
+            file.storyboards,
+            &known_projects,
+            opts,
+            &mut problems,
+        ),
+    );
+    put(
         "agents",
         apply_agents(state, file.agents, opts, &mut problems),
     );
@@ -1648,6 +1674,13 @@ pub fn apply_extra(state: &AppState, extra: Extra, principal: &str) -> Vec<Strin
     );
     apply_tests(state, file.tests, &known_projects, &opts, &mut problems);
     apply_test_schedules(state, file.test_schedules, &opts, &mut problems);
+    apply_storyboards(
+        state,
+        file.storyboards,
+        &known_projects,
+        &opts,
+        &mut problems,
+    );
     apply_roles(state, file.roles, &opts, &mut problems);
     apply_users(
         state,
@@ -2413,6 +2446,90 @@ fn apply_tests(
         match store.put(t, true) {
             Ok(_) => saved.push(name),
             Err(e) => problems.push(format!("tests.{name}: {}", e.message())),
+        }
+    }
+    Some(json!({ "saved": saved, "deleted": deleted }))
+}
+
+/// `storyboards:`: each valid storyboard saved (replacing one of its name);
+/// with `prune`, storyboards the document does not name are deleted. One
+/// that fails validation is reported and kept, never pruned. Applying a
+/// storyboard runs nothing.
+fn apply_storyboards(
+    state: &AppState,
+    section: Option<Vec<crate::storyboards::Storyboard>>,
+    known_projects: &BTreeSet<String>,
+    opts: &ApplyOptions,
+    problems: &mut Vec<String>,
+) -> Option<Value> {
+    use crate::storyboards::MAX_STORYBOARDS;
+    let section = section?;
+    let store = &state.storyboards;
+    let named: BTreeSet<String> = section.iter().map(|s| s.name.clone()).collect();
+    let mut valid = Vec::new();
+    for mut s in section {
+        let old = store.get(&s.name);
+        s.project = projects::project_gate(
+            &format!("storyboards.{}", s.name),
+            s.project.take(),
+            old.as_ref().map(|o| o.project.clone()),
+            known_projects,
+            opts,
+            problems,
+        );
+        // As a saved test: a pulled document never points a step's
+        // requests at a gateway its saved copy does not already name.
+        let known = old.map(|o| o.outbound()).unwrap_or_default();
+        if opts.untrusted && !s.outbound().is_subset(&known) {
+            problems.push(format!(
+                "storyboards.{}: a document from the repository cannot point a step at a new gateway (save it through the API, the console or the CLI): skipped",
+                s.name
+            ));
+            continue;
+        }
+        match s.validate() {
+            Ok(()) => valid.push(s),
+            Err(e) => problems.push(format!("storyboards.{}: {e} (skipped)", s.name)),
+        }
+    }
+    let delete: Vec<String> = if opts.prune {
+        store
+            .list()
+            .into_iter()
+            .map(|s| s.name)
+            .filter(|n| !named.contains(n))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let save: Vec<String> = valid.iter().map(|s| s.name.clone()).collect();
+    if opts.dry_run {
+        let existing = store.list();
+        let new = save
+            .iter()
+            .filter(|n| !existing.iter().any(|s| &s.name == *n))
+            .count();
+        if existing.len() + new > MAX_STORYBOARDS + delete.len() {
+            problems.push(format!(
+                "storyboards: an instance keeps at most {MAX_STORYBOARDS} storyboards"
+            ));
+        }
+        return Some(json!({ "save": save, "delete": delete }));
+    }
+    let mut deleted: Vec<String> = Vec::new();
+    for n in delete {
+        match store.delete(&n) {
+            Ok(true) => deleted.push(n),
+            Ok(false) => {}
+            Err(e) => problems.push(format!("storyboards.{n}: {}", e.message())),
+        }
+    }
+    let mut saved = Vec::new();
+    for s in valid {
+        let name = s.name.clone();
+        match store.put(s, true) {
+            Ok(_) => saved.push(name),
+            Err(e) => problems.push(format!("storyboards.{name}: {}", e.message())),
         }
     }
     Some(json!({ "saved": saved, "deleted": deleted }))

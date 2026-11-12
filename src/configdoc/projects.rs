@@ -253,10 +253,11 @@ pub fn members(
         let held = crate::rbac::project_api::resources(state, &p.name);
         if !held.is_empty() {
             problems.push(format!(
-                "{k}: holds {} mock(s), {} saved test(s) and {} checkpoint(s), so not pruned",
+                "{k}: holds {} mock(s), {} saved test(s), {} checkpoint(s) and {} storyboard(s), so not pruned",
                 held.mocks.len(),
                 held.tests.len(),
-                held.checkpoints.len()
+                held.checkpoints.len(),
+                held.storyboards.len()
             ));
             continue;
         }

@@ -990,7 +990,7 @@ pub fn run_view(run: &history::TestRun) -> Value {
 }
 
 /// The caller of a REST run, for the history: never a credential.
-fn rest_principal(
+pub(crate) fn rest_principal(
     state: &AppState,
     headers: &HeaderMap,
     key: Option<&crate::keys::KeyContext>,

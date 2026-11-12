@@ -700,3 +700,36 @@ dialog.small-dialog { width: min(520px, calc(100vw - 24px)); }
 dialog.wizard.wide { width: min(1120px, calc(100vw - 24px)); }
 .conflict-section { border-top: 1px solid var(--border); padding-top: 10px; }
 .conflict-col .code { max-height: 280px; }
+
+/* Storyboards: the editor's step rows and presenter mode (a full-window
+   overlay: the talk track large, the steps down the side). */
+.row.top { align-items: flex-start; }
+.presenter { position: fixed; inset: 0; z-index: 200; display: flex; flex-direction: column; background: var(--surface); color: var(--text); outline: none; }
+.presenter-head, .presenter-foot { display: flex; align-items: center; gap: 10px; padding: 10px 16px; background: var(--surface-2); flex-wrap: wrap; }
+.presenter-head { border-bottom: 1px solid var(--border); }
+.presenter-foot { border-top: 1px solid var(--border); }
+.presenter-head .grow, .presenter-foot .grow { flex: 1; }
+.presenter-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(200px, 300px) minmax(0, 1fr); }
+.presenter-side { overflow-y: auto; border-right: 1px solid var(--border); padding: 10px; }
+.presenter-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.presenter-step { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 8px 10px; border: 1px solid transparent; border-radius: var(--radius-sm); background: transparent; color: var(--text-2); font: inherit; cursor: pointer; }
+.presenter-step:hover { background: var(--surface-2); }
+.presenter-step:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.presenter-steps li.current .presenter-step { background: var(--accent-soft); border-color: var(--accent); color: var(--text); font-weight: 600; }
+.presenter-main { overflow-y: auto; padding: clamp(16px, 4vw, 56px); }
+.presenter-title { font-size: clamp(24px, 3.2vw, 44px); line-height: 1.15; margin: 0 0 18px; }
+.presenter-talk { font-size: clamp(17px, 1.7vw, 26px); line-height: 1.5; max-width: 60ch; }
+.presenter-talk .md p { margin: 0 0 .7em; }
+.presenter-action { margin-top: 22px; font-size: 14px; }
+.presenter-verdict { display: flex; gap: 14px; align-items: flex-start; margin-top: 14px; padding: 14px 16px; border-radius: var(--radius); max-width: 80ch; font-size: 16px; }
+.presenter-verdict.ok { background: var(--ok-soft); }
+.presenter-verdict.err { background: var(--err-soft); }
+.presenter-verdict .grow { flex: 1; min-width: 0; }
+.presenter-mark { font-size: 30px; line-height: 1; font-weight: 700; }
+.presenter-verdict.ok .presenter-mark { color: var(--ok); }
+.presenter-verdict.err .presenter-mark { color: var(--err); }
+.presenter-verdict details { margin-top: 8px; font-size: 13px; }
+@media (max-width: 760px) {
+  .presenter-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .presenter-side { border-right: 0; border-bottom: 1px solid var(--border); max-height: 28vh; }
+}

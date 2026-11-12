@@ -1261,6 +1261,13 @@ const OLD_RIGHTS: &[(&str, &str, bool)] = &[
     // scenario's check does; its runs are a mocks read.
     ("check_mock_drift", "manage", false),
     ("list_drift_runs", "read", true),
+    // Demo next step 05: storyboards are tests' kin (the same permissions);
+    // a step or a reset does what its action does, so it is not read-only.
+    ("list_storyboards", "admin", true),
+    ("save_storyboard", "admin", false),
+    ("delete_storyboard", "admin", false),
+    ("run_storyboard_step", "admin", false),
+    ("reset_storyboard", "admin", false),
 ];
 
 /// The 0.4 ceilings, by right: `read-only` a read-only tool that is not a
