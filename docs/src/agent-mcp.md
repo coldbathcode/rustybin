@@ -628,6 +628,12 @@ self-service on.
 | `delete_recording` | `mocks.write` | The recording and what it kept; the mock it built stays (confirmed) |
 | `check_mock_drift` | `mocks.write` | [Contract drift](mocks/drift.md): one request per operation to the real API the mock imitates, the findings by operation (confirmed: it sends requests out) |
 | `list_drift_runs` | `mocks.read` | A mock's kept drift checks |
+| `list_channels` | `mocks.read` | The channels of an [event mock](mocks/asyncapi.md) (a mock made from an AsyncAPI document): messages, pattern, settings, URL, who is connected |
+| `list_channel_messages` | `traffic.read` | What was published and received on a channel; payloads and the issues of received messages under `untrusted_*` |
+| `publish_event` | `mocks.data` | Make the mock publish on a channel now: its next message, several, or a payload given |
+| `list_event_subscribers` | `mocks.read` | A mock's webhook subscribers (a URL's query is never shown) |
+| `add_event_subscriber` | `mocks.write` | Post a channel's messages to a URL (its host must be allowed for the purpose `events`); confirmed: it sends messages out |
+| `remove_event_subscriber` | `mocks.write` | Remove a webhook subscriber |
 
 `get_mock` and `check_mock` carry the example `coverage` (which operations lack an
 example), the input of `generate_examples`.

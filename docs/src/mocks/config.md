@@ -95,6 +95,10 @@ mocks:
       upstream: https://api.example.com/v1
 ```
 
+A mock whose spec is an AsyncAPI document is an [event mock](asyncapi.md); its `channels:`
+(keyed by channel id: `pattern`, `every_ms`, `burst`, `delay_ms`, `drop_percent`,
+`malformed_percent`, `examples`) say how each channel publishes.
+
 Every field except `name` (and one of `spec` / `spec_inline`) is optional, with the
 defaults shown. Unknown fields are errors, so a typo does not go unnoticed: in a file
 on disk the entry with the typo is skipped (with a warning naming the field) and the

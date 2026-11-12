@@ -34,7 +34,7 @@ pub struct Finding {
 }
 
 impl Finding {
-    fn error(message: impl Into<String>) -> Self {
+    pub(super) fn error(message: impl Into<String>) -> Self {
         Self {
             level: Level::Error,
             message: message.into(),
@@ -42,7 +42,7 @@ impl Finding {
         }
     }
 
-    fn warning(message: impl Into<String>) -> Self {
+    pub(super) fn warning(message: impl Into<String>) -> Self {
         Self {
             level: Level::Warning,
             message: message.into(),
@@ -185,6 +185,177 @@ pub struct Report {
     /// Which operations have examples (the `no_examples` finding's data).
     #[serde(default)]
     pub coverage: Coverage,
+    /// The channels of an AsyncAPI mock.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<ChannelReport>,
+}
+
+/// One message of a channel as the checks saw it.
+#[derive(Clone, Debug, Serialize)]
+pub struct MessageCheck {
+    pub message: String,
+    /// `example`, `stored` or `generated` for a message Rustybin
+    /// publishes; `sample` for one a client may publish.
+    pub source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Value>,
+    /// The payload was left out (see [`KEPT_SAMPLE_BYTES`]).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub payload_omitted: bool,
+    pub issues: Vec<Issue>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ChannelReport {
+    pub id: String,
+    pub address: String,
+    /// `ok`, `warning` or `error`.
+    pub status: &'static str,
+    pub findings: Vec<Finding>,
+    /// What Rustybin publishes: the first message of each.
+    pub send: Vec<MessageCheck>,
+    /// A valid message a client could publish, when the channel receives.
+    pub receive: Vec<MessageCheck>,
+}
+
+/// Check an AsyncAPI mock's channels: every message Rustybin publishes is
+/// built once and validated against its own schema, and what Rustybin
+/// cannot serve or generate is a finding, never an error.
+fn check_channels(c: &Compiled, kept: &mut usize) -> (Vec<Finding>, Vec<ChannelReport>) {
+    use super::asyncapi;
+    let Some(events) = c.spec.events.as_deref() else {
+        return (Vec::new(), Vec::new());
+    };
+    let root = &c.spec.root;
+    let mut findings = Vec::new();
+    for key in c.settings.channels.keys() {
+        if events.channel(key).is_none() {
+            findings.push(Finding::warning(format!(
+                "settings for channel {key:?} are ignored: the document has no such channel"
+            )));
+        }
+    }
+    let not_served = asyncapi::not_served(events);
+    if !not_served.is_empty() {
+        findings.push(Finding::warning(format!(
+            "the document names {} that Rustybin does not serve: its channels are served over \
+             WebSocket, server-sent events and webhooks",
+            not_served.join(", ")
+        )));
+    }
+    if events.channels.is_empty() {
+        findings.push(Finding::warning(
+            "the document has no channels: the mock serves nothing",
+        ));
+    }
+    if c.settings.security.enabled {
+        findings.push(Finding::warning(
+            "security settings do not apply to an AsyncAPI mock: its channels answer without a credential",
+        ));
+    }
+    let mut keep = |payload: Value| -> (Option<Value>, bool) {
+        *kept = kept.saturating_add(serde_json::to_vec(&payload).map_or(usize::MAX, |b| b.len()));
+        if *kept > KEPT_SAMPLE_BYTES {
+            (None, true)
+        } else {
+            (Some(payload), false)
+        }
+    };
+    let seed = c.settings.responses.seed;
+    let channels = events
+        .channels
+        .iter()
+        .map(|ch| {
+            let mut found = Vec::new();
+            let stored = c
+                .settings
+                .channels
+                .get(&ch.id)
+                .map_or(&[][..], |s| s.examples.as_slice());
+            if ch.send.is_empty() && ch.receive.is_empty() {
+                found.push(Finding::warning(
+                    "the channel has no messages: nothing is published and nothing accepted",
+                ));
+            }
+            for m in ch.send.iter().chain(ch.receive.iter()) {
+                if let Some(f) = &m.unsupported_format {
+                    found.push(Finding::warning(format!(
+                        "message {}: the schema format {f:?} is not generated or validated \
+                         (JSON Schema is): add an example to the message",
+                        m.name
+                    )));
+                }
+            }
+            let mut send = Vec::new();
+            for n in 1..=ch.send.len() as u64 {
+                let Some(out) = asyncapi::outgoing(root, ch, stored, seed, n) else {
+                    break;
+                };
+                let m = &ch.send[(n - 1) as usize];
+                let issues = match (&m.payload, &m.unsupported_format) {
+                    (Some(schema), None) => {
+                        schema::validate(&out.payload, schema, root, Direction::Response)
+                    }
+                    _ => Vec::new(),
+                };
+                if !issues.is_empty() {
+                    found.push(Finding::warning(format!(
+                        "message {}: the {} payload does not match the message's schema: {}",
+                        m.name,
+                        match out.source {
+                            "example" => "example",
+                            "stored" => "stored example",
+                            _ => "generated",
+                        },
+                        issues_text(&issues)
+                    )));
+                }
+                if m.payload.is_none() && m.examples.is_empty() && stored.is_empty() {
+                    found.push(Finding::warning(format!(
+                        "message {}: no payload schema and no example, so an empty object is published",
+                        m.name
+                    )));
+                }
+                let (payload, payload_omitted) = keep(out.payload);
+                send.push(MessageCheck {
+                    message: out.message,
+                    source: out.source,
+                    payload,
+                    payload_omitted,
+                    issues,
+                });
+            }
+            let receive = asyncapi::sample_incoming(root, ch, seed)
+                .map(|(message, payload)| {
+                    let (payload, payload_omitted) = keep(payload);
+                    MessageCheck {
+                        message,
+                        source: "sample",
+                        payload,
+                        payload_omitted,
+                        issues: Vec::new(),
+                    }
+                })
+                .into_iter()
+                .collect();
+            let status = if found.iter().any(|f| matches!(f.level, Level::Error)) {
+                "error"
+            } else if found.is_empty() {
+                "ok"
+            } else {
+                "warning"
+            };
+            ChannelReport {
+                id: ch.id.clone(),
+                address: ch.address.clone(),
+                status,
+                findings: found,
+                send,
+                receive,
+            }
+        })
+        .collect();
+    (findings, channels)
 }
 
 fn text_of(v: &Value) -> String {
@@ -933,6 +1104,9 @@ pub fn run(c: &Compiled) -> Report {
              use a placeholder that may not match it (add an example to the schema)"
         )));
     }
+    let mut kept_sample_bytes = 0;
+    let (channel_findings, channels) = check_channels(c, &mut kept_sample_bytes);
+    findings.extend(channel_findings);
     let coverage = coverage(c);
     if !coverage.is_complete() {
         findings.push(Finding {
@@ -947,7 +1121,6 @@ pub fn run(c: &Compiled) -> Report {
             class: Some(NO_EXAMPLES),
         });
     }
-    let mut kept_sample_bytes = 0;
     let operations: Vec<OperationReport> = c
         .spec
         .operations
@@ -967,7 +1140,8 @@ pub fn run(c: &Compiled) -> Report {
         .collect();
     let all_findings = findings
         .iter()
-        .chain(operations.iter().flat_map(|o| o.findings.iter()));
+        .chain(operations.iter().flat_map(|o| o.findings.iter()))
+        .chain(channels.iter().flat_map(|o| o.findings.iter()));
     let (mut errors, mut warnings) = (0, 0);
     for f in all_findings {
         match f.level {
@@ -984,6 +1158,7 @@ pub fn run(c: &Compiled) -> Report {
         findings,
         operations,
         coverage,
+        channels,
     }
 }
 

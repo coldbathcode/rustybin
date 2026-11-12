@@ -1,0 +1,95 @@
+# An event mock as code: a rustybin.yaml with one mock whose spec is an
+# AsyncAPI document (docs/src/mocks/asyncapi.md). Apply it with
+# `rustybin mocks apply order-events.yaml`.
+version: 2
+mocks:
+  - name: order-events
+    channels:
+      orders-created:
+        every_ms: 500                # one orderCreated every half second
+    spec_inline:
+      asyncapi: 3.0.0
+      info:
+        title: Order events
+        version: 1.0.0
+        description: What an order service says and hears.
+      channels:
+        orderCreated:
+          address: orders/created
+          messages:
+            orderCreated:
+              $ref: '#/components/messages/OrderCreated'
+        orderCancel:
+          address: orders/cancel
+          messages:
+            orderCancel:
+              $ref: '#/components/messages/OrderCancel'
+        quotes:
+          address: quotes
+          messages:
+            quoteRequest:
+              $ref: '#/components/messages/QuoteRequest'
+            quote:
+              $ref: '#/components/messages/Quote'
+      operations:
+        announceOrder:
+          action: send               # Rustybin publishes these
+          channel:
+            $ref: '#/channels/orderCreated'
+        cancelOrder:
+          action: receive            # a client publishes these
+          channel:
+            $ref: '#/channels/orderCancel'
+        askForQuote:
+          action: receive
+          channel:
+            $ref: '#/channels/quotes'
+          messages:
+            - $ref: '#/channels/quotes/messages/quoteRequest'
+          reply:                     # answered with a quote
+            channel:
+              $ref: '#/channels/quotes'
+            messages:
+              - $ref: '#/channels/quotes/messages/quote'
+      components:
+        messages:
+          OrderCreated:
+            name: orderCreated
+            payload:
+              $ref: '#/components/schemas/Order'
+            examples:
+              - payload: { id: 1001, total: 59.9, status: new }
+              - payload: { id: 1002, total: 12.5, status: paid }
+          OrderCancel:
+            name: orderCancel
+            payload:
+              type: object
+              required: [id, reason]
+              additionalProperties: false
+              properties:
+                id: { type: integer }
+                reason: { type: string, minLength: 3 }
+          QuoteRequest:
+            name: quoteRequest
+            payload:
+              type: object
+              required: [sku]
+              properties:
+                sku: { type: string }
+                quantity: { type: integer, minimum: 1 }
+          Quote:
+            name: quote
+            payload:
+              type: object
+              required: [sku, price]
+              properties:
+                sku: { type: string }
+                price: { type: number, minimum: 0 }
+        schemas:
+          Order:
+            type: object
+            required: [id, total]
+            properties:
+              id: { type: integer, minimum: 1 }
+              total: { type: number }
+              status: { type: string, enum: [new, paid, shipped] }

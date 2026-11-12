@@ -7,6 +7,8 @@ OAuth 2.0 scopes, mTLS) can be switched on in front of it. Point a gateway at th
 mock URL and you have a realistic upstream for an API that does not exist yet, or
 that you cannot reach from a demo laptop.
 
+- An AsyncAPI document makes an [event mock](asyncapi.md) in the same list: channels
+  served over WebSocket, server-sent events and webhooks in place of operations.
 - OpenAPI 3.0 and 3.1, as JSON or YAML, one bundled file (local `#/...` references
   only; external `$ref`s are refused with a clear message). Swagger 2.0 is converted
   to OpenAPI 3.0 on import, with a warning saying so.

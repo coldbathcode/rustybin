@@ -20,6 +20,7 @@ pub mod assist;
 pub mod audit;
 pub mod checkpoints;
 pub mod config;
+pub mod events;
 pub mod harness;
 pub mod inspect;
 pub mod instance;

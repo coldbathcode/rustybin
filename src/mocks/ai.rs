@@ -704,6 +704,7 @@ pub async fn edit_work(
             operations: None,
             mcp: None,
             drift: None,
+            channels: None,
             deploy: None,
             force: None,
         };

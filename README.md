@@ -662,6 +662,13 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | POST | `/_rustybin/recordings/{name}/build` | Build a mock from a recording: an inferred spec, the recorded answers as examples (dry_run answers the spec) |
 | ANY | `/record/{id}` | The recording proxy: forwards to the recording's upstream (egress purpose record) and keeps the exchange |
 | ANY | `/record/{id}/{*path}` | The recording proxy with a path |
+| ANY | `/events/{name}/{channel}` | A channel of an AsyncAPI mock: a WebSocket, server-sent events (Accept: text/event-stream), or POST a message as a client (WebSocket) |
+| ANY | `/mock/{name}/_rustybin/events/{channel}` | The same channel below the mock's own root (a self-service mock answers on its own domain) (WebSocket) |
+| GET | `/_rustybin/mocks/{name}/channels` | An AsyncAPI mock's channels: messages, pattern, settings, a valid message to publish and the subscribers connected |
+| GET | `/_rustybin/mocks/{name}/channels/{channel}/messages` | The messages published and received on a channel, newest first (?limit=, ?after= a sequence number) |
+| POST | `/_rustybin/mocks/{name}/channels/{channel}/publish` | Publish the channel's next message (or a payload given) to every subscriber now |
+| GET POST | `/_rustybin/mocks/{name}/subscribers` | Webhook subscribers of an AsyncAPI mock: POST registers a URL a channel's messages are posted to (egress purpose events, no default) |
+| DELETE | `/_rustybin/mocks/{name}/subscribers/{id}` | Remove a webhook subscriber |
 
 ### Health & Identity
 

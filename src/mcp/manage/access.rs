@@ -98,6 +98,12 @@ pub const PROJECT_TOOLS: &[&str] = &[
     "run_storyboard_step",
     "reset_storyboard",
     "import_tests",
+    "list_channels",
+    "list_channel_messages",
+    "publish_event",
+    "list_event_subscribers",
+    "add_event_subscriber",
+    "remove_event_subscriber",
 ];
 
 /// Request headers forwarded into in-process requests (`try_request`,

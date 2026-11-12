@@ -959,6 +959,7 @@ pub async fn secure_mock(svc: &Svc, name: &str) -> Result<bool, ServiceError> {
         operations: None,
         mcp: None,
         drift: None,
+        channels: None,
         deploy: Some(true),
         force: None,
     };

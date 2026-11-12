@@ -1275,6 +1275,14 @@ const OLD_RIGHTS: &[(&str, &str, bool)] = &[
     ("export_pack", "admin", true),
     // Demo next step 07: an Arazzo import saves tests, as save_test does.
     ("import_tests", "admin", false),
+    // Demo next step 09: an event mock's channels read like a mock and its
+    // traffic; publishing and subscribers change what goes out.
+    ("list_channels", "read", true),
+    ("list_channel_messages", "traffic", true),
+    ("publish_event", "manage", false),
+    ("list_event_subscribers", "read", true),
+    ("add_event_subscriber", "manage", false),
+    ("remove_event_subscriber", "manage", false),
 ];
 
 /// The 0.4 ceilings, by right: `read-only` a read-only tool that is not a

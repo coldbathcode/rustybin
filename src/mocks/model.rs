@@ -316,6 +316,124 @@ pub struct MockSettings {
     /// (`crate::mocks::drift`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drift: Option<DriftSettings>,
+    /// Per-channel settings of an AsyncAPI mock, keyed by channel id
+    /// (`crate::mocks::asyncapi`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub channels: BTreeMap<String, ChannelSettings>,
+}
+
+/// When an AsyncAPI mock publishes a channel's messages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelPattern {
+    /// One message every `every_ms`.
+    Every,
+    /// `burst` messages at once every `every_ms`.
+    Burst,
+    /// One message for each valid message a client publishes (request and
+    /// reply).
+    OnReceive,
+    /// Only what `POST /_rustybin/mocks/{name}/channels/{channel}/publish`
+    /// publishes.
+    Off,
+}
+
+impl ChannelPattern {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Every => "every",
+            Self::Burst => "burst",
+            Self::OnReceive => "on_receive",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// Shortest and longest `every_ms` of a channel.
+pub const MIN_EVERY_MS: u64 = 100;
+pub const MAX_EVERY_MS: u64 = 3_600_000;
+/// Most messages of one burst.
+pub const MAX_BURST: u32 = 20;
+/// Most stored example payloads of one channel.
+pub const MAX_CHANNEL_EXAMPLES: usize = 20;
+/// Most channel entries in a mock's settings.
+pub const MAX_CHANNEL_ENTRIES: usize = 500;
+
+/// How an AsyncAPI mock publishes on one channel.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ChannelSettings {
+    /// Absent: `every`, or `on_receive` on a channel whose document
+    /// declares a reply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<ChannelPattern>,
+    pub every_ms: u64,
+    pub burst: u32,
+    /// Waited before each message is published.
+    pub delay_ms: u64,
+    /// Share of messages published to nobody (a lost message), 0 to 100.
+    pub drop_percent: u8,
+    /// Share of messages sent cut short, so they are not valid JSON, 0 to
+    /// 100.
+    pub malformed_percent: u8,
+    /// Payloads published when the document's message has no example,
+    /// in turn, before anything is generated.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<Value>,
+}
+
+impl Default for ChannelSettings {
+    fn default() -> Self {
+        Self {
+            pattern: None,
+            every_ms: 1000,
+            burst: 5,
+            delay_ms: 0,
+            drop_percent: 0,
+            malformed_percent: 0,
+            examples: Vec::new(),
+        }
+    }
+}
+
+impl ChannelSettings {
+    fn validate(&self, at: &str, limits: &SettingsLimits) -> Result<(), String> {
+        if !(MIN_EVERY_MS..=MAX_EVERY_MS).contains(&self.every_ms) {
+            return Err(format!(
+                "{at}.every_ms must be between {MIN_EVERY_MS} and {MAX_EVERY_MS}"
+            ));
+        }
+        if !(1..=MAX_BURST).contains(&self.burst) {
+            return Err(format!("{at}.burst must be between 1 and {MAX_BURST}"));
+        }
+        if self.delay_ms > limits.max_delay_ms {
+            return Err(format!(
+                "{at}.delay_ms must be at most {}",
+                limits.max_delay_ms
+            ));
+        }
+        if self.drop_percent > 100 || self.malformed_percent > 100 {
+            return Err(format!(
+                "{at}: drop_percent and malformed_percent are between 0 and 100"
+            ));
+        }
+        if self.examples.len() > MAX_CHANNEL_EXAMPLES {
+            return Err(format!(
+                "{at}.examples: at most {MAX_CHANNEL_EXAMPLES} examples"
+            ));
+        }
+        if self
+            .examples
+            .iter()
+            .any(|e| e.to_string().len() > limits.max_body_bytes)
+        {
+            return Err(format!(
+                "{at}.examples: an example is larger than {} bytes",
+                limits.max_body_bytes
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// The real API a mock imitates: what a drift check compares it with.
@@ -536,6 +654,12 @@ impl MockSettings {
         }
         if self.operations.len() > 1000 {
             return Err("at most 1000 operation entries".into());
+        }
+        if self.channels.len() > MAX_CHANNEL_ENTRIES {
+            return Err(format!("at most {MAX_CHANNEL_ENTRIES} channel entries"));
+        }
+        for (id, cfg) in &self.channels {
+            cfg.validate(&format!("channels.{id}"), limits)?;
         }
         if self.mcp.exclude.len() > MAX_MCP_EXCLUDE {
             return Err(format!("mcp.exclude: at most {MAX_MCP_EXCLUDE} entries"));

@@ -284,7 +284,7 @@ OpenAPI mocks on the instance (rustybin mock ... works offline)
 |---|---|---|---|
 | `rustybin mocks list [--all] [--project P]` | The mocks with their state and traffic. Flags: `--all`, `--project` value. | `GET /_rustybin/mocks` | `mocks.read` |
 | `rustybin mocks get <name>` | One mock: settings, operations, the deploy report. | `GET /_rustybin/mocks/{name}` | `mocks.read` |
-| `rustybin mocks create <name> (--spec FILE \| --spec-url URL) [--project P]` | Create a mock from an OpenAPI file (YAML or JSON), or from a URL the instance fetches itself. Flags: `--spec` value, `--spec-url` value, `--mode` value, `--disabled`, `--no-deploy`, `--strip-server-prefix`, `--project` value. | `POST /_rustybin/mocks` | `mocks.write` |
+| `rustybin mocks create <name> (--spec FILE \| --spec-url URL) [--project P]` | Create a mock from an OpenAPI file (YAML or JSON) or an AsyncAPI one (an event mock with channels), or from a URL the instance fetches itself. Flags: `--spec` value, `--spec-url` value, `--mode` value, `--disabled`, `--no-deploy`, `--strip-server-prefix`, `--project` value. | `POST /_rustybin/mocks` | `mocks.write` |
 | `rustybin mocks move <name> --project P` | Move a mock to another project (instance: the instance's); needs mocks.write in both. Flags: `--project` value. | `PATCH /_rustybin/mocks/{name}` | `mocks.write` |
 | `rustybin mocks import --spec FILE` | Preview a spec: title, operations, the checks, the suggested name. Flags: `--spec` value. | `POST /_rustybin/mocks/import` | `mocks.read` |
 | `rustybin mocks update <name> [--spec FILE] [--mode M] [--settings JSON]` | Change a mock's spec or settings (the draft, deployed unless --no-deploy). Flags: `--spec` value, `--mode` value, `--settings` value, `--no-deploy`, `--force`, `--expect-revision` value. | `PATCH /_rustybin/mocks/{name}` | `mocks.write` |
@@ -298,6 +298,12 @@ OpenAPI mocks on the instance (rustybin mock ... works offline)
 | `rustybin mocks coverage <name>` | Which operations lack an example. | `GET /_rustybin/mocks/{name}/coverage` | `mocks.read` |
 | `rustybin mocks drift <name> [--upstream URL] [--header 'K: V']... [--operation ID]... [--junit]` | Check the mock against the real API it imitates (its drift.upstream, or --upstream): one request per operation, where the answers disagree with the spec; exits 1 on drift. A header value may hold {{VAR}}, filled from this shell's RUSTYBIN_TEST_<VAR>. Flags: `--upstream` value, `--header` value, `--operation` value, `--junit`. | `POST /_rustybin/mocks/{name}/drift` | `mocks.write` |
 | `rustybin mocks drift-runs <name>` | The mock's kept drift checks, newest first. | `GET /_rustybin/mocks/{name}/drift` | `mocks.read` |
+| `rustybin mocks channels <name>` | An AsyncAPI mock's channels: what each sends and receives, its pattern, its URL and who is connected. | `GET /_rustybin/mocks/{name}/channels` | `mocks.read` |
+| `rustybin mocks events <name> <channel> [--limit N] [--follow]` | The messages published and received on a channel of an AsyncAPI mock, newest first; --follow keeps printing new ones (--max N, --timeout SECONDS). Flags: `--limit` value, `--follow`, `--max` value, `--timeout` value. | `GET /_rustybin/mocks/{name}/channels/{channel}/messages` | `traffic.read` |
+| `rustybin mocks publish <name> <channel> [--data JSON] [--count N]` | Make an AsyncAPI mock publish now, to every subscriber of the channel: its next message, --count of them, or --data as it is. Flags: `--data` value, `--count` value. | `POST /_rustybin/mocks/{name}/channels/{channel}/publish` | `mocks.data` |
+| `rustybin mocks subscribers <name>` | The webhook subscribers of an AsyncAPI mock. | `GET /_rustybin/mocks/{name}/subscribers` | `mocks.read` |
+| `rustybin mocks subscribe <name> <channel> --webhook URL [--ttl SECONDS]` | Post every message of a channel to a URL; its host must be in RUSTYBIN_EGRESS_ALLOW (purpose events). Flags: `--webhook` value, `--ttl` value. | `POST /_rustybin/mocks/{name}/subscribers` | `mocks.write` |
+| `rustybin mocks unsubscribe <name> <id>` | Remove a webhook subscriber. | `DELETE /_rustybin/mocks/{name}/subscribers/{id}` | `mocks.write` |
 | `rustybin mocks spec <name>` | The mock's OpenAPI document as stored. | `GET /_rustybin/mocks/{name}/spec` | `mocks.read` |
 | `rustybin mocks revision <name> <revision>` | A kept revision: what changed since in the draft, its settings and spec (the whole answer with --json). Flags: `--spec`. | `GET /_rustybin/mocks/{name}/revisions/{revision}` | `mocks.read` |
 | `rustybin mocks export [name]` | One mock, or all, as a rustybin.yaml with only the mocks section. | `GET /_rustybin/mocks/{name}/export`, `GET /_rustybin/mocks/export` | `mocks.read` |
@@ -337,6 +343,12 @@ rustybin mocks check orders
 rustybin mocks coverage orders
 rustybin mocks drift orders --upstream https://api.example.com/v1
 rustybin mocks drift-runs orders
+rustybin mocks channels orders
+rustybin mocks events orders orders-created --limit 5
+rustybin mocks publish orders orders-created
+rustybin mocks subscribers orders
+rustybin mocks subscribe orders orders-created --webhook https://hooks.example.com/orders
+rustybin mocks unsubscribe orders 0a1b2c3d4e5f6a7b
 rustybin mocks spec orders > orders.yaml
 rustybin mocks revision orders 12
 rustybin mocks export orders

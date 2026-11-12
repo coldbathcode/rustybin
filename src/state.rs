@@ -105,6 +105,9 @@ pub struct AppState {
     /// The demo packs applied to the instance (`crate::packs`),
     /// `<state>/packs.json`: at most 20 records.
     pub packs: Arc<crate::packs::Packs>,
+    /// The channels of AsyncAPI mocks being served (`crate::events`): hubs,
+    /// connections and webhook subscribers, all bounded and in memory.
+    pub events: Arc<crate::events::Events>,
     /// Checkpoints (`crate::checkpoints`), `<state>/checkpoints/`.
     pub checkpoints: Arc<crate::checkpoints::Checkpoints>,
     /// Users and custom roles (`crate::rbac::users`, `<state>/users.json`):
@@ -229,6 +232,7 @@ impl AppState {
             config.state_dir.as_deref(),
         ));
         let packs = Arc::new(crate::packs::Packs::new(config.state_dir.as_deref()));
+        let events = Arc::new(crate::events::Events::new(settings.clone()));
         let checkpoints = Arc::new(crate::checkpoints::Checkpoints::new(
             config.state_dir.as_deref(),
         ));
@@ -273,6 +277,7 @@ impl AppState {
             saved_tests,
             storyboards,
             packs,
+            events,
             checkpoints,
             users,
             sso,

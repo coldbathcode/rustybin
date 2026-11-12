@@ -14,6 +14,7 @@
 //!   `/_rustybin/mocks*` (control plane).
 
 pub mod ai;
+pub mod asyncapi;
 pub mod capture;
 pub mod checks;
 pub mod cli;

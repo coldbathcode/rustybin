@@ -22,7 +22,7 @@ pub const METHODS: &[&str] = &[
 const MAX_REF_DEPTH: usize = 32;
 const MAX_YAML_DEPTH: usize = 128;
 /// Unresolvable local refs listed in warnings.
-const MAX_LISTED_REFS: usize = 10;
+pub(super) const MAX_LISTED_REFS: usize = 10;
 
 /// Where a parameter or API key lives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -281,6 +281,10 @@ pub struct ParsedSpec {
     pub operations: Vec<Operation>,
     pub security_schemes: Vec<SecurityScheme>,
     pub warnings: Vec<String>,
+    /// The channels of an AsyncAPI document ([`super::asyncapi`]): such a
+    /// mock has no operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub events: Option<std::sync::Arc<super::asyncapi::EventSpec>>,
 }
 
 impl ParsedSpec {
@@ -426,7 +430,7 @@ fn str_of(v: &Value, key: &str) -> Option<String> {
 }
 
 /// Every `$ref` string in the document (bounded walk).
-fn collect_refs<'a>(v: &'a Value, out: &mut Vec<&'a str>, depth: usize) {
+pub(super) fn collect_refs<'a>(v: &'a Value, out: &mut Vec<&'a str>, depth: usize) {
     if depth > MAX_YAML_DEPTH || out.len() > 100_000 {
         return;
     }
@@ -468,6 +472,9 @@ pub fn parse(text: &str, limits: ParseLimits) -> Result<ParsedSpec, String> {
 pub fn parse_value(root: Value, limits: ParseLimits) -> Result<ParsedSpec, String> {
     if !root.is_object() {
         return Err("the spec must be a JSON or YAML object".into());
+    }
+    if root.get("asyncapi").is_some() {
+        return super::asyncapi::parse(root, limits);
     }
     let mut warnings = Vec::new();
     let root = if root.get("swagger").is_some() {
@@ -695,6 +702,7 @@ pub fn parse_value(root: Value, limits: ParseLimits) -> Result<ParsedSpec, Strin
         operations,
         security_schemes,
         warnings,
+        events: None,
     })
 }
 

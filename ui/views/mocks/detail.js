@@ -11,6 +11,7 @@ import * as visit from '../../lib/visit.js';
 import { operationEditor, checkIcon, responseChecks } from './operation.js';
 import { tryPanel, securityPanel, trafficPanel, mcpPanel } from './panels.js';
 import { driftPanel } from './drift.js';
+import { channelsPanel } from './events.js';
 import { checksFailed, wireDrop } from './wizard.js';
 import { coverageBanner, openEditDialog, openExamplesDialog } from './ai.js';
 import * as assist from '../../lib/assist.js';
@@ -20,7 +21,9 @@ import * as projects from '../../lib/projects.js';
 import * as perms from '../../lib/perms.js';
 
 const enc = encodeURIComponent;
-const TABS = [['operations', 'Operations'], ['try', 'Try it'], ['data', 'Data'], ['security', 'Security'], ['mcp', 'MCP server'], ['settings', 'Settings'], ['traffic', 'Traffic'], ['drift', 'Drift'], ['report', 'Deploy report']];
+const TABS = [['channels', 'Channels'], ['operations', 'Operations'], ['try', 'Try it'], ['data', 'Data'], ['security', 'Security'], ['mcp', 'MCP server'], ['settings', 'Settings'], ['traffic', 'Traffic'], ['drift', 'Drift'], ['report', 'Deploy report']];
+// An AsyncAPI mock has channels, not operations: these tabs only.
+const EVENT_TABS = ['channels', 'settings', 'report'];
 const SOURCE_LABEL = { examples: 'Example', generated: 'Generated', static: 'Static', stateful: 'Stateful', override: 'Override', custom: 'Custom', rules: 'Rules' };
 
 /** Mount the detail of mock `name` into `root`. Returns {destroy, route(sub)}. */
@@ -400,6 +403,7 @@ export function mountDetail(root, name, sub) {
     panels.settings = settingsPanel();
     panels.traffic = trafficPanel(ctx);
     panels.drift = driftPanel(ctx);
+    panels.channels = channelsPanel(Object.assign({ visitorOwned: detail.owner === 'visit' || detail.owner === 'key' }, ctx));
     panels.report = reportPanel();
     panels.data = dataPanel();
     for (const p of Object.values(panels)) if (p.update) p.update(detail);
@@ -409,20 +413,25 @@ export function mountDetail(root, name, sub) {
   let hasData = false;
   function buildTabControl() {
     hasData = isStateful(detail);
-    const items = TABS.filter(([id]) => id !== 'data' || hasData);
-    if (!items.some(([id]) => id === tab)) tab = 'operations';
+    const events = detail.kind === 'asyncapi';
+    const items = TABS.filter(([id]) => (events ? EVENT_TABS.includes(id) : id !== 'channels') && (id !== 'data' || hasData));
+    if (!items.some(([id]) => id === tab)) tab = events ? 'channels' : 'operations';
     tabCtl = tabs(items.map(([id, label]) => ({ id, label, render: () => panels[id].el })), tab, (id) => {
+      if (panels[tab] && panels[tab].hide && id !== tab) panels[tab].hide();
       tab = id;
       if (panels[id].show) panels[id].show();
       setHash();
     });
     tabCtl.el.classList.add('mock-tabs');
     replace(bodyEl, tabCtl.el);
+    if (tab === 'channels' && panels.channels) panels.channels.show();
   }
 
   function route(rest) {
     const parts = (rest || '').split('/');
-    const t = TABS.some(([id]) => id === parts[0]) && (parts[0] !== 'data' || !detail || hasData) ? parts[0] : 'operations';
+    const events = detail && detail.kind === 'asyncapi';
+    const known = TABS.some(([id]) => id === parts[0]) && (parts[0] !== 'data' || !detail || hasData) && (!detail || (events ? EVENT_TABS.includes(parts[0]) : parts[0] !== 'channels'));
+    const t = known ? parts[0] : (events ? 'channels' : 'operations');
     tab = t;
     if (t === 'operations' && parts[1]) opId = parts[1];
     if (tabCtl) {
@@ -600,7 +609,7 @@ export function mountDetail(root, name, sub) {
           readOnly || detail.yours ? null : card('Name', null, h('div', { class: 'stack-sm' }, h('div', { class: 'row nowrap' }, h('div', { class: 'grow' }, nameIn), renameBtn), nameMsg)),
           card('About', null, kvgrid([
             ['Origin', d.origin === 'sample' ? 'built-in sample' : d.origin === 'file' ? 'config file (changes are overwritten on reload)' : 'created here or with the API'],
-            ['Spec', (String(d.spec.openapi || '').startsWith('2') ? 'Swagger ' : 'OpenAPI ') + d.spec.openapi], ['Server prefix', d.spec.server_prefix || 'none'],
+            ['Spec', d.kind === 'asyncapi' ? 'AsyncAPI ' + d.spec.asyncapi : (String(d.spec.openapi || '').startsWith('2') ? 'Swagger ' : 'OpenAPI ') + d.spec.openapi], ['Server prefix', d.spec.server_prefix || 'none'],
             ['Live revision', d.live_revision === null ? 'none' : String(d.live_revision)], ['Draft revision', String(d.draft_revision)],
             ['Created', new Date(d.created_at).toLocaleString()], ['Updated', relTime(d.updated_at)],
             ['Expires', d.expires_at ? new Date(d.expires_at).toLocaleString() : 'never']]))),
@@ -691,7 +700,13 @@ export function mountDetail(root, name, sub) {
               responseChecks(o.responses),
               copyableCode(toCurl({ method: req.method, url: req.url, headers: req.headers, body: req.body })),
               readOnly ? null : h('div', null, h('button', { class: 'btn sm', type: 'button', onclick: () => goTab('operations', o.id) }, icon('edit'), 'Edit this operation'))));
-        }))));
+        }), ...(rep.channels || []).map((c) => h('details', { class: 'report-op', open: c.status === 'error' },
+          h('summary', null, checkIcon(c.status), badge('channel', 'info'), h('span', { class: 'mono ellipsis grow' }, c.address), h('span', { class: 'tiny muted' }, c.id),
+            c.findings.length ? badge(String(c.findings.length), c.status === 'error' ? 'err' : 'warn') : null),
+          h('div', { class: 'stack-sm', style: { padding: '8px 0 12px' } },
+            c.findings.length ? h('ul', { class: 'issue-list small' }, ...c.findings.map((f) => h('li', { class: f.level === 'error' ? 'err-text' : '' }, f.message))) : null,
+            ...c.send.map((m) => h('div', { class: 'small' }, h('strong', null, 'Publishes ' + m.message), ' (' + m.source + ')', m.payload !== undefined ? copyableCode(JSON.stringify(m.payload, null, 2)) : null)),
+            ...c.receive.map((m) => h('div', { class: 'small' }, h('strong', null, 'Accepts ' + m.message), ', for example', m.payload !== undefined ? copyableCode(JSON.stringify(m.payload, null, 2)) : null))))))));
     }
 
     function renderRevisions() {
@@ -735,6 +750,7 @@ export function mountDetail(root, name, sub) {
       document.removeEventListener('click', closeMenu);
       if (editor) editor.destroy();
       if (panels.traffic) panels.traffic.destroy();
+      if (panels.channels) panels.channels.destroy();
     },
   };
 }

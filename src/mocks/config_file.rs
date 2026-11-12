@@ -228,6 +228,9 @@ pub struct MockDoc {
     /// The real API it imitates, for drift checks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drift: Option<super::model::DriftSettings>,
+    /// Per-channel settings of an AsyncAPI mock, keyed by channel id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub channels: BTreeMap<String, super::model::ChannelSettings>,
     /// The project the mock belongs to (absent: the instance's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
@@ -242,6 +245,7 @@ impl MockDoc {
             operations: self.operations.clone(),
             mcp: self.mcp.clone(),
             drift: self.drift.clone(),
+            channels: self.channels.clone(),
         }
     }
 }
@@ -683,6 +687,12 @@ pub fn export(snapshots: &[Snapshot], reveal: bool) -> String {
                     serde_json::to_value(&settings.mcp).unwrap_or(Value::Null),
                 );
             }
+            if !settings.channels.is_empty() {
+                doc.insert(
+                    "channels".into(),
+                    serde_json::to_value(&settings.channels).unwrap_or(Value::Null),
+                );
+            }
             if let Some(p) = &s.project {
                 doc.insert("project".into(), json!(p));
             }
@@ -752,7 +762,7 @@ pub fn json_schema() -> Value {
     let mut mock = object(json!({
         "name": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$" },
         "spec": { "type": "string", "description": "Spec file path, relative to this file" },
-        "spec_inline": { "description": "The OpenAPI document (object or text)" },
+        "spec_inline": { "description": "The OpenAPI or AsyncAPI document (object or text)" },
         "enabled": { "type": "boolean", "default": true },
         "strip_server_prefix": { "type": "boolean", "default": false },
         "drift": {
@@ -761,6 +771,19 @@ pub fn json_schema() -> Value {
             "required": ["upstream"],
             "description": "The real API this mock imitates, for drift checks",
             "properties": { "upstream": { "type": "string", "description": "The real API's base URL" } }
+        },
+        "channels": {
+            "type": "object",
+            "description": "An AsyncAPI mock's channels, keyed by channel id",
+            "additionalProperties": object(json!({
+                "pattern": { "type": "string", "enum": ["every", "burst", "on_receive", "off"], "description": "When the channel's messages are published (default: every, or on_receive on a channel with a reply)" },
+                "every_ms": { "type": "integer", "minimum": 100, "maximum": 3600000, "default": 1000 },
+                "burst": { "type": "integer", "minimum": 1, "maximum": 20, "default": 5 },
+                "delay_ms": { "type": "integer", "minimum": 0, "default": 0 },
+                "drop_percent": { "type": "integer", "minimum": 0, "maximum": 100, "default": 0 },
+                "malformed_percent": { "type": "integer", "minimum": 0, "maximum": 100, "default": 0 },
+                "examples": { "type": "array", "maxItems": 20, "description": "Payloads published in turn when the document's message has no example" }
+            }))
         },
         "responses": responses,
         "security": security,

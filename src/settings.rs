@@ -376,6 +376,11 @@ pub fn groups() -> Vec<Group> {
             description: "The caps of the mock LLM's realtime sessions (/ai/openai/v1/realtime) and batch jobs (/ai/openai/v1/batches, /ai/anthropic/v1/messages/batches).",
         },
         Group {
+            id: "asyncapi",
+            title: "Event mocks",
+            description: "The caps of the channels of AsyncAPI mocks (/events/{mock}/{channel}): connections and webhook subscribers.",
+        },
+        Group {
             id: "agents",
             title: "AI agents",
             description: "What agents on the management MCP server (/_rustybin/mcp) may do unless a rule of rustybin.yaml or their own rights say otherwise.",
@@ -461,6 +466,7 @@ pub fn specs() -> Vec<Spec> {
     all.extend(crate::sourcecontrol::specs());
     all.extend(crate::audit::specs());
     all.extend(crate::ai::specs());
+    all.extend(crate::events::specs());
     all
 }
 

@@ -325,6 +325,10 @@ pub async fn create_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value 
             Ok(v) => v,
             Err(e) => return e,
         },
+        channels: match settings_from(args, "channels") {
+            Ok(v) => v,
+            Err(e) => return e,
+        },
     };
     let s = svc(ctx, access);
     if let Err(e) = s.fill_spec(&mut body).await {
@@ -382,6 +386,10 @@ pub async fn update_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value 
                 Err(e) => return err(format!("drift: {e}")),
             },
         },
+        channels: match settings_from(args, "channels") {
+            Ok(v) => v,
+            Err(e) => return e,
+        },
         deploy: arg_bool(args, "deploy"),
         force: arg_bool(args, "force"),
     };
@@ -392,9 +400,10 @@ pub async fn update_mock(ctx: &CallCtx, access: &Access, args: &Value) -> Value 
         && body.security.is_none()
         && body.operations.is_none()
         && body.mcp.is_none()
+        && body.channels.is_none()
         && body.deploy.is_none();
     if nothing {
-        return err("nothing to change: give spec, responses, security, operations, mcp, strip_server_prefix, rename or deploy");
+        return err("nothing to change: give spec, responses, security, operations, mcp, channels, strip_server_prefix, rename or deploy");
     }
     let deployed = body.deploy == Some(true);
     let owned = name.to_string();

@@ -368,7 +368,7 @@ pub static COMMANDS: &[Cmd] = &[
     // ── Mocks ──
     cmd!("mocks", "list", "[--all] [--project P]", "The mocks with their state and traffic.", &[Flag::switch("--all", "Every visitor's mocks too (admin)"), PROJECT_FLAG], [("GET", "/_rustybin/mocks")], false, "mocks list"),
     cmd!("mocks", "get", "<name>", "One mock: settings, operations, the deploy report.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}")], false, "mocks get petstore"),
-    cmd!("mocks", "create", "<name> (--spec FILE | --spec-url URL) [--project P]", "Create a mock from an OpenAPI file (YAML or JSON), or from a URL the instance fetches itself.", &[Flag::value("--spec", "The OpenAPI document"), Flag::value("--spec-url", "Where the instance fetches it (RUSTYBIN_EGRESS_ALLOW, purpose spec_fetch)"), Flag::value("--mode", "examples, generated, static or stateful"), Flag::switch("--disabled", "Create it switched off"), Flag::switch("--no-deploy", "Keep it as a draft"), Flag::switch("--strip-server-prefix", "Serve the paths without the spec's server prefix"), Flag::value("--project", "The project it belongs to (default: the instance's, or your one project)")], [("POST", "/_rustybin/mocks")], false, "mocks create orders --spec orders.yaml --mode generated"),
+    cmd!("mocks", "create", "<name> (--spec FILE | --spec-url URL) [--project P]", "Create a mock from an OpenAPI file (YAML or JSON) or an AsyncAPI one (an event mock with channels), or from a URL the instance fetches itself.", &[Flag::value("--spec", "The OpenAPI or AsyncAPI document"), Flag::value("--spec-url", "Where the instance fetches it (RUSTYBIN_EGRESS_ALLOW, purpose spec_fetch)"), Flag::value("--mode", "examples, generated, static or stateful"), Flag::switch("--disabled", "Create it switched off"), Flag::switch("--no-deploy", "Keep it as a draft"), Flag::switch("--strip-server-prefix", "Serve the paths without the spec's server prefix"), Flag::value("--project", "The project it belongs to (default: the instance's, or your one project)")], [("POST", "/_rustybin/mocks")], false, "mocks create orders --spec orders.yaml --mode generated"),
     cmd!("mocks", "move", "<name> --project P", "Move a mock to another project (instance: the instance's); needs mocks.write in both.", &[Flag::value("--project", "The project it goes to, or instance")], [("PATCH", "/_rustybin/mocks/{name}")], false, "mocks move orders --project instance"),
     cmd!("mocks", "import", "--spec FILE", "Preview a spec: title, operations, the checks, the suggested name.", &[Flag::value("--spec", "The OpenAPI document")], [("POST", "/_rustybin/mocks/import")], false, "mocks import --spec orders.yaml"),
     cmd!("mocks", "update", "<name> [--spec FILE] [--mode M] [--settings JSON]", "Change a mock's spec or settings (the draft, deployed unless --no-deploy).", &[Flag::value("--spec", "A new OpenAPI document"), Flag::value("--mode", "examples, generated, static or stateful"), Flag::value("--settings", "Settings as JSON or a file: responses, security, operations, mcp, strip_server_prefix"), Flag::switch("--no-deploy", "Change the draft only"), Flag::switch("--force", "Deploy even when the checks report errors"), Flag::value("--expect-revision", "Refuse (409) unless the draft is still this revision (default: the one read just before)")], [("PATCH", "/_rustybin/mocks/{name}")], false, "mocks update orders --mode stateful"),
@@ -382,6 +382,12 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("mocks", "coverage", "<name>", "Which operations lack an example.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}/coverage")], false, "mocks coverage orders"),
     cmd!("mocks", "drift", "<name> [--upstream URL] [--header 'K: V']... [--operation ID]... [--junit]", "Check the mock against the real API it imitates (its drift.upstream, or --upstream): one request per operation, where the answers disagree with the spec; exits 1 on drift. A header value may hold {{VAR}}, filled from this shell's RUSTYBIN_TEST_<VAR>.", &[Flag::value("--upstream", "The real API's base URL"), Flag::value("--header", "A header for the real API, 'Name: value' (repeatable)"), Flag::value("--operation", "Only this operationId (repeatable)"), Flag::switch("--junit", "Print a JUnit report")], [("POST", "/_rustybin/mocks/{name}/drift")], false, "mocks drift orders --upstream https://api.example.com/v1"),
     cmd!("mocks", "drift-runs", "<name>", "The mock's kept drift checks, newest first.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}/drift")], false, "mocks drift-runs orders"),
+    cmd!("mocks", "channels", "<name>", "An AsyncAPI mock's channels: what each sends and receives, its pattern, its URL and who is connected.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}/channels")], false, "mocks channels orders"),
+    cmd!("mocks", "events", "<name> <channel> [--limit N] [--follow]", "The messages published and received on a channel of an AsyncAPI mock, newest first; --follow keeps printing new ones (--max N, --timeout SECONDS).", &[Flag::value("--limit", "How many to list (default 20)"), Flag::switch("--follow", "Keep printing new messages"), Flag::value("--max", "Stop following after this many messages"), Flag::value("--timeout", "Stop following after this many seconds")], [("GET", "/_rustybin/mocks/{name}/channels/{channel}/messages")], false, "mocks events orders orders-created --limit 5"),
+    cmd!("mocks", "publish", "<name> <channel> [--data JSON] [--count N]", "Make an AsyncAPI mock publish now, to every subscriber of the channel: its next message, --count of them, or --data as it is.", &[Flag::value("--data", "The payload: a file or inline JSON (default: the channel's next message)"), Flag::value("--count", "How many of the next messages (1 to 20)")], [("POST", "/_rustybin/mocks/{name}/channels/{channel}/publish")], false, "mocks publish orders orders-created"),
+    cmd!("mocks", "subscribers", "<name>", "The webhook subscribers of an AsyncAPI mock.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}/subscribers")], false, "mocks subscribers orders"),
+    cmd!("mocks", "subscribe", "<name> <channel> --webhook URL [--ttl SECONDS]", "Post every message of a channel to a URL; its host must be in RUSTYBIN_EGRESS_ALLOW (purpose events).", &[Flag::value("--webhook", "Where the messages are posted"), Flag::value("--ttl", "Seconds the subscriber lives (default 3600)")], [("POST", "/_rustybin/mocks/{name}/subscribers")], false, "mocks subscribe orders orders-created --webhook https://hooks.example.com/orders"),
+    cmd!("mocks", "unsubscribe", "<name> <id>", "Remove a webhook subscriber.", NO_FLAGS, [("DELETE", "/_rustybin/mocks/{name}/subscribers/{id}")], false, "mocks unsubscribe orders 0a1b2c3d4e5f6a7b"),
     cmd!("mocks", "spec", "<name>", "The mock's OpenAPI document as stored.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}/spec")], false, "mocks spec orders > orders.yaml"),
     cmd!("mocks", "revision", "<name> <revision>", "A kept revision: what changed since in the draft, its settings and spec (the whole answer with --json).", &[Flag::switch("--spec", "Print only the revision's spec as uploaded")], [("GET", "/_rustybin/mocks/{name}/revisions/{revision}")], false, "mocks revision orders 12"),
     cmd!("mocks", "export", "[name]", "One mock, or all, as a rustybin.yaml with only the mocks section.", NO_FLAGS, [("GET", "/_rustybin/mocks/{name}/export"), ("GET", "/_rustybin/mocks/export")], false, "mocks export orders"),
@@ -2469,6 +2475,113 @@ async fn mocks(ctx: &mut Ctx, verb: &str) -> Result<()> {
         "traffic-clear" => {
             need_name(ctx)?;
             delete(ctx, &format!("{base}/requests"), &[]).await
+        }
+        "channels" => {
+            need_name(ctx)?;
+            get(ctx, &format!("{base}/channels"), &[]).await
+        }
+        "events" => {
+            need_name(ctx)?;
+            let channel = ctx.args.arg(1, "a channel id")?.to_string();
+            let path = format!("{base}/channels/{}/messages", enc(&channel));
+            let limit = ctx.args.value("--limit").unwrap_or("20").to_string();
+            if !ctx.args.has("--follow") {
+                return get(ctx, &path, &[("limit", limit)]).await;
+            }
+            // Following: the list is asked again for what came after the
+            // last message seen, oldest first on the screen.
+            let (max, timeout) = tail_params(ctx)?;
+            let started = std::time::Instant::now();
+            let json = ctx.json;
+            let mut after: Option<u64> = None;
+            let mut printed = 0usize;
+            loop {
+                let mut query = vec![("limit", "100".to_string())];
+                if let Some(a) = after {
+                    query.push(("after", a.to_string()));
+                }
+                let v = ctx.client()?.get(&path, &query).await?.value();
+                let mut list: Vec<Value> = v["messages"].as_array().cloned().unwrap_or_default();
+                list.reverse();
+                // The first look only finds where the channel is now.
+                let fresh = after.is_some();
+                after = Some(v["last"].as_u64().unwrap_or(0).max(after.unwrap_or(0)));
+                for m in list.iter().filter(|_| fresh) {
+                    if json {
+                        ctx.raw(&m.to_string());
+                    } else {
+                        let body = if m["payload"].is_null() {
+                            m["text"].as_str().unwrap_or_default().to_string()
+                        } else {
+                            m["payload"].to_string()
+                        };
+                        ctx.raw(&format!(
+                            "{} {:8} {:16} {}{}",
+                            m["timestamp"].as_str().unwrap_or_default(),
+                            m["direction"].as_str().unwrap_or_default(),
+                            m["message"].as_str().unwrap_or("-"),
+                            if m["valid"] == false {
+                                "(not valid) "
+                            } else {
+                                ""
+                            },
+                            body
+                        ));
+                    }
+                    printed += 1;
+                    if max.is_some_and(|m| printed >= m) {
+                        return Ok(());
+                    }
+                }
+                if started.elapsed() >= timeout {
+                    return Ok(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+        "publish" => {
+            need_name(ctx)?;
+            let channel = ctx.args.arg(1, "a channel id")?.to_string();
+            let mut body = json!({});
+            if let Some(d) = ctx.args.value("--data") {
+                let text = match std::fs::read_to_string(d) {
+                    Ok(t) => t,
+                    Err(_) => d.to_string(),
+                };
+                body["payload"] = serde_json::from_str(&text)
+                    .map_err(|e| Fail::Usage(format!("--data is not JSON: {e}")))?;
+            }
+            if let Some(c) = ctx.args.value("--count") {
+                body["count"] = json!(c
+                    .parse::<u32>()
+                    .map_err(|_| Fail::Usage("--count is a number from 1 to 20".into()))?);
+            }
+            let path = format!("{base}/channels/{}/publish", enc(&channel));
+            post(ctx, &path, Body::Json(body)).await
+        }
+        "subscribers" => {
+            need_name(ctx)?;
+            get(ctx, &format!("{base}/subscribers"), &[]).await
+        }
+        "subscribe" => {
+            need_name(ctx)?;
+            let channel = ctx.args.arg(1, "a channel id")?.to_string();
+            let url = ctx
+                .args
+                .value("--webhook")
+                .ok_or_else(|| Fail::Usage("--webhook URL is required".into()))?;
+            let mut body = json!({ "channel": channel, "url": url });
+            if let Some(t) = ctx.args.value("--ttl") {
+                body["ttl_seconds"] = json!(t
+                    .parse::<u64>()
+                    .map_err(|_| Fail::Usage("--ttl is a number of seconds".into()))?);
+            }
+            post(ctx, &format!("{base}/subscribers"), Body::Json(body)).await
+        }
+        "unsubscribe" => {
+            need_name(ctx)?;
+            let id = ctx.args.arg(1, "a subscriber id")?.to_string();
+            delete(ctx, &format!("{base}/subscribers/{}", enc(&id)), &[]).await
         }
         "data" => {
             need_name(ctx)?;

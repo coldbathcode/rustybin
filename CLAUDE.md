@@ -137,16 +137,17 @@ hops `safety::pin_chain` pinned; a field added to the marker goes inside its sig
 a client's marker byte for byte what it was; an onward call is never counted with the clients'
 arrivals.
 
-## Demo next, new features for gateway demos (planned 2026-11-11, steps 01 to 08 built, not released)
+## Demo next, new features for gateway demos (planned 2026-11-11, steps 01 to 09 built, not released)
 
 [docs/plans/demo-next/master-plan.md](docs/plans/demo-next/master-plan.md): nine new features and a
 release, one file each (section 4 is the build marker, section 6 the owner's decisions with a
 recommendation each): AI gateway scenarios, MCP security scenarios, a mock recorded from a real
 upstream, contract drift (steps 01 to 04, built 2026-11-11), demo storyboards and customer demo
-packs, Arazzo workflows, and realtime and batch AI APIs (steps 05 to 08, built 2026-11-12), AsyncAPI
-event mocks. Each built step file has build notes; the changelog's "Unreleased" section lists what is new.
-Step 09 waits for the owner's decision (section 6), step 10 (the release) is the owner's to
-start, and core-next step 14 (the 0.7.0 release) has not been done either.
+packs, Arazzo workflows, realtime and batch AI APIs and AsyncAPI event mocks (steps 05 to 09, built
+2026-11-12). Each built step file has build notes; the changelog's "Unreleased" section lists what is new.
+Step 09 is built as its part A (channels Rustybin serves itself); its part B (Kafka behind a cargo
+feature) waits for the owner's word. Step 10 (the release) is the owner's to start, and core-next step 14
+(the 0.7.0 release) has not been done either.
 
 Step 05 (storyboards; `docs/plans/demo-next/step-05-demo-storyboards.md`, user docs
 `docs/src/storyboards.md`): `src/storyboards/` (`mod.rs`: `Storyboard`, `Step`, `Action`, the store
@@ -204,6 +205,27 @@ client sees of it is `Batch::at` on the injectable clock; files and batches belo
 (session, and key in shared mode: another caller's is `404`) and are bounded per caller and for the
 instance; a fault of a batch's lines has its own headers, since `X-Rustybin-Fail` fails the request it is
 on; a new cap of the AI mocks is a setting of `ai::specs`.
+
+Step 09 (event mocks from AsyncAPI; `docs/plans/demo-next/step-09-asyncapi-event-mocks.md`, user docs
+`docs/src/mocks/asyncapi.md`): `src/mocks/asyncapi.rs` (AsyncAPI 2.x and 3.0 into `EventSpec`: channels
+with `send` and `receive` messages; `outgoing`, `check_incoming`) and `src/events/` (`mod.rs`: the hubs,
+the publishing task, webhook subscribers, the service the routes and tools share; `serve.rs`: the
+WebSocket, SSE and `POST` data plane at `/events/{name}/{channel}` and
+`/mock/{name}/_rustybin/events/{channel}`), `src/mcp/manage/events.rs`, `rustybin mocks channels | events
+| publish | subscribers | subscribe | unsubscribe`, `ui/views/mocks/events.js`, a mock's `channels:` in
+`rustybin.yaml`. Rules it left: an AsyncAPI mock is a `Compiled` revision whose `ParsedSpec.events` is set
+and whose operations are empty, so code that needs operations must cope with none, and a feature of
+channels asks `spec.events`, never the document; payloads are generated and validated by `mocks::schema`
+only; Rustybin plays the application the document describes (`send` and 2.x `subscribe` are what it
+publishes, `receive` and 2.x `publish` what it validates); every subscriber of a channel gets the same
+messages through one hub and one publishing task per channel, which runs only while somebody listens and
+ends with the mock (`Hub.log` ties a hub to its mock, so a mock made again starts afresh); every publish
+goes through `Events::publish` and every received message through `Events::receive`; a channel's messages
+live in the mock's `CaptureLog` (`record_event`) and every reader goes through `TrafficScope::sees_event`;
+a webhook subscriber is in memory, expiring and bounded, in no document, never on a visitor's mock, checked
+with `Egress::dry_check` under `Purpose::Events` (no default) when added and resolved again at each
+delivery, and its URL's query is never answered; what Rustybin cannot serve or generate is a warning of
+the deploy report, never an error; a new cap of the event mocks is a setting of `events::specs`.
 
 ## Rustybin 0.3, reliability and testing workflows (built and released 2026-11-02)
 
@@ -502,6 +524,8 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   directory) and `?from=git` lists and restores the repository's through `parse_untrusted` and the compile pool.
 - `src/ai/realtime.rs`, `src/ai/batch.rs`: the mock LLM's realtime (WebSocket) and batch APIs (see demo next
   step 08 above); `/ai/requests` records carry `kind` (`request`, `realtime`, `batch`) and `detail`.
+- `src/mocks/asyncapi.rs`, `src/events/`: event mocks, the channels of a mock made from an AsyncAPI document
+  served over WebSocket, SSE and webhooks (see demo next step 09 above); `AppState.events`.
 - `src/replay/arazzo.rs`: Arazzo 1.0 workflows as multi-step saved tests and back (see demo next step 07 above).
 - `src/replay/`: saved tests (`/_rustybin/tests*`, `rustybin tests`, `list_tests` / `save_test` / `delete_test` /
   `run_tests`, the console's Saved tests view and Live traffic's Save as test, `tests:` of `rustybin.yaml`).

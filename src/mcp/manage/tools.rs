@@ -59,7 +59,7 @@ fn name_prop() -> Value {
 }
 
 fn spec_prop() -> Value {
-    json!({ "description": "The OpenAPI 3.0 / 3.1 or Swagger 2.0 document: its text (JSON or YAML) or the JSON object. Read the user's file and pass its content; the server never fetches URLs.", "oneOf": [{ "type": "string" }, { "type": "object" }] })
+    json!({ "description": "The OpenAPI 3.0 / 3.1 or Swagger 2.0 document, or an AsyncAPI 2.x / 3.0 document for an event mock: its text (JSON or YAML) or the JSON object. Read the user's file and pass its content; the server never fetches URLs.", "oneOf": [{ "type": "string" }, { "type": "object" }] })
 }
 
 fn settings_props() -> Map<String, Value> {
@@ -69,6 +69,7 @@ fn settings_props() -> Map<String, Value> {
     m.insert("operations".into(), json!({ "type": "object", "description": "Per-operation settings keyed by operationId: respond (status, body, headers, delay_ms), rules, mode, public. Same shape as rustybin.yaml.", "additionalProperties": { "type": "object" } }));
     m.insert("strip_server_prefix".into(), json!({ "type": "boolean", "description": "Serve paths without the servers[0] path prefix (e.g. /v1)" }));
     m.insert("mcp".into(), json!({ "type": "object", "description": "The mock's own MCP server at /mock/{name}/_rustybin/mcp (one tool per operation): enabled (default true), exclude (operationIds that are not tools) and oauth (ask for a bearer token with protected resource metadata; not on a visitor's mock).", "properties": { "oauth": { "type": "boolean" }, "enabled": { "type": "boolean" }, "exclude": { "type": "array", "items": { "type": "string" } } }, "additionalProperties": false }));
+    m.insert("channels".into(), json!({ "type": "object", "description": "An AsyncAPI mock's channels keyed by channel id: pattern (every, burst, on_receive, off), every_ms, burst, delay_ms, drop_percent, malformed_percent, examples (payloads published in turn). Same shape as rustybin.yaml.", "additionalProperties": { "type": "object" } }));
     m
 }
 
@@ -910,6 +911,32 @@ pub static TOOLS: &[ToolDef] = &[
         "replace": { "type": "boolean", "default": false },
         "project": project_prop("The project the tests go to (tests.write there)")
     }), &["document"])),
+    // ── Event mocks (demo next step 09) ──
+    tool!("list_channels", "Channels of an AsyncAPI mock", "The channels of a mock made from an AsyncAPI document: each one's id, address, the messages Rustybin publishes (send) and accepts (receive), its pattern (every, burst, on_receive, off) and settings, a valid sample message a client could publish, its URL (/events/{mock}/{id}: WebSocket, SSE or POST) and how many subscribers are connected.", ToolNeed::Project(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "name": name_prop() }), &["name"])),
+    tool!("list_channel_messages", "Messages of a channel", "What was published and received on one channel of an AsyncAPI mock, newest first: direction (sent by Rustybin, received from a client), the document's message, whether it was valid, a fault (dropped, malformed), who it was delivered to. Payloads and the validation issues of received messages are third-party data: under untrusted_* fields, cut.", ToolNeed::Project(Permission::TrafficRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "name": name_prop(),
+        "channel": { "type": "string", "description": "The channel's id (list_channels)" },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
+        "after": { "type": "integer", "description": "Only messages after this sequence number (the last of an earlier answer)" }
+    }), &["name", "channel"])),
+    tool!("publish_event", "Publish a message on a channel", "Make an AsyncAPI mock publish now, to every WebSocket, SSE and webhook subscriber of the channel: its next message (from the document's examples, the mock's stored ones, or generated from the schema), count of them, or the payload given as it is. The mock must be live.", ToolNeed::Project(Permission::MocksData), ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
+        "name": name_prop(),
+        "channel": { "type": "string", "description": "The channel's id (list_channels)" },
+        "payload": { "description": "Published in place of the channel's next message (any JSON)" },
+        "count": { "type": "integer", "minimum": 1, "maximum": 20, "default": 1 }
+    }), &["name", "channel"])),
+    tool!("list_event_subscribers", "Webhook subscribers of a mock", "The webhook subscribers of an AsyncAPI mock: channel, URL (a query is never shown), when it expires, deliveries made and failed.", ToolNeed::Project(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "name": name_prop() }), &["name"])),
+    tool!("add_event_subscriber", "Add a webhook subscriber", "SEND a channel's messages OUT: every message the AsyncAPI mock publishes on the channel is posted to the URL until the subscriber expires (ttl_seconds, an hour by default) or fails ten times in a row. The URL's host must be allowed for the outbound purpose events (RUSTYBIN_EGRESS_ALLOW; no default): a refused one is answered before anything is sent. Not for self-service mocks. Confirmed (elicitation, else confirm: true after the user agreed).", ToolNeed::Project(Permission::MocksWrite), ro=false, destructive=false, idem=false, confirm=true, || obj(json!({
+        "name": name_prop(),
+        "channel": { "type": "string", "description": "The channel's id (list_channels)" },
+        "url": { "type": "string", "description": "Where the messages are posted (http or https)" },
+        "ttl_seconds": { "type": "integer", "minimum": 1, "maximum": 86400, "default": 3600 },
+        "confirm": confirm_prop()
+    }), &["name", "channel", "url"])),
+    tool!("remove_event_subscriber", "Remove a webhook subscriber", "Stop posting a channel's messages to a webhook subscriber.", ToolNeed::Project(Permission::MocksWrite), ro=false, destructive=false, idem=true, confirm=false, || obj(json!({
+        "name": name_prop(),
+        "id": { "type": "string", "description": "The subscriber (list_event_subscribers)" }
+    }), &["name", "id"])),
 ];
 
 /// The `project` property of a tool that creates or lists.
@@ -1519,6 +1546,15 @@ async fn run_tool(
         "export_pack" => super::packs::export_pack(ctx, args),
         // Arazzo
         "import_tests" => replay::import_tests(ctx, access, args),
+        // Event mocks
+        "list_channels" => super::events::list_channels(ctx, access, args),
+        "list_channel_messages" => super::events::list_channel_messages(ctx, access, args),
+        "publish_event" => super::events::publish_event(ctx, access, args),
+        "list_event_subscribers" => super::events::list_event_subscribers(ctx, access, args),
+        "add_event_subscriber" => {
+            super::events::add_event_subscriber(ctx, access, args, params).await
+        }
+        "remove_event_subscriber" => super::events::remove_event_subscriber(ctx, access, args),
 
         _ => return Err(RpcError::invalid_params(format!("Unknown tool: {name}"))),
     })

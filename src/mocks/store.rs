@@ -303,8 +303,10 @@ impl Snapshot {
     pub fn summary(&self) -> Value {
         let shown = self.live.as_ref().unwrap_or(&self.draft);
         let sec = &shown.settings.security;
-        json!({
+        let events = shown.spec.events.as_deref();
+        let mut out = json!({
             "name": self.name,
+            "kind": if events.is_some() { "asyncapi" } else { "openapi" },
             "path": format!("/mock/{}", self.name),
             "title": shown.spec.title,
             "version": shown.spec.version,
@@ -330,7 +332,12 @@ impl Snapshot {
             "expires_at": self.expires_at.map(|e| e.to_rfc3339()),
             "load_error": self.load_error,
             "project": self.project,
-        })
+        });
+        if let Some(e) = events {
+            out["channels"] = json!(e.channels.len());
+            out["events_path"] = json!(format!("/events/{}", self.name));
+        }
+        out
     }
 }
 

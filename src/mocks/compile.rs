@@ -247,6 +247,13 @@ impl Compiled {
             + document_weight(&self.spec.root)
             + report * REPORT_BYTE_COST
             + self.mcp_tools().nodes * TOOL_NODE_BYTES
+            + self.spec.events.as_deref().map_or(0, |e| {
+                // The parsed channels keep copies of their messages' schemas
+                // and examples beside the document.
+                super::asyncapi::kept_values(e)
+                    .map(document_weight)
+                    .sum::<usize>()
+            })
     }
 
     /// The MCP tools of this revision (one per operation; built once).

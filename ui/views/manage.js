@@ -111,6 +111,8 @@ function generalPanel(doc, reload, error) {
     el.appendChild(card('MCP attack servers', { hint: 'for MCP security demos; always off in public mode' }, attacks.el));
     const llm = settingsForm(doc, 'ai', { saveLabel: 'Save mock LLM settings', onSaved: reload });
     el.appendChild(card('Mock LLM', { hint: 'realtime sessions and batch jobs' }, llm.el));
+    const eventMocks = settingsForm(doc, 'asyncapi', { saveLabel: 'Save event mock settings', onSaved: reload });
+    el.appendChild(card('Event mocks', { hint: 'the channels of AsyncAPI mocks' }, eventMocks.el));
   } else {
     el.appendChild(card('Console', { hint: 'shown to everyone who opens it' }, loadError(error)));
   }

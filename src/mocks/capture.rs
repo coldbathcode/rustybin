@@ -3,6 +3,7 @@
 //! matched operation, validation issues, auth result and the response sent.
 
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::broadcast;
@@ -40,6 +41,96 @@ impl TrafficScope {
             TrafficScope::Own(sender) => c.sender.as_ref() == Some(sender),
         }
     }
+
+    /// A message of an AsyncAPI mock: what Rustybin published went to
+    /// every subscriber and holds nothing of a sender; what a client
+    /// published is its sender's.
+    pub fn sees_event(&self, e: &EventRecord) -> bool {
+        match self {
+            TrafficScope::All => true,
+            TrafficScope::Own(sender) => e.direction == "sent" || e.sender.as_ref() == Some(sender),
+        }
+    }
+}
+
+/// Bytes of a message's payload kept in an [`EventRecord`].
+pub const MAX_EVENT_PREVIEW: usize = 8 * 1024;
+
+/// How many subscribers of each kind a published message went to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Delivered {
+    pub ws: usize,
+    pub sse: usize,
+    pub webhook: usize,
+}
+
+/// One message on a channel of an AsyncAPI mock: published by Rustybin
+/// (`sent`) or by a client (`received`).
+#[derive(Clone, Debug, Serialize)]
+pub struct EventRecord {
+    /// Sequence number in the mock, from 1.
+    pub seq: u64,
+    pub timestamp: String,
+    /// The channel's id.
+    pub channel: String,
+    /// `sent` or `received`.
+    pub direction: &'static str,
+    /// How a received message arrived: `ws` or `http`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<&'static str>,
+    /// The document's message it is (a received one: the one it is valid
+    /// as).
+    pub message: Option<String>,
+    /// The payload, when it is JSON of at most [`MAX_EVENT_PREVIEW`] bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Value>,
+    /// Else its text, cut.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    pub size: usize,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    pub valid: bool,
+    /// Why a received message is not valid.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<Issue>,
+    /// Where a sent payload came from: `example`, `stored`, `generated`
+    /// or `given`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<&'static str>,
+    /// A fault of the channel's settings: `dropped` or `malformed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fault: Option<&'static str>,
+    /// The subscribers a sent message went to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered: Option<Delivered>,
+    /// Revision that published or checked it.
+    pub revision: u64,
+    /// Who published a received message, for [`TrafficScope`]; never in an
+    /// answer.
+    #[serde(skip)]
+    pub sender: Option<Sender>,
+}
+
+impl EventRecord {
+    fn stored_bytes(&self) -> usize {
+        self.size.min(MAX_EVENT_PREVIEW)
+            + self.channel.len()
+            + self.message.as_ref().map_or(0, String::len)
+            + self
+                .issues
+                .iter()
+                .map(|i| i.pointer.len() + i.message.len())
+                .sum::<usize>()
+            + 128
+    }
+}
+
+#[derive(Default)]
+struct EventLog {
+    entries: VecDeque<Arc<EventRecord>>,
+    bytes: usize,
+    total: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -146,6 +237,8 @@ struct LogInner {
 #[derive(Clone)]
 pub struct CaptureLog {
     inner: Arc<Mutex<LogInner>>,
+    /// The messages of an AsyncAPI mock's channels.
+    events: Arc<Mutex<EventLog>>,
     tx: broadcast::Sender<Arc<MockCapture>>,
     max_entries: usize,
     max_bytes: usize,
@@ -163,10 +256,64 @@ impl CaptureLog {
                 operations: HashMap::new(),
                 minutes: VecDeque::new(),
             })),
+            events: Arc::default(),
             tx,
             max_entries,
             max_bytes,
         }
+    }
+
+    /// Is this the log of the same mock (not of one deleted and made again
+    /// under its name)?
+    pub fn same(&self, other: &CaptureLog) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    fn lock_events(&self) -> MutexGuard<'_, EventLog> {
+        self.events.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Store a message of a channel (assigns `seq`): bounded like the
+    /// requests, in entries and in bytes.
+    pub fn record_event(&self, mut entry: EventRecord) -> Arc<EventRecord> {
+        let mut log = self.lock_events();
+        log.total += 1;
+        entry.seq = log.total;
+        let entry = Arc::new(entry);
+        let size = entry.stored_bytes();
+        while !log.entries.is_empty()
+            && (log.entries.len() >= self.max_entries || log.bytes + size > self.max_bytes)
+        {
+            if let Some(old) = log.entries.pop_front() {
+                log.bytes = log.bytes.saturating_sub(old.stored_bytes());
+            }
+        }
+        log.bytes += size;
+        log.entries.push_back(entry.clone());
+        entry
+    }
+
+    /// The messages `scope` sees, newest first: of one channel or all, after
+    /// sequence number `after`, at most `limit`; and the number published
+    /// and received on the mock in all.
+    pub fn events(
+        &self,
+        scope: &TrafficScope,
+        channel: Option<&str>,
+        after: u64,
+        limit: usize,
+    ) -> (Vec<Arc<EventRecord>>, u64) {
+        let log = self.lock_events();
+        let list = log
+            .entries
+            .iter()
+            .rev()
+            .take_while(|e| e.seq > after)
+            .filter(|e| channel.is_none_or(|c| e.channel == c) && scope.sees_event(e))
+            .take(limit)
+            .cloned()
+            .collect();
+        (list, log.total)
     }
 
     fn lock(&self) -> MutexGuard<'_, LogInner> {
@@ -286,6 +433,10 @@ impl CaptureLog {
         let mut inner = self.lock();
         inner.entries.clear();
         inner.bytes = 0;
+        drop(inner);
+        let mut events = self.lock_events();
+        events.entries.clear();
+        events.bytes = 0;
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<MockCapture>> {

@@ -242,6 +242,8 @@ pub struct CreateBody {
     pub mcp: Option<McpSettings>,
     /// The real API it imitates, for drift checks.
     pub drift: Option<crate::mocks::model::DriftSettings>,
+    /// An AsyncAPI mock's channels, keyed by channel id.
+    pub channels: Option<BTreeMap<String, crate::mocks::model::ChannelSettings>>,
     /// The project the mock goes to (step 11): `mocks.write` there; absent:
     /// the instance's, or the one project the caller works in.
     pub project: Option<String>,
@@ -274,6 +276,8 @@ pub struct PatchBody {
     /// The real API it imitates (`null` removes it).
     #[serde(default, deserialize_with = "double_option_drift")]
     pub drift: Option<Option<crate::mocks::model::DriftSettings>>,
+    /// An AsyncAPI mock's channels, keyed by channel id (the whole section).
+    pub channels: Option<BTreeMap<String, crate::mocks::model::ChannelSettings>>,
     pub deploy: Option<bool>,
     pub force: Option<bool>,
 }
@@ -299,6 +303,7 @@ impl PatchBody {
             && self.operations.is_none()
             && self.mcp.is_none()
             && self.drift.is_none()
+            && self.channels.is_none()
             && self.deploy.is_none()
     }
 }
@@ -570,6 +575,22 @@ pub fn detail(
         } else {
             serde_json::to_value(c.settings.redacted())
         };
+        if let Some(events) = c.spec.events.as_deref() {
+            // The draft's channels (GET .../channels adds their live numbers).
+            if let Some(Value::Object(spec)) = m.get_mut("spec") {
+                spec.insert("asyncapi".into(), json!(events.asyncapi));
+                spec.insert("protocols".into(), json!(events.protocols));
+                spec.remove("spec_url");
+            }
+            m.insert(
+                "channels".into(),
+                json!(events
+                    .channels
+                    .iter()
+                    .map(super::asyncapi::channel_json)
+                    .collect::<Vec<_>>()),
+            );
+        }
         m.insert("settings".into(), settings.unwrap_or(Value::Null));
         m.insert("secrets_hidden".into(), json!(!reveal));
         m.insert(
@@ -1027,7 +1048,16 @@ impl Svc {
             .map_err(ServiceError::bad_request)?;
         let s = &compiled.spec;
         let suggested = unique_name(self.store(), &s.suggested_name());
+        let channels: Option<Vec<Value>> = s.events.as_deref().map(|e| {
+            e.channels
+                .iter()
+                .map(super::asyncapi::channel_json)
+                .collect()
+        });
         Ok(json!({
+            "kind": if s.events.is_some() { "asyncapi" } else { "openapi" },
+            "asyncapi": s.events.as_deref().map(|e| e.asyncapi.clone()),
+            "channels": channels,
             "openapi": s.openapi,
             "title": s.title,
             "version": s.version,
@@ -1182,6 +1212,7 @@ impl Svc {
             operations: req.operations.unwrap_or_default(),
             mcp: req.mcp.unwrap_or_default(),
             drift: req.drift,
+            channels: req.channels.unwrap_or_default(),
         };
         let compiled = self
             .store()
@@ -1396,7 +1427,8 @@ impl Svc {
             || req.security.is_some()
             || req.operations.is_some()
             || req.mcp.is_some()
-            || req.drift.is_some();
+            || req.drift.is_some()
+            || req.channels.is_some();
         let compiled = if changes_definition {
             let source = match &req.spec {
                 Some(v) => Some(spec_text(v).map_err(ServiceError::bad_request)?),
@@ -1417,6 +1449,9 @@ impl Svc {
             }
             if let Some(v) = &req.mcp {
                 settings.mcp = v.clone();
+            }
+            if let Some(v) = &req.channels {
+                settings.channels = v.clone();
             }
             if let Some(v) = &req.drift {
                 settings.drift = v.clone();

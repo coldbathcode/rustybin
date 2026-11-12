@@ -159,7 +159,7 @@ export function openWizard(opts = {}) {
 
   function pasteStep() {
     const drop = h('div', { class: 'dropzone', 'data-autofocus': true, tabindex: '0', role: 'button', 'aria-label': 'Choose an OpenAPI file' },
-      icon('upload'), h('strong', null, 'Drop an OpenAPI file here'), h('span', { class: 'muted small' }, 'JSON or YAML: OpenAPI 3.0 / 3.1 or Swagger 2.0'),
+      icon('upload'), h('strong', null, 'Drop an OpenAPI file here'), h('span', { class: 'muted small' }, 'JSON or YAML: OpenAPI 3.0 / 3.1 or Swagger 2.0, or AsyncAPI 2.x / 3.0 for an event mock'),
       h('span', { class: 'btn sm' }, icon('file'), 'Browse files'));
     drop.addEventListener('click', () => fileIn.click());
     drop.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileIn.click(); } });
@@ -230,12 +230,16 @@ export function openWizard(opts = {}) {
     const warnings = p.warnings || [];
     replace(body, h('div', { class: 'stack' },
       h('div', { class: 'stack-sm' },
-        h('div', { class: 'row' }, h('h3', { style: { fontSize: '18px' } }, p.title || 'Untitled API'), badge('v' + (p.version || '?'), 'outline'), badge((String(p.openapi || '').startsWith('2') ? 'Swagger ' : 'OpenAPI ') + p.openapi, 'info')),
+        h('div', { class: 'row' }, h('h3', { style: { fontSize: '18px' } }, p.title || 'Untitled API'), badge('v' + (p.version || '?'), 'outline'), badge(p.kind === 'asyncapi' ? 'AsyncAPI ' + p.asyncapi : (String(p.openapi || '').startsWith('2') ? 'Swagger ' : 'OpenAPI ') + p.openapi, 'info')),
         p.description ? h('p', { class: 'small muted clamp-3' }, p.description) : null),
       h('div', { class: 'field' }, h('span', null, 'Name'), nameIn, nameMsg,
         h('div', { class: 'small' }, h('span', { class: 'muted' }, 'Base URL: '), urlEl),
         strip ? h('label', { class: 'check small' }, strip, 'Serve the paths without the spec\'s ', h('code', null, p.server_prefix), ' prefix') : null),
-      h('div', { class: 'stack-sm' }, h('span', { class: 'label' }, `${(p.operations || []).length} operations`), opsEl),
+      p.kind === 'asyncapi'
+        ? h('div', { class: 'stack-sm', id: 'wizard-channels' }, h('span', { class: 'label' }, `${(p.channels || []).length} channels`),
+          ...(p.channels || []).map((c) => h('div', { class: 'op-line' }, badge('channel', 'info'), h('span', { class: 'mono ellipsis' }, c.address),
+            h('span', { class: 'muted small ellipsis grow' }, `publishes ${c.send.length}, accepts ${c.receive.length} message(s)`))))
+        : h('div', { class: 'stack-sm' }, h('span', { class: 'label' }, `${(p.operations || []).length} operations`), opsEl),
       (p.security_schemes || []).length ? h('div', { class: 'stack-sm' }, h('span', { class: 'label' }, 'Security schemes'),
         h('div', { class: 'pill-list' }, ...p.security_schemes.map((s) => badge(h('span', null, icon('lock'), ' ', s.name, ' (', s.type.replace('_', ' '), ')'), 'violet')))) : null,
       warnings.length ? h('details', { class: 'disclosure' }, h('summary', null, `${warnings.length} warning${warnings.length === 1 ? '' : 's'} about the spec`),

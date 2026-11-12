@@ -38,6 +38,10 @@ recommended against for now.
 - [Realtime](ai/realtime.md) and [batch](ai/batch.md) AI APIs (unreleased, built 2026-11-12,
   step 08 of the demo next plan): the OpenAI-shaped realtime WebSocket protocol, and batch jobs
   in the OpenAI and Anthropic shapes on a compressed clock.
+- [Event mocks from AsyncAPI](mocks/asyncapi.md) (unreleased, built 2026-11-12, step 09 of the
+  demo next plan, part A): an AsyncAPI document as a mock whose channels are served over
+  WebSocket, server-sent events and webhooks, with valid messages published and what clients
+  publish validated.
 - The last of the roadmap's candidates ([unreleased](changelog.md#unreleased-the-last-of-the-roadmaps-candidates),
   built 2026-11-09): for source control a [diverged branch](source-control.md#a-diverged-branch)
   resolved by a person, [branches per environment](source-control.md#branches) and
@@ -115,14 +119,15 @@ recommended against for now.
 
 Planned on 2026-11-11 as a second milestone, in
 [the demo next plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/demo-next/master-plan.md)
-(steps 01 to 08 are built: the AI gateway scenarios, MCP security, recording, drift, demo
-storyboards, customer demo packs, Arazzo workflows as multi-step tests, and realtime and batch
-AI APIs): event-driven mocks from AsyncAPI.
+(every feature step, 01 to 09, is built: the AI gateway scenarios, MCP security, recording, drift,
+demo storyboards, customer demo packs, Arazzo workflows as multi-step tests, realtime and batch
+AI APIs, and event mocks from AsyncAPI): what is left is its release.
 
 ## Under consideration
 
 From the build notes of the earlier steps and the harness plan, in no order; each has a step in
-the plan named under "Next", except the platform authorization server:
+the plan named under "Next", except event mocks over Kafka and the platform authorization
+server:
 
 - **MCP inspector**: client ID metadata documents.
 - **Source control**: verifying the signatures of pulled commits against allowed
@@ -133,6 +138,10 @@ the plan named under "Next", except the platform authorization server:
 - **Self-service across replicas**: visits and visitor mocks live in memory on one
   instance today. A shared store would let a hosted demo run several replicas
   without routing each mock to one of them.
+- **Event mocks over Kafka**: an [event mock](mocks/asyncapi.md) serves its channels over
+  WebSocket, server-sent events and webhooks. Producing to and consuming from a Kafka broker
+  the operator names (part B of step 09 of the demo next plan, behind a cargo feature) waits
+  for the owner's word; MQTT and AMQP only when asked.
 - **A platform authorization server for hosted instances**: Rustybin already
   points its OAuth metadata at an external issuer (`RUSTYBIN_CONTROL_OAUTH_ISSUER`);
   the platform side that issues control tokens to agents is not built.

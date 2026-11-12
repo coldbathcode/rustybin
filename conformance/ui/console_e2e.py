@@ -691,6 +691,45 @@ def run_theme(browser, theme):
 
     step("ai playground: a realtime session and the request log", ai_realtime)
 
+    def event_mock():
+        # An AsyncAPI document becomes a mock with channels: Rustybin
+        # publishes on one, a client's invalid message is refused on another.
+        name = f"events-{theme}"
+        doc = {
+            "asyncapi": "3.0.0",
+            "info": {"title": "Order events", "version": "1.0.0"},
+            "channels": {
+                "created": {"address": "orders/created", "messages": {"orderCreated": {"name": "orderCreated", "payload": {"type": "object", "required": ["id"], "properties": {"id": {"type": "integer"}}}}}},
+                "cancel": {"address": "orders/cancel", "messages": {"orderCancel": {"name": "orderCancel", "payload": {"type": "object", "required": ["id"], "properties": {"id": {"type": "integer"}}}}}},
+            },
+            "operations": {
+                "sendCreated": {"action": "send", "channel": {"$ref": "#/channels/created"}},
+                "receiveCancel": {"action": "receive", "channel": {"$ref": "#/channels/cancel"}},
+            },
+        }
+        http("DELETE", f"/_rustybin/mocks/{name}")
+        body = json.dumps({"name": name, "spec": doc, "channels": {"orders-created": {"pattern": "off"}}})
+        assert http("POST", "/_rustybin/mocks", {"Content-Type": "application/json"}, body) == 201
+        page.goto(BASE + f"/ui/#/mocks/{name}")
+        page.wait_for_selector("#channels-panel")
+        page.locator("#channel-select option[value='orders-created']").wait_for(state="attached")
+        page.select_option("#channel-select", "orders-created")
+        expect(page.locator("#channel-url")).to_contain_text(f"/events/{name}/orders-created")
+        page.click("#channel-publish")
+        expect(page.locator("#channel-feed tr")).to_have_count(1)
+        expect(page.locator("#channel-feed")).to_contain_text("orderCreated")
+        page.select_option("#channel-select", "orders-cancel")
+        page.wait_for_selector("#channel-compose")
+        page.fill("#channel-compose", '{"id": "not a number"}')
+        page.click("#channel-send")
+        expect(page.locator("#channels-panel")).to_contain_text("Not valid")
+        expect(page.locator("#channel-feed")).to_contain_text("not valid")
+        shot(page, theme, "09c-event-mock")
+        assert_icons_sized(page, "event mock, channels")
+        http("DELETE", f"/_rustybin/mocks/{name}")
+
+    step("mocks: an AsyncAPI mock's channels, a publish and an invalid message", event_mock)
+
     def mcp():
         goto_view(page, "mcp")
         page.locator("#mcp-server option[value='/mcp']").wait_for(state="attached")

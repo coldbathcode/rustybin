@@ -88,3 +88,89 @@ Part A first, with no new dependency; part B behind `asyncapi-kafka`; MQTT only 
 
 An AsyncAPI document becomes a working event mock on every surface (part A), Kafka works behind its
 feature (part B, or its row says no), documented with tested examples.
+
+## Build notes (2026-11-12)
+
+Part A is built whole, with the recommendation of section 6. Part B (Kafka) is not built: the
+owner chose part A now and a decision on Kafka after seeing it. Where the build differs from the
+plan above:
+
+- **An AsyncAPI mock is a `Compiled` revision with channels and no operations**:
+  `ParsedSpec.events` (`mocks::asyncapi::EventSpec`), filled by `spec::parse_value` when the
+  document has an `asyncapi` key. Nothing else in the store changed, so drafts, deploys,
+  history, owners, projects, persistence, exports, checkpoints and packs carry such a mock as
+  they carry any other. The kind is detected, never given: there is no `kind` field to set and
+  no `--asyncapi` flag (`rustybin mocks create --spec` takes either document). A mock's summary
+  and detail answer `kind` (`openapi` or `asyncapi`).
+- **A channel's id is its address as a slug** (`orders/created` is `orders-created`, numbered on
+  a clash), in 2.x and 3.0 alike, so both forms of a document give the same channels.
+- **Every channel is served all three ways** (WebSocket, SSE, webhooks) whatever bindings the
+  document names; a binding or server protocol that is not `ws` or `http` is one warning of the
+  deploy report. A `POST` to the channel publishes as a client (the `http` binding's other
+  half), and a plain `GET` describes the channel.
+- **The data plane also answers below the mock's root**, at
+  `/mock/{name}/_rustybin/events/{channel}`: a visitor's mock answers only on the mocks domain,
+  whose host rewrite leads to `/mock/{name}`. `/events/{name}/{channel}` refuses a visitor's
+  mock when the instance has a mocks domain, as `/mock/{name}` does.
+- **Patterns**: `every`, `burst`, `on_receive` and also `off` (only what is published by hand).
+  The default is `every`, `on_receive` on a channel whose document declares a reply, `off` on a
+  channel that only receives. A 3.0 `reply` puts the reply's messages among what the reply's
+  channel sends; 2.x has no reply.
+- **Faults are settings of the channel** (`delay_ms`, `drop_percent`, `malformed_percent`),
+  drawn from the mock's seed so a run repeats; there are no per-connection fault parameters. A
+  message published by hand is never spoiled.
+- **One more control route than the plan's**: `GET /_rustybin/mocks/{name}/channels` (the
+  channels with their settings, a valid sample and live numbers), beside
+  `.../channels/{channel}/messages`, `.../channels/{channel}/publish` and the subscribers
+  routes. Its tool is `list_channels`; the subscribers have `list_event_subscribers`,
+  `add_event_subscriber` (confirmed) and `remove_event_subscriber`. Six tools, 169 in all.
+- **No control-plane stream of messages**: the console's feed and `rustybin mocks events
+  --follow` ask the list again with `after`. A never-ending control stream must check its
+  caller again at every event (`handlers::still_readable`); a short poll gets that check for
+  free.
+- **Messages live in the mock's capture log** (`CaptureLog::record_event`, `EventRecord`), not
+  in a store of their own: bounded by the mock's capture limits, cleared with its requests,
+  gone with the mock. The record's `channel` is the channel's id, so how a received message
+  arrived is `transport` (`ws` or `http`), and a sent message has `delivered` (how many
+  WebSocket, SSE and webhook subscribers it went to) in place of one record per transport.
+  `TrafficScope::sees_event`: a caller who reads only their own traffic sees what Rustybin
+  published and what they published.
+- **A hub belongs to its mock** (`Hub.log`, compared with `CaptureLog::same`): a mock deleted
+  and made again under the same name starts its channels at message one and lets the old
+  mock's listeners go. Found while running the docs examples twice against one instance.
+- **Webhook subscribers are in memory only**: an hour by default, at most a day, removed after
+  ten failed deliveries in a row, 10 a mock and `asyncapi.max_subscribers` an instance, never in
+  a document, an export or a checkpoint. A URL's query is never answered again. The host is
+  checked with `Egress::dry_check` when the subscriber is added and resolved again at every
+  delivery; at most 16 deliveries are under way at once.
+- **Bounds beyond the plan's**: `asyncapi.max_connections` (128) and `asyncapi.session_minutes`
+  (60) as settings, 1024 hubs, 50 messages a second and 256 KiB a message on one connection, 50
+  messages and 20 examples of a message kept at parse.
+- **Security settings do not apply to channels** (a warning of the deploy report says so), and
+  the parts of a mock built on operations (its MCP server's tools, stateful data, drift,
+  collections, the portal's try-it) have nothing to work on for an event mock. The portal still
+  lists such a mock as a candidate; publishing one shows an API with no operations.
+- **Self-service visitors** may create event mocks; their HTTP answers carry the visitor
+  response headers (an SSE stream keeps its media type), and webhook subscribers are refused
+  for them twice: the routes are not self-service, and `events::subscribe` refuses a visitor's
+  mock.
+- The tests were written with the code: `src/events/tests.rs` (the plan's first four, plus the
+  reply, the faults, the task's end, the connection cap, an allowed webhook on loopback, the
+  deploy report, the settings in a document and a mock made again) against a real WebSocket
+  server, and one in `src/mcp/manage/tests.rs` for the tools.
+  `docs/examples/mocks/asyncapi.hurl` and `asyncapi-stream.sh` (websocat) run the examples.
+
+### For the merge
+
+`src/mocks/asyncapi.rs`, `src/events/` (`mod.rs`, `serve.rs`), `ParsedSpec.events`,
+`MockSettings.channels` with `ChannelSettings` (and its place in `MockDoc`, `CreateBody`,
+`PatchBody`, the config schema and the configdoc diff), `Report.channels`, the event log inside
+`CaptureLog`, `Purpose::Events`, `AppState.events`, `events::specs` and the settings group
+`asyncapi`, `src/mcp/manage/events.rs`, six `mocks` commands, `ui/views/mocks/events.js`.
+
+### Part B, if the owner says go
+
+Kafka as a client of a broker the operator names, behind the cargo feature `asyncapi-kafka`:
+the model already keeps each channel's bindings (`Channel.bindings`), the deploy report already
+names `kafka` as not served, and a publish already goes through one function
+(`Events::publish`), which is where a producer would be handed the frame beside the webhooks.

@@ -261,6 +261,7 @@ under a **purpose** with its own rule, on only when the feature is configured:
 | `otlp` | The host of `harness.otlp_endpoint`, once set: [a finished run's metrics](harness.md#opentelemetry). |
 | `spec_fetch` | No default: name the hosts [specs are fetched from](mocks/index.md#a-spec-from-a-url) in `RUSTYBIN_EGRESS_ALLOW`. Never a visitor's. |
 | `record` | No default: name the hosts of the APIs you [record](mocks/record.md) in `RUSTYBIN_EGRESS_ALLOW`. Never a visitor's. |
+| `events` | No default: name the hosts of the [webhook subscribers](mocks/asyncapi.md#webhook-subscribers) of event mocks in `RUSTYBIN_EGRESS_ALLOW`. Never a visitor's. |
 | `sso` | The issuer's host once [single sign-on](sso.md) is set up (`sso.enabled`, `sso.issuer`, `sso.client_id`): discovery, the keys and the token endpoint. Keys or a token endpoint on another host need `RUSTYBIN_EGRESS_ALLOW`; a provider on the same machine `RUSTYBIN_EGRESS_ALLOW_LOOPBACK=true`. |
 
 ```hurl
@@ -398,6 +399,14 @@ Published items and the counters are saved in `<RUSTYBIN_STATE_DIR>/portal.json`
 | `RUSTYBIN_AI_API_KEY` | unset | The only accepted key (implies `RUSTYBIN_AI_REQUIRE_AUTH`). For Bedrock SigV4 it is compared with the access key id. |
 
 See [Faults, latency, credentials, inspection](ai/gateway-features.md#credential-checks).
+
+## Event mocks
+
+The caps of [event mocks](mocks/asyncapi.md) are [instance settings](#state-directory-settings-and-secrets) without
+a variable: `asyncapi.max_connections` (128: WebSocket and server-sent event connections to
+channels at once), `asyncapi.session_minutes` (60: the longest connection) and
+`asyncapi.max_subscribers` (50: webhook subscribers on the instance). Webhook subscribers reach
+out under the [outbound purpose](#outbound-connections) `events`.
 
 ## AI assist
 

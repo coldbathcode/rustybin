@@ -23,6 +23,7 @@
 - [Build mocks with AI](mocks/ai.md)
 - [Record a mock from a real API](mocks/record.md)
 - [Contract drift](mocks/drift.md)
+- [Event mocks from AsyncAPI](mocks/asyncapi.md)
 - [Bring your own AI](ai-assist.md)
 - [Dev portal](portal.md)
 - [Collections and OpenAPI](exports.md)

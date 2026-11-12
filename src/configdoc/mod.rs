@@ -598,6 +598,7 @@ fn mock_doc(s: &Snapshot, reveal: bool, bundle: bool) -> (MockDoc, Option<SpecFi
         operations: settings.operations.clone(),
         mcp: settings.mcp.clone(),
         drift: settings.drift.clone(),
+        channels: settings.channels.clone(),
         project: s.project.clone(),
     };
     if bundle {
@@ -1395,6 +1396,9 @@ fn mock_changes(out: &mut Vec<Change>, before: &[MockDoc], after: &[MockDoc], ba
         }
         if jv(&b.mcp) != jv(&a.mcp) {
             parts.push("mcp changed".into());
+        }
+        if jv(&b.channels) != jv(&a.channels) {
+            parts.push("channels changed".into());
         }
         let ops: BTreeSet<&String> = b
             .operations

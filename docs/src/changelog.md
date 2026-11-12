@@ -3,7 +3,7 @@
 ## Unreleased: the last of the roadmap's candidates
 
 [The plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/core-next/master-plan.md),
-steps 11 to 13, built on 2026-11-09 and not released yet, and steps 01 to 08 of
+steps 11 to 13, built on 2026-11-09 and not released yet, and steps 01 to 09 of
 [the demo next plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/demo-next/master-plan.md),
 built on 2026-11-11 and 2026-11-12. Nothing to do when upgrading: what is new is off until you turn it on or
 name it in a scenario.
@@ -105,6 +105,21 @@ name it in a scenario.
 - The AI request log (`GET /ai/requests`) has a `kind` (`request`, `realtime`, `batch`); a
   realtime session's record holds its events and a batch's its lines, never audio. The console's
   AI playground has a Realtime session panel and a Request log card.
+- [Event mocks from AsyncAPI](mocks/asyncapi.md): an AsyncAPI 2.x or 3.0 document becomes a mock
+  with channels in place of operations, in the same store as the OpenAPI mocks (drafts, deploys,
+  revisions, projects, exports). Each channel answers at `/events/{mock}/{channel}` as a
+  WebSocket, as server-sent events and to a `POST`; Rustybin publishes the document's `send`
+  messages (its examples, the mock's stored ones, or generated from the schema) on a pattern
+  (`every`, `burst`, `on_receive`, `off`), with faults (`delay_ms`, `drop_percent`,
+  `malformed_percent`), and validates what clients publish against the `receive` messages: an
+  invalid one is answered with an error and kept with its report. Webhook subscribers
+  (`/_rustybin/mocks/{name}/subscribers`) get a channel's messages posted, under the new
+  outbound purpose `events`, which has no default. The deploy report names what is not served
+  (`kafka`, `mqtt` and other bindings) or not generated (Avro, Protobuf). On every surface: the
+  console's Channels tab, `rustybin mocks channels | events | publish | subscribers | subscribe |
+  unsubscribe`, six management tools, `channels:` of a mock in `rustybin.yaml`, and the
+  settings `asyncapi.max_connections` (128), `asyncapi.session_minutes` (60) and
+  `asyncapi.max_subscribers` (50). Kafka is not built.
 
 - Source control: a [diverged branch](source-control.md#a-diverged-branch) says what differs
   (`divergence` in the status and in the `409`) and is resolved by a person: `POST

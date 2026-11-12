@@ -36,6 +36,7 @@ pub mod cookies;
 pub mod diagnostics;
 pub mod echo;
 pub mod egress;
+pub mod events;
 pub mod fault;
 pub mod flaky;
 pub mod graphql;
@@ -168,6 +169,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     replay::router,
     storyboards::router,
     packs::router,
+    events::router,
     checkpoints::router,
     egress::router,
     harness::router,
