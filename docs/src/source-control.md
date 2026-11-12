@@ -33,7 +33,8 @@ starts with `-` (it would reach git as an option).
 Anyone who can push to the repository controls what the document describes: the
 mocks, the settings it names, the registry and portal entries, the harness
 scenarios, the agents' rules and the health toggle, on the next pull with apply.
-Nothing more:
+(With [verified pulls](#verified-pulls) on, only when a signer the instance allows
+signed the commits.) Nothing more:
 
 - **Not the host's files.** A symbolic link in the working copy (`specs/`, the
   document, a spec) is refused when committing, git checks links out as plain files
@@ -123,6 +124,8 @@ instance is pushed and what a pull applies), and `secrets.write` for `git.token`
 | `git.webhook_secret` (secret) | | unset | The secret a git host signs push webhooks with, see [A webhook instead of polling](#a-webhook-instead-of-polling). |
 | `git.sign` | | `false` | Sign every commit this instance makes, see [Signed commits](#signed-commits). |
 | `git.signing_key` (secret) | | unset | The private key commits are signed with: an OpenSSH key without a passphrase. Never the deploy key, never shown again. |
+| `git.verify` | | `false` | Take the repository's side only when an allowed signer signed every commit since the last verified head, see [Verified pulls](#verified-pulls). Turning it on trusts the head of that moment. |
+| `git.allowed_signers` | | empty | Who may sign what this instance pulls: at most 50 lines, a name and a public key each (`ann ssh-ed25519 AAAA...`, or the line of a `.pub` file). Public keys, not secrets. |
 
 **Deploy key.** For an ssh remote, **Generate the deploy key** (`POST
 /_rustybin/git/key`) creates an ed25519 key in `<state>/repo.key` (mode `0600`) and
@@ -398,8 +401,108 @@ GitLab: SSH keys with usage "Signing"), then turn `git.sign` on:
 - **The author** is still `git.author`; a host shows a commit as verified when that
   email belongs to the account the signing key is registered with.
 
-The instance signs; it does not verify. Whether the commits it pulls are signed, and by
-whom, is the host's branch protection to enforce.
+Signing is about what the instance writes. What it reads is the next section.
+
+### Verified pulls
+
+An instance that applies its repository on a pull, a webhook or a timer applies whatever
+reaches the branch. With `git.verify` on (off by default), it takes the repository's side
+only when a named signer signed it. It needs git 2.38 or later and `ssh-keygen` (the
+image has both).
+
+**Who may sign** is the setting `git.allowed_signers`: one line each, a name and a public
+key (`ann ssh-ed25519 AAAA...`), or the line of a `.pub` file as a git host shows it (its
+comment becomes the name). They are public keys, not secrets, and the status answers
+their names and `SHA256:` fingerprints. The instance's own [signing key](#signed-commits)
+is allowed without being listed, while it is the current key. A line with an option
+(`cert-authority`, `namespaces`) is refused: every signer is good for git signatures only.
+
+```bash
+{{#include ../examples/config/source-control.sh:verify_on}}
+```
+
+```hurl
+{{#include ../examples/config/git_branches.hurl:status_verification}}
+```
+
+```hurl
+{{#include ../examples/config/git_branches.hurl:signers_refused}}
+```
+
+**What is verified** is every commit between the last verified head and the new one,
+not only the tip, so a signed commit on top of an unsigned one is refused:
+
+| A commit | Passes when |
+|---|---|
+| With one parent (or none) | An allowed signer signed it. SSH signatures only: an OpenPGP or X.509 signature, a git host's own web signature included, reads as no signature. |
+| A merge of two parents | An allowed signer signed it, or its tree is exactly what merging its two parents gives (`git merge-tree --write-tree`). So a host's merge button works, and a merge that carries a change of its own (a conflict resolved by hand, an edit slipped in) needs a signer. Both parents are verified like any commit. |
+| A merge of more than two parents | An allowed signer signed it. |
+
+**Where**: on every path that takes the repository's side. A pull (and its dry run), the
+[webhook](#a-webhook-instead-of-polling), the [automatic mode](#automatic-mode), startup
+from `RUSTYBIN_CONFIG_GIT`, [`resolve` with `repository`](#a-diverged-branch) and its
+preview, a [switch of branch](#branches) and its preview, the first checkout of a new
+working copy, and a [checkpoint](checkpoints.md) listed or restored from the repository.
+Resolving with the instance's copy, a pull request branch and a push take nothing from
+the repository and are not checked.
+
+**A refusal** is `409` with `reason: unverified`, the `commit` and `why`. Nothing is
+applied and the working copy does not move. The automatic mode and the webhook record
+it in the timeline and apply nothing; the status keeps it under
+`verification.last_refusal` and the `source_control_verification` check of the
+[diagnostics](troubleshooting.md) warns until a pull passes:
+
+```bash
+{{#include ../examples/config/source-control.sh:verify_refused}}
+```
+
+```json
+{
+  "error": "not verified: commit 3f9c2ab has no SSH signature. Nothing was applied and the working copy did not move (...)",
+  "reason": "unverified",
+  "commit": "3f9c2ab0c7d1e5a4b8f6d2c9e1a7b3f5d8c6e4a2",
+  "why": "has no SSH signature"
+}
+```
+
+**Squash and rebase merges are refused.** A squash merge or a rebase merge made by the
+git host is a new commit, signed by the host or by nobody, and no allowed signer vouches
+for it. What a team does:
+
+- **Merge pull requests with a merge commit**, and turn squash and rebase merging off for
+  the repository (on GitHub: Settings, General, Pull Requests; on GitLab: Settings, Merge
+  requests, Merge method "Merge commit"). The commits of the pull request are signed by
+  their authors, and the merge commit passes as a clean merge.
+- **Or push signed commits**: squash or rebase on your own machine, sign the result with a
+  key the instance allows, and push it (a fast-forward of the branch).
+- A merge with **conflicts** resolved in the host's editor carries a change of its own:
+  resolve it locally and sign the merge commit.
+
+**The last verified head** of each branch is kept in `<state>/repo.verified.json`. A
+commit below it is never checked again, so replacing a key (a signer removed from the
+list, a new signing key for the instance) does not reopen history: old commits stay
+trusted, new ones need a key that is allowed now. A commit the instance makes itself
+on a verified head is the verified head from then on, signed or not.
+
+**Turning it on trusts the head of that moment** as it is, whatever is below it, and the
+timeline says so (`verification turned on: the head 3f9c2ab is trusted as it is`); the
+status answers it as `verification.trusted`. Turning it off forgets the verified heads,
+so off and on again is how a person accepts a head as it stands, for example after
+resolving a diverged branch with the instance's copy on top of commits nobody signed.
+An instance that has `git.verify` on before it has a working copy trusts nothing: every
+commit of the branch has to verify before the first checkout, so connect first and turn
+verification on after.
+
+A document from the repository never changes `git.verify` or `git.allowed_signers`
+(nor any `git.*` setting), so what is pulled cannot turn its own check off. With
+verification on and nobody allowed (no signer listed, no signing key), every new commit
+is refused, and the status says so under `verification.problem`.
+
+What the instance does not do: it does not trust a git host's web signature (that
+would trust every commit the host makes for anyone who can click merge), and it does
+not verify the commits it pushed itself at the host. Branch protection at the host is
+still worth having: it stops an unsigned commit before it reaches the branch, where
+this stops it before it reaches the instance.
 
 ## History
 
@@ -480,9 +583,9 @@ the right signature does nothing. Without the secret the route answers `404`:
 ## Not in this version
 
 A merge inside the instance: a diverged branch is resolved by naming a side, or in a
-pull request at the git host. Verifying the signatures of pulled commits against a
-list of allowed signers: a host's merge commits carry the host's own signature, so it
-is the host's branch protection that enforces who may sign.
+pull request at the git host. Trusting a git host's own web signature when [verifying
+pulls](#verified-pulls): a squash or rebase merge made by the host is refused, a merge
+commit passes as a clean merge.
 
 ## On every surface
 
@@ -490,9 +593,9 @@ The same job from the API, the console, the command line, an agent and the confi
 
 | Surface | Where |
 |---|---|
-| API | `GET /_rustybin/git`, `POST /_rustybin/git/init`, `/commit` (with `checkpoints`), `/push`, `/pull`, `/resolve` (`instance`, `repository`, `pull_request`, with `dry_run`), `GET`, `POST /_rustybin/git/key`, `GET /_rustybin/git/history`, `GET /_rustybin/git/branches`, `POST /_rustybin/git/branch`, `GET`, `POST /_rustybin/git/signing-key`; the repository's checkpoints: `GET /_rustybin/checkpoints?from=git`, `POST /_rustybin/checkpoints/{name}/restore?from=git` |
-| Console | **Management, Source control**: the repository form, status (what differs on a diverged branch), connect, commit and push (with a checkpoint choice), pull, a diverged branch's three ways out with a preview, branches (list, preview, switch, start), the deploy key, commit signing, history; **Management, Checkpoints, In the repository** |
-| CLI | `rustybin git status`, `init`, `commit` (`--checkpoint NAME`), `push`, `pull`, `resolve` (`--with instance`, `repository` or `pull-request`, `--branch`, `--dry-run`), `key`, `history`, `branches`, `switch`, `branch`, `signing-key`; `rustybin checkpoint list --from-git`, `checkpoint restore NAME --from-git` ([reference](cli.md#git)) |
-| Management MCP | `git_status`, `git_init`, `git_commit` (`checkpoints`), `git_push`, `git_pull`, `git_resolve`, `git_deploy_key`, `git_branches`, `git_switch_branch`, `git_signing_key`, `list_repository_checkpoints`, `restore_checkpoint` with `from: "git"`; the prompt `backup_to_git` ([agent page](agent-mcp.md)) |
-| `rustybin.yaml` | Never: the `git.*` settings (the remote, the branch, the token, signing) are not exported, and a document from the repository cannot change one, so a document in a repository cannot point the instance elsewhere. The settings themselves: `git.branch`, `git.sign`, the secret `git.signing_key` |
+| API | `GET /_rustybin/git`, `POST /_rustybin/git/init`, `/commit` (with `checkpoints`), `/push`, `/pull`, `/resolve` (`instance`, `repository`, `pull_request`, with `dry_run`), `GET`, `POST /_rustybin/git/key`, `GET /_rustybin/git/history`, `GET /_rustybin/git/branches`, `POST /_rustybin/git/branch`, `GET`, `POST /_rustybin/git/signing-key`; `verification` in the status and the `409` with `reason: unverified` of [verified pulls](#verified-pulls); the repository's checkpoints: `GET /_rustybin/checkpoints?from=git`, `POST /_rustybin/checkpoints/{name}/restore?from=git` |
+| Console | **Management, Source control**: the repository form, status (what differs on a diverged branch), connect, commit and push (with a checkpoint choice), pull, a diverged branch's three ways out with a preview, branches (list, preview, switch, start), the deploy key, commit signing, verified pulls (the switch, the signers, the last verified head, the last refusal), history; **Management, Checkpoints, In the repository** |
+| CLI | `rustybin git status`, `init`, `commit` (`--checkpoint NAME`), `push`, `pull`, `resolve` (`--with instance`, `repository` or `pull-request`, `--branch`, `--dry-run`), `key`, `history`, `branches`, `switch`, `branch`, `signing-key`, `signers` (`--add`, `--remove`); `rustybin checkpoint list --from-git`, `checkpoint restore NAME --from-git` ([reference](cli.md#git)) |
+| Management MCP | `git_status`, `git_init`, `git_commit` (`checkpoints`), `git_push`, `git_pull`, `git_resolve`, `git_deploy_key`, `git_branches`, `git_switch_branch`, `git_signing_key`, `list_repository_checkpoints`, `restore_checkpoint` with `from: "git"` (`git_status` answers `verification`, and the tools that take the repository's side answer the refusal: `reason`, `commit`, `why`); the prompt `backup_to_git` ([agent page](agent-mcp.md)) |
+| `rustybin.yaml` | Never: the `git.*` settings (the remote, the branch, the token, signing) are not exported, and a document from the repository cannot change one, so a document in a repository cannot point the instance elsewhere. The settings themselves: `git.branch`, `git.sign`, the secret `git.signing_key`, `git.verify`, `git.allowed_signers` |
 | Environment | `RUSTYBIN_CONFIG_GIT`, `_REF`, `_PATH`, `_AUTH`, `_TOKEN`, `_AUTO`, `_REQUIRED` ([configuration](configuration.md#source-control)) |

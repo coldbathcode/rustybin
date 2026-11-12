@@ -235,6 +235,37 @@ pub fn report(state: &AppState) -> Value {
             ),
         });
     }
+    // Verified pulls: on, able to pass something, and nothing refused.
+    if state.git.verify_enabled() {
+        let refusal = state.git.last_refusal();
+        checks.push(match (state.git.verify_problem(), refusal) {
+            (Some(problem), _) => check(
+                "source_control_verification",
+                "warn",
+                problem,
+                Some("name the allowed signers (Management, Source control, or rustybin git signers --add \"<name> <public key>\"), run git 2.38 or later, or turn git.verify off; until then nothing new is taken from the repository"),
+            ),
+            (None, Some(r)) => check(
+                "source_control_verification",
+                "warn",
+                format!(
+                    "the repository's side was refused and nothing was applied: {} {}",
+                    r["commit"]
+                        .as_str()
+                        .map(|c| format!("commit {}", c.chars().take(7).collect::<String>()))
+                        .unwrap_or_else(|| "the branch".to_string()),
+                    r["why"].as_str().unwrap_or("is not verified")
+                ),
+                Some("have an allowed signer sign the commit (a merge commit instead of a squash or rebase merge at the git host), or add the signer's public key to git.allowed_signers (rustybin git signers)"),
+            ),
+            (None, None) => check(
+                "source_control_verification",
+                "ok",
+                "pulled commits are verified against the allowed signers",
+                None,
+            ),
+        });
+    }
 
     // The sign-in.
     checks.push(

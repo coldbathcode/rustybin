@@ -7,8 +7,9 @@
 // each with a preview: this instance's copy, the repository's, or a new
 // branch for a pull request at the git host), Branches (the remote's, a
 // switch with a preview, a new branch from this instance), the deploy key,
-// the commit signing key (its public half and fingerprint), the history and
-// the timeline of operations. "Write the commit message" asks the AI from
+// the commit signing key (its public half and fingerprint), verified pulls
+// (the switch, the allowed signers, the last verified head, the last
+// refusal), the history and the timeline of operations. "Write the commit message" asks the AI from
 // the drift summary.
 import { h, replace, card, input, checkbox, notice, toast, icon, badge, spinner, kvgrid, fmtTime, copyButton } from '../../lib/dom.js';
 import { SERVER, getJson, send } from '../../lib/http.js';
@@ -37,6 +38,11 @@ async function post(path, body) {
 // A read of a control path of the console's own (a literal of this file).
 async function read(path) {
   return unlessBusy(() => send({ control: true, url: SERVER + path, admin: true, session: false, timeout: 120000 }));
+}
+
+// A refused commit of the repository's side (verification.last_refusal).
+function refusalText(r) {
+  return (r.commit ? 'commit ' + String(r.commit).slice(0, 7) + ' ' : '') + (r.why || 'is not verified') + (r.branch ? ' (' + r.branch + ', ' + fmtTime(r.at) + ')' : '');
 }
 
 function lines(list, id) {
@@ -75,6 +81,7 @@ export function gitPanel(doc, reload, error) {
   const keyEl = h('div', { id: 'git-key' });
   const branchesEl = h('div', { id: 'git-branches' });
   const signingEl = h('div', { id: 'git-signing' });
+  const verifyEl = h('div', { id: 'git-verify' });
   // What the last action answered. These outlive the reload of the status
   // that follows an action (the cards around them are drawn again): the
   // answer of a pull request names the branch to open it from.
@@ -114,6 +121,7 @@ export function gitPanel(doc, reload, error) {
     renderBranches();
     renderKey();
     renderSigning();
+    renderVerify();
     renderTimeline();
     loadHistory();
   }
@@ -140,10 +148,12 @@ export function gitPanel(doc, reload, error) {
       ['Against the remote', sync || (st.fetched ? 'unknown' : h('button', { class: 'btn sm ghost', type: 'button', id: 'git-fetch', onclick: () => load(true) }, icon('refresh'), 'Ask the remote'))],
       ['Automatic mode', st.auto === 'off' ? 'off' : st.auto === 'pull' ? 'pull and apply every ' + st.pull_every : 'push every change (checked every 30 s)'],
       ['Commit signing', st.signing && st.signing.enabled ? (st.signing.problem ? badge('on, and cannot work', 'err') : badge('on', 'ok')) : 'off'],
+      ['Verified pulls', st.verification && st.verification.enabled ? (st.verification.problem ? badge('on, and nothing can pass', 'err') : st.verification.last_refusal ? badge('on, the last pull was refused', 'err') : badge('on', 'ok')) : 'off'],
     ]));
     if ((drift.summary || []).length) items.push(h('div', null, h('h3', { class: 'section-title' }, 'What a commit would record'), lines(drift.summary, 'git-drift')));
     if (st.divergence) items.push(divergenceBlock(st.divergence));
     if (st.signing && st.signing.problem) items.push(notice('warn', h('div', { class: 'grow' }, h('strong', null, 'Commits cannot be signed. '), st.signing.problem)));
+    if (st.verification && st.verification.enabled && st.verification.last_refusal) items.push(notice('err', h('div', { class: 'grow', id: 'git-unverified' }, h('strong', null, 'The repository\'s side is not verified, and nothing of it was applied. '), refusalText(st.verification.last_refusal))));
     replace(statusEl, ...items);
   }
 
@@ -343,6 +353,38 @@ export function gitPanel(doc, reload, error) {
           h('p', { class: 'muted small', style: { margin: 0 } }, 'No signing key yet. Generate one here (or paste an OpenSSH private key without a passphrase into the Signing key setting above), register its public key at the git host as a signing key, then turn Sign commits on.'))));
   }
 
+  // Verified pulls: the switch (the git.verify setting), who may sign
+  // (git.allowed_signers, public keys, edited in the form above), the head
+  // trusted when it was turned on, the last verified head, the last refusal.
+  function renderVerify() {
+    const v = st.verification || {};
+    const signers = (v.signers || []).slice();
+    if (v.own_key) signers.push(Object.assign({ own: true }, v.own_key));
+    const toggle = perms.guard(h('button', { class: 'btn sm', type: 'button', id: 'git-verify-toggle', disabled: !st.state_dir, onclick: async () => {
+      const on = !v.enabled;
+      if (on && !confirm('Verify pulled commits from now on? The head of this moment is trusted as it is; every commit after it needs an allowed signer\'s SSH signature. A squash or rebase merge made by the git host will be refused: merge with a merge commit.')) return;
+      if (!on && !confirm('Stop verifying pulled commits? Whatever reaches the branch is applied again.')) return;
+      const r = await send({ control: true, method: 'PATCH', url: SERVER + '/_rustybin/settings', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ values: { 'git.verify': on } }), admin: true, session: false });
+      if (!r.ok) { toast(errorText(r, 'verification'), 'err'); return; }
+      toast(on ? 'Pulled commits are verified' : 'Pulled commits are not verified');
+      refreshSettings();
+      load(false);
+    } }, icon('check'), v.enabled ? 'Turn off' : 'Turn on'), 'settings.write');
+    const head = (m) => h('span', null, h('code', { class: 'mono' }, m.short), h('span', { class: 'muted small' }, ' ' + fmtTime(m.at)));
+    replace(verifyEl, card('Verified pulls', { hint: 'only what an allowed signer signed is taken from the repository; ' + (v.enabled ? 'on' : 'off'), actions: toggle },
+      h('div', { class: 'stack' },
+        v.problem ? notice('warn', v.problem) : null,
+        v.enabled && v.last_refusal ? notice('err', h('div', { class: 'grow' }, h('strong', null, 'Refused: '), refusalText(v.last_refusal))) : null,
+        signers.length ? h('table', { class: 'table small', id: 'git-signers' }, h('thead', null, h('tr', null, h('th', null, 'Signer'), h('th', null, 'Key'), h('th', null, 'Fingerprint'))),
+          h('tbody', null, ...signers.map((s) => h('tr', null, h('td', null, s.name, s.own ? h('span', { class: 'muted small' }, ' (this instance\'s signing key)') : null), h('td', { class: 'mono' }, s.key_type), h('td', { class: 'mono' }, s.fingerprint)))))
+          : h('p', { class: 'muted small', id: 'git-signers', style: { margin: 0 } }, 'No allowed signers yet. List them in the Allowed signers setting above, one a line: a name and a public key (ann ssh-ed25519 AAAA...), or the line of a .pub file.'),
+        v.enabled ? kvgrid([
+          ['Last verified head', v.verified_head ? h('span', { id: 'git-verified-head' }, head(v.verified_head)) : h('span', { id: 'git-verified-head' }, 'none: every commit of the branch has to verify')],
+          ['Trusted when turned on', v.trusted ? head(v.trusted) : 'nothing (there was no commit yet)'],
+        ]) : null,
+        h('p', { class: 'muted small', style: { margin: 0 } }, 'Every commit since the last verified head needs an allowed signer\'s SSH signature: on a pull, the webhook, the automatic mode, a switch of branch, resolving with the repository\'s copy and a checkpoint from the repository. A merge commit passes unsigned only as the clean merge of two verified parents, so merge pull requests with a merge commit: a squash or rebase merge made by the git host is refused. The signers are public keys, changed in the Allowed signers setting above; this instance\'s own signing key is allowed without being listed.'))));
+  }
+
   function renderTimeline() {
     const list = st.timeline || [];
     replace(timelineEl, card('Operations', { hint: 'the last ' + list.length + ' on this instance' },
@@ -386,6 +428,7 @@ export function gitPanel(doc, reload, error) {
   el.appendChild(branchesEl);
   el.appendChild(keyEl);
   el.appendChild(signingEl);
+  el.appendChild(verifyEl);
   el.appendChild(historyEl);
   el.appendChild(timelineEl);
   fetchNext = true;

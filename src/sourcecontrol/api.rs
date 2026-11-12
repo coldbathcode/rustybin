@@ -2,7 +2,11 @@
 //!
 //! - `GET /_rustybin/git?fetch=true`: status (remote, branch, head, ahead
 //!   and behind, the drift between the working copy and the instance, the
-//!   deploy key, the timeline).
+//!   deploy key, `verification`, the timeline).
+//! - With `git.verify` on, every route that takes the repository's side
+//!   (pull, resolve with `repository`, branch, init's first checkout)
+//!   answers `409` with `reason: unverified`, `commit` and `why` for a
+//!   commit no allowed signer signed (`verify.rs`).
 //! - `POST /_rustybin/git/init`: clone, or initialise for an empty remote.
 //! - `POST /_rustybin/git/commit` `{message, checkpoints}`: export into the
 //!   working copy and commit, with the named checkpoints.
@@ -417,8 +421,10 @@ pub fn catalog() -> Vec<Endpoint> {
                 "The configured repository (git.remote, git.branch, git.path, git.auth), whether git \
                  is installed and the working copy exists, the last commit, ahead and behind \
                  (?fetch=true asks the remote), the drift between the working copy's document and \
-                 the instance (what a commit would record), the deploy key's public half and the \
-                 timeline of operations.",
+                 the instance (what a commit would record), the deploy key's public half, \
+                 verification (whether pulled commits are verified against allowed signers: \
+                 the signers' names and fingerprints, the head trusted when it was turned on, \
+                 the last verified head, the last refusal) and the timeline of operations.",
             )
             .example(Example::get("Source control status", GIT_PATH)),
         Endpoint::new(INIT_PATH, &["POST"], category::CONTROL, "Connect the repository (admin)")
@@ -452,7 +458,13 @@ pub fn catalog() -> Vec<Endpoint> {
                 "{apply, dry_run, prune}: fetch and fast-forward; with apply, apply the repository's \
                  document to the instance (dry_run answers the diff without touching anything, \
                  prune makes the document the whole truth). Never merges: a diverged branch \
-                 answers 409 with what differs (divergence) and the ways out (options).",
+                 answers 409 with what differs (divergence) and the ways out (options). With \
+                 the git.verify setting on, every commit since the last verified head needs an \
+                 allowed signer's SSH signature (a merge commit passes unsigned only as the \
+                 clean merge of two verified parents): otherwise 409 with reason unverified, \
+                 the commit and why, nothing applied and the working copy not moved. The \
+                 same holds for resolve with repository, a switch of branch and a checkpoint \
+                 from the repository.",
             )
             .example(
                 Example::post("Pull, dry run", PULL_PATH)
@@ -529,15 +541,14 @@ pub fn catalog() -> Vec<Endpoint> {
 
 pub fn openapi_paths() -> Value {
     let tags = json!(["Control Plane"]);
-    let not_ready =
-        json!({ "description": "Not configured, not initialised, busy, or a conflict to resolve" });
+    let not_ready = json!({ "description": "Not configured, not initialised, busy, a conflict to resolve, or (with git.verify on) a commit of the repository's side that no allowed signer signed: {error, reason: unverified, commit, why}, nothing applied" });
     let admin = json!({ "description": "Admin rights required" });
     let ok = |desc: &str| json!({ "200": { "description": desc }, "401": admin, "409": not_ready, "502": { "description": "git failed (the remote, the network)" } });
     json!({
         GIT_PATH: { "get": {
             "tags": tags, "summary": "Source control status", "operationId": "gitStatus",
             "parameters": [{ "name": "fetch", "in": "query", "schema": { "type": "boolean" }, "description": "Ask the remote for ahead and behind" }],
-            "responses": { "200": { "description": "{git, remote, branch, path, auth, initialised, head, ahead, behind, drift, divergence (what differs and the ways out, when diverged), deploy_key, signing, timeline}" }, "401": admin }
+            "responses": { "200": { "description": "{git, remote, branch, path, auth, initialised, head, ahead, behind, drift, divergence (what differs and the ways out, when diverged), deploy_key, signing, verification: {enabled, signers: [{name, key_type, fingerprint}], own_key, since, trusted, verified_head, last_refusal, problem}, timeline}" }, "401": admin }
         } },
         INIT_PATH: { "post": { "tags": tags, "summary": "Connect the repository", "operationId": "gitInit", "responses": ok("{initialised, fresh, remote_branch, head}") } },
         COMMIT_PATH: { "post": { "tags": tags, "summary": "Commit the instance's configuration", "operationId": "gitCommit",

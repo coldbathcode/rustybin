@@ -3780,6 +3780,48 @@ def run_source_control(browser):
             shot(page, "git", "62-source-control-signing")
 
         step("source control: the signing key shows its public half and fingerprint only", the_signing_key_shows_its_public_half)
+
+        def verified_pulls_refuse_an_unsigned_commit():
+            page.wait_for_selector("#git-verify >> text=Verified pulls")
+            expect(page.locator("#git-verify-toggle")).to_contain_text("Turn on")
+            if not shutil.which("ssh-keygen"):
+                return
+            # The instance's own signing key (the step before) is allowed
+            # without being listed.
+            expect(page.locator("#git-signers")).to_contain_text("this instance's signing key")
+            before = settled_status()
+            page.click("#git-verify-toggle")
+            page.wait_for_selector("#git-verified-head code")
+            expect(page.locator("#git-verify-toggle")).to_contain_text("Turn off")
+            status = settled_status()
+            assert status["verification"]["enabled"] is True, status["verification"]
+            assert status["verification"]["trusted"]["sha"] == before["head"]["sha"], status["verification"]
+            expect(page.locator("#git-verified-head")).to_contain_text(before["head"]["sha"][:7])
+            version = subprocess.run(["git", "--version"], capture_output=True, text=True).stdout.split()
+            numbers = [int(n) for n in version[2].split(".")[:2]] if len(version) > 2 else [0, 0]
+            if numbers < [2, 38]:
+                return
+            # Someone pushes an unsigned commit to the branch: the pull's dry
+            # run is refused, the status says why, nothing moves.
+            elsewhere = os.path.join(tmp, "elsewhere")
+            git("fetch", "--quiet", "origin", cwd=elsewhere)
+            git("checkout", "--quiet", "-B", "staging", "origin/staging", cwd=elsewhere)
+            with open(os.path.join(elsewhere, "UNSIGNED.md"), "w") as f:
+                f.write("# unsigned\n")
+            git("add", "UNSIGNED.md", cwd=elsewhere)
+            git("commit", "--quiet", "-m", "Unsigned at the host", cwd=elsewhere)
+            git("push", "--quiet", "origin", "staging", cwd=elsewhere)
+            page.click("#git-pull-dry")
+            page.wait_for_selector("#git-result >> text=not verified")
+            page.wait_for_selector("#git-unverified")
+            expect(page.locator("#git-unverified")).to_contain_text("no SSH signature")
+            expect(page.locator("#git-verify")).to_contain_text("Refused")
+            status = settled_status()
+            assert status["head"]["sha"] == before["head"]["sha"], "the working copy moved"
+            assert status["verification"]["last_refusal"]["commit"], status["verification"]
+            shot(page, "git", "63-source-control-verified-pulls")
+
+        step("source control: verified pulls trust the head, list the signers and refuse an unsigned commit", verified_pulls_refuse_an_unsigned_commit)
         ctx.close()
     except Exception as e:  # noqa: BLE001 - the setup failed: report it with the rest
         print(f"  FAIL source control: {e}")

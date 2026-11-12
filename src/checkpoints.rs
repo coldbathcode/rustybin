@@ -220,25 +220,37 @@ pub struct Checkpoints {
     items: Mutex<BTreeMap<String, Item>>,
 }
 
-/// A refusal: status and message.
+/// A refusal: status, message, and the extra fields of the answer (a
+/// repository's unverified commit: `reason`, `commit`, `why`).
 #[derive(Debug)]
-pub struct Refused(pub StatusCode, pub String);
+pub struct Refused(pub StatusCode, pub String, pub Value);
 
 impl Refused {
     fn new(status: StatusCode, m: impl Into<String>) -> Self {
-        Self(status, m.into())
+        Self(status, m.into(), Value::Null)
+    }
+
+    /// The answer's body: the message and the extra fields.
+    pub fn body(&self) -> Value {
+        let mut body = json!({ "error": self.1 });
+        if let (Value::Object(b), Value::Object(extra)) = (&mut body, &self.2) {
+            for (k, v) in extra {
+                b.insert(k.clone(), v.clone());
+            }
+        }
+        body
     }
 }
 
 impl IntoResponse for Refused {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({ "error": self.1 }))).into_response()
+        (self.0, Json(self.body())).into_response()
     }
 }
 
 impl From<ServiceError> for Refused {
     fn from(e: ServiceError) -> Self {
-        Self(e.status, e.message())
+        Self(e.status, e.message(), Value::Null)
     }
 }
 
@@ -688,7 +700,7 @@ struct FromQuery {
 
 impl From<crate::sourcecontrol::GitError> for Refused {
     fn from(e: crate::sourcecontrol::GitError) -> Self {
-        Self(e.status, e.message)
+        Self(e.status, e.message, e.extra)
     }
 }
 
@@ -1077,7 +1089,7 @@ pub fn openapi_paths() -> Value {
                 "description": "This instance's checkpoints; from=git lists the configuration repository's instead (the files under <git.path>/checkpoints/ at the working copy's HEAD, after a pull; admin), each read within the 16 MiB cap and checked, or listed with the reason it cannot be restored.",
                 "parameters": [{ "name": "from", "in": "query", "required": false, "schema": { "type": "string", "enum": ["instance", "git"], "default": "instance" } },
                     { "name": "project", "in": "query", "required": false, "description": "One project's checkpoints (instance: the instance's)", "schema": { "type": "string" } }],
-                "responses": { "200": { "description": "The checkpoints and their scope", "content": obj }, "409": { "description": "from=git: source control is not configured or connected" } }
+                "responses": { "200": { "description": "The checkpoints and their scope", "content": obj }, "409": { "description": "from=git: source control is not configured or connected, or (with git.verify on) the working copy's head is not verified: {error, reason: unverified, commit, why}" } }
             },
             "post": {
                 "tags": ["Control Plane"], "summary": "Save a checkpoint (admin)", "operationId": "saveCheckpoint",

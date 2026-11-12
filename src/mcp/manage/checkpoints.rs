@@ -112,8 +112,20 @@ pub async fn restore_checkpoint(
                 v,
             )
         }
-        Err(e) => err(e.1),
+        Err(e) => refused(&e),
     }
+}
+
+/// A refusal as a tool error: the message, and the fields of the answer
+/// when it has some (a repository's unverified commit).
+fn refused(e: &checkpoints::Refused) -> Value {
+    let mut v = err(format!("{} ({})", e.1, e.0.as_u16()));
+    if e.2.is_object() {
+        let mut body = e.body();
+        body["status"] = json!(e.0.as_u16());
+        v["structuredContent"] = body;
+    }
+    v
 }
 
 /// `list_repository_checkpoints` (admin): the configuration repository's
@@ -154,7 +166,7 @@ pub async fn list_repository_checkpoints(ctx: &CallCtx) -> Value {
                 v,
             )
         }
-        Err(e) => err(format!("{} ({})", e.1, e.0.as_u16())),
+        Err(e) => refused(&e),
     }
 }
 

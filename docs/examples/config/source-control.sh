@@ -3,8 +3,8 @@
 # temporary directory: an instance with a state directory commits and pushes
 # its configuration, a second instance starts from the repository
 # (RUSTYBIN_CONFIG_GIT) and holds the same mock; then a diverged branch and its
-# ways out (a side, a pull request), a branch per environment and signed
-# commits. Run through
+# ways out (a side, a pull request), a branch per environment, signed
+# commits and verified pulls. Run through
 # docs/examples/run.sh, which exports RUSTYBIN_BIN and BASE.
 set -euo pipefail
 BIN="${RUSTYBIN_BIN:-$(command -v rustybin || true)}"
@@ -339,4 +339,53 @@ expect "$out" '"signed":true'
 expect "$(git -C state-a/repo cat-file commit HEAD)" 'BEGIN SSH SIGNATURE'
 out=$(curl -s -H "Authorization: Bearer $ADMIN" "$A/_rustybin/git")
 expect "$out" '"signing":{"enabled":true,"key_set":true'
+
+# Verified pulls: the second instance takes only what an allowed signer
+# signed. Its allowed signer is the first instance's signing key (a public
+# key, not a secret). git 2.38 or later verifies a merge commit.
+if [[ "$(printf '%s\n' 2.38 "$(git --version | awk '{print $3}')" | sort -V | head -1)" != "2.38" ]]; then
+  echo "ok (git is older than 2.38: verified pulls not run)"
+  exit 0
+fi
+KEY=$(curl -s -H "Authorization: Bearer $ADMIN" "$A/_rustybin/git/signing-key" | sed -E 's/.*"public":"(ssh-ed25519 [A-Za-z0-9+\/=]+).*/\1/')
+out=$(
+# ANCHOR: verify_on
+# Who may sign what this instance pulls (a name and a public key each), then
+# verification on: the head of this moment is trusted as it is.
+curl -s -X PATCH -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d "{\"values\": {\"git.allowed_signers\": [\"instance-a $KEY\"], \"git.verify\": true}}" \
+  "$B/_rustybin/settings" >/dev/null
+curl -s -H "Authorization: Bearer $ADMIN" "$B/_rustybin/git"
+# ANCHOR_END: verify_on
+)
+expect "$out" '"verification":{"enabled":true,"signers":\[{"name":"instance-a","key_type":"ssh-ed25519","fingerprint":"SHA256:'
+expect "$out" '"trusted":{"sha":"'
+# The first instance pushes its signed commit: the second pulls and applies it.
+curl -s -o /dev/null -X POST -H "Authorization: Bearer $ADMIN" "$A/_rustybin/git/push"
+out=$(curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"apply": true, "prune": true}' "$B/_rustybin/git/pull")
+echo "$out"
+expect "$out" '"fast_forwarded":true'
+# Someone pushes an unsigned commit to the branch: refused, nothing applied.
+git -C elsewhere fetch --quiet origin
+git -C elsewhere checkout --quiet -B staging origin/staging
+echo "unsigned" > elsewhere/UNSIGNED.md
+git -C elsewhere add UNSIGNED.md
+git -C elsewhere -c user.name=someone -c user.email=someone@example.invalid -c commit.gpgsign=false \
+  commit --quiet -m "An unsigned commit"
+git -C elsewhere push --quiet origin staging
+before=$(git -C state-b/repo rev-parse HEAD)
+out=$(
+# ANCHOR: verify_refused
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"apply": true, "prune": true}' "$B/_rustybin/git/pull"
+# ANCHOR_END: verify_refused
+)
+echo "$out"
+expect "$out" '"reason":"unverified"'
+expect "$out" '"why":"has no SSH signature"'
+expect "$out" "\"commit\":\"$(git -C elsewhere rev-parse HEAD)\""
+[[ "$(git -C state-b/repo rev-parse HEAD)" == "$before" ]] || { echo "the working copy moved" >&2; exit 1; }
+out=$(curl -s -H "Authorization: Bearer $ADMIN" "$B/_rustybin/git")
+expect "$out" '"last_refusal":{"at":"'
 echo "ok"

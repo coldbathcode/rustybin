@@ -243,6 +243,9 @@ impl SourceControl {
                 truncated: false,
             });
         }
+        // A checkpoint holds mock data whoever pushed wrote: with
+        // git.verify on, read only from a verified head.
+        self.verify_rev(&env, &repo, "HEAD", true).await?;
         let (entries, truncated) = self.checkpoint_entries(&env, &repo, "HEAD").await;
         let max = self.max_checkpoint_bytes();
         let mut budget = crate::checkpoints::MAX_TOTAL_BYTES as u64;
@@ -293,6 +296,7 @@ impl SourceControl {
                 "the working copy has no commit yet: pull first (POST /_rustybin/git/pull)",
             ));
         }
+        self.verify_rev(&env, &repo, "HEAD", true).await?;
         let object = format!("HEAD:{}/{name}.json", self.checkpoints_rel());
         let max = self.max_checkpoint_bytes();
         let bytes = self

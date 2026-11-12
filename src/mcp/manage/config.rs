@@ -296,6 +296,25 @@ fn git_summary(s: &Value) -> String {
     } else if s["signing"]["enabled"].as_bool() == Some(true) {
         parts.push("commits are signed".into());
     }
+    let v = &s["verification"];
+    if v["enabled"].as_bool() == Some(true) {
+        if let Some(problem) = v["problem"].as_str() {
+            parts.push(format!(
+                "verification of pulled commits cannot pass anything: {problem}"
+            ));
+        } else if let Some(commit) = v["last_refusal"]["commit"].as_str() {
+            parts.push(format!(
+                "NOT VERIFIED: commit {} of the repository was refused and nothing was applied (verification.last_refusal says why); an allowed signer has to sign it, the user decides",
+                commit.chars().take(8).collect::<String>()
+            ));
+        } else {
+            parts.push(format!(
+                "pulled commits are verified against {} allowed signer(s)",
+                v["signers"].as_array().map(Vec::len).unwrap_or(0)
+                    + usize::from(v["own_key"].is_object())
+            ));
+        }
+    }
     parts.join("; ")
 }
 

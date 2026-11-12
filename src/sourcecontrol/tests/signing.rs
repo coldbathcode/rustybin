@@ -7,7 +7,7 @@
 use super::*;
 use crate::sourcecontrol::signing;
 
-fn run(dir: &Path, program: &str, args: &[&str]) -> (bool, String) {
+pub(super) fn run(dir: &Path, program: &str, args: &[&str]) -> (bool, String) {
     let out = std::process::Command::new(program)
         .args(args)
         .current_dir(dir)
@@ -24,7 +24,7 @@ fn run(dir: &Path, program: &str, args: &[&str]) -> (bool, String) {
 }
 
 /// A key pair from `ssh-keygen`: the private file's text and the public line.
-fn key_pair(dir: &Path, name: &str, passphrase: &str) -> (String, String) {
+pub(super) fn key_pair(dir: &Path, name: &str, passphrase: &str) -> (String, String) {
     let (ok, out) = run(
         dir,
         "ssh-keygen",

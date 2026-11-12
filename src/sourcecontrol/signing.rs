@@ -89,7 +89,7 @@ impl PublicKey {
 }
 
 /// One length-prefixed field of the key format.
-fn field<'a>(bytes: &'a [u8], at: &mut usize) -> Option<&'a [u8]> {
+pub(super) fn field<'a>(bytes: &'a [u8], at: &mut usize) -> Option<&'a [u8]> {
     let len = u32::from_be_bytes(bytes.get(*at..*at + 4)?.try_into().ok()?) as usize;
     let start = *at + 4;
     let end = start.checked_add(len)?;
@@ -177,7 +177,7 @@ impl SourceControl {
     }
 
     /// The signing key's public half, when a usable key is set.
-    fn signing_public(&self) -> Result<Option<PublicKey>, String> {
+    pub(super) fn signing_public(&self) -> Result<Option<PublicKey>, String> {
         match self.settings.secret(SIGNING_KEY_KEY) {
             None => Ok(None),
             Some(key) => parse(&key).map(Some),

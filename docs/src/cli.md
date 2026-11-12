@@ -760,6 +760,7 @@ Source control
 | `rustybin git switch <branch> [--dry-run] [--prune] [--no-apply]` | Move this instance to another branch of the remote (a branch per environment). --dry-run shows what applying that branch's document would change; without it the branch is stored (git.branch), taken, and its document applied. Flags: `--dry-run`, `--prune`, `--no-apply`. | `POST /_rustybin/git/branch` | `git.write` |
 | `rustybin git branch <name> [-m "<message>"] [--dry-run]` | Start a branch the remote does not have from this instance's configuration: committed, pushed, and the instance commits to it from now on. Flags: `--message` value, `-m` value, `--dry-run`. | `POST /_rustybin/git/branch` | `git.write` |
 | `rustybin git signing-key [--generate] [--replace]` | The commit signing key's public half and fingerprint, to register at the git host as a signing key; --generate makes one. Commits are signed when the git.sign setting is on. Flags: `--generate`, `--replace`. | `GET /_rustybin/git/signing-key`, `POST /_rustybin/git/signing-key` | `git.read`, `git.write` |
+| `rustybin git signers [--add "<name> <public key>"]... [--remove NAME]...` | Verified pulls: whether pulled commits are verified (the git.verify setting), the allowed signers with their fingerprints, the last verified head and the last refusal. --add and --remove change the git.allowed_signers setting (public keys, not secrets). Flags: `--add` value, `--remove` value. | `GET /_rustybin/git`, `GET /_rustybin/settings`, `PATCH /_rustybin/settings` | `git.read`, `settings.read`, `settings.write` |
 
 ```bash
 rustybin git status --fetch
@@ -774,6 +775,7 @@ rustybin git branches
 rustybin git switch staging --dry-run
 rustybin git branch staging --dry-run
 rustybin git signing-key
+rustybin git signers
 ```
 
 ## harness
