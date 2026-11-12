@@ -564,7 +564,7 @@ run call a further hop, so the report gains the leg of each hop
 | `hops` | required | 1 to 3 hops in order, never the same one twice: the server answering a client's request calls the first, the server answering that call the second. Each is a URL or an object. |
 | `hops[].url` | required | A gateway URL (`http` or `https`, no query or fragment). Allowed by `RUSTYBIN_HARNESS_TARGETS` **on the server node**, pinned, and verified like a target when `RUSTYBIN_HARNESS_VERIFY_TARGETS` is on. Never a control plane path. |
 | `hops[].path` | `/` | The one path the call asks for, after the URL's own. No placeholders: a hop is one fixed `GET`. |
-| `hops[].host`, `http`, `insecure` | as a target's | The `Host` header and TLS name, the protocol (`auto`, `h1`, `h2`, `h2c`; not `h3`) and whether to skip certificate verification. |
+| `hops[].host`, `http`, `insecure` | as a target's | The `Host` header and TLS name, the protocol (`auto`, `h1`, `h2`, `h2c`, or `h3` on an `https` hop in a build with the cargo feature `harness-http3` on the server nodes; a build without it refuses the scenario by the feature's name) and whether to skip certificate verification. |
 | `timeout` | `5s` | Per onward call (1 ms to 30 s). |
 | `max_concurrent` | `64` | Onward calls in flight per run on a server node (1 to 1024); one over it is refused, not queued. |
 

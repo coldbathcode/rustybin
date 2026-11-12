@@ -536,6 +536,44 @@ jsonpath "$.valid" == false
 jsonpath "$.problems[*]" includes "targets[0].http: h3 needs an https target (HTTP/3 is always TLS)"
 # ANCHOR_END: harness_http3
 
+# ANCHOR: harness_chain_http3
+# A chain whose inner hop speaks HTTP/3: the clients reach the gateway over
+# TCP, the server that answers calls on over QUIC. A build with the feature
+# answers valid: true; one without it names the feature, as for a target.
+POST {{harness_url}}/_rustybin/harness/validate
+Content-Type: application/json
+{
+  "name": "mesh-over-quic",
+  "target": "https://gateway.internal",
+  "source": {"request": {"path": "/harness/front"}},
+  "pattern": {"type": "constant", "rate": 50, "for": "10s"},
+  "servers": {"chain": {"hops": [
+    {"url": "https://mesh.internal:8443", "http": "h3", "path": "/orders"}
+  ]}}
+}
+HTTP 200
+[Asserts]
+jsonpath "$.scenario.servers.chain.hops[0].http" == "h3"
+jsonpath "$.summary.chain" count == 1
+
+# A hop over HTTP/3 is always TLS, in every build.
+POST {{harness_url}}/_rustybin/harness/validate
+Content-Type: application/json
+{
+  "name": "plain-hop",
+  "target": "https://gateway.internal",
+  "source": {"request": {"path": "/harness/front"}},
+  "pattern": {"type": "constant", "rate": 50, "for": "10s"},
+  "servers": {"chain": {"hops": [
+    {"url": "http://mesh.internal:8080", "http": "h3"}
+  ]}}
+}
+HTTP 200
+[Asserts]
+jsonpath "$.valid" == false
+jsonpath "$.problems[*]" includes "servers.chain.hops[0].http: h3 needs an https hop (HTTP/3 is always TLS)"
+# ANCHOR_END: harness_chain_http3
+
 # ANCHOR: harness_chain_preview
 # A chain of two hops: the preview names where the server side will call,
 # before anything is sent.

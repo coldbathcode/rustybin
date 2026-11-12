@@ -17,10 +17,17 @@
 //! A target keeps a small fixed set of connections, round robin over the
 //! pinned addresses; a connection that closed is replaced on its next use.
 //! Requests are streams on them, bounded by the run's in-flight cap.
+//!
+//! A hop of a server-to-server chain with `http: h3` is called by the same
+//! client (step 21 of `docs/plans/core-next`), handed the addresses
+//! [`super::safety::pin_chain`] pinned. Its connections are closed when the
+//! kill switch is set or the run is not live
+//! ([`H3Client::close_connections`]) and for good when the run ends
+//! ([`H3Client::shut`]).
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::{Buf, Bytes};
@@ -64,6 +71,21 @@ impl Drop for Conn {
     }
 }
 
+/// One of a target's connections. `connecting` lets one request at a time
+/// open it; `conn` is only ever held for a moment (never across an await),
+/// so closing never waits for a handshake.
+#[derive(Default)]
+struct Slot {
+    connecting: tokio::sync::Mutex<()>,
+    conn: Mutex<Option<Conn>>,
+}
+
+impl Slot {
+    fn conn(&self) -> std::sync::MutexGuard<'_, Option<Conn>> {
+        self.conn.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
 /// What an HTTP/3 exchange came to.
 pub struct Answer {
     pub status: u16,
@@ -81,8 +103,13 @@ pub struct H3Client {
     v6: Option<quinn::Endpoint>,
     addrs: Vec<SocketAddr>,
     server_name: String,
-    slots: Vec<tokio::sync::Mutex<Option<Conn>>>,
+    slots: Vec<Slot>,
     next: AtomicUsize,
+    /// Raised by every [`H3Client::close_connections`]: a connection made
+    /// under an earlier value is never kept.
+    epoch: AtomicU64,
+    /// [`H3Client::shut`]: no connection from here on.
+    shut: AtomicBool,
     /// The engine runtime: connections and their drivers live on it.
     handle: Handle,
 }
@@ -136,10 +163,10 @@ impl H3Client {
             v6,
             addrs,
             server_name: server_name.to_string(),
-            slots: (0..CONNECTIONS)
-                .map(|_| tokio::sync::Mutex::new(None))
-                .collect(),
+            slots: (0..CONNECTIONS).map(|_| Slot::default()).collect(),
             next: AtomicUsize::new(0),
+            epoch: AtomicU64::new(0),
+            shut: AtomicBool::new(false),
             handle: handle.clone(),
         })
     }
@@ -149,13 +176,21 @@ impl H3Client {
     async fn sender(&self) -> Result<Sender, &'static str> {
         let i = self.next.fetch_add(1, Ordering::Relaxed);
         let slot = self.slots.get(i % self.slots.len()).ok_or("connect")?;
-        let mut guard = slot.lock().await;
-        if let Some(conn) = guard.as_ref() {
-            if conn.quic.close_reason().is_none() {
-                return Ok(conn.send.clone());
+        let _connecting = slot.connecting.lock().await;
+        let epoch = self.epoch.load(Ordering::SeqCst);
+        {
+            let mut conn = slot.conn();
+            if self.is_shut() {
+                *conn = None;
+                return Err("connect");
             }
+            if let Some(open) = conn.as_ref() {
+                if open.quic.close_reason().is_none() {
+                    return Ok(open.send.clone());
+                }
+            }
+            *conn = None;
         }
-        *guard = None;
         // Only ever a pinned address.
         let addr = *self.addrs.get(i % self.addrs.len()).ok_or("connect")?;
         let endpoint = if addr.is_ipv4() { &self.v4 } else { &self.v6 }
@@ -174,12 +209,61 @@ impl H3Client {
         let driver = tokio::spawn(async move {
             let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
         });
-        *guard = Some(Conn {
+        let made = Conn {
             quic,
             send: send.clone(),
             driver,
-        });
+        };
+        let mut conn = slot.conn();
+        // Closed while the handshake ran: the connection is let go (its
+        // drop closes it), never kept.
+        if self.is_shut() || self.epoch.load(Ordering::SeqCst) != epoch {
+            return Err("connect");
+        }
+        *conn = Some(made);
         Ok(send)
+    }
+
+    /// Close every connection now, requests under way on them included.
+    /// The next request opens a new one (to a pinned address, as ever). A
+    /// connection whose handshake is under way is closed when it completes
+    /// and never kept.
+    pub fn close_connections(&self) {
+        // Raised first: a handshake that ends after this finds another
+        // value under the slot's lock and keeps nothing.
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+        for slot in &self.slots {
+            let closed = slot.conn().take();
+            drop(closed);
+        }
+    }
+
+    /// Close every connection for good: no request is sent from here on,
+    /// and a handshake under way ends with the sockets.
+    pub fn shut(&self) {
+        self.shut.store(true, Ordering::SeqCst);
+        self.close_connections();
+        for endpoint in [&self.v4, &self.v6].into_iter().flatten() {
+            endpoint.close(0u32.into(), b"done");
+        }
+    }
+
+    /// Whether [`H3Client::shut`] was called.
+    pub fn is_shut(&self) -> bool {
+        self.shut.load(Ordering::SeqCst)
+    }
+
+    /// Connections open now (tests).
+    #[cfg(test)]
+    pub fn open_connections(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|s| {
+                s.conn()
+                    .as_ref()
+                    .is_some_and(|c| c.quic.close_reason().is_none())
+            })
+            .count()
     }
 
     /// Send one request and read its answer whole (bounded). The error is
@@ -189,6 +273,26 @@ impl H3Client {
         &self,
         req: hyper::Request<ReqBody>,
         keep: bool,
+    ) -> Result<Answer, &'static str> {
+        self.exchange(req, keep, None).await
+    }
+
+    /// Send one request and read at most `most` bytes of its answer: past
+    /// that the stream is let go and what was read is the answer (a chain's
+    /// onward call, which keeps nothing of a body).
+    pub async fn request_bounded(
+        &self,
+        req: hyper::Request<ReqBody>,
+        most: u64,
+    ) -> Result<Answer, &'static str> {
+        self.exchange(req, false, Some(most)).await
+    }
+
+    async fn exchange(
+        &self,
+        req: hyper::Request<ReqBody>,
+        keep: bool,
+        most: Option<u64>,
     ) -> Result<Answer, &'static str> {
         let mut send = self.sender().await?;
         let (mut parts, mut body) = req.into_parts();
@@ -224,6 +328,10 @@ impl H3Client {
         while let Some(mut chunk) = stream.recv_data().await.map_err(|e| classify_stream(&e))? {
             let n = chunk.remaining();
             bytes += n as u64;
+            if most.is_some_and(|most| bytes > most) {
+                stream.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
+                break;
+            }
             if bytes > MAX_RESPONSE_BYTES as u64 {
                 return Err("protocol");
             }

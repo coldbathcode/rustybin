@@ -410,6 +410,9 @@ refused with an `h3` target, by name.
 {{#include ../examples/harness/api.hurl:harness_http3}}
 ```
 
+A hop of a [server-to-server chain](#a-hop-over-http3) takes `http: h3` too, in the same
+builds.
+
 ## Server-to-server chains
 
 A request through a gateway often goes on: the service it reaches calls another service, through
@@ -430,8 +433,8 @@ servers:
 ```
 
 A hop is a gateway URL plus the one path the call asks for (default `/`), with `host`, `http`
-(`auto`, `h1`, `h2`, `h2c`) and `insecure` as a target has them. The onward call is a `GET` with
-the harness's own headers and no body.
+(`auto`, `h1`, `h2`, `h2c`, or `h3` in a [build with HTTP/3](#a-hop-over-http3)) and `insecure`
+as a target has them. The onward call is a `GET` with the harness's own headers and no body.
 
 This is the only traffic the server role sends, so it has rules of its own, and nothing turns it on
 except a scenario that declares a chain:
@@ -504,6 +507,40 @@ latency histogram per hop; the report has the legs.
 
 ```hurl
 {{#include ../examples/harness/api.hurl:harness_chain_metrics}}
+```
+
+### A hop over HTTP/3
+
+A mesh whose inner hops speak HTTP/3 is tested end to end with `http: h3` on a hop:
+
+```yaml
+servers:
+  chain:
+    hops:
+      - url: https://mesh.internal:8443
+        http: h3
+        path: /orders
+```
+
+It needs the [build with HTTP/3](#http3-targets) on the server nodes, which make the call; a
+build without the cargo feature `harness-http3` refuses the scenario at validation with a
+message that names the feature, as for a target, and a server node of a cluster that lacks it
+makes no call and says so in `server.chain.problems`. Chains may be mixed: the clients' target
+over HTTP/1 or 2 with a hop over HTTP/3, or the reverse.
+
+Every rule of a chain holds as it is: the signed marker, the run being live, one bodiless `GET`
+per request and hop, the fixed depth, `max_concurrent` and the `timeout`, the legs in the report
+and the `rustybin_harness_chain_calls_total` series. And every fence of an HTTP/3 target holds
+for the hop: the allowlist entry's port is the UDP port, the hop's name is resolved once on the
+server node and QUIC connects to those pinned addresses only, with no `Alt-Svc`, no redirect and
+no move to another address the hop's server asks for; with `RUSTYBIN_HARNESS_VERIFY_TARGETS` the
+hop is verified over HTTP/3; TLS is verified unless the hop says `insecure`. A hop keeps at most 8
+QUIC connections, as a target does. They are closed when the kill switch is set and when the run
+is no longer live, calls under way included (the report counts those as `stopped`, under
+`kill_switch` or `not_live`), and for good when the run ends.
+
+```hurl
+{{#include ../examples/harness/api.hurl:harness_chain_http3}}
 ```
 
 ## OpenTelemetry

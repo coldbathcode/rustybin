@@ -9,7 +9,10 @@
 //!   through [`safety::pin_chain`] (the allowlist, pinned addresses,
 //!   forbidden addresses) and the node's target verification, whole or not
 //!   at all. The clients are the engine's [`PinnedTarget`]: there is no
-//!   other client here.
+//!   other client here. A hop with `http: h3` is called by that target's
+//!   HTTP/3 client (the cargo feature `harness-http3`, step 21), on the
+//!   same pinned addresses; its QUIC connections are closed while the kill
+//!   switch is set and when the run is not live, for good at its end.
 //! - [`call_on`] is called by the correlation layer for a marker it has
 //!   verified, and only then. It asks the run's [`ChainGate`] (live, the
 //!   kill switch, once per request and hop, the cap on calls in flight)
@@ -56,6 +59,37 @@ pub struct Chain {
     paths: Vec<String>,
     gate: ChainGate,
     timeout: Duration,
+    /// Closes the QUIC connections of the `h3` hops while the kill switch
+    /// is set (the cargo feature `harness-http3`); ended with the chain.
+    #[cfg(feature = "harness-http3")]
+    quic_watch: Option<tokio::task::JoinHandle<()>>,
+}
+
+#[cfg(feature = "harness-http3")]
+impl Drop for Chain {
+    fn drop(&mut self) {
+        if let Some(watch) = &self.quic_watch {
+            watch.abort();
+        }
+    }
+}
+
+/// While the kill switch is set, the QUIC connections of a chain's `h3`
+/// hops are closed, and closed again should a call that was on its way
+/// open one. Ends when the run did ([`Chain::shut`]).
+#[cfg(feature = "harness-http3")]
+async fn close_quic_on_kill(kill: Arc<safety::KillSwitch>, quic: Vec<Arc<super::http3::H3Client>>) {
+    while !quic.iter().all(|c| c.is_shut()) {
+        if kill.is_set() {
+            for client in &quic {
+                client.close_connections();
+            }
+            tokio::time::sleep(WATCH_EVERY).await;
+        } else {
+            // A press between the look and the wait is seen at the next.
+            let _ = tokio::time::timeout(WATCH_EVERY, kill.notified()).await;
+        }
+    }
 }
 
 impl Chain {
@@ -79,12 +113,11 @@ impl Chain {
         let mut hops = Vec::with_capacity(pinned.len());
         let mut problems = Vec::new();
         for (i, (hop, pin)) in chain.hops.iter().zip(pinned).enumerate() {
-            if hop.http == scenario::HttpVersion::H3 {
-                problems.push(format!(
-                    "servers.chain.hops[{i}].http: a hop is called over HTTP/1.1 or HTTP/2"
-                ));
-                continue;
-            }
+            // An `h3` hop gets the HTTP/3 client of `http3.rs` on the
+            // addresses pinned above, as an `h3` target does. A build
+            // without the cargo feature has none: `PinnedTarget::new`
+            // refuses the hop by the feature's name (a member of a cluster
+            // whose leader has the feature), never another protocol.
             match PinnedTarget::new(
                 &handle,
                 hop.target(),
@@ -110,12 +143,44 @@ impl Chain {
                 return Err(problems);
             }
         }
+        #[cfg(feature = "harness-http3")]
+        let quic_watch = {
+            let quic: Vec<_> = hops.iter().filter_map(|t| t.h3.clone()).collect();
+            (!quic.is_empty()).then(|| tokio::spawn(close_quic_on_kill(h.kill.clone(), quic)))
+        };
         Ok(Self {
             gate: ChainGate::new(h.kill.clone(), hops.len(), chain.max_concurrent()),
             paths: chain.hops.iter().map(|hop| hop.path.clone()).collect(),
             hops,
             timeout: chain.timeout(),
+            #[cfg(feature = "harness-http3")]
+            quic_watch,
         })
+    }
+
+    /// The run is not live: the QUIC connections of the `h3` hops are
+    /// closed, calls under way on them included. A run that is live again
+    /// (a cluster's leader says so) opens new ones, to the pinned addresses.
+    pub fn close_connections(&self) {
+        #[cfg(feature = "harness-http3")]
+        for client in self.hops.iter().filter_map(|t| t.h3.as_ref()) {
+            client.close_connections();
+        }
+    }
+
+    /// The run ended: the QUIC connections of the `h3` hops are closed for
+    /// good, and nothing is sent over QUIC for this chain again.
+    pub fn shut(&self) {
+        #[cfg(feature = "harness-http3")]
+        for client in self.hops.iter().filter_map(|t| t.h3.as_ref()) {
+            client.shut();
+        }
+    }
+
+    /// The HTTP/3 client of a hop (tests).
+    #[cfg(all(test, feature = "harness-http3"))]
+    pub(super) fn quic_of(&self, hop: usize) -> Option<Arc<super::http3::H3Client>> {
+        self.hops.get(hop).and_then(|t| t.h3.clone())
     }
 
     /// The gate: the caller renews the run's liveness through it.
@@ -202,7 +267,44 @@ impl Chain {
         *req.headers_mut() = headers;
         let client = target.client.clone();
         let started = Instant::now();
+        // What an answer's head says: the next server's tag, verified with
+        // the run key (a tagged answer reached a server, an untagged one
+        // came from between), and that server's processing time.
+        let head = |headers: &HeaderMap| {
+            let tagged = headers
+                .get(correlate::SERVED_BY)
+                .and_then(|v| v.to_str().ok())
+                .and_then(Tag::parse)
+                .is_some_and(|t| {
+                    t.run == incoming.run && t.seq == incoming.seq && t.verify(&entry.key)
+                });
+            let upstream_ms = headers
+                .get("server-timing")
+                .and_then(|v| v.to_str().ok())
+                .and_then(correlate::parse_server_timing)
+                .filter(|ms| tagged && ms.is_finite() && *ms >= 0.0);
+            (tagged, upstream_ms)
+        };
+        // An `h3` hop: the same request (marker and all) as a stream on a
+        // QUIC connection to the hop's pinned addresses.
+        #[cfg(feature = "harness-http3")]
+        let quic = target.h3.clone();
         let call = async {
+            #[cfg(feature = "harness-http3")]
+            if let Some(quic) = quic.as_ref() {
+                return match quic.request_bounded(req, MAX_ANSWER_BYTES as u64).await {
+                    Ok(answer) => {
+                        let (tagged, upstream_ms) = head(&answer.headers);
+                        Outcome::Answer {
+                            status: answer.status,
+                            tagged,
+                            upstream_ms,
+                            elapsed: started.elapsed(),
+                        }
+                    }
+                    Err(kind) => Outcome::Transport(kind, started.elapsed()),
+                };
+            }
             let resp = match client.request(req).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -210,22 +312,7 @@ impl Chain {
                 }
             };
             let status = resp.status().as_u16();
-            // The next server's tag, verified with the run key: a tagged
-            // answer reached a server, an untagged one came from between.
-            let tagged = resp
-                .headers()
-                .get(correlate::SERVED_BY)
-                .and_then(|v| v.to_str().ok())
-                .and_then(Tag::parse)
-                .is_some_and(|t| {
-                    t.run == incoming.run && t.seq == incoming.seq && t.verify(&entry.key)
-                });
-            let upstream_ms = resp
-                .headers()
-                .get("server-timing")
-                .and_then(|v| v.to_str().ok())
-                .and_then(correlate::parse_server_timing)
-                .filter(|ms| tagged && ms.is_finite() && *ms >= 0.0);
+            let (tagged, upstream_ms) = head(resp.headers());
             // The body is read frame by frame (so the connection goes back
             // to the pool) up to a bound, and never kept: nothing of an
             // answer is held, however many calls are in flight.
@@ -255,14 +342,28 @@ impl Chain {
                 }
             }
         };
-        tokio::select! {
+        let outcome = tokio::select! {
             biased;
             () = self.gate.kill_switch().notified() => Outcome::Refused(ChainRefusal::KillSwitch),
             why = watch => Outcome::Refused(why),
             outcome = tokio::time::timeout(self.timeout, call) => {
                 outcome.unwrap_or(Outcome::Transport("timeout", self.timeout))
             }
+        };
+        // An `h3` hop's connections are closed under a call when the kill
+        // switch is set or the run ends, so the call may see its stream go
+        // before it sees why: it was stopped, as over HTTP/1 and 2, not
+        // failed by the hop.
+        #[cfg(feature = "harness-http3")]
+        if quic.is_some() && matches!(outcome, Outcome::Transport(..)) {
+            if self.gate.kill_switch().is_set() {
+                return Outcome::Refused(ChainRefusal::KillSwitch);
+            }
+            if !self.gate.live() || entry.is_done() {
+                return Outcome::Refused(ChainRefusal::NotLive);
+            }
         }
+        outcome
     }
 }
 
