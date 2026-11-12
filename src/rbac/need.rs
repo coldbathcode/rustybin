@@ -155,6 +155,10 @@ pub const BODY_CHECKS: &[(Permission, &str)] = &[
         Permission::SettingsWrite,
         "POST /_rustybin/secret-requests/{id}/fulfil (the route declares secrets.write): what setting that secret needs, so also settings.security, git.write or portal.settings for a secret of those groups",
     ),
+    (
+        Permission::SecretsWrite,
+        "GET /_rustybin/secret-requests, GET /_rustybin/secret-requests/{id} and POST /_rustybin/secret-requests/{id}/decline of a request that is not of the caller's own agents (a user reads and declines their own agents' requests; fulfilling one is never theirs by that)",
+    ),
 ];
 
 /// The routes whose resources may belong to a project (step 11): the

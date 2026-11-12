@@ -577,9 +577,9 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("audit", "list", "[--actor A] [--action A] [--target T] [--since S] [--until U] [--result R] [--limit N] [--cursor C]", "The audit log, newest first: who did what and when, sign-ins and refusals (audit.read). --cursor pages back with the next_cursor printed last.", AUDIT_LIST_FLAGS, [("GET", "/_rustybin/audit")], false, "audit list --since 1h --result refused"),
     cmd!("audit", "tail", "[--actor A] [--action A] [--target T] [--result R]", "Follow the audit log: one line per new entry that matches (audit.read).", AUDIT_TAIL_FLAGS, [("GET", "/_rustybin/audit/stream")], false, "audit tail --action mocks --max 10"),
     // ── Secrets an agent asked for (core next 12) ──
-    cmd!("settings", "requests", "[--state S]", "The secrets AI agents asked to have set (request_secret): the setting, the agent and the user it acts for, the agent's reason (its claim), the state. An agent never sets a secret: you fulfil or decline.", &[Flag::value("--state", "Only pending, fulfilled, declined or expired")], [("GET", "/_rustybin/secret-requests")], false, "settings requests --state pending"),
+    cmd!("settings", "requests", "[--state S]", "The secrets AI agents asked to have set (request_secret): the setting, the agent and the user it acts for, the agent's reason (its claim), the state, the note left on a decline. Everyone's with secrets.write, else your own agents'. An agent never sets a secret: you fulfil or decline.", &[Flag::value("--state", "Only pending, fulfilled, declined or expired")], [("GET", "/_rustybin/secret-requests")], false, "settings requests --state pending"),
     cmd!("settings", "fulfil", "<id> [--stdin]", "Set the secret an agent asked for: the value is prompted without echo, or read from the first line of stdin, never an argument. It goes to the settings store and never to the agent; needs what settings set-secret needs for that setting.", &[Flag::switch("--stdin", "Read the secret from the first line of stdin")], [("GET", "/_rustybin/secret-requests/{id}"), ("POST", "/_rustybin/secret-requests/{id}/fulfil")], false, "settings fulfil sr_0000000000000000 --stdin < key.txt"),
-    cmd!("settings", "decline", "<id>", "Decline a secret request: nothing is set, and the agent reads declined.", NO_FLAGS, [("POST", "/_rustybin/secret-requests/{id}/decline")], false, "settings decline sr_0000000000000000"),
+    cmd!("settings", "decline", "<id> [--note TEXT]", "Decline a secret request: nothing is set, and the agent reads declined, with your note when you leave one. Any request with secrets.write, else one of your own agents'.", &[Flag::value("--note", "A few words for the agent (at most 300 characters). Never the secret: the agent reads it")], [("POST", "/_rustybin/secret-requests/{id}/decline")], false, "settings decline sr_0000000000000000 --note \"use the deploy key that is already set\""),
     // ── Source control: branches per environment, signed commits ──
     cmd!("git", "branches", "", "The remote's branches, and the one this instance is on.", NO_FLAGS, [("GET", "/_rustybin/git/branches")], false, "git branches"),
     cmd!("git", "switch", "<branch> [--dry-run] [--prune] [--no-apply]", "Move this instance to another branch of the remote (a branch per environment). --dry-run shows what applying that branch's document would change; without it the branch is stored (git.branch), taken, and its document applied.", SWITCH_FLAGS, [("POST", "/_rustybin/git/branch")], false, "git switch staging --dry-run"),
@@ -1548,17 +1548,30 @@ async fn settings(ctx: &mut Ctx, verb: &str) -> Result<()> {
         }
         "decline" => {
             let id = ctx.args.arg(0, "a secret request id")?.to_string();
+            // A few words for the agent, never the secret (it reads them).
+            let body = match ctx.args.value("--note") {
+                Some(note) => Body::Json(json!({ "note": note })),
+                None => Body::None,
+            };
             let reply = ctx
                 .client()?
                 .post(
                     &format!("/_rustybin/secret-requests/{}/decline", enc(&id)),
-                    Body::None,
+                    body,
                 )
                 .await?;
             if ctx.json {
                 emit_reply(ctx, &reply);
             } else {
-                ctx.say(&format!("Request {id} is declined: nothing was set."));
+                let noted = reply.value()["note"].is_string();
+                ctx.say(&format!(
+                    "Request {id} is declined: nothing was set.{}",
+                    if noted {
+                        " The agent reads your note."
+                    } else {
+                        ""
+                    }
+                ));
             }
             Ok(())
         }
@@ -1578,6 +1591,7 @@ fn secret_request_row(r: &Value) -> Value {
         "owner": text(&r["agent"]["owner_label"], 120),
         "reason": text(&r["untrusted_reason"], 300),
         "expires_in": r["expires_in"],
+        "note": text(&r["note"], 300),
     })
 }
 

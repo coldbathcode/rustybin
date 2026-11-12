@@ -351,6 +351,36 @@ async fn nothing_secret_reaches_an_entry_or_a_file() {
     .await;
     assert_eq!(status, StatusCode::GONE, "{v}");
     assert!(!v.to_string().contains("SECRET"), "{v}");
+    // A note on a decline (core next 17): a person who types the secret
+    // there by mistake leaves it in no entry.
+    let r = tool(
+        &app,
+        &[("authorization", &bearer)],
+        "request_secret",
+        json!({ "setting": "notify.webhook_token", "reason": "the schedule's notices" }),
+    )
+    .await;
+    assert_ne!(r["isError"], json!(true), "{r}");
+    let request = r["structuredContent"]["request"]["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+    let (status, v) = call(
+        &app,
+        "POST",
+        &format!("/_rustybin/secret-requests/{request}/decline"),
+        &[("authorization", admin)],
+        Some(json!({ "note": "SECRET-note-15 typed in the wrong box" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["note"], json!("SECRET-note-15 typed in the wrong box"));
+    let declined = last(&state);
+    assert_eq!(declined.event.as_deref(), Some("secret_declined"));
+    assert!(declined.targets.contains(&Target {
+        kind: "secret-request".into(),
+        name: request.clone()
+    }));
     state.audit.flush();
 
     let ring = serde_json::to_string(&state.audit.all()).expect("json");

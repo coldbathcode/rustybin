@@ -430,5 +430,34 @@ async fn settings_fulfil_reads_the_value_from_stdin_never_an_argument() {
     assert_eq!(code, 1);
     let (code, _) = inst.run(None, &["settings", "decline"]).await;
     assert_eq!(code, 2);
+    // With a note for the agent (core next 17): cleaned by the instance,
+    // listed with the request.
+    let id = ask("git.token").await;
+    let (code, out) = inst
+        .run(
+            None,
+            &[
+                "settings",
+                "decline",
+                &id,
+                "--note",
+                "use the deploy key\u{1b}[2J that is set",
+            ],
+        )
+        .await;
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("The agent reads your note"), "{out}");
+    let listed = inst
+        .json(&["settings", "requests", "--state", "declined"])
+        .await;
+    assert_eq!(
+        listed["requests"][0]["note"],
+        json!("use the deploy key [2J that is set")
+    );
+    let (code, out) = inst
+        .run(None, &["settings", "requests", "--state", "declined"])
+        .await;
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("use the deploy key [2J that is set"), "{out}");
     inst.server.shutdown();
 }

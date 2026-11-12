@@ -172,10 +172,17 @@ pub fn get_secret_request(ctx: &CallCtx, _access: &Access, agent: &str, args: &V
                     "no secret request {id:?} of this agent (a request is gone an hour after it was set, declined or expired; get_secret_request without an id lists yours)"
                 ));
             };
+            // A note is the word of the person who declined (cleaned and
+            // capped): theirs to the agent, so it is in the text too.
+            let note = r
+                .note
+                .as_deref()
+                .map(|n| format!(" The person who declined left a note: {n:?}."))
+                .unwrap_or_default();
             ok(
                 ctx,
                 format!(
-                    "Request {} for {} is {}. {}",
+                    "Request {} for {} is {}. {}{note}",
                     r.id,
                     r.key,
                     r.status.as_str(),

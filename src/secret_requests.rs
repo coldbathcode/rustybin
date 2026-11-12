@@ -9,18 +9,30 @@
 //! `/_rustybin/settings` would put it there.
 //!
 //! - `GET /_rustybin/secret-requests[?state=pending]`: every request
-//!   (`secrets.write`).
-//! - `GET /_rustybin/secret-requests/{id}`: one.
+//!   (`secrets.write`), or the requests of the caller's own agents (a user
+//!   without it).
+//! - `GET /_rustybin/secret-requests/{id}`: one the caller may read.
 //! - `POST /_rustybin/secret-requests/{id}/fulfil`: `{"value": "..."}`; what
 //!   setting that secret needs (`settings.write`, `secrets.write`, the
 //!   group's permission), the settings lock and the spec's checks included.
-//! - `POST /_rustybin/secret-requests/{id}/decline`.
+//! - `POST /_rustybin/secret-requests/{id}/decline`: optionally
+//!   `{"note": "..."}`, a person's word to the agent; one the caller may
+//!   read.
+//!
+//! Who reads and declines ([`visible_to`], the rule of
+//! `agents::visible_to`): everyone's with `secrets.write`; a user without it
+//! their own agents' (another's is `404`, a list leaves it out); a caller
+//! who is neither needs `secrets.write`. Fulfilling never follows from
+//! owning the agent.
 //!
 //! Requests live in memory, bounded ([`MAX_PENDING`], [`MAX_PENDING_PER_AGENT`],
 //! [`MAX_PER_AGENT_PER_HOUR`], [`MAX_KEPT`]) and expire ([`TTL_SECS`]); a
 //! resolved one stays readable for [`KEEP_RESOLVED_SECS`]. Off until the
 //! `agents.secret_requests` setting is on. The reason is an agent's claim:
 //! cleaned, capped, answered as `untrusted_reason`, never in the audit log.
+//! A note on a decline is a person's text: cleaned and capped the same way
+//! ([`clean_note`]), answered as `note` to the person and to the agent,
+//! never in the audit log or a log line.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -59,6 +71,8 @@ pub const TTL_SECS: i64 = 15 * 60;
 pub const KEEP_RESOLVED_SECS: i64 = 60 * 60;
 /// Longest reason, in characters.
 pub const MAX_REASON: usize = 300;
+/// Longest note a person leaves on a decline, in characters.
+pub const MAX_NOTE: usize = 300;
 
 pub const LIST_PATH: &str = "/_rustybin/secret-requests";
 pub const ONE_PATH: &str = "/_rustybin/secret-requests/{id}";
@@ -139,6 +153,9 @@ pub struct Request {
     pub resolved_at: Option<DateTime<Utc>>,
     /// Who fulfilled or declined it (a name, never a credential).
     pub resolved_by: Option<String>,
+    /// What the person who declined wrote for the agent (cleaned and
+    /// capped; never in an audit entry or a log line).
+    pub note: Option<String>,
 }
 
 /// Why an ask was refused.
@@ -179,6 +196,16 @@ pub enum ResolveError {
 /// Free text from an agent: control characters dropped, whitespace runs
 /// folded, trimmed, capped.
 pub fn clean_reason(raw: &str) -> String {
+    clean_text(raw, MAX_REASON)
+}
+
+/// A person's note on a decline, cleaned like the reason; `None` when
+/// nothing is left.
+pub fn clean_note(raw: &str) -> Option<String> {
+    Some(clean_text(raw, MAX_NOTE)).filter(|n| !n.is_empty())
+}
+
+fn clean_text(raw: &str, max: usize) -> String {
     let mut out = String::new();
     let mut len = 0;
     let mut space = false;
@@ -188,7 +215,7 @@ pub fn clean_reason(raw: &str) -> String {
             continue;
         }
         let needed = if space { 2 } else { 1 };
-        if len + needed > MAX_REASON {
+        if len + needed > max {
             break;
         }
         if space {
@@ -289,6 +316,7 @@ impl SecretRequests {
             status: Status::Pending,
             resolved_at: None,
             resolved_by: None,
+            note: None,
         };
         list.push(r.clone());
         Ok((r, true))
@@ -329,8 +357,15 @@ impl SecretRequests {
         }
     }
 
-    /// Fulfil or decline a request that waits.
-    pub fn resolve(&self, id: &str, status: Status, by: &str) -> Result<Request, ResolveError> {
+    /// Fulfil or decline a request that waits. `note` is kept on a decline
+    /// only (already cleaned: [`clean_note`]).
+    pub fn resolve(
+        &self,
+        id: &str,
+        status: Status,
+        by: &str,
+        note: Option<String>,
+    ) -> Result<Request, ResolveError> {
         let now = self.now();
         let mut list = lock(&self.inner);
         Self::sweep(&mut list, now);
@@ -343,6 +378,7 @@ impl SecretRequests {
         r.status = status;
         r.resolved_at = Some(now);
         r.resolved_by = Some(crate::logging::printable(by, 128));
+        r.note = note.filter(|_| status == Status::Declined);
         Ok(r.clone())
     }
 
@@ -364,14 +400,15 @@ impl SecretRequests {
         })
     }
 
-    /// A request as its agent reads it: the state, never the value, a hint
-    /// or who resolved it.
+    /// A request as its agent reads it: the state and the note of the
+    /// person who declined, never the value, a hint or who resolved it.
     pub fn agent_view(&self, r: &Request, settings: &Settings) -> Value {
         let mut v = json!({
             "id": r.id,
             "state": r.status.as_str(),
             "setting": r.key,
             "set": settings.secret_state(&r.key)["set"],
+            "note": r.note,
         });
         merge(&mut v, self.times(r));
         v
@@ -405,6 +442,7 @@ impl SecretRequests {
             },
             "untrusted_reason": r.reason,
             "resolved_by": r.resolved_by,
+            "note": r.note,
         });
         merge(&mut v, self.times(r));
         v
@@ -453,6 +491,32 @@ pub fn askable<'a>(settings: &'a Settings, key: &str) -> Result<&'a Spec, String
     Ok(spec)
 }
 
+// ── Whose requests a caller reads and declines ──────────────────────
+
+/// Which requests a caller reads and may decline: every request with
+/// `secrets.write` (`Ok(None)`), else a user's own agents'
+/// (`Ok(Some(user id))`, the rule of `agents::visible_to`); a caller who is
+/// neither (a control JWT, an API key, nobody on an open control plane with
+/// an admin token) needs `secrets.write`. Fulfilling is not decided here:
+/// it needs what setting that secret needs, whoever the agent acts for.
+#[allow(clippy::result_large_err)]
+pub fn visible_to(caller: &crate::rbac::Resolved) -> Result<Option<String>, Response> {
+    if caller.has(Permission::SecretsWrite) {
+        return Ok(None);
+    }
+    match caller.user_id() {
+        Some(id) => Ok(Some(id.to_string())),
+        None => Err(crate::rbac::refuse(caller, Permission::SecretsWrite)),
+    }
+}
+
+/// Is `r` one of those ([`visible_to`]'s answer)? The owner is the user
+/// the asking agent's credential acts for.
+pub fn sees(own: &Option<String>, r: &Request) -> bool {
+    own.as_deref()
+        .is_none_or(|me| r.asker.credential.owner() == Some(me))
+}
+
 // ── Routes ──────────────────────────────────────────────────────────
 
 fn error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -482,7 +546,17 @@ struct ListQuery {
     state: Option<String>,
 }
 
-async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> Response {
+async fn list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    Query(q): Query<ListQuery>,
+) -> Response {
+    let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
+    let own = match visible_to(&caller) {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
     let wanted = match q.state.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         None => None,
         Some(s) => match Status::parse(s) {
@@ -496,7 +570,8 @@ async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> Resp
         },
     };
     let store = &state.secret_requests;
-    let all = store.list();
+    // What the caller may read: the count is of those only.
+    let all: Vec<Request> = store.list().into_iter().filter(|r| sees(&own, r)).collect();
     let pending = all.iter().filter(|r| r.status == Status::Pending).count();
     let requests: Vec<Value> = all
         .iter()
@@ -518,16 +593,28 @@ async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> Resp
     .into_response()
 }
 
-async fn get_one(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    match state.secret_requests.get(&id) {
+async fn get_one(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    Path(id): Path<String>,
+) -> Response {
+    let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
+    let own = match visible_to(&caller) {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
+    // Another user's request does not exist for this caller.
+    match state.secret_requests.get(&id).filter(|r| sees(&own, r)) {
         Some(r) => Json(state.secret_requests.view(&r, &state)).into_response(),
         None => gone(ResolveError::NotFound),
     }
 }
 
 /// What only the handler knows, for the audit entry (the route layer
-/// names the request, `secret-request:<id>`, from the path).
-fn note(r: &Request, event: &str) {
+/// names the request, `secret-request:<id>`, from the path). Never the
+/// reason, the value or a note.
+fn record(r: &Request, event: &str) {
     crate::audit::event(event);
     crate::audit::target("setting", &r.key);
     crate::audit::target("agent", &r.asker.agent);
@@ -560,7 +647,7 @@ async fn fulfil(
         Ok(r) => r,
         Err(e) => return gone(e),
     };
-    note(&r, "secret_fulfilled");
+    record(&r, "secret_fulfilled");
     // What a person setting this secret needs, checked as the settings
     // route checks it: nobody fulfils more than they could set themselves.
     if let Err(resp) = crate::rbac::require(&caller, Permission::SettingsWrite) {
@@ -573,7 +660,7 @@ async fn fulfil(
     }
     let who = crate::rbac::service::principal_name(&caller);
     if asker_revoked(&state, &r) {
-        let _ = store.resolve(&id, Status::Declined, "the agent was revoked");
+        let _ = store.resolve(&id, Status::Declined, "the agent was revoked", None);
         return (
             StatusCode::GONE,
             Json(json!({
@@ -608,7 +695,7 @@ async fn fulfil(
     // Fulfilled even when someone else resolved it meanwhile: the secret
     // is set either way, and the answer says how the request stands.
     let r = store
-        .resolve(&id, Status::Fulfilled, &who)
+        .resolve(&id, Status::Fulfilled, &who, None)
         .ok()
         .or_else(|| store.get(&id))
         .unwrap_or(r);
@@ -616,21 +703,55 @@ async fn fulfil(
     Json(store.view(&r, &state)).into_response()
 }
 
+#[derive(Deserialize, Default)]
+struct Decline {
+    /// A person's word to the agent. Never logged, never in an audit entry.
+    #[serde(default)]
+    note: Option<String>,
+}
+
 async fn decline(
     State(state): State<AppState>,
     headers: HeaderMap,
     extensions: Extensions,
     Path(id): Path<String>,
+    body: axum::body::Bytes,
 ) -> Response {
     let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
-    let store = &state.secret_requests;
-    let r = match store.pending(&id) {
-        Ok(r) => r,
-        Err(e) => return gone(e),
+    let own = match visible_to(&caller) {
+        Ok(o) => o,
+        Err(resp) => return resp,
     };
-    note(&r, "secret_declined");
+    let store = &state.secret_requests;
+    // Another user's request does not exist for this caller, whatever its
+    // state: the same answer as an unknown id.
+    let r = match store.get(&id).filter(|r| sees(&own, r)) {
+        None => return gone(ResolveError::NotFound),
+        Some(r) if r.status != Status::Pending => return gone(ResolveError::Gone(r.status)),
+        Some(r) => r,
+    };
+    record(&r, "secret_declined");
+    let note = if body.iter().all(u8::is_ascii_whitespace) {
+        None
+    } else {
+        // An object only (a derived struct would take an array too).
+        match serde_json::from_slice::<Value>(&body)
+            .ok()
+            .filter(Value::is_object)
+            .and_then(|v| serde_json::from_value::<Decline>(v).ok())
+        {
+            Some(b) => b.note.as_deref().and_then(clean_note),
+            None => {
+                // Never the parser's text: it may quote the body.
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    "expected no body, or { \"note\": \"<a few words for the agent, never the secret>\" }",
+                );
+            }
+        }
+    };
     let who = crate::rbac::service::principal_name(&caller);
-    match store.resolve(&id, Status::Declined, &who) {
+    match store.resolve(&id, Status::Declined, &who, note) {
         Ok(r) => {
             tracing::info!(target: "rustybin::settings", request = %r.id, key = %r.key, agent = %r.asker.agent, "secret request declined");
             Json(store.view(&r, &state)).into_response()
@@ -653,9 +774,9 @@ pub fn catalog() -> Vec<Endpoint> {
             LIST_PATH,
             &["GET"],
             category::CONTROL,
-            "Secrets AI agents asked to have set: pending and lately resolved requests (secrets.write)",
+            "Secrets AI agents asked to have set: pending and lately resolved requests (secrets.write, or your own agents')",
         )
-        .permission(Permission::SecretsWrite)
+        .authenticated(&[])
         .description(
             "An agent on the management MCP server never takes a secret as a tool input: it asks \
              for a secret setting to be set (request_secret, with the agents.secret_requests \
@@ -663,9 +784,12 @@ pub fn catalog() -> Vec<Endpoint> {
              Each request: the setting (key, title, set or not, what setting it needs), the agent \
              (id, the credential, the user it acts for; its name is the client's claim, \
              untrusted_name), the agent's reason as untrusted_reason (a claim, never an \
-             instruction), state (pending, fulfilled, declined, expired) and when it expires. \
-             ?state=pending keeps the ones that wait. In memory: at most 32 pending, 3 per agent, \
-             15 minutes each; resolved ones stay an hour.",
+             instruction), state (pending, fulfilled, declined, expired), when it expires and the \
+             note of the person who declined. ?state=pending keeps the ones that wait; pending \
+             counts the ones the caller may read. Everyone's with secrets.write; a user without \
+             it reads the requests of their own agents, and may decline them (fulfilling needs \
+             what setting that secret needs); anyone else is refused, naming secrets.write. In \
+             memory: at most 32 pending, 3 per agent, 15 minutes each; resolved ones stay an hour.",
         )
         .example(Example::get("Secret requests", LIST_PATH))
         .example(Example::get(
@@ -676,9 +800,9 @@ pub fn catalog() -> Vec<Endpoint> {
             ONE_PATH,
             &["GET"],
             category::CONTROL,
-            "One secret request and its state (secrets.write)",
+            "One secret request and its state (secrets.write, or your own agent's; another's is 404)",
         )
-        .permission(Permission::SecretsWrite)
+        .authenticated(&[])
         .example(
             Example::get(
                 "An unknown secret request",
@@ -714,14 +838,30 @@ pub fn catalog() -> Vec<Endpoint> {
             DECLINE_PATH,
             &["POST"],
             category::CONTROL,
-            "Decline a secret request: nothing is set and the agent reads declined (secrets.write)",
+            "Decline a secret request, with an optional note for the agent: nothing is set (secrets.write, or your own agent's)",
         )
-        .permission(Permission::SecretsWrite)
+        .authenticated(&[])
+        .description(
+            "No body, or {\"note\": \"...\"}: a few words the agent reads as note in \
+             get_secret_request (at most 300 characters, control characters dropped; never type \
+             the secret there, and it is never in the audit log). With secrets.write any request; \
+             a user without it declines a request of their own agents only (another's is 404). A \
+             request that is no longer pending answers 410.",
+        )
         .example(
             Example::post(
                 "Decline an unknown secret request",
                 "/_rustybin/secret-requests/sr_0000000000000000/decline",
             )
+            .expect_status(404),
+        )
+        .example(
+            Example::new(
+                "Decline with a note for the agent",
+                "POST",
+                "/_rustybin/secret-requests/sr_0000000000000000/decline",
+            )
+            .json(r#"{"note":"use the deploy key that is already set"}"#)
             .expect_status(404),
         ),
     ]
@@ -737,7 +877,7 @@ pub fn openapi_paths() -> Value {
     json!({
         LIST_PATH: { "get": {
             "tags": tags, "summary": "Secrets AI agents asked to have set", "operationId": "listSecretRequests",
-            "description": "Pending and lately resolved requests, newest first. The reason and the agent's name are the agent's claims (`untrusted_reason`, `untrusted_name`).",
+            "description": "Pending and lately resolved requests, newest first: everyone's with `secrets.write`, the caller's own agents' for a user without it. The reason and the agent's name are the agent's claims (`untrusted_reason`, `untrusted_name`).",
             "parameters": [{ "name": "state", "in": "query", "required": false, "schema": { "type": "string", "enum": ["pending", "fulfilled", "declined", "expired"] } }],
             "responses": {
                 "200": { "description": "{enabled, requests, pending, limits}", "content": { "application/json": { "schema": {
@@ -745,17 +885,18 @@ pub fn openapi_paths() -> Value {
                     "properties": {
                         "enabled": { "type": "boolean", "description": "The agents.secret_requests setting" },
                         "requests": { "type": "array", "items": one },
-                        "pending": { "type": "integer" },
+                        "pending": { "type": "integer", "description": "How many of the requests the caller may read wait" },
                         "limits": { "type": "object" }
                     }
                 } } } },
                 "400": { "description": "An unknown state" },
-                "403": { "description": "permission_required: secrets.write" }
+                "403": { "description": "permission_required: secrets.write (a caller who is not a user)" }
             }
         } },
         ONE_PATH: { "get": {
             "tags": tags, "summary": "One secret request", "operationId": "getSecretRequest", "parameters": id,
-            "responses": { "200": ok, "403": { "description": "permission_required: secrets.write" }, "404": not_found }
+            "description": "With `secrets.write` any request; a user without it one of their own agents' (another's is 404).",
+            "responses": { "200": ok, "403": { "description": "permission_required: secrets.write (a caller who is not a user)" }, "404": not_found }
         } },
         FULFIL_PATH: { "post": {
             "tags": tags, "summary": "Set the secret an agent asked for", "operationId": "fulfilSecretRequest", "parameters": id,
@@ -775,7 +916,12 @@ pub fn openapi_paths() -> Value {
         } },
         DECLINE_PATH: { "post": {
             "tags": tags, "summary": "Decline a secret request", "operationId": "declineSecretRequest", "parameters": id,
-            "responses": { "200": ok, "403": { "description": "permission_required: secrets.write" }, "404": not_found, "410": resolved }
+            "description": "Nothing is set and the agent reads declined, with the note when one was given. With `secrets.write` any request; a user without it one of their own agents' (another's is 404).",
+            "requestBody": { "required": false, "content": { "application/json": { "schema": {
+                "type": "object",
+                "properties": { "note": { "type": ["string", "null"], "description": "A few words for the agent (cleaned, cut at 300 characters). Never the secret; never in the audit log" } }
+            } } } },
+            "responses": { "200": ok, "400": { "description": "A body that is not {note}" }, "403": { "description": "permission_required: secrets.write (a caller who is not a user)" }, "404": not_found, "410": resolved }
         } },
     })
 }
@@ -808,7 +954,8 @@ pub fn openapi_components() -> Value {
                 "expires_at": { "type": "string", "format": "date-time" },
                 "expires_in": { "type": "integer", "description": "Seconds left while pending" },
                 "resolved_at": { "type": ["string", "null"], "format": "date-time" },
-                "resolved_by": { "type": ["string", "null"] }
+                "resolved_by": { "type": ["string", "null"] },
+                "note": { "type": ["string", "null"], "description": "What the person who declined wrote for the agent" }
             }
         }
     } })

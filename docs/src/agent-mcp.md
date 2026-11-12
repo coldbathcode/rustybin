@@ -490,15 +490,19 @@ state, and where a person goes; never a value.
 **Secrets an agent asked for** above every tab while a request waits: the setting,
 the agent's id, the user it acts for and its credential (what the instance knows),
 then, set apart, the name the agent gave itself and its reason (what the agent
-claims, shown as text). Type the value and **Set the secret**, or **Decline**. From
-the command line the value comes from a prompt without echo or from stdin, never an
-argument:
+claims, shown as text). Type the value and **Set the secret**, or **Decline**. While
+a request waits, the gear in the top bar shows how many do, from any view; the count
+goes when the last one is set, declined or expired. (The console asks the route below
+for it, about every 15 seconds while its tab is shown, only for a caller who may read
+requests, and seldom while the setting is off.) From the command line the value comes
+from a prompt without echo or from stdin, never an argument:
 
 ```bash
 {{#include ../examples/cli/cli.sh:secret_requests}}
 ```
 
-The same over the API, for a caller with `secrets.write`:
+The same over the API, for a caller with `secrets.write` (or a user reading [their
+own agents' requests](#your-own-agents-requests)):
 
 ```hurl
 {{#include ../examples/agent/secret_requests.hurl:list}}
@@ -519,16 +523,46 @@ and `RUSTYBIN_SETTINGS_LOCK` answers `409`. Nobody fulfils more than they could 
 themselves. A request that is no longer pending answers `410`, and so does one whose
 agent was revoked since (it is declined, nothing is set).
 
+**A note on a decline.** Declining takes an optional `note`: a few words for the
+agent, so it does not ask again or knows what to do instead (the field beside
+**Decline** in the console, `rustybin settings decline <id> --note "..."`).
+
 ```hurl
 {{#include ../examples/agent/secret_requests.hurl:decline}}
 ```
 
+The note is cleaned like the reason (control characters dropped, at most 300
+characters) and the agent reads it as `note`. It is a person's text, so it is not
+marked `untrusted_`. **Never type the secret there**: the agent reads it. Like the
+reason, a note is in no audit entry and no log line.
+
 **The agent reads the state** with `get_secret_request`: `pending`, `fulfilled`,
-`declined` or `expired`, and whether the setting is set now. Its own requests only
-(another agent's id does not exist for it), and never the value or a hint of it.
+`declined` or `expired`, whether the setting is set now, and on a declined request
+the note, when the person left one. Its own requests only (another agent's id does
+not exist for it), and never the value or a hint of it.
 
 ```hurl
 {{#include ../examples/agent/secret_requests.hurl:state}}
+```
+
+```hurl
+{{#include ../examples/agent/secret_requests.hurl:note}}
+```
+
+### Your own agents' requests
+
+A user whose agent asked sees that request without holding `secrets.write`, as they
+see [their own agents](#agents-act-for-a-user): the list and the single read answer
+the requests of the agents that act for them, with the same fields, and the card in
+**Management** and the count on the gear show those. They may **decline** one (it
+only takes away). They may **not** fulfil one by that: setting the secret needs
+exactly what it needs for anyone (`settings.write`, `secrets.write` and the group's
+permission), and the `403` names what is missing. Somebody else's request does not
+exist for them (`404`, and the list leaves it out). A caller who is not a user (a
+control JWT, an API key) still needs `secrets.write` for all of it.
+
+```hurl
+{{#include ../examples/agent/secret_requests.hurl:own}}
 ```
 
 **The reason is the agent's claim.** It is text an agent wrote, shown to a person who
@@ -542,10 +576,10 @@ setting and the agent; never the value, and never the reason.
 
 | Surface | Where |
 |---|---|
-| API | `GET /_rustybin/secret-requests[?state=pending]`, `GET /_rustybin/secret-requests/{id}`, `POST /_rustybin/secret-requests/{id}/fulfil` (`{"value"}`), `POST /_rustybin/secret-requests/{id}/decline` |
-| Console | **Management**, above every tab: **Secrets an agent asked for** (the value field, **Set the secret**, **Decline**); the switch is in **AI agents**, Defaults and rules |
-| CLI | `rustybin settings requests [--state S]`, `rustybin settings fulfil <id> [--stdin]`, `rustybin settings decline <id>` ([reference](cli.md#settings)) |
-| Management MCP | `request_secret` (asks), `get_secret_request` (the caller's own requests); fulfilling and declining have no tool, on purpose |
+| API | `GET /_rustybin/secret-requests[?state=pending]`, `GET /_rustybin/secret-requests/{id}`, `POST /_rustybin/secret-requests/{id}/fulfil` (`{"value"}`), `POST /_rustybin/secret-requests/{id}/decline` (optionally `{"note"}`) |
+| Console | The gear in the top bar: how many wait. **Management**, above every tab: **Secrets an agent asked for** (the value field, **Set the secret**, the note field, **Decline**); the switch is in **AI agents**, Defaults and rules |
+| CLI | `rustybin settings requests [--state S]`, `rustybin settings fulfil <id> [--stdin]`, `rustybin settings decline <id> [--note TEXT]` ([reference](cli.md#settings)) |
+| Management MCP | `request_secret` (asks), `get_secret_request` (the caller's own requests, with the `note` of a declined one); fulfilling and declining have no tool, on purpose |
 | `rustybin.yaml` | `settings: {agents.secret_requests: true}`; a request itself is not instance state and is in no document |
 
 ## Talking to the server
@@ -665,7 +699,7 @@ set](#a-secret-at-an-agents-request); `assist_status` shows `{set, hint}`.
 | `update_settings` | `settings.write` | Set values (`null` forgets a stored one) and unset stored values; secrets are refused, and so is the console sign-in in password mode (it changes only with its current password); each key needs what `PATCH /_rustybin/settings` needs for it (`settings.security` for the security groups, `portal.settings`, `git.write` for `git.*`, the permissions of the roles a `sso.role_map` or `sso.default_roles` names); a change of `egress.*`, `agents.*`, `console.*`, `git.*`, `sso.*`, `proxy.*`, `assist.provider` or `assist.base_url` is then confirmed by the user |
 | `check_egress` | `settings.read` | The [outbound policy](configuration.md#outbound-connections) and, with `url` and `purpose`, whether that URL would be allowed before DNS and why not |
 | `request_secret` | `settings.write` | [Ask for a secret setting to be set](#a-secret-at-an-agents-request) by a person (`setting`, `reason`): the request's id and state, never a value; needs the `agents.secret_requests` setting on and what changing a setting of that group needs; at most 3 waiting per agent, 15 minutes each |
-| `get_secret_request` | `settings.write` | How a request of this agent stands (`pending`, `fulfilled`, `declined`, `expired`) and whether the setting is set now; without `id`, its requests of the last hour. Never the value, never another agent's |
+| `get_secret_request` | `settings.write` | How a request of this agent stands (`pending`, `fulfilled`, `declined`, `expired`) whether the setting is set now and, on a declined one, the `note` the person left; without `id`, its requests of the last hour. Never the value, never another agent's |
 
 ### MCP inspector and registry
 

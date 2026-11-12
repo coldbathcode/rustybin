@@ -137,8 +137,10 @@ settings requests` lists what waits (the setting, the agent and the user it acts
 and the agent's reason, which is its own claim), `settings fulfil <id>` sets the
 secret from a prompt without echo or from the first line of stdin (`--stdin`), never
 from an argument (it would stay in the shell's history), and `settings decline <id>`
-declines. Fulfilling needs what `settings set-secret` needs for that setting; the
-value goes to the settings store and never to the agent.
+declines, with `--note "..."` to leave the agent a few words (it reads them, so never
+the secret). Fulfilling needs what `settings set-secret` needs for that setting; the
+value goes to the settings store and never to the agent. Without `secrets.write` you
+see, and may decline, the requests of your own agents.
 
 ## Nouns and verbs
 
