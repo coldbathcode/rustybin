@@ -1572,6 +1572,111 @@ async fn a_panic_after_the_release_gives_the_slot_back_once() {
     let _ = server.wait().await;
 }
 
+/// Core next step 18: the import route takes an envelope with values for
+/// the document's variables. A given value wins, a placeholder's name and
+/// the caps are refused by name, and a value that lands where a credential
+/// would be is in no answer and no audit entry.
+#[tokio::test]
+async fn the_import_route_takes_variables_in_an_envelope() {
+    const VALUE: &str = "v4lue-that-must-not-survive";
+    let state = AppState::for_tests(Config::for_tests());
+    let app = test_app_with(state.clone());
+    let post = |body: Value| {
+        let app = app.clone();
+        async move {
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri("/_rustybin/harness/import")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request");
+            let resp = app.oneshot(req).await.expect("response");
+            let status = resp.status();
+            let text = body_string(resp).await;
+            (
+                status,
+                serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)),
+            )
+        }
+    };
+    let collection = json!({
+        "info": { "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+        "variable": [{ "key": "version", "value": "v1" }],
+        "item": [
+            { "name": "list", "request": { "method": "GET",
+                "header": [{ "key": "Authorization", "value": "Bearer {{who}}" }],
+                "url": "{{baseUrl}}/{{version}}/orders?tenant={{tenant}}" } },
+            { "name": "one", "request": { "method": "GET", "url": "{{baseUrl}}/{{version}}/orders/{{orderId}}" } }
+        ]
+    });
+    // Bare: nothing imports, and the answer names why.
+    let (status, j) = post(collection.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    let why = j["error"].as_str().expect("error");
+    assert!(why.contains("tenant") && why.contains("orderId"), "{j}");
+    // The names go along, for a caller that asks for them: not the one in
+    // the Authorization header, which is removed whatever it holds.
+    assert_eq!(j["variables"], json!(["tenant", "orderId"]), "{j}");
+    // Some of the values: what is still undefined stays named.
+    let (status, j) =
+        post(json!({ "document": collection, "variables": { "tenant": "acme" } })).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["source"]["requests"].as_array().map(Vec::len), Some(1));
+    assert_eq!(j["variables"], json!(["orderId"]));
+    // All of them: everything imports, and the given version wins.
+    let (status, j) = post(json!({
+        "document": collection.to_string(),
+        "format": "postman",
+        "variables": { "baseUrl": "https://api.example.com/shop", "tenant": "acme", "orderId": 42,
+            "version": "v2", "who": VALUE }
+    }))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    let paths: Vec<&str> = j["source"]["requests"]
+        .as_array()
+        .expect("requests")
+        .iter()
+        .filter_map(|r| r["path"].as_str())
+        .collect();
+    assert_eq!(paths.len(), 2, "{j}");
+    assert!(paths.contains(&"/shop/v2/orders?tenant=acme"), "{j}");
+    assert!(paths.contains(&"/shop/v2/orders/42"), "{j}");
+    assert_eq!(j["variables"], json!([]));
+    assert_eq!(j["removed"], json!(["authorization"]));
+    assert_eq!(j["hosts"], json!(["api.example.com"]));
+    assert!(!j.to_string().contains(VALUE), "{j}");
+    // Refused by name, the value never shown.
+    let many: serde_json::Map<String, Value> =
+        (0..65).map(|i| (format!("v{i}"), json!(VALUE))).collect();
+    for (variables, why) in [
+        (json!({ "seq": VALUE }), "variables.seq:"),
+        (json!({ "apiToken": VALUE }), "variables.apiToken:"),
+        (
+            json!({ "a": format!("{VALUE}{}", "x".repeat(1024)) }),
+            "variables.a: a value is at most 1024 bytes",
+        ),
+        (Value::Object(many), "variables: at most 64"),
+    ] {
+        let (status, j) = post(json!({ "document": collection, "variables": variables })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+        assert!(
+            j["error"].as_str().is_some_and(|e| e.starts_with(why)),
+            "{why}: {j}"
+        );
+        assert!(!j.to_string().contains(VALUE), "{j}");
+    }
+    // A recording has no variables.
+    let (status, j) = post(json!({
+        "document": { "log": { "entries": [{ "request": { "method": "GET", "url": "https://a.test/x", "headers": [] } }] } },
+        "variables": { "a": "b" }
+    }))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    // Whatever the audit log kept of these calls, it holds no value.
+    let kept = serde_json::to_string(&state.audit.all()).expect("entries");
+    assert!(!kept.contains(VALUE), "{kept}");
+}
+
 /// Core next step 13: the import route reads YAML (an Artillery script),
 /// takes the format by name, and refuses a program. Harness mode is off.
 #[tokio::test]

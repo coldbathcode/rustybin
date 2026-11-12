@@ -492,6 +492,50 @@ jsonpath "$.left_out" includes "config.processor (code, never run)"
 jsonpath "$.hosts[0]" == "api.example.com"
 # ANCHOR_END: harness_import_artillery
 
+# ANCHOR: harness_import_variables
+# A collection whose base URL and ids live in an environment, in an envelope
+# with their values (import-variables.json). The base URL's path leads the
+# requests and its host is listed; the given version wins over the
+# collection's own; the Authorization header is removed whatever it holds;
+# the one variable that still has no value stays named, its request left out.
+POST {{harness_url}}/_rustybin/harness/import
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+file,import-variables.json;
+HTTP 200
+[Asserts]
+jsonpath "$.format" == "postman"
+jsonpath "$.entries" == 3
+jsonpath "$.source.requests" count == 2
+jsonpath "$.source.requests[*].path" includes "/shop/v2/customers/7/orders?state=open"
+jsonpath "$.source.requests[*].path" includes "/shop/v2/orders/o-42"
+jsonpath "$.hosts[0]" == "api.example.com"
+jsonpath "$.removed[0]" == "authorization"
+jsonpath "$.variables" count == 1
+jsonpath "$.variables[0]" == "invoiceId"
+# ANCHOR_END: harness_import_variables
+
+# A placeholder of the harness is never a variable: refused by name.
+POST {{harness_url}}/_rustybin/harness/import
+Authorization: Bearer {{admin_token}}
+{"document": {"info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+  "item": [{"name": "a", "request": {"method": "GET", "url": "https://api.example.com/orders/:order"}}]},
+ "variables": {"seq": "1"}}
+HTTP 400
+[Asserts]
+jsonpath "$.error" startsWith "variables.seq:"
+
+# Nothing imports for want of a variable: the refusal carries its name.
+POST {{harness_url}}/_rustybin/harness/import
+Authorization: Bearer {{admin_token}}
+{"document": {"info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+  "item": [{"name": "a", "request": {"method": "GET", "url": {"raw": "https://api.example.com/orders/:order",
+   "protocol": "https", "host": ["api", "example", "com"], "path": ["orders", ":order"]}}}]}}
+HTTP 400
+[Asserts]
+jsonpath "$.error" contains "nothing to import"
+jsonpath "$.variables[0]" == ":order"
+
 # A program is refused: nothing here runs or translates code.
 POST {{harness_url}}/_rustybin/harness/import
 Authorization: Bearer {{admin_token}}

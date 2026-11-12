@@ -532,3 +532,55 @@ async fn the_harness_imports_the_steps_that_stand_alone() {
         "{v}"
     );
 }
+
+/// Core next step 18: a workflow input is a variable the caller may give
+/// to the harness import; an earlier step's output is made by a run and is
+/// never given.
+#[tokio::test]
+async fn the_harness_import_takes_a_workflow_input_never_a_step_output() {
+    let (_state, app) = instance();
+    let post = |body: Value| {
+        let app = app.clone();
+        async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/_rustybin/harness/import")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("req");
+            let resp = app.oneshot(req).await.expect("resp");
+            let status = resp.status();
+            (status, crate::test_support::body_json(resp).await)
+        }
+    };
+    let (status, v) =
+        post(json!({ "document": ARAZZO, "variables": { "PETNAME": "Rex", "OTHER": "x" } })).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["format"], json!("arazzo"), "{v}");
+    // The create has its input now; the read still needs the create's answer.
+    let requests = v["source"]["requests"].as_array().expect("requests");
+    assert_eq!(requests.len(), 2, "{v}");
+    let create = requests
+        .iter()
+        .find(|r| r["method"] == json!("POST"))
+        .expect("the create");
+    assert_eq!(create["path"], json!("/mock/petstore/v1/pets"));
+    assert_eq!(create["body"]["name"], json!("Rex"), "{v}");
+    assert_eq!(v["variables"], json!(["steps.create.outputs.id"]), "{v}");
+    assert!(
+        v["notes"]
+            .to_string()
+            .contains("given and not used by the document: OTHER"),
+        "{v}"
+    );
+    let (status, v) =
+        post(json!({ "document": ARAZZO, "variables": { "steps.create.outputs.id": "1" } })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .expect("e")
+            .starts_with("variables.steps.create.outputs.id: the output of a step"),
+        "{v}"
+    );
+}

@@ -379,14 +379,67 @@ export default {
       // goes through the form like anything else; nothing in the file is run.
       const recording = h('input', { type: 'file', accept: '.har,.json,.yaml,.yml,application/json', id: 'harness-import', 'aria-label': 'A HAR file, a Postman collection or an Artillery script' });
       const importedEl = h('div', { id: 'harness-imported', 'aria-live': 'polite' });
+      // The file last chosen and the values given for its variables: the
+      // variables form imports the same text again with them. Kept for the
+      // builder's lifetime only, never stored.
+      let importing = null;
       recording.addEventListener('change', async () => {
         const file = recording.files[0];
         recording.value = '';
         if (!file) return;
         const text = await file.text();
-        const yaml = /\.ya?ml$/i.test(file.name) && !text.trimStart().startsWith('{');
-        const r = await send({ control: true, method: 'POST', url: `${SERVER}${PREFIX}/import`, headers: { 'Content-Type': yaml ? 'application/yaml' : 'application/json' }, body: text, timeout: 30000 });
-        if (!r.ok || !r.json) { toast((r.json && r.json.error) || `answered ${r.status}`, 'err'); return; }
+        importing = { text, yaml: /\.ya?ml$/i.test(file.name) && !text.trimStart().startsWith('{'), given: {} };
+        await importFile();
+      });
+      // A small form for the variables the file does not define (a
+      // collection keeps them in an environment): one field each, and room
+      // for one more, such as the variable a base URL stands behind.
+      function variablesForm(missing) {
+        const rows = h('div', { class: 'stack-sm' });
+        const addRow = (name, value, fixed) => {
+          const nameEl = input({ value: name, placeholder: 'name', 'aria-label': 'Variable name', class: 'input harness-import-var-name' });
+          if (fixed) nameEl.readOnly = true;
+          const valueEl = input({ value, placeholder: 'value', 'aria-label': fixed ? `Value of ${name}` : 'Variable value', class: 'input harness-import-var-value' });
+          rows.append(h('div', { class: 'row harness-import-var' }, nameEl, valueEl));
+        };
+        const known = new Set(missing);
+        for (const name of missing) addRow(name, importing.given[name] || '', true);
+        for (const [name, value] of Object.entries(importing.given)) if (!known.has(name)) addRow(name, value, false);
+        const formEl = h('form', { id: 'harness-import-vars', class: 'stack-sm' },
+          h('strong', null, missing.length ? 'Give the variables their values and import again' : 'Variables given'),
+          rows,
+          h('div', { class: 'row' },
+            h('button', { class: 'btn sm', type: 'button', id: 'harness-import-var-add', onclick: () => addRow('', '', false) }, 'Add a variable'),
+            h('button', { class: 'btn sm primary', type: 'submit', id: 'harness-import-again' }, 'Import again')),
+          h('span', { class: 'hint' }, 'A name as the file writes it: baseUrl for {{baseUrl}}, :id for a path variable. Not for credentials: an import removes them, a scenario gets its own identity. The values go into the scenario, nowhere else.'));
+        formEl.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const given = {};
+          for (const row of rows.querySelectorAll('.harness-import-var')) {
+            const name = row.querySelector('.harness-import-var-name').value.trim();
+            const value = row.querySelector('.harness-import-var-value').value;
+            if (name && value !== '') given[name] = value;
+          }
+          importing.given = given;
+          await importFile();
+        });
+        return formEl;
+      }
+      async function importFile() {
+        const { text, yaml, given } = importing;
+        const withValues = Object.keys(given).length > 0;
+        // With values the file travels as text in an envelope; without, as it is.
+        const r = await send({ control: true, method: 'POST', url: `${SERVER}${PREFIX}/import`,
+          headers: { 'Content-Type': !withValues && yaml ? 'application/yaml' : 'application/json' },
+          body: withValues ? JSON.stringify({ document: text, variables: given }) : text, timeout: 30000 });
+        if (!r.ok || !r.json || !r.json.source) {
+          const why = (r.json && r.json.error) || `answered ${r.status}`;
+          toast(why, 'err');
+          // Nothing imported because variables have no value: ask for them.
+          const missing = (r.json && Array.isArray(r.json.variables)) ? r.json.variables : [];
+          if (missing.length || withValues) replace(importedEl, notice('warn', h('div', { class: 'stack-sm' }, h('div', null, why), variablesForm(missing))));
+          return;
+        }
         let current = normalise(initial);
         try { current = form.value(); } catch { /* the form is half filled: start from what it opened with */ }
         // A scenario's first layer holds the source: the top-level one is a
@@ -412,8 +465,9 @@ export default {
         if (variables.length) lines.push(h('div', null, h('strong', null, 'Variables the file does not define (their requests are left out): '), variables.join(', ')));
         if (skipped.length) lines.push(h('div', null, h('strong', null, 'Requests left out: '), skipped.map(([why, n]) => `${n} with ${why}`).join('; ')));
         for (const n of notes) lines.push(h('div', null, n));
+        if (variables.length || withValues) lines.push(variablesForm(variables));
         replace(importedEl, lines.length ? notice('warn', h('div', { class: 'stack-sm' }, ...lines)) : null);
-      });
+      }
       const yamlPane = h('div', { hidden: true, class: 'stack-sm' }, yamlArea,
         h('div', { class: 'row' }, h('button', { class: 'btn sm', type: 'button', onclick: applyYaml }, 'Apply YAML to the form'), copyButton(() => yamlArea.value, { label: 'Copy YAML' })));
       const bForm = h('button', { type: 'button', 'aria-pressed': 'true', onclick: () => show('form') }, 'Form');

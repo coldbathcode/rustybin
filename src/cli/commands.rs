@@ -540,7 +540,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("harness", "delete-scenario", "<name>", "Delete a saved scenario.", NO_FLAGS, [("DELETE", "/_rustybin/harness/scenarios/{name}")], true, "harness delete-scenario my-smoke --yes"),
     cmd!("harness", "validate", "<file> --remote", "Validate a scenario on the instance (without --remote: offline, in this process).", &[Flag::switch("--remote", "On the instance")], [("POST", "/_rustybin/harness/validate")], false, "harness validate smoke.yaml --remote"),
     cmd!("harness", "preview", "<file>", "The run plan of a scenario: stages, requests, duration.", NO_FLAGS, [("POST", "/_rustybin/harness/preview")], false, "harness preview smoke.yaml"),
-    cmd!("harness", "import", "<file> [--format F]", "A recording (a HAR file, or saved GET /_rustybin/requests), a Postman collection (v2.1), an Artillery script or an Arazzo document (its steps against the instance's mocks) as a scenario's source; what does not map is named, nothing in the file is run. Sends nothing.", &[Flag::value("--format", "har, captures, postman, artillery or arazzo (default: read from the file)")], [("POST", "/_rustybin/harness/import")], false, "harness import recording.har"),
+    cmd!("harness", "import", "<file> [--format F] [--var NAME=value]...", "A recording (a HAR file, or saved GET /_rustybin/requests), a Postman collection (v2.1), an Artillery script or an Arazzo document (its steps against the instance's mocks) as a scenario's source; what does not map is named, nothing in the file is run. --var gives a value for a variable the file does not define (a collection's environment). Sends nothing.", &[Flag::value("--format", "har, captures, postman, artillery or arazzo (default: read from the file)"), Flag::value("--var", "A variable of the file: NAME=value, the name as the file writes it (baseUrl for {{baseUrl}}, :id for a Postman path variable); repeatable, at most 64. Never a credential: an import removes credentials")], [("POST", "/_rustybin/harness/import")], false, "harness import recording.har"),
     cmd!("harness", "runs", "", "The runs on this node.", NO_FLAGS, [("GET", "/_rustybin/harness/runs")], false, "harness runs"),
     cmd!("harness", "run", "<file> --remote [--wait]", "Start a run on the instance (without --remote: from this process); --wait follows it and prints the report.", &[Flag::switch("--remote", "On the instance"), Flag::switch("--wait", "Follow the run and print the report"), Flag::value("--format", "The report format with --wait: text (default), json or junit")], [("POST", "/_rustybin/harness/runs")], false, "harness run smoke.yaml --remote --wait"),
     cmd!("harness", "show", "<run>", "One run: state, progress, the live controls.", NO_FLAGS, [("GET", "/_rustybin/harness/runs/{run}")], false, "harness show r-1"),
@@ -4696,13 +4696,29 @@ async fn harness(ctx: &mut Ctx, verb: &str) -> Result<()> {
             ctx.args
                 .arg(0, "a recording, a collection or a script file")?;
             let text = ctx.input(&first)?;
-            // JSON, or YAML for an Artillery script: the instance reads both.
-            let content_type = content_type_for(&first, &text);
             let path = match ctx.args.value("--format") {
                 Some(format) => format!("/_rustybin/harness/import?format={}", enc(format)),
                 None => "/_rustybin/harness/import".to_string(),
             };
-            post(ctx, &path, Body::Text(text, content_type)).await
+            // Values for the file's variables go in an envelope with its
+            // text. A refusal names the variable, never what was typed.
+            let mut variables = serde_json::Map::new();
+            for pair in ctx.args.values("--var") {
+                let (name, value) = pair
+                    .split_once('=')
+                    .map(|(n, v)| (n.trim(), v))
+                    .filter(|(n, _)| !n.is_empty())
+                    .ok_or_else(|| Fail::Usage("--var takes NAME=value".into()))?;
+                variables.insert(name.to_string(), Value::String(value.to_string()));
+            }
+            if variables.is_empty() {
+                // JSON, or YAML for an Artillery script: the instance reads both.
+                let content_type = content_type_for(&first, &text);
+                post(ctx, &path, Body::Text(text, content_type)).await
+            } else {
+                let envelope = json!({ "document": text, "variables": variables });
+                post(ctx, &path, Body::Json(envelope)).await
+            }
         }
         "validate" | "preview" => {
             ctx.args.arg(0, "a scenario file")?;

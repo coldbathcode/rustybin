@@ -1683,8 +1683,13 @@ pub fn catalog() -> Vec<Endpoint> {
              is named in `left_out`, a request with a variable the document does not define is \
              left out and the variable named in `variables`, and an Artillery script's phases \
              become `pattern` when they map exactly. `?format=` (har, captures, postman, \
-             artillery) names the format instead of reading it from the document. A program in a \
-             scripting language is refused. Sends nothing. Works with harness mode off.",
+             artillery, arazzo) names the format instead of reading it from the document. The \
+             body may also be a JSON envelope `{document, format, variables}`: `document` is the \
+             document or its text, and `variables` gives values for variables the document does \
+             not define (at most 64, 1 KiB each; a given value wins over the document's own; a \
+             harness placeholder's name or one that looks like a credential is refused; \
+             credentials are removed after the values are put in). A program in a scripting \
+             language is refused. Sends nothing. Works with harness mode off.",
         )
         .example(
             Example::post("Import", "/_rustybin/harness/import").json(
@@ -2258,7 +2263,7 @@ fn live_openapi_paths(paths: &mut Value, tag: &Value, off: &Value, scenario_body
             "post": {
                 "tags": tag,
                 "summary": "A recording, a collection or a script as a scenario's source",
-                "description": "A HAR file, the answer of GET /_rustybin/requests, a Postman collection (v2.1) or an Artillery script (YAML or JSON), as weighted request templates. Secret-looking headers and query parameters are removed and named; entries with a secret-looking field in the body are left out. What a collection or a script says that has no counterpart (scripts, hooks, plugins, captures, think times) is never run: it is named in `left_out`. A request with a variable the document does not define is left out and the variable named in `variables`. An Artillery script's phases become `pattern` when they map exactly. Sends nothing.",
+                "description": "A HAR file, the answer of GET /_rustybin/requests, a Postman collection (v2.1) or an Artillery script (YAML or JSON), as weighted request templates. Secret-looking headers and query parameters are removed and named; entries with a secret-looking field in the body are left out. What a collection or a script says that has no counterpart (scripts, hooks, plugins, captures, think times) is never run: it is named in `left_out`. A request with a variable the document does not define is left out and the variable named in `variables`. An Artillery script's phases become `pattern` when they map exactly. The body is the document, or an envelope `{document, format, variables}` that gives values for the document's variables: a given value wins over the document's own, a harness placeholder's name (`seq`, `vu`, `run`, `node`, `layer`, `rand`, `id`, `ip`) or one that looks like a credential is refused, and credentials are removed after the values are put in. A recording has no variables. Sends nothing.",
                 "operationId": "importHarnessRecording",
                 "parameters": [{
                     "name": "format", "in": "query", "required": false,
@@ -2266,10 +2271,17 @@ fn live_openapi_paths(paths: &mut Value, tag: &Value, off: &Value, scenario_body
                     "schema": { "type": "string", "enum": ["har", "captures", "postman", "artillery", "arazzo"] }
                 }],
                 "requestBody": { "required": true, "content": {
-                    "application/json": { "schema": { "type": "object", "description": "A HAR file, saved captures, a Postman collection or an Artillery script." } },
+                    "application/json": { "schema": { "oneOf": [
+                        { "type": "object", "description": "A HAR file, saved captures, a Postman collection, an Artillery script or an Arazzo document." },
+                        { "type": "object", "description": "An envelope: the document with values for its variables.", "required": ["document"], "additionalProperties": false, "properties": {
+                            "document": { "description": "The document, or its text (JSON or YAML).", "oneOf": [{ "type": "object" }, { "type": "array" }, { "type": "string" }] },
+                            "format": { "type": "string", "enum": ["har", "captures", "postman", "artillery", "arazzo"], "description": "The format, instead of reading it from the document or the query." },
+                            "variables": { "type": "object", "maxProperties": 64, "additionalProperties": { "oneOf": [{ "type": "string", "maxLength": 1024 }, { "type": "number" }, { "type": "boolean" }] }, "description": "Values for variables of the document, by name as the document writes it (`baseUrl` for `{{baseUrl}}`, `:id` for a Postman path variable, an Arazzo workflow input as `variables` names it)." }
+                        } }
+                    ] } },
                     "application/yaml": { "schema": { "type": "string", "description": "An Artillery script." } }
                 } },
-                "responses": { "200": json_ok("`format`, `source.requests`, `entries`, `skipped`, `removed`, `hosts`, `left_out`, `variables`, `notes`, and `pattern` and `timeout` when an Artillery script gives them"), "400": { "description": "Not a document this import reads (a program is refused), or nothing to import" } }
+                "responses": { "200": json_ok("`format`, `source.requests`, `entries`, `skipped`, `removed`, `hosts`, `left_out`, `variables` (the ones that still have no value), `notes`, and `pattern` and `timeout` when an Artillery script gives them"), "400": { "description": "Not a document this import reads (a program is refused), nothing to import, or a variable that is refused (named, its value never shown)" } }
             }
         }));
         all.insert("/_rustybin/harness/preview".into(), json!({

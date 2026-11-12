@@ -1477,6 +1477,97 @@ async fn git_branches_switch_resolve_and_signing_key() {
     inst.server.shutdown();
 }
 
+/// Core next step 18: `harness import --var NAME=value` gives a value for a
+/// variable the file does not define; a harness placeholder's name is
+/// refused by name (exit 1), and a value is in no failure message.
+#[tokio::test]
+async fn harness_import_takes_variables() {
+    let inst = instance().await;
+    inst.login().await;
+    let dir = inst.home.path().join("import-vars");
+    std::fs::create_dir_all(&dir).expect("dir");
+    let collection = dir.join("shop.postman_collection.json");
+    std::fs::write(
+        &collection,
+        json!({
+            "info": { "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+            "item": [{ "name": "one", "request": { "method": "GET",
+                "url": { "raw": "{{baseUrl}}/orders/:id?tenant={{tenant}}", "host": ["{{baseUrl}}"],
+                    "path": ["orders", ":id"], "query": [{ "key": "tenant", "value": "{{tenant}}" }] } } }]
+        })
+        .to_string(),
+    )
+    .expect("collection");
+    let collection = collection.display().to_string();
+    // Without the values nothing imports.
+    let (code, _, why) = inst
+        .run_full(None, &["harness", "import", &collection])
+        .await;
+    assert_eq!(code, 1);
+    assert!(why.contains("tenant") && why.contains(":id"), "{why}");
+    let j = inst
+        .json(&[
+            "harness",
+            "import",
+            &collection,
+            "--var",
+            "baseUrl=https://api.example.com/v1",
+            "--var",
+            "tenant=a=b",
+            "--var",
+            ":id=42",
+        ])
+        .await;
+    assert_eq!(j["format"], json!("postman"), "{j}");
+    assert_eq!(
+        j["source"]["requests"][0]["path"],
+        json!("/v1/orders/42?tenant=a%3Db")
+    );
+    assert_eq!(j["variables"], json!([]));
+    // A script is YAML: it travels as text, its format still named.
+    let script = dir.join("load.yml");
+    std::fs::write(
+        &script,
+        "config:\n  target: https://api.example.com\nscenarios:\n  - flow:\n      - get:\n          url: \"/items/{{ item }}\"\n",
+    )
+    .expect("script");
+    let script = script.display().to_string();
+    let j = inst
+        .json(&[
+            "harness",
+            "import",
+            &script,
+            "--format",
+            "artillery",
+            "--var",
+            "item=3",
+        ])
+        .await;
+    assert_eq!(j["source"]["requests"][0]["path"], json!("/items/3"));
+    // A placeholder of the harness is refused by name.
+    let (code, _, why) = inst
+        .run_full(
+            None,
+            &["harness", "import", &collection, "--var", "seq=v4lue-1"],
+        )
+        .await;
+    assert_eq!(code, 1);
+    assert!(why.contains("variables.seq"), "{why}");
+    assert!(!why.contains("v4lue-1"), "{why}");
+    // Not NAME=value: a usage error that does not repeat what was typed.
+    let (code, _, why) = inst
+        .run_full(
+            None,
+            &["harness", "import", &collection, "--var", "v4lue-2"],
+        )
+        .await;
+    assert_eq!(code, 2, "{why}");
+    assert!(
+        why.contains("NAME=value") && !why.contains("v4lue-2"),
+        "{why}"
+    );
+}
+
 /// Core next step 13: `harness import` sends a script as YAML and names
 /// the format with `--format`; a program is refused (exit 1).
 #[tokio::test]

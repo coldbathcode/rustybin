@@ -881,8 +881,16 @@ pub async fn import_scenario(ctx: &CallCtx, access: &Access, args: &Value) -> Va
         .get("format")
         .and_then(Value::as_str)
         .map(str::to_string);
+    // Values for the document's variables: named in a refusal, never shown.
+    let variables = match crate::harness::import::Variables::from_value(
+        args.get("variables").unwrap_or(&Value::Null),
+    ) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
     let mocks = crate::replay::mocks_for(&ctx.app, &access.resolved);
-    match crate::harness::api::import_document(document.to_string(), format, mocks).await {
+    match crate::harness::api::import_document(document.to_string(), format, mocks, variables).await
+    {
         Ok(view) => {
             let count = |key: &str| view[key].as_array().map_or(0, Vec::len);
             let summary = format!(

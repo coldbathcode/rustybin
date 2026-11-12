@@ -648,3 +648,386 @@ fn an_imported_source_validates_as_a_scenario() {
         assert_eq!(out.skipped[reason], 1, "{reason}: {:?}", out.skipped);
     }
 }
+
+// ── Variables given by the caller (core next step 18) ───────────────
+
+fn given(v: Value) -> Variables {
+    Variables::from_value(&v).expect("variables")
+}
+
+/// A collection as the app exports it when its base URL and ids live in an
+/// environment: nothing of it is defined in the document.
+fn environment_collection() -> Value {
+    json!({
+        "info": { "name": "Shop",
+            "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+        "item": [
+            { "name": "A user", "request": { "method": "GET", "header": [],
+                "url": { "raw": "{{baseUrl}}/users/{{userId}}", "host": ["{{baseUrl}}"],
+                    "path": ["users", "{{userId}}"] } } },
+            { "name": "Its orders", "request": { "method": "GET",
+                "header": [{ "key": "X-Tenant", "value": "{{tenant}}" }],
+                "url": { "raw": "{{baseUrl}}/users/{{userId}}/orders/:order?state={{state}}",
+                    "host": ["{{baseUrl}}"], "path": ["users", "{{userId}}", "orders", ":order"],
+                    "query": [{ "key": "state", "value": "{{state}}" }] } } },
+            { "name": "Create", "request": { "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": { "mode": "raw", "raw": "{\"user\": \"{{userId}}\", \"tenant\": \"{{tenant}}\"}" },
+                "url": "{{baseUrl}}/users/{{userId}}/orders" } }
+        ]
+    })
+}
+
+#[test]
+fn a_collection_with_an_environment_imports_whole_with_its_variables() {
+    // Without the environment nothing imports, and every variable is named.
+    let err = import(&environment_collection()).unwrap_err();
+    assert!(err.contains("nothing to import"), "{err}");
+    // Every one a request needs, not only the first it meets.
+    for name in ["userId", "tenant", "state", ":order"] {
+        assert!(err.contains(name), "{name}: {err}");
+    }
+    // With it everything does: the base URL's path leads the requests and
+    // its host is listed, as any host of the document is.
+    let vars = given(json!({
+        "baseUrl": "https://api.example.com/v1/",
+        "userId": 7,
+        "tenant": "acme",
+        "state": "open",
+        ":order": "o-1"
+    }));
+    let out = import_given(&environment_collection(), None, &[], &vars).expect("imported");
+    assert_eq!(out.entries, 3);
+    assert_eq!(out.requests.len(), 3, "{out:?}");
+    assert!(out.skipped.is_empty(), "{:?}", out.skipped);
+    assert!(out.variables.is_empty(), "{:?}", out.variables);
+    assert_eq!(out.hosts, vec!["api.example.com"]);
+    let paths: Vec<&str> = out.requests.iter().map(|t| t.path.as_str()).collect();
+    for path in [
+        "/v1/users/7",
+        "/v1/users/7/orders/o-1?state=open",
+        "/v1/users/7/orders",
+    ] {
+        assert!(paths.contains(&path), "{path}: {paths:?}");
+    }
+    let create = out
+        .requests
+        .iter()
+        .find(|t| t.method == "POST")
+        .expect("the create");
+    assert_eq!(create.body, Some(json!({ "user": "7", "tenant": "acme" })));
+    let orders = out
+        .requests
+        .iter()
+        .find(|t| t.path.contains("o-1"))
+        .expect("the orders");
+    assert_eq!(orders.headers["x-tenant"], "acme");
+    assert!(out.notes.is_empty(), "{:?}", out.notes);
+
+    // An Artillery script's URL that starts with a variable is a path: the
+    // same holds there.
+    let script = "config:\n  target: https://gw.test\nscenarios:\n  - flow:\n      - get:\n          url: \"{{ baseUrl }}/orders\"\n      - get:\n          url: \"{{ baseUrl }}/orders/{{ orderId }}\"\n";
+    let err = import_text(script, None).unwrap_err();
+    assert!(err.contains("baseUrl") && err.contains("orderId"), "{err}");
+    let vars = given(json!({ "baseUrl": "/v1", "orderId": "42" }));
+    let out = import_text_given(script, None, &[], &vars).expect("imported");
+    assert_eq!(out.requests.len(), 2, "{out:?}");
+    assert!(out.requests.iter().any(|t| t.path == "/v1/orders/42"));
+    assert!(out.variables.is_empty());
+}
+
+#[test]
+fn what_is_still_undefined_stays_named_and_what_is_unused_is_said() {
+    let vars = given(json!({ "baseUrl": "https://api.example.com", "userId": "7", "extra": "x" }));
+    let out = import_given(&environment_collection(), None, &[], &vars).expect("imported");
+    // The user imports; the two that need more are still out, by name.
+    assert_eq!(out.requests.len(), 1, "{out:?}");
+    assert_eq!(out.requests[0].path, "/users/7");
+    assert_eq!(out.skipped["an unresolved variable"], 2);
+    assert_eq!(out.variables, vec![":order", "state", "tenant"]);
+    assert!(
+        out.notes
+            .iter()
+            .any(|n| n == "variables: given and not used by the document: extra"),
+        "{:?}",
+        out.notes
+    );
+    // A host's variable without a value is dropped with the host, as it
+    // was, and a note says a value may be given.
+    let out = import(&collection()).expect("imported");
+    assert!(
+        out.notes
+            .iter()
+            .any(|n| n.starts_with("hosts:") && n.contains("baseUrl")),
+        "{:?}",
+        out.notes
+    );
+    // A recording has no variables.
+    let err = import_given(
+        &har(vec![entry("GET", "https://a.test/x")]),
+        None,
+        &[],
+        &given(json!({ "a": "b" })),
+    )
+    .unwrap_err();
+    assert!(err.contains("a recording (har) has no variables"), "{err}");
+}
+
+#[test]
+fn a_given_value_wins_over_the_documents() {
+    // The collection says version is v2.
+    let out = import_given(&collection(), None, &[], &given(json!({ "version": "v3" })))
+        .expect("imported");
+    assert!(
+        out.requests.iter().any(|t| t.path == "/v3/orders?page=1"),
+        "{out:?}"
+    );
+    let create = out
+        .requests
+        .iter()
+        .find(|t| t.method == "POST")
+        .expect("the create");
+    assert_eq!(create.body, Some(json!({ "item": "tea", "api": "v3" })));
+    // A path variable's own value too.
+    let out =
+        import_given(&collection(), None, &[], &given(json!({ ":id": "77" }))).expect("imported");
+    assert!(out.requests.iter().any(|t| t.path == "/v2/orders/77"));
+    assert!(!out.requests.iter().any(|t| t.path == "/v2/orders/42"));
+    // A script's variable with one value, and one with several, which the
+    // document alone leaves out.
+    let several = SCRIPT.replace("region: [\"eu\"]", "region: [\"eu\", \"us\"]");
+    let alone = import_text(&several, None).expect("imported");
+    assert!(alone
+        .left_out
+        .contains(&"config.variables.region (several values)".to_string()));
+    assert_eq!(alone.variables, vec!["region"]);
+    for script in [SCRIPT.to_string(), several] {
+        let out = import_text_given(&script, None, &[], &given(json!({ "region": "ap" })))
+            .expect("imported");
+        assert!(
+            out.requests
+                .iter()
+                .any(|t| t.path == "/shop/items?region=ap"),
+            "{out:?}"
+        );
+        assert!(out.variables.is_empty());
+        assert!(!out.left_out.iter().any(|l| l.contains("region")));
+        assert!(out.pattern.is_some(), "every request kept: {out:?}");
+    }
+}
+
+#[test]
+fn a_harness_placeholder_is_never_a_variable() {
+    for name in crate::harness::scenario::PLACEHOLDERS {
+        let err = Variables::from_value(&json!({ *name: "1" })).unwrap_err();
+        assert!(
+            err.starts_with(&format!("variables.{name}:")) && err.contains("placeholder"),
+            "{err}"
+        );
+    }
+    let err = Variables::from_value(&json!({ " seq ": "1" })).unwrap_err();
+    assert!(err.starts_with("variables.seq:"), "{err}");
+    // A Postman path variable is not a placeholder, whatever its name.
+    assert!(Variables::from_value(&json!({ ":id": "1" })).is_ok());
+    // A value cannot bring a placeholder in whole,
+    let err = Variables::from_value(&json!({ "n": "{{vu}}" })).unwrap_err();
+    assert!(
+        err.starts_with("variables.n:") && !err.contains("vu"),
+        "{err}"
+    );
+    // nor in pieces: what reads as one after the values are in is left out.
+    let mut doc = environment_collection();
+    doc["item"] = json!([
+        { "name": "pieces", "request": { "method": "GET", "url": "https://a.test/n/{{a}}{{a}}seq}}" } },
+        { "name": "plain", "request": { "method": "GET", "url": "https://a.test/n/{{b}}" } }
+    ]);
+    let out =
+        import_given(&doc, None, &[], &given(json!({ "a": "{", "b": "1" }))).expect("imported");
+    assert_eq!(out.requests.len(), 1, "{out:?}");
+    assert_eq!(out.requests[0].path, "/n/1");
+    assert_eq!(out.skipped["text that reads as a placeholder"], 1);
+}
+
+#[test]
+fn a_given_value_is_removed_where_a_credential_would_be() {
+    let mut doc = environment_collection();
+    doc["item"] = json!([
+        { "name": "header", "request": { "method": "GET",
+            "header": [
+                { "key": "Authorization", "value": "Bearer {{who}}" },
+                { "key": "X-Api-Key", "value": "{{who}}" },
+                { "key": "Accept", "value": "application/json" }
+            ],
+            "url": { "raw": "{{baseUrl}}/a?access_token={{who}}&page=2", "host": ["{{baseUrl}}"], "path": ["a"],
+                "query": [{ "key": "access_token", "value": "{{who}}" }, { "key": "page", "value": "2" }] } } },
+        { "name": "body", "request": { "method": "POST", "header": [],
+            "body": { "mode": "raw", "raw": "{\"password\": \"{{who}}\"}" },
+            "url": "{{baseUrl}}/login" } },
+        { "name": "form", "request": { "method": "POST", "header": [],
+            "body": { "mode": "urlencoded", "urlencoded": [{ "key": "client_secret", "value": "{{who}}" }] },
+            "url": "{{baseUrl}}/token" } }
+    ]);
+    let vars =
+        given(json!({ "baseUrl": format!("https://user:{SECRET}@a.test/v1"), "who": SECRET }));
+    let out = import_given(&doc, None, &[], &vars).expect("imported");
+    let text = serde_json::to_string(&out).expect("json");
+    assert!(!text.contains(SECRET), "{text}");
+    assert_eq!(out.requests.len(), 1, "{text}");
+    assert_eq!(out.requests[0].path, "/v1/a?page=2");
+    assert_eq!(out.requests[0].headers.len(), 1, "{text}");
+    for name in ["authorization", "x-api-key", "access_token"] {
+        assert!(out.removed.contains(&name.to_string()), "{:?}", out.removed);
+    }
+    assert_eq!(out.skipped["a body with a secret-looking field"], 2);
+    // The same in a script.
+    let script = "config:\n  target: http://a.test\n  defaults:\n    headers:\n      Authorization: \"Bearer {{ who }}\"\nscenarios:\n  - flow:\n      - get:\n          url: \"/x?api_key={{ who }}&page=2\"\n      - post:\n          url: /login\n          json:\n            password: \"{{ who }}\"\n";
+    let out =
+        import_text_given(script, None, &[], &given(json!({ "who": SECRET }))).expect("imported");
+    let text = serde_json::to_string(&out).expect("json");
+    assert!(!text.contains(SECRET), "{text}");
+    assert_eq!(out.requests.len(), 1, "{text}");
+    assert_eq!(out.requests[0].path, "/x?page=2");
+    // A name that looks like a credential is refused, and no refusal, nor
+    // the variables' own Debug, shows a value.
+    let long = format!("{SECRET}{}", "x".repeat(MAX_VARIABLE_BYTES));
+    for (bad, why) in [
+        (
+            json!({ "apiKey": SECRET }),
+            "variables.apiKey: a name that looks like a credential",
+        ),
+        (
+            json!({ "token": SECRET }),
+            "variables.token: a name that looks like a credential",
+        ),
+        (
+            json!({ "a": long }),
+            "variables.a: a value is at most 1024 bytes",
+        ),
+        (
+            json!({ "a": format!("{SECRET}{{{{x}}}}") }),
+            "variables.a: a value does not hold",
+        ),
+        (json!({ "a": [SECRET] }), "variables.a: a value is text"),
+        (json!([SECRET]), "variables: a map of name to value"),
+    ] {
+        let err = Variables::from_value(&bad).unwrap_err();
+        assert!(err.starts_with(why), "{why}: {err}");
+        assert!(!err.contains(SECRET), "{err}");
+    }
+    assert!(!format!("{vars:?}").contains(SECRET), "{vars:?}");
+    // The refusal of an import that imports nothing has names only.
+    doc["item"]
+        .as_array_mut()
+        .expect("items")
+        .retain(|i| i["name"] != "header");
+    let err = import_given(&doc, None, &[], &vars).unwrap_err();
+    assert!(err.contains("nothing to import"), "{err}");
+    assert!(!err.contains(SECRET), "{err}");
+}
+
+#[test]
+fn given_variables_are_capped() {
+    let many = |n: usize| {
+        Value::Object(
+            (0..n)
+                .map(|i| (format!("v{i}"), json!("x")))
+                .collect::<Map<String, Value>>(),
+        )
+    };
+    assert!(Variables::from_value(&many(MAX_VARIABLES)).is_ok());
+    let err = Variables::from_value(&many(MAX_VARIABLES + 1)).unwrap_err();
+    assert_eq!(err, "variables: at most 64");
+    assert!(Variables::from_value(&json!({ "a": "x".repeat(MAX_VARIABLE_BYTES) })).is_ok());
+    let err =
+        Variables::from_value(&json!({ "a": "x".repeat(MAX_VARIABLE_BYTES + 1) })).unwrap_err();
+    assert_eq!(err, "variables.a: a value is at most 1024 bytes");
+    // A name is one the document could write.
+    let long = "n".repeat(MAX_VARIABLE_NAME + 1);
+    for name in ["", "  ", "a{{b", "a}}b", "a\nb", long.as_str()] {
+        let err = Variables::from_value(&json!({ name: "x" })).unwrap_err();
+        assert!(
+            err.starts_with("variables: a name is 1 to 64 characters"),
+            "{err}"
+        );
+    }
+    assert!(Variables::from_value(&json!({ "n".repeat(MAX_VARIABLE_NAME): "x" })).is_ok());
+    assert!(Variables::from_value(&Value::Null)
+        .expect("none")
+        .is_empty());
+}
+
+#[test]
+fn a_request_body_is_the_document_or_an_envelope() {
+    let doc = environment_collection();
+    // Bare, as before.
+    let err = import_body(&doc.to_string(), None, &[]).unwrap_err().error;
+    assert!(err.contains("nothing to import"), "{err}");
+    // An envelope: the document itself, or its text.
+    let variables = json!({ "baseUrl": "https://api.example.com", "userId": "7", "tenant": "t",
+        "state": "open", ":order": "1" });
+    for document in [doc.clone(), json!(doc.to_string())] {
+        let body = json!({ "document": document, "variables": variables });
+        let out = import_body(&body.to_string(), None, &[]).expect("imported");
+        assert_eq!(out.format, Format::Postman);
+        assert_eq!(out.requests.len(), 3, "{out:?}");
+    }
+    // A script as text, its format named in the envelope (which wins) or
+    // beside it.
+    let script = "config:\n  target: http://a.test\nscenarios:\n  - flow:\n      - get:\n          url: \"/items/{{ item }}\"\n";
+    let body = json!({ "document": script, "format": "artillery", "variables": { "item": 3 } });
+    let out = import_body(&body.to_string(), Some("postman"), &[]).expect("imported");
+    assert_eq!(out.format, Format::Artillery);
+    assert_eq!(out.requests[0].path, "/items/3");
+    let body = json!({ "document": script });
+    assert!(import_body(&body.to_string(), Some("postman"), &[])
+        .unwrap_err()
+        .error
+        .contains("v2.1"));
+    assert!(import_body(&body.to_string(), Some("artillery"), &[])
+        .unwrap_err()
+        .error
+        .contains("variables not defined: item"));
+    // What an envelope refuses: another key, a document that is neither,
+    // variables that are no map, a format that is none.
+    for (body, why) in [
+        (
+            json!({ "document": script, "variable": {} }),
+            "variable: an import takes document, format and variables",
+        ),
+        (
+            json!({ "document": 4 }),
+            "document: the document, or its text",
+        ),
+        (
+            json!({ "document": script, "variables": ["a"] }),
+            "variables: a map of name to value",
+        ),
+        (
+            json!({ "document": script, "format": "k6" }),
+            "format: one of",
+        ),
+        (json!({ "document": script, "format": 4 }), "format: one of"),
+        (
+            json!({ "document": script, "variables": { "seq": "1" } }),
+            "variables.seq:",
+        ),
+    ] {
+        let err = import_body(&body.to_string(), None, &[]).unwrap_err().error;
+        assert!(err.starts_with(why), "{why}: {err}");
+    }
+    // A document that says "document" somewhere is still a document.
+    let mut recording = entry("GET", "https://a.test/x");
+    recording["request"]["headers"] = json!([{ "name": "X-Kind", "value": "document" }]);
+    let mut recording = har(vec![recording]);
+    recording["document"] = json!("a field of its own");
+    let out = import_body(&recording.to_string(), None, &[]).expect("a recording");
+    assert_eq!(out.format, Format::Har);
+    // The size bound of a collection holds inside an envelope too.
+    let mut big = environment_collection();
+    big["info"]["description"] = json!("x".repeat(MAX_TEXT_BYTES));
+    let body = json!({ "document": big, "variables": variables });
+    assert!(import_body(&body.to_string(), None, &[])
+        .unwrap_err()
+        .error
+        .contains("at most 4 MiB"));
+}

@@ -1,0 +1,58 @@
+{
+  "document": {
+    "info": {
+      "name": "Shop",
+      "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "variable": [{ "key": "version", "value": "v1" }],
+    "item": [
+      {
+        "name": "A customer's orders",
+        "request": {
+          "method": "GET",
+          "header": [
+            { "key": "Accept", "value": "application/json" },
+            { "key": "Authorization", "value": "Bearer {{session}}" }
+          ],
+          "url": {
+            "raw": "{{baseUrl}}/{{version}}/customers/{{customerId}}/orders?state={{state}}",
+            "host": ["{{baseUrl}}"],
+            "path": ["{{version}}", "customers", "{{customerId}}", "orders"],
+            "query": [{ "key": "state", "value": "{{state}}" }]
+          }
+        }
+      },
+      {
+        "name": "One order",
+        "request": {
+          "method": "GET",
+          "header": [],
+          "url": {
+            "raw": "{{baseUrl}}/{{version}}/orders/:order",
+            "host": ["{{baseUrl}}"],
+            "path": ["{{version}}", "orders", ":order"]
+          }
+        }
+      },
+      {
+        "name": "The invoice of an order",
+        "request": {
+          "method": "GET",
+          "header": [],
+          "url": {
+            "raw": "{{baseUrl}}/{{version}}/orders/:order/invoices/{{invoiceId}}",
+            "host": ["{{baseUrl}}"],
+            "path": ["{{version}}", "orders", ":order", "invoices", "{{invoiceId}}"]
+          }
+        }
+      }
+    ]
+  },
+  "variables": {
+    "baseUrl": "https://api.example.com/shop",
+    "version": "v2",
+    "customerId": 7,
+    "state": "open",
+    ":order": "o-42"
+  }
+}
