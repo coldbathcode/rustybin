@@ -538,10 +538,10 @@ or an object:
 | `insecure` | `false` | Skip TLS certificate verification (a demo gateway with a self-signed certificate). |
 
 **HTTP/3 targets.** `http: h3` needs a build with the cargo feature `harness-http3`
-(`cargo build --release --features harness-http3`, or the image built with
-`--build-arg CARGO_FEATURES="quota-postgres harness-http3"`); the default binary and the
-published image have no QUIC stack, and refuse the scenario at validation with a message
-that names the feature. `GET /_rustybin/harness` says `http3: true` on a build that has
+(the published image whose tag ends in `-http3`, `cargo build --release --features
+harness-http3`, or an image built with `--build-arg CARGO_FEATURES="quota-postgres
+harness-http3"`); the default binary and the default image have no QUIC stack, and refuse
+the scenario at validation with a message that names the feature. `GET /_rustybin/harness` says `http3: true` on a build that has
 it. An HTTP/3 target goes through the same fences as any other: the allowlist entry's
 port is the UDP port, the name is resolved once and QUIC connects to those pinned
 addresses only (no `Alt-Svc`, no redirect, no move to an address the server prefers),

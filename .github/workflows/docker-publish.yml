@@ -14,6 +14,13 @@ name: Docker image
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
 #     --certificate-identity-regexp '^https://github.com/coldbathcode/rustybin/'
 #
+# A second image, tagged with the suffix `-http3` (`latest-http3`, `X.Y.Z-http3`,
+# `sha-<commit>-http3`), is the same build with the cargo feature
+# `harness-http3`: the load test mode can send to HTTP/3 targets. The default
+# image, the one a public instance runs, carries no QUIC stack. Both are built
+# in parallel jobs, signed the same way, and each job prints its own
+# `signed ...@sha256:...` line, which a release records.
+#
 # The package must be made public once in the repository's package settings
 # (GHCR packages start private).
 
@@ -41,8 +48,28 @@ env:
 
 jobs:
   publish:
-    name: build and push
+    name: build and push (${{ matrix.variant }})
     runs-on: ubuntu-latest
+    strategy:
+      # A failure of one image never stops the other from being published.
+      fail-fast: false
+      matrix:
+        include:
+          - variant: default
+            features: quota-postgres
+            suffix: ""
+            flavor: latest=auto
+            http3: "false"
+            # The cache scope the single image used before the variant existed.
+            cache: buildkit
+          - variant: http3
+            features: quota-postgres harness-http3
+            suffix: "-http3"
+            flavor: |
+              latest=auto
+              suffix=-http3,onlatest=true
+            http3: "true"
+            cache: http3
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
@@ -56,6 +83,9 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+          # `latest=auto` as before the variant (a release tag also moves
+          # `latest`); the variant's suffix goes on that tag too.
+          flavor: ${{ matrix.flavor }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=edge,enable={{is_default_branch}}
@@ -76,15 +106,21 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: RUSTYBIN_GIT_SHA=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          build-args: |
+            RUSTYBIN_GIT_SHA=${{ github.sha }}
+            CARGO_FEATURES=${{ matrix.features }}
+          cache-from: type=gha,scope=${{ matrix.cache }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache }}
+      # Under the limits of the hosted demo: a read-only root and 512 MiB.
       - name: smoke test the pushed image
+        env:
+          SUFFIX: ${{ matrix.suffix }}
+          HTTP3: ${{ matrix.http3 }}
         run: |
-          docker run -d --name rb --read-only --cap-drop ALL --security-opt no-new-privileges \
+          docker run -d --name rb --read-only --cap-drop ALL --security-opt no-new-privileges --memory 512m \
             -v rb-certs:/app/certs -e RUSTYBIN_USAGE_FILE=/app/certs/usage.json -e RUSTYBIN_PORTAL=on -p 8080:80 \
-            "${IMAGE}:sha-$(git rev-parse --short=7 HEAD)" || \
-          docker run -d --name rb --read-only --cap-drop ALL --security-opt no-new-privileges \
+            "${IMAGE}:sha-$(git rev-parse --short=7 HEAD)${SUFFIX}" || \
+          docker run -d --name rb --read-only --cap-drop ALL --security-opt no-new-privileges --memory 512m \
             -v rb-certs:/app/certs -e RUSTYBIN_USAGE_FILE=/app/certs/usage.json -e RUSTYBIN_PORTAL=on -p 8080:80 \
             "$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)"
           for i in $(seq 1 60); do curl -fs http://localhost:8080/_rustybin/ready >/dev/null && break; sleep 1; done
@@ -92,6 +128,8 @@ jobs:
           TOKEN="$(curl -fsS -X POST http://localhost:8080/_rustybin/login -H 'Content-Type: application/json' \
             -d '{"username":"rustybin","password":"rustybin"}' | jq -r .token)"
           curl -fsS -H "Authorization: Bearer $TOKEN" http://localhost:8080/_rustybin/version | grep -q "${GITHUB_SHA:0:12}"
+          # The default image has no QUIC stack; the variant says it has one.
+          test "$(curl -fsS -H "Authorization: Bearer $TOKEN" http://localhost:8080/_rustybin/harness | jq -r .http3)" = "$HTTP3"
           curl -fsS http://localhost:8080/ui/ | grep -q '<html'
           curl -fsS http://localhost:8080/portal/ | grep -q '<html'
           curl -fsS -X POST http://localhost:8080/_rustybin/mcp -H "Authorization: Bearer $TOKEN" \

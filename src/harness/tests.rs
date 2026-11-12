@@ -199,6 +199,9 @@ async fn api_when_harness_is_off() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["enabled"], false);
     assert_eq!(v["harness_api"], 1);
+    // The build's HTTP/3 flag is answered with the harness off too (an
+    // image's variant is told apart by it).
+    assert_eq!(v["http3"], cfg!(feature = "harness-http3"));
     let (status, v) = send(&app, Method::GET, "/_rustybin/harness/runs", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(v["hint"].as_str().unwrap().contains("RUSTYBIN_HARNESS=on"));

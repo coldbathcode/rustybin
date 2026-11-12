@@ -15,6 +15,10 @@
 #
 # The join token is a documentation value: set HARNESS_JOIN_TOKEN for your
 # own. RUSTYBIN_IMAGE names an image built elsewhere (CI) instead of building.
+# A cluster that sends HTTP/3 (a target or a chain hop with `http: h3`) runs
+# the image variant with the suffix -http3 on every node, for example
+# RUSTYBIN_IMAGE=ghcr.io/coldbathcode/rustybin:latest-http3: a node without a
+# QUIC stack refuses the scenario by the feature's name.
 # conformance/harness/run.sh runs this cluster and kills the leader mid-run.
 
 x-node: &node

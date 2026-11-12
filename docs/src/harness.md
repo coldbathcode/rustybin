@@ -375,12 +375,23 @@ targets:
     http: h3
 ```
 
-It needs a build with the cargo feature `harness-http3` (`cargo build --release --features
-harness-http3`, or the image built with `--build-arg CARGO_FEATURES="quota-postgres
-harness-http3"`). The default binary and the published image carry no QUIC stack: they know
-the parameter (it is in the schema, the console form and the tools' schemas in every build)
-and refuse the scenario at validation with a message that names the feature. `GET
-/_rustybin/harness` answers `http3: true` on a build that has it.
+It needs a build with the cargo feature `harness-http3`: the published image whose tag ends
+in `-http3` (`ghcr.io/coldbathcode/rustybin:latest-http3`, or `X.Y.Z-http3` for a release),
+or your own build (`cargo build --release --features harness-http3`, or `docker build
+--build-arg CARGO_FEATURES="quota-postgres harness-http3"`). The default binary and the
+default image carry no QUIC stack: they know the parameter (it is in the schema, the console
+form and the tools' schemas in every build) and refuse the scenario at validation with a
+message that names the feature. `GET /_rustybin/harness` answers `http3: true` on a build
+that has it, `false` on one that has not. In a cluster every node that sends runs the
+variant.
+
+The variant is signed like the default image and verified the same way, by its own tag:
+
+```bash
+cosign verify ghcr.io/coldbathcode/rustybin:latest-http3 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/coldbathcode/rustybin/'
+```
 
 Nothing about where load may go changes with the protocol. The allowlist entry's port is the
 UDP port; the name is resolved once and QUIC connects to those pinned addresses only, with no

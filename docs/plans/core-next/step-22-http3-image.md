@@ -43,3 +43,33 @@ The variant boots under the demo's limits and reports `http3: true`; the default
 ## Done when
 
 The chosen option is built into the release workflow and documented, or this row says no image.
+
+## Build notes (2026-11-12)
+
+The owner chose the recommended option on 2026-11-12 ("all buildable, then release", taking the
+plan's recommendation for each decision): a second image with the suffix `-http3`.
+
+- `.github/workflows/docker-publish.yml` is a matrix of two variants, `default`
+  (`quota-postgres`) and `http3` (`quota-postgres harness-http3`), built in parallel jobs with
+  `fail-fast: false`, so a failure of one never stops the other. Every tag of the variant
+  carries the suffix (`latest-http3`, `edge-http3`, `X.Y.Z-http3`, `X.Y-http3`, `X-http3`,
+  `sha-<commit>-http3`). Each job signs its own digest and prints its own `signed ...` line.
+- Each variant has its own build cache scope; the default keeps the scope the single image had.
+- The smoke test of both now runs under `--memory 512m` next to the read-only root (the limits
+  of the hosted demo), and asserts `http3` of `GET /_rustybin/harness`: `false` on the default,
+  `true` on the variant.
+- For that assertion `GET /_rustybin/harness` answers `http3` with the harness off too (it
+  answered it only with the harness on); `harness::tests` pins it.
+- The variant is built on every push to `main` as well as on a release tag, like the default.
+- The release binaries stay on the default features.
+- Not verified here: the workflow itself runs only on GitHub, so the first push that carries it
+  is its first run (the arm64 build of the QUIC stack under QEMU has never been built). That an
+  `h3` scenario is refused by the feature's name on a default build, and sent on a build with the
+  feature, is what the tests of step 13 already prove.
+
+## For the merge
+
+**New**: a second published image, tagged with the suffix `-http3`, built with the cargo feature
+`harness-http3` for load tests of an HTTP/3 gateway; signed like the default image. The default
+image carries no QUIC stack. **Changed**: `GET /_rustybin/harness` answers `http3` with the
+harness off too. A release records and verifies two digests.

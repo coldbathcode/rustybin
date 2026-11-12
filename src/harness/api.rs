@@ -77,6 +77,9 @@ pub async fn node_status(State(state): State<AppState>) -> Response {
             "harness_api": super::HARNESS_API,
             "hint": "RUSTYBIN_HARNESS=on turns this instance into a harness node (docs/plans/harness.md)",
             "caps": Caps::from_config(&state.config.harness),
+            // Whether this build sends HTTP/3 (the cargo feature), also with
+            // the harness off: an image's variant is told apart here.
+            "http3": super::scenario::http3_built(),
         }))
         .into_response(),
     }

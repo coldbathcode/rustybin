@@ -47,6 +47,11 @@ cosign verify ghcr.io/coldbathcode/rustybin:latest \
   --certificate-identity-regexp '^https://github.com/coldbathcode/rustybin/'
 ```
 
+A second image carries the suffix `-http3` on every tag (`latest-http3`, `X.Y.Z-http3`): the
+same build with the cargo feature `harness-http3`, for [load tests of an HTTP/3
+gateway](harness.md#http3-targets). It is signed the same way and verified with the same
+command and its own tag. The default image has no QUIC stack.
+
 Or build it yourself:
 
 ```bash
