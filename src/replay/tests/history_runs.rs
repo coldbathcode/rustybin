@@ -22,6 +22,7 @@ fn report_of(results: &[(&str, bool)]) -> run::Report {
                 }]
             },
             error: None,
+            steps: Vec::new(),
         })
         .collect();
     let failed = results.iter().filter(|r| !r.passed).count();
@@ -303,6 +304,7 @@ async fn a_kept_run_never_holds_a_variable_value() {
             headers: [("x-api-key".to_string(), "{{API_KEY}}".to_string())].into(),
             body: Some("token is {{API_KEY}}".into()),
         },
+        steps: Vec::new(),
         gateway: None,
         assert: vec![Assertion {
             body_contains: Some("never there".into()),

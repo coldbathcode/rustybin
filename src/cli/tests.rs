@@ -885,6 +885,70 @@ async fn git_commit_takes_checkpoints_and_restore_reads_the_repository() {
     inst.server.shutdown();
 }
 
+/// An Arazzo file is previewed, imported, run and exported back.
+#[tokio::test]
+async fn an_arazzo_file_is_imported_run_and_exported() {
+    let inst = instance().await;
+    inst.login().await;
+    let file = inst.home.path().join("pets.arazzo.yaml");
+    std::fs::write(
+        &file,
+        "arazzo: 1.0.1\ninfo: {title: Pets, version: '1'}\nsourceDescriptions: [{name: petstore, url: ./petstore.yaml, type: openapi}]\nworkflows:\n  - workflowId: pet-journey\n    steps:\n      - stepId: list\n        operationId: listPets\n        successCriteria: [{condition: $statusCode == 200}]\n        outputs: {total: $response.header.X-Total-Count}\n        onFailure: [{name: again, type: retry}]\n      - stepId: read\n        operationId: getPetById\n        parameters: [{name: petId, in: path, value: $steps.list.outputs.total}]\n        successCriteria: [{condition: $statusCode == 200}]\n",
+    )
+    .expect("file");
+    let path = file.display().to_string();
+    let preview = inst.json(&["tests", "import", &path, "--dry-run"]).await;
+    assert_eq!(
+        preview["tests"][0]["name"],
+        json!("pet-journey"),
+        "{preview}"
+    );
+    assert!(
+        preview["left_out"]
+            .to_string()
+            .contains("onFailure[0] (retry)"),
+        "{preview}"
+    );
+    assert_eq!(inst.json(&["tests", "list"]).await["tests"], json!([]));
+    let (code, text) = inst.run(None, &["tests", "import", &path]).await;
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains("pet-journey") && text.contains("onFailure"),
+        "{text}"
+    );
+    let run = inst.json(&["tests", "run"]).await;
+    assert_eq!(run["passed"], json!(true), "{run}");
+    assert_eq!(
+        run["results"][0]["steps"][0]["outputs"]["total"],
+        json!("3"),
+        "{run}"
+    );
+    let (code, hurl) = inst.run(None, &["tests", "export", "pet-journey"]).await;
+    assert_eq!(code, 0);
+    assert!(
+        hurl.contains("list_total: header \"X-Total-Count\""),
+        "{hurl}"
+    );
+    let (code, yaml) = inst
+        .run(
+            None,
+            &["tests", "export", "pet-journey", "--format", "arazzo"],
+        )
+        .await;
+    assert_eq!(code, 0, "{yaml}");
+    assert!(
+        yaml.contains("arazzo: 1.0.1") && yaml.contains("operationId: getPetById"),
+        "{yaml}"
+    );
+    let (code, _) = inst
+        .run(None, &["tests", "export", "--format", "arazzo"])
+        .await;
+    assert_eq!(code, 2);
+    let j = inst.json(&["harness", "import", &path]).await;
+    assert_eq!(j["format"], json!("arazzo"), "{j}");
+    inst.server.shutdown();
+}
+
 /// A pack directory (its spec a file beside it) is applied, listed,
 /// exported and torn down; a second apply is refused naming what exists.
 #[tokio::test]

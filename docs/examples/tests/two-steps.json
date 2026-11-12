@@ -1,0 +1,20 @@
+{
+  "steps": [
+    {
+      "id": "create",
+      "request": {
+        "method": "POST",
+        "path": "/mock/petstore/v1/pets",
+        "headers": {"content-type": "application/json"},
+        "body": "{\"name\": \"{{PET_NAME}}\", \"tag\": \"dog\"}"
+      },
+      "assert": [{"status": 201}],
+      "outputs": {"id": "$response.body#/id", "where": "$response.header.location"}
+    },
+    {
+      "id": "read",
+      "request": {"path": "/mock/petstore/v1/pets/{{steps.create.outputs.id}}"},
+      "assert": [{"status": 200}, {"json": "$.name"}]
+    }
+  ]
+}

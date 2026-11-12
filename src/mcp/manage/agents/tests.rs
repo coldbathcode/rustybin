@@ -1273,6 +1273,8 @@ const OLD_RIGHTS: &[(&str, &str, bool)] = &[
     ("apply_pack", "admin", false),
     ("teardown_pack", "admin", false),
     ("export_pack", "admin", true),
+    // Demo next step 07: an Arazzo import saves tests, as save_test does.
+    ("import_tests", "admin", false),
 ];
 
 /// The 0.4 ceilings, by right: `read-only` a read-only tool that is not a

@@ -1,0 +1,46 @@
+# An Arazzo document against the built-in petstore mock: create a pet, then
+# read it back by the id the create answered.
+#   rustybin tests import pets.arazzo.yaml --dry-run
+arazzo: 1.0.1
+info:
+  title: Pet journeys
+  version: 1.0.0
+sourceDescriptions:
+  - name: petstore
+    url: ./petstore.yaml
+    type: openapi
+workflows:
+  - workflowId: docs-create-and-read
+    summary: Create a pet, read it back
+    inputs:
+      type: object
+      properties:
+        petName: { type: string }
+    steps:
+      - stepId: create
+        operationId: createPet
+        requestBody:
+          contentType: application/json
+          payload:
+            name: $inputs.petName
+            tag: dog
+        successCriteria:
+          - condition: $statusCode == 201
+        outputs:
+          id: $response.body#/id
+      - stepId: read
+        operationId: getPetById
+        parameters:
+          - name: petId
+            in: path
+            value: $steps.create.outputs.id
+        successCriteria:
+          - condition: $statusCode == 200
+          - context: $response.body
+            condition: $.name
+            type: jsonpath
+        onFailure:
+          - name: try-again
+            type: retry
+            retryAfter: 1
+            retryLimit: 3

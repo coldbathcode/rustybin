@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tower::ServiceExt;
 
-use super::{Assertion, SavedTest};
+use super::{Assertion, SavedTest, TestRequest};
 use crate::egress::Purpose;
 use crate::state::AppState;
 
@@ -68,6 +68,31 @@ pub struct TestResult {
     /// The request could not be made (a missing variable, a refusal).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// A multi-step test: each step's result, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<StepResult>,
+}
+
+/// One step of a multi-step test's result.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct StepResult {
+    pub id: String,
+    pub passed: bool,
+    /// Not run: an earlier step failed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<Failure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// What the step took from its answer, cut short; one whose name looks
+    /// like a credential is shown as `(hidden)`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub outputs: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -128,6 +153,87 @@ pub fn fill(text: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<Strin
     }
     out.push_str(rest);
     Ok(out)
+}
+
+/// One `{{steps.<id>.outputs.<name>}}` reference: the step and the output.
+fn step_ref(inner: &str) -> Option<(&str, &str)> {
+    let rest = inner.trim().strip_prefix("steps.")?;
+    let (id, name) = rest.split_once(".outputs.")?;
+    let word = |w: &str| {
+        !w.is_empty()
+            && w.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    };
+    (word(id) && word(name)).then_some((id, name))
+}
+
+/// The `{{steps.<id>.outputs.<name>}}` references in a text.
+pub fn step_refs(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else { break };
+        if let Some((id, name)) = step_ref(&after[..end]) {
+            out.push((id.to_string(), name.to_string()));
+        }
+        rest = &after[end + 2..];
+    }
+    out
+}
+
+/// The outputs of the steps run so far, by step then name.
+type Outputs = BTreeMap<String, BTreeMap<String, String>>;
+
+/// Fill `{{steps.<id>.outputs.<name>}}` references from the steps run so
+/// far; the first one that has no value is the error. Done after the
+/// variables, so a value an answer gave is never read as a variable.
+fn fill_outputs(text: &str, outputs: &Outputs) -> Result<String, String> {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            out.push_str(&rest[start..]);
+            rest = "";
+            break;
+        };
+        match step_ref(&after[..end]) {
+            Some((id, name)) => {
+                let v = outputs.get(id).and_then(|o| o.get(name)).ok_or_else(|| {
+                    format!("the step {id} gave no output {name} (its answer did not have it)")
+                })?;
+                out.push_str(v);
+            }
+            None => out.push_str(&rest[start..start + 2 + end + 2]),
+        }
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// The value of an output expression in an answer, as text.
+fn output_of(expr: &str, ans: &Answer) -> Option<String> {
+    let expr = expr.trim();
+    if expr == "$statusCode" {
+        return Some(ans.status.to_string());
+    }
+    if let Some(h) = expr.strip_prefix("$response.header.") {
+        return ans
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(h))
+            .map(|(_, v)| v.clone());
+    }
+    let pointer = expr.strip_prefix("$response.body#")?;
+    let doc: Value = serde_json::from_slice(&ans.body).ok()?;
+    match doc.pointer(pointer)? {
+        Value::String(s) => Some(s.clone()),
+        Value::Null => None,
+        other => Some(other.to_string()),
+    }
 }
 
 // ── JSON paths ──────────────────────────────────────────────────────
@@ -192,15 +298,26 @@ struct Prepared {
     body: Option<String>,
 }
 
-fn prepare(t: &SavedTest, lookup: &dyn Fn(&str) -> Option<String>) -> Result<Prepared, String> {
+fn prepare(
+    r: &TestRequest,
+    lookup: &dyn Fn(&str) -> Option<String>,
+    outputs: &Outputs,
+) -> Result<Prepared, String> {
     let missing = |n: String| {
         format!("needs the variable {n} (give it in the run's variables, or set {ENV_PREFIX}{n} on the instance)")
     };
-    let r = &t.request;
-    let path = fill(&r.path, lookup).map_err(missing)?;
+    // The variables, then the earlier steps' outputs.
+    let fill = |text: &str| -> Result<String, String> {
+        fill_outputs(&fill(text, lookup).map_err(missing)?, outputs)
+    };
+    let path = fill(&r.path)?;
+    // A value from an answer never adds a line to the request.
+    if path.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("the path has a space or a control character once filled".into());
+    }
     let mut headers = Vec::new();
     for (k, v) in &r.headers {
-        let v = fill(v, lookup).map_err(missing)?;
+        let v = fill(v)?;
         let (Ok(n), Ok(v)) = (
             HeaderName::from_bytes(k.as_bytes()),
             HeaderValue::from_str(&v),
@@ -209,12 +326,7 @@ fn prepare(t: &SavedTest, lookup: &dyn Fn(&str) -> Option<String>) -> Result<Pre
         };
         headers.push((n, v));
     }
-    let body = r
-        .body
-        .as_deref()
-        .map(|b| fill(b, lookup))
-        .transpose()
-        .map_err(missing)?;
+    let body = r.body.as_deref().map(fill).transpose()?;
     let method =
         Method::from_bytes(r.method.as_bytes()).map_err(|_| "invalid method".to_string())?;
     Ok(Prepared {
@@ -353,6 +465,37 @@ async fn through(client: &reqwest::Client, url: &str, p: Prepared) -> Result<Ans
     })
 }
 
+/// The gateway clients of a run, by origin (resolved once each).
+type Clients = HashMap<String, Result<reqwest::Client, String>>;
+
+/// Send a prepared request: in process, or through the test's gateway
+/// under the egress policy (purpose replay).
+async fn send(
+    state: &AppState,
+    session: &str,
+    gateway: Option<&str>,
+    p: Prepared,
+    clients: &mut Clients,
+) -> Result<Answer, String> {
+    let Some(g) = gateway else {
+        return direct(state, p, session).await;
+    };
+    let url = format!("{}{}", g.trim_end_matches('/'), p.path);
+    let origin = crate::egress::url_origin(&url);
+    if !clients.contains_key(&origin) {
+        let c = match state.egress.resolve(&url, Purpose::Replay).await {
+            Ok(pinned) => state.egress.client(&pinned, REQUEST_TIMEOUT),
+            Err(e) => Err(e.0),
+        };
+        clients.insert(origin.clone(), c);
+    }
+    match clients.get(&origin) {
+        Some(Ok(c)) => through(c, &url, p).await,
+        Some(Err(e)) => Err(format!("refused by the egress policy: {e}")),
+        None => Err("no client".into()),
+    }
+}
+
 // ── Judging ─────────────────────────────────────────────────────────
 
 fn cut(s: &str) -> String {
@@ -457,6 +600,18 @@ pub(crate) fn scrub(result: &mut TestResult, filled: &[(String, String)]) {
     if let Some(e) = &mut result.error {
         clean(e);
     }
+    for step in &mut result.steps {
+        for f in &mut step.failures {
+            clean(&mut f.seen);
+            clean(&mut f.expected);
+        }
+        if let Some(e) = &mut step.error {
+            clean(e);
+        }
+        for v in step.outputs.values_mut() {
+            clean(v);
+        }
+    }
 }
 
 // ── A run ───────────────────────────────────────────────────────────
@@ -502,9 +657,11 @@ pub async fn run_these(
         })
     };
     let started = Instant::now();
-    let mut clients: HashMap<String, Result<reqwest::Client, String>> = HashMap::new();
+    let mut clients: Clients = HashMap::new();
     let mut results = Vec::new();
-    for (i, t) in tests.iter().enumerate() {
+    // Requests sent in this run: a multi-step test sends one a step.
+    let mut sent = 0usize;
+    for t in tests {
         let target = t
             .gateway
             .as_deref()
@@ -518,46 +675,15 @@ pub async fn run_these(
             ms: None,
             failures: Vec::new(),
             error: None,
+            steps: Vec::new(),
         };
-        if i >= MAX_RUN_REQUESTS || started.elapsed() > RUN_DEADLINE {
-            result.error = Some(format!(
+        let over = |sent: usize| sent >= MAX_RUN_REQUESTS || started.elapsed() > RUN_DEADLINE;
+        let not_run = || {
+            format!(
                 "not run: a run sends at most {MAX_RUN_REQUESTS} requests in {} s",
                 RUN_DEADLINE.as_secs()
-            ));
-            results.push(result);
-            continue;
-        }
-        let answer = match prepare(t, &lookup) {
-            Err(e) => Err(e),
-            Ok(p) => match &t.gateway {
-                None => direct(state, p, session).await,
-                Some(g) => {
-                    let url = format!("{}{}", g.trim_end_matches('/'), p.path);
-                    let origin = crate::egress::url_origin(&url);
-                    if !clients.contains_key(&origin) {
-                        let c = match state.egress.resolve(&url, Purpose::Replay).await {
-                            Ok(pinned) => state.egress.client(&pinned, REQUEST_TIMEOUT),
-                            Err(e) => Err(e.0),
-                        };
-                        clients.insert(origin.clone(), c);
-                    }
-                    match clients.get(&origin) {
-                        Some(Ok(c)) => through(c, &url, p).await,
-                        Some(Err(e)) => Err(format!("refused by the egress policy: {e}")),
-                        None => Err("no client".into()),
-                    }
-                }
-            },
+            )
         };
-        match answer {
-            Err(e) => result.error = Some(e),
-            Ok(ans) => {
-                result.status = Some(ans.status);
-                result.ms = Some(ans.ms);
-                result.failures = t.assert.iter().filter_map(|a| judge(a, &ans)).collect();
-                result.passed = result.failures.is_empty();
-            }
-        }
         // What the run saw may echo a filled variable (a request to /echo):
         // a report never carries a variable's value, only its name.
         let filled: Vec<(String, String)> = t
@@ -566,6 +692,102 @@ pub async fn run_these(
             .filter_map(|n| lookup(&n).map(|v| (n, v)))
             .filter(|(_, v)| !v.is_empty())
             .collect();
+        if t.steps.is_empty() {
+            if over(sent) {
+                result.error = Some(not_run());
+                results.push(result);
+                continue;
+            }
+            sent += 1;
+            let answer = match prepare(&t.request, &lookup, &Outputs::new()) {
+                Err(e) => Err(e),
+                Ok(p) => send(state, session, t.gateway.as_deref(), p, &mut clients).await,
+            };
+            match answer {
+                Err(e) => result.error = Some(e),
+                Ok(ans) => {
+                    result.status = Some(ans.status);
+                    result.ms = Some(ans.ms);
+                    result.failures = t.assert.iter().filter_map(|a| judge(a, &ans)).collect();
+                    result.passed = result.failures.is_empty();
+                }
+            }
+        } else {
+            // In order; a step that fails stops the test, and the steps
+            // after it are reported as skipped.
+            let mut outputs = Outputs::new();
+            let mut stopped = false;
+            let mut total_ms = 0u64;
+            for step in &t.steps {
+                let mut sr = StepResult {
+                    id: step.id.clone(),
+                    ..StepResult::default()
+                };
+                if stopped {
+                    sr.skipped = true;
+                    result.steps.push(sr);
+                    continue;
+                }
+                if over(sent) {
+                    sr.error = Some(not_run());
+                } else {
+                    sent += 1;
+                    let answer = match prepare(&step.request, &lookup, &outputs) {
+                        Err(e) => Err(e),
+                        Ok(p) => send(state, session, t.gateway.as_deref(), p, &mut clients).await,
+                    };
+                    match answer {
+                        Err(e) => sr.error = Some(e),
+                        Ok(ans) => {
+                            sr.status = Some(ans.status);
+                            sr.ms = Some(ans.ms);
+                            total_ms += ans.ms;
+                            sr.failures =
+                                step.assert.iter().filter_map(|a| judge(a, &ans)).collect();
+                            sr.passed = sr.failures.is_empty();
+                            let mut got = BTreeMap::new();
+                            for (name, expr) in &step.outputs {
+                                if let Some(v) = output_of(expr, &ans) {
+                                    // What is kept never holds a credential,
+                                    // nor a variable's value an answer echoed.
+                                    let mut shown = if crate::keys::looks_secret(name) {
+                                        "(hidden)".to_string()
+                                    } else {
+                                        cut(&v)
+                                    };
+                                    for (n, value) in &filled {
+                                        if shown.contains(value.as_str()) {
+                                            shown = shown
+                                                .replace(value.as_str(), &format!("{{{{{n}}}}}"));
+                                        }
+                                    }
+                                    sr.outputs.insert(name.clone(), shown);
+                                    got.insert(name.clone(), v);
+                                }
+                            }
+                            outputs.insert(step.id.clone(), got);
+                            result.status = Some(ans.status);
+                        }
+                    }
+                }
+                if !sr.passed {
+                    stopped = true;
+                    // The test's own lines name the step, so every reader
+                    // of a result (the CLI, JUnit, the history) does too.
+                    match &sr.error {
+                        Some(e) => result.error = Some(format!("step {}: {e}", step.id)),
+                        None => result.failures.extend(sr.failures.iter().map(|f| Failure {
+                            assertion: format!("step {}: {}", step.id, f.assertion),
+                            expected: f.expected.clone(),
+                            seen: f.seen.clone(),
+                        })),
+                    }
+                }
+                result.steps.push(sr);
+            }
+            result.ms = Some(total_ms);
+            result.passed = !stopped;
+        }
         scrub(&mut result, &filled);
         results.push(result);
     }

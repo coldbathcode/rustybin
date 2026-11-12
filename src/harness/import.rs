@@ -77,10 +77,13 @@ pub enum Format {
     Postman,
     /// An Artillery script.
     Artillery,
+    /// An Arazzo 1.0 document: its workflows' steps against the instance's
+    /// mocks (`crate::replay::arazzo`).
+    Arazzo,
 }
 
 impl Format {
-    pub const ALL: &'static [&'static str] = &["har", "captures", "postman", "artillery"];
+    pub const ALL: &'static [&'static str] = &["har", "captures", "postman", "artillery", "arazzo"];
 
     pub fn parse(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
@@ -88,6 +91,7 @@ impl Format {
             "captures" => Some(Format::Captures),
             "postman" => Some(Format::Postman),
             "artillery" => Some(Format::Artillery),
+            "arazzo" => Some(Format::Arazzo),
             _ => None,
         }
     }
@@ -98,6 +102,7 @@ impl Format {
             Format::Captures => "captures",
             Format::Postman => "postman",
             Format::Artillery => "artillery",
+            Format::Arazzo => "arazzo",
         }
     }
 
@@ -1276,6 +1281,9 @@ fn fits(t: &RequestTemplate) -> Result<(), &'static str> {
 
 /// The format of a document, by its shape.
 pub fn detect(doc: &Value) -> Result<Format, String> {
+    if crate::replay::arazzo::is_arazzo(doc) {
+        return Ok(Format::Arazzo);
+    }
     if doc["log"]["entries"].is_array() {
         return Ok(Format::Har);
     }
@@ -1301,7 +1309,7 @@ pub fn detect(doc: &Value) -> Result<Format, String> {
         return Ok(Format::Captures);
     }
     Err(format!(
-        "not a document this import reads: expected a HAR file (log.entries), the answer of GET /_rustybin/requests, a Postman collection v2.1 or an Artillery script (formats: {})",
+        "not a document this import reads: expected a HAR file (log.entries), the answer of GET /_rustybin/requests, a Postman collection v2.1, an Artillery script or an Arazzo document (formats: {})",
         Format::ALL.join(", ")
     ))
 }
@@ -1312,9 +1320,86 @@ pub fn import(doc: &Value) -> Result<Imported, String> {
     import_as(doc, None)
 }
 
+/// Turn a document into request templates ([`import_with`], without the
+/// instance's mocks: an Arazzo document finds no source description).
+pub fn import_as(doc: &Value, format: Option<Format>) -> Result<Imported, String> {
+    import_with(doc, format, &[])
+}
+
+/// The steps of an Arazzo document's workflows as entries. A step that
+/// needs a value the document does not give (a workflow input, an earlier
+/// step's output) is left out and the value named: request templates are
+/// sent by weight, not as a journey, so nothing can be passed on.
+fn read_arazzo(
+    doc: &Value,
+    mocks: &[crate::replay::arazzo::Mock],
+    out: &mut Imported,
+) -> Result<Vec<Read>, String> {
+    let imported = crate::replay::arazzo::import(doc, mocks)?;
+    for l in imported.left_out {
+        name_once(&mut out.left_out, l);
+    }
+    let mut entries = Vec::new();
+    for t in &imported.tests {
+        for step in &t.steps {
+            let r = &step.request;
+            let texts = std::iter::once(r.path.as_str())
+                .chain(r.headers.values().map(String::as_str))
+                .chain(r.body.as_deref());
+            let mut needs = false;
+            for text in texts {
+                for v in crate::replay::run::variables_in(text) {
+                    needs = true;
+                    name_once(&mut out.variables, v);
+                }
+                for (id, name) in crate::replay::run::step_refs(text) {
+                    needs = true;
+                    name_once(&mut out.variables, format!("steps.{id}.outputs.{name}"));
+                }
+            }
+            if needs {
+                entries.push(Err(
+                    "a value the document does not give (a workflow input, or an earlier step's output)",
+                ));
+                continue;
+            }
+            let (path, query) = match r.path.split_once('?') {
+                Some((p, q)) => (p.to_string(), Some(q.to_string())),
+                None => (r.path.clone(), None),
+            };
+            entries.push(Ok(Entry {
+                method: r.method.clone(),
+                path,
+                query,
+                headers: r
+                    .headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+                body: r.body.clone(),
+                expect: step.assert.iter().filter_map(|a| a.status).collect(),
+                weight: 1,
+                ..Entry::default()
+            }));
+        }
+    }
+    if !out.variables.is_empty() {
+        out.notes.push(
+            "arazzo: a scenario's requests are sent by weight, not in the order of a workflow: steps that need an input or an earlier step's output are left out (run the workflow as a saved test for the journey)".into(),
+        );
+    }
+    Ok(entries)
+}
+
 /// Turn a document into request templates. Identical requests become one
 /// template with their count as its weight, so the mix is the document's.
-pub fn import_as(doc: &Value, format: Option<Format>) -> Result<Imported, String> {
+/// `mocks`: the instance's mocks an Arazzo document's source descriptions
+/// may be.
+pub fn import_with(
+    doc: &Value,
+    format: Option<Format>,
+    mocks: &[crate::replay::arazzo::Mock],
+) -> Result<Imported, String> {
     let format = match format {
         Some(f) => f,
         None => detect(doc)?,
@@ -1341,6 +1426,7 @@ pub fn import_as(doc: &Value, format: Option<Format>) -> Result<Imported, String
             .map(from_capture)
             .collect(),
         Format::Postman => read_postman(doc, &mut out)?,
+        Format::Arazzo => read_arazzo(doc, mocks, &mut out)?,
         Format::Artillery => {
             let (entries, p) = read_artillery(doc, &mut out)?;
             phases = p;
@@ -1472,6 +1558,16 @@ pub fn import_as(doc: &Value, format: Option<Format>) -> Result<Imported, String
 /// Artillery script). Anything else, a program in a scripting language
 /// above all, is refused: nothing here runs or translates code.
 pub fn import_text(text: &str, format: Option<Format>) -> Result<Imported, String> {
+    import_text_with(text, format, &[])
+}
+
+/// [`import_text`] with the instance's mocks, which an Arazzo document's
+/// source descriptions may be.
+pub fn import_text_with(
+    text: &str,
+    format: Option<Format>,
+    mocks: &[crate::replay::arazzo::Mock],
+) -> Result<Imported, String> {
     let bounded = |doc: &Value, format: Option<Format>| -> Result<(), String> {
         let format = match format {
             Some(f) => f,
@@ -1488,7 +1584,7 @@ pub fn import_text(text: &str, format: Option<Format>) -> Result<Imported, Strin
     if let Ok(doc) = serde_json::from_str::<Value>(text) {
         if doc.is_object() || doc.is_array() {
             bounded(&doc, format)?;
-            return import_as(&doc, format);
+            return import_with(&doc, format, mocks);
         }
     }
     let refused = || {
@@ -1507,7 +1603,7 @@ pub fn import_text(text: &str, format: Option<Format>) -> Result<Imported, Strin
         // A mapping that is none of the formats is as likely a program
         // that happens to read as YAML (a line ending in a colon).
         Ok(doc) if doc.is_object() && (format.is_some() || detect(&doc).is_ok()) => {
-            import_as(&doc, format)
+            import_with(&doc, format, mocks)
         }
         _ => Err(refused()),
     }

@@ -1145,11 +1145,20 @@ pub async fn patch_cluster_run(
 /// of `GET /_rustybin/requests`), a Postman collection or an Artillery
 /// script as a scenario's `source`. Sends nothing and works with harness
 /// mode off.
-pub async fn import(Query(q): Query<FormatQuery>, body: Bytes) -> Response {
+pub async fn import(
+    State(state): State<AppState>,
+    Query(q): Query<FormatQuery>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
+    body: Bytes,
+) -> Response {
     let Ok(text) = String::from_utf8(body.to_vec()) else {
         return error(StatusCode::BAD_REQUEST, "the document is not UTF-8 text");
     };
-    match import_document(text, q.format).await {
+    // An Arazzo document's source descriptions are the mocks the caller reads.
+    let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
+    let mocks = crate::replay::mocks_for(&state, &caller);
+    match import_document(text, q.format, mocks).await {
         Ok(view) => Json(view).into_response(),
         Err(e) => error(StatusCode::BAD_REQUEST, e),
     }
@@ -1159,7 +1168,11 @@ pub async fn import(Query(q): Query<FormatQuery>, body: Bytes) -> Response {
 /// source, on the blocking pool: a large recording is parsed off the
 /// request workers. `format` names the format instead of reading it from
 /// the document. The route and the tools share this.
-pub async fn import_document(text: String, format: Option<String>) -> Result<Value, String> {
+pub async fn import_document(
+    text: String,
+    format: Option<String>,
+    mocks: Vec<crate::replay::arazzo::Mock>,
+) -> Result<Value, String> {
     let format =
         match format.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
             None => None,
@@ -1168,7 +1181,7 @@ pub async fn import_document(text: String, format: Option<String>) -> Result<Val
             })?),
         };
     tokio::task::spawn_blocking(move || {
-        super::import::import_text(&text, format).map(|i| import_view(&i))
+        super::import::import_text_with(&text, format, &mocks).map(|i| import_view(&i))
     })
     .await
     .map_err(|_| "the import did not finish".to_string())?

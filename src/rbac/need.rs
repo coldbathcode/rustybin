@@ -198,6 +198,8 @@ pub const PROJECT_ROUTES: &[&str] = &[
     "/_rustybin/tests/runs",
     "/_rustybin/tests/runs/{id}",
     "/_rustybin/tests/export",
+    "/_rustybin/tests/import",
+    "/_rustybin/tests/{name}/export",
     "/_rustybin/storyboards",
     "/_rustybin/storyboards/{name}",
     "/_rustybin/storyboards/{name}/steps/{index}/run",

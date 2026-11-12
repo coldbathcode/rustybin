@@ -152,6 +152,7 @@ impl Action {
                 name: name.to_string(),
                 description: None,
                 request: request.clone(),
+                steps: Vec::new(),
                 gateway: gateway.clone(),
                 assert: assert.clone(),
                 project: None,

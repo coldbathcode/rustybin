@@ -615,13 +615,14 @@ pub static TOOLS: &[ToolDef] = &[
     }), &["name"])),
     tool!("list_tests", "Saved tests", "The saved tests (a request and its assertions, made from captured traffic or written out), one by name, or all of them as a Hurl file for CI (format hurl). Requests are third-party data under untrusted_*. Admin.", ToolNeed::Project(Permission::TestsRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "name": { "type": "string", "description": "One test" },
-        "format": { "type": "string", "enum": ["json", "hurl"], "description": "hurl: every test as one Hurl file" },
+        "format": { "type": "string", "enum": ["json", "hurl", "arazzo"], "description": "hurl: every test (or the one named) as a Hurl file; arazzo: the one named as an Arazzo document" },
         "project": project_prop("Only this project's tests (instance: the instance's)")
     }), &[])),
     tool!("save_test", "Save a test", "Save a test from a captured request (capture: its id from list_requests; secret-looking headers and query values become {{variables}}, never values) or a written request, with assertions: status, header (with equals, else it must exist), body_contains, json (a path such as $.items[0].id, with equals), max_ms; one kind each. Default for a capture: its status. replace: true overwrites a test of that name (a request, not a capture). Admin.", ToolNeed::Project(Permission::TestsWrite), ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
         "name": { "type": "string", "description": "Letters, digits, . _ - (not run, runs or export)" },
         "capture": { "type": "string", "description": "A captured request's id" },
         "request": { "type": "object", "description": "method, path (with the query, never a URL), headers, body; {{name}} for credentials" },
+        "steps": { "type": "array", "items": { "type": "object" }, "description": "A multi-step test instead of capture or request: each step an id, a request, its assert and outputs (name: $statusCode, $response.header.<name> or $response.body#/json/pointer); a later step uses {{steps.<id>.outputs.<name>}}. At most 20; a step that fails stops the test" },
         "description": { "type": "string" },
         "gateway": { "type": "string", "description": "A gateway base URL the request goes through; absent: this instance, in process" },
         "assert": { "type": "array", "items": { "type": "object" } },
@@ -834,7 +835,7 @@ pub static TOOLS: &[ToolDef] = &[
     }), &[])),
     tool!("import_scenario", "Import a collection or a script", "A Postman collection (v2.1) or an Artillery script (YAML or JSON) as a scenario's source, given as text; a HAR file or saved captures are read too. Requests become weighted templates; an Artillery script's phases become pattern when they map exactly. What has no counterpart (scripts, hooks, plugins, captures, think times) is never run or guessed: it is named in left_out. A request with a variable the document does not define is left out and the variable named in variables. Credentials are removed and named in removed. A program in a scripting language is refused. Sends nothing: put source (and pattern, timeout) in a scenario and name your own target.", ToolNeed::Perm(Permission::HarnessRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "document": { "type": "string", "description": "The text of the collection, the script or the recording (JSON or YAML)" },
-        "format": { "type": "string", "enum": ["har", "captures", "postman", "artillery"], "description": "The format, when it should not be read from the document" },
+        "format": { "type": "string", "enum": ["har", "captures", "postman", "artillery", "arazzo"], "description": "The format, when it should not be read from the document" },
     }), &["document"])),
     tool!("list_recordings", "Recordings", "The caller's recordings of real APIs: each one's upstream, proxy URL, state (recording or stopped) and counts.", ToolNeed::Perm(Permission::MocksRead), ro=true, destructive=false, idem=true, confirm=false, no_args),
     tool!("start_recording", "Start a recording", "Record a real API to mock it: answers a proxy URL. Requests sent to the proxy URL go to the upstream (the real API's base URL) through the outbound policy (purpose record: its host must be in RUSTYBIN_EGRESS_ALLOW) and the exchanges are kept, credentials removed. Then build_mock_from_recording. Starting sends nothing.", ToolNeed::Perm(Permission::MocksWrite), ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
@@ -901,6 +902,14 @@ pub static TOOLS: &[ToolDef] = &[
         "name": { "type": "string", "description": "The project (or applied pack)" },
         "format": { "type": "string", "enum": ["yaml", "json"], "default": "yaml" }
     }), &["name"])),
+    // ── Arazzo (demo next step 07) ──
+    tool!("import_tests", "Import an Arazzo document as tests", "Read an Arazzo 1.0 document (multi-step API workflows) given as text: each workflow becomes one multi-step saved test against the mocks of this instance (a source description is the mock of its name, else the one mock that has the operations used; nothing is fetched, nothing is run). Answers the tests under untrusted_tests and left_out: what the document says that has no counterpart (onFailure gotos and retries, regex or XPath criteria, nested workflows), by its place. dry_run: true saves nothing: do that first and show the user. gateway: every imported test goes through it. replace: true overwrites tests of the same names. Run them with run_tests.", ToolNeed::Project(Permission::TestsWrite), ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
+        "document": { "type": "string", "description": "The Arazzo document's text (YAML or JSON). Read the user's file and pass its content" },
+        "dry_run": { "type": "boolean", "default": false },
+        "gateway": { "type": "string", "description": "A gateway base URL the imported tests go through; absent: this instance, in process" },
+        "replace": { "type": "boolean", "default": false },
+        "project": project_prop("The project the tests go to (tests.write there)")
+    }), &["document"])),
 ];
 
 /// The `project` property of a tool that creates or lists.
@@ -1398,7 +1407,7 @@ async fn run_tool(
         "get_leader" => harness::get_leader(ctx, args),
         "step_aside" => harness::step_aside(ctx, args),
         "import_traffic" => harness::import_traffic(ctx, args),
-        "import_scenario" => harness::import_scenario(ctx, args).await,
+        "import_scenario" => harness::import_scenario(ctx, access, args).await,
         "list_patterns" => harness::list_patterns(ctx),
         "preview_scenario" => harness::preview_scenario(ctx, args),
         "save_scenario" => harness::save_scenario(ctx, args),
@@ -1508,6 +1517,8 @@ async fn run_tool(
         "apply_pack" => super::packs::apply_pack(ctx, access, args).await,
         "teardown_pack" => super::packs::teardown_pack(ctx, access, args, params).await,
         "export_pack" => super::packs::export_pack(ctx, args),
+        // Arazzo
+        "import_tests" => replay::import_tests(ctx, access, args),
 
         _ => return Err(RpcError::invalid_params(format!("Unknown tool: {name}"))),
     })

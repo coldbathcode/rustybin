@@ -136,6 +136,8 @@ pub(crate) const NEW_SINCE_0_4: &[&str] = &[
     "/_rustybin/recordings",
     "/_rustybin/recordings/{name}",
     "/_rustybin/recordings/{name}/stop",
+    "/_rustybin/tests/import",
+    "/_rustybin/tests/{name}/export",
     "/_rustybin/storyboards",
     "/_rustybin/storyboards/{name}",
     "/_rustybin/storyboards/{name}/steps/{index}/run",

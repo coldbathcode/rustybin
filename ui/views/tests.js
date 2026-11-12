@@ -50,6 +50,30 @@ export default {
       h('label', { class: 'field' }, h('span', null, 'Variables for this run'), vars),
       resultEl));
 
+    // Arazzo: a document of multi-step workflows, each imported as a
+    // multi-step test against this instance's mocks.
+    const arazzoText = h('textarea', { class: 'input mono', id: 'arazzo-document', rows: 8, spellcheck: 'false', placeholder: 'arazzo: 1.0.1\nsourceDescriptions:\n  - { name: petstore, url: ./petstore.yaml, type: openapi }\nworkflows:\n  - workflowId: create-and-read\n    steps: [...]' });
+    const arazzoFile = h('input', { type: 'file', id: 'arazzo-file', accept: '.yaml,.yml,.json', class: 'input' });
+    const arazzoGateway = h('input', { class: 'input mono', id: 'arazzo-gateway', placeholder: 'https://gateway.example.com/pets (optional: absent, this instance)' });
+    const arazzoReplace = h('input', { type: 'checkbox', id: 'arazzo-replace' });
+    const arazzoPreview = perms.guard(h('button', { class: 'btn', type: 'button', id: 'arazzo-preview' }, 'Preview'), 'tests.write');
+    const arazzoImport = perms.guard(h('button', { class: 'btn primary', type: 'button', id: 'arazzo-import' }, icon('upload'), 'Import'), 'tests.write');
+    const arazzoResult = h('div', { id: 'arazzo-result' });
+    arazzoFile.onchange = async () => {
+      const f = arazzoFile.files && arazzoFile.files[0];
+      if (f && f.size <= 1024 * 1024) arazzoText.value = await f.text();
+      else if (f) replace(arazzoResult, notice('err', 'An Arazzo document is at most 1 MiB.'));
+    };
+    arazzoPreview.onclick = () => importArazzo(true);
+    arazzoImport.onclick = () => importArazzo(false);
+    root.appendChild(card('Import Arazzo', { hint: 'POST ' + BASE + '/import' },
+      h('p', { class: 'muted small' }, 'An Arazzo document describes journeys of several steps. Each workflow becomes one multi-step test: its source descriptions are this instance\'s mocks (nothing is fetched), outputs of a step feed the next, and what has no counterpart here is listed, never guessed.'),
+      h('label', { class: 'field' }, h('span', null, 'An Arazzo file'), arazzoFile),
+      h('label', { class: 'field' }, h('span', null, 'Or paste it'), arazzoText),
+      h('label', { class: 'field' }, h('span', null, 'Gateway for the imported tests'), arazzoGateway),
+      h('div', { class: 'row' }, h('label', { class: 'row small' }, arazzoReplace, 'Replace tests of the same names'), h('div', { class: 'grow' }), arazzoPreview, arazzoImport),
+      arazzoResult));
+
     // The history: every run from any surface, newest first, a run's
     // detail and its JUnit report.
     const historyEl = h('div', { id: 'tests-history' }, spinner('Loading the history'));
@@ -130,12 +154,15 @@ export default {
         return h('tr', { 'data-test': t.name },
           h('td', null, res ? badge(res.passed ? 'pass' : res.error ? 'error' : 'fail', res.passed ? 'ok' : 'err') : badge('not run', 'outline')),
           h('td', { class: 'mono small' }, t.name),
-          h('td', null, methodBadge(t.request.method), ' ', h('span', { class: 'mono small' }, t.request.path)),
+          (t.steps && t.steps.length)
+            ? h('td', { 'data-steps': String(t.steps.length) }, badge(t.steps.length + ' steps', 'info'), ' ', h('span', { class: 'mono small' }, t.steps.map((s) => s.id).join(', ')))
+            : h('td', null, methodBadge(t.request.method), ' ', h('span', { class: 'mono small' }, t.request.path)),
           h('td', { class: 'small' }, t.gateway ? 'through ' + t.gateway : 'this instance'),
-          h('td', { class: 'small' }, String((t.assert || []).length)),
+          h('td', { class: 'small' }, String((t.steps && t.steps.length) ? t.steps.reduce((n, s) => n + (s.assert || []).length, 0) : (t.assert || []).length)),
           h('td', { class: 'mono small' }, (t.variables || []).join(', ')),
           h('td', null, h('div', { class: 'row nowrap' },
-            perms.guard(h('button', { class: 'btn sm', type: 'button', title: 'Run this test', onclick: () => run([t.name]) }, icon('play')), 'tests.run'),
+            perms.guard(h('button', { class: 'btn sm', type: 'button', title: 'Run this test', 'data-run-test': t.name, onclick: () => run([t.name]) }, icon('play')), 'tests.run'),
+            (t.steps && t.steps.length) ? h('button', { class: 'btn sm', type: 'button', title: 'Export as an Arazzo document', 'data-arazzo': t.name, onclick: () => exportArazzo(t.name) }, icon('download')) : null,
             perms.guard(h('button', { class: 'btn sm', type: 'button', title: 'Delete', 'data-delete': t.name, onclick: () => remove(t.name) }, icon('trash')), 'tests.write'))));
       });
       replace(listEl, h('div', { class: 'table-wrap' }, h('table', { class: 'table', id: 'tests-table' },
@@ -166,10 +193,24 @@ export default {
       return h('div', { class: 'row', 'data-change': 'since' }, h('span', { class: 'small' }, 'Since ', h('span', { class: 'mono' }, c.previous), ':'), ...parts);
     }
 
+    /** The steps of a multi-step test's result: each one's verdict, status, time and outputs. */
+    function stepsTable(t) {
+      return h('div', { class: 'table-wrap' }, h('table', { class: 'table', 'data-step-results': t.name },
+        h('thead', null, h('tr', null, h('th', null, ''), h('th', null, 'Step'), h('th', null, 'Status'), h('th', null, 'Time'), h('th', null, 'Outputs'), h('th', null, ''))),
+        h('tbody', null, t.steps.map((s) => h('tr', { 'data-step-result': s.id },
+          h('td', null, s.skipped ? badge('skipped', 'outline') : badge(s.passed ? 'pass' : s.error ? 'error' : 'fail', s.passed ? 'ok' : 'err')),
+          h('td', { class: 'mono small' }, s.id),
+          h('td', { class: 'small' }, s.status != null ? String(s.status) : ''),
+          h('td', { class: 'small' }, s.ms != null ? `${s.ms} ms` : ''),
+          h('td', { class: 'mono small' }, Object.entries(s.outputs || {}).map(([k, v]) => `${k}=${v}`).join(', ')),
+          h('td', { class: 'small' }, s.error || (s.failures || []).map((f) => `${f.assertion}: expected ${f.expected}, saw ${f.seen}`).join('; ') || (s.skipped ? 'an earlier step failed' : '')))))));
+    }
+
     function report(r) {
-      const rows = r.results.filter((t) => !t.passed).map((t) => h('div', { class: 'stack-sm', 'data-result': t.name },
+      const rows = r.results.filter((t) => !t.passed || (t.steps && t.steps.length)).map((t) => h('div', { class: 'stack-sm', 'data-result': t.name },
         h('strong', null, t.name),
-        t.error ? notice('warn', t.error) : h('ul', { class: 'small' }, ...t.failures.map((f) => h('li', null, `${f.assertion}: expected ${f.expected}, saw ${f.seen}`)))));
+        (t.steps && t.steps.length) ? stepsTable(t)
+          : t.error ? notice('warn', t.error) : h('ul', { class: 'small' }, ...t.failures.map((f) => h('li', null, `${f.assertion}: expected ${f.expected}, saw ${f.seen}`)))));
       return h('div', { class: 'stack' },
         notice(r.passed ? 'ok' : 'err', r.passed ? `All ${r.total} test(s) passed.` : `${r.failed} failed, ${r.errors} could not run, of ${r.total}.`),
         r.change ? changeLine(r.change) : null,
@@ -233,6 +274,42 @@ export default {
             h('tbody', null, all)))));
       } catch (e) {
         replace(detailEl, notice('err', e.message));
+      }
+    }
+
+    async function exportArazzo(name) {
+      try {
+        const text = await call('GET', `${BASE}/${encodeURIComponent(name)}/export?format=arazzo`);
+        download(text, `${name}.arazzo.yaml`, 'application/yaml');
+      } catch (e) {
+        toast('This test cannot be an Arazzo document: ' + e.message, 'err');
+      }
+    }
+
+    async function importArazzo(dry) {
+      if (!arazzoText.value.trim()) {
+        replace(arazzoResult, notice('err', 'Paste an Arazzo document or choose its file.'));
+        return;
+      }
+      replace(arazzoResult, spinner(dry ? 'Reading the document' : 'Importing'));
+      try {
+        const body = { document: arazzoText.value, dry_run: dry, replace: arazzoReplace.checked };
+        if (arazzoGateway.value.trim()) body.gateway = arazzoGateway.value.trim();
+        const project = projects.forNew();
+        if (project && project !== projects.INSTANCE) body.project = project;
+        const r = await call('POST', BASE + '/import', body);
+        const sources = Object.entries(r.sources || {}).map(([k, v]) => `${k} is the mock ${v}`).join('; ');
+        replace(arazzoResult, h('div', { class: 'stack-sm', id: 'arazzo-imported' },
+          notice(dry ? 'info' : 'ok', dry
+            ? `${r.tests.length} of ${r.workflows} workflow(s) would become tests: ${r.tests.map((t) => t.name).join(', ') || 'none'}.`
+            : `Imported ${r.tests.length} test(s): ${r.tests.map((t) => t.name).join(', ')}.`),
+          sources ? h('p', { class: 'small' }, 'Source descriptions: ' + sources + '.') : null,
+          (r.left_out || []).length ? h('div', { class: 'stack-sm', id: 'arazzo-left-out' },
+            h('p', { class: 'small' }, 'Left out (no counterpart here, never guessed):'),
+            h('ul', { class: 'small mono' }, r.left_out.map((l) => h('li', null, l)))) : null));
+        if (!dry) await load();
+      } catch (e) {
+        replace(arazzoResult, notice('err', e.message));
       }
     }
 

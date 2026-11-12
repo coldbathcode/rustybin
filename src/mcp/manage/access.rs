@@ -97,6 +97,7 @@ pub const PROJECT_TOOLS: &[&str] = &[
     "delete_storyboard",
     "run_storyboard_step",
     "reset_storyboard",
+    "import_tests",
 ];
 
 /// Request headers forwarded into in-process requests (`try_request`,

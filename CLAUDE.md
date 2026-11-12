@@ -137,15 +137,15 @@ hops `safety::pin_chain` pinned; a field added to the marker goes inside its sig
 a client's marker byte for byte what it was; an onward call is never counted with the clients'
 arrivals.
 
-## Demo next, new features for gateway demos (planned 2026-11-11, steps 01 to 06 built, not released)
+## Demo next, new features for gateway demos (planned 2026-11-11, steps 01 to 07 built, not released)
 
 [docs/plans/demo-next/master-plan.md](docs/plans/demo-next/master-plan.md): nine new features and a
 release, one file each (section 4 is the build marker, section 6 the owner's decisions with a
 recommendation each): AI gateway scenarios, MCP security scenarios, a mock recorded from a real
 upstream, contract drift (steps 01 to 04, built 2026-11-11), demo storyboards and customer demo
-packs (steps 05 and 06, built 2026-11-12), Arazzo workflows, realtime and batch AI APIs, AsyncAPI
+packs and Arazzo workflows (steps 05 to 07, built 2026-11-12), realtime and batch AI APIs, AsyncAPI
 event mocks. Each built step file has build notes; the changelog's "Unreleased" section lists what is new.
-Steps 07 to 09 wait for the owner's decisions (section 6), step 10 (the release) is the owner's to
+Steps 08 and 09 wait for the owner's decisions (section 6), step 10 (the release) is the owner's to
 start, and core-next step 14 (the 0.7.0 release) has not been done either.
 
 Step 05 (storyboards; `docs/plans/demo-next/step-05-demo-storyboards.md`, user docs
@@ -176,6 +176,20 @@ at the apply, never overwritten; a pack section must be removable again (a new o
 `secrets`, `users`, `roles` or `projects`, and an instance reads no file for one (specs inline); what
 a pack changes outside its project (the console title) is remembered in the record and restored only
 when it is still the pack's.
+
+Step 07 (multi-step tests and Arazzo; `docs/plans/demo-next/step-07-arazzo-workflows.md`, user docs
+`docs/src/saved-tests.md#multi-step-tests`): `SavedTest.steps` (`TestStep`: id, request, assert,
+outputs), the step loop in `src/replay/run.rs`, `src/replay/arazzo.rs` (import and export),
+`POST /_rustybin/tests/import`, `GET /_rustybin/tests/{name}/export`, `harness::import::Format::Arazzo`,
+the `import_tests` tool, `rustybin tests import`. Rules it left: a test has a `request` or `steps`, never
+both, and code that reads a test's requests goes through `SavedTest::requests()`; a step uses only an
+output of an earlier step, variables are filled before outputs, and what a run keeps of an output is cut,
+hidden when its name looks like a credential and scrubbed of variable values; a failing step is named in
+the test's own `failures` or `error` (`step <id>: ...`), so readers of a result need not know about
+steps; an Arazzo import never fetches a source description (it is a mock the caller may read,
+`replay::mocks_for`), never runs and never guesses (`left_out` by place; a workflow that cannot run
+without what was left out is left out whole) and makes only tests `validate` accepts; the harness has
+no journeys (its Arazzo import leaves out a step that needs a value passed on).
 
 ## Rustybin 0.3, reliability and testing workflows (built and released 2026-11-02)
 
@@ -472,6 +486,7 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
   secrets, visitors' or keys' mocks. In git (`src/sourcecontrol/checkpoints.rs`), an explicit `git/commit` with
   `checkpoints` writes `<git.path>/checkpoints/<name>.json` (never the automatic mode, whose commits exclude the
   directory) and `?from=git` lists and restores the repository's through `parse_untrusted` and the compile pool.
+- `src/replay/arazzo.rs`: Arazzo 1.0 workflows as multi-step saved tests and back (see demo next step 07 above).
 - `src/replay/`: saved tests (`/_rustybin/tests*`, `rustybin tests`, `list_tests` / `save_test` / `delete_test` /
   `run_tests`, the console's Saved tests view and Live traffic's Save as test, `tests:` of `rustybin.yaml`).
   `mod.rs` the model (`SavedTest`, `Assertion`: one kind each), validation, the store (`AppState.saved_tests`,

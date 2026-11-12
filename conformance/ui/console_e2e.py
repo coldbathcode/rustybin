@@ -1366,6 +1366,55 @@ def run_theme(browser, theme):
 
     step("saved tests: save from live traffic, run, export, schedule, delete", saved_tests)
 
+    def arazzo():
+        # An Arazzo document pasted in: the preview names what was left out,
+        # the import makes a multi-step test, a run shows each step with its
+        # outputs, the test downloads as Arazzo again.
+        name = f"e2e-journey-{theme}"
+        doc = (
+            "arazzo: 1.0.1\n"
+            "info: {title: Pets, version: '1'}\n"
+            "sourceDescriptions: [{name: petstore, url: ./petstore.yaml, type: openapi}]\n"
+            "workflows:\n"
+            f"  - workflowId: {name}\n"
+            "    steps:\n"
+            "      - stepId: list\n"
+            "        operationId: listPets\n"
+            "        successCriteria: [{condition: $statusCode == 200}]\n"
+            "        outputs: {total: $response.header.X-Total-Count}\n"
+            "        onFailure: [{name: again, type: retry}]\n"
+            "      - stepId: read\n"
+            "        operationId: getPetById\n"
+            "        parameters: [{name: petId, in: path, value: $steps.list.outputs.total}]\n"
+            "        successCriteria: [{condition: $statusCode == 200}]\n"
+        )
+        page.goto(BASE + "/ui/#/tests")
+        page.wait_for_selector("#arazzo-document")
+        page.fill("#arazzo-document", doc)
+        page.click("#arazzo-preview")
+        expect(page.locator("#arazzo-imported")).to_contain_text("would become tests: " + name)
+        expect(page.locator("#arazzo-left-out")).to_contain_text("onFailure[0] (retry)")
+        expect(page.locator(f"tr[data-test='{name}']")).to_have_count(0)
+        page.click("#arazzo-import")
+        row = page.locator(f"tr[data-test='{name}']")
+        row.wait_for()
+        expect(row.locator("[data-steps='2']")).to_contain_text("2 steps")
+        page.click(f"[data-run-test='{name}']")
+        steps = page.locator(f"[data-step-results='{name}']")
+        steps.wait_for()
+        expect(steps.locator("[data-step-result='list']")).to_contain_text("total=3")
+        expect(steps.locator("[data-step-result='read']")).to_contain_text("200")
+        with page.expect_download() as dl:
+            page.click(f"[data-arazzo='{name}']")
+        assert dl.value.suggested_filename == name + ".arazzo.yaml", dl.value.suggested_filename
+        shot(page, theme, "16f-arazzo")
+        assert_icons_sized(page, "saved tests, arazzo")
+        page.once("dialog", lambda d: d.accept())
+        page.click(f"[data-delete='{name}']")
+        expect(page.locator(f"tr[data-test='{name}']")).to_have_count(0)
+
+    step("saved tests: import an Arazzo document, run its steps, export it", arazzo)
+
     def storyboards():
         # A storyboard written in the editor (the action forms come from the
         # configuration schema), presented with the keyboard (a tick, then a

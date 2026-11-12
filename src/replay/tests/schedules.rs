@@ -40,6 +40,7 @@ fn test_of(name: &str, path: &str, status: u16) -> SavedTest {
             headers: Default::default(),
             body: None,
         },
+        steps: Vec::new(),
         gateway: None,
         assert: vec![Assertion::status(status)],
         project: None,

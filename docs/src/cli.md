@@ -472,7 +472,8 @@ Saved tests: captured requests with assertions, run here, through a gateway or i
 | `rustybin tests put <name> --file F` | Save or replace a test from a file (JSON or YAML: request, gateway, assert). Flags: `--file` value. | `PUT /_rustybin/tests/{name}` | `tests.write` |
 | `rustybin tests delete <name>` | Delete a saved test. | `DELETE /_rustybin/tests/{name}` | `tests.write` |
 | `rustybin tests run [--names a,b] [--project P] [--var NAME=value]... [--junit]` | Run saved tests (all by default); exits 1 when one fails. --junit prints JUnit XML for CI. Flags: `--names` value, `--var` value, `--junit`, `--project` value. | `POST /_rustybin/tests/run` | `tests.run` |
-| `rustybin tests export` | Every saved test as one Hurl file (hurl --test --variable base_url=...). | `GET /_rustybin/tests/export` | `tests.read` |
+| `rustybin tests export [<name>] [--format hurl\|arazzo]` | Every saved test as one Hurl file (hurl --test --variable base_url=...), or the one named: as Hurl, or as an Arazzo document (--format arazzo). Flags: `--format` value. | `GET /_rustybin/tests/export`, `GET /_rustybin/tests/{name}/export` | `tests.read` |
+| `rustybin tests import <file> [--dry-run] [--gateway U] [--replace] [--project P]` | Import an Arazzo document: each workflow becomes a multi-step saved test against the instance's mocks; what has no counterpart is listed as left out. --dry-run saves nothing. Flags: `--dry-run`, `--gateway` value, `--replace`, `--project` value. | `POST /_rustybin/tests/import` | `tests.write` |
 | `rustybin tests runs [--limit N] [--cursor C]` | The history of test runs, newest first: when, the trigger, who, the counts, what changed since the previous run. Flags: `--limit` value, `--cursor` value. | `GET /_rustybin/tests/runs` | `tests.read` |
 | `rustybin tests run-show <id> [--junit]` | One kept run: each test's result and failures, the change since the previous run; --junit prints its JUnit XML. Flags: `--junit`. | `GET /_rustybin/tests/runs/{id}` | `tests.read` |
 | `rustybin tests runs-clear` | Forget every kept test run (the tests stay). | `DELETE /_rustybin/tests/runs` | `tests.write` |
@@ -490,6 +491,7 @@ rustybin tests put order-1 --file '{"request":{"path":"/status/200"},"assert":[{
 rustybin tests delete order-1 --yes
 rustybin tests run --junit
 rustybin tests export
+rustybin tests import '{"arazzo":"1.0.1","info":{"title":"Pets","version":"1"},"sourceDescriptions":[{"name":"petstore","url":"./petstore.yaml","type":"openapi"}],"workflows":[{"workflowId":"list-pets","steps":[{"stepId":"list","operationId":"listPets","successCriteria":[{"condition":"$statusCode == 200"}]}]}]}' --dry-run
 rustybin tests runs --limit 5
 rustybin tests run-show 20261103T101500000Z-abc123 --junit
 rustybin tests runs-clear --yes
@@ -776,7 +778,7 @@ Load tests on the instance (--remote); validate, run and report work offline too
 | `rustybin harness delete-scenario <name>` | Delete a saved scenario. | `DELETE /_rustybin/harness/scenarios/{name}` | `harness.run` |
 | `rustybin harness validate <file> --remote` | Validate a scenario on the instance (without --remote: offline, in this process). Flags: `--remote`. | `POST /_rustybin/harness/validate` | `harness.read` |
 | `rustybin harness preview <file>` | The run plan of a scenario: stages, requests, duration. | `POST /_rustybin/harness/preview` | `harness.read` |
-| `rustybin harness import <file> [--format F]` | A recording (a HAR file, or saved GET /_rustybin/requests), a Postman collection (v2.1) or an Artillery script as a scenario's source; what does not map is named, nothing in the file is run. Sends nothing. Flags: `--format` value. | `POST /_rustybin/harness/import` | `harness.read` |
+| `rustybin harness import <file> [--format F]` | A recording (a HAR file, or saved GET /_rustybin/requests), a Postman collection (v2.1), an Artillery script or an Arazzo document (its steps against the instance's mocks) as a scenario's source; what does not map is named, nothing in the file is run. Sends nothing. Flags: `--format` value. | `POST /_rustybin/harness/import` | `harness.read` |
 | `rustybin harness runs` | The runs on this node. | `GET /_rustybin/harness/runs` | `harness.read` |
 | `rustybin harness run <file> --remote [--wait]` | Start a run on the instance (without --remote: from this process); --wait follows it and prints the report. Flags: `--remote`, `--wait`, `--format` value. | `POST /_rustybin/harness/runs` | `harness.run` |
 | `rustybin harness show <run>` | One run: state, progress, the live controls. | `GET /_rustybin/harness/runs/{run}` | `harness.read` |

@@ -19,8 +19,28 @@ pub fn list_tests(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
         Ok(f) => f,
         Err(e) => return err(e),
     };
+    if arg_str(args, "format") == Some("arazzo") {
+        let Some(name) = arg_str(args, "name") else {
+            return err("format arazzo exports one test: give its name");
+        };
+        let base = access.svc(&ctx.app).links.base_url().to_string();
+        return match replay::export_arazzo(&ctx.app, caller, name, &base) {
+            Ok((doc, left_out)) => ok(
+                ctx,
+                format!(
+                    "Saved test {name} as an Arazzo document (in untrusted_arazzo); {} assertion(s) Arazzo cannot say are in left_out",
+                    left_out.len()
+                ),
+                json!({ "untrusted_arazzo": serde_yaml::to_string(&doc).unwrap_or_default(), "left_out": left_out }),
+            ),
+            Err(e) => err(e.message()),
+        };
+    }
     if arg_str(args, "format") == Some("hurl") {
-        let tests = replay::tests_for(&ctx.app, caller, &filter);
+        let mut tests = replay::tests_for(&ctx.app, caller, &filter);
+        if let Some(name) = arg_str(args, "name") {
+            tests.retain(|t| t.name == name);
+        }
         let text = replay::hurl::export(&tests);
         return ok(
             ctx,
@@ -119,6 +139,54 @@ pub fn save_test(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     }
 }
 
+/// `import_tests`: an Arazzo document as multi-step tests (`dry_run`
+/// previews). The tests are built from the user's document: under
+/// `untrusted_tests`.
+pub fn import_tests(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
+    let Some(document) = args.get("document").and_then(Value::as_str) else {
+        return err("document is required (the text of the Arazzo document)");
+    };
+    let body = replay::ImportBody {
+        document: Value::String(document.to_string()),
+        dry_run: arg_bool(args, "dry_run").unwrap_or(false),
+        gateway: arg_str(args, "gateway").map(str::to_string),
+        project: arg_str(args, "project").map(str::to_string),
+        replace: arg_bool(args, "replace").unwrap_or(false),
+    };
+    let dry_run = body.dry_run;
+    match replay::import_arazzo(&ctx.app, &access.resolved, body) {
+        Ok(mut v) => {
+            let tests = v["tests"].take();
+            let names: Vec<&str> = tests
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|t| t["name"].as_str())
+                .collect();
+            let summary =
+                format!(
+                "{} {} test(s) from {} workflow(s): {}. {} thing(s) left out by name (left_out).{}",
+                if dry_run { "Would import" } else { "Imported" },
+                names.len(),
+                v["workflows"].as_u64().unwrap_or(0),
+                names.join(", "),
+                v["left_out"].as_array().map_or(0, Vec::len),
+                if dry_run { " Nothing was saved." } else { " Run them with run_tests." }
+            );
+            v["untrusted_tests"] = tests;
+            if let Value::Object(m) = &mut v {
+                m.remove("tests");
+                // The places quote the document's own names.
+                if let Some(l) = m.remove("left_out") {
+                    m.insert("untrusted_left_out".into(), l);
+                }
+            }
+            ok(ctx, summary, v)
+        }
+        Err(e) => err(e.message()),
+    }
+}
+
 /// `delete_test` (confirmed).
 pub async fn delete_test(ctx: &CallCtx, access: &Access, args: &Value, params: &Value) -> Value {
     let name = match need_str(args, "name") {
@@ -141,9 +209,6 @@ pub async fn delete_test(ctx: &CallCtx, access: &Access, args: &Value, params: &
         Err(e) => err(e.message()),
     }
 }
-
-/// Methods a run sends without asking: they read, never change.
-const SAFE_METHODS: &[&str] = &["GET", "HEAD", "OPTIONS"];
 
 /// `run_tests`: confirmed when a test goes through a gateway or sends a
 /// method that changes something (`POST`, `PUT`, `PATCH`, `DELETE`: the
@@ -182,11 +247,7 @@ pub async fn run_tests(ctx: &CallCtx, access: &Access, args: &Value, params: &Va
         .collect();
     let mut writes: Vec<&str> = selected
         .iter()
-        .filter(|t| {
-            !SAFE_METHODS
-                .iter()
-                .any(|m| m.eq_ignore_ascii_case(t.request.method.trim()))
-        })
+        .filter(|t| t.changes_state())
         .map(|t| t.name.as_str())
         .collect();
     writes.truncate(10);
@@ -500,11 +561,7 @@ pub async fn run_test_schedule(ctx: &CallCtx, args: &Value, params: &Value) -> V
             gateways.join(", ")
         ));
     }
-    if selected.iter().any(|t| {
-        !SAFE_METHODS
-            .iter()
-            .any(|m| m.eq_ignore_ascii_case(t.request.method.trim()))
-    }) {
+    if selected.iter().any(|t| t.changes_state()) {
         what.push("replay requests that change state".to_string());
     }
     if let Some(h) = &schedule.webhook {

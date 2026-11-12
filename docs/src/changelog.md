@@ -3,7 +3,7 @@
 ## Unreleased: the last of the roadmap's candidates
 
 [The plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/core-next/master-plan.md),
-steps 11 to 13, built on 2026-11-09 and not released yet, and steps 01 to 06 of
+steps 11 to 13, built on 2026-11-09 and not released yet, and steps 01 to 07 of
 [the demo next plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/demo-next/master-plan.md),
 built on 2026-11-11 and 2026-11-12. Nothing to do when upgrading: what is new is off until you turn it on or
 name it in a scenario.
@@ -72,6 +72,21 @@ name it in a scenario.
   surface: the routes, Management, Packs in the console, `rustybin pack apply` (a file, or a
   directory whose spec files it sends inline), `list`, `teardown`, `export`, four management
   tools and the prompt `prepare_customer_demo`.
+- [Multi-step saved tests](saved-tests.md#multi-step-tests): a test takes `steps` instead of
+  `request`, each step a request with its assertions and `outputs` (`$statusCode`,
+  `$response.header.<name>`, `$response.body#/json/pointer`) that later steps use as
+  `{{steps.<id>.outputs.<name>}}`. At most 20 steps; a step that fails stops the test and is
+  named in the failure; a result has each step with its outputs (one named like a credential is
+  hidden). The Hurl export writes a step as an entry and an output as a capture.
+- [Arazzo workflows](saved-tests.md#arazzo-workflows): `POST /_rustybin/tests/import` reads an
+  Arazzo 1.0 document and makes one multi-step test a workflow, its source descriptions being the
+  instance's mocks (by name, else the one mock with the operations used; never fetched). What has
+  no counterpart (an `onFailure` goto or retry, regex and XPath criteria, nested workflows) is
+  named in `left_out`, never guessed; `dry_run` previews. `GET
+  /_rustybin/tests/{name}/export?format=arazzo` writes a test back as Arazzo. The harness import
+  reads the same document (`format: arazzo`) for the steps that stand alone. On every surface:
+  the console's Import Arazzo card and per-step results, `rustybin tests import` and `tests
+  export <name> --format arazzo`, the tool `import_tests`, `steps:` in `rustybin.yaml`.
 
 - Source control: a [diverged branch](source-control.md#a-diverged-branch) says what differs
   (`divergence` in the status and in the `409`) and is resolved by a person: `POST
@@ -118,14 +133,16 @@ name it in a scenario.
 
 **Changed**:
 
-- The management MCP server has 162 tools for an admin (`request_secret`, `get_secret_request`,
+- The management MCP server has 163 tools for an admin (`request_secret`, `get_secret_request`,
   `git_branches`, `git_switch_branch`, `git_signing_key`, `import_scenario`, the six recording
   tools `list_recordings`, `start_recording`, `get_recording`, `stop_recording`,
   `build_mock_from_recording`, `delete_recording`, `check_mock_drift`, `list_drift_runs`, and
   the five storyboard tools `list_storyboards`, `save_storyboard`, `delete_storyboard`,
   `run_storyboard_step`, `reset_storyboard`, and the four pack tools `list_packs`, `apply_pack`,
-  `teardown_pack`, `export_pack`) and eleven prompts (`rehearse_demo` and
+  `teardown_pack`, `export_pack`, and `import_tests`) and eleven prompts (`rehearse_demo` and
   `prepare_customer_demo` are new).
+- A saved test's name cannot be `import` (a route now). A test's result has `steps` when it is
+  a multi-step test; a single-request test is as before.
 - `rustybin.yaml` has a `storyboards:` section (empty when there are none), and a project's
   resources count its storyboards.
 - `profiles.json` may hold an `agent` object per profile. An older `rustybin` reads the file

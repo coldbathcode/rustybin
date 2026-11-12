@@ -798,6 +798,8 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET DELETE | `/_rustybin/tests/runs` | The history of saved-test runs, newest first (limit, cursor); DELETE forgets every run (admin) |
 | GET | `/_rustybin/tests/runs/{id}` | One kept test run: each test's result, the change since the previous run; JSON or JUnit (?format=junit) (admin) |
 | GET | `/_rustybin/tests/export` | The saved tests as a Hurl file, assertions included, for CI |
+| POST | `/_rustybin/tests/import` | Import an Arazzo document: each workflow a multi-step saved test (dry_run answers the tests and what was left out) |
+| GET | `/_rustybin/tests/{name}/export` | One saved test as Hurl, or as an Arazzo document (?format=arazzo) |
 | GET POST | `/_rustybin/tests/schedules` | Saved tests on a schedule: list them with their status, or create one (admin) |
 | GET PUT DELETE | `/_rustybin/tests/schedules/{name}` | A test schedule: read it with its status, save or replace it, delete it (admin) |
 | POST | `/_rustybin/tests/schedules/{name}/run` | Run a test schedule now: its tests, kept in the history, its notice when it fails (admin) |

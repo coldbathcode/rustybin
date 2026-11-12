@@ -436,7 +436,8 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("tests", "put", "<name> --file F", "Save or replace a test from a file (JSON or YAML: request, gateway, assert).", &[Flag::value("--file", "The test: a file, - for stdin, or inline JSON")], [("PUT", "/_rustybin/tests/{name}")], false, r#"tests put order-1 --file '{"request":{"path":"/status/200"},"assert":[{"status":200}]}'"#),
     cmd!("tests", "delete", "<name>", "Delete a saved test.", NO_FLAGS, [("DELETE", "/_rustybin/tests/{name}")], true, "tests delete order-1 --yes"),
     cmd!("tests", "run", "[--names a,b] [--project P] [--var NAME=value]... [--junit]", "Run saved tests (all by default); exits 1 when one fails. --junit prints JUnit XML for CI.", &[Flag::value("--names", "Only these tests, comma separated"), Flag::value("--var", "A {{variable}}: NAME=value, or NAME=- (stdin) or NAME=@file for a credential (repeat it)"), Flag::switch("--junit", "Print the JUnit XML report"), PROJECT_FLAG], [("POST", "/_rustybin/tests/run")], false, "tests run --junit"),
-    cmd!("tests", "export", "", "Every saved test as one Hurl file (hurl --test --variable base_url=...).", NO_FLAGS, [("GET", "/_rustybin/tests/export")], false, "tests export"),
+    cmd!("tests", "export", "[<name>] [--format hurl|arazzo]", "Every saved test as one Hurl file (hurl --test --variable base_url=...), or the one named: as Hurl, or as an Arazzo document (--format arazzo).", &[Flag::value("--format", "hurl (default) or arazzo (one test, by name)")], [("GET", "/_rustybin/tests/export"), ("GET", "/_rustybin/tests/{name}/export")], false, "tests export"),
+    cmd!("tests", "import", "<file> [--dry-run] [--gateway U] [--replace] [--project P]", "Import an Arazzo document: each workflow becomes a multi-step saved test against the instance's mocks; what has no counterpart is listed as left out. --dry-run saves nothing.", &[Flag::switch("--dry-run", "Answer the tests and what was left out; save nothing"), Flag::value("--gateway", "Send every imported test through this gateway base URL"), Flag::switch("--replace", "Overwrite tests of the same names"), Flag::value("--project", "The project the tests go to")], [("POST", "/_rustybin/tests/import")], false, r#"tests import '{"arazzo":"1.0.1","info":{"title":"Pets","version":"1"},"sourceDescriptions":[{"name":"petstore","url":"./petstore.yaml","type":"openapi"}],"workflows":[{"workflowId":"list-pets","steps":[{"stepId":"list","operationId":"listPets","successCriteria":[{"condition":"$statusCode == 200"}]}]}]}' --dry-run"#),
     cmd!("tests", "runs", "[--limit N] [--cursor C]", "The history of test runs, newest first: when, the trigger, who, the counts, what changed since the previous run.", &[Flag::value("--limit", "Runs a page (20, at most 100)"), Flag::value("--cursor", "The next_cursor of the page before")], [("GET", "/_rustybin/tests/runs")], false, "tests runs --limit 5"),
     cmd!("tests", "run-show", "<id> [--junit]", "One kept run: each test's result and failures, the change since the previous run; --junit prints its JUnit XML.", &[Flag::switch("--junit", "Print the JUnit XML report")], [("GET", "/_rustybin/tests/runs/{id}")], false, "tests run-show 20261103T101500000Z-abc123 --junit"),
     cmd!("tests", "runs-clear", "", "Forget every kept test run (the tests stay).", NO_FLAGS, [("DELETE", "/_rustybin/tests/runs")], true, "tests runs-clear --yes"),
@@ -533,7 +534,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("harness", "delete-scenario", "<name>", "Delete a saved scenario.", NO_FLAGS, [("DELETE", "/_rustybin/harness/scenarios/{name}")], true, "harness delete-scenario my-smoke --yes"),
     cmd!("harness", "validate", "<file> --remote", "Validate a scenario on the instance (without --remote: offline, in this process).", &[Flag::switch("--remote", "On the instance")], [("POST", "/_rustybin/harness/validate")], false, "harness validate smoke.yaml --remote"),
     cmd!("harness", "preview", "<file>", "The run plan of a scenario: stages, requests, duration.", NO_FLAGS, [("POST", "/_rustybin/harness/preview")], false, "harness preview smoke.yaml"),
-    cmd!("harness", "import", "<file> [--format F]", "A recording (a HAR file, or saved GET /_rustybin/requests), a Postman collection (v2.1) or an Artillery script as a scenario's source; what does not map is named, nothing in the file is run. Sends nothing.", &[Flag::value("--format", "har, captures, postman or artillery (default: read from the file)")], [("POST", "/_rustybin/harness/import")], false, "harness import recording.har"),
+    cmd!("harness", "import", "<file> [--format F]", "A recording (a HAR file, or saved GET /_rustybin/requests), a Postman collection (v2.1), an Artillery script or an Arazzo document (its steps against the instance's mocks) as a scenario's source; what does not map is named, nothing in the file is run. Sends nothing.", &[Flag::value("--format", "har, captures, postman, artillery or arazzo (default: read from the file)")], [("POST", "/_rustybin/harness/import")], false, "harness import recording.har"),
     cmd!("harness", "runs", "", "The runs on this node.", NO_FLAGS, [("GET", "/_rustybin/harness/runs")], false, "harness runs"),
     cmd!("harness", "run", "<file> --remote [--wait]", "Start a run on the instance (without --remote: from this process); --wait follows it and prints the report.", &[Flag::switch("--remote", "On the instance"), Flag::switch("--wait", "Follow the run and print the report"), Flag::value("--format", "The report format with --wait: text (default), json or junit")], [("POST", "/_rustybin/harness/runs")], false, "harness run smoke.yaml --remote --wait"),
     cmd!("harness", "show", "<run>", "One run: state, progress, the live controls.", NO_FLAGS, [("GET", "/_rustybin/harness/runs/{run}")], false, "harness show r-1"),
@@ -3064,7 +3065,64 @@ async fn tests(ctx: &mut Ctx, verb: &str) -> Result<()> {
             let query = project_query(ctx);
             get(ctx, "/_rustybin/tests", &query).await
         }
-        "export" => get(ctx, "/_rustybin/tests/export", &[]).await,
+        "export" => {
+            let format = ctx.args.value("--format").unwrap_or("hurl").to_string();
+            let path = match ctx.args.arg(0, "a test name") {
+                Ok(name) => format!("/_rustybin/tests/{}/export", enc(name)),
+                Err(_) if format == "arazzo" => {
+                    return Err(Fail::Usage(
+                        "--format arazzo exports one test: give its name".into(),
+                    ))
+                }
+                Err(_) => "/_rustybin/tests/export".to_string(),
+            };
+            let reply = ctx.client()?.get(&path, &[("format", format)]).await?;
+            ctx.raw(&reply.text);
+            Ok(())
+        }
+        "import" => {
+            let file = ctx
+                .args
+                .arg(0, "an Arazzo document: a file, or - for stdin")?
+                .to_string();
+            let text = ctx.input(&file)?;
+            let dry_run = ctx.args.has("--dry-run");
+            let mut body = json!({ "document": text, "dry_run": dry_run, "replace": ctx.args.has("--replace") });
+            if let Some(g) = ctx.args.value("--gateway") {
+                body["gateway"] = json!(g);
+            }
+            if let Some(p) = ctx.args.value("--project") {
+                body["project"] = json!(p);
+            }
+            let v = ctx
+                .client()?
+                .post("/_rustybin/tests/import", Body::Json(body))
+                .await?
+                .value();
+            if ctx.json {
+                ctx.emit(&v);
+            } else {
+                let rows: Vec<Value> = v["tests"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|t| {
+                        json!({
+                            "test": t["name"],
+                            "steps": t["steps"].as_array().map(Vec::len).unwrap_or(0),
+                            "variables": t["variables"],
+                        })
+                    })
+                    .collect();
+                ctx.emit(&json!({
+                    "dry_run": dry_run,
+                    "sources": v["sources"],
+                    "tests": rows,
+                    "left_out": v["left_out"],
+                }));
+            }
+            Ok(())
+        }
         "run" => tests_run(ctx).await,
         "runs" => tests_runs(ctx).await,
         "runs-clear" => delete(ctx, "/_rustybin/tests/runs", &[]).await,

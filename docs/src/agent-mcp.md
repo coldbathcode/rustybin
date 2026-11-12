@@ -802,6 +802,7 @@ server and a gateway's JWT validation:
 |---|---|---|
 | `list_tests` | `tests.read` | The [saved tests](saved-tests.md), one by name, or all of them as a Hurl file (`format: hurl`); requests are under `untrusted_*` |
 | `save_test` | `tests.write` | A test from a captured request (`capture`: its id) or a written one, with assertions; secret-looking headers and query values must be `{{variables}}` |
+| `import_tests` | `tests.write` | An [Arazzo](saved-tests.md#arazzo-workflows) document, given as text, as multi-step saved tests against the instance's mocks; `dry_run` saves nothing; what has no counterpart is under `untrusted_left_out` |
 | `delete_test` | `tests.write` | Delete a saved test (confirmed) |
 | `run_tests` | `tests.run` | Run every saved test or the ones named, in process or through each test's gateway; confirmed when a test goes through a gateway or sends a method other than `GET`, `HEAD` or `OPTIONS`; one run at a time. Results under `untrusted_results`, JUnit with `format: junit`; answers the kept run's `run_id` and the change since the previous run |
 | `list_test_runs` | `tests.read` | The [history of runs](saved-tests.md#history), newest first (`limit`, `cursor`): when, the trigger, who, the counts, the failing tests, newly failing and newly passing |
@@ -854,7 +855,7 @@ is the `harness` or `admin` scope, or the admin token on an open control plane.
 | `get_run_report` | `harness.read` | The final report as JSON, text or JUnit |
 | `harness_stop` | `harness.run` | The kill switch: all load on this node stops now (no confirmation) |
 | `import_traffic` | `harness.read` | A HAR file or saved captures as a scenario's source, without credentials; sends nothing |
-| `import_scenario` | `harness.read` | A Postman collection (v2.1) or an Artillery script, given as text, as a scenario's source: what does not map is named in `left_out`, nothing in the document is run, a program is refused; sends nothing |
+| `import_scenario` | `harness.read` | A Postman collection (v2.1), an Artillery script or an Arazzo document (its steps against the instance's mocks), given as text, as a scenario's source: what does not map is named in `left_out`, nothing in the document is run, a program is refused; sends nothing |
 | `step_aside` | `harness.cluster` | Before maintenance: the leader hands the cluster to the first in the succession, with the run still on |
 | `create_cluster` / `list_cluster_nodes` / `export_upstreams` / `get_leader` | `harness.cluster` / `harness.read` | A cluster led by this node (the join token once), its members, the server nodes' URLs for the gateway's upstream pool, and who leads with the succession and the history of leader changes |
 

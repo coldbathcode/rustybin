@@ -2263,7 +2263,7 @@ fn live_openapi_paths(paths: &mut Value, tag: &Value, off: &Value, scenario_body
                 "parameters": [{
                     "name": "format", "in": "query", "required": false,
                     "description": "The format, instead of reading it from the document.",
-                    "schema": { "type": "string", "enum": ["har", "captures", "postman", "artillery"] }
+                    "schema": { "type": "string", "enum": ["har", "captures", "postman", "artillery", "arazzo"] }
                 }],
                 "requestBody": { "required": true, "content": {
                     "application/json": { "schema": { "type": "object", "description": "A HAR file, saved captures, a Postman collection or an Artillery script." } },

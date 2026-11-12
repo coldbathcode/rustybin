@@ -873,7 +873,7 @@ pub fn import_traffic(ctx: &CallCtx, args: &Value) -> Value {
 /// `import_scenario`: a Postman collection or an Artillery script (or a
 /// recording) given as text, as a scenario's source. Nothing is sent and
 /// nothing in the document is run.
-pub async fn import_scenario(ctx: &CallCtx, args: &Value) -> Value {
+pub async fn import_scenario(ctx: &CallCtx, access: &Access, args: &Value) -> Value {
     let Some(document) = args.get("document").and_then(Value::as_str) else {
         return err("document is required (the text of the collection or the script)");
     };
@@ -881,7 +881,8 @@ pub async fn import_scenario(ctx: &CallCtx, args: &Value) -> Value {
         .get("format")
         .and_then(Value::as_str)
         .map(str::to_string);
-    match crate::harness::api::import_document(document.to_string(), format).await {
+    let mocks = crate::replay::mocks_for(&ctx.app, &access.resolved);
+    match crate::harness::api::import_document(document.to_string(), format, mocks).await {
         Ok(view) => {
             let count = |key: &str| view[key].as_array().map_or(0, Vec::len);
             let summary = format!(

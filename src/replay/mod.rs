@@ -8,6 +8,7 @@
 //! is kept in the history ([`history`], `/_rustybin/tests/runs*`), and
 //! tests run on a schedule ([`schedule`], `/_rustybin/tests/schedules*`).
 
+pub mod arazzo;
 pub mod history;
 pub mod hurl;
 pub mod run;
@@ -41,17 +42,28 @@ pub const MAX_TEST_BYTES: usize = 64 * 1024;
 const MAX_HEADERS: usize = 50;
 const MAX_ASSERTIONS: usize = 32;
 const MAX_NAME: usize = 64;
+/// Most steps of a multi-step test, and outputs of a step.
+pub const MAX_STEPS: usize = 20;
+const MAX_OUTPUTS: usize = 16;
 const FILE: &str = "tests.json";
 pub const METHODS: &[&str] = &["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
 
-/// One saved test, as in `rustybin.yaml`.
+/// One saved test, as in `rustybin.yaml`: one `request`, or `steps` (a
+/// multi-step test: each step a request with its assertions and the
+/// outputs later steps use).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SavedTest {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The one request of a single-request test (absent with `steps`).
+    #[serde(default, skip_serializing_if = "TestRequest::is_absent")]
     pub request: TestRequest,
+    /// The steps of a multi-step test, run in order; a step that fails
+    /// stops the test.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<TestStep>,
     /// The gateway base URL the request goes through (the request's path is
     /// appended); absent: this instance, in process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,6 +86,43 @@ pub struct TestRequest {
     pub headers: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+}
+
+impl Default for TestRequest {
+    /// No request: what a multi-step test has in `request`.
+    fn default() -> Self {
+        Self {
+            method: default_method(),
+            path: String::new(),
+            headers: BTreeMap::new(),
+            body: None,
+        }
+    }
+}
+
+impl TestRequest {
+    /// Is there no request here (a multi-step test's `request`)?
+    pub fn is_absent(&self) -> bool {
+        self.path.is_empty()
+    }
+}
+
+/// One step of a multi-step test.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestStep {
+    /// Letters, digits, `_` and `-`: how later steps name its outputs
+    /// (`{{steps.<id>.outputs.<name>}}`).
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub request: TestRequest,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assert: Vec<Assertion>,
+    /// Values taken from the answer, by name: `$statusCode`,
+    /// `$response.header.<name>` or `$response.body#/json/pointer`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub outputs: BTreeMap<String, String>,
 }
 
 fn default_method() -> String {
@@ -161,10 +210,10 @@ impl Assertion {
     }
 }
 
-/// A name a test may have (`run`, `runs`, `schedules` and `export` are
-/// routes).
+/// A name a test may have (`run`, `runs`, `schedules`, `export` and
+/// `import` are routes).
 pub fn valid_name(name: &str) -> bool {
-    !matches!(name, "run" | "runs" | "schedules" | "export")
+    !matches!(name, "run" | "runs" | "schedules" | "export" | "import")
         && !name.is_empty()
         && name.len() <= MAX_NAME
         && name
@@ -172,37 +221,114 @@ pub fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+/// Every rule a request of a test follows (`at`: its place, `request` or
+/// `steps[2].request`).
+fn validate_request(r: &TestRequest, at: &str) -> Result<(), String> {
+    if !METHODS.contains(&r.method.as_str()) {
+        return Err(format!(
+            "{at}.method {:?}: one of {}",
+            r.method,
+            METHODS.join(", ")
+        ));
+    }
+    if !r.path.starts_with('/') || r.path.starts_with("//") {
+        return Err(format!("{at}.path: a path starting with / (never a URL)"));
+    }
+    // The path and gateway go into request lines and the Hurl export:
+    // no whitespace or control characters.
+    let unsafe_char = |c: char| c.is_whitespace() || c.is_control();
+    if r.path.chars().any(unsafe_char) {
+        return Err(format!(
+            "{at}.path: no spaces or control characters (percent-encode them)"
+        ));
+    }
+    // Credentials are never saved: a secret-looking header or query
+    // value must reference a variable (`Bearer {{TOKEN}}`), never be one.
+    for (k, v) in &r.headers {
+        // A variable, or an earlier step's output (a token a sign-in step got).
+        if crate::keys::looks_secret(k)
+            && run::variables_in(v).is_empty()
+            && run::step_refs(v).is_empty()
+        {
+            return Err(format!(
+                "{at}.headers.{k}: a credential is never saved: use a variable, such as {{{{{}}}}}",
+                variable_name(k)
+            ));
+        }
+    }
+    if let Some((_, query)) = r.path.split_once('?') {
+        for (k, v) in form_urlencoded::parse(query.as_bytes()) {
+            if crate::keys::looks_secret(&k)
+                && run::variables_in(&v).is_empty()
+                && run::step_refs(&v).is_empty()
+            {
+                return Err(format!(
+                    "{at}.path: the query value of {k} is a credential, never saved: use a variable, such as {{{{{}}}}}",
+                    variable_name(&k)
+                ));
+            }
+        }
+    }
+    let path_only = r.path.split('?').next().unwrap_or("");
+    if crate::control::is_control_path(path_only) {
+        return Err(format!(
+            "{at}.path: control-plane paths (/_rustybin/*, /ui/*) are not tested"
+        ));
+    }
+    if r.headers.len() > MAX_HEADERS {
+        return Err(format!("{at}.headers: at most {MAX_HEADERS}"));
+    }
+    for (k, v) in &r.headers {
+        HeaderName::from_bytes(k.as_bytes())
+            .map_err(|_| format!("{at}.headers: {k:?} is not a header name"))?;
+        HeaderValue::from_str(v).map_err(|_| format!("{at}.headers.{k}: not a header value"))?;
+    }
+    Ok(())
+}
+
+/// An output's expression: `$statusCode`, `$response.header.<name>` or
+/// `$response.body#/json/pointer`.
+pub fn valid_output(expr: &str) -> Result<(), String> {
+    let expr = expr.trim();
+    if expr == "$statusCode" {
+        return Ok(());
+    }
+    if let Some(h) = expr.strip_prefix("$response.header.") {
+        return HeaderName::from_bytes(h.as_bytes())
+            .map(|_| ())
+            .map_err(|_| format!("{expr:?}: {h:?} is not a header name"));
+    }
+    if let Some(pointer) = expr.strip_prefix("$response.body#") {
+        if (pointer.is_empty() || pointer.starts_with('/')) && pointer.len() <= 512 {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "{expr:?}: one of $statusCode, $response.header.<name>, $response.body#/json/pointer"
+    ))
+}
+
+pub(crate) fn valid_step_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_NAME
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+}
+
 impl SavedTest {
     /// Every rule a saved test follows (a document's tests too).
     pub fn validate(&self) -> Result<(), String> {
         if !valid_name(&self.name) {
             return Err(format!(
-                "name {:?}: 1 to {MAX_NAME} letters, digits, . _ - (not run, runs, schedules or export)",
+                "name {:?}: 1 to {MAX_NAME} letters, digits, . _ - (not run, runs, schedules, export or import)",
                 self.name
             ));
         }
         if let Some(p) = &self.project {
             crate::rbac::projects::check_name(p)?;
         }
-        let r = &self.request;
-        if !METHODS.contains(&r.method.as_str()) {
-            return Err(format!(
-                "request.method {:?}: one of {}",
-                r.method,
-                METHODS.join(", ")
-            ));
-        }
-        if !r.path.starts_with('/') || r.path.starts_with("//") {
-            return Err("request.path: a path starting with / (never a URL)".into());
-        }
-        // The path and gateway go into request lines and the Hurl export:
-        // no whitespace or control characters.
         let unsafe_char = |c: char| c.is_whitespace() || c.is_control();
-        if r.path.chars().any(unsafe_char) {
-            return Err(
-                "request.path: no spaces or control characters (percent-encode them)".into(),
-            );
-        }
         if self
             .gateway
             .as_deref()
@@ -210,40 +336,13 @@ impl SavedTest {
         {
             return Err("gateway: no spaces or control characters".into());
         }
-        // Credentials are never saved: a secret-looking header or query
-        // value must reference a variable (`Bearer {{TOKEN}}`), never be one.
-        for (k, v) in &r.headers {
-            if crate::keys::looks_secret(k) && run::variables_in(v).is_empty() {
-                return Err(format!(
-                    "request.headers.{k}: a credential is never saved: use a variable, such as {{{{{}}}}}",
-                    variable_name(k)
-                ));
+        if self.steps.is_empty() {
+            if self.request.is_absent() {
+                return Err("a test has a request, or steps".into());
             }
-        }
-        if let Some((_, query)) = r.path.split_once('?') {
-            for (k, v) in form_urlencoded::parse(query.as_bytes()) {
-                if crate::keys::looks_secret(&k) && run::variables_in(&v).is_empty() {
-                    return Err(format!(
-                        "request.path: the query value of {k} is a credential, never saved: use a variable, such as {{{{{}}}}}",
-                        variable_name(&k)
-                    ));
-                }
-            }
-        }
-        let path_only = r.path.split('?').next().unwrap_or("");
-        if crate::control::is_control_path(path_only) {
-            return Err(
-                "request.path: control-plane paths (/_rustybin/*, /ui/*) are not tested".into(),
-            );
-        }
-        if r.headers.len() > MAX_HEADERS {
-            return Err(format!("request.headers: at most {MAX_HEADERS}"));
-        }
-        for (k, v) in &r.headers {
-            HeaderName::from_bytes(k.as_bytes())
-                .map_err(|_| format!("request.headers: {k:?} is not a header name"))?;
-            HeaderValue::from_str(v)
-                .map_err(|_| format!("request.headers.{k}: not a header value"))?;
+            validate_request(&self.request, "request")?;
+        } else {
+            self.validate_steps()?;
         }
         if let Some(g) = &self.gateway {
             crate::egress::parse_url(g, false).map_err(|e| format!("gateway: {e}"))?;
@@ -265,17 +364,95 @@ impl SavedTest {
         Ok(())
     }
 
+    /// The rules of a multi-step test: its steps, their ids and outputs,
+    /// and that a step uses only outputs an earlier step has.
+    fn validate_steps(&self) -> Result<(), String> {
+        if !self.request.is_absent() {
+            return Err("a test has a request, or steps: not both".into());
+        }
+        if !self.assert.is_empty() {
+            return Err("assert: with steps, each step has its own assert".into());
+        }
+        if self.steps.len() > MAX_STEPS {
+            return Err(format!("steps: at most {MAX_STEPS}"));
+        }
+        let mut known: Vec<(String, String)> = Vec::new();
+        for (i, step) in self.steps.iter().enumerate() {
+            let at = format!("steps[{}]", i + 1);
+            if !valid_step_id(&step.id) {
+                return Err(format!(
+                    "{at}.id {:?}: 1 to {MAX_NAME} letters, digits, _ -",
+                    step.id
+                ));
+            }
+            if self.steps[..i].iter().any(|s| s.id == step.id) {
+                return Err(format!("{at}.id {:?}: used by an earlier step", step.id));
+            }
+            validate_request(&step.request, &format!("{at}.request"))?;
+            let r = &step.request;
+            let texts = std::iter::once(r.path.as_str())
+                .chain(r.headers.values().map(String::as_str))
+                .chain(r.body.as_deref());
+            for t in texts {
+                for (id, name) in run::step_refs(t) {
+                    if !known.iter().any(|(i, n)| *i == id && *n == name) {
+                        return Err(format!(
+                            "{at}.request: {{{{steps.{id}.outputs.{name}}}}} is not an output of an earlier step"
+                        ));
+                    }
+                }
+            }
+            if step.assert.len() > MAX_ASSERTIONS {
+                return Err(format!("{at}.assert: at most {MAX_ASSERTIONS}"));
+            }
+            for (n, a) in step.assert.iter().enumerate() {
+                a.validate().map_err(|e| format!("{at}.assert[{n}]: {e}"))?;
+            }
+            if step.outputs.len() > MAX_OUTPUTS {
+                return Err(format!("{at}.outputs: at most {MAX_OUTPUTS}"));
+            }
+            for (name, expr) in &step.outputs {
+                if !valid_step_id(name) {
+                    return Err(format!("{at}.outputs {name:?}: letters, digits, _ -"));
+                }
+                valid_output(expr).map_err(|e| format!("{at}.outputs.{name}: {e}"))?;
+                known.push((step.id.clone(), name.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Does a run of it send a method other than `GET`, `HEAD` or
+    /// `OPTIONS` (which may change state: a tool asks first)?
+    pub fn changes_state(&self) -> bool {
+        self.requests().iter().any(|r| {
+            !["GET", "HEAD", "OPTIONS"]
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case(r.method.trim()))
+        })
+    }
+
+    /// Its requests in order: the one, or each step's.
+    pub fn requests(&self) -> Vec<&TestRequest> {
+        if self.steps.is_empty() {
+            vec![&self.request]
+        } else {
+            self.steps.iter().map(|s| &s.request).collect()
+        }
+    }
+
     /// The variables it uses (`{{name}}`), in order of appearance.
     pub fn variables(&self) -> Vec<String> {
         let mut out = Vec::new();
-        let r = &self.request;
-        let texts = std::iter::once(r.path.as_str())
-            .chain(r.headers.values().map(String::as_str))
-            .chain(r.body.as_deref());
-        for t in texts {
-            for v in run::variables_in(t) {
-                if !out.contains(&v) {
-                    out.push(v);
+        for r in self.requests() {
+            let texts = std::iter::once(r.path.as_str())
+                .chain(r.headers.values().map(String::as_str))
+                .chain(r.body.as_deref());
+            for t in texts {
+                for v in run::variables_in(t) {
+                    if !out.contains(&v) {
+                        out.push(v);
+                    }
                 }
             }
         }
@@ -532,7 +709,7 @@ const DROPPED: &[&str] = &[
 ];
 
 /// `X-Api-Key` -> `X_API_KEY`.
-fn variable_name(raw: &str) -> String {
+pub(crate) fn variable_name(raw: &str) -> String {
     raw.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() {
@@ -697,6 +874,9 @@ pub struct SaveBody {
     pub capture: Option<String>,
     #[serde(default)]
     pub request: Option<TestRequest>,
+    /// The steps of a multi-step test (instead of `capture` or `request`).
+    #[serde(default)]
+    pub steps: Option<Vec<TestStep>>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
@@ -718,7 +898,9 @@ pub fn save(
     session: &str,
     key_id: Option<&str>,
 ) -> Result<Value, (StatusCode, String)> {
+    let stepped = body.steps.as_ref().is_some_and(|s| !s.is_empty());
     let (request, introduced, captured_status) = match (body.capture, body.request) {
+        (None, None) if stepped => (TestRequest::default(), Vec::new(), None),
         (Some(id), None) => {
             let c = state
                 .inspector
@@ -735,7 +917,7 @@ pub fn save(
         _ => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "give either capture (an inspector id) or request".into(),
+                "give one of capture (an inspector id), request or steps".into(),
             ))
         }
     };
@@ -746,6 +928,7 @@ pub fn save(
         name: body.name,
         description: body.description,
         request,
+        steps: body.steps.unwrap_or_default(),
         gateway: body.gateway,
         assert,
         project: body.project,
@@ -1009,6 +1192,10 @@ const RUN_ONE_PATH: &str = "/_rustybin/tests/runs/{id}";
 /// The header a JUnit answer of a run names the kept run in.
 pub const RUN_ID_HEADER: &str = "x-rustybin-test-run";
 const ONE_PATH: &str = "/_rustybin/tests/{name}";
+pub const IMPORT_PATH: &str = "/_rustybin/tests/import";
+const ONE_EXPORT_PATH: &str = "/_rustybin/tests/{name}/export";
+/// The largest Arazzo document read.
+pub const MAX_IMPORT_BYTES: usize = 1024 * 1024;
 pub const RUN_PATH: &str = "/_rustybin/tests/run";
 pub const EXPORT_PATH: &str = "/_rustybin/tests/export";
 
@@ -1327,9 +1514,252 @@ async fn export_handler(
         .into_response()
 }
 
+// ── Arazzo (demo next step 07) ──────────────────────────────────────
+
+/// The mocks a source description of an Arazzo document may be: the
+/// instance's mocks the caller may read, each with the revision that
+/// answers.
+pub fn mocks_for(state: &AppState, caller: &Resolved) -> Vec<arazzo::Mock> {
+    state
+        .mocks
+        .list()
+        .into_iter()
+        .filter(|s| !s.owner.is_visitor() && !s.scratch)
+        .filter(|s| caller.has_in(Perm::MocksRead, s.project.as_deref()))
+        .map(|s| {
+            let c = s.live.clone().unwrap_or_else(|| s.draft.clone());
+            (s.name, c)
+        })
+        .collect()
+}
+
+/// `POST /_rustybin/tests/import`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportBody {
+    /// The Arazzo document: YAML or JSON text, or a JSON object.
+    pub document: Value,
+    /// Answer the tests and what was left out; save nothing.
+    #[serde(default)]
+    pub dry_run: bool,
+    /// The gateway base URL every imported test goes through.
+    #[serde(default)]
+    pub gateway: Option<String>,
+    /// The project the tests go to.
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Overwrite tests of the same names.
+    #[serde(default)]
+    pub replace: bool,
+}
+
+/// Import an Arazzo document: each workflow a multi-step test, checked as
+/// a save checks it (`tests.write` in the project, the caps, the names).
+/// Nothing runs.
+pub fn import_arazzo(
+    state: &AppState,
+    caller: &Resolved,
+    body: ImportBody,
+) -> Result<Value, ServiceError> {
+    let doc: Value = match &body.document {
+        Value::String(text) => {
+            if text.len() > MAX_IMPORT_BYTES {
+                return Err(ServiceError::bad_request(format!(
+                    "an Arazzo document is at most {} KiB",
+                    MAX_IMPORT_BYTES / 1024
+                )));
+            }
+            serde_yaml::from_str(text)
+                .map_err(|e| ServiceError::bad_request(format!("not YAML or JSON: {e}")))?
+        }
+        Value::Object(_) => body.document.clone(),
+        _ => {
+            return Err(ServiceError::bad_request(
+                "document: an Arazzo document as YAML or JSON text, or a JSON object",
+            ))
+        }
+    };
+    let imported =
+        arazzo::import(&doc, &mocks_for(state, caller)).map_err(ServiceError::bad_request)?;
+    let mut tests = Vec::new();
+    let mut taken = Vec::new();
+    for mut t in imported.tests {
+        t.gateway = body.gateway.clone();
+        t.project = body.project.clone();
+        t.validate().map_err(ServiceError::bad_request)?;
+        if state.saved_tests.get(&t.name).is_some() && !body.replace {
+            taken.push(t.name.clone());
+        }
+        tests.push(admit_for(state, caller, t)?);
+    }
+    if !taken.is_empty() {
+        return Err(ServiceError::with_body(
+            StatusCode::CONFLICT,
+            json!({
+                "error": format!("tests named {} exist: replace: true overwrites them", taken.join(", ")),
+                "reason": "name_taken",
+                "tests": taken,
+            }),
+        ));
+    }
+    let new = tests
+        .iter()
+        .filter(|t| state.saved_tests.get(&t.name).is_none())
+        .count();
+    if state.saved_tests.len() + new > MAX_TESTS {
+        return Err(ServiceError::new(
+            StatusCode::INSUFFICIENT_STORAGE,
+            StoreError::Full.message(),
+        ));
+    }
+    let mut out = json!({
+        "format": "arazzo",
+        "dry_run": body.dry_run,
+        "workflows": imported.workflows,
+        "sources": imported.sources,
+        "left_out": imported.left_out,
+    });
+    if body.dry_run {
+        out["tests"] = json!(tests);
+        return Ok(out);
+    }
+    let mut saved = Vec::new();
+    for t in tests {
+        saved.push(
+            state
+                .saved_tests
+                .put(t, true)
+                .map_err(|e| ServiceError::new(e.status(), e.message()))?,
+        );
+    }
+    out["tests"] = json!(saved);
+    Ok(out)
+}
+
+/// One test as an Arazzo document (`left_out`: the assertions Arazzo's
+/// subset cannot say).
+pub fn export_arazzo(
+    state: &AppState,
+    caller: &Resolved,
+    name: &str,
+    base_url: &str,
+) -> Result<(Value, Vec<String>), ServiceError> {
+    let t = state
+        .saved_tests
+        .get(name)
+        .filter(|t| visible(caller, t))
+        .ok_or_else(|| no_test(name))?;
+    arazzo::export(&t, &mocks_for(state, caller), base_url)
+        .map_err(|e| ServiceError::new(StatusCode::UNPROCESSABLE_ENTITY, e))
+}
+
+#[derive(Deserialize, Default)]
+struct ImportQuery {
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default)]
+    replace: bool,
+    #[serde(default)]
+    gateway: Option<String>,
+    #[serde(default)]
+    project: Option<String>,
+}
+
+/// `{document, dry_run, gateway, project, replace}` as JSON, or the
+/// Arazzo document itself as the body (`Content-Type: application/yaml`)
+/// with the rest in the query.
+async fn import_handler(
+    State(state): State<AppState>,
+    Query(q): Query<ImportQuery>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
+    body: Bytes,
+) -> Response {
+    let yaml = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|t| t.contains("yaml"));
+    let body = if yaml {
+        ImportBody {
+            document: Value::String(String::from_utf8_lossy(&body).into_owned()),
+            dry_run: q.dry_run,
+            gateway: q.gateway,
+            project: q.project,
+            replace: q.replace,
+        }
+    } else {
+        match serde_json::from_slice::<ImportBody>(&body) {
+            Ok(b) => b,
+            Err(e) => {
+                return refuse(
+                    StatusCode::BAD_REQUEST,
+                    format!("expected {{document, dry_run, gateway, project, replace}}, or the Arazzo document as application/yaml: {e}"),
+                )
+            }
+        }
+    };
+    let dry_run = body.dry_run;
+    let c = caller(&state, &headers, &extensions);
+    match import_arazzo(&state, &c, body) {
+        Ok(v) if dry_run => Json(v).into_response(),
+        Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// The header that names what an Arazzo export could not say.
+pub const LEFT_OUT_HEADER: &str = "x-rustybin-left-out";
+
+async fn export_one_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<FormatQuery>,
+    headers: HeaderMap,
+    extensions: axum::http::Extensions,
+    uri: axum::http::Uri,
+) -> Response {
+    let c = caller(&state, &headers, &extensions);
+    match q.format.as_deref().unwrap_or("hurl") {
+        "hurl" => match state.saved_tests.get(&name).filter(|t| visible(&c, t)) {
+            Some(t) => (
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                hurl::export(&[t]),
+            )
+                .into_response(),
+            None => no_test(&name).into_response(),
+        },
+        "arazzo" => {
+            let base = crate::session::request_origin(&headers, &extensions, &uri, &state.config)
+                .base_url();
+            match export_arazzo(&state, &c, &name, &base) {
+                Ok((doc, left_out)) => {
+                    let mut resp = (
+                        [(header::CONTENT_TYPE, "application/yaml; charset=utf-8")],
+                        serde_yaml::to_string(&doc).unwrap_or_default(),
+                    )
+                        .into_response();
+                    if let Ok(v) = HeaderValue::from_str(&left_out.join("; ")) {
+                        if !left_out.is_empty() {
+                            resp.headers_mut().insert(LEFT_OUT_HEADER, v);
+                        }
+                    }
+                    resp
+                }
+                Err(e) => e.into_response(),
+            }
+        }
+        f => refuse(
+            StatusCode::BAD_REQUEST,
+            format!("format {f:?}: hurl or arazzo"),
+        ),
+    }
+}
+
 pub fn router(_state: &AppState) -> Router<AppState> {
     Router::new()
         .route(LIST_PATH, get(list_handler).post(save_handler))
+        .route(IMPORT_PATH, post(import_handler))
+        .route(ONE_EXPORT_PATH, get(export_one_handler))
         .route(RUN_PATH, post(run_handler))
         .route(RUNS_PATH, get(runs_handler).delete(clear_runs_handler))
         .route(RUN_ONE_PATH, get(run_one_handler))
@@ -1405,6 +1835,37 @@ pub fn catalog() -> Vec<Endpoint> {
 .permission(crate::rbac::Permission::TestsRead).project_scoped()
         .example(Example::get("Export as Hurl", EXPORT_PATH)),
     ];
+    out.push(
+        Endpoint::new(
+            IMPORT_PATH,
+            &["POST"],
+            category::CONTROL,
+            "Import an Arazzo document: each workflow a multi-step saved test (dry_run answers the tests and what was left out)",
+        )
+        .permission(crate::rbac::Permission::TestsWrite)
+        .project_scoped()
+        .example(
+            Example::post("Preview an Arazzo import", IMPORT_PATH)
+                .json(r#"{"document": {"arazzo": "1.0.1", "info": {"title": "Pets", "version": "1"}, "sourceDescriptions": [{"name": "petstore", "url": "./petstore.yaml", "type": "openapi"}], "workflows": [{"workflowId": "list-pets", "steps": [{"stepId": "list", "operationId": "listPets", "successCriteria": [{"condition": "$statusCode == 200"}]}]}]}, "dry_run": true}"#),
+        ),
+    );
+    out.push(
+        Endpoint::new(
+            ONE_EXPORT_PATH,
+            &["GET"],
+            category::CONTROL,
+            "One saved test as Hurl, or as an Arazzo document (?format=arazzo)",
+        )
+        .permission(crate::rbac::Permission::TestsRead)
+        .project_scoped()
+        .example(
+            Example::get(
+                "A test as Arazzo",
+                "/_rustybin/tests/pet-1/export?format=arazzo",
+            )
+            .expect_status(404),
+        ),
+    );
     out.extend(schedule::catalog());
     out
 }
@@ -1501,6 +1962,24 @@ fn tests_openapi_paths() -> Value {
                 "404": { "description": "No such run" }
             }
         } },
+        IMPORT_PATH: { "post": {
+            "tags": ["Control Plane"], "summary": "Import an Arazzo document as multi-step tests",
+            "description": "Arazzo 1.0: each workflow becomes one multi-step saved test. A source description is the mock of its name on this instance, else the one mock that has the operations the workflows use (its url is never fetched; none is a 400 naming it). operationId and operationPath become requests from the mock's spec, parameters and requestBody map directly, successCriteria of the simple and JSONPath kinds become assertions, outputs stay outputs, workflow inputs become {{NAME}} variables. What has no counterpart (onSuccess and onFailure actions, regex and XPath criteria, nested workflows, replacements) is named in left_out; a workflow that cannot run without it is left out whole. Nothing runs. dry_run answers the tests without saving; gateway sends every imported test through it; replace overwrites tests of the same names (else 409).",
+            "operationId": "importTests",
+            "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "additionalProperties": false, "required": ["document"], "properties": {
+                "document": { "description": "The Arazzo document: YAML or JSON text, or a JSON object" },
+                "dry_run": { "type": "boolean" },
+                "gateway": { "type": "string" },
+                "project": { "type": "string" },
+                "replace": { "type": "boolean" }
+            } } } } },
+            "responses": { "200": { "description": "The preview (dry_run): tests, left_out, sources", "content": obj }, "201": { "description": "The saved tests, left_out, sources", "content": obj }, "400": { "description": "Not an Arazzo 1.0 document, or a source description that is no mock here" }, "409": { "description": "Tests of those names exist" } }
+        } },
+        ONE_EXPORT_PATH: { "get": {
+            "tags": ["Control Plane"], "summary": "One saved test as Hurl or Arazzo", "operationId": "exportSavedTest",
+            "parameters": [name, { "name": "format", "in": "query", "required": false, "schema": { "type": "string", "enum": ["hurl", "arazzo"], "default": "hurl" } }],
+            "responses": { "200": { "description": "A Hurl file, or an Arazzo document as YAML (X-Rustybin-Left-Out names the assertions Arazzo cannot say)", "content": { "text/plain": { "schema": { "type": "string" } }, "application/yaml": { "schema": { "type": "string" } } } }, "404": { "description": "No such test" }, "422": { "description": "A request of the test is not an operation of a mock" } }
+        } },
         EXPORT_PATH: { "get": {
             "tags": ["Control Plane"], "summary": "Saved tests as Hurl", "operationId": "exportSavedTests",
             "responses": { "200": { "description": "A Hurl file ({{base_url}} for in-process tests)", "content": { "text/plain": { "schema": { "type": "string" } } } } }
@@ -1511,33 +1990,46 @@ fn tests_openapi_paths() -> Value {
 /// `tests:` of `rustybin.yaml`.
 pub fn schema() -> Value {
     let s = json!({ "type": "string" });
+    let request = json!({
+        "type": "object", "additionalProperties": false, "required": ["path"],
+        "properties": {
+            "method": { "type": "string", "enum": METHODS },
+            "path": { "type": "string" },
+            "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+            "body": s
+        }
+    });
+    let assert = json!({ "type": "array", "maxItems": MAX_ASSERTIONS, "items": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+            "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+            "header": s,
+            "body_contains": s,
+            "json": { "type": "string", "description": "A path: $.a.b[0]" },
+            "equals": {},
+            "max_ms": { "type": "integer", "minimum": 0 }
+        }
+    } });
     json!({
         "type": "array", "maxItems": MAX_TESTS,
         "description": "Saved tests: a request (with {{variables}} for credentials, never values) and assertions",
         "items": {
-            "type": "object", "additionalProperties": false, "required": ["name", "request"],
+            "type": "object", "additionalProperties": false, "required": ["name"],
             "properties": {
                 "name": { "type": "string", "maxLength": MAX_NAME, "pattern": "^[A-Za-z0-9._-]+$" },
                 "description": s,
                 "gateway": { "type": "string", "description": "A gateway base URL; absent: this instance" },
-                "request": {
-                    "type": "object", "additionalProperties": false, "required": ["path"],
+                "project": { "type": "string", "description": "The project it belongs to; absent: the instance's" },
+                "request": request,
+                "assert": assert,
+                "steps": { "type": "array", "maxItems": MAX_STEPS, "description": "A multi-step test (instead of request and assert): run in order, a step that fails stops it", "items": {
+                    "type": "object", "additionalProperties": false, "required": ["id", "request"],
                     "properties": {
-                        "method": { "type": "string", "enum": METHODS },
-                        "path": { "type": "string" },
-                        "headers": { "type": "object", "additionalProperties": { "type": "string" } },
-                        "body": s
-                    }
-                },
-                "assert": { "type": "array", "maxItems": MAX_ASSERTIONS, "items": {
-                    "type": "object", "additionalProperties": false,
-                    "properties": {
-                        "status": { "type": "integer", "minimum": 100, "maximum": 599 },
-                        "header": s,
-                        "body_contains": s,
-                        "json": { "type": "string", "description": "A path: $.a.b[0]" },
-                        "equals": {},
-                        "max_ms": { "type": "integer", "minimum": 0 }
+                        "id": { "type": "string", "maxLength": MAX_NAME, "pattern": "^[A-Za-z0-9_-]+$" },
+                        "description": s,
+                        "request": request,
+                        "assert": assert,
+                        "outputs": { "type": "object", "maxProperties": MAX_OUTPUTS, "additionalProperties": { "type": "string" }, "description": "Values from the answer by name ($statusCode, $response.header.<name>, $response.body#/json/pointer); later steps use {{steps.<id>.outputs.<name>}}" }
                     }
                 } }
             }

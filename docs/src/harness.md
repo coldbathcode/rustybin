@@ -548,6 +548,23 @@ layer takes.
 {{#include ../examples/harness/api.hurl:harness_import_artillery}}
 ```
 
+## Importing an Arazzo document
+
+The import also reads an [Arazzo](saved-tests.md#arazzo-workflows) 1.0 document
+(`?format=arazzo`, or read from the document): the steps of its workflows become
+request templates, each against the mock its source description is on this instance.
+A step's `$statusCode` criterion is the template's `expect_status`.
+
+A scenario's requests are sent by weight, not as a journey, so nothing can be passed
+from one to the next: a step that needs a workflow input or an earlier step's output
+is left out, and the value is named in `variables`. Load test the steps that stand
+alone here, and run the whole journey as a multi-step saved test. Both steps of the
+example document need a value, so the import says so:
+
+```hurl
+{{#include ../examples/tests/arazzo.hurl:harness}}
+```
+
 ## Live tuning
 
 `PATCH .../runs/<run>` changes a running run: `rate_multiplier` (0 to 10, the run or one

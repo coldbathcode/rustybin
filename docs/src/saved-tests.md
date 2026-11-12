@@ -270,6 +270,123 @@ load the same `rustybin.yaml` (or pull the same repository) each run every sched
 and each posts its own notices; there is no election of one runner. Keep the
 schedules on one instance, or give each replica its own document.
 
+## Multi-step tests
+
+A test can be a journey: several requests in order, where a value from one answer goes
+into the next request. Give `steps` instead of `request`:
+
+```json
+{{#include ../examples/tests/two-steps.json}}
+```
+
+```hurl
+{{#include ../examples/tests/arazzo.hurl:steps}}
+```
+
+Each step has an `id` (letters, digits, `_`, `-`), a `request`, its own `assert`, and
+`outputs`: values taken from its answer, by name.
+
+| Output | Is |
+|---|---|
+| `$statusCode` | The answer's status |
+| `$response.header.<name>` | A response header |
+| `$response.body#/json/pointer` | A value of the JSON body, by JSON pointer (`#/id`, `#/items/0/id`) |
+
+A later step uses one as `{{steps.<id>.outputs.<name>}}`, in its path, a header or
+its body; a step can only name an output of a step before it. A secret-looking header
+may take one too (`Authorization: Bearer {{steps.sign-in.outputs.token}}`), so a
+journey can sign in first. At most 20 steps, 16 outputs a step.
+
+The steps run in order and **a step that fails stops the test**: the steps after it
+are reported as `skipped`. A run's result has each step:
+
+```hurl
+{{#include ../examples/tests/arazzo.hurl:run_steps}}
+```
+
+A failing test names its step in the failure (`step read: status 200`), so the
+history, JUnit and the CLI's table say where a journey broke. An output is shown cut
+to 200 characters, and one whose name looks like a credential (`token`, `key`,
+`secret`) as `(hidden)`: what a run keeps never holds one. Each step counts toward a
+run's 200 requests.
+
+## Arazzo workflows
+
+[Arazzo](https://spec.openapis.org/arazzo/latest.html) is the OpenAPI Initiative's
+format for multi-step API workflows. An instance imports an Arazzo 1.0 document:
+each workflow becomes one multi-step test.
+
+```yaml
+{{#include ../examples/tests/pets.arazzo.yaml}}
+```
+
+A preview answers the tests it would make and what it left out, and saves nothing.
+Send the document as the body, or as `{"document": ..., "dry_run": true}`:
+
+```hurl
+{{#include ../examples/tests/arazzo.hurl:preview}}
+```
+
+```hurl
+{{#include ../examples/tests/arazzo.hurl:import}}
+```
+
+```hurl
+{{#include ../examples/tests/arazzo.hurl:run}}
+```
+
+| In the document | Becomes |
+|---|---|
+| A source description | The mock of that name on this instance, else the one mock that has the operations the workflows use from it. Its `url` is never fetched |
+| A workflow | A test named after its `workflowId`, with its `summary` |
+| `operationId`, `operationPath` | The step's request: the method and path of that operation in the mock's spec, under `/mock/<name>` |
+| `parameters` (the workflow's and the step's) | Path, query and header values |
+| `requestBody.payload` | The body (`contentType`, default `application/json`) |
+| `$inputs.<name>` | The variable `{{NAME}}`, filled when the test runs |
+| `$steps.<id>.outputs.<name>` | `{{steps.<id>.outputs.<name>}}` |
+| `successCriteria`: `$statusCode == 200`, `$response.header.X == 'v'`, `$response.body#/p == v`, or a JSONPath criterion on `$response.body` that is a path (`$.a.b`) or a path and a value | Assertions |
+| `outputs`: `$statusCode`, `$response.header.<name>`, `$response.body#/pointer` | The step's outputs |
+
+**Nothing runs at import and nothing is guessed.** What has no counterpart is named in
+`left_out` by its place in the document: `onSuccess` and `onFailure` actions (a goto,
+a retry, an end), regex and XPath criteria and criteria with other operators,
+`replacements`, reusable `components`, a workflow's own `outputs` and `dependsOn`. The
+step it belongs to is still imported when it can run without it. A workflow that
+cannot (a nested workflow, a path parameter without a value, more than 20 steps) is
+left out whole, with why.
+
+A source description that is no mock here refuses the document, by name:
+
+```hurl
+{{#include ../examples/tests/arazzo.hurl:no_mock}}
+```
+
+`gateway` sends every imported test through a gateway, which is how a workflow tests
+what a gateway does to a journey; `replace: true` overwrites tests of the same names
+(without it they are a `409`); `project` puts the tests in a project.
+
+A test exports back to Arazzo, when every request of it is an operation of a mock.
+Assertions Arazzo's subset cannot say (`max_ms`, `body_contains`, a header that only
+has to exist) are named in the `X-Rustybin-Left-Out` header:
+
+```hurl
+{{#include ../examples/tests/arazzo.hurl:export_arazzo}}
+```
+
+The Hurl export has a multi-step test's steps as entries, a step's outputs as
+`[Captures]`, so the journey runs in CI without the instance's console:
+
+```bash
+{{#include ../examples/tests/arazzo-hurl.sh:import}}
+{{#include ../examples/tests/arazzo-hurl.sh:export}}
+```
+
+```hurl
+{{#include ../examples/tests/arazzo.hurl:cleanup}}
+```
+
+The same document is a [load test's source](harness.md#importing-an-arazzo-document).
+
 ## In CI without an instance's console
 
 `GET /_rustybin/tests/export` is every test as one Hurl file, assertions included.
@@ -295,8 +412,8 @@ exits `1` when a test fails.
 
 | Surface | Where |
 |---|---|
-| API | `GET`, `POST /_rustybin/tests`, `GET`, `PUT`, `DELETE /_rustybin/tests/{name}`, `POST /_rustybin/tests/run` (`?format=junit`), `GET /_rustybin/tests/export`; the history: `GET`, `DELETE /_rustybin/tests/runs`, `GET /_rustybin/tests/runs/{id}` (`?format=junit`); schedules: `GET`, `POST /_rustybin/tests/schedules`, `GET`, `PUT`, `DELETE /_rustybin/tests/schedules/{name}`, `POST /_rustybin/tests/schedules/{name}/run` |
-| Console | **Live traffic**: **Save as test** on an entry; **Saved tests**: the list, **Run all** with variables, a test's run, the failures and the change since the previous run, **Export as Hurl**, delete; **History**: every run, a run's detail, its JUnit download, **Clear history**; **Schedules**: the list with each one's next time, last run and last notice, on or off, **Run now**, edit, delete (confirmed), and the form; the notice settings under **Management**, **Network** |
-| CLI | `rustybin tests list`, `show`, `save`, `put`, `delete`, `run`, `export` (`run --junit`, `--var NAME=value`, `--var NAME=-` or `NAME=@file` for a credential); the history: `tests runs` (`--limit`, `--cursor`), `tests run-show <id>` (`--junit`), `tests runs-clear`; schedules: `tests schedules`, `schedule-show <name>`, `schedule-save <name> --every 15m` (or `--at 02:30`, `--names`, `--prefix`, `--webhook`, `--notify-recovery`, `--disabled`), `schedule-run <name>` (exits `1` when it fails), `schedule-delete <name>` ([reference](cli.md#tests)) |
-| Management MCP | `list_tests` (one, all, or `format: hurl`), `save_test`, `delete_test` (confirmed), `run_tests` (confirmed when a test goes through a gateway or sends a method other than `GET`, `HEAD` or `OPTIONS`; one run at a time; variables only from `RUSTYBIN_TEST_*`; answers the `run_id` and the change), `list_test_runs`, `get_test_run` (results under `untrusted_results`, JUnit with `format: junit`), `clear_test_runs` (confirmed); `list_test_schedules`, `save_test_schedule` (confirmed when it names a new webhook), `delete_test_schedule` (confirmed), `run_test_schedule` (confirmed when its tests go through a gateway or change state, or it has a webhook) ([agent page](agent-mcp.md)) |
-| `rustybin.yaml` | `tests:`, a list of tests as above, and `test_schedules:`, a list of schedules (without their status) ([instance as code](configuration-as-code.md)); the history is not configuration and is never exported |
+| API | `GET`, `POST /_rustybin/tests`, `GET`, `PUT`, `DELETE /_rustybin/tests/{name}` (with `request`, or `steps`), `POST /_rustybin/tests/run` (`?format=junit`), `GET /_rustybin/tests/export`, `GET /_rustybin/tests/{name}/export` (`?format=arazzo`), `POST /_rustybin/tests/import` (Arazzo; `dry_run`, `gateway`, `replace`); the history: `GET`, `DELETE /_rustybin/tests/runs`, `GET /_rustybin/tests/runs/{id}` (`?format=junit`); schedules: `GET`, `POST /_rustybin/tests/schedules`, `GET`, `PUT`, `DELETE /_rustybin/tests/schedules/{name}`, `POST /_rustybin/tests/schedules/{name}/run` |
+| Console | **Live traffic**: **Save as test** on an entry; **Saved tests**: the list, **Run all** with variables, a test's run, the failures and the change since the previous run, **Export as Hurl**, delete; a multi-step test's steps with each one's result and outputs, its Arazzo download; **Import Arazzo** (a file or pasted text, **Preview**, **Import**, what was left out); **History**: every run, a run's detail, its JUnit download, **Clear history**; **Schedules**: the list with each one's next time, last run and last notice, on or off, **Run now**, edit, delete (confirmed), and the form; the notice settings under **Management**, **Network** |
+| CLI | `rustybin tests list`, `show`, `save`, `put`, `delete`, `run`, `export` (`export <name> --format arazzo`), `import <file>` (Arazzo; `--dry-run`, `--gateway`, `--replace`) (`run --junit`, `--var NAME=value`, `--var NAME=-` or `NAME=@file` for a credential); the history: `tests runs` (`--limit`, `--cursor`), `tests run-show <id>` (`--junit`), `tests runs-clear`; schedules: `tests schedules`, `schedule-show <name>`, `schedule-save <name> --every 15m` (or `--at 02:30`, `--names`, `--prefix`, `--webhook`, `--notify-recovery`, `--disabled`), `schedule-run <name>` (exits `1` when it fails), `schedule-delete <name>` ([reference](cli.md#tests)) |
+| Management MCP | `list_tests` (one, all, `format: hurl`, or one as `format: arazzo`), `save_test` (with `request`, `capture` or `steps`), `import_tests` (Arazzo; `dry_run`), `delete_test` (confirmed), `run_tests` (confirmed when a test goes through a gateway or sends a method other than `GET`, `HEAD` or `OPTIONS`; one run at a time; variables only from `RUSTYBIN_TEST_*`; answers the `run_id` and the change), `list_test_runs`, `get_test_run` (results under `untrusted_results`, JUnit with `format: junit`), `clear_test_runs` (confirmed); `list_test_schedules`, `save_test_schedule` (confirmed when it names a new webhook), `delete_test_schedule` (confirmed), `run_test_schedule` (confirmed when its tests go through a gateway or change state, or it has a webhook) ([agent page](agent-mcp.md)) |
+| `rustybin.yaml` | `tests:`, a list of tests as above (with `request`, or `steps`), and `test_schedules:`, a list of schedules (without their status) ([instance as code](configuration-as-code.md)); the history is not configuration and is never exported |

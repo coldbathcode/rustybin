@@ -606,7 +606,7 @@ pub fn confirm_reason(state: &AppState, action: &Action) -> Option<String> {
                     "send the saved test {name} through {}",
                     crate::egress::url_origin(g)
                 )),
-                None if unsafe_method(&t.request.method) => Some(format!(
+                None if t.changes_state() => Some(format!(
                     "replay the saved test {name}, which may change state"
                 )),
                 None => None,

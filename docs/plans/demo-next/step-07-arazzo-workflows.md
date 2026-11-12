@@ -70,3 +70,59 @@ Workflows run as multi-step saved tests and as a harness import, not as a third 
 
 Arazzo workflows import, run as tests and as harness traffic, and export on every surface, documented
 with tested examples.
+
+## Build notes (2026-11-12)
+
+Built whole, with the recommendation of section 6: workflows run as multi-step saved tests and as
+a harness import, not as a third engine. Where the build differs from the plan above:
+
+- **`SavedTest.request` stays a field, absent with `steps`.** A multi-step test has an empty
+  `request` that is not written to a document (`TestRequest::is_absent`); `validate` wants exactly
+  one of the two, and with `steps` no top-level `assert`. Everything that walked one request
+  walks `SavedTest::requests()` (the variables, `changes_state` for the tools' confirmation).
+- **Outputs** are `$statusCode`, `$response.header.<name>` and `$response.body#/json/pointer`
+  (a JSON pointer, as Arazzo writes it); a step uses `{{steps.<id>.outputs.<name>}}` only of a
+  step before it, checked at save. Variables are filled first and outputs second, so a value an
+  answer gave is never read as a variable; a filled path with a space or a control character is
+  refused. A secret-looking header may take an output (a token from a sign-in step).
+- **A result** has `steps` (each with `passed`, `skipped`, `status`, `ms`, `failures`, `outputs`),
+  and the test's own `failures` or `error` carry `step <id>: ...`, so the history, JUnit and the
+  CLI name the step without knowing about steps. An output is cut to 200 characters, `(hidden)`
+  when its name looks like a credential, and scrubbed of variable values. A run's 200 requests
+  count each step.
+- **Source descriptions** are the mock of the same name, else the one mock that has every
+  `operationId` the workflows use from that source; none or several refuses the document naming
+  the source. Only mocks the caller may read are candidates (`replay::mocks_for`).
+- **The subset of criteria**: simple `$statusCode == n`, `$response.header.X == 'v'`,
+  `$response.body#/pointer == v`; JSONPath with the context `$response.body` and a condition
+  that is a path or a path `==` a literal. Anything else is in `left_out`. A step without
+  criteria has no assertion (nothing is guessed).
+- **A workflow input** becomes a variable named as a captured credential is
+  (`petName` is `{{PETNAME}}`). A whole-value expression in a JSON payload stays a string.
+- **What leaves a workflow out whole**: a nested workflow step, an operation no source has, a
+  path parameter without a value, a payload expression with no counterpart, more than 20 steps,
+  a `workflowId` that is not a test name. Each is one line of `left_out` with why.
+- **The export to Arazzo** needs every request to be an operation of a mock (matched through the
+  mock's route table); a test that calls anything else is `422` naming the step. Assertions with
+  no Arazzo counterpart are named in `X-Rustybin-Left-Out` (and `left_out` of the tool).
+- **The harness import** makes request templates of the steps that stand alone. Templates are
+  sent by weight, not as a journey, so a step that needs an input or an earlier step's output is
+  left out and named in `variables`; the plan's "sequences per virtual user" would need the
+  engine to pass values on, which is the third engine the decision ruled out.
+- **Routes**: `POST /_rustybin/tests/import` also takes the document as the body
+  (`application/yaml`, the rest in the query), and `GET /_rustybin/tests/{name}/export` answers
+  one test as Hurl by default. `import` is no longer a test name.
+- **The CLI**: `tests export [<name>] [--format hurl|arazzo]` covers both export routes.
+- The tests were written with the code: `src/replay/tests/arazzo.rs` (the four the plan names,
+  the rules of a multi-step test, the harness import), the tools' and the CLI's tests, a console
+  step, and `docs/examples/tests/arazzo-hurl.sh`, which runs the exported Hurl under
+  `hurl --test`.
+
+### For the merge
+
+`SavedTest.steps` and `TestStep` (every `SavedTest` literal gains `steps`), `replay/run.rs` (the
+step loop, `StepResult`, `step_refs`), `replay/hurl.rs` (entries and captures), the new
+`replay/arazzo.rs`, two routes in the tests router (`PROJECT_ROUTES`, `NEW_SINCE_0_4`),
+`harness::import::Format::Arazzo` with `import_text_with` (the route and `import_scenario` pass
+the caller's mocks), one tool at the end of `TOOLS` (163 for an admin), `tests import` and the
+wider `tests export` in the CLI, the Import Arazzo card and step results in `ui/views/tests.js`.

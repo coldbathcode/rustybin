@@ -8,6 +8,8 @@ use super::*;
 use crate::config::Config;
 use crate::test_support::{test_app_with, test_state_with};
 
+/// Multi-step tests and Arazzo.
+mod arazzo;
 /// The history of runs.
 mod history_runs;
 /// Saved tests on a schedule.
@@ -294,6 +296,7 @@ async fn a_gateway_run_is_refused_until_the_egress_policy_allows_it() {
             headers: Default::default(),
             body: None,
         },
+        steps: Vec::new(),
         gateway: Some(gateway.clone()),
         assert: vec![Assertion::status(200)],
         project: None,
@@ -329,6 +332,7 @@ fn tests_are_validated_and_bounded() {
             headers: Default::default(),
             body: None,
         },
+        steps: Vec::new(),
         gateway: None,
         assert: vec![],
         project: None,
@@ -402,6 +406,7 @@ fn saved_tests_survive_a_restart() {
             headers: [("content-type".to_string(), "application/json".to_string())].into(),
             body: Some("{\"x\":1}".into()),
         },
+        steps: Vec::new(),
         gateway: None,
         assert: vec![Assertion::status(200)],
         project: None,
@@ -431,6 +436,7 @@ fn a_document_carries_the_tests_and_prunes_only_what_it_does_not_name() {
             headers: Default::default(),
             body: None,
         },
+        steps: Vec::new(),
         gateway: None,
         assert: vec![Assertion::status(200)],
         project: None,
@@ -494,6 +500,7 @@ async fn a_run_never_shows_or_captures_a_filled_secret() {
             headers: [("x-api-key".to_string(), "{{API_KEY}}".to_string())].into(),
             body: Some("token is {{API_KEY}}".into()),
         },
+        steps: Vec::new(),
         gateway: None,
         assert: vec![Assertion {
             body_contains: Some("never there".into()),
@@ -541,6 +548,7 @@ fn a_literal_credential_is_never_saved() {
             headers: [("authorization".to_string(), "Bearer abc123".to_string())].into(),
             body: None,
         },
+        steps: Vec::new(),
         gateway: None,
         assert: vec![],
         project: None,
@@ -618,6 +626,7 @@ fn plain_test(name: &str) -> SavedTest {
             headers: Default::default(),
             body: None,
         },
+        steps: Vec::new(),
         gateway: None,
         assert: vec![Assertion::status(200)],
         project: None,
