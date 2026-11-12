@@ -4,6 +4,7 @@
 //! the kill switch, a hop that is not allowed or not verified: each makes no
 //! onward call. Everything is on loopback; rates stay low.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -155,6 +156,71 @@ fn chain_of(state: &AppState, id: &str) -> Value {
     serde_json::to_value(report).expect("json")
 }
 
+/// The series of a run's onward calls: `(hop, result)` to its count.
+type Series = BTreeMap<(u64, String), u64>;
+
+/// `rustybin_harness_chain_calls_total` of the run as the node exports it.
+fn series_of(state: &AppState, id: &str) -> Series {
+    let prefix = format!("rustybin_harness_chain_calls_total{{run=\"{id}\",hop=\"");
+    state
+        .metrics
+        .render()
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix(&prefix)?;
+            let (hop, rest) = rest.split_once("\",result=\"")?;
+            let (result, n) = rest.split_once("\"} ")?;
+            Some((
+                (hop.parse().expect("hop"), result.to_string()),
+                n.parse().expect("count"),
+            ))
+        })
+        .collect()
+}
+
+/// What the series must be for a node's chain numbers (`chain_of`): per hop
+/// `ok` the calls that were answered, `failed` those that got no answer,
+/// and every refusal under its reason (a call stopped under way is a
+/// refusal, as in the report). Nothing that is zero.
+fn series_for(chain: &Value) -> Series {
+    let mut want = Series::new();
+    let n = |v: &Value| v.as_u64().unwrap_or(0);
+    for leg in chain["hops"].as_array().expect("hops") {
+        let hop = n(&leg["hop"]);
+        let ok = n(&leg["upstream"]) + n(&leg["gateway"]);
+        let failed = n(&leg["transport"]) - n(&leg["transport_kinds"]["stopped"]);
+        let mut put = |result: &str, count: u64| {
+            if count > 0 {
+                want.insert((hop, result.to_string()), count);
+            }
+        };
+        put("ok", ok);
+        put("failed", failed);
+        for (why, count) in leg["refused"].as_object().expect("refused") {
+            put(why, n(count));
+        }
+    }
+    want
+}
+
+/// The node's series say what its chain numbers say (the two are counted
+/// one after the other, so a call ending right now is given a moment).
+async fn series_agree(state: &AppState, id: &str) -> Series {
+    for _ in 0..100 {
+        if series_of(state, id) == series_for(&chain_of(state, id)) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let series = series_of(state, id);
+    assert_eq!(series, series_for(&chain_of(state, id)));
+    series
+}
+
+fn at(series: &Series, hop: u64, result: &str) -> u64 {
+    series.get(&(hop, result.to_string())).copied().unwrap_or(0)
+}
+
 async fn stop_all(servers: Vec<crate::RunningServer>) {
     for s in servers {
         s.shutdown();
@@ -168,7 +234,7 @@ fn both() -> crate::config::Config {
 
 #[tokio::test]
 async fn a_chain_reaches_every_hop_and_reports_each_leg() {
-    let (server, app, _state) = running(both()).await;
+    let (server, app, state) = running(both()).await;
     let url = format!("http://{}", server.http_addr);
     let hops = json!([
         { "url": url, "path": "/harness/middle" },
@@ -247,6 +313,28 @@ async fn a_chain_reaches_every_hop_and_reports_each_leg() {
     )
     .await;
     assert!(text.as_str().unwrap().contains("chain hop 2"), "{text}");
+    // The series of the onward calls: one per hop and result, the report's
+    // numbers, and nothing else of the run.
+    let series = series_agree(&state, &id).await;
+    assert_eq!(
+        series,
+        Series::from([((1, "ok".to_string()), sent), ((2, "ok".to_string()), sent)])
+    );
+    let metrics = state.metrics.render();
+    assert_eq!(
+        metrics
+            .matches("# TYPE rustybin_harness_chain_calls_total counter")
+            .count(),
+        1,
+        "{metrics}"
+    );
+    // The onward calls are not arrivals of the run in the series either.
+    assert!(
+        metrics.contains(&format!(
+            "rustybin_harness_server_arrivals_total{{run=\"{id}\"}} {sent}\n"
+        )),
+        "{metrics}"
+    );
     stop_all(vec![server]).await;
 }
 
@@ -524,6 +612,14 @@ async fn the_depth_is_fixed_and_a_repeat_calls_nothing() {
     );
     assert_eq!(legs[2]["refused"]["seen_before"], 1, "{legs:?}");
     assert_eq!(report["server"]["arrivals"], sent);
+    // The series: a call per request at each of the three hops, and the
+    // repeat under its reason.
+    let series = series_agree(&state, &id).await;
+    for hop in 1..=3 {
+        assert_eq!(at(&series, hop, "ok"), sent, "{series:?}");
+    }
+    assert_eq!(at(&series, 3, "seen_before"), 1, "{series:?}");
+    assert_eq!(series.len(), 4, "{series:?}");
     stop_all(vec![server]).await;
 }
 
@@ -541,6 +637,10 @@ async fn the_kill_switch_stops_onward_calls() {
     wait_until_sending(&app, &id).await;
     let (key, node) = run_key(&state, &id);
     tokio::time::sleep(Duration::from_millis(300)).await;
+    // The run is on and its calls are under way: nothing has an answer.
+    let before = series_of(&state, &id);
+    let stopped_by = |s: &Series| at(s, 1, "kill_switch") + at(s, 1, "not_live");
+    assert_eq!(stopped_by(&before), 0, "{before:?}");
     let (status, v) = send(&app, Method::POST, "/_rustybin/harness/stop", None).await;
     assert_eq!(status, StatusCode::OK, "{v}");
     // With the switch set, a request of the run calls nothing.
@@ -548,6 +648,18 @@ async fn the_kill_switch_stops_onward_calls() {
     let late = signed(&key, &id, &node, 900_000, 0, "/harness/front");
     let late = [("x-rustybin-harness", late.as_str())];
     assert_eq!(knock(&app, "/harness/front", &late).await, StatusCode::OK);
+    // The series while the run winds down: the refusals rose (the calls
+    // under way and the late request), `ok` did not.
+    for _ in 0..100 {
+        if stopped_by(&series_of(&state, &id)) >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let after = series_of(&state, &id);
+    assert!(stopped_by(&after) >= 2, "{after:?}");
+    assert!(at(&after, 1, "kill_switch") >= 1, "{after:?}");
+    assert_eq!(at(&after, 1, "ok"), at(&before, 1, "ok"), "{after:?}");
     let report = wait_for_report(&app, &id).await;
     assert_eq!(report["state"], "stopped", "{report}");
     // Nothing left after the switch, and the calls under way ended with
@@ -565,6 +677,9 @@ async fn the_kill_switch_stops_onward_calls() {
             >= 2,
         "{leg}"
     );
+    let series = series_agree(&state, &id).await;
+    assert_eq!(at(&series, 1, "ok"), at(&before, 1, "ok"), "{series:?}");
+    assert_eq!(at(&series, 1, "failed"), 0, "a stopped call: {series:?}");
     stop_all(vec![server]).await;
 }
 
@@ -675,7 +790,7 @@ async fn an_unverified_hop_refuses_the_run() {
 
 #[tokio::test]
 async fn onward_calls_are_bounded_per_run() {
-    let (server, app, _state) = running(both()).await;
+    let (server, app, state) = running(both()).await;
     let url = format!("http://{}", server.http_addr);
     let slow = sink(Duration::from_millis(400)).await;
     // One call in flight at a time: the rest are refused, not queued.
@@ -698,6 +813,10 @@ async fn onward_calls_are_bounded_per_run() {
     assert_eq!(slow.hits(), calls);
     // The clients' requests were answered all the same.
     assert_eq!(report["totals"]["ok"], sent);
+    // The series: the answered calls and the refused ones are the requests.
+    let series = series_agree(&state, run["run_id"].as_str().unwrap()).await;
+    assert_eq!(at(&series, 1, "ok"), calls, "{series:?}");
+    assert_eq!(at(&series, 1, "busy"), busy, "{series:?}");
     // A call is given its timeout and no longer.
     let mut s = scenario(
         &url,
@@ -714,6 +833,13 @@ async fn onward_calls_are_bounded_per_run() {
     assert_eq!(leg["calls"], sent, "{leg}");
     assert_eq!(leg["transport_kinds"]["timeout"], sent, "{leg}");
     assert!(leg["latency"]["max_ms"].as_f64().unwrap() < 400.0, "{leg}");
+    // A call without an answer is `failed`, under its own run.
+    let series = series_agree(&state, run["run_id"].as_str().unwrap()).await;
+    assert_eq!(
+        series,
+        Series::from([((1, "failed".to_string()), sent)]),
+        "{series:?}"
+    );
     stop_all(vec![server]).await;
 }
 
@@ -787,6 +913,21 @@ async fn a_cluster_hands_the_chain_to_its_servers() {
     assert_eq!(calls + refused, sent, "{leg}");
     assert!(calls * 10 >= sent * 8, "most requests were followed: {leg}");
     assert!(srv["chain"].get("problems").is_none(), "{srv}");
+    // Each server node exports its own calls: the front server made them
+    // all, the back server (the end of the chain) none, and the nodes that
+    // serve nothing have no series. Together they are the merged report,
+    // so nothing is counted twice.
+    let series = series_agree(&front.state, &run_id).await;
+    assert_eq!(at(&series, 1, "ok"), calls, "{series:?}");
+    assert_eq!(series.values().sum::<u64>(), sent, "{series:?}");
+    assert_eq!(series_agree(&back.state, &run_id).await, Series::new());
+    for n in [&l, &c, &back] {
+        let metrics = n.state.metrics.render();
+        assert!(
+            !metrics.contains("rustybin_harness_chain_calls_total"),
+            "{metrics}"
+        );
+    }
     // The run is over: the leader no longer says live, and a request of
     // the run (its key still signs) calls nothing on a member.
     let entry = front
@@ -878,6 +1019,11 @@ async fn a_cluster_hands_the_chain_to_its_servers() {
         "{chain}"
     );
     assert_eq!(hop.hits(), 0);
+    let series = series_agree(&strict.state, &run_id).await;
+    assert_eq!(
+        series,
+        Series::from([((1, "not_prepared".to_string()), sent)])
+    );
     for n in [l, strict, c2] {
         n.stop().await;
     }

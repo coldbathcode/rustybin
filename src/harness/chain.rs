@@ -36,6 +36,10 @@ use super::report::{histogram, Percentiles, WireHist};
 use super::safety::{self, ChainGate, ChainRefusal, MAX_CHAIN_HOPS};
 use super::scenario;
 use super::Harness;
+use crate::metrics::{self, Metrics};
+
+// The series' `hop` label is as deep as a chain.
+const _: () = assert!(metrics::MAX_HARNESS_CHAIN_HOPS == MAX_CHAIN_HOPS);
 
 /// The most of an onward answer read before it is let go.
 const MAX_ANSWER_BYTES: usize = 1024 * 1024;
@@ -343,10 +347,14 @@ impl ChainStats {
         self.problem = Some(problem.chars().take(1024).collect());
     }
 
-    fn refuse(&mut self, hop: usize, why: ChainRefusal) {
-        if let Some(h) = self.hops.get_mut(hop) {
-            *h.refused.entry(why.as_str()).or_default() += 1;
-        }
+    /// Answers the `result` of the series
+    /// `rustybin_harness_chain_calls_total` this count belongs to (`None`:
+    /// nothing was counted), as [`ChainStats::record`] does: the series is
+    /// fed by what is counted here and by nothing else.
+    fn refuse(&mut self, hop: usize, why: ChainRefusal) -> Option<&'static str> {
+        let h = self.hops.get_mut(hop)?;
+        *h.refused.entry(why.as_str()).or_default() += 1;
+        Some(why.as_str())
     }
 
     /// An onward call of hop `hop` (1 or more) arrived at this node.
@@ -356,11 +364,9 @@ impl ChainStats {
         }
     }
 
-    fn record(&mut self, hop: usize, outcome: &Outcome) {
-        let Some(h) = self.hops.get_mut(hop) else {
-            return;
-        };
-        match outcome {
+    fn record(&mut self, hop: usize, outcome: &Outcome) -> Option<&'static str> {
+        let h = self.hops.get_mut(hop)?;
+        Some(match outcome {
             Outcome::Answer {
                 status,
                 tagged,
@@ -383,12 +389,14 @@ impl ChainStats {
                     h.overhead
                         .saturating_record(micros(elapsed.saturating_sub(up)));
                 }
+                metrics::CHAIN_OK
             }
             Outcome::Transport(kind, elapsed) => {
                 h.calls += 1;
                 h.transport += 1;
                 *h.transport_kinds.entry(kind).or_default() += 1;
                 h.latency.saturating_record(micros(*elapsed));
+                metrics::CHAIN_FAILED
             }
             // Ended before an answer: the call was made, and stopped.
             Outcome::Refused(why) => {
@@ -396,8 +404,9 @@ impl ChainStats {
                 h.transport += 1;
                 *h.transport_kinds.entry("stopped").or_default() += 1;
                 *h.refused.entry(why.as_str()).or_default() += 1;
+                why.as_str()
             }
-        }
+        })
     }
 
     /// The report of this node's part, with what `chain` says of each hop.
@@ -594,7 +603,10 @@ impl Merge {
 /// only for one): count the arrival of an onward call, then make this
 /// server's own onward call when the chain goes on and the gate lets it.
 /// The incoming request is answered either way.
-pub async fn call_on(entry: &Arc<RunEntry>, marker: &Marker) {
+///
+/// Every count of a call or a refusal is also one of
+/// `rustybin_harness_chain_calls_total` on `metrics`; an arrival is not.
+pub async fn call_on(entry: &Arc<RunEntry>, marker: &Marker, metrics: &Metrics) {
     let Some(stats) = entry.chain_stats() else {
         return; // the run declares no chain
     };
@@ -602,6 +614,12 @@ pub async fn call_on(entry: &Arc<RunEntry>, marker: &Marker) {
     fn lock(s: &Mutex<ChainStats>) -> std::sync::MutexGuard<'_, ChainStats> {
         s.lock().unwrap_or_else(|p| p.into_inner())
     }
+    // The series of what `stats` just counted (after its lock is let go).
+    let count = |result: Option<&'static str>| {
+        if let Some(result) = result {
+            metrics.harness_chain_call(&entry.id, hop, result);
+        }
+    };
     if hop > 0 {
         lock(stats).arrived(hop);
     }
@@ -614,24 +632,28 @@ pub async fn call_on(entry: &Arc<RunEntry>, marker: &Marker) {
         return; // the end of the chain
     }
     let Some(chain) = entry.chain() else {
-        lock(stats).refuse(hop, ChainRefusal::NotPrepared);
+        let counted = lock(stats).refuse(hop, ChainRefusal::NotPrepared);
+        count(counted);
         return;
     };
     // The run ended on this node: its entry says so before the gate does.
     if entry.is_done() {
-        lock(stats).refuse(hop, ChainRefusal::NotLive);
+        let counted = lock(stats).refuse(hop, ChainRefusal::NotLive);
+        count(counted);
         return;
     }
     let permit = match chain.gate.admit(hop, &marker.node, marker.seq) {
         Ok(permit) => permit,
         Err(why) => {
-            lock(stats).refuse(hop, why);
+            let counted = lock(stats).refuse(hop, why);
+            count(counted);
             return;
         }
     };
     let outcome = chain.send(hop, entry, marker).await;
     drop(permit);
-    lock(stats).record(hop, &outcome);
+    let counted = lock(stats).record(hop, &outcome);
+    count(counted);
 }
 
 #[cfg(test)]

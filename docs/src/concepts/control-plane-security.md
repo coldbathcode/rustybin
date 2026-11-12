@@ -554,6 +554,7 @@ it needs `settings.read`, so a visitor reads no totals of the others' use:
 | `rustybin_mock_visits` (gauge) | running [self-service](../mocks/self-service.md) visits (only with self-service on) |
 | `rustybin_mock_visit_events_total` | `event`: `started`, `extended`, `ended`, `email_required`, `daily_limit`, `time_used`, `too_early`, `busy`, `rate_limited`, `invalid_email`, `paused`, `not_found` |
 | `rustybin_mock_leads_total` | email addresses captured by self-service visits, by `result`: `captured`, `delivered`, `retried`, `dropped` (never an address) |
+| `rustybin_harness_*` | in [load test mode](../harness.md) only: `run` (the active run plus the last 4) on every series, among them `rustybin_harness_chain_calls_total` with `hop` (`1` to `3`) and `result` (a fixed list) for a run's [server-to-server chain](../harness.md#server-to-server-chains) |
 | `rustybin_build_info` (always 1) | `version`, `git_sha` |
 
 Every label is bounded: raw paths, query strings and model names never become label

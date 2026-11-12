@@ -632,3 +632,15 @@ jsonpath "$.server.chain.hops[1].calls" >= 30
 jsonpath "$.server.chain.hops[1].arrivals" >= 30
 jsonpath "$.server.chain.hops[1].refused.seen_before" not exists
 # ANCHOR_END: harness_chain_run
+
+# ANCHOR: harness_chain_metrics
+# The same calls as a Prometheus series, by run, hop and result, scraped
+# while the run is on or after it.
+GET {{harness_url}}/_rustybin/metrics
+Authorization: Bearer {{admin_token}}
+HTTP 200
+[Asserts]
+body contains "# TYPE rustybin_harness_chain_calls_total counter"
+body contains "rustybin_harness_chain_calls_total{run=\"{{chain_run}}\",hop=\"1\",result=\"ok\"}"
+body contains "rustybin_harness_chain_calls_total{run=\"{{chain_run}}\",hop=\"2\",result=\"ok\"}"
+# ANCHOR_END: harness_chain_metrics

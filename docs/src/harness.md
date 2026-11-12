@@ -484,6 +484,28 @@ and `upstream_reach` keep describing what the clients sent.
 {{#include ../examples/harness/api.hurl:harness_chain_run}}
 ```
 
+A dashboard sees the onward calls while the run is on:
+[`/_rustybin/metrics`](concepts/control-plane-security.md#metrics) has the counter
+`rustybin_harness_chain_calls_total{run, hop, result}` on every server node, for the calls that
+node made (a cluster's total is the sum over its server nodes, as in the merged report).
+
+| Label | Values |
+|---|---|
+| `run` | the run's id; like every `rustybin_harness_*` series, the active run plus the last 4 |
+| `hop` | `1` to `3`, the report's `hop` |
+| `result` | `ok`: the call was answered, whatever the status (the report's `upstream` plus `gateway`); `failed`: no answer, such as a refused connection or the `timeout` (the report's `transport` without `stopped`); or why a request made no call, or a call under way was ended: `not_prepared`, `not_live`, `kill_switch`, `seen_before`, `untracked`, `busy` (the report's `refused`) |
+
+The series is fed by the counts the report sums, so at the end of a run the two agree. A value
+appears once it is counted: a run without a chain has no such series, and neither has a result that
+never happened, so write `sum(rate(...))` rather than expect a zero. With the kill switch pressed
+`kill_switch` rises and `ok` stops. An onward call's arrival is in no series:
+`rustybin_harness_server_arrivals_total` keeps counting the clients' requests only. There is no
+latency histogram per hop; the report has the legs.
+
+```hurl
+{{#include ../examples/harness/api.hurl:harness_chain_metrics}}
+```
+
 ## OpenTelemetry
 
 Set `harness.otlp_endpoint` (Management, or `rustybin settings set`) to a collector's HTTP base URL

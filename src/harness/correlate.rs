@@ -1001,7 +1001,7 @@ pub async fn layer(State(state): State<AppState>, req: Request, next: Next) -> R
     // call goes is the run's, never this request's: only the marker is
     // handed on.
     if entry.chain_stats().is_some() {
-        super::chain::call_on(&entry, &marker).await;
+        super::chain::call_on(&entry, &marker, &state.metrics).await;
     }
     let mut resp = next.run(req).await;
     let processing = started.elapsed();
