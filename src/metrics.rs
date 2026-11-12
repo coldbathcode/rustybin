@@ -221,7 +221,32 @@ pub struct HarnessSeries {
     lag: Histogram,
     inflight: i64,
     server_arrivals: u64,
+    /// Onward calls of a chain by hop and result (a fixed table: every
+    /// label is one of [`MAX_HARNESS_CHAIN_HOPS`] and
+    /// [`HARNESS_CHAIN_RESULTS`]).
+    chain_calls: [[u64; HARNESS_CHAIN_RESULTS.len()]; MAX_HARNESS_CHAIN_HOPS],
 }
+
+/// Most hops of a harness chain (the `hop` label; the harness asserts it is
+/// its own depth).
+pub const MAX_HARNESS_CHAIN_HOPS: usize = 3;
+/// An onward call that was answered, whatever the status.
+pub const CHAIN_OK: &str = "ok";
+/// An onward call that got no answer (refused, reset, timed out).
+pub const CHAIN_FAILED: &str = "failed";
+/// Every `result` of `rustybin_harness_chain_calls_total`: the two above and
+/// the reasons a server made no call or ended one
+/// (`harness::safety::ChainRefusal::ALL`; a test keeps them the same).
+pub const HARNESS_CHAIN_RESULTS: [&str; 8] = [
+    CHAIN_OK,
+    CHAIN_FAILED,
+    "not_prepared",
+    "not_live",
+    "kill_switch",
+    "seen_before",
+    "untracked",
+    "busy",
+];
 
 /// One second of a harness run, as the engine reports it to the metrics.
 pub struct HarnessRoll<'a> {
@@ -498,6 +523,23 @@ impl Metrics {
     pub fn harness_arrival(&self, run: &str) {
         let mut inner = self.lock();
         Self::harness_series(&mut inner, run).server_arrivals += 1;
+    }
+
+    /// One onward call of a chain, or one request that made none, on this
+    /// node's server side: `hop` counts from 0 (the label from 1), `result`
+    /// is one of [`HARNESS_CHAIN_RESULTS`]. Anything else is not a series.
+    pub fn harness_chain_call(&self, run: &str, hop: usize, result: &str) {
+        let Some(r) = HARNESS_CHAIN_RESULTS.iter().position(|k| *k == result) else {
+            return;
+        };
+        if hop >= MAX_HARNESS_CHAIN_HOPS {
+            return;
+        }
+        let mut inner = self.lock();
+        let series = Self::harness_series(&mut inner, run);
+        if let Some(cell) = series.chain_calls.get_mut(hop).and_then(|h| h.get_mut(r)) {
+            *cell += 1;
+        }
     }
 
     /// Running self-service visits (negative: not reported).
@@ -858,6 +900,27 @@ impl Metrics {
                     s.server_arrivals
                 );
             }
+            // Only runs with a chain have the series, and only what was
+            // counted: a run without one exports nothing, not even a zero.
+            let counted = |s: &HarnessSeries| s.chain_calls.iter().flatten().any(|n| *n > 0);
+            if runs.iter().any(|(_, s)| counted(s)) {
+                out.push_str("# HELP rustybin_harness_chain_calls_total Onward calls of a harness chain on this node's server side, by run, hop and result (ok, failed, or why no call was made).\n");
+                out.push_str("# TYPE rustybin_harness_chain_calls_total counter\n");
+                for (run, s) in &runs {
+                    for (hop, results) in s.chain_calls.iter().enumerate() {
+                        for (result, n) in HARNESS_CHAIN_RESULTS.iter().zip(results) {
+                            if *n > 0 {
+                                let _ = writeln!(
+                                    out,
+                                    "rustybin_harness_chain_calls_total{{run=\"{}\",hop=\"{}\",result=\"{result}\"}} {n}",
+                                    escape(run),
+                                    hop + 1
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         out.push_str("# HELP rustybin_build_info Build information (always 1).\n");
@@ -1169,7 +1232,7 @@ pub fn openapi_paths() -> Value {
             "get": {
                 "tags": ["Control Plane"],
                 "summary": "Prometheus metrics",
-                "description": "Prometheus text exposition (version 0.0.4): rustybin_requests_total{route,method,status_class}, rustybin_request_duration_seconds{route} (histogram, buckets 1 ms to 60 s), rustybin_streams_open, rustybin_egress_bytes_total, rustybin_protocol_requests_total{protocol}, rustybin_llm_tokens_total{provider,model_family,direction}, rustybin_llm_requests_total{provider,model_family,streaming}, rustybin_llm_faults_total{provider,kind}, rustybin_limit_rejections_total{dimension}, rustybin_faults_injected_total{kind}, rustybin_build_info{version,git_sha}; in harness mode rustybin_harness_requests_total{run,class,status}, rustybin_harness_latency_seconds{run,kind}, rustybin_harness_scheduler_lag_seconds{run}, rustybin_harness_inflight{run} and rustybin_harness_server_arrivals_total{run} (the run label is bounded to the active run plus the last 4); with API keys also rustybin_keys_active, rustybin_keys_last_sync_timestamp_seconds and (with a quota store) rustybin_quota_store_up. The route label is the matched route template.",
+                "description": "Prometheus text exposition (version 0.0.4): rustybin_requests_total{route,method,status_class}, rustybin_request_duration_seconds{route} (histogram, buckets 1 ms to 60 s), rustybin_streams_open, rustybin_egress_bytes_total, rustybin_protocol_requests_total{protocol}, rustybin_llm_tokens_total{provider,model_family,direction}, rustybin_llm_requests_total{provider,model_family,streaming}, rustybin_llm_faults_total{provider,kind}, rustybin_limit_rejections_total{dimension}, rustybin_faults_injected_total{kind}, rustybin_build_info{version,git_sha}; in harness mode rustybin_harness_requests_total{run,class,status}, rustybin_harness_latency_seconds{run,kind}, rustybin_harness_scheduler_lag_seconds{run}, rustybin_harness_inflight{run}, rustybin_harness_server_arrivals_total{run} and, for a run with a chain, rustybin_harness_chain_calls_total{run,hop,result} (the run label is bounded to the active run plus the last 4); with API keys also rustybin_keys_active, rustybin_keys_last_sync_timestamp_seconds and (with a quota store) rustybin_quota_store_up. The route label is the matched route template.",
                 "operationId": "getRustybinMetrics",
                 "responses": {
                     "200": { "description": "Metrics", "content": { "text/plain": { "schema": { "type": "string" } } } },

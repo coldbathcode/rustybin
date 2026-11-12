@@ -627,3 +627,52 @@ async fn a_public_instance_keeps_its_metrics_for_the_operator() {
     assert_eq!(resp.status(), 200);
     assert!(body_string(resp).await.contains("rustybin_requests_total"));
 }
+
+#[test]
+fn the_chain_series_has_fixed_labels_and_no_zeros() {
+    let metrics = Metrics::new();
+    // A run of the harness without a chain: no series, not even a zero.
+    metrics.harness_arrival("run-a");
+    assert!(!metrics
+        .render()
+        .contains("rustybin_harness_chain_calls_total"));
+    // The results are `ok`, `failed` and the refusals the harness names.
+    let refusals: Vec<&str> = crate::harness::safety::ChainRefusal::ALL
+        .iter()
+        .map(|r| r.as_str())
+        .collect();
+    assert_eq!(HARNESS_CHAIN_RESULTS[..2], [CHAIN_OK, CHAIN_FAILED]);
+    assert_eq!(HARNESS_CHAIN_RESULTS[2..], refusals[..]);
+    for result in HARNESS_CHAIN_RESULTS {
+        metrics.harness_chain_call("run-b", 0, result);
+    }
+    metrics.harness_chain_call("run-b", 2, CHAIN_OK);
+    metrics.harness_chain_call("run-b", 2, CHAIN_OK);
+    // A hop past the depth and a result nobody defined are not labels.
+    metrics.harness_chain_call("run-b", MAX_HARNESS_CHAIN_HOPS, CHAIN_OK);
+    metrics.harness_chain_call("run-b", 0, "anything else");
+    let text = metrics.render();
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| l.starts_with("rustybin_harness_chain_calls_total"))
+        .collect();
+    assert_eq!(lines.len(), HARNESS_CHAIN_RESULTS.len() + 1, "{lines:?}");
+    assert!(lines.iter().all(|l| l.contains("run=\"run-b\"")));
+    assert!(lines.contains(
+        &"rustybin_harness_chain_calls_total{run=\"run-b\",hop=\"1\",result=\"kill_switch\"} 1"
+    ));
+    assert!(lines
+        .contains(&"rustybin_harness_chain_calls_total{run=\"run-b\",hop=\"3\",result=\"ok\"} 2"));
+    // The run label is bounded with the other harness series.
+    for i in 0..MAX_HARNESS_RUNS {
+        metrics.harness_chain_call(&format!("later-{i}"), 0, CHAIN_OK);
+    }
+    let text = metrics.render();
+    assert!(!text.contains("run=\"run-b\""), "{text}");
+    assert_eq!(
+        text.lines()
+            .filter(|l| l.starts_with("rustybin_harness_chain_calls_total"))
+            .count(),
+        MAX_HARNESS_RUNS
+    );
+}

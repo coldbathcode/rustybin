@@ -477,7 +477,9 @@ records what arrived, samples captures into the inspector (the scenario's
 `gateway`, `transport` and `lost` requests and shows the gateway's overhead and what it
 changed on the way. `/harness/{*path}` is a shaped upstream that answers with the run's
 `servers` profile (latency, status mix, body size, streaming). The metrics gain
-`rustybin_harness_*` series with a run label bounded to the active run plus the last 4.
+`rustybin_harness_*` series with a run label bounded to the active run plus the last 4; a run
+with a [chain](harness.md#server-to-server-chains) adds
+`rustybin_harness_chain_calls_total{run, hop, result}` on its server nodes.
 
 A cluster spreads a run over several nodes. A coordinator creates it
 (`RUSTYBIN_HARNESS_CLUSTER` and `RUSTYBIN_HARNESS_JOIN_TOKEN` at startup, or

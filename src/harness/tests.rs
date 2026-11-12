@@ -1016,6 +1016,11 @@ async fn loop_through_tags_every_answer_and_measures_the_legs() {
         "rustybin_harness_latency_seconds_count{{run=\"{id}\",kind=\"overhead\"}} {sent}"
     )));
     assert!(metrics.contains(&format!("rustybin_harness_inflight{{run=\"{id}\"}} 0")));
+    // A run without a chain has no series of onward calls, not even a zero.
+    assert!(
+        !metrics.contains("rustybin_harness_chain_calls_total"),
+        "{metrics}"
+    );
     server.shutdown();
     let _ = server.wait().await;
 }
