@@ -50,9 +50,11 @@ pub mod checkpoints;
 pub mod signing;
 #[cfg(test)]
 mod tests;
+pub mod verify;
 
 pub use branches::BranchRequest;
 pub use signing::{SIGNING_KEY_FILE, SIGNING_KEY_KEY, SIGN_KEY};
+pub use verify::{ALLOWED_SIGNERS_KEY, VERIFY_KEY};
 
 /// Most operations kept in the timeline.
 pub const MAX_TIMELINE: usize = 50;
@@ -223,6 +225,27 @@ pub fn specs() -> Vec<Spec> {
         .secret()
         .normalize(signing::one_line)
         .check(signing::check_key),
+        Spec::new(
+            VERIFY_KEY,
+            "git",
+            "Verify pulled commits",
+            "Take the repository's side (a pull, the webhook, the automatic mode, a switch of branch, resolving with the repository's copy, a checkpoint from the repository) only when every commit since the last verified head is signed by an allowed signer below (SSH signatures; git 2.38 or later). A merge commit passes unsigned only as the clean merge of two verified parents; a squash or rebase merge made by the git host is refused. Off by default. Turning it on trusts the head of that moment as it is.",
+            Kind::Bool,
+            json!(false),
+        ),
+        Spec::new(
+            ALLOWED_SIGNERS_KEY,
+            "git",
+            "Allowed signers",
+            "Who may sign what this instance pulls, one a line: a name and a public key (ann ssh-ed25519 AAAA...), or the line of a .pub file. Public keys, not secrets. This instance's own signing key is allowed without being listed.",
+            Kind::List {
+                max_items: verify::MAX_SIGNERS,
+                max_len: verify::MAX_SIGNER_LEN,
+            },
+            json!([]),
+        )
+        .normalize(verify::normalize_signers)
+        .check(verify::check_signers),
     ]
 }
 
@@ -579,6 +602,10 @@ pub struct SourceControl {
     /// Ahead and behind of the configured branch as last counted (for the
     /// diagnostics: a diverged branch waits for a person).
     last_sync: Mutex<Option<(String, u64, u64)>>,
+    /// How often `git.verify` had changed at the last look (`verify.rs`).
+    verify_seen: AtomicU64,
+    /// The last commit a verification refused, until one passes.
+    last_refusal: Mutex<Option<Value>>,
 }
 
 impl SourceControl {
@@ -602,6 +629,8 @@ impl SourceControl {
             git_version: OnceLock::new(),
             auto_warned: Mutex::new(None),
             last_sync: Mutex::new(None),
+            verify_seen: AtomicU64::new(0),
+            last_refusal: Mutex::new(None),
         }
     }
 
@@ -817,10 +846,10 @@ impl SourceControl {
         Ok((repo, remote))
     }
 
-    /// The environment and configuration of a git command.
-    fn git_env(&self, remote: &Remote) -> GitResult<GitEnv> {
+    /// What every git command runs with, a remote or not.
+    fn base_env(&self) -> GitEnv {
         let state = self.state_dir.clone().unwrap_or_else(|| PathBuf::from("."));
-        let mut vars = vec![
+        let vars = vec![
             ("GIT_TERMINAL_PROMPT".to_string(), "0".to_string()),
             ("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string()),
             ("GIT_CONFIG_GLOBAL".to_string(), "/dev/null".to_string()),
@@ -834,16 +863,25 @@ impl SourceControl {
                 .unwrap_or_else(|| DEFAULT_AUTHOR.into()),
         )
         .unwrap_or_else(|_| ("Rustybin".into(), "rustybin@example.invalid".into()));
-        let mut config = vec![
+        let config = vec![
             format!("user.name={name}"),
             format!("user.email={email}"),
             "credential.helper=".to_string(),
             "core.hooksPath=/dev/null".to_string(),
             // A checkout writes links as plain files holding the target path.
             "core.symlinks=false".to_string(),
-            // No transport unless allowed below (never ext::, fd::, git://).
+            // No transport unless a remote allows one (never ext::, fd::, git://).
             "protocol.allow=never".to_string(),
         ];
+        GitEnv { vars, config }
+    }
+
+    /// The environment and configuration of a git command.
+    fn git_env(&self, remote: &Remote) -> GitResult<GitEnv> {
+        let GitEnv {
+            mut vars,
+            mut config,
+        } = self.base_env();
         // The addresses `permit` pinned for this remote, when it did.
         let pinned = self
             .pinned
@@ -1207,6 +1245,7 @@ impl SourceControl {
             "pull_every": self.settings.string(PULL_EVERY_KEY).unwrap_or_else(|| "5m".into()),
             "deploy_key": deploy_key,
             "signing": self.signing(),
+            "verification": self.verification(),
             "divergence": null,
             "head": null,
             "upstream": false,
@@ -1243,6 +1282,9 @@ impl SourceControl {
                 return body;
             }
         };
+        // Turned on since the last look: the head is trusted now, and said.
+        self.verify_sync().await;
+        body["verification"] = self.verification();
         body["head"] = self.head(&env, &repo).await.unwrap_or(Value::Null);
         if fetch {
             match self.fetch(&env, &repo, &branch).await {
@@ -1361,7 +1403,9 @@ impl SourceControl {
         let mut checked_out = false;
         if exists {
             if self.head(&env, &repo).await.is_none() {
-                // Nothing local yet: take the remote branch as it is.
+                // Nothing local yet: take the remote branch as it is (with
+                // git.verify on, only when all of it verifies).
+                self.verify_rev(&env, &repo, &upstream, true).await?;
                 self.must(
                     &env,
                     &repo,
@@ -1444,6 +1488,11 @@ impl SourceControl {
         let env = env;
         let _guard = self.lock.try_lock().map_err(|_| busy())?;
         self.need_init(&repo)?;
+        self.verify_sync().await;
+        let before = self
+            .head(&env, &repo)
+            .await
+            .and_then(|h| h["sha"].as_str().map(str::to_string));
         let dir = self.document_dir(&repo);
         let export = configdoc::export(state, SecretsMode::Refs, true);
         configdoc::write_dir_within(&export, &dir, &repo)
@@ -1493,6 +1542,9 @@ impl SourceControl {
                 .await;
             return Err(e);
         }
+        // The instance's own commit stays verified when it stands on a
+        // verified head.
+        self.own_commit(&env, &repo, before.as_deref()).await;
         let head = self.head(&env, &repo).await;
         let short = head
             .as_ref()
@@ -1658,7 +1710,17 @@ impl SourceControl {
         let upstream = format!("origin/{branch}");
         let (ahead, behind) = self.ahead_behind(&env, &repo, &branch).await;
         let mut fast_forwarded = false;
-        if self.head(&env, &repo).await.is_none() {
+        let unborn = self.head(&env, &repo).await.is_none();
+        // With git.verify on, what this pull would take (the remote's
+        // branch when the working copy moves, else the head an apply
+        // reads) passes before anything moves or is applied; a dry run is
+        // refused like the pull. A diverged branch is refused below either way.
+        let moves = unborn || behind > 0;
+        if (unborn || ahead == 0 || behind == 0) && (moves || apply) {
+            let takes = if moves { upstream.as_str() } else { "HEAD" };
+            self.verify_rev(&env, &repo, takes, !dry_run).await?;
+        }
+        if unborn {
             if !dry_run {
                 self.must(
                     &env,
@@ -1964,10 +2026,16 @@ impl SourceControl {
         {
             let _guard = self.lock.try_lock().map_err(|_| busy())?;
             self.need_init(&repo)?;
+            self.verify_sync().await;
             if !self.fetch(&env, &repo, &branch).await? {
                 return Err(GitError::conflict(format!(
                     "the remote has no branch {branch}: there is nothing to resolve, push"
                 )));
+            }
+            // Taking the repository's side: verified before the working
+            // copy moves. (The instance's side applies nothing of it.)
+            if with == "repository" {
+                self.verify_rev(&env, &repo, &upstream, true).await?;
             }
             // The local commits go; the remote's history is never rewritten.
             self.must(&env, &repo, &["reset", "--quiet", "--hard", &upstream])
@@ -2136,6 +2204,11 @@ impl SourceControl {
     /// One tick of the automatic mode (every 30 s): push the instance's
     /// changes, or pull at the interval.
     pub async fn auto_tick(&self, state: &AppState) {
+        // git.verify turned on since the last look: the head is trusted
+        // now, before anything else moves it.
+        if let Ok(_guard) = self.lock.try_lock() {
+            self.verify_sync().await;
+        }
         let mode = self
             .settings
             .string(AUTO_KEY)

@@ -153,7 +153,9 @@ token, `x-access-token` by default), `git.author` (the commits' `Name <email>`,
 interval, `1m` to `24h`, `5m` by default), the secret `git.webhook_secret` (a git host's
 [push webhook](source-control.md#a-webhook-instead-of-polling)), and `git.sign` (off by
 default) with the secret `git.signing_key` for [signed
-commits](source-control.md#signed-commits). No document sets any of them from the
+commits](source-control.md#signed-commits), and `git.verify` (off by default) with
+`git.allowed_signers` (names and public keys, at most 50) for [verified
+pulls](source-control.md#verified-pulls). No document sets any of them from the
 repository, and `git.branch` changes with a [switch of
 branch](source-control.md#branches).
 

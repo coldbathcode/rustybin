@@ -199,6 +199,9 @@ impl SourceControl {
             )));
         }
         let (ahead, behind) = self.ahead_behind(&env, &repo, &branch).await;
+        // The preview is refused like the resolve it previews.
+        self.verify_rev(&env, &repo, &format!("origin/{branch}"), false)
+            .await?;
         let report = self
             .apply_working_copy(
                 state,
@@ -519,6 +522,7 @@ impl SourceControl {
             }
             if req.dry_run {
                 // The same read and the same checks as the switch's apply.
+                self.verify_rev(&env, &repo, &upstream, false).await?;
                 let report = self
                     .apply_working_copy(state, &env, &repo, &upstream, true, req.prune, by)
                     .await?;
@@ -588,6 +592,9 @@ impl SourceControl {
     ) -> GitResult<Value> {
         let upstream = format!("origin/{target}");
         let _guard = self.lock.try_lock().map_err(|_| busy())?;
+        // With git.verify on, the branch passes before the working copy
+        // moves (also when its document is not applied).
+        self.verify_rev(env, repo, &upstream, true).await?;
         // The document is validated before the working copy moves: a branch
         // whose document cannot be read is not switched to.
         if req.apply {

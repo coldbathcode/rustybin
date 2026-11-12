@@ -757,6 +757,10 @@ pub struct Settings {
     console_tokens: Arc<crate::login::Tokens>,
     /// The user store: user one's name follows `console.user`.
     users: Arc<crate::rbac::Users>,
+    /// How often each key's stored value changed since start (at most one
+    /// entry per setting): a feature that must notice a switch turned off
+    /// and on again between two of its own looks compares the count.
+    changes: std::sync::Mutex<BTreeMap<String, u64>>,
 }
 
 /// What a public instance answers to clearing the console password hash.
@@ -831,6 +835,7 @@ impl Settings {
             sign_in_guard: crate::login::enabled(config),
             console_tokens: config.console_tokens.clone(),
             users: config.users.clone(),
+            changes: std::sync::Mutex::new(BTreeMap::new()),
         };
         store.check_secrets();
         store.sync();
@@ -922,6 +927,22 @@ impl Settings {
     /// `RUSTYBIN_SETTINGS_LOCK` is on.
     pub fn locked(&self) -> bool {
         self.locked
+    }
+
+    /// How often the stored value of `key` changed since start.
+    pub fn changes_of(&self, key: &str) -> u64 {
+        self.changes
+            .lock()
+            .map(|c| c.get(key).copied().unwrap_or(0))
+            .unwrap_or(0)
+    }
+
+    fn count_changes<'a>(&self, keys: impl Iterator<Item = &'a str>) {
+        if let Ok(mut c) = self.changes.lock() {
+            for key in keys {
+                *c.entry(key.to_string()).or_insert(0) += 1;
+            }
+        }
     }
 
     /// May a stored value of `key` be written (a known key that
@@ -1359,6 +1380,7 @@ impl Settings {
         self.persist(&next).map_err(UpdateError::Io)?;
         *doc = next;
         drop(doc);
+        self.count_changes(changed.iter().map(String::as_str));
         {
             let mut bad = self.write_unreadable();
             for key in &changed {
@@ -1432,6 +1454,7 @@ impl Settings {
         self.persist(&next).map_err(UpdateError::Io)?;
         *doc = next;
         drop(doc);
+        self.count_changes(std::iter::once(key));
         self.write_unreadable().remove(key);
         tracing::info!(
             target: "rustybin::settings",

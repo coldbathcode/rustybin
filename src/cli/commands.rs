@@ -270,6 +270,16 @@ const RESOLVE_FLAGS: &[Flag] = &[
         "What the way out would change; nothing changes",
     ),
 ];
+const SIGNERS_FLAGS: &[Flag] = &[
+    Flag::value(
+        "--add",
+        "Allow a signer: \"<name> <key-type> <base64-key>\", or the line of a .pub file (repeat it)",
+    ),
+    Flag::value(
+        "--remove",
+        "Remove a signer by its name or its SHA256 fingerprint (repeat it)",
+    ),
+];
 const SWITCH_FLAGS: &[Flag] = &[
     Flag::switch(
         "--dry-run",
@@ -585,6 +595,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("git", "switch", "<branch> [--dry-run] [--prune] [--no-apply]", "Move this instance to another branch of the remote (a branch per environment). --dry-run shows what applying that branch's document would change; without it the branch is stored (git.branch), taken, and its document applied.", SWITCH_FLAGS, [("POST", "/_rustybin/git/branch")], false, "git switch staging --dry-run"),
     cmd!("git", "branch", "<name> [-m \"<message>\"] [--dry-run]", "Start a branch the remote does not have from this instance's configuration: committed, pushed, and the instance commits to it from now on.", BRANCH_FLAGS, [("POST", "/_rustybin/git/branch")], false, "git branch staging --dry-run"),
     cmd!("git", "signing-key", "[--generate] [--replace]", "The commit signing key's public half and fingerprint, to register at the git host as a signing key; --generate makes one. Commits are signed when the git.sign setting is on.", &[Flag::switch("--generate", "Generate the key"), Flag::switch("--replace", "Replace an existing key")], [("GET", "/_rustybin/git/signing-key"), ("POST", "/_rustybin/git/signing-key")], false, "git signing-key"),
+    cmd!("git", "signers", "[--add \"<name> <public key>\"]... [--remove NAME]...", "Verified pulls: whether pulled commits are verified (the git.verify setting), the allowed signers with their fingerprints, the last verified head and the last refusal. --add and --remove change the git.allowed_signers setting (public keys, not secrets).", SIGNERS_FLAGS, [("GET", "/_rustybin/git"), ("GET", "/_rustybin/settings"), ("PATCH", "/_rustybin/settings")], false, "git signers"),
 ];
 
 /// Catalogue paths no command calls, each with its reason (the parity test
@@ -4616,6 +4627,120 @@ async fn git(ctx: &mut Ctx, verb: &str) -> Result<()> {
                     ));
                 }
                 None => ctx.raw("no signing key yet: rustybin git signing-key --generate"),
+            }
+            if let Some(problem) = s["problem"].as_str() {
+                ctx.raw(&format!("problem: {problem}"));
+            }
+            Ok(())
+        }
+        "signers" => {
+            let add: Vec<String> = ctx
+                .args
+                .values("--add")
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let remove: Vec<String> = ctx
+                .args
+                .values("--remove")
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !add.is_empty() || !remove.is_empty() {
+                // The setting's lines, in the order the status lists them
+                // (a fingerprint is found through the status).
+                let status = ctx.client()?.get("/_rustybin/git", &[]).await?.value();
+                let settings = ctx.client()?.get("/_rustybin/settings", &[]).await?.value();
+                let lines: Vec<String> = settings["settings"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|s| s["key"] == json!("git.allowed_signers"))
+                    .and_then(|s| s["value"].as_array().cloned())
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|l| l.as_str().map(str::to_string))
+                    .collect();
+                let listed = status["verification"]["signers"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                let mut kept: Vec<String> = Vec::new();
+                let mut removed = 0usize;
+                for (i, line) in lines.iter().enumerate() {
+                    let name = line.split_whitespace().next().unwrap_or("");
+                    let fingerprint = listed
+                        .get(i)
+                        .filter(|_| listed.len() == lines.len())
+                        .and_then(|s| s["fingerprint"].as_str())
+                        .unwrap_or("");
+                    if remove.iter().any(|r| r == name || r == fingerprint) {
+                        removed += 1;
+                    } else {
+                        kept.push(line.clone());
+                    }
+                }
+                if !remove.is_empty() && removed == 0 {
+                    return Err(Fail::Failed(format!(
+                        "no allowed signer is named {} (rustybin git signers lists them)",
+                        remove.join(" or ")
+                    )));
+                }
+                kept.extend(add);
+                let body = json!({ "values": { "git.allowed_signers": kept } });
+                ctx.client()?
+                    .patch("/_rustybin/settings", Body::Json(body))
+                    .await?;
+            }
+            let v = ctx.client()?.get("/_rustybin/git", &[]).await?.value();
+            let s = &v["verification"];
+            if ctx.json {
+                ctx.emit(s);
+                return Ok(());
+            }
+            ctx.raw(&format!(
+                "pulled commits are {}",
+                if s["enabled"] == json!(true) {
+                    "verified (git.verify is on)"
+                } else {
+                    "not verified (rustybin settings set git.verify true)"
+                }
+            ));
+            let line = |x: &Value, note: &str| {
+                format!(
+                    "{}  {}  {}{note}",
+                    x["name"].as_str().unwrap_or(""),
+                    x["key_type"].as_str().unwrap_or(""),
+                    x["fingerprint"].as_str().unwrap_or("")
+                )
+            };
+            let signers = s["signers"].as_array().cloned().unwrap_or_default();
+            for x in &signers {
+                ctx.raw(&line(x, ""));
+            }
+            if s["own_key"].is_object() {
+                ctx.raw(&line(&s["own_key"], "  (this instance's signing key)"));
+            } else if signers.is_empty() {
+                ctx.raw("no allowed signers: rustybin git signers --add \"<name> <public key>\"");
+            }
+            if let Some(sha) = s["verified_head"]["short"].as_str() {
+                ctx.raw(&format!(
+                    "verified head: {sha} ({})",
+                    s["verified_head"]["at"].as_str().unwrap_or("")
+                ));
+            }
+            if s["last_refusal"].is_object() {
+                let r = &s["last_refusal"];
+                ctx.raw(&format!(
+                    "last refusal: {} {}",
+                    r["commit"]
+                        .as_str()
+                        .map(|c| format!("commit {}", c.chars().take(7).collect::<String>()))
+                        .unwrap_or_else(|| "the branch".to_string()),
+                    r["why"].as_str().unwrap_or("")
+                ));
             }
             if let Some(problem) = s["problem"].as_str() {
                 ctx.raw(&format!("problem: {problem}"));

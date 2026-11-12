@@ -1,5 +1,5 @@
-# Source control: a diverged branch's ways out, branches per environment and
-# signed commits (docs/src/source-control.md), on the first documentation
+# Source control: a diverged branch's ways out, branches per environment,
+# signed commits and verified pulls (docs/src/source-control.md), on the first documentation
 # instance. It has no state directory, so the calls that need a working copy
 # answer 409 and say so; docs/examples/config/source-control.sh runs the same
 # calls against a bare repository.
@@ -107,6 +107,32 @@ HTTP 409
 [Asserts]
 jsonpath "$.error" contains "RUSTYBIN_STATE_DIR"
 # ANCHOR_END: signing_key_generate
+
+# ANCHOR: status_verification
+# The status says whether pulled commits are verified (off by default), who
+# the allowed signers are and the last verified head.
+GET {{base_url}}/_rustybin/git
+Authorization: Bearer {{admin_token}}
+HTTP 200
+[Asserts]
+jsonpath "$.verification.enabled" == false
+jsonpath "$.verification.signers" count == 0
+jsonpath "$.verification.verified_head" == null
+jsonpath "$.verification.last_refusal" == null
+# ANCHOR_END: status_verification
+
+# ANCHOR: signers_refused
+# An allowed signer is a name and a public key, nothing more: a line with an
+# option (a certificate authority here) is refused, and nothing is stored.
+PATCH {{base_url}}/_rustybin/settings
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{ "values": { "git.allowed_signers": ["ann cert-authority ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPcTdrsIh7YkANjaKyUYQYzJTCVVKgE9HtCjRkTmaiXX"] } }
+HTTP 400
+[Asserts]
+jsonpath "$.error" == "invalid settings"
+jsonpath "$.problems[0]" contains "not an allowed signer"
+# ANCHOR_END: signers_refused
 
 # Reading needs git.read, changing needs git.write: nobody without a
 # credential on an instance with an admin token.

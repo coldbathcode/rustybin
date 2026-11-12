@@ -510,7 +510,7 @@ pub static TOOLS: &[ToolDef] = &[
         "prune": { "type": "boolean", "default": false },
         "confirm": confirm_prop()
     }), &["document"])),
-    tool!("git_status", "Git status", "Source control: the repository (remote, branch, auth, deploy key), the working copy, the drift between it and the instance, ahead and behind (with fetch), untrusted_divergence when the branch has diverged (the commits of each side and what each way out of git_resolve would change), whether commits are signed, the timeline of operations and the last commits. Admin.", ToolNeed::Perm(Permission::GitRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "fetch": { "type": "boolean", "default": false, "description": "Ask the remote for ahead and behind" } }), &[])),
+    tool!("git_status", "Git status", "Source control: the repository (remote, branch, auth, deploy key), the working copy, the drift between it and the instance, ahead and behind (with fetch), untrusted_divergence when the branch has diverged (the commits of each side and what each way out of git_resolve would change), whether commits are signed, verification (whether pulled commits are verified against allowed signers: the signers' names and fingerprints, the last verified head, the last refusal), the timeline of operations and the last commits. Admin.", ToolNeed::Perm(Permission::GitRead), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({ "fetch": { "type": "boolean", "default": false, "description": "Ask the remote for ahead and behind" } }), &[])),
     tool!("git_init", "Connect the repository", "Clone the configured remote (git.remote, git.branch settings) into the working copy, or start an empty one for a new repository. Admin.", ToolNeed::Perm(Permission::GitWrite), ro=false, destructive=false, idem=true, confirm=false, no_args),
     tool!("git_commit", "Commit the configuration", "Export the instance into the working copy and commit with a message (nothing to commit is a fine answer). checkpoints names local checkpoints (list_checkpoints) to write to <git.path>/checkpoints/<name>.json in the same commit: they hold mock data, so only when the user asks; the automatic mode never writes one. Admin.", ToolNeed::Perm(Permission::GitWrite), ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
         "message": { "type": "string" },
@@ -531,7 +531,7 @@ pub static TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "git_pull",
         title: "Pull from the remote",
-        description: "Fetch and fast-forward the working copy; with apply true the repository's document is applied to this instance (the user confirms, unless dry_run shows the diff only); prune makes the document the whole truth. Admin.",
+        description: "Fetch and fast-forward the working copy; with apply true the repository's document is applied to this instance (the user confirms, unless dry_run shows the diff only); prune makes the document the whole truth. With the git.verify setting on, a commit no allowed signer signed is refused (409, reason unverified, the commit and why) and nothing is applied: an allowed signer signs it, or the user changes git.allowed_signers; never work around it. Admin.",
         permission: ToolNeed::Perm(Permission::GitWrite),
         read_only: false,
         destructive: false,

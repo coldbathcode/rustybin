@@ -18,6 +18,7 @@ use crate::test_support::{body_json, get_request, json_request, test_app_with, t
 mod branches;
 mod checkpoints;
 mod signing;
+mod verify;
 
 const SPEC: &str = r#"{"openapi":"3.0.3","info":{"title":"Orders","version":"1"},"paths":{"/orders":{"get":{"operationId":"listOrders","responses":{"200":{"description":"ok"}}}}}}"#;
 

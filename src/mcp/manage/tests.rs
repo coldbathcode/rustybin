@@ -4992,6 +4992,56 @@ async fn git_branch_and_signing_tools() {
     let r = tool(&app, &[], "git_status", json!({})).await;
     assert_eq!(r["structuredContent"]["signing"]["key_set"], true, "{r}");
     assert!(!r.to_string().contains(private.as_str()));
+
+    // Core next step 19: with git.verify on, the git tools answer the
+    // refusal (the repository's side here is the host's unsigned commit):
+    // the reason, the commit and why, and never the repository's words.
+    let version = state.git.git_version().await.unwrap_or_default();
+    if crate::sourcecontrol::signing::git_version_of(&version)
+        .is_none_or(|v| v < crate::sourcecontrol::verify::MIN_GIT)
+    {
+        eprintln!("git is older than 2.38: the verification tools are not tried");
+        return;
+    }
+    let r = tool(
+        &app,
+        &[],
+        "update_settings",
+        json!({ "values": { "git.verify": true }, "confirm": true }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    for (name, args) in [
+        (
+            "git_resolve",
+            json!({ "with": "repository", "dry_run": true }),
+        ),
+        (
+            "git_resolve",
+            json!({ "with": "repository", "confirm": true }),
+        ),
+    ] {
+        let r = tool(&app, &[], name, args).await;
+        assert!(is_error(&r), "{r}");
+        let body = &r["structuredContent"];
+        assert_eq!(body["reason"], "unverified", "{r}");
+        assert_eq!(body["status"], 409, "{r}");
+        assert_eq!(body["commit"].as_str().map(str::len), Some(40), "{r}");
+        assert!(
+            body["why"]
+                .as_str()
+                .is_some_and(|w| w.contains("no SSH signature")),
+            "{r}"
+        );
+        assert!(!r.to_string().contains("IGNORE PREVIOUS"), "{r}");
+    }
+    let r = tool(&app, &[], "git_status", json!({})).await;
+    let v = &r["structuredContent"]["verification"];
+    assert_eq!(v["enabled"], true, "{r}");
+    assert_eq!(v["own_key"]["name"], "rustybin-instance", "{r}");
+    assert!(v["trusted"]["sha"].is_string(), "{r}");
+    assert!(v["last_refusal"]["commit"].is_string(), "{r}");
+    assert!(text_of(&r).contains("NOT VERIFIED"), "{}", text_of(&r));
 }
 
 /// Core next step 18: `import_scenario` takes values for the document's

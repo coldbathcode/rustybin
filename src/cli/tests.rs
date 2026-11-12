@@ -1473,6 +1473,42 @@ async fn git_branches_switch_resolve_and_signing_key() {
         let v = inst.json(&["git", "signing-key"]).await;
         assert_eq!(v["signing"]["key_set"], json!(true));
         assert!(!v.to_string().contains(private.as_str()));
+
+        // Core next step 19: the allowed signers. Off and empty (the
+        // instance's own key is allowed without being listed), a signer
+        // added and removed, verification on with its verified head.
+        let (code, text) = inst.run(None, &["git", "signers"]).await;
+        assert_eq!(code, 0, "{text}");
+        assert!(text.contains("not verified"), "{text}");
+        assert!(text.contains("this instance's signing key"), "{text}");
+        let public = v["signing"]["public"].as_str().expect("public");
+        let blob = public.split_whitespace().nth(1).expect("blob");
+        let ann = format!("ann ssh-ed25519 {blob}");
+        let (code, text) = inst.run(None, &["git", "signers", "--add", &ann]).await;
+        assert_eq!(code, 0, "{text}");
+        assert!(text.contains("ann  ssh-ed25519  SHA256:"), "{text}");
+        let (code, text) = inst
+            .run(None, &["git", "signers", "--add", "not a signer"])
+            .await;
+        assert_eq!(code, 1, "{text}");
+        inst.json(&["settings", "set", "git.verify", "true"]).await;
+        let (code, text) = inst.run(None, &["git", "signers"]).await;
+        assert_eq!(code, 0, "{text}");
+        assert!(text.contains("verified (git.verify is on)"), "{text}");
+        assert!(text.contains("verified head: "), "{text}");
+        let v = inst.json(&["git", "signers"]).await;
+        assert_eq!(v["enabled"], json!(true), "{v}");
+        assert_eq!(v["signers"][0]["name"], json!("ann"), "{v}");
+        let fingerprint = v["signers"][0]["fingerprint"]
+            .as_str()
+            .expect("fingerprint")
+            .to_string();
+        let (code, text) = inst.run(None, &["git", "signers", "--remove", "bob"]).await;
+        assert_eq!(code, 1, "{text}");
+        let v = inst
+            .json(&["git", "signers", "--remove", &fingerprint])
+            .await;
+        assert_eq!(v["signers"], json!([]), "{v}");
     }
     inst.server.shutdown();
 }
