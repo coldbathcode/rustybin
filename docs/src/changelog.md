@@ -3,7 +3,7 @@
 ## Unreleased: the last of the roadmap's candidates
 
 [The plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/core-next/master-plan.md),
-steps 11 to 13, built on 2026-11-09 and not released yet, and steps 01 to 07 of
+steps 11 to 13, built on 2026-11-09 and not released yet, and steps 01 to 08 of
 [the demo next plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/demo-next/master-plan.md),
 built on 2026-11-11 and 2026-11-12. Nothing to do when upgrading: what is new is off until you turn it on or
 name it in a scenario.
@@ -87,6 +87,24 @@ name it in a scenario.
   reads the same document (`format: arazzo`) for the steps that stand alone. On every surface:
   the console's Import Arazzo card and per-step results, `rustybin tests import` and `tests
   export <name> --format arazzo`, the tool `import_tests`, `steps:` in `rustybin.yaml`.
+- [Realtime API](ai/realtime.md) of the mock LLM: `GET /ai/openai/v1/realtime`, the OpenAI-shaped
+  realtime protocol over a WebSocket (`session.update`, `conversation.item.create`,
+  `input_audio_buffer.*`, `response.create` and `cancel`; the `response.*` events with text,
+  audio and transcript deltas, function calls from the session's tools, `response.done` with
+  usage). Answers come from the engine of the other AI paths. Input audio is counted and never
+  kept; output audio is silence or a tone in PCM16 or G.711. `?fail=drop_after:N` and
+  `error_after:N` fault a session, a fail kind refuses the upgrade. At most
+  `ai.realtime.max_sessions` (64) sessions of `ai.realtime.session_minutes` (30).
+- [Batch APIs](ai/batch.md) of the mock LLM: OpenAI-shaped files and batches
+  (`/ai/openai/v1/files*`, `/ai/openai/v1/batches*`) and Anthropic-shaped message batches
+  (`/ai/anthropic/v1/messages/batches*`). A batch moves through the provider's states in
+  `X-Rustybin-Batch-Seconds` (default 10, `ai.batch.seconds`); its results are the engine's and
+  deterministic for the same input, ids included; `X-Rustybin-Batch-Fail-Rate` fails chosen
+  lines with the provider's error, a malformed line fails validation, a cancel goes through
+  `cancelling`. Per caller `ai.batch.max_files` (20) and `ai.batch.max_batches` (10), an hour.
+- The AI request log (`GET /ai/requests`) has a `kind` (`request`, `realtime`, `batch`); a
+  realtime session's record holds its events and a batch's its lines, never audio. The console's
+  AI playground has a Realtime session panel and a Request log card.
 
 - Source control: a [diverged branch](source-control.md#a-diverged-branch) says what differs
   (`divergence` in the status and in the `409`) and is resolved by a person: `POST

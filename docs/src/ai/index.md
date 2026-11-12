@@ -23,6 +23,8 @@ answer and demos are reproducible.
 | Streaming | Native SSE, NDJSON and AWS event stream framing with configurable pace and time to first token |
 | Credential injection, key vaults | [Native credential checks](gateway-features.md#credential-checks) that report the redacted key they received |
 | Tool calling, structured output, agent flows | [Tool calls](behaviour.md#tool-calls) with arguments generated from your JSON schema; [structured output](behaviour.md#structured-output) valid against your schema |
+| Realtime sessions (WebSocket, text and audio) | The [realtime API](realtime.md): the OpenAI-shaped protocol with events both ways, tools, counted audio, mid-session faults |
+| Batch jobs | The [batch APIs](batch.md) in the OpenAI and Anthropic shapes, on a compressed clock, with deterministic results |
 | Observability | [Request inspection](gateway-features.md#request-inspection): what the upstream received, normalised |
 
 ## Pages
@@ -35,5 +37,7 @@ answer and demos are reproducible.
   response headers that make the mock useful behind a gateway.
 - [Embeddings and rerank](embeddings.md).
 - [Guardrails and content safety](guardrails.md).
+- [Realtime API](realtime.md): sessions over a WebSocket.
+- [Batch APIs](batch.md): files, batches and message batches.
 - [MCP server](../mcp/index.md) and [A2A agents](../a2a/index.md) for agentic
   traffic.

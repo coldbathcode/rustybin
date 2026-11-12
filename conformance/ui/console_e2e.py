@@ -665,6 +665,32 @@ def run_theme(browser, theme):
 
     step("ai playground (6 providers + tools)", ai)
 
+    def ai_realtime():
+        # A text realtime session from the browser: the reply from its text
+        # deltas, the events as a timeline, and the session in the request
+        # log with its events.
+        page.goto(BASE + "/ui/#/ai")
+        page.wait_for_selector("#realtime-connect")
+        page.click("#realtime-connect")
+        expect(page.locator("#realtime-status")).to_contain_text("Connected")
+        page.fill("#realtime-prompt", "hello realtime")
+        page.click("#realtime-send")
+        expect(page.locator("#realtime-timeline tr[data-event='response.done']")).to_have_count(1)
+        expect(page.locator("#realtime-reply")).to_contain_text("Rustybin")
+        expect(page.locator("#realtime-status")).to_contain_text("tokens in")
+        page.click("#realtime-close")
+        expect(page.locator("#realtime-status")).to_contain_text("Closed")
+        page.click("#ai-requests-refresh")
+        row = page.locator("#ai-requests-table tr[data-kind='realtime']").first
+        row.wait_for()
+        row.locator("[data-show-ai-request]").click()
+        expect(page.locator("#ai-request-timeline tr[data-event='session.created']")).to_have_count(1)
+        expect(page.locator("#ai-request-detail")).to_contain_text("audio is never kept")
+        shot(page, theme, "09b-ai-realtime")
+        assert_icons_sized(page, "ai playground, realtime")
+
+    step("ai playground: a realtime session and the request log", ai_realtime)
+
     def mcp():
         goto_view(page, "mcp")
         page.locator("#mcp-server option[value='/mcp']").wait_for(state="attached")

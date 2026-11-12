@@ -35,6 +35,8 @@
   - [Faults, latency and credentials](ai/gateway-features.md)
   - [Embeddings and rerank](ai/embeddings.md)
   - [Guardrails](ai/guardrails.md)
+  - [Realtime API](ai/realtime.md)
+  - [Batch APIs](ai/batch.md)
 - [MCP server](mcp/index.md)
 - [MCP inspector](mcp/inspector.md)
 - [MCP registry](mcp/registry.md)

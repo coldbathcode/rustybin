@@ -7,6 +7,7 @@ import { jsonView, codeBlock, headersTable, copyableCode } from '../lib/format.j
 import { SERVER, send, toCurl, sseParser, ndjsonParser, readText } from '../lib/http.js';
 import { targetPicker } from '../lib/widgets.js';
 import * as settings from '../lib/settings.js';
+import { realtimeCard, requestsCard } from './ai/realtime.js';
 
 const WEATHER_TOOL = {
   name: 'get_weather',
@@ -285,6 +286,9 @@ export default {
     }
     syncStream();
 
+    const realtime = realtimeCard();
+    const requests = requestsCard();
+
     root.appendChild(h('div', { class: 'view-head' },
       h('div', { class: 'grow' }, h('h1', null, 'AI playground'),
         h('p', null, 'Chat with the mock LLM in each provider\'s native wire format. Send through the gateway to demo AI proxying, credential injection, token rate limits and guardrails; the raw wire panel shows exactly what went over the network.')),
@@ -309,7 +313,9 @@ export default {
             h('button', { class: 'btn sm', type: 'button', onclick: () => { st.messages = []; st.exchanges = []; renderChat(); renderWire(); } }, icon('trash'), 'New chat')),
           chatEl,
           h('div', { class: 'chat-input' }, promptIn, sendBtn, stopBtn)),
-        wireEl)));
+        wireEl),
+      realtime.el,
+      requests.el));
 
     promptIn.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); }
@@ -536,7 +542,7 @@ export default {
 
     renderChat();
     renderWire();
-    return () => { alive = false; if (ctrl) ctrl.abort(); if (target.destroy) target.destroy(); };
+    return () => { alive = false; if (ctrl) ctrl.abort(); if (target.destroy) target.destroy(); realtime.destroy(); };
   },
 };
 

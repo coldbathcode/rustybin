@@ -453,6 +453,13 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | POST | `/ai/v1/audio/transcriptions` | Audio transcription (multipart; json, text, srt, vtt, verbose_json) |
 | POST | `/ai/openai/v1/responses` | Responses API (output items, function calls, native SSE events with stream=true) |
 | POST | `/ai/v1/responses` | Responses API |
+| GET | `/ai/openai/v1/realtime` | Realtime API over WebSocket: session, conversation and response events both ways, text and audio (WebSocket) |
+| GET POST | `/ai/openai/v1/files` | Files: upload a batch input file (multipart, purpose batch, JSONL), or list yours |
+| GET DELETE | `/ai/openai/v1/files/{id}` | One file: its metadata, or delete it |
+| GET | `/ai/openai/v1/files/{id}/content` | A file's content: your input file, or a batch's output or error file (JSONL) |
+| GET POST | `/ai/openai/v1/batches` | Batches: start one from an input file, or list yours |
+| GET | `/ai/openai/v1/batches/{id}` | One batch: its status, counts and output files |
+| POST | `/ai/openai/v1/batches/{id}/cancel` | Cancel a batch: cancelling, then cancelled with what was done |
 | POST | `/ai/azure/openai/deployments/{deployment}/chat/completions` | Azure OpenAI chat completions (api-version required, model = deployment) |
 | POST | `/ai/azure/openai/deployments/{deployment}/completions` | Azure OpenAI legacy completions |
 | POST | `/ai/azure/openai/deployments/{deployment}/embeddings` | Azure OpenAI embeddings |
@@ -461,6 +468,10 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 
 | Methods | Path | Description |
 |---|---|---|
+| GET POST | `/ai/anthropic/v1/messages/batches` | Message batches: start one (requests with a custom_id and params), or list yours |
+| GET | `/ai/anthropic/v1/messages/batches/{id}` | One message batch: processing_status and request_counts |
+| POST | `/ai/anthropic/v1/messages/batches/{id}/cancel` | Cancel a message batch: canceling, then ended with the rest canceled |
+| GET | `/ai/anthropic/v1/messages/batches/{id}/results` | A message batch's results as JSONL, once it ended |
 | POST | `/ai/anthropic/v1/messages` | Messages API (tools, prompt caching usage, native SSE event stream with stream=true) |
 | POST | `/ai/anthropic/v1/messages/count_tokens` | Count input tokens |
 | GET | `/ai/anthropic/v1/models` | List models |

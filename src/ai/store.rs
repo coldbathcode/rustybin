@@ -39,6 +39,12 @@ pub struct AiRecord {
     pub completion_tokens: u32,
     pub finish_reason: String,
     pub reply_preview: String,
+    /// `request` (one exchange), `realtime` (a session) or `batch` (a job).
+    pub kind: &'static str,
+    /// A realtime session's events or a batch's lines: types, sizes and
+    /// text only, bounded, never audio.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<Value>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -74,6 +80,15 @@ impl RequestStore {
             e.pop_front();
         }
         e.push_back((now, Arc::new(rec)));
+    }
+
+    /// Insert a record in place of the caller's earlier one with the same
+    /// request id (a realtime session is recorded again as it goes on).
+    pub fn replace(&self, rec: AiRecord) {
+        lock(&self.entries).retain(|(_, r)| {
+            !(r.request_id == rec.request_id && r.session == rec.session && r.key_id == rec.key_id)
+        });
+        self.insert(rec);
     }
 
     pub fn get(&self, request_id: &str) -> Option<Arc<AiRecord>> {
@@ -196,6 +211,8 @@ mod tests {
             completion_tokens: 0,
             finish_reason: "stop".into(),
             reply_preview: String::new(),
+            kind: "request",
+            detail: None,
         }
     }
 

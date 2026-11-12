@@ -88,3 +88,57 @@ APIs when asked.
 
 Both APIs are served, faulted and inspected like the rest of the AI mocks, documented with tested
 examples.
+
+## Build notes (2026-11-12)
+
+Built whole, with the recommendation of section 6: the OpenAI-shaped realtime protocol, and batch
+in the OpenAI and Anthropic shapes. Where the build differs from the plan above:
+
+- **There is no `rustybin ai requests` command and no AI request tool**: `/ai/*` is the data
+  plane, and neither surface had a reader of the request log before this step. The log is read
+  over HTTP (`GET /ai/requests`) and in the console; the CLI and the management MCP reach this
+  step through its settings only. The plan's rows for those two surfaces assumed commands that
+  were never there.
+- **The request log gained `kind` and `detail`** (`AiRecord`): `request`, `realtime` or `batch`.
+  A realtime session is one record under the upgrade's request id, written again after each
+  response (`RequestStore::replace`), so its `usage` is the session's total and equals the sum
+  of the `response.done` usages. A batch is one record written when it is created.
+- **Realtime pacing**: the query (`ttft_ms`, `tokens_per_second`), the headers of the other AI
+  paths on the upgrade, or `session.update` with a `rustybin` object.
+- **Realtime faults**: `?fail=drop_after:N` and also `?fail=error_after:N` (an `error` event
+  after the Nth server event, the session goes on). `ai_layer` does not know these two forms
+  and leaves them to the session; a fail kind it knows refuses the upgrade there.
+- **A cancel** is seen while a response is paced (the deltas wait on the socket): with
+  `tokens_per_second=0` a response is sent before a cancel can arrive, and the cancel is then
+  answered with `response_cancel_not_active`, as the provider does.
+- **Usage**: input is the engine's prompt tokens plus ten tokens a second of committed input
+  audio; output is the engine's completion tokens plus two tokens for each 100 ms audio delta.
+- **Batch headers**: the fail rate and kind of a batch's lines are `X-Rustybin-Batch-Fail-Rate`
+  and `X-Rustybin-Batch-Fail`, since `X-Rustybin-Fail` already fails the create request itself.
+  `X-Rustybin-Batch-Outcome: expired` makes the `expired` state reachable.
+- **Batch results are made when the batch is created** and shown as the clock allows, so the
+  states cost nothing while a batch waits. The clock is the limiter's (`Limiter::clock`, the
+  injectable `limits::Clock`); the phases are also a pure function (`Batch::at`), tested without
+  waiting.
+- **Only `/v1/chat/completions` batches** in the OpenAI shape (another endpoint is a `400`).
+  Validation problems end the batch `failed` after its validating share; a missing file or a
+  wrong endpoint is refused at once.
+- **Bounds beyond the plan's**: 256 callers and 256 MiB of files for the instance (64 and 32 MiB
+  in public mode), 1000 requests a batch (100 in public mode). A file is at most 8 MiB and never
+  more than the instance's body limit, which is 1 MiB by default.
+- **A message batch's `results_url` is a path**: the mock does not know the address a gateway
+  serves it at.
+- **The caps are settings** of the group `ai`: `ai.realtime.max_sessions`,
+  `ai.realtime.session_minutes`, `ai.batch.max_files`, `ai.batch.max_batches`,
+  `ai.batch.seconds` (`ai::specs`).
+- The tests were written with the code: `src/ai/realtime.rs` (the plan's three plus audio, the
+  G.711 encoders, a cancel and the cap, against a real WebSocket server) and `src/ai/batch.rs`
+  (the plan's two plus the phases, the Anthropic shape and the instance's bounds on a manual
+  clock); `docs/examples/ai/batch.hurl` and `docs/examples/ai/realtime.sh` (websocat).
+
+### For the merge
+
+`src/ai/realtime.rs` and `src/ai/batch.rs`, `AiRecord.kind` and `detail` with
+`RequestStore::replace` and `AiCtx::record_detail`, three fields of `AiShared` (`settings`,
+`realtime`, `batches`), `ai::specs` in `settings::specs`, `ui/views/ai/realtime.js` and two cards
+in `ui/views/ai.js`.

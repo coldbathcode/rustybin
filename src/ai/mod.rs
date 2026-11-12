@@ -23,6 +23,7 @@
 pub mod anthropic;
 pub mod auth;
 pub mod azure;
+pub mod batch;
 pub mod bedrock;
 pub mod cohere;
 pub mod embed;
@@ -32,6 +33,7 @@ pub mod faults;
 pub mod gemini;
 pub mod ollama;
 pub mod openai;
+pub mod realtime;
 pub mod responses;
 pub mod schema;
 pub mod store;
@@ -82,6 +84,84 @@ pub struct AiShared {
     /// The gateway scenario runs: an AI run's requests (its secret session)
     /// are answered by its profile (`crate::scenarios::AiProfile`).
     pub scenarios: Arc<crate::scenarios::Scenarios>,
+    /// The instance's settings (the `ai.realtime.*` and `ai.batch.*` caps).
+    pub settings: Arc<crate::settings::Settings>,
+    /// The realtime sessions open now ([`realtime`]).
+    pub realtime: Arc<realtime::Sessions>,
+    /// Every caller's files and batches ([`batch`]), on the limiter's clock.
+    pub batches: batch::Store,
+}
+
+/// An integer setting of the AI mocks, else its default.
+pub fn setting_usize(shared: &AiShared, key: &str, default: usize) -> usize {
+    shared
+        .settings
+        .get(key)
+        .0
+        .as_u64()
+        .map_or(default, |v| v as usize)
+}
+
+/// The caps of the realtime and batch APIs as instance settings.
+pub fn specs() -> Vec<crate::settings::Spec> {
+    use crate::settings::{Kind, Spec};
+    let int = |key: &'static str,
+               title: &'static str,
+               help: &'static str,
+               min: i64,
+               max: i64,
+               default: usize| {
+        Spec::new(
+            key,
+            "ai",
+            title,
+            help,
+            Kind::Integer { min, max },
+            json!(default),
+        )
+    };
+    vec![
+        int(
+            realtime::MAX_SESSIONS_KEY,
+            "Realtime sessions at once",
+            "How many realtime sessions (GET /ai/openai/v1/realtime) may be open on the instance; one more is refused with the provider's rate limit error.",
+            1,
+            256,
+            realtime::DEFAULT_MAX_SESSIONS,
+        ),
+        int(
+            realtime::SESSION_MINUTES_KEY,
+            "Longest realtime session (minutes)",
+            "A realtime session is closed after this long.",
+            1,
+            120,
+            realtime::DEFAULT_SESSION_MINUTES,
+        ),
+        int(
+            batch::MAX_FILES_KEY,
+            "Batch files a caller",
+            "How many uploaded files (POST /ai/openai/v1/files) the instance keeps for one caller, an hour each.",
+            1,
+            100,
+            batch::DEFAULT_MAX_FILES,
+        ),
+        int(
+            batch::MAX_BATCHES_KEY,
+            "Batches a caller",
+            "How many batches the instance keeps for one caller, an hour each; one more is refused with the provider's rate limit error.",
+            1,
+            50,
+            batch::DEFAULT_MAX_BATCHES,
+        ),
+        int(
+            batch::SECONDS_KEY,
+            "A batch's life (seconds)",
+            "How long a batch takes from created to completed when the request has no X-Rustybin-Batch-Seconds header.",
+            0,
+            3600,
+            batch::DEFAULT_SECONDS,
+        ),
+    ]
 }
 
 impl AiShared {
@@ -92,6 +172,9 @@ impl AiShared {
             inspector: state.inspector.clone(),
             metrics: state.metrics.clone(),
             scenarios: state.scenarios.clone(),
+            settings: state.settings.clone(),
+            realtime: Arc::new(realtime::Sessions::default()),
+            batches: batch::Store::new(state.limits.clock(), public),
             auth,
             store: RequestStore::new(if public { 200 } else { 1000 }, Duration::from_secs(3600)),
             prompt_cache: PromptCache::new(
@@ -220,6 +303,50 @@ impl AiCtx {
             completion_tokens: r.completion_tokens,
             finish_reason: r.finish.to_string(),
             reply_preview: preview,
+            kind: "request",
+            detail: None,
+        });
+    }
+
+    /// Record a realtime session or a batch job: `detail` holds its events
+    /// or lines (types, sizes and text only). A session is recorded again
+    /// as it goes on, in place of its earlier record.
+    pub fn record_detail(&self, r: DetailArgs<'_>) {
+        self.shared.metrics.record_llm_tokens(
+            self.provider.as_str(),
+            r.model,
+            r.new_prompt_tokens,
+            r.new_completion_tokens,
+        );
+        if r.first {
+            self.shared.metrics.count_llm_request(
+                self.provider.as_str(),
+                r.model,
+                r.kind == "realtime",
+            );
+        }
+        self.shared.store.replace(AiRecord {
+            request_id: self.request_id.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            session: self.session.clone(),
+            key_id: self.key_id.clone(),
+            provider: self.provider.as_str(),
+            method: self.method.clone(),
+            endpoint: self.path.clone(),
+            query: self.query_string.clone(),
+            model: r.model.to_string(),
+            mode: r.mode.to_string(),
+            stream: r.kind == "realtime",
+            credential: self.credential.clone(),
+            headers: self.headers.clone(),
+            body: Value::Null,
+            normalized_prompt: r.prompt.chars().take(32 * 1024).collect(),
+            prompt_tokens: r.prompt_tokens,
+            completion_tokens: r.completion_tokens,
+            finish_reason: r.finish.to_string(),
+            reply_preview: r.reply.chars().take(500).collect(),
+            kind: r.kind,
+            detail: Some(r.detail),
         });
     }
 
@@ -273,6 +400,26 @@ pub struct RecordArgs<'a> {
     pub completion_tokens: u32,
     pub finish: &'a str,
     pub reply: &'a str,
+}
+
+/// Arguments of [`AiCtx::record_detail`].
+pub struct DetailArgs<'a> {
+    /// `realtime` or `batch`.
+    pub kind: &'static str,
+    pub model: &'a str,
+    pub mode: &'a str,
+    pub prompt: &'a str,
+    /// The totals of the session or the job so far.
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    /// What this recording adds to the token counters.
+    pub new_prompt_tokens: u32,
+    pub new_completion_tokens: u32,
+    /// The first recording of this session or job (counted as a request).
+    pub first: bool,
+    pub finish: &'a str,
+    pub reply: &'a str,
+    pub detail: Value,
 }
 
 /// Response extension: lets [`ai_layer`] add model and rate-limit headers.
@@ -633,6 +780,7 @@ async fn list_requests(
         .map(|r| {
             json!({
                 "request_id": r.request_id,
+                "kind": r.kind,
                 "timestamp": r.timestamp,
                 "provider": r.provider,
                 "endpoint": r.endpoint,
@@ -690,6 +838,8 @@ pub fn router_with(state: &AppState, auth: AuthSettings) -> Router<AppState> {
     let api = Router::new()
         .merge(openai::routes())
         .merge(responses::routes())
+        .merge(realtime::routes())
+        .merge(batch::routes())
         .merge(azure::routes())
         .merge(anthropic::routes())
         .merge(gemini::routes())
@@ -710,6 +860,8 @@ pub fn catalog() -> Vec<Endpoint> {
     let mut v = Vec::new();
     v.extend(openai::catalog());
     v.extend(responses::catalog());
+    v.extend(realtime::catalog());
+    v.extend(batch::catalog());
     v.extend(azure::catalog());
     v.extend(anthropic::catalog());
     v.extend(gemini::catalog());
@@ -744,6 +896,8 @@ pub fn openapi_paths() -> Value {
     for frag in [
         openai::openapi_paths(),
         responses::openapi_paths(),
+        realtime::openapi_paths(),
+        batch::openapi_paths(),
         azure::openapi_paths(),
         anthropic::openapi_paths(),
         gemini::openapi_paths(),
@@ -809,6 +963,8 @@ pub fn openapi_components() -> Value {
             "type": "object",
             "properties": {
                 "request_id": {"type": "string"},
+                "kind": {"type": "string", "enum": ["request", "realtime", "batch"]},
+                "detail": {"type": "object", "description": "A realtime session's events or a batch's lines: types, sizes and text only"},
                 "provider": {"type": "string"},
                 "endpoint": {"type": "string"},
                 "model": {"type": "string"},
