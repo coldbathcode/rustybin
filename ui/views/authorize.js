@@ -87,6 +87,9 @@ export default {
       const grantable = Array.isArray(req.scopes_grantable) ? req.scopes_grantable : [];
       const requested = Array.isArray(req.scopes_requested) ? req.scopes_requested : [];
       const name = String(req.client_name || 'MCP client');
+      // A client that named itself with a metadata document: its name is
+      // what that document says, fetched from this host.
+      const doc = req.client_document && typeof req.client_document === 'object' ? req.client_document : null;
       const kind = req.redirect_kind;
       const dest = destination(String(req.redirect_uri || ''));
       const err = h('div');
@@ -177,7 +180,9 @@ export default {
           h('div', { class: 'row nowrap', style: { alignItems: 'flex-start' } }, shield,
             h('h2', { class: 'grow', id: 'authorize-client', style: { minWidth: '0', overflowWrap: 'anywhere' } }, name),
             h('span', { style: { flex: 'none' } }, badge('client ' + String(req.client || ''), 'outline'))),
-          h('p', null, 'This name was chosen by the agent when it registered: check that it is the agent you just connected.'),
+          doc
+            ? h('p', { id: 'authorize-document' }, 'This name is the client\'s own claim, read from its metadata document at ', h('strong', { class: 'mono', id: 'authorize-document-host' }, String(doc.host || '')), ' (', h('span', { class: 'mono small break' }, String(doc.url || '')), '). Nothing verifies it beyond that address: check that it is the agent you just connected, and that you trust that host.')
+            : h('p', null, 'This name was chosen by the agent when it registered: check that it is the agent you just connected.'),
           destination_,
           h('h3', { id: 'authorize-access' }, 'Access to grant'),
           grantable.length ? cards : notice('err', 'The credential this console signed in with cannot grant any of the access the agent asked for (',

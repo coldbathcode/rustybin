@@ -457,6 +457,7 @@ pub fn specs() -> Vec<Spec> {
     all.extend(crate::mcp::registry::specs());
     all.extend(crate::mcp::manage::agents::specs());
     all.extend(crate::secret_requests::specs());
+    all.extend(crate::control_oauth::client_docs::specs());
     all.extend(crate::mcp::attacks::specs());
     all.extend(crate::portal::specs());
     all.extend(crate::mocks::leads::specs());
@@ -1578,11 +1579,12 @@ pub fn principal(headers: &HeaderMap, config: &Config) -> String {
     "open".into()
 }
 
-/// Key prefixes of the security groups (egress, proxy, agents, the
-/// console and its sign-in, single sign-on): changing one needs
-/// `settings.security` on top of `settings.write`.
-pub const SECURITY_PREFIXES: &[&str] =
-    &["egress.", "proxy.", "agents.", "console.", "sso.", "audit."];
+/// Key prefixes of the security groups (egress, proxy, agents and their
+/// OAuth sign-in, the console and its sign-in, single sign-on): changing
+/// one needs `settings.security` on top of `settings.write`.
+pub const SECURITY_PREFIXES: &[&str] = &[
+    "egress.", "proxy.", "agents.", "oauth.", "console.", "sso.", "audit.",
+];
 /// Single keys of the security groups (where the AI prompts go).
 pub const SECURITY_KEYS: &[&str] = &["assist.provider", "assist.base_url"];
 

@@ -653,7 +653,7 @@ The MCP inspector: servers, saved connections, checks, calls through the relay
 | `rustybin mcp servers` | This instance's MCP servers. | `GET /_rustybin/mcp-servers` | `mcp.inspect` |
 | `rustybin mcp connections` | The saved connections. | `GET /_rustybin/mcp-connections` | `mcp.inspect` |
 | `rustybin mcp connection <id>` | One saved connection. | `GET /_rustybin/mcp-connections/{id}` | `mcp.inspect` |
-| `rustybin mcp save-connection <id> --target URL` | Save a connection (its secrets sealed on the instance). Flags: `--target` value, `--name` value, `--transport` value, `--mode` value, `--auth` value, `--secret` value. | `PUT /_rustybin/mcp-connections/{id}` | `mcp.connections` |
+| `rustybin mcp save-connection <id> --target URL` | Save a connection (its secrets sealed on the instance). Flags: `--target` value, `--name` value, `--transport` value, `--mode` value, `--auth` value, `--oauth-client` value, `--secret` value. | `PUT /_rustybin/mcp-connections/{id}` | `mcp.connections` |
 | `rustybin mcp delete-connection <id>` | Forget a saved connection. | `DELETE /_rustybin/mcp-connections/{id}` | `mcp.connections` |
 | `rustybin mcp check <target>` | Run the checks against a server (--junit writes a report). Flags: `--transport` value, `--version` value, `--header` value, `--connection` value, `--checks` value, `--junit` value. | `POST /_rustybin/mcp-checks` | `mcp.inspect` |
 | `rustybin mcp runs` | The saved check runs. | `GET /_rustybin/mcp-checks` | `mcp.inspect` |
@@ -663,6 +663,7 @@ The MCP inspector: servers, saved connections, checks, calls through the relay
 | `rustybin mcp tools <target>` | The tools a server offers (tools/list through the relay). Flags: `--header` value, `--connection` value. | `POST /_rustybin/mcp-relay` | `mcp.inspect` |
 | `rustybin mcp fetch <url>` | Fetch an OAuth discovery document through the instance. | `POST /_rustybin/mcp-relay/fetch` | `mcp.inspect` |
 | `rustybin mcp end-relay <session>` | End a relay session. | `DELETE /_rustybin/mcp-relay/{session}` | `mcp.inspect` |
+| `rustybin mcp client-document` | The inspector's client ID metadata document (its client id where an authorization server supports one). | `GET /_rustybin/oauth/inspector-client.json` | open |
 
 ```bash
 rustybin mcp servers
@@ -678,6 +679,7 @@ rustybin mcp call http://localhost:8080/mcp tools/call --params '{"name": "echo"
 rustybin mcp tools http://localhost:8080/mcp
 rustybin mcp fetch https://mcp.acme.example/.well-known/oauth-authorization-server
 rustybin mcp end-relay 5b2c
+rustybin mcp client-document
 ```
 
 ## registry

@@ -51,6 +51,8 @@ signed the commits.) Nothing more:
   `assist.provider`, `assist.base_url` and `proxy.client_ip_header` are never changed
   by a pulled document: a different value is a problem and the setting is kept as it
   is (prune leaves them alone too; the same value is quiet, so an export round-trips).
+  The same holds for `oauth.client_metadata_documents`, which decides whether the
+  instance fetches a client's document for a caller who has not signed in.
   A test in the document may name a gateway only when its saved copy already names
   that one, and a test schedule a webhook only when its saved copy already names that
   one.

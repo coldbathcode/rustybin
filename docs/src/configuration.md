@@ -199,12 +199,12 @@ time where they are checked, returned by the API only as `{ "set": true, "hint":
 "k3Qx" }` (the last four characters, and only for secrets of eight characters or
 more), never written to a configuration export in the clear, and never settable
 through the management MCP (its `update_settings` also asks the user to confirm a
-change under `egress.`, `agents.`, `console.` or `git.`, and never changes the sign-in
+change under `egress.`, `agents.`, `oauth.`, `console.` or `git.`, and never changes the sign-in
 in password mode). The settings of this release: `console.title`,
 `console.backlink`, the sign-in's `console.user` and secret `console.password_hash`,
 the `assist.*` settings of [AI assist](ai-assist.md) (the provider keys are secrets,
 `assist.job.<task>` the model per job), `proxy.client_ip_header`, `egress.allow`,
-`egress.allow_loopback`, `agents.default_ceiling` and `agents.default_ceiling_for` (the default ceiling of the agents of a role's users, `role=ceiling` entries), `agents.secret_requests` (off by default: lets an agent [ask for a secret to be set](agent-mcp.md#a-secret-at-an-agents-request) by a person), `registry.scenario`,
+`egress.allow_loopback`, `agents.default_ceiling` and `agents.default_ceiling_for` (the default ceiling of the agents of a role's users, `role=ceiling` entries), `agents.secret_requests` (off by default: lets an agent [ask for a secret to be set](agent-mcp.md#a-secret-at-an-agents-request) by a person), `oauth.client_metadata_documents` (no variable; off by default: lets an agent's client [name itself with a metadata document](agent-mcp.md#sign-in-with-oauth) at the OAuth sign-in, which the instance then fetches from the hosts in `egress.allow`), `registry.scenario`,
 `registry.saved`, the `portal.*` settings of the [dev portal](#dev-portal), the secret
 `leads.webhook_token`, the [test schedule notices](saved-tests.md#the-failure-notice)' secret
 `notify.webhook_token` and `notify.base_url`, `mocks.require_revision` (no variable; `false` by default: when
@@ -264,6 +264,7 @@ under a **purpose** with its own rule, on only when the feature is configured:
 | `spec_fetch` | No default: name the hosts [specs are fetched from](mocks/index.md#a-spec-from-a-url) in `RUSTYBIN_EGRESS_ALLOW`. Never a visitor's. |
 | `record` | No default: name the hosts of the APIs you [record](mocks/record.md) in `RUSTYBIN_EGRESS_ALLOW`. Never a visitor's. |
 | `events` | No default: name the hosts of the [webhook subscribers](mocks/asyncapi.md#webhook-subscribers) of event mocks in `RUSTYBIN_EGRESS_ALLOW`. Never a visitor's. |
+| `client_metadata` | No default, and only with the `oauth.client_metadata_documents` setting on: name the hosts of the [client ID metadata documents](agent-mcp.md#sign-in-with-oauth) of the agents that sign in to `/_rustybin/mcp` in `RUSTYBIN_EGRESS_ALLOW`. `https` only, no redirects, 5 KiB. |
 | `sso` | The issuer's host once [single sign-on](sso.md) is set up (`sso.enabled`, `sso.issuer`, `sso.client_id`): discovery, the keys and the token endpoint. Keys or a token endpoint on another host need `RUSTYBIN_EGRESS_ALLOW`; a provider on the same machine `RUSTYBIN_EGRESS_ALLOW_LOOPBACK=true`. |
 
 ```hurl

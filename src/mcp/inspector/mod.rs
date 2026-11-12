@@ -9,6 +9,7 @@
 //! | `POST /_rustybin/mcp-checks` | read | Run the check suite ([`checks`]); JSON or JUnit; saved (at most 50) |
 //! | `GET /_rustybin/mcp-checks`, `GET`, `DELETE /_rustybin/mcp-checks/{id}` | read / admin | The saved runs |
 //! | `GET /_rustybin/mcp-connections`, `PUT`, `DELETE /_rustybin/mcp-connections/{id}` | read / admin | Saved connections, credentials sealed ([`store`]) |
+//! | `GET /_rustybin/oauth/inspector-client.json` | open | The inspector's client ID metadata document ([`clientdoc`]) |
 //!
 //! "read" is the console scope (control auth lets it through as a
 //! read-only POST: these routes change nothing on the instance); outbound
@@ -16,6 +17,7 @@
 
 pub mod checks;
 pub mod client;
+pub mod clientdoc;
 pub mod relay;
 pub mod store;
 
@@ -24,7 +26,7 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, Extensions, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, Extensions, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
@@ -194,8 +196,13 @@ pub fn server_list(
 }
 
 /// The answer of `GET /_rustybin/mcp-servers` for a caller (also the
-/// management tool `list_mcp_servers`).
-pub fn servers_json(state: &AppState, caller: &crate::mocks::selfservice::Caller) -> Value {
+/// management tool `list_mcp_servers`). `base` is the URL the caller reached
+/// this instance at: the inspector's client document depends on it.
+pub fn servers_json(
+    state: &AppState,
+    caller: &crate::mocks::selfservice::Caller,
+    base: &str,
+) -> Value {
     let list = server_list(state, |s| caller.can_read(s));
     let (allow, _) = state.egress.allowlist();
     json!({
@@ -207,6 +214,7 @@ pub fn servers_json(state: &AppState, caller: &crate::mocks::selfservice::Caller
             "hint": "Servers on this instance are relayed in process. Other hosts need RUSTYBIN_EGRESS_ALLOW (Management, Network); loopback needs the loopback switch.",
         },
         "checks": checks::CHECKS.iter().map(|(id, title)| json!({ "id": id, "title": title })).collect::<Vec<_>>(),
+        "client_document": clientdoc::status(base),
     })
 }
 
@@ -214,9 +222,11 @@ async fn servers(
     State(state): State<AppState>,
     headers: HeaderMap,
     extensions: Extensions,
+    uri: Uri,
 ) -> Response {
     let caller = crate::mocks::selfservice::caller(&state, &headers, &extensions);
-    Json(servers_json(&state, &caller)).into_response()
+    let base = clientdoc::base_url(&headers, &extensions, &uri, &state);
+    Json(servers_json(&state, &caller, &base)).into_response()
 }
 
 // ── POST /_rustybin/mcp-checks and the saved runs ───────────────────
@@ -269,12 +279,14 @@ fn junit_response(report: &Value) -> Response {
 /// A check run's specification from a request body: the saved connection's
 /// target and credentials, the body's headers on top, the transport and the
 /// checks to run. Shared by `POST /_rustybin/mcp-checks` and the management
-/// tool `run_mcp_checks`.
+/// tool `run_mcp_checks`. `base_url` is the URL the caller reached this
+/// instance at (the `client_document` check offers the document served there).
 pub fn build_run_spec(
     inspector: &Inspector,
     req: ChecksBody,
     principal: String,
     admin: bool,
+    base_url: &str,
 ) -> Result<checks::RunSpec, (StatusCode, String, &'static str)> {
     let (conn_target, conn_transport, conn_version, mut auth, query) = match &req.connection {
         Some(id) => match inspector.store.use_connection(id, &req.target, admin) {
@@ -338,6 +350,7 @@ pub fn build_run_spec(
             .clamp(1, checks::MAX_TOOLS),
         ai_arguments: req.ai_arguments.unwrap_or(false),
         principal,
+        base_url: base_url.to_string(),
     })
 }
 
@@ -346,6 +359,7 @@ async fn run_checks(
     Extension(inspector): Extension<Arc<Inspector>>,
     headers: HeaderMap,
     extensions: Extensions,
+    uri: Uri,
     body: Bytes,
 ) -> Response {
     if body.len() > 256 * 1024 {
@@ -377,7 +391,8 @@ async fn run_checks(
     let caller = crate::control_auth::open_caller(&headers, &state.config);
     let admin = caller.has(crate::rbac::Permission::McpConnections);
     let save = req.save.unwrap_or(true) && keeps_runs(&state.config, &caller);
-    let spec = match build_run_spec(&inspector, req, principal, admin) {
+    let base = clientdoc::base_url(&headers, &extensions, &uri, &state);
+    let spec = match build_run_spec(&inspector, req, principal, admin, &base) {
         Ok(s) => s,
         Err((status, message, reason)) => return error(status, message, reason),
     };
@@ -581,6 +596,7 @@ pub fn router(state: &AppState) -> Router<AppState> {
     let inspector = state.mcp_inspector.clone();
     Router::new()
         .route(SERVERS_PATH, get(servers))
+        .route(clientdoc::DOCUMENT_PATH, get(clientdoc::handler))
         .route(RELAY_PATH, post(relay::relay))
         .route(RELAY_FETCH_PATH, post(relay::fetch))
         .route(
@@ -637,6 +653,10 @@ pub fn catalog() -> Vec<Endpoint> {
         Endpoint::new("/_rustybin/mcp-connections/{id}", &["GET", "PUT", "DELETE"], category::CONTROL, "MCP inspector: one saved connection; PUT and DELETE need admin")
 .permission_for(&["GET"], crate::rbac::Permission::McpInspect).permission_for(&["PUT", "DELETE"], crate::rbac::Permission::McpConnections)
             .example(Example::get("A saved connection", "/_rustybin/mcp-connections/unknown").expect_status(404)),
+        Endpoint::new(clientdoc::DOCUMENT_PATH, &["GET"], category::CONTROL, "MCP inspector: its client ID metadata document (the client id the OAuth walk sends where a server supports one)")
+.open()
+            .description("Public, like the other OAuth metadata: the inspector's name and the console's callback as its only redirect URI. An authorization server that says client_id_metadata_document_supported fetches it, so it is usable only when this instance is reached over https on a host that is not loopback (GET /_rustybin/mcp-servers says which under client_document).")
+            .example(Example::get("The inspector's client document", clientdoc::DOCUMENT_PATH)),
     ]
 }
 
@@ -667,7 +687,19 @@ pub fn openapi_paths() -> Value {
     checks_props["save"] = json!({ "type": "boolean" });
     checks_props["format"] = json!({ "type": "string", "enum": ["json", "junit"] });
     json!({
-        SERVERS_PATH: { "get": { "tags": tags, "summary": "MCP servers of this instance", "operationId": "listMcpServers", "responses": ok("{servers, relay, checks}") } },
+        SERVERS_PATH: { "get": { "tags": tags, "summary": "MCP servers of this instance", "operationId": "listMcpServers", "responses": ok("{servers, relay, checks, client_document: {url, redirect_uri, usable, reason, document, ways}}") } },
+        clientdoc::DOCUMENT_PATH: { "get": {
+            "tags": tags, "summary": "The MCP inspector's client ID metadata document", "operationId": "getInspectorClientDocument", "security": [],
+            "description": "The document whose URL the inspector's OAuth walk sends as its client id to an authorization server that supports client ID metadata documents. No credentials; nothing secret.",
+            "responses": { "200": { "description": "The document", "content": { "application/json": { "schema": { "type": "object", "required": ["client_id", "redirect_uris"], "properties": {
+                "client_id": { "type": "string", "description": "This document's own URL" },
+                "client_name": { "type": "string" },
+                "client_uri": { "type": "string" },
+                "redirect_uris": { "type": "array", "items": { "type": "string" }, "description": "The console's callback" },
+                "grant_types": { "type": "array", "items": { "type": "string" } },
+                "response_types": { "type": "array", "items": { "type": "string" } },
+                "token_endpoint_auth_method": { "type": "string", "enum": ["none"] } } } } } } }
+        } },
         RELAY_PATH: { "post": {
             "tags": tags, "summary": "Relay one JSON-RPC message to an MCP server", "operationId": "mcpRelay",
             "description": "The answer streams as SSE: relay ({session, status, headers}), message per JSON-RPC message, body for a non-JSON-RPC answer, error, done. Relay sessions keep the upstream session id or the open legacy stream (at most 64, idle 10 minutes).",
@@ -702,7 +734,7 @@ pub fn openapi_paths() -> Value {
                 "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["name", "target"], "properties": {
                     "name": { "type": "string" }, "target": { "type": "string" }, "transport": { "type": "string", "enum": ["modern", "session", "legacy"] },
                     "version": { "type": "string" }, "mode": { "type": "string", "enum": ["browser", "relay"] },
-                    "auth": { "type": "object", "properties": { "kind": { "type": "string", "enum": store::AUTH_KINDS }, "name": { "type": "string" }, "location": { "type": "string", "enum": ["header", "query"] }, "username": { "type": "string" }, "headers": { "type": "array", "items": { "type": "string" } }, "oauth": { "type": "object" } } },
+                    "auth": { "type": "object", "properties": { "kind": { "type": "string", "enum": store::AUTH_KINDS }, "name": { "type": "string" }, "location": { "type": "string", "enum": ["header", "query"] }, "username": { "type": "string" }, "headers": { "type": "array", "items": { "type": "string" } }, "oauth": { "type": "object", "description": "The OAuth facts worth keeping, never a secret: issuer, token_endpoint, client_id, scope, and client (how the walk names its client)", "properties": { "client": { "type": "string", "enum": clientdoc::CLIENT_WAYS } } } } },
                     "secrets": { "type": "object", "description": "token, api_key, password, refresh_token, client_secret or header:<name>; null clears, absent keeps" } } } } } },
                 "responses": { "200": { "description": "The saved connection" }, "400": { "description": "Invalid connection" } }
             },

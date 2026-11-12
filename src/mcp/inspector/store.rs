@@ -47,7 +47,8 @@ pub struct AuthSpec {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<String>,
     /// The OAuth facts worth keeping (issuer, token endpoint, client id,
-    /// scopes, resource): never a secret.
+    /// scopes, resource, and `client`: how the walk names its client, one
+    /// of [`super::clientdoc::CLIENT_WAYS`]): never a secret.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth: Option<Value>,
 }
@@ -91,6 +92,18 @@ impl AuthSpec {
         if let Some(o) = &self.oauth {
             if o.to_string().len() > 8 * 1024 {
                 return Err("auth.oauth is larger than 8 KiB".into());
+            }
+            // How the walk names its client (the console's choice).
+            if let Some(way) = o.get("client").filter(|w| !w.is_null()) {
+                let known = way
+                    .as_str()
+                    .is_some_and(|w| super::clientdoc::CLIENT_WAYS.contains(&w));
+                if !known {
+                    return Err(format!(
+                        "auth.oauth.client must be one of {}",
+                        super::clientdoc::CLIENT_WAYS.join(", ")
+                    ));
+                }
             }
         }
         Ok(())

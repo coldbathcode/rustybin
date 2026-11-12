@@ -93,12 +93,14 @@ pub fn get_settings(ctx: &CallCtx, _access: &Access, args: &Value) -> Value {
 }
 
 /// Setting groups whose change widens what the instance reaches or who may
-/// sign in: the outbound policy, the agents' ceilings, the console sign-in
-/// git, single sign-on and the trusted proxy header (plus the AI provider
-/// and base URL). A change there is confirmed by the user, after the
-/// permission check.
-pub const SENSITIVE_PREFIXES: &[&str] =
-    &["egress.", "agents.", "console.", "git.", "sso.", "proxy."];
+/// sign in: the outbound policy, the agents' ceilings and their OAuth
+/// sign-in (client ID metadata documents make the instance call out), the
+/// console sign-in, git, single sign-on and the trusted proxy header (plus
+/// the AI provider and base URL). A change there is confirmed by the user,
+/// after the permission check.
+pub const SENSITIVE_PREFIXES: &[&str] = &[
+    "egress.", "agents.", "oauth.", "console.", "git.", "sso.", "proxy.",
+];
 
 fn sensitive(key: &str) -> bool {
     SENSITIVE_PREFIXES.iter().any(|p| key.starts_with(p))

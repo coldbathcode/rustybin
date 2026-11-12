@@ -3926,6 +3926,255 @@ def run_source_control(browser):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def run_client_documents(browser):
+    """Client ID metadata documents (core next 15). The inspector as a client,
+    on the open instance against an MCP server whose authorization server
+    supports documents: on http://127.0.0.1 the walk says why this instance's
+    document cannot be used and registers; forced, it sends the document's URL
+    as the client id, makes no registration call and gets its token. Then the
+    control plane accepting one, on the jwt instance: off by default; on, the
+    consent page shows the document's host and the name as the client's claim."""
+    import http.server
+    import threading
+
+    print(f"client documents: {BASE}")
+    seen = []
+
+    class Server(http.server.BaseHTTPRequestHandler):
+        """An MCP server behind OAuth and its authorization server, which
+        approves at once (no person to ask) and logs what it is sent."""
+
+        def log_message(self, *a):
+            pass
+
+        def cors(self):
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+            self.send_header("Access-Control-Expose-Headers", "WWW-Authenticate, Mcp-Session-Id")
+
+        def answer(self, status, body=None, headers=None):
+            self.send_response(status)
+            self.cors()
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
+            raw = json.dumps(body).encode() if body is not None else b""
+            if body is not None:
+                self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def own(self):
+            return f"http://127.0.0.1:{self.server.server_address[1]}"
+
+        def do_OPTIONS(self):
+            self.answer(204)
+
+        def do_GET(self):
+            url = urllib.parse.urlparse(self.path)
+            q = urllib.parse.parse_qs(url.query)
+            seen.append(("GET", url.path, q))
+            own = self.own()
+            if url.path == "/.well-known/oauth-protected-resource/mcp":
+                return self.answer(200, {"resource": own + "/mcp", "authorization_servers": [own], "scopes_supported": ["mcp:tools"]})
+            if url.path == "/.well-known/oauth-authorization-server":
+                return self.answer(200, {
+                    "issuer": own, "authorization_endpoint": own + "/authorize", "token_endpoint": own + "/token",
+                    "registration_endpoint": own + "/register", "grant_types_supported": ["authorization_code"],
+                    "client_id_metadata_document_supported": True})
+            if url.path == "/authorize":
+                back = q["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "e2e-code", "state": q["state"][0]})
+                return self.answer(302, None, {"Location": back})
+            self.answer(404)
+
+        def do_POST(self):
+            url = urllib.parse.urlparse(self.path)
+            raw = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
+            if url.path == "/mcp":
+                seen.append(("POST", url.path, {}))
+                return self.answer(401, {"error": "unauthorized"}, {
+                    "WWW-Authenticate": f'Bearer resource_metadata="{self.own()}/.well-known/oauth-protected-resource/mcp"'})
+            if url.path == "/register":
+                seen.append(("POST", url.path, json.loads(raw)))
+                return self.answer(201, {"client_id": "registered-client"})
+            if url.path == "/token":
+                seen.append(("POST", url.path, urllib.parse.parse_qs(raw)))
+                return self.answer(200, {"access_token": "e2e-access-token", "token_type": "Bearer", "expires_in": 600})
+            self.answer(404)
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Server)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    server = f"http://127.0.0.1:{srv.server_address[1]}"
+    document_url = BASE + "/_rustybin/oauth/inspector-client.json"
+
+    ctx = browser.new_context(viewport={"width": 1280, "height": 860})
+    page = ctx.new_page()
+    page.set_default_timeout(TIMEOUT)
+    page.on("pageerror", lambda e: console_errors.append(f"[client documents] uncaught: {e}"))
+
+    def walk(way):
+        del seen[:]
+        page.goto(BASE + "/ui/#/mcp")
+        page.locator(".seg button", has_text="Another server").click()
+        page.fill("#mcp-url", server + "/mcp")
+        page.select_option("#mcp-version", "2026-07-28")
+        page.select_option("#mcp-auth-kind", "oauth")
+        page.select_option("#mcp-oauth-way", way)
+        page.locator("#mcp-oauth-start").click()
+        page.locator("#mcp-oauth-connect").wait_for()
+        expect(page.locator("#mcp-oauth-steps .step")).to_have_count(6)
+        expect(page.locator("#mcp-token")).to_have_value("e2e-access-token")
+        return page.locator("#mcp-oauth-steps .step").nth(3)
+
+    def on_loopback_the_walk_says_why_and_registers():
+        # The instance's document, as the console is told about it.
+        with urllib.request.urlopen(BASE + "/_rustybin/mcp-servers", timeout=10) as r:
+            cd = json.loads(r.read())["client_document"]
+        assert cd["url"] == document_url and cd["usable"] is False and "loopback" in cd["reason"], cd
+        fourth = walk("auto")
+        expect(fourth).to_contain_text("Dynamic client registration")
+        expect(fourth).to_contain_text("no document")
+        expect(fourth).to_contain_text("loopback")
+        registered = [s for s in seen if s[1] == "/register"]
+        assert len(registered) == 1, seen
+        sent = [s for s in seen if s[1] == "/authorize"][0][2]
+        assert sent["client_id"] == ["registered-client"], sent
+        # The form says why before anyone clicks.
+        expect(page.locator("label.field", has=page.locator("#mcp-oauth-way"))).to_contain_text("Automatic skips the document here")
+
+    step("client documents: on loopback the walk says why no document and registers", on_loopback_the_walk_says_why_and_registers)
+
+    def forced_the_walk_uses_the_document_and_never_registers():
+        fourth = walk("document")
+        expect(fourth).to_contain_text("Client ID metadata document")
+        expect(fourth).to_contain_text(document_url)
+        expect(fourth).to_contain_text("forced")
+        assert not [s for s in seen if s[1] == "/register"], f"a registration call was made: {seen}"
+        sent = [s for s in seen if s[1] == "/authorize"][0][2]
+        assert sent["client_id"] == [document_url], sent
+        # The redirect URI sent is the document's own, byte for byte.
+        with urllib.request.urlopen(document_url, timeout=10) as r:
+            doc = json.loads(r.read())
+        assert doc["client_id"] == document_url, doc
+        assert sent["redirect_uri"] == doc["redirect_uris"], (sent["redirect_uri"], doc["redirect_uris"])
+        token = [s for s in seen if s[1] == "/token"][0][2]
+        assert token["client_id"] == [document_url] and token["code"] == ["e2e-code"], token
+        # The document's URL is not typed into the client id field (which
+        # still holds the id the walk before registered).
+        expect(page.locator("#mcp-oauth-client")).to_have_value("registered-client")
+        shot(page, "light", "26-inspector-client-document")
+
+    step("client documents: forced, the walk sends the document, makes no registration call and gets its token", forced_the_walk_uses_the_document_and_never_registers)
+    ctx.close()
+    srv.shutdown()
+
+    class AgentSite(http.server.BaseHTTPRequestHandler):
+        """An agent's own site: its client document at /agent.json. The name
+        is markup, which the consent page must show as text."""
+
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            own = f"http://127.0.0.1:{self.server.server_address[1]}"
+            if self.path != "/agent.json":
+                self.send_response(404)
+                self.end_headers()
+                return
+            raw = json.dumps({"client_id": own + "/agent.json", "client_name": "Doc <b>agent</b>",
+                              "redirect_uris": ["http://127.0.0.1:47912/callback"],
+                              "token_endpoint_auth_method": "none"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+    site = http.server.ThreadingHTTPServer(("127.0.0.1", 0), AgentSite)
+    threading.Thread(target=site.serve_forever, daemon=True).start()
+    site_host = f"127.0.0.1:{site.server_address[1]}"
+
+    jwt_base = os.environ.get("RUSTYBIN_JWT_URL", "").rstrip("/")
+    if not jwt_base:
+        return
+    admin = "ui-admin-token"
+
+    def api(method, path, body=None):
+        req = urllib.request.Request(jwt_base + path, method=method, data=json.dumps(body).encode() if body is not None else None,
+                                     headers={"Content-Type": "application/json", "Authorization": "Bearer " + admin})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                raw = r.read()
+                return r.status, json.loads(raw) if raw else None
+        except urllib.error.HTTPError as e:
+            return e.code, None
+
+    def authorize(client_id, redirect, verifier):
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+        query = urllib.parse.urlencode({
+            "response_type": "code", "client_id": client_id, "redirect_uri": redirect,
+            "code_challenge": challenge, "code_challenge_method": "S256", "state": "e2e"})
+        try:
+            urllib.request.build_opener(_NoRedirect).open(jwt_base + "/_rustybin/oauth/authorize?" + query, timeout=10)
+            raise AssertionError("authorize answered 200")
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers.get("Location") or "", e.read().decode(errors="replace")
+
+    def the_control_plane_takes_a_document_only_when_turned_on():
+        client_id = f"http://{site_host}/agent.json"
+        redirect = "http://127.0.0.1:47912/callback"
+        verifier = "e2e-" + "d" * 50
+        metadata = jwt_base + "/.well-known/oauth-authorization-server/_rustybin/oauth"
+        with urllib.request.urlopen(metadata, timeout=10) as r:
+            assert json.loads(r.read())["client_id_metadata_document_supported"] is False
+        status, _, body = authorize(client_id, redirect, verifier)
+        assert status == 400 and "oauth.client_metadata_documents" in body, (status, body)
+        status, _ = api("PATCH", "/_rustybin/settings", {"values": {
+            "oauth.client_metadata_documents": True, "egress.allow": ["127.0.0.1"], "egress.allow_loopback": True}})
+        assert status == 200, status
+        ctx2 = browser.new_context(viewport={"width": 1280, "height": 860})
+        try:
+            with urllib.request.urlopen(metadata, timeout=10) as r:
+                assert json.loads(r.read())["client_id_metadata_document_supported"] is True
+            status, location, body = authorize(client_id, redirect, verifier)
+            assert status == 302 and location.startswith("/ui/#/authorize/"), (status, location, body)
+            p2 = ctx2.new_page()
+            p2.set_default_timeout(TIMEOUT)
+            p2.on("pageerror", lambda e: console_errors.append(f"[client documents consent] uncaught: {e}"))
+            landed = []
+
+            def callback(route):
+                landed.append(route.request.url)
+                route.fulfill(status=200, content_type="text/plain", body="callback reached")
+
+            ctx2.route("http://127.0.0.1:47912/**", callback)
+            p2.goto(jwt_base + "/ui/#/authorize/" + location[len("/ui/#/authorize/"):] + "&token=" + admin)
+            # The document's name is shown as text, never parsed as HTML.
+            expect(p2.locator("#authorize-client")).to_have_text("Doc <b>agent</b>")
+            # The host the document came from, and the name as its claim.
+            expect(p2.locator("#authorize-document-host")).to_have_text(site_host)
+            expect(p2.locator("#authorize-document")).to_contain_text("own claim")
+            expect(p2.locator("#authorize-document")).to_contain_text(client_id)
+            shot(p2, "jwt", "27-agent-consent-document")
+            p2.locator("label[data-scope=console]").click()
+            p2.locator("#authorize-approve").click()
+            p2.wait_for_url(re.compile(r"^http://127\.0\.0\.1:47912/callback\?"))
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(landed[-1]).query)
+            tokens = oauth_token(jwt_base, client_id, q["code"][0], redirect, verifier)
+            assert tokens["scope"] == "console", tokens
+            assert "list_mocks" in mcp_tool_names(jwt_base, tokens["access_token"])
+        finally:
+            ctx2.close()
+            for key in ("oauth.client_metadata_documents", "egress.allow", "egress.allow_loopback"):
+                api("DELETE", "/_rustybin/settings/" + key)
+        with urllib.request.urlopen(metadata, timeout=10) as r:
+            assert json.loads(r.read())["client_id_metadata_document_supported"] is False
+
+    step("client documents: the control plane takes one only when turned on, the consent page shows its host", the_control_plane_takes_a_document_only_when_turned_on)
+    site.shutdown()
+
+
 def main():
     print(f"console e2e against {BASE}")
     with sync_playwright() as p:
@@ -3935,6 +4184,7 @@ def main():
             run_theme(browser, theme)
         if os.environ.get("RUSTYBIN_JWT_URL"):
             run_jwt(browser)
+        run_client_documents(browser)
         if os.environ.get("RUSTYBIN_SS_URL"):
             run_self_service(browser)
         if os.environ.get("RUSTYBIN_HARNESS_URL"):

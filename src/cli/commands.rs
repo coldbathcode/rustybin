@@ -503,7 +503,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("mcp", "servers", "", "This instance's MCP servers.", NO_FLAGS, [("GET", "/_rustybin/mcp-servers")], false, "mcp servers"),
     cmd!("mcp", "connections", "", "The saved connections.", NO_FLAGS, [("GET", "/_rustybin/mcp-connections")], false, "mcp connections"),
     cmd!("mcp", "connection", "<id>", "One saved connection.", NO_FLAGS, [("GET", "/_rustybin/mcp-connections/{id}")], false, "mcp connection acme"),
-    cmd!("mcp", "save-connection", "<id> --target URL", "Save a connection (its secrets sealed on the instance).", &[Flag::value("--target", "The MCP endpoint"), Flag::value("--name", "A display name"), Flag::value("--transport", "modern, session or legacy"), Flag::value("--mode", "browser or relay"), Flag::value("--auth", "The auth spec as JSON ({\"kind\": \"bearer\"})"), Flag::value("--secret", "name=- (stdin) or name=@file, repeatable (bearer, api_key, password, header:<name>)")], [("PUT", "/_rustybin/mcp-connections/{id}")], false, "mcp save-connection acme --target https://mcp.acme.example/mcp --auth '{\"kind\": \"bearer\"}' --secret bearer=- < token.txt"),
+    cmd!("mcp", "save-connection", "<id> --target URL", "Save a connection (its secrets sealed on the instance).", &[Flag::value("--target", "The MCP endpoint"), Flag::value("--name", "A display name"), Flag::value("--transport", "modern, session or legacy"), Flag::value("--mode", "browser or relay"), Flag::value("--auth", "The auth spec as JSON ({\"kind\": \"bearer\"})"), Flag::value("--oauth-client", "How the OAuth walk names its client: auto, document, registration or given"), Flag::value("--secret", "name=- (stdin) or name=@file, repeatable (bearer, api_key, password, header:<name>)")], [("PUT", "/_rustybin/mcp-connections/{id}")], false, "mcp save-connection acme --target https://mcp.acme.example/mcp --auth '{\"kind\": \"bearer\"}' --secret bearer=- < token.txt"),
     cmd!("mcp", "delete-connection", "<id>", "Forget a saved connection.", NO_FLAGS, [("DELETE", "/_rustybin/mcp-connections/{id}")], true, "mcp delete-connection acme --yes"),
     cmd!("mcp", "check", "<target>", "Run the checks against a server (--junit writes a report).", &[Flag::value("--transport", "modern, session or legacy"), Flag::value("--version", "The protocol version to speak"), Flag::value("--header", "An extra header 'Name: value', repeatable"), Flag::value("--connection", "A saved connection to take the credentials from"), Flag::value("--checks", "Only these checks, comma separated"), Flag::value("--junit", "Write a JUnit report to this file")], [("POST", "/_rustybin/mcp-checks")], false, "mcp check http://localhost:8080/mcp --junit mcp.xml"),
     cmd!("mcp", "runs", "", "The saved check runs.", NO_FLAGS, [("GET", "/_rustybin/mcp-checks")], false, "mcp runs"),
@@ -513,6 +513,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("mcp", "tools", "<target>", "The tools a server offers (tools/list through the relay).", &[Flag::value("--header", "An extra header 'Name: value', repeatable"), Flag::value("--connection", "A saved connection to take the credentials from")], [("POST", "/_rustybin/mcp-relay")], false, "mcp tools http://localhost:8080/mcp"),
     cmd!("mcp", "fetch", "<url>", "Fetch an OAuth discovery document through the instance.", NO_FLAGS, [("POST", "/_rustybin/mcp-relay/fetch")], false, "mcp fetch https://mcp.acme.example/.well-known/oauth-authorization-server"),
     cmd!("mcp", "end-relay", "<session>", "End a relay session.", NO_FLAGS, [("DELETE", "/_rustybin/mcp-relay/{session}")], false, "mcp end-relay 5b2c"),
+    cmd!("mcp", "client-document", "", "The inspector's client ID metadata document (its client id where an authorization server supports one).", NO_FLAGS, [("GET", "/_rustybin/oauth/inspector-client.json")], false, "mcp client-document"),
     // ── Registry ──
     cmd!("registry", "status", "", "The mock registry: scenario, entries, capacity.", NO_FLAGS, [("GET", "/_rustybin/registry")], false, "registry status"),
     cmd!("registry", "publish", "<file>", "Publish a server.json to the mock registry (through its publish API).", NO_FLAGS, [], false, "registry publish server.json"),
@@ -3988,6 +3989,7 @@ async fn mcp(ctx: &mut Ctx, verb: &str) -> Result<()> {
     let first = ctx.args.positional.first().cloned().unwrap_or_default();
     match verb {
         "servers" => get(ctx, "/_rustybin/mcp-servers", &[]).await,
+        "client-document" => get(ctx, "/_rustybin/oauth/inspector-client.json", &[]).await,
         "connections" => get(ctx, "/_rustybin/mcp-connections", &[]).await,
         "connection" => {
             ctx.args.arg(0, "a connection id")?;
@@ -4025,12 +4027,29 @@ async fn mcp(ctx: &mut Ctx, verb: &str) -> Result<()> {
                 };
                 secrets.insert(k.to_string(), json!(value));
             }
+            let mut auth = ctx
+                .json_flag("--auth")?
+                .unwrap_or_else(|| json!({ "kind": "none" }));
+            // How the console's OAuth walk names its client for this
+            // connection (the instance checks the value).
+            if let Some(way) = ctx.args.value("--oauth-client") {
+                if !auth.is_object() {
+                    return Err(Fail::Usage("--auth must be a JSON object".into()));
+                }
+                if auth["kind"] == "none" {
+                    auth["kind"] = json!("oauth");
+                }
+                if !auth["oauth"].is_object() {
+                    auth["oauth"] = json!({});
+                }
+                auth["oauth"]["client"] = json!(way);
+            }
             let body = json!({
                 "name": ctx.args.value("--name").unwrap_or(&first),
                 "target": target,
                 "transport": ctx.args.value("--transport").unwrap_or("modern"),
                 "mode": ctx.args.value("--mode").unwrap_or("relay"),
-                "auth": ctx.json_flag("--auth")?.unwrap_or_else(|| json!({ "kind": "none" })),
+                "auth": auth,
                 "secrets": secrets,
             });
             let reply = ctx

@@ -16,7 +16,7 @@ use crate::mcp::inspector::{self, relay, store, ChecksBody};
 /// server and its variants, the management server, each mock's server)
 /// with its auth, the relay's policy and the check ids.
 pub fn list_mcp_servers(ctx: &CallCtx, access: &Access, _args: &Value) -> Value {
-    let v = inspector::servers_json(&ctx.app, &access.caller);
+    let v = inspector::servers_json(&ctx.app, &access.caller, access.links.base_url());
     let servers = v["servers"].as_array().cloned().unwrap_or_default();
     let summary = format!(
         "{} MCP server(s) on this instance: {}; the relay reaches other hosts in {}",
@@ -300,6 +300,7 @@ pub async fn run_mcp_checks(ctx: &CallCtx, access: &Access, args: &Value, params
         body,
         access.principal(),
         access.has(crate::rbac::Permission::McpConnections),
+        access.links.base_url(),
     ) {
         Ok(s) => s,
         Err((status, message, reason)) => {
