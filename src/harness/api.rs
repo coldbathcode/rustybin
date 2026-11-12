@@ -1146,8 +1146,9 @@ pub async fn patch_cluster_run(
 
 /// `POST /_rustybin/harness/import`: a recording (a HAR file, or the answer
 /// of `GET /_rustybin/requests`), a Postman collection or an Artillery
-/// script as a scenario's `source`. Sends nothing and works with harness
-/// mode off.
+/// script as a scenario's `source`. The body is the document, or a JSON
+/// envelope `{document, format, variables}` that gives values for the
+/// document's variables. Sends nothing and works with harness mode off.
 pub async fn import(
     State(state): State<AppState>,
     Query(q): Query<FormatQuery>,
@@ -1161,30 +1162,39 @@ pub async fn import(
     // An Arazzo document's source descriptions are the mocks the caller reads.
     let caller = crate::control_auth::caller_of(&state, &headers, &extensions);
     let mocks = crate::replay::mocks_for(&state, &caller);
-    match import_document(text, q.format, mocks).await {
+    let read = tokio::task::spawn_blocking(move || {
+        super::import::import_body(&text, q.format.as_deref(), &mocks).map(|i| import_view(&i))
+    })
+    .await
+    .unwrap_or_else(|_| Err("the import did not finish".into()));
+    match read {
         Ok(view) => Json(view).into_response(),
-        Err(e) => error(StatusCode::BAD_REQUEST, e),
+        // Nothing imported for want of variables: their names go along, so
+        // a caller can ask for exactly those and import again.
+        Err(refusal) if !refusal.variables.is_empty() => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": refusal.error, "variables": refusal.variables })),
+        )
+            .into_response(),
+        Err(refusal) => error(StatusCode::BAD_REQUEST, refusal.error),
     }
 }
 
 /// Read a document (JSON, or YAML for an Artillery script) as a scenario's
 /// source, on the blocking pool: a large recording is parsed off the
 /// request workers. `format` names the format instead of reading it from
-/// the document. The route and the tools share this.
+/// the document, `variables` gives values for the document's variables.
+/// The tool's side of the import: the route reads the same through
+/// `import::import_body`.
 pub async fn import_document(
     text: String,
     format: Option<String>,
     mocks: Vec<crate::replay::arazzo::Mock>,
+    variables: super::import::Variables,
 ) -> Result<Value, String> {
-    let format =
-        match format.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
-            None => None,
-            Some(name) => Some(super::import::Format::parse(name).ok_or_else(|| {
-                format!("format: one of {}", super::import::Format::ALL.join(", "))
-            })?),
-        };
+    let format = super::import::format_named(format.as_deref())?;
     tokio::task::spawn_blocking(move || {
-        super::import::import_text_with(&text, format, &mocks).map(|i| import_view(&i))
+        super::import::import_text_given(&text, format, &mocks, &variables).map(|i| import_view(&i))
     })
     .await
     .map_err(|_| "the import did not finish".to_string())?

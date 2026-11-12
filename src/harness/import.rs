@@ -18,8 +18,15 @@
 //! never run and never guessed: it is named in `left_out`. A variable the
 //! document does not define leaves its request out and is named in
 //! `variables`. A program in a scripting language is refused.
+//!
+//! The caller may give values for variables ([`Variables`]): collections
+//! keep their base URL and ids in an environment the document does not
+//! carry. A given value is put in where the document's own would be, and
+//! nothing else about the import changes: credentials are removed after
+//! it, and what comes out is validated like any other source (`fits`).
+//! A value is never in an error, a note or `left_out`, only its name.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -45,6 +52,13 @@ pub const MAX_FOLDER_DEPTH: usize = 16;
 pub const MAX_NAMES: usize = 100;
 /// The largest weight a template takes.
 const MAX_WEIGHT: u32 = 1000;
+/// Variables given with an import, at most.
+pub const MAX_VARIABLES: usize = 64;
+/// The largest value of a given variable.
+pub const MAX_VARIABLE_BYTES: usize = 1024;
+/// The longest name of a given variable (a name in `variables` is cut here
+/// too).
+pub const MAX_VARIABLE_NAME: usize = 64;
 
 /// Never replayed: set by the client, or wrong for another target.
 const DROPPED_HEADERS: &[&str] = &[
@@ -141,6 +155,30 @@ pub struct Imported {
     pub notes: Vec<String>,
 }
 
+/// Why an import made nothing, with the variables that had no value: a
+/// caller can ask for exactly those and import again.
+#[derive(Debug)]
+pub struct Refusal {
+    pub error: String,
+    /// Names only, as [`Imported::variables`] holds them.
+    pub variables: Vec<String>,
+}
+
+impl From<String> for Refusal {
+    fn from(error: String) -> Self {
+        Self {
+            error,
+            variables: Vec::new(),
+        }
+    }
+}
+
+impl From<&str> for Refusal {
+    fn from(error: &str) -> Self {
+        error.to_string().into()
+    }
+}
+
 /// One request, whichever format it came from.
 #[derive(Default)]
 struct Entry {
@@ -225,15 +263,175 @@ fn from_capture(c: &Value) -> Read {
 
 // ── Variables ───────────────────────────────────────────────────────
 
-/// The variables a document defines with one plain value, and the ones it
-/// uses without defining.
-#[derive(Default)]
-struct Vars {
-    defined: BTreeMap<String, String>,
-    missing: Vec<String>,
+/// Values the caller gives for variables of the document, by name in the
+/// document's own syntax (`baseUrl` for `{{baseUrl}}`, `:id` for a Postman
+/// path variable). Checked when made, so one that exists is within the
+/// caps, is no harness placeholder and has no name that looks like a
+/// credential. `Debug` shows the names only.
+#[derive(Clone, Default)]
+pub struct Variables(BTreeMap<String, String>);
+
+impl std::fmt::Debug for Variables {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_set().entries(self.0.keys()).finish()
+    }
 }
 
+impl Variables {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The names given.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
+
+    /// A JSON object of name to value (text, a number, true or false). A
+    /// refusal names the variable, never its value.
+    pub fn from_value(v: &Value) -> Result<Self, String> {
+        let map = match v {
+            Value::Null => return Ok(Self::default()),
+            Value::Object(map) => map,
+            _ => return Err("variables: a map of name to value".into()),
+        };
+        if map.len() > MAX_VARIABLES {
+            return Err(format!("variables: at most {MAX_VARIABLES}"));
+        }
+        let mut out = BTreeMap::new();
+        for (name, value) in map {
+            let name = name.trim();
+            if name.is_empty()
+                || name.chars().count() > MAX_VARIABLE_NAME
+                || name.contains("{{")
+                || name.contains("}}")
+                || name.chars().any(char::is_control)
+            {
+                return Err(format!(
+                    "variables: a name is 1 to {MAX_VARIABLE_NAME} characters as the document writes it, without the braces"
+                ));
+            }
+            if super::scenario::PLACEHOLDERS.contains(&name) {
+                return Err(format!(
+                    "variables.{name}: {{{{{name}}}}} is a placeholder of the harness ({}), which an import never gives a value",
+                    super::scenario::PLACEHOLDERS.join(", ")
+                ));
+            }
+            if looks_secret(name) {
+                return Err(format!(
+                    "variables.{name}: a name that looks like a credential is not taken: an import removes credentials, give the scenario an identity instead"
+                ));
+            }
+            let Some(text) = scalar(value) else {
+                return Err(format!(
+                    "variables.{name}: a value is text, a number, true or false"
+                ));
+            };
+            if text.len() > MAX_VARIABLE_BYTES {
+                return Err(format!(
+                    "variables.{name}: a value is at most {MAX_VARIABLE_BYTES} bytes"
+                ));
+            }
+            if text.contains("{{") {
+                return Err(format!(
+                    "variables.{name}: a value does not hold {{{{, which would read as another variable or a placeholder"
+                ));
+            }
+            out.insert(name.to_string(), text);
+        }
+        Ok(Self(out))
+    }
+}
+
+/// The variables a document defines with one plain value or the caller
+/// gave, and the ones it uses without either.
+#[derive(Default)]
+struct Vars {
+    /// The caller's: they win over the document's.
+    given: BTreeMap<String, String>,
+    defined: BTreeMap<String, String>,
+    missing: Vec<String>,
+    /// The given ones the document used.
+    used: BTreeSet<String>,
+    /// The request being read uses a variable that has no value. Reading
+    /// goes on to its end, so every such variable is named at once.
+    incomplete: bool,
+}
+
+/// Why a request with a variable that has no value is left out.
+const UNRESOLVED: &str = "an unresolved variable";
+
 impl Vars {
+    fn with(given: &Variables) -> Self {
+        Self {
+            given: given.0.clone(),
+            ..Self::default()
+        }
+    }
+
+    /// The value of `name`: the caller's, else the document's.
+    fn value(&mut self, name: &str) -> Option<String> {
+        if let Some(value) = self.given.get(name) {
+            self.used.insert(name.to_string());
+            return Some(value.clone());
+        }
+        self.defined.get(name).cloned()
+    }
+
+    /// Only the caller's value of `name`.
+    fn given(&mut self, name: &str) -> Option<String> {
+        let value = self.given.get(name)?.clone();
+        self.used.insert(name.to_string());
+        Some(value)
+    }
+
+    /// [`Vars::resolve`], without naming what is missing: for a place whose
+    /// variable does not leave the request out (the host).
+    fn resolve_quiet(&mut self, text: &str) -> Option<String> {
+        let (before, incomplete) = (self.missing.len(), self.incomplete);
+        let out = self.resolve(text);
+        self.missing.truncate(before);
+        self.incomplete = incomplete;
+        out
+    }
+
+    /// Start a request.
+    fn begin(&mut self) {
+        self.incomplete = false;
+    }
+
+    /// The request read so far is whole, or the reason it is left out.
+    fn whole(&self) -> Result<(), &'static str> {
+        if self.incomplete {
+            Err(UNRESOLVED)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// [`Vars::resolve`], or nothing with the request marked incomplete.
+    fn put(&mut self, text: &str) -> String {
+        self.resolve(text).unwrap_or_default()
+    }
+
+    /// Say which given variables the document never used (names only), and
+    /// hand over the names that have no value.
+    fn finish(self, out: &mut Imported) {
+        let unused: Vec<&str> = self
+            .given
+            .keys()
+            .filter(|name| !self.used.contains(*name))
+            .map(String::as_str)
+            .collect();
+        if !unused.is_empty() {
+            out.notes.push(format!(
+                "variables: given and not used by the document: {}",
+                unused.join(", ")
+            ));
+        }
+        out.variables = self.missing;
+    }
+
     /// Define `name`, unless its name looks secret or the value is not plain.
     fn define(&mut self, name: &str, value: &Value) {
         let text = match value {
@@ -248,8 +446,8 @@ impl Vars {
         self.defined.insert(name.to_string(), text);
     }
 
-    /// `text` with every `{{name}}` the document defines put in. `None`
-    /// when it uses one the document does not define (named in `missing`):
+    /// `text` with every `{{name}}` the caller gave or the document defines
+    /// put in. `None` when it uses one that has no value (named in `missing`):
     /// a value is never guessed, and a name is never left for the harness
     /// to read as one of its own placeholders.
     fn resolve(&mut self, text: &str) -> Option<String> {
@@ -269,17 +467,20 @@ impl Vars {
                 break;
             };
             let name = after[..end].trim();
-            match self.defined.get(name) {
-                Some(value) => out.push_str(value),
+            match self.value(name) {
+                Some(value) => out.push_str(&value),
                 None => {
                     whole = false;
-                    let shown: String = name.chars().take(64).collect();
+                    let shown: String = name.chars().take(MAX_VARIABLE_NAME).collect();
                     name_once(&mut self.missing, shown);
                 }
             }
             rest = &after[end + 2..];
         }
         out.push_str(rest);
+        if !whole {
+            self.incomplete = true;
+        }
         whole.then_some(out)
     }
 
@@ -351,6 +552,22 @@ fn scalar(v: &Value) -> Option<String> {
 /// query. The host (with its scheme, or a `{{variable}}` standing for it)
 /// is returned apart.
 fn split_raw_url(raw: &str) -> (Option<String>, String, Option<String>) {
+    let (host, path, query) = split_raw(raw);
+    (host.and_then(clean_host), path, query)
+}
+
+/// A host as written (maybe with credentials and a port) as its name. One
+/// that is a variable is no name.
+fn clean_host(host: String) -> Option<String> {
+    Some(host)
+        .filter(|h| !h.contains("{{") && !h.is_empty())
+        .map(|h| h.rsplit('@').next().unwrap_or("").to_string())
+        .map(|h| h.split(':').next().unwrap_or("").to_string())
+        .filter(|h| !h.is_empty())
+}
+
+/// [`split_raw_url`] with the host as it is written, a variable included.
+fn split_raw(raw: &str) -> (Option<String>, String, Option<String>) {
     let raw = raw.trim();
     let raw = raw.split('#').next().unwrap_or("");
     let (host, rest) = if let Some(after) = raw
@@ -374,12 +591,6 @@ fn split_raw_url(raw: &str) -> (Option<String>, String, Option<String>) {
         None => (rest, None),
     };
     let path = if path.is_empty() { "/" } else { path };
-    // A host that is a variable or holds a port keeps only its name.
-    let host = host
-        .filter(|h| !h.contains("{{") && !h.is_empty())
-        .map(|h| h.rsplit('@').next().unwrap_or("").to_string())
-        .map(|h| h.split(':').next().unwrap_or("").to_string())
-        .filter(|h| !h.is_empty());
     (host, path.to_string(), query)
 }
 
@@ -411,6 +622,8 @@ struct Postman<'a> {
     vars: Vars,
     out: &'a mut Imported,
     entries: Vec<Read>,
+    /// Variables in the place of a host that have no value.
+    host_vars: Vec<String>,
 }
 
 impl Postman<'_> {
@@ -472,6 +685,9 @@ impl Postman<'_> {
             weight: 1,
             ..Entry::default()
         };
+        // Read to the end even when a variable has no value, so the answer
+        // names every one the request needs; it is left out all the same.
+        self.vars.begin();
         self.url(&url, &mut entry)?;
         let headers: Vec<(String, String)> = request["header"]
             .as_array()
@@ -482,12 +698,44 @@ impl Postman<'_> {
                     .collect()
             })
             .unwrap_or_default();
-        entry.headers = self
-            .vars
-            .resolve_pairs(headers)
-            .ok_or("an unresolved variable")?;
-        self.body(&request["body"], &mut entry)?;
+        entry.headers = self.vars.resolve_pairs(headers).unwrap_or_default();
+        let body = self.body(&request["body"], &mut entry);
+        self.vars.whole()?;
+        body?;
         Ok(entry)
+    }
+
+    /// The host of a URL as its name, and the path that leads the request
+    /// when a variable in the host's place holds one (`{{baseUrl}}` as
+    /// `https://api.example.com/v1`). A variable without a value is dropped
+    /// with the host, as every host is, and named in a note.
+    fn host(&mut self, raw: Option<String>) -> (Option<String>, String) {
+        let Some(raw) = raw.filter(|h| !h.is_empty()) else {
+            return (None, String::new());
+        };
+        if !raw.contains("{{") {
+            return (clean_host(raw), String::new());
+        }
+        match self.vars.resolve_quiet(&raw) {
+            Some(resolved) => {
+                let (host, path, _) = split_raw_url(&resolved);
+                (host, path.trim_end_matches('/').to_string())
+            }
+            None => {
+                let mut rest = raw.as_str();
+                while let Some(start) = rest.find("{{") {
+                    let after = &rest[start + 2..];
+                    let Some(end) = after.find("}}") else { break };
+                    let name = after[..end].trim();
+                    if self.vars.value(name).is_none() {
+                        let shown: String = name.chars().take(MAX_VARIABLE_NAME).collect();
+                        name_once(&mut self.host_vars, shown);
+                    }
+                    rest = &after[end + 2..];
+                }
+                (None, String::new())
+            }
+        }
     }
 
     fn url(&mut self, url: &Value, entry: &mut Entry) -> Result<(), &'static str> {
@@ -514,14 +762,22 @@ impl Postman<'_> {
                         Value::String(s) => s.as_str(),
                         other => other["value"].as_str().unwrap_or(""),
                     };
+                    let given;
                     let seg = match seg.strip_prefix(':') {
-                        Some(name) if !name.is_empty() => match path_vars.get(name) {
-                            Some(value) => value,
-                            None => {
-                                name_once(&mut self.vars.missing, format!(":{name}"));
-                                return Err("an unresolved variable");
+                        Some(name) if !name.is_empty() => {
+                            given = self.vars.given(&format!(":{name}"));
+                            match (given.as_deref(), path_vars.get(name)) {
+                                (Some(value), _) => value,
+                                (None, Some(value)) => value,
+                                (None, None) => {
+                                    let shown: String =
+                                        name.chars().take(MAX_VARIABLE_NAME - 1).collect();
+                                    name_once(&mut self.vars.missing, format!(":{shown}"));
+                                    self.vars.incomplete = true;
+                                    ""
+                                }
                             }
-                        },
+                        }
                         _ => seg,
                     };
                     path.push('/');
@@ -540,12 +796,17 @@ impl Postman<'_> {
                     ),
                     Value::String(s) => Some(s.clone()),
                     _ => None,
-                }
-                .filter(|h| !h.is_empty() && !h.contains("{{"));
+                };
                 (host, path, None)
             }
-            (None, Some(raw)) => split_raw_url(raw),
+            (None, Some(raw)) => split_raw(raw),
             (None, None) => return Err("not an http request"),
+        };
+        let (host, lead) = self.host(host);
+        let path = match (lead.is_empty(), path.as_str()) {
+            (true, _) => path,
+            (false, "/") => lead,
+            (false, _) => format!("{lead}{path}"),
         };
         if url["protocol"]
             .as_str()
@@ -554,7 +815,7 @@ impl Postman<'_> {
             return Err("not an http request");
         }
         entry.host = host;
-        entry.path = self.vars.resolve(&path).ok_or("an unresolved variable")?;
+        entry.path = self.vars.put(&path);
         // The query as the collection lists it (enabled parameters), else
         // as the raw URL holds it.
         entry.query = match url["query"].as_array() {
@@ -569,14 +830,14 @@ impl Postman<'_> {
                         ))
                     })
                     .collect();
-                self.vars.query(pairs).ok_or("an unresolved variable")?
+                self.vars.query(pairs).unwrap_or_default()
             }
             None => match raw_query {
                 Some(q) => {
                     let pairs: Vec<(String, String)> = form_urlencoded::parse(q.as_bytes())
                         .map(|(k, v)| (k.into_owned(), v.into_owned()))
                         .collect();
-                    self.vars.query(pairs).ok_or("an unresolved variable")?
+                    self.vars.query(pairs).unwrap_or_default()
                 }
                 None => None,
             },
@@ -592,7 +853,7 @@ impl Postman<'_> {
             None | Some("none") => {}
             Some("raw") => {
                 let text = body["raw"].as_str().unwrap_or("");
-                entry.body = Some(self.vars.resolve(text).ok_or("an unresolved variable")?);
+                entry.body = Some(self.vars.put(text));
             }
             Some("urlencoded") => {
                 let pairs: Vec<(String, String)> = body["urlencoded"]
@@ -616,7 +877,7 @@ impl Postman<'_> {
                     if looks_secret(&k) {
                         resolved.push((k, String::new()));
                     } else {
-                        resolved.push((k, self.vars.resolve(&v).ok_or("an unresolved variable")?));
+                        resolved.push((k, self.vars.put(&v)));
                     }
                 }
                 entry.body = Some(form_body(&resolved));
@@ -630,12 +891,9 @@ impl Postman<'_> {
             Some("graphql") => {
                 let query = body["graphql"]["query"].as_str().unwrap_or("");
                 let mut doc = Map::new();
-                doc.insert(
-                    "query".into(),
-                    Value::String(self.vars.resolve(query).ok_or("an unresolved variable")?),
-                );
+                doc.insert("query".into(), Value::String(self.vars.put(query)));
                 if let Some(text) = body["graphql"]["variables"].as_str() {
-                    let text = self.vars.resolve(text).ok_or("an unresolved variable")?;
+                    let text = self.vars.put(text);
                     if let Ok(v) = serde_json::from_str::<Value>(&text) {
                         doc.insert("variables".into(), v);
                     }
@@ -648,7 +906,7 @@ impl Postman<'_> {
     }
 }
 
-fn read_postman(doc: &Value, out: &mut Imported) -> Result<Vec<Read>, String> {
+fn read_postman(doc: &Value, given: &Variables, out: &mut Imported) -> Result<Vec<Read>, String> {
     let schema = doc["info"]["schema"].as_str().unwrap_or("");
     if !schema.contains("/v2.1") {
         return Err(
@@ -656,7 +914,7 @@ fn read_postman(doc: &Value, out: &mut Imported) -> Result<Vec<Read>, String> {
                 .into(),
         );
     }
-    let mut vars = Vars::default();
+    let mut vars = Vars::with(given);
     for v in doc["variable"].as_array().into_iter().flatten() {
         if v["disabled"] == json!(true) {
             continue;
@@ -669,12 +927,24 @@ fn read_postman(doc: &Value, out: &mut Imported) -> Result<Vec<Read>, String> {
         vars,
         out,
         entries: Vec::new(),
+        host_vars: Vec::new(),
     };
     walker.note_item(doc, "collection");
     let items = doc["item"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     walker.walk(items, "", 0);
-    let Postman { vars, entries, .. } = walker;
-    out.variables = vars.missing;
+    let Postman {
+        vars,
+        entries,
+        host_vars,
+        ..
+    } = walker;
+    if !host_vars.is_empty() {
+        out.notes.push(format!(
+            "hosts: a variable in the place of a host has no value and is dropped with the host ({}): give it in variables when it holds a path that leads the requests",
+            host_vars.join(", ")
+        ));
+    }
+    vars.finish(out);
     Ok(entries)
 }
 
@@ -738,6 +1008,8 @@ impl Artillery<'_> {
                             Value::Array(list) if list.len() == 1 => {
                                 self.vars.define(name, &list[0]);
                             }
+                            // The caller's value stands for the list.
+                            Value::Array(_) if self.vars.given.contains_key(name) => {}
                             Value::Array(_) => name_once(
                                 &mut self.out.left_out,
                                 format!("config.variables.{name} (several values)"),
@@ -877,7 +1149,10 @@ impl Artillery<'_> {
             Some((h, q)) => (h, Some(q.to_string()).filter(|q| !q.is_empty())),
             None => (url, None),
         };
-        let head = self.vars.resolve(head).ok_or("an unresolved variable")?;
+        // Read to the end even when a variable has no value, so the answer
+        // names every one the request needs; it is left out all the same.
+        self.vars.begin();
+        let head = self.vars.put(head);
         // An absolute URL names its own host and path; a relative one
         // follows the target's.
         let (host, path) = if head.starts_with("http://") || head.starts_with("https://") {
@@ -911,8 +1186,8 @@ impl Artillery<'_> {
             })
             .unwrap_or_default();
         entry.query = join_query(
-            self.vars.query(from_url).ok_or("an unresolved variable")?,
-            self.vars.query(from_qs).ok_or("an unresolved variable")?,
+            self.vars.query(from_url).unwrap_or_default(),
+            self.vars.query(from_qs).unwrap_or_default(),
         );
         // The defaults, then the request's own (which replace them).
         let own: Vec<(String, String)> = spec
@@ -931,10 +1206,7 @@ impl Artillery<'_> {
             .cloned()
             .collect();
         headers.extend(own);
-        entry.headers = self
-            .vars
-            .resolve_pairs(headers)
-            .ok_or("an unresolved variable")?;
+        entry.headers = self.vars.resolve_pairs(headers).unwrap_or_default();
         // Credentials a step carries outside its headers: removed, named.
         if spec.contains_key("auth") {
             name_once(&mut self.out.removed, "authorization");
@@ -943,7 +1215,7 @@ impl Artillery<'_> {
             name_once(&mut self.out.removed, "cookie");
         }
         if let Some(v) = spec.get("json") {
-            let resolved = self.vars.resolve_value(v).ok_or("an unresolved variable")?;
+            let resolved = self.vars.resolve_value(v).unwrap_or_default();
             entry.body = Some(resolved.to_string());
             if !has_header(&entry.headers, "content-type") {
                 entry
@@ -951,7 +1223,7 @@ impl Artillery<'_> {
                     .push(("content-type".into(), "application/json".into()));
             }
         } else if let Some(text) = spec.get("body").and_then(scalar) {
-            entry.body = Some(self.vars.resolve(&text).ok_or("an unresolved variable")?);
+            entry.body = Some(self.vars.put(&text));
         } else if let Some(form) = spec.get("form").and_then(Value::as_object) {
             let mut pairs = Vec::with_capacity(form.len());
             for (k, v) in form {
@@ -959,10 +1231,7 @@ impl Artillery<'_> {
                 if looks_secret(k) {
                     pairs.push((k.clone(), String::new()));
                 } else {
-                    pairs.push((
-                        k.clone(),
-                        self.vars.resolve(&v).ok_or("an unresolved variable")?,
-                    ));
+                    pairs.push((k.clone(), self.vars.put(&v)));
                 }
             }
             entry.body = Some(form_body(&pairs));
@@ -1000,6 +1269,7 @@ impl Artillery<'_> {
         entry.expect.sort_unstable();
         entry.expect.dedup();
         entry.expect.truncate(32);
+        self.vars.whole()?;
         Ok(entry)
     }
 
@@ -1126,7 +1396,11 @@ fn constant(rate: f64, hold: Duration) -> Pattern {
 /// to be all kept. `None`: the script has no phases.
 type Phases = Option<Result<(Pattern, f64), String>>;
 
-fn read_artillery(doc: &Value, out: &mut Imported) -> Result<(Vec<Read>, Phases), String> {
+fn read_artillery(
+    doc: &Value,
+    given: &Variables,
+    out: &mut Imported,
+) -> Result<(Vec<Read>, Phases), String> {
     let Some(scenarios) = doc["scenarios"].as_array() else {
         return Err("an Artillery script needs scenarios with a flow each".into());
     };
@@ -1136,7 +1410,7 @@ fn read_artillery(doc: &Value, out: &mut Imported) -> Result<(Vec<Read>, Phases)
         }
     }
     let mut reader = Artillery {
-        vars: Vars::default(),
+        vars: Vars::with(given),
         out,
         entries: Vec::new(),
         prefix: String::new(),
@@ -1152,7 +1426,7 @@ fn read_artillery(doc: &Value, out: &mut Imported) -> Result<(Vec<Read>, Phases)
         .unwrap_or(&[]);
     let pattern = (!phases.is_empty()).then(|| reader.pattern(phases));
     let Artillery { vars, entries, .. } = reader;
-    out.variables = vars.missing;
+    vars.finish(out);
     Ok((entries, pattern))
 }
 
@@ -1330,21 +1604,61 @@ pub fn import_as(doc: &Value, format: Option<Format>) -> Result<Imported, String
 /// needs a value the document does not give (a workflow input, an earlier
 /// step's output) is left out and the value named: request templates are
 /// sent by weight, not as a journey, so nothing can be passed on.
+///
+/// A workflow input is a variable (`{{NAME}}`, as `variables` names it), so
+/// the caller may give its value. An earlier step's output is made by a
+/// run and is never given: a scenario has no journeys.
 fn read_arazzo(
     doc: &Value,
     mocks: &[crate::replay::arazzo::Mock],
+    given: &Variables,
     out: &mut Imported,
 ) -> Result<Vec<Read>, String> {
+    if let Some(name) = given.names().find(|n| n.starts_with("steps.")) {
+        return Err(format!(
+            "variables.{name}: the output of a step is made by a run and is never given (run the workflow as a saved test for the journey)"
+        ));
+    }
     let imported = crate::replay::arazzo::import(doc, mocks)?;
     for l in imported.left_out {
         name_once(&mut out.left_out, l);
     }
+    let used = std::cell::RefCell::new(BTreeSet::new());
+    // A given input put in; any other reference stays as it is written.
+    let fill = |text: &str| -> String {
+        crate::replay::run::fill(text, &|name| {
+            Some(match given.0.get(name) {
+                Some(value) => {
+                    used.borrow_mut().insert(name.to_string());
+                    value.clone()
+                }
+                None => format!("{{{{{name}}}}}"),
+            })
+        })
+        .unwrap_or_else(|_| text.to_string())
+    };
     let mut entries = Vec::new();
     for t in &imported.tests {
         for step in &t.steps {
-            let r = &step.request;
+            let mut r = step.request.clone();
+            if !given.is_empty() {
+                r.path = fill(&r.path);
+                for (name, value) in r.headers.iter_mut() {
+                    // A secret-looking header is removed by name later,
+                    // whatever it holds: nothing is put in it.
+                    if !looks_secret(name) {
+                        *value = fill(value);
+                    }
+                }
+                r.body = r.body.as_deref().map(fill);
+            }
             let texts = std::iter::once(r.path.as_str())
-                .chain(r.headers.values().map(String::as_str))
+                .chain(
+                    r.headers
+                        .iter()
+                        .filter(|(name, _)| !looks_secret(name))
+                        .map(|(_, value)| value.as_str()),
+                )
                 .chain(r.body.as_deref());
             let mut needs = false;
             for text in texts {
@@ -1383,6 +1697,14 @@ fn read_arazzo(
             }));
         }
     }
+    let used = used.into_inner();
+    let unused: Vec<&str> = given.names().filter(|n| !used.contains(*n)).collect();
+    if !unused.is_empty() {
+        out.notes.push(format!(
+            "variables: given and not used by the document: {}",
+            unused.join(", ")
+        ));
+    }
     if !out.variables.is_empty() {
         out.notes.push(
             "arazzo: a scenario's requests are sent by weight, not in the order of a workflow: steps that need an input or an earlier step's output are left out (run the workflow as a saved test for the journey)".into(),
@@ -1400,10 +1722,40 @@ pub fn import_with(
     format: Option<Format>,
     mocks: &[crate::replay::arazzo::Mock],
 ) -> Result<Imported, String> {
+    import_given(doc, format, mocks, &Variables::default())
+}
+
+/// [`import_with`], with the values the caller gives for variables of the
+/// document. A given value wins over the document's own. Everything after
+/// the reading is the same: credentials are removed by name, and a request
+/// is kept only when a scenario would take it (`fits`).
+pub fn import_given(
+    doc: &Value,
+    format: Option<Format>,
+    mocks: &[crate::replay::arazzo::Mock],
+    given: &Variables,
+) -> Result<Imported, String> {
+    import_doc(doc, format, mocks, given).map_err(|r| r.error)
+}
+
+/// [`import_given`], its refusal with the variables that had no value.
+fn import_doc(
+    doc: &Value,
+    format: Option<Format>,
+    mocks: &[crate::replay::arazzo::Mock],
+    given: &Variables,
+) -> Result<Imported, Refusal> {
     let format = match format {
         Some(f) => f,
         None => detect(doc)?,
     };
+    if format.recording() && !given.is_empty() {
+        return Err(format!(
+            "variables: a recording ({}) has no variables",
+            format.as_str()
+        )
+        .into());
+    }
     let mut out = Imported {
         format,
         ..Imported::default()
@@ -1425,10 +1777,10 @@ pub fn import_with(
             .take(MAX_ENTRIES)
             .map(from_capture)
             .collect(),
-        Format::Postman => read_postman(doc, &mut out)?,
-        Format::Arazzo => read_arazzo(doc, mocks, &mut out)?,
+        Format::Postman => read_postman(doc, given, &mut out)?,
+        Format::Arazzo => read_arazzo(doc, mocks, given, &mut out)?,
         Format::Artillery => {
-            let (entries, p) = read_artillery(doc, &mut out)?;
+            let (entries, p) = read_artillery(doc, given, &mut out)?;
             phases = p;
             entries
         }
@@ -1493,7 +1845,7 @@ pub fn import_with(
             .insert(format!("rarer than the {MAX_TEMPLATES} kept"), dropped);
     }
     if requests.is_empty() {
-        return Err(if format.recording() {
+        let error = if format.recording() {
             "nothing to replay: every entry was left out".to_string()
         } else {
             let mut why: Vec<String> = out
@@ -1516,6 +1868,10 @@ pub fn import_with(
                     format!("{})", why.join("; "))
                 }
             )
+        };
+        return Err(Refusal {
+            error,
+            variables: out.variables,
         });
     }
     // A template's weight is 1 to 1000: a larger mix keeps its proportions.
@@ -1568,6 +1924,27 @@ pub fn import_text_with(
     format: Option<Format>,
     mocks: &[crate::replay::arazzo::Mock],
 ) -> Result<Imported, String> {
+    import_text_given(text, format, mocks, &Variables::default())
+}
+
+/// [`import_text_with`], with the values the caller gives for variables
+/// ([`import_given`]).
+pub fn import_text_given(
+    text: &str,
+    format: Option<Format>,
+    mocks: &[crate::replay::arazzo::Mock],
+    given: &Variables,
+) -> Result<Imported, String> {
+    import_text_doc(text, format, mocks, given).map_err(|r| r.error)
+}
+
+/// [`import_text_given`], its refusal with the variables that had no value.
+fn import_text_doc(
+    text: &str,
+    format: Option<Format>,
+    mocks: &[crate::replay::arazzo::Mock],
+    given: &Variables,
+) -> Result<Imported, Refusal> {
     let bounded = |doc: &Value, format: Option<Format>| -> Result<(), String> {
         let format = match format {
             Some(f) => f,
@@ -1584,7 +1961,7 @@ pub fn import_text_with(
     if let Ok(doc) = serde_json::from_str::<Value>(text) {
         if doc.is_object() || doc.is_array() {
             bounded(&doc, format)?;
-            return import_with(&doc, format, mocks);
+            return import_doc(&doc, format, mocks, given);
         }
     }
     let refused = || {
@@ -1597,15 +1974,88 @@ pub fn import_text_with(
         return Err(format!(
             "a collection or a script is at most {} MiB",
             MAX_TEXT_BYTES / (1024 * 1024)
-        ));
+        )
+        .into());
     }
     match serde_yaml::from_str::<Value>(text) {
         // A mapping that is none of the formats is as likely a program
         // that happens to read as YAML (a line ending in a colon).
         Ok(doc) if doc.is_object() && (format.is_some() || detect(&doc).is_ok()) => {
-            import_with(&doc, format, mocks)
+            import_doc(&doc, format, mocks, given)
         }
-        _ => Err(refused()),
+        _ => Err(refused().into()),
+    }
+}
+
+/// The keys of an import's envelope.
+const ENVELOPE_KEYS: &[&str] = &["document", "format", "variables"];
+
+/// A format by its name, or the refusal that lists them.
+pub fn format_named(name: Option<&str>) -> Result<Option<Format>, String> {
+    match name.map(str::trim).filter(|f| !f.is_empty()) {
+        None => Ok(None),
+        Some(name) => Format::parse(name)
+            .map(Some)
+            .ok_or_else(|| format!("format: one of {}", Format::ALL.join(", "))),
+    }
+}
+
+/// Turn the body of an import request into request templates: the document
+/// bare ([`import_text_given`]), or a JSON envelope `{document, format,
+/// variables}` whose `document` is the document's text or the document
+/// itself. `format` is the one the request names beside the body; the
+/// envelope's own wins. A refusal says which variables had no value.
+pub fn import_body(
+    body: &str,
+    format: Option<&str>,
+    mocks: &[crate::replay::arazzo::Mock],
+) -> Result<Imported, Refusal> {
+    // An envelope is a JSON object with `document` that is none of the
+    // formats itself. Only a body that could be one is parsed for it.
+    let envelope = (body.trim_start().starts_with('{') && body.contains("\"document\""))
+        .then(|| serde_json::from_str::<Value>(body).ok())
+        .flatten()
+        .and_then(|v| match v {
+            Value::Object(map) if map.contains_key("document") => Some(map),
+            _ => None,
+        })
+        .filter(|map| {
+            map.keys().all(|k| ENVELOPE_KEYS.contains(&k.as_str()))
+                || detect(&Value::Object(map.clone())).is_err()
+        });
+    let Some(mut envelope) = envelope else {
+        return import_text_doc(body, format_named(format)?, mocks, &Variables::default());
+    };
+    if let Some(other) = envelope
+        .keys()
+        .find(|k| !ENVELOPE_KEYS.contains(&k.as_str()))
+    {
+        let shown: String = other.chars().take(64).collect();
+        return Err(format!("{shown}: an import takes document, format and variables").into());
+    }
+    let format = match envelope.get("format") {
+        None | Some(Value::Null) => format_named(format)?,
+        Some(Value::String(name)) => format_named(Some(name))?,
+        Some(_) => return Err(format!("format: one of {}", Format::ALL.join(", ")).into()),
+    };
+    let given = Variables::from_value(envelope.get("variables").unwrap_or(&Value::Null))?;
+    match envelope.remove("document") {
+        Some(Value::String(text)) => import_text_doc(&text, format, mocks, &given),
+        Some(doc @ (Value::Object(_) | Value::Array(_))) => {
+            let read_as = match format {
+                Some(f) => f,
+                None => detect(&doc)?,
+            };
+            if !read_as.recording() && body.len() > MAX_TEXT_BYTES {
+                return Err(format!(
+                    "a collection or a script is at most {} MiB",
+                    MAX_TEXT_BYTES / (1024 * 1024)
+                )
+                .into());
+            }
+            import_doc(&doc, format, mocks, &given)
+        }
+        _ => Err("document: the document, or its text".into()),
     }
 }
 

@@ -3381,6 +3381,44 @@ def import_recording(page):
     expect(page.locator("#harness-yaml")).to_have_value(re.compile(r"rate: 3"))
     expect(page.locator("#harness-imported")).to_contain_text("config.processor")
     assert "abc123" not in page.locator("#harness-yaml").input_value()
+    # A collection whose base URL and ids live in an environment: nothing
+    # imports, the form asks for the variables, and the same file imports
+    # whole with their values. The Authorization header never arrives.
+    collection = {
+        "info": {"name": "Shop", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+        "item": [
+            {"name": "A user", "request": {"method": "GET",
+                "header": [{"key": "Authorization", "value": "Bearer {{who}}"}],
+                "url": {"raw": "{{baseUrl}}/users/{{userId}}", "host": ["{{baseUrl}}"], "path": ["users", "{{userId}}"]}}},
+            {"name": "Its orders", "request": {"method": "GET", "header": [],
+                "url": {"raw": "{{baseUrl}}/users/{{userId}}/orders/:order", "host": ["{{baseUrl}}"],
+                        "path": ["users", "{{userId}}", "orders", ":order"]}}},
+        ],
+    }
+    page.set_input_files("#harness-import", files=[{
+        "name": "shop.postman_collection.json", "mimeType": "application/json",
+        "buffer": json.dumps(collection).encode(),
+    }])
+    form = page.locator("#harness-import-vars")
+    expect(form).to_be_visible()
+    expect(page.locator("#harness-imported")).to_contain_text("nothing to import")
+    form.get_by_label("Value of userId").fill("7")
+    form.get_by_label("Value of :order").fill("o-42")
+    page.click("#harness-import-var-add")
+    form.get_by_label("Variable name").last.fill("baseUrl")
+    form.get_by_label("Variable value").last.fill("https://api.example.com/v1")
+    page.click("#harness-import-again")
+    expect(page.locator("#harness-yaml")).to_have_value(re.compile(r"/v1/users/7/orders/o-42"))
+    expect(page.locator("#harness-yaml")).to_have_value(re.compile(r"/v1/users/7['\"]?\n"))
+    assert "authorization" not in page.locator("#harness-yaml").input_value().lower()
+    # A placeholder of the harness is refused by name; the form stays.
+    page.click("#harness-import-var-add")
+    form = page.locator("#harness-import-vars")
+    form.get_by_label("Variable name").last.fill("seq")
+    form.get_by_label("Variable value").last.fill("1")
+    page.click("#harness-import-again")
+    expect(page.locator("#harness-imported")).to_contain_text("variables.seq")
+    expect(page.locator("#harness-import-vars")).to_be_visible()
 
 
 def spec_fetch_refused(page):

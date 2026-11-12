@@ -565,7 +565,8 @@ with the reason in `left_out`.
 **Variables** (`{{name}}` in both formats): one the document defines with a single plain
 value is put in. Any other (an environment variable, a captured value, `{{$guid}}`) is
 never guessed: its request is left out, counted in `skipped`, and the name is listed in
-`variables`. Define it in the collection or the script and import again. A variable whose
+`variables`. Define it in the collection or the script, or
+[give its value with the import](#giving-the-variables-their-values). A variable whose
 name looks secret is never put in, and credentials are removed as for a recording.
 
 A program in a scripting language (a k6 or Locust script, an Artillery processor) is refused
@@ -581,6 +582,55 @@ layer takes.
 {{#include ../examples/harness/api.hurl:harness_import_artillery}}
 ```
 
+### Giving the variables their values
+
+A collection usually keeps its base URL and ids in an environment the exported file does
+not carry, so it can import as nothing: every request waits for a variable. Give the values
+with the import. On the API the body becomes an envelope, `{"document": ..., "format": ...,
+"variables": {...}}`, where `document` is the document or its text (a YAML script travels
+as text) and `format` is optional:
+
+```json
+{{#include ../examples/harness/import-variables.json}}
+```
+
+```hurl
+{{#include ../examples/harness/api.hurl:harness_import_variables}}
+```
+
+- A name is written as the document writes it, without the braces: `baseUrl` for
+  `{{baseUrl}}`, `:order` for a Postman path variable. **A given value wins** over the
+  document's own (the collection above says `version` is `v1`).
+- A variable in the place of a Postman URL's host (`{{baseUrl}}/orders`) is a base URL: its
+  host is listed in `hosts` and dropped as every host is, and its path leads the requests.
+  Without a value it is dropped with the host, and `notes` says so.
+- **The answer keeps naming what is still undefined** in `variables`, every variable a
+  left-out request needs, so one more round finishes the job. When nothing imports at all,
+  the `400` carries the same `variables` list. A given variable the document never uses is
+  named in `notes`.
+- **Never a credential.** A name that looks like one (`token`, `apiKey`, `password`) is
+  refused, and a value that lands in a secret-looking header or query parameter is removed
+  with it, as the document's own would be: the `Authorization` header above is gone
+  whatever `session` holds. Give the scenario an
+  [identity](#traffic-from-mocks-identities-protocols-and-faults) instead. A value is never
+  logged, never in the audit log and never in an error, which names the variable only.
+- **Never a placeholder.** `seq`, `vu`, `run`, `node`, `layer`, `rand`, `id` and `ip` are the
+  harness's own `{{placeholders}}`: a variable of that name is refused, a value may not hold
+  `{{`, and a request whose text still reads as a placeholder once the values are in is left
+  out. An import cannot change what a placeholder means.
+- At most 64 variables, 1 KiB each, text, numbers or `true` and `false`. A recording has no
+  variables: giving one with a HAR file or captures is refused.
+- Nothing about safety changes with a value: what comes out is still a scenario's `source`,
+  validated and allowlisted like a hand-written one, and it still names its own target.
+
+| Surface | How |
+|---|---|
+| API | `POST /_rustybin/harness/import` with the envelope `{document, format, variables}` |
+| Console | Load test, the builder's file field: when the file leaves requests out for variables, a form under it lists them (and takes one more, such as a base URL); **Import again** sends the same file with the values |
+| Management MCP | `import_scenario` with `variables`, a map of name to value |
+| CLI | `rustybin harness import shop.postman_collection.json --var baseUrl=https://api.example.com/shop --var :order=o-42` (repeatable) |
+| `rustybin.yaml` | Nothing: an import is a conversion, its result is a scenario |
+
 ## Importing an Arazzo document
 
 The import also reads an [Arazzo](saved-tests.md#arazzo-workflows) 1.0 document
@@ -590,7 +640,10 @@ A step's `$statusCode` criterion is the template's `expect_status`.
 
 A scenario's requests are sent by weight, not as a journey, so nothing can be passed
 from one to the next: a step that needs a workflow input or an earlier step's output
-is left out, and the value is named in `variables`. Load test the steps that stand
+is left out, and the value is named in `variables`. A workflow input can be
+[given with the import](#giving-the-variables-their-values) under the name `variables`
+shows (`PETNAME` for the input `petName`); an earlier step's output cannot, since only a
+run makes it. Load test the steps that stand
 alone here, and run the whole journey as a multi-step saved test. Both steps of the
 example document need a value, so the import says so:
 

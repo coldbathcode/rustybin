@@ -4994,6 +4994,61 @@ async fn git_branch_and_signing_tools() {
     assert!(!r.to_string().contains(private.as_str()));
 }
 
+/// Core next step 18: `import_scenario` takes values for the document's
+/// variables. A placeholder's name and a credential's are refused, and a
+/// value is in no summary and, where a credential would be, in no answer.
+#[tokio::test]
+async fn import_scenario_takes_variables() {
+    const VALUE: &str = "v4lue-that-must-not-survive";
+    let app = app_with(Config::for_tests());
+    let collection = json!({
+        "info": { "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+        "item": [{ "name": "a", "request": { "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{who}}" }],
+            "url": "{{baseUrl}}/orders/{{orderId}}" } }]
+    })
+    .to_string();
+    let r = tool(
+        &app,
+        &[],
+        "import_scenario",
+        json!({ "document": collection }),
+    )
+    .await;
+    assert!(is_error(&r), "{r}");
+    assert!(text_of(&r).contains("orderId"), "{r}");
+    let r = tool(
+        &app,
+        &[],
+        "import_scenario",
+        json!({ "document": collection, "variables": { "baseUrl": "https://api.example.com/v1", "orderId": "42", "who": VALUE } }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    let s = &r["structuredContent"];
+    assert_eq!(s["source"]["requests"][0]["path"], "/v1/orders/42");
+    assert_eq!(s["variables"], json!([]));
+    assert_eq!(s["removed"], json!(["authorization"]));
+    assert!(text_of(&r).contains("0 variable(s) not defined"), "{r}");
+    assert!(!r.to_string().contains(VALUE), "{r}");
+    for (variables, why) in [
+        (json!({ "seq": VALUE }), "variables.seq:"),
+        (json!({ "api_key": VALUE }), "variables.api_key:"),
+        (json!([VALUE]), "variables: a map of name to value"),
+    ] {
+        let r = tool(
+            &app,
+            &[],
+            "import_scenario",
+            json!({ "document": collection, "variables": variables }),
+        )
+        .await;
+        assert!(is_error(&r), "{r}");
+        assert!(text_of(&r).starts_with(why), "{why}: {r}");
+        assert!(!r.to_string().contains(VALUE), "{r}");
+    }
+}
+
 /// Core next step 13: a collection or a script as text. What does not map
 /// is named, a program is refused, nothing is sent.
 #[tokio::test]
