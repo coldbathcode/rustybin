@@ -752,6 +752,58 @@ async fn a_hop_outside_the_allowlist_refuses_the_run() {
     stop_all(vec![server, client]).await;
 }
 
+/// Core next step 21: a hop over HTTP/3 is for a build with the cargo
+/// feature `harness-http3`. One without it refuses the run by the feature's
+/// name before anything is prepared or sent; one with it takes the scenario.
+#[tokio::test]
+async fn an_h3_hop_needs_the_feature() {
+    let (server, app, _state) = running(both()).await;
+    let url = format!("http://{}", server.http_addr);
+    // A UDP port nobody answers on: nothing here is to reach it.
+    let hops = json!([{ "url": "https://127.0.0.1:9", "http": "h3", "insecure": true }]);
+    let (status, v) = send(
+        &app,
+        Method::POST,
+        "/_rustybin/harness/validate",
+        Some(scenario(&url, 10, "1s", hops.clone())),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["scenario"]["servers"]["chain"]["hops"][0]["http"], "h3");
+    if cfg!(feature = "harness-http3") {
+        assert_eq!(v["valid"], true, "{v}");
+    } else {
+        assert_eq!(v["valid"], false, "{v}");
+        let needle =
+            "servers.chain.hops[0].http: h3 needs a build with the cargo feature harness-http3";
+        assert!(
+            v["problems"][0].as_str().unwrap().starts_with(needle),
+            "{v}"
+        );
+        let (status, v) = start(&app, scenario(&url, 10, "1s", hops)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+        assert!(
+            v["problems"][0].as_str().unwrap().starts_with(needle),
+            "{v}"
+        );
+        let (_, list) = send(&app, Method::GET, "/_rustybin/harness/runs", None).await;
+        assert_eq!(list["runs"].as_array().unwrap().len(), 0, "nothing started");
+    }
+    // In every build HTTP/3 is TLS.
+    let plain = json!([{ "url": "http://127.0.0.1:9", "http": "h3" }]);
+    let (status, v) = start(&app, scenario(&url, 10, "1s", plain)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    assert!(
+        v["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p.as_str().unwrap().contains("h3 needs an https hop")),
+        "{v}"
+    );
+    stop_all(vec![server]).await;
+}
+
 #[tokio::test]
 async fn an_unverified_hop_refuses_the_run() {
     let mut config = both();

@@ -718,7 +718,13 @@ impl RunEntry {
             Some(left) if !self.is_done() => chain.gate().renew(left),
             _ => chain.gate().end(),
         }
-        *self.chain.lock().unwrap_or_else(|p| p.into_inner()) = Some(chain);
+        *self.chain.lock().unwrap_or_else(|p| p.into_inner()) = Some(chain.clone());
+        // The end has the last word here too: a run that ended before its
+        // chain was kept leaves no connection of it open.
+        if self.is_done() {
+            chain.gate().end();
+            chain.shut();
+        }
     }
 
     /// The run is live for `period` from now: a single node says so when
@@ -744,6 +750,9 @@ impl RunEntry {
         *self.chain_live.lock().unwrap_or_else(|p| p.into_inner()) = None;
         if let Some(chain) = self.chain() {
             chain.gate().end();
+            // No call from here on, so no connection either (the QUIC
+            // ones of an `h3` hop; a run live again opens new ones).
+            chain.close_connections();
         }
     }
 
@@ -794,8 +803,12 @@ impl RunEntry {
 
     pub fn finish(&self) {
         self.done.store(true, std::sync::atomic::Ordering::Relaxed);
-        // The run is over: its chain makes no call from here on.
+        // The run is over: its chain makes no call from here on, and the
+        // QUIC connections of its `h3` hops are closed for good.
         self.chain_not_live();
+        if let Some(chain) = self.chain() {
+            chain.shut();
+        }
     }
 
     /// Whether this node is down for churn now: in each `every`, server

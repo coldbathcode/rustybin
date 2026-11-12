@@ -1737,9 +1737,20 @@ fn validate_chain(chain: &Chain, p: &mut Vec<String>) {
                     HttpVersion::H2c if parsed.tls() => p.push(format!(
                         "{here}.http: h2c is for plain connections (use h2 with https)"
                     )),
-                    HttpVersion::H3 => p.push(format!(
-                        "{here}.http: a hop is called over HTTP/1.1 or HTTP/2 (the server role has no HTTP/3 client)"
-                    )),
+                    // As for a target: only a build with the feature has
+                    // the HTTP/3 client, and HTTP/3 is always TLS.
+                    HttpVersion::H3 => {
+                        if !http3_built() {
+                            p.push(format!(
+                                "{here}.http: h3 needs a build with the cargo feature {HTTP3_FEATURE} (cargo build --features {HTTP3_FEATURE}); this build has no QUIC stack"
+                            ));
+                        }
+                        if !parsed.tls() {
+                            p.push(format!(
+                                "{here}.http: h3 needs an https hop (HTTP/3 is always TLS)"
+                            ));
+                        }
+                    }
                     _ => {}
                 }
                 if hop.path.starts_with('/')
@@ -2701,7 +2712,7 @@ pub fn schema(caps: &Caps) -> Value {
                                                 "url": json!({ "type": "string", "description": "The hop's URL (http or https), without query or fragment: a gateway, allowed and verified like a target.", "maxLength": 2048, "format": "uri" }),
                                                 "path": json!({ "type": "string", "description": "The one path the call asks for, after the URL's own. Never a Rustybin control plane path, no placeholders.", "default": "/", "maxLength": 2048, "pattern": "^/" }),
                                                 "host": string("Host header and TLS server name to send instead of the URL's host.", 253),
-                                                "http": enumeration("Protocol: auto (ALPN on TLS, HTTP/1.1 on plain), h1, h2 (TLS only), h2c (prior knowledge on plain connections).", &["auto", "h1", "h2", "h2c"], "auto"),
+                                                "http": enumeration("Protocol: auto (ALPN on TLS, HTTP/1.1 on plain), h1, h2 (TLS only), h2c (prior knowledge on plain connections), h3 (HTTP/3 over QUIC, https only; needs a build with the cargo feature harness-http3 on the server nodes, else the scenario is refused).", &["auto", "h1", "h2", "h2c", "h3"], "auto"),
                                                 "insecure": prop("boolean", "Skip TLS certificate verification (demo gateways with self-signed certificates).")
                                             },
                                             "required": ["url"],
@@ -3331,6 +3342,57 @@ mod tests {
             .any(|p| p.contains("h3 needs an https target")));
     }
 
+    /// Core next step 21: a chain hop takes `http: h3` like a target. It is
+    /// in the schema of every build, and a build without the cargo feature
+    /// refuses it at validation with a message that names the feature.
+    #[test]
+    fn an_h3_hop_is_in_the_schema_and_refused_without_the_feature() {
+        let root = schema(&Caps::default());
+        let http = &root["properties"]["servers"]["properties"]["chain"]["properties"]["hops"]
+            ["items"]["oneOf"][1]["properties"]["http"];
+        assert!(
+            http["enum"]
+                .as_array()
+                .is_some_and(|e| e.contains(&json!("h3"))),
+            "{http}"
+        );
+        assert!(http["description"]
+            .as_str()
+            .is_some_and(|d| d.contains(HTTP3_FEATURE)));
+        // Mixed chains: a plain target with an `h3` hop and a hop over TCP.
+        let mut s = Scenario::parse(
+            "name: q\ntarget: http://gw.example\nsource: { request: { path: / } }\npattern: { type: constant, rate: 1, for: 1s }\nservers: { chain: { hops: [{ url: 'https://gw.example:4433', http: h3, path: /inner }, 'http://gw.example/last'] } }\n",
+        )
+        .expect("parses in every build");
+        s.normalise();
+        let hop = |s: &Scenario| s.servers.chain.as_ref().expect("chain").hops[0].clone();
+        assert_eq!(hop(&s).http, HttpVersion::H3);
+        assert_eq!(
+            serde_json::to_value(&s).unwrap()["servers"]["chain"]["hops"][0]["http"],
+            "h3"
+        );
+        let problems = s.validate(&Caps::default());
+        if http3_built() {
+            assert!(problems.is_empty(), "{problems:#?}");
+        } else {
+            assert_eq!(problems.len(), 1, "{problems:#?}");
+            assert!(
+                problems[0].starts_with(
+                    "servers.chain.hops[0].http: h3 needs a build with the cargo feature harness-http3"
+                ),
+                "{problems:#?}"
+            );
+        }
+        // Whatever the build: HTTP/3 is TLS.
+        if let Some(chain) = s.servers.chain.as_mut() {
+            chain.hops[0].url = "http://gw.example:4433".into();
+        }
+        assert!(s
+            .validate(&Caps::default())
+            .iter()
+            .any(|p| p.contains("servers.chain.hops[0].http: h3 needs an https hop")));
+    }
+
     #[test]
     fn full_scenario_normalises_and_validates() {
         let mut s = full();
@@ -3436,8 +3498,8 @@ mod tests {
                 "servers.chain.hops[0].http: h2c is for plain connections",
             ),
             (
-                "{ hops: [{ url: 'https://a.example', http: h3 }] }",
-                "the server role has no HTTP/3 client",
+                "{ hops: [{ url: 'http://a.example', http: h3 }] }",
+                "servers.chain.hops[0].http: h3 needs an https hop",
             ),
             (
                 "{ hops: [{ url: 'http://a.example', host: 'not a host' }] }",
