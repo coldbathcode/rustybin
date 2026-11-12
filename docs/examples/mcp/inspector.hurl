@@ -15,6 +15,43 @@ jsonpath "$.relay.allow_loopback" isBoolean
 jsonpath "$.checks[*].id" contains "tools_call"
 # ANCHOR_END: servers
 
+# ANCHOR: client_document
+# The inspector's client ID metadata document: open, nothing secret. Its URL
+# is the client id, and its only redirect URI is the console's callback.
+GET {{base_url}}/_rustybin/oauth/inspector-client.json
+HTTP 200
+[Asserts]
+jsonpath "$.client_id" == "{{base_url}}/_rustybin/oauth/inspector-client.json"
+jsonpath "$.client_name" == "Rustybin MCP inspector"
+jsonpath "$.redirect_uris" count == 1
+jsonpath "$.redirect_uris[0]" == "{{base_url}}/ui/callback"
+jsonpath "$.token_endpoint_auth_method" == "none"
+jsonpath "$.grant_types" contains "authorization_code"
+
+# Whether an authorization server can use it: not from a loopback address.
+GET {{base_url}}/_rustybin/mcp-servers
+HTTP 200
+[Asserts]
+jsonpath "$.client_document.url" == "{{base_url}}/_rustybin/oauth/inspector-client.json"
+jsonpath "$.client_document.redirect_uri" == "{{base_url}}/ui/callback"
+jsonpath "$.client_document.usable" == false
+jsonpath "$.client_document.reason" contains "loopback"
+jsonpath "$.client_document.ways" contains "document"
+# ANCHOR_END: client_document
+
+# ANCHOR: client_document_check
+# The check walks the discovery and, where the authorization server says it
+# supports documents, offers this instance's. The mock identity provider
+# behind /mcp/protected does not say so: skipped, with the reason.
+POST {{base_url}}/_rustybin/mcp-checks
+Content-Type: application/json
+{"target": "/mcp/protected", "checks": ["client_document"], "save": false}
+HTTP 200
+[Asserts]
+jsonpath "$.checks[?(@.id == 'client_document')].status" contains "skip"
+jsonpath "$.checks[?(@.id == 'client_document')].message" contains "does not say client_id_metadata_document_supported"
+# ANCHOR_END: client_document_check
+
 # ANCHOR: relay
 POST {{base_url}}/_rustybin/mcp-relay
 Content-Type: application/json

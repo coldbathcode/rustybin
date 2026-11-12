@@ -715,10 +715,13 @@ pub enum Purpose {
     /// An AsyncAPI mock's messages posted to a webhook subscriber
     /// (`crate::events`).
     Events,
+    /// The client ID metadata document of an agent signing in to
+    /// `/_rustybin/mcp` (`crate::control_oauth::client_docs`).
+    ClientMetadata,
 }
 
 impl Purpose {
-    pub const ALL: [Purpose; 15] = [
+    pub const ALL: [Purpose; 16] = [
         Purpose::Assist,
         Purpose::McpRelay,
         Purpose::Registry,
@@ -734,6 +737,7 @@ impl Purpose {
         Purpose::Sso,
         Purpose::Record,
         Purpose::Events,
+        Purpose::ClientMetadata,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -753,6 +757,7 @@ impl Purpose {
             Purpose::Sso => "sso",
             Purpose::Record => "record",
             Purpose::Events => "events",
+            Purpose::ClientMetadata => "client_metadata",
         }
     }
 
@@ -774,6 +779,7 @@ impl Purpose {
             Purpose::Sso => "Single sign-on provider",
             Purpose::Record => "Recordings of a real API",
             Purpose::Events => "Event mock webhooks",
+            Purpose::ClientMetadata => "Client ID metadata documents of agents signing in",
         }
     }
 
@@ -798,6 +804,9 @@ impl Purpose {
             Purpose::Record => "RUSTYBIN_EGRESS_ALLOW only (the APIs recorded; no default)",
             Purpose::Events => {
                 "RUSTYBIN_EGRESS_ALLOW only (the webhook subscribers of event mocks; no default)"
+            }
+            Purpose::ClientMetadata => {
+                "RUSTYBIN_EGRESS_ALLOW only (the hosts of the clients' documents; no default), and only with oauth.client_metadata_documents on"
             }
         }
     }

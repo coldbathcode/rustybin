@@ -111,7 +111,7 @@ route's:
 | Request | Also needs |
 |---|---|
 | `DELETE /_rustybin/requests` without `?session=` (everyone's captures) | `traffic.clear` (one session's need only `traffic.read`) |
-| A settings change (`PATCH /_rustybin/settings`, `DELETE /_rustybin/settings/{key}`, a document's `settings:`) of `egress.*`, `proxy.*`, `agents.*`, `console.*`, `sso.*`, `assist.provider` or `assist.base_url` | `settings.security` |
+| A settings change (`PATCH /_rustybin/settings`, `DELETE /_rustybin/settings/{key}`, a document's `settings:`) of `egress.*`, `proxy.*`, `agents.*`, `oauth.*`, `console.*`, `sso.*`, `assist.provider` or `assist.base_url` | `settings.security` |
 | A settings change of a `portal.*` setting | `portal.settings` |
 | A settings change of a `git.*` setting (the remote and the automatic mode decide where the whole instance is pushed and what a pull applies) | `git.write` |
 | A settings change (or a document's `settings:`) of `sso.role_map` or `sso.default_roles` | every permission of each role named (in its project for `project:role`): nobody grants more than they hold, through the provider's groups included |

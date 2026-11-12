@@ -80,8 +80,11 @@ pub const REPOSITORY_REFUSED: [&str; 7] = [
 /// source control itself (`git.*`: the remote, the branch, the automatic
 /// mode, commit signing), so a pusher cannot move an instance to another
 /// branch or remote. The `git` group is never exported either
-/// ([`SKIPPED_GROUPS`]), so only a hand-written document names one.
-pub const REPOSITORY_REFUSED_PREFIXES: [&str; 3] = ["sso.", "audit.", "git."];
+/// ([`SKIPPED_GROUPS`]), so only a hand-written document names one. And the
+/// OAuth sign-in of agents (`oauth.*`: whether the instance fetches a
+/// client's metadata document, a call out for a caller who has not signed
+/// in), which is the operator's alone to turn on.
+pub const REPOSITORY_REFUSED_PREFIXES: [&str; 4] = ["sso.", "audit.", "git.", "oauth."];
 
 /// Does a document from the repository leave this setting alone?
 pub fn repository_refused(key: &str) -> bool {

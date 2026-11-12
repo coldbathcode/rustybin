@@ -11,7 +11,7 @@ import { jsonView, codeBlock, headersTable } from '../lib/format.js';
 import { SERVER, send, getJson, maskCredential } from '../lib/http.js';
 import { schemaForm, promptArgsSchema } from '../lib/schemaform.js';
 import { McpClient, VERSIONS, MODERN, transportOf, exportSession } from '../lib/mcpclient.js';
-import { MODES, buildAuth, withQuery, oauthWalk, refreshToken } from '../lib/mcpauth.js';
+import { MODES, CLIENT_WAYS, buildAuth, withQuery, oauthWalk, refreshToken } from '../lib/mcpauth.js';
 import * as settings from '../lib/settings.js';
 import * as auth from '../lib/auth.js';
 import * as assist from '../lib/assist.js';
@@ -22,7 +22,7 @@ const SOURCES = [['instance', 'This instance'], ['saved', 'Saved'], ['url', 'Ano
 // OAuth walk fetched): the console's own control token never goes in here,
 // it is added at send time for this instance's management server only.
 function defaultAuth() {
-  return { kind: 'none', token: '', name: 'X-API-Key', location: 'header', key: '', username: '', password: '', headers: [['', '']], grant: 'authorization_code', clientId: '', clientSecret: '', scope: '' };
+  return { kind: 'none', token: '', name: 'X-API-Key', location: 'header', key: '', username: '', password: '', headers: [['', '']], grant: 'authorization_code', clientWay: 'auto', clientId: '', clientSecret: '', scope: '' };
 }
 
 function defaultState() {
@@ -59,6 +59,8 @@ export default {
     let servers = [];
     let checksList = [];
     let relayInfo = null;
+    // This instance's client ID metadata document ({url, usable, reason, document}).
+    let clientDoc = null;
     let saved = [];
     let client = null;
     let server = null;
@@ -196,7 +198,8 @@ export default {
       const c = saved.find((x) => x.id === st.saved);
       if (!c) return null;
       const secrets = Object.entries(c.secrets || {}).map(([k, v]) => k + (v.hint ? ' (ends in ' + v.hint + ')' : ''));
-      return h('div', { class: 'small muted' }, 'Auth ', (c.auth && c.auth.kind) || 'none', secrets.length ? ', credentials kept on the instance: ' + secrets.join(', ') : '', '.');
+      const way = c.auth && c.auth.oauth && c.auth.oauth.client;
+      return h('div', { class: 'small muted' }, 'Auth ', (c.auth && c.auth.kind) || 'none', way ? ' (client: ' + String(way) + ')' : '', secrets.length ? ', credentials kept on the instance: ' + secrets.join(', ') : '', '.');
     }
 
     // ── Auth ──
@@ -246,9 +249,15 @@ export default {
         const getBtn = h('button', { class: 'btn', type: 'button', id: 'mcp-oauth-start' }, icon('token'), 'Get a token');
         getBtn.addEventListener('click', () => runOAuth(getBtn));
         const refreshBtn = oauthState && oauthState.refresh ? h('button', { class: 'btn sm', type: 'button', onclick: doRefresh }, icon('refresh'), 'Refresh the token') : null;
+        const way = select(CLIENT_WAYS, a.clientWay || 'auto', { 'aria-label': 'OAuth client', id: 'mcp-oauth-way' });
+        way.addEventListener('change', () => { a.clientWay = way.value; });
+        const docHint = !clientDoc ? null
+          : clientDoc.usable ? ['This instance\'s document: ', h('span', { class: 'mono break' }, String(clientDoc.url)), '.']
+            : ['Automatic skips the document here: ', String(clientDoc.reason || 'it cannot be fetched'), '. Forcing it tests how a server answers.'];
         authEl.appendChild(h('div', { class: 'stack-sm' },
           field('Grant', grant),
-          h('div', { class: 'grid grid-2' }, field('Client id', bind('clientId', { placeholder: 'empty: register dynamically', 'aria-label': 'Client id', id: 'mcp-oauth-client' })), field('Client secret', bind('clientSecret', { type: 'password', 'aria-label': 'Client secret' }))),
+          field('Client', way, docHint),
+          h('div', { class: 'grid grid-2' }, field('Client id', bind('clientId', { placeholder: 'empty: a document or registration', 'aria-label': 'Client id', id: 'mcp-oauth-client' })), field('Client secret', bind('clientSecret', { type: 'password', 'aria-label': 'Client secret' }))),
           field('Scope', bind('scope', { placeholder: 'empty: what the server advertises', 'aria-label': 'Scope' })),
           field('Access token', bind('token', { type: 'password', class: 'input mono', 'aria-label': 'Access token', id: 'mcp-token' }), 'Filled by Get a token, or paste one.'),
           h('div', { class: 'row' }, getBtn, refreshBtn),
@@ -300,9 +309,11 @@ export default {
         const first = await probe.connect();
         const www = (first.headers.find(([k]) => String(k).toLowerCase() === 'www-authenticate') || [])[1] || '';
         if (first.status !== 401) oauthSteps.appendChild(notice('warn', 'Expected a 401 from the server, got ' + (first.status || 'no answer') + '. Is a gateway already authenticating this route?'));
-        oauthState = await oauthWalk({ resource: absoluteTarget(), challenge: www, mode: st.mode, grant: st.auth.grant, clientId: st.auth.clientId, clientSecret: st.auth.clientSecret, scope: st.auth.scope, step });
+        oauthState = await oauthWalk({ resource: absoluteTarget(), challenge: www, mode: st.mode, grant: st.auth.grant, clientId: st.auth.clientId, clientSecret: st.auth.clientSecret, scope: st.auth.scope, clientWay: st.auth.clientWay, clientDocument: clientDoc, step });
         st.auth.token = oauthState.token;
-        if (oauthState.clientId) st.auth.clientId = oauthState.clientId;
+        // A registered id is kept for the next walk; a document's URL is not
+        // typed into the form (the next walk decides again).
+        if (oauthState.clientId && oauthState.clientWay !== 'document') st.auth.clientId = oauthState.clientId;
         renderAuth();
         oauthSteps.appendChild(h('div', { class: 'row' }, h('span', { class: 'small muted' }, 'Token in place.'), h('button', { class: 'btn primary sm', type: 'button', id: 'mcp-oauth-connect', onclick: () => connect() }, 'Connect now')));
       } catch (e) {
@@ -350,7 +361,7 @@ export default {
         if (a.kind === 'api_key') { spec.name = a.name || 'X-API-Key'; spec.location = a.location || 'header'; if (a.key) secrets.api_key = a.key; }
         if (a.kind === 'basic') { spec.username = a.username; if (a.password) secrets.password = a.password; }
         if (a.kind === 'headers') { spec.headers = a.headers.filter(([k]) => k).map(([k]) => k); for (const [k, v] of a.headers) if (k && v) secrets['header:' + k] = v; }
-        if (a.kind === 'oauth') { spec.oauth = { client_id: a.clientId || null, scope: a.scope || null, token_endpoint: oauthState ? oauthState.tokenEndpoint : null, issuer: oauthState ? oauthState.issuer : null }; if (oauthState && oauthState.refresh) secrets.refresh_token = oauthState.refresh; if (a.clientSecret) secrets.client_secret = a.clientSecret; }
+        if (a.kind === 'oauth') { spec.oauth = { client: a.clientWay || 'auto', client_id: a.clientId || (oauthState && oauthState.clientId) || null, scope: a.scope || null, token_endpoint: oauthState ? oauthState.tokenEndpoint : null, issuer: oauthState ? oauthState.issuer : null }; if (oauthState && oauthState.refresh) secrets.refresh_token = oauthState.refresh; if (a.clientSecret) secrets.client_secret = a.clientSecret; }
         const body = { name: nameIn.value.trim() || id, target: targetPath(), transport: transportOf(st.version), version: transportOf(st.version) === 'session' ? st.version : undefined, mode: st.mode, auth: spec, secrets };
         const r = await send({ control: true, method: 'PUT', url: SERVER + '/_rustybin/mcp-connections/' + encodeURIComponent(id), headers: [['Content-Type', 'application/json']], body: JSON.stringify(body), admin: true, session: false });
         if (!r.ok) { replace(msg, notice('err', (r.json && r.json.error) || r.error || ('HTTP ' + r.status))); return; }
@@ -860,6 +871,7 @@ export default {
         servers = d.servers || [];
         checksList = d.checks || [];
         relayInfo = d.relay || null;
+        clientDoc = d.client_document || null;
       } catch (e) {
         servers = [{ path: '/mcp', title: 'Mock MCP server (open)', transports: ['modern', 'session'], auth: { kind: 'none' }, state: 'serving' }];
         console.warn('mcp servers unavailable', e);

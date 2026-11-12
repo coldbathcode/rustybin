@@ -15,6 +15,11 @@
 //!   capped by the approver's), and the token endpoint (PKCE S256, refresh
 //!   tokens).
 //!
+//! A client may also name itself with the URL of a client ID metadata
+//! document instead of registering, when the operator turned that on
+//! ([`client_docs`]: off by default, since the instance then calls out for a
+//! caller who has not signed in).
+//!
 //! Tokens are HS256 JWTs signed with [`OAuthKey`], audience-bound to this
 //! instance's `/_rustybin/mcp` URL, and accepted there only: every other
 //! control-plane route and the data plane's admin guard refuse them.
@@ -43,6 +48,8 @@ use crate::mcp::manage::MANAGE_PATH;
 use crate::oidc::store::BoundedStore;
 use crate::state::AppState;
 
+pub mod client_docs;
+
 /// Issuer path of the built-in authorization server.
 pub const ISSUER_PATH: &str = "/_rustybin/oauth";
 pub const PRM_PATH: &str = "/.well-known/oauth-protected-resource/_rustybin/mcp";
@@ -52,6 +59,9 @@ pub const REGISTER_PATH: &str = "/_rustybin/oauth/register";
 pub const AUTHORIZE_PATH: &str = "/_rustybin/oauth/authorize";
 pub const TOKEN_PATH: &str = "/_rustybin/oauth/token";
 pub const REQUESTS_PATH: &str = "/_rustybin/oauth/requests/{id}";
+/// The MCP inspector's client ID metadata document
+/// (`crate::mcp::inspector::clientdoc`): public, served in every mode.
+pub const INSPECTOR_CLIENT_PATH: &str = "/_rustybin/oauth/inspector-client.json";
 const REQUESTS_PREFIX: &str = "/_rustybin/oauth/requests/";
 /// The console's consent page (the request id follows).
 pub const CONSENT_PAGE: &str = "/ui/#/authorize/";
@@ -223,12 +233,18 @@ pub fn mode(config: &Config) -> &'static str {
 
 /// Control-plane paths the OAuth flow needs without credentials.
 pub fn is_public_path(path: &str) -> bool {
-    matches!(path, REGISTER_PATH | AUTHORIZE_PATH | TOKEN_PATH)
+    matches!(
+        path,
+        REGISTER_PATH | AUTHORIZE_PATH | TOKEN_PATH | INSPECTOR_CLIENT_PATH
+    )
 }
 
 /// The discovery documents (public metadata, no instance data).
 pub fn is_discovery_path(path: &str) -> bool {
-    matches!(path, PRM_PATH | AS_METADATA_PATH | OIDC_METADATA_PATH)
+    matches!(
+        path,
+        PRM_PATH | AS_METADATA_PATH | OIDC_METADATA_PATH | INSPECTOR_CLIENT_PATH
+    )
 }
 
 /// The consent API, which checks the approver's grant itself (any scope
@@ -749,6 +765,9 @@ fn with_params(uri: &str, params: &[(&str, &str)]) -> String {
 #[derive(Clone)]
 struct Pending {
     client_id: String,
+    /// The client's metadata document, when its id is one's URL: its name
+    /// is then the document's claim, not something this instance signed.
+    client_document: Option<String>,
     client_name: String,
     redirect_uri: String,
     state: Option<String>,
@@ -789,6 +808,8 @@ pub struct OAuthState {
     /// first: a client holds at most [`MAX_PENDING_PER_CLIENT`].
     per_client:
         std::sync::Mutex<std::collections::HashMap<String, std::collections::VecDeque<String>>>,
+    /// Client ID metadata documents fetched lately ([`client_docs`]).
+    documents: client_docs::Cache,
 }
 
 /// Sign-in requests one client address may open per minute.
@@ -880,6 +901,7 @@ impl OAuthState {
             // alone never fills it.
             global_per_minute: (cap / (PENDING_TTL_SECS as usize / 60)).max(1),
             per_client: std::sync::Mutex::new(std::collections::HashMap::new()),
+            documents: client_docs::Cache::default(),
         }
     }
 }
@@ -1008,7 +1030,8 @@ async fn as_metadata_handler(State(app): State<AppState>, req: Request) -> Respo
         "token_endpoint_auth_methods_supported": ["none"],
         "code_challenge_methods_supported": ["S256"],
         "authorization_response_iss_parameter_supported": true,
-        "client_id_metadata_document_supported": false,
+        // True only while the operator has it on ([`client_docs`]).
+        "client_id_metadata_document_supported": client_docs::on(&app.settings),
     }))
     .into_response()
 }
@@ -1126,11 +1149,46 @@ async fn authorize_handler(State(app): State<AppState>, st: St, req: Request) ->
     let Some(id) = q.get("client_id") else {
         return error_page(StatusCode::BAD_REQUEST, "client_id is missing.");
     };
-    let Some(client) = parse_client(id, config) else {
-        return error_page(
-            StatusCode::BAD_REQUEST,
-            "Unknown client: register again (client ids from another instance, or from before a key change, are not accepted).",
-        );
+    let ip = crate::session::client_ip(req.headers(), req.extensions(), config);
+    // A client that names itself with a document's URL: honoured only when
+    // the operator turned it on, and counted against the address's sign-in
+    // allowance before the instance calls out for it.
+    let mut counted = false;
+    let mut client_document = None;
+    let client = if client_docs::looks_like_document(id) {
+        if !client_docs::on(&app.settings) {
+            return error_page(
+                StatusCode::BAD_REQUEST,
+                "This instance does not accept client ID metadata documents (the oauth.client_metadata_documents setting is off): register the client instead.",
+            );
+        }
+        if !st.allow_authorize(ip) {
+            return error_page(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many sign-in requests from this address: wait a minute and start again.",
+            );
+        }
+        counted = true;
+        match client_docs::client(&app, &st.documents, id).await {
+            Ok(c) => {
+                client_document = Some(id.clone());
+                c
+            }
+            Err(e) => {
+                return error_page(
+                    StatusCode::BAD_REQUEST,
+                    &format!("The client's metadata document was refused: {e}."),
+                )
+            }
+        }
+    } else {
+        let Some(client) = parse_client(id, config) else {
+            return error_page(
+                StatusCode::BAD_REQUEST,
+                "Unknown client: register again (client ids from another instance, or from before a key change, are not accepted).",
+            );
+        };
+        client
     };
     let redirect_uri = match q.get("redirect_uri") {
         Some(given) => {
@@ -1205,8 +1263,7 @@ async fn authorize_handler(State(app): State<AppState>, st: St, req: Request) ->
             );
         }
     }
-    let ip = crate::session::client_ip(req.headers(), req.extensions(), config);
-    if !st.allow_authorize(ip) {
+    if !counted && !st.allow_authorize(ip) {
         return error_page(
             StatusCode::TOO_MANY_REQUESTS,
             "Too many sign-in requests from this address: wait a minute and start again.",
@@ -1217,6 +1274,7 @@ async fn authorize_handler(State(app): State<AppState>, st: St, req: Request) ->
         request_id.clone(),
         Pending {
             client_id: id.clone(),
+            client_document,
             client_name: client.name,
             redirect_uri,
             state,
@@ -1358,6 +1416,9 @@ async fn request_get_handler(
             "id": id,
             "client_name": p.client_name,
             "client": fingerprint(&p.client_id),
+            // A client that named itself with a document: the name above is
+            // what that document claims, fetched from this host.
+            "client_document": p.client_document.as_ref().map(|u| json!({ "url": u, "host": client_docs::host_of(u) })),
             "redirect_uri": p.redirect_uri,
             "redirect_kind": redirect_kind(&p.redirect_uri),
             "resource": p.resource,
@@ -1510,7 +1571,12 @@ async fn token_handler(State(app): State<AppState>, st: St, req: Request) -> Res
             "client_id is required (public clients only)",
         );
     };
-    if parse_client(client_id, &config).is_none() {
+    // A document's URL is a client only while the feature is on; the code
+    // or refresh token it presents was issued to exactly this id.
+    let document_client = client_docs::looks_like_document(client_id)
+        && client_docs::on(&app.settings)
+        && client_docs::check_url(client_id).is_ok();
+    if !document_client && parse_client(client_id, &config).is_none() {
         return oauth_error(
             StatusCode::UNAUTHORIZED,
             "invalid_client",

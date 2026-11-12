@@ -955,6 +955,7 @@ fn sign_in_requests_have_a_global_rate_and_ipv6_counts_by_slash_64() {
 fn pending_for(client_id: &str) -> Pending {
     Pending {
         client_id: client_id.into(),
+        client_document: None,
         client_name: "c".into(),
         redirect_uri: REDIRECT.into(),
         state: None,
@@ -1026,6 +1027,7 @@ async fn a_query_on_the_mcp_url_names_the_same_resource() {
 }
 
 // Agents act for a user (testing-2 step 12).
+mod client_docs;
 mod users;
 
 /// Finding A3: the OAuth tokens acting for a single sign-on user (an

@@ -63,8 +63,12 @@ document it fetched:
 1. The `401` challenge and its `WWW-Authenticate` header.
 2. Protected resource metadata ([RFC 9728](https://www.rfc-editor.org/rfc/rfc9728)).
 3. Authorization server metadata ([RFC 8414](https://www.rfc-editor.org/rfc/rfc8414)).
-4. The client: dynamic registration ([RFC 7591](https://www.rfc-editor.org/rfc/rfc7591))
-   when the server offers it and no client id is given.
+4. The client, in this order: a client id you gave; this instance's [client ID
+   metadata document](#the-inspector-as-a-client-with-a-metadata-document) when the
+   server supports one and the instance can offer its own; dynamic registration
+   ([RFC 7591](https://www.rfc-editor.org/rfc/rfc7591)) when the server offers it;
+   else the walk asks for a client id. The step says which was used and why the
+   others were not.
 5. The grant: authorization code with PKCE in a popup (any issuer; the popup returns to
    `/ui/callback`), or client credentials.
 6. The token, with its scope and expiry. A refresh token is kept and **Refresh the
@@ -77,6 +81,41 @@ fetched by the browser, or through the instance when CORS blocks them:
 ```hurl
 {{#include ../../examples/mcp/inspector.hurl:fetch}}
 ```
+
+### The inspector as a client with a metadata document
+
+Current MCP clients do not register with an authorization server: they name
+themselves with the `https` URL of a document that describes them, which the server
+fetches (a client ID metadata document). A server that takes one says
+`client_id_metadata_document_supported` in its metadata, and the inspector tests it
+the same way. The instance serves the inspector's document at an open route; it holds
+nothing secret, only the name and the console's callback as the one redirect URI:
+
+```hurl
+{{#include ../../examples/mcp/inspector.hurl:client_document}}
+```
+
+The document's URL is the client id, so the walk makes no registration call and step 4
+shows the document. An authorization server has to fetch it from where it runs, so the
+walk uses it only when this instance is reached over `https` on a host that is not this
+computer, and the console is open at that same address (the redirect URI the walk sends
+is the document's, byte for byte). From `http://localhost` step 4 says why not and
+registers instead; `client_document` of `GET /_rustybin/mcp-servers` says the same
+ahead of time (`usable`, `reason`).
+
+**Client** in the auth form chooses the way:
+
+| Client | What the walk does |
+|---|---|
+| Automatic | the order above |
+| Client ID metadata document | sends the document's URL even where the server does not say it supports one, or cannot reach it: for testing how a server answers |
+| Dynamic registration | registers even where a document would do; stops when the server names no registration endpoint |
+| The client id below | uses the id you typed; stops without one |
+
+A [saved connection](#saved-connections) keeps the choice (`auth.oauth.client`: `auto`,
+`document`, `registration` or `given`) with the other OAuth facts, and never a token it
+was not given. The [`client_document` check](#checks) asks the same question without a
+person: does the server say yes, and does it then take the document.
 
 ## Browser or relay
 
@@ -155,9 +194,26 @@ runs it: in process for its own servers, through the egress policy for others.
 | `routing_headers` | 2026-07-28: a routing header that contradicts the body is refused |
 | `server_stream` | session transports: the server-to-client stream opens or is declined |
 | `session` | session transports: `DELETE` ends the session and the old id is refused |
+| `client_document` | OAuth: the authorization server says `client_id_metadata_document_supported` and accepts [this instance's document](#the-inspector-as-a-client-with-a-metadata-document) as the client |
 
 Tools marked destructive are skipped unless you include them, and at most 25 tools are
 called by default (`max_tools`, up to 50). A check that does not apply is skipped.
+
+`client_document` is the one check that needs no connection: a server behind OAuth
+answers `401` until somebody signs in, which is when the question matters. It reads the
+protected resource metadata (from the challenge, else the well-known path) and the
+authorization server's, and is skipped with the reason when there is no OAuth, when the
+server does not say it supports documents, or when this instance cannot offer its own
+(reached over plain `http` or on a loopback address). Otherwise it starts one
+authorization request with the document's URL as `client_id` and the console's callback,
+follows nothing and signs nobody in: a sign-in or consent page (or a redirect to one)
+passes, an error fails with the server's status in the details. The server fetches the
+document from the address the check was asked at, so run it against the instance's
+public URL.
+
+```hurl
+{{#include ../../examples/mcp/inspector.hurl:client_document_check}}
+```
 
 `POST /_rustybin/mcp-checks` runs the suite: `{target, transport?, version?, headers?,
 connection?, checks?, include_destructive?, max_tools?, ai_arguments?, save?}`. The report
@@ -191,7 +247,9 @@ show the target without its query string, which may hold a saved connection's AP
 ## Saved connections
 
 A saved connection holds the target, the transport and version, the mode and the auth
-mode. Its credentials (token, API key, password, refresh token, client secret, custom
+mode (for OAuth also the facts of the walk: issuer, token endpoint, client id, scope and
+`client`, [how the walk names its client](#the-inspector-as-a-client-with-a-metadata-document)).
+Its credentials (token, API key, password, refresh token, client secret, custom
 header values) are sealed with the [settings](../configuration.md) secrets key in
 `<state>/mcp-inspector.json` and are returned only as `{set, hint}`. A connection that
 holds credentials is used through the relay, which adds them on the instance, so the
@@ -233,9 +291,9 @@ The same job from the API, the console, the command line, an agent and the confi
 
 | Surface | Where |
 |---|---|
-| API | `GET /_rustybin/mcp-servers`, `POST /_rustybin/mcp-relay` and `DELETE /_rustybin/mcp-relay/{session}`, `POST /_rustybin/mcp-relay/fetch`, `POST`, `GET /_rustybin/mcp-checks`, `GET`, `DELETE /_rustybin/mcp-checks/{id}`, `GET /_rustybin/mcp-connections`, `GET`, `PUT`, `DELETE /_rustybin/mcp-connections/{id}` |
-| Console | The **MCP inspector** view (servers, connections, the protocol tabs, the timeline, checks); a mock's **MCP** tab opens it on the mock's server |
-| CLI | `rustybin mcp servers \| tools <target> \| call <target> <method> \| check <target> [--junit] \| runs \| run <id> \| delete-run <id> \| connections \| connection <id> \| save-connection \| delete-connection <id> \| fetch \| end-relay` ([reference](../cli.md#mcp)) |
-| Management MCP | `list_mcp_servers`, `mcp_call` (answers under `untrusted_result`), `run_mcp_checks` and `list_mcp_check_runs` (reports under `untrusted_report`), `list_mcp_connections`; the prompt `test_mcp_server` ([agent page](../agent-mcp.md)) |
+| API | `GET /_rustybin/mcp-servers` (with `client_document`), `GET /_rustybin/oauth/inspector-client.json` (open), `POST /_rustybin/mcp-relay` and `DELETE /_rustybin/mcp-relay/{session}`, `POST /_rustybin/mcp-relay/fetch`, `POST`, `GET /_rustybin/mcp-checks`, `GET`, `DELETE /_rustybin/mcp-checks/{id}`, `GET /_rustybin/mcp-connections`, `GET`, `PUT`, `DELETE /_rustybin/mcp-connections/{id}` |
+| Console | The **MCP inspector** view (servers, connections, the protocol tabs, the timeline, checks; **Client** in the OAuth form chooses a metadata document, registration or a given id); a mock's **MCP** tab opens it on the mock's server |
+| CLI | `rustybin mcp servers \| tools <target> \| call <target> <method> \| check <target> [--junit] \| runs \| run <id> \| delete-run <id> \| connections \| connection <id> \| save-connection [--oauth-client auto\|document\|registration\|given] \| delete-connection <id> \| fetch \| end-relay \| client-document` ([reference](../cli.md#mcp)) |
+| Management MCP | `list_mcp_servers` (with `client_document`: the document, its URL, whether a server can use it and why not), `mcp_call` (answers under `untrusted_result`), `run_mcp_checks` (the `client_document` check included) and `list_mcp_check_runs` (reports under `untrusted_report`), `list_mcp_connections` (each with its `auth.oauth.client`); the prompt `test_mcp_server` ([agent page](../agent-mcp.md)) |
 | `rustybin.yaml` | Nothing: saved connections hold credentials and stay in `<state>/mcp-inspector.json`; the servers a document creates (mocks with MCP on) appear in the server list |
 | Environment | `RUSTYBIN_EGRESS_ALLOW` and `RUSTYBIN_EGRESS_ALLOW_LOOPBACK` for the relay's destinations, `RUSTYBIN_STATE_DIR` for saved connections and runs ([configuration](../configuration.md#outbound-connections)) |

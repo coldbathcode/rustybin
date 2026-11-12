@@ -166,6 +166,55 @@ or an app's own scheme (`cursor://...`). A failed request goes back to the agent
 only when it waits on a loopback address; for any other redirect URI the browser
 shows the error, so the server never redirects anywhere on someone else's behalf.
 
+**Client ID metadata documents (off by default).** Current MCP clients can name
+themselves with the `https` URL of a document that describes them instead of
+registering. To honour one the instance has to fetch that URL, a call out on the word
+of a caller who has not signed in yet, so it does that only when you turn it on and
+only to hosts you named:
+
+- The setting `oauth.client_metadata_documents` (the AI agents view's settings,
+  `rustybin settings set oauth.client_metadata_documents true`, `update_settings`, or
+  `settings:` of your own `rustybin.yaml`; no environment variable). A document pulled
+  from git never changes it. While it is off the metadata says
+  `client_id_metadata_document_supported: false` and a URL as `client_id` is no client.
+- The fetch goes through the [outbound policy](configuration.md#outbound-connections)
+  under the purpose `client_metadata`, which has no default: name the hosts of the
+  clients you expect in `egress.allow`. A host outside it is refused before any call.
+- `https` only (plain `http` only for a document on a loopback address, which the
+  policy refuses unless `egress.allow_loopback` is on), no redirect followed, at most
+  5 KiB, five seconds. The URL has a path, no fragment, no credentials and no `.` or
+  `..` segments.
+- The document's `client_id` must be the URL it was fetched from, it describes a public
+  client (no secret, `token_endpoint_auth_method` `none` or absent), and its redirect
+  URIs follow the rules of registration (at most 10).
+- A document is kept for five minutes and a refusal for 30 seconds (at most 64), so a
+  loop of sign-in requests is not a loop of calls, and a sign-in request counts against
+  its address's allowance before the instance calls out.
+- The consent page shows the host the document came from and says that the name is the
+  client's own claim: nothing verifies it beyond that address.
+
+```hurl
+{{#include ../examples/agent/client_documents.hurl:off}}
+```
+
+```hurl
+{{#include ../examples/agent/client_documents.hurl:on}}
+```
+
+```hurl
+{{#include ../examples/agent/client_documents.hurl:authorize}}
+```
+
+```hurl
+{{#include ../examples/agent/client_documents.hurl:refused}}
+```
+
+The mock authorization server behind `/mcp/protected` (the data plane's demo identity
+provider) never fetches a client's URL: it knows its demo clients and the ones
+registered with it. To test a client's document flow, point the client at
+`/_rustybin/mcp` with the setting on, or use the [inspector](mcp/inspector.md#the-inspector-as-a-client-with-a-metadata-document)
+to test a server's.
+
 These are the requests an agent makes, step by step. The console's part is the
 consent API, called with its credential:
 
@@ -662,7 +711,7 @@ set](#a-secret-at-an-agents-request); `assist_status` shows `{set, hint}`.
 | Tool | Permission | |
 |---|---|---|
 | `get_settings` | `settings.read` | Every [instance setting](configuration.md#state-directory-settings-and-secrets) with its value, source and lock state, or one group or key; secrets show `{set, hint}` |
-| `update_settings` | `settings.write` | Set values (`null` forgets a stored one) and unset stored values; secrets are refused, and so is the console sign-in in password mode (it changes only with its current password); each key needs what `PATCH /_rustybin/settings` needs for it (`settings.security` for the security groups, `portal.settings`, `git.write` for `git.*`, the permissions of the roles a `sso.role_map` or `sso.default_roles` names); a change of `egress.*`, `agents.*`, `console.*`, `git.*`, `sso.*`, `proxy.*`, `assist.provider` or `assist.base_url` is then confirmed by the user |
+| `update_settings` | `settings.write` | Set values (`null` forgets a stored one) and unset stored values; secrets are refused, and so is the console sign-in in password mode (it changes only with its current password); each key needs what `PATCH /_rustybin/settings` needs for it (`settings.security` for the security groups, `portal.settings`, `git.write` for `git.*`, the permissions of the roles a `sso.role_map` or `sso.default_roles` names); a change of `egress.*`, `agents.*`, `oauth.*`, `console.*`, `git.*`, `sso.*`, `proxy.*`, `assist.provider` or `assist.base_url` is then confirmed by the user |
 | `check_egress` | `settings.read` | The [outbound policy](configuration.md#outbound-connections) and, with `url` and `purpose`, whether that URL would be allowed before DNS and why not |
 | `request_secret` | `settings.write` | [Ask for a secret setting to be set](#a-secret-at-an-agents-request) by a person (`setting`, `reason`): the request's id and state, never a value; needs the `agents.secret_requests` setting on and what changing a setting of that group needs; at most 3 waiting per agent, 15 minutes each |
 | `get_secret_request` | `settings.write` | How a request of this agent stands (`pending`, `fulfilled`, `declined`, `expired`) and whether the setting is set now; without `id`, its requests of the last hour. Never the value, never another agent's |
@@ -671,7 +720,7 @@ set](#a-secret-at-an-agents-request); `assist_status` shows `{set, hint}`.
 
 | Tool | Permission | |
 |---|---|---|
-| `list_mcp_servers` | `mcp.inspect` | Every MCP server this instance serves with its auth, the relay's allowlist, the check ids |
+| `list_mcp_servers` | `mcp.inspect` | Every MCP server this instance serves with its auth, the relay's allowlist, the check ids, and the inspector's [client ID metadata document](mcp/inspector.md#the-inspector-as-a-client-with-a-metadata-document) (`client_document`: its URL, whether a server can use it, why not) |
 | `mcp_call` | `mcp.inspect` | One JSON-RPC request to any MCP server (a path on this instance in process, or a URL through the relay) with the handshake the transport needs; credentials as headers or a saved connection. Another host is confirmed, and without admin rights gets read-only methods only (no `tools/call`). The answer is `untrusted_result` |
 | `run_mcp_checks` | `mcp.inspect` | The [inspector's check suite](mcp/inspector.md) against a server; the report is saved unless `save: false`. Another host is confirmed, and without admin rights the calls to tools are skipped. At most two suites run at once |
 | `list_mcp_check_runs` | `mcp.inspect` | The saved runs, or one report (under `untrusted_report`) |
@@ -1124,8 +1173,7 @@ so [plan limits](concepts/plans-and-limits.md) apply as for the REST routes.
   content.
 - The self-service email step: consent stays in the console.
 - OAuth sign-in for self-service visitors and shared-mode key holders (they send their
-  manage token or API key as a header), and client ID metadata documents (the server
-  would have to fetch a URL).
+  manage token or API key as a header).
 
 ## On every surface
 
@@ -1137,5 +1185,5 @@ The same job from the API, the console, the command line, an agent and the confi
 | Console | The **AI agents** view (the list with the **Owner** column and its filter, rights with a role as the ceiling, revoke, the live feed, **Connect an agent** with the `claude mcp add` command), `#/authorize/<id>` for the agent sign-in (the permissions the agent will hold); **Management**, **Secrets an agent asked for** (set or decline) |
 | CLI | `rustybin agents list [--owner U] \| get \| rights [--ceiling ROLE] \| revoke \| restore \| end-sessions \| tail`, `rustybin mcp-stdio`, `rustybin login --agent` (an agent's own sign-in for `mcp-stdio`), `rustybin settings requests \| fulfil \| decline` ([reference](cli.md#agents)) |
 | Management MCP | `list_agents` (`owner`), `get_agent`, `set_agent_rights` (a role as the ceiling), `revoke_agent` (never oneself), `restore_agent`, `end_agent_sessions` (rights, restore and end sessions never on an agent of the caller's own credential; a user's own agents without `agents.read` / `agents.manage`); `request_secret`, `get_secret_request`; the prompt `onboard_agent` |
-| `rustybin.yaml` | `agents:` (`default_ceiling`, `rules` by client name, credential kind, user and role, a role as the ceiling), `settings: {agents.default_ceiling_for: [...], agents.secret_requests: true}` ([the whole instance as code](configuration-as-code.md)) |
+| `rustybin.yaml` | `agents:` (`default_ceiling`, `rules` by client name, credential kind, user and role, a role as the ceiling), `settings: {agents.default_ceiling_for: [...], agents.secret_requests: true, oauth.client_metadata_documents: true}` (the last never from git) ([the whole instance as code](configuration-as-code.md)) |
 | Environment | `RUSTYBIN_AGENTS_DEFAULT_CEILING`, `RUSTYBIN_CONTROL_OAUTH`, `RUSTYBIN_CONTROL_OAUTH_ISSUER`, `RUSTYBIN_CONTROL_OAUTH_KEY` ([configuration](configuration.md#control-plane-and-console)) |

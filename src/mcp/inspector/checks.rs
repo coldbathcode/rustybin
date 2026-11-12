@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
@@ -65,7 +65,16 @@ pub const CHECKS: &[(&str, &str)] = &[
         "session",
         "Session transports: DELETE ends the session and the old id is refused",
     ),
+    (
+        CLIENT_DOCUMENT,
+        "OAuth: an authorization server that says it supports client ID metadata documents accepts this instance's",
+    ),
 ];
+
+/// The id of the client ID metadata document check, the one check that
+/// runs without a connection (a server behind OAuth answers 401 until
+/// somebody signs in, which is when the check is wanted).
+pub const CLIENT_DOCUMENT: &str = "client_document";
 
 /// Default and most tools called.
 pub const DEFAULT_MAX_TOOLS: usize = 25;
@@ -114,6 +123,9 @@ pub struct RunSpec {
     /// Admin callers, or a server of this instance: without admin rights a
     /// remote server only sees read-only methods.
     pub call_tools: bool,
+    /// The URL the caller reached this instance at: where an authorization
+    /// server would fetch the inspector's client document.
+    pub base_url: String,
 }
 
 /// Why a tool-calling check was skipped for a caller without admin rights.
@@ -386,6 +398,9 @@ pub async fn run(state: &AppState, spec: RunSpec) -> Value {
 
     if !connected {
         for (id, _) in CHECKS.iter().skip(1) {
+            if *id == CLIENT_DOCUMENT {
+                continue;
+            }
             if wanted(id) {
                 results.push(CheckResult {
                     id,
@@ -395,6 +410,10 @@ pub async fn run(state: &AppState, spec: RunSpec) -> Value {
                     details: Value::Null,
                 });
             }
+        }
+        if wanted(CLIENT_DOCUMENT) {
+            let challenge = o.header("www-authenticate").map(str::to_string);
+            results.push(client_document_check(state, &spec, challenge.as_deref()).await);
         }
         return report(state, &spec, started, started_at, server, results, lat);
     }
@@ -1294,8 +1313,335 @@ pub async fn run(state: &AppState, spec: RunSpec) -> Value {
     } else if is_session {
         conn.close().await;
     }
+    if wanted(CLIENT_DOCUMENT) {
+        results.push(client_document_check(state, &spec, None).await);
+    }
 
     report(state, &spec, started, started_at, server, results, lat)
+}
+
+// ── client_document ─────────────────────────────────────────────────
+
+/// Largest OAuth metadata document the check reads.
+const MAX_METADATA_BYTES: usize = 64 * 1024;
+const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The `resource_metadata` parameter of a `WWW-Authenticate` challenge.
+fn resource_metadata_of(challenge: &str) -> Option<String> {
+    let rest = &challenge[challenge.find("resource_metadata=")? + "resource_metadata=".len()..];
+    let value = match rest.strip_prefix('"') {
+        Some(quoted) => quoted.split('"').next()?,
+        None => rest.split([',', ' ']).next()?,
+    };
+    (!value.is_empty() && value.len() <= 2048).then(|| value.to_string())
+}
+
+fn origin_of(url: &str) -> Option<String> {
+    let u = reqwest::Url::parse(url).ok()?;
+    matches!(u.scheme(), "http" | "https").then(|| u.origin().ascii_serialization())
+}
+
+/// Where a URL a metadata document names is: a server of this instance
+/// names its own documents with the address the request came in on, so for
+/// a target on this instance a URL on `own` (any origin when `None`) is the
+/// same path served in process; every other URL goes through the outbound
+/// policy like the target itself.
+fn locate(target: &Target, own: Option<&str>, reference: &str) -> Result<Target, String> {
+    if matches!(target, Target::Local(_)) {
+        if reference.starts_with('/') {
+            return Target::parse(reference, true);
+        }
+        if let Ok(u) = reqwest::Url::parse(reference) {
+            let origin = u.origin().ascii_serialization();
+            if own.is_none_or(|o| o == origin) {
+                let mut path = u.path().to_string();
+                if let Some(q) = u.query() {
+                    path.push('?');
+                    path.push_str(q);
+                }
+                return Target::parse(&path, true);
+            }
+        }
+    }
+    match Target::parse(reference, true)? {
+        Target::Local(_) => Err(format!("{reference:?} is not an absolute URL")),
+        remote => Ok(remote),
+    }
+}
+
+/// GET one JSON document: its status and, when it is one, the JSON.
+async fn get_json(state: &AppState, target: &Target) -> Result<(u16, Option<Value>), String> {
+    let headers = [("accept".to_string(), "application/json".to_string())];
+    let resp = super::client::send(state, target, "GET", &headers, None, METADATA_TIMEOUT).await?;
+    let status = resp.status;
+    let bytes = super::client::read_all(resp.body, MAX_METADATA_BYTES).await?;
+    Ok((status, serde_json::from_slice(&bytes).ok()))
+}
+
+/// A short token of the server's (an OAuth error code) as a message may
+/// quote it: letters, digits, `_` and `-` only.
+fn code_word(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        .take(60)
+        .collect()
+}
+
+/// `client_document`: does the authorization server of this MCP server say
+/// it supports client ID metadata documents, and does it take this
+/// instance's (`GET /_rustybin/oauth/inspector-client.json`) as a client?
+/// The check walks the discovery a client walks (the protected resource
+/// metadata, the authorization server's) and then starts one authorization
+/// request with the document's URL as `client_id`, following nothing: a
+/// sign-in or consent page is a yes, an error is a no. Nobody signs in.
+async fn client_document_check(
+    state: &AppState,
+    spec: &RunSpec,
+    challenge: Option<&str>,
+) -> CheckResult {
+    let t0 = Instant::now();
+    let (status, message, details) = client_document_judge(state, spec, challenge).await;
+    CheckResult {
+        id: CLIENT_DOCUMENT,
+        status,
+        message,
+        ms: t0.elapsed().as_millis() as u64,
+        details,
+    }
+}
+
+async fn client_document_judge(
+    state: &AppState,
+    spec: &RunSpec,
+    challenge: Option<&str>,
+) -> (Status, String, Value) {
+    use super::clientdoc;
+    let skip = |m: String| (Status::Skip, m, Value::Null);
+    // 1. The protected resource metadata (RFC 9728): where the challenge
+    // points, else the well-known path of the server's URL.
+    let (origin, path) = match &spec.target {
+        Target::Local(p) => (String::new(), p.split('?').next().unwrap_or("").to_string()),
+        Target::Remote(u) => match reqwest::Url::parse(u) {
+            Ok(u) => (u.origin().ascii_serialization(), u.path().to_string()),
+            Err(e) => return skip(format!("the target is not a URL: {e}")),
+        },
+    };
+    let path = if path == "/" { String::new() } else { path };
+    let prm_ref = challenge
+        .and_then(resource_metadata_of)
+        .unwrap_or_else(|| format!("{origin}/.well-known/oauth-protected-resource{path}"));
+    let prm = match locate(&spec.target, None, &prm_ref) {
+        Ok(t) => match get_json(state, &t).await {
+            Ok((200, Some(v))) if v.is_object() => v,
+            Ok(_) => {
+                return skip(
+                    "no protected resource metadata (RFC 9728): the server does not sign clients in with OAuth, or does not say where"
+                        .into(),
+                )
+            }
+            Err(e) => return skip(format!("the protected resource metadata could not be read: {e}")),
+        },
+        Err(e) => return skip(format!("the protected resource metadata could not be read: {e}")),
+    };
+    // 2. The authorization server's metadata (RFC 8414, else OpenID discovery).
+    let resource = prm
+        .get("resource")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let own = resource
+        .as_deref()
+        .and_then(origin_of)
+        .or_else(|| origin_of(&spec.base_url));
+    let issuer = prm
+        .get("authorization_servers")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .and_then(Value::as_str)
+        .map(|s| s.trim_end_matches('/').to_string())
+        .or_else(|| resource.as_deref().and_then(origin_of));
+    let Some(issuer) = issuer else {
+        return skip("the protected resource metadata names no authorization server".into());
+    };
+    let Ok(iss) = reqwest::Url::parse(&issuer) else {
+        return skip("the authorization server's issuer is not a URL".into());
+    };
+    let iss_origin = iss.origin().ascii_serialization();
+    let iss_path = if iss.path() == "/" { "" } else { iss.path() };
+    let mut candidates = vec![
+        format!("{iss_origin}/.well-known/oauth-authorization-server{iss_path}"),
+        format!("{iss_origin}/.well-known/openid-configuration{iss_path}"),
+        format!("{issuer}/.well-known/oauth-authorization-server"),
+        format!("{issuer}/.well-known/openid-configuration"),
+    ];
+    candidates.dedup();
+    let mut asm = None;
+    for c in &candidates {
+        let Ok(t) = locate(&spec.target, own.as_deref(), c) else {
+            continue;
+        };
+        if let Ok((200, Some(v))) = get_json(state, &t).await {
+            if v.get("authorization_endpoint").is_some() || v.get("token_endpoint").is_some() {
+                asm = Some(v);
+                break;
+            }
+        }
+    }
+    let Some(asm) = asm else {
+        return skip(format!(
+            "no authorization server metadata at {}",
+            crate::egress::url_origin(&issuer)
+        ));
+    };
+    let shown_issuer = crate::egress::url_origin(&issuer);
+    // 3. Does it say so, and can this instance offer a document?
+    if asm
+        .get("client_id_metadata_document_supported")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return skip(format!(
+            "the authorization server ({shown_issuer}) does not say client_id_metadata_document_supported"
+        ));
+    }
+    if let Some(reason) = clientdoc::unusable_reason(&spec.base_url) {
+        return skip(format!(
+            "the authorization server ({shown_issuer}) supports client ID metadata documents, but this instance cannot offer its own: {reason}"
+        ));
+    }
+    let Some(endpoint) = asm.get("authorization_endpoint").and_then(Value::as_str) else {
+        return (
+            Status::Fail,
+            "the authorization server supports client ID metadata documents but names no authorization_endpoint".into(),
+            Value::Null,
+        );
+    };
+    // 4. One authorization request with the document's URL as the client.
+    let client_id = clientdoc::client_id(&spec.base_url);
+    let redirect_uri = clientdoc::redirect_uri(&spec.base_url);
+    let mut random = [0u8; 48];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut random);
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let verifier = base64::Engine::encode(&b64, &random[..32]);
+    let state_param = base64::Engine::encode(&b64, &random[32..]);
+    let code_challenge = base64::Engine::encode(
+        &b64,
+        <sha2::Sha256 as sha2::Digest>::digest(verifier.as_bytes()),
+    );
+    let scope = prm
+        .get("scopes_supported")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
+    // (In a block: the serializer must not live across an await.)
+    let url = {
+        let mut q = form_urlencoded::Serializer::new(String::new());
+        q.append_pair("response_type", "code")
+            .append_pair("client_id", &client_id)
+            .append_pair("redirect_uri", &redirect_uri)
+            .append_pair("state", &state_param)
+            .append_pair("code_challenge", &code_challenge)
+            .append_pair("code_challenge_method", "S256");
+        if !scope.is_empty() {
+            q.append_pair("scope", &scope);
+        }
+        if let Some(r) = &resource {
+            q.append_pair("resource", r);
+        }
+        format!(
+            "{endpoint}{}{}",
+            if endpoint.contains('?') { '&' } else { '?' },
+            q.finish()
+        )
+    };
+    let details = |status: u16, extra: Value| {
+        let mut d = json!({ "authorization_server": shown_issuer, "client_id": client_id, "status": status });
+        if let (Some(d), Some(e)) = (d.as_object_mut(), extra.as_object()) {
+            d.extend(e.clone());
+        }
+        d
+    };
+    let target = match locate(&spec.target, own.as_deref(), &url) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                Status::Warn,
+                format!("the authorization endpoint could not be asked: {e}"),
+                details(0, json!({})),
+            )
+        }
+    };
+    let resp = match super::client::send(state, &target, "GET", &[], None, METADATA_TIMEOUT).await {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                Status::Warn,
+                format!("the authorization endpoint could not be asked: {e}"),
+                details(0, json!({})),
+            )
+        }
+    };
+    let code = resp.status;
+    let location = resp.header("location").unwrap_or("").to_string();
+    if (300..400).contains(&code) {
+        // Back at our callback: with an error it refused the client, with a
+        // code it took it without asking anybody.
+        if location.starts_with(&redirect_uri) {
+            let params: BTreeMap<String, String> = location
+                .split_once('?')
+                .map(|(_, q)| {
+                    form_urlencoded::parse(q.as_bytes())
+                        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(e) = params.get("error") {
+                return (
+                    Status::Fail,
+                    format!(
+                        "the authorization server says it supports client ID metadata documents but refused this instance's: {}",
+                        code_word(e)
+                    ),
+                    details(code, json!({ "error": code_word(e), "error_description": params.get("error_description").map(|d| d.chars().take(300).collect::<String>()) })),
+                );
+            }
+            return (
+                Status::Pass,
+                format!("{shown_issuer} accepted this instance's document as the client and answered the callback at once"),
+                details(code, json!({})),
+            );
+        }
+        return (
+            Status::Pass,
+            format!("{shown_issuer} accepted this instance's document as the client: it sends the browser on to sign in"),
+            details(code, json!({ "redirects_to": crate::egress::url_origin(&location) })),
+        );
+    }
+    if (200..300).contains(&code) {
+        return (
+            Status::Pass,
+            format!("{shown_issuer} accepted this instance's document as the client: it answered its sign-in page ({code})"),
+            details(code, json!({})),
+        );
+    }
+    let body = super::client::read_all(resp.body, 4 * 1024)
+        .await
+        .map(|b| {
+            String::from_utf8_lossy(&b)
+                .chars()
+                .take(300)
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    (
+        Status::Fail,
+        format!("the authorization server says it supports client ID metadata documents but refused this instance's: HTTP {code}"),
+        details(code, json!({ "body": body })),
+    )
 }
 
 fn report(

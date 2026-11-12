@@ -1798,6 +1798,7 @@ const COVERAGE: &[(&str, Cover)] = &[
     ("/_rustybin/projects/{name}", Tool("save_project")),
     ("/_rustybin/mcp", Excluded("this server")),
     ("/_rustybin/mcp-servers", Tool("list_mcp_servers")),
+    ("/_rustybin/oauth/inspector-client.json", Tool("list_mcp_servers")),
     ("/_rustybin/mcp-relay", Tool("mcp_call")),
     ("/_rustybin/mcp-relay/fetch", Excluded("the console's OAuth walk fetches discovery documents; run_mcp_checks covers OAuth servers")),
     ("/_rustybin/mcp-relay/{session}", Tool("mcp_call")),
@@ -2062,6 +2063,7 @@ async fn settings_and_egress_tools() {
         json!({ "console.title": "Team mocks" }),
         json!({ "egress.allow_loopback": true }),
         json!({ "agents.default_ceiling": "full" }),
+        json!({ "oauth.client_metadata_documents": true }),
         json!({ "git.branch": "other" }),
     ] {
         let r = tool(&app, &[], "update_settings", json!({ "values": values })).await;
@@ -4609,6 +4611,11 @@ async fn update_settings_tool_needs_settings_security() {
             "settings.security",
         ),
         ("egress.allow_loopback", json!(true), "settings.security"),
+        (
+            "oauth.client_metadata_documents",
+            json!(true),
+            "settings.security",
+        ),
         (
             "proxy.client_ip_header",
             json!("X-Forwarded-For"),

@@ -1053,11 +1053,32 @@ async fn the_console_scope_sends_only_list_methods_to_another_host() {
         format: None,
     };
     let inspector = &state.mcp_inspector;
-    let spec = build_run_spec(inspector, body(remote), "t".into(), false).expect("spec");
+    let spec = build_run_spec(
+        inspector,
+        body(remote),
+        "t".into(),
+        false,
+        "http://rustybin.test",
+    )
+    .expect("spec");
     assert!(!spec.call_tools);
-    let spec = build_run_spec(inspector, body(remote), "t".into(), true).expect("spec");
+    let spec = build_run_spec(
+        inspector,
+        body(remote),
+        "t".into(),
+        true,
+        "http://rustybin.test",
+    )
+    .expect("spec");
     assert!(spec.call_tools);
-    let spec = build_run_spec(inspector, body("/mcp"), "t".into(), false).expect("spec");
+    let spec = build_run_spec(
+        inspector,
+        body("/mcp"),
+        "t".into(),
+        false,
+        "http://rustybin.test",
+    )
+    .expect("spec");
     assert!(spec.call_tools);
 }
 
@@ -1157,3 +1178,5 @@ async fn the_security_checks_warn_on_the_attack_servers_and_pass_a_clean_one() {
     assert_eq!(c["status"], "warn", "{c}");
     assert_eq!(c["details"]["changed"][0], "get_exchange_rate", "{c}");
 }
+
+mod clientdoc_tests;
