@@ -140,6 +140,10 @@ pub const NOUNS: &[(&str, &str)] = &[
         "Demo storyboards: a scripted demo with a talk track, rehearsed step by step",
     ),
     (
+        "pack",
+        "Customer demo packs: a demo's mocks, tests and storyboards applied and torn down as one",
+    ),
+    (
         "record",
         "Recordings of a real API: a proxy URL to send traffic through, then a mock built from it",
     ),
@@ -452,6 +456,10 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("storyboard", "run", "<name> [--step N] [--var NAME=value]...", "Rehearse a storyboard: run every step in order (or one with --step) with your own permissions and print each verdict; exits 1 when a step fails.", &[Flag::value("--step", "Only this step, counted from 1"), Flag::value("--var", "A {{variable}}: NAME=value, or NAME=- (stdin) or NAME=@file for a credential (repeat it)")], [("POST", "/_rustybin/storyboards/{name}/steps/{index}/run")], false, "storyboard run retry-demo"),
     cmd!("storyboard", "reset", "<name> [--var NAME=value]...", "Before a rehearsal: run every step's reset action, end the scenario runs the storyboard started, clear your progress.", &[Flag::value("--var", "A {{variable}}: NAME=value, or NAME=- (stdin) or NAME=@file for a credential (repeat it)")], [("POST", "/_rustybin/storyboards/{name}/reset")], false, "storyboard reset retry-demo"),
     cmd!("storyboard", "delete", "<name>", "Delete a storyboard (what its steps changed stays).", NO_FLAGS, [("DELETE", "/_rustybin/storyboards/{name}")], true, "storyboard delete retry-demo --yes"),
+    cmd!("pack", "list", "", "The demo packs applied to the instance and what each holds now.", NO_FLAGS, [("GET", "/_rustybin/packs")], false, "pack list"),
+    cmd!("pack", "apply", "<file|dir> [--dry-run] [--untrusted]", "Apply a demo pack: a file, or a directory with a rustybin.yaml (its spec files are read here and sent inline). Everything goes to a new project named after the pack; a name that exists is refused. --dry-run previews.", &[Flag::switch("--dry-run", "Say what it would create, after the same checks, and change nothing"), Flag::switch("--untrusted", "A pack from someone else: no new gateways or webhooks")], [("POST", "/_rustybin/packs/apply")], false, r#"pack apply '{"pack":{"name":"acme"},"storyboards":[{"name":"acme-demo","steps":[{"title":"Welcome"}]}]}' --dry-run"#),
+    cmd!("pack", "teardown", "<name> [--dry-run]", "Remove an applied pack: what its project holds, its test schedules, the console title it set and the project. --dry-run lists it.", &[Flag::switch("--dry-run", "List what would be removed and change nothing")], [("DELETE", "/_rustybin/packs/{name}")], false, "pack teardown acme --dry-run"),
+    cmd!("pack", "export", "<project> [--output FILE] [--format yaml|json]", "A project's mocks, tests and storyboards as a pack (specs inline): a demo built by hand becomes reusable.", &[Flag::value("--output", "Write the pack to this file instead of printing it"), Flag::value("--format", "yaml (default) or json")], [("GET", "/_rustybin/packs/{name}/export")], false, "pack export acme"),
     cmd!("bins", "list", "", "Your request bins.", NO_FLAGS, [("GET", "/bin")], false, "bins list"),
     cmd!("bins", "create", "[--status N] [--body B] [--delay-ms N]", "A new bin, with the answer it gives.", &[Flag::value("--status", "The status the bin answers"), Flag::value("--body", "The body it answers: a file or inline JSON"), Flag::value("--delay-ms", "A delay before the answer")], [("POST", "/bin")], false, "bins create --status 202"),
     cmd!("bins", "delete", "<id>", "Delete a bin.", NO_FLAGS, [("DELETE", "/bin/{id}")], true, "bins delete 0123456789abcdef01234567 --yes"),
@@ -826,6 +834,7 @@ pub async fn dispatch(ctx: &mut Ctx) -> Result<()> {
         "scenario" => scenario(ctx, cmd.verb).await,
         "tests" => tests(ctx, cmd.verb).await,
         "storyboard" => storyboard(ctx, cmd.verb).await,
+        "pack" => pack(ctx, cmd.verb).await,
         "checkpoint" => checkpoint(ctx, cmd.verb).await,
         "record" => record(ctx, cmd.verb).await,
         "ai" => ai(ctx, cmd.verb).await,
@@ -2698,6 +2707,200 @@ async fn checkpoint(ctx: &mut Ctx, verb: &str) -> Result<()> {
             Ok(())
         }
         _ => Err(Fail::Usage(format!("checkpoint {verb}: not implemented"))),
+    }
+}
+
+// ── Demo packs ──────────────────────────────────────────────────────
+
+/// The pack at `source` as a document: a file (or inline JSON, or `-`), or
+/// a directory with a `rustybin.yaml` whose `spec:` files are read here
+/// and put inline, since the instance reads no files.
+fn pack_document(ctx: &Ctx, source: &str) -> Result<Value> {
+    let dir = std::path::Path::new(source);
+    if !dir.is_dir() {
+        let text = ctx.input(source)?;
+        return serde_yaml::from_str(&text)
+            .map_err(|e| Fail::Usage(format!("{source}: not YAML or JSON ({e})")));
+    }
+    let file = dir.join("rustybin.yaml");
+    let text = std::fs::read_to_string(&file)
+        .map_err(|e| Fail::Usage(format!("{}: {e}", file.display())))?;
+    let mut doc: Value = serde_yaml::from_str(&text)
+        .map_err(|e| Fail::Usage(format!("{}: not YAML or JSON ({e})", file.display())))?;
+    for m in doc["mocks"].as_array_mut().into_iter().flatten() {
+        let Some(path) = m["spec"].as_str().map(str::to_string) else {
+            continue;
+        };
+        let rel = std::path::Path::new(&path);
+        let inside = rel.is_relative()
+            && rel
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)));
+        if !inside {
+            return Err(Fail::Usage(format!(
+                "mocks: spec {path}: a path inside the pack's directory"
+            )));
+        }
+        let spec = std::fs::read_to_string(dir.join(rel))
+            .map_err(|e| Fail::Usage(format!("{}: {e}", dir.join(rel).display())))?;
+        if let Value::Object(o) = m {
+            o.remove("spec");
+            o.insert("spec_inline".into(), json!(spec));
+        }
+    }
+    Ok(doc)
+}
+
+/// What a pack creates or removes, as rows for people.
+fn pack_rows(by_kind: &Value) -> Vec<Value> {
+    by_kind
+        .as_object()
+        .into_iter()
+        .flatten()
+        .flat_map(|(kind, names)| {
+            names
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(move |n| json!({ "kind": kind, "name": n }))
+        })
+        .collect()
+}
+
+async fn pack(ctx: &mut Ctx, verb: &str) -> Result<()> {
+    match verb {
+        "list" => {
+            let v = ctx.client()?.get("/_rustybin/packs", &[]).await?.value();
+            if ctx.json {
+                ctx.emit(&v);
+            } else {
+                let rows: Vec<Value> = v["packs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|p| {
+                        let n = |k: &str| p["holds"][k].as_array().map(Vec::len).unwrap_or(0);
+                        json!({
+                            "name": p["name"],
+                            "customer": p["customer"],
+                            "title": p["title"],
+                            "applied_at": p["applied_at"],
+                            "mocks": n("mocks"),
+                            "tests": n("tests"),
+                            "storyboards": n("storyboards"),
+                        })
+                    })
+                    .collect();
+                ctx.emit(&json!({ "packs": rows }));
+            }
+            Ok(())
+        }
+        "apply" => {
+            let source = ctx
+                .args
+                .arg(0, "a pack: a file, or a directory with a rustybin.yaml")?
+                .to_string();
+            let document = pack_document(ctx, &source)?;
+            let dry_run = ctx.args.has("--dry-run");
+            let body = json!({ "document": document, "dry_run": dry_run, "untrusted": ctx.args.has("--untrusted") });
+            let reply = ctx
+                .client()?
+                .send(
+                    Method::POST,
+                    "/_rustybin/packs/apply",
+                    &[],
+                    Body::Json(body),
+                )
+                .await?;
+            let v = reply.value();
+            // A refusal names what is wrong: the taken names, the problems.
+            if reply.status >= 400 && (v["collisions"].is_array() || v["problems"].is_array()) {
+                if ctx.json {
+                    ctx.emit(&v);
+                } else {
+                    ctx.emit(&json!({ "collisions": v["collisions"], "problems": v["problems"] }));
+                }
+                return Err(Fail::Failed(
+                    v["error"]
+                        .as_str()
+                        .unwrap_or("the pack was refused")
+                        .to_string(),
+                ));
+            }
+            let v = reply.ok()?.value();
+            if ctx.json {
+                ctx.emit(&v);
+            } else {
+                let key = if dry_run { "would_create" } else { "created" };
+                ctx.emit(&json!({
+                    "pack": v["project"],
+                    "dry_run": dry_run,
+                    key: pack_rows(&v[key]),
+                }));
+            }
+            Ok(())
+        }
+        "teardown" => {
+            let name = ctx
+                .args
+                .arg(0, "a pack name (rustybin pack list)")?
+                .to_string();
+            let dry_run = ctx.args.has("--dry-run");
+            if !dry_run {
+                ctx.confirm(&format!(
+                    "tear down the pack {name} (what its project holds is deleted)?"
+                ))?;
+            }
+            let query: Vec<(&str, String)> = if dry_run {
+                vec![("dry_run", "true".to_string())]
+            } else {
+                Vec::new()
+            };
+            let v = ctx
+                .client()?
+                .delete(&format!("/_rustybin/packs/{}", enc(&name)), &query)
+                .await?
+                .value();
+            if ctx.json {
+                ctx.emit(&v);
+            } else {
+                let key = if dry_run { "would_remove" } else { "removed" };
+                ctx.emit(&json!({
+                    "pack": name,
+                    "dry_run": dry_run,
+                    "console_title": v["console_title"],
+                    key: pack_rows(&v[key]),
+                }));
+            }
+            if !dry_run && v["ok"] != json!(true) {
+                return Err(Fail::Failed(format!(
+                    "torn down with problems: {}",
+                    v["problems"]
+                )));
+            }
+            Ok(())
+        }
+        "export" => {
+            let name = ctx.args.arg(0, "a project name")?.to_string();
+            let format = ctx.args.value("--format").unwrap_or("yaml").to_string();
+            let reply = ctx
+                .client()?
+                .get(
+                    &format!("/_rustybin/packs/{}/export", enc(&name)),
+                    &[("format", format)],
+                )
+                .await?;
+            match ctx.args.value("--output").map(str::to_string) {
+                Some(file) => {
+                    std::fs::write(&file, reply.text.as_bytes())
+                        .map_err(|e| Fail::Usage(format!("{file}: {e}")))?;
+                    ctx.say(&format!("Written to {file}."));
+                }
+                None => ctx.raw(&reply.text),
+            }
+            Ok(())
+        }
+        _ => Err(Fail::Usage(format!("pack {verb}: not implemented"))),
     }
 }
 

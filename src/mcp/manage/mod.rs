@@ -24,6 +24,7 @@ pub mod harness;
 pub mod inspect;
 pub mod instance;
 pub mod mocks;
+pub mod packs;
 pub mod portal;
 pub mod projects;
 pub mod prompts;

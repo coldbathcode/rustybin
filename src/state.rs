@@ -102,6 +102,9 @@ pub struct AppState {
     /// Demo storyboards (`crate::storyboards`), `<state>/storyboards.json`,
     /// and each session's progress (in memory, bounded).
     pub storyboards: Arc<crate::storyboards::Storyboards>,
+    /// The demo packs applied to the instance (`crate::packs`),
+    /// `<state>/packs.json`: at most 20 records.
+    pub packs: Arc<crate::packs::Packs>,
     /// Checkpoints (`crate::checkpoints`), `<state>/checkpoints/`.
     pub checkpoints: Arc<crate::checkpoints::Checkpoints>,
     /// Users and custom roles (`crate::rbac::users`, `<state>/users.json`):
@@ -225,6 +228,7 @@ impl AppState {
         let storyboards = Arc::new(crate::storyboards::Storyboards::new(
             config.state_dir.as_deref(),
         ));
+        let packs = Arc::new(crate::packs::Packs::new(config.state_dir.as_deref()));
         let checkpoints = Arc::new(crate::checkpoints::Checkpoints::new(
             config.state_dir.as_deref(),
         ));
@@ -268,6 +272,7 @@ impl AppState {
             drift: Arc::new(crate::mocks::drift::DriftRuns::default()),
             saved_tests,
             storyboards,
+            packs,
             checkpoints,
             users,
             sso,

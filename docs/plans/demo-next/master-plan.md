@@ -60,7 +60,7 @@ The marker a session looks for is the first row that is not done.
 | [03](step-03-record-from-upstream.md) | Record a mock from a real upstream | | large | done 2026-11-11 |
 | [04](step-04-contract-drift.md) | Contract drift: a mock checked against the real API it imitates | 03 (shares the purpose) | medium | done 2026-11-11 |
 | [05](step-05-demo-storyboards.md) | Demo storyboards: a scripted demo with a talk track and resets | | medium | done 2026-11-12 |
-| [06](step-06-demo-packs.md) | Customer demo packs: one apply, one teardown | 05 | medium | planned 2026-11-11: owner decision, section 6 |
+| [06](step-06-demo-packs.md) | Customer demo packs: one apply, one teardown | 05 | medium | done 2026-11-12 (a pack is a project, the recommendation) |
 | [07](step-07-arazzo-workflows.md) | Arazzo workflows as multi-step saved tests and harness scenarios | | medium | planned 2026-11-11: owner decision, section 6 |
 | [08](step-08-realtime-and-batch-ai.md) | Realtime (WebSocket) and batch AI APIs | | large | planned 2026-11-11: owner decision, section 6 |
 | [09](step-09-asyncapi-event-mocks.md) | Event-driven mocks from AsyncAPI | | large | planned 2026-11-11: owner decision, section 6 |

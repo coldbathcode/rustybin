@@ -885,6 +885,95 @@ async fn git_commit_takes_checkpoints_and_restore_reads_the_repository() {
     inst.server.shutdown();
 }
 
+/// A pack directory (its spec a file beside it) is applied, listed,
+/// exported and torn down; a second apply is refused naming what exists.
+#[tokio::test]
+async fn a_pack_directory_is_applied_exported_and_torn_down() {
+    let inst = instance().await;
+    inst.login().await;
+    let dir = inst.home.path().join("acme-pack");
+    std::fs::create_dir_all(dir.join("specs")).expect("dir");
+    std::fs::write(dir.join("specs/orders.yaml"), SPEC).expect("spec");
+    std::fs::write(
+        dir.join("rustybin.yaml"),
+        "version: 2\npack: {name: acme, title: Acme checkout, customer: Acme Corp}\nmocks:\n  - {name: acme-orders, spec: specs/orders.yaml}\nstoryboards:\n  - name: acme-demo\n    steps: [{title: Welcome}]\n",
+    )
+    .expect("pack");
+    let path = dir.display().to_string();
+    let before = inst.run(None, &["config", "export"]).await.1;
+    let preview = inst.json(&["pack", "apply", &path, "--dry-run"]).await;
+    assert_eq!(
+        preview["would_create"]["mocks"],
+        json!(["acme-orders"]),
+        "{preview}"
+    );
+    assert_eq!(inst.json(&["pack", "list"]).await["packs"], json!([]));
+    let applied = inst.json(&["pack", "apply", &path]).await;
+    assert_eq!(
+        applied["created"]["storyboards"],
+        json!(["acme-demo"]),
+        "{applied}"
+    );
+    let (code, text) = inst.run(None, &["pack", "list"]).await;
+    assert_eq!(code, 0);
+    assert!(
+        text.contains("acme") && text.contains("Acme Corp"),
+        "{text}"
+    );
+    // Again: refused, with the names that are taken.
+    let (code, out, message) = inst.run_full(None, &["pack", "apply", &path]).await;
+    assert_eq!(code, 1, "{out}");
+    assert!(message.contains("already exists"), "{message}");
+    assert!(out.contains("acme-orders"), "{out}");
+    // A spec outside the directory is not read.
+    let escape = inst.home.path().join("escape");
+    std::fs::create_dir_all(&escape).expect("dir");
+    std::fs::write(
+        escape.join("rustybin.yaml"),
+        "pack: {name: escape}\nmocks:\n  - {name: x, spec: ../acme-pack/specs/orders.yaml}\n",
+    )
+    .expect("pack");
+    let (code, _, message) = inst
+        .run_full(None, &["pack", "apply", &escape.display().to_string()])
+        .await;
+    assert_eq!(code, 2, "{message}");
+    // The export is a pack again, in one file.
+    let out = inst.home.path().join("acme.yaml");
+    let (code, _) = inst
+        .run(
+            None,
+            &[
+                "pack",
+                "export",
+                "acme",
+                "--output",
+                &out.display().to_string(),
+            ],
+        )
+        .await;
+    assert_eq!(code, 0);
+    let exported = std::fs::read_to_string(&out).expect("export");
+    assert!(
+        exported.contains("customer: Acme Corp") && exported.contains("spec_inline"),
+        "{exported}"
+    );
+    let would = inst.json(&["pack", "teardown", "acme", "--dry-run"]).await;
+    assert_eq!(
+        would["would_remove"]["mocks"],
+        json!(["acme-orders"]),
+        "{would}"
+    );
+    let gone = inst.json(&["pack", "teardown", "acme", "--yes"]).await;
+    assert_eq!(gone["ok"], json!(true), "{gone}");
+    assert_eq!(inst.run(None, &["config", "export"]).await.1, before);
+    // The exported file applies.
+    let again = inst
+        .json(&["pack", "apply", &out.display().to_string()])
+        .await;
+    assert_eq!(again["created"]["mocks"], json!(["acme-orders"]), "{again}");
+    inst.server.shutdown();
+}
+
 /// `storyboard run` is a rehearsal: every step's verdict, exit 1 when one
 /// fails; `--step` runs one; a viewer is refused naming the permission.
 #[tokio::test]

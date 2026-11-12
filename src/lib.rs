@@ -60,6 +60,7 @@ pub mod mocks;
 pub mod oidc;
 pub mod openapi;
 pub mod orchestration;
+pub mod packs;
 pub mod portal;
 pub mod random;
 pub mod rbac;
@@ -166,6 +167,7 @@ pub const ROUTERS: &[fn(&AppState) -> Router<AppState>] = &[
     recordings::router,
     replay::router,
     storyboards::router,
+    packs::router,
     checkpoints::router,
     egress::router,
     harness::router,

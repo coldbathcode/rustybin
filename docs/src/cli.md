@@ -542,6 +542,24 @@ rustybin storyboard reset retry-demo
 rustybin storyboard delete retry-demo --yes
 ```
 
+## pack
+
+Customer demo packs: a demo's mocks, tests and storyboards applied and torn down as one
+
+| Command | What it does | Calls | Needs |
+|---|---|---|---|
+| `rustybin pack list` | The demo packs applied to the instance and what each holds now. | `GET /_rustybin/packs` | `config.export` |
+| `rustybin pack apply <file\|dir> [--dry-run] [--untrusted]` | Apply a demo pack: a file, or a directory with a rustybin.yaml (its spec files are read here and sent inline). Everything goes to a new project named after the pack; a name that exists is refused. --dry-run previews. Flags: `--dry-run`, `--untrusted`. | `POST /_rustybin/packs/apply` | `config.apply` |
+| `rustybin pack teardown <name> [--dry-run]` | Remove an applied pack: what its project holds, its test schedules, the console title it set and the project. --dry-run lists it. Flags: `--dry-run`. | `DELETE /_rustybin/packs/{name}` | `config.apply` |
+| `rustybin pack export <project> [--output FILE] [--format yaml\|json]` | A project's mocks, tests and storyboards as a pack (specs inline): a demo built by hand becomes reusable. Flags: `--output` value, `--format` value. | `GET /_rustybin/packs/{name}/export` | `config.export` |
+
+```bash
+rustybin pack list
+rustybin pack apply '{"pack":{"name":"acme"},"storyboards":[{"name":"acme-demo","steps":[{"title":"Welcome"}]}]}' --dry-run
+rustybin pack teardown acme --dry-run
+rustybin pack export acme
+```
+
 ## record
 
 Recordings of a real API: a proxy URL to send traffic through, then a mock built from it

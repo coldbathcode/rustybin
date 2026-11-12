@@ -839,6 +839,7 @@ pub fn json_schema() -> Value {
         "tests": crate::replay::schema(),
         "test_schedules": crate::replay::schedule::schema(),
         "storyboards": crate::storyboards::schema(),
+        "pack": crate::packs::header_schema(),
         "agents": agents,
         "roles": crate::configdoc::roles_schema(),
         "users": crate::configdoc::users_schema(),

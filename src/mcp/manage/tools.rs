@@ -885,6 +885,22 @@ pub static TOOLS: &[ToolDef] = &[
         "name": { "type": "string" },
         "confirm": confirm_prop()
     }), &["name"])),
+    // ── Demo packs (demo next step 06) ──
+    tool!("list_packs", "Applied demo packs", "The demo packs applied to this instance: name, title, customer, notes, when and by whom, and what each pack's project holds now. What the pack's author wrote is under untrusted_*.", ToolNeed::Perm(Permission::ConfigExport), ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("apply_pack", "Apply a demo pack", "Apply a customer demo pack: a rustybin.yaml document with a pack: header (name, title, customer, notes, console_title) and only the sections mocks (specs inline as spec_inline), portal (the pack's own mocks), tests, test_schedules (of the pack's own tests) and storyboards. Creates a project named after the pack and puts every resource in it. A name that exists is refused, never overwritten; a pack with a problem is refused whole. dry_run: true previews after the same checks and changes nothing: do that first and show the user. untrusted: true for a pack from someone else (no new gateways or webhooks). Needs config.apply and users.manage (and settings.write for a console_title).", ToolNeed::Perm(Permission::ConfigApply), ro=false, destructive=false, idem=false, confirm=false, || obj(json!({
+        "document": { "description": "The pack: YAML or JSON text, or the JSON object. Read the user's file and pass its content", "oneOf": [{ "type": "string" }, { "type": "object" }] },
+        "dry_run": { "type": "boolean", "default": false },
+        "untrusted": { "type": "boolean", "default": false }
+    }), &["document"])),
+    tool!("teardown_pack", "Tear down a demo pack", "Remove an applied pack: DELETE what its project holds now (mocks with their portal items, saved tests, storyboards, checkpoints), its test schedules and the project, and put the console title back when it is still the pack's. A resource moved out of the project stays. dry_run: true lists what would go (no confirmation). Destructive: confirmed.", ToolNeed::Perm(Permission::ConfigApply), ro=false, destructive=true, idem=true, confirm=true, || obj(json!({
+        "name": { "type": "string", "description": "The pack (list_packs)" },
+        "dry_run": { "type": "boolean", "default": false },
+        "confirm": confirm_prop()
+    }), &["name"])),
+    tool!("export_pack", "Export a project as a pack", "A project's mocks (with their portal items), saved tests, their schedules and storyboards as a demo pack document, specs inline: a demo built by hand becomes reusable with apply_pack on another instance. The document is under untrusted_pack (YAML, or format json).", ToolNeed::Perm(Permission::ConfigExport), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+        "name": { "type": "string", "description": "The project (or applied pack)" },
+        "format": { "type": "string", "enum": ["yaml", "json"], "default": "yaml" }
+    }), &["name"])),
 ];
 
 /// The `project` property of a tool that creates or lists.
@@ -1487,6 +1503,11 @@ async fn run_tool(
             super::storyboards::run_storyboard_step(ctx, access, args, params).await
         }
         "reset_storyboard" => super::storyboards::reset_storyboard(ctx, access, args, params).await,
+        // Demo packs
+        "list_packs" => super::packs::list_packs(ctx),
+        "apply_pack" => super::packs::apply_pack(ctx, access, args).await,
+        "teardown_pack" => super::packs::teardown_pack(ctx, access, args, params).await,
+        "export_pack" => super::packs::export_pack(ctx, args),
 
         _ => return Err(RpcError::invalid_params(format!("Unknown tool: {name}"))),
     })

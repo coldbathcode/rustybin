@@ -137,15 +137,15 @@ hops `safety::pin_chain` pinned; a field added to the marker goes inside its sig
 a client's marker byte for byte what it was; an onward call is never counted with the clients'
 arrivals.
 
-## Demo next, new features for gateway demos (planned 2026-11-11, steps 01 to 05 built, not released)
+## Demo next, new features for gateway demos (planned 2026-11-11, steps 01 to 06 built, not released)
 
 [docs/plans/demo-next/master-plan.md](docs/plans/demo-next/master-plan.md): nine new features and a
 release, one file each (section 4 is the build marker, section 6 the owner's decisions with a
 recommendation each): AI gateway scenarios, MCP security scenarios, a mock recorded from a real
-upstream, contract drift (steps 01 to 04, built 2026-11-11), demo storyboards (step 05, built
-2026-11-12), customer demo packs, Arazzo workflows, realtime and batch AI APIs, AsyncAPI event
-mocks. Each built step file has build notes; the changelog's "Unreleased" section lists what is new.
-Steps 06 to 09 wait for the owner's decisions (section 6), step 10 (the release) is the owner's to
+upstream, contract drift (steps 01 to 04, built 2026-11-11), demo storyboards and customer demo
+packs (steps 05 and 06, built 2026-11-12), Arazzo workflows, realtime and batch AI APIs, AsyncAPI
+event mocks. Each built step file has build notes; the changelog's "Unreleased" section lists what is new.
+Steps 07 to 09 wait for the owner's decisions (section 6), step 10 (the release) is the owner's to
 start, and core-next step 14 (the 0.7.0 release) has not been done either.
 
 Step 05 (storyboards; `docs/plans/demo-next/step-05-demo-storyboards.md`, user docs
@@ -162,6 +162,20 @@ action is a variant of `Action` with its arms in `validate`, `act`, `confirm_rea
 `send` action is validated as a saved test) and progress is never instance state (in memory, bounded,
 in no export or checkpoint); a storyboard from git is never moved and never gains a gateway
 (`Storyboard::outbound`).
+
+Step 06 (demo packs; `docs/plans/demo-next/step-06-demo-packs.md`, user docs `docs/src/demo-packs.md`):
+`src/packs/` (`Header`, `parse`, `apply`, `teardown`, `export`, the records in `AppState.packs` and
+`<state>/packs.json`, `/_rustybin/packs*`), `src/mcp/manage/packs.rs`, `rustybin pack`,
+`ui/views/manage/packs.js`, the example pack in `docs/examples/packs/`. Rules it left: a pack is a
+project (the apply creates it through `configdoc::apply` with a `projects:` entry and every resource's
+`project` set, never a path of its own), and a teardown removes what the project holds now plus what
+the record names, never something found by its name; a name that is taken is refused at the preview as
+at the apply, never overwritten; a pack section must be removable again (a new one belongs in
+`packs::SECTIONS` only when its apply is additive and its resources are the project's or the record's:
+`registry` is not, its section replaces the instance's entries); a pack never carries `settings`,
+`secrets`, `users`, `roles` or `projects`, and an instance reads no file for one (specs inline); what
+a pack changes outside its project (the console title) is remembered in the record and restored only
+when it is still the pack's.
 
 ## Rustybin 0.3, reliability and testing workflows (built and released 2026-11-02)
 
@@ -469,6 +483,9 @@ MSRV is Rust 1.88 (`rust-version` in Cargo.toml, Dockerfile builder image, CI `m
 - `src/storyboards/`: demo storyboards (`/_rustybin/storyboards*`, `rustybin storyboard`, the `*_storyboard*`
   tools and the `rehearse_demo` prompt, the console's Storyboards view, `storyboards:` of `rustybin.yaml`): at most
   50 of 40 steps, 64 KiB each; a step's action runs as the caller through `run::act`; see demo next step 05 above.
+- `src/packs/`: customer demo packs (`/_rustybin/packs*`, `rustybin pack`, the `*_pack(s)` tools and the
+  `prepare_customer_demo` prompt, Management, Packs): a document with a `pack:` header applied into a project
+  of its own and torn down as a unit; at most 20; see demo next step 06 above.
 - `src/scenarios/`: guided gateway scenarios (`/_rustybin/scenarios*`, `rustybin scenario`, the
   `*_gateway_scenario` tools, the console's Gateway scenarios view). `catalog.rs` is the one table (what each
   proves, the upstream, the steps, the requests, `evaluate`); `mod.rs` the runs (`AppState.scenarios`, 32, an hour,

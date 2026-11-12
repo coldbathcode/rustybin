@@ -3,7 +3,7 @@
 ## Unreleased: the last of the roadmap's candidates
 
 [The plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/core-next/master-plan.md),
-steps 11 to 13, built on 2026-11-09 and not released yet, and steps 01 to 05 of
+steps 11 to 13, built on 2026-11-09 and not released yet, and steps 01 to 06 of
 [the demo next plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/demo-next/master-plan.md),
 built on 2026-11-11 and 2026-11-12. Nothing to do when upgrading: what is new is off until you turn it on or
 name it in a scenario.
@@ -60,6 +60,18 @@ name it in a scenario.
   exits 1 when a step fails), `reset`, `delete`, five management tools and the prompt
   `rehearse_demo`, `storyboards:` in `rustybin.yaml` (a pulled document cannot point a step at
   a new gateway).
+- [Customer demo packs](demo-packs.md): a customer's whole demo as one document, a
+  `rustybin.yaml` with a `pack:` header (`name`, `title`, `customer`, `notes`, `console_title`)
+  and the sections `mocks`, `portal`, `tests`, `test_schedules` and `storyboards` only. `POST
+  /_rustybin/packs/apply` creates a project named after the pack and applies the document into
+  it (`dry_run` previews after the same checks; a name that is taken is `409 name_taken`, never
+  overwritten; a pack with a problem is refused whole); `DELETE /_rustybin/packs/{name}` removes
+  what the project holds now, the pack's schedules and the project, and puts the console title
+  back (`dry_run` lists it), leaving an export of the instance byte for byte what it was; `GET
+  /_rustybin/packs/{name}/export` gives any project as a pack. At most 20 packs. On every
+  surface: the routes, Management, Packs in the console, `rustybin pack apply` (a file, or a
+  directory whose spec files it sends inline), `list`, `teardown`, `export`, four management
+  tools and the prompt `prepare_customer_demo`.
 
 - Source control: a [diverged branch](source-control.md#a-diverged-branch) says what differs
   (`divergence` in the status and in the `409`) and is resolved by a person: `POST
@@ -106,12 +118,14 @@ name it in a scenario.
 
 **Changed**:
 
-- The management MCP server has 158 tools for an admin (`request_secret`, `get_secret_request`,
+- The management MCP server has 162 tools for an admin (`request_secret`, `get_secret_request`,
   `git_branches`, `git_switch_branch`, `git_signing_key`, `import_scenario`, the six recording
   tools `list_recordings`, `start_recording`, `get_recording`, `stop_recording`,
   `build_mock_from_recording`, `delete_recording`, `check_mock_drift`, `list_drift_runs`, and
   the five storyboard tools `list_storyboards`, `save_storyboard`, `delete_storyboard`,
-  `run_storyboard_step`, `reset_storyboard`) and ten prompts (`rehearse_demo` is new).
+  `run_storyboard_step`, `reset_storyboard`, and the four pack tools `list_packs`, `apply_pack`,
+  `teardown_pack`, `export_pack`) and eleven prompts (`rehearse_demo` and
+  `prepare_customer_demo` are new).
 - `rustybin.yaml` has a `storyboards:` section (empty when there are none), and a project's
   resources count its storyboards.
 - `profiles.json` may hold an `agent` object per profile. An older `rustybin` reads the file

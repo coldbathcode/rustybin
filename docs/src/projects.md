@@ -94,6 +94,9 @@ Instance-wide things refuse a member of a project:
 {{#include ../examples/concepts/projects.hurl:instance}}
 ```
 
+A [demo pack](demo-packs.md) is a project made for one customer's demo: applying the
+pack creates it, tearing the pack down deletes it with what it holds.
+
 ## Delete a project
 
 A project that holds mocks, saved tests, checkpoints or storyboards is deleted only with

@@ -26,6 +26,7 @@ import * as portal from '../lib/portal.js';
 import { exportPanel } from './manage/export.js';
 import { gitPanel } from './manage/git.js';
 import { checkpointsPanel } from './manage/checkpoints.js';
+import { packsPanel } from './manage/packs.js';
 import { usersPanel } from './manage/users.js';
 import { auditPanel } from './manage/audit.js';
 import * as perms from '../lib/perms.js';
@@ -41,6 +42,7 @@ export const TABS = [
   { id: 'export', title: 'Export', icon: 'file', hint: 'The whole instance as rustybin.yaml: export, diff, apply a document' },
   { id: 'git', title: 'Source control', icon: 'history', hint: 'Commit the configuration to a git repository, pull and apply it' },
   { id: 'checkpoints', title: 'Checkpoints', icon: 'history', hint: 'Save the mocks and health a demo starts from, restore them before a run' },
+  { id: 'packs', title: 'Packs', icon: 'inbox', hint: 'A customer\'s demo as one document: applied into a project of its own, torn down as a unit' },
   { id: 'audit', title: 'Audit', icon: 'file', hint: 'Who changed what, every sign-in and every refusal; how long the log is kept' },
   { id: 'diagnostics', title: 'Diagnostics', icon: 'shield', hint: 'What is wrong with this instance and how to fix it' },
 ];
@@ -780,7 +782,7 @@ export default {
         b.tabIndex = tid === id ? 0 : -1;
       }
       if (location.hash !== '#/manage/' + id) history.replaceState(null, '', '#/manage/' + id);
-      const render = id === 'users' ? usersPanel : id === 'audit' ? auditPanel : id === 'checkpoints' ? checkpointsPanel : id === 'diagnostics' ? diagnosticsPanel : id === 'network' ? networkPanel : id === 'signin' ? signinPanel : id === 'ai' ? aiPanel : id === 'portal' ? portalPanel : id === 'export' ? exportPanel : id === 'git' ? gitPanel : generalPanel;
+      const render = id === 'users' ? usersPanel : id === 'audit' ? auditPanel : id === 'checkpoints' ? checkpointsPanel : id === 'packs' ? packsPanel : id === 'diagnostics' ? diagnosticsPanel : id === 'network' ? networkPanel : id === 'signin' ? signinPanel : id === 'ai' ? aiPanel : id === 'portal' ? portalPanel : id === 'export' ? exportPanel : id === 'git' ? gitPanel : generalPanel;
       replace(panel, render(doc, (d) => { if (d) { doc = d; renderStatus(); } }, error));
     }
 

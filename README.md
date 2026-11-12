@@ -805,6 +805,10 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET PUT DELETE | `/_rustybin/storyboards/{name}` | A storyboard with your progress through it: read, replace or delete it |
 | POST | `/_rustybin/storyboards/{name}/steps/{index}/run` | Run one step of a storyboard (counted from 1): its action, with your own permissions, and the verdict |
 | POST | `/_rustybin/storyboards/{name}/reset` | Reset a storyboard before a rehearsal: every step's reset action, the scenario runs it started ended, your progress cleared |
+| GET | `/_rustybin/packs` | The demo packs applied to this instance, with what each holds now |
+| POST | `/_rustybin/packs/apply` | Apply a demo pack: a project named after it with its mocks, portal items, saved tests, schedules and storyboards (dry_run previews) |
+| DELETE | `/_rustybin/packs/{name}` | Tear a demo pack down: what its project holds, its schedules, the console title it set, the project (?dry_run=true lists it) |
+| GET | `/_rustybin/packs/{name}/export` | A project's resources as a demo pack (YAML, or ?format=json): the inverse of an apply |
 | GET POST | `/_rustybin/checkpoints` | Checkpoints of the instance's API mocks and health: list them (?from=git: the configuration repository's, admin), or save one (admin) |
 | GET DELETE | `/_rustybin/checkpoints/{name}` | A checkpoint: what it holds; DELETE removes it (admin) |
 | POST | `/_rustybin/checkpoints/{name}/restore` | Restore a checkpoint: mocks, their data and health back, flaky counters reset; ?dry_run=true says what would change, ?from=git restores the configuration repository's (admin) |

@@ -406,7 +406,7 @@ rule of `rustybin.yaml`; see [Managing agents](agent-mcp.md#managing-agents)):
 | `read-only` | Exploring: what is mocked, what the deploy checks say, sample requests | 71 |
 | `traffic` | Debugging a gateway: the above plus captured traffic | 78 |
 | `manage` | Building mocks: reads plus creating, editing and deploying mocks, AI-built examples, recordings, drift checks, the portal | 79 |
-| `full` | Building the whole platform: settings, git, agents, saved tests, checkpoints, the harness | 158 |
+| `full` | Building the whole platform: settings, git, agents, saved tests, checkpoints, the harness | 162 |
 
 The counts are for an admin credential on an instance without self-service mocks;
 `tools/list` shows only what the agent may call. Start with `read-only` while you
@@ -441,7 +441,7 @@ rustybin agents rights <id> --ceiling manage --deny delete_mock,apply_config
 
 ## Tool limits
 
-With an admin credential the server has 158 tools, sent 100 to a `tools/list` page
+With an admin credential the server has 162 tools, sent 100 to a `tools/list` page
 with `nextCursor` for the rest. Clients differ in how many tools they take:
 
 | Client | Reads every `tools/list` page | Its own limit |
@@ -600,5 +600,5 @@ doctor`) lists what is wrong and the fix.
 | API | `POST /_rustybin/mcp` (the server), `POST /_rustybin/login` (a token), `GET /_rustybin/agents` (who connected) |
 | Console | **AI agents**: **Connect an agent** (the command and JSON with this instance's URL and credential), the agents, their rights and calls |
 | CLI | `rustybin login`, `rustybin mcp-stdio`, `rustybin agents list \| rights \| tail` ([reference](cli.md#agents)) |
-| Management MCP | Every tool; the prompts `build_instance`, `mock_an_api`, `secure_a_mock`, `debug_gateway_call`, `load_test_gateway`, `publish_portal`, `backup_to_git`, `test_mcp_server`, `onboard_agent`, `rehearse_demo` |
+| Management MCP | Every tool; the prompts `build_instance`, `mock_an_api`, `secure_a_mock`, `debug_gateway_call`, `load_test_gateway`, `publish_portal`, `backup_to_git`, `test_mcp_server`, `onboard_agent`, `rehearse_demo`, `prepare_customer_demo` |
 | `rustybin.yaml` | `agents:` rules by client name and credential kind ([Managing agents](agent-mcp.md#managing-agents)) |

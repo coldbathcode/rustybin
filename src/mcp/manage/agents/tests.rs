@@ -1268,6 +1268,11 @@ const OLD_RIGHTS: &[(&str, &str, bool)] = &[
     ("delete_storyboard", "admin", false),
     ("run_storyboard_step", "admin", false),
     ("reset_storyboard", "admin", false),
+    // Demo next step 06: a pack is a document applied and removed whole.
+    ("list_packs", "admin", true),
+    ("apply_pack", "admin", false),
+    ("teardown_pack", "admin", false),
+    ("export_pack", "admin", true),
 ];
 
 /// The 0.4 ceilings, by right: `read-only` a read-only tool that is not a

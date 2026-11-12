@@ -829,6 +829,10 @@ server and a gateway's JWT validation:
 | `save_storyboard` | `tests.write` | Save a storyboard: steps with a `title`, a `talk_track`, an `action` and a `reset`; `replace: true` overwrites one. Saving runs nothing |
 | `delete_storyboard` | `tests.write` | Delete a storyboard (confirmed) |
 | `run_storyboard_step` | `tests.run` | Run one step (`step`, counted from 1) with your own permissions: the step's action needs its own (`checkpoints.restore`, `scenarios.run`, `settings.write`, `mocks.write`). Confirmed when the action restores a checkpoint, checks a scenario or sends through a gateway, or replays a request that changes state. The action's answer is under `untrusted_detail` |
+| `list_packs` | `config.export` | The [demo packs](demo-packs.md) applied to the instance and what each holds now; what a pack's author wrote is under `untrusted_*` |
+| `apply_pack` | `config.apply` | Apply a pack (a document with a `pack:` header) into a project named after it; `dry_run` previews after the same checks; a taken name or a problem refuses it whole. Also needs `users.manage`, and `settings.write` for a `console_title` |
+| `teardown_pack` | `config.apply` | Remove what the pack's project holds, its schedules, the console title it set and the project (confirmed; `dry_run` lists it) |
+| `export_pack` | `config.export` | A project as a pack document, under `untrusted_pack` |
 | `reset_storyboard` | `tests.run` | Run every step's reset action, end the scenario runs your progress started, clear your progress (confirmed as a step is) |
 
 ### Harness
@@ -902,6 +906,7 @@ Clients that support MCP prompts offer these as commands:
 | `debug_gateway_call` | `path` | Find the request a gateway sent and explain what arrived (headers, auth, validation) against what was expected |
 | `load_test_gateway` | `target`, `rate` | On a [harness](harness.md) node: check the allowed targets, build and validate a scenario, preview it, dry-run it at a low rate, then run it for real and read the report |
 | `secure_a_mock` | `name`, `mode` | Pick a mocked security mode and show the credentials a gateway must present |
+| `prepare_customer_demo` | `pack_path` | Preview a [demo pack](demo-packs.md), apply it when the user agrees, rehearse its storyboard, say how to tear it down |
 | `rehearse_demo` | `name` | Reset a [storyboard](storyboards.md), run its steps in order (asking before a step that restores, sends out or changes state) and report each verdict |
 
 | Resource | |

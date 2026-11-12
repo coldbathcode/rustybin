@@ -136,6 +136,14 @@ pub const BODY_CHECKS: &[(Permission, &str)] = &[
         "a document with users: or roles:; PUT /_rustybin/password by a caller who is not a user (the first admin's password)",
     ),
     (
+        Permission::UsersManage,
+        "POST /_rustybin/packs/apply and DELETE /_rustybin/packs/{name}: a pack is a project, created and deleted with it",
+    ),
+    (
+        Permission::SettingsWrite,
+        "a pack with console_title (and its teardown): the title is a settings change, so also settings.security",
+    ),
+    (
         Permission::PortalRead,
         "the API portal's closed items: their credentials, Try it, collections and connection snippets (/portal/api/*), and the whole portal with portal.auth=password; a portal session or a bearer control credential",
     ),

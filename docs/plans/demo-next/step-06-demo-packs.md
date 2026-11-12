@@ -65,3 +65,50 @@ teardown to guessing by name and is not recommended.
 
 A pack applies, tears down cleanly and exports on every surface, with the example pack tested in
 `docs/examples/run.sh`.
+
+## Build notes (2026-11-12)
+
+Built whole, with the recommendation of section 6: a pack is a project plus a document. Where the
+build differs from the plan above:
+
+- **There is a small record store after all** (`<state>/packs.json`, `AppState.packs`, 20 packs):
+  the header, who applied it and when, and the two things the pack's project does not hold, which
+  a teardown needs: the names of the pack's test schedules and the console title it replaced. The
+  packs themselves stay files; the instance keeps no copy of the document.
+- **`registry` is not a pack section.** The registry section of a document replaces the
+  instance's file entries as a whole (`set_file_registry`), so it cannot be applied additively
+  and removed again without touching what was there. A pack carries `mocks`, `portal`, `tests`,
+  `test_schedules` and `storyboards`; everything else is refused by name.
+- **What keeps a pack removable**: its portal items are items of its own mocks, its schedules
+  name its own tests (no `prefix`, never every test), and a resource that names another project
+  is refused. Schedules are not project resources, so they are the record's.
+- **Specs are inline.** An instance reads no files: a pack sent to the API with `spec:` is
+  refused, `rustybin pack apply <dir>` reads the spec files (paths inside the directory) and
+  sends them inline. There is no `.tar.gz` pack: a pack with inline specs is one file, which is
+  what `pack export` writes (`--output FILE`), so the plan's `pack export <project> <dir>` is
+  `pack export <project> --output FILE`.
+- **The apply is a unit** by a dry run first (`configdoc::apply` with `dry_run`, so the preview
+  and the apply share every check), then the apply; if it still reports a problem, what it
+  created is removed again and the answer is `422`. The portal section is left out of the dry
+  run (its items name mocks the dry run has not created) and its metadata checked beside it.
+- **The console title** is `pack.console_title`. The teardown restores the stored value from
+  before, or unsets it when none was stored, and only when the title is still the pack's.
+- **Permissions**: no new one (the step's first question). `config.apply` on the routes plus
+  `users.manage` (the project), and `settings.write` with `settings.security` for a
+  `console_title`; the list and the export are `config.export`.
+- **The apply route takes the pack as the body** (`Content-Type: application/yaml`, with
+  `?dry_run=true`), beside the JSON `{document, dry_run, untrusted}`, so `curl --data-binary
+  @pack.yaml` and the docs' Hurl example send the example pack as it is.
+- **Export** of a project that is not a pack takes the schedules that name only its tests, and
+  the project's description as the title. A project's checkpoints are not in a pack (a pack
+  creates state, a checkpoint snapshots it); a teardown does remove them.
+- `untrusted` is the applier's word on the request (`ApplyOptions.untrusted`), since a pack has
+  no source the instance could judge.
+
+### For the merge
+
+`src/packs/` (`mod.rs`, `tests.rs`), `AppState.packs`, the `pack` property of the configuration
+schema, two rows of `BODY_CHECKS` and four of `NEW_SINCE_0_4`, four tools at the end of `TOOLS`
+(the frozen rights, 162 tools for an admin) and the prompt `prepare_customer_demo` (eleven
+prompts), the `pack` noun of the CLI, `ui/views/manage/packs.js` and its entry in `TABS`,
+`docs/examples/packs/`.

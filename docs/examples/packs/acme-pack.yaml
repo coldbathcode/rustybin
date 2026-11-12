@@ -1,0 +1,47 @@
+# A demo pack: everything the Acme demo needs, in one file.
+#   rustybin pack apply acme-pack.yaml --dry-run
+#   rustybin pack apply acme-pack.yaml
+#   rustybin pack teardown acme
+version: 2
+pack:
+  name: acme
+  title: Acme checkout
+  customer: Acme Corp
+  notes: Thursday 10:00, with their platform team
+  console_title: Acme demo
+mocks:
+  - name: acme-orders
+    spec_inline:
+      openapi: 3.0.3
+      info: { title: Acme Orders, version: "1" }
+      paths:
+        /orders/{id}:
+          get:
+            operationId: getOrder
+            parameters:
+              - { name: id, in: path, required: true, schema: { type: integer } }
+            responses:
+              "200":
+                description: The order
+                content:
+                  application/json:
+                    example: { id: 1, status: paid, total: 42.5 }
+portal:
+  items:
+    - { id: "mock:acme-orders", title: Acme Orders API, tags: [acme] }
+tests:
+  - name: acme-order-1
+    request: { path: /mock/acme-orders/orders/1 }
+    assert: [{ status: 200 }, { json: $.status, equals: paid }]
+test_schedules:
+  - { name: acme-hourly, every: 1h, names: [acme-order-1], enabled: false }
+storyboards:
+  - name: acme-demo
+    title: Acme checkout through the gateway
+    steps:
+      - title: The Acme Orders API
+        talk_track: This is **your** Orders API, mocked from your spec.
+        action: { type: open_view, route: "#/mocks/acme-orders" }
+      - title: An order
+        action: { type: run_test, name: acme-order-1 }
+      - title: Questions

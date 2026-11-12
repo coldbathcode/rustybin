@@ -1461,6 +1461,50 @@ def run_theme(browser, theme):
 
     step("management: checkpoints save, preview, restore, delete", checkpoints)
 
+    def packs():
+        # A pack pasted in: the preview, the apply, a second apply refused
+        # with the taken name, what it holds, the teardown.
+        name = f"e2e-pack-{theme}"
+        doc = (
+            f"pack: {{name: {name}, title: A demo, customer: E2E Corp, console_title: E2E demo}}\n"
+            "tests:\n"
+            f"  - name: {name}-ok\n"
+            "    request: {path: /status/200}\n"
+            "    assert: [{status: 200}]\n"
+            "storyboards:\n"
+            f"  - name: {name}-demo\n"
+            "    steps: [{title: Welcome}]\n"
+        )
+        page.goto(BASE + "/ui/#/manage/packs")
+        page.wait_for_selector("#pack-list")
+        page.fill("#pack-document", doc)
+        page.click("#pack-preview")
+        expect(page.locator("#pack-applied")).to_contain_text("would create")
+        expect(page.locator("#pack-applied")).to_contain_text(name + "-demo")
+        expect(page.locator(f"tr[data-pack='{name}']")).to_have_count(0)
+        page.click("#pack-apply")
+        row = page.locator(f"tr[data-pack='{name}']")
+        row.wait_for()
+        expect(row).to_contain_text("E2E Corp")
+        expect(row).to_contain_text("2 resources")
+        page.click("#pack-apply")
+        expect(page.locator("#pack-result")).to_contain_text("already exists")
+        expect(page.locator("#pack-result")).to_contain_text("project " + name)
+        page.click(f"[data-pack-preview='{name}']")
+        expect(page.locator("#pack-teardown-result")).to_contain_text("would remove")
+        with page.expect_download() as dl:
+            page.click(f"[data-pack-export='{name}']")
+        assert dl.value.suggested_filename == name + "-pack.yaml", dl.value.suggested_filename
+        shot(page, theme, "20d-packs")
+        assert_icons_sized(page, "management, packs")
+        page.once("dialog", lambda d: d.accept())
+        page.click(f"[data-pack-teardown='{name}']")
+        expect(page.locator("#pack-teardown-result")).to_contain_text("Tore down " + name)
+        expect(page.locator("#pack-teardown-result")).to_contain_text("restored")
+        expect(page.locator(f"tr[data-pack='{name}']")).to_have_count(0)
+
+    step("management: packs preview, apply, a refused second apply, export, teardown", packs)
+
     def via_gateway():
         # A second origin for the same server stands in for a gateway with CORS.
         alt = BASE.replace("127.0.0.1", "localhost") if "127.0.0.1" in BASE else BASE.replace("localhost", "127.0.0.1")
