@@ -212,9 +212,12 @@ request](agent-mcp.md#a-secret-at-an-agents-request) waits, a card sits above ev
 tab: the setting, the agent's id, the user it acts for and its credential (what the
 instance knows), then, set apart, the name the agent gave itself and its reason
 (what the agent claims, shown as text, never as markup). Type the value and **Set
-the secret**, or **Decline**; the value goes to the settings store and never to the
-agent. It shows for a caller with `secrets.write`, and the field is off when the
-caller may not set that secret.
+the secret**, or **Decline**, with a note for the agent when you want to leave one
+(the agent reads it: never type the secret there); the value goes to the settings
+store and never to the agent. It shows every request for a caller with
+`secrets.write` and, for a user without it, the requests of their own agents (which
+they may decline); the value field is off when the caller may not set that secret.
+While a request waits, the gear in the top bar carries the count from any view.
 
 **Instance settings** come from `GET /_rustybin/settings` and save with one `PATCH`
 per card (the admin token, or a control token with the `admin` scope). Every form is
@@ -263,7 +266,7 @@ sign-in token; the others across visits):
 | `GET /_rustybin/assist`, `POST /_rustybin/assist/run`, `POST /_rustybin/assist/test`, `GET /_rustybin/assist/usage` | The assist bar and drawer (the status, the streamed tasks), and the AI tab's test and usage (admin) |
 | `GET /_rustybin/catalog` | The route catalogue as JSON: categories with counts, and every endpoint with methods, category, summary, description and runnable examples |
 | `GET`, `PATCH /_rustybin/settings`, `DELETE /_rustybin/settings/{key}` | The instance settings of the Management view (admin): every registered key with its value, source, lock state and schema; secrets as `{set, hint}` |
-| `GET /_rustybin/secret-requests?state=pending`, `POST /_rustybin/secret-requests/{id}/fulfil`, `POST /_rustybin/secret-requests/{id}/decline` | Management, **Secrets an agent asked for** (`secrets.write`) |
+| `GET /_rustybin/secret-requests?state=pending`, `POST /_rustybin/secret-requests/{id}/fulfil`, `POST /_rustybin/secret-requests/{id}/decline` | Management, **Secrets an agent asked for**, and the count on the gear (`secrets.write`, or a user's own agents' requests) |
 | `GET /_rustybin/egress` | The outbound connection policy (admin): the allowlist, each feature's rule and the last decisions |
 | `GET /_rustybin/portal`, `PUT`, `DELETE /_rustybin/portal/items/{id}`, `GET /_rustybin/portal/insights` | Management, Portal and Publish to portal: the items, publishing, the counters |
 | `GET /_rustybin/config/export`, `POST /_rustybin/config/apply`, `GET /_rustybin/config/schema` | Management, Export (admin): the instance as `rustybin.yaml`, the dry run and the apply |

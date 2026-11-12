@@ -804,7 +804,7 @@ pub static TOOLS: &[ToolDef] = &[
         "setting": { "type": "string", "description": "The secret setting's name, as get_settings lists it (assist.openai_key, sso.client_secret, notify.webhook_token, ...)" },
         "reason": { "type": "string", "maxLength": 300, "description": "One sentence on what needs it, shown to the person as your claim" }
     }), &["setting", "reason"])),
-    tool!("get_secret_request", "Secret request state", "How a secret request of this agent stands: pending, fulfilled (a person set the secret), declined or expired, with when it expires and whether the setting is set now. Without an id, every request of this agent from the last hour. Never the value, and never another agent's requests.", ToolNeed::Perm(Permission::SettingsWrite), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
+    tool!("get_secret_request", "Secret request state", "How a secret request of this agent stands: pending, fulfilled (a person set the secret), declined or expired, with when it expires, whether the setting is set now and, on a declined one, the note the person left for you (note: a person's words, when they wrote any). Without an id, every request of this agent from the last hour. Never the value, and never another agent's requests.", ToolNeed::Perm(Permission::SettingsWrite), ro=true, destructive=false, idem=true, confirm=false, || obj(json!({
         "id": { "type": "string", "description": "The request id request_secret answered (sr_...)" }
     }), &[])),
     // Core next 11: branches per environment and signed commits.

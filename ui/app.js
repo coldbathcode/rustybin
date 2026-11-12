@@ -10,6 +10,7 @@ import * as visit from './lib/visit.js';
 import * as assist from './lib/assist.js';
 import * as perms from './lib/perms.js';
 import * as projects from './lib/projects.js';
+import * as secretRequests from './lib/secretrequests.js';
 import { SERVER, getJson, send, trimBase } from './lib/http.js';
 import { deliverCallback } from './lib/oauthpopup.js';
 
@@ -248,7 +249,11 @@ function renderActions() {
   if (auth.signInOptional && !auth.getToken()) {
     actions.appendChild(h('button', { class: 'btn sm ghost', type: 'button', id: 'sign-in-btn', onclick: () => auth.askSignIn() }, icon('lock'), 'Sign in'));
   }
-  actions.appendChild(h('button', { class: 'btn ghost icon', type: 'button', id: 'settings-btn', 'aria-label': 'Console settings', title: 'Console settings', onclick: openSettings }, icon('settings')));
+  // The gear, with how many secrets an agent asked for wait (the route's
+  // own count, ../lib/secretrequests.js; empty and hidden while none do).
+  actions.appendChild(h('button', { class: 'btn ghost icon', type: 'button', id: 'settings-btn', 'aria-label': 'Console settings', 'aria-describedby': 'secret-requests-count', title: 'Console settings', onclick: openSettings },
+    icon('settings'), h('span', { class: 'gear-count', id: 'secret-requests-count', hidden: true })));
+  paintGearCount();
   const themeBtn = h('button', { class: 'btn ghost icon', type: 'button', id: 'theme-btn' });
   themeBtn.addEventListener('click', () => settings.set('theme', effectiveTheme() === 'dark' ? 'light' : 'dark'));
   actions.appendChild(themeBtn);
@@ -279,6 +284,18 @@ function projectPicker() {
 
 function openSettings() {
   location.hash = '#/manage/general';
+}
+
+/** The count on the gear: secrets an agent asked for that wait for a person. */
+function paintGearCount() {
+  const el = document.getElementById('secret-requests-count');
+  const btn = document.getElementById('settings-btn');
+  if (!el || !btn) return;
+  const n = secretRequests.waiting();
+  el.hidden = n === 0;
+  const words = n === 1 ? '1 secret an agent asked for is waiting' : n + ' secrets an agent asked for are waiting';
+  replace(el, n === 0 ? null : String(n > 99 ? '99+' : n), n === 0 ? null : h('span', { class: 'sr-only' }, ' ' + words));
+  btn.title = n === 0 ? 'Console settings' : 'Console settings. ' + words + ': Management shows them.';
 }
 
 function expiryText() {
@@ -635,6 +652,9 @@ async function loadInstance() {
     route();
   }
   if (projectsChanged) renderActions();
+  // Secrets an agent asked for: the count on the gear (nothing is asked
+  // while the tab is hidden or the caller may not read them).
+  secretRequests.pollCount();
 
   renderMeta();
   renderBanner();
@@ -673,7 +693,11 @@ function start() {
     visit.consumeFragment();
     route();
   });
+  secretRequests.onCount(paintGearCount);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) secretRequests.pollCount(); });
   auth.onChange((kind) => {
+    // Another caller: what was counted was the last one's.
+    secretRequests.resetCount();
     if (kind === 'reset') {
       forgetPreviousUser();
     } else if (kind === 'token') {

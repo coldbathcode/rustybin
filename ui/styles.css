@@ -297,6 +297,9 @@ hr.sep { border: 0; border-top: 1px solid var(--border); margin: 6px 0; }
 .btn.ghost:hover { background: var(--surface-3); }
 .btn.sm { height: 28px; padding: 0 10px; font-size: 13px; }
 .btn.icon { width: 34px; padding: 0; }
+#settings-btn { position: relative; }
+.gear-count { position: absolute; top: -3px; right: -5px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px; background: var(--accent); color: var(--accent-text); font: 700 10px/16px var(--font); text-align: center; pointer-events: none; }
+.gear-count[hidden] { display: none; }
 .btn.sm.icon { width: 28px; }
 .btn svg { width: 16px; height: 16px; flex: none; }
 .btn.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }

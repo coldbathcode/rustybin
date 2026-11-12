@@ -42,7 +42,7 @@ permissions! {
     SettingsRead => "settings.read", Instance, "Read the instance settings (secrets show only whether they are set), diagnostics, outbound decisions and usage";
     SettingsWrite => "settings.write", Instance, "Change the instance settings outside the security groups";
     SettingsSecurity => "settings.security", Instance, "Change the security groups: egress, the AI provider and base URL, proxy, agents, console and single sign-on";
-    SecretsWrite => "secrets.write", Instance, "Set or clear stored secrets; read, fulfil and decline the secrets AI agents asked to have set";
+    SecretsWrite => "secrets.write", Instance, "Set or clear stored secrets; fulfil the secrets AI agents asked to have set, read and decline everyone's (a user reads and declines their own agents' without it)";
     MocksRead => "mocks.read", Mocks, "List and read mocks, their revisions, reports, stateful data and checkpoints";
     MocksWrite => "mocks.write", Mocks, "Create, edit, deploy, roll back and turn mocks on or off";
     MocksDelete => "mocks.delete", Mocks, "Delete mocks";

@@ -131,8 +131,9 @@ expect "$out" 'the nightly schedule posts its failures'
 expect "$out" 'notify.webhook_token is set'
 expect "$out" '{"set":true,"hint":"k3Qx"}'
 if grep -q 'whk_docs-example-value' <<<"$out"; then echo "the value was printed" >&2; exit 1; fi
-out=$(rustybin settings decline "$declined")
+out=$(rustybin settings decline "$declined" --note "the repository is read with the deploy key")
 expect "$out" 'is declined: nothing was set'
+expect "$out" 'The agent reads your note'
 rustybin settings unset agents.secret_requests >/dev/null
 
 # Exit codes: a refused operation is 1, usage 2, a bad credential 3.

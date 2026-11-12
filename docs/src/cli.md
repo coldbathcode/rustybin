@@ -125,9 +125,9 @@ Instance settings: get, set, secrets, unset, the schema
 | `rustybin settings set-secret <key> [--stdin]` | Save a secret (prompted without echo, or the first line of stdin). Flags: `--stdin`. | `PATCH /_rustybin/settings` | `settings.write` |
 | `rustybin settings unset <key>` | Forget the stored value (back to the environment or the default). | `DELETE /_rustybin/settings/{key}` | `settings.write` |
 | `rustybin settings schema` | Every registered setting: key, kind, default, variable. | `GET /_rustybin/settings` | `settings.read` |
-| `rustybin settings requests [--state S]` | The secrets AI agents asked to have set (request_secret): the setting, the agent and the user it acts for, the agent's reason (its claim), the state. An agent never sets a secret: you fulfil or decline. Flags: `--state` value. | `GET /_rustybin/secret-requests` | `secrets.write` |
-| `rustybin settings fulfil <id> [--stdin]` | Set the secret an agent asked for: the value is prompted without echo, or read from the first line of stdin, never an argument. It goes to the settings store and never to the agent; needs what settings set-secret needs for that setting. Flags: `--stdin`. | `GET /_rustybin/secret-requests/{id}`, `POST /_rustybin/secret-requests/{id}/fulfil` | `secrets.write` |
-| `rustybin settings decline <id>` | Decline a secret request: nothing is set, and the agent reads declined. | `POST /_rustybin/secret-requests/{id}/decline` | `secrets.write` |
+| `rustybin settings requests [--state S]` | The secrets AI agents asked to have set (request_secret): the setting, the agent and the user it acts for, the agent's reason (its claim), the state, the note left on a decline. Everyone's with secrets.write, else your own agents'. An agent never sets a secret: you fulfil or decline. Flags: `--state` value. | `GET /_rustybin/secret-requests` | signed in |
+| `rustybin settings fulfil <id> [--stdin]` | Set the secret an agent asked for: the value is prompted without echo, or read from the first line of stdin, never an argument. It goes to the settings store and never to the agent; needs what settings set-secret needs for that setting. Flags: `--stdin`. | `GET /_rustybin/secret-requests/{id}`, `POST /_rustybin/secret-requests/{id}/fulfil` | signed in, `secrets.write` |
+| `rustybin settings decline <id> [--note TEXT]` | Decline a secret request: nothing is set, and the agent reads declined, with your note when you leave one. Any request with secrets.write, else one of your own agents'. Flags: `--note` value. | `POST /_rustybin/secret-requests/{id}/decline` | signed in |
 
 ```bash
 rustybin settings get console.title
@@ -137,7 +137,7 @@ rustybin settings unset console.title
 rustybin settings schema
 rustybin settings requests --state pending
 rustybin settings fulfil sr_0000000000000000 --stdin < key.txt
-rustybin settings decline sr_0000000000000000
+rustybin settings decline sr_0000000000000000 --note "use the deploy key that is already set"
 ```
 
 ## sessions

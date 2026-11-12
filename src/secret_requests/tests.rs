@@ -72,7 +72,7 @@ fn the_store_is_bounded_and_requests_expire() {
     assert_eq!(r.status, Status::Expired);
     assert_eq!(r.resolved_at, Some(first.expires));
     assert_eq!(
-        store.resolve(&first.id, Status::Fulfilled, "ada"),
+        store.resolve(&first.id, Status::Fulfilled, "ada", None),
         Err(ResolveError::Gone(Status::Expired))
     );
     assert_eq!(
@@ -85,7 +85,7 @@ fn the_store_is_bounded_and_requests_expire() {
     clock.advance(StdDuration::from_secs(1));
     assert!(store.get(&first.id).is_none());
     assert_eq!(
-        store.resolve(&first.id, Status::Declined, "ada"),
+        store.resolve(&first.id, Status::Declined, "ada", None),
         Err(ResolveError::NotFound)
     );
     assert!(store.list().is_empty());
@@ -100,7 +100,7 @@ fn an_agent_asks_ten_times_an_hour_and_the_instance_keeps_thirty_two_waiting() {
             .ask(asker("a"), KEY, &format!("ask {i}"))
             .expect("ask");
         store
-            .resolve(&r.id, Status::Declined, "ada")
+            .resolve(&r.id, Status::Declined, "ada", None)
             .expect("declined");
         clock.advance(StdDuration::from_secs(60));
     }
@@ -126,12 +126,12 @@ fn a_resolved_request_names_who_and_stays_resolved() {
     let store = SecretRequests::new(clock());
     let (r, _) = store.ask(asker("a"), KEY, "x").expect("ask");
     let done = store
-        .resolve(&r.id, Status::Fulfilled, "ada\u{1b}[31m")
+        .resolve(&r.id, Status::Fulfilled, "ada\u{1b}[31m", None)
         .expect("fulfilled");
     assert_eq!(done.status, Status::Fulfilled);
     assert_eq!(done.resolved_by.as_deref(), Some("ada\\u{1b}[31m"));
     assert_eq!(
-        store.resolve(&r.id, Status::Declined, "bob"),
+        store.resolve(&r.id, Status::Declined, "bob", None),
         Err(ResolveError::Gone(Status::Fulfilled))
     );
     // Once resolved, the agent may ask again.
@@ -686,18 +686,23 @@ async fn fulfilling_needs_what_setting_that_secret_needs() {
     let decline = |id: &str| format!("/_rustybin/secret-requests/{id}/decline");
     let value = Some(json!({ "value": VALUE }));
 
-    // Reading, fulfilling and declining need secrets.write; a refusal
-    // names the permission that is missing.
+    // Fulfilling needs secrets.write at the route; a refusal names the
+    // permission that is missing. Another user's request does not exist
+    // for a user without it (core next 17: a user reads their own agents'
+    // requests only).
+    let (status, v) = send(&app, "POST", &fulfil(&plain), &vic, value.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["reason"], json!("permission_required"));
+    assert_eq!(v["permission"], json!("secrets.write"));
+    let (status, v) = send(&app, "GET", LIST_PATH, &vic, None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!((&v["requests"], &v["pending"]), (&json!([]), &json!(0)));
     for (method, path) in [
-        ("GET", LIST_PATH.to_string()),
         ("GET", format!("/_rustybin/secret-requests/{plain}")),
-        ("POST", fulfil(&plain)),
         ("POST", decline(&plain)),
     ] {
-        let (status, v) = send(&app, method, &path, &vic, value.clone()).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {v}");
-        assert_eq!(v["reason"], json!("permission_required"));
-        assert_eq!(v["permission"], json!("secrets.write"));
+        let (status, v) = send(&app, method, &path, &vic, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}: {v}");
     }
     // secrets.write alone reads and declines, and fulfils nothing.
     let (status, v) = send(&app, "GET", LIST_PATH, &kim, None).await;
@@ -1021,4 +1026,280 @@ async fn an_open_control_plane_and_a_key_holder() {
         is_error(&r) && text(&r).contains("permission_required: settings.write"),
         "{r}"
     );
+}
+
+// ── Core next 17: a user's own agents' requests, a note on a decline ──
+
+#[tokio::test]
+async fn a_user_reads_and_declines_their_own_agents_requests_only() {
+    let state = test_state_with(password_config());
+    add_role(
+        &state,
+        "tuner",
+        &["instance.read", "settings.read", "settings.write"],
+    );
+    add_user(&state, "ada", &["admin"]);
+    let tom_id = add_user(&state, "tom", &["tuner"]);
+    add_user(&state, "tia", &["tuner"]);
+    add_user(&state, "vic", &["viewer"]);
+    let app = test_app_with(state.clone());
+    turn_on(&state);
+    let ada = sign_in(&app, "ada").await;
+    let tom = sign_in(&app, "tom").await;
+    let tia = sign_in(&app, "tia").await;
+    let vic = sign_in(&app, "vic").await;
+    let id_of = |r: &Value| {
+        r["structuredContent"]["request"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("an id: {r}"))
+            .to_string()
+    };
+    let adas = id_of(&ask(&app, &ada, "cli", KEY).await);
+    let toms = id_of(&ask(&app, &tom, "cli", KEY).await);
+    let tias = id_of(&ask(&app, &tia, "cli", KEY).await);
+    let one = |id: &str| format!("/_rustybin/secret-requests/{id}");
+    let fulfil = |id: &str| format!("/_rustybin/secret-requests/{id}/fulfil");
+    let decline = |id: &str| format!("/_rustybin/secret-requests/{id}/decline");
+
+    // Without secrets.write: the caller's own agents' requests, with the
+    // fields everyone reads, and a count of those only.
+    for path in [LIST_PATH, "/_rustybin/secret-requests?state=pending"] {
+        let (status, v) = send(&app, "GET", path, &tom, None).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["pending"], json!(1), "{v}");
+        let list = v["requests"].as_array().expect("requests");
+        assert_eq!(list.len(), 1, "{v}");
+        assert_eq!(list[0]["id"], json!(toms));
+        assert_eq!(list[0]["agent"]["owner"]["user_id"], json!(tom_id));
+        assert_eq!(list[0]["setting"]["key"], json!(KEY));
+        assert!(list[0]["untrusted_reason"].is_string());
+        assert!(!v.to_string().contains(&adas) && !v.to_string().contains(&tias));
+    }
+    let (status, v) = send(&app, "GET", &one(&toms), &tom, None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["id"], json!(toms));
+    // A user with no agent that asked: an empty list, not a refusal.
+    let (status, v) = send(&app, "GET", LIST_PATH, &vic, None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!((&v["requests"], &v["pending"]), (&json!([]), &json!(0)));
+    // secrets.write reads everyone's.
+    let (_, v) = send(&app, "GET", LIST_PATH, &ada, None).await;
+    assert_eq!(v["pending"], json!(3), "{v}");
+
+    // Another user's request does not exist: read and decline are 404,
+    // exactly as an id nobody has.
+    let nobodys = "sr_0000000000000000".to_string();
+    for other in [&adas, &tias, &nobodys] {
+        for who in [&tom, &vic] {
+            let (status, v) = send(&app, "GET", &one(other), who, None).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{v}");
+            let (status, declined) = send(
+                &app,
+                "POST",
+                &decline(other),
+                who,
+                Some(json!({ "note": "x" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{declined}");
+            assert_eq!(declined, v, "the same answer as an unknown id");
+        }
+    }
+    for id in [&adas, &tias] {
+        assert_eq!(
+            state.secret_requests.get(id).map(|r| r.status),
+            Some(Status::Pending)
+        );
+    }
+
+    // Fulfilling keeps what it needed: their own agent's request too.
+    for id in [&toms, &adas] {
+        let (status, v) = send(
+            &app,
+            "POST",
+            &fulfil(id),
+            &tom,
+            Some(json!({ "value": VALUE })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+        assert_eq!(v["reason"], json!("permission_required"));
+        assert_eq!(v["permission"], json!("secrets.write"));
+    }
+    assert!(state.settings.secret(KEY).is_none());
+    assert_eq!(
+        state.secret_requests.get(&toms).map(|r| r.status),
+        Some(Status::Pending)
+    );
+
+    // Declining their own: it only takes away.
+    let (status, v) = send(&app, "POST", &decline(&toms), &tom, None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["state"], json!("declined"));
+    assert_eq!(v["resolved_by"], json!("tom"));
+    let (status, v) = send(&app, "POST", &decline(&toms), &tom, None).await;
+    assert_eq!(status, StatusCode::GONE, "{v}");
+    let (_, v) = send(&app, "GET", LIST_PATH, &tom, None).await;
+    assert_eq!(v["pending"], json!(0), "{v}");
+    assert_eq!(v["requests"][0]["state"], json!("declined"));
+    let (_, v) = send(&app, "GET", LIST_PATH, &ada, None).await;
+    assert_eq!(v["pending"], json!(2), "{v}");
+}
+
+/// A caller who is no user (a control JWT's scope) still needs
+/// secrets.write on every one of the four routes.
+#[tokio::test]
+async fn a_caller_who_is_no_user_still_needs_secrets_write() {
+    use crate::test_support::{control_jwt, jwt_config};
+    let state = test_state_with(jwt_config());
+    let app = test_app_with(state.clone());
+    let (r, _) = state
+        .secret_requests
+        .ask(asker("a"), KEY, "x")
+        .expect("ask");
+    for scope in ["inspector", "console"] {
+        let auth = format!("Bearer {}", control_jwt(Some(scope)));
+        for (method, path) in [
+            ("GET", LIST_PATH.to_string()),
+            ("GET", format!("/_rustybin/secret-requests/{}", r.id)),
+            (
+                "GET",
+                "/_rustybin/secret-requests/sr_0000000000000000".into(),
+            ),
+            (
+                "POST",
+                format!("/_rustybin/secret-requests/{}/decline", r.id),
+            ),
+            (
+                "POST",
+                format!("/_rustybin/secret-requests/{}/fulfil", r.id),
+            ),
+        ] {
+            let body = (method == "POST").then(|| json!({ "value": "x" }));
+            let (status, v) = send(&app, method, &path, &auth, body).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{scope} {method} {path}: {v}"
+            );
+            assert_eq!(v["reason"], json!("permission_required"));
+            assert_eq!(v["permission"], json!("secrets.write"));
+        }
+    }
+    assert_eq!(
+        state.secret_requests.get(&r.id).map(|r| r.status),
+        Some(Status::Pending)
+    );
+}
+
+#[tokio::test]
+async fn a_note_on_a_decline_reaches_the_agent_cleaned_and_capped() {
+    let state = test_state_with(password_config());
+    add_user(&state, "ada", &["admin"]);
+    let app = test_app_with(state.clone());
+    turn_on(&state);
+    let ada = sign_in(&app, "ada").await;
+    let id_of = |r: &Value| {
+        r["structuredContent"]["request"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("an id: {r}"))
+            .to_string()
+    };
+    let decline = |id: &str| format!("/_rustybin/secret-requests/{id}/decline");
+    let read = |id: &str| json!({ "id": id });
+    let first = id_of(&ask(&app, &ada, "cli", KEY).await);
+    // While it waits there is no note.
+    let r = call(&app, &ada, "cli", "get_secret_request", read(&first)).await;
+    assert_eq!(r["structuredContent"]["request"]["note"], Value::Null);
+
+    // A body that is not the shape: refused, quoting nothing, still waiting.
+    for body in [
+        json!({ "note": 7 }),
+        json!({ "note": ["PLANTED-note"] }),
+        json!(["PLANTED-note"]),
+        json!("PLANTED-note"),
+    ] {
+        let (status, v) = send(&app, "POST", &decline(&first), &admin(), Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+        assert!(!v.to_string().contains("PLANTED"), "{v}");
+    }
+    assert_eq!(
+        state.secret_requests.get(&first).map(|r| r.status),
+        Some(Status::Pending)
+    );
+
+    // The note: cleaned like the reason, answered to the person and to
+    // the agent as `note` (a person's text, not untrusted_*).
+    let typed = "  use the\u{1b}[2J deploy key \n\n instead,\tnot a token\u{0}  ";
+    let (status, v) = send(
+        &app,
+        "POST",
+        &decline(&first),
+        &admin(),
+        Some(json!({ "note": typed })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let cleaned = "use the [2J deploy key instead, not a token";
+    assert_eq!(v["state"], json!("declined"));
+    assert_eq!(v["note"], json!(cleaned));
+    assert!(v.get("untrusted_note").is_none());
+    let r = call(&app, &ada, "cli", "get_secret_request", read(&first)).await;
+    assert_eq!(
+        r["structuredContent"]["request"]["state"],
+        json!("declined")
+    );
+    assert_eq!(r["structuredContent"]["request"]["note"], json!(cleaned));
+    assert!(text(&r).contains(cleaned), "{}", text(&r));
+    let r = call(&app, &ada, "cli", "get_secret_request", json!({})).await;
+    assert_eq!(
+        r["structuredContent"]["requests"][0]["note"],
+        json!(cleaned)
+    );
+
+    // Capped at 300 characters.
+    let second = id_of(&ask(&app, &ada, "cli", KEY).await);
+    let (status, v) = send(
+        &app,
+        "POST",
+        &decline(&second),
+        &admin(),
+        Some(json!({ "note": "é".repeat(MAX_NOTE * 3) })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        v["note"].as_str().map(|n| n.chars().count()),
+        Some(MAX_NOTE)
+    );
+    assert_eq!(MAX_NOTE, 300);
+
+    // No note, an empty one, an empty object: none.
+    for body in [
+        None,
+        Some(json!({})),
+        Some(json!({ "note": " \n " })),
+        Some(json!({ "note": null })),
+    ] {
+        let id = id_of(&ask(&app, &ada, "cli", "git.token").await);
+        let (status, v) = send(&app, "POST", &decline(&id), &admin(), body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}: {v}");
+        assert_eq!(v["note"], Value::Null, "{body:?}");
+        let r = call(&app, &ada, "cli", "get_secret_request", read(&id)).await;
+        assert_eq!(r["structuredContent"]["request"]["note"], Value::Null);
+        assert!(!text(&r).contains("note"), "{}", text(&r));
+    }
+
+    // A fulfilled request never has one, and fulfil takes none.
+    let third = id_of(&ask(&app, &ada, "cli", "sso.client_secret").await);
+    let (status, v) = send(
+        &app,
+        "POST",
+        &format!("/_rustybin/secret-requests/{third}/fulfil"),
+        &admin(),
+        Some(json!({ "value": VALUE, "note": "not kept" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["note"], Value::Null);
 }

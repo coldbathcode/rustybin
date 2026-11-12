@@ -1,8 +1,10 @@
 # A secret set at an agent's request (docs/src/agent-mcp.md, "A secret at an
 # agent's request"), on the password instance of docs/examples/run.sh
 # (rustybin / rustybin). An agent asks for two secrets with request_secret, a
-# person reads the requests, fulfils one and declines the other, and the agent
-# reads the state of each: never the value. Leaves the instance as it found it.
+# person reads the requests, fulfils one and declines the other with a note,
+# and the agent reads the state of each: never the value. Then a user without
+# secrets.write reads and declines the request of their own agent, and is
+# refused the fulfilling. Leaves the instance as it found it.
 
 POST {{password_url}}/_rustybin/login
 Content-Type: application/json
@@ -162,14 +164,139 @@ body not contains "k3Qx"
 # ANCHOR_END: state
 
 # ANCHOR: decline
-# Declined: nothing is set, and the agent reads declined.
+# Declined, with a few words for the agent (optional; never the secret):
+# nothing is set.
 POST {{password_url}}/_rustybin/secret-requests/{{other}}/decline
 Authorization: Bearer {{admin}}
+Content-Type: application/json
+{ "note": "the repository is read with the deploy key that is already set" }
 HTTP 200
 [Asserts]
 jsonpath "$.state" == "declined"
 jsonpath "$.setting.set" == false
+jsonpath "$.note" == "the repository is read with the deploy key that is already set"
 # ANCHOR_END: decline
+
+# ANCHOR: note
+# The agent reads declined, and the note the person left.
+POST {{password_url}}/_rustybin/mcp
+Authorization: Bearer {{agent}}
+Accept: application/json, text/event-stream
+Content-Type: application/json
+MCP-Protocol-Version: 2026-07-28
+Mcp-Method: tools/call
+Mcp-Name: get_secret_request
+{"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "get_secret_request", "arguments": {"id": "{{other}}"}, "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}, "io.modelcontextprotocol/clientInfo": {"name": "docs-secret-agent", "version": "1.0"}}}}
+HTTP 200
+[Asserts]
+jsonpath "$.result.structuredContent.request.state" == "declined"
+jsonpath "$.result.structuredContent.request.note" == "the repository is read with the deploy key that is already set"
+jsonpath "$.result.content[0].text" contains "deploy key that is already set"
+# ANCHOR_END: note
+
+# A user who may change settings but not set secrets (no secrets.write), and
+# an agent on a sign-in of that user.
+PUT {{password_url}}/_rustybin/roles/docs-tuner
+Authorization: Bearer {{admin}}
+Content-Type: application/json
+{ "description": "Changes settings, sets no secret", "permissions": ["instance.read", "settings.read", "settings.write"] }
+HTTP 200
+
+POST {{password_url}}/_rustybin/users
+Authorization: Bearer {{admin}}
+Content-Type: application/json
+{ "name": "docs-tess", "display_name": "Tess Tuner", "roles": ["docs-tuner"] }
+HTTP 201
+[Captures]
+invitation: jsonpath "$.invitation.token"
+
+POST {{password_url}}/_rustybin/join
+Content-Type: application/json
+{ "token": "{{invitation}}", "password": "tess-secret-k3Qx" }
+HTTP 200
+[Captures]
+tess: jsonpath "$.token"
+
+POST {{password_url}}/_rustybin/login
+Content-Type: application/json
+{ "username": "docs-tess", "password": "tess-secret-k3Qx" }
+HTTP 200
+[Captures]
+tess_agent: jsonpath "$.token"
+
+POST {{password_url}}/_rustybin/mcp
+Authorization: Bearer {{tess_agent}}
+Accept: application/json, text/event-stream
+Content-Type: application/json
+MCP-Protocol-Version: 2026-07-28
+Mcp-Method: tools/call
+Mcp-Name: request_secret
+{"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "request_secret", "arguments": {"setting": "leads.webhook_token", "reason": "the leads webhook of the demo"}, "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}, "io.modelcontextprotocol/clientInfo": {"name": "docs-tess-agent", "version": "1.0"}}}}
+HTTP 200
+[Captures]
+hers: jsonpath "$.result.structuredContent.request.id"
+[Asserts]
+jsonpath "$.result.isError" == false
+
+# The admin's agent asks too: a request that is not hers.
+POST {{password_url}}/_rustybin/mcp
+Authorization: Bearer {{agent}}
+Accept: application/json, text/event-stream
+Content-Type: application/json
+MCP-Protocol-Version: 2026-07-28
+Mcp-Method: tools/call
+Mcp-Name: request_secret
+{"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "request_secret", "arguments": {"setting": "git.token", "reason": "the configuration repository"}, "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}, "io.modelcontextprotocol/clientInfo": {"name": "docs-secret-agent", "version": "1.0"}}}}
+HTTP 200
+[Captures]
+not_hers: jsonpath "$.result.structuredContent.request.id"
+
+# ANCHOR: own
+# Without secrets.write, a user reads the requests of their own agents: the
+# same fields, and nobody else's (pending counts what they may read).
+GET {{password_url}}/_rustybin/secret-requests?state=pending
+Authorization: Bearer {{tess}}
+HTTP 200
+[Asserts]
+jsonpath "$.pending" == 1
+jsonpath "$.requests" count == 1
+jsonpath "$.requests[0].id" == "{{hers}}"
+jsonpath "$.requests[0].agent.owner_label" == "docs-tess"
+jsonpath "$.requests[0].setting.needs" contains "secrets.write"
+
+# Another user's request does not exist for them.
+GET {{password_url}}/_rustybin/secret-requests/{{not_hers}}
+Authorization: Bearer {{tess}}
+HTTP 404
+
+POST {{password_url}}/_rustybin/secret-requests/{{not_hers}}/decline
+Authorization: Bearer {{tess}}
+HTTP 404
+
+# Fulfilling keeps what it needs: owning the agent is not enough.
+POST {{password_url}}/_rustybin/secret-requests/{{hers}}/fulfil
+Authorization: Bearer {{tess}}
+Content-Type: application/json
+{ "value": "whk_docs-example-value-k3Qx" }
+HTTP 403
+[Asserts]
+jsonpath "$.reason" == "permission_required"
+jsonpath "$.permission" == "secrets.write"
+
+# Declining their own agent's request only takes away, so they may.
+POST {{password_url}}/_rustybin/secret-requests/{{hers}}/decline
+Authorization: Bearer {{tess}}
+Content-Type: application/json
+{ "note": "not needed: the demo has no leads webhook" }
+HTTP 200
+[Asserts]
+jsonpath "$.state" == "declined"
+jsonpath "$.resolved_by" == "docs-tess"
+# ANCHOR_END: own
+
+POST {{password_url}}/_rustybin/secret-requests/{{not_hers}}/decline
+Authorization: Bearer {{admin}}
+HTTP 200
 
 # The audit log names the request, the setting and the agent; never a value
 # or the agent's reason.
@@ -181,6 +308,8 @@ jsonpath "$.entries[*].event" contains "secret_fulfilled"
 jsonpath "$.entries[*].event" contains "secret_declined"
 body not contains "whk_docs-example-value"
 body not contains "nightly schedule"
+body not contains "deploy key that is already set"
+body not contains "no leads webhook"
 
 # Back to how it was.
 DELETE {{password_url}}/_rustybin/settings/notify.webhook_token
@@ -190,6 +319,14 @@ HTTP 200
 DELETE {{password_url}}/_rustybin/settings/agents.secret_requests
 Authorization: Bearer {{admin}}
 HTTP 200
+
+DELETE {{password_url}}/_rustybin/users/docs-tess
+Authorization: Bearer {{admin}}
+HTTP *
+
+DELETE {{password_url}}/_rustybin/roles/docs-tuner
+Authorization: Bearer {{admin}}
+HTTP *
 
 POST {{password_url}}/_rustybin/logout
 Authorization: Bearer {{agent}}

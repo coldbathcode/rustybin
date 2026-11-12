@@ -124,6 +124,7 @@ route's:
 | `DELETE /_rustybin/sessions` (and `end_session` with `all`): sign out everywhere, every OAuth and agent token too | every permission (the `admin` role, the admin token) |
 | `GET /_rustybin/config/export` (and `export_config`) | without `users.read` the document carries no `users:`, `roles:` nor `projects:` |
 | `PUT /_rustybin/password` by a caller who is not a user (the admin token, a control JWT): the first admin's password | `users.manage` |
+| `GET /_rustybin/secret-requests`, `GET /_rustybin/secret-requests/{id}` and `POST /_rustybin/secret-requests/{id}/decline` of a request that is not of the caller's own agents | `secrets.write` (a user reads and declines [their own agents' requests](../agent-mcp.md#your-own-agents-requests) without it; fulfilling one is never theirs by that) |
 | `GET /_rustybin/agents*` (and `list_agents`, `get_agent`) of AI agents that are not the caller's own | `agents.read` (a user sees their own [agents](../agent-mcp.md#agents-act-for-a-user) without it) |
 | Changing, revoking, restoring or ending the sessions of an AI agent that is not the caller's own | `agents.manage` (a user limits, revokes and ends the sessions of their own without it, and restores one they revoked) |
 | Inviting a user, giving roles, saving a custom role; changing, disabling, deleting or resetting a user | every permission of the roles given (or of the user's roles): nobody grants or manages more than they hold ([users and roles](../users.md#the-guard-rails)) |
