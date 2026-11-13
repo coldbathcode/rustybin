@@ -995,7 +995,6 @@ impl MockStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn create_inner(
         &self,
         name: &str,
