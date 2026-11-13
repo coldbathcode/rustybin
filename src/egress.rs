@@ -586,6 +586,32 @@ pub fn is_control_prefix(path: &str) -> bool {
         || decoded.starts_with("/ui/")
 }
 
+/// The addresses of a host name, from the system resolver.
+#[cfg(not(test))]
+pub async fn lookup(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+    Ok(tokio::net::lookup_host((host, port)).await?.collect())
+}
+
+/// The addresses of a host name in the unit tests, which never leave this
+/// machine: `localhost` (and a name under it) is the loopback address, and
+/// no other name resolves, as on a machine without a network. (Addresses
+/// written as literals are pinned as they are: a test reaches one only by
+/// naming it.)
+#[cfg(test)]
+pub async fn lookup(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(vec![SocketAddr::new(ip, port)]);
+    }
+    let name = host.trim_end_matches('.').to_ascii_lowercase();
+    if name == "localhost" || name.ends_with(".localhost") {
+        return Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))]);
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "the unit tests resolve no name but localhost (they never reach the network)",
+    ))
+}
+
 /// Check a target against an allowlist and resolve it to pinned addresses.
 /// `allowlist: None` skips the list (a feature allowed to reach anything)
 /// but never the forbidden addresses; `var` names the variable in the
@@ -613,8 +639,8 @@ pub async fn pin_with(
             if !name_allowed && !allowlist.has_networks() {
                 return Err(format!("{}:{} is not in {var}", target.host, target.port));
             }
-            let lookup = tokio::net::lookup_host((target.host.as_str(), target.port));
-            let resolved: Vec<IpAddr> = match tokio::time::timeout(RESOLVE_TIMEOUT, lookup).await
+            let looked = lookup(target.host.as_str(), target.port);
+            let resolved: Vec<IpAddr> = match tokio::time::timeout(RESOLVE_TIMEOUT, looked).await
             {
                 Err(_) => return Err(format!("resolving {} timed out", target.host)),
                 Ok(Err(e)) if name_allowed => {
@@ -626,7 +652,11 @@ pub async fn pin_with(
                         target.host, target.port
                     ))
                 }
-                Ok(Ok(iter)) => iter.map(|a| a.ip()).take(MAX_PINNED_ADDRS).collect(),
+                Ok(Ok(found)) => found
+                    .iter()
+                    .map(|a| a.ip())
+                    .take(MAX_PINNED_ADDRS)
+                    .collect(),
             };
             if resolved.is_empty() {
                 return Err(format!("{} resolves to no address", target.host));
@@ -1449,6 +1479,39 @@ mod tests {
         config.egress_allow_loopback = loopback;
         config.public_mode = public;
         Egress::new(&config, Arc::new(Settings::new(&config)))
+    }
+
+    /// No unit test leaves this machine: a host name is never handed to the
+    /// system resolver, so a route that reaches out by default (browsing the
+    /// public MCP registry, say) answers the same refusal with or without a
+    /// network, whoever calls it.
+    #[tokio::test]
+    async fn the_unit_tests_resolve_no_public_name() {
+        for host in ["localhost", "app.localhost", "127.0.0.1", "::1"] {
+            let found = lookup(host, 80).await.expect(host);
+            assert!(
+                !found.is_empty() && found.iter().all(|a| a.ip().is_loopback()),
+                "{host}: {found:?}"
+            );
+        }
+        for host in [
+            "registry.modelcontextprotocol.io",
+            "github.com",
+            "example.com",
+        ] {
+            assert!(lookup(host, 443).await.is_err(), "{host} resolved");
+        }
+        // The registry's host is allowed by default: what stops the fetch is
+        // the resolver, before any packet.
+        let e = policy(&[], false, false);
+        let err = e
+            .resolve(
+                "https://registry.modelcontextprotocol.io/v0.1/servers",
+                Purpose::Registry,
+            )
+            .await
+            .expect_err("no network in a unit test");
+        assert!(err.0.contains("cannot resolve"), "{}", err.0);
     }
 
     #[tokio::test]

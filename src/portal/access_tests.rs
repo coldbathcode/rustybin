@@ -1595,3 +1595,51 @@ fn portal_sign_outs_never_evict_console_sign_outs() {
         "portal sign-outs are kept apart"
     );
 }
+
+/// An event API is closed only on an instance that asks every data-plane
+/// call for an API key (a channel has no mocked security). Signed out, its
+/// entry is the docs (channels, messages, examples, addresses) without a
+/// connection snippet; a reader gets the snippets.
+#[tokio::test]
+async fn a_locked_event_api_keeps_its_docs_and_holds_no_snippet() {
+    let mut c = password_config();
+    c.require_key = true;
+    let (app, _) = setup(c);
+    let body = json!({ "name": "order-events", "spec": super::tests::event_doc() });
+    let a = as_admin(&app, "POST", "/_rustybin/mocks", Some(body)).await;
+    assert_eq!(a.status, StatusCode::CREATED, "{}", a.text);
+    let a = as_admin(
+        &app,
+        "PUT",
+        "/_rustybin/portal/items/mock:order-events",
+        Some(json!({ "access": "closed" })),
+    )
+    .await;
+    assert_eq!(a.status, StatusCode::CREATED, "{}", a.text);
+
+    let signed_out = call(&app, "GET", CATALOG_PATH, &[], None).await;
+    assert_eq!(signed_out.status, StatusCode::OK, "{}", signed_out.text);
+    let it = item(&signed_out.body, "mock:order-events");
+    assert_eq!(it["kind"], "event", "{it}");
+    assert_eq!(it["access"], "closed", "{it}");
+    assert_eq!(it["locked"], true, "{it}");
+    let text = it.to_string();
+    for needle in ["websocat", "curl", "/collections/", "\"connect\""] {
+        assert!(
+            !text.contains(needle),
+            "the locked entry carries {needle}: {text}"
+        );
+    }
+    let channels = it["detail"]["channels"].as_array().expect("channels");
+    assert_eq!(channels.len(), 2, "{it}");
+    assert!(channels[0]["url"].is_string() && channels[0]["send"].is_array());
+
+    let (k, v) = admin();
+    let reader = call(&app, "GET", CATALOG_PATH, &[(k, &v)], None).await;
+    let it = item(&reader.body, "mock:order-events");
+    assert_eq!(it["locked"], false, "{it}");
+    assert!(
+        it["detail"]["channels"][0]["connect"]["websocket"].is_string(),
+        "{it}"
+    );
+}

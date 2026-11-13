@@ -247,8 +247,9 @@ pub fn keyed(config: &crate::config::Config) -> bool {
 /// the credentials the portal hands to a reader.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unclosable {
-    /// `security_off`, `default_credentials`, `obtainable_credentials` or
-    /// `open_operations` (no operation is protected).
+    /// `security_off`, `default_credentials`, `obtainable_credentials`,
+    /// `open_operations` (no operation is protected) or `open_channels`
+    /// (an event mock: its channels have no mocked security).
     pub reason: &'static str,
     pub message: String,
 }
@@ -281,6 +282,14 @@ pub fn unclosable_with(
     use crate::mocks::model::SecurityMode;
     if keyed {
         return None;
+    }
+    if spec.events.is_some() {
+        // Mocked security guards operations; a channel answers whoever
+        // connects, whatever the mock's security says.
+        return Some(Unclosable {
+            reason: "open_channels",
+            message: "it is an event mock, and a channel answers whoever connects (mocked security guards operations, not channels)".into(),
+        });
     }
     let sec = &settings.security;
     if !sec.enabled {
@@ -550,6 +559,7 @@ pub enum ItemId {
 /// The kinds in display order: (kind, title).
 pub const KINDS: &[(&str, &str)] = &[
     ("api", "APIs"),
+    ("event", "Event APIs"),
     ("mcp", "MCP servers"),
     ("llm", "LLM"),
     ("agent", "Agents"),

@@ -2,7 +2,8 @@
 # document applied as a mock, its channels, a message published by Rustybin,
 # messages published by a client (valid, invalid, answered with a reply), the
 # channel's log, and a webhook subscriber the outbound policy refuses (the
-# docs instance allows no outbound host).
+# docs instance allows no outbound host), and the mock on the dev portal as
+# an event API (its channels, no collection).
 
 DELETE {{base_url}}/_rustybin/mocks/order-events
 Authorization: Bearer {{admin_token}}
@@ -171,6 +172,56 @@ HTTP 409
 [Asserts]
 jsonpath "$.reason" == "not_asyncapi"
 # ANCHOR_END: not_asyncapi
+
+# ANCHOR: portal
+# On the dev portal an event mock is an event API: its channels, what each
+# publishes and accepts, and how to connect.
+PUT {{base_url}}/_rustybin/portal/items/mock:order-events
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{
+  "summary": "What happens to an order, as events."
+}
+HTTP 201
+
+GET {{base_url}}/portal/api/catalog
+HTTP 200
+[Asserts]
+jsonpath "$.kinds[?(@.id == 'event')].title" contains "Event APIs"
+jsonpath "$.items[?(@.id == 'mock:order-events')].kind" contains "event"
+jsonpath "$.items[?(@.id == 'mock:order-events')].detail.asyncapi" contains "3.0.0"
+jsonpath "$.items[?(@.id == 'mock:order-events')].detail.channels[0].address" contains "orders/created"
+jsonpath "$.items[?(@.id == 'mock:order-events')].detail.channels[0].send[0].name" contains "orderCreated"
+jsonpath "$.items[?(@.id == 'mock:order-events')].detail.channels[0].connect.sse" contains "text/event-stream"
+# ANCHOR_END: portal
+
+# ANCHOR: no_collection
+# A collection is made from operations: an event mock has none, and says so.
+GET {{base_url}}/_rustybin/mocks/order-events/collections/hurl
+HTTP 409
+[Asserts]
+jsonpath "$.reason" == "asyncapi"
+
+GET {{base_url}}/portal/api/items/mock:order-events/collections/hurl
+HTTP 404
+[Asserts]
+jsonpath "$.reason" == "event_api"
+# ANCHOR_END: no_collection
+
+# A channel answers whoever connects, so the entry cannot be closed.
+PUT {{base_url}}/_rustybin/portal/items/mock:order-events
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{
+  "access": "closed"
+}
+HTTP 409
+[Asserts]
+jsonpath "$.reason" == "open_channels"
+
+DELETE {{base_url}}/_rustybin/portal/items/mock:order-events
+Authorization: Bearer {{admin_token}}
+HTTP 200
 
 DELETE {{base_url}}/_rustybin/mocks/order-events
 Authorization: Bearer {{admin_token}}

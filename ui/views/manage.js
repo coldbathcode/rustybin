@@ -637,7 +637,7 @@ function diagnosticsPanel() {
 
 // ── Portal ──
 
-const KIND_TITLES = { api: 'Mock APIs', mcp: 'MCP servers', llm: 'Mock LLM', agent: 'A2A agents', tools: 'HTTP tools', registry: 'MCP registry' };
+const KIND_TITLES = { api: 'Mock APIs', event: 'Event APIs (AsyncAPI mocks)', mcp: 'MCP servers', llm: 'Mock LLM', agent: 'A2A agents', tools: 'HTTP tools', registry: 'MCP registry' };
 
 function portalPanel(doc, reload, error) {
   const el = h('div', { class: 'stack' });
@@ -710,7 +710,7 @@ function portalPanel(doc, reload, error) {
           edit.addEventListener('click', () => portal.openPublishDialog(it, { onDone: () => load() }));
           return h('tr', { 'data-item': it.id },
             h('td', null, cb),
-            h('td', null, h('div', null, (p && p.title) || it.title), h('div', { class: 'tiny muted mono' }, it.id + (it.kind === 'api' && it.state !== 'live' ? ' (' + it.state + ')' : '')),
+            h('td', null, h('div', null, (p && p.title) || it.title), h('div', { class: 'tiny muted mono' }, it.id + ((it.kind === 'api' || it.kind === 'event') && it.state !== 'live' ? ' (' + it.state + ')' : '')),
               p && p.visitor ? badge('visitor', 'outline') : null),
             h('td', null, h('div', { class: 'row', style: { gap: '4px', flexWrap: 'wrap' } }, state, lock), warning),
             h('td', { class: 'mono small' }, it.insights ? String(it.insights.views_7d) : ''),

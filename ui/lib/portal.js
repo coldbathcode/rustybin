@@ -73,7 +73,12 @@ export function openPublishDialog(item, opts = {}) {
           notice('warn', 'Closed as it is, this mock would still answer callers who never signed in to the portal: ' + why + '. ',
             h('strong', null, 'Turn on security and close'), ' turns its security on with credentials of its own (a random API key in place of the demo ones, or the mode the spec declares when that is enough), deploys it and closes the entry.'),
           h('p', { class: 'muted small', style: { margin: 0 } }, 'A closed mock needs an API key (api_key mode) or a Basic user (basic mode) of its own on every operation. JWT and bearer modes, OAuth and OpenID Connect schemes and mutual TLS cannot be closed: anyone gets a token from the built-in identity provider, whose demo client is public, or the downloadable demo client certificate.'));
-      } else if (item.kind !== 'api') {
+      } else if (item.kind === 'event' && item.secured === false) {
+        // No security to turn on: mocked security guards operations.
+        const why = item.closable && item.closable.why ? String(item.closable.why) : 'a channel answers whoever connects';
+        extra = h('div', { class: 'stack-sm', id: 'portal-closable' },
+          notice('warn', 'This entry cannot be closed: ' + why + '. Only an instance that requires an API key on every call can close an event API.'));
+      } else if (item.kind !== 'api' && item.kind !== 'event') {
         extra = h('p', { class: 'small', style: { margin: 0 }, id: 'portal-closable' }, 'This endpoint stays callable without the portal sign-in: closing only hides its credentials and connection snippets on the portal.');
       }
       replace(accessNote, what, extra);
@@ -110,7 +115,7 @@ export function openPublishDialog(item, opts = {}) {
   }
 
   replace(body,
-    item.kind === 'api' && item.state !== 'live' ? notice('warn', 'This mock is ' + item.state + ': the portal shows it once it is deployed' + (item.state === 'off' ? ' (it answers 503 while off)' : '') + '.') : null,
+    (item.kind === 'api' || item.kind === 'event') && item.state !== 'live' ? notice('warn', 'This mock is ' + item.state + ': the portal shows it once it is deployed' + (item.state === 'off' ? ' (it answers 503 while off)' : '') + '.') : null,
     field('Title', title, 'Empty: the item\'s own title (' + item.title + ').'),
     field('Summary', summary, 'Markdown. Empty: the item\'s own description.'),
     aiBtn ? h('div', { class: 'row' }, aiBtn, h('div', { class: 'grow' }, aiOut)) : null,

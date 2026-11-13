@@ -154,6 +154,7 @@ refused by the mock:
 | `jwt` or `bearer` mode | No (`obtainable_credentials`): the built-in identity provider's demo client is public, so anyone mints a JWT the mock accepts |
 | `spec` mode | Only when each alternative of every requirement includes an API key or Basic scheme with values of its own; OAuth 2, OpenID Connect and bearer schemes take a JWT anyone mints, `mutualTLS` the downloadable demo client certificate (`obtainable_credentials`) |
 | Every operation public (marked `public`, or in `spec` mode without a requirement) | No (`open_operations`) |
+| An event mock (made from an AsyncAPI document) | No (`open_channels`): mocked security guards operations, and a channel answers whoever connects |
 
 Operations declared public (marked `public` in the mock's operation settings, or in
 `spec` mode without a security requirement) answer anyone by design, closed or not: a
@@ -290,8 +291,8 @@ a restart; `portal.items` in `rustybin.yaml` is the durable way then.
 
 ## For testers
 
-Open `/portal`. The home page lists what is published by kind (APIs, MCP servers, LLM,
-agents, tools, registry), with a search box and a "new this week" strip (published or
+Open `/portal`. The home page lists what is published by kind (APIs, event APIs, MCP
+servers, LLM, agents, tools, registry), with a search box and a "new this week" strip (published or
 changed in the last seven days). An item's page has everything to start: the base
 URL, how to authenticate, **Try it** on every operation or sample (sent from your
 browser, through the gateway when the operator set one), copyable curl commands and
@@ -330,6 +331,25 @@ calls are reported to `/portal/api/events`:
 {{#include ../examples/portal/portal.hurl:event}}
 ```
 
+### Event APIs
+
+A mock made from an [AsyncAPI document](mocks/asyncapi.md) has channels and no
+operations. Published, it is an **event API**: its catalogue entry has the kind `event`
+(the home page lists it under **Event APIs**) and its page shows each channel: the
+address in the document, the URL (`/events/<name>/<channel>`), what Rustybin publishes
+on it and on which pattern, what it accepts from a client, an example of every message,
+and a connection snippet for a WebSocket, for server-sent events and for publishing a
+message. What is made from operations is not there: no Try it, no collection
+(`/portal/api/items/<id>/collections/<format>` answers `404` with the reason
+`event_api`, as does `/portal/reference/<id>`) and no MCP server. An event API has no
+credential to hand out and [cannot be closed](#open-and-closed-items) unless the
+instance asks every call for an API key; a closed one keeps its channels, messages and
+addresses for everyone and its connection snippets for readers.
+
+```hurl
+{{#include ../examples/mocks/asyncapi.hurl:portal}}
+```
+
 ## Routes
 
 | Route | |
@@ -337,8 +357,8 @@ calls are reported to `/portal/api/events`:
 | `GET /portal`, `GET /portal/`, `GET /portal/{*path}` | The portal (embedded in the binary, no CDN; strict CSP) |
 | `GET /portal/api/catalog` | The published items |
 | `POST /portal/api/events` | `{item, event: "view" \| "try"}` |
-| `GET /portal/api/items/{id}/collections/{format}` | A published mock as a collection |
-| `GET /portal/reference/{id}` | A published mock's spec in the API reference viewer (pinned and sandboxed like `/docs`, the spec inlined) |
+| `GET /portal/api/items/{id}/collections/{format}` | A published mock as a collection (`404 event_api` for an event API: it has no operations) |
+| `GET /portal/reference/{id}` | A published mock's spec in the API reference viewer (pinned and sandboxed like `/docs`, the spec inlined; `404 event_api` for an event API) |
 | `POST /portal/api/login`, `POST /portal/api/logout`, `GET /portal/api/session` | The portal sign-in: the `rustybin_portal` cookie |
 | `GET /_rustybin/portal` | The console's view: settings, every publishable item, why a published one is hidden, its counters |
 | `PUT`, `DELETE /_rustybin/portal/items/{id}` | Publish or update (with `access`, and `secure` to turn a mock's security on to close it), unpublish |

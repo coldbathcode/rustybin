@@ -28,6 +28,12 @@ pub const MAX_HALF_OPEN_MS: u64 = 60_000;
 /// The most requests a `circuit_breaker` check sends before the circuit
 /// opens.
 pub const MAX_BREAKER_REQUESTS: usize = 20;
+/// The requests a `circuit_breaker` check sends after the first one the
+/// gateway answered on its own, to see the circuit stay open: one at once,
+/// the last half the half-open time later. One answer without the upstream
+/// is also what a single failed call between the gateway and the upstream
+/// looks like; an open circuit keeps answering.
+pub const BREAKER_CONFIRMATIONS: usize = 2;
 /// The trial requests a `circuit_breaker` check sends after the half-open
 /// wait, stopping at the first that reaches the upstream.
 pub const BREAKER_TRIALS: usize = 3;
@@ -167,6 +173,9 @@ pub const LABEL_CACHE_OTHER: &str = "a different prompt";
 pub const LABEL_CLEAN: &str = "clean prompt";
 pub const LABEL_PII: &str = "prompt with personal data";
 pub const LABEL_INJECTION: &str = "prompt injection";
+/// The guarded prompts sent a second time (a refusal is repeated).
+pub const LABEL_PII_AGAIN: &str = "prompt with personal data, again";
+pub const LABEL_INJECTION_AGAIN: &str = "prompt injection, again";
 
 /// The MCP protocol version and request labels of the MCP checks.
 pub const MCP_VERSION: &str = "2025-06-18";
@@ -750,7 +759,7 @@ pub static SCENARIOS: &[Scenario] = &[
     Scenario {
         id: "timeouts",
         title: "Upstream timeouts",
-        proves: "The gateway stops waiting for a slow upstream and answers a gateway error before the upstream would have.",
+        proves: "The gateway stops waiting for a slow upstream that has received the request, and answers a gateway error before the upstream would have.",
         setup: &[
             ROUTE,
             "Set the route's upstream read timeout under {slow_ms} ms (1 second, say): the upstream answers after {slow_ms} ms.",
@@ -776,11 +785,11 @@ pub static SCENARIOS: &[Scenario] = &[
     Scenario {
         id: "circuit_breaker",
         title: "Circuit breaker",
-        proves: "The gateway stops forwarding to an upstream that keeps failing and answers on its own, then lets a trial request through after the half-open time.",
+        proves: "The gateway stops forwarding to an upstream that keeps failing and keeps answering on its own (three requests in a row, into the half-open time), then lets a trial request through after the half-open time.",
         setup: &[
             ROUTE,
-            "Turn on a circuit breaker for the route (passive health checks on its upstream): open it after a few failed requests in a row (the upstream answers 503 to every request; the check sends at most 20), answer on its own while it is open, and let a trial request through after a half-open time (10 seconds, say).",
-            "Check with the route's URL and the half-open time you set (half_open_ms): the check sends requests until the gateway stops forwarding them, waits that long, then sends a trial. Wait for the circuit to close or open again before checking again.",
+            "Turn on a circuit breaker for the route (passive health checks on its upstream): open it after a few failed requests in a row (the upstream answers 503 to every request; the check sends at most 20), answer on its own with a 5xx while it is open, and let a trial request through after a half-open time (10 seconds, say).",
+            "Check with the route's URL and the half-open time you set (half_open_ms): the check sends requests until the gateway stops forwarding them, sends two more (one at once, one half that time later) to see the circuit stay open, waits out the time, then sends a trial. Wait for the circuit to close or open again before checking again.",
         ],
         request_path: "",
         upstream: Upstream::Flaky("/flaky/after/0"),
@@ -1046,14 +1055,16 @@ impl Scenario {
         }
     }
 
-    /// How many requests a check sends (at most, for `circuit_breaker`
-    /// and `ai_token_limit`).
+    /// How many requests a check sends (at most, for `circuit_breaker`,
+    /// `ai_token_limit` and `ai_prompt_guard`).
     pub fn requests(&self, limit: u32) -> usize {
         match self.id {
-            "retries" | "caching" | "cors" | "ai_model_fallback" | "ai_prompt_guard" => 3,
+            "retries" | "caching" | "cors" | "ai_model_fallback" => 3,
+            // Three prompts, and the two guarded ones again when refused.
+            "ai_prompt_guard" => 5,
             "rate_limiting" => (limit * 2) as usize,
             "credential_injection" | "request_size_limit" => 2,
-            "circuit_breaker" => MAX_BREAKER_REQUESTS + BREAKER_TRIALS,
+            "circuit_breaker" => MAX_BREAKER_REQUESTS + BREAKER_CONFIRMATIONS + BREAKER_TRIALS,
             "ai_token_limit" => MAX_TOKEN_REQUESTS,
             "ai_semantic_cache" => 4,
             "ai_provider_balance" => BALANCE_REQUESTS,
@@ -1260,12 +1271,30 @@ impl Scenario {
             ],
             "timeouts" => {
                 let gave_up = sent.iter().all(|s| s.status != 0 && s.ms < SLOW_MS);
+                let received = |s: &Sent| s.arrived || !s.upstream.is_empty();
                 vec![
                     Expectation::new(
                         "The gateway answered with a gateway error",
                         "504 (or 502, 503)",
                         statuses.clone(),
                         sent.iter().all(|s| (502..=504).contains(&s.status)),
+                    ),
+                    // A gateway error alone is also what a route that does
+                    // not reach the upstream answers, at once.
+                    Expectation::new(
+                        "The request reached the upstream, which was still working on it",
+                        "the upstream received the request before the gateway answered",
+                        list(sent.iter().map(|s| {
+                            if received(s) {
+                                "received by the upstream".to_string()
+                            } else {
+                                format!(
+                                    "{} without reaching the upstream (the route does not reach it, or the call failed): not a timeout",
+                                    s.status_text()
+                                )
+                            }
+                        })),
+                        n > 0 && sent.iter().all(received),
                     ),
                     Expectation::new(
                         "The gateway gave up before the upstream answered",
@@ -1773,32 +1802,69 @@ fn ai_cache(sent: &[Sent]) -> Vec<Expectation> {
 }
 
 /// What became of a guarded prompt: refused by the gateway, redacted, or
-/// what reached the model.
-fn guarded(s: Option<&Sent>, found: impl Fn(&str) -> Vec<&'static str>) -> (bool, String) {
+/// what reached the model. An answer without the model is a refusal only
+/// when the same prompt, sent `again`, got one too: once is also what a
+/// failed call between the gateway and the model looks like.
+fn guarded(
+    s: Option<&Sent>,
+    again: Option<&Sent>,
+    found: impl Fn(&str) -> Vec<&'static str>,
+) -> (bool, String) {
     let Some(s) = s else {
         return (false, "not sent".into());
     };
     if s.status == 0 {
         return (false, "no answer".into());
     }
-    if s.upstream.is_empty() {
-        return (true, format!("refused by the gateway ({})", s.status));
-    }
-    let mut kinds: Vec<&'static str> = Vec::new();
-    for body in &s.upstream_bodies {
-        for k in found(body) {
-            if !kinds.contains(&k) {
-                kinds.push(k);
+    let kinds_of = |s: &Sent| {
+        let mut kinds: Vec<&'static str> = Vec::new();
+        for body in &s.upstream_bodies {
+            for k in found(body) {
+                if !kinds.contains(&k) {
+                    kinds.push(k);
+                }
             }
         }
+        kinds
+    };
+    let reached = |kinds: Vec<&'static str>| {
+        if kinds.is_empty() {
+            (true, "redacted before the model".to_string())
+        } else {
+            (
+                false,
+                format!("reached the model with: {}", kinds.join(", ")),
+            )
+        }
+    };
+    if !s.upstream.is_empty() {
+        return reached(kinds_of(s));
     }
-    if kinds.is_empty() {
-        (true, "redacted before the model".into())
-    } else {
-        (
+    match again {
+        Some(a) if a.status != 0 && a.upstream.is_empty() => (
+            true,
+            format!(
+                "refused by the gateway, twice ({}, {})",
+                s.status, a.status
+            ),
+        ),
+        Some(a) if a.status != 0 => {
+            let (ok, seen) = reached(kinds_of(a));
+            (
+                ok,
+                format!(
+                    "answered {} without reaching the model once (a failed call, not a refusal); sent again, it was {seen}",
+                    s.status
+                ),
+            )
+        }
+        _ => (
             false,
-            format!("reached the model with: {}", kinds.join(", ")),
-        )
+            format!(
+                "answered {} without reaching the model once, and the same prompt sent again got no answer: not shown to be a refusal",
+                s.status
+            ),
+        ),
     }
 }
 
@@ -1816,15 +1882,15 @@ fn ai_prompt_guard(sent: &[Sent], injection: bool) -> Vec<Expectation> {
         },
         clean.is_some_and(|s| (200..300).contains(&s.status) && model_calls(s) > 0),
     )];
-    let (ok, seen) = guarded(by(LABEL_PII), planted_in);
+    let (ok, seen) = guarded(by(LABEL_PII), by(LABEL_PII_AGAIN), planted_in);
     out.push(Expectation::new(
         "Personal data never reached the model",
-        "the prompt refused by the gateway, or the SSN, card number and email removed from it",
+        "the prompt refused by the gateway (and refused again when sent again), or the SSN, card number and email removed from it",
         seen,
         ok,
     ));
     if injection {
-        let (ok, seen) = guarded(by(LABEL_INJECTION), |t| {
+        let (ok, seen) = guarded(by(LABEL_INJECTION), by(LABEL_INJECTION_AGAIN), |t| {
             if injection_in(t) {
                 vec!["the injection"]
             } else {
@@ -1833,7 +1899,7 @@ fn ai_prompt_guard(sent: &[Sent], injection: bool) -> Vec<Expectation> {
         });
         out.push(Expectation::new(
             "The prompt injection never reached the model",
-            "the prompt refused by the gateway, or the injection removed from it",
+            "the prompt refused by the gateway (and refused again when sent again), or the injection removed from it",
             seen,
             ok,
         ));
@@ -2092,30 +2158,92 @@ fn transformation(sent: &[Sent], p: &Params) -> Vec<Expectation> {
     ]
 }
 
+/// Is this what an open circuit answers: the gateway's own 5xx, nothing
+/// upstream? (A `429` without the upstream is a rate limit.)
+pub fn breaker_answer(status: u16, upstream: usize) -> bool {
+    status >= 500 && upstream == 0
+}
+
 /// `circuit_breaker`: the requests before the trials reach the upstream
-/// until one is answered without it; after the wait a trial reaches it.
+/// until the gateway answers on its own and keeps doing so (the first such
+/// answer and [`BREAKER_CONFIRMATIONS`] more, in a row); after the wait a
+/// trial reaches it. One answer without the upstream proves nothing: a
+/// gateway that failed to reach the upstream once answers the same.
 fn breaker(sent: &[Sent], half_open_ms: u64) -> Vec<Expectation> {
     let before: Vec<&Sent> = sent.iter().filter(|s| !s.trial).collect();
     let trials: Vec<&Sent> = sent.iter().filter(|s| s.trial).collect();
-    let forwarded = before.iter().take_while(|s| !s.upstream.is_empty()).count();
-    let own = before
-        .get(forwarded)
-        .filter(|s| s.status != 0 && s.upstream.is_empty());
-    let opened = forwarded > 0 && own.is_some();
-    let seen = match own {
-        Some(s) if forwarded > 0 => format!(
-            "{forwarded} request(s) reached the upstream, then request {} was answered {} by the gateway without reaching it",
+    let own = |s: &Sent| breaker_answer(s.status, s.upstream.len());
+    let needed = 1 + BREAKER_CONFIRMATIONS;
+    // The open circuit: the gateway's own answers the requests end with.
+    let tail = before.iter().rev().take_while(|s| own(s)).count();
+    let start = before.len() - tail;
+    let forwarded = before[..start]
+        .iter()
+        .filter(|s| !s.upstream.is_empty())
+        .count();
+    let opened = forwarded > 0 && tail >= needed;
+    // Answers without the upstream that the next requests did not repeat.
+    let once: Vec<&Sent> = before[..start]
+        .iter()
+        .copied()
+        .filter(|s| s.status != 0 && s.upstream.is_empty())
+        .collect();
+    let once_text = || {
+        format!(
+            "request {} was answered {} without reaching the upstream but a request after it reached it again (one failed call between the gateway and the upstream, or another refusal: not an open circuit)",
+            list(once.iter().map(|s| (s.n + 1).to_string())),
+            list(once.iter().map(|s| s.status.to_string())),
+        )
+    };
+    let streak = || {
+        format!(
+            "requests {} to {} were answered {} by the gateway without reaching it",
+            before[start].n + 1,
+            before[before.len() - 1].n + 1,
+            list(before[start..].iter().map(|s| s.status.to_string())),
+        )
+    };
+    let seen = if opened {
+        let mut t = format!(
+            "{forwarded} request(s) reached the upstream, then {}",
+            streak()
+        );
+        if !once.is_empty() {
+            t.push_str(&format!(" (before that, {})", once_text()));
+        }
+        t
+    } else if forwarded == 0
+        && before
+            .first()
+            .is_some_and(|s| s.status != 0 && s.upstream.is_empty())
+    {
+        format!(
+            "request 1 was answered {} without reaching the upstream: the route does not reach it",
+            before[0].status
+        )
+    } else if before.iter().any(|s| s.status == 0) {
+        format!("{forwarded} request(s) reached the upstream, then the gateway did not answer")
+    } else if tail > 0 {
+        format!(
+            "{forwarded} request(s) reached the upstream, then {}: {needed} in a row are needed, and no requests were left to see the circuit stay open",
+            streak()
+        )
+    } else if let Some(s) = before
+        .last()
+        .filter(|s| s.status < 500 && s.upstream.is_empty())
+    {
+        format!(
+            "{forwarded} request(s) reached the upstream, then request {} was answered {} without reaching it: not the 5xx of an open circuit",
             s.n + 1,
             s.status
-        ),
-        Some(s) => format!(
-            "request 1 was answered {} without reaching the upstream: the route does not reach it",
-            s.status
-        ),
-        None if before.iter().any(|s| s.status == 0) => format!(
-            "{forwarded} request(s) reached the upstream, then the gateway did not answer"
-        ),
-        None => format!("all {} requests reached the upstream", before.len()),
+        )
+    } else if !once.is_empty() {
+        format!(
+            "{forwarded} request(s) reached the upstream; {}",
+            once_text()
+        )
+    } else {
+        format!("all {} requests reached the upstream", before.len())
     };
     let reached = trials.iter().position(|s| !s.upstream.is_empty());
     let trial_seen = match (opened, reached) {
@@ -2135,7 +2263,7 @@ fn breaker(sent: &[Sent], half_open_ms: u64) -> Vec<Expectation> {
         Expectation::new(
             "The gateway opened the circuit after upstream failures",
             format!(
-                "requests reach the upstream (it answers 503) until the gateway answers one on its own, within {MAX_BREAKER_REQUESTS} requests"
+                "requests reach the upstream (it answers 503) until the gateway answers on its own with a 5xx, and keeps doing so for {needed} requests in a row (the last half the half-open time later), within {MAX_BREAKER_REQUESTS} requests"
             ),
             seen,
             opened,
@@ -2224,6 +2352,10 @@ pub struct Sent {
     /// A trial request after the half-open wait (`circuit_breaker`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub trial: bool,
+    /// The upstream received it, whether or not it has answered yet
+    /// (`timeouts`: the gateway gives up before the capture exists).
+    #[serde(skip)]
+    pub arrived: bool,
     /// What the request was (`cors`: which preflight, or the GET).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<&'static str>,

@@ -436,7 +436,9 @@ async fn the_deploy_key_is_generated_once() {
         return;
     }
     let root = tempfile::tempdir().expect("tempdir");
-    let state = instance(root.path(), "k", "git@github.com:acme/mocks.git");
+    // An address, not a name: no unit test asks a resolver for a public host
+    // (192.0.2.0/24 is the documentation range; nothing here connects to it).
+    let state = instance(root.path(), "k", "git@192.0.2.10:acme/mocks.git");
     assert!(state.git.public_key().is_none());
     let key = state.git.generate_key(false, "t").await.expect("generate");
     let public = key["public"].as_str().expect("public");

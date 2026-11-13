@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use super::{ItemId, Published, KINDS, MCP_SERVERS, NEW_DAYS};
 use crate::catalog::category;
 use crate::mcp::Profile;
+use crate::mocks::asyncapi;
 use crate::mocks::checks;
 use crate::mocks::service::Links;
 use crate::mocks::store::Snapshot;
@@ -186,11 +187,31 @@ fn first_paragraph(text: Option<&str>) -> String {
     out
 }
 
+/// The kind of a mock's item: `event` for one made from an AsyncAPI
+/// document (channels, no operations), else `api`.
+fn mock_kind(s: &Snapshot) -> &'static str {
+    let c = s.live.as_ref().unwrap_or(&s.draft);
+    if c.spec.events.is_some() {
+        "event"
+    } else {
+        "api"
+    }
+}
+
+/// The kind of an item as the catalogue and the console show it. A mock's
+/// follows its document ([`mock_kind`]); the id alone says `api`.
+pub fn kind_of(state: &AppState, id: &ItemId) -> &'static str {
+    match id {
+        ItemId::Mock(name) => state.mocks.get(name).as_ref().map_or("api", mock_kind),
+        other => other.kind(),
+    }
+}
+
 fn mock_candidate(s: &Snapshot) -> Candidate {
     let c = s.live.as_ref().unwrap_or(&s.draft);
     Candidate {
         id: ItemId::Mock(s.name.clone()).as_string(),
-        kind: "api",
+        kind: mock_kind(s),
         title: c.spec.title.clone(),
         summary: first_paragraph(c.spec.description.as_deref()),
         state: s.state().to_string(),
@@ -422,7 +443,7 @@ pub fn catalog_json(state: &AppState, ctx: &Ctx) -> Value {
             .map(|t| t.with_timezone(&Utc))
             .unwrap_or(e.published.updated_at);
         list.push((
-            kind_rank(e.id.kind()),
+            kind_rank(item["kind"].as_str().unwrap_or("")),
             e.published.order,
             title,
             item,
@@ -480,7 +501,7 @@ fn item_json(state: &AppState, e: &Entry, ctx: &Ctx, now: DateTime<Utc>) -> Opti
     let new = (now - changed).num_days() < NEW_DAYS;
     Some(json!({
         "id": e.key,
-        "kind": e.id.kind(),
+        "kind": cand.kind,
         "title": p.title.clone().unwrap_or(cand.title),
         "summary": p.summary.clone().unwrap_or(cand.summary),
         "tags": p.tags,
@@ -525,6 +546,9 @@ fn mock_detail(
     locked: bool,
 ) -> Option<Value> {
     let c = s.live.as_ref()?;
+    if let Some(events) = c.spec.events.as_deref() {
+        return Some(event_detail(s, c, events, ctx, locked));
+    }
     let base = ctx.mock_base(&s.owner, &s.name);
     let reveal = p.credentials && !locked;
     let coverage = checks::coverage(c);
@@ -646,6 +670,139 @@ fn mock_detail(
         "mcp": mcp,
         "registry": registry,
     }))
+}
+
+/// The most of one message's example a catalogue entry carries (a longer
+/// one is left out and said to be).
+const MAX_EVENT_EXAMPLE: usize = 8 * 1024;
+
+/// A message of a channel with an example payload, if there is one.
+fn event_message(m: &asyncapi::Message, example: Option<&Value>) -> Value {
+    let mut o = serde_json::Map::new();
+    o.insert("name".into(), json!(m.name));
+    if let Some(t) = &m.title {
+        o.insert("title".into(), json!(t));
+    }
+    if let Some(c) = &m.content_type {
+        o.insert("content_type".into(), json!(c));
+    }
+    if let Some(f) = &m.unsupported_format {
+        o.insert("unsupported_format".into(), json!(f));
+    }
+    if let Some(text) = example.and_then(|e| serde_json::to_string_pretty(e).ok()) {
+        if text.len() <= MAX_EVENT_EXAMPLE {
+            o.insert("example".into(), json!(text));
+        } else {
+            o.insert("example_too_long".into(), json!(true));
+        }
+    }
+    Value::Object(o)
+}
+
+/// The page of a mock made from an AsyncAPI document: its channels, what
+/// Rustybin publishes and accepts on each, and how to connect. It has no
+/// operations, so no samples, collections, reference viewer or MCP tools;
+/// and no mocked security, so no credential either. Locked: the docs and
+/// the addresses, without the connection snippets.
+fn event_detail(
+    s: &Snapshot,
+    c: &crate::mocks::compile::Compiled,
+    events: &asyncapi::EventSpec,
+    ctx: &Ctx,
+    locked: bool,
+) -> Value {
+    let root = &c.spec.root;
+    let seed = c.settings.responses.seed;
+    // A visitor's mock answers on its own host, below its root.
+    let mock_base = ctx.mock_base(&s.owner, &s.name);
+    let own_host = mock_base != format!("{}/mock/{}", ctx.base, s.name);
+    let base = if own_host {
+        format!("{mock_base}/_rustybin/events")
+    } else {
+        format!("{}/events/{}", ctx.base, s.name)
+    };
+    let channels: Vec<Value> = events
+        .channels
+        .iter()
+        .map(|ch| {
+            let (pattern, cfg) = crate::events::settings_of(c, ch);
+            let url = format!("{base}/{}", ch.id);
+            // `http` to `ws`, `https` to `wss`.
+            let ws_url = format!("ws{}", url.strip_prefix("http").unwrap_or(&url));
+            let send: Vec<Value> = ch
+                .send
+                .iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    // The channel's messages come in turn: the first round
+                    // holds one of each.
+                    let out = asyncapi::outgoing(root, ch, &cfg.examples, seed, i as u64 + 1);
+                    event_message(m, out.as_ref().map(|o| &o.payload))
+                })
+                .collect();
+            let incoming = asyncapi::sample_incoming(root, ch, seed);
+            let receive: Vec<Value> = ch
+                .receive
+                .iter()
+                .map(|m| {
+                    let example = incoming
+                        .as_ref()
+                        .filter(|(name, _)| *name == m.name)
+                        .map(|(_, payload)| payload);
+                    event_message(m, example)
+                })
+                .collect();
+            let mut v = json!({
+                "id": ch.id,
+                "address": ch.address,
+                "description": ch.description,
+                "bindings": ch.bindings,
+                "reply": ch.reply,
+                "pattern": pattern.as_str(),
+                "every_ms": cfg.every_ms,
+                "send": send,
+                "receive": receive,
+                "url": url,
+                "ws_url": ws_url,
+            });
+            if !locked {
+                let sse = curl(
+                    "GET",
+                    &url,
+                    &[("Accept".to_string(), "text/event-stream".to_string())],
+                    None,
+                )
+                .replacen("curl", "curl -N", 1);
+                let publish = incoming.as_ref().map(|(_, payload)| {
+                    curl(
+                        "POST",
+                        &url,
+                        &[("Content-Type".to_string(), "application/json".to_string())],
+                        Some(&payload.to_string()),
+                    )
+                });
+                v["connect"] = json!({
+                    "websocket": format!("websocat '{}'", ws_url.replace('\'', r"'\''")),
+                    "sse": sse,
+                    "publish": publish,
+                });
+            }
+            v
+        })
+        .collect();
+    json!({
+        "name": s.name,
+        "api_title": c.spec.title,
+        "version": c.spec.version,
+        "description": c.spec.description,
+        "state": s.state(),
+        "asyncapi": events.asyncapi,
+        "protocols": events.protocols,
+        "base_url": base,
+        "transports": ["websocket", "sse", "post"],
+        "channels": channels,
+        "locked": locked,
+    })
 }
 
 /// What a mock's page says about authentication. Locked: the scheme and

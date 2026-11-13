@@ -2066,6 +2066,16 @@ impl Svc {
             None => self.links.mock_base(&s.owner, name),
         };
         let c = s.live.as_ref().unwrap_or(&s.draft);
+        if c.spec.events.is_some() {
+            // A collection is its operations; an empty file helps nobody.
+            return Err(ServiceError::with_body(
+                StatusCode::CONFLICT,
+                json!({
+                    "error": format!("mock {name:?} is an AsyncAPI mock: it has channels, not operations, so there is no collection of it (its channels: GET /_rustybin/mocks/{name}/channels)"),
+                    "reason": "asyncapi",
+                }),
+            ));
+        }
         let reveal = self.caller.reveals(&s);
         super::collections::render(c, name, format, &base, reveal).ok_or_else(|| {
             let known: Vec<&str> = super::collections::FORMATS

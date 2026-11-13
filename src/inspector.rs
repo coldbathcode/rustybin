@@ -638,6 +638,11 @@ pub async fn capture(State(state): State<AppState>, req: Request, next: Next) ->
         _ => KeyRetention::default(),
     };
 
+    // A capture exists once the answer does; a gateway scenario that waits
+    // on a slow upstream needs to know the request came in at all.
+    if let Some(s) = &entry.session {
+        state.scenarios.note_arrival(s);
+    }
     let resp = match early {
         Some(resp) => resp,
         None => {

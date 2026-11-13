@@ -40,6 +40,11 @@ struct Gw {
     ai: Option<AiGw>,
     /// An MCP gateway in front of an attack server (the MCP scenarios).
     mcp: Option<McpGw>,
+    /// This request (the first is 1) never reaches the upstream: the call
+    /// fails at once (`502`), or times out after a moment (`504`), as one
+    /// lost connection between a gateway and its upstream does.
+    fail_call: Option<(u32, FailedCall)>,
+    calls: AtomicU32,
     count: AtomicU32,
     cached: Mutex<HashMap<String, (u16, bytes::Bytes)>>,
     circuit: Mutex<Circuit>,
@@ -51,6 +56,28 @@ struct Gw {
 struct Cors {
     origin: String,
     answer_preflights: bool,
+}
+
+/// How a call the stand-in gateway loses ends.
+#[derive(Clone, Copy, Debug)]
+enum FailedCall {
+    Dropped,
+    TimedOut,
+}
+
+/// The answer to the request the gateway loses on the way to the upstream.
+async fn lost_call(g: &Gw) -> Option<Response> {
+    let (nth, how) = g.fail_call?;
+    if g.calls.fetch_add(1, Ordering::SeqCst) + 1 != nth {
+        return None;
+    }
+    Some(match how {
+        FailedCall::Dropped => StatusCode::BAD_GATEWAY.into_response(),
+        FailedCall::TimedOut => {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            StatusCode::GATEWAY_TIMEOUT.into_response()
+        }
+    })
 }
 
 /// Headers a proxy never forwards as they are.
@@ -306,6 +333,9 @@ async fn mcp_gw(g: &Gw, m: &McpGw, req: Request) -> Response {
 }
 
 async fn gw(State(g): State<Arc<Gw>>, req: Request) -> Response {
+    if let Some(lost) = lost_call(&g).await {
+        return lost;
+    }
     if let Some(a) = &g.ai {
         return ai_gw(&g, a, req).await;
     }
@@ -500,7 +530,7 @@ async fn run_of(state: &AppState, base: &str, id: &str) -> Value {
 }
 
 /// The stand-in gateway's half-open time and body limit.
-const HALF_OPEN_MS: u64 = 300;
+const HALF_OPEN_MS: u64 = 1000;
 const SIZE_LIMIT: u64 = 1024;
 
 async fn check_via(state: &AppState, run: &Value, gateway: &str) -> Value {
@@ -1069,14 +1099,20 @@ async fn a_breaker_check_waits_the_half_open_time_and_names_the_trial() {
     assert!(t.elapsed() >= Duration::from_millis(HALF_OPEN_MS), "{v:#}");
     assert_eq!(v["passed"], true, "{v:#}");
     let requests = v["requests"].as_array().expect("requests");
-    // Three failures reach the upstream, the fourth is answered by the gateway,
-    // the trial reaches the upstream again.
+    // Three failures reach the upstream, the fourth is answered by the gateway
+    // and so are the two that confirm the circuit stays open, the trial reaches
+    // the upstream again.
     let reached: Vec<bool> = requests
         .iter()
         .map(|r| !r["upstream"].as_array().expect("u").is_empty())
         .collect();
-    assert_eq!(reached, [true, true, true, false, true], "{v:#}");
-    assert_eq!(requests[4]["trial"], true, "{v:#}");
+    assert_eq!(
+        reached,
+        [true, true, true, false, false, false, true],
+        "{v:#}"
+    );
+    assert_eq!(requests[5]["trial"], Value::Null, "{v:#}");
+    assert_eq!(requests[6]["trial"], true, "{v:#}");
     let out = end(
         &state,
         "me",
@@ -1085,6 +1121,173 @@ async fn a_breaker_check_waits_the_half_open_time_and_names_the_trial() {
     )
     .expect("end");
     assert_eq!(out["removed"][0]["kind"], "flaky_counters", "{out}");
+}
+
+/// What an expectation of a verdict saw.
+fn seen_of(v: &Value, name: &str) -> String {
+    v["expectations"]
+        .as_array()
+        .expect("expectations")
+        .iter()
+        .find(|e| e["name"] == name)
+        .and_then(|e| e["seen"].as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+const OPENED: &str = "The gateway opened the circuit after upstream failures";
+
+/// The false pass this guards against: a plain proxy lost one call to the
+/// upstream and answered `502` (or `504`) itself, and the check read that
+/// one answer as an opened circuit.
+#[tokio::test]
+async fn one_lost_upstream_call_is_not_an_open_circuit() {
+    let (_server, state, base) = instance(config()).await;
+    for how in [FailedCall::Dropped, FailedCall::TimedOut] {
+        let run = run_of(&state, &base, "circuit_breaker").await;
+        let upstream = run["upstream"].as_str().expect("upstream").to_string();
+        let gateway = start_gw(Gw {
+            upstream,
+            fail_call: Some((4, how)),
+            ..Gw::default()
+        })
+        .await;
+        let v = check_via(&state, &run, &gateway).await;
+        assert_eq!(v["passed"], false, "{how:?}: {v:#}");
+        assert!(failed(&v).iter().any(|f| f == OPENED), "{how:?}: {v:#}");
+        let seen = seen_of(&v, OPENED);
+        assert!(
+            seen.contains("request 4 was answered") && seen.contains("not an open circuit"),
+            "{how:?}: {seen}"
+        );
+        // No trial was sent: the circuit never opened.
+        assert!(
+            v["requests"]
+                .as_array()
+                .expect("requests")
+                .iter()
+                .all(|r| r["trial"].is_null()),
+            "{how:?}: {v:#}"
+        );
+        end(
+            &state,
+            "me",
+            "circuit_breaker",
+            run["id"].as_str().expect("id"),
+        )
+        .expect("end");
+    }
+}
+
+/// A lost call in front of a real breaker does not hide it: the check goes
+/// on until the circuit opens and stays open.
+#[tokio::test]
+async fn a_breaker_passes_though_a_call_before_it_opened_was_lost() {
+    let (_server, state, base) = instance(config()).await;
+    let run = run_of(&state, &base, "circuit_breaker").await;
+    let upstream = run["upstream"].as_str().expect("upstream").to_string();
+    let mut g = behaving("circuit_breaker", &upstream, None);
+    g.fail_call = Some((2, FailedCall::Dropped));
+    let gateway = start_gw(g).await;
+    let v = check_via(&state, &run, &gateway).await;
+    assert_eq!(v["passed"], true, "{v:#}");
+    let seen = seen_of(&v, OPENED);
+    assert!(
+        seen.contains("before that, request 2 was answered 502"),
+        "{seen}"
+    );
+}
+
+/// A rate limit answers on its own too, and lets requests through again
+/// later: its `429` is not an open circuit.
+#[tokio::test]
+async fn a_rate_limit_is_not_an_open_circuit() {
+    let (_server, state, base) = instance(config()).await;
+    let run = run_of(&state, &base, "circuit_breaker").await;
+    let upstream = run["upstream"].as_str().expect("upstream").to_string();
+    let gateway = start_gw(Gw {
+        upstream,
+        limit: Some(3),
+        ..Gw::default()
+    })
+    .await;
+    let v = check_via(&state, &run, &gateway).await;
+    assert_eq!(v["passed"], false, "{v:#}");
+    assert!(
+        seen_of(&v, OPENED).contains("not the 5xx of an open circuit"),
+        "{v:#}"
+    );
+}
+
+/// A route that does not reach the upstream answers a gateway error at
+/// once: that is not a timeout.
+#[tokio::test]
+async fn a_gateway_error_without_the_upstream_is_not_a_timeout() {
+    let (_server, state, base) = instance(config()).await;
+    let name = "The request reached the upstream, which was still working on it";
+    let run = run_of(&state, &base, "timeouts").await;
+    let upstream = run["upstream"].as_str().expect("upstream").to_string();
+    let lost = start_gw(Gw {
+        upstream: upstream.clone(),
+        fail_call: Some((1, FailedCall::Dropped)),
+        ..Gw::default()
+    })
+    .await;
+    // A route to a port nothing listens on.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let dead = format!("http://{}", closed.local_addr().expect("addr"));
+    drop(closed);
+    let nowhere = start_gw(Gw {
+        upstream: dead,
+        ..Gw::default()
+    })
+    .await;
+    for gateway in [lost, nowhere] {
+        let v = check_via(&state, &run, &gateway).await;
+        assert_eq!(v["passed"], false, "{v:#}");
+        assert_eq!(failed(&v), [name], "{v:#}");
+    }
+    // The gateway that gives up on a request the upstream holds still passes.
+    let gateway = start_gw(behaving("timeouts", &upstream, None)).await;
+    let v = check_via(&state, &run, &gateway).await;
+    assert_eq!(v["passed"], true, "{v:#}");
+}
+
+/// A guard's refusal is repeated; a lost call is not. A plain proxy that
+/// lost the call with the personal data must not get the guard's line.
+#[tokio::test]
+async fn a_lost_model_call_is_not_a_guards_refusal() {
+    let (_server, state, base) = instance(config()).await;
+    let name = "Personal data never reached the model";
+    let run = run_of(&state, &base, "ai_prompt_guard").await;
+    let upstream = run["upstream"].as_str().expect("upstream").to_string();
+    let gateway = start_gw(Gw {
+        upstream: upstream.clone(),
+        ai: Some(AiGw::default()),
+        fail_call: Some((2, FailedCall::Dropped)),
+        ..Gw::default()
+    })
+    .await;
+    let v = check_via(&state, &run, &gateway).await;
+    assert_eq!(v["passed"], false, "{v:#}");
+    assert!(failed(&v).iter().any(|f| f == name), "{v:#}");
+    assert!(
+        seen_of(&v, name).contains("a failed call, not a refusal"),
+        "{v:#}"
+    );
+    // A guard that redacts, behind the same lost call, is still seen.
+    let gateway = start_gw(Gw {
+        upstream,
+        ai: Some(AiGw {
+            guard: Some(Guard::Redact),
+            ..AiGw::default()
+        }),
+        fail_call: Some((2, FailedCall::Dropped)),
+        ..Gw::default()
+    })
+    .await;
+    let v = check_via(&state, &run, &gateway).await;
+    assert!(!failed(&v).iter().any(|f| f == name), "{v:#}");
 }
 
 fn label<'a>(v: &'a Value, label: &str) -> &'a Value {
