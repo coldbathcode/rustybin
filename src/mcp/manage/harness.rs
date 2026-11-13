@@ -881,9 +881,11 @@ pub async fn import_scenario(ctx: &CallCtx, access: &Access, args: &Value) -> Va
         .get("format")
         .and_then(Value::as_str)
         .map(str::to_string);
-    // Values for the document's variables: named in a refusal, never shown.
-    let variables = match crate::harness::import::Variables::from_value(
+    // Values for the document's variables, one by one or as a Postman
+    // environment file: named in a refusal, never shown.
+    let variables = match crate::harness::import::Variables::with_environment(
         args.get("variables").unwrap_or(&Value::Null),
+        args.get("environment").unwrap_or(&Value::Null),
     ) {
         Ok(v) => v,
         Err(e) => return err(e),

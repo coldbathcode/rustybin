@@ -171,3 +171,170 @@ consideration. A candidate this step leaves: a Postman environment file read as 
 **Parity tables**: none changed. `import_scenario` keeps its permission, ceiling and place in
 `TOOLS`; the route, its permission and its catalogue row are the same (the description and the
 OpenAPI request body grew); the CLI command gained a flag, so `docs/src/cli.md` was regenerated.
+
+## Follow-ups (built after 0.7.0)
+
+Two follow-ups the owner asked for after the release, built together on 2026-11-13.
+
+### A. A placeholder name may be given a value
+
+- **What changed.** `Variables::from_value` no longer refuses a name of
+  `scenario::PLACEHOLDERS`. A given `id` (or `seq`, `vu`, `run`, `node`, `layer`, `rand`,
+  `ip`) is put in where `{{id}}` stands, like any other given variable, and the answer's
+  `notes` gains `variables: a harness placeholder name was given a fixed value: id. ...`
+  (`import::fixed_placeholders`, names only), so the person knows the imported requests
+  carry a constant where the harness would generate a value for each request.
+- **What did not.** Without a given value the document's `{{id}}` is treated as before:
+  it is the document's variable, never left for the harness to read, so its request is
+  left out and `id` is named in `variables` (`Vars::resolve`; the step 13 test
+  `postman_variables_are_resolved_or_the_request_is_left_out` is untouched). A value the
+  document defines itself for such a name (a collection's `variable` list, a script's
+  `config.variables`) also keeps its treatment, which was and is: put in like any other
+  variable of the document, with no note (`Vars::define` never looked at the placeholder
+  names; only the caller's were refused). A value still never holds `{{`, and what reads
+  as a placeholder once the values are in is still left out by `fits`.
+- **The note is written when the value is used.** A placeholder name that is given and
+  that the document never uses gets the note every unused variable gets, not this one.
+- **The console** already listed every name of `variables`, `id` included, so the field was
+  there; what stopped it was the instance's refusal. The hint under the form now says what
+  giving such a name means.
+
+### B. A Postman environment file as the variables
+
+- **Where it lives.** `Variables::with_environment(variables, environment)`: the given map
+  first, then the environment's entries that the map does not name. `check_variable` is
+  the one check both kinds of variable meet (`from_value` turns a failure into its refusal,
+  the environment into a note). The envelope's fourth key is `environment` (the document or
+  its text); the tool's property has the same name; the CLI's flag is `--environment FILE`;
+  the console's form has a file field (`#harness-import-env`).
+- **Refused or skipped.** A variable typed one by one is refused as before. An
+  environment's entry that fails a check is skipped and named in `notes`, never its value,
+  and the import goes on: a file is somebody's whole setup, real ones hold `token` and
+  `apiKey` entries of the default type, and refusing the file for them would make it
+  useless. Skipped by name: an entry of `type: "secret"`, one whose name looks like a
+  credential (`keys::looks_secret`), one with no value (null or empty, which is how an
+  unset entry is exported), one whose value is no variable's (over 1 KiB, holding `{{`,
+  not a scalar). Skipped and counted, not named: an entry whose name no variable could have
+  (empty, over 64 characters, braces, control characters), since such a name is not safe to
+  repeat. Passed over in silence: `enabled: false` (and `disabled: true`, the collection's
+  spelling), as the app does.
+- **Refused whole (`400`, nothing of the file quoted).** Text over 256 KiB (checked before
+  it is parsed, `MAX_ENVIRONMENT_BYTES`), not JSON, no `values` list, more than 1000
+  entries (`MAX_ENVIRONMENT_ENTRIES`), an entry that is no object with a text `key`
+  (named by its index), and more than 64 variables once the file's are counted with the
+  given ones. A recording with an environment is refused as one with variables is.
+- **A placeholder name in the file** (`id`) is taken like one given by hand, with the note
+  of follow-up A: the caller handed the file over, which is the caller giving the value.
+- **An unused entry of the file is not reported.** The "given and not used" note is for a
+  variable typed by hand (a typo); a file's entries the collection never uses are the
+  normal case.
+- **The console** reads the file in the browser only to fill the fields the form lists
+  (never from a secret, disabled or credential-named entry) and sends the file's text as
+  `environment` with the import, so the instance applies the rules and names what it did
+  not take. The fields win, being `variables`. The form is now also offered when the only
+  thing missing is a host's variable (the `hosts:` note), which is exactly the case an
+  environment file answers.
+
+### Where this differs from the brief, and why
+
+- **`--environment`, not `--env`.** `--env` is not a global flag, but it reads as "an
+  environment variable of the process" (it is that in most command lines). `--environment
+  FILE` matches the API's and the tool's `environment`, and its help says "a JSON file, not
+  the variables of this process".
+- **An environment given as an object is bounded by the request body and by its entries**,
+  not by its own byte count: it has been parsed with the envelope by then. Its text form is
+  bounded before parsing. The CLI and the console send text.
+- **The console form is offered for a dropped host variable too** (not asked for; without
+  it a collection whose only variable is its base URL never showed the form or the file
+  field).
+- **Skipped entries without a value** are a rule the brief did not list.
+- **More than 64 usable entries refuse the import** rather than being cut: the brief says
+  the caps apply to the total, and a silent cut would leave requests out for no visible
+  reason. The way out (disable what the collection does not use) is in the message.
+
+### Not built
+
+- Postman's "initial" versus "current" value (an export holds one `value`), and more than
+  one file (an environment plus globals) in one import.
+- A value built from another variable (`{{baseUrl}}/v1`) is not resolved: the entry is
+  skipped and named.
+- Nothing for an Artillery script's own `config.environments` (still named in `left_out`);
+  a Postman environment's entries are taken for a script or an Arazzo document like any
+  other given variables.
+
+### Tests
+
+- Changed deliberately, because they asserted the old refusal of a placeholder name:
+  `import_tests::a_harness_placeholder_is_never_a_variable` is now
+  `a_placeholder_name_takes_a_value_only_when_the_caller_gives_one` plus
+  `a_value_never_brings_a_placeholder_in` (the second keeps the old test's other halves);
+  the `seq` rows of the refusal tables in
+  `harness::tests::the_import_route_takes_variables_in_an_envelope`,
+  `mcp::manage::tests::import_scenario_takes_variables` and
+  `import_tests::a_request_body_is_the_document_or_an_envelope` (there replaced by a
+  credential's name, and the envelope's key list in the message grew); the `--var seq=`
+  case of `cli::tests::harness_import_takes_variables` (now `--var apiKey=`); the Hurl
+  request "a placeholder of the harness is never a variable" in
+  `docs/examples/harness/api.hurl` (now a credential's name); the `seq` case of the
+  console check (now `apiKey`).
+- New: the environment tests at the end of `import_tests.rs`, the route, tool and CLI
+  halves in the three tests above, the Hurl example `harness_import_environment` with three
+  more requests, the console check's environment file, and
+  `the_documented_envelope_is_the_example_collection_and_its_environment`, which holds the
+  example envelope to the two example files.
+
+## For the merge (follow-ups)
+
+**Changelog** (under "Unreleased"):
+
+New
+
+- **Harness import: a Postman environment file as the variables.** `POST
+  /_rustybin/harness/import` takes `environment` in its envelope (the exported environment
+  or globals file, or its text), `rustybin harness import <file> --environment FILE`, the
+  `import_scenario` tool takes `environment`, and the console's variables form takes the
+  file and fills its fields. A given variable wins over the file's entry. A disabled entry
+  is passed over; an entry marked `secret`, one named like a credential and one without a
+  usable value are not taken and are named in `notes`, never their values. At most 256 KiB
+  and 1000 entries; the 64 variables count the file's with the given ones.
+
+Changed
+
+- **Harness import: a variable named like a harness placeholder may be given a value.**
+  `id`, `seq`, `vu`, `run`, `node`, `layer`, `rand` and `ip` were refused as `variables`;
+  a collection that writes `{{id}}` kept losing those requests. A given value is now put
+  in like any other, and `notes` names the variable, since the imported requests then carry
+  a constant where the harness would generate a value. Without a given value nothing
+  changed: the request is left out and the name listed in `variables`.
+- The console's variables form is also offered when an import only dropped a host's
+  variable.
+
+**Upgrade note**: none needed. A caller that relied on the `400` for a placeholder name in
+`variables` now gets a `200` with a note; an envelope with a key `environment` was refused
+before and is read now.
+
+**CLAUDE.md**, the step 18 paragraph, corrected:
+
+Step 18 (import variables; `step-18-import-variables.md`): values for a document's variables given with a
+harness import (`import::Variables`, the envelope read by `import::import_body`, `--var` and
+`--environment`, `variables` and `environment` of `import_scenario`, the form in `ui/views/harness.js`).
+Rules it left: a given value goes in only where the document's own would (`Vars::value`), so credentials
+are removed after it by the same code and the result still passes `import::fits`; a variable is refused by
+name when it looks like a credential, and a value never holds `{{`; a document's variable named like a
+harness placeholder (`scenario::PLACEHOLDERS`) is the document's, never the harness's: without a value its
+request is left out, and a value the caller gives is put in and named in `notes`
+(`import::fixed_placeholders`); a Postman environment file is more variables
+(`Variables::with_environment`): every entry meets `import::check_variable`, the one check a typed variable
+meets, a failing entry is skipped and named in `notes` where a typed one is refused, an entry marked
+`secret` is never taken, the file is bounded before it is parsed and a refusal quotes nothing of it; a
+value is never in an error, a note, `left_out`, a log line or an audit entry (`Variables`' `Debug` shows
+names only); a refusal that names missing variables carries them as `variables` (`import::Refusal`); an
+Arazzo step's output is never given.
+
+**`docs/src/roadmap.md`**: take "a Postman environment file read as the variables" out of the
+candidates, if it is listed.
+
+**Parity tables**: none changed. The route, its permission and its catalogue row are the same
+(the description and the OpenAPI request body grew); `import_scenario` keeps its permission,
+ceiling and place in `TOOLS` and gained a property; the CLI command gained a flag, so
+`docs/src/cli.md` was regenerated.

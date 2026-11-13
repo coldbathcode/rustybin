@@ -1147,8 +1147,9 @@ pub async fn patch_cluster_run(
 /// `POST /_rustybin/harness/import`: a recording (a HAR file, or the answer
 /// of `GET /_rustybin/requests`), a Postman collection or an Artillery
 /// script as a scenario's `source`. The body is the document, or a JSON
-/// envelope `{document, format, variables}` that gives values for the
-/// document's variables. Sends nothing and works with harness mode off.
+/// envelope `{document, format, variables, environment}` that gives values
+/// for the document's variables, one by one or as a Postman environment
+/// file. Sends nothing and works with harness mode off.
 pub async fn import(
     State(state): State<AppState>,
     Query(q): Query<FormatQuery>,

@@ -1581,9 +1581,11 @@ async fn a_panic_after_the_release_gives_the_slot_back_once() {
 }
 
 /// Core next step 18: the import route takes an envelope with values for
-/// the document's variables. A given value wins, a placeholder's name and
-/// the caps are refused by name, and a value that lands where a credential
-/// would be is in no answer and no audit entry.
+/// the document's variables, one by one or as a Postman environment file.
+/// A given value wins, a credential's name and the caps are refused by
+/// name, a placeholder's name that is given is named in `notes`, and a
+/// value that lands where a credential would be (or that an environment
+/// marks secret) is in no answer and no audit entry.
 #[tokio::test]
 async fn the_import_route_takes_variables_in_an_envelope() {
     const VALUE: &str = "v4lue-that-must-not-survive";
@@ -1657,7 +1659,6 @@ async fn the_import_route_takes_variables_in_an_envelope() {
     let many: serde_json::Map<String, Value> =
         (0..65).map(|i| (format!("v{i}"), json!(VALUE))).collect();
     for (variables, why) in [
-        (json!({ "seq": VALUE }), "variables.seq:"),
         (json!({ "apiToken": VALUE }), "variables.apiToken:"),
         (
             json!({ "a": format!("{VALUE}{}", "x".repeat(1024)) }),
@@ -1680,6 +1681,81 @@ async fn the_import_route_takes_variables_in_an_envelope() {
     }))
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    // A variable named like a harness placeholder: without a value its
+    // request is left out as any other's, and given one it is put in and
+    // `notes` names it, never its value.
+    let by_id = json!({
+        "info": { "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+        "item": [{ "name": "one", "request": { "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{who}}" }],
+            "url": "{{baseUrl}}/orders/{{id}}" } }]
+    });
+    let (status, j) = post(by_id.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    assert_eq!(j["variables"], json!(["id"]), "{j}");
+    let (status, j) = post(json!({ "document": by_id, "variables": { "id": "id-41" } })).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["source"]["requests"][0]["path"], json!("/orders/id-41"));
+    let notes = j["notes"].to_string();
+    assert!(
+        notes.contains("a harness placeholder name was given a fixed value: id."),
+        "{j}"
+    );
+    assert!(!notes.contains("id-41"), "{j}");
+    // A Postman environment file as the variables: a given variable wins,
+    // a secret entry and a credential's name are named and never taken.
+    let environment = json!({
+        "name": "Staging",
+        "values": [
+            { "key": "baseUrl", "value": "https://api.example.com/shop", "type": "default", "enabled": true },
+            { "key": "id", "value": "7", "type": "default", "enabled": true },
+            { "key": "who", "value": VALUE, "type": "secret", "enabled": true },
+            { "key": "apiToken", "value": VALUE, "type": "default", "enabled": true },
+            { "key": "old", "value": VALUE, "type": "default", "enabled": false }
+        ],
+        "_postman_variable_scope": "environment"
+    });
+    for environment in [environment.clone(), json!(environment.to_string())] {
+        let (status, j) = post(json!({ "document": by_id, "environment": environment })).await;
+        assert_eq!(status, StatusCode::OK, "{j}");
+        assert_eq!(j["source"]["requests"][0]["path"], json!("/shop/orders/7"));
+        assert_eq!(j["hosts"], json!(["api.example.com"]));
+        let notes = j["notes"].to_string();
+        assert!(
+            notes.contains("marked secret (a credential is never taken): who"),
+            "{j}"
+        );
+        assert!(
+            notes.contains(
+                "a name that looks like a credential (an import removes credentials): apiToken"
+            ),
+            "{j}"
+        );
+        assert!(notes.contains("fixed value: id."), "{j}");
+        assert!(!j.to_string().contains(VALUE), "{j}");
+    }
+    let (status, j) = post(json!({ "document": by_id, "environment": environment,
+        "variables": { "id": 8 } }))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["source"]["requests"][0]["path"], json!("/shop/orders/8"));
+    // A malformed environment is a 400 that quotes nothing of it.
+    for bad in [
+        json!({ "values": VALUE }),
+        json!(format!("{{ \"values\": [ {VALUE}")),
+        json!({ "values": [{ "value": VALUE }] }),
+        json!("x".repeat(256 * 1024 + 1)),
+    ] {
+        let (status, j) = post(json!({ "document": by_id, "environment": bad })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+        assert!(
+            j["error"]
+                .as_str()
+                .is_some_and(|e| e.starts_with("environment")),
+            "{j}"
+        );
+        assert!(!j.to_string().contains(VALUE), "{j}");
+    }
     // Whatever the audit log kept of these calls, it holds no value.
     let kept = serde_json::to_string(&state.audit.all()).expect("entries");
     assert!(!kept.contains(VALUE), "{kept}");

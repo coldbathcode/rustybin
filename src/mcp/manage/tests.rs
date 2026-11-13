@@ -5052,8 +5052,10 @@ async fn git_branch_and_signing_tools() {
 }
 
 /// Core next step 18: `import_scenario` takes values for the document's
-/// variables. A placeholder's name and a credential's are refused, and a
-/// value is in no summary and, where a credential would be, in no answer.
+/// variables, one by one or as a Postman environment file. A credential's
+/// name is refused, a placeholder's name that is given is named in the
+/// notes, and a value is in no summary and, where a credential would be
+/// (or where an environment marks it secret), in no answer.
 #[tokio::test]
 async fn import_scenario_takes_variables() {
     const VALUE: &str = "v4lue-that-must-not-survive";
@@ -5089,7 +5091,6 @@ async fn import_scenario_takes_variables() {
     assert!(text_of(&r).contains("0 variable(s) not defined"), "{r}");
     assert!(!r.to_string().contains(VALUE), "{r}");
     for (variables, why) in [
-        (json!({ "seq": VALUE }), "variables.seq:"),
         (json!({ "api_key": VALUE }), "variables.api_key:"),
         (json!([VALUE]), "variables: a map of name to value"),
     ] {
@@ -5104,6 +5105,66 @@ async fn import_scenario_takes_variables() {
         assert!(text_of(&r).starts_with(why), "{why}: {r}");
         assert!(!r.to_string().contains(VALUE), "{r}");
     }
+    // A variable named like a harness placeholder is the document's: given,
+    // it is put in, and the notes name it (never its value).
+    let by_id = json!({
+        "info": { "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+        "item": [{ "name": "a", "request": { "method": "GET", "url": "{{baseUrl}}/orders/{{id}}" } }]
+    })
+    .to_string();
+    let r = tool(&app, &[], "import_scenario", json!({ "document": by_id })).await;
+    assert!(is_error(&r), "{r}");
+    let r = tool(
+        &app,
+        &[],
+        "import_scenario",
+        json!({ "document": by_id, "variables": { "id": "id-41" } }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    let s = &r["structuredContent"];
+    assert_eq!(s["source"]["requests"][0]["path"], "/orders/id-41");
+    let notes = s["notes"].to_string();
+    assert!(notes.contains("fixed value: id."), "{r}");
+    assert!(
+        !notes.contains("id-41") && !text_of(&r).contains("id-41"),
+        "{r}"
+    );
+    // A Postman environment file, as the exported JSON or its text: a
+    // variable given beside it wins, a secret entry is never taken.
+    let environment = json!({
+        "name": "Staging",
+        "values": [
+            { "key": "baseUrl", "value": "https://api.example.com/v1", "enabled": true },
+            { "key": "id", "value": "7", "enabled": true },
+            { "key": "session", "value": VALUE, "type": "secret", "enabled": true }
+        ]
+    });
+    for environment in [environment.clone(), json!(environment.to_string())] {
+        let r = tool(
+            &app,
+            &[],
+            "import_scenario",
+            json!({ "document": by_id, "environment": environment, "variables": { "id": "8" } }),
+        )
+        .await;
+        assert!(!is_error(&r), "{r}");
+        let s = &r["structuredContent"];
+        assert_eq!(s["source"]["requests"][0]["path"], "/v1/orders/8");
+        assert!(s["notes"].to_string().contains("marked secret"), "{r}");
+        assert!(s["notes"].to_string().contains(": session"), "{r}");
+        assert!(!r.to_string().contains(VALUE), "{r}");
+    }
+    let r = tool(
+        &app,
+        &[],
+        "import_scenario",
+        json!({ "document": by_id, "environment": { "values": VALUE } }),
+    )
+    .await;
+    assert!(is_error(&r), "{r}");
+    assert!(text_of(&r).starts_with("environment:"), "{r}");
+    assert!(!r.to_string().contains(VALUE), "{r}");
 }
 
 /// Core next step 13: a collection or a script as text. What does not map

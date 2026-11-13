@@ -603,7 +603,8 @@ with the reason in `left_out`.
 value is put in. Any other (an environment variable, a captured value, `{{$guid}}`) is
 never guessed: its request is left out, counted in `skipped`, and the name is listed in
 `variables`. Define it in the collection or the script, or
-[give its value with the import](#giving-the-variables-their-values). A variable whose
+[give its value with the import](#giving-the-variables-their-values), one by one or as
+[the collection's environment file](#a-postman-environment-file-as-the-variables). A variable whose
 name looks secret is never put in, and credentials are removed as for a recording.
 
 A program in a scripting language (a k6 or Locust script, an Artillery processor) is refused
@@ -651,10 +652,17 @@ as text) and `format` is optional:
   whatever `session` holds. Give the scenario an
   [identity](#traffic-from-mocks-identities-protocols-and-faults) instead. A value is never
   logged, never in the audit log and never in an error, which names the variable only.
-- **Never a placeholder.** `seq`, `vu`, `run`, `node`, `layer`, `rand`, `id` and `ip` are the
-  harness's own `{{placeholders}}`: a variable of that name is refused, a value may not hold
-  `{{`, and a request whose text still reads as a placeholder once the values are in is left
-  out. An import cannot change what a placeholder means.
+- **A name the harness has a placeholder for.** `seq`, `vu`, `run`, `node`, `layer`, `rand`,
+  `id` and `ip` are the harness's own `{{placeholders}}`, and `{{id}}` is also the commonest
+  variable a collection has. In an imported document it is always the document's variable,
+  never the harness's: without a value its request is left out and the name listed in
+  `variables`, like any other. Give it a value and it is put in like any other too, and
+  `notes` names it (`variables: a harness placeholder name was given a fixed value: id`),
+  because every imported request then carries that one constant where a hand-written
+  `{{id}}` would get a new value for each request. To have the harness generate the value,
+  write the placeholder into the scenario after the import. A value may still not hold
+  `{{`, and a request whose text reads as a placeholder once the values are in is left
+  out: an import never brings a placeholder in.
 - At most 64 variables, 1 KiB each, text, numbers or `true` and `false`. A recording has no
   variables: giving one with a HAR file or captures is refused.
 - Nothing about safety changes with a value: what comes out is still a scenario's `source`,
@@ -662,11 +670,62 @@ as text) and `format` is optional:
 
 | Surface | How |
 |---|---|
-| API | `POST /_rustybin/harness/import` with the envelope `{document, format, variables}` |
-| Console | Load test, the builder's file field: when the file leaves requests out for variables, a form under it lists them (and takes one more, such as a base URL); **Import again** sends the same file with the values |
-| Management MCP | `import_scenario` with `variables`, a map of name to value |
-| CLI | `rustybin harness import shop.postman_collection.json --var baseUrl=https://api.example.com/shop --var :order=o-42` (repeatable) |
+| API | `POST /_rustybin/harness/import` with the envelope `{document, format, variables, environment}` |
+| Console | Load test, the builder's file field: when the file leaves requests out for variables (or drops a host's variable), a form under it lists them, takes more rows (such as a base URL) and takes the collection's environment file, which fills the fields; **Import again** sends the same file with the values |
+| Management MCP | `import_scenario` with `variables`, a map of name to value, and `environment`, the environment file or its text |
+| CLI | `rustybin harness import shop.postman_collection.json --var baseUrl=https://api.example.com/shop --var :order=o-42` (repeatable), `--environment staging.postman_environment.json` |
 | `rustybin.yaml` | Nothing: an import is a conversion, its result is a scenario |
+
+### A Postman environment file as the variables
+
+The values usually exist already, in the environment the collection is run with. Export it
+(the environment's menu, **Export**; a globals export has the same shape) and hand the file
+over instead of typing each variable. This collection keeps its base URL, an id and a region
+in its environment:
+
+```json
+{{#include ../examples/harness/items.postman_collection.json}}
+```
+
+```json
+{{#include ../examples/harness/items.postman_environment.json}}
+```
+
+On the API the envelope takes it as `environment`, the document or its text, next to
+`variables`:
+
+```hurl
+{{#include ../examples/harness/api.hurl:harness_import_environment}}
+```
+
+```bash
+rustybin harness import items.postman_collection.json --environment items.postman_environment.json
+```
+
+- **Every entry meets the checks a given variable meets**, and the 64 count what is taken
+  from the file together with what `variables` gives. A file is somebody's whole setup, so
+  an entry that fails a check is not taken, and `notes` names it with the reason, where a
+  variable you typed would be refused: the import goes on with the rest.
+- **An entry marked `secret` is never taken**: it is a credential. Nor is one whose name
+  looks like a credential (`token`, `apiKey`), whatever its type. Both are named in `notes`,
+  never their values. Give the scenario an
+  [identity](#traffic-from-mocks-identities-protocols-and-faults) instead, and export the
+  environment without its secrets where you can: the file still travels to the instance.
+- **A disabled entry** (`"enabled": false`) is passed over, as the app passes over it. An
+  entry without a value, or with one that is no variable's (over 1 KiB, holding `{{` as a
+  value built from another variable does, or not text, a number, `true` or `false`), is
+  not taken and is named. When a name is listed twice, the last entry stands.
+- **`variables` win** over the file's entries, so one value can be changed without editing
+  the file. An entry the document never uses is not reported: only a variable you typed is
+  (it may be a typo).
+- An environment is at most 256 KiB and 1000 entries. One that is not an environment (not
+  JSON, no `values` list, an entry without a `key`) is a `400` that quotes nothing of it,
+  and more than 64 usable variables is a `400` too: disable the entries the collection does
+  not use. A value is never logged, never in the audit log and never in an answer beyond
+  the requests it was put in. A recording has no variables, from a file either.
+- In the console the form reads the file in the browser to fill the fields it lists (never
+  from a secret or disabled entry) and sends the file with the import for the rest, such as
+  a base URL.
 
 ## Importing an Arazzo document
 

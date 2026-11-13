@@ -388,9 +388,35 @@ export default {
         recording.value = '';
         if (!file) return;
         const text = await file.text();
-        importing = { text, yaml: /\.ya?ml$/i.test(file.name) && !text.trimStart().startsWith('{'), given: {} };
+        importing = { text, yaml: /\.ya?ml$/i.test(file.name) && !text.trimStart().startsWith('{'), given: {}, environment: null };
         await importFile();
       });
+      // A Postman environment (or globals) export as the variables: its
+      // text goes with the import, where the instance takes what a variable
+      // may be and names the rest. Here only the fields are filled from it,
+      // so what the form lists is seen before it is sent: never an entry
+      // that is disabled, marked secret or named like a credential (the
+      // words the instance looks for; it refuses such a name whatever is
+      // sent).
+      const CREDENTIAL_WORDS = ['key', 'token', 'secret', 'password', 'auth', 'signature', 'sig', 'cookie'];
+      function environmentValues(text) {
+        let doc = null;
+        try { doc = JSON.parse(text); } catch { return null; }
+        if (!doc || typeof doc !== 'object' || !Array.isArray(doc.values)) return null;
+        const values = {};
+        for (const entry of doc.values) {
+          if (!entry || typeof entry.key !== 'string') continue;
+          const name = entry.key.trim();
+          delete values[name];
+          if (entry.enabled === false || entry.disabled === true || entry.type === 'secret') continue;
+          const lower = name.toLowerCase();
+          if (!name || CREDENTIAL_WORDS.some((w) => lower.includes(w))) continue;
+          const value = entry.value;
+          if (!['string', 'number', 'boolean'].includes(typeof value) || value === '') continue;
+          values[name] = String(value);
+        }
+        return { name: typeof doc.name === 'string' ? doc.name.slice(0, 64) : '', values };
+      }
       // A small form for the variables the file does not define (a
       // collection keeps them in an environment): one field each, and room
       // for one more, such as the variable a base URL stands behind.
@@ -403,15 +429,42 @@ export default {
           rows.append(h('div', { class: 'row harness-import-var' }, nameEl, valueEl));
         };
         const known = new Set(missing);
-        for (const name of missing) addRow(name, importing.given[name] || '', true);
+        const fromFile = () => (importing.environment ? importing.environment.values : {});
+        for (const name of missing) addRow(name, importing.given[name] || fromFile()[name] || '', true);
         for (const [name, value] of Object.entries(importing.given)) if (!known.has(name)) addRow(name, value, false);
+        // The collection's environment file, instead of typing each value.
+        const envEl = h('input', { type: 'file', accept: '.json,application/json', id: 'harness-import-env', 'aria-label': 'A Postman environment file' });
+        const envSaid = h('span', { class: 'hint', id: 'harness-import-env-said', 'aria-live': 'polite' });
+        const sayEnvironment = () => {
+          const env = importing.environment;
+          if (!env) return;
+          const n = Object.keys(env.values).length;
+          envSaid.textContent = `${env.name ? `${env.name}: ` : ''}${n} value(s) read. The fields above are filled from it and win over it; its other entries go with the import. Secret and disabled entries are never taken.`;
+        };
+        sayEnvironment();
+        envEl.addEventListener('change', async () => {
+          const file = envEl.files[0];
+          envEl.value = '';
+          if (!file) return;
+          const text = await file.text();
+          const read = environmentValues(text);
+          if (!read) { toast('Not a Postman environment or globals export (a JSON file with a values list)', 'err'); return; }
+          importing.environment = { text, name: read.name, values: read.values };
+          for (const row of rows.querySelectorAll('.harness-import-var')) {
+            const name = row.querySelector('.harness-import-var-name').value.trim();
+            const valueEl = row.querySelector('.harness-import-var-value');
+            if (name in read.values && valueEl.value === '') valueEl.value = read.values[name];
+          }
+          sayEnvironment();
+        });
         const formEl = h('form', { id: 'harness-import-vars', class: 'stack-sm' },
           h('strong', null, missing.length ? 'Give the variables their values and import again' : 'Variables given'),
           rows,
+          h('label', { class: 'field' }, h('span', null, 'Or the collection\'s Postman environment file'), envEl, envSaid),
           h('div', { class: 'row' },
             h('button', { class: 'btn sm', type: 'button', id: 'harness-import-var-add', onclick: () => addRow('', '', false) }, 'Add a variable'),
             h('button', { class: 'btn sm primary', type: 'submit', id: 'harness-import-again' }, 'Import again')),
-          h('span', { class: 'hint' }, 'A name as the file writes it: baseUrl for {{baseUrl}}, :id for a path variable. Not for credentials: an import removes them, a scenario gets its own identity. The values go into the scenario, nowhere else.'));
+          h('span', { class: 'hint' }, 'A name as the file writes it: baseUrl for {{baseUrl}}, :id for a path variable. Not for credentials: an import removes them, a scenario gets its own identity. A name the harness also has a placeholder for (id, seq, vu, run, node, layer, rand, ip) may be given: the requests then carry that one value, where the harness would generate one for each request. The values go into the scenario, nowhere else.'));
         formEl.addEventListener('submit', async (e) => {
           e.preventDefault();
           const given = {};
@@ -426,12 +479,14 @@ export default {
         return formEl;
       }
       async function importFile() {
-        const { text, yaml, given } = importing;
-        const withValues = Object.keys(given).length > 0;
+        const { text, yaml, given, environment } = importing;
+        const withValues = Object.keys(given).length > 0 || !!environment;
         // With values the file travels as text in an envelope; without, as it is.
+        const envelope = { document: text, variables: given };
+        if (environment) envelope.environment = environment.text;
         const r = await send({ control: true, method: 'POST', url: `${SERVER}${PREFIX}/import`,
           headers: { 'Content-Type': !withValues && yaml ? 'application/yaml' : 'application/json' },
-          body: withValues ? JSON.stringify({ document: text, variables: given }) : text, timeout: 30000 });
+          body: withValues ? JSON.stringify(envelope) : text, timeout: 30000 });
         if (!r.ok || !r.json || !r.json.source) {
           const why = (r.json && r.json.error) || `answered ${r.status}`;
           toast(why, 'err');
@@ -465,7 +520,9 @@ export default {
         if (variables.length) lines.push(h('div', null, h('strong', null, 'Variables the file does not define (their requests are left out): '), variables.join(', ')));
         if (skipped.length) lines.push(h('div', null, h('strong', null, 'Requests left out: '), skipped.map(([why, n]) => `${n} with ${why}`).join('; ')));
         for (const n of notes) lines.push(h('div', null, n));
-        if (variables.length || withValues) lines.push(variablesForm(variables));
+        // A host's variable without a value is in a note, not in variables:
+        // the form is offered for it too (a row, or the environment file).
+        if (variables.length || withValues || notes.some((n) => n.startsWith('hosts:'))) lines.push(variablesForm(variables));
         replace(importedEl, lines.length ? notice('warn', h('div', { class: 'stack-sm' }, ...lines)) : null);
       }
       const yamlPane = h('div', { hidden: true, class: 'stack-sm' }, yamlArea,

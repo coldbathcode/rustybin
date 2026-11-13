@@ -1535,8 +1535,10 @@ async fn git_branches_switch_resolve_and_signing_key() {
 }
 
 /// Core next step 18: `harness import --var NAME=value` gives a value for a
-/// variable the file does not define; a harness placeholder's name is
-/// refused by name (exit 1), and a value is in no failure message.
+/// variable the file does not define and `--environment FILE` a Postman
+/// environment file's; a credential's name is refused by name (exit 1), a
+/// harness placeholder's name that is given is named in the notes, and a
+/// value is in no failure message.
 #[tokio::test]
 async fn harness_import_takes_variables() {
     let inst = instance().await;
@@ -1601,16 +1603,83 @@ async fn harness_import_takes_variables() {
         ])
         .await;
     assert_eq!(j["source"]["requests"][0]["path"], json!("/items/3"));
-    // A placeholder of the harness is refused by name.
+    // A name that looks like a credential is refused by name.
     let (code, _, why) = inst
         .run_full(
             None,
-            &["harness", "import", &collection, "--var", "seq=v4lue-1"],
+            &["harness", "import", &collection, "--var", "apiKey=v4lue-1"],
         )
         .await;
     assert_eq!(code, 1);
-    assert!(why.contains("variables.seq"), "{why}");
+    assert!(why.contains("variables.apiKey"), "{why}");
     assert!(!why.contains("v4lue-1"), "{why}");
+    // A variable named like a harness placeholder may be given: the notes
+    // name it, since the requests then carry a constant.
+    let by_id = dir.join("items.postman_collection.json");
+    std::fs::write(
+        &by_id,
+        json!({
+            "info": { "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+            "item": [{ "name": "one", "request": { "method": "GET", "url": "{{baseUrl}}/items/{{id}}" } }]
+        })
+        .to_string(),
+    )
+    .expect("collection");
+    let by_id = by_id.display().to_string();
+    let (code, _, why) = inst.run_full(None, &["harness", "import", &by_id]).await;
+    assert_eq!(code, 1);
+    assert!(why.contains("variables not defined: id"), "{why}");
+    let j = inst
+        .json(&["harness", "import", &by_id, "--var", "id=41"])
+        .await;
+    assert_eq!(j["source"]["requests"][0]["path"], json!("/items/41"));
+    assert!(j["notes"].to_string().contains("fixed value: id."), "{j}");
+    // The collection's Postman environment file gives the values; --var
+    // wins over its entries, and a secret entry is never taken.
+    let environment = dir.join("staging.postman_environment.json");
+    std::fs::write(
+        &environment,
+        json!({
+            "name": "Staging",
+            "values": [
+                { "key": "baseUrl", "value": "https://api.example.com/v1", "type": "default", "enabled": true },
+                { "key": "id", "value": "7", "type": "default", "enabled": true },
+                { "key": "session", "value": "v4lue-3", "type": "secret", "enabled": true }
+            ],
+            "_postman_variable_scope": "environment"
+        })
+        .to_string(),
+    )
+    .expect("environment");
+    let environment = environment.display().to_string();
+    let j = inst
+        .json(&["harness", "import", &by_id, "--environment", &environment])
+        .await;
+    assert_eq!(j["source"]["requests"][0]["path"], json!("/v1/items/7"));
+    assert!(j["notes"].to_string().contains("marked secret"), "{j}");
+    assert!(!j.to_string().contains("v4lue-3"), "{j}");
+    let j = inst
+        .json(&[
+            "harness",
+            "import",
+            &by_id,
+            "--environment",
+            &environment,
+            "--var",
+            "id=8",
+        ])
+        .await;
+    assert_eq!(j["source"]["requests"][0]["path"], json!("/v1/items/8"));
+    // A file that is no environment: refused, nothing of it repeated.
+    let (code, _, why) = inst
+        .run_full(
+            None,
+            &["harness", "import", &by_id, "--environment", &collection],
+        )
+        .await;
+    assert_eq!(code, 1);
+    assert!(why.contains("environment:"), "{why}");
+    assert!(!why.contains("tenant"), "{why}");
     // Not NAME=value: a usage error that does not repeat what was typed.
     let (code, _, why) = inst
         .run_full(
