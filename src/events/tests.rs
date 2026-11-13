@@ -1080,3 +1080,38 @@ async fn a_mock_made_again_under_the_same_name_starts_its_channels_afresh() {
     }
     assert!(closed, "the deleted mock's listener was not let go");
 }
+
+/// The mock's own spec route serves the AsyncAPI document with `servers`
+/// in that version's shape (a map, never OpenAPI's list), pointing at this
+/// instance's `/events/<name>`.
+#[tokio::test]
+async fn the_served_document_names_this_instance_in_asyncapis_own_shape() {
+    let state = state();
+    create(&state, "ev3", V3, json!({})).await;
+    create(&state, "ev2", V2, json!({})).await;
+    let (status, v3) = call(&state, "GET", "/mock/ev3/_rustybin/openapi.json", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{v3}");
+    assert_eq!(v3["asyncapi"], "3.0.0");
+    let server = &v3["servers"]["rustybin"];
+    assert!(v3["servers"].is_object(), "{v3}");
+    assert_eq!(server["pathname"], "/events/ev3", "{server}");
+    assert_eq!(server["protocol"], "ws", "{server}");
+    assert!(
+        server["host"]
+            .as_str()
+            .is_some_and(|h| !h.is_empty() && !h.contains('/')),
+        "{server}"
+    );
+    let (status, v2) = call(&state, "GET", "/mock/ev2/_rustybin/openapi.json", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{v2}");
+    let server = &v2["servers"]["rustybin"];
+    assert_eq!(server["protocol"], "ws", "{server}");
+    assert!(
+        server["url"]
+            .as_str()
+            .is_some_and(|u| u.starts_with("ws://") && u.ends_with("/events/ev2")),
+        "{server}"
+    );
+    // The document's own channels are untouched.
+    assert!(v3["channels"].is_object() && v2["channels"].is_object());
+}

@@ -663,6 +663,17 @@ pub(crate) async fn serve(
 pub fn served_spec(c: &Compiled, server: &str, idp_base: &str, name: &str) -> Value {
     let mut doc = c.spec.root.clone();
     let description = format!("Rustybin mock {name:?}");
+    if let Some(events) = &c.spec.events {
+        // An AsyncAPI document: `servers` is a map there, and the channels
+        // are served below /events/<name> over WebSocket (and SSE, POST).
+        if let Value::Object(m) = &mut doc {
+            m.insert(
+                "servers".into(),
+                event_servers(&events.asyncapi, server, name, &description),
+            );
+        }
+        return doc;
+    }
     if let Value::Object(m) = &mut doc {
         m.insert(
             "servers".into(),
@@ -692,6 +703,34 @@ pub fn served_spec(c: &Compiled, server: &str, idp_base: &str, name: &str) -> Va
         }
     }
     doc
+}
+
+/// The `servers` of a served AsyncAPI document, in that version's shape:
+/// this instance, where the mock's channels are (`/events/<name>`), over
+/// WebSocket. `server` is the mock's own URL; only its origin is used.
+fn event_servers(version: &str, server: &str, name: &str, description: &str) -> Value {
+    let (secure, rest) = match server.split_once("://") {
+        Some((scheme, rest)) => (scheme.eq_ignore_ascii_case("https"), rest),
+        None => (false, server),
+    };
+    let host = rest.split('/').next().unwrap_or_default();
+    let protocol = if secure { "wss" } else { "ws" };
+    let pathname = format!("/events/{name}");
+    let entry = if version.starts_with("2.") {
+        json!({
+            "url": format!("{protocol}://{host}{pathname}"),
+            "protocol": protocol,
+            "description": description,
+        })
+    } else {
+        json!({
+            "host": host,
+            "pathname": pathname,
+            "protocol": protocol,
+            "description": description,
+        })
+    };
+    json!({ "rustybin": entry })
 }
 
 fn rewrite_flows(scheme: &mut Value, base: &str) {
