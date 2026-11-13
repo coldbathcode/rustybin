@@ -437,6 +437,32 @@ impl SourceControl {
                 ));
             }
             Err(not) => {
+                // The host refused the request itself: one is perhaps open
+                // already for these two branches. One read says, and the
+                // opening call is not made again.
+                let existing = if not.may_be_open() {
+                    self.existing_at_host(&at, &token, &pr).await
+                } else {
+                    None
+                };
+                if let Some(existing) = existing {
+                    crate::audit::event("git_pull_request_already_open");
+                    tracing::info!(
+                        target: "rustybin::git",
+                        kind = at.kind.as_str(),
+                        host = %crate::egress::url_origin(&at.api),
+                        "a pull request was already open at the git host"
+                    );
+                    body["opened"] = json!(false);
+                    body["already_open"] = json!(true);
+                    // The host's own answer: third-party content.
+                    body["untrusted_pull_request"] =
+                        json!({ "number": existing.number, "url": existing.url });
+                    body["detail"] = json!(format!(
+                        "pushed this instance's side to {target}; a pull request from {target} into {base} was already open at the git host, so none was opened (its address is in untrusted_pull_request). Nothing was applied, and {base} reads as diverged here until the merge is pulled"
+                    ));
+                    return Ok(body);
+                }
                 tracing::warn!(
                     target: "rustybin::git",
                     kind = at.kind.as_str(),

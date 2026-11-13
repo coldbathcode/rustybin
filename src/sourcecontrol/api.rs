@@ -488,8 +488,11 @@ pub fn catalog() -> Vec<Endpoint> {
                  pull request at the git host and applies nothing; with open: true the git \
                  host's API (the git.host, git.host_api and git.host_token settings; egress \
                  purpose git_host) is then asked to open that pull request, never to merge it: \
-                 {opened, untrusted_pull_request: {number, url}}, or {opened: false, not_opened: \
-                 {reason, why}} with the branch left pushed. What the settings cannot serve is a \
+                 {opened, untrusted_pull_request: {number, url}}, or {opened: false, already_open: \
+                 true, untrusted_pull_request} when the host had one open for the two branches \
+                 (found with one read after its refusal), or {opened: false, not_opened: \
+                 {reason, why}} with the branch left pushed. The kinds are github, gitlab and \
+                 gitea (Gitea and Forgejo). What the settings cannot serve is a \
                  409 before anything is pushed. dry_run answers what the way out would change, \
                  validated like the apply (with open: would_open, and no call is made).",
             )
@@ -580,7 +583,7 @@ pub fn openapi_paths() -> Value {
                 "branch": { "type": "string", "maxLength": 128, "description": "pull_request: the new branch (a name is made when absent)" },
                 "dry_run": { "type": "boolean", "default": false, "description": "What the way out would change; nothing is changed" },
                 "open": { "type": "boolean", "default": false, "description": "pull_request: after the push, ask the git host's API to open the pull request (never to merge it). 409 before anything is pushed when no host is set up, no token is set or the outbound policy refuses the API (reason: host_not_set, host_token_missing, egress_refused)" } } } } } },
-            "responses": ok("{resolved, commit, push}, {resolved, applied, head} or {resolved, branch, base, pushed}; with open also {host: {kind, api, repository}, opened, untrusted_pull_request: {number, url} (the git host's answer) or not_opened: {reason, why, status, untrusted_host_message}}; with dry_run {dry_run, would_resolve, ...} and, with open, would_open: {host, base, head, title, body}") } },
+            "responses": ok("{resolved, commit, push}, {resolved, applied, head} or {resolved, branch, base, pushed}; with open also {host: {kind, api, repository}, opened, untrusted_pull_request: {number, url} (the git host's answer; with already_open: true and opened: false when the host had one open for the two branches) or not_opened: {reason, why, status, untrusted_host_message}}; with dry_run {dry_run, would_resolve, ...} and, with open, would_open: {host, base, head, title, body}") } },
         KEY_PATH: {
             "get": { "tags": tags, "summary": "The deploy key's public half", "operationId": "gitKey", "responses": { "200": { "description": "{deploy_key: {public, path} | null}" }, "401": admin } },
             "post": { "tags": tags, "summary": "Generate the deploy key", "operationId": "gitGenerateKey",

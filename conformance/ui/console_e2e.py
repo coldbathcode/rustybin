@@ -3853,26 +3853,41 @@ def run_source_control(browser):
 
         def the_git_host_opens_the_pull_request():
             # A stand-in for a git host's API on loopback (never a real
-            # host): it answers the one call the instance makes.
+            # host): it answers the call that opens a pull request,
+            # refuses a second one for the same branches, and lists the
+            # open ones.
             import http.server
             import threading
 
             calls = []
+            reads = []
+            opened = []
             repository = os.path.basename(tmp) + "/config"
 
             class Host(http.server.BaseHTTPRequestHandler):
-                def do_POST(self):
-                    body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
-                    calls.append({"path": self.path, "authorization": self.headers.get("Authorization"), "body": body})
-                    ok = self.path == f"/api/v3/repos/{repository}/pulls" and self.headers.get("Authorization") == "Bearer ui-host-token-123456"
-                    answer = ({"number": 12, "html_url": f"https://git.example.test/{repository}/pull/12"} if ok
-                              else {"message": "Not Found"})
+                def answer(self, status, answer):
                     data = json.dumps(answer).encode()
-                    self.send_response(201 if ok else 404)
+                    self.send_response(status)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(data)))
                     self.end_headers()
                     self.wfile.write(data)
+
+                def do_POST(self):
+                    body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
+                    calls.append({"path": self.path, "authorization": self.headers.get("Authorization"), "body": body})
+                    ok = self.path == f"/api/v3/repos/{repository}/pulls" and self.headers.get("Authorization") == "Bearer ui-host-token-123456"
+                    if not ok:
+                        return self.answer(404, {"message": "Not Found"})
+                    if (body.get("head"), body.get("base")) in opened:
+                        return self.answer(422, {"message": "Validation Failed", "errors": [{"resource": "PullRequest", "code": "custom", "message": "A pull request already exists."}], "status": "422"})
+                    opened.append((body.get("head"), body.get("base")))
+                    self.answer(201, {"number": 12, "html_url": f"https://git.example.test/{repository}/pull/12"})
+
+                def do_GET(self):
+                    reads.append(self.path)
+                    self.answer(200, [{"number": 12, "state": "open", "html_url": f"https://git.example.test/{repository}/pull/12",
+                                       "head": {"ref": head}, "base": {"ref": base}} for head, base in opened])
 
                 def log_message(self, *args):
                     pass
@@ -3910,6 +3925,17 @@ def run_source_control(browser):
                 # The token is on no page: not in the form, not in the answer.
                 assert "ui-host-token-123456" not in page.content()
                 shot(page, "git", "61b-source-control-pull-request-opened")
+                # The same again: the host has it open, and the page shows
+                # that one and says none was opened.
+                page.click("#git-resolve-pr")
+                page.wait_for_selector("#git-result >> text=was already open at the git host")
+                expect(page.locator("#git-pull-request")).to_contain_text("Pull request 12")
+                expect(page.locator("#git-pull-request")).to_contain_text("already open")
+                expect(page.locator("#git-pull-request a")).to_have_text(f"https://git.example.test/{repository}/pull/12")
+                expect(page.locator("#git-not-opened")).to_have_count(0)
+                assert len(calls) == 2 and len(reads) == 1, (calls, reads)
+                assert "head=" in reads[0] and "review%2Fopened" in reads[0], reads
+                shot(page, "git", "61c-source-control-pull-request-already-open")
                 # A host that refuses: the branch is pushed all the same,
                 # and the page says why there is no pull request.
                 code, body = api("PATCH", "/_rustybin/settings", {"secrets": {"git.host_token": "another-token-654321"}})
@@ -3919,7 +3945,7 @@ def run_source_control(browser):
                 page.wait_for_selector("#git-result >> text=the pull request was not opened")
                 expect(page.locator("#git-not-opened")).to_contain_text("Not Found")
                 expect(page.locator("#git-pull-request")).to_have_count(0)
-                assert len(calls) == 2, calls
+                assert len(calls) == 3 and len(reads) == 1, (calls, reads)
             finally:
                 srv.shutdown()
                 # Back to no host, so the rest of the walk is as before.

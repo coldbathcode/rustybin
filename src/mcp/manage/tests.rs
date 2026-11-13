@@ -5388,6 +5388,22 @@ async fn git_resolve_opens_a_pull_request_at_the_git_host() {
     assert_eq!(fake.last_call()["body"]["base"], "main");
     assert!(!r.to_string().contains(WRITER), "{r}");
 
+    // The same again: the host has one open for the two branches. Not an
+    // error, not a refusal: that one, under the same untrusted field.
+    let mut again = open.clone();
+    again["confirm"] = json!(true);
+    let r = tool(&app, &[], "git_resolve", again).await;
+    assert!(!is_error(&r), "{r}");
+    let answer = &r["structuredContent"];
+    assert_eq!(answer["opened"], false, "{r}");
+    assert_eq!(answer["already_open"], true, "{r}");
+    assert_eq!(answer["untrusted_pull_request"]["number"], 1, "{r}");
+    assert!(answer.get("not_opened").is_none(), "{r}");
+    assert!(!text_of(&r).contains("github.example"), "{}", text_of(&r));
+    assert!(text_of(&r).contains("was already open"), "{}", text_of(&r));
+    assert_eq!((fake.count_of("POST"), fake.count_of("GET")), (2, 1));
+    assert!(!r.to_string().contains(WRITER), "{r}");
+
     // A host that refuses: not an error of the tool (the branch is
     // pushed), the reason in the instance's words, the host's apart.
     let mut secrets = std::collections::BTreeMap::new();

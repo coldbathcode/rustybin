@@ -12,8 +12,9 @@
 //!   The API's base is `git.host_api`, else the public API of a public
 //!   host, else the kind's usual path on the remote's host.
 //! - **One trait, one small module per kind** ([`Host`]; `github.rs`,
-//!   `gitlab.rs`): a kind says where the call goes, what it carries and how
-//!   its answer reads. The call itself is made here, once, for every kind.
+//!   `gitlab.rs`, `gitea.rs` for Gitea and Forgejo): a kind says where a
+//!   call goes, what it carries and how its answer reads. The calls
+//!   themselves are made here, in one place, for every kind.
 //! - **The network**: through `egress::Egress` under `Purpose::GitHost`,
 //!   whose rule permits exactly the API host the settings resolve to
 //!   ([`SourceControl::sync_host_egress`]). Pinned addresses, no redirect
@@ -30,6 +31,11 @@
 //!   `untrusted_host_message`, cleaned and cut, never in `detail`.
 //! - **A failure to open** leaves the pushed branch where it is and says
 //!   why ([`NotOpened`]): a person opens the pull request by hand.
+//! - **One already open**: when the host refuses the opening call, it is
+//!   asked once which pull requests are open for that head and base
+//!   ([`SourceControl::existing_at_host`]: one read, the same path out),
+//!   and the one found is answered instead of the refusal. The opening
+//!   call itself is never made twice.
 
 use std::time::Duration;
 
@@ -42,6 +48,7 @@ use super::{
 use crate::configdoc::Change;
 use crate::egress::{Allowlist, Purpose, Rule};
 
+mod gitea;
 mod github;
 mod gitlab;
 
@@ -50,7 +57,7 @@ pub const HOST_API_KEY: &str = "git.host_api";
 pub const HOST_TOKEN_KEY: &str = "git.host_token";
 
 /// `git.host`: `auto`, `none`, or a kind by name.
-pub const HOST_OPTIONS: &[&str] = &["auto", "none", "github", "gitlab"];
+pub const HOST_OPTIONS: &[&str] = &["auto", "none", "github", "gitlab", "gitea"];
 
 /// How long the host may take to answer.
 pub const HOST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -72,15 +79,18 @@ pub const MAX_HOST_MESSAGE: usize = 300;
 pub enum Kind {
     Github,
     Gitlab,
+    /// Gitea and Forgejo: one API shape.
+    Gitea,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 2] = [Kind::Github, Kind::Gitlab];
+    pub const ALL: [Kind; 3] = [Kind::Github, Kind::Gitlab, Kind::Gitea];
 
     pub fn as_str(&self) -> &'static str {
         match self {
             Kind::Github => "github",
             Kind::Gitlab => "gitlab",
+            Kind::Gitea => "gitea",
         }
     }
 
@@ -88,10 +98,11 @@ impl Kind {
         match self {
             Kind::Github => &github::Github,
             Kind::Gitlab => &gitlab::Gitlab,
+            Kind::Gitea => &gitea::Gitea,
         }
     }
 
-    fn named(name: &str) -> Option<Kind> {
+    pub fn named(name: &str) -> Option<Kind> {
         Kind::ALL.into_iter().find(|k| k.as_str() == name)
     }
 }
@@ -112,7 +123,8 @@ pub struct PullRequest<'a> {
 pub struct Call {
     pub url: String,
     pub headers: Vec<(&'static str, String)>,
-    pub body: Value,
+    /// What a `POST` carries; a read (`GET`) carries nothing.
+    pub body: Option<Value>,
 }
 
 /// What the host answered for an opened pull request. Both are the host's.
@@ -124,10 +136,10 @@ pub struct Opened {
 
 /// A git host kind: open a pull request, read the answer. Nothing else.
 pub trait Host: Send + Sync {
-    /// The public host's name, which `auto` recognises.
-    fn public_host(&self) -> &'static str;
-    /// The public host's API.
-    fn public_api(&self) -> &'static str;
+    /// The public host's name, which `auto` recognises, and its API. A
+    /// kind without one public host that a repository is certain to be on
+    /// has none, and is always named in `git.host`.
+    fn public(&self) -> Option<(&'static str, &'static str)>;
     /// Where a self-hosted host of this kind usually serves its API.
     fn self_hosted_api(&self, host: &str) -> String;
     /// The repository as this kind's API names it, from the remote's path
@@ -139,6 +151,26 @@ pub trait Host: Send + Sync {
     fn opened(&self, answer: &Value) -> Opened;
     /// The host's own words in the answer of a refused call.
     fn message(&self, answer: &Value) -> Option<String>;
+    /// The read that lists the open pull requests for `pr`'s head and
+    /// base (as far as the kind's API can narrow it).
+    fn existing(&self, api: &str, token: &str, pr: &PullRequest) -> Call;
+    /// The open pull request from `pr`'s head into its base in the answer
+    /// of that read, when there is one. An entry that names other branches
+    /// is never taken.
+    fn found(&self, answer: &Value, pr: &PullRequest) -> Option<Opened>;
+}
+
+/// `url` with a query of `pairs`, each value encoded.
+fn with_query(url: &str, pairs: &[(&str, &str)]) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(mut parsed) => {
+            parsed.query_pairs_mut().extend_pairs(pairs);
+            parsed.to_string()
+        }
+        // Never for an API that passed `check_api`: the call then goes
+        // nowhere the settings did not name, and finds nothing.
+        Err(_) => url.to_string(),
+    }
 }
 
 /// The host the settings resolve to.
@@ -178,7 +210,19 @@ pub struct NotOpened {
     pub host_message: Option<String>,
 }
 
+/// The reason of a pull request the host itself refused (`400`, `409`,
+/// `422`): a branch it does not know, nothing to merge, or one already
+/// open, which is then looked for.
+const REFUSED: &str = "refused";
+
 impl NotOpened {
+    /// Whether the refusal may mean that a pull request is already open
+    /// for the two branches: the host answered and refused the request
+    /// itself, not the token or the repository.
+    pub fn may_be_open(&self) -> bool {
+        self.reason == REFUSED
+    }
+
     fn new(reason: &'static str, why: impl Into<String>) -> Self {
         Self {
             reason,
@@ -409,14 +453,18 @@ impl SourceControl {
             Err(e) => return Setup::Off(format!("{REMOTE_KEY}: {e}")),
         };
         let kind = if setting == "auto" {
-            let found = Kind::ALL
-                .into_iter()
-                .find(|k| remote.host.as_deref() == Some(k.host().public_host()));
+            let found = Kind::ALL.into_iter().find(|k| {
+                k.host()
+                    .public()
+                    .is_some_and(|(name, _)| remote.host.as_deref() == Some(name))
+            });
             match found {
                 Some(k) => k,
                 None => {
-                    let known: Vec<&str> =
-                        Kind::ALL.iter().map(|k| k.host().public_host()).collect();
+                    let known: Vec<&str> = Kind::ALL
+                        .iter()
+                        .filter_map(|k| k.host().public().map(|(name, _)| name))
+                        .collect();
                     return Setup::Off(format!(
                         "git.host is auto, which recognises {} only: name the kind in git.host for a self-hosted host",
                         known.join(" and ")
@@ -430,16 +478,20 @@ impl SourceControl {
             }
         };
         let host = kind.host();
-        let on_public = remote.host.as_deref() == Some(host.public_host());
+        // The public API, when the repository is on the kind's public host.
+        let public_api = host
+            .public()
+            .filter(|(name, _)| remote.host.as_deref() == Some(*name))
+            .map(|(_, api)| api);
         let api =
             match self
                 .settings
                 .string(HOST_API_KEY)
                 .map(|s| s.trim().trim_end_matches('/').to_string())
                 .filter(|s| !s.is_empty())
+                .or_else(|| public_api.map(str::to_string))
             {
                 Some(api) => api,
-                None if on_public => host.public_api().to_string(),
                 None => match remote.host.as_deref() {
                     Some(h) if h.parse::<std::net::Ipv6Addr>().is_ok() => {
                         host.self_hosted_api(&format!("[{h}]"))
@@ -462,7 +514,7 @@ impl SourceControl {
         // The remote's token goes only where the remote is: its own host,
         // or the public API of the public host it is on.
         let same_host = url_host(&api).is_some_and(|h| Some(h) == remote.host)
-            || (on_public && api == host.public_api());
+            || public_api == Some(api.as_str());
         let token_from = if self.settings.secret(HOST_TOKEN_KEY).is_some() {
             Some(HOST_TOKEN_KEY)
         } else if same_host
@@ -569,19 +621,11 @@ impl SourceControl {
                     "host_token_missing",
                 )
             })?;
-        let check = self.egress.dry_check(&target.api, Purpose::GitHost);
-        if check["allowed"] != json!(true) {
-            let reasons: Vec<&str> = check["reasons"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .collect();
+        if let Some(reasons) = self.egress_refusal(&target) {
             let mut e = refused(
                 format!(
-                    "the outbound policy refuses the git host's API ({}): {}",
+                    "the outbound policy refuses the git host's API ({}): {reasons}",
                     crate::egress::url_origin(&target.api),
-                    reasons.join("; ")
                 ),
                 "egress_refused",
             );
@@ -591,15 +635,11 @@ impl SourceControl {
         Ok((target, token))
     }
 
-    /// Ask the host to open the pull request. One call, no retry.
-    pub(super) async fn open_at_host(
-        &self,
-        target: &Target,
-        token: &str,
-        pr: &PullRequest<'_>,
-    ) -> Result<Opened, NotOpened> {
-        let host = target.kind.host();
-        let call = host.open(&target.api, token, pr);
+    /// The one way out to a git host's API: under `Purpose::GitHost`,
+    /// pinned addresses, no redirect followed, the timeout, a bounded
+    /// answer. A `POST` when the call has a body, else a read. Answers the
+    /// host's status and what it said (`Null` when that is not JSON).
+    async fn call_host(&self, call: &Call) -> Result<(u16, Value), NotOpened> {
         let origin = crate::egress::url_origin(&call.url);
         let timeout = self.host_timeout();
         let slow = || {
@@ -625,7 +665,10 @@ impl SourceControl {
             .egress
             .client(&pinned, timeout)
             .map_err(|e| NotOpened::new("unreachable", format!("no client for {origin}: {e}")))?;
-        let mut request = client.post(&call.url).json(&call.body);
+        let mut request = match &call.body {
+            Some(body) => client.post(&call.url).json(body),
+            None => client.get(&call.url),
+        };
         for (name, value) in &call.headers {
             request = request.header(*name, value.as_str());
         }
@@ -652,8 +695,20 @@ impl SourceControl {
             Ok(Ok(answer)) => answer,
         };
         let answer: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        let code = status.as_u16();
-        if status.is_success() {
+        Ok((status.as_u16(), answer))
+    }
+
+    /// Ask the host to open the pull request. One call, no retry.
+    pub(super) async fn open_at_host(
+        &self,
+        target: &Target,
+        token: &str,
+        pr: &PullRequest<'_>,
+    ) -> Result<Opened, NotOpened> {
+        let host = target.kind.host();
+        let call = host.open(&target.api, token, pr);
+        let (code, answer) = self.call_host(&call).await?;
+        if (200..300).contains(&code) {
             let opened = host.opened(&answer);
             let opened = Opened {
                 number: opened.number,
@@ -691,8 +746,8 @@ impl SourceControl {
                 format!("the git host answered {code}: too many calls for now, try again later"),
             ),
             400 | 409 | 422 => (
-                "refused",
-                format!("the git host refused the pull request from {} into {} ({code}): a branch it does not know, nothing to merge, or one already open", pr.head, pr.base),
+                REFUSED,
+                format!("the git host refused the pull request from {} into {} ({code}): a branch it does not know, nothing to merge, or one already open that was not found", pr.head, pr.base),
             ),
             _ => (
                 "host_error",
@@ -706,6 +761,115 @@ impl SourceControl {
             .map(|m| self.scrub(clean(&m, MAX_HOST_MESSAGE).as_bytes()))
             .filter(|m| !m.is_empty());
         Err(n)
+    }
+
+    /// The pull request that is already open from `pr`'s head into its
+    /// base, when the host has one: one read of the host's API, made only
+    /// after the host refused to open one ([`NotOpened::may_be_open`]).
+    /// Whatever goes wrong with the read (the policy, the token, a slow
+    /// host, an answer that does not read) is "none found": the refusal
+    /// stands as it was.
+    pub(super) async fn existing_at_host(
+        &self,
+        target: &Target,
+        token: &str,
+        pr: &PullRequest<'_>,
+    ) -> Option<Opened> {
+        let host = target.kind.host();
+        let call = host.existing(&target.api, token, pr);
+        let (code, answer) = self.call_host(&call).await.ok()?;
+        if !(200..300).contains(&code) {
+            return None;
+        }
+        let found = host.found(&answer, pr)?;
+        let found = Opened {
+            number: found.number,
+            url: found.url.as_deref().and_then(clean_address),
+        };
+        (found.number.is_some() || found.url.is_some()).then_some(found)
+    }
+
+    /// The `source_control_host` check of the diagnostics: a git host that
+    /// is named and could not be asked to open a pull request. `None` when
+    /// there is nothing to say: no repository, `git.host` is `none`, or
+    /// `auto` with a repository on no public host. Never the token.
+    pub fn host_diagnostics(&self) -> Option<(&'static str, String, Option<&'static str>)> {
+        let setup = self.host_setup();
+        self.sync_host_egress(&setup);
+        let named = self
+            .settings
+            .string(HOST_KEY)
+            .is_some_and(|s| Kind::named(&s).is_some());
+        match setup {
+            Setup::Off(_) => None,
+            Setup::Problem(kind, why) => Some((
+                "warn",
+                format!(
+                    "git.host names a git host{} and a pull request cannot be opened there: {why}",
+                    kind.map(|k| format!(" ({})", k.as_str())).unwrap_or_default()
+                ),
+                Some("set git.host_api to the base URL of the host's API (https), check that git.remote reads as a repository at the host (owner/name), or set git.host to none to open pull requests by hand (Management, Source control)"),
+            )),
+            Setup::Ready(t) => {
+                let origin = crate::egress::url_origin(&t.api);
+                if t.token_from.is_none() {
+                    // `auto` recognised a public host and nobody set a
+                    // token: nothing was asked for, so nothing is wrong.
+                    if !named && self.settings.string(HOST_API_KEY).is_none() {
+                        return Some((
+                            "ok",
+                            format!(
+                                "the repository is on a git host this instance knows ({}) and no token is set for its API: a pull request is opened by hand ({HOST_TOKEN_KEY} lets the host open it)",
+                                t.kind.as_str()
+                            ),
+                            None,
+                        ));
+                    }
+                    return Some((
+                        "warn",
+                        format!(
+                            "a git host is named ({}, {origin}) and a pull request cannot be opened there: {}",
+                            t.kind.as_str(),
+                            no_token()
+                        ),
+                        Some("set the secret git.host_token to a token that may open pull requests in the repository (Management, Source control, or rustybin settings set-secret git.host_token), or set git.host to none to open them by hand"),
+                    ));
+                }
+                if let Some(reasons) = self.egress_refusal(&t) {
+                    return Some((
+                        "warn",
+                        format!(
+                            "a git host is named ({}) and the outbound policy refuses its API ({origin}): {reasons}",
+                            t.kind.as_str()
+                        ),
+                        Some("allow the API's host in the outbound policy (Management, Network: egress.allow, and egress.allow_loopback for a host on this machine), or correct git.host_api; GET /_rustybin/egress/check with purpose git_host says what is refused"),
+                    ));
+                }
+                Some((
+                    "ok",
+                    format!(
+                        "a pull request can be opened at the git host ({}, {origin})",
+                        t.kind.as_str()
+                    ),
+                    None,
+                ))
+            }
+        }
+    }
+
+    /// Why the outbound policy refuses the API on a dry check, when it does.
+    fn egress_refusal(&self, target: &Target) -> Option<String> {
+        let check = self.egress.dry_check(&target.api, Purpose::GitHost);
+        if check["allowed"] == json!(true) {
+            return None;
+        }
+        let reasons: Vec<&str> = check["reasons"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        Some(reasons.join("; "))
     }
 
     fn host_timeout(&self) -> Duration {
